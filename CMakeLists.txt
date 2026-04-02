@@ -186,6 +186,9 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_all_features examples/09_all_features.cpp)
         target_link_libraries(example_all_features PRIVATE neograph::core neograph::llm)
 
+        add_executable(example_send_command examples/10_send_command.cpp)
+        target_link_libraries(example_send_command PRIVATE neograph::core)
+
         if(NEOGRAPH_BUILD_MCP)
             add_executable(example_mcp_agent examples/03_mcp_agent.cpp)
             target_link_libraries(example_mcp_agent PRIVATE neograph::core neograph::llm neograph::mcp)
@@ -203,7 +206,7 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
             FetchContent_MakeAvailable(raylib)
 
-            add_executable(example_clay_chatbot examples/10_clay_chatbot.cpp examples/clay_impl.c)
+            add_executable(example_clay_chatbot examples/11_clay_chatbot.cpp examples/clay_impl.c)
             target_link_libraries(example_clay_chatbot PRIVATE neograph::core neograph::llm raylib)
             target_include_directories(example_clay_chatbot PRIVATE ${DEPS_DIR})
         endif()

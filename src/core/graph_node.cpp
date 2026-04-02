@@ -16,10 +16,13 @@ NodeResult GraphNode::execute_full(const GraphState& state) {
     return NodeResult{execute(state)};
 }
 
-// --- GraphNode default execute_full_stream: wraps execute_stream() ---
+// --- GraphNode default execute_full_stream: delegates to execute_full() ---
+// This ensures that nodes overriding execute_full() (for Command/Send)
+// have their results properly returned even in streaming mode.
 NodeResult GraphNode::execute_full_stream(
     const GraphState& state, const GraphStreamCallback& cb) {
-    return NodeResult{execute_stream(state, cb)};
+    (void)cb;
+    return execute_full(state);
 }
 
 // =========================================================================
