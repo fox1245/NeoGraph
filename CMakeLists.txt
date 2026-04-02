@@ -183,6 +183,9 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_state_management examples/08_state_management.cpp)
         target_link_libraries(example_state_management PRIVATE neograph::core neograph::llm)
 
+        add_executable(example_all_features examples/09_all_features.cpp)
+        target_link_libraries(example_all_features PRIVATE neograph::core neograph::llm)
+
         if(NEOGRAPH_BUILD_MCP)
             add_executable(example_mcp_agent examples/03_mcp_agent.cpp)
             target_link_libraries(example_mcp_agent PRIVATE neograph::core neograph::llm neograph::mcp)
