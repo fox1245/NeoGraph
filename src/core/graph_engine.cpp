@@ -138,6 +138,110 @@ Checkpoint GraphEngine::save_checkpoint(
     return cp;
 }
 
+// =========================================================================
+// get_state / get_state_history / update_state / fork
+// =========================================================================
+
+std::optional<json> GraphEngine::get_state(const std::string& thread_id) const {
+    if (!checkpoint_store_) return std::nullopt;
+
+    auto cp_opt = checkpoint_store_->load_latest(thread_id);
+    if (!cp_opt) return std::nullopt;
+
+    return cp_opt->channel_values;
+}
+
+std::vector<Checkpoint> GraphEngine::get_state_history(
+    const std::string& thread_id, int limit) const {
+    if (!checkpoint_store_) return {};
+    return checkpoint_store_->list(thread_id, limit);
+}
+
+void GraphEngine::update_state(const std::string& thread_id,
+                                const json& channel_writes,
+                                const std::string& as_node) {
+    if (!checkpoint_store_) {
+        throw std::runtime_error("Cannot update_state: no checkpoint store configured");
+    }
+
+    auto cp_opt = checkpoint_store_->load_latest(thread_id);
+    if (!cp_opt) {
+        throw std::runtime_error("No checkpoint found for thread: " + thread_id);
+    }
+    auto& cp = *cp_opt;
+
+    // Restore state from checkpoint
+    GraphState state;
+    init_state(state);
+    state.restore(cp.channel_values);
+
+    // Apply the user's writes through reducers
+    if (channel_writes.is_object()) {
+        for (const auto& [key, value] : channel_writes.items()) {
+            auto known = state.channel_names();
+            if (std::find(known.begin(), known.end(), key) != known.end()) {
+                state.write(key, value);
+            }
+        }
+    }
+
+    // Save as a new checkpoint
+    Checkpoint new_cp;
+    new_cp.id              = Checkpoint::generate_id();
+    new_cp.thread_id       = thread_id;
+    new_cp.channel_values  = state.serialize();
+    new_cp.parent_id       = cp.id;
+    new_cp.current_node    = as_node.empty() ? cp.current_node : as_node;
+    new_cp.next_node       = cp.next_node;
+    new_cp.interrupt_phase = "updated";
+    new_cp.step            = cp.step;
+    new_cp.timestamp       = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    checkpoint_store_->save(new_cp);
+}
+
+std::string GraphEngine::fork(const std::string& source_thread_id,
+                               const std::string& new_thread_id,
+                               const std::string& checkpoint_id) {
+    if (!checkpoint_store_) {
+        throw std::runtime_error("Cannot fork: no checkpoint store configured");
+    }
+
+    // Load source checkpoint
+    std::optional<Checkpoint> cp_opt;
+    if (checkpoint_id.empty()) {
+        cp_opt = checkpoint_store_->load_latest(source_thread_id);
+    } else {
+        cp_opt = checkpoint_store_->load_by_id(checkpoint_id);
+    }
+
+    if (!cp_opt) {
+        throw std::runtime_error("No checkpoint found for fork source");
+    }
+
+    // Create a new checkpoint under the new thread_id
+    Checkpoint forked;
+    forked.id              = Checkpoint::generate_id();
+    forked.thread_id       = new_thread_id;
+    forked.channel_values  = cp_opt->channel_values;
+    forked.channel_versions = cp_opt->channel_versions;
+    forked.parent_id       = cp_opt->id;  // link to source for provenance
+    forked.current_node    = cp_opt->current_node;
+    forked.next_node       = cp_opt->next_node;
+    forked.interrupt_phase = cp_opt->interrupt_phase;
+    forked.metadata        = {{"forked_from", {
+        {"thread_id", source_thread_id},
+        {"checkpoint_id", cp_opt->id}
+    }}};
+    forked.step            = cp_opt->step;
+    forked.timestamp       = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    checkpoint_store_->save(forked);
+    return forked.id;
+}
+
 void GraphEngine::init_state(GraphState& state) const {
     for (const auto& cd : channel_defs_) {
         auto reducer = ReducerRegistry::instance().get(cd.reducer_name);
@@ -186,6 +290,14 @@ RunResult GraphEngine::resume(const std::string& thread_id,
         throw std::runtime_error("No checkpoint found for thread: " + thread_id);
     }
     auto& cp = *cp_opt;
+
+    // If next_node is __end__, the graph already completed — nothing to resume
+    if (cp.next_node == std::string(END_NODE)) {
+        RunResult result;
+        result.output = cp.channel_values;
+        result.checkpoint_id = cp.id;
+        return result;
+    }
 
     // Build a RunConfig that restores from checkpoint
     RunConfig config;

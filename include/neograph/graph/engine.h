@@ -50,6 +50,33 @@ public:
                      const json& resume_value = json(),
                      const GraphStreamCallback& cb = nullptr);
 
+    // ── State inspection & manipulation (LangGraph Checkpointer API) ──
+
+    // Get the current state for a thread (restored from latest checkpoint).
+    // Returns the full serialized channel state, or nullopt if no checkpoint exists.
+    std::optional<json> get_state(const std::string& thread_id) const;
+
+    // Get state history for a thread (most recent first).
+    std::vector<Checkpoint> get_state_history(const std::string& thread_id,
+                                              int limit = 100) const;
+
+    // Update state for a thread: apply writes to the latest checkpoint
+    // and save as a new checkpoint. Does NOT execute any nodes.
+    // Use this to edit messages, inject tool results, or modify channels
+    // before calling resume().
+    void update_state(const std::string& thread_id,
+                      const json& channel_writes,
+                      const std::string& as_node = "");
+
+    // Fork: create a new thread from an existing checkpoint.
+    // If checkpoint_id is empty, forks from the latest checkpoint.
+    // Returns the new checkpoint ID in the forked thread.
+    std::string fork(const std::string& source_thread_id,
+                     const std::string& new_thread_id,
+                     const std::string& checkpoint_id = "");
+
+    // ── Lifecycle ──
+
     // Take ownership of tools (lifetime management)
     void own_tools(std::vector<std::unique_ptr<Tool>> tools);
 
