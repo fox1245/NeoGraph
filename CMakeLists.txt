@@ -167,6 +167,18 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_custom_graph examples/02_custom_graph.cpp)
         target_link_libraries(example_custom_graph PRIVATE neograph::core neograph::llm)
 
+        add_executable(example_checkpoint_hitl examples/04_checkpoint_hitl.cpp)
+        target_link_libraries(example_checkpoint_hitl PRIVATE neograph::core neograph::llm)
+
+        add_executable(example_parallel_fanout examples/05_parallel_fanout.cpp)
+        target_link_libraries(example_parallel_fanout PRIVATE neograph::core)
+
+        add_executable(example_subgraph examples/06_subgraph.cpp)
+        target_link_libraries(example_subgraph PRIVATE neograph::core neograph::llm)
+
+        add_executable(example_intent_routing examples/07_intent_routing.cpp)
+        target_link_libraries(example_intent_routing PRIVATE neograph::core neograph::llm)
+
         if(NEOGRAPH_BUILD_MCP)
             add_executable(example_mcp_agent examples/03_mcp_agent.cpp)
             target_link_libraries(example_mcp_agent PRIVATE neograph::core neograph::llm neograph::mcp)
