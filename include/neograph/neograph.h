@@ -16,3 +16,4 @@
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/react_graph.h>
+#include <neograph/graph/store.h>

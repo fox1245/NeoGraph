@@ -4,6 +4,7 @@
 #include <taskflow/taskflow.hpp>
 #include <stdexcept>
 #include <algorithm>
+#include <thread>
 
 namespace neograph::graph {
 
@@ -71,7 +72,7 @@ std::unique_ptr<GraphEngine> GraphEngine::compile(
         }
     }
 
-    // --- Parse interrupt points (Phase 2) ---
+    // --- Parse interrupt points ---
     if (definition.contains("interrupt_before")) {
         for (const auto& n : definition["interrupt_before"]) {
             engine->interrupt_before_.insert(n.get<std::string>());
@@ -81,6 +82,15 @@ std::unique_ptr<GraphEngine> GraphEngine::compile(
         for (const auto& n : definition["interrupt_after"]) {
             engine->interrupt_after_.insert(n.get<std::string>());
         }
+    }
+
+    // --- Parse retry policy ---
+    if (definition.contains("retry_policy")) {
+        auto& rp = definition["retry_policy"];
+        engine->default_retry_policy_.max_retries = rp.value("max_retries", 0);
+        engine->default_retry_policy_.initial_delay_ms = rp.value("initial_delay_ms", 100);
+        engine->default_retry_policy_.backoff_multiplier = rp.value("backoff_multiplier", 2.0f);
+        engine->default_retry_policy_.max_delay_ms = rp.value("max_delay_ms", 5000);
     }
 
     // --- Build predecessor map (for fan-in detection) ---
@@ -102,7 +112,7 @@ std::unique_ptr<GraphEngine> GraphEngine::compile(
 }
 
 // =========================================================================
-// Helpers
+// Configuration helpers
 // =========================================================================
 
 void GraphEngine::own_tools(std::vector<std::unique_ptr<Tool>> tools) {
@@ -111,6 +121,24 @@ void GraphEngine::own_tools(std::vector<std::unique_ptr<Tool>> tools) {
 
 void GraphEngine::set_checkpoint_store(std::shared_ptr<CheckpointStore> store) {
     checkpoint_store_ = std::move(store);
+}
+
+void GraphEngine::set_store(std::shared_ptr<Store> store) {
+    store_ = std::move(store);
+}
+
+void GraphEngine::set_retry_policy(const RetryPolicy& policy) {
+    default_retry_policy_ = policy;
+}
+
+void GraphEngine::set_node_retry_policy(const std::string& node_name, const RetryPolicy& policy) {
+    node_retry_policies_[node_name] = policy;
+}
+
+RetryPolicy GraphEngine::get_retry_policy(const std::string& node_name) const {
+    auto it = node_retry_policies_.find(node_name);
+    if (it != node_retry_policies_.end()) return it->second;
+    return default_retry_policy_;
 }
 
 Checkpoint GraphEngine::save_checkpoint(
@@ -144,10 +172,8 @@ Checkpoint GraphEngine::save_checkpoint(
 
 std::optional<json> GraphEngine::get_state(const std::string& thread_id) const {
     if (!checkpoint_store_) return std::nullopt;
-
     auto cp_opt = checkpoint_store_->load_latest(thread_id);
     if (!cp_opt) return std::nullopt;
-
     return cp_opt->channel_values;
 }
 
@@ -160,32 +186,27 @@ std::vector<Checkpoint> GraphEngine::get_state_history(
 void GraphEngine::update_state(const std::string& thread_id,
                                 const json& channel_writes,
                                 const std::string& as_node) {
-    if (!checkpoint_store_) {
+    if (!checkpoint_store_)
         throw std::runtime_error("Cannot update_state: no checkpoint store configured");
-    }
 
     auto cp_opt = checkpoint_store_->load_latest(thread_id);
-    if (!cp_opt) {
+    if (!cp_opt)
         throw std::runtime_error("No checkpoint found for thread: " + thread_id);
-    }
     auto& cp = *cp_opt;
 
-    // Restore state from checkpoint
     GraphState state;
     init_state(state);
     state.restore(cp.channel_values);
 
-    // Apply the user's writes through reducers
     if (channel_writes.is_object()) {
+        auto known = state.channel_names();
         for (const auto& [key, value] : channel_writes.items()) {
-            auto known = state.channel_names();
             if (std::find(known.begin(), known.end(), key) != known.end()) {
                 state.write(key, value);
             }
         }
     }
 
-    // Save as a new checkpoint
     Checkpoint new_cp;
     new_cp.id              = Checkpoint::generate_id();
     new_cp.thread_id       = thread_id;
@@ -204,29 +225,24 @@ void GraphEngine::update_state(const std::string& thread_id,
 std::string GraphEngine::fork(const std::string& source_thread_id,
                                const std::string& new_thread_id,
                                const std::string& checkpoint_id) {
-    if (!checkpoint_store_) {
+    if (!checkpoint_store_)
         throw std::runtime_error("Cannot fork: no checkpoint store configured");
-    }
 
-    // Load source checkpoint
     std::optional<Checkpoint> cp_opt;
     if (checkpoint_id.empty()) {
         cp_opt = checkpoint_store_->load_latest(source_thread_id);
     } else {
         cp_opt = checkpoint_store_->load_by_id(checkpoint_id);
     }
-
-    if (!cp_opt) {
+    if (!cp_opt)
         throw std::runtime_error("No checkpoint found for fork source");
-    }
 
-    // Create a new checkpoint under the new thread_id
     Checkpoint forked;
     forked.id              = Checkpoint::generate_id();
     forked.thread_id       = new_thread_id;
     forked.channel_values  = cp_opt->channel_values;
     forked.channel_versions = cp_opt->channel_versions;
-    forked.parent_id       = cp_opt->id;  // link to source for provenance
+    forked.parent_id       = cp_opt->id;
     forked.current_node    = cp_opt->current_node;
     forked.next_node       = cp_opt->next_node;
     forked.interrupt_phase = cp_opt->interrupt_phase;
@@ -241,6 +257,10 @@ std::string GraphEngine::fork(const std::string& source_thread_id,
     checkpoint_store_->save(forked);
     return forked.id;
 }
+
+// =========================================================================
+// State helpers
+// =========================================================================
 
 void GraphEngine::init_state(GraphState& state) const {
     for (const auto& cd : channel_defs_) {
@@ -257,8 +277,6 @@ void GraphEngine::apply_input(GraphState& state, const json& input) const {
     if (!input.is_object()) return;
     auto known = state.channel_names();
     for (const auto& [key, value] : input.items()) {
-        // Skip channels not defined in this graph (e.g., parent-only channels
-        // passed through by SubgraphNode's default input mapping)
         if (std::find(known.begin(), known.end(), key) != known.end()) {
             state.write(key, value);
         }
@@ -266,7 +284,7 @@ void GraphEngine::apply_input(GraphState& state, const json& input) const {
 }
 
 // =========================================================================
-// run / run_stream
+// run / run_stream / resume
 // =========================================================================
 
 RunResult GraphEngine::run(const RunConfig& config) {
@@ -281,43 +299,34 @@ RunResult GraphEngine::run_stream(const RunConfig& config,
 RunResult GraphEngine::resume(const std::string& thread_id,
                                const json& resume_value,
                                const GraphStreamCallback& cb) {
-    if (!checkpoint_store_) {
+    if (!checkpoint_store_)
         throw std::runtime_error("Cannot resume: no checkpoint store configured");
-    }
 
     auto cp_opt = checkpoint_store_->load_latest(thread_id);
-    if (!cp_opt) {
+    if (!cp_opt)
         throw std::runtime_error("No checkpoint found for thread: " + thread_id);
-    }
-    auto& cp = *cp_opt;
 
-    // If next_node is __end__, the graph already completed — nothing to resume
-    if (cp.next_node == std::string(END_NODE)) {
+    if (cp_opt->next_node == std::string(END_NODE)) {
         RunResult result;
-        result.output = cp.channel_values;
-        result.checkpoint_id = cp.id;
+        result.output = cp_opt->channel_values;
+        result.checkpoint_id = cp_opt->id;
         return result;
     }
 
-    // Build a RunConfig that restores from checkpoint
     RunConfig config;
     config.thread_id = thread_id;
     config.max_steps = 50;
 
-    return execute_graph(config, cb, cp.next_node, resume_value);
+    return execute_graph(config, cb, cp_opt->next_node, resume_value);
 }
 
 // =========================================================================
-// resolve_next_nodes(): determine successor(s) from a node
-//   - Conditional edge: single successor (condition evaluation)
-//   - Multiple regular edges from same source: fan-out (all successors)
-//   - Single regular edge: single successor
+// resolve_next_nodes
 // =========================================================================
 
 std::vector<std::string> GraphEngine::resolve_next_nodes(
     const std::string& current, const GraphState& state) const {
 
-    // 1. Conditional edge takes priority
     for (const auto& ce : conditional_edges_) {
         if (ce.from == current) {
             auto cond_fn = ConditionRegistry::instance().get(ce.condition);
@@ -328,7 +337,6 @@ std::vector<std::string> GraphEngine::resolve_next_nodes(
         }
     }
 
-    // 2. Regular edges: collect ALL successors (fan-out if multiple)
     std::vector<std::string> successors;
     for (const auto& e : edges_) {
         if (e.from == current) {
@@ -345,7 +353,7 @@ bool GraphEngine::all_predecessors_done(
     const std::set<std::string>& completed) const {
 
     auto it = predecessors_.find(node);
-    if (it == predecessors_.end()) return true; // no predecessors = ready
+    if (it == predecessors_.end()) return true;
 
     for (const auto& pred : it->second) {
         if (completed.find(pred) == completed.end()) return false;
@@ -354,7 +362,7 @@ bool GraphEngine::all_predecessors_done(
 }
 
 // =========================================================================
-// Global Taskflow executor (for parallel fan-out)
+// Global Taskflow executor
 // =========================================================================
 static tf::Executor& global_executor() {
     static tf::Executor exec;
@@ -362,9 +370,83 @@ static tf::Executor& global_executor() {
 }
 
 // =========================================================================
-// execute_graph(): super-step loop with fan-out/fan-in + checkpoint + HITL
-//   - Single node ready: sequential execution
-//   - Multiple nodes ready: parallel execution via Taskflow
+// execute_node_with_retry: run a node with retry policy + NodeInterrupt
+// =========================================================================
+
+std::vector<ChannelWrite> GraphEngine::execute_node_with_retry(
+    const std::string& node_name,
+    GraphState& state,
+    const GraphStreamCallback& cb,
+    StreamMode stream_mode) {
+
+    auto node_it = nodes_.find(node_name);
+    if (node_it == nodes_.end()) {
+        throw std::runtime_error("Node not found: " + node_name);
+    }
+
+    auto policy = get_retry_policy(node_name);
+    int delay_ms = policy.initial_delay_ms;
+
+    for (int attempt = 0; attempt <= policy.max_retries; ++attempt) {
+        try {
+            if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
+                json data;
+                if (attempt > 0) data["retry_attempt"] = attempt;
+                cb(GraphEvent{GraphEvent::Type::NODE_START, node_name, data});
+            }
+
+            auto writes = cb
+                ? node_it->second->execute_stream(state, cb)
+                : node_it->second->execute(state);
+
+            if (cb) {
+                if (has_mode(stream_mode, StreamMode::UPDATES)) {
+                    for (const auto& w : writes) {
+                        cb(GraphEvent{GraphEvent::Type::CHANNEL_WRITE, node_name,
+                                      json{{"channel", w.channel}, {"value", w.value}}});
+                    }
+                }
+                if (has_mode(stream_mode, StreamMode::EVENTS)) {
+                    cb(GraphEvent{GraphEvent::Type::NODE_END, node_name, json()});
+                }
+            }
+
+            return writes;
+
+        } catch (const NodeInterrupt&) {
+            throw;  // NodeInterrupt is never retried — propagate immediately
+
+        } catch (const std::exception& e) {
+            if (attempt >= policy.max_retries) {
+                if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
+                    cb(GraphEvent{GraphEvent::Type::ERROR, node_name,
+                                  json{{"error", e.what()}, {"attempts", attempt + 1}}});
+                }
+                throw;  // exhausted retries
+            }
+
+            if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
+                cb(GraphEvent{GraphEvent::Type::ERROR, node_name,
+                              json{{"retry", attempt + 1},
+                                   {"max_retries", policy.max_retries},
+                                   {"delay_ms", delay_ms},
+                                   {"error", e.what()}}});
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+            delay_ms = std::min(
+                static_cast<int>(delay_ms * policy.backoff_multiplier),
+                policy.max_delay_ms);
+        }
+    }
+
+    throw std::runtime_error("Unreachable: retry loop exited without return or throw");
+}
+
+// =========================================================================
+// execute_graph(): super-step loop
+//   Supports: fan-out/fan-in, checkpoint, HITL, NodeInterrupt,
+//             Command, Send, retry, stream modes
 // =========================================================================
 
 RunResult GraphEngine::execute_graph(const RunConfig& config,
@@ -375,6 +457,7 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
     GraphState state;
     init_state(state);
 
+    StreamMode stream_mode = config.stream_mode;
     std::string last_checkpoint_id;
     int start_step = 0;
 
@@ -416,34 +499,16 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
     std::set<std::string> completed;
     bool hit_end = false;
 
-    // Lambda: execute a single node and return its writes
-    auto exec_node = [&](const std::string& node_name) -> std::vector<ChannelWrite> {
-        auto node_it = nodes_.find(node_name);
-        if (node_it == nodes_.end()) {
-            throw std::runtime_error("Node not found: " + node_name);
-        }
+    // Pending Send requests (dynamic fan-out)
+    std::vector<Send> pending_sends;
 
-        if (cb) cb(GraphEvent{GraphEvent::Type::NODE_START, node_name, json()});
-
-        auto writes = cb
-            ? node_it->second->execute_stream(state, cb)
-            : node_it->second->execute(state);
-
-        if (cb) {
-            for (const auto& w : writes) {
-                cb(GraphEvent{GraphEvent::Type::CHANNEL_WRITE, node_name,
-                              json{{"channel", w.channel}}});
-            }
-            cb(GraphEvent{GraphEvent::Type::NODE_END, node_name, json()});
-        }
-
-        return writes;
-    };
+    // Command override for routing
+    std::optional<std::string> command_goto;
 
     for (int step = start_step; step < config.max_steps + start_step; ++step) {
         if (ready.empty() || hit_end) break;
 
-        // --- interrupt_before check ---
+        // --- interrupt_before check (compile-time) ---
         bool is_resume_entry = (!resume_from.empty() && step == start_step);
         if (!is_resume_entry) {
             for (const auto& node_name : ready) {
@@ -461,44 +526,105 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                     result.checkpoint_id   = cp.id;
                     result.execution_trace = std::move(trace);
 
-                    if (cb) cb(GraphEvent{GraphEvent::Type::INTERRUPT, node_name,
-                                json{{"phase", "before"}, {"checkpoint_id", cp.id}}});
+                    if (cb && has_mode(stream_mode, StreamMode::EVENTS))
+                        cb(GraphEvent{GraphEvent::Type::INTERRUPT, node_name,
+                            json{{"phase", "before"}, {"checkpoint_id", cp.id}}});
                     return result;
                 }
             }
         }
 
         // --- Execute ready nodes ---
-        if (ready.size() == 1) {
-            // Sequential: direct call
-            auto writes = exec_node(ready[0]);
-            state.apply_writes(writes);
-            trace.push_back(ready[0]);
-            completed.insert(ready[0]);
-        } else {
-            // Parallel: Taskflow fan-out
-            std::map<std::string, std::vector<ChannelWrite>> all_writes;
-            std::mutex writes_mutex;
+        command_goto.reset();
+        pending_sends.clear();
 
-            tf::Taskflow taskflow("fan-out");
-            for (const auto& node_name : ready) {
-                taskflow.emplace([&, node_name]() {
-                    auto writes = exec_node(node_name);
-                    std::lock_guard lock(writes_mutex);
-                    all_writes[node_name] = std::move(writes);
-                }).name(node_name);
-            }
-            global_executor().run(taskflow).wait();
+        auto execute_single = [&](const std::string& node_name) {
+            try {
+                auto writes = execute_node_with_retry(node_name, state, cb, stream_mode);
+                state.apply_writes(writes);
 
-            // Apply writes in deterministic order
-            for (const auto& node_name : ready) {
-                auto it = all_writes.find(node_name);
-                if (it != all_writes.end()) {
-                    state.apply_writes(it->second);
+            } catch (const NodeInterrupt& ni) {
+                // Dynamic breakpoint: save checkpoint and return interrupted
+                if (checkpoint_store_ && !config.thread_id.empty()) {
+                    auto cp = save_checkpoint(state, config.thread_id,
+                        node_name, node_name, "node_interrupt", step, last_checkpoint_id);
+
+                    RunResult result;
+                    result.output          = state.serialize();
+                    result.interrupted     = true;
+                    result.interrupt_node  = node_name;
+                    result.interrupt_value = json{{"reason", ni.reason()}, {"type", "NodeInterrupt"}};
+                    result.checkpoint_id   = cp.id;
+                    result.execution_trace = trace;
+
+                    if (cb && has_mode(stream_mode, StreamMode::EVENTS))
+                        cb(GraphEvent{GraphEvent::Type::INTERRUPT, node_name,
+                            json{{"phase", "node_interrupt"}, {"reason", ni.reason()}}});
+
+                    throw;  // re-throw to exit the loop
                 }
-                trace.push_back(node_name);
-                completed.insert(node_name);
+                throw;
             }
+
+            trace.push_back(node_name);
+            completed.insert(node_name);
+        };
+
+        try {
+            if (ready.size() == 1) {
+                execute_single(ready[0]);
+            } else {
+                // Parallel: Taskflow fan-out
+                std::map<std::string, std::vector<ChannelWrite>> all_writes;
+                std::mutex writes_mutex;
+                std::exception_ptr first_exception;
+
+                tf::Taskflow taskflow("fan-out");
+                for (const auto& node_name : ready) {
+                    taskflow.emplace([&, node_name]() {
+                        try {
+                            auto writes = execute_node_with_retry(
+                                node_name, state, cb, stream_mode);
+                            std::lock_guard lock(writes_mutex);
+                            all_writes[node_name] = std::move(writes);
+                        } catch (...) {
+                            std::lock_guard lock(writes_mutex);
+                            if (!first_exception) first_exception = std::current_exception();
+                        }
+                    }).name(node_name);
+                }
+                global_executor().run(taskflow).wait();
+
+                if (first_exception) std::rethrow_exception(first_exception);
+
+                for (const auto& node_name : ready) {
+                    auto it = all_writes.find(node_name);
+                    if (it != all_writes.end()) {
+                        state.apply_writes(it->second);
+                    }
+                    trace.push_back(node_name);
+                    completed.insert(node_name);
+                }
+            }
+        } catch (const NodeInterrupt& ni) {
+            // Build and return interrupted result (checkpoint already saved)
+            RunResult result;
+            result.output          = state.serialize();
+            result.interrupted     = true;
+            result.interrupt_node  = ni.reason();
+            result.interrupt_value = json{{"reason", ni.reason()}, {"type", "NodeInterrupt"}};
+            result.execution_trace = std::move(trace);
+            if (checkpoint_store_ && !config.thread_id.empty()) {
+                auto cp_opt = checkpoint_store_->load_latest(config.thread_id);
+                if (cp_opt) result.checkpoint_id = cp_opt->id;
+            }
+            return result;
+        }
+
+        // --- Stream VALUES mode: emit full state after each step ---
+        if (cb && has_mode(stream_mode, StreamMode::VALUES)) {
+            cb(GraphEvent{GraphEvent::Type::CHANNEL_WRITE, "__state__",
+                          state.serialize()});
         }
 
         // --- interrupt_after check ---
@@ -506,7 +632,6 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
             if (interrupt_after_.count(node_name) &&
                 checkpoint_store_ && !config.thread_id.empty()) {
 
-                // Determine next for this node (for checkpoint)
                 auto nexts = resolve_next_nodes(node_name, state);
                 std::string next_str = nexts.empty() ? std::string(END_NODE) : nexts[0];
 
@@ -521,16 +646,19 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                 result.checkpoint_id   = cp.id;
                 result.execution_trace = std::move(trace);
 
-                if (cb) cb(GraphEvent{GraphEvent::Type::INTERRUPT, node_name,
-                            json{{"phase", "after"}, {"checkpoint_id", cp.id}}});
+                if (cb && has_mode(stream_mode, StreamMode::EVENTS))
+                    cb(GraphEvent{GraphEvent::Type::INTERRUPT, node_name,
+                        json{{"phase", "after"}, {"checkpoint_id", cp.id}}});
                 return result;
             }
         }
 
         // --- Resolve next ready set ---
-        // Note: do NOT filter by `completed` — cycles require re-entry.
-        // max_steps prevents infinite loops.
         std::set<std::string> candidates;
+
+        // TODO: Command and Send handling will be integrated when nodes
+        // return NodeResult. For now, use standard edge routing.
+
         for (const auto& node_name : ready) {
             auto nexts = resolve_next_nodes(node_name, state);
             for (const auto& next : nexts) {
@@ -542,12 +670,19 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
             }
         }
 
-        // Filter: only nodes with ALL predecessors completed (fan-in)
         ready.clear();
         for (const auto& candidate : candidates) {
             if (all_predecessors_done(candidate, completed)) {
                 ready.push_back(candidate);
             }
+        }
+
+        // --- Debug: emit routing decision ---
+        if (cb && has_mode(stream_mode, StreamMode::DEBUG) && !ready.empty()) {
+            json next_nodes = json::array();
+            for (const auto& n : ready) next_nodes.push_back(n);
+            cb(GraphEvent{GraphEvent::Type::NODE_START, "__routing__",
+                          json{{"next_nodes", next_nodes}, {"step", step}}});
         }
 
         // --- Checkpoint after each super-step ---

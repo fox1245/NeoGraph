@@ -4,6 +4,7 @@
 #include <neograph/graph/state.h>
 #include <neograph/graph/node.h>
 #include <neograph/graph/checkpoint.h>
+#include <neograph/graph/store.h>
 #include <memory>
 #include <set>
 
@@ -11,15 +12,16 @@ namespace neograph::graph {
 
 // --- Run configuration ---
 struct RunConfig {
-    std::string thread_id;       // for checkpoint association (Phase 2)
-    json        input;           // initial channel writes (e.g. {"messages": [...]})
-    int         max_steps = 50;  // safety limit for loops
+    std::string thread_id;           // for checkpoint association
+    json        input;               // initial channel writes (e.g. {"messages": [...]})
+    int         max_steps  = 50;     // safety limit for loops
+    StreamMode  stream_mode = StreamMode::ALL;  // which events to emit
 };
 
 // --- Run result ---
 struct RunResult {
     json        output;                           // final serialized state
-    bool        interrupted       = false;        // Phase 2: HITL
+    bool        interrupted       = false;        // HITL
     std::string interrupt_node;
     json        interrupt_value;
     std::string checkpoint_id;
@@ -28,7 +30,6 @@ struct RunResult {
 
 // =========================================================================
 // GraphEngine: super-step loop execution engine
-// Sequential loop for Phase 1; Taskflow parallel fan-out in Phase 3.
 // =========================================================================
 class GraphEngine {
 public:
@@ -52,64 +53,53 @@ public:
 
     // ── State inspection & manipulation (LangGraph Checkpointer API) ──
 
-    // Get the current state for a thread (restored from latest checkpoint).
-    // Returns the full serialized channel state, or nullopt if no checkpoint exists.
     std::optional<json> get_state(const std::string& thread_id) const;
 
-    // Get state history for a thread (most recent first).
     std::vector<Checkpoint> get_state_history(const std::string& thread_id,
                                               int limit = 100) const;
 
-    // Update state for a thread: apply writes to the latest checkpoint
-    // and save as a new checkpoint. Does NOT execute any nodes.
-    // Use this to edit messages, inject tool results, or modify channels
-    // before calling resume().
     void update_state(const std::string& thread_id,
                       const json& channel_writes,
                       const std::string& as_node = "");
 
-    // Fork: create a new thread from an existing checkpoint.
-    // If checkpoint_id is empty, forks from the latest checkpoint.
-    // Returns the new checkpoint ID in the forked thread.
     std::string fork(const std::string& source_thread_id,
                      const std::string& new_thread_id,
                      const std::string& checkpoint_id = "");
 
-    // ── Lifecycle ──
+    // ── Configuration ──
 
-    // Take ownership of tools (lifetime management)
     void own_tools(std::vector<std::unique_ptr<Tool>> tools);
-
-    // Set checkpoint store after compilation
     void set_checkpoint_store(std::shared_ptr<CheckpointStore> store);
+
+    // Set cross-thread shared memory store
+    void set_store(std::shared_ptr<Store> store);
+    std::shared_ptr<Store> get_store() const { return store_; }
+
+    // Set default retry policy for all nodes
+    void set_retry_policy(const RetryPolicy& policy);
+
+    // Set retry policy for a specific node
+    void set_node_retry_policy(const std::string& node_name, const RetryPolicy& policy);
 
     const std::string& graph_name() const { return name_; }
 
 private:
     GraphEngine() = default;
 
-    // Initialize state from channel definitions (in-place, no move)
     void init_state(GraphState& state) const;
-
-    // Apply initial input to state
     void apply_input(GraphState& state, const json& input) const;
 
-    // Internal run (shared between run/run_stream)
     RunResult execute_graph(const RunConfig& config,
                             const GraphStreamCallback& cb,
                             const std::string& resume_from = "",
                             const json& resume_value = json());
 
-    // Resolve next node(s) from current node + state
-    // Returns multiple for fan-out (multiple outgoing edges)
     std::vector<std::string> resolve_next_nodes(
         const std::string& current, const GraphState& state) const;
 
-    // Check if all predecessors of a node are in the completed set
     bool all_predecessors_done(const std::string& node,
                                const std::set<std::string>& completed) const;
 
-    // Save a checkpoint at the current state
     Checkpoint save_checkpoint(const GraphState& state,
                                const std::string& thread_id,
                                const std::string& current_node,
@@ -117,6 +107,16 @@ private:
                                const std::string& phase,
                                int step,
                                const std::string& parent_id) const;
+
+    // Execute a node with retry policy
+    std::vector<ChannelWrite> execute_node_with_retry(
+        const std::string& node_name,
+        GraphState& state,
+        const GraphStreamCallback& cb,
+        StreamMode stream_mode);
+
+    // Get retry policy for a node (node-specific or default)
+    RetryPolicy get_retry_policy(const std::string& node_name) const;
 
     // --- Graph definition ---
     std::string name_;
@@ -136,11 +136,15 @@ private:
     std::set<std::string> interrupt_before_;
     std::set<std::string> interrupt_after_;
 
-    // Precomputed graph topology (built in compile())
-    std::map<std::string, std::set<std::string>> predecessors_;  // node -> {required predecessors}
+    std::map<std::string, std::set<std::string>> predecessors_;
 
     std::shared_ptr<CheckpointStore> checkpoint_store_;
+    std::shared_ptr<Store>           store_;
     std::vector<std::unique_ptr<Tool>> owned_tools_;
+
+    // Retry policies
+    RetryPolicy default_retry_policy_;
+    std::map<std::string, RetryPolicy> node_retry_policies_;
 };
 
 } // namespace neograph::graph
