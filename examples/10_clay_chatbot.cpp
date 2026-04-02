@@ -1,7 +1,7 @@
 // NeoGraph Example 10: Multi-turn Chatbot with Clay UI + Raylib
 //
-// NeoGraph Agent 백엔드 + Clay 레이아웃(C) + Raylib 렌더러.
-// Clay 레이아웃은 clay_impl.c (C99)에서 정의하고, C++에서 호출합니다.
+// NeoGraph Agent 백엔드 + Clay 레이아웃(C) + Raylib 렌더러(C).
+// C++ 코드는 NeoGraph 에이전트 + 입력 처리만 담당.
 //
 // 빌드: cmake .. -DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON && make example_clay_chatbot
 // 실행: ./example_clay_chatbot          (Mock)
@@ -13,85 +13,28 @@
 
 #include <raylib.h>
 
-// Clay types needed for rendering — forward-declared from clay.h
-// (Full Clay header is C99 only; macros & layout live in clay_impl.c)
-extern "C" {
-
-typedef struct { float r, g, b, a; } Clay_Color;
-typedef struct { float topLeft, topRight, bottomLeft, bottomRight; } Clay_CornerRadius;
-typedef struct { bool isStaticallyAllocated; int32_t length; const char *chars; } Clay_String;
-typedef struct { Clay_String stringContents; Clay_Color textColor; uint16_t fontId; uint16_t fontSize; uint16_t letterSpacing; uint16_t lineHeight; } Clay_TextRenderData;
-typedef struct { Clay_Color backgroundColor; Clay_CornerRadius cornerRadius; } Clay_RectangleRenderData;
-typedef struct { bool horizontal; bool vertical; } Clay_ClipRenderData;
-typedef struct { Clay_Color color; } Clay_OverlayColorRenderData;
-typedef struct { Clay_Color color; Clay_CornerRadius cornerRadius; struct { uint16_t left,right,top,bottom,betweenChildren; } width; } Clay_BorderRenderData;
-typedef struct { Clay_Color backgroundColor; Clay_CornerRadius cornerRadius; void* imageData; } Clay_ImageRenderData;
-typedef struct { Clay_Color backgroundColor; Clay_CornerRadius cornerRadius; void* customData; } Clay_CustomRenderData;
-typedef union {
-    Clay_RectangleRenderData rectangle;
-    Clay_TextRenderData text;
-    Clay_ImageRenderData image;
-    Clay_CustomRenderData custom;
-    Clay_BorderRenderData border;
-    Clay_ClipRenderData clip;
-    Clay_OverlayColorRenderData overlayColor;
-} Clay_RenderData;
-typedef struct { float x, y, width, height; } Clay_BoundingBox;
-typedef struct { float x, y; } Clay_Vector2;
-typedef struct { float width, height; } Clay_Dimensions;
-typedef struct { uintptr_t nextAllocation; size_t capacity; char* memory; } Clay_Arena;
-typedef struct { void (*errorHandlerFunction)(void*); void* userData; } Clay_ErrorHandler;
-
-typedef enum {
-    CLAY_RENDER_COMMAND_TYPE_NONE,
-    CLAY_RENDER_COMMAND_TYPE_RECTANGLE,
-    CLAY_RENDER_COMMAND_TYPE_BORDER,
-    CLAY_RENDER_COMMAND_TYPE_TEXT,
-    CLAY_RENDER_COMMAND_TYPE_IMAGE,
-    CLAY_RENDER_COMMAND_TYPE_SCISSOR_START,
-    CLAY_RENDER_COMMAND_TYPE_SCISSOR_END,
-    CLAY_RENDER_COMMAND_TYPE_CUSTOM,
-    CLAY_RENDER_COMMAND_TYPE_OVERLAY_COLOR_START,
-    CLAY_RENDER_COMMAND_TYPE_OVERLAY_COLOR_END,
-} Clay_RenderCommandType;
-
-typedef struct { Clay_BoundingBox boundingBox; Clay_RenderData renderData; Clay_RenderCommandType commandType; uint32_t id; int16_t zIndex; } Clay_RenderCommand;
-typedef struct { int32_t capacity; int32_t length; Clay_RenderCommand *internalArray; } Clay_RenderCommandArray;
-
-typedef struct { int32_t length; const char* chars; const char* baseChars; } Clay_StringSlice;
-typedef struct { Clay_Color textColor; uint16_t fontId; uint16_t fontSize; uint16_t letterSpacing; uint16_t lineHeight; int wrapMode; } Clay_TextElementConfig;
-
-Clay_RenderCommand* Clay_RenderCommandArray_Get(Clay_RenderCommandArray* array, int32_t index);
-typedef struct Clay_Context Clay_Context;
-uint32_t Clay_MinMemorySize(void);
-Clay_Arena Clay_CreateArenaWithCapacityAndMemory(size_t capacity, void *memory);
-Clay_Context* Clay_Initialize(Clay_Arena arena, Clay_Dimensions dimensions, Clay_ErrorHandler errorHandler);
-void Clay_SetMeasureTextFunction(Clay_Dimensions (*measureText)(Clay_StringSlice, Clay_TextElementConfig*, void*), void* userData);
-void Clay_SetLayoutDimensions(Clay_Dimensions dimensions);
-void Clay_SetPointerState(Clay_Vector2 position, bool pointerDown);
-void Clay_UpdateScrollContainers(bool enableDragScrolling, Clay_Vector2 scrollDelta, float deltaTime);
-Clay_RenderCommandArray Clay_EndLayout(float deltaTime);
-
-} // extern "C"
-
 #include <string>
 #include <vector>
 #include <fstream>
 #include <thread>
 #include <mutex>
 #include <atomic>
-#include <algorithm>
 #include <cstring>
 
 // =========================================================================
-// C functions defined in clay_impl.c
+// C functions from clay_impl.c
 // =========================================================================
 extern "C" {
+    void clay_init(int screen_w, int screen_h);
+    void clay_cleanup(void);
+    void clay_set_font(Font font);
     void clay_set_messages(const char* roles[], const char* contents[],
                            int content_lens[], int streaming[], int count);
     void clay_set_input(const char* text, int len);
-    void clay_set_config(int is_live, float screen_width, double time);
+    void clay_set_config(int is_live, float screen_width, double time_val);
+    void clay_update(void);
     void clay_build_layout(void);
+    void clay_render(void);
 }
 
 // =========================================================================
@@ -106,7 +49,6 @@ static std::mutex g_mutex;
 static std::atomic<bool> g_generating{false};
 static neograph::llm::Agent* g_agent = nullptr;
 static std::vector<neograph::ChatMessage> g_history;
-static Font g_font;
 static bool g_live = false;
 
 // =========================================================================
@@ -117,10 +59,10 @@ class ChatMockProvider : public neograph::Provider {
 public:
     neograph::ChatCompletion complete(const neograph::CompletionParams&) override {
         const char* r[] = {
-            "안녕하세요! NeoGraph 챗봇입니다.",
-            "NeoGraph는 C++ 그래프 에이전트 엔진입니다.\n체크포인팅, HITL, 병렬 실행을 지원합니다.",
-            "Clay + Raylib으로 이런 UI를 만들 수 있습니다!",
-            "더 궁금한 점이 있으면 물어보세요."};
+            "Hello! I'm the NeoGraph chatbot.",
+            "NeoGraph is a C++ graph agent engine library.\nIt supports checkpointing, HITL, and parallel execution.",
+            "This UI is built with Clay + Raylib!",
+            "Feel free to ask me anything."};
         neograph::ChatCompletion c;
         c.message.role = "assistant";
         c.message.content = r[turn_++ % 4];
@@ -189,77 +131,25 @@ static void send_message() {
     }).detach();
 }
 
-// =========================================================================
-// Clay text measurement (called from C side via function pointer)
-// =========================================================================
-static Clay_Dimensions MeasureText(Clay_StringSlice text, Clay_TextElementConfig* cfg, void*) {
-    float scale = (float)cfg->fontSize / (float)g_font.baseSize;
-    float w = 0, maxW = 0; int lines = 1;
-    for (int i = 0; i < (int)text.length; i++) {
-        if (text.chars[i] == '\n') { maxW = std::max(maxW, w); w = 0; lines++; continue; }
-        int idx = GetGlyphIndex(g_font, (unsigned char)text.chars[i]);
-        float adv = g_font.glyphs[idx].advanceX ? (float)g_font.glyphs[idx].advanceX : g_font.recs[idx].width;
-        w += adv * scale;
-    }
-    return {std::max(maxW, w), (float)(lines * cfg->fontSize * 1.25f)};
-}
-
-// =========================================================================
-// Raylib renderer
-// =========================================================================
-static void RenderClay(Clay_RenderCommandArray cmds) {
-    for (int i = 0; i < (int)cmds.length; i++) {
-        auto* cmd = Clay_RenderCommandArray_Get(&cmds, i);
-        auto& b = cmd->boundingBox;
-        switch (cmd->commandType) {
-        case CLAY_RENDER_COMMAND_TYPE_RECTANGLE: {
-            auto& d = cmd->renderData.rectangle;
-            Color c = {(uint8_t)d.backgroundColor.r,(uint8_t)d.backgroundColor.g,
-                       (uint8_t)d.backgroundColor.b,(uint8_t)d.backgroundColor.a};
-            float r = d.cornerRadius.topLeft;
-            if (r > 0.5f) DrawRectangleRounded({b.x,b.y,b.width,b.height}, r/(std::min(b.width,b.height)*0.5f), 6, c);
-            else DrawRectangle((int)b.x,(int)b.y,(int)b.width,(int)b.height, c);
-            break; }
-        case CLAY_RENDER_COMMAND_TYPE_TEXT: {
-            auto& d = cmd->renderData.text;
-            Color c = {(uint8_t)d.textColor.r,(uint8_t)d.textColor.g,
-                       (uint8_t)d.textColor.b,(uint8_t)d.textColor.a};
-            std::string txt(d.stringContents.chars, d.stringContents.length);
-            DrawTextEx(g_font, txt.c_str(), {b.x,b.y}, (float)d.fontSize, 1, c);
-            break; }
-        case CLAY_RENDER_COMMAND_TYPE_SCISSOR_START:
-            BeginScissorMode((int)b.x,(int)b.y,(int)b.width,(int)b.height); break;
-        case CLAY_RENDER_COMMAND_TYPE_SCISSOR_END:
-            EndScissorMode(); break;
-        default: break;
-        }
-    }
-}
-
-// =========================================================================
-// Sync state from C++ to C layout
-// =========================================================================
 static void sync_to_clay() {
     std::lock_guard lock(g_mutex);
     int n = (int)g_messages.size();
     if (n == 0) {
         clay_set_messages(nullptr, nullptr, nullptr, nullptr, 0);
-        clay_set_input(g_input, g_input_len);
-        return;
+    } else {
+        static std::vector<const char*> roles, contents;
+        static std::vector<int> lens, streams;
+        roles.resize(n); contents.resize(n); lens.resize(n); streams.resize(n);
+        for (int i = 0; i < n; i++) {
+            roles[i] = g_messages[i].role.c_str();
+            contents[i] = g_messages[i].content.c_str();
+            lens[i] = (int)g_messages[i].content.size();
+            streams[i] = g_messages[i].streaming ? 1 : 0;
+        }
+        clay_set_messages(roles.data(), contents.data(), lens.data(), streams.data(), n);
     }
-
-    // Build flat arrays for C
-    static std::vector<const char*> roles, contents;
-    static std::vector<int> lens, streams;
-    roles.resize(n); contents.resize(n); lens.resize(n); streams.resize(n);
-    for (int i = 0; i < n; i++) {
-        roles[i] = g_messages[i].role.c_str();
-        contents[i] = g_messages[i].content.c_str();
-        lens[i] = (int)g_messages[i].content.size();
-        streams[i] = g_messages[i].streaming ? 1 : 0;
-    }
-    clay_set_messages(roles.data(), contents.data(), lens.data(), streams.data(), n);
     clay_set_input(g_input, g_input_len);
+    clay_set_config(g_live ? 1 : 0, (float)GetScreenWidth(), GetTime());
 }
 
 // =========================================================================
@@ -283,32 +173,33 @@ int main(int argc, char** argv) {
         "You are a helpful assistant. Respond concisely in the user's language.");
     g_agent = &agent;
 
+    // Raylib
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
     InitWindow(800, 600, g_live ? "NeoGraph Chat (Live)" : "NeoGraph Chat (Mock)");
     SetTargetFPS(60);
 
-    g_font = LoadFontEx("/usr/share/fonts/opentype/noto/NotoSansCJK-Light.ttc", 20, nullptr, 0);
-    if (g_font.glyphCount == 0) g_font = GetFontDefault();
-    SetTextureFilter(g_font.texture, TEXTURE_FILTER_BILINEAR);
+    Font font = LoadFontEx("/usr/share/fonts/opentype/noto/NotoSansCJK-Light.ttc", 20, nullptr, 0);
+    if (font.glyphCount == 0) font = GetFontDefault();
+    SetTextureFilter(font.texture, TEXTURE_FILTER_BILINEAR);
 
-    uint64_t memSz = Clay_MinMemorySize();
-    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(memSz, malloc(memSz));
-    Clay_Initialize(arena, {(float)GetScreenWidth(), (float)GetScreenHeight()}, (Clay_ErrorHandler){});
-    Clay_SetMeasureTextFunction(MeasureText, nullptr);
+    // Clay
+    clay_init(GetScreenWidth(), GetScreenHeight());
+    clay_set_font(font);
 
     while (!WindowShouldClose()) {
-        float dt = GetFrameTime();
-        Clay_SetLayoutDimensions({(float)GetScreenWidth(), (float)GetScreenHeight()});
-        Clay_SetPointerState({(float)GetMouseX(), (float)GetMouseY()}, IsMouseButtonDown(MOUSE_BUTTON_LEFT));
-        Clay_UpdateScrollContainers(true, {0, GetMouseWheelMove() * 50}, dt);
-
-        // Keyboard
+        // Input
         int ch = GetCharPressed();
         while (ch > 0) {
             if (ch >= 32 && g_input_len < 1000) {
                 if (ch<0x80) g_input[g_input_len++]=(char)ch;
-                else if (ch<0x800) { g_input[g_input_len++]=0xC0|(ch>>6); g_input[g_input_len++]=0x80|(ch&0x3F); }
-                else { g_input[g_input_len++]=0xE0|(ch>>12); g_input[g_input_len++]=0x80|((ch>>6)&0x3F); g_input[g_input_len++]=0x80|(ch&0x3F); }
+                else if (ch<0x800) {
+                    g_input[g_input_len++]=0xC0|(ch>>6);
+                    g_input[g_input_len++]=0x80|(ch&0x3F);
+                } else {
+                    g_input[g_input_len++]=0xE0|(ch>>12);
+                    g_input[g_input_len++]=0x80|((ch>>6)&0x3F);
+                    g_input[g_input_len++]=0x80|(ch&0x3F);
+                }
                 g_input[g_input_len] = '\0';
             }
             ch = GetCharPressed();
@@ -320,20 +211,19 @@ int main(int argc, char** argv) {
         }
         if (IsKeyPressed(KEY_ENTER)) send_message();
 
-        // Sync → Layout → Render
+        // Sync state → Clay update → Layout → Render
         sync_to_clay();
-        clay_set_config(g_live ? 1 : 0, (float)GetScreenWidth(), GetTime());
+        clay_update();
         clay_build_layout();
-        Clay_RenderCommandArray cmds = Clay_EndLayout(dt);
 
         BeginDrawing();
-        ClearBackground({25,25,35,255});
-        RenderClay(cmds);
+        ClearBackground((Color){25, 25, 35, 255});
+        clay_render();
         EndDrawing();
     }
 
-    UnloadFont(g_font);
+    UnloadFont(font);
     CloseWindow();
-    free(arena.memory);
+    clay_cleanup();
     return 0;
 }
