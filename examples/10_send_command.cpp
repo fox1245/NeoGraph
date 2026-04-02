@@ -1,16 +1,16 @@
 // NeoGraph Example 10: Send & Command Engine Integration
 //
-// Send(동적 fan-out)와 Command(라우팅 오버라이드)가 엔진에서
-// 실제로 동작하는 것을 보여주는 예제.
+// Demonstrates Send (dynamic fan-out) and Command (routing override)
+// working in the engine.
 //
-// 시나리오: 리서치 에이전트
-//   1. planner 노드가 사용자 질문을 분석하고 Send로 동적 fan-out
-//   2. researcher 노드가 각 토픽을 병렬 조사
-//   3. evaluator 노드가 결과를 평가하고 Command로 분기
-//      - 충분하면 → summarizer → END
-//      - 부족하면 → planner로 돌아가서 추가 조사
+// Scenario: Research agent
+//   1. planner node analyzes the user's question and uses Send for dynamic fan-out
+//   2. researcher node investigates each topic in parallel
+//   3. evaluator node assesses results and branches via Command
+//      - sufficient → summarizer → END
+//      - insufficient → back to planner for additional research
 //
-// API 키 불필요 (커스텀 노드)
+// No API key required (custom nodes)
 //
 // Usage: ./example_send_command
 
@@ -24,18 +24,18 @@ using namespace neograph;
 using namespace neograph::graph;
 
 // =========================================================================
-// PlannerNode: 사용자 질문에서 토픽을 추출하고 Send로 동적 fan-out
+// PlannerNode: extracts topics from user question and uses Send for dynamic fan-out
 // =========================================================================
 class PlannerNode : public GraphNode {
     static int round_;
 public:
-    // execute_full을 오버라이드하여 Send를 반환
+    // Override execute_full to return Sends
     NodeResult execute_full(const GraphState& state) override {
         round_++;
         auto query = state.get("query");
         std::string q = query.is_string() ? query.get<std::string>() : "general research";
 
-        // 1라운드: 3개 토픽, 2라운드: 2개 추가 토픽
+        // Round 1: 3 topics, Round 2: 2 additional topics
         std::vector<std::string> topics;
         if (round_ == 1) {
             topics = {"market_size", "key_players", "technology_trends"};
@@ -50,11 +50,11 @@ public:
             {"topics", topics}
         })});
 
-        // Send: researcher 노드를 토픽 수만큼 동적 실행
-        // Send.input은 채널명→값 매핑 (apply_input으로 상태에 적용됨)
+        // Send: dynamically execute researcher node once per topic
+        // Send.input is a channel-name→value mapping (applied to state via apply_input)
         for (const auto& topic : topics) {
             nr.sends.push_back(Send{"researcher", json({
-                {"topic", topic}   // "topic" 채널에 토픽 문자열 주입
+                {"topic", topic}   // Inject topic string into "topic" channel
             })});
         }
 
@@ -70,7 +70,7 @@ public:
 int PlannerNode::round_ = 0;
 
 // =========================================================================
-// ResearcherNode: 단일 토픽 조사 (Send로 호출됨)
+// ResearcherNode: investigates a single topic (invoked via Send)
 // =========================================================================
 class ResearcherNode : public GraphNode {
 public:
@@ -78,7 +78,7 @@ public:
         auto topic_json = state.get("topic");
         std::string topic = topic_json.is_string() ? topic_json.get<std::string>() : "unknown";
 
-        // 시뮬레이션: 조사에 50~100ms 소요
+        // Simulation: research takes 50-100ms
         int delay = 50 + (std::hash<std::string>{}(topic) % 50);
         std::this_thread::sleep_for(std::chrono::milliseconds(delay));
 
@@ -96,7 +96,7 @@ public:
 };
 
 // =========================================================================
-// EvaluatorNode: 결과 평가 후 Command로 분기 결정
+// EvaluatorNode: evaluates results and decides branching via Command
 // =========================================================================
 class EvaluatorNode : public GraphNode {
     static int eval_count_;
@@ -109,13 +109,13 @@ public:
         NodeResult nr;
 
         if (count >= 5 || eval_count_ >= 2) {
-            // 충분한 데이터 → summarizer로
+            // Sufficient data → go to summarizer
             nr.command = Command{
                 "summarizer",
                 {ChannelWrite{"eval_status", json("sufficient: " + std::to_string(count) + " findings")}}
             };
         } else {
-            // 부족 → planner로 돌아가서 추가 조사
+            // Insufficient → go back to planner for more research
             nr.command = Command{
                 "planner",
                 {ChannelWrite{"eval_status", json("insufficient: need more research (have " + std::to_string(count) + ")")}}
@@ -134,7 +134,7 @@ public:
 int EvaluatorNode::eval_count_ = 0;
 
 // =========================================================================
-// SummarizerNode: 모든 결과를 종합
+// SummarizerNode: aggregates all results
 // =========================================================================
 class SummarizerNode : public GraphNode {
 public:
@@ -164,7 +164,7 @@ public:
 // Main
 // =========================================================================
 int main() {
-    // 커스텀 노드 등록
+    // Register custom nodes
     auto& factory = NodeFactory::instance();
 
     factory.register_type("planner",
@@ -183,14 +183,14 @@ int main() {
         [](const std::string&, const json&, const NodeContext&) {
             return std::make_unique<SummarizerNode>(); });
 
-    // 그래프 정의
-    // planner → (Send로 researcher 동적 실행) → evaluator → Command로 분기
+    // Graph definition
+    // planner → (dynamic researcher execution via Send) → evaluator → branching via Command
     json definition = {
         {"name", "research_agent"},
         {"channels", {
             {"query",       {{"reducer", "overwrite"}}},
             {"plan",        {{"reducer", "overwrite"}}},
-            {"topic",       {{"reducer", "overwrite"}}},  // Send가 주입하는 채널
+            {"topic",       {{"reducer", "overwrite"}}},  // Channel injected by Send
             {"findings",    {{"reducer", "append"}}},
             {"eval_status", {{"reducer", "overwrite"}}},
             {"summary",     {{"reducer", "overwrite"}}}
@@ -204,8 +204,8 @@ int main() {
         {"edges", json::array({
             {{"from", "__start__"}, {"to", "planner"}},
             {{"from", "planner"},   {"to", "evaluator"}},
-            // evaluator는 Command로 라우팅하므로 여기서 edge 불필요
-            // (Command.goto가 "summarizer" 또는 "planner"로 직접 지정)
+            // No edge needed here since evaluator routes via Command
+            // (Command.goto directly specifies "summarizer" or "planner")
             {{"from", "summarizer"}, {"to", "__end__"}}
         })}
     };
@@ -213,7 +213,7 @@ int main() {
     NodeContext ctx;
     auto engine = GraphEngine::compile(definition, ctx);
 
-    // 실행
+    // Execute
     std::cout << "=== Send & Command Integration Demo ===\n\n";
 
     auto start = std::chrono::steady_clock::now();
@@ -257,7 +257,7 @@ int main() {
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start).count();
 
-    // 결과 출력
+    // Print results
     std::cout << "\n";
     std::cout << "Execution trace: ";
     for (size_t i = 0; i < result.execution_trace.size(); ++i) {

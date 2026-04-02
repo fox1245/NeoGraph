@@ -1,11 +1,11 @@
 // NeoGraph Example 10: Multi-turn Chatbot with Clay UI + Raylib
 //
-// NeoGraph Agent 백엔드 + Clay 레이아웃(C) + Raylib 렌더러(C).
-// C++ 코드는 NeoGraph 에이전트 + 입력 처리만 담당.
+// NeoGraph Agent backend + Clay layout (C) + Raylib renderer (C).
+// C++ code handles only the NeoGraph agent + input processing.
 //
-// 빌드: cmake .. -DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON && make example_clay_chatbot
-// 실행: ./example_clay_chatbot          (Mock)
-//       ./example_clay_chatbot --live   (OpenAI API)
+// Build: cmake .. -DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON && make example_clay_chatbot
+// Run:   ./example_clay_chatbot          (Mock)
+//        ./example_clay_chatbot --live   (OpenAI API)
 
 #include <neograph/neograph.h>
 #include <neograph/llm/openai_provider.h>

@@ -1,13 +1,13 @@
-// NeoGraph Example 06: Subgraph (계층적 그래프 합성)
+// NeoGraph Example 06: Subgraph (Hierarchical Graph Composition)
 //
-// 서브그래프 노드를 사용하여 복잡한 워크플로를 계층적으로 구성하는 예제.
-// 코드 변경 없이 JSON만으로 에이전트를 합성할 수 있습니다.
+// An example of composing complex workflows hierarchically using subgraph nodes.
+// Agents can be composed purely via JSON without any code changes.
 //
-// 시나리오: Supervisor 패턴
-//   메인 그래프: supervisor → inner_react_agent(서브그래프) → __end__
-//   서브그래프 : llm → tools → llm (ReAct 루프)
+// Scenario: Supervisor pattern
+//   Main graph: supervisor → inner_react_agent (subgraph) → __end__
+//   Subgraph  : llm → tools → llm (ReAct loop)
 //
-// API 키 불필요 (Mock Provider 사용)
+// No API key required (uses Mock Provider)
 //
 // Usage: ./example_subgraph
 
@@ -29,8 +29,8 @@ public:
                 R"({"query": "NeoGraph features"})"
             }};
         } else {
-            result.message.content = "NeoGraph는 C++로 작성된 그래프 에이전트 엔진입니다. "
-                "체크포인팅, HITL, 병렬 실행, 서브그래프를 지원합니다.";
+            result.message.content = "NeoGraph is a graph agent engine written in C++. "
+                "It supports checkpointing, HITL, parallel execution, and subgraphs.";
         }
         return result;
     }
@@ -44,7 +44,7 @@ public:
     std::string get_name() const override { return "subgraph_mock"; }
 };
 
-// Mock 도구
+// Mock tool
 class LookupTool : public neograph::Tool {
 public:
     neograph::ChatTool get_definition() const override {
@@ -69,14 +69,14 @@ int main() {
     ctx.provider = provider;
     ctx.tools = tool_ptrs;
 
-    // JSON 기반 그래프 정의 — 서브그래프를 인라인으로 포함
+    // JSON-based graph definition — subgraph included inline
     neograph::json definition = {
         {"name", "supervisor_graph"},
         {"channels", {
             {"messages", {{"reducer", "append"}}}
         }},
         {"nodes", {
-            // 서브그래프 노드: 내부에 ReAct 루프를 포함
+            // Subgraph node: contains a ReAct loop internally
             {"inner_agent", {
                 {"type", "subgraph"},
                 {"definition", {
@@ -95,7 +95,7 @@ int main() {
                         {{"from", "tools"}, {"to", "llm"}}
                     })}
                 }}
-                // input_map/output_map 생략 → 동명 채널 자동 매핑
+                // input_map/output_map omitted → auto-mapped by same-name channels
             }}
         }},
         {"edges", neograph::json::array({
@@ -107,12 +107,12 @@ int main() {
     auto engine = neograph::graph::GraphEngine::compile(definition, ctx);
     engine->own_tools(std::move(tools));
 
-    // 실행
-    std::cout << "=== Subgraph (Supervisor 패턴) ===\n\n";
+    // Execute
+    std::cout << "=== Subgraph (Supervisor Pattern) ===\n\n";
 
     neograph::graph::RunConfig config;
     config.input = {{"messages", neograph::json::array({
-        {{"role", "user"}, {"content", "NeoGraph가 뭐야?"}}
+        {{"role", "user"}, {"content", "What is NeoGraph?"}}
     })}};
 
     auto result = engine->run_stream(config,
@@ -132,12 +132,12 @@ int main() {
             }
         });
 
-    std::cout << "\n\n실행 추적 (외부 그래프): ";
+    std::cout << "\n\nExecution trace (outer graph): ";
     for (const auto& n : result.execution_trace) std::cout << n << " → ";
     std::cout << "END\n";
 
     if (result.output.contains("final_response")) {
-        std::cout << "\n최종 응답: " << result.output["final_response"].get<std::string>() << "\n";
+        std::cout << "\nFinal response: " << result.output["final_response"].get<std::string>() << "\n";
     }
 
     return 0;

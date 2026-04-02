@@ -1,14 +1,14 @@
 // NeoGraph Example 08: State Management (get_state / update_state / fork)
 //
-// LangGraph의 Checkpointer API에 대응하는 상태 관리 기능 데모.
+// Demonstrates state management features corresponding to LangGraph's Checkpointer API.
 //
-// 시나리오:
-//   1. 그래프 실행 → interrupt → 상태 조회 (get_state)
-//   2. 상태 수정 (update_state) — 메시지 편집 후 재개
-//   3. 분기 (fork) — 기존 체크포인트에서 새 스레드로 포크
-//   4. 시간 여행 — 과거 체크포인트에서 다시 실행
+// Scenario:
+//   1. Run graph → interrupt → inspect state (get_state)
+//   2. Modify state (update_state) — edit messages and resume
+//   3. Fork — fork from an existing checkpoint to a new thread
+//   4. Time travel — re-run from a past checkpoint
 //
-// API 키 불필요 (Mock Provider 사용)
+// No API key required (uses Mock Provider)
 //
 // Usage: ./example_state_management
 
@@ -18,27 +18,27 @@
 #include <iostream>
 #include <iomanip>
 
-// Mock Provider: 메시지 내용에 따라 응답이 달라짐
+// Mock Provider: responds differently based on message content
 class StateMockProvider : public neograph::Provider {
 public:
     neograph::ChatCompletion complete(const neograph::CompletionParams& params) override {
         neograph::ChatCompletion result;
         result.message.role = "assistant";
 
-        // 마지막 user 메시지 확인
+        // Check the last user message
         std::string last_user;
         for (auto it = params.messages.rbegin(); it != params.messages.rend(); ++it) {
             if (it->role == "user") { last_user = it->content; break; }
         }
 
-        if (last_user.find("서울") != std::string::npos) {
-            result.message.content = "서울은 대한민국의 수도이며, 인구 약 950만명의 도시입니다.";
-        } else if (last_user.find("부산") != std::string::npos) {
-            result.message.content = "부산은 대한민국 제2의 도시이며, 해운대 해수욕장으로 유명합니다.";
-        } else if (last_user.find("도쿄") != std::string::npos) {
-            result.message.content = "도쿄는 일본의 수도이며, 세계 최대 도시권 중 하나입니다.";
+        if (last_user.find("Seoul") != std::string::npos) {
+            result.message.content = "Seoul is the capital of South Korea, with a population of about 9.5 million.";
+        } else if (last_user.find("Busan") != std::string::npos) {
+            result.message.content = "Busan is the second largest city in South Korea, famous for Haeundae Beach.";
+        } else if (last_user.find("Tokyo") != std::string::npos) {
+            result.message.content = "Tokyo is the capital of Japan and one of the largest metropolitan areas in the world.";
         } else {
-            result.message.content = "안녕하세요! 도시에 대해 물어봐 주세요.";
+            result.message.content = "Hello! Please ask me about a city.";
         }
         return result;
     }
@@ -75,8 +75,8 @@ static void print_messages(const neograph::json& state) {
 int main() {
     auto provider = std::make_shared<StateMockProvider>();
 
-    // 2-노드 그래프: llm → reviewer (reviewer 전에 interrupt)
-    // 사용자가 LLM 응답을 검토한 뒤 reviewer가 최종 확인하는 구조
+    // 2-node graph: llm → reviewer (interrupt before reviewer)
+    // The user reviews the LLM response, then the reviewer does final confirmation
     neograph::json definition = {
         {"name", "state_demo"},
         {"channels", {{"messages", {{"reducer", "append"}}}}},
@@ -99,97 +99,97 @@ int main() {
     auto engine = neograph::graph::GraphEngine::compile(definition, ctx, store);
 
     // ================================================================
-    // 1. 실행 → interrupt → get_state
+    // 1. Execute → interrupt → get_state
     // ================================================================
-    print_separator("1. 실행 후 상태 조회 (get_state)");
+    print_separator("1. Inspect state after execution (get_state)");
 
     neograph::graph::RunConfig config;
     config.thread_id = "thread-001";
     config.input = {{"messages", neograph::json::array({
-        {{"role", "user"}, {"content", "서울에 대해 알려줘"}}
+        {{"role", "user"}, {"content", "Tell me about Seoul"}}
     })}};
 
     auto result = engine->run(config);
     std::cout << "interrupted: " << std::boolalpha << result.interrupted << "\n\n";
 
-    // get_state로 현재 상태 조회
+    // Inspect current state via get_state
     auto state = engine->get_state("thread-001");
     if (state) {
-        std::cout << "현재 대화 내용:\n";
+        std::cout << "Current conversation:\n";
         print_messages(*state);
     }
 
     // ================================================================
-    // 2. update_state — 메시지를 수정하고 재개
+    // 2. update_state — modify messages and resume
     // ================================================================
-    print_separator("2. 상태 수정 후 재개 (update_state)");
+    print_separator("2. Modify state and resume (update_state)");
 
-    std::cout << "원래 질문: \"서울에 대해 알려줘\"\n";
-    std::cout << "수정 후:   \"부산에 대해 알려줘\" (질문 변경)\n\n";
+    std::cout << "Original question: \"Tell me about Seoul\"\n";
+    std::cout << "Modified to:       \"Tell me about Busan\" (question changed)\n\n";
 
-    // 새 user 메시지를 추가 (reducer=append이므로 기존에 추가됨)
+    // Add a new user message (reducer=append, so it appends to existing)
     engine->update_state("thread-001", {
         {"messages", neograph::json::array({
-            {{"role", "user"}, {"content", "부산에 대해 알려줘"}}
+            {{"role", "user"}, {"content", "Tell me about Busan"}}
         })}
     });
 
-    // 수정된 상태 확인
+    // Verify modified state
     auto updated_state = engine->get_state("thread-001");
     if (updated_state) {
-        std::cout << "수정된 대화 내용:\n";
+        std::cout << "Modified conversation:\n";
         print_messages(*updated_state);
     }
 
-    // resume로 재개
-    std::cout << "\n재개 실행...\n";
+    // Resume execution
+    std::cout << "\nResuming...\n";
     auto resumed = engine->resume("thread-001");
-    std::cout << "실행 추적: ";
+    std::cout << "Execution trace: ";
     for (const auto& n : resumed.execution_trace) std::cout << n << " → ";
     std::cout << "END\n\n";
 
     auto final_state = engine->get_state("thread-001");
     if (final_state) {
-        std::cout << "최종 대화 내용:\n";
+        std::cout << "Final conversation:\n";
         print_messages(*final_state);
     }
 
     // ================================================================
-    // 3. fork — 분기 실행
+    // 3. fork — branch execution
     // ================================================================
-    print_separator("3. 분기 (fork)");
+    print_separator("3. Fork");
 
-    // thread-001의 현재 상태에서 새 스레드로 분기
+    // Fork from thread-001's current state to a new thread
     auto fork_cp_id = engine->fork("thread-001", "thread-001-tokyo");
-    std::cout << "fork 완료: thread-001 → thread-001-tokyo\n";
-    std::cout << "새 체크포인트 ID: " << fork_cp_id << "\n\n";
+    std::cout << "Fork complete: thread-001 -> thread-001-tokyo\n";
+    std::cout << "New checkpoint ID: " << fork_cp_id << "\n\n";
 
-    // 분기된 스레드의 상태 수정
+    // Modify the forked thread's state
     engine->update_state("thread-001-tokyo", {
         {"messages", neograph::json::array({
-            {{"role", "user"}, {"content", "도쿄에 대해 알려줘"}}
+            {{"role", "user"}, {"content", "Tell me about Tokyo"}}
         })}
     });
 
-    // 분기된 스레드에서 실행
+    // Execute on the forked thread
     auto forked_result = engine->resume("thread-001-tokyo");
-    std::cout << "분기 스레드 실행 추적: ";
+    std::cout << "Forked thread execution trace: ";
     for (const auto& n : forked_result.execution_trace) std::cout << n << " → ";
     std::cout << "END\n\n";
 
     auto fork_state = engine->get_state("thread-001-tokyo");
     if (fork_state) {
-        std::cout << "분기 스레드 대화 내용:\n";
+        std::cout << "Forked thread conversation:\n";
         print_messages(*fork_state);
     }
 
     // ================================================================
-    // 4. 상태 히스토리 (시간 여행)
+    // 4. State history (time travel)
     // ================================================================
-    print_separator("4. 상태 히스토리 (Time Travel)");
+    print_separator("4. State History (Time Travel)");
 
     auto history = engine->get_state_history("thread-001");
-    std::cout << "thread-001 체크포인트 히스토리 (" << history.size() << "개):\n\n";
+    std::cout << "thread-001 checkpoint history (" << history.size() << " entries):\n\n";
     for (size_t i = 0; i < history.size(); ++i) {
         const auto& cp = history[i];
         std::cout << "  #" << (i + 1) << " [" << cp.interrupt_phase << "]"
@@ -200,7 +200,7 @@ int main() {
     }
 
     auto fork_history = engine->get_state_history("thread-001-tokyo");
-    std::cout << "\nthread-001-tokyo 체크포인트 히스토리 (" << fork_history.size() << "개):\n\n";
+    std::cout << "\nthread-001-tokyo checkpoint history (" << fork_history.size() << " entries):\n\n";
     for (size_t i = 0; i < fork_history.size(); ++i) {
         const auto& cp = fork_history[i];
         std::string meta_info;

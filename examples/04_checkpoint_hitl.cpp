@@ -1,14 +1,14 @@
 // NeoGraph Example 04: Checkpointing + Human-in-the-Loop (HITL)
 //
-// 그래프 실행 중 특정 노드 앞에서 중단(interrupt)하고,
-// 사용자 승인 후 재개(resume)하는 HITL 워크플로 예제.
+// A HITL workflow example that interrupts execution before a specific node
+// and resumes after user approval.
 //
-// 시나리오: 주문 처리 에이전트
-//   1. LLM이 주문 내용을 분석
-//   2. 결제 실행 전 사용자 승인 요청 (interrupt_before)
-//   3. 사용자가 승인하면 결제 실행 후 완료
+// Scenario: Order processing agent
+//   1. LLM analyzes the order contents
+//   2. Requests user approval before executing payment (interrupt_before)
+//   3. Proceeds with payment after user approval
 //
-// API 키 불필요 (Mock Provider 사용)
+// No API key required (uses Mock Provider)
 //
 // Usage: ./example_checkpoint_hitl
 
@@ -18,7 +18,7 @@
 #include <iostream>
 #include <string>
 
-// Mock Provider: 단계별로 다른 응답 반환
+// Mock Provider: returns different responses per step
 class OrderProvider : public neograph::Provider {
     int call_count_ = 0;
 public:
@@ -27,19 +27,19 @@ public:
         result.message.role = "assistant";
 
         if (call_count_++ == 0) {
-            // 1단계: 도구 호출 (주문 분석)
+            // Step 1: tool call (order analysis)
             result.message.tool_calls = {{
                 "call_001", "analyze_order",
                 R"({"item": "MacBook Pro", "quantity": 1, "price": 2500000})"
             }};
         } else {
-            // 2단계: 최종 응답
+            // Step 2: final response
             result.message.content =
-                "주문이 확인되었습니다.\n"
-                "- 상품: MacBook Pro\n"
-                "- 수량: 1\n"
-                "- 금액: 2,500,000원\n"
-                "결제가 완료되었습니다. 감사합니다!";
+                "Your order has been confirmed.\n"
+                "- Product: MacBook Pro\n"
+                "- Quantity: 1\n"
+                "- Amount: 2,500,000 KRW\n"
+                "Payment has been completed. Thank you!";
         }
         return result;
     }
@@ -54,7 +54,7 @@ public:
     std::string get_name() const override { return "order_mock"; }
 };
 
-// 주문 분석 도구
+// Order analysis tool
 class AnalyzeOrderTool : public neograph::Tool {
 public:
     neograph::ChatTool get_definition() const override {
@@ -73,7 +73,7 @@ int main() {
     std::vector<std::unique_ptr<neograph::Tool>> tools;
     tools.push_back(std::make_unique<AnalyzeOrderTool>());
 
-    // JSON으로 그래프 정의 — tools 노드 앞에서 interrupt
+    // Define graph via JSON — interrupt before the tools node
     neograph::json definition = {
         {"name", "order_workflow"},
         {"channels", {
@@ -89,11 +89,11 @@ int main() {
              {"routes", {{"true", "tools"}, {"false", "__end__"}}}},
             {{"from", "tools"}, {"to", "llm"}}
         })},
-        // 핵심: tools 실행 전에 중단
+        // Key: interrupt before tools execution
         {"interrupt_before", neograph::json::array({"tools"})}
     };
 
-    // Tool 포인터 준비
+    // Prepare tool pointers
     std::vector<neograph::Tool*> tool_ptrs;
     for (auto& t : tools) tool_ptrs.push_back(t.get());
 
@@ -101,52 +101,52 @@ int main() {
     ctx.provider = provider;
     ctx.tools = tool_ptrs;
 
-    // 체크포인트 스토어 (인메모리)
+    // Checkpoint store (in-memory)
     auto store = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
     auto engine = neograph::graph::GraphEngine::compile(definition, ctx, store);
     engine->own_tools(std::move(tools));
 
-    // === 1차 실행: 중단까지 ===
-    std::cout << "=== Phase 1: 주문 분석 후 승인 대기 ===\n\n";
+    // === First run: up to interrupt ===
+    std::cout << "=== Phase 1: Waiting for approval after order analysis ===\n\n";
 
     neograph::graph::RunConfig config;
     config.thread_id = "order-001";
     config.input = {{"messages", neograph::json::array({
-        {{"role", "user"}, {"content", "MacBook Pro 1대 주문해줘"}}
+        {{"role", "user"}, {"content", "Order 1 MacBook Pro"}}
     })}};
 
     auto result = engine->run(config);
 
     if (result.interrupted) {
-        std::cout << "중단됨! 노드: " << result.interrupt_node << "\n";
-        std::cout << "체크포인트 ID: " << result.checkpoint_id << "\n";
-        std::cout << "실행 추적: ";
+        std::cout << "Interrupted! Node: " << result.interrupt_node << "\n";
+        std::cout << "Checkpoint ID: " << result.checkpoint_id << "\n";
+        std::cout << "Execution trace: ";
         for (const auto& n : result.execution_trace) std::cout << n << " → ";
         std::cout << "PAUSED\n\n";
 
-        // 사용자에게 승인 요청 시뮬레이션
-        std::cout << ">>> 결제를 진행하시겠습니까? (시뮬레이션: 승인) <<<\n\n";
+        // Simulate requesting user approval
+        std::cout << ">>> Proceed with payment? (simulation: approved) <<<\n\n";
     }
 
-    // === 2차 실행: 승인 후 재개 ===
-    std::cout << "=== Phase 2: 승인 후 재개 ===\n\n";
+    // === Second run: resume after approval ===
+    std::cout << "=== Phase 2: Resume after approval ===\n\n";
 
     auto resumed = engine->resume(
         "order-001",
-        neograph::json("승인합니다")
+        neograph::json("Approved")
     );
 
-    std::cout << "실행 추적: ";
+    std::cout << "Execution trace: ";
     for (const auto& n : resumed.execution_trace) std::cout << n << " → ";
     std::cout << "END\n\n";
 
     if (resumed.output.contains("final_response")) {
-        std::cout << "최종 응답:\n" << resumed.output["final_response"].get<std::string>() << "\n";
+        std::cout << "Final response:\n" << resumed.output["final_response"].get<std::string>() << "\n";
     }
 
-    // 체크포인트 히스토리
+    // Checkpoint history
     auto checkpoints = store->list("order-001");
-    std::cout << "\n=== 체크포인트 히스토리 (" << checkpoints.size() << "개) ===\n";
+    std::cout << "\n=== Checkpoint history (" << checkpoints.size() << " entries) ===\n";
     for (const auto& cp : checkpoints) {
         std::cout << "  [" << cp.interrupt_phase << "] step=" << cp.step
                   << " node=" << cp.current_node << " → " << cp.next_node << "\n";

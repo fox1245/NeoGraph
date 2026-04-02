@@ -1,12 +1,12 @@
 // NeoGraph Example 07: Intent-based Dynamic Routing
 //
-// LLM이 사용자 의도를 분류하고, 결과에 따라
-// 전문가 서브그래프로 동적 라우팅하는 예제.
+// The LLM classifies user intent and dynamically routes
+// to specialized expert subgraphs based on the result.
 //
-// 시나리오: Panel of Experts
+// Scenario: Panel of Experts
 //   classifier → (math? → math_expert, translate? → translate_expert, else → general)
 //
-// API 키 불필요 (Mock Provider 사용)
+// No API key required (uses Mock Provider)
 //
 // Usage: ./example_intent_routing
 
@@ -14,7 +14,7 @@
 
 #include <iostream>
 
-// Mock Provider: 의도 분류 + 전문가 응답
+// Mock Provider: intent classification + expert responses
 class RoutingMockProvider : public neograph::Provider {
     int call_count_ = 0;
 public:
@@ -22,8 +22,8 @@ public:
         neograph::ChatCompletion result;
         result.message.role = "assistant";
 
-        // 첫 번째 호출: 의도 분류 (IntentClassifierNode가 호출)
-        // → system prompt에 "Classify" 가 있으면 분류 응답
+        // First call: intent classification (called by IntentClassifierNode)
+        // → if system prompt contains "Classify", return classification response
         bool is_classifier = false;
         for (const auto& msg : params.messages) {
             if (msg.role == "system" && msg.content.find("Classify") != std::string::npos) {
@@ -33,35 +33,35 @@ public:
         }
 
         if (is_classifier) {
-            // 사용자 메시지에서 의도 판별
+            // Determine intent from user message
             std::string user_msg;
             for (const auto& msg : params.messages) {
                 if (msg.role == "user") user_msg = msg.content;
             }
 
-            if (user_msg.find("계산") != std::string::npos ||
-                user_msg.find("더하기") != std::string::npos ||
+            if (user_msg.find("calculate") != std::string::npos ||
+                user_msg.find("plus") != std::string::npos ||
                 user_msg.find("+") != std::string::npos) {
                 result.message.content = "math";
-            } else if (user_msg.find("번역") != std::string::npos ||
+            } else if (user_msg.find("translate") != std::string::npos ||
                        user_msg.find("translate") != std::string::npos) {
                 result.message.content = "translate";
             } else {
                 result.message.content = "general";
             }
         } else {
-            // 전문가 응답
+            // Expert response
             std::string instruction;
             for (const auto& msg : params.messages) {
                 if (msg.role == "system") instruction = msg.content;
             }
 
-            if (instruction.find("수학") != std::string::npos) {
-                result.message.content = "수학 전문가입니다. 42 + 58 = 100입니다.";
-            } else if (instruction.find("번역") != std::string::npos) {
-                result.message.content = "번역 전문가입니다. 'Hello' → '안녕하세요'";
+            if (instruction.find("math") != std::string::npos) {
+                result.message.content = "I'm a math expert. 42 + 58 = 100.";
+            } else if (instruction.find("translation") != std::string::npos) {
+                result.message.content = "I'm a translation expert. 'Hello' -> 'Bonjour'";
             } else {
-                result.message.content = "범용 어시스턴트입니다. 무엇이든 도와드리겠습니다.";
+                result.message.content = "I'm a general assistant. I can help with anything.";
             }
         }
 
@@ -83,17 +83,17 @@ int main() {
     neograph::graph::NodeContext ctx;
     ctx.provider = provider;
 
-    // 전문가별 서브그래프 컨텍스트 (다른 instructions)
+    // Per-expert subgraph contexts (different instructions)
     neograph::graph::NodeContext math_ctx = ctx;
-    math_ctx.instructions = "당신은 수학 전문가입니다. 계산 문제를 풀어주세요.";
+    math_ctx.instructions = "You are a math expert. Solve calculation problems.";
 
     neograph::graph::NodeContext translate_ctx = ctx;
-    translate_ctx.instructions = "당신은 번역 전문가입니다. 번역을 해주세요.";
+    translate_ctx.instructions = "You are a translation expert. Perform translations.";
 
     neograph::graph::NodeContext general_ctx = ctx;
-    general_ctx.instructions = "당신은 범용 어시스턴트입니다.";
+    general_ctx.instructions = "You are a general assistant.";
 
-    // 그래프 정의
+    // Graph definition
     neograph::json definition = {
         {"name", "intent_router"},
         {"channels", {
@@ -101,13 +101,13 @@ int main() {
             {"__route__", {{"reducer", "overwrite"}}}
         }},
         {"nodes", {
-            // 의도 분류기
+            // Intent classifier
             {"classifier", {
                 {"type", "intent_classifier"},
                 {"routes", neograph::json::array({"math", "translate", "general"})},
                 {"prompt", "Classify the user's intent. Respond with ONLY one of: math, translate, general"}
             }},
-            // 전문가 서브그래프들
+            // Expert subgraphs
             {"math_expert", {
                 {"type", "subgraph"},
                 {"definition", {
@@ -147,7 +147,7 @@ int main() {
         }},
         {"edges", neograph::json::array({
             {{"from", "__start__"}, {"to", "classifier"}},
-            // 의도에 따라 라우팅
+            // Route based on intent
             {{"from", "classifier"}, {"condition", "route_channel"},
              {"routes", {
                  {"math", "math_expert"},
@@ -162,16 +162,16 @@ int main() {
 
     auto engine = neograph::graph::GraphEngine::compile(definition, ctx);
 
-    // 테스트 케이스 3개 실행
+    // Run 3 test cases
     struct TestCase {
         std::string question;
         std::string expected_route;
     };
 
     std::vector<TestCase> cases = {
-        {"42 더하기 58은 뭐야?", "math"},
-        {"Hello를 번역해줘", "translate"},
-        {"오늘 뭐하지?", "general"}
+        {"What is 42 plus 58?", "math"},
+        {"translate Hello to French", "translate"},
+        {"What should I do today?", "general"}
     };
 
     for (const auto& tc : cases) {
@@ -188,7 +188,7 @@ int main() {
                     std::cout << event.data.get<std::string>();
             });
 
-        std::cout << "\n추적: ";
+        std::cout << "\nTrace: ";
         for (size_t i = 0; i < result.execution_trace.size(); ++i) {
             std::cout << result.execution_trace[i];
             if (i + 1 < result.execution_trace.size()) std::cout << " → ";

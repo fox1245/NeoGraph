@@ -1,13 +1,13 @@
 // NeoGraph Example 05: Parallel Fan-out / Fan-in
 //
-// 여러 노드를 Taskflow 기반으로 병렬 실행하고,
-// 모든 결과를 수집(fan-in)한 후 다음 단계로 진행하는 예제.
+// Runs multiple nodes in parallel using Taskflow,
+// collects all results (fan-in), then proceeds to the next step.
 //
-// 시나리오: 병렬 리서치 에이전트
+// Scenario: Parallel research agent
 //   __start__ → [researcher_a, researcher_b, researcher_c] → summarizer → __end__
-//   3명의 리서처가 동시에 작업하고, 결과를 요약기가 종합.
+//   3 researchers work concurrently, and the summarizer aggregates the results.
 //
-// API 키 불필요 (커스텀 노드 사용)
+// No API key required (uses custom nodes)
 //
 // Usage: ./example_parallel_fanout
 
@@ -17,7 +17,7 @@
 #include <thread>
 #include <chrono>
 
-// 커스텀 노드: 리서처 (시뮬레이션 — 100ms 지연)
+// Custom node: Researcher (simulation — 100ms delay)
 class ResearcherNode : public neograph::graph::GraphNode {
     std::string name_;
     std::string topic_;
@@ -32,7 +32,7 @@ public:
 
         auto start = std::chrono::steady_clock::now();
 
-        // 실제로는 LLM 호출이나 웹 검색을 할 자리
+        // In practice, this is where you'd call an LLM or web search
         std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms_));
 
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -41,32 +41,32 @@ public:
         neograph::json result = {
             {"researcher", name_},
             {"topic", topic_},
-            {"finding", topic_ + "에 대한 조사 결과입니다. (" + std::to_string(elapsed) + "ms)"},
+            {"finding", "Research findings on " + topic_ + ". (" + std::to_string(elapsed) + "ms)"},
             {"elapsed_ms", elapsed}
         };
 
-        // "findings" 채널에 결과를 append
+        // Append result to the "findings" channel
         return {neograph::graph::ChannelWrite{"findings", neograph::json::array({result})}};
     }
 
     std::string name() const override { return name_; }
 };
 
-// 커스텀 노드: 요약기
+// Custom node: Summarizer
 class SummarizerNode : public neograph::graph::GraphNode {
 public:
     std::vector<neograph::graph::ChannelWrite> execute(
         const neograph::graph::GraphState& state) override {
 
         auto findings = state.get("findings");
-        std::string summary = "=== 리서치 요약 ===\n";
+        std::string summary = "=== Research Summary ===\n";
 
         if (findings.is_array()) {
             for (const auto& f : findings) {
                 summary += "- [" + f.value("researcher", "?") + "] "
                         + f.value("finding", "") + "\n";
             }
-            summary += "\n총 " + std::to_string(findings.size()) + "건의 조사 결과 수집 완료.";
+            summary += "\nTotal " + std::to_string(findings.size()) + " research findings collected.";
         }
 
         return {neograph::graph::ChannelWrite{"summary", neograph::json(summary)}};
@@ -76,7 +76,7 @@ public:
 };
 
 int main() {
-    // 커스텀 노드 타입 등록
+    // Register custom node types
     auto& factory = neograph::graph::NodeFactory::instance();
 
     factory.register_type("researcher",
@@ -95,7 +95,7 @@ int main() {
             return std::make_unique<SummarizerNode>();
         });
 
-    // JSON 기반 그래프 정의
+    // JSON-based graph definition
     neograph::json definition = {
         {"name", "parallel_research"},
         {"channels", {
@@ -103,29 +103,29 @@ int main() {
             {"summary",  {{"reducer", "overwrite"}}}
         }},
         {"nodes", {
-            {"researcher_a", {{"type", "researcher"}, {"topic", "AI 반도체 시장"}, {"delay_ms", 150}}},
-            {"researcher_b", {{"type", "researcher"}, {"topic", "양자 컴퓨팅 동향"}, {"delay_ms", 100}}},
-            {"researcher_c", {{"type", "researcher"}, {"topic", "자율주행 기술 현황"}, {"delay_ms", 120}}},
+            {"researcher_a", {{"type", "researcher"}, {"topic", "AI semiconductor market"}, {"delay_ms", 150}}},
+            {"researcher_b", {{"type", "researcher"}, {"topic", "Quantum computing trends"}, {"delay_ms", 100}}},
+            {"researcher_c", {{"type", "researcher"}, {"topic", "Autonomous driving technology"}, {"delay_ms", 120}}},
             {"summarizer",   {{"type", "summarizer"}}}
         }},
         {"edges", neograph::json::array({
-            // fan-out: __start__ → 3개 리서처 (병렬 실행)
+            // fan-out: __start__ → 3 researchers (parallel execution)
             {{"from", "__start__"}, {"to", "researcher_a"}},
             {{"from", "__start__"}, {"to", "researcher_b"}},
             {{"from", "__start__"}, {"to", "researcher_c"}},
-            // fan-in: 3개 리서처 → 요약기 (모두 완료 후)
+            // fan-in: 3 researchers → summarizer (after all complete)
             {{"from", "researcher_a"}, {"to", "summarizer"}},
             {{"from", "researcher_b"}, {"to", "summarizer"}},
             {{"from", "researcher_c"}, {"to", "summarizer"}},
-            // 요약 완료
+            // Summarization complete
             {{"from", "summarizer"}, {"to", "__end__"}}
         })}
     };
 
-    neograph::graph::NodeContext ctx;  // 커스텀 노드라 Provider/Tool 불필요
+    neograph::graph::NodeContext ctx;  // Custom nodes, no Provider/Tool needed
     auto engine = neograph::graph::GraphEngine::compile(definition, ctx);
 
-    // 실행
+    // Execute
     std::cout << "=== Parallel Fan-out / Fan-in ===\n\n";
 
     auto total_start = std::chrono::steady_clock::now();
@@ -142,21 +142,21 @@ int main() {
     auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - total_start).count();
 
-    std::cout << "\n실행 추적: ";
+    std::cout << "\nExecution trace: ";
     for (size_t i = 0; i < result.execution_trace.size(); ++i) {
         std::cout << result.execution_trace[i];
         if (i + 1 < result.execution_trace.size()) std::cout << " → ";
     }
     std::cout << " → END\n";
 
-    // 요약 출력
+    // Print summary
     if (result.output.contains("channels") &&
         result.output["channels"].contains("summary")) {
         std::cout << "\n" << result.output["channels"]["summary"]["value"].get<std::string>() << "\n";
     }
 
-    std::cout << "\n총 소요시간: " << total_ms << "ms";
-    std::cout << " (순차 실행이었으면 ~370ms, 병렬이므로 ~150ms)\n";
+    std::cout << "\nTotal elapsed: " << total_ms << "ms";
+    std::cout << " (sequential would be ~370ms, parallel brings it to ~150ms)\n";
 
     return 0;
 }

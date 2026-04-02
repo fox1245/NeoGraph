@@ -1,15 +1,15 @@
 // NeoGraph Example 09: All New Features Demo
 //
-// 하나의 예제에서 6가지 신규 기능을 모두 사용합니다:
+// Demonstrates all 6 new features in a single example:
 //
-//   1. NodeInterrupt  — 동적 breakpoint (노드 내부에서 throw)
-//   2. RetryPolicy    — 실패 시 exponential backoff 재시도
-//   3. StreamMode     — EVENTS | DEBUG 모드로 내부 동작 관찰
-//   4. Send           — 동적 fan-out (map-reduce 패턴)
-//   5. Command        — 라우팅 + 상태 수정 동시 반환
-//   6. Store          — cross-thread 공유 메모리
+//   1. NodeInterrupt  — dynamic breakpoint (throw from inside a node)
+//   2. RetryPolicy    — exponential backoff retry on failure
+//   3. StreamMode     — observe internal behavior via EVENTS | DEBUG mode
+//   4. Send           — dynamic fan-out (map-reduce pattern)
+//   5. Command        — return routing + state modification simultaneously
+//   6. Store          — cross-thread shared memory
 //
-// API 키 불필요 (커스텀 노드 사용)
+// No API key required (uses custom nodes)
 //
 // Usage: ./example_all_features
 
@@ -25,7 +25,7 @@ using namespace neograph;
 using namespace neograph::graph;
 
 // =========================================================================
-// 1. NodeInterrupt — 위험 금액 감지 시 동적 중단
+// 1. NodeInterrupt — dynamic interrupt on high-risk amount
 // =========================================================================
 class PaymentNode : public GraphNode {
 public:
@@ -33,19 +33,19 @@ public:
         auto amount_json = state.get("amount");
         int amount = amount_json.is_number() ? amount_json.get<int>() : 0;
 
-        // 100만원 이상이면 동적 breakpoint
+        // Dynamic breakpoint if amount >= 1,000,000
         if (amount >= 1000000) {
             throw NodeInterrupt(
-                "고액 결제 감지: " + std::to_string(amount) + "원. 관리자 승인 필요.");
+                "High-value payment detected: " + std::to_string(amount) + " KRW. Admin approval required.");
         }
 
-        return {ChannelWrite{"result", json("결제 완료: " + std::to_string(amount) + "원")}};
+        return {ChannelWrite{"result", json("Payment complete: " + std::to_string(amount) + " KRW")}};
     }
     std::string name() const override { return "payment"; }
 };
 
 // =========================================================================
-// 2. RetryPolicy — 간헐적 실패 노드 (3번째 시도에 성공)
+// 2. RetryPolicy — intermittently failing node (succeeds on 3rd attempt)
 // =========================================================================
 class UnstableAPINode : public GraphNode {
     static std::atomic<int> call_count_;
@@ -54,26 +54,26 @@ public:
         int count = ++call_count_;
         if (count < 3) {
             throw std::runtime_error(
-                "API 일시 장애 (attempt " + std::to_string(count) + ")");
+                "API temporary failure (attempt " + std::to_string(count) + ")");
         }
-        return {ChannelWrite{"api_result", json("외부 API 응답 성공 (attempt " + std::to_string(count) + ")")}};
+        return {ChannelWrite{"api_result", json("External API response success (attempt " + std::to_string(count) + ")")}};
     }
     std::string name() const override { return "unstable_api"; }
 };
 std::atomic<int> UnstableAPINode::call_count_{0};
 
 // =========================================================================
-// 5. Command — 점수에 따라 라우팅 + 상태 동시 수정
+// 5. Command — route + modify state simultaneously based on score
 // =========================================================================
-// (Command 구조체 자체를 보여주는 데모. 현재 엔진은 ChannelWrite 기반이므로
-//  Command의 updates를 직접 적용하고, goto는 __route__ 채널로 표현합니다.)
+// (Demo showing the Command struct itself. Since the engine is ChannelWrite-based,
+//  Command's updates are applied directly, and goto is expressed via the __route__ channel.)
 class ScoreRouterNode : public GraphNode {
 public:
     std::vector<ChannelWrite> execute(const GraphState& state) override {
         auto score = state.get("score");
         int s = score.is_number() ? score.get<int>() : 0;
 
-        // Command 패턴: 라우팅 결정 + 상태 수정을 동시에
+        // Command pattern: routing decision + state modification at once
         Command cmd;
         if (s >= 90) {
             cmd.goto_node = "premium";
@@ -86,7 +86,7 @@ public:
             cmd.updates = {ChannelWrite{"tier", json("BASIC")}};
         }
 
-        // 라우팅은 __route__ 채널로, 상태는 직접 write
+        // Routing goes via __route__ channel, state is written directly
         std::vector<ChannelWrite> writes;
         writes.push_back(ChannelWrite{"__route__", json(cmd.goto_node)});
         for (auto& u : cmd.updates) writes.push_back(std::move(u));
@@ -96,7 +96,7 @@ public:
     std::string name() const override { return "score_router"; }
 };
 
-// 등급별 처리 노드
+// Tier-specific processing node
 class TierNode : public GraphNode {
     std::string name_;
     std::string message_;
@@ -104,13 +104,13 @@ public:
     TierNode(const std::string& n, const std::string& msg) : name_(n), message_(msg) {}
     std::vector<ChannelWrite> execute(const GraphState& state) override {
         auto tier = state.get("tier");
-        return {ChannelWrite{"result", json(message_ + " (등급: " + tier.get<std::string>() + ")")}};
+        return {ChannelWrite{"result", json(message_ + " (tier: " + tier.get<std::string>() + ")")}};
     }
     std::string name() const override { return name_; }
 };
 
 // =========================================================================
-// Helper: 구분선 출력
+// Helper: print section separator
 // =========================================================================
 static void section(const std::string& title) {
     std::cout << "\n" << std::string(60, '=') << "\n"
@@ -119,13 +119,13 @@ static void section(const std::string& title) {
 }
 
 // =========================================================================
-// Stream callback — StreamMode에 따라 선택적 출력
+// Stream callback — selective output based on StreamMode
 // =========================================================================
 static void stream_handler(const GraphEvent& event) {
     switch (event.type) {
         case GraphEvent::Type::NODE_START:
             if (event.node_name == "__routing__") {
-                // DEBUG 모드 라우팅 정보
+                // DEBUG mode routing info
                 std::cout << "  [debug] routing → " << event.data.dump() << "\n";
             } else {
                 std::string extra;
@@ -161,9 +161,9 @@ static void stream_handler(const GraphEvent& event) {
 
 int main() {
     // ================================================================
-    // Demo 1: NodeInterrupt (동적 breakpoint)
+    // Demo 1: NodeInterrupt (dynamic breakpoint)
     // ================================================================
-    section("1. NodeInterrupt — 동적 breakpoint");
+    section("1. NodeInterrupt — dynamic breakpoint");
     {
         NodeFactory::instance().register_type("payment",
             [](const std::string& name, const json&, const NodeContext&) {
@@ -187,31 +187,31 @@ int main() {
         auto store = std::make_shared<InMemoryCheckpointStore>();
         auto engine = GraphEngine::compile(def, ctx, store);
 
-        // 소액 결제: 정상 통과
+        // Small payment: passes normally
         RunConfig cfg;
         cfg.thread_id = "pay-001";
         cfg.input = {{"amount", 50000}};
         auto r1 = engine->run_stream(cfg, stream_handler);
-        std::cout << "  결과: " << r1.output["channels"]["result"]["value"] << "\n\n";
+        std::cout << "  Result: " << r1.output["channels"]["result"]["value"] << "\n\n";
 
-        // 고액 결제: NodeInterrupt 발동
+        // Large payment: NodeInterrupt triggered
         cfg.thread_id = "pay-002";
         cfg.input = {{"amount", 2500000}};
         cfg.stream_mode = StreamMode::EVENTS | StreamMode::DEBUG;
         auto r2 = engine->run_stream(cfg, stream_handler);
         std::cout << "  interrupted: " << std::boolalpha << r2.interrupted << "\n";
-        std::cout << "  사유: " << r2.interrupt_value.value("reason", "") << "\n";
+        std::cout << "  Reason: " << r2.interrupt_value.value("reason", "") << "\n";
 
-        // 승인 후 resume
-        std::cout << "\n  >>> 관리자 승인 → resume <<<\n";
+        // Resume after approval
+        std::cout << "\n  >>> Admin approved -> resume <<<\n";
         auto r3 = engine->resume("pay-002", json(), stream_handler);
-        std::cout << "  결과: " << r3.output["channels"]["result"]["value"] << "\n";
+        std::cout << "  Result: " << r3.output["channels"]["result"]["value"] << "\n";
     }
 
     // ================================================================
-    // Demo 2: RetryPolicy (자동 재시도)
+    // Demo 2: RetryPolicy (automatic retry)
     // ================================================================
-    section("2. RetryPolicy — exponential backoff 재시도");
+    section("2. RetryPolicy — exponential backoff retry");
     {
         NodeFactory::instance().register_type("unstable_api",
             [](const std::string& name, const json&, const NodeContext&) {
@@ -231,10 +231,10 @@ int main() {
         NodeContext ctx;
         auto engine = GraphEngine::compile(def, ctx);
 
-        // 노드별 retry 정책 설정
+        // Set per-node retry policy
         engine->set_node_retry_policy("unstable_api", {
             .max_retries = 5,
-            .initial_delay_ms = 10,   // 데모용으로 짧게
+            .initial_delay_ms = 10,   // Short for demo purposes
             .backoff_multiplier = 2.0f,
             .max_delay_ms = 100
         });
@@ -242,13 +242,13 @@ int main() {
         RunConfig cfg;
         cfg.stream_mode = StreamMode::EVENTS | StreamMode::DEBUG;
         auto result = engine->run_stream(cfg, stream_handler);
-        std::cout << "  결과: " << result.output["channels"]["api_result"]["value"] << "\n";
+        std::cout << "  Result: " << result.output["channels"]["api_result"]["value"] << "\n";
     }
 
     // ================================================================
-    // Demo 3: StreamMode (선택적 스트리밍)
+    // Demo 3: StreamMode (selective streaming)
     // ================================================================
-    section("3. StreamMode — VALUES + UPDATES 모드");
+    section("3. StreamMode — VALUES + UPDATES mode");
     {
         json def = {
             {"name", "stream_demo"},
@@ -268,16 +268,16 @@ int main() {
 
         RunConfig cfg;
         cfg.input = {{"amount", 30000}};
-        // VALUES + UPDATES만 (EVENTS 없이)
+        // VALUES + UPDATES only (without EVENTS)
         cfg.stream_mode = StreamMode::VALUES | StreamMode::UPDATES;
 
-        std::cout << "  (EVENTS 없이 VALUES + UPDATES만 스트림)\n";
+        std::cout << "  (Streaming VALUES + UPDATES only, without EVENTS)\n";
         auto result = engine->run_stream(cfg,
             [](const GraphEvent& ev) {
                 if (ev.type == GraphEvent::Type::NODE_START ||
                     ev.type == GraphEvent::Type::NODE_END) {
-                    // EVENTS 모드가 꺼져있으므로 이건 안 옴
-                    std::cout << "  [!] 이건 보이면 안 됨\n";
+                    // EVENTS mode is off, so this should never appear
+                    std::cout << "  [!] This should not be visible\n";
                 }
                 if (ev.type == GraphEvent::Type::CHANNEL_WRITE) {
                     if (ev.node_name == "__state__")
@@ -286,34 +286,34 @@ int main() {
                         std::cout << "  [update] " << ev.data.dump().substr(0, 80) << "\n";
                 }
             });
-        std::cout << "  결과: " << result.output["channels"]["result"]["value"] << "\n";
+        std::cout << "  Result: " << result.output["channels"]["result"]["value"] << "\n";
     }
 
     // ================================================================
-    // Demo 4: Send (동적 fan-out 구조체)
+    // Demo 4: Send (dynamic fan-out struct)
     // ================================================================
-    section("4. Send — 동적 fan-out 구조체");
+    section("4. Send — dynamic fan-out struct");
     {
-        // Send 구조체 사용법 데모 (구조체 자체가 데이터임)
+        // Demo of Send struct usage (the struct itself is the data)
         std::vector<Send> sends = {
             {"researcher", {{"topic", "AI"}}},
             {"researcher", {{"topic", "Quantum"}}},
             {"researcher", {{"topic", "Biotech"}}},
         };
 
-        std::cout << "  Send 요청 " << sends.size() << "개 생성:\n";
+        std::cout << "  Created " << sends.size() << " Send requests:\n";
         for (const auto& s : sends) {
             std::cout << "    → " << s.target_node
                       << " (input: " << s.input.dump() << ")\n";
         }
-        std::cout << "\n  이 Send들은 엔진의 동적 fan-out 스케줄러가\n"
-                  << "  같은 노드를 서로 다른 입력으로 병렬 실행합니다.\n";
+        std::cout << "\n  These Sends are processed by the engine's dynamic fan-out scheduler,\n"
+                  << "  which runs the same node in parallel with different inputs.\n";
     }
 
     // ================================================================
-    // Demo 5: Command (라우팅 + 상태 수정)
+    // Demo 5: Command (routing + state modification)
     // ================================================================
-    section("5. Command — 라우팅 + 상태 동시 수정");
+    section("5. Command — routing + simultaneous state modification");
     {
         NodeFactory::instance().register_type("score_router",
             [](const std::string& name, const json&, const NodeContext&) {
@@ -321,7 +321,7 @@ int main() {
             });
         NodeFactory::instance().register_type("tier_node",
             [](const std::string& name, const json& config, const NodeContext&) {
-                return std::make_unique<TierNode>(name, config.value("message", "처리 완료"));
+                return std::make_unique<TierNode>(name, config.value("message", "Processing complete"));
             });
 
         json def = {
@@ -334,9 +334,9 @@ int main() {
             }},
             {"nodes", {
                 {"score_router", {{"type", "score_router"}}},
-                {"premium",  {{"type", "tier_node"}, {"message", "VIP 전용 서비스 제공"}}},
-                {"standard", {{"type", "tier_node"}, {"message", "일반 서비스 제공"}}},
-                {"basic",    {{"type", "tier_node"}, {"message", "기본 서비스 제공"}}}
+                {"premium",  {{"type", "tier_node"}, {"message", "VIP exclusive service provided"}}},
+                {"standard", {{"type", "tier_node"}, {"message", "Standard service provided"}}},
+                {"basic",    {{"type", "tier_node"}, {"message", "Basic service provided"}}}
             }},
             {"edges", json::array({
                 {{"from", "__start__"}, {"to", "score_router"}},
@@ -359,7 +359,7 @@ int main() {
             cfg.input = {{"score", tc.score}};
             cfg.stream_mode = StreamMode::EVENTS | StreamMode::UPDATES;
 
-            std::cout << "  점수 " << tc.score << ":\n";
+            std::cout << "  Score " << tc.score << ":\n";
             auto result = engine->run_stream(cfg, stream_handler);
             std::cout << "  → " << result.output["channels"]["result"]["value"]
                       << "  (tier: " << result.output["channels"]["tier"]["value"] << ")\n\n";
@@ -367,33 +367,33 @@ int main() {
     }
 
     // ================================================================
-    // Demo 6: Store (cross-thread 공유 메모리)
+    // Demo 6: Store (cross-thread shared memory)
     // ================================================================
-    section("6. Store — cross-thread 공유 메모리");
+    section("6. Store — cross-thread shared memory");
     {
         auto store = std::make_shared<InMemoryStore>();
 
-        // Thread A: 사용자 선호도 저장
+        // Thread A: save user preferences
         store->put({"users", "user123"}, "language", json("ko"));
         store->put({"users", "user123"}, "theme", json("dark"));
         store->put({"users", "user456"}, "language", json("en"));
 
-        // Thread B: 선호도 조회
+        // Thread B: retrieve preferences
         auto lang = store->get({"users", "user123"}, "language");
         if (lang) {
             std::cout << "  user123 language: " << lang->value << "\n";
         }
 
-        // Namespace 검색
+        // Namespace search
         auto user123_prefs = store->search({"users", "user123"});
-        std::cout << "  user123 preferences (" << user123_prefs.size() << "개):\n";
+        std::cout << "  user123 preferences (" << user123_prefs.size() << " items):\n";
         for (const auto& item : user123_prefs) {
             std::cout << "    " << item.key << " = " << item.value << "\n";
         }
 
-        // 전체 namespace 목록
+        // List all namespaces
         auto namespaces = store->list_namespaces({"users"});
-        std::cout << "\n  Namespaces under 'users' (" << namespaces.size() << "개):\n";
+        std::cout << "\n  Namespaces under 'users' (" << namespaces.size() << " items):\n";
         for (const auto& ns : namespaces) {
             std::string path;
             for (size_t i = 0; i < ns.size(); ++i) {
@@ -403,7 +403,7 @@ int main() {
             std::cout << "    " << path << "\n";
         }
 
-        // GraphEngine에 Store 연결
+        // Connect Store to GraphEngine
         json def = {
             {"name", "store_demo"},
             {"channels", {
@@ -420,7 +420,7 @@ int main() {
         auto engine = GraphEngine::compile(def, ctx);
         engine->set_store(store);
 
-        std::cout << "\n  Engine store 연결: "
+        std::cout << "\n  Engine store connection: "
                   << (engine->get_store() ? "OK" : "FAIL")
                   << " (size=" << store->size() << ")\n";
     }
@@ -430,12 +430,12 @@ int main() {
     // ================================================================
     section("Summary");
     std::cout << "  All 6 features demonstrated successfully:\n\n"
-              << "  1. NodeInterrupt  — 고액 결제 시 동적 중단 + resume\n"
-              << "  2. RetryPolicy    — 2번 실패 후 3번째 성공 (backoff)\n"
-              << "  3. StreamMode     — VALUES/UPDATES/EVENTS/DEBUG 선택적 스트림\n"
-              << "  4. Send           — 동적 fan-out 요청 구조체\n"
-              << "  5. Command        — 점수 기반 라우팅 + 등급 동시 설정\n"
-              << "  6. Store          — 사용자 선호도 cross-thread 공유 메모리\n"
+              << "  1. NodeInterrupt  — dynamic interrupt on high-value payment + resume\n"
+              << "  2. RetryPolicy    — 2 failures then 3rd success (backoff)\n"
+              << "  3. StreamMode     — selective streaming: VALUES/UPDATES/EVENTS/DEBUG\n"
+              << "  4. Send           — dynamic fan-out request struct\n"
+              << "  5. Command        — score-based routing + tier set simultaneously\n"
+              << "  6. Store          — user preferences cross-thread shared memory\n"
               << "\n";
 
     return 0;
