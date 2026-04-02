@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(NeoGraph VERSION 0.1.0 LANGUAGES CXX)
+project(NeoGraph VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -203,7 +203,7 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
             FetchContent_MakeAvailable(raylib)
 
-            add_executable(example_clay_chatbot examples/10_clay_chatbot.cpp)
+            add_executable(example_clay_chatbot examples/10_clay_chatbot.cpp examples/clay_impl.c)
             target_link_libraries(example_clay_chatbot PRIVATE neograph::core neograph::llm raylib)
             target_include_directories(example_clay_chatbot PRIVATE ${DEPS_DIR})
         endif()
