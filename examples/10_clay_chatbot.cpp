@@ -174,10 +174,12 @@ int main(int argc, char** argv) {
     g_agent = &agent;
 
     // Raylib
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     InitWindow(800, 600, g_live ? "NeoGraph Chat (Live)" : "NeoGraph Chat (Mock)");
     SetTargetFPS(60);
 
+    // Use Raylib default font (external TTF has rendering issues with Raylib 5.5)
+    // TODO: Switch to LoadFontEx when Raylib fixes GRAY_ALPHA texture rendering
     Font font = GetFontDefault();
 
     // Clay
