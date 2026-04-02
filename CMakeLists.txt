@@ -190,6 +190,23 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             add_executable(example_mcp_agent examples/03_mcp_agent.cpp)
             target_link_libraries(example_mcp_agent PRIVATE neograph::core neograph::llm neograph::mcp)
         endif()
+
+        # Clay + Raylib chatbot (optional — requires Raylib)
+        option(NEOGRAPH_BUILD_CLAY_EXAMPLE "Build Clay chatbot example (fetches Raylib)" OFF)
+        if(NEOGRAPH_BUILD_CLAY_EXAMPLE)
+            include(FetchContent)
+            FetchContent_Declare(raylib
+                GIT_REPOSITORY https://github.com/raysan5/raylib.git
+                GIT_TAG 5.5
+                GIT_SHALLOW TRUE)
+            set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+            set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
+            FetchContent_MakeAvailable(raylib)
+
+            add_executable(example_clay_chatbot examples/10_clay_chatbot.cpp)
+            target_link_libraries(example_clay_chatbot PRIVATE neograph::core neograph::llm raylib)
+            target_include_directories(example_clay_chatbot PRIVATE ${DEPS_DIR})
+        endif()
     endif()
 endif()
 
