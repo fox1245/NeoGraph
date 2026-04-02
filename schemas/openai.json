@@ -1,0 +1,104 @@
+{
+  "name": "openai",
+  "connection": {
+    "base_url": "https://api.openai.com",
+    "endpoint": "/v1/chat/completions",
+    "stream_endpoint": "/v1/chat/completions",
+    "auth_header": "Authorization",
+    "auth_prefix": "Bearer ",
+    "api_key_env": "OPENAI_API_KEY",
+    "extra_headers": {}
+  },
+  "request": {
+    "model_field": "model",
+    "messages_field": "messages",
+    "tools_field": "tools",
+    "temperature_path": "temperature",
+    "max_tokens_path": "max_completion_tokens",
+    "max_tokens_required": false,
+    "max_tokens_default": -1,
+    "stream_field": "stream",
+    "extra_fields": {
+      "tool_choice": "auto"
+    }
+  },
+  "system_prompt": {
+    "strategy": "in_messages",
+    "role_name": "system"
+  },
+  "messages": {
+    "role_field": "role",
+    "content_field": "content",
+    "role_map": {
+      "system": "system",
+      "user": "user",
+      "assistant": "assistant",
+      "tool": "tool"
+    },
+    "content_is_parts": false
+  },
+  "tool_definition": {
+    "wrapper": "function",
+    "name_field": "name",
+    "description_field": "description",
+    "parameters_field": "parameters"
+  },
+  "tool_call_in_message": {
+    "strategy": "tool_calls_array",
+    "field": "tool_calls",
+    "item": {
+      "id": "$ID",
+      "type": "function",
+      "function": {
+        "name": "$NAME",
+        "arguments": "$ARGUMENTS_STRING"
+      }
+    }
+  },
+  "tool_result": {
+    "role": "tool",
+    "strategy": "flat",
+    "id_field": "tool_call_id",
+    "content_field": "content"
+  },
+  "image": {
+    "strategy": "openai",
+    "item": {
+      "type": "image_url",
+      "image_url": {
+        "url": "$DATA_URL"
+      }
+    },
+    "text_part": {
+      "type": "text",
+      "text": "$TEXT"
+    }
+  },
+  "response": {
+    "strategy": "choices_message",
+    "message_path": "choices.0.message",
+    "content_field": "content",
+    "role_field": "role",
+    "tool_calls_field": "tool_calls",
+    "tool_call_id_field": "id",
+    "tool_call_name_path": "function.name",
+    "tool_call_args_path": "function.arguments",
+    "tool_call_args_is_string": true,
+    "usage_path": "usage",
+    "prompt_tokens_field": "prompt_tokens",
+    "completion_tokens_field": "completion_tokens",
+    "total_tokens_field": "total_tokens"
+  },
+  "streaming": {
+    "format": "sse_data",
+    "prefix": "data: ",
+    "done_signal": "[DONE]",
+    "delta_path": "choices.0.delta",
+    "content_field": "content",
+    "tool_calls_field": "tool_calls",
+    "tool_call_index_field": "index",
+    "tool_call_id_field": "id",
+    "tool_call_name_path": "function.name",
+    "tool_call_args_path": "function.arguments"
+  }
+}

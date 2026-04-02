@@ -1,0 +1,110 @@
+{
+  "name": "gemini",
+  "connection": {
+    "base_url": "https://generativelanguage.googleapis.com",
+    "endpoint": "/v1beta/models/$MODEL:generateContent",
+    "stream_endpoint": "/v1beta/models/$MODEL:streamGenerateContent?alt=sse",
+    "auth_header": "",
+    "auth_prefix": "",
+    "api_key_env": "GEMINI_API_KEY",
+    "auth_query_param": "key",
+    "extra_headers": {}
+  },
+  "request": {
+    "model_field": "",
+    "messages_field": "contents",
+    "tools_field": "tools",
+    "temperature_path": "generationConfig.temperature",
+    "max_tokens_path": "generationConfig.maxOutputTokens",
+    "max_tokens_required": false,
+    "max_tokens_default": -1,
+    "stream_field": "",
+    "extra_fields": {}
+  },
+  "system_prompt": {
+    "strategy": "top_level_parts",
+    "field": "system_instruction",
+    "parts_field": "parts",
+    "text_field": "text"
+  },
+  "messages": {
+    "role_field": "role",
+    "content_field": "parts",
+    "role_map": {
+      "system": "user",
+      "user": "user",
+      "assistant": "model",
+      "tool": "user"
+    },
+    "content_is_parts": true,
+    "text_part": {
+      "text": "$TEXT"
+    }
+  },
+  "tool_definition": {
+    "wrapper": "function_declarations",
+    "name_field": "name",
+    "description_field": "description",
+    "parameters_field": "parameters"
+  },
+  "tool_call_in_message": {
+    "strategy": "parts_array",
+    "text_part": {
+      "text": "$TEXT"
+    },
+    "item": {
+      "functionCall": {
+        "name": "$NAME",
+        "args": "$ARGUMENTS_OBJECT"
+      }
+    }
+  },
+  "tool_result": {
+    "role": "user",
+    "strategy": "parts_array",
+    "item": {
+      "functionResponse": {
+        "name": "$NAME",
+        "response": {
+          "result": "$CONTENT"
+        }
+      }
+    }
+  },
+  "image": {
+    "strategy": "gemini",
+    "item": {
+      "inline_data": {
+        "mime_type": "$MIME",
+        "data": "$DATA"
+      }
+    },
+    "text_part": {
+      "text": "$TEXT"
+    }
+  },
+  "response": {
+    "strategy": "candidates_parts",
+    "parts_path": "candidates.0.content.parts",
+    "text_field": "text",
+    "function_call_field": "functionCall",
+    "tool_call_name_field": "name",
+    "tool_call_args_field": "args",
+    "tool_call_args_is_string": false,
+    "usage_path": "usageMetadata",
+    "prompt_tokens_field": "promptTokenCount",
+    "completion_tokens_field": "candidatesTokenCount",
+    "total_tokens_field": "totalTokenCount"
+  },
+  "streaming": {
+    "format": "sse_data",
+    "prefix": "data: ",
+    "done_signal": "",
+    "delta_strategy": "candidates_parts",
+    "parts_path": "candidates.0.content.parts",
+    "text_field": "text",
+    "function_call_field": "functionCall",
+    "tool_call_name_field": "name",
+    "tool_call_args_field": "args"
+  }
+}

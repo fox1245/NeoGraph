@@ -1,0 +1,129 @@
+{
+  "name": "claude",
+  "connection": {
+    "base_url": "https://api.anthropic.com",
+    "endpoint": "/v1/messages",
+    "stream_endpoint": "/v1/messages",
+    "auth_header": "x-api-key",
+    "auth_prefix": "",
+    "api_key_env": "ANTHROPIC_API_KEY",
+    "extra_headers": {
+      "anthropic-version": "2023-06-01"
+    }
+  },
+  "request": {
+    "model_field": "model",
+    "messages_field": "messages",
+    "tools_field": "tools",
+    "temperature_path": "temperature",
+    "max_tokens_path": "max_tokens",
+    "max_tokens_required": true,
+    "max_tokens_default": 4096,
+    "stream_field": "stream",
+    "extra_fields": {}
+  },
+  "system_prompt": {
+    "strategy": "top_level",
+    "field": "system"
+  },
+  "messages": {
+    "role_field": "role",
+    "content_field": "content",
+    "role_map": {
+      "system": "user",
+      "user": "user",
+      "assistant": "assistant",
+      "tool": "user"
+    },
+    "content_is_parts": false
+  },
+  "tool_definition": {
+    "wrapper": "none",
+    "name_field": "name",
+    "description_field": "description",
+    "parameters_field": "input_schema"
+  },
+  "tool_call_in_message": {
+    "strategy": "content_array",
+    "text_item": {
+      "type": "text",
+      "text": "$TEXT"
+    },
+    "item": {
+      "type": "tool_use",
+      "id": "$ID",
+      "name": "$NAME",
+      "input": "$ARGUMENTS_OBJECT"
+    }
+  },
+  "tool_result": {
+    "role": "user",
+    "strategy": "content_array",
+    "item": {
+      "type": "tool_result",
+      "tool_use_id": "$ID",
+      "content": "$CONTENT"
+    }
+  },
+  "image": {
+    "strategy": "claude",
+    "item": {
+      "type": "image",
+      "source": {
+        "type": "base64",
+        "media_type": "$MIME",
+        "data": "$DATA"
+      }
+    },
+    "text_part": {
+      "type": "text",
+      "text": "$TEXT"
+    }
+  },
+  "response": {
+    "strategy": "content_array",
+    "content_path": "content",
+    "role_field": "role",
+    "text_type": "text",
+    "text_field": "text",
+    "tool_use_type": "tool_use",
+    "tool_call_id_field": "id",
+    "tool_call_name_field": "name",
+    "tool_call_args_field": "input",
+    "tool_call_args_is_string": false,
+    "usage_path": "usage",
+    "prompt_tokens_field": "input_tokens",
+    "completion_tokens_field": "output_tokens",
+    "total_tokens_field": ""
+  },
+  "streaming": {
+    "format": "sse_events",
+    "events": {
+      "message_start": {
+        "action": "ignore"
+      },
+      "content_block_start": {
+        "action": "block_start",
+        "block_path": "content_block",
+        "type_field": "type"
+      },
+      "content_block_delta": {
+        "action": "delta",
+        "delta_path": "delta",
+        "text_delta_type": "text_delta",
+        "text_field": "text",
+        "tool_delta_type": "input_json_delta",
+        "tool_args_field": "partial_json"
+      },
+      "content_block_stop": {
+        "action": "block_stop"
+      },
+      "message_delta": {
+        "action": "ignore"
+      },
+      "message_stop": {
+        "action": "done"
+      }
+    }
+  }
+}
