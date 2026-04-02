@@ -178,9 +178,7 @@ int main(int argc, char** argv) {
     InitWindow(800, 600, g_live ? "NeoGraph Chat (Live)" : "NeoGraph Chat (Mock)");
     SetTargetFPS(60);
 
-    Font font = LoadFontEx("/usr/share/fonts/opentype/noto/NotoSansCJK-Light.ttc", 20, nullptr, 0);
-    if (font.glyphCount == 0) font = GetFontDefault();
-    SetTextureFilter(font.texture, TEXTURE_FILTER_BILINEAR);
+    Font font = GetFontDefault();
 
     // Clay
     clay_init(GetScreenWidth(), GetScreenHeight());
