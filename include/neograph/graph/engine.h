@@ -108,8 +108,8 @@ private:
                                int step,
                                const std::string& parent_id) const;
 
-    // Execute a node with retry policy
-    std::vector<ChannelWrite> execute_node_with_retry(
+    // Execute a node with retry policy, returns full NodeResult
+    NodeResult execute_node_with_retry(
         const std::string& node_name,
         GraphState& state,
         const GraphStreamCallback& cb,

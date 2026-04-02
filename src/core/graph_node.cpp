@@ -11,6 +11,17 @@ std::vector<ChannelWrite> GraphNode::execute_stream(
     return execute(state);
 }
 
+// --- GraphNode default execute_full: wraps execute() ---
+NodeResult GraphNode::execute_full(const GraphState& state) {
+    return NodeResult{execute(state)};
+}
+
+// --- GraphNode default execute_full_stream: wraps execute_stream() ---
+NodeResult GraphNode::execute_full_stream(
+    const GraphState& state, const GraphStreamCallback& cb) {
+    return NodeResult{execute_stream(state, cb)};
+}
+
 // =========================================================================
 // LLMCallNode
 // =========================================================================

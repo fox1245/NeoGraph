@@ -373,7 +373,7 @@ static tf::Executor& global_executor() {
 // execute_node_with_retry: run a node with retry policy + NodeInterrupt
 // =========================================================================
 
-std::vector<ChannelWrite> GraphEngine::execute_node_with_retry(
+NodeResult GraphEngine::execute_node_with_retry(
     const std::string& node_name,
     GraphState& state,
     const GraphStreamCallback& cb,
@@ -395,26 +395,32 @@ std::vector<ChannelWrite> GraphEngine::execute_node_with_retry(
                 cb(GraphEvent{GraphEvent::Type::NODE_START, node_name, data});
             }
 
-            auto writes = cb
-                ? node_it->second->execute_stream(state, cb)
-                : node_it->second->execute(state);
+            // Use execute_full to get NodeResult (Command/Send support)
+            auto node_result = cb
+                ? node_it->second->execute_full_stream(state, cb)
+                : node_it->second->execute_full(state);
 
             if (cb) {
                 if (has_mode(stream_mode, StreamMode::UPDATES)) {
-                    for (const auto& w : writes) {
+                    for (const auto& w : node_result.writes) {
                         cb(GraphEvent{GraphEvent::Type::CHANNEL_WRITE, node_name,
                                       json{{"channel", w.channel}, {"value", w.value}}});
                     }
                 }
                 if (has_mode(stream_mode, StreamMode::EVENTS)) {
-                    cb(GraphEvent{GraphEvent::Type::NODE_END, node_name, json()});
+                    json end_data;
+                    if (node_result.command)
+                        end_data["command_goto"] = node_result.command->goto_node;
+                    if (!node_result.sends.empty())
+                        end_data["sends"] = (int)node_result.sends.size();
+                    cb(GraphEvent{GraphEvent::Type::NODE_END, node_name, end_data});
                 }
             }
 
-            return writes;
+            return node_result;
 
         } catch (const NodeInterrupt&) {
-            throw;  // NodeInterrupt is never retried — propagate immediately
+            throw;
 
         } catch (const std::exception& e) {
             if (attempt >= policy.max_retries) {
@@ -422,7 +428,7 @@ std::vector<ChannelWrite> GraphEngine::execute_node_with_retry(
                     cb(GraphEvent{GraphEvent::Type::ERROR, node_name,
                                   json{{"error", e.what()}, {"attempts", attempt + 1}}});
                 }
-                throw;  // exhausted retries
+                throw;
             }
 
             if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
@@ -538,57 +544,53 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
         command_goto.reset();
         pending_sends.clear();
 
-        auto execute_single = [&](const std::string& node_name) {
+        // Collect NodeResults from all executed nodes
+        std::vector<NodeResult> step_results;
+
+        auto execute_single = [&](const std::string& node_name) -> NodeResult {
             try {
-                auto writes = execute_node_with_retry(node_name, state, cb, stream_mode);
-                state.apply_writes(writes);
+                auto nr = execute_node_with_retry(node_name, state, cb, stream_mode);
+
+                // Apply writes from this node
+                state.apply_writes(nr.writes);
+
+                // Apply Command updates if present
+                if (nr.command) {
+                    state.apply_writes(nr.command->updates);
+                }
+
+                trace.push_back(node_name);
+                completed.insert(node_name);
+                return nr;
 
             } catch (const NodeInterrupt& ni) {
-                // Dynamic breakpoint: save checkpoint and return interrupted
                 if (checkpoint_store_ && !config.thread_id.empty()) {
-                    auto cp = save_checkpoint(state, config.thread_id,
+                    save_checkpoint(state, config.thread_id,
                         node_name, node_name, "node_interrupt", step, last_checkpoint_id);
-
-                    RunResult result;
-                    result.output          = state.serialize();
-                    result.interrupted     = true;
-                    result.interrupt_node  = node_name;
-                    result.interrupt_value = json{{"reason", ni.reason()}, {"type", "NodeInterrupt"}};
-                    result.checkpoint_id   = cp.id;
-                    result.execution_trace = trace;
-
-                    if (cb && has_mode(stream_mode, StreamMode::EVENTS))
-                        cb(GraphEvent{GraphEvent::Type::INTERRUPT, node_name,
-                            json{{"phase", "node_interrupt"}, {"reason", ni.reason()}}});
-
-                    throw;  // re-throw to exit the loop
                 }
                 throw;
             }
-
-            trace.push_back(node_name);
-            completed.insert(node_name);
         };
 
         try {
             if (ready.size() == 1) {
-                execute_single(ready[0]);
+                step_results.push_back(execute_single(ready[0]));
             } else {
                 // Parallel: Taskflow fan-out
-                std::map<std::string, std::vector<ChannelWrite>> all_writes;
-                std::mutex writes_mutex;
+                std::map<std::string, NodeResult> all_results;
+                std::mutex results_mutex;
                 std::exception_ptr first_exception;
 
                 tf::Taskflow taskflow("fan-out");
                 for (const auto& node_name : ready) {
                     taskflow.emplace([&, node_name]() {
                         try {
-                            auto writes = execute_node_with_retry(
+                            auto nr = execute_node_with_retry(
                                 node_name, state, cb, stream_mode);
-                            std::lock_guard lock(writes_mutex);
-                            all_writes[node_name] = std::move(writes);
+                            std::lock_guard lock(results_mutex);
+                            all_results[node_name] = std::move(nr);
                         } catch (...) {
-                            std::lock_guard lock(writes_mutex);
+                            std::lock_guard lock(results_mutex);
                             if (!first_exception) first_exception = std::current_exception();
                         }
                     }).name(node_name);
@@ -598,16 +600,18 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                 if (first_exception) std::rethrow_exception(first_exception);
 
                 for (const auto& node_name : ready) {
-                    auto it = all_writes.find(node_name);
-                    if (it != all_writes.end()) {
-                        state.apply_writes(it->second);
+                    auto it = all_results.find(node_name);
+                    if (it != all_results.end()) {
+                        state.apply_writes(it->second.writes);
+                        if (it->second.command)
+                            state.apply_writes(it->second.command->updates);
+                        step_results.push_back(std::move(it->second));
                     }
                     trace.push_back(node_name);
                     completed.insert(node_name);
                 }
             }
         } catch (const NodeInterrupt& ni) {
-            // Build and return interrupted result (checkpoint already saved)
             RunResult result;
             result.output          = state.serialize();
             result.interrupted     = true;
@@ -619,6 +623,16 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                 if (cp_opt) result.checkpoint_id = cp_opt->id;
             }
             return result;
+        }
+
+        // --- Collect Command goto and Send requests from step results ---
+        for (auto& nr : step_results) {
+            if (nr.command && !nr.command->goto_node.empty()) {
+                command_goto = nr.command->goto_node;
+            }
+            for (auto& s : nr.sends) {
+                pending_sends.push_back(std::move(s));
+            }
         }
 
         // --- Stream VALUES mode: emit full state after each step ---
@@ -653,26 +667,100 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
             }
         }
 
+        // --- Execute pending Sends (dynamic fan-out) ---
+        if (!pending_sends.empty()) {
+            if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
+                json send_info = json::array();
+                for (const auto& s : pending_sends)
+                    send_info.push_back({{"target", s.target_node}, {"input", s.input}});
+                cb(GraphEvent{GraphEvent::Type::NODE_START, "__send__",
+                              json{{"sends", send_info}}});
+            }
+
+            if (pending_sends.size() == 1) {
+                // Single send: sequential
+                auto& s = pending_sends[0];
+                auto node_it = nodes_.find(s.target_node);
+                if (node_it != nodes_.end()) {
+                    // Apply send input to a temporary state overlay
+                    apply_input(state, s.input);
+                    auto nr = execute_node_with_retry(s.target_node, state, cb, stream_mode);
+                    state.apply_writes(nr.writes);
+                    trace.push_back(s.target_node + "[send]");
+                }
+            } else {
+                // Multiple sends: parallel via Taskflow
+                std::vector<NodeResult> send_results(pending_sends.size());
+                std::mutex send_mutex;
+                std::exception_ptr send_exception;
+
+                tf::Taskflow taskflow("send-fan-out");
+                for (size_t si = 0; si < pending_sends.size(); ++si) {
+                    taskflow.emplace([&, si]() {
+                        try {
+                            auto& s = pending_sends[si];
+                            auto node_it = nodes_.find(s.target_node);
+                            if (node_it == nodes_.end()) return;
+
+                            // Each send gets its own state copy with send input applied
+                            GraphState send_state;
+                            init_state(send_state);
+                            send_state.restore(state.serialize());
+                            apply_input(send_state, s.input);
+
+                            auto nr = node_it->second->execute_full(send_state);
+                            std::lock_guard lock(send_mutex);
+                            send_results[si] = std::move(nr);
+                        } catch (...) {
+                            std::lock_guard lock(send_mutex);
+                            if (!send_exception) send_exception = std::current_exception();
+                        }
+                    }).name(pending_sends[si].target_node);
+                }
+                global_executor().run(taskflow).wait();
+
+                if (send_exception) std::rethrow_exception(send_exception);
+
+                // Apply all send results to main state
+                for (size_t si = 0; si < pending_sends.size(); ++si) {
+                    state.apply_writes(send_results[si].writes);
+                    trace.push_back(pending_sends[si].target_node + "[send]");
+                }
+            }
+        }
+
         // --- Resolve next ready set ---
         std::set<std::string> candidates;
 
-        // TODO: Command and Send handling will be integrated when nodes
-        // return NodeResult. For now, use standard edge routing.
+        if (command_goto) {
+            // Command override: go directly to the specified node
+            if (*command_goto == std::string(END_NODE)) {
+                hit_end = true;
+            } else {
+                candidates.insert(*command_goto);
+            }
 
-        for (const auto& node_name : ready) {
-            auto nexts = resolve_next_nodes(node_name, state);
-            for (const auto& next : nexts) {
-                if (next == std::string(END_NODE)) {
-                    hit_end = true;
-                } else {
-                    candidates.insert(next);
+            if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
+                cb(GraphEvent{GraphEvent::Type::NODE_START, "__routing__",
+                              json{{"command_goto", *command_goto}}});
+            }
+        } else {
+            // Standard edge routing
+            for (const auto& node_name : ready) {
+                auto nexts = resolve_next_nodes(node_name, state);
+                for (const auto& next : nexts) {
+                    if (next == std::string(END_NODE)) {
+                        hit_end = true;
+                    } else {
+                        candidates.insert(next);
+                    }
                 }
             }
         }
 
         ready.clear();
         for (const auto& candidate : candidates) {
-            if (all_predecessors_done(candidate, completed)) {
+            if (command_goto || all_predecessors_done(candidate, completed)) {
                 ready.push_back(candidate);
             }
         }

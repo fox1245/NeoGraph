@@ -17,6 +17,15 @@ public:
     virtual std::vector<ChannelWrite> execute_stream(
         const GraphState& state, const GraphStreamCallback& cb);
 
+    // Extended execute: return NodeResult with optional Command/Send.
+    // Default implementation wraps execute() into NodeResult.writes.
+    // Override this to use Command or Send.
+    virtual NodeResult execute_full(const GraphState& state);
+
+    // Extended streaming variant
+    virtual NodeResult execute_full_stream(
+        const GraphState& state, const GraphStreamCallback& cb);
+
     virtual std::string name() const = 0;
 };
 
