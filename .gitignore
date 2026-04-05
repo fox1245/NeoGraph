@@ -1,3 +1,4 @@
 build/
+docs/api/
 .env
 .claude/
