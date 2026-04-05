@@ -16,13 +16,20 @@ NodeResult GraphNode::execute_full(const GraphState& state) {
     return NodeResult{execute(state)};
 }
 
-// --- GraphNode default execute_full_stream: delegates to execute_full() ---
-// This ensures that nodes overriding execute_full() (for Command/Send)
-// have their results properly returned even in streaming mode.
+// --- GraphNode default execute_full_stream ---
+// Calls execute_full() first to capture any Command/Send directives,
+// then replaces the writes with execute_stream() output so that
+// LLM_TOKEN events are properly emitted during graph execution.
+// Nodes that need both streaming AND Command/Send should override this.
 NodeResult GraphNode::execute_full_stream(
     const GraphState& state, const GraphStreamCallback& cb) {
-    (void)cb;
-    return execute_full(state);
+    auto result = execute_full(state);
+    // If the node didn't override execute_full (i.e., no Command/Send),
+    // re-execute with streaming to emit tokens.
+    if (!result.command && result.sends.empty()) {
+        result.writes = execute_stream(state, cb);
+    }
+    return result;
 }
 
 // =========================================================================
