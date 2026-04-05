@@ -1,3 +1,13 @@
+/**
+ * @file graph/node.h
+ * @brief Graph node implementations: base class and built-in node types.
+ *
+ * Defines the abstract GraphNode base class and all built-in node types:
+ * - LLMCallNode: makes LLM completion calls
+ * - ToolDispatchNode: executes pending tool calls
+ * - IntentClassifierNode: LLM-based intent routing
+ * - SubgraphNode: hierarchical graph composition
+ */
 #pragma once
 
 #include <neograph/graph/types.h>
@@ -5,33 +15,79 @@
 
 namespace neograph::graph {
 
-// --- Abstract graph node ---
+/**
+ * @brief Abstract base class for all graph nodes.
+ *
+ * Nodes are the building blocks of the graph. Each node reads from
+ * the graph state and produces channel writes (and optionally Command
+ * or Send directives). Override execute() for basic nodes, or
+ * execute_full() to use Command/Send.
+ */
 class GraphNode {
 public:
     virtual ~GraphNode() = default;
 
-    // Execute node: read state, return channel writes
+    /**
+     * @brief Execute the node: read state, return channel writes.
+     * @param state The current graph state (read-only access).
+     * @return Vector of channel writes to apply to the state.
+     */
     virtual std::vector<ChannelWrite> execute(const GraphState& state) = 0;
 
-    // Streaming variant (default: delegates to execute)
+    /**
+     * @brief Streaming execution variant.
+     *
+     * Default implementation delegates to execute(). Override to emit
+     * LLM_TOKEN events during execution.
+     *
+     * @param state The current graph state.
+     * @param cb Callback for emitting streaming events.
+     * @return Vector of channel writes.
+     */
     virtual std::vector<ChannelWrite> execute_stream(
         const GraphState& state, const GraphStreamCallback& cb);
 
-    // Extended execute: return NodeResult with optional Command/Send.
-    // Default implementation wraps execute() into NodeResult.writes.
-    // Override this to use Command or Send.
+    /**
+     * @brief Extended execute returning a full NodeResult.
+     *
+     * Default implementation wraps execute() output into NodeResult::writes.
+     * Override this to return Command (routing override) or Send (dynamic fan-out).
+     *
+     * @param state The current graph state.
+     * @return NodeResult with writes, optional Command, and optional Sends.
+     */
     virtual NodeResult execute_full(const GraphState& state);
 
-    // Extended streaming variant
+    /**
+     * @brief Extended streaming execution returning a full NodeResult.
+     * @param state The current graph state.
+     * @param cb Callback for emitting streaming events.
+     * @return NodeResult with writes, optional Command, and optional Sends.
+     */
     virtual NodeResult execute_full_stream(
         const GraphState& state, const GraphStreamCallback& cb);
 
+    /**
+     * @brief Get the node's unique name within the graph.
+     * @return Node name string.
+     */
     virtual std::string name() const = 0;
 };
 
-// --- LLM Call node: mirrors Agent::run() LLM call logic ---
+/**
+ * @brief Node that makes LLM completion calls.
+ *
+ * Reads the "messages" channel, builds completion parameters,
+ * calls the LLM provider, and writes the response back to "messages".
+ * Mirrors the Agent::run() LLM call logic.
+ */
 class LLMCallNode : public GraphNode {
 public:
+    /**
+     * @brief Construct an LLM call node.
+     * @param name Unique node name within the graph.
+     * @param ctx Node context providing the LLM provider, tools, model, and instructions.
+     */
     LLMCallNode(const std::string& name, const NodeContext& ctx);
 
     std::vector<ChannelWrite> execute(const GraphState& state) override;
@@ -46,13 +102,22 @@ private:
     std::string              model_;
     std::string              instructions_;
 
-    // Shared logic: build messages + params from state
     CompletionParams build_params(const GraphState& state) const;
 };
 
-// --- Tool Dispatch node: mirrors Agent::run() tool execution logic ---
+/**
+ * @brief Node that dispatches and executes pending tool calls.
+ *
+ * Reads the last assistant message from the "messages" channel,
+ * executes each tool call, and writes tool result messages back.
+ */
 class ToolDispatchNode : public GraphNode {
 public:
+    /**
+     * @brief Construct a tool dispatch node.
+     * @param name Unique node name within the graph.
+     * @param ctx Node context providing available tools.
+     */
     ToolDispatchNode(const std::string& name, const NodeContext& ctx);
 
     std::vector<ChannelWrite> execute(const GraphState& state) override;
@@ -66,11 +131,22 @@ private:
 // Forward declaration
 class GraphEngine;
 
-// --- Intent Classifier node: LLM-based intent routing ---
-// Calls the LLM to classify user intent, writes result to __route__ channel.
-// Used with "route_channel" condition for dynamic routing.
+/**
+ * @brief Node that classifies user intent via LLM and routes execution.
+ *
+ * Calls the LLM with a classification prompt, writes the detected intent
+ * to the "__route__" channel. Used with the "route_channel" condition
+ * for dynamic routing based on user intent.
+ */
 class IntentClassifierNode : public GraphNode {
 public:
+    /**
+     * @brief Construct an intent classifier node.
+     * @param name Unique node name within the graph.
+     * @param ctx Node context providing the LLM provider.
+     * @param prompt Classification prompt template sent to the LLM.
+     * @param valid_routes List of valid intent route names the LLM can return.
+     */
     IntentClassifierNode(const std::string& name, const NodeContext& ctx,
                          const std::string& prompt,
                          std::vector<std::string> valid_routes);
@@ -86,13 +162,28 @@ private:
     std::vector<std::string>  valid_routes_;
 };
 
-// --- Subgraph node: runs a compiled GraphEngine as a single node ---
-// Enables hierarchical composition (Supervisor pattern, nested workflows).
-// Input/output channels are mapped between parent and child graph.
+/**
+ * @brief Node that runs a compiled GraphEngine as a single node (hierarchical composition).
+ *
+ * Enables the Supervisor pattern and nested workflows. Channels are
+ * mapped between parent and child graphs via input_map and output_map.
+ *
+ * @code
+ * // Map parent "messages" -> child "messages", child "result" -> parent "findings"
+ * auto sub = std::make_shared<SubgraphNode>("inner", subgraph,
+ *     {{"messages", "messages"}},   // input_map: parent -> child
+ *     {{"result", "findings"}});    // output_map: child -> parent
+ * @endcode
+ */
 class SubgraphNode : public GraphNode {
 public:
-    // input_map:  parent_channel -> child_channel (read from parent, write to child input)
-    // output_map: child_channel  -> parent_channel (read from child result, write to parent)
+    /**
+     * @brief Construct a subgraph node.
+     * @param name Unique node name within the parent graph.
+     * @param subgraph Compiled GraphEngine to run as a sub-workflow.
+     * @param input_map Mapping of parent_channel -> child_channel for input.
+     * @param output_map Mapping of child_channel -> parent_channel for output.
+     */
     SubgraphNode(const std::string& name,
                  std::shared_ptr<GraphEngine> subgraph,
                  std::map<std::string, std::string> input_map = {},
@@ -106,12 +197,10 @@ public:
 private:
     std::string name_;
     std::shared_ptr<GraphEngine> subgraph_;
-    std::map<std::string, std::string> input_map_;   // parent -> child
-    std::map<std::string, std::string> output_map_;   // child -> parent
+    std::map<std::string, std::string> input_map_;
+    std::map<std::string, std::string> output_map_;
 
-    // Build subgraph input from parent state
     json build_subgraph_input(const GraphState& state) const;
-    // Extract parent writes from subgraph result
     std::vector<ChannelWrite> extract_output(const json& subgraph_output) const;
 };
 

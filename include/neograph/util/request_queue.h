@@ -1,3 +1,11 @@
+/**
+ * @file util/request_queue.h
+ * @brief Lock-free request queue with worker pool and backpressure.
+ *
+ * Provides a concurrent task queue backed by moodycamel::ConcurrentQueue
+ * with a configurable worker thread pool. Useful for decoupling HTTP
+ * connection acceptance from LLM call concurrency.
+ */
 #pragma once
 
 #include <concurrentqueue.h>
@@ -12,19 +20,35 @@
 
 namespace neograph::util {
 
-// Lock-free request queue with worker pool and backpressure.
-// Decouples HTTP connection acceptance from LLM call concurrency.
+/**
+ * @brief Lock-free task queue with a fixed worker thread pool and backpressure.
+ *
+ * Tasks are submitted via submit() and executed asynchronously by worker
+ * threads. When the queue is full, new tasks are rejected (backpressure).
+ *
+ * @code
+ * RequestQueue queue(4, 1000);  // 4 workers, max 1000 pending tasks
+ * auto [accepted, future] = queue.submit([]{ do_work(); });
+ * if (accepted) future.wait();
+ * @endcode
+ */
 class RequestQueue {
 public:
+    /// Runtime statistics for monitoring queue health.
     struct Stats {
-        size_t pending;
-        size_t active;
-        size_t completed;
-        size_t rejected;
-        size_t num_workers;
-        size_t max_queue_size;
+        size_t pending;         ///< Tasks waiting in the queue.
+        size_t active;          ///< Tasks currently being executed.
+        size_t completed;       ///< Total tasks finished.
+        size_t rejected;        ///< Tasks rejected due to backpressure (queue full).
+        size_t num_workers;     ///< Number of worker threads.
+        size_t max_queue_size;  ///< Maximum queue capacity.
     };
 
+    /**
+     * @brief Construct a request queue with a worker thread pool.
+     * @param num_workers Number of worker threads to spawn (default: 128).
+     * @param max_queue_size Maximum number of pending tasks before backpressure (default: 10000).
+     */
     RequestQueue(size_t num_workers = 128, size_t max_queue_size = 10000)
         : max_queue_size_(max_queue_size)
     {
@@ -35,6 +59,7 @@ public:
                   << " workers, max queue: " << max_queue_size << "\n";
     }
 
+    /// Destructor: stops all workers and waits for them to finish.
     ~RequestQueue() {
         running_ = false;
         cv_.notify_all();
@@ -46,8 +71,18 @@ public:
     RequestQueue(const RequestQueue&) = delete;
     RequestQueue& operator=(const RequestQueue&) = delete;
 
-    // Submit a task.  Returns {accepted, future}.
-    // If the queue is full (backpressure), returns {false, {}}.
+    /**
+     * @brief Submit a task to the queue.
+     *
+     * If the queue is full (pending >= max_queue_size), the task is
+     * rejected and the rejected counter is incremented.
+     *
+     * @tparam F Callable type (must be invocable with no arguments).
+     * @param task The task to execute.
+     * @return A pair of {accepted, future}: accepted is true if the task
+     *         was enqueued; future can be waited on for completion.
+     *         If rejected, future is default-constructed (invalid).
+     */
     template<typename F>
     std::pair<bool, std::future<void>> submit(F&& task) {
         if (pending_.load(std::memory_order_relaxed) >= max_queue_size_) {
@@ -73,6 +108,10 @@ public:
         return {true, std::move(future)};
     }
 
+    /**
+     * @brief Get current queue statistics.
+     * @return Stats snapshot with pending, active, completed, and rejected counts.
+     */
     Stats stats() const {
         return {
             pending_.load(std::memory_order_relaxed),

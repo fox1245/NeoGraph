@@ -1,3 +1,14 @@
+/**
+ * @file llm/schema_provider.h
+ * @brief Multi-vendor LLM provider adapter driven by JSON schema configuration.
+ *
+ * SchemaProvider reads a JSON schema file that describes how to serialize
+ * requests and parse responses for any LLM API (OpenAI, Claude, Gemini, etc.).
+ * Built-in schemas are embedded at build time via embed_schemas.py.
+ *
+ * This allows supporting new LLM providers without writing C++ code --
+ * just add a new JSON schema file.
+ */
 #pragma once
 
 #include <neograph/provider.h>
@@ -9,60 +20,63 @@
 
 namespace neograph::llm {
 
+/**
+ * @brief LLM provider that adapts to any API via a JSON schema.
+ *
+ * The schema describes connection details, request/response formats,
+ * tool call conventions, and streaming protocols for a given LLM vendor.
+ * Built-in schemas: "openai", "claude", "gemini".
+ *
+ * @code
+ * auto provider = SchemaProvider::create({
+ *     .schema_path = "claude",          // built-in schema name
+ *     .api_key = "sk-ant-...",
+ *     .default_model = "claude-sonnet-4-20250514"
+ * });
+ * @endcode
+ *
+ * @see OpenAIProvider for a simpler OpenAI-only provider.
+ */
 class SchemaProvider : public Provider {
   public:
+    /// Configuration for schema-based provider.
     struct Config {
-        std::string schema_path;   // path to provider JSON config file
-        std::string api_key;       // API key (overrides env var if set)
-        std::string default_model = "gpt-4o-mini";
-        int timeout_seconds = 60;
+        std::string schema_path;                    ///< Path to schema file, or built-in name ("openai", "claude", "gemini").
+        std::string api_key;                        ///< API key (overrides env var if set).
+        std::string default_model = "gpt-4o-mini";  ///< Default model name.
+        int timeout_seconds = 60;                   ///< HTTP request timeout in seconds.
     };
 
+    /**
+     * @brief Create a schema-based provider instance.
+     *
+     * If schema_path matches a built-in name, the embedded schema is used.
+     * Otherwise it is treated as a file path.
+     *
+     * @param config Provider configuration with schema path and API key.
+     * @return A unique_ptr to the created provider.
+     * @throws std::runtime_error If the schema cannot be loaded or parsed.
+     */
     static std::unique_ptr<SchemaProvider> create(const Config& config);
 
     ChatCompletion complete(const CompletionParams& params) override;
     ChatCompletion complete_stream(const CompletionParams& params,
                                    const StreamCallback& on_chunk) override;
+
+    /// @brief Get the provider name (from the schema's "name" field).
+    /// @return Provider identifier string (e.g., "openai", "claude", "gemini").
     std::string get_name() const override;
 
   private:
     explicit SchemaProvider(Config config, json schema);
 
-    // --- Strategies ---
-    enum class SystemPromptStrategy {
-        IN_MESSAGES,      // OpenAI: system message as role in messages array
-        TOP_LEVEL,        // Claude: top-level "system" string field
-        TOP_LEVEL_PARTS   // Gemini: top-level "system_instruction":{parts:[{text:...}]}
-    };
-
-    enum class ToolCallStrategy {
-        TOOL_CALLS_ARRAY, // OpenAI: tool_calls array with function wrapper
-        CONTENT_ARRAY,    // Claude: content array with tool_use items
-        PARTS_ARRAY       // Gemini: parts array with functionCall items
-    };
-
-    enum class ToolResultStrategy {
-        FLAT,             // OpenAI: {role:"tool", tool_call_id, content}
-        CONTENT_ARRAY,    // Claude: {role:"user", content:[{type:"tool_result",...}]}
-        PARTS_ARRAY       // Gemini: {role:"user", parts:[{functionResponse:{...}}]}
-    };
-
-    enum class ToolDefWrapper {
-        FUNCTION,             // OpenAI: [{type:"function", function:{...}}]
-        NONE,                 // Claude: [{name, description, input_schema}]
-        FUNCTION_DECLARATIONS // Gemini: [{function_declarations:[{...}]}]
-    };
-
-    enum class ResponseStrategy {
-        CHOICES_MESSAGE,  // OpenAI: choices[0].message
-        CONTENT_ARRAY,    // Claude: content[] array
-        CANDIDATES_PARTS  // Gemini: candidates[0].content.parts[]
-    };
-
-    enum class StreamFormat {
-        SSE_DATA,         // OpenAI/Gemini: "data: {json}\n\n"
-        SSE_EVENTS        // Claude: "event: type\ndata: {json}\n\n"
-    };
+    // --- Strategies (internal) ---
+    enum class SystemPromptStrategy { IN_MESSAGES, TOP_LEVEL, TOP_LEVEL_PARTS };
+    enum class ToolCallStrategy { TOOL_CALLS_ARRAY, CONTENT_ARRAY, PARTS_ARRAY };
+    enum class ToolResultStrategy { FLAT, CONTENT_ARRAY, PARTS_ARRAY };
+    enum class ToolDefWrapper { FUNCTION, NONE, FUNCTION_DECLARATIONS };
+    enum class ResponseStrategy { CHOICES_MESSAGE, CONTENT_ARRAY, CANDIDATES_PARTS };
+    enum class StreamFormat { SSE_DATA, SSE_EVENTS };
 
     // --- Internal config parsed from schema ---
     struct ConnectionConfig {
@@ -72,7 +86,7 @@ class SchemaProvider : public Provider {
         std::string auth_header;
         std::string auth_prefix;
         std::string api_key_env;
-        std::string auth_query_param;  // e.g., "key" for Gemini
+        std::string auth_query_param;
         std::map<std::string, std::string> extra_headers;
     };
 
@@ -91,9 +105,9 @@ class SchemaProvider : public Provider {
     struct SystemPromptConfig {
         SystemPromptStrategy strategy;
         std::string field;
-        std::string role_name;     // for IN_MESSAGES
-        std::string parts_field;   // for TOP_LEVEL_PARTS
-        std::string text_field;    // for TOP_LEVEL_PARTS
+        std::string role_name;
+        std::string parts_field;
+        std::string text_field;
     };
 
     struct MessagesConfig {
@@ -101,7 +115,7 @@ class SchemaProvider : public Provider {
         std::string content_field;
         std::map<std::string, std::string> role_map;
         bool content_is_parts = false;
-        json text_part_template;  // for parts-based content
+        json text_part_template;
     };
 
     struct ToolDefConfig {
@@ -113,28 +127,27 @@ class SchemaProvider : public Provider {
 
     struct ToolCallConfig {
         ToolCallStrategy strategy;
-        std::string field;        // for TOOL_CALLS_ARRAY
+        std::string field;
         json item_template;
-        json text_item_template;  // for content_array/parts_array text items
+        json text_item_template;
     };
 
     struct ToolResultConfig {
         std::string role;
         ToolResultStrategy strategy;
-        std::string id_field;      // for FLAT
-        std::string content_field; // for FLAT
+        std::string id_field;
+        std::string content_field;
         json item_template;
     };
 
     struct ImageConfig {
-        std::string strategy;   // "openai", "claude", "gemini"
+        std::string strategy;
         json item_template;
         json text_part_template;
     };
 
     struct ResponseConfig {
         ResponseStrategy strategy;
-        // CHOICES_MESSAGE
         std::string message_path;
         std::string content_field;
         std::string role_field;
@@ -143,17 +156,14 @@ class SchemaProvider : public Provider {
         std::string tool_call_name_path;
         std::string tool_call_args_path;
         bool tool_call_args_is_string = true;
-        // CONTENT_ARRAY
         std::string content_path;
         std::string text_type;
         std::string text_field;
         std::string tool_use_type;
         std::string tool_call_name_field;
         std::string tool_call_args_field;
-        // CANDIDATES_PARTS
         std::string parts_path;
         std::string function_call_field;
-        // Usage
         std::string usage_path;
         std::string prompt_tokens_field;
         std::string completion_tokens_field;
@@ -162,7 +172,6 @@ class SchemaProvider : public Provider {
 
     struct StreamConfig {
         StreamFormat format;
-        // SSE_DATA
         std::string prefix;
         std::string done_signal;
         std::string delta_path;
@@ -172,14 +181,12 @@ class SchemaProvider : public Provider {
         std::string tool_call_id_field;
         std::string tool_call_name_path;
         std::string tool_call_args_path;
-        // SSE_DATA with candidates_parts delta (Gemini)
-        std::string delta_strategy;  // "candidates_parts" for Gemini
+        std::string delta_strategy;
         std::string delta_parts_path;
         std::string delta_text_field;
         std::string delta_function_call_field;
         std::string delta_tool_call_name_field;
         std::string delta_tool_call_args_field;
-        // SSE_EVENTS (Claude)
         json events_config;
     };
 
@@ -209,22 +216,12 @@ class SchemaProvider : public Provider {
     ChatMessage parse_response(const json& resp_json) const;
     ChatCompletion::Usage parse_usage(const json& resp_json) const;
 
-    // Build endpoint URL with model substitution and auth query param
     std::string build_endpoint(const std::string& model, bool streaming) const;
-
-    // Build HTTP headers
     std::map<std::string, std::string> build_headers() const;
-
-    // Get the resolved API key
     std::string get_api_key() const;
 
-    // Parse a data URL: "data:image/jpeg;base64,ABC" -> {mime, data}
     static std::pair<std::string, std::string> parse_data_url(const std::string& url);
-
-    // Substitute $VAR placeholders in a JSON template
     static json substitute(const json& tmpl, const std::map<std::string, json>& vars);
-
-    // Generate a unique tool call ID
     static std::string generate_tool_call_id();
 };
 

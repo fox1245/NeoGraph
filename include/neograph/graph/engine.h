@@ -1,3 +1,11 @@
+/**
+ * @file graph/engine.h
+ * @brief Main graph execution engine with super-step loop and HITL support.
+ *
+ * GraphEngine is the central orchestrator that compiles JSON graph definitions,
+ * executes them using the Pregel BSP (Bulk Synchronous Parallel) model,
+ * and provides checkpointing, state management, and Human-in-the-Loop APIs.
+ */
 #pragma once
 
 #include <neograph/graph/types.h>
@@ -10,77 +18,195 @@
 
 namespace neograph::graph {
 
-// --- Run configuration ---
+/**
+ * @brief Configuration for a graph execution run.
+ */
 struct RunConfig {
-    std::string thread_id;           // for checkpoint association
-    json        input;               // initial channel writes (e.g. {"messages": [...]})
-    int         max_steps  = 50;     // safety limit for loops
-    StreamMode  stream_mode = StreamMode::ALL;  // which events to emit
+    std::string thread_id;                          ///< Thread ID for checkpoint association.
+    json        input;                              ///< Initial channel writes (e.g., {"messages": [...]}).
+    int         max_steps  = 50;                    ///< Safety limit for maximum super-steps per run.
+    StreamMode  stream_mode = StreamMode::ALL;      ///< Which event types to emit during streaming.
 };
 
-// --- Run result ---
+/**
+ * @brief Result of a graph execution run.
+ */
 struct RunResult {
-    json        output;                           // final serialized state
-    bool        interrupted       = false;        // HITL
-    std::string interrupt_node;
-    json        interrupt_value;
-    std::string checkpoint_id;
-    std::vector<std::string> execution_trace;     // ordered list of executed nodes
+    json        output;                             ///< Final serialized graph state.
+    bool        interrupted       = false;          ///< True if execution was interrupted (HITL).
+    std::string interrupt_node;                     ///< Name of the node that triggered the interrupt.
+    json        interrupt_value;                    ///< Value associated with the interrupt.
+    std::string checkpoint_id;                      ///< ID of the last checkpoint saved.
+    std::vector<std::string> execution_trace;       ///< Ordered list of executed node names.
 };
 
-// =========================================================================
-// GraphEngine: super-step loop execution engine
-// =========================================================================
+/**
+ * @brief Super-step loop execution engine for graph-based agent workflows.
+ *
+ * GraphEngine compiles a JSON graph definition into an executable workflow,
+ * then runs it using the Pregel BSP model. Key capabilities:
+ *
+ * - **Parallel execution**: Multiple independent nodes run concurrently via Taskflow.
+ * - **Checkpointing**: Full state snapshots at every super-step for time-travel.
+ * - **HITL**: interrupt_before/after + resume() for human-in-the-loop workflows.
+ * - **Send/Command**: Dynamic fan-out and routing overrides from nodes.
+ * - **Retry policies**: Per-node exponential backoff on failure.
+ *
+ * @code
+ * auto engine = GraphEngine::compile(graph_json, context, checkpoint_store);
+ * RunConfig config;
+ * config.thread_id = "session-1";
+ * config.input = {{"messages", json::array({{{"role","user"},{"content","Hello"}}})}};
+ * auto result = engine->run(config);
+ * @endcode
+ *
+ * @see RunConfig, RunResult, GraphNode
+ */
 class GraphEngine {
 public:
-    // Compile a graph from JSON definition + default context
+    /**
+     * @brief Compile a graph from a JSON definition.
+     *
+     * Parses the JSON graph definition, creates nodes via NodeFactory,
+     * resolves edges and conditions, and returns a ready-to-run engine.
+     *
+     * @param definition JSON graph definition (nodes, edges, channels, etc.).
+     * @param default_context Default NodeContext providing provider, tools, model.
+     * @param store Optional checkpoint store for persistence (nullptr = no checkpointing).
+     * @return A compiled GraphEngine ready for execution.
+     * @throws std::runtime_error If the graph definition is invalid.
+     */
     static std::unique_ptr<GraphEngine> compile(
         const json& definition,
         const NodeContext& default_context,
         std::shared_ptr<CheckpointStore> store = nullptr);
 
-    // Execute the graph (blocking)
+    /**
+     * @brief Execute the graph synchronously (blocking).
+     * @param config Run configuration with thread ID, input, and limits.
+     * @return Execution result with final state and metadata.
+     */
     RunResult run(const RunConfig& config);
 
-    // Execute with streaming events
+    /**
+     * @brief Execute the graph with streaming event callbacks.
+     * @param config Run configuration.
+     * @param cb Callback invoked for each graph event (filtered by config.stream_mode).
+     * @return Execution result.
+     */
     RunResult run_stream(const RunConfig& config,
                          const GraphStreamCallback& cb);
 
-    // Resume from interrupt (HITL)
+    /**
+     * @brief Resume execution from a HITL interrupt.
+     *
+     * Loads the last checkpoint for the given thread, applies the resume
+     * value, and continues execution from the interrupted node.
+     *
+     * @param thread_id Thread ID of the interrupted session.
+     * @param resume_value Optional value to inject before resuming (e.g., human input).
+     * @param cb Optional streaming callback.
+     * @return Execution result after resumption.
+     */
     RunResult resume(const std::string& thread_id,
                      const json& resume_value = json(),
                      const GraphStreamCallback& cb = nullptr);
 
     // ── State inspection & manipulation (LangGraph Checkpointer API) ──
 
+    /**
+     * @brief Get the current state for a thread.
+     * @param thread_id Thread ID to look up.
+     * @return Serialized state JSON, or std::nullopt if no checkpoint exists.
+     */
     std::optional<json> get_state(const std::string& thread_id) const;
 
+    /**
+     * @brief Get the checkpoint history for a thread (time-travel).
+     * @param thread_id Thread ID to look up.
+     * @param limit Maximum number of checkpoints to return (default: 100).
+     * @return Vector of Checkpoint objects, newest first.
+     */
     std::vector<Checkpoint> get_state_history(const std::string& thread_id,
                                               int limit = 100) const;
 
+    /**
+     * @brief Update the state for a thread by applying channel writes.
+     *
+     * Loads the latest checkpoint, applies the writes, and saves a new checkpoint.
+     * Useful for injecting state externally (e.g., from a UI).
+     *
+     * @param thread_id Thread ID to update.
+     * @param channel_writes JSON object of channel_name -> value pairs to write.
+     * @param as_node Optional node name to attribute the update to (for tracing).
+     */
     void update_state(const std::string& thread_id,
                       const json& channel_writes,
                       const std::string& as_node = "");
 
+    /**
+     * @brief Fork a thread, creating a new thread from an existing checkpoint.
+     *
+     * Copies the specified checkpoint (or the latest) to a new thread ID,
+     * enabling branching execution paths.
+     *
+     * @param source_thread_id Thread to fork from.
+     * @param new_thread_id Thread ID for the new fork.
+     * @param checkpoint_id Specific checkpoint to fork from (empty = latest).
+     * @return The checkpoint ID of the forked state.
+     */
     std::string fork(const std::string& source_thread_id,
                      const std::string& new_thread_id,
                      const std::string& checkpoint_id = "");
 
     // ── Configuration ──
 
+    /**
+     * @brief Transfer tool ownership to the engine.
+     *
+     * The engine takes ownership of the tools and keeps them alive for
+     * the duration of the engine's lifetime.
+     *
+     * @param tools Vector of tool unique_ptrs to transfer.
+     */
     void own_tools(std::vector<std::unique_ptr<Tool>> tools);
+
+    /**
+     * @brief Set the checkpoint persistence store.
+     * @param store Checkpoint store implementation.
+     */
     void set_checkpoint_store(std::shared_ptr<CheckpointStore> store);
 
-    // Set cross-thread shared memory store
+    /**
+     * @brief Set the cross-thread shared memory store.
+     * @param store Store implementation for cross-thread data sharing.
+     * @see Store, InMemoryStore
+     */
     void set_store(std::shared_ptr<Store> store);
+
+    /**
+     * @brief Get the cross-thread shared memory store.
+     * @return Shared pointer to the Store, or nullptr if not set.
+     */
     std::shared_ptr<Store> get_store() const { return store_; }
 
-    // Set default retry policy for all nodes
+    /**
+     * @brief Set the default retry policy for all nodes.
+     * @param policy Retry policy with backoff configuration.
+     */
     void set_retry_policy(const RetryPolicy& policy);
 
-    // Set retry policy for a specific node
+    /**
+     * @brief Set a retry policy for a specific node (overrides default).
+     * @param node_name Name of the node.
+     * @param policy Retry policy for this specific node.
+     */
     void set_node_retry_policy(const std::string& node_name, const RetryPolicy& policy);
 
+    /**
+     * @brief Get the graph name (from the JSON definition).
+     * @return Graph name string.
+     */
     const std::string& graph_name() const { return name_; }
 
 private:
@@ -108,14 +234,12 @@ private:
                                int step,
                                const std::string& parent_id) const;
 
-    // Execute a node with retry policy, returns full NodeResult
     NodeResult execute_node_with_retry(
         const std::string& node_name,
         GraphState& state,
         const GraphStreamCallback& cb,
         StreamMode stream_mode);
 
-    // Get retry policy for a node (node-specific or default)
     RetryPolicy get_retry_policy(const std::string& node_name) const;
 
     // --- Graph definition ---

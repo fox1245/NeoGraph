@@ -1,3 +1,11 @@
+/**
+ * @file types.h
+ * @brief Foundation types for NeoGraph: messages, tool calls, and LLM completions.
+ *
+ * Defines the core data structures shared across all NeoGraph modules,
+ * including ChatMessage, ToolCall, ChatCompletion, and their JSON
+ * serialization helpers (ADL-based, nlohmann/json compatible).
+ */
 #pragma once
 
 #include <string>
@@ -6,51 +14,85 @@
 
 namespace neograph {
 
+/// Convenience alias for the JSON library type used throughout NeoGraph.
 using json = nlohmann::json;
 
+/**
+ * @brief Represents a single tool invocation requested by the LLM.
+ *
+ * When an LLM response contains tool calls, each call is represented
+ * as a ToolCall with a unique ID, the tool name, and its arguments
+ * serialized as a JSON string.
+ */
 struct ToolCall {
-    std::string id;
-    std::string name;
-    std::string arguments; // JSON string
+    std::string id;         ///< Unique identifier for this tool call.
+    std::string name;       ///< Name of the tool to invoke.
+    std::string arguments;  ///< JSON-encoded string of tool arguments.
 };
 
+/**
+ * @brief A message in the conversation history.
+ *
+ * Supports all standard roles (user, assistant, tool, system) and
+ * multi-modal content via image_urls for vision-capable models.
+ */
 struct ChatMessage {
-    std::string role;
-    std::string content;
-    std::vector<ToolCall> tool_calls;
-    std::string tool_call_id;
-    std::string tool_name;
-    std::vector<std::string> image_urls; // base64 data URLs or http URLs for Vision
+    std::string role;                    ///< Message role: "user", "assistant", "tool", or "system".
+    std::string content;                 ///< Text content of the message.
+    std::vector<ToolCall> tool_calls;    ///< Tool calls made by the assistant (if any).
+    std::string tool_call_id;            ///< ID of the tool call being responded to (role == "tool").
+    std::string tool_name;               ///< Name of the tool being called.
+    std::vector<std::string> image_urls; ///< Base64 data URLs or HTTP URLs for vision support.
 };
 
+/**
+ * @brief Tool definition metadata sent to the LLM.
+ *
+ * Describes a callable tool with its name, description, and parameter
+ * schema (JSON Schema object) so the LLM can decide when and how to call it.
+ */
 struct ChatTool {
-    std::string name;
-    std::string description;
-    json parameters; // JSON Schema object
+    std::string name;         ///< Tool name (must be unique within a session).
+    std::string description;  ///< Human-readable description of what the tool does.
+    json parameters;          ///< JSON Schema object describing the tool's parameters.
 };
 
+/**
+ * @brief LLM completion response including the message and token usage.
+ */
 struct ChatCompletion {
-    ChatMessage message;
+    ChatMessage message;  ///< The response message from the LLM.
+
+    /// Token usage statistics for the completion.
     struct Usage {
-        int prompt_tokens = 0;
-        int completion_tokens = 0;
-        int total_tokens = 0;
+        int prompt_tokens = 0;      ///< Number of tokens in the prompt.
+        int completion_tokens = 0;  ///< Number of tokens in the completion.
+        int total_tokens = 0;       ///< Total tokens used (prompt + completion).
     } usage;
 };
 
 // --- ADL serialization: ChatMessage/ToolCall <-> json ---
 // These live in the same namespace as the types for ADL lookup.
 
+/// @brief Serialize a ToolCall to JSON.
+/// @param[out] j Target JSON object.
+/// @param[in] tc ToolCall to serialize.
 inline void to_json(json& j, const ToolCall& tc) {
     j = json{{"id", tc.id}, {"name", tc.name}, {"arguments", tc.arguments}};
 }
 
+/// @brief Deserialize a ToolCall from JSON.
+/// @param[in] j Source JSON object.
+/// @param[out] tc Target ToolCall.
 inline void from_json(const json& j, ToolCall& tc) {
     tc.id = j.value("id", "");
     tc.name = j.value("name", "");
     tc.arguments = j.value("arguments", "");
 }
 
+/// @brief Serialize a ChatMessage to JSON.
+/// @param[out] j Target JSON object.
+/// @param[in] msg ChatMessage to serialize.
 inline void to_json(json& j, const ChatMessage& msg) {
     j["role"] = msg.role;
     j["content"] = msg.content;
@@ -67,6 +109,9 @@ inline void to_json(json& j, const ChatMessage& msg) {
     if (!msg.image_urls.empty())   j["image_urls"] = msg.image_urls;
 }
 
+/// @brief Deserialize a ChatMessage from JSON.
+/// @param[in] j Source JSON object.
+/// @param[out] msg Target ChatMessage.
 inline void from_json(const json& j, ChatMessage& msg) {
     msg.role    = j.value("role", "");
     msg.content = j.value("content", "");
@@ -86,6 +131,15 @@ inline void from_json(const json& j, ChatMessage& msg) {
 
 // --- JSON serialization helpers ---
 
+/**
+ * @brief Convert a vector of ChatMessages to OpenAI-compatible JSON format.
+ *
+ * Handles tool call messages, tool result messages, and multi-modal
+ * messages (text + images in OpenAI Vision format).
+ *
+ * @param messages Vector of ChatMessage objects to convert.
+ * @return JSON array in OpenAI messages format.
+ */
 inline json messages_to_json(const std::vector<ChatMessage>& messages) {
     json arr = json::array();
     for (const auto& msg : messages) {
@@ -125,6 +179,12 @@ inline json messages_to_json(const std::vector<ChatMessage>& messages) {
     return arr;
 }
 
+/**
+ * @brief Convert a vector of ChatTools to OpenAI-compatible JSON format.
+ *
+ * @param tools Vector of ChatTool objects to convert.
+ * @return JSON array in OpenAI tool definition format.
+ */
 inline json tools_to_json(const std::vector<ChatTool>& tools) {
     json arr = json::array();
     for (const auto& tool : tools) {
@@ -140,6 +200,16 @@ inline json tools_to_json(const std::vector<ChatTool>& tools) {
     return arr;
 }
 
+/**
+ * @brief Parse an OpenAI API response choice into a ChatMessage.
+ *
+ * Extracts the message content, role, and any tool calls from
+ * the `choices[n]` object of an OpenAI completion response.
+ *
+ * @param choice A single choice object from the OpenAI response (must contain "message").
+ * @return Parsed ChatMessage with role, content, and tool_calls populated.
+ * @throws json::exception If required fields are missing.
+ */
 inline ChatMessage parse_response_message(const json& choice) {
     ChatMessage msg;
     auto& m = choice.at("message");

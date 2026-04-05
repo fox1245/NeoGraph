@@ -1,3 +1,11 @@
+/**
+ * @file llm/json_path.h
+ * @brief JSON dot-path navigation utilities.
+ *
+ * Provides functions for navigating and manipulating JSON objects using
+ * dot-notation paths like "choices.0.message.content". Numeric segments
+ * are treated as array indices.
+ */
 #pragma once
 
 #include <nlohmann/json.hpp>
@@ -11,7 +19,12 @@ using json = nlohmann::json;
 
 namespace json_path {
 
-// Split a dot-path string into segments: "choices.0.message" -> ["choices","0","message"]
+/**
+ * @brief Split a dot-path string into individual segments.
+ *
+ * @param path Dot-separated path (e.g., "choices.0.message").
+ * @return Vector of path segments (e.g., ["choices", "0", "message"]).
+ */
 inline std::vector<std::string> split_path(const std::string& path) {
     std::vector<std::string> segments;
     if (path.empty()) return segments;
@@ -29,7 +42,11 @@ inline std::vector<std::string> split_path(const std::string& path) {
     return segments;
 }
 
-// Check if a string is a non-negative integer
+/**
+ * @brief Check if a string represents a non-negative integer (array index).
+ * @param s String to check.
+ * @return True if the string is a valid non-negative integer.
+ */
 inline bool is_index(const std::string& s) {
     if (s.empty()) return false;
     for (char c : s) {
@@ -38,8 +55,16 @@ inline bool is_index(const std::string& s) {
     return true;
 }
 
-// Navigate into a JSON value by dot-path. Numeric segments index into arrays.
-// Returns nullptr (json) if path not found.
+/**
+ * @brief Navigate into a JSON value by dot-path (const).
+ *
+ * Numeric segments index into arrays. Returns nullptr if the path
+ * does not exist.
+ *
+ * @param root The root JSON value to navigate from.
+ * @param path Dot-separated path (e.g., "choices.0.message.content").
+ * @return Pointer to the value at the path, or nullptr if not found.
+ */
 inline const json* at_path(const json& root, const std::string& path) {
     if (path.empty()) return &root;
 
@@ -62,7 +87,12 @@ inline const json* at_path(const json& root, const std::string& path) {
     return current;
 }
 
-// Mutable version of at_path
+/**
+ * @brief Navigate into a JSON value by dot-path (mutable).
+ * @param root The root JSON value to navigate from.
+ * @param path Dot-separated path.
+ * @return Mutable pointer to the value at the path, or nullptr if not found.
+ */
 inline json* at_path_mut(json& root, const std::string& path) {
     if (path.empty()) return &root;
 
@@ -85,12 +115,25 @@ inline json* at_path_mut(json& root, const std::string& path) {
     return current;
 }
 
-// Check if a path exists in the JSON
+/**
+ * @brief Check if a dot-path exists in the JSON value.
+ * @param root The root JSON value.
+ * @param path Dot-separated path to check.
+ * @return True if the path exists.
+ */
 inline bool has_path(const json& root, const std::string& path) {
     return at_path(root, path) != nullptr;
 }
 
-// Get a value at a path, with a default if not found
+/**
+ * @brief Get a value at a dot-path with a default fallback.
+ *
+ * @tparam T The expected value type.
+ * @param root The root JSON value.
+ * @param path Dot-separated path to navigate.
+ * @param default_val Default value returned if the path doesn't exist or type conversion fails.
+ * @return The value at the path, or default_val.
+ */
 template<typename T>
 inline T get_path(const json& root, const std::string& path, const T& default_val) {
     const json* node = at_path(root, path);
@@ -102,8 +145,16 @@ inline T get_path(const json& root, const std::string& path, const T& default_va
     }
 }
 
-// Set a value at a dot-path, creating intermediate objects as needed.
-// Numeric segments create array entries only if the parent is already an array.
+/**
+ * @brief Set a value at a dot-path, creating intermediate objects as needed.
+ *
+ * Numeric segments create array entries only if the parent is already an array.
+ * Otherwise, intermediate objects are created automatically.
+ *
+ * @param root The root JSON value to modify.
+ * @param path Dot-separated path where the value should be set.
+ * @param value The JSON value to set.
+ */
 inline void set_path(json& root, const std::string& path, const json& value) {
     if (path.empty()) {
         root = value;
