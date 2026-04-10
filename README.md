@@ -7,6 +7,7 @@
 </p>
 
 <p align="center">
+  <a href="https://fox1245.github.io/NeoGraph/">API Reference</a> &middot;
   <a href="#quick-start">Quick Start</a> &middot;
   <a href="#features">Features</a> &middot;
   <a href="#examples">Examples</a> &middot;
