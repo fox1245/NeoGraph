@@ -46,10 +46,10 @@ int main() {
         return 1;
     }
 
-    auto provider = neograph::llm::OpenAIProvider::create({
-        .api_key = api_key,
-        .default_model = "gpt-4o-mini"
-    });
+    neograph::llm::OpenAIProvider::Config config;
+    config.api_key = api_key;
+    config.default_model = "gpt-4o-mini";
+    auto provider = neograph::llm::OpenAIProvider::create(config);
 
     // 2. Create tools
     std::vector<std::unique_ptr<neograph::Tool>> tools;

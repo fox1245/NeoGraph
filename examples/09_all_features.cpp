@@ -232,12 +232,12 @@ int main() {
         auto engine = GraphEngine::compile(def, ctx);
 
         // Set per-node retry policy
-        engine->set_node_retry_policy("unstable_api", {
-            .max_retries = 5,
-            .initial_delay_ms = 10,   // Short for demo purposes
-            .backoff_multiplier = 2.0f,
-            .max_delay_ms = 100
-        });
+        RetryPolicy retry;
+        retry.max_retries = 5;
+        retry.initial_delay_ms = 10;   // Short for demo purposes
+        retry.backoff_multiplier = 2.0f;
+        retry.max_delay_ms = 100;
+        engine->set_node_retry_policy("unstable_api", retry);
 
         RunConfig cfg;
         cfg.stream_mode = StreamMode::EVENTS | StreamMode::DEBUG;
