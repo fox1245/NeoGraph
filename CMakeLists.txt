@@ -196,6 +196,9 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_send_command examples/10_send_command.cpp)
         target_link_libraries(example_send_command PRIVATE neograph::core)
 
+        add_executable(example_rag_agent examples/12_rag_agent.cpp)
+        target_link_libraries(example_rag_agent PRIVATE neograph::core neograph::llm)
+
         if(NEOGRAPH_BUILD_MCP)
             add_executable(example_mcp_agent examples/03_mcp_agent.cpp)
             target_link_libraries(example_mcp_agent PRIVATE neograph::core neograph::llm neograph::mcp)

@@ -146,6 +146,7 @@ target_link_libraries(my_app PRIVATE neograph::core neograph::llm)
 | 09 | `all_features` | All 6 advanced features in one demo | No |
 | 10 | `send_command` | Dynamic Send fan-out + Command routing override | No |
 | 11 | `clay_chatbot` | Multi-turn chatbot UI (Clay + Raylib) | Optional |
+| 12 | `rag_agent` | RAG agent with in-memory vector search (CLI) | Required |
 
 ### Run with a real LLM
 
