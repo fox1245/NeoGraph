@@ -55,7 +55,11 @@ static void load_dotenv(const std::string& path = ".env") {
             val = val.substr(1, val.size() - 2);
         }
 
+#ifdef _WIN32
+        _putenv_s(key.c_str(), val.c_str());
+#else
         setenv(key.c_str(), val.c_str(), 0);  // 0 = do not overwrite existing values
+#endif
     }
 }
 
@@ -79,11 +83,11 @@ int main(int argc, char* argv[]) {
     }
 
     // 2. Create LLM Provider
+    neograph::llm::OpenAIProvider::Config llm_config;
+    llm_config.api_key = api_key;
+    llm_config.default_model = "gpt-4o-mini";
     auto provider = std::shared_ptr<neograph::Provider>(
-        neograph::llm::OpenAIProvider::create({
-            .api_key = api_key,
-            .default_model = "gpt-4o-mini"
-        })
+        neograph::llm::OpenAIProvider::create(llm_config)
     );
 
     // 3. Discover tools from the MCP server

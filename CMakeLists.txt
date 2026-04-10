@@ -5,6 +5,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# MSVC: treat source files as UTF-8
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
 # ===========================================================================
 # Options
 # ===========================================================================
@@ -44,12 +49,14 @@ endif()
 # ===========================================================================
 # Schema embedding (build-time code generation)
 # ===========================================================================
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
 set(GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${GENERATED_DIR})
 
 add_custom_command(
     OUTPUT ${GENERATED_DIR}/builtin_schemas.h
-    COMMAND ${CMAKE_COMMAND} -E env python3
+    COMMAND Python3::Interpreter
             ${CMAKE_SOURCE_DIR}/scripts/embed_schemas.py
             ${CMAKE_SOURCE_DIR}/schemas
             ${GENERATED_DIR}/builtin_schemas.h
