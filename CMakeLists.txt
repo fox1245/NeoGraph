@@ -199,6 +199,9 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_rag_agent examples/12_rag_agent.cpp)
         target_link_libraries(example_rag_agent PRIVATE neograph::core neograph::llm httplib OpenSSL::SSL OpenSSL::Crypto)
 
+        add_executable(example_openai_responses examples/13_openai_responses.cpp)
+        target_link_libraries(example_openai_responses PRIVATE neograph::core neograph::llm)
+
         if(NEOGRAPH_BUILD_MCP)
             add_executable(example_mcp_agent examples/03_mcp_agent.cpp)
             target_link_libraries(example_mcp_agent PRIVATE neograph::core neograph::llm neograph::mcp)

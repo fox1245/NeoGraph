@@ -128,6 +128,8 @@ void SchemaProvider::parse_schema()
         tool_def_.wrapper = ToolDefWrapper::NONE;
     } else if (wrapper == "function_declarations") {
         tool_def_.wrapper = ToolDefWrapper::FUNCTION_DECLARATIONS;
+    } else if (wrapper == "flat_function") {
+        tool_def_.wrapper = ToolDefWrapper::FLAT_FUNCTION;
     } else {
         tool_def_.wrapper = ToolDefWrapper::FUNCTION;
     }
@@ -142,6 +144,8 @@ void SchemaProvider::parse_schema()
         tool_call_.strategy = ToolCallStrategy::CONTENT_ARRAY;
     } else if (tc_strategy == "parts_array") {
         tool_call_.strategy = ToolCallStrategy::PARTS_ARRAY;
+    } else if (tc_strategy == "flat_items") {
+        tool_call_.strategy = ToolCallStrategy::FLAT_ITEMS;
     } else {
         tool_call_.strategy = ToolCallStrategy::TOOL_CALLS_ARRAY;
     }
@@ -157,6 +161,8 @@ void SchemaProvider::parse_schema()
         tool_result_.strategy = ToolResultStrategy::CONTENT_ARRAY;
     } else if (tr_strategy == "parts_array") {
         tool_result_.strategy = ToolResultStrategy::PARTS_ARRAY;
+    } else if (tr_strategy == "flat_item") {
+        tool_result_.strategy = ToolResultStrategy::FLAT_ITEM;
     } else {
         tool_result_.strategy = ToolResultStrategy::FLAT;
     }
@@ -177,6 +183,8 @@ void SchemaProvider::parse_schema()
         resp_.strategy = ResponseStrategy::CONTENT_ARRAY;
     } else if (resp_strategy == "candidates_parts") {
         resp_.strategy = ResponseStrategy::CANDIDATES_PARTS;
+    } else if (resp_strategy == "output_array") {
+        resp_.strategy = ResponseStrategy::OUTPUT_ARRAY;
     } else {
         resp_.strategy = ResponseStrategy::CHOICES_MESSAGE;
     }
@@ -196,6 +204,11 @@ void SchemaProvider::parse_schema()
     resp_.tool_call_args_field = resp.value("tool_call_args_field", "input");
     resp_.parts_path = resp.value("parts_path", "");
     resp_.function_call_field = resp.value("function_call_field", "functionCall");
+    resp_.output_path = resp.value("output_path", "output");
+    resp_.message_item_type = resp.value("message_item_type", "message");
+    resp_.function_call_item_type = resp.value("function_call_item_type", "function_call");
+    resp_.message_content_field = resp.value("message_content_field", "content");
+    resp_.function_call_id_field = resp.value("function_call_id_field", "call_id");
     resp_.usage_path = resp.value("usage_path", "usage");
     resp_.prompt_tokens_field = resp.value("prompt_tokens_field", "prompt_tokens");
     resp_.completion_tokens_field = resp.value("completion_tokens_field", "completion_tokens");
@@ -527,6 +540,56 @@ json SchemaProvider::serialize_single_message(const ChatMessage& msg) const {
 json SchemaProvider::serialize_messages(const std::vector<ChatMessage>& messages) const {
     json arr = json::array();
 
+    // Responses-style: tool calls and tool results are emitted as flat top-level items.
+    // A single assistant ChatMessage with tool_calls becomes an optional text message +
+    // N separate function_call items; a tool-role ChatMessage becomes a flat function_call_output.
+    if (tool_call_.strategy == ToolCallStrategy::FLAT_ITEMS) {
+        for (const auto& msg : messages) {
+            if (msg.role == "system" && sys_.strategy != SystemPromptStrategy::IN_MESSAGES) {
+                continue;
+            }
+
+            if (msg.role == "tool" && tool_result_.strategy == ToolResultStrategy::FLAT_ITEM) {
+                std::map<std::string, json> vars;
+                vars["ID"] = msg.tool_call_id;
+                vars["CONTENT"] = msg.content;
+                vars["NAME"] = msg.tool_name;
+                arr.push_back(substitute(tool_result_.item_template, vars));
+                continue;
+            }
+
+            if (!msg.tool_calls.empty()) {
+                // Optional leading text message from the assistant.
+                if (!msg.content.empty()) {
+                    json text_msg;
+                    std::string role = msg.role;
+                    auto it = msgs_.role_map.find(role);
+                    if (it != msgs_.role_map.end()) role = it->second;
+                    text_msg[msgs_.role_field] = role;
+                    text_msg[msgs_.content_field] = msg.content;
+                    arr.push_back(text_msg);
+                }
+                // One flat function_call item per tool call.
+                for (const auto& tc : msg.tool_calls) {
+                    std::map<std::string, json> vars;
+                    vars["ID"] = tc.id;
+                    vars["NAME"] = tc.name;
+                    vars["ARGUMENTS_STRING"] = tc.arguments;
+                    try {
+                        vars["ARGUMENTS_OBJECT"] = json::parse(tc.arguments);
+                    } catch (...) {
+                        vars["ARGUMENTS_OBJECT"] = json::object();
+                    }
+                    arr.push_back(substitute(tool_call_.item_template, vars));
+                }
+                continue;
+            }
+
+            arr.push_back(serialize_single_message(msg));
+        }
+        return arr;
+    }
+
     // For Claude: consecutive same-role messages must be merged
     // Claude doesn't allow consecutive user messages; tool results become user role
     bool need_merge = (provider_name_ == "claude");
@@ -637,6 +700,19 @@ json SchemaProvider::serialize_tools(const std::vector<ChatTool>& tools) const {
                 decls.push_back(item);
             }
             return json::array({json{{"function_declarations", decls}}});
+        }
+        case ToolDefWrapper::FLAT_FUNCTION: {
+            // OpenAI Responses: [{type:"function", name, description, parameters}]
+            json arr = json::array();
+            for (const auto& tool : tools) {
+                json item;
+                item["type"] = "function";
+                item[tool_def_.name_field] = tool.name;
+                item[tool_def_.description_field] = tool.description;
+                item[tool_def_.parameters_field] = tool.parameters;
+                arr.push_back(item);
+            }
+            return arr;
         }
     }
     return json::array();
@@ -807,6 +883,46 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
             msg.content = full_text;
             break;
         }
+        case ResponseStrategy::OUTPUT_ARRAY: {
+            // OpenAI Responses: output[] with mixed item types
+            //   {type:"message", role:"assistant", content:[{type:"output_text", text:"..."}]}
+            //   {type:"function_call", call_id:"...", name:"...", arguments:"..."}
+            //   {type:"reasoning", ...} (ignored)
+            const json* output = json_path::at_path(resp_json, resp_.output_path);
+            if (!output || !output->is_array()) break;
+
+            std::string full_text;
+            for (const auto& item : *output) {
+                std::string type = item.value("type", "");
+                if (type == resp_.message_item_type) {
+                    if (item.contains(resp_.message_content_field) &&
+                        item[resp_.message_content_field].is_array()) {
+                        for (const auto& part : item[resp_.message_content_field]) {
+                            if (part.value("type", "") == resp_.text_type) {
+                                if (!full_text.empty()) full_text += "\n";
+                                full_text += part.value(resp_.text_field, "");
+                            }
+                        }
+                    }
+                } else if (type == resp_.function_call_item_type) {
+                    ToolCall call;
+                    call.id = item.value(resp_.function_call_id_field, "");
+                    call.name = item.value(resp_.tool_call_name_field, "");
+                    if (item.contains(resp_.tool_call_args_field)) {
+                        const auto& args = item[resp_.tool_call_args_field];
+                        if (resp_.tool_call_args_is_string && args.is_string()) {
+                            call.arguments = args.get<std::string>();
+                        } else {
+                            call.arguments = args.dump();
+                        }
+                    }
+                    msg.tool_calls.push_back(std::move(call));
+                }
+                // Other item types (reasoning, web_search_call, etc.) are ignored.
+            }
+            msg.content = full_text;
+            break;
+        }
         case ResponseStrategy::CANDIDATES_PARTS: {
             // Gemini: candidates[0].content.parts[]
             const json* parts = json_path::at_path(resp_json, resp_.parts_path);
@@ -927,8 +1043,8 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
     std::map<int, ToolCall> tc_map;
     std::string line_buffer;
 
-    // For Claude SSE_EVENTS: track current block
-    struct ClaudeBlock {
+    // SSE_EVENTS: track current block/item (used by Claude and OpenAI Responses)
+    struct EventBlock {
         std::string type;
         std::string id;
         std::string name;
@@ -936,8 +1052,8 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
         std::string args;
         int index = -1;
     };
-    std::vector<ClaudeBlock> claude_blocks;
-    int claude_block_index = -1;
+    std::vector<EventBlock> event_blocks;
+    int event_block_index = -1;
 
     // For Gemini: track tool call index
     int gemini_tc_index = 0;
@@ -1051,28 +1167,35 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
                             // noop
                         }
                         else if (action == "block_start") {
-                            // New content block starting
+                            // New content block / output item starting.
+                            // Claude default: block_path="content_block", tool_type="tool_use", id in "id".
+                            // Responses:      block_path="item",          tool_type="function_call", id in "call_id".
                             std::string block_path = event_cfg.value("block_path", "content_block");
                             std::string type_field = event_cfg.value("type_field", "type");
+                            std::string tool_type   = event_cfg.value("tool_call_type", "tool_use");
+                            std::string id_fld      = event_cfg.value("id_field", "id");
+                            std::string name_fld    = event_cfg.value("name_field", "name");
 
                             const json* block = json_path::at_path(j, block_path);
                             if (block) {
-                                ClaudeBlock cb;
+                                EventBlock cb;
                                 cb.type = block->value(type_field, "");
-                                cb.index = static_cast<int>(claude_blocks.size());
-                                if (cb.type == "tool_use") {
-                                    cb.id = block->value("id", "");
-                                    cb.name = block->value("name", "");
+                                cb.index = static_cast<int>(event_blocks.size());
+                                if (cb.type == tool_type) {
+                                    cb.id = block->value(id_fld, "");
+                                    cb.name = block->value(name_fld, "");
                                 }
-                                claude_blocks.push_back(cb);
-                                claude_block_index = cb.index;
+                                event_blocks.push_back(cb);
+                                event_block_index = cb.index;
                             }
                         }
                         else if (action == "delta") {
-                            if (claude_block_index < 0 ||
-                                claude_block_index >= static_cast<int>(claude_blocks.size())) continue;
+                            // Claude-style delta: single event carries both text and tool args,
+                            // discriminated by a nested "type" field inside the delta object.
+                            if (event_block_index < 0 ||
+                                event_block_index >= static_cast<int>(event_blocks.size())) continue;
 
-                            auto& cur_block = claude_blocks[claude_block_index];
+                            auto& cur_block = event_blocks[event_block_index];
                             std::string delta_path = event_cfg.value("delta_path", "delta");
                             const json* delta = json_path::at_path(j, delta_path);
                             if (!delta) continue;
@@ -1094,12 +1217,33 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
                                 cur_block.args += chunk;
                             }
                         }
+                        else if (action == "text_delta") {
+                            // Responses-style: dedicated text-delta event.
+                            // Reads a single field directly from the event payload.
+                            if (event_block_index < 0 ||
+                                event_block_index >= static_cast<int>(event_blocks.size())) continue;
+                            auto& cur_block = event_blocks[event_block_index];
+                            std::string delta_fld = event_cfg.value("delta_field", "delta");
+                            std::string token = j.value(delta_fld, "");
+                            full_content += token;
+                            cur_block.text += token;
+                            if (on_chunk) on_chunk(token);
+                        }
+                        else if (action == "tool_args_delta") {
+                            // Responses-style: dedicated function-call-arguments delta event.
+                            if (event_block_index < 0 ||
+                                event_block_index >= static_cast<int>(event_blocks.size())) continue;
+                            auto& cur_block = event_blocks[event_block_index];
+                            std::string delta_fld = event_cfg.value("delta_field", "delta");
+                            cur_block.args += j.value(delta_fld, "");
+                        }
                         else if (action == "block_stop") {
-                            // Block finished
-                            if (claude_block_index >= 0 &&
-                                claude_block_index < static_cast<int>(claude_blocks.size())) {
-                                auto& cb = claude_blocks[claude_block_index];
-                                if (cb.type == "tool_use") {
+                            // Block / item finished.
+                            std::string tool_type = event_cfg.value("tool_call_type", "tool_use");
+                            if (event_block_index >= 0 &&
+                                event_block_index < static_cast<int>(event_blocks.size())) {
+                                auto& cb = event_blocks[event_block_index];
+                                if (cb.type == tool_type) {
                                     ToolCall call;
                                     call.id = cb.id;
                                     call.name = cb.name;
@@ -1107,7 +1251,7 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
                                     tc_map[cb.index] = call;
                                 }
                             }
-                            claude_block_index = -1;
+                            event_block_index = -1;
                         }
                         else if (action == "done") {
                             // Stream complete

@@ -72,10 +72,14 @@ class SchemaProvider : public Provider {
 
     // --- Strategies (internal) ---
     enum class SystemPromptStrategy { IN_MESSAGES, TOP_LEVEL, TOP_LEVEL_PARTS };
-    enum class ToolCallStrategy { TOOL_CALLS_ARRAY, CONTENT_ARRAY, PARTS_ARRAY };
-    enum class ToolResultStrategy { FLAT, CONTENT_ARRAY, PARTS_ARRAY };
-    enum class ToolDefWrapper { FUNCTION, NONE, FUNCTION_DECLARATIONS };
-    enum class ResponseStrategy { CHOICES_MESSAGE, CONTENT_ARRAY, CANDIDATES_PARTS };
+    // FLAT_ITEMS: OpenAI Responses — tool calls are separate top-level items in input[] (not nested in a message).
+    enum class ToolCallStrategy { TOOL_CALLS_ARRAY, CONTENT_ARRAY, PARTS_ARRAY, FLAT_ITEMS };
+    // FLAT_ITEM: OpenAI Responses — {type:"function_call_output", call_id, output} as a top-level input[] item.
+    enum class ToolResultStrategy { FLAT, CONTENT_ARRAY, PARTS_ARRAY, FLAT_ITEM };
+    // FLAT_FUNCTION: OpenAI Responses — [{type:"function", name, description, parameters}] (no nesting under "function").
+    enum class ToolDefWrapper { FUNCTION, NONE, FUNCTION_DECLARATIONS, FLAT_FUNCTION };
+    // OUTPUT_ARRAY: OpenAI Responses — output[] with mixed message/function_call items.
+    enum class ResponseStrategy { CHOICES_MESSAGE, CONTENT_ARRAY, CANDIDATES_PARTS, OUTPUT_ARRAY };
     enum class StreamFormat { SSE_DATA, SSE_EVENTS };
 
     // --- Internal config parsed from schema ---
@@ -164,6 +168,12 @@ class SchemaProvider : public Provider {
         std::string tool_call_args_field;
         std::string parts_path;
         std::string function_call_field;
+        // OUTPUT_ARRAY (OpenAI Responses)
+        std::string output_path;             ///< Path to output[] array (default: "output").
+        std::string message_item_type;       ///< Discriminator value for message items (default: "message").
+        std::string function_call_item_type; ///< Discriminator value for function_call items (default: "function_call").
+        std::string message_content_field;   ///< Field holding message item's content[] (default: "content").
+        std::string function_call_id_field;  ///< Field for tool call id inside function_call item (default: "call_id").
         std::string usage_path;
         std::string prompt_tokens_field;
         std::string completion_tokens_field;

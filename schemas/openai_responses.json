@@ -1,0 +1,138 @@
+{
+  "name": "openai-responses",
+  "connection": {
+    "base_url": "https://api.openai.com",
+    "endpoint": "/v1/responses",
+    "stream_endpoint": "/v1/responses",
+    "auth_header": "Authorization",
+    "auth_prefix": "Bearer ",
+    "api_key_env": "OPENAI_API_KEY",
+    "extra_headers": {}
+  },
+  "request": {
+    "model_field": "model",
+    "messages_field": "input",
+    "tools_field": "tools",
+    "temperature_path": "temperature",
+    "max_tokens_path": "max_output_tokens",
+    "max_tokens_required": false,
+    "max_tokens_default": -1,
+    "stream_field": "stream",
+    "extra_fields": {
+      "tool_choice": "auto"
+    }
+  },
+  "system_prompt": {
+    "strategy": "top_level",
+    "field": "instructions"
+  },
+  "messages": {
+    "role_field": "role",
+    "content_field": "content",
+    "role_map": {
+      "system": "system",
+      "user": "user",
+      "assistant": "assistant",
+      "tool": "tool"
+    },
+    "content_is_parts": false
+  },
+  "tool_definition": {
+    "wrapper": "flat_function",
+    "name_field": "name",
+    "description_field": "description",
+    "parameters_field": "parameters"
+  },
+  "tool_call_in_message": {
+    "strategy": "flat_items",
+    "item": {
+      "type": "function_call",
+      "call_id": "$ID",
+      "name": "$NAME",
+      "arguments": "$ARGUMENTS_STRING"
+    }
+  },
+  "tool_result": {
+    "role": "tool",
+    "strategy": "flat_item",
+    "item": {
+      "type": "function_call_output",
+      "call_id": "$ID",
+      "output": "$CONTENT"
+    }
+  },
+  "image": {
+    "strategy": "openai",
+    "item": {
+      "type": "input_image",
+      "image_url": "$DATA_URL"
+    },
+    "text_part": {
+      "type": "input_text",
+      "text": "$TEXT"
+    }
+  },
+  "response": {
+    "strategy": "output_array",
+    "output_path": "output",
+    "message_item_type": "message",
+    "message_content_field": "content",
+    "function_call_item_type": "function_call",
+    "function_call_id_field": "call_id",
+    "text_type": "output_text",
+    "text_field": "text",
+    "tool_call_name_field": "name",
+    "tool_call_args_field": "arguments",
+    "tool_call_args_is_string": true,
+    "usage_path": "usage",
+    "prompt_tokens_field": "input_tokens",
+    "completion_tokens_field": "output_tokens",
+    "total_tokens_field": "total_tokens"
+  },
+  "streaming": {
+    "format": "sse_events",
+    "events": {
+      "response.created": {
+        "action": "ignore"
+      },
+      "response.in_progress": {
+        "action": "ignore"
+      },
+      "response.output_item.added": {
+        "action": "block_start",
+        "block_path": "item",
+        "type_field": "type",
+        "tool_call_type": "function_call",
+        "id_field": "call_id",
+        "name_field": "name"
+      },
+      "response.content_part.added": {
+        "action": "ignore"
+      },
+      "response.output_text.delta": {
+        "action": "text_delta",
+        "delta_field": "delta"
+      },
+      "response.output_text.done": {
+        "action": "ignore"
+      },
+      "response.content_part.done": {
+        "action": "ignore"
+      },
+      "response.function_call_arguments.delta": {
+        "action": "tool_args_delta",
+        "delta_field": "delta"
+      },
+      "response.function_call_arguments.done": {
+        "action": "ignore"
+      },
+      "response.output_item.done": {
+        "action": "block_stop",
+        "tool_call_type": "function_call"
+      },
+      "response.completed": {
+        "action": "done"
+      }
+    }
+  }
+}
