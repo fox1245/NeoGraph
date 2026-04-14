@@ -62,6 +62,7 @@ add_custom_command(
             ${GENERATED_DIR}/builtin_schemas.h
     DEPENDS
         ${CMAKE_SOURCE_DIR}/schemas/openai.json
+        ${CMAKE_SOURCE_DIR}/schemas/openai_responses.json
         ${CMAKE_SOURCE_DIR}/schemas/claude.json
         ${CMAKE_SOURCE_DIR}/schemas/gemini.json
         ${CMAKE_SOURCE_DIR}/scripts/embed_schemas.py
@@ -204,6 +205,21 @@ if(NEOGRAPH_BUILD_EXAMPLES)
 
         add_executable(example_plan_executor examples/14_plan_executor.cpp)
         target_link_libraries(example_plan_executor PRIVATE neograph::core)
+
+        add_executable(example_reflexion examples/15_reflexion.cpp)
+        target_link_libraries(example_reflexion PRIVATE neograph::core neograph::llm)
+
+        add_executable(example_tree_of_thoughts examples/16_tree_of_thoughts.cpp)
+        target_link_libraries(example_tree_of_thoughts PRIVATE neograph::core neograph::llm)
+
+        add_executable(example_self_ask examples/17_self_ask.cpp)
+        target_link_libraries(example_self_ask PRIVATE neograph::core neograph::llm)
+
+        add_executable(example_multi_agent_debate examples/18_multi_agent_debate.cpp)
+        target_link_libraries(example_multi_agent_debate PRIVATE neograph::core neograph::llm)
+
+        add_executable(example_rewoo examples/19_rewoo.cpp)
+        target_link_libraries(example_rewoo PRIVATE neograph::core neograph::llm)
 
         if(NEOGRAPH_BUILD_MCP)
             add_executable(example_mcp_agent examples/03_mcp_agent.cpp)
