@@ -1,5 +1,13 @@
 build/
+build-*/
 docs/api/
 .env
 .claude/
 .playwright-mcp
+
+# Stray CMake artifacts if cmake is ever run from the repo root by accident
+/CMakeCache.txt
+/CMakeFiles/
+/Makefile
+/cmake_install.cmake
+/compile_commands.json
