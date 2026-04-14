@@ -215,6 +215,57 @@ neograph::util             + concurrentqueue (header-only)
 
 `httplib` is never exposed to your code. `core` has zero network dependencies.
 
+## Concurrency & Async
+
+NeoGraph does not ship its own async runtime — it exposes synchronous
+`run()` / `run_stream()` / `resume()` and lets you pick the executor.
+A single compiled `GraphEngine` is safe to share across threads that
+invoke `run()` concurrently with **distinct `thread_id`s**, so hosting
+multi-tenant agent workloads is a matter of dispatching onto whatever
+executor you already use.
+
+```cpp
+// One engine, many concurrent sessions — no external runtime required.
+auto engine = GraphEngine::compile(def, ctx, std::make_shared<InMemoryCheckpointStore>());
+
+std::vector<std::future<RunResult>> sessions;
+for (const auto& user : users) {
+    sessions.push_back(std::async(std::launch::async, [&engine, user]() {
+        RunConfig cfg;
+        cfg.thread_id = user.session_id;
+        cfg.input = {{"messages", user.history}};
+        return engine->run(cfg);
+    }));
+}
+for (auto& f : sessions) handle(f.get());
+```
+
+Works the same way with a `boost::asio::thread_pool`, a `taskflow::Executor`,
+or your web framework's worker pool — NeoGraph stays out of the executor
+decision.
+
+**Rules for safe concurrent use:**
+
+- Configuration mutators (`set_retry_policy`, `set_checkpoint_store`,
+  `set_store`, `own_tools`, …) must be called **before** any concurrent
+  `run()`. Treat the engine as frozen after the first dispatch.
+- Concurrent `run()` calls sharing the **same** `thread_id` do not crash
+  but produce unspecified checkpoint interleaving. Serialize per-session
+  access yourself if you need deterministic history.
+- Custom `GraphNode` subclasses must be **stateless or self-synchronized**.
+  Node instances are owned by the engine and reused across every run on
+  every thread — per-run scratch data belongs in graph channels, not in
+  node member variables.
+- User-supplied `CheckpointStore`, `Store`, `Provider`, and `Tool`
+  implementations must be thread-safe. The bundled `InMemoryCheckpointStore`
+  and `InMemoryStore` already are.
+
+Coverage: `tests/test_graph_engine.cpp` contains
+`ConcurrentRunDifferentThreadIds` (16 threads × 25 runs = 400 parallel
+executions, validates per-session output + checkpoint isolation) and
+`ConcurrentRunSameThreadIdNoCrash` (8 threads × 50 runs on one shared
+`thread_id`, validates crash-free behavior).
+
 ## JSON Graph Definition
 
 ```json

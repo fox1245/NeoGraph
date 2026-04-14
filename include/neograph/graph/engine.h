@@ -52,6 +52,29 @@ struct RunResult {
  * - **Send/Command**: Dynamic fan-out and routing overrides from nodes.
  * - **Retry policies**: Per-node exponential backoff on failure.
  *
+ * ## Thread safety
+ *
+ * After `compile()` returns, the graph definition (nodes, edges, channels)
+ * is treated as immutable. A single GraphEngine instance is therefore safe
+ * to share across user threads that invoke `run()` / `run_stream()` /
+ * `resume()` concurrently with **distinct `thread_id`s** — each call
+ * constructs its own GraphState and the bundled InMemoryCheckpointStore
+ * is mutex-guarded. This lets you host multi-tenant agent workloads on a
+ * shared engine without an external async runtime; just dispatch onto
+ * `std::async`, a thread pool, or your existing event loop's worker.
+ *
+ * Caveats:
+ * - Mutator APIs (`set_retry_policy`, `set_node_retry_policy`,
+ *   `set_checkpoint_store`, `set_store`, `own_tools`) must be called
+ *   before any concurrent `run()` — they are configuration, not runtime.
+ * - Concurrent `run()` calls sharing the **same** `thread_id` do not
+ *   crash but produce unspecified checkpoint interleaving; serialize
+ *   per-thread access yourself if you need deterministic semantics.
+ * - Custom `GraphNode` subclasses must be stateless or self-synchronized.
+ *   Node instances are owned by the engine and shared across all runs.
+ * - User-provided `CheckpointStore` / `Store` / `Provider` / `Tool`
+ *   implementations must be thread-safe.
+ *
  * @code
  * auto engine = GraphEngine::compile(graph_json, context, checkpoint_store);
  * RunConfig config;
@@ -83,6 +106,11 @@ public:
 
     /**
      * @brief Execute the graph synchronously (blocking).
+     *
+     * Thread-safe across distinct `thread_id`s on a shared engine instance:
+     * dispatch via `std::async`, a thread pool, or any executor. See the
+     * class-level "Thread safety" notes for caveats.
+     *
      * @param config Run configuration with thread ID, input, and limits.
      * @return Execution result with final state and metadata.
      */
