@@ -6,6 +6,7 @@ add_executable(neograph_tests
     test_node.cpp
     test_loader.cpp
     test_json_path.cpp
+    test_pending_writes.cpp
 )
 
 target_link_libraries(neograph_tests PRIVATE

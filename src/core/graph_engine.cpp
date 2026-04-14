@@ -5,8 +5,135 @@
 #include <stdexcept>
 #include <algorithm>
 #include <thread>
+#include <chrono>
+#include <cstdio>
+#include <cstdint>
+#include <unordered_set>
 
 namespace neograph::graph {
+
+namespace {
+
+// ── FNV-1a 64-bit: deterministic, 0 deps, sufficient for task_id ──
+inline uint64_t fnv1a_64(const std::string& s) noexcept {
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (unsigned char c : s) {
+        h ^= c;
+        h *= 0x100000001b3ULL;
+    }
+    return h;
+}
+inline std::string fnv1a_hex(const std::string& s) {
+    char buf[17];
+    std::snprintf(buf, sizeof(buf), "%016llx",
+                  static_cast<unsigned long long>(fnv1a_64(s)));
+    return std::string(buf, 16);
+}
+
+// ── task_id generators ──
+// Plain nlohmann::json uses std::map internally, so dump() is already
+// key-sorted and deterministic across runs. No manual canonicalization
+// is needed.
+inline std::string make_static_task_id(int step, const std::string& node_name) {
+    return "s" + std::to_string(step) + ":" + node_name;
+}
+inline std::string make_send_task_id(int step, size_t idx,
+                                      const std::string& target,
+                                      const json& input) {
+    return "s" + std::to_string(step) + ":send[" + std::to_string(idx)
+           + "]:" + target + ":" + fnv1a_hex(input.dump());
+}
+
+inline int64_t now_ms() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(
+        system_clock::now().time_since_epoch()).count();
+}
+
+// Serialize a vector<ChannelWrite> to json array for PendingWrite storage.
+inline json serialize_writes(const std::vector<ChannelWrite>& writes) {
+    json arr = json::array();
+    for (const auto& w : writes) {
+        arr.push_back({{"channel", w.channel}, {"value", w.value}});
+    }
+    return arr;
+}
+inline std::vector<ChannelWrite> deserialize_writes(const json& arr) {
+    std::vector<ChannelWrite> out;
+    if (!arr.is_array()) return out;
+    out.reserve(arr.size());
+    for (const auto& item : arr) {
+        out.push_back(ChannelWrite{
+            item.value("channel", std::string{}),
+            item.contains("value") ? item["value"] : json()
+        });
+    }
+    return out;
+}
+
+inline json serialize_command(const std::optional<Command>& cmd) {
+    if (!cmd) return json();  // null
+    return {
+        {"goto_node", cmd->goto_node},
+        {"updates",   serialize_writes(cmd->updates)}
+    };
+}
+inline std::optional<Command> deserialize_command(const json& j) {
+    if (j.is_null() || !j.is_object()) return std::nullopt;
+    Command c;
+    c.goto_node = j.value("goto_node", std::string{});
+    c.updates = deserialize_writes(j.value("updates", json::array()));
+    return c;
+}
+
+inline json serialize_sends(const std::vector<Send>& sends) {
+    json arr = json::array();
+    for (const auto& s : sends) {
+        arr.push_back({{"target_node", s.target_node}, {"input", s.input}});
+    }
+    return arr;
+}
+inline std::vector<Send> deserialize_sends(const json& arr) {
+    std::vector<Send> out;
+    if (!arr.is_array()) return out;
+    out.reserve(arr.size());
+    for (const auto& item : arr) {
+        Send s;
+        s.target_node = item.value("target_node", std::string{});
+        s.input = item.contains("input") ? item["input"] : json();
+        out.push_back(std::move(s));
+    }
+    return out;
+}
+
+// Populate a PendingWrite from a NodeResult + task metadata.
+inline PendingWrite make_pending_write(const std::string& task_id,
+                                       const std::string& task_path,
+                                       const std::string& node_name,
+                                       const NodeResult& nr,
+                                       int step) {
+    PendingWrite pw;
+    pw.task_id   = task_id;
+    pw.task_path = task_path;
+    pw.node_name = node_name;
+    pw.writes    = serialize_writes(nr.writes);
+    pw.command   = serialize_command(nr.command);
+    pw.sends     = serialize_sends(nr.sends);
+    pw.step      = step;
+    pw.timestamp = now_ms();
+    return pw;
+}
+
+// Rehydrate a NodeResult from a PendingWrite (used on resume to replay).
+inline NodeResult pending_to_node_result(const PendingWrite& pw) {
+    NodeResult nr;
+    nr.writes  = deserialize_writes(pw.writes);
+    nr.command = deserialize_command(pw.command);
+    nr.sends   = deserialize_sends(pw.sends);
+    return nr;
+}
+
+} // namespace
 
 // =========================================================================
 // compile(): JSON definition -> GraphEngine
@@ -467,12 +594,38 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
     std::string last_checkpoint_id;
     int start_step = 0;
 
+    // Replay map for crash / partial-failure recovery: task_id -> NodeResult
+    // that was already recorded as a pending write under last_checkpoint_id.
+    // Tasks whose id hits this map are skipped during execution and their
+    // results are applied exactly as originally recorded.
+    std::unordered_map<std::string, NodeResult> replay_results;
+
     if (!resume_from.empty() && checkpoint_store_ && !config.thread_id.empty()) {
         auto cp_opt = checkpoint_store_->load_latest(config.thread_id);
         if (cp_opt) {
             state.restore(cp_opt->channel_values);
             last_checkpoint_id = cp_opt->id;
+
+            // Phase-aware step offset:
+            //   "before"     → cp was saved *before* the node in this step ran,
+            //                  so resume starts AT that step (first iteration
+            //                  re-enters step=cp.step).
+            //   "after" / "completed" → cp was saved *after* the step's work
+            //                  finished, so resume starts at the NEXT step.
             start_step = static_cast<int>(cp_opt->step);
+            if (cp_opt->interrupt_phase == "after" ||
+                cp_opt->interrupt_phase == "completed") {
+                start_step += 1;
+            }
+
+            // Load any pending writes attached to this parent checkpoint —
+            // these represent partial progress of the super-step that was
+            // in flight when the previous run exited (crash or shutdown).
+            auto pending = checkpoint_store_->get_writes(
+                config.thread_id, last_checkpoint_id);
+            for (const auto& pw : pending) {
+                replay_results.emplace(pw.task_id, pending_to_node_result(pw));
+            }
 
             if (!resume_value.is_null()) {
                 json resume_msg = {
@@ -549,12 +702,28 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
 
         auto execute_single = [&](const std::string& node_name) -> NodeResult {
             try {
-                auto nr = execute_node_with_retry(node_name, state, cb, stream_mode);
+                const std::string task_id = make_static_task_id(step, node_name);
+                NodeResult nr;
 
-                // Apply writes from this node
+                auto replay_it = replay_results.find(task_id);
+                if (replay_it != replay_results.end()) {
+                    // Replayed from a previous partial run — do NOT re-execute,
+                    // do NOT re-record. Just apply the recorded writes and
+                    // propagate command / sends to the current super-step.
+                    nr = replay_it->second;
+                } else {
+                    nr = execute_node_with_retry(node_name, state, cb, stream_mode);
+
+                    // Record BEFORE apply_writes so a crash between the two
+                    // still leaves a durable log for resume to replay.
+                    if (checkpoint_store_ && !config.thread_id.empty()) {
+                        checkpoint_store_->put_writes(
+                            config.thread_id, last_checkpoint_id,
+                            make_pending_write(task_id, task_id, node_name, nr, step));
+                    }
+                }
+
                 state.apply_writes(nr.writes);
-
-                // Apply Command updates if present
                 if (nr.command) {
                     state.apply_writes(nr.command->updates);
                 }
@@ -585,8 +754,23 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                 for (const auto& node_name : ready) {
                     taskflow.emplace([&, node_name]() {
                         try {
-                            auto nr = execute_node_with_retry(
-                                node_name, state, cb, stream_mode);
+                            const std::string task_id = make_static_task_id(step, node_name);
+                            NodeResult nr;
+
+                            auto replay_it = replay_results.find(task_id);
+                            if (replay_it != replay_results.end()) {
+                                nr = replay_it->second;
+                            } else {
+                                nr = execute_node_with_retry(
+                                    node_name, state, cb, stream_mode);
+                                if (checkpoint_store_ && !config.thread_id.empty()) {
+                                    checkpoint_store_->put_writes(
+                                        config.thread_id, last_checkpoint_id,
+                                        make_pending_write(task_id, task_id,
+                                                           node_name, nr, step));
+                                }
+                            }
+
                             std::lock_guard lock(results_mutex);
                             all_results[node_name] = std::move(nr);
                         } catch (...) {
@@ -682,9 +866,23 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                 auto& s = pending_sends[0];
                 auto node_it = nodes_.find(s.target_node);
                 if (node_it != nodes_.end()) {
-                    // Apply send input to a temporary state overlay
-                    apply_input(state, s.input);
-                    auto nr = execute_node_with_retry(s.target_node, state, cb, stream_mode);
+                    const std::string task_id = make_send_task_id(
+                        step, 0, s.target_node, s.input);
+                    NodeResult nr;
+
+                    auto replay_it = replay_results.find(task_id);
+                    if (replay_it != replay_results.end()) {
+                        nr = replay_it->second;
+                    } else {
+                        apply_input(state, s.input);
+                        nr = execute_node_with_retry(s.target_node, state, cb, stream_mode);
+                        if (checkpoint_store_ && !config.thread_id.empty()) {
+                            checkpoint_store_->put_writes(
+                                config.thread_id, last_checkpoint_id,
+                                make_pending_write(task_id, task_id,
+                                                   s.target_node, nr, step));
+                        }
+                    }
                     state.apply_writes(nr.writes);
                     trace.push_back(s.target_node + "[send]");
                 }
@@ -702,6 +900,16 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                             auto node_it = nodes_.find(s.target_node);
                             if (node_it == nodes_.end()) return;
 
+                            const std::string task_id = make_send_task_id(
+                                step, si, s.target_node, s.input);
+
+                            auto replay_it = replay_results.find(task_id);
+                            if (replay_it != replay_results.end()) {
+                                std::lock_guard lock(send_mutex);
+                                send_results[si] = replay_it->second;
+                                return;
+                            }
+
                             // Each send gets its own state copy with send input applied
                             GraphState send_state;
                             init_state(send_state);
@@ -709,6 +917,14 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                             apply_input(send_state, s.input);
 
                             auto nr = node_it->second->execute_full(send_state);
+
+                            if (checkpoint_store_ && !config.thread_id.empty()) {
+                                checkpoint_store_->put_writes(
+                                    config.thread_id, last_checkpoint_id,
+                                    make_pending_write(task_id, task_id,
+                                                       s.target_node, nr, step));
+                            }
+
                             std::lock_guard lock(send_mutex);
                             send_results[si] = std::move(nr);
                         } catch (...) {
@@ -776,9 +992,23 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
         // --- Checkpoint after each super-step ---
         if (checkpoint_store_ && !config.thread_id.empty()) {
             std::string next_str = ready.empty() ? std::string(END_NODE) : ready[0];
+            const std::string parent_cp_id = last_checkpoint_id;
             auto cp = save_checkpoint(state, config.thread_id,
-                trace.back(), next_str, "completed", step, last_checkpoint_id);
+                trace.back(), next_str, "completed", step, parent_cp_id);
             last_checkpoint_id = cp.id;
+
+            // Pending writes for the just-committed super-step are now
+            // superseded by the fresh checkpoint — safe to discard.
+            // Ordering matters: clear ONLY after save_checkpoint returned,
+            // so a crash between save and clear is harmless (stale writes
+            // will simply be ignored once a newer cp exists).
+            if (!parent_cp_id.empty()) {
+                checkpoint_store_->clear_writes(config.thread_id, parent_cp_id);
+            }
+
+            // Replay map is scoped to the parent cp we just superseded;
+            // subsequent steps start with a clean slate.
+            replay_results.clear();
         }
     }
 
