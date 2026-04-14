@@ -244,6 +244,52 @@ Works the same way with a `boost::asio::thread_pool`, a `taskflow::Executor`,
 or your web framework's worker pool — NeoGraph stays out of the executor
 decision.
 
+### Using the bundled `RequestQueue`
+
+For multi-tenant servers that want a fixed worker pool with
+backpressure (rejecting new sessions when the queue is saturated
+instead of unbounded memory growth), link `neograph::util` and use
+the built-in lock-free queue — no external executor needed:
+
+```cpp
+#include <neograph/util/request_queue.h>
+using namespace neograph::util;
+
+RequestQueue pool(16, 1000);           // 16 workers, max 1000 pending sessions
+auto engine = GraphEngine::compile(def, ctx,
+                                   std::make_shared<InMemoryCheckpointStore>());
+
+std::vector<RunResult>          results(users.size());
+std::vector<std::future<void>>  futs;
+
+for (size_t i = 0; i < users.size(); ++i) {
+    auto [accepted, fut] = pool.submit([&, i]() {
+        RunConfig cfg;
+        cfg.thread_id = users[i].session_id;
+        cfg.input     = {{"messages", users[i].history}};
+        results[i]    = engine->run(cfg);
+    });
+    if (!accepted) {
+        // Backpressure: queue is full — shed load, return 503, retry later, …
+        reject(users[i]);
+        continue;
+    }
+    futs.push_back(std::move(fut));
+}
+
+for (auto& f : futs) f.get();           // propagates exceptions from run()
+
+auto s = pool.stats();
+log("pending={} active={} completed={} rejected={}",
+    s.pending, s.active, s.completed, s.rejected);
+```
+
+`submit()` returns `{accepted, std::future<void>}`: capture the
+`RunResult` via a shared output slot (as above) or a per-task
+`std::promise<RunResult>`. The queue is backed by
+`moodycamel::ConcurrentQueue` (lock-free) and workers park on a
+condvar when idle — no busy-spin.
+
 **Rules for safe concurrent use:**
 
 - Configuration mutators (`set_retry_policy`, `set_checkpoint_store`,
