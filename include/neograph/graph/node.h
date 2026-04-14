@@ -22,6 +22,18 @@ namespace neograph::graph {
  * the graph state and produces channel writes (and optionally Command
  * or Send directives). Override execute() for basic nodes, or
  * execute_full() to use Command/Send.
+ *
+ * ## Thread safety
+ *
+ * Node instances are owned by the GraphEngine and shared across **all**
+ * concurrent `run()` invocations on that engine — including runs with
+ * different `thread_id`s. Implementations MUST therefore be either
+ * stateless (the recommended default — derive everything from the
+ * `GraphState` argument) or fully self-synchronized. Storing per-run
+ * scratch data in a member variable will silently corrupt parallel runs.
+ *
+ * Per-execution state belongs in the channels: read inputs from
+ * `state.get(...)` and emit outputs as `ChannelWrite`s.
  */
 class GraphNode {
 public:
