@@ -202,6 +202,9 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_openai_responses examples/13_openai_responses.cpp)
         target_link_libraries(example_openai_responses PRIVATE neograph::core neograph::llm)
 
+        add_executable(example_plan_executor examples/14_plan_executor.cpp)
+        target_link_libraries(example_plan_executor PRIVATE neograph::core)
+
         if(NEOGRAPH_BUILD_MCP)
             add_executable(example_mcp_agent examples/03_mcp_agent.cpp)
             target_link_libraries(example_mcp_agent PRIVATE neograph::core neograph::llm neograph::mcp)

@@ -88,4 +88,41 @@ size_t InMemoryCheckpointStore::size() const {
     return by_id_.size();
 }
 
+// =========================================================================
+// Pending writes (fine-grained progress log)
+// =========================================================================
+
+void InMemoryCheckpointStore::put_writes(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id,
+    const PendingWrite& write) {
+    std::lock_guard lock(mutex_);
+    pending_[{thread_id, parent_checkpoint_id}].push_back(write);
+}
+
+std::vector<PendingWrite> InMemoryCheckpointStore::get_writes(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id) {
+    std::lock_guard lock(mutex_);
+    auto it = pending_.find({thread_id, parent_checkpoint_id});
+    if (it == pending_.end()) return {};
+    return it->second;
+}
+
+void InMemoryCheckpointStore::clear_writes(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id) {
+    std::lock_guard lock(mutex_);
+    pending_.erase({thread_id, parent_checkpoint_id});
+}
+
+size_t InMemoryCheckpointStore::pending_writes_count(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id) const {
+    std::lock_guard lock(mutex_);
+    auto it = pending_.find({thread_id, parent_checkpoint_id});
+    if (it == pending_.end()) return 0;
+    return it->second.size();
+}
+
 } // namespace neograph::graph
