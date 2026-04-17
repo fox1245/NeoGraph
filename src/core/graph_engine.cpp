@@ -266,7 +266,7 @@ Checkpoint GraphEngine::save_checkpoint(
     const GraphState& state,
     const std::string& thread_id,
     const std::string& current_node,
-    const std::string& next_node,
+    const std::vector<std::string>& next_nodes,
     const std::string& phase,
     int step,
     const std::string& parent_id) const {
@@ -277,7 +277,7 @@ Checkpoint GraphEngine::save_checkpoint(
     cp.channel_values  = state.serialize();
     cp.parent_id       = parent_id;
     cp.current_node    = current_node;
-    cp.next_node       = next_node;
+    cp.next_nodes      = next_nodes;
     cp.interrupt_phase = phase;
     cp.step            = step;
     cp.timestamp       = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -334,7 +334,7 @@ void GraphEngine::update_state(const std::string& thread_id,
     new_cp.channel_values  = state.serialize();
     new_cp.parent_id       = cp.id;
     new_cp.current_node    = as_node.empty() ? cp.current_node : as_node;
-    new_cp.next_node       = cp.next_node;
+    new_cp.next_nodes      = cp.next_nodes;
     new_cp.interrupt_phase = "updated";
     new_cp.step            = cp.step;
     new_cp.timestamp       = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -365,7 +365,7 @@ std::string GraphEngine::fork(const std::string& source_thread_id,
     forked.channel_versions = cp_opt->channel_versions;
     forked.parent_id       = cp_opt->id;
     forked.current_node    = cp_opt->current_node;
-    forked.next_node       = cp_opt->next_node;
+    forked.next_nodes      = cp_opt->next_nodes;
     forked.interrupt_phase = cp_opt->interrupt_phase;
     forked.metadata        = {{"forked_from", {
         {"thread_id", source_thread_id},
@@ -427,7 +427,12 @@ RunResult GraphEngine::resume(const std::string& thread_id,
     if (!cp_opt)
         throw std::runtime_error("No checkpoint found for thread: " + thread_id);
 
-    if (cp_opt->next_node == std::string(END_NODE)) {
+    // "Completed to END" means the original run finished cleanly — nothing
+    // left to resume. Under multi-node checkpoints this is encoded as
+    // next_nodes == {END} (a single-element vector), so check for exactly
+    // that shape.
+    if (cp_opt->next_nodes.size() == 1 &&
+        cp_opt->next_nodes[0] == std::string(END_NODE)) {
         RunResult result;
         result.output = cp_opt->channel_values;
         result.checkpoint_id = cp_opt->id;
@@ -438,7 +443,7 @@ RunResult GraphEngine::resume(const std::string& thread_id,
     config.thread_id = thread_id;
     config.max_steps = 50;
 
-    return execute_graph(config, cb, cp_opt->next_node, resume_value);
+    return execute_graph(config, cb, cp_opt->next_nodes, resume_value);
 }
 
 // =========================================================================
@@ -565,8 +570,9 @@ NodeResult GraphEngine::execute_node_with_retry(
 
 RunResult GraphEngine::execute_graph(const RunConfig& config,
                                       const GraphStreamCallback& cb,
-                                      const std::string& resume_from,
+                                      const std::vector<std::string>& resume_from,
                                       const json& resume_value) {
+    const bool is_resume = !resume_from.empty();
     // 1. Initialize state
     GraphState state;
     init_state(state);
@@ -581,7 +587,7 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
     // results are applied exactly as originally recorded.
     std::unordered_map<std::string, NodeResult> replay_results;
 
-    if (!resume_from.empty() && checkpoint_store_ && !config.thread_id.empty()) {
+    if (is_resume && checkpoint_store_ && !config.thread_id.empty()) {
         auto cp_opt = checkpoint_store_->load_latest(config.thread_id);
         if (cp_opt) {
             state.restore(cp_opt->channel_values);
@@ -624,8 +630,8 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
 
     // 2. Determine initial ready set
     std::vector<std::string> ready;
-    if (!resume_from.empty()) {
-        ready = {resume_from};
+    if (is_resume) {
+        ready = resume_from;
     } else {
         for (const auto& e : edges_) {
             if (e.from == std::string(START_NODE) && e.to != std::string(END_NODE)) {
@@ -649,14 +655,17 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
         if (ready.empty() || hit_end) break;
 
         // --- interrupt_before check (compile-time) ---
-        bool is_resume_entry = (!resume_from.empty() && step == start_step);
+        bool is_resume_entry = (is_resume && step == start_step);
         if (!is_resume_entry) {
             for (const auto& node_name : ready) {
                 if (interrupt_before_.count(node_name) &&
                     checkpoint_store_ && !config.thread_id.empty()) {
 
+                    // The interrupt happens before this node runs; resume
+                    // must re-enter exactly here, so next_nodes = {this node}.
                     auto cp = save_checkpoint(state, config.thread_id,
-                        node_name, node_name, "before", step, last_checkpoint_id);
+                        node_name, std::vector<std::string>{node_name},
+                        "before", step, last_checkpoint_id);
 
                     RunResult result;
                     result.output          = state.serialize();
@@ -715,8 +724,11 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
 
             } catch (const NodeInterrupt& ni) {
                 if (checkpoint_store_ && !config.thread_id.empty()) {
+                    // NodeInterrupt pauses this specific node — resume must
+                    // re-enter exactly here.
                     save_checkpoint(state, config.thread_id,
-                        node_name, node_name, "node_interrupt", step, last_checkpoint_id);
+                        node_name, std::vector<std::string>{node_name},
+                        "node_interrupt", step, last_checkpoint_id);
                 }
                 throw;
             }
@@ -812,10 +824,10 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                 checkpoint_store_ && !config.thread_id.empty()) {
 
                 auto nexts = resolve_next_nodes(node_name, state);
-                std::string next_str = nexts.empty() ? std::string(END_NODE) : nexts[0];
+                if (nexts.empty()) nexts.push_back(std::string(END_NODE));
 
                 auto cp = save_checkpoint(state, config.thread_id,
-                    node_name, next_str, "after", step, last_checkpoint_id);
+                    node_name, nexts, "after", step, last_checkpoint_id);
 
                 RunResult result;
                 result.output          = state.serialize();
@@ -976,10 +988,16 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
 
         // --- Checkpoint after each super-step ---
         if (checkpoint_store_ && !config.thread_id.empty()) {
-            std::string next_str = ready.empty() ? std::string(END_NODE) : ready[0];
+            // Persist the ENTIRE ready set — under signal dispatch multiple
+            // nodes can be simultaneously scheduled, and resume must pick
+            // up all of them (not just the first) or sibling branches are
+            // silently dropped across a crash.
+            std::vector<std::string> next_nodes =
+                ready.empty() ? std::vector<std::string>{std::string(END_NODE)}
+                              : ready;
             const std::string parent_cp_id = last_checkpoint_id;
             auto cp = save_checkpoint(state, config.thread_id,
-                trace.back(), next_str, "completed", step, parent_cp_id);
+                trace.back(), next_nodes, "completed", step, parent_cp_id);
             last_checkpoint_id = cp.id;
 
             // Pending writes for the just-committed super-step are now

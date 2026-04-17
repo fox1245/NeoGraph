@@ -32,7 +32,11 @@ struct Checkpoint {
     json        channel_versions;  ///< Per-channel version counters.
     std::string parent_id;         ///< Previous checkpoint ID (for time-travel chain).
     std::string current_node;      ///< Node that was active at checkpoint time.
-    std::string next_node;         ///< Node to execute on resume.
+    /// Nodes to execute on resume. With signal dispatch, a super-step can
+    /// end with multiple nodes ready simultaneously (parallel fan-out,
+    /// multiple conditional branches activating together); storing only
+    /// one would silently drop siblings.
+    std::vector<std::string> next_nodes;
     std::string interrupt_phase;   ///< Phase: "before", "after", or "completed".
     json        metadata;          ///< User-defined metadata.
     int64_t     step;              ///< Super-step number.
