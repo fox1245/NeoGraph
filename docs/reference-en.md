@@ -62,6 +62,11 @@ directed graphs with state management, checkpointing, streaming, and tool integr
   - [RunConfig](#runconfig)
   - [RunResult](#runresult)
   - [GraphEngine](#graphengine-1)
+- [7b. Engine Internals](#7b-engine-internals)
+  - [GraphCompiler](#graphcompiler)
+  - [Scheduler](#scheduler)
+  - [CheckpointCoordinator](#checkpointcoordinator)
+  - [NodeExecutor](#nodeexecutor)
 - [8. Checkpoint](#8-checkpoint)
   - [Checkpoint (struct)](#checkpoint-struct)
   - [CheckpointStore](#checkpointstore)
@@ -1193,6 +1198,257 @@ Returns the name of the graph as specified in the definition.
 
 ---
 
+## 7b. Engine Internals
+
+`GraphEngine` is a thin orchestrator that delegates to four purpose-built
+classes. Users typically never touch them directly — they are instantiated
+inside `GraphEngine::compile()` and driven from `execute_graph()` — but
+they are public so advanced callers can build without JSON, drive custom
+checkpoint flows, or stub pieces in tests.
+
+| Class | Header | Responsibility |
+|-------|--------|----------------|
+| [`GraphCompiler`](#graphcompiler) | `<neograph/graph/compiler.h>` | Parses JSON → `CompiledGraph` |
+| [`Scheduler`](#scheduler) | `<neograph/graph/scheduler.h>` | Routing decisions (signal dispatch + barriers) |
+| [`CheckpointCoordinator`](#checkpointcoordinator) | `<neograph/graph/coordinator.h>` | Per-run checkpoint lifecycle |
+| [`NodeExecutor`](#nodeexecutor) | `<neograph/graph/executor.h>` | Retry, parallel fan-out, Send dispatch |
+
+### GraphCompiler
+
+**Header:** `<neograph/graph/compiler.h>`
+
+Pure JSON → value-type translation. No runtime dependencies — the
+resulting `CompiledGraph` is a movable bundle you can inspect or
+construct by hand in tests.
+
+```cpp
+namespace neograph::graph {
+
+struct ChannelDef {
+    std::string  name;
+    ReducerType  type = ReducerType::OVERWRITE;
+    std::string  reducer_name = "overwrite";
+    json         initial_value;
+};
+
+struct CompiledGraph {
+    std::string name;
+    std::vector<ChannelDef> channel_defs;
+    std::map<std::string, std::unique_ptr<GraphNode>> nodes;
+    std::vector<Edge> edges;
+    std::vector<ConditionalEdge> conditional_edges;
+    BarrierSpecs barrier_specs;
+    std::set<std::string> interrupt_before;
+    std::set<std::string> interrupt_after;
+    std::optional<RetryPolicy> retry_policy;
+};
+
+class GraphCompiler {
+public:
+    static CompiledGraph compile(const json& definition,
+                                 const NodeContext& default_context);
+};
+
+} // namespace neograph::graph
+```
+
+`GraphEngine::compile()` calls `GraphCompiler::compile()` then moves
+every field of the result into the engine's runtime home. Parsing
+failures (malformed edge, unknown node type) surface here before any
+runtime state is built.
+
+### Scheduler
+
+**Header:** `<neograph/graph/scheduler.h>`
+
+Owns the graph topology and computes each super-step's ready set from
+routing signals emitted by the previous step. No knowledge of
+threading, checkpointing, retries, or HITL — those stay in the engine.
+
+```cpp
+namespace neograph::graph {
+
+struct StepRouting {
+    std::string node_name;
+    std::optional<std::string> command_goto;
+};
+
+struct NextStepPlan {
+    std::vector<std::string> ready;
+    bool hit_end = false;
+    std::optional<std::string> winning_command_goto;
+};
+
+using BarrierSpecs = std::map<std::string, std::set<std::string>>;
+using BarrierState = std::map<std::string, std::set<std::string>>;
+
+class Scheduler {
+public:
+    Scheduler(const std::vector<Edge>& edges,
+              const std::vector<ConditionalEdge>& conditional_edges,
+              BarrierSpecs barrier_specs = {});
+
+    std::vector<std::string> plan_start_step() const;
+
+    NextStepPlan plan_next_step(
+        const std::vector<std::string>& just_ran,
+        const std::vector<NodeResult>& results,
+        const GraphState& state,
+        BarrierState& barrier_state) const;
+
+    std::vector<std::string> resolve_next_nodes(
+        const std::string& from,
+        const GraphState& state) const;
+
+    const BarrierSpecs& barrier_specs() const;
+};
+
+} // namespace neograph::graph
+```
+
+**Semantics:**
+
+- **Signal dispatch**: a node becomes ready in super-step S+1 iff some
+  node in step S explicitly routed to it (regular edge, conditional
+  edge branch, `Command::goto_node`, or Send). No static predecessor
+  map — that would conflate XOR routing with AND fan-in.
+- **Pairing invariant**: the caller must pass `just_ran` and `results`
+  with `just_ran[i] ↔ results[i]`. Enforced by the two-argument
+  overload's type signature so callers cannot desynchronize them.
+- **Barriers**: nodes declared with `"barrier": {"wait_for": [...]}`
+  gate on ALL listed upstreams having signaled, accumulated across
+  super-steps via the mutable `BarrierState` map. Fires reset the
+  entry so loops through the barrier work correctly.
+
+### CheckpointCoordinator
+
+**Header:** `<neograph/graph/coordinator.h>`
+
+Per-run wrapper over `(CheckpointStore, thread_id)`. Every method is a
+safe no-op when the store is null or thread_id is empty, so call sites
+never need to guard.
+
+```cpp
+namespace neograph::graph {
+
+struct ResumeContext {
+    bool have_cp = false;
+    std::string checkpoint_id;
+    json channel_values;
+    int start_step = 0;  // Phase-adjusted
+    CheckpointPhase phase = CheckpointPhase::Completed;
+    std::vector<std::string> next_nodes;
+    std::unordered_map<std::string, NodeResult> replay_results;
+    BarrierState barrier_state;
+};
+
+class CheckpointCoordinator {
+public:
+    CheckpointCoordinator(std::shared_ptr<CheckpointStore> store,
+                          std::string thread_id);
+
+    bool enabled() const noexcept;
+
+    std::string save_super_step(
+        const GraphState& state,
+        const std::string& current_node,
+        const std::vector<std::string>& next_nodes,
+        CheckpointPhase phase,
+        int step,
+        const std::string& parent_id,
+        const BarrierState& barrier_state) const;
+
+    ResumeContext load_for_resume() const;
+
+    void record_pending_write(
+        const std::string& parent_cp_id,
+        const std::string& task_id,
+        const std::string& task_path,
+        const std::string& node_name,
+        const NodeResult& nr,
+        int step) const;
+
+    void clear_pending_writes(const std::string& parent_cp_id) const;
+};
+
+} // namespace neograph::graph
+```
+
+**Phase-aware step offset:** `load_for_resume()` reads the latest
+checkpoint's `interrupt_phase` and sets `start_step` accordingly —
+`Before` / `NodeInterrupt` re-enter at `cp.step`, `After` / `Completed` /
+`Updated` advance by +1. The engine's resume path never repeats this
+logic.
+
+### NodeExecutor
+
+**Header:** `<neograph/graph/executor.h>`
+
+Owns per-super-step node invocation: retry loop, replay lookup,
+pending-write recording, Taskflow fan-out, and Send dispatch.
+
+```cpp
+namespace neograph::graph {
+
+class NodeExecutor {
+public:
+    using RetryPolicyLookup = std::function<RetryPolicy(const std::string&)>;
+
+    NodeExecutor(
+        const std::map<std::string, std::unique_ptr<GraphNode>>& nodes,
+        const std::vector<ChannelDef>& channel_defs,
+        RetryPolicyLookup retry_policy_for);
+
+    NodeResult run_one(
+        const std::string& node_name, int step,
+        GraphState& state,
+        const std::unordered_map<std::string, NodeResult>& replay,
+        CheckpointCoordinator& coord,
+        const std::string& parent_cp_id,
+        const BarrierState& barrier_state,
+        std::vector<std::string>& trace,
+        const GraphStreamCallback& cb, StreamMode stream_mode);
+
+    std::vector<NodeResult> run_parallel(
+        const std::vector<std::string>& ready, int step,
+        GraphState& state,
+        const std::unordered_map<std::string, NodeResult>& replay,
+        CheckpointCoordinator& coord,
+        const std::string& parent_cp_id,
+        const BarrierState& barrier_state,
+        std::vector<std::string>& trace,
+        const GraphStreamCallback& cb, StreamMode stream_mode);
+
+    void run_sends(
+        const std::vector<Send>& sends, int step,
+        GraphState& state,
+        const std::unordered_map<std::string, NodeResult>& replay,
+        CheckpointCoordinator& coord,
+        const std::string& parent_cp_id,
+        std::vector<std::string>& trace,
+        const GraphStreamCallback& cb, StreamMode stream_mode);
+};
+
+} // namespace neograph::graph
+```
+
+**Invariants:**
+
+- `run_one` and `run_parallel` both save a `phase=NodeInterrupt`
+  checkpoint scoped to the interrupting node before rethrowing
+  `NodeInterrupt`, so resume re-enters just that node (sibling writes
+  are already in `pending_writes` and replay via the map).
+- `run_parallel` applies writes + `Command.updates` in `ready` order so
+  `ready[i] ↔ results[i]` pairing holds for the subsequent Scheduler
+  call.
+- `run_sends`: single Send runs on the shared state with retry; multi
+  Send gives each target an isolated state copy (init + restore + apply
+  input) without retry — preserves pre-extraction semantics.
+- A process-wide Taskflow executor is shared across calls; each invoke
+  is synchronous to the caller.
+
+---
+
 ## 8. Checkpoint
 
 **Header:** `<neograph/graph/checkpoint.h>`
@@ -1215,6 +1471,7 @@ struct Checkpoint {
     std::string current_node;      // Node that was active at checkpoint time
     std::vector<std::string> next_nodes;  // Nodes to execute on resume
     CheckpointPhase interrupt_phase;  // Before | After | Completed | NodeInterrupt | Updated
+    std::map<std::string, std::set<std::string>> barrier_state;  // v2+: in-flight barrier accumulators
     json        metadata;          // User-defined metadata
     int64_t     step;              // Super-step number
     int64_t     timestamp;         // Unix epoch milliseconds
@@ -1234,10 +1491,11 @@ struct Checkpoint {
 | `current_node` | `std::string` | Node that was executing when the checkpoint was taken |
 | `next_nodes` | `std::vector<std::string>` | All nodes scheduled for the next super-step (used by `resume()`). Under signal dispatch a super-step can leave several nodes simultaneously ready (parallel fan-out, conditional branches activating together), and every one of them must be persisted — storing a single node would silently drop siblings across a crash |
 | `interrupt_phase` | `CheckpointPhase` | Enum: `Before` (interrupt_before fired), `After` (interrupt_after fired), `Completed` (normal super-step cadence), `NodeInterrupt` (node threw `NodeInterrupt` mid-execution), `Updated` (external `update_state()` injection). `to_string()` and `parse_checkpoint_phase()` give a stable wire/log encoding |
+| `barrier_state` | `map<string, set<string>>` | Per-barrier accumulator of upstreams that have signaled so far. Entries only exist for barriers that are in-flight (not yet fired) — the Scheduler clears an entry when its barrier fires. Shape matches `BarrierState` from `scheduler.h`. Present since schema v2; v1 blobs deserialize with an empty map, which matches their pre-v2 behavior |
 | `metadata` | `json` | Arbitrary user-defined data |
 | `step` | `int64_t` | Super-step counter |
 | `timestamp` | `int64_t` | Creation time in Unix epoch milliseconds |
-| `schema_version` | `int` | On-wire layout version (see `CHECKPOINT_SCHEMA_VERSION`). Fresh checkpoints from the engine always carry the current version. Persistent `CheckpointStore` implementations should serialize it and treat `0` on a deserialized blob as "pre-versioned" (e.g. the field was absent — migration is the caller's responsibility) |
+| `schema_version` | `int` | On-wire layout version (see `CHECKPOINT_SCHEMA_VERSION`, currently `2`). Fresh checkpoints from the engine always carry the current version. Persistent `CheckpointStore` implementations should serialize it and treat `0` on a deserialized blob as "pre-versioned" (e.g. the field was absent — migration is the caller's responsibility) |
 
 ### CheckpointStore
 

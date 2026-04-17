@@ -15,6 +15,7 @@
 5. [GraphState (`neograph/graph/state.h`)](#5-graphstate)
 6. [GraphNode (`neograph/graph/node.h`)](#6-graphnode)
 7. [GraphEngine (`neograph/graph/engine.h`)](#7-graphengine)
+7b. [엔진 내부 구성 요소](#7b-엔진-내부-구성-요소) — Compiler / Scheduler / Coordinator / NodeExecutor
 8. [체크포인트 (`neograph/graph/checkpoint.h`)](#8-체크포인트)
 9. [Store (`neograph/graph/store.h`)](#9-store)
 10. [로더 / 레지스트리 (`neograph/graph/loader.h`)](#10-로더--레지스트리)
@@ -1266,6 +1267,252 @@ engine->set_node_retry_policy("llm", {5, 500, 2.0f, 10000});
 
 ---
 
+## 7b. 엔진 내부 구성 요소
+
+`GraphEngine`은 얇은 오케스트레이터이며, 실제 일은 네 개의 전용 클래스에 위임한다.
+일반 사용자는 직접 건드릴 일이 없지만(전부 `GraphEngine::compile()`에서 생성되어
+`execute_graph()`에서 구동됨), 공개 헤더로 노출되어 있어 JSON 없이 직접 구성하거나,
+커스텀 체크포인트 흐름을 만들거나, 테스트에서 특정 부분을 스텁할 수 있다.
+
+| 클래스 | 헤더 | 역할 |
+|--------|------|------|
+| [`GraphCompiler`](#graphcompiler) | `<neograph/graph/compiler.h>` | JSON → `CompiledGraph` 파싱 |
+| [`Scheduler`](#scheduler) | `<neograph/graph/scheduler.h>` | 라우팅 결정 (signal dispatch + barrier) |
+| [`CheckpointCoordinator`](#checkpointcoordinator) | `<neograph/graph/coordinator.h>` | 실행당 체크포인트 생명주기 |
+| [`NodeExecutor`](#nodeexecutor) | `<neograph/graph/executor.h>` | 재시도, 병렬 fan-out, Send 디스패치 |
+
+### GraphCompiler
+
+**헤더:** `<neograph/graph/compiler.h>`
+
+순수 JSON → 값 타입 변환. 런타임 의존성 없음 — 결과인 `CompiledGraph`는
+테스트에서 수동으로 만들거나 검사할 수 있는 이동 가능한 번들이다.
+
+```cpp
+namespace neograph::graph {
+
+struct ChannelDef {
+    std::string  name;
+    ReducerType  type = ReducerType::OVERWRITE;
+    std::string  reducer_name = "overwrite";
+    json         initial_value;
+};
+
+struct CompiledGraph {
+    std::string name;
+    std::vector<ChannelDef> channel_defs;
+    std::map<std::string, std::unique_ptr<GraphNode>> nodes;
+    std::vector<Edge> edges;
+    std::vector<ConditionalEdge> conditional_edges;
+    BarrierSpecs barrier_specs;
+    std::set<std::string> interrupt_before;
+    std::set<std::string> interrupt_after;
+    std::optional<RetryPolicy> retry_policy;
+};
+
+class GraphCompiler {
+public:
+    static CompiledGraph compile(const json& definition,
+                                 const NodeContext& default_context);
+};
+
+} // namespace neograph::graph
+```
+
+`GraphEngine::compile()`은 내부적으로 `GraphCompiler::compile()`을 호출한 뒤
+결과 필드를 엔진의 런타임 슬롯으로 move한다. 잘못된 edge나 등록되지 않은 노드
+타입 같은 파싱 실패는 런타임 상태를 만들기 전에 여기서 터진다.
+
+### Scheduler
+
+**헤더:** `<neograph/graph/scheduler.h>`
+
+그래프 토폴로지(edges + conditional edges)를 소유하며, 이전 super-step이
+내보낸 라우팅 신호로부터 다음 super-step의 ready 집합을 계산한다. 스레딩,
+체크포인트, 재시도, HITL에 대해서는 아무것도 모름 — 그건 전부 엔진 쪽에 남는다.
+
+```cpp
+namespace neograph::graph {
+
+struct StepRouting {
+    std::string node_name;
+    std::optional<std::string> command_goto;
+};
+
+struct NextStepPlan {
+    std::vector<std::string> ready;
+    bool hit_end = false;
+    std::optional<std::string> winning_command_goto;
+};
+
+using BarrierSpecs = std::map<std::string, std::set<std::string>>;
+using BarrierState = std::map<std::string, std::set<std::string>>;
+
+class Scheduler {
+public:
+    Scheduler(const std::vector<Edge>& edges,
+              const std::vector<ConditionalEdge>& conditional_edges,
+              BarrierSpecs barrier_specs = {});
+
+    std::vector<std::string> plan_start_step() const;
+
+    NextStepPlan plan_next_step(
+        const std::vector<std::string>& just_ran,
+        const std::vector<NodeResult>& results,
+        const GraphState& state,
+        BarrierState& barrier_state) const;
+
+    std::vector<std::string> resolve_next_nodes(
+        const std::string& from,
+        const GraphState& state) const;
+
+    const BarrierSpecs& barrier_specs() const;
+};
+
+} // namespace neograph::graph
+```
+
+**의미론:**
+
+- **Signal dispatch**: 노드는 step S에서 누가 명시적으로 라우팅해준 경우에만
+  step S+1에 ready가 된다 (일반 edge, 조건 edge 분기, `Command::goto_node`, Send).
+  정적 predecessor 맵은 사용하지 않음 — 그렇게 하면 XOR 라우팅과 AND fan-in이
+  뒤섞여 조건부 self-loop이 deadlock된다.
+- **Pairing invariant**: 호출자는 `just_ran[i] ↔ results[i]`가 1:1로 정렬된
+  상태로 넘겨야 한다. 타입 시그니처 자체가 이를 강제해 호출자가 두 배열을
+  비동기화할 수 없도록 막는다.
+- **Barrier**: `"barrier": {"wait_for": [...]}`로 선언한 노드는 명시된 모든
+  upstream이 신호를 보낸 뒤에만 발사된다. 누적 상태는 가변 `BarrierState`
+  맵을 통해 super-step들 사이를 넘어 유지되며, 발사 시점에 해당 항목이
+  리셋되어 barrier를 통과하는 루프 그래프도 정상 동작한다.
+
+### CheckpointCoordinator
+
+**헤더:** `<neograph/graph/coordinator.h>`
+
+`(CheckpointStore, thread_id)` 쌍을 래핑하는 실행당 객체. store가 null이거나
+thread_id가 비어 있으면 모든 메서드가 안전한 no-op이라서 호출 지점마다
+가드를 쓸 필요가 없다.
+
+```cpp
+namespace neograph::graph {
+
+struct ResumeContext {
+    bool have_cp = false;
+    std::string checkpoint_id;
+    json channel_values;
+    int start_step = 0;  // phase-aware로 조정됨
+    CheckpointPhase phase = CheckpointPhase::Completed;
+    std::vector<std::string> next_nodes;
+    std::unordered_map<std::string, NodeResult> replay_results;
+    BarrierState barrier_state;
+};
+
+class CheckpointCoordinator {
+public:
+    CheckpointCoordinator(std::shared_ptr<CheckpointStore> store,
+                          std::string thread_id);
+
+    bool enabled() const noexcept;
+
+    std::string save_super_step(
+        const GraphState& state,
+        const std::string& current_node,
+        const std::vector<std::string>& next_nodes,
+        CheckpointPhase phase,
+        int step,
+        const std::string& parent_id,
+        const BarrierState& barrier_state) const;
+
+    ResumeContext load_for_resume() const;
+
+    void record_pending_write(
+        const std::string& parent_cp_id,
+        const std::string& task_id,
+        const std::string& task_path,
+        const std::string& node_name,
+        const NodeResult& nr,
+        int step) const;
+
+    void clear_pending_writes(const std::string& parent_cp_id) const;
+};
+
+} // namespace neograph::graph
+```
+
+**phase-aware step 오프셋:** `load_for_resume()`은 최신 체크포인트의
+`interrupt_phase`를 보고 `start_step`을 계산한다 — `Before` / `NodeInterrupt`는
+`cp.step`에서 재진입, `After` / `Completed` / `Updated`는 `+1` 전진.
+엔진의 resume 경로는 이 로직을 더 이상 반복하지 않는다.
+
+### NodeExecutor
+
+**헤더:** `<neograph/graph/executor.h>`
+
+super-step당 노드 호출을 소유한다: 재시도 루프, replay 조회, pending write 기록,
+Taskflow fan-out, Send 디스패치.
+
+```cpp
+namespace neograph::graph {
+
+class NodeExecutor {
+public:
+    using RetryPolicyLookup = std::function<RetryPolicy(const std::string&)>;
+
+    NodeExecutor(
+        const std::map<std::string, std::unique_ptr<GraphNode>>& nodes,
+        const std::vector<ChannelDef>& channel_defs,
+        RetryPolicyLookup retry_policy_for);
+
+    NodeResult run_one(
+        const std::string& node_name, int step,
+        GraphState& state,
+        const std::unordered_map<std::string, NodeResult>& replay,
+        CheckpointCoordinator& coord,
+        const std::string& parent_cp_id,
+        const BarrierState& barrier_state,
+        std::vector<std::string>& trace,
+        const GraphStreamCallback& cb, StreamMode stream_mode);
+
+    std::vector<NodeResult> run_parallel(
+        const std::vector<std::string>& ready, int step,
+        GraphState& state,
+        const std::unordered_map<std::string, NodeResult>& replay,
+        CheckpointCoordinator& coord,
+        const std::string& parent_cp_id,
+        const BarrierState& barrier_state,
+        std::vector<std::string>& trace,
+        const GraphStreamCallback& cb, StreamMode stream_mode);
+
+    void run_sends(
+        const std::vector<Send>& sends, int step,
+        GraphState& state,
+        const std::unordered_map<std::string, NodeResult>& replay,
+        CheckpointCoordinator& coord,
+        const std::string& parent_cp_id,
+        std::vector<std::string>& trace,
+        const GraphStreamCallback& cb, StreamMode stream_mode);
+};
+
+} // namespace neograph::graph
+```
+
+**불변식:**
+
+- `run_one`과 `run_parallel`은 모두 `NodeInterrupt`를 rethrow하기 전에
+  `phase=NodeInterrupt`인 체크포인트를 저장하되, `next_nodes`를 해당 노드 하나로
+  좁힌다. 성공한 형제 노드들의 writes는 `pending_writes`에 이미 기록돼 있어
+  resume의 replay 맵이 그들을 건너뛰고 문제의 노드만 재실행한다.
+- `run_parallel`은 writes와 `Command.updates`를 `ready` 순서로 적용해
+  이후 Scheduler 호출의 `ready[i] ↔ results[i]` pairing이 그대로 유지된다.
+- `run_sends`: 단일 Send는 공유 state에서 재시도 포함으로 실행, 다중 Send는
+  각 타겟에 독립 state 복사(init + restore + input 적용)를 주고 재시도 없이
+  실행 — 리팩토링 이전 의미론을 보존한다.
+- 프로세스 전역의 Taskflow executor가 모든 호출에 공유되지만, 각 호출은
+  호출자 입장에서는 동기 실행이다.
+
+---
+
 ## 8. 체크포인트
 
 **헤더:** `neograph/graph/checkpoint.h`
@@ -1286,10 +1533,11 @@ struct Checkpoint {
     std::string current_node;     // checkpoint 시점의 활성 노드
     std::vector<std::string> next_nodes;  // 재개 시 실행할 노드 목록
     CheckpointPhase interrupt_phase;  // Before | After | Completed | NodeInterrupt | Updated
+    std::map<std::string, std::set<std::string>> barrier_state;  // v2+: in-flight barrier 누적
     json        metadata;         // 사용자 정의 메타데이터
     int64_t     step;             // super-step 번호
     int64_t     timestamp;        // Unix epoch 밀리초
-    int         schema_version = CHECKPOINT_SCHEMA_VERSION;  // 레이아웃 버전
+    int         schema_version = CHECKPOINT_SCHEMA_VERSION;  // 레이아웃 버전 (현재 2)
 
     static std::string generate_id(); // UUID v4 생성
 };
@@ -1301,7 +1549,9 @@ struct Checkpoint {
 | `thread_id` | 대화/세션 단위 식별자 |
 | `parent_id` | 이전 checkpoint와 연결 (체인) |
 | `interrupt_phase` | `CheckpointPhase` enum. `Before` -- interrupt_before, `After` -- interrupt_after, `Completed` -- super-step 정상 종료, `NodeInterrupt` -- 노드 내부에서 `NodeInterrupt` throw, `Updated` -- `update_state()`로 외부 주입. 문자열 인코딩은 `to_string()` / `parse_checkpoint_phase()` |
+| `barrier_state` | barrier 별 누적 upstream 집합. 아직 발사되지 않은 barrier에 대해서만 항목이 존재 — Scheduler가 barrier를 발사할 때 해당 항목을 clear한다. `scheduler.h`의 `BarrierState` 와 동일한 shape. schema v2부터 존재하며, v1 blob은 빈 map으로 로드 (pre-v2 동작과 동등) |
 | `step` | 몇 번째 super-step에서 생성되었는지 |
+| `schema_version` | 현재 `2`. persistent `CheckpointStore` 구현은 이 값을 직렬화해야 하며, `0`은 pre-versioned blob (마이그레이션 책임은 호출자에게) |
 
 ---
 
