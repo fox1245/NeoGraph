@@ -16,6 +16,7 @@
 #include <neograph/graph/scheduler.h>
 #include <neograph/graph/compiler.h>
 #include <neograph/graph/coordinator.h>
+#include <neograph/graph/executor.h>
 #include <memory>
 #include <set>
 
@@ -251,12 +252,6 @@ private:
                             const std::vector<std::string>& resume_from = {},
                             const json& resume_value = json());
 
-    NodeResult execute_node_with_retry(
-        const std::string& node_name,
-        GraphState& state,
-        const GraphStreamCallback& cb,
-        StreamMode stream_mode);
-
     RetryPolicy get_retry_policy(const std::string& node_name) const;
 
     // --- Graph definition ---
@@ -275,6 +270,12 @@ private:
     /// to both, so it must be destroyed before them (trivially true:
     /// member order guarantees destruction is reverse of declaration).
     std::unique_ptr<Scheduler> scheduler_;
+
+    /// Owns per-super-step node invocation (retry, replay, pending
+    /// writes, Taskflow fan-out, Send dispatch). Holds references into
+    /// nodes_ / channel_defs_ above, so must be declared after them —
+    /// reverse destruction order keeps the references valid.
+    std::unique_ptr<NodeExecutor> executor_;
 
     std::set<std::string> interrupt_before_;
     std::set<std::string> interrupt_after_;
