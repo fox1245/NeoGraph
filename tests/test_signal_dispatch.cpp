@@ -324,3 +324,116 @@ TEST(SignalDispatch, ParallelFanInRunsOnce) {
     EXPECT_EQ(join_hits.load(), 1) << "join should execute exactly once";
     EXPECT_TRUE(result.output["channels"]["joined"]["value"].get<bool>());
 }
+
+// -------------------------------------------------------------------------
+// 5. Asymmetric serial fan-in: two paths of DIFFERENT lengths converge on
+// the same node. Under the old predecessor-gated model, `join` would
+// have waited for both upstream paths to complete and fired exactly
+// once. Under signal dispatch there is no cross-super-step join barrier
+// — `join` fires each super-step in which some upstream path routes to
+// it, which for asymmetric paths means MULTIPLE executions.
+//
+// This is the documented contract from the signal-dispatch refactor:
+// "serial fan-in is explicitly the user's responsibility (they can use
+// a reducer or a barrier node)". The test locks in that semantics so
+// any future change back to implicit join barriers is caught.
+//
+// Graph shape (edge lengths in parentheses):
+//
+//     __start__ ──(1)──→ a ──(1)────────────→ join ──→ finish ──→ __end__
+//     __start__ ──(1)──→ s1 ──(1)→ s2 ──(1)─→ join
+//
+// Super-step schedule under signal dispatch:
+//   step 0: {a, s1}     — both fired from __start__
+//   step 1: {join, s2}  — a→join and s1→s2 in parallel; join runs (hit #1)
+//   step 2: {finish, join} — join→finish and s2→join; join runs again (hit #2)
+//   step 3: terminate   — finish→__end__ triggers hit_end
+// -------------------------------------------------------------------------
+TEST(SignalDispatch, AsymmetricSerialFanInFiresJoinPerPath) {
+    static std::atomic<int> join_hits{0};
+    static std::atomic<int> finish_hits{0};
+    join_hits = 0;
+    finish_hits = 0;
+
+    class PassThrough : public GraphNode {
+    public:
+        explicit PassThrough(std::string n) : n_(std::move(n)) {}
+        std::vector<ChannelWrite> execute(const GraphState&) override {
+            return {ChannelWrite{n_ + "_ran", json(true)}};
+        }
+        std::string name() const override { return n_; }
+    private:
+        std::string n_;
+    };
+    class JoinCounter : public GraphNode {
+    public:
+        std::vector<ChannelWrite> execute(const GraphState&) override {
+            join_hits.fetch_add(1, std::memory_order_relaxed);
+            return {ChannelWrite{"join_ran", json(true)}};
+        }
+        std::string name() const override { return "join"; }
+    };
+    class FinishCounter : public GraphNode {
+    public:
+        std::vector<ChannelWrite> execute(const GraphState&) override {
+            finish_hits.fetch_add(1, std::memory_order_relaxed);
+            return {ChannelWrite{"finish_ran", json(true)}};
+        }
+        std::string name() const override { return "finish"; }
+    };
+
+    NodeFactory::instance().register_type("pass",
+        [](const std::string& name, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<PassThrough>(name);
+        });
+    NodeFactory::instance().register_type("join_ctr",
+        [](const std::string&, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<JoinCounter>();
+        });
+    NodeFactory::instance().register_type("finish_ctr",
+        [](const std::string&, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<FinishCounter>();
+        });
+
+    json graph = {
+        {"name", "asym_fan_in"},
+        {"channels", {
+            {"a_ran",      {{"reducer", "overwrite"}}},
+            {"s1_ran",     {{"reducer", "overwrite"}}},
+            {"s2_ran",     {{"reducer", "overwrite"}}},
+            {"join_ran",   {{"reducer", "overwrite"}}},
+            {"finish_ran", {{"reducer", "overwrite"}}}
+        }},
+        {"nodes", {
+            {"a",      {{"type", "pass"}}},
+            {"s1",     {{"type", "pass"}}},
+            {"s2",     {{"type", "pass"}}},
+            {"join",   {{"type", "join_ctr"}}},
+            {"finish", {{"type", "finish_ctr"}}}
+        }},
+        {"edges", json::array({
+            {{"from", "__start__"}, {"to", "a"}},
+            {{"from", "__start__"}, {"to", "s1"}},
+            {{"from", "a"},  {"to", "join"}},
+            {{"from", "s1"}, {"to", "s2"}},
+            {{"from", "s2"}, {"to", "join"}},
+            {{"from", "join"},   {"to", "finish"}},
+            {{"from", "finish"}, {"to", "__end__"}}
+        })}
+    };
+
+    auto engine = GraphEngine::compile(graph, NodeContext{});
+    RunConfig cfg;
+    cfg.max_steps = 10;
+    auto result = engine->run(cfg);
+
+    EXPECT_EQ(join_hits.load(), 2)
+        << "join must fire TWICE under signal dispatch — once when path "
+           "`a` signals it (step 1) and again when path `s1→s2` signals "
+           "it (step 2). If this ever drops back to 1 the engine has "
+           "silently reintroduced an implicit AND-join barrier, which "
+           "would deadlock conditional self-loops.";
+}
