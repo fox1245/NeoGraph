@@ -15,7 +15,7 @@ protected:
         cp.thread_id = thread_id;
         cp.channel_values = json{{"data", step}};
         cp.current_node = node;
-        cp.next_node = "__end__";
+        cp.next_nodes = {"__end__"};
         cp.interrupt_phase = "completed";
         cp.step = step;
         cp.timestamp = step * 1000;  // deterministic ordering

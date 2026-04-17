@@ -151,7 +151,8 @@ TEST_F(PendingWritesTest, PartialFailureRecordsPendingWrites) {
     auto cp = store->load_latest("plan-exec-001");
     ASSERT_TRUE(cp.has_value());
     EXPECT_EQ(cp->current_node, "setup");
-    EXPECT_EQ(cp->next_node, "planner");
+    ASSERT_EQ(cp->next_nodes.size(), 1u);
+    EXPECT_EQ(cp->next_nodes[0], "planner");
 
     size_t pending = store->pending_writes_count("plan-exec-001", cp->id);
     // 1 (planner) + 4 (successful sends: 0, 1, 3, 4) = 5

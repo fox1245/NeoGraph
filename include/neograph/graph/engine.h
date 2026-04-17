@@ -245,7 +245,7 @@ private:
 
     RunResult execute_graph(const RunConfig& config,
                             const GraphStreamCallback& cb,
-                            const std::string& resume_from = "",
+                            const std::vector<std::string>& resume_from = {},
                             const json& resume_value = json());
 
     std::vector<std::string> resolve_next_nodes(
@@ -254,7 +254,7 @@ private:
     Checkpoint save_checkpoint(const GraphState& state,
                                const std::string& thread_id,
                                const std::string& current_node,
-                               const std::string& next_node,
+                               const std::vector<std::string>& next_nodes,
                                const std::string& phase,
                                int step,
                                const std::string& parent_id) const;
