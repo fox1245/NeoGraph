@@ -21,6 +21,8 @@ LangGraph: no checkpointer).
 
 ## Results (2026-04-18)
 
+![Engine-overhead benchmark: per-iteration latency and peak RSS](../docs/images/bench-engine-overhead.png)
+
 ```
 workload    iters      neograph_ms   langgraph_ms   per-iter neo/lg   speedup
 seq         20,000     413           12,906         20.65 / 645.30    31.2×
@@ -31,7 +33,7 @@ End-to-end process metrics (whole binary including warm-up + both runs):
 
 | Metric | NeoGraph | LangGraph | Ratio |
 |--------|----------|-----------|-------|
-| Wall clock | **1.92 s** | 35.64 s | 18.6× |
+| Total elapsed | **1.92 s** | 35.64 s | 18.6× |
 | Peak RSS | **4.9 MB** | 58.9 MB | 12.0× |
 | CPU utilization | 407% (Taskflow multi-core) | 100% (GIL-bound) | — |
 
