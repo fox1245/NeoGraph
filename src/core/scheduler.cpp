@@ -3,6 +3,7 @@
 #include <neograph/graph/loader.h>
 
 #include <set>
+#include <stdexcept>
 
 namespace neograph::graph {
 
@@ -90,6 +91,29 @@ NextStepPlan Scheduler::plan_next_step(
     plan.ready.reserve(candidates.size());
     for (const auto& c : candidates) plan.ready.push_back(c);
     return plan;
+}
+
+NextStepPlan Scheduler::plan_next_step(
+    const std::vector<std::string>& just_ran,
+    const std::vector<NodeResult>& results,
+    const GraphState& state) const {
+
+    if (just_ran.size() != results.size()) {
+        throw std::invalid_argument(
+            "Scheduler::plan_next_step: just_ran and results size mismatch");
+    }
+
+    std::vector<StepRouting> routings;
+    routings.reserve(just_ran.size());
+    for (size_t i = 0; i < just_ran.size(); ++i) {
+        StepRouting r;
+        r.node_name = just_ran[i];
+        if (results[i].command && !results[i].command->goto_node.empty()) {
+            r.command_goto = results[i].command->goto_node;
+        }
+        routings.push_back(std::move(r));
+    }
+    return plan_next_step(routings, state);
 }
 
 } // namespace neograph::graph

@@ -909,23 +909,10 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
         }
 
         // --- Plan next super-step via Scheduler ---
-        // Pair each just-run node with its Command.goto_node (if any).
-        // step_results is pushed in the same order as `ready` by both
-        // the single- and parallel-execution paths above.
-        std::vector<StepRouting> routings;
-        routings.reserve(ready.size());
-        for (size_t i = 0; i < ready.size(); ++i) {
-            StepRouting r;
-            r.node_name = ready[i];
-            if (i < step_results.size() &&
-                step_results[i].command &&
-                !step_results[i].command->goto_node.empty()) {
-                r.command_goto = step_results[i].command->goto_node;
-            }
-            routings.push_back(std::move(r));
-        }
-
-        auto plan = scheduler_->plan_next_step(routings, state);
+        // Scheduler internally pairs ready[i] ↔ step_results[i] and
+        // extracts Command.goto_node — the engine no longer restates
+        // that pairing invariant.
+        auto plan = scheduler_->plan_next_step(ready, step_results, state);
         hit_end = hit_end || plan.hit_end;
         ready  = std::move(plan.ready);
 
