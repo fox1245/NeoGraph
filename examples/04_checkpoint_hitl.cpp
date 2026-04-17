@@ -149,7 +149,12 @@ int main() {
     std::cout << "\n=== Checkpoint history (" << checkpoints.size() << " entries) ===\n";
     for (const auto& cp : checkpoints) {
         std::cout << "  [" << cp.interrupt_phase << "] step=" << cp.step
-                  << " node=" << cp.current_node << " → " << cp.next_node << "\n";
+                  << " node=" << cp.current_node << " → ";
+        for (size_t i = 0; i < cp.next_nodes.size(); ++i) {
+            if (i) std::cout << ",";
+            std::cout << cp.next_nodes[i];
+        }
+        std::cout << "\n";
     }
 
     return 0;

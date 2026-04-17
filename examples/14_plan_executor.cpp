@@ -222,7 +222,12 @@ int main() {
     std::cout << "── Checkpoint history ────────────────────────────────\n";
     for (const auto& cp : store->list(cfg.thread_id)) {
         std::cout << "  [" << cp.interrupt_phase << "] step=" << cp.step
-                  << "  " << cp.current_node << " → " << cp.next_node << "\n";
+                  << "  " << cp.current_node << " → ";
+        for (size_t i = 0; i < cp.next_nodes.size(); ++i) {
+            if (i) std::cout << ",";
+            std::cout << cp.next_nodes[i];
+        }
+        std::cout << "\n";
     }
 
     std::cout << "\n✓ Plan & Executor completed with 1 expensive call saved.\n\n";
