@@ -2,7 +2,7 @@
   <h1 align="center">NeoGraph</h1>
   <p align="center">
     <strong>A C++ Graph Agent Engine Library</strong><br>
-    LangGraph for C++ — build, checkpoint, and orchestrate LLM agents with zero Python dependency.
+    Microsecond tail latency under 10k concurrent requests on 512 MB — LangGraph's semantics, without the Python runtime tax.
   </p>
 </p>
 
