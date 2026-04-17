@@ -8,6 +8,7 @@ add_executable(neograph_tests
     test_json_path.cpp
     test_pending_writes.cpp
     test_plan_execute_graph.cpp
+    test_signal_dispatch.cpp
 )
 
 target_link_libraries(neograph_tests PRIVATE
