@@ -232,6 +232,61 @@ TEST(SchedulerPlan, NoRoutingsProducesEmptyPlan) {
 // Having it here as a pure test means the rule is verifiable without
 // spinning up the engine.
 // -------------------------------------------------------------------------
+// -------------------------------------------------------------------------
+// NodeResult-taking overload: the engine-facing ergonomic path. The
+// scheduler should do the ready[i] ↔ results[i] pairing + Command
+// extraction internally.
+// -------------------------------------------------------------------------
+TEST(SchedulerPlan, NodeResultOverloadExtractsCommandGoto) {
+    std::vector<Edge> edges = {{"a", "wrong"}};
+    std::vector<ConditionalEdge> cedges;
+    Scheduler sch(edges, cedges);
+
+    NodeResult a_result;
+    a_result.command = Command{"right", {}};
+    std::vector<NodeResult> results = {a_result};
+    std::vector<std::string> ready = {"a"};
+
+    GraphState s_empty;
+    auto plan = sch.plan_next_step(ready, results, s_empty);
+    ASSERT_EQ(plan.ready.size(), 1u);
+    EXPECT_EQ(plan.ready[0], "right")
+        << "Command.goto must preempt the edge to 'wrong'";
+}
+
+TEST(SchedulerPlan, NodeResultOverloadIgnoresEmptyCommandGoto) {
+    std::vector<Edge> edges = {{"a", "b"}};
+    std::vector<ConditionalEdge> cedges;
+    Scheduler sch(edges, cedges);
+
+    NodeResult a_result;
+    a_result.command = Command{"", {}};  // empty goto_node: no override
+    std::vector<NodeResult> results = {a_result};
+    std::vector<std::string> ready = {"a"};
+
+    GraphState s_empty;
+    auto plan = sch.plan_next_step(ready, results, s_empty);
+    ASSERT_EQ(plan.ready.size(), 1u);
+    EXPECT_EQ(plan.ready[0], "b")
+        << "Command with empty goto_node must NOT override edge routing "
+           "— Command is carrying state updates only";
+}
+
+TEST(SchedulerPlan, NodeResultOverloadThrowsOnSizeMismatch) {
+    std::vector<Edge> edges;
+    std::vector<ConditionalEdge> cedges;
+    Scheduler sch(edges, cedges);
+
+    std::vector<std::string> ready = {"a", "b"};
+    std::vector<NodeResult> results = {NodeResult{}};  // one short
+
+    GraphState s_empty;
+    EXPECT_THROW(sch.plan_next_step(ready, results, s_empty),
+                 std::invalid_argument)
+        << "caller must not silently truncate — pairing invariant is a "
+           "contract, not a hint";
+}
+
 TEST(SchedulerPlan, NoImplicitJoinBarrierAcrossSuperSteps) {
     // Graph: a -> join, s2 -> join. Both `a` and `s2` route to `join`
     // in the same super-step → join runs once. This is dedup, not a

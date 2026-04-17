@@ -135,6 +135,29 @@ public:
     NextStepPlan plan_next_step(const std::vector<StepRouting>& routings,
                                 const GraphState& state) const;
 
+    /**
+     * @brief Convenience overload: pair up ready[i] with results[i].
+     *
+     * The engine's super-step guarantees `results` is pushed in the
+     * same order as `just_ran` in both the single- and parallel-node
+     * paths. This overload bakes that pairing — plus the
+     * `Command.goto_node` extraction — into the scheduler so the
+     * engine doesn't have to restate the invariant at the call site
+     * (where forgetting to zip correctly is the kind of mistake today's
+     * multi-node checkpoint bug came from).
+     *
+     * `just_ran` and `results` must be the same size; mismatched
+     * lengths throw std::invalid_argument rather than silently
+     * truncating.
+     *
+     * @param just_ran Node names executed in this super-step, in order.
+     * @param results NodeResults parallel to `just_ran`.
+     * @param state State snapshot for conditional-edge evaluation.
+     */
+    NextStepPlan plan_next_step(const std::vector<std::string>& just_ran,
+                                const std::vector<NodeResult>& results,
+                                const GraphState& state) const;
+
 private:
     const std::vector<Edge>& edges_;
     const std::vector<ConditionalEdge>& conditional_edges_;
