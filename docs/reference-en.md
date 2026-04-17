@@ -1016,6 +1016,33 @@ Compiles a graph from a JSON definition and returns an engine ready for executio
 }
 ```
 
+##### Barrier nodes (AND-join opt-in)
+
+A node declaration may include a `barrier` field to opt into AND-join
+semantics for that specific node. Under the default signal-dispatch
+model, a node fires every super-step that any upstream routes to it
+— which double-fires join nodes on asymmetric serial fan-in (paths
+of different lengths). A barrier gates the node until **all** listed
+upstreams have signaled at least once (across any number of
+super-steps):
+
+```json
+"join": {
+  "type": "my_join",
+  "barrier": {"wait_for": ["a", "s2"]}
+}
+```
+
+Fires once when both `a` and `s2` have signaled. State resets on
+fire, so loops through the barrier collect fresh signals each round.
+
+**Limitation (current):** barrier accumulation state is in-memory
+only and not persisted in `Checkpoint` — a resume that lands
+mid-accumulation loses partial signals. Avoid interrupting graphs
+with barriers while some, but not all, upstreams have fired.
+Barrier persistence is slated for the next `CHECKPOINT_SCHEMA_VERSION`
+bump.
+
 #### `run`
 
 ```cpp

@@ -165,12 +165,31 @@ std::unique_ptr<GraphEngine> GraphEngine::compile(
         }
     }
 
-    // --- Parse nodes ---
+    // --- Parse nodes (and any per-node barrier specs) ---
+    BarrierSpecs barrier_specs;
     if (definition.contains("nodes")) {
         for (const auto& [name, node_def] : definition["nodes"].items()) {
             auto type = node_def.value("type", "");
             auto node = NodeFactory::instance().create(type, name, node_def, default_context);
             engine->nodes_[name] = std::move(node);
+
+            // Optional: {"barrier": {"wait_for": ["a", "b", ...]}}
+            // A node so declared gates on ALL listed upstreams having
+            // signaled (accumulated across super-steps) before it
+            // fires. Subsumes the manual "dedup reducer" pattern for
+            // asymmetric serial fan-in.
+            if (node_def.contains("barrier")) {
+                const auto& b = node_def["barrier"];
+                std::set<std::string> wait_for;
+                if (b.contains("wait_for")) {
+                    for (const auto& up : b["wait_for"]) {
+                        wait_for.insert(up.get<std::string>());
+                    }
+                }
+                if (!wait_for.empty()) {
+                    barrier_specs[name] = std::move(wait_for);
+                }
+            }
         }
     }
 
@@ -224,9 +243,11 @@ std::unique_ptr<GraphEngine> GraphEngine::compile(
     // super-step S+1 iff some node in step S routed to it (regular edge,
     // conditional-edge branch, Command goto, or Send). No static
     // predecessor map: that would conflate XOR routing with AND fan-in
-    // and deadlock conditional self-loops.
+    // and deadlock conditional self-loops. Explicitly-declared barriers
+    // (via the node's "barrier": {"wait_for": [...]} field) opt back
+    // into AND-join semantics for those specific nodes.
     engine->scheduler_ = std::make_unique<Scheduler>(
-        engine->edges_, engine->conditional_edges_);
+        engine->edges_, engine->conditional_edges_, std::move(barrier_specs));
 
     engine->checkpoint_store_ = std::move(store);
     return engine;
@@ -612,6 +633,15 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
     // Pending Send requests (dynamic fan-out)
     std::vector<Send> pending_sends;
 
+    // Per-run barrier accumulation. Scheduler mutates this across
+    // super-steps so partial upstream-signal sets add up over time.
+    // WARNING: this state is in-memory only — it is NOT written into
+    // Checkpoints (schema v1 doesn't carry it), so a resume starts
+    // with an empty map. Graphs with barriers should therefore
+    // currently avoid interrupting mid-accumulation. See
+    // CHECKPOINT_SCHEMA_VERSION log for the v2 plan.
+    BarrierState barrier_state;
+
     for (int step = start_step; step < config.max_steps + start_step; ++step) {
         if (ready.empty() || hit_end) break;
 
@@ -909,10 +939,11 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
         }
 
         // --- Plan next super-step via Scheduler ---
-        // Scheduler internally pairs ready[i] ↔ step_results[i] and
-        // extracts Command.goto_node — the engine no longer restates
-        // that pairing invariant.
-        auto plan = scheduler_->plan_next_step(ready, step_results, state);
+        // Scheduler internally pairs ready[i] ↔ step_results[i],
+        // extracts Command.goto_node, and applies barrier gating
+        // against `barrier_state` (shared across super-steps).
+        auto plan = scheduler_->plan_next_step(
+            ready, step_results, state, barrier_state);
         hit_end = hit_end || plan.hit_end;
         ready  = std::move(plan.ready);
 

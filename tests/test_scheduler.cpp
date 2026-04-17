@@ -305,3 +305,107 @@ TEST(SchedulerPlan, NoImplicitJoinBarrierAcrossSuperSteps) {
     ASSERT_EQ(plan.ready.size(), 1u)
         << "parallel fan-in into the same super-step dedups to one ready entry";
 }
+
+// -------------------------------------------------------------------------
+// Barrier (AND-join) semantics — opt-in, declared per-node at compile
+// time. Covers the full lifecycle: partial signals accumulate across
+// super-step boundaries, the barrier fires only when its wait_for set
+// is fully satisfied, then its state resets for the next round.
+// -------------------------------------------------------------------------
+TEST(SchedulerBarrier, DefersUntilAllUpstreamsHaveSignaled) {
+    std::vector<Edge> edges = {{"a", "join"}, {"s2", "join"}};
+    std::vector<ConditionalEdge> cedges;
+    BarrierSpecs specs = {{"join", {"a", "s2"}}};
+    Scheduler sch(edges, cedges, specs);
+
+    GraphState s_empty;
+    BarrierState bstate;
+
+    // Super-step 1: only `a` signals → join NOT ready yet.
+    auto plan1 = sch.plan_next_step({{"a", std::nullopt}}, s_empty, bstate);
+    EXPECT_TRUE(plan1.ready.empty())
+        << "barrier must defer until every wait_for entry has signaled";
+    ASSERT_EQ(bstate["join"].size(), 1u);
+    EXPECT_TRUE(bstate["join"].count("a"));
+
+    // Super-step 2: `s2` signals → join fires, state resets.
+    auto plan2 = sch.plan_next_step({{"s2", std::nullopt}}, s_empty, bstate);
+    ASSERT_EQ(plan2.ready.size(), 1u);
+    EXPECT_EQ(plan2.ready[0], "join");
+    EXPECT_TRUE(bstate["join"].empty())
+        << "barrier state must clear on fire so a subsequent loop "
+           "through the barrier collects fresh signals";
+}
+
+TEST(SchedulerBarrier, FiresImmediatelyWhenAllSignalsArriveInOneStep) {
+    std::vector<Edge> edges = {{"a", "join"}, {"s2", "join"}};
+    std::vector<ConditionalEdge> cedges;
+    BarrierSpecs specs = {{"join", {"a", "s2"}}};
+    Scheduler sch(edges, cedges, specs);
+
+    GraphState s_empty;
+    BarrierState bstate;
+
+    // Both signal in the same super-step → fire that super-step.
+    auto plan = sch.plan_next_step(
+        {{"a", std::nullopt}, {"s2", std::nullopt}}, s_empty, bstate);
+    ASSERT_EQ(plan.ready.size(), 1u);
+    EXPECT_EQ(plan.ready[0], "join");
+    EXPECT_TRUE(bstate["join"].empty());
+}
+
+TEST(SchedulerBarrier, TwoArgOverloadIgnoresBarrierSpecs) {
+    // Document the contract: the barrierless overload has no caller-
+    // owned state to remember partial signals in, so it treats every
+    // candidate (barrier or not) as ready-on-first-signal. Callers
+    // that declared barriers MUST use the BarrierState overload.
+    std::vector<Edge> edges = {{"a", "join"}};
+    std::vector<ConditionalEdge> cedges;
+    BarrierSpecs specs = {{"join", {"a", "s2"}}};  // s2 never signals
+    Scheduler sch(edges, cedges, specs);
+
+    GraphState s_empty;
+    auto plan = sch.plan_next_step({{"a", std::nullopt}}, s_empty);
+    ASSERT_EQ(plan.ready.size(), 1u);
+    EXPECT_EQ(plan.ready[0], "join")
+        << "two-arg overload must fire normally — it cannot honor "
+           "barriers because it has no state to accumulate into";
+}
+
+TEST(SchedulerBarrier, NonBarrierTargetsUnaffected) {
+    // Only `join` is a barrier; `other` isn't. `other` fires on first
+    // signal regardless of barrier_state contents.
+    std::vector<Edge> edges = {{"a", "join"}, {"a", "other"}};
+    std::vector<ConditionalEdge> cedges;
+    BarrierSpecs specs = {{"join", {"a", "b"}}};
+    Scheduler sch(edges, cedges, specs);
+
+    GraphState s_empty;
+    BarrierState bstate;
+
+    auto plan = sch.plan_next_step({{"a", std::nullopt}}, s_empty, bstate);
+    // `join` is deferred (only 1/2 signals). `other` fires immediately.
+    ASSERT_EQ(plan.ready.size(), 1u);
+    EXPECT_EQ(plan.ready[0], "other");
+}
+
+TEST(SchedulerBarrier, CommandGotoPreemptsBarrier) {
+    // If any node emits Command.goto, edge routing (and therefore
+    // barrier accumulation) is entirely skipped. Preserves existing
+    // "Command overrides everything" contract.
+    std::vector<Edge> edges = {{"a", "join"}};
+    std::vector<ConditionalEdge> cedges;
+    BarrierSpecs specs = {{"join", {"a", "s2"}}};
+    Scheduler sch(edges, cedges, specs);
+
+    GraphState s_empty;
+    BarrierState bstate;
+
+    auto plan = sch.plan_next_step(
+        {{"a", std::optional<std::string>{"redirect"}}}, s_empty, bstate);
+    ASSERT_EQ(plan.ready.size(), 1u);
+    EXPECT_EQ(plan.ready[0], "redirect");
+    EXPECT_TRUE(bstate.empty())
+        << "Command preempts signal accumulation — no partial barrier "
+           "state should be recorded when edges aren't consulted";
+}
