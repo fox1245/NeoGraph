@@ -368,7 +368,7 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
             } else {
                 step_results = executor_->run_parallel(
                     ready, step, state, replay_results,
-                    coord, last_checkpoint_id,
+                    coord, last_checkpoint_id, barrier_state,
                     trace, cb, stream_mode);
             }
         } catch (const NodeInterrupt& ni) {
@@ -388,16 +388,29 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
             return result;
         }
 
-        // --- Collect Send requests (pending_sends are drained after
-        // interrupt_after). Command.goto_node is consumed later by the
-        // Scheduler; we only need to surface Sends here. ---
+        // --- Collect Send requests (pending_sends are drained below).
+        // Command.goto_node is consumed later by the Scheduler; we
+        // only need to surface Sends here. ---
         for (auto& nr : step_results) {
             for (auto& s : nr.sends) {
                 pending_sends.push_back(std::move(s));
             }
         }
 
-        // --- Stream VALUES mode: emit full state after each step ---
+        // --- Execute pending Sends BEFORE interrupt_after ---
+        // Rationale: interrupt_after semantically means "pause after
+        // this node's super-step has fully completed", which includes
+        // any dynamic fan-out it emitted. If we gate before Sends and
+        // a node with interrupt_after emits them, the interrupt cp
+        // captures pre-Sends state, resume's start_step advances past
+        // this super-step, and the Sends vanish permanently.
+        executor_->run_sends(pending_sends, step, state, replay_results,
+                             coord, last_checkpoint_id,
+                             trace, cb, stream_mode);
+
+        // --- Stream VALUES mode: emit full state after each step
+        // (post-Sends so the emitted snapshot matches what will land
+        // in the super-step's committed checkpoint). ---
         if (cb && has_mode(stream_mode, StreamMode::VALUES)) {
             cb(GraphEvent{GraphEvent::Type::CHANNEL_WRITE, "__state__",
                           state.serialize()});
@@ -437,11 +450,6 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                 return result;
             }
         }
-
-        // --- Execute pending Sends (dynamic fan-out) ---
-        executor_->run_sends(pending_sends, step, state, replay_results,
-                             coord, last_checkpoint_id,
-                             trace, cb, stream_mode);
 
         // --- Plan next super-step via Scheduler ---
         // Scheduler internally pairs ready[i] ↔ step_results[i],
