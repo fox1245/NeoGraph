@@ -661,10 +661,12 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                 if (interrupt_before_.count(node_name) &&
                     checkpoint_store_ && !config.thread_id.empty()) {
 
-                    // The interrupt happens before this node runs; resume
-                    // must re-enter exactly here, so next_nodes = {this node}.
+                    // The interrupt happens before this node runs. Resume
+                    // must re-enter the WHOLE super-step (this node PLUS
+                    // every sibling that was also ready) — saving just
+                    // this one would silently drop the siblings.
                     auto cp = save_checkpoint(state, config.thread_id,
-                        node_name, std::vector<std::string>{node_name},
+                        node_name, ready,
                         "before", step, last_checkpoint_id);
 
                     RunResult result;
@@ -823,7 +825,16 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
             if (interrupt_after_.count(node_name) &&
                 checkpoint_store_ && !config.thread_id.empty()) {
 
-                auto nexts = resolve_next_nodes(node_name, state);
+                // Every node in `ready` has already executed by this
+                // point, so resume must re-enter with the union of all
+                // their successors — not just the interrupted node's.
+                std::set<std::string> union_next;
+                for (const auto& rn : ready) {
+                    for (const auto& nx : resolve_next_nodes(rn, state)) {
+                        union_next.insert(nx);
+                    }
+                }
+                std::vector<std::string> nexts(union_next.begin(), union_next.end());
                 if (nexts.empty()) nexts.push_back(std::string(END_NODE));
 
                 auto cp = save_checkpoint(state, config.thread_id,

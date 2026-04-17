@@ -170,7 +170,94 @@ TEST(SignalDispatch, MutualRecursionBetweenConditionals) {
 }
 
 // -------------------------------------------------------------------------
-// 3. Parallel fan-in: two upstream nodes running in the same super-step
+// 3. Command.goto_node overrides edge routing: `a` has a regular edge to
+// `wrong` but returns Command{goto="right"}. The engine must dispatch
+// to `right` — proving the Command path is still wired through after
+// the predecessor-gate removal. This is end-to-end coverage for a code
+// path that was only tested as a struct until now.
+// -------------------------------------------------------------------------
+TEST(SignalDispatch, CommandGotoOverridesEdgeRouting) {
+    class GotoNode : public GraphNode {
+    public:
+        explicit GotoNode(std::string target) : target_(std::move(target)) {}
+        std::vector<ChannelWrite> execute(const GraphState&) override {
+            return {};
+        }
+        NodeResult execute_full(const GraphState&) override {
+            NodeResult nr;
+            Command c;
+            c.goto_node = target_;
+            nr.command = c;
+            return nr;
+        }
+        std::string name() const override { return "a"; }
+    private:
+        std::string target_;
+    };
+
+    class SinkNode : public GraphNode {
+    public:
+        explicit SinkNode(std::string n) : n_(std::move(n)) {}
+        std::vector<ChannelWrite> execute(const GraphState&) override {
+            return {ChannelWrite{"hit_" + n_, json(true)}};
+        }
+        std::string name() const override { return n_; }
+    private:
+        std::string n_;
+    };
+
+    NodeFactory::instance().register_type("a_goto_right",
+        [](const std::string&, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<GotoNode>("right");
+        });
+    NodeFactory::instance().register_type("sink",
+        [](const std::string& name, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<SinkNode>(name);
+        });
+
+    json graph = {
+        {"name", "cmd_override"},
+        {"channels", {
+            {"hit_wrong", {{"reducer", "overwrite"}}},
+            {"hit_right", {{"reducer", "overwrite"}}}
+        }},
+        {"nodes", {
+            {"a",     {{"type", "a_goto_right"}}},
+            {"wrong", {{"type", "sink"}}},
+            {"right", {{"type", "sink"}}}
+        }},
+        {"edges", json::array({
+            {{"from", "__start__"}, {"to", "a"}},
+            // Static edge says a -> wrong, but Command overrides.
+            {{"from", "a"},     {"to", "wrong"}},
+            {{"from", "wrong"}, {"to", "__end__"}},
+            {{"from", "right"}, {"to", "__end__"}}
+        })}
+    };
+
+    auto engine = GraphEngine::compile(graph, NodeContext{});
+    RunConfig cfg;
+    cfg.max_steps = 10;
+    auto result = engine->run(cfg);
+
+    auto channels = result.output["channels"];
+    EXPECT_TRUE(channels["hit_right"]["value"].get<bool>())
+        << "Command.goto_node must route to 'right'";
+    EXPECT_FALSE(channels["hit_wrong"].contains("value") &&
+                 channels["hit_wrong"]["value"].is_boolean() &&
+                 channels["hit_wrong"]["value"].get<bool>())
+        << "'wrong' must not run — Command overrode the static edge";
+
+    // Also confirm the trace shape: a then right, no wrong.
+    ASSERT_EQ(result.execution_trace.size(), 2u);
+    EXPECT_EQ(result.execution_trace[0], "a");
+    EXPECT_EQ(result.execution_trace[1], "right");
+}
+
+// -------------------------------------------------------------------------
+// 4. Parallel fan-in: two upstream nodes running in the same super-step
 // both signal the same downstream node. Under signal dispatch the
 // downstream runs exactly once (set dedup), not twice.
 // -------------------------------------------------------------------------

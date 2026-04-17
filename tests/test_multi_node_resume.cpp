@@ -40,37 +40,32 @@ void register_hit_counter() {
 } // namespace
 
 // -------------------------------------------------------------------------
-// Parallel fan-out from __start__ → {a, b, c}. After the first super-step
-// all three have run (and the downstream join is next). We then trigger
-// a fresh resume from the interrupt_before boundary and verify every one
-// of the three siblings still fires — exactly what the old single-string
-// next_node would have lost.
+// Mid-graph fan-out: `a` writes to two downstream nodes. The checkpoint
+// committed at the end of step 0 (where `a` ran) must record BOTH
+// {b, c} as next_nodes — the exact case where the old single-string
+// next_node would have dropped a sibling.
 // -------------------------------------------------------------------------
-TEST(MultiNodeResume, CheckpointPersistsEntireReadySet) {
+TEST(MultiNodeResume, FanOutCheckpointPersistsBothBranches) {
     register_hit_counter();
 
     json graph = {
-        {"name", "fanout_resume"},
+        {"name", "fanout_mid"},
         {"channels", {
-            {"a_hits",   {{"reducer", "overwrite"}}},
-            {"b_hits",   {{"reducer", "overwrite"}}},
-            {"c_hits",   {{"reducer", "overwrite"}}},
-            {"join_hits",{{"reducer", "overwrite"}}}
+            {"a_hits", {{"reducer", "overwrite"}}},
+            {"b_hits", {{"reducer", "overwrite"}}},
+            {"c_hits", {{"reducer", "overwrite"}}}
         }},
         {"nodes", {
-            {"a",    {{"type", "hit"}}},
-            {"b",    {{"type", "hit"}}},
-            {"c",    {{"type", "hit"}}},
-            {"join", {{"type", "hit"}}}
+            {"a", {{"type", "hit"}}},
+            {"b", {{"type", "hit"}}},
+            {"c", {{"type", "hit"}}}
         }},
         {"edges", json::array({
             {{"from", "__start__"}, {"to", "a"}},
-            {{"from", "__start__"}, {"to", "b"}},
-            {{"from", "__start__"}, {"to", "c"}},
-            {{"from", "a"},    {"to", "join"}},
-            {{"from", "b"},    {"to", "join"}},
-            {{"from", "c"},    {"to", "join"}},
-            {{"from", "join"}, {"to", "__end__"}}
+            {{"from", "a"}, {"to", "b"}},
+            {{"from", "a"}, {"to", "c"}},
+            {{"from", "b"}, {"to", "__end__"}},
+            {{"from", "c"}, {"to", "__end__"}}
         })}
     };
 
@@ -78,34 +73,94 @@ TEST(MultiNodeResume, CheckpointPersistsEntireReadySet) {
     auto engine = GraphEngine::compile(graph, NodeContext{}, store);
 
     RunConfig cfg;
-    cfg.thread_id = "fanout-001";
+    cfg.thread_id = "fanout-mid-001";
     cfg.max_steps = 10;
     auto result = engine->run(cfg);
 
     EXPECT_EQ(result.output["channels"]["a_hits"]["value"].get<int>(), 1);
     EXPECT_EQ(result.output["channels"]["b_hits"]["value"].get<int>(), 1);
     EXPECT_EQ(result.output["channels"]["c_hits"]["value"].get<int>(), 1);
-    EXPECT_EQ(result.output["channels"]["join_hits"]["value"].get<int>(), 1);
 
-    // Walk through every stored checkpoint — each one must encode its
-    // entire ready set, not a truncated single next_node.
-    auto history = engine->get_state_history("fanout-001");
-    ASSERT_FALSE(history.empty());
-
-    // The first committed super-step fired {a, b, c} in parallel. Its
-    // checkpoint's next_nodes must be {"join"} (single successor), but a
-    // checkpoint ONE step earlier — the implicit __start__ state — ran
-    // {a, b, c} simultaneously. Inspect the oldest committed cp.
-    const Checkpoint* first = nullptr;
+    // Find the checkpoint whose current_node is "a". Its next_nodes must
+    // contain BOTH "b" and "c" — this is the whole point of the vector
+    // upgrade.
+    auto history = engine->get_state_history("fanout-mid-001");
+    const Checkpoint* after_a = nullptr;
     for (auto& cp : history) {
-        if (cp.interrupt_phase == "completed" &&
-            (!first || cp.step < first->step)) {
-            first = &cp;
+        if (cp.current_node == "a" && cp.interrupt_phase == "completed") {
+            after_a = &cp;
+            break;
         }
     }
-    ASSERT_NE(first, nullptr);
-    EXPECT_GE(first->next_nodes.size(), 1u)
-        << "next_nodes must never be empty for a 'completed' cp";
+    ASSERT_NE(after_a, nullptr) << "must have a completed cp after node 'a'";
+    ASSERT_EQ(after_a->next_nodes.size(), 2u)
+        << "fan-out from a must save both b and c";
+    std::set<std::string> got(after_a->next_nodes.begin(),
+                              after_a->next_nodes.end());
+    EXPECT_EQ(got, (std::set<std::string>{"b", "c"}));
+}
+
+// -------------------------------------------------------------------------
+// End-to-end resume from a multi-element next_nodes checkpoint: the
+// engine must re-enter with the ENTIRE ready set, not just ready[0].
+// We force this by running until an interrupt_before at a single node,
+// but after a fan-out — so the committed cp from the fan-out step is
+// restored and both branches must be picked up on resume.
+// -------------------------------------------------------------------------
+TEST(MultiNodeResume, ResumeReEntersAllReadyNodes) {
+    register_hit_counter();
+
+    json graph = {
+        {"name", "fanout_resume"},
+        {"channels", {
+            {"a_hits", {{"reducer", "overwrite"}}},
+            {"b_hits", {{"reducer", "overwrite"}}},
+            {"c_hits", {{"reducer", "overwrite"}}}
+        }},
+        {"nodes", {
+            {"a", {{"type", "hit"}}},
+            {"b", {{"type", "hit"}}},
+            {"c", {{"type", "hit"}}}
+        }},
+        {"edges", json::array({
+            {{"from", "__start__"}, {"to", "a"}},
+            {{"from", "a"}, {"to", "b"}},
+            {{"from", "a"}, {"to", "c"}},
+            {{"from", "b"}, {"to", "__end__"}},
+            {{"from", "c"}, {"to", "__end__"}}
+        })}
+    };
+
+    auto store = std::make_shared<InMemoryCheckpointStore>();
+
+    // Phase 1: run with interrupt_before={b, c} so execution stops the
+    // moment the fan-out decision is committed. The latest cp will have
+    // next_nodes = {b, c}.
+    {
+        auto g = graph;
+        g["interrupt_before"] = json::array({"b"});
+        auto engine = GraphEngine::compile(g, NodeContext{}, store);
+
+        RunConfig cfg;
+        cfg.thread_id = "resume-001";
+        cfg.max_steps = 10;
+        auto result = engine->run(cfg);
+        EXPECT_TRUE(result.interrupted);
+    }
+
+    auto cp = store->load_latest("resume-001");
+    ASSERT_TRUE(cp.has_value());
+
+    // Phase 2: resume with NO interrupt — both siblings must fire.
+    auto engine2 = GraphEngine::compile(graph, NodeContext{}, store);
+    auto result = engine2->resume("resume-001");
+
+    EXPECT_EQ(result.output["channels"]["a_hits"]["value"].get<int>(), 1);
+    EXPECT_EQ(result.output["channels"]["b_hits"]["value"].get<int>(), 1)
+        << "b must fire on resume (it was in next_nodes)";
+    EXPECT_EQ(result.output["channels"]["c_hits"]["value"].get<int>(), 1)
+        << "c must ALSO fire on resume — under the old single next_node "
+           "schema this branch would have been silently dropped";
 }
 
 // -------------------------------------------------------------------------
