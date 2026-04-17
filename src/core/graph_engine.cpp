@@ -137,106 +137,29 @@ inline NodeResult pending_to_node_result(const PendingWrite& pw) {
 
 // =========================================================================
 // compile(): JSON definition -> GraphEngine
+//
+// Parsing is delegated to GraphCompiler (pure JSON → CompiledGraph). This
+// function is now just a thin adapter: move every parsed field into the
+// engine's runtime home, then construct the Scheduler from the resulting
+// edge topology + barrier specs.
 // =========================================================================
 std::unique_ptr<GraphEngine> GraphEngine::compile(
     const json& definition,
     const NodeContext& default_context,
     std::shared_ptr<CheckpointStore> store) {
 
+    auto cg = GraphCompiler::compile(definition, default_context);
+
     auto engine = std::unique_ptr<GraphEngine>(new GraphEngine());
-    engine->name_ = definition.value("name", "unnamed_graph");
-
-    // --- Parse channels ---
-    if (definition.contains("channels")) {
-        for (const auto& [name, ch_def] : definition["channels"].items()) {
-            ChannelDef cd;
-            cd.name          = name;
-            cd.reducer_name  = ch_def.value("reducer", "overwrite");
-            cd.initial_value = ch_def.contains("initial") ? ch_def["initial"] : json();
-
-            if (cd.reducer_name == "append")
-                cd.type = ReducerType::APPEND;
-            else if (cd.reducer_name == "overwrite")
-                cd.type = ReducerType::OVERWRITE;
-            else
-                cd.type = ReducerType::CUSTOM;
-
-            engine->channel_defs_.push_back(std::move(cd));
-        }
-    }
-
-    // --- Parse nodes (and any per-node barrier specs) ---
-    BarrierSpecs barrier_specs;
-    if (definition.contains("nodes")) {
-        for (const auto& [name, node_def] : definition["nodes"].items()) {
-            auto type = node_def.value("type", "");
-            auto node = NodeFactory::instance().create(type, name, node_def, default_context);
-            engine->nodes_[name] = std::move(node);
-
-            // Optional: {"barrier": {"wait_for": ["a", "b", ...]}}
-            // A node so declared gates on ALL listed upstreams having
-            // signaled (accumulated across super-steps) before it
-            // fires. Subsumes the manual "dedup reducer" pattern for
-            // asymmetric serial fan-in.
-            if (node_def.contains("barrier")) {
-                const auto& b = node_def["barrier"];
-                std::set<std::string> wait_for;
-                if (b.contains("wait_for")) {
-                    for (const auto& up : b["wait_for"]) {
-                        wait_for.insert(up.get<std::string>());
-                    }
-                }
-                if (!wait_for.empty()) {
-                    barrier_specs[name] = std::move(wait_for);
-                }
-            }
-        }
-    }
-
-    // --- Parse edges ---
-    if (definition.contains("edges")) {
-        for (const auto& edge_def : definition["edges"]) {
-            bool is_conditional = edge_def.contains("condition")
-                               || edge_def.value("type", "") == "conditional";
-
-            if (is_conditional) {
-                ConditionalEdge ce;
-                ce.from      = edge_def.at("from").get<std::string>();
-                ce.condition = edge_def.at("condition").get<std::string>();
-                if (edge_def.contains("routes")) {
-                    for (const auto& [key, target] : edge_def["routes"].items()) {
-                        ce.routes[key] = target.get<std::string>();
-                    }
-                }
-                engine->conditional_edges_.push_back(std::move(ce));
-            } else {
-                Edge e;
-                e.from = edge_def.at("from").get<std::string>();
-                e.to   = edge_def.at("to").get<std::string>();
-                engine->edges_.push_back(std::move(e));
-            }
-        }
-    }
-
-    // --- Parse interrupt points ---
-    if (definition.contains("interrupt_before")) {
-        for (const auto& n : definition["interrupt_before"]) {
-            engine->interrupt_before_.insert(n.get<std::string>());
-        }
-    }
-    if (definition.contains("interrupt_after")) {
-        for (const auto& n : definition["interrupt_after"]) {
-            engine->interrupt_after_.insert(n.get<std::string>());
-        }
-    }
-
-    // --- Parse retry policy ---
-    if (definition.contains("retry_policy")) {
-        auto rp = definition["retry_policy"];
-        engine->default_retry_policy_.max_retries = rp.value("max_retries", 0);
-        engine->default_retry_policy_.initial_delay_ms = rp.value("initial_delay_ms", 100);
-        engine->default_retry_policy_.backoff_multiplier = rp.value("backoff_multiplier", 2.0f);
-        engine->default_retry_policy_.max_delay_ms = rp.value("max_delay_ms", 5000);
+    engine->name_              = std::move(cg.name);
+    engine->channel_defs_      = std::move(cg.channel_defs);
+    engine->nodes_             = std::move(cg.nodes);
+    engine->edges_             = std::move(cg.edges);
+    engine->conditional_edges_ = std::move(cg.conditional_edges);
+    engine->interrupt_before_  = std::move(cg.interrupt_before);
+    engine->interrupt_after_   = std::move(cg.interrupt_after);
+    if (cg.retry_policy) {
+        engine->default_retry_policy_ = *cg.retry_policy;
     }
 
     // Signal-based dispatch — see Scheduler. A node becomes ready in
@@ -247,7 +170,7 @@ std::unique_ptr<GraphEngine> GraphEngine::compile(
     // (via the node's "barrier": {"wait_for": [...]} field) opt back
     // into AND-join semantics for those specific nodes.
     engine->scheduler_ = std::make_unique<Scheduler>(
-        engine->edges_, engine->conditional_edges_, std::move(barrier_specs));
+        engine->edges_, engine->conditional_edges_, std::move(cg.barrier_specs));
 
     engine->checkpoint_store_ = std::move(store);
     return engine;

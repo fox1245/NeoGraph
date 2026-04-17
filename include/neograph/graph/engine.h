@@ -14,6 +14,7 @@
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/store.h>
 #include <neograph/graph/scheduler.h>
+#include <neograph/graph/compiler.h>
 #include <memory>
 #include <set>
 
@@ -268,12 +269,8 @@ private:
     // --- Graph definition ---
     std::string name_;
 
-    struct ChannelDef {
-        std::string  name;
-        ReducerType  type;
-        std::string  reducer_name;
-        json         initial_value;
-    };
+    /// Populated by GraphCompiler during compile(); consumed at runtime
+    /// by init_state() to construct GraphState channels.
     std::vector<ChannelDef> channel_defs_;
 
     std::map<std::string, std::unique_ptr<GraphNode>> nodes_;
