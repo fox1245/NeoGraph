@@ -83,18 +83,9 @@ std::vector<std::string> extract_plan(const std::string& text) {
     return plan;
 }
 
-// Shared helper: decide whether to go to executor or responder based on
-// the current plan length. Command-based routing sidesteps the BSP
-// predecessor checks that would otherwise deadlock a self-loop over
-// conditional edges.
-Command next_after_step(size_t remaining_plan) {
-    Command c;
-    c.goto_node = remaining_plan > 0 ? "executor" : "responder";
-    return c;
-}
-
 // =========================================================================
-// PlannerNode — one LLM call, parse list, emit Command to next phase.
+// PlannerNode — one LLM call, parse list. Routes via the `plan_empty`
+// condition on outgoing conditional edges (see factory below).
 // =========================================================================
 class PlannerNode : public GraphNode {
 public:
@@ -107,11 +98,7 @@ public:
 
     std::string name() const override { return name_; }
 
-    std::vector<ChannelWrite> execute(const GraphState& /*state*/) override {
-        return {};  // actual work lives in execute_full
-    }
-
-    NodeResult execute_full(const GraphState& state) override {
+    std::vector<ChannelWrite> execute(const GraphState& state) override {
         auto msgs = state.get_messages();
         std::string objective;
         for (auto it = msgs.rbegin(); it != msgs.rend(); ++it) {
@@ -138,11 +125,10 @@ public:
         json plan_json = json::array();
         for (auto& s : plan_items) plan_json.push_back(json(s));
 
-        NodeResult nr;
-        nr.writes.push_back({"objective", json(objective)});
-        nr.writes.push_back({"plan", plan_json});
-        nr.command = next_after_step(plan_items.size());
-        return nr;
+        return {
+            ChannelWrite{"objective", json(objective)},
+            ChannelWrite{"plan", plan_json}
+        };
     }
 
 private:
@@ -170,17 +156,9 @@ public:
 
     std::string name() const override { return name_; }
 
-    std::vector<ChannelWrite> execute(const GraphState&) override {
-        return {};
-    }
-
-    NodeResult execute_full(const GraphState& state) override {
+    std::vector<ChannelWrite> execute(const GraphState& state) override {
         auto plan = state.get("plan");
-        if (!plan.is_array() || plan.size() == 0) {
-            NodeResult nr;
-            nr.command = next_after_step(0);  // responder
-            return nr;
-        }
+        if (!plan.is_array() || plan.size() == 0) return {};
 
         std::string step;
         {
@@ -246,11 +224,10 @@ public:
         step_record["step"] = step;
         step_record["result"] = result_text;
 
-        NodeResult nr;
-        nr.writes.push_back({"plan", new_plan});
-        nr.writes.push_back({"past_steps", json::array({step_record})});
-        nr.command = next_after_step(new_plan.size());
-        return nr;
+        return {
+            ChannelWrite{"plan", new_plan},
+            ChannelWrite{"past_steps", json::array({step_record})}
+        };
     }
 
 private:
@@ -363,6 +340,13 @@ void ensure_registrations_once() {
                     name, ctx.provider, ctx.model,
                     config.value("prompt", std::string{}));
             });
+
+        ConditionRegistry::instance().register_condition("plan_empty",
+            [](const GraphState& state) -> std::string {
+                auto plan = state.get("plan");
+                if (!plan.is_array() || plan.size() == 0) return "true";
+                return "false";
+            });
     });
 }
 
@@ -379,9 +363,9 @@ std::unique_ptr<GraphEngine> create_plan_execute_graph(
 
     ensure_registrations_once();
 
-    // Only the __start__ → planner and responder → __end__ edges are
-    // static; planner and executor drive the loop via Command routing so
-    // that the BSP predecessor check doesn't deadlock on self-loops.
+    // Signal-based dispatch (no static predecessor map) lets us express
+    // the loop with plain conditional edges — including the executor's
+    // self-referential "keep going" branch.
     json definition = {
         {"name", "plan_execute_agent"},
         {"channels", {
@@ -400,6 +384,12 @@ std::unique_ptr<GraphEngine> create_plan_execute_graph(
         }},
         {"edges", json::array({
             {{"from", "__start__"}, {"to", "planner"}},
+            {{"from", "planner"},  {"type", "conditional"},
+             {"condition", "plan_empty"},
+             {"routes", {{"true", "responder"}, {"false", "executor"}}}},
+            {{"from", "executor"}, {"type", "conditional"},
+             {"condition", "plan_empty"},
+             {"routes", {{"true", "responder"}, {"false", "executor"}}}},
             {{"from", "responder"}, {"to", "__end__"}}
         })}
     };

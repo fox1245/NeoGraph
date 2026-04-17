@@ -251,9 +251,6 @@ private:
     std::vector<std::string> resolve_next_nodes(
         const std::string& current, const GraphState& state) const;
 
-    bool all_predecessors_done(const std::string& node,
-                               const std::set<std::string>& completed) const;
-
     Checkpoint save_checkpoint(const GraphState& state,
                                const std::string& thread_id,
                                const std::string& current_node,
@@ -287,8 +284,6 @@ private:
 
     std::set<std::string> interrupt_before_;
     std::set<std::string> interrupt_after_;
-
-    std::map<std::string, std::set<std::string>> predecessors_;
 
     std::shared_ptr<CheckpointStore> checkpoint_store_;
     std::shared_ptr<Store>           store_;

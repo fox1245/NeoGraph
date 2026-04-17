@@ -220,19 +220,13 @@ std::unique_ptr<GraphEngine> GraphEngine::compile(
         engine->default_retry_policy_.max_delay_ms = rp.value("max_delay_ms", 5000);
     }
 
-    // --- Build predecessor map (for fan-in detection) ---
-    for (const auto& e : engine->edges_) {
-        if (e.from != std::string(START_NODE) && e.to != std::string(END_NODE)) {
-            engine->predecessors_[e.to].insert(e.from);
-        }
-    }
-    for (const auto& ce : engine->conditional_edges_) {
-        for (const auto& [key, target] : ce.routes) {
-            if (target != std::string(END_NODE)) {
-                engine->predecessors_[target].insert(ce.from);
-            }
-        }
-    }
+    // No static predecessor map is built: NeoGraph uses signal-based
+    // dispatch. A node becomes ready in super-step S+1 iff some node in
+    // step S routed to it (via a regular edge, the selected branch of a
+    // conditional edge, a Command goto, or a Send). This sidesteps the
+    // AND/XOR conflation that a static `predecessors_` set causes — in
+    // particular, conditional self-loops and mutual-recursion cycles now
+    // work without contortions.
 
     engine->checkpoint_store_ = std::move(store);
     return engine;
@@ -473,19 +467,6 @@ std::vector<std::string> GraphEngine::resolve_next_nodes(
 
     if (successors.empty()) return {END_NODE};
     return successors;
-}
-
-bool GraphEngine::all_predecessors_done(
-    const std::string& node,
-    const std::set<std::string>& completed) const {
-
-    auto it = predecessors_.find(node);
-    if (it == predecessors_.end()) return true;
-
-    for (const auto& pred : it->second) {
-        if (completed.find(pred) == completed.end()) return false;
-    }
-    return true;
 }
 
 // =========================================================================
@@ -974,11 +955,15 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
             }
         }
 
+        // Signal dispatch: every candidate that was routed to (by a regular
+        // edge, the selected conditional branch, or a Command goto) runs
+        // next. No static predecessor check — that would conflate "one of
+        // these upstream branches ran" (XOR) with "all upstream fan-in
+        // branches ran" (AND) and deadlock on conditional self-loops.
         ready.clear();
+        ready.reserve(candidates.size());
         for (const auto& candidate : candidates) {
-            if (command_goto || all_predecessors_done(candidate, completed)) {
-                ready.push_back(candidate);
-            }
+            ready.push_back(candidate);
         }
 
         // --- Debug: emit routing decision ---
