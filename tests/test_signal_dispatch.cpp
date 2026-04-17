@@ -437,3 +437,86 @@ TEST(SignalDispatch, AsymmetricSerialFanInFiresJoinPerPath) {
            "silently reintroduced an implicit AND-join barrier, which "
            "would deadlock conditional self-loops.";
 }
+
+// -------------------------------------------------------------------------
+// 6. Explicit barrier opt-in: the same asymmetric-fan-in graph as #5,
+// but with `join` declared as a barrier node waiting for both `a` and
+// `s2` to signal. Now join must fire exactly ONCE — the barrier
+// accumulates the `a` signal in step 1, defers, then fires in step 2
+// when `s2` also signals.
+//
+// This is the user-facing fix for the footgun locked in by test 5:
+// serial fan-in semantics are now declarable, not "user writes a dedup
+// reducer and hopes to remember why".
+// -------------------------------------------------------------------------
+TEST(SignalDispatch, DeclaredBarrierCoalescesAsymmetricFanIn) {
+    static std::atomic<int> b_join_hits{0};
+    b_join_hits = 0;
+
+    class PassThrough : public GraphNode {
+    public:
+        explicit PassThrough(std::string n) : n_(std::move(n)) {}
+        std::vector<ChannelWrite> execute(const GraphState&) override {
+            return {ChannelWrite{n_ + "_ran", json(true)}};
+        }
+        std::string name() const override { return n_; }
+    private:
+        std::string n_;
+    };
+    class BarrierJoinCounter : public GraphNode {
+    public:
+        std::vector<ChannelWrite> execute(const GraphState&) override {
+            b_join_hits.fetch_add(1, std::memory_order_relaxed);
+            return {ChannelWrite{"bjoin_ran", json(true)}};
+        }
+        std::string name() const override { return "join"; }
+    };
+    NodeFactory::instance().register_type("bpass",
+        [](const std::string& name, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<PassThrough>(name);
+        });
+    NodeFactory::instance().register_type("bjoin_ctr",
+        [](const std::string&, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<BarrierJoinCounter>();
+        });
+
+    json graph = {
+        {"name", "asym_barrier"},
+        {"channels", {
+            {"a_ran",    {{"reducer", "overwrite"}}},
+            {"s1_ran",   {{"reducer", "overwrite"}}},
+            {"s2_ran",   {{"reducer", "overwrite"}}},
+            {"bjoin_ran",{{"reducer", "overwrite"}}}
+        }},
+        {"nodes", {
+            {"a",    {{"type", "bpass"}}},
+            {"s1",   {{"type", "bpass"}}},
+            {"s2",   {{"type", "bpass"}}},
+            {"join", {
+                {"type", "bjoin_ctr"},
+                {"barrier", {{"wait_for", json::array({"a", "s2"})}}}
+            }}
+        }},
+        {"edges", json::array({
+            {{"from", "__start__"}, {"to", "a"}},
+            {{"from", "__start__"}, {"to", "s1"}},
+            {{"from", "a"},  {"to", "join"}},
+            {{"from", "s1"}, {"to", "s2"}},
+            {{"from", "s2"}, {"to", "join"}},
+            {{"from", "join"}, {"to", "__end__"}}
+        })}
+    };
+
+    auto engine = GraphEngine::compile(graph, NodeContext{});
+    RunConfig cfg;
+    cfg.max_steps = 10;
+    auto result = engine->run(cfg);
+
+    EXPECT_EQ(b_join_hits.load(), 1)
+        << "With an explicit barrier declaration, asymmetric serial "
+           "fan-in must coalesce to a single join execution. Firing "
+           "twice means the scheduler stopped honoring the barrier.";
+    EXPECT_TRUE(result.output["channels"]["bjoin_ran"]["value"].get<bool>());
+}

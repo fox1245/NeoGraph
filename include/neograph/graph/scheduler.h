@@ -21,7 +21,9 @@
 #pragma once
 
 #include <neograph/graph/types.h>
+#include <map>
 #include <optional>
+#include <set>
 #include <vector>
 
 namespace neograph::graph {
@@ -56,6 +58,21 @@ struct NextStepPlan {
     std::optional<std::string> winning_command_goto;
 };
 
+/// Per-barrier signal bookkeeping. Maps barrier node name → set of
+/// upstream node names that have signaled it so far. The caller (engine)
+/// owns this map and threads it through successive plan_next_step calls
+/// so partial signal counts accumulate across super-steps.
+///
+/// Entries are cleared by the Scheduler when a barrier fires (so the
+/// next round of signals starts fresh), and created lazily on first
+/// signal.
+using BarrierState = std::map<std::string, std::set<std::string>>;
+
+/// Static barrier declarations extracted at graph-compile time. Maps
+/// barrier node name → set of upstream node names that must ALL signal
+/// before the barrier fires. Immutable after construction.
+using BarrierSpecs = std::map<std::string, std::set<std::string>>;
+
 /**
  * @brief Immutable routing oracle for a compiled graph.
  *
@@ -72,12 +89,16 @@ public:
      * @brief Bind the scheduler to the graph's edge topology.
      * @param edges Regular (unconditional) edges.
      * @param conditional_edges Edges that route on a runtime condition.
+     * @param barrier_specs Optional declaration of barrier nodes and
+     *        their required upstream signal sets. Copied by value so
+     *        caller ownership is simple.
      *
-     * Both vectors must out-live the Scheduler — typical usage has
-     * GraphEngine own them and pass references.
+     * `edges` and `conditional_edges` must out-live the Scheduler —
+     * typical usage has GraphEngine own them and pass references.
      */
     Scheduler(const std::vector<Edge>& edges,
-              const std::vector<ConditionalEdge>& conditional_edges);
+              const std::vector<ConditionalEdge>& conditional_edges,
+              BarrierSpecs barrier_specs = {});
 
     /**
      * @brief Resolve the direct successors of a node.
@@ -158,9 +179,50 @@ public:
                                 const std::vector<NodeResult>& results,
                                 const GraphState& state) const;
 
+    /**
+     * @brief Barrier-aware planning.
+     *
+     * Identical to the 2-arg form, except any candidate listed in
+     * `barrier_specs_` is gated on accumulated upstream signals. When
+     * a candidate `b` would normally be added to `ready`, the scheduler:
+     *
+     *   1. Records every upstream node currently signaling `b` into
+     *      `barrier_state[b]`.
+     *   2. If `barrier_state[b] ⊇ barrier_specs_[b]`, the barrier has
+     *      all required upstream signals → it fires this super-step
+     *      (added to ready) and `barrier_state[b]` is CLEARED so the
+     *      next round starts fresh (important for graphs that loop
+     *      back through the barrier).
+     *   3. Otherwise, the candidate is DEFERRED (not added to ready;
+     *      signals remain in `barrier_state[b]` for the next call).
+     *
+     * Engines call this with a persistent `barrier_state` owned across
+     * super-steps. Ephemeral callers (unit tests, single-shot routing
+     * decisions) can use the 2-arg overload, which ignores
+     * `barrier_specs_` entirely — there's no memory to gate against.
+     *
+     * Note: under the current implementation barrier state is
+     * **per-run and in-memory only** — a checkpoint/resume round trip
+     * drops all partial signals. See module docs for the follow-up
+     * schema-versioned persistence plan.
+     */
+    NextStepPlan plan_next_step(const std::vector<StepRouting>& routings,
+                                const GraphState& state,
+                                BarrierState& barrier_state) const;
+
+    /// NodeResult-taking barrier-aware overload.
+    NextStepPlan plan_next_step(const std::vector<std::string>& just_ran,
+                                const std::vector<NodeResult>& results,
+                                const GraphState& state,
+                                BarrierState& barrier_state) const;
+
+    /// Read-only view of declared barriers (mainly for tests).
+    const BarrierSpecs& barrier_specs() const { return barrier_specs_; }
+
 private:
     const std::vector<Edge>& edges_;
     const std::vector<ConditionalEdge>& conditional_edges_;
+    BarrierSpecs barrier_specs_;
 };
 
 } // namespace neograph::graph
