@@ -1,5 +1,6 @@
 #include <neograph/graph/engine.h>
 #include <neograph/graph/loader.h>
+#include <neograph/graph/coordinator.h>
 
 #include <taskflow/taskflow.hpp>
 #include <stdexcept>
@@ -42,95 +43,6 @@ inline std::string make_send_task_id(int step, size_t idx,
                                       const json& input) {
     return "s" + std::to_string(step) + ":send[" + std::to_string(idx)
            + "]:" + target + ":" + fnv1a_hex(input.dump());
-}
-
-inline int64_t now_ms() {
-    using namespace std::chrono;
-    return duration_cast<milliseconds>(
-        system_clock::now().time_since_epoch()).count();
-}
-
-// Serialize a vector<ChannelWrite> to json array for PendingWrite storage.
-inline json serialize_writes(const std::vector<ChannelWrite>& writes) {
-    json arr = json::array();
-    for (const auto& w : writes) {
-        arr.push_back({{"channel", w.channel}, {"value", w.value}});
-    }
-    return arr;
-}
-inline std::vector<ChannelWrite> deserialize_writes(const json& arr) {
-    std::vector<ChannelWrite> out;
-    if (!arr.is_array()) return out;
-    out.reserve(arr.size());
-    for (const auto& item : arr) {
-        out.push_back(ChannelWrite{
-            item.value("channel", std::string{}),
-            item.contains("value") ? item["value"] : json()
-        });
-    }
-    return out;
-}
-
-inline json serialize_command(const std::optional<Command>& cmd) {
-    if (!cmd) return json();  // null
-    return {
-        {"goto_node", cmd->goto_node},
-        {"updates",   serialize_writes(cmd->updates)}
-    };
-}
-inline std::optional<Command> deserialize_command(const json& j) {
-    if (j.is_null() || !j.is_object()) return std::nullopt;
-    Command c;
-    c.goto_node = j.value("goto_node", std::string{});
-    c.updates = deserialize_writes(j.value("updates", json::array()));
-    return c;
-}
-
-inline json serialize_sends(const std::vector<Send>& sends) {
-    json arr = json::array();
-    for (const auto& s : sends) {
-        arr.push_back({{"target_node", s.target_node}, {"input", s.input}});
-    }
-    return arr;
-}
-inline std::vector<Send> deserialize_sends(const json& arr) {
-    std::vector<Send> out;
-    if (!arr.is_array()) return out;
-    out.reserve(arr.size());
-    for (const auto& item : arr) {
-        Send s;
-        s.target_node = item.value("target_node", std::string{});
-        s.input = item.contains("input") ? item["input"] : json();
-        out.push_back(std::move(s));
-    }
-    return out;
-}
-
-// Populate a PendingWrite from a NodeResult + task metadata.
-inline PendingWrite make_pending_write(const std::string& task_id,
-                                       const std::string& task_path,
-                                       const std::string& node_name,
-                                       const NodeResult& nr,
-                                       int step) {
-    PendingWrite pw;
-    pw.task_id   = task_id;
-    pw.task_path = task_path;
-    pw.node_name = node_name;
-    pw.writes    = serialize_writes(nr.writes);
-    pw.command   = serialize_command(nr.command);
-    pw.sends     = serialize_sends(nr.sends);
-    pw.step      = step;
-    pw.timestamp = now_ms();
-    return pw;
-}
-
-// Rehydrate a NodeResult from a PendingWrite (used on resume to replay).
-inline NodeResult pending_to_node_result(const PendingWrite& pw) {
-    NodeResult nr;
-    nr.writes  = deserialize_writes(pw.writes);
-    nr.command = deserialize_command(pw.command);
-    nr.sends   = deserialize_sends(pw.sends);
-    return nr;
 }
 
 } // namespace
@@ -204,33 +116,6 @@ RetryPolicy GraphEngine::get_retry_policy(const std::string& node_name) const {
     auto it = node_retry_policies_.find(node_name);
     if (it != node_retry_policies_.end()) return it->second;
     return default_retry_policy_;
-}
-
-Checkpoint GraphEngine::save_checkpoint(
-    const GraphState& state,
-    const std::string& thread_id,
-    const std::string& current_node,
-    const std::vector<std::string>& next_nodes,
-    CheckpointPhase phase,
-    int step,
-    const std::string& parent_id,
-    const BarrierState& barrier_state) const {
-
-    Checkpoint cp;
-    cp.id              = Checkpoint::generate_id();
-    cp.thread_id       = thread_id;
-    cp.channel_values  = state.serialize();
-    cp.parent_id       = parent_id;
-    cp.current_node    = current_node;
-    cp.next_nodes      = next_nodes;
-    cp.interrupt_phase = phase;
-    cp.barrier_state   = barrier_state;
-    cp.step            = step;
-    cp.timestamp       = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-
-    checkpoint_store_->save(cp);
-    return cp;
 }
 
 // =========================================================================
@@ -496,6 +381,8 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
     init_state(state);
 
     StreamMode stream_mode = config.stream_mode;
+    CheckpointCoordinator coord(checkpoint_store_, config.thread_id);
+
     std::string last_checkpoint_id;
     int start_step = 0;
 
@@ -505,39 +392,21 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
     // results are applied exactly as originally recorded.
     std::unordered_map<std::string, NodeResult> replay_results;
 
-    // Deferred barrier-state restore: captured from the resume cp below
-    // and assigned to `barrier_state` after its declaration further down.
-    BarrierState restored_barrier_state;
-    bool have_restored_barrier_state = false;
+    // Per-run barrier accumulation. Scheduler mutates this across
+    // super-steps so partial upstream-signal sets add up over time.
+    // Since schema v2 the map is persisted into every checkpoint and
+    // restored below on resume, so an interrupt mid-accumulation no
+    // longer loses upstream signals.
+    BarrierState barrier_state;
 
-    if (is_resume && checkpoint_store_ && !config.thread_id.empty()) {
-        auto cp_opt = checkpoint_store_->load_latest(config.thread_id);
-        if (cp_opt) {
-            state.restore(cp_opt->channel_values);
-            last_checkpoint_id = cp_opt->id;
-            restored_barrier_state = cp_opt->barrier_state;
-            have_restored_barrier_state = true;
-
-            // Phase-aware step offset:
-            //   "before"     → cp was saved *before* the node in this step ran,
-            //                  so resume starts AT that step (first iteration
-            //                  re-enters step=cp.step).
-            //   "after" / "completed" → cp was saved *after* the step's work
-            //                  finished, so resume starts at the NEXT step.
-            start_step = static_cast<int>(cp_opt->step);
-            if (cp_opt->interrupt_phase == CheckpointPhase::After ||
-                cp_opt->interrupt_phase == CheckpointPhase::Completed) {
-                start_step += 1;
-            }
-
-            // Load any pending writes attached to this parent checkpoint —
-            // these represent partial progress of the super-step that was
-            // in flight when the previous run exited (crash or shutdown).
-            auto pending = checkpoint_store_->get_writes(
-                config.thread_id, last_checkpoint_id);
-            for (const auto& pw : pending) {
-                replay_results.emplace(pw.task_id, pending_to_node_result(pw));
-            }
+    if (is_resume) {
+        auto ctx = coord.load_for_resume();
+        if (ctx.have_cp) {
+            state.restore(ctx.channel_values);
+            last_checkpoint_id = ctx.checkpoint_id;
+            start_step         = ctx.start_step;
+            replay_results     = std::move(ctx.replay_results);
+            barrier_state      = std::move(ctx.barrier_state);
 
             if (!resume_value.is_null()) {
                 json resume_msg = {
@@ -565,16 +434,6 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
     // Pending Send requests (dynamic fan-out)
     std::vector<Send> pending_sends;
 
-    // Per-run barrier accumulation. Scheduler mutates this across
-    // super-steps so partial upstream-signal sets add up over time.
-    // Since schema v2 the map is persisted into every checkpoint and
-    // restored here on resume, so an interrupt mid-accumulation no
-    // longer loses upstream signals.
-    BarrierState barrier_state;
-    if (have_restored_barrier_state) {
-        barrier_state = std::move(restored_barrier_state);
-    }
-
     for (int step = start_step; step < config.max_steps + start_step; ++step) {
         if (ready.empty() || hit_end) break;
 
@@ -582,14 +441,13 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
         bool is_resume_entry = (is_resume && step == start_step);
         if (!is_resume_entry) {
             for (const auto& node_name : ready) {
-                if (interrupt_before_.count(node_name) &&
-                    checkpoint_store_ && !config.thread_id.empty()) {
+                if (interrupt_before_.count(node_name) && coord.enabled()) {
 
                     // The interrupt happens before this node runs. Resume
                     // must re-enter the WHOLE super-step (this node PLUS
                     // every sibling that was also ready) — saving just
                     // this one would silently drop the siblings.
-                    auto cp = save_checkpoint(state, config.thread_id,
+                    auto cp_id = coord.save_super_step(state,
                         node_name, ready,
                         CheckpointPhase::Before, step, last_checkpoint_id,
                         barrier_state);
@@ -599,12 +457,12 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                     result.interrupted     = true;
                     result.interrupt_node  = node_name;
                     result.interrupt_value = json{{"message", "Interrupt before node: " + node_name}};
-                    result.checkpoint_id   = cp.id;
+                    result.checkpoint_id   = cp_id;
                     result.execution_trace = std::move(trace);
 
                     if (cb && has_mode(stream_mode, StreamMode::EVENTS))
                         cb(GraphEvent{GraphEvent::Type::INTERRUPT, node_name,
-                            json{{"phase", "before"}, {"checkpoint_id", cp.id}}});
+                            json{{"phase", "before"}, {"checkpoint_id", cp_id}}});
                     return result;
                 }
             }
@@ -632,11 +490,8 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
 
                     // Record BEFORE apply_writes so a crash between the two
                     // still leaves a durable log for resume to replay.
-                    if (checkpoint_store_ && !config.thread_id.empty()) {
-                        checkpoint_store_->put_writes(
-                            config.thread_id, last_checkpoint_id,
-                            make_pending_write(task_id, task_id, node_name, nr, step));
-                    }
+                    coord.record_pending_write(last_checkpoint_id,
+                        task_id, task_id, node_name, nr, step);
                 }
 
                 state.apply_writes(nr.writes);
@@ -649,14 +504,12 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                 return nr;
 
             } catch (const NodeInterrupt& ni) {
-                if (checkpoint_store_ && !config.thread_id.empty()) {
-                    // NodeInterrupt pauses this specific node — resume must
-                    // re-enter exactly here.
-                    save_checkpoint(state, config.thread_id,
-                        node_name, std::vector<std::string>{node_name},
-                        CheckpointPhase::NodeInterrupt, step, last_checkpoint_id,
-                        barrier_state);
-                }
+                // NodeInterrupt pauses this specific node — resume must
+                // re-enter exactly here.
+                coord.save_super_step(state,
+                    node_name, std::vector<std::string>{node_name},
+                    CheckpointPhase::NodeInterrupt, step, last_checkpoint_id,
+                    barrier_state);
                 throw;
             }
         };
@@ -683,12 +536,8 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                             } else {
                                 nr = execute_node_with_retry(
                                     node_name, state, cb, stream_mode);
-                                if (checkpoint_store_ && !config.thread_id.empty()) {
-                                    checkpoint_store_->put_writes(
-                                        config.thread_id, last_checkpoint_id,
-                                        make_pending_write(task_id, task_id,
-                                                           node_name, nr, step));
-                                }
+                                coord.record_pending_write(last_checkpoint_id,
+                                    task_id, task_id, node_name, nr, step);
                             }
 
                             std::lock_guard lock(results_mutex);
@@ -722,8 +571,11 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
             result.interrupt_node  = ni.reason();
             result.interrupt_value = json{{"reason", ni.reason()}, {"type", "NodeInterrupt"}};
             result.execution_trace = std::move(trace);
-            if (checkpoint_store_ && !config.thread_id.empty()) {
-                auto cp_opt = checkpoint_store_->load_latest(config.thread_id);
+            // The NodeInterrupt cp was already written by execute_single
+            // above; find it by loading the most recent entry for this
+            // thread so the RunResult surfaces its id to the caller.
+            if (coord.enabled()) {
+                auto cp_opt = coord.store()->load_latest(coord.thread_id());
                 if (cp_opt) result.checkpoint_id = cp_opt->id;
             }
             return result;
@@ -746,8 +598,7 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
 
         // --- interrupt_after check ---
         for (const auto& node_name : ready) {
-            if (interrupt_after_.count(node_name) &&
-                checkpoint_store_ && !config.thread_id.empty()) {
+            if (interrupt_after_.count(node_name) && coord.enabled()) {
 
                 // Every node in `ready` has already executed by this
                 // point, so resume must re-enter with the union of all
@@ -761,7 +612,7 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                 std::vector<std::string> nexts(union_next.begin(), union_next.end());
                 if (nexts.empty()) nexts.push_back(std::string(END_NODE));
 
-                auto cp = save_checkpoint(state, config.thread_id,
+                auto cp_id = coord.save_super_step(state,
                     node_name, nexts, CheckpointPhase::After, step, last_checkpoint_id,
                     barrier_state);
 
@@ -770,12 +621,12 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                 result.interrupted     = true;
                 result.interrupt_node  = node_name;
                 result.interrupt_value = json{{"message", "Interrupt after node: " + node_name}};
-                result.checkpoint_id   = cp.id;
+                result.checkpoint_id   = cp_id;
                 result.execution_trace = std::move(trace);
 
                 if (cb && has_mode(stream_mode, StreamMode::EVENTS))
                     cb(GraphEvent{GraphEvent::Type::INTERRUPT, node_name,
-                        json{{"phase", "after"}, {"checkpoint_id", cp.id}}});
+                        json{{"phase", "after"}, {"checkpoint_id", cp_id}}});
                 return result;
             }
         }
@@ -805,12 +656,8 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                     } else {
                         apply_input(state, s.input);
                         nr = execute_node_with_retry(s.target_node, state, cb, stream_mode);
-                        if (checkpoint_store_ && !config.thread_id.empty()) {
-                            checkpoint_store_->put_writes(
-                                config.thread_id, last_checkpoint_id,
-                                make_pending_write(task_id, task_id,
-                                                   s.target_node, nr, step));
-                        }
+                        coord.record_pending_write(last_checkpoint_id,
+                            task_id, task_id, s.target_node, nr, step);
                     }
                     state.apply_writes(nr.writes);
                     trace.push_back(s.target_node + "[send]");
@@ -847,12 +694,8 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
 
                             auto nr = node_it->second->execute_full(send_state);
 
-                            if (checkpoint_store_ && !config.thread_id.empty()) {
-                                checkpoint_store_->put_writes(
-                                    config.thread_id, last_checkpoint_id,
-                                    make_pending_write(task_id, task_id,
-                                                       s.target_node, nr, step));
-                            }
+                            coord.record_pending_write(last_checkpoint_id,
+                                task_id, task_id, s.target_node, nr, step);
 
                             std::lock_guard lock(send_mutex);
                             send_results[si] = std::move(nr);
@@ -898,7 +741,7 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
         }
 
         // --- Checkpoint after each super-step ---
-        if (checkpoint_store_ && !config.thread_id.empty()) {
+        if (coord.enabled()) {
             // Persist the ENTIRE ready set — under signal dispatch multiple
             // nodes can be simultaneously scheduled, and resume must pick
             // up all of them (not just the first) or sibling branches are
@@ -907,19 +750,17 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                 ready.empty() ? std::vector<std::string>{std::string(END_NODE)}
                               : ready;
             const std::string parent_cp_id = last_checkpoint_id;
-            auto cp = save_checkpoint(state, config.thread_id,
+            auto cp_id = coord.save_super_step(state,
                 trace.back(), next_nodes, CheckpointPhase::Completed, step, parent_cp_id,
                 barrier_state);
-            last_checkpoint_id = cp.id;
+            last_checkpoint_id = cp_id;
 
             // Pending writes for the just-committed super-step are now
             // superseded by the fresh checkpoint — safe to discard.
-            // Ordering matters: clear ONLY after save_checkpoint returned,
+            // Ordering matters: clear ONLY after save_super_step returned,
             // so a crash between save and clear is harmless (stale writes
             // will simply be ignored once a newer cp exists).
-            if (!parent_cp_id.empty()) {
-                checkpoint_store_->clear_writes(config.thread_id, parent_cp_id);
-            }
+            coord.clear_pending_writes(parent_cp_id);
 
             // Replay map is scoped to the parent cp we just superseded;
             // subsequent steps start with a clean slate.

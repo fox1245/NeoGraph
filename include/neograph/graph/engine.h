@@ -15,6 +15,7 @@
 #include <neograph/graph/store.h>
 #include <neograph/graph/scheduler.h>
 #include <neograph/graph/compiler.h>
+#include <neograph/graph/coordinator.h>
 #include <memory>
 #include <set>
 
@@ -249,15 +250,6 @@ private:
                             const GraphStreamCallback& cb,
                             const std::vector<std::string>& resume_from = {},
                             const json& resume_value = json());
-
-    Checkpoint save_checkpoint(const GraphState& state,
-                               const std::string& thread_id,
-                               const std::string& current_node,
-                               const std::vector<std::string>& next_nodes,
-                               CheckpointPhase phase,
-                               int step,
-                               const std::string& parent_id,
-                               const BarrierState& barrier_state) const;
 
     NodeResult execute_node_with_retry(
         const std::string& node_name,
