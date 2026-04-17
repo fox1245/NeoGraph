@@ -2,15 +2,24 @@ NeoGraph Third-Party Licenses
 ==============================
 
 This file contains the licenses for all third-party libraries bundled with
-NeoGraph. All dependencies are header-only (except OpenSSL, which is a
-system dependency and not bundled).
+NeoGraph or fetched at build time. Summary:
+
+  * Bundled under `deps/` (vendored): yyjson, Taskflow, cpp-httplib,
+    moodycamel::ConcurrentQueue, Clay.
+  * Vendored C glue file only (library itself pulled at build time):
+    Clay's raylib renderer (`deps/clay_renderer_raylib.c`) + raylib
+    (FetchContent, optional, used only by example 11 `clay_chatbot`).
+  * System dependency (not bundled): OpenSSL, required by cpp-httplib
+    for HTTPS.
+
+yyjson is compiled (C source), everything else bundled is header-only.
 
 
-1. nlohmann/json
-================
+1. yyjson
+=========
 MIT License
 
-Copyright (c) 2013-2025 Niels Lohmann <https://nlohmann.me>
+Copyright (c) 2020 YaoYuan <ibireme@gmail.com>
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -119,6 +128,38 @@ zlib/libpng License
 Copyright (c) 2024 Nic Barker
 
 This software is provided 'as-is', without any express or implied warranty.
+In no event will the authors be held liable for any damages arising from the
+use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+    1. The origin of this software must not be misrepresented; you must not
+    claim that you wrote the original software. If you use this software in a
+    product, an acknowledgment in the product documentation would be
+    appreciated but is not required.
+
+    2. Altered source versions must be plainly marked as such, and must not
+    be misrepresented as being the original software.
+
+    3. This notice may not be removed or altered from any source
+    distribution.
+
+
+6. raylib (optional, example 11 only)
+======================================
+zlib/libpng License
+
+Copyright (c) 2013-2024 Ramon Santamaria (@raysan5)
+
+raylib is fetched at build time via CMake FetchContent when the
+`NEOGRAPH_BUILD_EXAMPLES` option is enabled and is linked only into the
+`example_clay_chatbot` target. It is not bundled under `deps/` — only
+Clay's raylib renderer glue file (`deps/clay_renderer_raylib.c`,
+covered by Clay's zlib license above) is vendored.
+
+This software is provided "as-is", without any express or implied warranty.
 In no event will the authors be held liable for any damages arising from the
 use of this software.
 
