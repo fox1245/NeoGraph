@@ -445,6 +445,33 @@ NeoGraph/
 
 ## Benchmarks
 
+### Engine overhead vs LangGraph
+
+Matched-topology, zero-I/O workloads: graph compiled once, invoked in a
+hot loop. Measures what the engine itself costs (dispatch, state
+writes, reducer calls) — no LLM, no sleep, no network.
+
+![NeoGraph vs LangGraph — per-iteration latency and peak RSS](docs/images/bench-engine-overhead.png)
+
+|                           | NeoGraph    | LangGraph    | Ratio |
+|---------------------------|-------------|--------------|-------|
+| Per-iter, 3-node chain    | **20.65 µs** | 645.30 µs   | **31.2× faster** |
+| Per-iter, fan-out 5 + join| **150.7 µs** | 2,225 µs    | **14.8× faster** |
+| Peak RSS (whole process)  | **4.9 MB**   | 58.9 MB     | **12× less RAM** |
+| Total elapsed, full bench | 1.92 s       | 35.64 s     | 18.6× |
+| CPU utilization on fan-out| 407% (Taskflow multi-core) | 100% (GIL-bound) | — |
+
+**Engine overhead disappears under LLM latency.** A 500 ms OpenAI round
+trip swamps both engines; the per-iter gap only shows up in non-LLM
+nodes (data transforms, routing decisions, pure-compute tool calls) and
+in dense agent orchestration. Where it does show up, it shows up big:
+on a Raspberry Pi 4 / Jetson Nano / any SBC class target, a 12× RAM
+delta is the difference between "fits" and "swap thrash."
+
+Reproduction and methodology: [`benchmarks/README.md`](benchmarks/README.md).
+
+### Size & cold-start footprint (Plan & Executor demo)
+
 All numbers below were measured on x86_64 Linux (GCC 13) using
 `example_plan_executor` — a self-contained Plan & Executor demo that
 runs a 5-way Send fan-out, crashes sub-topic #2 on the first run, and
