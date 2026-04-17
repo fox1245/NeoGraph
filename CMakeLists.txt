@@ -80,6 +80,7 @@ add_custom_target(generate_schemas DEPENDS ${GENERATED_DIR}/builtin_schemas.h)
 add_library(neograph_core STATIC
     src/core/json.cpp
     src/core/graph_engine.cpp
+    src/core/scheduler.cpp
     src/core/graph_state.cpp
     src/core/graph_node.cpp
     src/core/graph_loader.cpp
