@@ -174,51 +174,30 @@ cmake .. -DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON && make example_clay_chatbot
 
 ## Architecture
 
-```
-User Code
-  │
-  ▼
-┌──────────────────────────────────────────┐
-│  neograph::core                          │
-│                                          │
-│  GraphEngine::compile(json, context)     │
-│    ├─ NodeFactory (llm_call, tool_dispatch, subgraph, intent_classifier, custom)
-│    ├─ ReducerRegistry (overwrite, append, custom)
-│    └─ ConditionRegistry (has_tool_calls, route_channel, custom)
-│                                          │
-│  GraphEngine::run(config)                │
-│    ├─ Super-step loop (Pregel BSP)       │
-│    ├─ Single node → direct call          │
-│    ├─ Multiple nodes → Taskflow parallel │
-│    ├─ Send → dynamic fan-out             │
-│    ├─ Command → routing override         │
-│    ├─ Checkpoint after each step         │
-│    └─ interrupt → resume()               │
-│                                          │
-│  Dependencies: nlohmann/json, Taskflow   │
-│  No network. No HTTP. Pure computation.  │
-├──────────────────────────────────────────┤
-│  neograph::llm           (PRIVATE httplib)│
-│  OpenAIProvider, SchemaProvider, Agent    │
-├──────────────────────────────────────────┤
-│  neograph::mcp           (PRIVATE httplib)│
-│  MCPClient, MCPTool (JSON-RPC 2.0)       │
-├──────────────────────────────────────────┤
-│  neograph::util                          │
-│  RequestQueue (lock-free worker pool)    │
-└──────────────────────────────────────────┘
-```
+![NeoGraph architecture — core / llm / mcp / util with internal class breakdown](docs/images/architecture.png)
+
+`GraphEngine` is a thin super-step orchestrator that delegates to four
+purpose-built classes extracted in the 0.1 refactor:
+
+- **`GraphCompiler`** — pure `JSON → CompiledGraph` parser.
+- **`Scheduler`** — signal-dispatch routing plus barrier accumulation.
+- **`NodeExecutor`** — retry loop, Taskflow parallel fan-out, Send dispatch.
+- **`CheckpointCoordinator`** — save / resume / pending-writes lifecycle
+  behind a `(store, thread_id)` façade.
+
+Each class has a dedicated unit-test suite so engine behaviour is
+verifiable without spinning up a full run. See
+[`docs/reference-en.md` §7b](docs/reference-en.md#7b-engine-internals)
+for the full API surface.
 
 ### Dependency Isolation
 
-```
-Link target               What gets pulled in
-─────────────────          ──────────────────
-neograph::core             nlohmann/json (header-only)
-neograph::core + llm       + OpenSSL (httplib stays PRIVATE)
-neograph::core + mcp       + OpenSSL (httplib stays PRIVATE)
-neograph::util             + concurrentqueue (header-only)
-```
+| Link target               | What gets pulled in |
+|---------------------------|---------------------|
+| `neograph::core`          | `yyjson` (compiled, bundled), `Taskflow` (header-only) |
+| `neograph::core + llm`    | + OpenSSL (`httplib` stays PRIVATE) |
+| `neograph::core + mcp`    | + OpenSSL (`httplib` stays PRIVATE) |
+| `neograph::util`          | + `moodycamel::ConcurrentQueue` (header-only) |
 
 `httplib` is never exposed to your code. `core` has zero network dependencies.
 
@@ -413,13 +392,15 @@ NeoGraph/
 │   ├── openai.json
 │   ├── claude.json
 │   └── gemini.json
-├── deps/                       # Header-only dependencies (vendored)
-│   ├── nlohmann/json.hpp
-│   ├── taskflow/
-│   ├── httplib.h
-│   ├── concurrentqueue.h
-│   └── clay.h
-├── examples/                   # 11 examples + demo MCP server
+├── deps/                       # Vendored dependencies
+│   ├── yyjson/                 # Compiled C JSON library (yyjson.c + yyjson.h)
+│   ├── taskflow/               # Header-only parallel task engine
+│   ├── httplib.h               # cpp-httplib (PRIVATE to llm/mcp)
+│   ├── concurrentqueue.h       # moodycamel lock-free queue
+│   ├── clay.h                  # Clay UI layout
+│   └── clay_renderer_raylib.c  # Clay + raylib renderer glue (example 11)
+├── benchmarks/                 # NeoGraph vs LangGraph engine-overhead bench
+├── examples/                   # 18 runnable examples + Clay chatbot
 └── scripts/
     └── embed_schemas.py        # Build-time schema embedding
 ```
@@ -428,7 +409,7 @@ NeoGraph/
 
 | Target | Description | Dependencies |
 |--------|-------------|--------------|
-| `neograph::core` | Graph engine + types | nlohmann/json, Taskflow, Threads |
+| `neograph::core` | Graph engine + types | yyjson (bundled), Taskflow, Threads |
 | `neograph::llm` | LLM providers + Agent | core + OpenSSL (httplib PRIVATE) |
 | `neograph::mcp` | MCP client | core + OpenSSL (httplib PRIVATE) |
 | `neograph::util` | RequestQueue | core + concurrentqueue |
