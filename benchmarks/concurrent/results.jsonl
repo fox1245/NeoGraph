@@ -1,0 +1,30 @@
+{"profile":"2:1g","status":"ok","engine":"neograph","mode":"threadpool","concurrency":10,"total_wall_ms":0,"p50_us":139,"p95_us":187,"p99_us":187,"ok":10,"err":0,"peak_rss_kb":4608}
+{"profile":"2:1g","status":"ok","engine": "langgraph", "mode": "asyncio", "concurrency": 10, "total_wall_ms": 18, "p50_us": 14641, "p95_us": 16138, "p99_us": 16138, "ok": 10, "err": 0, "peak_rss_kb": 58964}
+{"profile":"2:1g","status":"ok","engine": "langgraph", "mode": "mp-pool-7", "concurrency": 10, "total_wall_ms": 46, "p50_us": 5847, "p95_us": 8108, "p99_us": 8108, "ok": 10, "err": 0, "peak_rss_kb": 61228}
+{"profile":"2:1g","status":"ok","engine":"neograph","mode":"threadpool","concurrency":100,"total_wall_ms":0,"p50_us":3,"p95_us":225,"p99_us":302,"ok":100,"err":0,"peak_rss_kb":4480}
+{"profile":"2:1g","status":"ok","engine": "langgraph", "mode": "asyncio", "concurrency": 100, "total_wall_ms": 119, "p50_us": 94579, "p95_us": 113137, "p99_us": 114976, "ok": 100, "err": 0, "peak_rss_kb": 62868}
+{"profile":"2:1g","status":"ok","engine": "langgraph", "mode": "mp-pool-7", "concurrency": 100, "total_wall_ms": 109, "p50_us": 969, "p95_us": 12035, "p99_us": 44497, "ok": 100, "err": 0, "peak_rss_kb": 61716}
+{"profile":"2:1g","status":"ok","engine":"neograph","mode":"threadpool","concurrency":1000,"total_wall_ms":0,"p50_us":2,"p95_us":5,"p99_us":16,"ok":1000,"err":0,"peak_rss_kb":4736}
+{"profile":"2:1g","status":"ok","engine": "langgraph", "mode": "asyncio", "concurrency": 1000, "total_wall_ms": 1364, "p50_us": 1129498, "p95_us": 1326089, "p99_us": 1341770, "ok": 1000, "err": 0, "peak_rss_kb": 96020}
+{"profile":"2:1g","status":"ok","engine": "langgraph", "mode": "mp-pool-7", "concurrency": 1000, "total_wall_ms": 444, "p50_us": 784, "p95_us": 1266, "p99_us": 71734, "ok": 1000, "err": 0, "peak_rss_kb": 62012}
+{"profile":"2:1g","status":"ok","engine":"neograph","mode":"threadpool","concurrency":5000,"total_wall_ms":3,"p50_us":3,"p95_us":3,"p99_us":6,"ok":5000,"err":0,"peak_rss_kb":6016}
+{"profile":"2:1g","status":"ok","engine": "langgraph", "mode": "asyncio", "concurrency": 5000, "total_wall_ms": 9584, "p50_us": 8011313, "p95_us": 9339792, "p99_us": 9434628, "ok": 5000, "err": 0, "peak_rss_kb": 242564}
+{"profile":"2:1g","status":"ok","engine": "langgraph", "mode": "mp-pool-7", "concurrency": 5000, "total_wall_ms": 1998, "p50_us": 757, "p95_us": 1157, "p99_us": 71322, "ok": 5000, "err": 0, "peak_rss_kb": 61300}
+{"profile":"2:1g","status":"ok","engine":"neograph","mode":"threadpool","concurrency":10000,"total_wall_ms":5,"p50_us":3,"p95_us":4,"p99_us":5,"ok":10000,"err":0,"peak_rss_kb":7936}
+{"profile":"2:1g","status":"ok","engine": "langgraph", "mode": "asyncio", "concurrency": 10000, "total_wall_ms": 20209, "p50_us": 17172558, "p95_us": 19710478, "p99_us": 19887599, "ok": 10000, "err": 0, "peak_rss_kb": 426616}
+{"profile":"2:1g","status":"ok","engine": "langgraph", "mode": "mp-pool-7", "concurrency": 10000, "total_wall_ms": 4112, "p50_us": 764, "p95_us": 1577, "p99_us": 71649, "ok": 10000, "err": 0, "peak_rss_kb": 62056}
+{"profile":"1:512m","status":"ok","engine":"neograph","mode":"threadpool","concurrency":10,"total_wall_ms":0,"p50_us":85,"p95_us":472,"p99_us":472,"ok":10,"err":0,"peak_rss_kb":4352}
+{"profile":"1:512m","status":"ok","engine": "langgraph", "mode": "asyncio", "concurrency": 10, "total_wall_ms": 17, "p50_us": 14515, "p95_us": 16314, "p99_us": 16314, "ok": 10, "err": 0, "peak_rss_kb": 59200}
+{"profile":"1:512m","status":"ok","engine": "langgraph", "mode": "mp-pool-7", "concurrency": 10, "total_wall_ms": 100, "p50_us": 4622, "p95_us": 62744, "p99_us": 62744, "ok": 10, "err": 0, "peak_rss_kb": 61708}
+{"profile":"1:512m","status":"ok","engine":"neograph","mode":"threadpool","concurrency":100,"total_wall_ms":0,"p50_us":3,"p95_us":272,"p99_us":537,"ok":100,"err":0,"peak_rss_kb":4480}
+{"profile":"1:512m","status":"ok","engine": "langgraph", "mode": "asyncio", "concurrency": 100, "total_wall_ms": 128, "p50_us": 101312, "p95_us": 124205, "p99_us": 125821, "ok": 100, "err": 0, "peak_rss_kb": 62732}
+{"profile":"1:512m","status":"ok","engine": "langgraph", "mode": "mp-pool-7", "concurrency": 100, "total_wall_ms": 212, "p50_us": 784, "p95_us": 73803, "p99_us": 77164, "ok": 100, "err": 0, "peak_rss_kb": 62184}
+{"profile":"1:512m","status":"ok","engine":"neograph","mode":"threadpool","concurrency":1000,"total_wall_ms":0,"p50_us":3,"p95_us":3,"p99_us":5,"ok":1000,"err":0,"peak_rss_kb":4736}
+{"profile":"1:512m","status":"ok","engine": "langgraph", "mode": "asyncio", "concurrency": 1000, "total_wall_ms": 1340, "p50_us": 1096766, "p95_us": 1265576, "p99_us": 1280781, "ok": 1000, "err": 0, "peak_rss_kb": 95764}
+{"profile":"1:512m","status":"ok","engine": "langgraph", "mode": "mp-pool-7", "concurrency": 1000, "total_wall_ms": 928, "p50_us": 789, "p95_us": 85044, "p99_us": 89303, "ok": 1000, "err": 0, "peak_rss_kb": 61772}
+{"profile":"1:512m","status":"ok","engine":"neograph","mode":"threadpool","concurrency":5000,"total_wall_ms":3,"p50_us":3,"p95_us":5,"p99_us":8,"ok":5000,"err":0,"peak_rss_kb":5888}
+{"profile":"1:512m","status":"ok","engine": "langgraph", "mode": "asyncio", "concurrency": 5000, "total_wall_ms": 9784, "p50_us": 8272161, "p95_us": 9477138, "p99_us": 9638525, "ok": 5000, "err": 0, "peak_rss_kb": 242688}
+{"profile":"1:512m","status":"ok","engine": "langgraph", "mode": "mp-pool-7", "concurrency": 5000, "total_wall_ms": 3971, "p50_us": 733, "p95_us": 81325, "p99_us": 89416, "ok": 5000, "err": 0, "peak_rss_kb": 61864}
+{"profile":"1:512m","status":"ok","engine":"neograph","mode":"threadpool","concurrency":10000,"total_wall_ms":6,"p50_us":2,"p95_us":3,"p99_us":6,"ok":10000,"err":0,"peak_rss_kb":7808}
+{"profile":"1:512m","status":"ok","engine": "langgraph", "mode": "asyncio", "concurrency": 10000, "total_wall_ms": 20348, "p50_us": 17179301, "p95_us": 19830535, "p99_us": 20022485, "ok": 10000, "err": 0, "peak_rss_kb": 425584}
+{"profile":"1:512m","status":"ok","engine": "langgraph", "mode": "mp-pool-7", "concurrency": 10000, "total_wall_ms": 8046, "p50_us": 750, "p95_us": 81223, "p99_us": 89303, "ok": 10000, "err": 0, "peak_rss_kb": 61872}
