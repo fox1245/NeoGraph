@@ -2,50 +2,12 @@
 #include <neograph/graph/loader.h>
 #include <neograph/graph/coordinator.h>
 
-#include <taskflow/taskflow.hpp>
 #include <stdexcept>
 #include <algorithm>
-#include <thread>
 #include <chrono>
-#include <cstdio>
 #include <cstdint>
-#include <unordered_set>
 
 namespace neograph::graph {
-
-namespace {
-
-// ── FNV-1a 64-bit: deterministic, 0 deps, sufficient for task_id ──
-inline uint64_t fnv1a_64(const std::string& s) noexcept {
-    uint64_t h = 0xcbf29ce484222325ULL;
-    for (unsigned char c : s) {
-        h ^= c;
-        h *= 0x100000001b3ULL;
-    }
-    return h;
-}
-inline std::string fnv1a_hex(const std::string& s) {
-    char buf[17];
-    std::snprintf(buf, sizeof(buf), "%016llx",
-                  static_cast<unsigned long long>(fnv1a_64(s)));
-    return std::string(buf, 16);
-}
-
-// ── task_id generators ──
-// Plain nlohmann::json uses std::map internally, so dump() is already
-// key-sorted and deterministic across runs. No manual canonicalization
-// is needed.
-inline std::string make_static_task_id(int step, const std::string& node_name) {
-    return "s" + std::to_string(step) + ":" + node_name;
-}
-inline std::string make_send_task_id(int step, size_t idx,
-                                      const std::string& target,
-                                      const json& input) {
-    return "s" + std::to_string(step) + ":send[" + std::to_string(idx)
-           + "]:" + target + ":" + fnv1a_hex(input.dump());
-}
-
-} // namespace
 
 // =========================================================================
 // compile(): JSON definition -> GraphEngine
@@ -83,6 +45,17 @@ std::unique_ptr<GraphEngine> GraphEngine::compile(
     // into AND-join semantics for those specific nodes.
     engine->scheduler_ = std::make_unique<Scheduler>(
         engine->edges_, engine->conditional_edges_, std::move(cg.barrier_specs));
+
+    // NodeExecutor owns retry + fan-out + Send invocation. Bind the
+    // retry-policy lookup to this engine's per-node override map so
+    // set_node_retry_policy continues to work after compile() returns.
+    GraphEngine* raw_engine = engine.get();
+    engine->executor_ = std::make_unique<NodeExecutor>(
+        engine->nodes_,
+        engine->channel_defs_,
+        [raw_engine](const std::string& node_name) {
+            return raw_engine->get_retry_policy(node_name);
+        });
 
     engine->checkpoint_store_ = std::move(store);
     return engine;
@@ -278,97 +251,12 @@ RunResult GraphEngine::resume(const std::string& thread_id,
 }
 
 // =========================================================================
-// Global Taskflow executor
-// =========================================================================
-static tf::Executor& global_executor() {
-    static tf::Executor exec;
-    return exec;
-}
-
-// =========================================================================
-// execute_node_with_retry: run a node with retry policy + NodeInterrupt
-// =========================================================================
-
-NodeResult GraphEngine::execute_node_with_retry(
-    const std::string& node_name,
-    GraphState& state,
-    const GraphStreamCallback& cb,
-    StreamMode stream_mode) {
-
-    auto node_it = nodes_.find(node_name);
-    if (node_it == nodes_.end()) {
-        throw std::runtime_error("Node not found: " + node_name);
-    }
-
-    auto policy = get_retry_policy(node_name);
-    int delay_ms = policy.initial_delay_ms;
-
-    for (int attempt = 0; attempt <= policy.max_retries; ++attempt) {
-        try {
-            if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
-                json data;
-                if (attempt > 0) data["retry_attempt"] = attempt;
-                cb(GraphEvent{GraphEvent::Type::NODE_START, node_name, data});
-            }
-
-            // Use execute_full to get NodeResult (Command/Send support)
-            auto node_result = cb
-                ? node_it->second->execute_full_stream(state, cb)
-                : node_it->second->execute_full(state);
-
-            if (cb) {
-                if (has_mode(stream_mode, StreamMode::UPDATES)) {
-                    for (const auto& w : node_result.writes) {
-                        cb(GraphEvent{GraphEvent::Type::CHANNEL_WRITE, node_name,
-                                      json{{"channel", w.channel}, {"value", w.value}}});
-                    }
-                }
-                if (has_mode(stream_mode, StreamMode::EVENTS)) {
-                    json end_data;
-                    if (node_result.command)
-                        end_data["command_goto"] = node_result.command->goto_node;
-                    if (!node_result.sends.empty())
-                        end_data["sends"] = (int)node_result.sends.size();
-                    cb(GraphEvent{GraphEvent::Type::NODE_END, node_name, end_data});
-                }
-            }
-
-            return node_result;
-
-        } catch (const NodeInterrupt&) {
-            throw;
-
-        } catch (const std::exception& e) {
-            if (attempt >= policy.max_retries) {
-                if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
-                    cb(GraphEvent{GraphEvent::Type::ERROR, node_name,
-                                  json{{"error", e.what()}, {"attempts", attempt + 1}}});
-                }
-                throw;
-            }
-
-            if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
-                cb(GraphEvent{GraphEvent::Type::ERROR, node_name,
-                              json{{"retry", attempt + 1},
-                                   {"max_retries", policy.max_retries},
-                                   {"delay_ms", delay_ms},
-                                   {"error", e.what()}}});
-            }
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-            delay_ms = std::min(
-                static_cast<int>(delay_ms * policy.backoff_multiplier),
-                policy.max_delay_ms);
-        }
-    }
-
-    throw std::runtime_error("Unreachable: retry loop exited without return or throw");
-}
-
-// =========================================================================
 // execute_graph(): super-step loop
-//   Supports: fan-out/fan-in, checkpoint, HITL, NodeInterrupt,
-//             Command, Send, retry, stream modes
+//   Owns: state init, interrupt_before/after gates, resume load,
+//         super-step commit, routing via Scheduler.
+//   Delegates: node invocation (single/parallel/Send) → NodeExecutor,
+//              checkpoint lifecycle → CheckpointCoordinator,
+//              routing decisions → Scheduler.
 // =========================================================================
 
 RunResult GraphEngine::execute_graph(const RunConfig& config,
@@ -428,7 +316,6 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
 
     // 3. Super-step loop
     std::vector<std::string> trace;
-    std::set<std::string> completed;
     bool hit_end = false;
 
     // Pending Send requests (dynamic fan-out)
@@ -470,99 +357,19 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
 
         // --- Execute ready nodes ---
         pending_sends.clear();
-
-        // Collect NodeResults from all executed nodes
         std::vector<NodeResult> step_results;
-
-        auto execute_single = [&](const std::string& node_name) -> NodeResult {
-            try {
-                const std::string task_id = make_static_task_id(step, node_name);
-                NodeResult nr;
-
-                auto replay_it = replay_results.find(task_id);
-                if (replay_it != replay_results.end()) {
-                    // Replayed from a previous partial run — do NOT re-execute,
-                    // do NOT re-record. Just apply the recorded writes and
-                    // propagate command / sends to the current super-step.
-                    nr = replay_it->second;
-                } else {
-                    nr = execute_node_with_retry(node_name, state, cb, stream_mode);
-
-                    // Record BEFORE apply_writes so a crash between the two
-                    // still leaves a durable log for resume to replay.
-                    coord.record_pending_write(last_checkpoint_id,
-                        task_id, task_id, node_name, nr, step);
-                }
-
-                state.apply_writes(nr.writes);
-                if (nr.command) {
-                    state.apply_writes(nr.command->updates);
-                }
-
-                trace.push_back(node_name);
-                completed.insert(node_name);
-                return nr;
-
-            } catch (const NodeInterrupt& ni) {
-                // NodeInterrupt pauses this specific node — resume must
-                // re-enter exactly here.
-                coord.save_super_step(state,
-                    node_name, std::vector<std::string>{node_name},
-                    CheckpointPhase::NodeInterrupt, step, last_checkpoint_id,
-                    barrier_state);
-                throw;
-            }
-        };
 
         try {
             if (ready.size() == 1) {
-                step_results.push_back(execute_single(ready[0]));
+                step_results.push_back(executor_->run_one(
+                    ready[0], step, state, replay_results,
+                    coord, last_checkpoint_id, barrier_state,
+                    trace, cb, stream_mode));
             } else {
-                // Parallel: Taskflow fan-out
-                std::map<std::string, NodeResult> all_results;
-                std::mutex results_mutex;
-                std::exception_ptr first_exception;
-
-                tf::Taskflow taskflow("fan-out");
-                for (const auto& node_name : ready) {
-                    taskflow.emplace([&, node_name]() {
-                        try {
-                            const std::string task_id = make_static_task_id(step, node_name);
-                            NodeResult nr;
-
-                            auto replay_it = replay_results.find(task_id);
-                            if (replay_it != replay_results.end()) {
-                                nr = replay_it->second;
-                            } else {
-                                nr = execute_node_with_retry(
-                                    node_name, state, cb, stream_mode);
-                                coord.record_pending_write(last_checkpoint_id,
-                                    task_id, task_id, node_name, nr, step);
-                            }
-
-                            std::lock_guard lock(results_mutex);
-                            all_results[node_name] = std::move(nr);
-                        } catch (...) {
-                            std::lock_guard lock(results_mutex);
-                            if (!first_exception) first_exception = std::current_exception();
-                        }
-                    }).name(node_name);
-                }
-                global_executor().run(taskflow).wait();
-
-                if (first_exception) std::rethrow_exception(first_exception);
-
-                for (const auto& node_name : ready) {
-                    auto it = all_results.find(node_name);
-                    if (it != all_results.end()) {
-                        state.apply_writes(it->second.writes);
-                        if (it->second.command)
-                            state.apply_writes(it->second.command->updates);
-                        step_results.push_back(std::move(it->second));
-                    }
-                    trace.push_back(node_name);
-                    completed.insert(node_name);
-                }
+                step_results = executor_->run_parallel(
+                    ready, step, state, replay_results,
+                    coord, last_checkpoint_id,
+                    trace, cb, stream_mode);
             }
         } catch (const NodeInterrupt& ni) {
             RunResult result;
@@ -632,90 +439,9 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
         }
 
         // --- Execute pending Sends (dynamic fan-out) ---
-        if (!pending_sends.empty()) {
-            if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
-                json send_info = json::array();
-                for (const auto& s : pending_sends)
-                    send_info.push_back({{"target", s.target_node}, {"input", s.input}});
-                cb(GraphEvent{GraphEvent::Type::NODE_START, "__send__",
-                              json{{"sends", send_info}}});
-            }
-
-            if (pending_sends.size() == 1) {
-                // Single send: sequential
-                auto& s = pending_sends[0];
-                auto node_it = nodes_.find(s.target_node);
-                if (node_it != nodes_.end()) {
-                    const std::string task_id = make_send_task_id(
-                        step, 0, s.target_node, s.input);
-                    NodeResult nr;
-
-                    auto replay_it = replay_results.find(task_id);
-                    if (replay_it != replay_results.end()) {
-                        nr = replay_it->second;
-                    } else {
-                        apply_input(state, s.input);
-                        nr = execute_node_with_retry(s.target_node, state, cb, stream_mode);
-                        coord.record_pending_write(last_checkpoint_id,
-                            task_id, task_id, s.target_node, nr, step);
-                    }
-                    state.apply_writes(nr.writes);
-                    trace.push_back(s.target_node + "[send]");
-                }
-            } else {
-                // Multiple sends: parallel via Taskflow
-                std::vector<NodeResult> send_results(pending_sends.size());
-                std::mutex send_mutex;
-                std::exception_ptr send_exception;
-
-                tf::Taskflow taskflow("send-fan-out");
-                for (size_t si = 0; si < pending_sends.size(); ++si) {
-                    taskflow.emplace([&, si]() {
-                        try {
-                            auto& s = pending_sends[si];
-                            auto node_it = nodes_.find(s.target_node);
-                            if (node_it == nodes_.end()) return;
-
-                            const std::string task_id = make_send_task_id(
-                                step, si, s.target_node, s.input);
-
-                            auto replay_it = replay_results.find(task_id);
-                            if (replay_it != replay_results.end()) {
-                                std::lock_guard lock(send_mutex);
-                                send_results[si] = replay_it->second;
-                                return;
-                            }
-
-                            // Each send gets its own state copy with send input applied
-                            GraphState send_state;
-                            init_state(send_state);
-                            send_state.restore(state.serialize());
-                            apply_input(send_state, s.input);
-
-                            auto nr = node_it->second->execute_full(send_state);
-
-                            coord.record_pending_write(last_checkpoint_id,
-                                task_id, task_id, s.target_node, nr, step);
-
-                            std::lock_guard lock(send_mutex);
-                            send_results[si] = std::move(nr);
-                        } catch (...) {
-                            std::lock_guard lock(send_mutex);
-                            if (!send_exception) send_exception = std::current_exception();
-                        }
-                    }).name(pending_sends[si].target_node);
-                }
-                global_executor().run(taskflow).wait();
-
-                if (send_exception) std::rethrow_exception(send_exception);
-
-                // Apply all send results to main state
-                for (size_t si = 0; si < pending_sends.size(); ++si) {
-                    state.apply_writes(send_results[si].writes);
-                    trace.push_back(pending_sends[si].target_node + "[send]");
-                }
-            }
-        }
+        executor_->run_sends(pending_sends, step, state, replay_results,
+                             coord, last_checkpoint_id,
+                             trace, cb, stream_mode);
 
         // --- Plan next super-step via Scheduler ---
         // Scheduler internally pairs ready[i] ↔ step_results[i],
