@@ -11,6 +11,7 @@ add_executable(neograph_tests
     test_signal_dispatch.cpp
     test_multi_node_resume.cpp
     test_scheduler.cpp
+    test_node_execution.cpp
 )
 
 target_link_libraries(neograph_tests PRIVATE
