@@ -220,13 +220,13 @@ std::unique_ptr<GraphEngine> GraphEngine::compile(
         engine->default_retry_policy_.max_delay_ms = rp.value("max_delay_ms", 5000);
     }
 
-    // No static predecessor map is built: NeoGraph uses signal-based
-    // dispatch. A node becomes ready in super-step S+1 iff some node in
-    // step S routed to it (via a regular edge, the selected branch of a
-    // conditional edge, a Command goto, or a Send). This sidesteps the
-    // AND/XOR conflation that a static `predecessors_` set causes — in
-    // particular, conditional self-loops and mutual-recursion cycles now
-    // work without contortions.
+    // Signal-based dispatch — see Scheduler. A node becomes ready in
+    // super-step S+1 iff some node in step S routed to it (regular edge,
+    // conditional-edge branch, Command goto, or Send). No static
+    // predecessor map: that would conflate XOR routing with AND fan-in
+    // and deadlock conditional self-loops.
+    engine->scheduler_ = std::make_unique<Scheduler>(
+        engine->edges_, engine->conditional_edges_);
 
     engine->checkpoint_store_ = std::move(store);
     return engine;
@@ -447,34 +447,6 @@ RunResult GraphEngine::resume(const std::string& thread_id,
 }
 
 // =========================================================================
-// resolve_next_nodes
-// =========================================================================
-
-std::vector<std::string> GraphEngine::resolve_next_nodes(
-    const std::string& current, const GraphState& state) const {
-
-    for (const auto& ce : conditional_edges_) {
-        if (ce.from == current) {
-            auto cond_fn = ConditionRegistry::instance().get(ce.condition);
-            auto result  = cond_fn(state);
-            auto it = ce.routes.find(result);
-            if (it != ce.routes.end()) return {it->second};
-            return {ce.routes.rbegin()->second};
-        }
-    }
-
-    std::vector<std::string> successors;
-    for (const auto& e : edges_) {
-        if (e.from == current) {
-            successors.push_back(e.to);
-        }
-    }
-
-    if (successors.empty()) return {END_NODE};
-    return successors;
-}
-
-// =========================================================================
 // Global Taskflow executor
 // =========================================================================
 static tf::Executor& global_executor() {
@@ -629,16 +601,8 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
     }
 
     // 2. Determine initial ready set
-    std::vector<std::string> ready;
-    if (is_resume) {
-        ready = resume_from;
-    } else {
-        for (const auto& e : edges_) {
-            if (e.from == std::string(START_NODE) && e.to != std::string(END_NODE)) {
-                ready.push_back(e.to);
-            }
-        }
-    }
+    std::vector<std::string> ready =
+        is_resume ? resume_from : scheduler_->plan_start_step();
 
     // 3. Super-step loop
     std::vector<std::string> trace;
@@ -647,9 +611,6 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
 
     // Pending Send requests (dynamic fan-out)
     std::vector<Send> pending_sends;
-
-    // Command override for routing
-    std::optional<std::string> command_goto;
 
     for (int step = start_step; step < config.max_steps + start_step; ++step) {
         if (ready.empty() || hit_end) break;
@@ -686,7 +647,6 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
         }
 
         // --- Execute ready nodes ---
-        command_goto.reset();
         pending_sends.clear();
 
         // Collect NodeResults from all executed nodes
@@ -804,11 +764,10 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
             return result;
         }
 
-        // --- Collect Command goto and Send requests from step results ---
+        // --- Collect Send requests (pending_sends are drained after
+        // interrupt_after). Command.goto_node is consumed later by the
+        // Scheduler; we only need to surface Sends here. ---
         for (auto& nr : step_results) {
-            if (nr.command && !nr.command->goto_node.empty()) {
-                command_goto = nr.command->goto_node;
-            }
             for (auto& s : nr.sends) {
                 pending_sends.push_back(std::move(s));
             }
@@ -830,7 +789,7 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                 // their successors — not just the interrupted node's.
                 std::set<std::string> union_next;
                 for (const auto& rn : ready) {
-                    for (const auto& nx : resolve_next_nodes(rn, state)) {
+                    for (const auto& nx : scheduler_->resolve_next_nodes(rn, state)) {
                         union_next.insert(nx);
                     }
                 }
@@ -949,52 +908,39 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
             }
         }
 
-        // --- Resolve next ready set ---
-        std::set<std::string> candidates;
-
-        if (command_goto) {
-            // Command override: go directly to the specified node
-            if (*command_goto == std::string(END_NODE)) {
-                hit_end = true;
-            } else {
-                candidates.insert(*command_goto);
+        // --- Plan next super-step via Scheduler ---
+        // Pair each just-run node with its Command.goto_node (if any).
+        // step_results is pushed in the same order as `ready` by both
+        // the single- and parallel-execution paths above.
+        std::vector<StepRouting> routings;
+        routings.reserve(ready.size());
+        for (size_t i = 0; i < ready.size(); ++i) {
+            StepRouting r;
+            r.node_name = ready[i];
+            if (i < step_results.size() &&
+                step_results[i].command &&
+                !step_results[i].command->goto_node.empty()) {
+                r.command_goto = step_results[i].command->goto_node;
             }
-
-            if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
-                cb(GraphEvent{GraphEvent::Type::NODE_START, "__routing__",
-                              json{{"command_goto", *command_goto}}});
-            }
-        } else {
-            // Standard edge routing
-            for (const auto& node_name : ready) {
-                auto nexts = resolve_next_nodes(node_name, state);
-                for (const auto& next : nexts) {
-                    if (next == std::string(END_NODE)) {
-                        hit_end = true;
-                    } else {
-                        candidates.insert(next);
-                    }
-                }
-            }
+            routings.push_back(std::move(r));
         }
 
-        // Signal dispatch: every candidate that was routed to (by a regular
-        // edge, the selected conditional branch, or a Command goto) runs
-        // next. No static predecessor check — that would conflate "one of
-        // these upstream branches ran" (XOR) with "all upstream fan-in
-        // branches ran" (AND) and deadlock on conditional self-loops.
-        ready.clear();
-        ready.reserve(candidates.size());
-        for (const auto& candidate : candidates) {
-            ready.push_back(candidate);
-        }
+        auto plan = scheduler_->plan_next_step(routings, state);
+        hit_end = hit_end || plan.hit_end;
+        ready  = std::move(plan.ready);
 
         // --- Debug: emit routing decision ---
-        if (cb && has_mode(stream_mode, StreamMode::DEBUG) && !ready.empty()) {
-            json next_nodes = json::array();
-            for (const auto& n : ready) next_nodes.push_back(n);
-            cb(GraphEvent{GraphEvent::Type::NODE_START, "__routing__",
-                          json{{"next_nodes", next_nodes}, {"step", step}}});
+        if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
+            if (plan.winning_command_goto) {
+                cb(GraphEvent{GraphEvent::Type::NODE_START, "__routing__",
+                              json{{"command_goto", *plan.winning_command_goto}}});
+            }
+            if (!ready.empty()) {
+                json next_nodes = json::array();
+                for (const auto& n : ready) next_nodes.push_back(n);
+                cb(GraphEvent{GraphEvent::Type::NODE_START, "__routing__",
+                              json{{"next_nodes", next_nodes}, {"step", step}}});
+            }
         }
 
         // --- Checkpoint after each super-step ---

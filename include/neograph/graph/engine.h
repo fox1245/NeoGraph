@@ -13,6 +13,7 @@
 #include <neograph/graph/node.h>
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/store.h>
+#include <neograph/graph/scheduler.h>
 #include <memory>
 #include <set>
 
@@ -248,9 +249,6 @@ private:
                             const std::vector<std::string>& resume_from = {},
                             const json& resume_value = json());
 
-    std::vector<std::string> resolve_next_nodes(
-        const std::string& current, const GraphState& state) const;
-
     Checkpoint save_checkpoint(const GraphState& state,
                                const std::string& thread_id,
                                const std::string& current_node,
@@ -281,6 +279,12 @@ private:
     std::map<std::string, std::unique_ptr<GraphNode>> nodes_;
     std::vector<Edge>            edges_;
     std::vector<ConditionalEdge> conditional_edges_;
+
+    /// Owns routing decisions. Constructed after edges_ /
+    /// conditional_edges_ are populated in compile(); holds references
+    /// to both, so it must be destroyed before them (trivially true:
+    /// member order guarantees destruction is reverse of declaration).
+    std::unique_ptr<Scheduler> scheduler_;
 
     std::set<std::string> interrupt_before_;
     std::set<std::string> interrupt_after_;
