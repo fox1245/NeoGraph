@@ -1282,7 +1282,7 @@ struct Checkpoint {
     json        channel_versions; // 채널별 버전 카운터
     std::string parent_id;        // 이전 checkpoint (time-travel 체인)
     std::string current_node;     // checkpoint 시점의 활성 노드
-    std::string next_node;        // 재개 시 실행할 노드
+    std::vector<std::string> next_nodes;  // 재개 시 실행할 노드 목록
     std::string interrupt_phase;  // "before" | "after" | "completed"
     json        metadata;         // 사용자 정의 메타데이터
     int64_t     step;             // super-step 번호
