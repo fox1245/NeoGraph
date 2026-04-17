@@ -81,6 +81,7 @@ add_library(neograph_core STATIC
     src/core/json.cpp
     src/core/graph_engine.cpp
     src/core/graph_compiler.cpp
+    src/core/graph_coordinator.cpp
     src/core/scheduler.cpp
     src/core/graph_state.cpp
     src/core/graph_node.cpp
