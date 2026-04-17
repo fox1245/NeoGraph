@@ -2,7 +2,7 @@
 #include <neograph/llm/json_path.h>
 
 using namespace neograph::llm;
-using json = nlohmann::json;
+using json = neograph::json;
 namespace jp = neograph::llm::json_path;
 
 // ── split_path ──
@@ -44,52 +44,42 @@ TEST(JsonPath, IsIndexInvalid) {
 
 TEST(JsonPath, AtPathObject) {
     json root = {{"a", {{"b", 42}}}};
-    auto* val = jp::at_path(root, "a.b");
-    ASSERT_NE(val, nullptr);
-    EXPECT_EQ(*val, 42);
+    auto val = jp::at_path(root, "a.b");
+    ASSERT_TRUE(val.has_value());
+    EXPECT_EQ(val->template get<int>(), 42);
 }
 
 TEST(JsonPath, AtPathArray) {
     json root = {{"items", json::array({10, 20, 30})}};
-    auto* val = jp::at_path(root, "items.1");
-    ASSERT_NE(val, nullptr);
-    EXPECT_EQ(*val, 20);
+    auto val = jp::at_path(root, "items.1");
+    ASSERT_TRUE(val.has_value());
+    EXPECT_EQ(val->template get<int>(), 20);
 }
 
 TEST(JsonPath, AtPathNested) {
     json root = {{"choices", json::array({{{"message", {{"content", "hello"}}}}})}};
-    auto* val = jp::at_path(root, "choices.0.message.content");
-    ASSERT_NE(val, nullptr);
-    EXPECT_EQ(*val, "hello");
+    auto val = jp::at_path(root, "choices.0.message.content");
+    ASSERT_TRUE(val.has_value());
+    EXPECT_EQ(val->template get<std::string>(), "hello");
 }
 
 TEST(JsonPath, AtPathNotFound) {
     json root = {{"a", 1}};
-    auto* val = jp::at_path(root, "b");
-    EXPECT_EQ(val, nullptr);
+    auto val = jp::at_path(root, "b");
+    EXPECT_FALSE(val.has_value());
 }
 
 TEST(JsonPath, AtPathEmptyReturnsRoot) {
     json root = {{"a", 1}};
-    auto* val = jp::at_path(root, "");
-    ASSERT_NE(val, nullptr);
-    EXPECT_EQ(*val, root);
+    auto val = jp::at_path(root, "");
+    ASSERT_TRUE(val.has_value());
+    EXPECT_EQ(val->dump(), root.dump());
 }
 
 TEST(JsonPath, AtPathArrayOutOfBounds) {
     json root = {{"arr", json::array({1, 2})}};
-    auto* val = jp::at_path(root, "arr.5");
-    EXPECT_EQ(val, nullptr);
-}
-
-// ── at_path_mut ──
-
-TEST(JsonPath, AtPathMut) {
-    json root = {{"a", {{"b", 1}}}};
-    auto* val = jp::at_path_mut(root, "a.b");
-    ASSERT_NE(val, nullptr);
-    *val = 99;
-    EXPECT_EQ(root["a"]["b"], 99);
+    auto val = jp::at_path(root, "arr.5");
+    EXPECT_FALSE(val.has_value());
 }
 
 // ── has_path ──
@@ -123,19 +113,19 @@ TEST(JsonPath, GetPathTypeMismatch) {
 TEST(JsonPath, SetPathSimple) {
     json root;
     jp::set_path(root, "a.b.c", json(42));
-    EXPECT_EQ(root["a"]["b"]["c"], 42);
+    EXPECT_EQ(root["a"]["b"]["c"].template get<int>(), 42);
 }
 
 TEST(JsonPath, SetPathOverwrite) {
     json root = {{"a", 1}};
     jp::set_path(root, "a", json(2));
-    EXPECT_EQ(root["a"], 2);
+    EXPECT_EQ(root["a"].template get<int>(), 2);
 }
 
 TEST(JsonPath, SetPathEmpty) {
     json root = {{"old", true}};
     jp::set_path(root, "", json("replaced"));
-    EXPECT_EQ(root, "replaced");
+    EXPECT_EQ(root.get<std::string>(), "replaced");
 }
 
 TEST(JsonPath, SetPathCreatesIntermediates) {

@@ -66,7 +66,7 @@ void SchemaProvider::parse_schema()
     provider_name_ = schema_.value("name", "unknown");
 
     // --- Connection ---
-    auto& c = schema_["connection"];
+    auto c = schema_["connection"];
     conn_.base_url = c.value("base_url", "");
     conn_.endpoint = c.value("endpoint", "");
     conn_.stream_endpoint = c.value("stream_endpoint", conn_.endpoint);
@@ -75,13 +75,13 @@ void SchemaProvider::parse_schema()
     conn_.api_key_env = c.value("api_key_env", "");
     conn_.auth_query_param = c.value("auth_query_param", "");
     if (c.contains("extra_headers") && c["extra_headers"].is_object()) {
-        for (auto& [k, v] : c["extra_headers"].items()) {
+        for (const auto& [k, v] : c["extra_headers"].items()) {
             conn_.extra_headers[k] = v.get<std::string>();
         }
     }
 
     // --- Request ---
-    auto& r = schema_["request"];
+    auto r = schema_["request"];
     req_.model_field = r.value("model_field", "model");
     req_.messages_field = r.value("messages_field", "messages");
     req_.tools_field = r.value("tools_field", "tools");
@@ -93,7 +93,7 @@ void SchemaProvider::parse_schema()
     req_.extra_fields = r.value("extra_fields", json::object());
 
     // --- System Prompt ---
-    auto& s = schema_["system_prompt"];
+    auto s = schema_["system_prompt"];
     std::string sys_strategy = s.value("strategy", "in_messages");
     if (sys_strategy == "top_level") {
         sys_.strategy = SystemPromptStrategy::TOP_LEVEL;
@@ -108,12 +108,12 @@ void SchemaProvider::parse_schema()
     sys_.text_field = s.value("text_field", "text");
 
     // --- Messages ---
-    auto& m = schema_["messages"];
+    auto m = schema_["messages"];
     msgs_.role_field = m.value("role_field", "role");
     msgs_.content_field = m.value("content_field", "content");
     msgs_.content_is_parts = m.value("content_is_parts", false);
     if (m.contains("role_map") && m["role_map"].is_object()) {
-        for (auto& [k, v] : m["role_map"].items()) {
+        for (const auto& [k, v] : m["role_map"].items()) {
             msgs_.role_map[k] = v.get<std::string>();
         }
     }
@@ -122,7 +122,7 @@ void SchemaProvider::parse_schema()
     }
 
     // --- Tool Definition ---
-    auto& td = schema_["tool_definition"];
+    auto td = schema_["tool_definition"];
     std::string wrapper = td.value("wrapper", "function");
     if (wrapper == "none") {
         tool_def_.wrapper = ToolDefWrapper::NONE;
@@ -138,7 +138,7 @@ void SchemaProvider::parse_schema()
     tool_def_.parameters_field = td.value("parameters_field", "parameters");
 
     // --- Tool Call in Message ---
-    auto& tc = schema_["tool_call_in_message"];
+    auto tc = schema_["tool_call_in_message"];
     std::string tc_strategy = tc.value("strategy", "tool_calls_array");
     if (tc_strategy == "content_array") {
         tool_call_.strategy = ToolCallStrategy::CONTENT_ARRAY;
@@ -154,7 +154,7 @@ void SchemaProvider::parse_schema()
     if (tc.contains("text_item")) tool_call_.text_item_template = tc["text_item"];
 
     // --- Tool Result ---
-    auto& tr = schema_["tool_result"];
+    auto tr = schema_["tool_result"];
     tool_result_.role = tr.value("role", "tool");
     std::string tr_strategy = tr.value("strategy", "flat");
     if (tr_strategy == "content_array") {
@@ -171,13 +171,13 @@ void SchemaProvider::parse_schema()
     if (tr.contains("item")) tool_result_.item_template = tr["item"];
 
     // --- Image ---
-    auto& img = schema_["image"];
+    auto img = schema_["image"];
     image_.strategy = img.value("strategy", "openai");
     if (img.contains("item")) image_.item_template = img["item"];
     if (img.contains("text_part")) image_.text_part_template = img["text_part"];
 
     // --- Response ---
-    auto& resp = schema_["response"];
+    auto resp = schema_["response"];
     std::string resp_strategy = resp.value("strategy", "choices_message");
     if (resp_strategy == "content_array") {
         resp_.strategy = ResponseStrategy::CONTENT_ARRAY;
@@ -215,7 +215,7 @@ void SchemaProvider::parse_schema()
     resp_.total_tokens_field = resp.value("total_tokens_field", "total_tokens");
 
     // --- Streaming ---
-    auto& st = schema_["streaming"];
+    auto st = schema_["streaming"];
     std::string stream_format = st.value("format", "sse_data");
     if (stream_format == "sse_events") {
         stream_.format = StreamFormat::SSE_EVENTS;
@@ -313,7 +313,7 @@ json SchemaProvider::substitute(const json& tmpl, const std::map<std::string, js
     }
     if (tmpl.is_object()) {
         json result = json::object();
-        for (auto& [k, v] : tmpl.items()) {
+        for (const auto& [k, v] : tmpl.items()) {
             result[k] = substitute(v, vars);
         }
         return result;
@@ -617,13 +617,13 @@ json SchemaProvider::serialize_messages(const std::vector<ChatMessage>& messages
 
         // Check if we can merge with previous message
         if (!arr.empty()) {
-            auto& prev = arr.back();
+            auto prev = arr[arr.size() - 1];
             std::string prev_role = prev.value(msgs_.role_field, "");
 
             if (role == prev_role) {
                 // Merge: ensure both have content arrays
-                json& prev_content = prev[msgs_.content_field];
-                json& cur_content = serialized[msgs_.content_field];
+                auto prev_content = prev[msgs_.content_field];
+                auto cur_content = serialized[msgs_.content_field];
 
                 // Convert prev to array if it's a string
                 if (prev_content.is_string()) {
@@ -643,7 +643,7 @@ json SchemaProvider::serialize_messages(const std::vector<ChatMessage>& messages
                         prev_content.push_back({{"type", "text"}, {"text", text}});
                     }
                 } else if (cur_content.is_array()) {
-                    for (auto& item : cur_content) {
+                    for (const auto& item : cur_content) {
                         prev_content.push_back(item);
                     }
                 }
@@ -786,7 +786,7 @@ json SchemaProvider::build_body(const CompletionParams& params) const {
         body[req_.tools_field] = serialize_tools(params.tools);
 
         // Add tool-related extra fields (like tool_choice) only when tools present
-        for (auto& [k, v] : req_.extra_fields.items()) {
+        for (const auto& [k, v] : req_.extra_fields.items()) {
             body[k] = v;
         }
     }
@@ -819,7 +819,7 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
     switch (resp_.strategy) {
         case ResponseStrategy::CHOICES_MESSAGE: {
             // OpenAI: choices[0].message.{content, tool_calls}
-            const json* message = json_path::at_path(resp_json, resp_.message_path);
+            auto message = json_path::at_path(resp_json, resp_.message_path);
             if (!message) {
                 throw std::runtime_error("SchemaProvider: cannot find message at path: " + resp_.message_path);
             }
@@ -835,11 +835,11 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
                 for (const auto& tc : (*message)[resp_.tool_calls_field]) {
                     ToolCall call;
                     call.id = tc.value(resp_.tool_call_id_field, "");
-                    const json* name_node = json_path::at_path(tc, resp_.tool_call_name_path);
+                    auto name_node = json_path::at_path(tc, resp_.tool_call_name_path);
                     if (name_node && name_node->is_string()) {
                         call.name = name_node->get<std::string>();
                     }
-                    const json* args_node = json_path::at_path(tc, resp_.tool_call_args_path);
+                    auto args_node = json_path::at_path(tc, resp_.tool_call_args_path);
                     if (args_node) {
                         if (resp_.tool_call_args_is_string && args_node->is_string()) {
                             call.arguments = args_node->get<std::string>();
@@ -854,7 +854,7 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
         }
         case ResponseStrategy::CONTENT_ARRAY: {
             // Claude: content[] with text and tool_use items
-            const json* content = json_path::at_path(resp_json, resp_.content_path);
+            auto content = json_path::at_path(resp_json, resp_.content_path);
             if (!content || !content->is_array()) break;
 
             msg.role = resp_json.value(resp_.role_field, "assistant");
@@ -888,7 +888,7 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
             //   {type:"message", role:"assistant", content:[{type:"output_text", text:"..."}]}
             //   {type:"function_call", call_id:"...", name:"...", arguments:"..."}
             //   {type:"reasoning", ...} (ignored)
-            const json* output = json_path::at_path(resp_json, resp_.output_path);
+            auto output = json_path::at_path(resp_json, resp_.output_path);
             if (!output || !output->is_array()) break;
 
             std::string full_text;
@@ -925,7 +925,7 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
         }
         case ResponseStrategy::CANDIDATES_PARTS: {
             // Gemini: candidates[0].content.parts[]
-            const json* parts = json_path::at_path(resp_json, resp_.parts_path);
+            auto parts = json_path::at_path(resp_json, resp_.parts_path);
             if (!parts || !parts->is_array()) break;
 
             std::string full_text;
@@ -956,7 +956,7 @@ ChatMessage SchemaProvider::parse_response(const json& resp_json) const {
 
 ChatCompletion::Usage SchemaProvider::parse_usage(const json& resp_json) const {
     ChatCompletion::Usage usage;
-    const json* u = json_path::at_path(resp_json, resp_.usage_path);
+    auto u = json_path::at_path(resp_json, resp_.usage_path);
     if (!u) return usage;
 
     usage.prompt_tokens = u->value(resp_.prompt_tokens_field, 0);
@@ -1086,7 +1086,7 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
 
                         if (stream_.delta_strategy == "candidates_parts") {
                             // Gemini streaming: candidates[0].content.parts[]
-                            const json* parts = json_path::at_path(j, stream_.delta_parts_path);
+                            auto parts = json_path::at_path(j, stream_.delta_parts_path);
                             if (parts && parts->is_array()) {
                                 for (const auto& part : *parts) {
                                     if (part.contains(stream_.delta_text_field) &&
@@ -1109,7 +1109,7 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
                             }
                         } else {
                             // OpenAI streaming: choices[0].delta
-                            const json* delta = json_path::at_path(j, stream_.delta_path);
+                            auto delta = json_path::at_path(j, stream_.delta_path);
                             if (!delta) continue;
 
                             // Content token
@@ -1127,11 +1127,11 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
                                     if (tc.contains(stream_.tool_call_id_field)) {
                                         tc_map[idx].id = tc[stream_.tool_call_id_field].get<std::string>();
                                     }
-                                    const json* name_node = json_path::at_path(tc, stream_.tool_call_name_path);
+                                    auto name_node = json_path::at_path(tc, stream_.tool_call_name_path);
                                     if (name_node && name_node->is_string()) {
                                         tc_map[idx].name += name_node->get<std::string>();
                                     }
-                                    const json* args_node = json_path::at_path(tc, stream_.tool_call_args_path);
+                                    auto args_node = json_path::at_path(tc, stream_.tool_call_args_path);
                                     if (args_node && args_node->is_string()) {
                                         tc_map[idx].arguments += args_node->get<std::string>();
                                     }
@@ -1160,7 +1160,7 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
                         auto j = json::parse(payload);
 
                         if (!stream_.events_config.contains(current_event_type)) continue;
-                        auto& event_cfg = stream_.events_config[current_event_type];
+                        auto event_cfg = stream_.events_config[current_event_type];
                         std::string action = event_cfg.value("action", "ignore");
 
                         if (action == "ignore") {
@@ -1176,7 +1176,7 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
                             std::string id_fld      = event_cfg.value("id_field", "id");
                             std::string name_fld    = event_cfg.value("name_field", "name");
 
-                            const json* block = json_path::at_path(j, block_path);
+                            auto block = json_path::at_path(j, block_path);
                             if (block) {
                                 EventBlock cb;
                                 cb.type = block->value(type_field, "");
@@ -1197,7 +1197,7 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
 
                             auto& cur_block = event_blocks[event_block_index];
                             std::string delta_path = event_cfg.value("delta_path", "delta");
-                            const json* delta = json_path::at_path(j, delta_path);
+                            auto delta = json_path::at_path(j, delta_path);
                             if (!delta) continue;
 
                             std::string delta_type = delta->value("type", "");

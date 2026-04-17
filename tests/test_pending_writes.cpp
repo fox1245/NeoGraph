@@ -188,9 +188,9 @@ TEST_F(PendingWritesTest, ResumeSkipsCompletedSends) {
     // The super-step that crashed should now be committed. Final state
     // must contain all 5 "results" entries (order-independent).
     ASSERT_TRUE(resumed.output.contains("channels"));
-    auto& ch = resumed.output["channels"];
+    auto ch = resumed.output["channels"];
     ASSERT_TRUE(ch.contains("results"));
-    auto& results_value = ch["results"]["value"];
+    auto results_value = ch["results"]["value"];
     ASSERT_TRUE(results_value.is_array());
     EXPECT_EQ(results_value.size(), 5u);
 

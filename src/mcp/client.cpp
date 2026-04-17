@@ -33,7 +33,7 @@ std::string MCPTool::execute(const json& arguments) {
     // MCP returns { content: [{type: "text", text: "..."}], isError: false }
     if (result.contains("content") && result["content"].is_array()) {
         std::string output;
-        for (auto& item : result["content"]) {
+        for (const auto& item : result["content"]) {
             if (item.value("type", "") == "text") {
                 if (!output.empty()) output += "\n";
                 output += item.value("text", "");
@@ -117,7 +117,7 @@ json MCPClient::rpc_call(const std::string& method, const json& params) {
     }
 
     if (resp.contains("error")) {
-        auto& err = resp["error"];
+        auto err = resp["error"];
         throw std::runtime_error("MCP RPC error: " + err.value("message", "unknown"));
     }
 
@@ -159,7 +159,7 @@ std::vector<std::unique_ptr<Tool>> MCPClient::get_tools() {
     std::vector<std::unique_ptr<Tool>> tools;
 
     if (result.contains("tools") && result["tools"].is_array()) {
-        for (auto& t : result["tools"]) {
+        for (const auto& t : result["tools"]) {
             auto name = t.value("name", "");
             auto desc = t.value("description", "");
             auto schema = t.value("inputSchema", json::object());

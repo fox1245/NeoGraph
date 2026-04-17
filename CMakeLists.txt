@@ -25,9 +25,13 @@ find_package(Threads REQUIRED)
 
 set(DEPS_DIR ${CMAKE_SOURCE_DIR}/deps)
 
-# nlohmann/json (header-only) — used by all modules
-add_library(nlohmann_json INTERFACE)
-target_include_directories(nlohmann_json INTERFACE ${DEPS_DIR})
+# yyjson (C, compiled) — used by all modules for JSON parse/write
+add_library(yyjson STATIC ${DEPS_DIR}/yyjson/yyjson.c)
+target_include_directories(yyjson PUBLIC ${DEPS_DIR}/yyjson)
+set_target_properties(yyjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(NOT MSVC)
+    target_compile_options(yyjson PRIVATE -O2)
+endif()
 
 # Taskflow (header-only) — used by core (graph engine parallelism)
 add_library(taskflow INTERFACE)
@@ -74,6 +78,7 @@ add_custom_target(generate_schemas DEPENDS ${GENERATED_DIR}/builtin_schemas.h)
 # neograph::core — Graph engine + foundation types
 # ===========================================================================
 add_library(neograph_core STATIC
+    src/core/json.cpp
     src/core/graph_engine.cpp
     src/core/graph_state.cpp
     src/core/graph_node.cpp
@@ -90,7 +95,7 @@ target_include_directories(neograph_core
 )
 
 target_link_libraries(neograph_core
-    PUBLIC  nlohmann_json Threads::Threads
+    PUBLIC  yyjson Threads::Threads
     PRIVATE taskflow
 )
 

@@ -206,9 +206,9 @@ int main() {
 
     // ── Report final findings ──────────────────────────────────────────
     if (resumed.output.contains("channels")) {
-        auto& ch = resumed.output["channels"];
+        auto ch = resumed.output["channels"];
         if (ch.contains("findings") && ch["findings"].contains("value")) {
-            auto& findings = ch["findings"]["value"];
+            auto findings = ch["findings"]["value"];
             std::cout << "── Final findings (" << findings.size() << " entries) ──\n";
             for (const auto& f : findings) {
                 std::cout << "  #" << f.value("idx", -1) << "  "

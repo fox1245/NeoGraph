@@ -86,13 +86,13 @@ OpenAIProvider::complete(const CompletionParams& params)
     }
 
     auto resp_json = json::parse(res->body);
-    auto& choice = resp_json.at("choices").at(0);
+    auto choice = resp_json.at("choices").at(0);
 
     ChatCompletion completion;
     completion.message = parse_response_message(choice);
 
     if (resp_json.contains("usage")) {
-        auto& u = resp_json["usage"];
+        auto u = resp_json["usage"];
         completion.usage.prompt_tokens = u.value("prompt_tokens", 0);
         completion.usage.completion_tokens = u.value("completion_tokens", 0);
         completion.usage.total_tokens = u.value("total_tokens", 0);
@@ -149,7 +149,7 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
 
                 try {
                     auto j = json::parse(payload);
-                    auto& delta = j["choices"][0]["delta"];
+                    auto delta = j["choices"][0]["delta"];
 
                     // Content token
                     if (delta.contains("content") && !delta["content"].is_null()) {
@@ -160,16 +160,16 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
 
                     // Tool calls (streamed incrementally)
                     if (delta.contains("tool_calls")) {
-                        for (auto& tc : delta["tool_calls"]) {
+                        for (const auto& tc : delta["tool_calls"]) {
                             int idx = tc.value("index", 0);
                             if (tc.contains("id")) {
-                                tc_map[idx].id = tc["id"];
+                                tc_map[idx].id = tc["id"].template get<std::string>();
                             }
                             if (tc.contains("function")) {
                                 if (tc["function"].contains("name"))
-                                    tc_map[idx].name += tc["function"]["name"].get<std::string>();
+                                    tc_map[idx].name += tc["function"]["name"].template get<std::string>();
                                 if (tc["function"].contains("arguments"))
-                                    tc_map[idx].arguments += tc["function"]["arguments"].get<std::string>();
+                                    tc_map[idx].arguments += tc["function"]["arguments"].template get<std::string>();
                             }
                         }
                     }

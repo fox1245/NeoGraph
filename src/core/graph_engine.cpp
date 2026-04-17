@@ -213,7 +213,7 @@ std::unique_ptr<GraphEngine> GraphEngine::compile(
 
     // --- Parse retry policy ---
     if (definition.contains("retry_policy")) {
-        auto& rp = definition["retry_policy"];
+        auto rp = definition["retry_policy"];
         engine->default_retry_policy_.max_retries = rp.value("max_retries", 0);
         engine->default_retry_policy_.initial_delay_ms = rp.value("initial_delay_ms", 100);
         engine->default_retry_policy_.backoff_multiplier = rp.value("backoff_multiplier", 2.0f);

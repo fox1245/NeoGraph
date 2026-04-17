@@ -228,7 +228,7 @@ int main() {
             switch (event.type) {
                 case GraphEvent::Type::NODE_START:
                     if (event.node_name == "__send__") {
-                        auto& sends = event.data["sends"];
+                        auto sends = event.data["sends"];
                         std::cout << "  [send] Dynamic fan-out: " << sends.size() << " tasks\n";
                         for (const auto& s : sends)
                             std::cout << "         → " << s["target"] << "(" << s["input"]["topic"] << ")\n";
