@@ -1186,7 +1186,7 @@ struct Checkpoint {
     std::string parent_id;         // Previous checkpoint ID (for time-travel chain)
     std::string current_node;      // Node that was active at checkpoint time
     std::vector<std::string> next_nodes;  // Nodes to execute on resume
-    std::string interrupt_phase;   // "before", "after", or "completed"
+    CheckpointPhase interrupt_phase;  // Before | After | Completed | NodeInterrupt | Updated
     json        metadata;          // User-defined metadata
     int64_t     step;              // Super-step number
     int64_t     timestamp;         // Unix epoch milliseconds
@@ -1205,7 +1205,7 @@ struct Checkpoint {
 | `parent_id` | `std::string` | ID of the preceding checkpoint (forms a linked list for time-travel) |
 | `current_node` | `std::string` | Node that was executing when the checkpoint was taken |
 | `next_nodes` | `std::vector<std::string>` | All nodes scheduled for the next super-step (used by `resume()`). Under signal dispatch a super-step can leave several nodes simultaneously ready (parallel fan-out, conditional branches activating together), and every one of them must be persisted — storing a single node would silently drop siblings across a crash |
-| `interrupt_phase` | `std::string` | `"before"` (interrupt_before), `"after"` (interrupt_after), or `"completed"` |
+| `interrupt_phase` | `CheckpointPhase` | Enum: `Before` (interrupt_before fired), `After` (interrupt_after fired), `Completed` (normal super-step cadence), `NodeInterrupt` (node threw `NodeInterrupt` mid-execution), `Updated` (external `update_state()` injection). `to_string()` and `parse_checkpoint_phase()` give a stable wire/log encoding |
 | `metadata` | `json` | Arbitrary user-defined data |
 | `step` | `int64_t` | Super-step counter |
 | `timestamp` | `int64_t` | Creation time in Unix epoch milliseconds |

@@ -192,7 +192,7 @@ int main() {
     std::cout << "thread-001 checkpoint history (" << history.size() << " entries):\n\n";
     for (size_t i = 0; i < history.size(); ++i) {
         const auto& cp = history[i];
-        std::cout << "  #" << (i + 1) << " [" << cp.interrupt_phase << "]"
+        std::cout << "  #" << (i + 1) << " [" << to_string(cp.interrupt_phase) << "]"
                   << " step=" << cp.step
                   << " node=" << cp.current_node
                   << " → ";
@@ -212,7 +212,7 @@ int main() {
             meta_info = " (forked from " +
                 cp.metadata["forked_from"].value("thread_id", "?") + ")";
         }
-        std::cout << "  #" << (i + 1) << " [" << cp.interrupt_phase << "]"
+        std::cout << "  #" << (i + 1) << " [" << to_string(cp.interrupt_phase) << "]"
                   << " step=" << cp.step
                   << " node=" << cp.current_node
                   << meta_info << "\n";

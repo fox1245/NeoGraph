@@ -16,7 +16,7 @@ protected:
         cp.channel_values = json{{"data", step}};
         cp.current_node = node;
         cp.next_nodes = {"__end__"};
-        cp.interrupt_phase = "completed";
+        cp.interrupt_phase = CheckpointPhase::Completed;
         cp.step = step;
         cp.timestamp = step * 1000;  // deterministic ordering
         return cp;
@@ -138,6 +138,24 @@ TEST_F(CheckpointTest, FreshCheckpointCarriesCurrentSchemaVersion) {
 // the field) can distinguish them by seeing schema_version == 0 and
 // take a migration path — the in-memory store round-trips an explicit
 // 0 unchanged.
+TEST(CheckpointPhaseStrings, AllEnumValuesRoundTrip) {
+    // Every enum value must survive to_string → parse_checkpoint_phase
+    // so persistent stores can serialize phases as strings and load
+    // them back losslessly. Guards against "I added an enum value but
+    // forgot one of the two functions" drift.
+    for (auto p : {CheckpointPhase::Before, CheckpointPhase::After,
+                   CheckpointPhase::Completed, CheckpointPhase::NodeInterrupt,
+                   CheckpointPhase::Updated}) {
+        EXPECT_EQ(parse_checkpoint_phase(to_string(p)), p)
+            << "phase " << to_string(p) << " failed round-trip";
+    }
+}
+
+TEST(CheckpointPhaseStrings, ParseUnknownThrows) {
+    EXPECT_THROW(parse_checkpoint_phase("garbage"), std::invalid_argument);
+    EXPECT_THROW(parse_checkpoint_phase(""), std::invalid_argument);
+}
+
 TEST_F(CheckpointTest, PreVersionedSentinelRoundTrips) {
     auto cp = make_cp("legacy-thread", 0);
     cp.schema_version = 0;  // simulate a blob deserialized without the field

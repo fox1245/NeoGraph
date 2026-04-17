@@ -3,8 +3,33 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <stdexcept>
 
 namespace neograph::graph {
+
+// =========================================================================
+// CheckpointPhase <-> string
+// =========================================================================
+const char* to_string(CheckpointPhase phase) {
+    switch (phase) {
+        case CheckpointPhase::Before:        return "before";
+        case CheckpointPhase::After:         return "after";
+        case CheckpointPhase::Completed:     return "completed";
+        case CheckpointPhase::NodeInterrupt: return "node_interrupt";
+        case CheckpointPhase::Updated:       return "updated";
+    }
+    return "unknown";  // unreachable — all enum values handled
+}
+
+CheckpointPhase parse_checkpoint_phase(std::string_view s) {
+    if (s == "before")         return CheckpointPhase::Before;
+    if (s == "after")          return CheckpointPhase::After;
+    if (s == "completed")      return CheckpointPhase::Completed;
+    if (s == "node_interrupt") return CheckpointPhase::NodeInterrupt;
+    if (s == "updated")        return CheckpointPhase::Updated;
+    throw std::invalid_argument(
+        "parse_checkpoint_phase: unknown phase '" + std::string(s) + "'");
+}
 
 // =========================================================================
 // UUID v4 generation

@@ -253,7 +253,7 @@ private:
                                const std::string& thread_id,
                                const std::string& current_node,
                                const std::vector<std::string>& next_nodes,
-                               const std::string& phase,
+                               CheckpointPhase phase,
                                int step,
                                const std::string& parent_id) const;
 
