@@ -42,8 +42,8 @@ auto result = engine->run(config);
 
 | Python + LangGraph | C++ + NeoGraph (measured) |
 |---|---|
-| ~500 MB runtime (Python + deps) | **982 KB static binary** (stripped, `example_plan_executor`) |
-| ~300 MB steady RSS | **3.1 MB peak RSS** (Plan & Executor run) |
+| ~500 MB runtime (Python + deps) | **1.1 MB static binary** (stripped, `example_plan_executor`) |
+| ~300 MB steady RSS | **2.9 MB peak RSS** (Plan & Executor run) |
 | 2–8 s import / cold start | **< 250 ms** end-to-end (crash + resume cycle included) |
 | GIL-limited parallelism | Taskflow work-stealing + lock-free RequestQueue |
 | Cloud / server only | Raspberry Pi Zero 2W, Jetson, drones, IoT, edge |
@@ -495,9 +495,7 @@ resumes with the failure cleared. No LLM calls, no API keys, no network.
 
 | Build configuration | Size |
 |---|---|
-| Debug (dev default) | 12.2 MB |
-| Release `-O3`, dynamic libstdc++, stripped | **653 KB** |
-| **MinSizeRel `-Os`, static libstdc++, `--gc-sections`, stripped** | **982 KB** |
+| **MinSizeRel `-Os`, static libstdc++, `--gc-sections`, stripped** | **1,119 KB (1.1 MB)** |
 
 The MinSizeRel binary's only dynamic dependency is `libc.so.6` —
 `libstdc++` and `libgcc_s` are linked in statically. Drop it onto any
@@ -519,7 +517,7 @@ Per-object contribution (Release, `.text` section):
 
 | Metric | Value |
 |---|---|
-| Peak RSS (full Plan & Executor run, crash + resume included) | **3.1 MB** |
+| Peak RSS (full Plan & Executor run, crash + resume included) | **2.9 MB** |
 | Wall-clock (cold start → both phases complete) | **~240 ms** |
 | Dynamic dependencies | `libc.so.6` only |
 
@@ -546,10 +544,10 @@ ldd       build-minsize/example_plan_executor        # dynamic deps (libc only)
 
 ### What the numbers mean for embedded / robotics
 
-- **982 KB static binary** fits a Docker `scratch` image under 1 MB, fits
-  on-board flash of a Pixhawk companion computer, fits in the first 1 MB
-  of a Jetson Orin boot partition. Python + LangGraph does not.
-- **3.1 MB RSS** means you can host **100+ concurrent agent sessions**
+- **1.1 MB static binary** fits a Docker `scratch` image at ~1 MB, fits
+  on-board flash of a Pixhawk companion computer, fits comfortably in
+  a Jetson Orin boot partition. Python + LangGraph does not.
+- **2.9 MB RSS** means you can host **100+ concurrent agent sessions**
   on an RPi Zero 2W (512 MB RAM) by sharing one compiled engine across
   threads — the [Concurrency & Async](#concurrency--async) section covers
   the pattern.
