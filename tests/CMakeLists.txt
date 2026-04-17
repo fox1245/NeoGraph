@@ -15,6 +15,7 @@ add_executable(neograph_tests
     test_compiler.cpp
     test_barrier_persistence.cpp
     test_coordinator.cpp
+    test_sends_interrupt_order.cpp
 )
 
 target_link_libraries(neograph_tests PRIVATE

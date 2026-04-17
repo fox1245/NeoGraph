@@ -240,6 +240,7 @@ std::vector<NodeResult> NodeExecutor::run_parallel(
     const std::unordered_map<std::string, NodeResult>& replay,
     CheckpointCoordinator& coord,
     const std::string& parent_cp_id,
+    const BarrierState& barrier_state,
     std::vector<std::string>& trace,
     const GraphStreamCallback& cb,
     StreamMode stream_mode) {
@@ -247,6 +248,10 @@ std::vector<NodeResult> NodeExecutor::run_parallel(
     std::map<std::string, NodeResult> all_results;
     std::mutex results_mutex;
     std::exception_ptr first_exception;
+    // Captured alongside first_exception so a NodeInterrupt from any
+    // parallel worker can still produce the same narrow resume
+    // (phase=NodeInterrupt, next_nodes={this_one}) that run_one does.
+    std::string first_exception_node;
 
     tf::Taskflow taskflow("fan-out");
     for (const auto& node_name : ready) {
@@ -268,13 +273,34 @@ std::vector<NodeResult> NodeExecutor::run_parallel(
                 all_results[node_name] = std::move(nr);
             } catch (...) {
                 std::lock_guard lock(results_mutex);
-                if (!first_exception) first_exception = std::current_exception();
+                if (!first_exception) {
+                    first_exception = std::current_exception();
+                    first_exception_node = node_name;
+                }
             }
         }).name(node_name);
     }
     global_executor().run(taskflow).wait();
 
-    if (first_exception) std::rethrow_exception(first_exception);
+    if (first_exception) {
+        // If this is a NodeInterrupt, match run_one's contract: save a
+        // phase=NodeInterrupt cp scoped to just the interrupting node
+        // BEFORE rethrowing. Successful siblings have already recorded
+        // pending writes against parent_cp_id, so resume's replay map
+        // will skip them and only the throwing node will re-execute.
+        try {
+            std::rethrow_exception(first_exception);
+        } catch (const NodeInterrupt&) {
+            coord.save_super_step(state,
+                first_exception_node,
+                std::vector<std::string>{first_exception_node},
+                CheckpointPhase::NodeInterrupt, step, parent_cp_id,
+                barrier_state);
+            throw;
+        }
+        // Non-NodeInterrupt: propagate as-is, no cp save (matches
+        // non-retry failure of run_one, which also doesn't save).
+    }
 
     // Apply results in ready order so caller can pair them 1:1 with
     // Scheduler's routing input (ready[i] ↔ step_results[i]).

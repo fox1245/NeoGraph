@@ -112,9 +112,12 @@ public:
      * in `ready` order so the caller can pair them with scheduler
      * routing decisions.
      *
-     * Parallel NodeInterrupts bypass coord.save_super_step here —
-     * only the outer catch at the engine layer can build the
-     * interrupt RunResult, and pre-extraction behavior did the same.
+     * If the first thrown exception is a NodeInterrupt, the offending
+     * node's name is captured and a phase=NodeInterrupt checkpoint is
+     * saved with `next_nodes={interrupted_node}` before rethrow —
+     * matching run_one's behavior so resume re-enters on just the
+     * interrupting node (replay skips the siblings that already
+     * completed via pending_writes).
      */
     std::vector<NodeResult> run_parallel(
         const std::vector<std::string>& ready,
@@ -123,6 +126,7 @@ public:
         const std::unordered_map<std::string, NodeResult>& replay,
         CheckpointCoordinator& coord,
         const std::string& parent_cp_id,
+        const BarrierState& barrier_state,
         std::vector<std::string>& trace,
         const GraphStreamCallback& cb,
         StreamMode stream_mode);
