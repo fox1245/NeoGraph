@@ -12,6 +12,7 @@
 #include <optional>
 #include <mutex>
 #include <map>
+#include <set>
 #include <vector>
 #include <string_view>
 #include <chrono>
@@ -25,7 +26,13 @@ namespace neograph::graph {
 ///   1 — first versioned format. `next_nodes` is `vector<string>`
 ///       (previously a single `next_node` string; the string form is
 ///       unversioned and predates this constant).
-constexpr int CHECKPOINT_SCHEMA_VERSION = 1;
+///   2 — added `barrier_state`: per-barrier accumulator of upstream
+///       signals received so far. v1 blobs deserialize with an empty
+///       map, which is safe — a barrier that had partial signals under
+///       v1 would have lost them anyway (the pre-v2 contract), so the
+///       v2 engine simply resumes with zero accumulated signals and
+///       waits for the full set again.
+constexpr int CHECKPOINT_SCHEMA_VERSION = 2;
 
 /// Phase at which a Checkpoint was produced. Drives resume semantics —
 /// `Before` means "re-enter before the target node runs", `After` /
@@ -76,6 +83,16 @@ struct Checkpoint {
     /// one would silently drop siblings.
     std::vector<std::string> next_nodes;
     CheckpointPhase interrupt_phase = CheckpointPhase::Completed;  ///< Phase at which this cp was produced.
+    /// Per-barrier accumulator: each entry maps a declared barrier node
+    /// to the set of upstreams that have signaled it so far. Persists
+    /// across super-steps for barriers that haven't yet reached their
+    /// `wait_for` set. The Scheduler clears an entry when its barrier
+    /// fires, so this map only ever contains in-flight (partial) state.
+    ///
+    /// Shape matches `BarrierState` from scheduler.h; kept as raw map
+    /// here to avoid pulling the scheduler header into every checkpoint
+    /// consumer.
+    std::map<std::string, std::set<std::string>> barrier_state;
     json        metadata;          ///< User-defined metadata.
     int64_t     step;              ///< Super-step number.
     int64_t     timestamp;         ///< Unix epoch milliseconds.

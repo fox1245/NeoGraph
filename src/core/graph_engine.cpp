@@ -213,7 +213,8 @@ Checkpoint GraphEngine::save_checkpoint(
     const std::vector<std::string>& next_nodes,
     CheckpointPhase phase,
     int step,
-    const std::string& parent_id) const {
+    const std::string& parent_id,
+    const BarrierState& barrier_state) const {
 
     Checkpoint cp;
     cp.id              = Checkpoint::generate_id();
@@ -223,6 +224,7 @@ Checkpoint GraphEngine::save_checkpoint(
     cp.current_node    = current_node;
     cp.next_nodes      = next_nodes;
     cp.interrupt_phase = phase;
+    cp.barrier_state   = barrier_state;
     cp.step            = step;
     cp.timestamp       = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -503,11 +505,18 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
     // results are applied exactly as originally recorded.
     std::unordered_map<std::string, NodeResult> replay_results;
 
+    // Deferred barrier-state restore: captured from the resume cp below
+    // and assigned to `barrier_state` after its declaration further down.
+    BarrierState restored_barrier_state;
+    bool have_restored_barrier_state = false;
+
     if (is_resume && checkpoint_store_ && !config.thread_id.empty()) {
         auto cp_opt = checkpoint_store_->load_latest(config.thread_id);
         if (cp_opt) {
             state.restore(cp_opt->channel_values);
             last_checkpoint_id = cp_opt->id;
+            restored_barrier_state = cp_opt->barrier_state;
+            have_restored_barrier_state = true;
 
             // Phase-aware step offset:
             //   "before"     → cp was saved *before* the node in this step ran,
@@ -558,12 +567,13 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
 
     // Per-run barrier accumulation. Scheduler mutates this across
     // super-steps so partial upstream-signal sets add up over time.
-    // WARNING: this state is in-memory only — it is NOT written into
-    // Checkpoints (schema v1 doesn't carry it), so a resume starts
-    // with an empty map. Graphs with barriers should therefore
-    // currently avoid interrupting mid-accumulation. See
-    // CHECKPOINT_SCHEMA_VERSION log for the v2 plan.
+    // Since schema v2 the map is persisted into every checkpoint and
+    // restored here on resume, so an interrupt mid-accumulation no
+    // longer loses upstream signals.
     BarrierState barrier_state;
+    if (have_restored_barrier_state) {
+        barrier_state = std::move(restored_barrier_state);
+    }
 
     for (int step = start_step; step < config.max_steps + start_step; ++step) {
         if (ready.empty() || hit_end) break;
@@ -581,7 +591,8 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                     // this one would silently drop the siblings.
                     auto cp = save_checkpoint(state, config.thread_id,
                         node_name, ready,
-                        CheckpointPhase::Before, step, last_checkpoint_id);
+                        CheckpointPhase::Before, step, last_checkpoint_id,
+                        barrier_state);
 
                     RunResult result;
                     result.output          = state.serialize();
@@ -643,7 +654,8 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                     // re-enter exactly here.
                     save_checkpoint(state, config.thread_id,
                         node_name, std::vector<std::string>{node_name},
-                        CheckpointPhase::NodeInterrupt, step, last_checkpoint_id);
+                        CheckpointPhase::NodeInterrupt, step, last_checkpoint_id,
+                        barrier_state);
                 }
                 throw;
             }
@@ -750,7 +762,8 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                 if (nexts.empty()) nexts.push_back(std::string(END_NODE));
 
                 auto cp = save_checkpoint(state, config.thread_id,
-                    node_name, nexts, CheckpointPhase::After, step, last_checkpoint_id);
+                    node_name, nexts, CheckpointPhase::After, step, last_checkpoint_id,
+                    barrier_state);
 
                 RunResult result;
                 result.output          = state.serialize();
@@ -895,7 +908,8 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                               : ready;
             const std::string parent_cp_id = last_checkpoint_id;
             auto cp = save_checkpoint(state, config.thread_id,
-                trace.back(), next_nodes, CheckpointPhase::Completed, step, parent_cp_id);
+                trace.back(), next_nodes, CheckpointPhase::Completed, step, parent_cp_id,
+                barrier_state);
             last_checkpoint_id = cp.id;
 
             // Pending writes for the just-committed super-step are now
