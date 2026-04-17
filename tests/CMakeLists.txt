@@ -13,6 +13,7 @@ add_executable(neograph_tests
     test_scheduler.cpp
     test_node_execution.cpp
     test_compiler.cpp
+    test_barrier_persistence.cpp
 )
 
 target_link_libraries(neograph_tests PRIVATE

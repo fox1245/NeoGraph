@@ -1019,7 +1019,7 @@ static std::unique_ptr<GraphEngine> compile(
 | `interrupt_before` | X | HITL: 이 노드 실행 전에 인터럽트 |
 | `interrupt_after` | X | HITL: 이 노드 실행 후에 인터럽트 |
 
-**노드별 barrier (AND-join 옵트인):** 개별 노드 정의에 `"barrier": {"wait_for": ["a", "b"]}`를 추가하면 해당 노드는 **모든** 지정된 upstream이 신호를 보낼 때까지 실행을 지연함. signal dispatch 기본 모델은 비대칭 serial fan-in에서 join을 경로당 1회씩 중복 실행하는데, barrier가 이를 1회로 합침. 발사 후 상태가 리셋되어 loop 그래프에서도 재사용 가능. **현재 제약:** barrier 누적 상태는 in-memory이며 `Checkpoint`에 저장되지 않음 — barrier 누적 중 resume 시 부분 신호 손실. 다음 `CHECKPOINT_SCHEMA_VERSION` 증가에서 영속화 예정.
+**노드별 barrier (AND-join 옵트인):** 개별 노드 정의에 `"barrier": {"wait_for": ["a", "b"]}`를 추가하면 해당 노드는 **모든** 지정된 upstream이 신호를 보낼 때까지 실행을 지연함. signal dispatch 기본 모델은 비대칭 serial fan-in에서 join을 경로당 1회씩 중복 실행하는데, barrier가 이를 1회로 합침. 발사 후 상태가 리셋되어 loop 그래프에서도 재사용 가능. **영속성:** `CHECKPOINT_SCHEMA_VERSION = 2`부터 barrier 누적 상태(`Checkpoint::barrier_state`, `map<string, set<string>>`)가 모든 체크포인트에 저장되며 resume 시 복원됨. barrier 누적 중 인터럽트가 발생해도 부분 upstream 집합이 보존되어, 나머지 신호가 도착하면 정상적으로 발사됨. v1 blob은 빈 `barrier_state`로 로드됨 (기존 pre-v2 동작과 동등).
 
 **전체 예제:**
 

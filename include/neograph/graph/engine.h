@@ -256,7 +256,8 @@ private:
                                const std::vector<std::string>& next_nodes,
                                CheckpointPhase phase,
                                int step,
-                               const std::string& parent_id) const;
+                               const std::string& parent_id,
+                               const BarrierState& barrier_state) const;
 
     NodeResult execute_node_with_retry(
         const std::string& node_name,

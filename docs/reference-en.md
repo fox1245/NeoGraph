@@ -1036,12 +1036,13 @@ super-steps):
 Fires once when both `a` and `s2` have signaled. State resets on
 fire, so loops through the barrier collect fresh signals each round.
 
-**Limitation (current):** barrier accumulation state is in-memory
-only and not persisted in `Checkpoint` — a resume that lands
-mid-accumulation loses partial signals. Avoid interrupting graphs
-with barriers while some, but not all, upstreams have fired.
-Barrier persistence is slated for the next `CHECKPOINT_SCHEMA_VERSION`
-bump.
+**Persistence:** since `CHECKPOINT_SCHEMA_VERSION = 2`, the barrier
+accumulator is persisted on every checkpoint (`Checkpoint::barrier_state`,
+a `map<string, set<string>>`) and restored on resume. Interrupts that
+land mid-accumulation are therefore safe — the partial upstream set
+survives the pause and the barrier fires as soon as the remaining
+signals arrive. v1 blobs deserialize with an empty `barrier_state`,
+matching pre-v2 behavior for those stored checkpoints.
 
 #### `run`
 
