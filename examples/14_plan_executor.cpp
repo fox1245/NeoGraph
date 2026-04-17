@@ -221,7 +221,7 @@ int main() {
 
     std::cout << "── Checkpoint history ────────────────────────────────\n";
     for (const auto& cp : store->list(cfg.thread_id)) {
-        std::cout << "  [" << cp.interrupt_phase << "] step=" << cp.step
+        std::cout << "  [" << to_string(cp.interrupt_phase) << "] step=" << cp.step
                   << "  " << cp.current_node << " → ";
         for (size_t i = 0; i < cp.next_nodes.size(); ++i) {
             if (i) std::cout << ",";

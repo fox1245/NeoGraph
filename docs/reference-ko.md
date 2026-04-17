@@ -1283,7 +1283,7 @@ struct Checkpoint {
     std::string parent_id;        // 이전 checkpoint (time-travel 체인)
     std::string current_node;     // checkpoint 시점의 활성 노드
     std::vector<std::string> next_nodes;  // 재개 시 실행할 노드 목록
-    std::string interrupt_phase;  // "before" | "after" | "completed"
+    CheckpointPhase interrupt_phase;  // Before | After | Completed | NodeInterrupt | Updated
     json        metadata;         // 사용자 정의 메타데이터
     int64_t     step;             // super-step 번호
     int64_t     timestamp;        // Unix epoch 밀리초
@@ -1298,7 +1298,7 @@ struct Checkpoint {
 | `id` | 고유 식별자. `generate_id()`로 자동 생성 |
 | `thread_id` | 대화/세션 단위 식별자 |
 | `parent_id` | 이전 checkpoint와 연결 (체인) |
-| `interrupt_phase` | `"before"` -- 노드 실행 전 인터럽트, `"after"` -- 실행 후, `"completed"` -- 정상 완료 |
+| `interrupt_phase` | `CheckpointPhase` enum. `Before` -- interrupt_before, `After` -- interrupt_after, `Completed` -- super-step 정상 종료, `NodeInterrupt` -- 노드 내부에서 `NodeInterrupt` throw, `Updated` -- `update_state()`로 외부 주입. 문자열 인코딩은 `to_string()` / `parse_checkpoint_phase()` |
 | `step` | 몇 번째 super-step에서 생성되었는지 |
 
 ---
@@ -1363,7 +1363,7 @@ auto history = store->list("thread-001");
 for (const auto& cp : history) {
     std::cout << "step=" << cp.step
               << " node=" << cp.current_node
-              << " phase=" << cp.interrupt_phase << "\n";
+              << " phase=" << to_string(cp.interrupt_phase) << "\n";
 }
 ```
 

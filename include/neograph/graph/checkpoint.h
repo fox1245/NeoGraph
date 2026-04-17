@@ -13,6 +13,7 @@
 #include <mutex>
 #include <map>
 #include <vector>
+#include <string_view>
 #include <chrono>
 
 namespace neograph::graph {
@@ -25,6 +26,34 @@ namespace neograph::graph {
 ///       (previously a single `next_node` string; the string form is
 ///       unversioned and predates this constant).
 constexpr int CHECKPOINT_SCHEMA_VERSION = 1;
+
+/// Phase at which a Checkpoint was produced. Drives resume semantics —
+/// `Before` means "re-enter before the target node runs", `After` /
+/// `Completed` means "routing has already happened, advance from the
+/// stored next_nodes", `NodeInterrupt` means "a node threw
+/// NodeInterrupt mid-execution", `Updated` means "user patched state
+/// out-of-band via update_state()".
+enum class CheckpointPhase {
+    Before,         ///< Saved just before an interrupt_before node fires.
+    After,          ///< Saved just after an interrupt_after node completed.
+    Completed,      ///< Saved at end of super-step (normal cadence).
+    NodeInterrupt,  ///< Saved when a node threw NodeInterrupt.
+    Updated         ///< Saved by update_state() injecting state externally.
+};
+
+/// @brief Canonical wire / log string for a CheckpointPhase.
+///
+/// The returned value is the same as the legacy stringly-typed phase
+/// so persistent stores serializing with to_string() produce identical
+/// blobs to pre-enum NeoGraph.
+const char* to_string(CheckpointPhase phase);
+
+/// @brief Parse a phase string back to the enum.
+///
+/// Useful for deserializing checkpoints from persistent stores. Unknown
+/// strings throw std::invalid_argument — deliberate, because silent
+/// fallback would mask wire-format drift.
+CheckpointPhase parse_checkpoint_phase(std::string_view s);
 
 /**
  * @brief Serialized snapshot of graph execution state at a single super-step.
@@ -46,7 +75,7 @@ struct Checkpoint {
     /// multiple conditional branches activating together); storing only
     /// one would silently drop siblings.
     std::vector<std::string> next_nodes;
-    std::string interrupt_phase;   ///< Phase: "before", "after", or "completed".
+    CheckpointPhase interrupt_phase = CheckpointPhase::Completed;  ///< Phase at which this cp was produced.
     json        metadata;          ///< User-defined metadata.
     int64_t     step;              ///< Super-step number.
     int64_t     timestamp;         ///< Unix epoch milliseconds.

@@ -148,7 +148,7 @@ int main() {
     auto checkpoints = store->list("order-001");
     std::cout << "\n=== Checkpoint history (" << checkpoints.size() << " entries) ===\n";
     for (const auto& cp : checkpoints) {
-        std::cout << "  [" << cp.interrupt_phase << "] step=" << cp.step
+        std::cout << "  [" << to_string(cp.interrupt_phase) << "] step=" << cp.step
                   << " node=" << cp.current_node << " → ";
         for (size_t i = 0; i < cp.next_nodes.size(); ++i) {
             if (i) std::cout << ",";

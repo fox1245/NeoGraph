@@ -267,7 +267,7 @@ Checkpoint GraphEngine::save_checkpoint(
     const std::string& thread_id,
     const std::string& current_node,
     const std::vector<std::string>& next_nodes,
-    const std::string& phase,
+    CheckpointPhase phase,
     int step,
     const std::string& parent_id) const {
 
@@ -335,7 +335,7 @@ void GraphEngine::update_state(const std::string& thread_id,
     new_cp.parent_id       = cp.id;
     new_cp.current_node    = as_node.empty() ? cp.current_node : as_node;
     new_cp.next_nodes      = cp.next_nodes;
-    new_cp.interrupt_phase = "updated";
+    new_cp.interrupt_phase = CheckpointPhase::Updated;
     new_cp.step            = cp.step;
     new_cp.timestamp       = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -572,8 +572,8 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
             //   "after" / "completed" → cp was saved *after* the step's work
             //                  finished, so resume starts at the NEXT step.
             start_step = static_cast<int>(cp_opt->step);
-            if (cp_opt->interrupt_phase == "after" ||
-                cp_opt->interrupt_phase == "completed") {
+            if (cp_opt->interrupt_phase == CheckpointPhase::After ||
+                cp_opt->interrupt_phase == CheckpointPhase::Completed) {
                 start_step += 1;
             }
 
@@ -628,7 +628,7 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                     // this one would silently drop the siblings.
                     auto cp = save_checkpoint(state, config.thread_id,
                         node_name, ready,
-                        "before", step, last_checkpoint_id);
+                        CheckpointPhase::Before, step, last_checkpoint_id);
 
                     RunResult result;
                     result.output          = state.serialize();
@@ -690,7 +690,7 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                     // re-enter exactly here.
                     save_checkpoint(state, config.thread_id,
                         node_name, std::vector<std::string>{node_name},
-                        "node_interrupt", step, last_checkpoint_id);
+                        CheckpointPhase::NodeInterrupt, step, last_checkpoint_id);
                 }
                 throw;
             }
@@ -797,7 +797,7 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                 if (nexts.empty()) nexts.push_back(std::string(END_NODE));
 
                 auto cp = save_checkpoint(state, config.thread_id,
-                    node_name, nexts, "after", step, last_checkpoint_id);
+                    node_name, nexts, CheckpointPhase::After, step, last_checkpoint_id);
 
                 RunResult result;
                 result.output          = state.serialize();
@@ -954,7 +954,7 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
                               : ready;
             const std::string parent_cp_id = last_checkpoint_id;
             auto cp = save_checkpoint(state, config.thread_id,
-                trace.back(), next_nodes, "completed", step, parent_cp_id);
+                trace.back(), next_nodes, CheckpointPhase::Completed, step, parent_cp_id);
             last_checkpoint_id = cp.id;
 
             // Pending writes for the just-committed super-step are now

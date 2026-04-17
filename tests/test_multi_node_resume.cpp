@@ -87,7 +87,7 @@ TEST(MultiNodeResume, FanOutCheckpointPersistsBothBranches) {
     auto history = engine->get_state_history("fanout-mid-001");
     const Checkpoint* after_a = nullptr;
     for (auto& cp : history) {
-        if (cp.current_node == "a" && cp.interrupt_phase == "completed") {
+        if (cp.current_node == "a" && cp.interrupt_phase == CheckpointPhase::Completed) {
             after_a = &cp;
             break;
         }
@@ -223,7 +223,7 @@ TEST(MultiNodeResume, ForkCopiesEntireNextNodesVector) {
     cp.channel_values = json::object();
     cp.current_node = "planner";
     cp.next_nodes = {"a", "b", "c"};
-    cp.interrupt_phase = "completed";
+    cp.interrupt_phase = CheckpointPhase::Completed;
     cp.step = 3;
     cp.timestamp = 1;
 
