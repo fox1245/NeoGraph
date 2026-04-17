@@ -85,6 +85,7 @@ add_library(neograph_core STATIC
     src/core/graph_loader.cpp
     src/core/graph_checkpoint.cpp
     src/core/react_graph.cpp
+    src/core/plan_execute_graph.cpp
     src/core/store.cpp
 )
 
