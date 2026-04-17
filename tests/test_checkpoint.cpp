@@ -116,3 +116,36 @@ TEST_F(CheckpointTest, GenerateIdUnique) {
     EXPECT_NE(id1, id2);
     EXPECT_GT(id1.size(), 10);  // UUID-like length
 }
+
+// A fresh Checkpoint (either default-constructed or built via make_cp)
+// must carry the current schema version, so persistent stores serialize
+// the field instead of writing 0 and later mis-classifying it as a
+// pre-versioned blob needing migration.
+TEST_F(CheckpointTest, FreshCheckpointCarriesCurrentSchemaVersion) {
+    Checkpoint fresh;
+    EXPECT_EQ(fresh.schema_version, CHECKPOINT_SCHEMA_VERSION);
+
+    auto cp = make_cp("thread-1", 0);
+    EXPECT_EQ(cp.schema_version, CHECKPOINT_SCHEMA_VERSION);
+
+    store.save(cp);
+    auto loaded = store.load_latest("thread-1");
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(loaded->schema_version, CHECKPOINT_SCHEMA_VERSION);
+}
+
+// Confirms the contract that stores loading legacy blobs (which predate
+// the field) can distinguish them by seeing schema_version == 0 and
+// take a migration path — the in-memory store round-trips an explicit
+// 0 unchanged.
+TEST_F(CheckpointTest, PreVersionedSentinelRoundTrips) {
+    auto cp = make_cp("legacy-thread", 0);
+    cp.schema_version = 0;  // simulate a blob deserialized without the field
+    store.save(cp);
+
+    auto loaded = store.load_latest("legacy-thread");
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(loaded->schema_version, 0)
+        << "store must not silently upgrade — migration is the caller's "
+           "responsibility so the caller can log / one-shot convert";
+}

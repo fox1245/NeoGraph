@@ -17,6 +17,15 @@
 
 namespace neograph::graph {
 
+/// Current Checkpoint layout version. Bump whenever the on-wire schema
+/// changes in a way that would break a naive load of an older blob.
+///
+/// Version log:
+///   1 — first versioned format. `next_nodes` is `vector<string>`
+///       (previously a single `next_node` string; the string form is
+///       unversioned and predates this constant).
+constexpr int CHECKPOINT_SCHEMA_VERSION = 1;
+
 /**
  * @brief Serialized snapshot of graph execution state at a single super-step.
  *
@@ -41,6 +50,13 @@ struct Checkpoint {
     json        metadata;          ///< User-defined metadata.
     int64_t     step;              ///< Super-step number.
     int64_t     timestamp;         ///< Unix epoch milliseconds.
+    /// Layout version of this record. Persistent CheckpointStore impls
+    /// should write it and inspect it on load: a value of 0 on a
+    /// deserialized blob means "pre-versioned format" and may require
+    /// migration (e.g. promoting a single next_node field into a one-
+    /// element next_nodes vector). In-memory checkpoints created
+    /// through the engine always carry CHECKPOINT_SCHEMA_VERSION.
+    int         schema_version = CHECKPOINT_SCHEMA_VERSION;
 
     /**
      * @brief Generate a new UUID v4 string.
