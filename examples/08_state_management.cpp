@@ -195,8 +195,12 @@ int main() {
         std::cout << "  #" << (i + 1) << " [" << cp.interrupt_phase << "]"
                   << " step=" << cp.step
                   << " node=" << cp.current_node
-                  << " → " << cp.next_node
-                  << " id=" << cp.id.substr(0, 8) << "...\n";
+                  << " → ";
+        for (size_t j = 0; j < cp.next_nodes.size(); ++j) {
+            if (j) std::cout << ",";
+            std::cout << cp.next_nodes[j];
+        }
+        std::cout << " id=" << cp.id.substr(0, 8) << "...\n";
     }
 
     auto fork_history = engine->get_state_history("thread-001-tokyo");
