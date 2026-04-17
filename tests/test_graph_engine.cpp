@@ -114,7 +114,7 @@ TEST_F(GraphEngineTest, ResultChannelWritten) {
     auto result = engine->run(config);
 
     ASSERT_TRUE(result.output.contains("channels"));
-    auto& channels = result.output["channels"];
+    auto channels = result.output["channels"];
     ASSERT_TRUE(channels.contains("result"));
     EXPECT_EQ(channels["result"]["value"], "done_by_worker");
 }
@@ -304,7 +304,7 @@ TEST_F(GraphEngineTest, ConcurrentRunDifferentThreadIds) {
                 }
                 if (r.interrupted) return "unexpected interrupt";
                 if (!r.output.contains("channels")) return "missing channels";
-                auto& ch = r.output["channels"];
+                auto ch = r.output["channels"];
                 if (!ch.contains("result")) return "missing result channel";
                 int got = ch["result"]["value"].get<int>();
                 int want = input_val * 2;

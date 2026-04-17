@@ -2,7 +2,7 @@
 #include <neograph/graph/checkpoint.h>
 
 using namespace neograph::graph;
-using json = nlohmann::json;
+using json = neograph::json;
 
 class CheckpointTest : public ::testing::Test {
 protected:

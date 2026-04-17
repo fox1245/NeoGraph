@@ -2,7 +2,7 @@
 #include <neograph/graph/store.h>
 
 using namespace neograph::graph;
-using json = nlohmann::json;
+using json = neograph::json;
 
 class StoreTest : public ::testing::Test {
 protected:

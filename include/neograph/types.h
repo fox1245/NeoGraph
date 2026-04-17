@@ -10,12 +10,9 @@
 
 #include <string>
 #include <vector>
-#include <nlohmann/json.hpp>
+#include <neograph/json.h>
 
 namespace neograph {
-
-/// Convenience alias for the JSON library type used throughout NeoGraph.
-using json = nlohmann::json;
 
 /**
  * @brief Represents a single tool invocation requested by the LLM.
@@ -212,7 +209,7 @@ inline json tools_to_json(const std::vector<ChatTool>& tools) {
  */
 inline ChatMessage parse_response_message(const json& choice) {
     ChatMessage msg;
-    auto& m = choice.at("message");
+    auto m = choice.at("message");
     msg.role = m.value("role", "assistant");
     msg.content = (m.contains("content") && !m["content"].is_null())
                   ? m["content"].get<std::string>() : "";
@@ -221,7 +218,7 @@ inline ChatMessage parse_response_message(const json& choice) {
         for (const auto& tc : m["tool_calls"]) {
             ToolCall call;
             call.id = tc.value("id", "");
-            auto& fn = tc.at("function");
+            auto fn = tc.at("function");
             call.name = fn.value("name", "");
             call.arguments = fn.value("arguments", "");
             msg.tool_calls.push_back(std::move(call));

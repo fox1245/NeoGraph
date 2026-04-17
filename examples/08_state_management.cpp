@@ -60,7 +60,7 @@ static void print_separator(const std::string& title) {
 
 static void print_messages(const neograph::json& state) {
     if (!state.contains("channels") || !state["channels"].contains("messages")) return;
-    auto& msgs = state["channels"]["messages"]["value"];
+    auto msgs = state["channels"]["messages"]["value"];
     if (!msgs.is_array()) return;
 
     for (const auto& m : msgs) {
