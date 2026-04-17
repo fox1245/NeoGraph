@@ -1,0 +1,13 @@
+# LangGraph concurrent bench image.
+#
+# Build from repo root (context just needs the bench script):
+#   docker build -t lg-concurrent -f benchmarks/concurrent/Dockerfile.langgraph .
+
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir langgraph==1.1.7
+
+WORKDIR /app
+COPY benchmarks/concurrent/bench_concurrent_langgraph.py /app/bench.py
+
+ENTRYPOINT ["python", "-u", "/app/bench.py"]

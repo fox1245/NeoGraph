@@ -1,0 +1,11 @@
+build/
+build-*/
+docs/api/
+.git
+.github
+.claude
+.env
+.playwright-mcp
+NEXT_SESSION.md
+benchmarks/concurrent/results*.jsonl
+tests/NeoGraph.code-workspace

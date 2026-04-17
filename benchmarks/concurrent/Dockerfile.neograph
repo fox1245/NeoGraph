@@ -1,0 +1,42 @@
+# NeoGraph concurrent bench image.
+#
+# Build from repo root:
+#   docker build -t ng-concurrent -f benchmarks/concurrent/Dockerfile.neograph .
+
+FROM ubuntu:24.04 AS build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        ninja-build \
+        pkg-config \
+        python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+# Core-only build — skip llm / mcp / util / examples to keep CI fast.
+RUN cmake -S . -B build \
+        -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DNEOGRAPH_BUILD_LLM=OFF \
+        -DNEOGRAPH_BUILD_MCP=OFF \
+        -DNEOGRAPH_BUILD_UTIL=OFF \
+        -DNEOGRAPH_BUILD_EXAMPLES=OFF \
+        -DNEOGRAPH_BUILD_TESTS=OFF \
+    && cmake --build build --target neograph_core -j
+
+RUN g++ -std=c++20 -O2 -DNDEBUG \
+        -Iinclude -Ideps -Ideps/yyjson \
+        benchmarks/concurrent/bench_concurrent_neograph.cpp \
+        build/libneograph_core.a build/libyyjson.a \
+        -pthread -o /usr/local/bin/bench_ng
+
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /usr/local/bin/bench_ng /usr/local/bin/bench_ng
+
+ENTRYPOINT ["/usr/local/bin/bench_ng"]
