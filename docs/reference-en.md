@@ -1190,6 +1190,7 @@ struct Checkpoint {
     json        metadata;          // User-defined metadata
     int64_t     step;              // Super-step number
     int64_t     timestamp;         // Unix epoch milliseconds
+    int         schema_version = CHECKPOINT_SCHEMA_VERSION;  // Layout version
 
     static std::string generate_id();  // Generate UUID v4
 };
@@ -1208,6 +1209,7 @@ struct Checkpoint {
 | `metadata` | `json` | Arbitrary user-defined data |
 | `step` | `int64_t` | Super-step counter |
 | `timestamp` | `int64_t` | Creation time in Unix epoch milliseconds |
+| `schema_version` | `int` | On-wire layout version (see `CHECKPOINT_SCHEMA_VERSION`). Fresh checkpoints from the engine always carry the current version. Persistent `CheckpointStore` implementations should serialize it and treat `0` on a deserialized blob as "pre-versioned" (e.g. the field was absent — migration is the caller's responsibility) |
 
 ### CheckpointStore
 

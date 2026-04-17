@@ -1287,6 +1287,7 @@ struct Checkpoint {
     json        metadata;         // 사용자 정의 메타데이터
     int64_t     step;             // super-step 번호
     int64_t     timestamp;        // Unix epoch 밀리초
+    int         schema_version = CHECKPOINT_SCHEMA_VERSION;  // 레이아웃 버전
 
     static std::string generate_id(); // UUID v4 생성
 };
