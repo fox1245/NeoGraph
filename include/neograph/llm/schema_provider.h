@@ -15,6 +15,7 @@
 #include <neograph/llm/json_path.h>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <map>
 
@@ -45,6 +46,7 @@ class SchemaProvider : public Provider {
         std::string api_key;                        ///< API key (overrides env var if set).
         std::string default_model = "gpt-4o-mini";  ///< Default model name.
         int timeout_seconds = 60;                   ///< HTTP request timeout in seconds.
+        std::string base_url_override;              ///< If non-empty, overrides the schema's `connection.base_url`. Useful for test doubles and self-hosted OpenAI-compatible endpoints.
     };
 
     /**
@@ -199,6 +201,15 @@ class SchemaProvider : public Provider {
         std::string delta_tool_call_args_field;
         json events_config;
     };
+
+    // Serializes access to the schema-derived json templates (schema_,
+    // tool_call_.item_template, tool_result_.item_template, req_.extra_fields,
+    // etc.). These are backed by shared yyjson_mut_doc handles — even
+    // read-only traversal of a yyjson_mut_val from multiple threads at once
+    // trips internal iterator state that yyjson explicitly disclaims as
+    // thread-unsafe for mutable docs. HTTP I/O is issued OUTSIDE this lock
+    // so concurrent fan-out requests still overlap on the network.
+    mutable std::mutex schema_mutex_;
 
     // --- Parsed config ---
     Config user_config_;

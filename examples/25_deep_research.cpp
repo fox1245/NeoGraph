@@ -242,7 +242,7 @@ int main(int argc, char** argv) {
 
     const char* api_key = std::getenv("ANTHROPIC_API_KEY");
     if (!api_key) {
-        std::cerr << "Set ANTHROPIC_API_KEY in the environment or in ./\.env\n";
+        std::cerr << "Set ANTHROPIC_API_KEY in the environment or in ./.env\n";
         return 1;
     }
 
