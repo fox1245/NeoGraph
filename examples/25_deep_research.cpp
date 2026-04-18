@@ -166,8 +166,10 @@ public:
 
         try {
             std::string md = client_->fetch_markdown(ddg_url, query);
-            // DDG's HTML is noisy; cap length so we don't explode context.
-            if (md.size() > 8000) md.resize(8000);
+            // DDG's HTML is noisy; cap aggressively. Researcher context
+            // bloat propagates to supervisor via compressed summaries; keep
+            // raw tool output small so there's less for the model to quote.
+            if (md.size() > 3000) md.resize(3000);
             return md;
         } catch (const std::exception& e) {
             json err = {{"error", std::string("web_search failed: ") + e.what()}};
@@ -214,7 +216,7 @@ public:
 
         try {
             std::string md = client_->fetch_markdown(url);
-            if (md.size() > 16000) md.resize(16000);
+            if (md.size() > 5000) md.resize(5000);
             return md;
         } catch (const std::exception& e) {
             json err = {{"error", std::string("fetch_url failed: ") + e.what()}};
@@ -272,9 +274,9 @@ int main(int argc, char** argv) {
 
     graph::DeepResearchConfig cfg;
     cfg.model = model;
-    cfg.max_supervisor_iterations  = 3;
+    cfg.max_supervisor_iterations  = 2;
     cfg.max_concurrent_researchers = 3;
-    cfg.max_researcher_iterations  = 4;
+    cfg.max_researcher_iterations  = 3;
 
     auto engine = graph::create_deep_research_graph(
         provider, std::move(tools), cfg);
@@ -287,10 +289,13 @@ int main(int argc, char** argv) {
     graph::RunConfig rc;
     rc.thread_id  = "dr-1";
     rc.max_steps  = 40;
-    rc.stream_mode = graph::StreamMode::EVENTS;
+    // DEBUG enables __send__ / __routing__ meta-events so fan-out is visible.
+    rc.stream_mode = graph::StreamMode::EVENTS | graph::StreamMode::DEBUG;
     rc.input = {{"user_query", query}};
 
-    auto result = engine->run_stream(rc,
+    graph::RunResult result;
+    try {
+        result = engine->run_stream(rc,
         [](const graph::GraphEvent& event) {
             using T = graph::GraphEvent::Type;
             switch (event.type) {
@@ -318,6 +323,15 @@ int main(int argc, char** argv) {
                 default: break;
             }
         });
+    } catch (const std::exception& e) {
+        std::cerr << "\n[fatal] run aborted: " << e.what() << "\n";
+        std::cerr << "If this is Anthropic HTTP 429, your org's tokens-per-minute\n"
+                     "budget is too tight for the default iteration counts. Try:\n"
+                     "  * lowering max_supervisor_iterations / max_concurrent_researchers\n"
+                     "  * shrinking Crawl4AI response caps further\n"
+                     "  * upgrading your Anthropic rate tier\n";
+        return 1;
+    }
 
     std::cout << "\n--- Execution trace ---\n";
     for (size_t i = 0; i < result.execution_trace.size(); ++i) {

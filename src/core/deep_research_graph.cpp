@@ -23,19 +23,18 @@ namespace {
 // load-bearing instructions.
 // =========================================================================
 
-constexpr const char* SUPERVISOR_SYSTEM = R"(You are a lead research supervisor. Given a research brief, your job is to decompose it into focused sub-topics and dispatch parallel researchers.
+constexpr const char* SUPERVISOR_SYSTEM = R"(You are a lead research supervisor. Given a research brief, decompose it into focused sub-topics and dispatch parallel researchers.
 
-You have three tools:
-  - conduct_research(research_topic: string): dispatch a sub-researcher to investigate ONE focused topic. Call this multiple times in a single turn to fan out in parallel.
-  - think_tool(reflection: string): pause and record your reasoning. Use this between research rounds to plan the next step.
-  - research_complete(): stop researching. Call ONLY when you have enough material to write a comprehensive report.
+Tools:
+  - conduct_research(research_topic: string): dispatch one sub-researcher. Call MULTIPLE TIMES in a single assistant turn to fan out in parallel.
+  - think_tool(reflection: string): private reasoning. NEVER use alone — always pair with conduct_research or research_complete.
+  - research_complete(): finish researching. Call when coverage is adequate.
 
-Guidelines:
-  * In the FIRST turn, issue 2–4 parallel `conduct_research` calls covering distinct angles of the brief.
-  * Each `research_topic` must be a self-contained paragraph: include the question, the context, and what specifically to look for.
-  * After researchers return, decide whether coverage is sufficient. If gaps remain, issue more `conduct_research` calls.
-  * Call `research_complete` as soon as the brief is adequately covered. Do NOT over-research.
-  * Total budget: a few rounds. Quality over quantity.
+HARD RULES (the graph engine depends on these):
+  1. On your FIRST turn you MUST call conduct_research 2–4 times in parallel. Do NOT just think_tool.
+  2. Each research_topic is one SHORT paragraph (2–4 sentences) describing the question + what to look for. NOT prose-heavy — the researcher will do the reading.
+  3. After researchers report back, either dispatch more conduct_research OR call research_complete. Do not loop indefinitely.
+  4. Total budget: at most 2 rounds of research. Prefer quality+breadth in round 1 over many shallow rounds.
 )";
 
 constexpr const char* RESEARCHER_SYSTEM = R"(You are a focused researcher. You were given ONE topic. Investigate it using your tools and return rich, citation-backed findings.
@@ -53,7 +52,11 @@ Workflow:
   * Budget: a handful of tool calls. Keep moving.
 )";
 
-constexpr const char* COMPRESS_SYSTEM = R"(You are compressing raw research notes into a dense summary. Preserve every concrete fact, number, and URL citation. Drop only meta-commentary ("let me search for...", "I'll now..."). Output only the compressed summary as markdown prose.)";
+constexpr const char* COMPRESS_SYSTEM = R"(Compress raw research notes into a terse summary.
+  * Target length: 400–700 characters. Hard ceiling: 900.
+  * Keep concrete facts, numbers, and URL citations. Drop meta-commentary.
+  * Output ONLY the summary, no preamble. Bulleted markdown is fine.
+)";
 
 constexpr const char* FINAL_REPORT_SYSTEM = R"(You are a senior analyst writing a final research report. You will be given:
   1. The original research brief.
@@ -559,7 +562,17 @@ private:
 
         try {
             auto completion = provider_->complete(cp);
-            return completion.message.content;
+            std::string out = completion.message.content;
+            // Hard cap regardless of what the model produced. Protects the
+            // supervisor's accumulated context from unbounded growth across
+            // research rounds — each round appends one tool_result per
+            // researcher to supervisor_messages.
+            constexpr size_t kMaxCompressed = 1000;
+            if (out.size() > kMaxCompressed) {
+                out.resize(kMaxCompressed);
+                out += "\n…(truncated)";
+            }
+            return out;
         } catch (const std::exception& e) {
             return std::string("(compression failed: ") + e.what() + ")";
         }
@@ -793,6 +806,20 @@ std::unique_ptr<GraphEngine> create_deep_research_graph(
 
     auto engine = GraphEngine::compile(definition, ctx);
     engine->own_tools(std::move(tools));
+
+    // Resilience against transient Anthropic 5xx and rate-limit (HTTP 429)
+    // errors. Anthropic's minute-window rate limits usually clear within 60s;
+    // two retries at up to 45s apart cover that. Applied to every LLM-calling
+    // node. Brief/dispatch don't call the API but policy is harmless there.
+    RetryPolicy llm_retry;
+    llm_retry.max_retries       = 2;
+    llm_retry.initial_delay_ms  = 15'000;
+    llm_retry.backoff_multiplier = 2.0f;
+    llm_retry.max_delay_ms      = 45'000;
+    engine->set_node_retry_policy("supervisor",   llm_retry);
+    engine->set_node_retry_policy("researcher",   llm_retry);
+    engine->set_node_retry_policy("final_report", llm_retry);
+
     return engine;
 }
 
