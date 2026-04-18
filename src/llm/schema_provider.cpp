@@ -67,7 +67,9 @@ void SchemaProvider::parse_schema()
 
     // --- Connection ---
     auto c = schema_["connection"];
-    conn_.base_url = c.value("base_url", "");
+    conn_.base_url = user_config_.base_url_override.empty()
+        ? c.value("base_url", "")
+        : user_config_.base_url_override;
     conn_.endpoint = c.value("endpoint", "");
     conn_.stream_endpoint = c.value("stream_endpoint", conn_.endpoint);
     conn_.auth_header = c.value("auth_header", "");
@@ -272,8 +274,11 @@ std::pair<std::string, std::string> SchemaProvider::parse_data_url(const std::st
 }
 
 std::string SchemaProvider::generate_tool_call_id() {
-    static std::mt19937 gen(static_cast<unsigned>(
-        std::chrono::steady_clock::now().time_since_epoch().count()));
+    // thread_local so concurrent fan-out calls (parallel Sends calling
+    // complete() from Taskflow workers) don't race on the PRNG state.
+    thread_local std::mt19937 gen(static_cast<unsigned>(
+        std::chrono::steady_clock::now().time_since_epoch().count()
+        ^ reinterpret_cast<std::uintptr_t>(&gen)));
     static const char alphanum[] =
         "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
     std::string id = "call_";
@@ -975,22 +980,30 @@ ChatCompletion::Usage SchemaProvider::parse_usage(const json& resp_json) const {
 
 ChatCompletion SchemaProvider::complete(const CompletionParams& params)
 {
-    auto body = build_body(params);
-    std::string model = params.model.empty() ? user_config_.default_model : params.model;
-
-    auto [host, prefix] = split_host_prefix(conn_.base_url);
-    std::string endpoint = prefix + build_endpoint(model, false);
+    // Build the request body under the schema lock so concurrent callers
+    // don't race on shared yyjson_mut_doc templates. HTTP is issued OUTSIDE
+    // the lock so parallel fan-out still overlaps on the wire.
+    std::string body_str;
+    std::string endpoint;
+    httplib::Headers headers;
+    std::string host, prefix;
+    {
+        std::lock_guard<std::mutex> lock(schema_mutex_);
+        auto body = build_body(params);
+        body_str = body.dump();
+        std::string model = params.model.empty() ? user_config_.default_model : params.model;
+        std::tie(host, prefix) = split_host_prefix(conn_.base_url);
+        endpoint = prefix + build_endpoint(model, false);
+        for (const auto& [k, v] : build_headers()) {
+            headers.emplace(k, v);
+        }
+    }
 
     httplib::Client cli(host);
     cli.set_read_timeout(user_config_.timeout_seconds, 0);
     cli.set_connection_timeout(10, 0);
 
-    httplib::Headers headers;
-    for (const auto& [k, v] : build_headers()) {
-        headers.emplace(k, v);
-    }
-
-    auto res = cli.Post(endpoint, headers, body.dump(), "application/json");
+    auto res = cli.Post(endpoint, headers, body_str, "application/json");
 
     if (!res) {
         throw std::runtime_error("HTTP request failed: " + httplib::to_string(res.error()));
@@ -1003,9 +1016,18 @@ ChatCompletion SchemaProvider::complete(const CompletionParams& params)
 
     auto resp_json = json::parse(res->body);
 
+    // parse_response / parse_usage read config strings + walk the freshly
+    // parsed resp_json (thread-local). Still holding the lock is cheapest
+    // correctness — they don't touch schema_ templates but they do read
+    // resp_.*_field members (std::string) which are safe; lock kept for
+    // symmetry + to guard against any future edits that introduce template
+    // substitution during response parse.
     ChatCompletion completion;
-    completion.message = parse_response(resp_json);
-    completion.usage = parse_usage(resp_json);
+    {
+        std::lock_guard<std::mutex> lock(schema_mutex_);
+        completion.message = parse_response(resp_json);
+        completion.usage = parse_usage(resp_json);
+    }
 
     return completion;
 }
@@ -1017,25 +1039,30 @@ ChatCompletion SchemaProvider::complete(const CompletionParams& params)
 ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
                                                const StreamCallback& on_chunk)
 {
-    auto body = build_body(params);
-    std::string model = params.model.empty() ? user_config_.default_model : params.model;
-
-    // Add stream flag if the provider uses one
-    if (!req_.stream_field.empty()) {
-        body[req_.stream_field] = true;
+    // See complete() for the locking rationale. Same pattern: build the
+    // request under the schema lock, issue the streaming HTTP call outside.
+    std::string body_str;
+    std::string endpoint;
+    httplib::Headers headers;
+    std::string host, prefix;
+    {
+        std::lock_guard<std::mutex> lock(schema_mutex_);
+        auto body = build_body(params);
+        if (!req_.stream_field.empty()) {
+            body[req_.stream_field] = true;
+        }
+        body_str = body.dump();
+        std::string model = params.model.empty() ? user_config_.default_model : params.model;
+        std::tie(host, prefix) = split_host_prefix(conn_.base_url);
+        endpoint = prefix + build_endpoint(model, true);
+        for (const auto& [k, v] : build_headers()) {
+            headers.emplace(k, v);
+        }
     }
-
-    auto [host, prefix] = split_host_prefix(conn_.base_url);
-    std::string endpoint = prefix + build_endpoint(model, true);
 
     httplib::Client cli(host);
     cli.set_read_timeout(user_config_.timeout_seconds, 0);
     cli.set_connection_timeout(10, 0);
-
-    httplib::Headers headers;
-    for (const auto& [k, v] : build_headers()) {
-        headers.emplace(k, v);
-    }
 
     ChatCompletion completion;
     completion.message.role = "assistant";
@@ -1062,7 +1089,7 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
     std::string current_event_type;
 
     auto res = cli.Post(
-        endpoint, headers, body.dump(), "application/json",
+        endpoint, headers, body_str, "application/json",
         [&](const char* data, size_t len) -> bool {
             line_buffer.append(data, len);
 

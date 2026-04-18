@@ -17,11 +17,13 @@ add_executable(neograph_tests
     test_coordinator.cpp
     test_sends_interrupt_order.cpp
     test_multi_send_events.cpp
+    test_schema_provider_concurrent.cpp
 )
 
 target_link_libraries(neograph_tests PRIVATE
     neograph::core
     neograph::llm
+    httplib OpenSSL::SSL OpenSSL::Crypto
     GTest::gtest_main
 )
 
