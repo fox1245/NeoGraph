@@ -399,7 +399,11 @@ bool MCPClient::initialize(const std::string& client_name) {
         return true;
     }
 
-    // HTTP notification path (no id = notification, fire-and-forget POST).
+    // HTTP notification path. Per the MCP spec this is a notification
+    // (no id) but the server still returns a status code on the HTTP
+    // envelope, and a 4xx/5xx here means the session is misconfigured —
+    // silently swallowing it (as the pre-audit code did) would leave the
+    // caller with an "initialized" MCPClient that actually isn't.
     json notify;
     notify["jsonrpc"] = "2.0";
     notify["method"]  = "notifications/initialized";
@@ -414,7 +418,20 @@ bool MCPClient::initialize(const std::string& client_name) {
     if (!session_id_.empty()) {
         headers.insert({"Mcp-Session-Id", session_id_});
     }
-    cli.Post(path_prefix_ + "/mcp", headers, notify.dump(), "application/json");
+    auto res = cli.Post(path_prefix_ + "/mcp", headers, notify.dump(),
+                        "application/json");
+    if (!res) {
+        throw std::runtime_error(
+            "MCP initialize notification failed: "
+            + httplib::to_string(res.error()));
+    }
+    // 200 OK and 202 Accepted are both valid per MCP spec for
+    // notifications. Anything else is an error.
+    if (res->status != 200 && res->status != 202 && res->status != 204) {
+        throw std::runtime_error(
+            "MCP initialize notification returned HTTP "
+            + std::to_string(res->status) + ": " + res->body);
+    }
 
     return true;
 }

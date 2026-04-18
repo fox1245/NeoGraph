@@ -122,6 +122,13 @@ private:
  *
  * Reads the last assistant message from the "messages" channel,
  * executes each tool call, and writes tool result messages back.
+ *
+ * Deliberately does NOT override `execute_stream`: tool execution is
+ * synchronous work against the user's `Tool` implementations and
+ * produces no LLM token stream to emit. The default `execute_stream`
+ * inherited from GraphNode falls through to `execute()`, which is the
+ * intended behaviour. Emit your own progress events from inside your
+ * Tool if you need fine-grained observability.
  */
 class ToolDispatchNode : public GraphNode {
 public:
@@ -164,6 +171,8 @@ public:
                          std::vector<std::string> valid_routes);
 
     std::vector<ChannelWrite> execute(const GraphState& state) override;
+    std::vector<ChannelWrite> execute_stream(
+        const GraphState& state, const GraphStreamCallback& cb) override;
     std::string get_name() const override { return name_; }
 
 private:
@@ -172,6 +181,11 @@ private:
     std::string               model_;
     std::string               prompt_;
     std::vector<std::string>  valid_routes_;
+
+    /// Shared setup: returns (params, route_tail_callback) common to
+    /// the streaming and non-streaming execute paths.
+    CompletionParams build_params(const GraphState& state) const;
+    std::vector<ChannelWrite> route_from(const std::string& intent) const;
 };
 
 /**

@@ -173,7 +173,7 @@ IntentClassifierNode::IntentClassifierNode(
     , valid_routes_(std::move(valid_routes))
 {}
 
-std::vector<ChannelWrite> IntentClassifierNode::execute(const GraphState& state) {
+CompletionParams IntentClassifierNode::build_params(const GraphState& state) const {
     auto messages = state.get_messages();
 
     // Find last user message
@@ -185,7 +185,6 @@ std::vector<ChannelWrite> IntentClassifierNode::execute(const GraphState& state)
         }
     }
 
-    // Build classification prompt
     std::string sys_prompt = prompt_;
     if (sys_prompt.empty()) {
         sys_prompt = "Classify the user's intent. Respond with ONLY one of: ";
@@ -209,12 +208,13 @@ std::vector<ChannelWrite> IntentClassifierNode::execute(const GraphState& state)
     usr_msg.role = "user";
     usr_msg.content = user_content;
 
-    params.messages = {sys_msg, usr_msg};
+    params.messages = {std::move(sys_msg), std::move(usr_msg)};
+    return params;
+}
 
-    auto completion = provider_->complete(params);
-    std::string intent = completion.message.content;
-
-    // Match against valid routes (case-insensitive substring match)
+std::vector<ChannelWrite> IntentClassifierNode::route_from(const std::string& intent) const {
+    // Match against valid routes (case-insensitive substring match — the
+    // existing contract. `valid_routes_` order is authoritative.)
     std::string best_route = valid_routes_.empty() ? intent : valid_routes_[0];
     for (const auto& r : valid_routes_) {
         if (intent.find(r) != std::string::npos) {
@@ -222,8 +222,27 @@ std::vector<ChannelWrite> IntentClassifierNode::execute(const GraphState& state)
             break;
         }
     }
-
     return {ChannelWrite{"__route__", json(best_route)}};
+}
+
+std::vector<ChannelWrite> IntentClassifierNode::execute(const GraphState& state) {
+    auto params = build_params(state);
+    auto completion = provider_->complete(params);
+    return route_from(completion.message.content);
+}
+
+std::vector<ChannelWrite> IntentClassifierNode::execute_stream(
+    const GraphState& state, const GraphStreamCallback& cb) {
+
+    auto params = build_params(state);
+
+    auto on_token = [&cb, this](const std::string& token) {
+        if (cb) {
+            cb(GraphEvent{GraphEvent::Type::LLM_TOKEN, name_, json(token)});
+        }
+    };
+    auto completion = provider_->complete_stream(params, on_token);
+    return route_from(completion.message.content);
 }
 
 // =========================================================================

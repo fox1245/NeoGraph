@@ -100,7 +100,9 @@
     "format": "sse_events",
     "events": {
       "message_start": {
-        "action": "ignore"
+        "action": "usage",
+        "prompt_path": "message.usage.input_tokens",
+        "completion_path": "message.usage.output_tokens"
       },
       "content_block_start": {
         "action": "block_start",
@@ -119,7 +121,8 @@
         "action": "block_stop"
       },
       "message_delta": {
-        "action": "ignore"
+        "action": "usage",
+        "completion_path": "usage.output_tokens"
       },
       "message_stop": {
         "action": "done"
