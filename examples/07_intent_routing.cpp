@@ -50,15 +50,19 @@ public:
                 result.message.content = "general";
             }
         } else {
-            // Expert response
-            std::string instruction;
+            // Expert response — inspect user message to determine which expert branch ran.
+            // (Subgraph nodes inherit parent's NodeContext, so system-prompt differentiation
+            //  is not available here; user-message inspection is the reliable signal.)
+            std::string user_msg;
             for (const auto& msg : params.messages) {
-                if (msg.role == "system") instruction = msg.content;
+                if (msg.role == "user") user_msg = msg.content;
             }
 
-            if (instruction.find("math") != std::string::npos) {
+            if (user_msg.find("plus") != std::string::npos ||
+                user_msg.find("+") != std::string::npos ||
+                user_msg.find("calculate") != std::string::npos) {
                 result.message.content = "I'm a math expert. 42 + 58 = 100.";
-            } else if (instruction.find("translation") != std::string::npos) {
+            } else if (user_msg.find("translate") != std::string::npos) {
                 result.message.content = "I'm a translation expert. 'Hello' -> 'Bonjour'";
             } else {
                 result.message.content = "I'm a general assistant. I can help with anything.";
@@ -82,16 +86,6 @@ int main() {
 
     neograph::graph::NodeContext ctx;
     ctx.provider = provider;
-
-    // Per-expert subgraph contexts (different instructions)
-    neograph::graph::NodeContext math_ctx = ctx;
-    math_ctx.instructions = "You are a math expert. Solve calculation problems.";
-
-    neograph::graph::NodeContext translate_ctx = ctx;
-    translate_ctx.instructions = "You are a translation expert. Perform translations.";
-
-    neograph::graph::NodeContext general_ctx = ctx;
-    general_ctx.instructions = "You are a general assistant.";
 
     // Graph definition
     neograph::json definition = {
