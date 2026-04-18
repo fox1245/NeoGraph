@@ -367,10 +367,13 @@ void NodeExecutor::run_sends(
         return;
     }
 
-    // Multi-send: Taskflow fan-out with isolated state per target.
-    // Multi-sends intentionally skip retry (execute_full, not retry loop)
-    // to preserve pre-extraction semantics — revisit if users need retry
-    // across large Send fan-outs.
+    // Multi-send: Taskflow fan-out with isolated state per target. Each
+    // worker routes through execute_node_with_retry, matching the parallel
+    // ready-set fan-out path — so NODE_START/END events fire and the
+    // retry policy is honoured, just as for single-Send and
+    // non-Send parallel execution. Callback thread-safety is the user's
+    // responsibility, same contract as the existing parallel ready-set
+    // path; nodes still execute on isolated per-worker GraphState copies.
     std::vector<NodeResult> send_results(sends.size());
     std::mutex send_mutex;
     std::exception_ptr send_exception;
@@ -401,27 +404,8 @@ void NodeExecutor::run_sends(
                 send_state.restore(state.serialize());
                 apply_input(send_state, s.input);
 
-                // Emit NODE_START. The callback is shared across worker
-                // threads, so serialize with send_mutex — users may not
-                // have thread-safe callbacks.
-                if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
-                    std::lock_guard lock(send_mutex);
-                    cb(GraphEvent{GraphEvent::Type::NODE_START,
-                                  s.target_node, json::object()});
-                }
-
-                auto nr = node_it->second->execute_full(send_state);
-
-                if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
-                    std::lock_guard lock(send_mutex);
-                    json end_data;
-                    if (nr.command)
-                        end_data["command_goto"] = nr.command->goto_node;
-                    if (!nr.sends.empty())
-                        end_data["sends"] = (int)nr.sends.size();
-                    cb(GraphEvent{GraphEvent::Type::NODE_END,
-                                  s.target_node, end_data});
-                }
+                auto nr = execute_node_with_retry(
+                    s.target_node, send_state, cb, stream_mode);
 
                 coord.record_pending_write(parent_cp_id,
                     task_id, task_id, s.target_node, nr, step);

@@ -168,3 +168,94 @@ TEST(MultiSendEvents, DebugModeEmitsSendMetaEvent) {
 
     EXPECT_EQ(1, log.count(GraphEvent::Type::NODE_START, "__send__"));
 }
+
+// =========================================================================
+// Retry parity: parallel ready-set fan-out retries transient failures.
+// Multi-Send used to call execute_full() directly, so retry_policy was
+// silently ignored on fan-out to 2+ targets — inconsistent with both
+// single-Send and parallel ready-set. These tests pin the normalised
+// behaviour: multi-Send now honours the retry policy too.
+// =========================================================================
+
+// A worker that throws std::runtime_error on its first `fail_until_`
+// invocations (per-instance counter), then succeeds. Shared across the
+// fan-out so every Send sees the same counter — models a transient
+// upstream failure (e.g. rate limit, flaky socket) that heals on retry.
+class FlakyWorkerNode : public GraphNode {
+public:
+    FlakyWorkerNode(std::atomic<int>* attempts, int fail_until)
+        : attempts_(attempts), fail_until_(fail_until) {}
+    std::vector<ChannelWrite> execute(const GraphState& state) override {
+        int n = attempts_->fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= fail_until_) {
+            throw std::runtime_error(
+                "simulated transient failure #" + std::to_string(n));
+        }
+        json v = state.get("task_idx");
+        int idx = v.is_number_integer() ? v.get<int>() : -1;
+        return {ChannelWrite{"results", json::array({idx})}};
+    }
+    std::string get_name() const override { return "worker"; }
+private:
+    std::atomic<int>* attempts_;
+    int fail_until_;
+};
+
+TEST(MultiSendEvents, MultiSendHonoursRetryPolicy) {
+    std::atomic<int> attempts{0};
+    const int fail_until = 2;  // first 2 invocations throw, later ones succeed
+
+    // Register a flaky worker that captures our shared counter.
+    NodeFactory::instance().register_type("__mse_flaky",
+        [&attempts, fail_until](const std::string&, const json&,
+                                const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<FlakyWorkerNode>(&attempts, fail_until);
+        });
+
+    // Also register a fanout=3 planner to this flaky worker.
+    NodeFactory::instance().register_type("__mse_planner_flaky",
+        [](const std::string&, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<FanoutPlannerNode>(3);
+        });
+
+    json def = {
+        {"name", "retry_fanout_test"},
+        {"channels", {
+            {"task_idx", {{"reducer", "overwrite"}}},
+            {"results",  {{"reducer", "append"}}}
+        }},
+        {"nodes", {
+            {"planner", {{"type", "__mse_planner_flaky"}}},
+            {"worker",  {{"type", "__mse_flaky"}}}
+        }},
+        {"edges", json::array({
+            {{"from", "__start__"}, {"to", "planner"}},
+            {{"from", "planner"},   {"to", "__end__"}}
+        })}
+    };
+    NodeContext ctx;
+    auto engine = GraphEngine::compile(def, ctx);
+
+    RetryPolicy rp;
+    rp.max_retries = 3;
+    rp.initial_delay_ms = 1;
+    rp.backoff_multiplier = 1.0f;
+    rp.max_delay_ms = 1;
+    engine->set_node_retry_policy("worker", rp);
+
+    RunConfig rc;
+    rc.max_steps = 10;
+    auto result = engine->run_stream(rc, {});
+
+    // Without multi-Send retry, the very first fan-out invocation would
+    // throw and abort the run (exception propagates up run_sends). With
+    // retry honoured, attempts > fail_until (we make 3 sends; attempts
+    // is expected to be at least fail_until + 3 successful ones).
+    EXPECT_GT(attempts.load(), fail_until);
+    ASSERT_TRUE(result.output.contains("channels"));
+    ASSERT_TRUE(result.output["channels"].contains("results"));
+    // All 3 sends eventually succeeded.
+    EXPECT_EQ(3u, result.output["channels"]["results"]["value"].size());
+}
