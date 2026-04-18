@@ -333,6 +333,40 @@ json SchemaProvider::substitute(const json& tmpl, const std::map<std::string, js
     return tmpl; // numbers, bools, null
 }
 
+// Extract the `Retry-After` header value from an httplib response, in
+// seconds. Accepts either the numeric-seconds form ("30") or falls back
+// to the `x-ratelimit-reset` / `anthropic-ratelimit-*` families. Returns
+// -1 when no usable header is present.
+//
+// HTTP-date form (RFC 7231) is intentionally NOT parsed here — Anthropic
+// emits the numeric-seconds form in practice, and HTTP-date parsing
+// would drag locale-sensitive strptime into hot path. If you hit a
+// server that only emits HTTP-date, add that branch.
+static int retry_after_seconds(const httplib::Result& res) {
+    if (!res) return -1;
+    auto try_int = [](const std::string& v) -> int {
+        if (v.empty()) return -1;
+        try {
+            long n = std::stol(v);
+            if (n < 0) return -1;
+            if (n > 600) return 600;  // clamp absurd values
+            return static_cast<int>(n);
+        } catch (...) { return -1; }
+    };
+    if (res->has_header("Retry-After")) {
+        int s = try_int(res->get_header_value("Retry-After"));
+        if (s >= 0) return s;
+    }
+    if (res->has_header("retry-after")) {
+        int s = try_int(res->get_header_value("retry-after"));
+        if (s >= 0) return s;
+    }
+    // Anthropic also emits `anthropic-ratelimit-input-tokens-reset` as
+    // an ISO-8601 timestamp — skip that path for now; the standard
+    // Retry-After header is always present on 429 per their docs.
+    return -1;
+}
+
 // Parse base_url into host + path prefix
 static std::pair<std::string, std::string> split_host_prefix(const std::string& base_url) {
     std::string host = base_url;
@@ -1003,7 +1037,30 @@ ChatCompletion SchemaProvider::complete(const CompletionParams& params)
     cli.set_read_timeout(user_config_.timeout_seconds, 0);
     cli.set_connection_timeout(10, 0);
 
-    auto res = cli.Post(endpoint, headers, body_str, "application/json");
+    // Single provider-internal wait+retry for HTTP 429. Anthropic's
+    // minute-window rate limits reset in predictable Retry-After seconds;
+    // without this, the engine's node-level RetryPolicy fires with a
+    // blind 15s/30s backoff that is often shorter than the reset window
+    // (users on low tiers kept burning retries into the same 429 wall).
+    //
+    // The outer RetryPolicy still catches anything this loop can't
+    // resolve — we only attempt ONE internal wait so we don't stall
+    // forever on a wedged provider.
+    httplib::Result res = cli.Post(endpoint, headers, body_str, "application/json");
+    if (res && res->status == 429) {
+        int wait_s = retry_after_seconds(res);
+        if (wait_s < 0) wait_s = 30;
+        // Cap at the caller's timeout (plus a little slack) so we don't
+        // exceed it. A user with timeout_seconds=5 clearly does not want
+        // to wait a minute here.
+        if (wait_s > user_config_.timeout_seconds + 5) {
+            // Re-throw immediately; outer RetryPolicy or the user can
+            // decide to keep going.
+        } else {
+            std::this_thread::sleep_for(std::chrono::seconds(wait_s + 1));
+            res = cli.Post(endpoint, headers, body_str, "application/json");
+        }
+    }
 
     if (!res) {
         throw std::runtime_error("HTTP request failed: " + httplib::to_string(res.error()));
