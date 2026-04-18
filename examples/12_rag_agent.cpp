@@ -345,7 +345,7 @@ int main() {
     std::string input;
     while (true) {
         std::cout << "You: " << std::flush;
-        std::getline(std::cin, input);
+        if (!std::getline(std::cin, input)) break;
 
         if (input.empty()) continue;
         if (input == "quit" || input == "exit" || input == "q") break;
