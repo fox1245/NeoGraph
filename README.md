@@ -78,7 +78,7 @@ make -j$(nproc)
 
 ```bash
 ./example_custom_graph      # Mock ReAct agent
-./example_parallel_fanout   # Parallel fan-out/fan-in (150ms vs 370ms sequential)
+./example_parallel_fanout   # Parallel fan-out/fan-in (3 researchers run concurrently)
 ./example_send_command      # Dynamic Send + Command routing
 ```
 
@@ -146,14 +146,21 @@ target_link_libraries(my_app PRIVATE neograph::core neograph::llm)
 | 02 | `custom_graph` | JSON-defined graph with mock provider | No |
 | 03 | `mcp_agent` | Real MCP server tool integration | Required |
 | 04 | `checkpoint_hitl` | Checkpointing + Human-in-the-Loop (interrupt/resume) | No |
-| 05 | `parallel_fanout` | Taskflow parallel fan-out/fan-in (3 workers, 150ms) | No |
+| 05 | `parallel_fanout` | Taskflow parallel fan-out/fan-in (3 workers) | No |
 | 06 | `subgraph` | Hierarchical graph composition (Supervisor pattern) | No |
 | 07 | `intent_routing` | Intent classification + expert routing | No |
 | 08 | `state_management` | get_state / update_state / fork / time-travel | No |
 | 09 | `all_features` | All 6 advanced features in one demo | No |
 | 10 | `send_command` | Dynamic Send fan-out + Command routing override | No |
 | 11 | `clay_chatbot` | Multi-turn chatbot UI (Clay + Raylib) | Optional |
-| 12 | `rag_agent` | RAG agent with in-memory vector search (CLI) | Required |
+| 12 | `rag_agent` | RAG agent with in-memory vector search (CLI) | Required (OpenAI) |
+| 13 | `openai_responses` | ReAct via OpenAI `/v1/responses` through SchemaProvider | Required (OpenAI) |
+| 14 | `plan_executor` | Plan & Executor: 5-way Send + crash/resume via pending_writes | No |
+| 15 | `reflexion` | Self-critique loop until acceptance (Anthropic) | Required (Anthropic) |
+| 16 | `tree_of_thoughts` | BFS over LLM thought branches, top-k pruning | Required (Anthropic) |
+| 17 | `self_ask` | Follow-up decomposition across multiple hops | Required (Anthropic) |
+| 18 | `multi_agent_debate` | Proponent / opponent / judge pattern | Required (Anthropic) |
+| 19 | `rewoo` | Reasoning WithOut Observation — plan once, fan out, synthesize | Required (Anthropic) |
 
 ### Run with a real LLM
 
@@ -385,7 +392,7 @@ NeoGraph/
 │   └── util/
 │       └── request_queue.h     # Lock-free worker pool
 ├── src/
-│   ├── core/                   # 7 source files
+│   ├── core/                   # 13 source files (engine + compiler/scheduler/executor/coordinator split)
 │   ├── llm/                    # 3 source files
 │   └── mcp/                    # 1 source file
 ├── schemas/                    # Built-in LLM provider schemas

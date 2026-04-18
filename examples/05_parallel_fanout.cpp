@@ -156,7 +156,7 @@ int main() {
     }
 
     std::cout << "\nTotal elapsed: " << total_ms << "ms";
-    std::cout << " (sequential would be ~370ms, parallel brings it to ~150ms)\n";
+    std::cout << " (sequential would be ~370ms)\n";
 
     return 0;
 }

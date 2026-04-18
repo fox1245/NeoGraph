@@ -1297,7 +1297,7 @@ public:
         BarrierState& barrier_state) const;
 
     std::vector<std::string> resolve_next_nodes(
-        const std::string& from,
+        const std::string& current,
         const GraphState& state) const;
 
     const BarrierSpecs& barrier_specs() const;
@@ -1776,6 +1776,53 @@ std::unique_ptr<GraphEngine> create_react_graph(
 This is functionally equivalent to using `Agent::run()` but as a graph engine, giving
 you access to checkpointing, streaming events, state inspection, and all other graph
 engine features.
+
+---
+
+## 11b. Plan-and-Execute Graph
+
+**Header:** `<neograph/graph/plan_execute_graph.h>`
+**Namespace:** `neograph::graph`
+
+Convenience factory for the Plan-and-Execute pattern: a planner emits a JSON
+array of steps, an executor consumes them one-by-one via an inner ReAct loop,
+and a responder composes the final answer from `past_steps`.
+
+```
+__start__ → planner → [plan_empty? responder : executor]
+                      executor → [plan_empty? responder : executor]
+                      responder → __end__
+```
+
+```cpp
+std::unique_ptr<GraphEngine> create_plan_execute_graph(
+    std::shared_ptr<Provider> provider,
+    std::vector<std::unique_ptr<Tool>> tools,
+    const std::string& planner_prompt,
+    const std::string& executor_prompt,
+    const std::string& responder_prompt,
+    const std::string& model = "",
+    int max_step_iterations = 5);
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `provider` | `std::shared_ptr<Provider>` | LLM provider shared by every phase |
+| `tools` | `std::vector<std::unique_ptr<Tool>>` | Tools the executor may invoke (ownership transferred) |
+| `planner_prompt` | `std::string` | System prompt for the planner; must instruct the model to reply with a JSON array of steps (fenced ```json blocks and leading prose are tolerated) |
+| `executor_prompt` | `std::string` | System prompt for the single-step executor (inner ReAct loop) |
+| `responder_prompt` | `std::string` | System prompt for the final synthesis phase |
+| `model` | `std::string` | Model override (empty uses provider default) |
+| `max_step_iterations` | `int` | Upper bound on tool-call iterations inside the executor per step |
+
+**Channels populated:** `plan`, `past_steps`, `final_response`, `messages`.
+
+**Returns:** A compiled `GraphEngine` ready to run. The factory registers its
+three custom node types and the `plan_empty` condition on first call
+(idempotent via `std::call_once`).
+
+See `examples/14_plan_executor.cpp` for a Send-fan-out variant with crash /
+resume via pending-writes.
 
 ---
 
