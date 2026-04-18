@@ -10,9 +10,36 @@
 #include <neograph/types.h>
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <string>
 
 namespace neograph {
+
+/**
+ * @brief Thrown by a Provider when an upstream API returned HTTP 429
+ *        (rate limit exceeded).
+ *
+ * This is a typed exception so decorators like `RateLimitedProvider`
+ * can catch it specifically and apply backoff, without fragile string
+ * parsing of a generic error message.
+ *
+ * The `retry_after_seconds()` value is the upstream's `Retry-After`
+ * header in seconds, or -1 if no usable Retry-After was present.
+ * Decorators should prefer the honest value when positive and fall
+ * back to their own default when -1.
+ */
+class RateLimitError : public std::runtime_error {
+public:
+    RateLimitError(const std::string& message, int retry_after_seconds = -1)
+        : std::runtime_error(message)
+        , retry_after_seconds_(retry_after_seconds) {}
+
+    /// @brief Seconds to wait per the upstream, or -1 if unknown.
+    int retry_after_seconds() const noexcept { return retry_after_seconds_; }
+
+private:
+    int retry_after_seconds_;
+};
 
 /// Callback invoked per token during streaming completion.
 /// @param chunk The token or text chunk received from the LLM.

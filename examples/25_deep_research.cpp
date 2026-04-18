@@ -19,6 +19,7 @@
 
 #include <neograph/neograph.h>
 #include <neograph/llm/schema_provider.h>
+#include <neograph/llm/rate_limited_provider.h>
 #include <neograph/graph/deep_research_graph.h>
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
@@ -264,14 +265,21 @@ int main(int argc, char** argv) {
     const char* model_env = std::getenv("DR_MODEL");
     std::string model = model_env ? model_env : "claude-sonnet-4-5";
 
-    // Anthropic provider via built-in "claude" schema.
-    auto provider_uptr = llm::SchemaProvider::create({
+    // Anthropic provider via built-in "claude" schema. Wrapped in the
+    // RateLimitedProvider decorator because Deep Research fans out several
+    // concurrent researcher calls and it's easy to trip Anthropic's
+    // minute-window rate limits on low tiers. The decorator reads the
+    // 429 response's Retry-After header and sleeps exactly that long
+    // before retrying. Users with generous quotas (or non-Anthropic
+    // backends that don't rate-limit) can drop the wrapper.
+    auto raw_claude = llm::SchemaProvider::create({
         .schema_path    = "claude",
         .api_key        = api_key,
         .default_model  = model,
         .timeout_seconds = 120
     });
-    std::shared_ptr<Provider> provider = std::move(provider_uptr);
+    std::shared_ptr<Provider> provider =
+        llm::RateLimitedProvider::create(std::move(raw_claude));
 
     auto crawl = std::make_shared<Crawl4AIClient>(crawl4ai_url);
 
