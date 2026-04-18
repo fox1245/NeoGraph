@@ -45,6 +45,10 @@ target_include_directories(httplib INTERFACE ${DEPS_DIR})
 add_library(concurrentqueue INTERFACE)
 target_include_directories(concurrentqueue INTERFACE ${DEPS_DIR})
 
+# cppdotenv (header-only) — used by examples that read .env for API keys
+add_library(cppdotenv INTERFACE)
+target_include_directories(cppdotenv INTERFACE ${DEPS_DIR})
+
 # OpenSSL — required by httplib for HTTPS
 if(NEOGRAPH_BUILD_LLM OR NEOGRAPH_BUILD_MCP)
     find_package(OpenSSL REQUIRED)
@@ -233,7 +237,7 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         target_link_libraries(example_rewoo PRIVATE neograph::core neograph::llm)
 
         add_executable(example_deep_research examples/25_deep_research.cpp)
-        target_link_libraries(example_deep_research PRIVATE neograph::core neograph::llm httplib OpenSSL::SSL OpenSSL::Crypto)
+        target_link_libraries(example_deep_research PRIVATE neograph::core neograph::llm httplib OpenSSL::SSL OpenSSL::Crypto cppdotenv)
 
         if(NEOGRAPH_BUILD_MCP)
             add_executable(example_mcp_agent examples/03_mcp_agent.cpp)

@@ -289,72 +289,66 @@ public:
             return nr;
         }
 
-        // Partition tool calls by intent.
-        std::vector<ToolCall> research_calls;
+        // =====================================================================
+        // Anthropic invariant: every `tool_use` in the assistant message MUST
+        // be paired with a `tool_result` in the very next user message, else
+        // the API returns HTTP 400. Our strategy:
+        //
+        //   * We emit one tool_result per tool_call unconditionally. The
+        //     content depends on whether this dispatcher will act on it:
+        //       - conduct_research (dispatched) → researcher fan-in writes
+        //         the ACTUAL result. We do NOT pre-emit here; the researcher
+        //         writes the tool_result carrying the compressed findings.
+        //       - conduct_research (over concurrency cap) → synthetic
+        //         "skipped, concurrency cap hit" so the id is paired.
+        //       - think_tool → synthetic reflection echo.
+        //       - research_complete → synthetic "acknowledged".
+        //       - unknown tool (model hallucination) → synthetic error.
+        //
+        //   * Truncating conduct_research past max_concurrent WITHOUT
+        //     emitting a paired tool_result was the bug that produced
+        //     "tool_use ids were found without tool_result blocks" on the
+        //     next supervisor round.
+        // =====================================================================
+
+        // First pass: classify every tool_call, capture the subset that will
+        // actually fan out to researchers (bounded by max_concurrent).
+        std::vector<ToolCall> research_calls_to_dispatch;
+        std::vector<ToolCall> research_calls_skipped;
         std::vector<ToolCall> think_calls;
-        bool saw_complete = false;
+        std::vector<ToolCall> research_complete_calls;
+        std::vector<ToolCall> unknown_calls;
+        int research_seen = 0;
 
         for (const auto& tc : last->tool_calls) {
             if (tc.name == "conduct_research") {
-                research_calls.push_back(tc);
+                if (research_seen < max_concurrent_) {
+                    research_calls_to_dispatch.push_back(tc);
+                } else {
+                    research_calls_skipped.push_back(tc);
+                }
+                ++research_seen;
             } else if (tc.name == "think_tool") {
                 think_calls.push_back(tc);
             } else if (tc.name == "research_complete") {
-                saw_complete = true;
+                research_complete_calls.push_back(tc);
+            } else {
+                unknown_calls.push_back(tc);
             }
-            // Unknown tool names are silently dropped.
         }
 
-        // research_complete wins (user-requested short-circuit).
-        if (saw_complete) {
-            // Tool-result echoes keep the Anthropic tool_use/tool_result
-            // pairing valid in case the supervisor also chose other tools,
-            // though we won't run them.
-            json echo_msgs = json::array();
-            for (const auto& tc : last->tool_calls) {
-                auto m = tool_result_msg(tc.id, tc.name, "acknowledged");
-                json j; to_json(j, m);
-                echo_msgs.push_back(j);
-            }
-            nr.writes.push_back(
-                ChannelWrite{"supervisor_messages", echo_msgs});
-            nr.command = Command{"final_report", {}};
-            return nr;
-        }
-
-        // Iteration cap: if we'd be entering another round, force finish.
-        if (iter >= max_iter_) {
-            json echo_msgs = json::array();
-            for (const auto& tc : last->tool_calls) {
-                auto m = tool_result_msg(tc.id, tc.name,
-                    "iteration budget exhausted; terminating");
-                json j; to_json(j, m);
-                echo_msgs.push_back(j);
-            }
-            nr.writes.push_back(
-                ChannelWrite{"supervisor_messages", echo_msgs});
-            nr.command = Command{"final_report", {}};
-            return nr;
-        }
-
-        // Cap fan-out width.
-        if ((int)research_calls.size() > max_concurrent_) {
-            research_calls.resize(max_concurrent_);
-        }
-
-        // 1. Echo think_tool results back into the supervisor conversation.
-        //    (These ARE paired with the supervisor's tool_use ids.)
-        // 2. For conduct_research calls: Send to researcher with the topic
-        //    plus the corresponding tool_call_id so the researcher can
-        //    write its compressed result back keyed by that id.
-        // 3. We do NOT pre-emit tool-result messages for conduct_research
-        //    here — the researcher fan-in writes them after it runs, so
-        //    that the paired tool_result carries the actual findings.
+        // Build paired tool_result echoes for everything EXCEPT the
+        // conduct_research calls we're actually dispatching — those are
+        // paired by the researcher fan-in instead.
+        auto build_echo = [](const ToolCall& tc, const std::string& content) {
+            auto m = tool_result_msg(tc.id, tc.name, content);
+            json j; to_json(j, m);
+            return j;
+        };
 
         json sv_updates = json::array();
+
         for (const auto& tc : think_calls) {
-            // Extract the reflection text for a useful echo; fall back to
-            // "noted" if parsing fails.
             std::string content = "noted";
             try {
                 auto args = json::parse(tc.arguments);
@@ -364,14 +358,60 @@ public:
                         + args["reflection"].get<std::string>();
                 }
             } catch (...) { /* keep fallback */ }
-            auto m = tool_result_msg(tc.id, tc.name, content);
-            json j; to_json(j, m);
-            sv_updates.push_back(j);
+            sv_updates.push_back(build_echo(tc, content));
         }
 
-        // If the supervisor ONLY called think_tool (no research), loop back
-        // to give it another chance to dispatch.
-        if (research_calls.empty()) {
+        for (const auto& tc : research_calls_skipped) {
+            sv_updates.push_back(build_echo(tc,
+                "skipped: conduct_research concurrency cap ("
+                + std::to_string(max_concurrent_)
+                + ") hit within this turn"));
+        }
+
+        for (const auto& tc : unknown_calls) {
+            sv_updates.push_back(build_echo(tc,
+                "unknown tool name; ignored. Valid tools: conduct_research, "
+                "think_tool, research_complete"));
+        }
+
+        // research_complete wins: short-circuit to final_report, echoing
+        // every tool_call (including research_complete itself + any others).
+        if (!research_complete_calls.empty()) {
+            for (const auto& tc : research_complete_calls) {
+                sv_updates.push_back(build_echo(tc, "acknowledged"));
+            }
+            // The research_calls_to_dispatch will NOT run; we still need
+            // their tool_results paired or the next (never-made) supervisor
+            // call would 400. But since we're going to final_report and not
+            // back to supervisor, no Claude call observes these messages —
+            // we still write them for a clean conversation log.
+            for (const auto& tc : research_calls_to_dispatch) {
+                sv_updates.push_back(build_echo(tc,
+                    "not dispatched: research_complete signalled in same turn"));
+            }
+            nr.writes.push_back(
+                ChannelWrite{"supervisor_messages", sv_updates});
+            nr.command = Command{"final_report", {}};
+            return nr;
+        }
+
+        // Iteration cap: force finish. Pair every tool_use so the saved
+        // checkpoint remains a valid Anthropic-format conversation (useful
+        // for debug inspection and future resume semantics).
+        if (iter >= max_iter_) {
+            for (const auto& tc : research_calls_to_dispatch) {
+                sv_updates.push_back(build_echo(tc,
+                    "not dispatched: supervisor iteration budget exhausted"));
+            }
+            nr.writes.push_back(
+                ChannelWrite{"supervisor_messages", sv_updates});
+            nr.command = Command{"final_report", {}};
+            return nr;
+        }
+
+        // If the supervisor ONLY called think_tool / unknown / skipped
+        // (no research to actually run), loop back to let it try again.
+        if (research_calls_to_dispatch.empty()) {
             if (!sv_updates.empty()) {
                 nr.writes.push_back(
                     ChannelWrite{"supervisor_messages", sv_updates});
@@ -380,11 +420,9 @@ public:
             return nr;
         }
 
-        // Emit Sends for parallel research. The researcher node reads
-        // `current_topic` + `current_call_id` on execute and writes back
-        // `raw_notes` (appended) and `supervisor_messages` (appended
-        // with the paired tool_result).
-        for (const auto& tc : research_calls) {
+        // Emit Sends for each dispatchable conduct_research. Researcher
+        // fan-in writes the paired tool_result for each of these.
+        for (const auto& tc : research_calls_to_dispatch) {
             std::string topic;
             try {
                 auto args = json::parse(tc.arguments);
@@ -392,7 +430,7 @@ public:
                     args["research_topic"].is_string()) {
                     topic = args["research_topic"].get<std::string>();
                 }
-            } catch (...) { /* empty topic will cause researcher to skip */ }
+            } catch (...) { /* empty topic handled by researcher */ }
 
             nr.sends.push_back(Send{"researcher", json{
                 {"current_topic",    topic},
@@ -400,8 +438,10 @@ public:
             }});
         }
 
-        // Any think_tool echoes written now so the post-Send supervisor
-        // round sees a consistent conversation.
+        // Write the think/skipped/unknown echoes alongside the Sends. The
+        // researcher fan-in will append its own tool_results after. The
+        // Claude schema's consecutive-user-role merging concatenates them
+        // into a single valid tool_result content array.
         if (!sv_updates.empty()) {
             nr.writes.push_back(
                 ChannelWrite{"supervisor_messages", sv_updates});

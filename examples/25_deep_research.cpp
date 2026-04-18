@@ -24,6 +24,8 @@
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
 
+#include <cppdotenv/dotenv.hpp>
+
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -233,9 +235,14 @@ private:
 // =========================================================================
 
 int main(int argc, char** argv) {
+    // Load .env from the current working directory (or the nearest ancestor
+    // that has one). Existing environment variables win — a shell-exported
+    // ANTHROPIC_API_KEY still takes precedence over the .env value.
+    cppdotenv::load_dotenv(".env");
+
     const char* api_key = std::getenv("ANTHROPIC_API_KEY");
     if (!api_key) {
-        std::cerr << "Set ANTHROPIC_API_KEY.\n";
+        std::cerr << "Set ANTHROPIC_API_KEY in the environment or in ./\.env\n";
         return 1;
     }
 
