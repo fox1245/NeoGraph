@@ -57,7 +57,7 @@ public:
     std::vector<ChannelWrite> execute(const GraphState& state) override {
         return execute_full(state).writes;
     }
-    std::string name() const override { return "planner"; }
+    std::string get_name() const override { return "planner"; }
 };
 
 // =========================================================================
@@ -103,7 +103,7 @@ public:
         }})}};
     }
 
-    std::string name() const override { return "mcp_caller"; }
+    std::string get_name() const override { return "mcp_caller"; }
 };
 
 // =========================================================================
@@ -123,7 +123,7 @@ public:
         }
         return {ChannelWrite{"summary", json(out)}};
     }
-    std::string name() const override { return "summarizer"; }
+    std::string get_name() const override { return "summarizer"; }
 };
 
 int main(int argc, char** argv) {

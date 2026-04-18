@@ -29,7 +29,7 @@ public:
         return {ChannelWrite{"__route__", json(r)},
                 ChannelWrite{name_ + "_count", json(static_cast<int>(idx_))}};
     }
-    std::string name() const override { return name_; }
+    std::string get_name() const override { return name_; }
 
 private:
     std::string name_;
@@ -43,7 +43,7 @@ public:
     std::vector<ChannelWrite> execute(const GraphState&) override {
         return {ChannelWrite{"hits", json::array({name_})}};
     }
-    std::string name() const override { return name_; }
+    std::string get_name() const override { return name_; }
 private:
     std::string name_;
 };
@@ -190,7 +190,7 @@ TEST(SignalDispatch, CommandGotoOverridesEdgeRouting) {
             nr.command = c;
             return nr;
         }
-        std::string name() const override { return "a"; }
+        std::string get_name() const override { return "a"; }
     private:
         std::string target_;
     };
@@ -201,7 +201,7 @@ TEST(SignalDispatch, CommandGotoOverridesEdgeRouting) {
         std::vector<ChannelWrite> execute(const GraphState&) override {
             return {ChannelWrite{"hit_" + n_, json(true)}};
         }
-        std::string name() const override { return n_; }
+        std::string get_name() const override { return n_; }
     private:
         std::string n_;
     };
@@ -271,7 +271,7 @@ TEST(SignalDispatch, ParallelFanInRunsOnce) {
         std::vector<ChannelWrite> execute(const GraphState&) override {
             return {ChannelWrite{"leaf_" + n_, json(true)}};
         }
-        std::string name() const override { return n_; }
+        std::string get_name() const override { return n_; }
     private:
         std::string n_;
     };
@@ -281,7 +281,7 @@ TEST(SignalDispatch, ParallelFanInRunsOnce) {
             join_hits.fetch_add(1, std::memory_order_relaxed);
             return {ChannelWrite{"joined", json(true)}};
         }
-        std::string name() const override { return "join"; }
+        std::string get_name() const override { return "join"; }
     };
 
     NodeFactory::instance().register_type("leaf",
@@ -361,7 +361,7 @@ TEST(SignalDispatch, AsymmetricSerialFanInFiresJoinPerPath) {
         std::vector<ChannelWrite> execute(const GraphState&) override {
             return {ChannelWrite{n_ + "_ran", json(true)}};
         }
-        std::string name() const override { return n_; }
+        std::string get_name() const override { return n_; }
     private:
         std::string n_;
     };
@@ -371,7 +371,7 @@ TEST(SignalDispatch, AsymmetricSerialFanInFiresJoinPerPath) {
             join_hits.fetch_add(1, std::memory_order_relaxed);
             return {ChannelWrite{"join_ran", json(true)}};
         }
-        std::string name() const override { return "join"; }
+        std::string get_name() const override { return "join"; }
     };
     class FinishCounter : public GraphNode {
     public:
@@ -379,7 +379,7 @@ TEST(SignalDispatch, AsymmetricSerialFanInFiresJoinPerPath) {
             finish_hits.fetch_add(1, std::memory_order_relaxed);
             return {ChannelWrite{"finish_ran", json(true)}};
         }
-        std::string name() const override { return "finish"; }
+        std::string get_name() const override { return "finish"; }
     };
 
     NodeFactory::instance().register_type("pass",
@@ -459,7 +459,7 @@ TEST(SignalDispatch, DeclaredBarrierCoalescesAsymmetricFanIn) {
         std::vector<ChannelWrite> execute(const GraphState&) override {
             return {ChannelWrite{n_ + "_ran", json(true)}};
         }
-        std::string name() const override { return n_; }
+        std::string get_name() const override { return n_; }
     private:
         std::string n_;
     };
@@ -469,7 +469,7 @@ TEST(SignalDispatch, DeclaredBarrierCoalescesAsymmetricFanIn) {
             b_join_hits.fetch_add(1, std::memory_order_relaxed);
             return {ChannelWrite{"bjoin_ran", json(true)}};
         }
-        std::string name() const override { return "join"; }
+        std::string get_name() const override { return "join"; }
     };
     NodeFactory::instance().register_type("bpass",
         [](const std::string& name, const json&, const NodeContext&)

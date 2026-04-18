@@ -65,7 +65,7 @@ public:
         return execute_full(state).writes;
     }
 
-    std::string name() const override { return "planner"; }
+    std::string get_name() const override { return "planner"; }
 };
 int PlannerNode::round_ = 0;
 
@@ -92,7 +92,7 @@ public:
         return {ChannelWrite{"findings", json::array({finding})}};
     }
 
-    std::string name() const override { return "researcher"; }
+    std::string get_name() const override { return "researcher"; }
 };
 
 // =========================================================================
@@ -129,7 +129,7 @@ public:
         return execute_full(state).writes;
     }
 
-    std::string name() const override { return "evaluator"; }
+    std::string get_name() const override { return "evaluator"; }
 };
 int EvaluatorNode::eval_count_ = 0;
 
@@ -157,7 +157,7 @@ public:
         return {ChannelWrite{"summary", json(summary)}};
     }
 
-    std::string name() const override { return "summarizer"; }
+    std::string get_name() const override { return "summarizer"; }
 };
 
 // =========================================================================

@@ -49,7 +49,7 @@ public:
         return {neograph::graph::ChannelWrite{"findings", neograph::json::array({result})}};
     }
 
-    std::string name() const override { return name_; }
+    std::string get_name() const override { return name_; }
 };
 
 // Custom node: Summarizer
@@ -72,7 +72,7 @@ public:
         return {neograph::graph::ChannelWrite{"summary", neograph::json(summary)}};
     }
 
-    std::string name() const override { return "summarizer"; }
+    std::string get_name() const override { return "summarizer"; }
 };
 
 int main() {

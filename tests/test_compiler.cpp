@@ -22,7 +22,7 @@ class NoopNode : public GraphNode {
 public:
     explicit NoopNode(std::string n) : name_(std::move(n)) {}
     std::vector<ChannelWrite> execute(const GraphState&) override { return {}; }
-    std::string name() const override { return name_; }
+    std::string get_name() const override { return name_; }
 private:
     std::string name_;
 };
@@ -117,8 +117,8 @@ TEST(GraphCompiler, NodesInstantiatedViaFactory) {
     auto cg = GraphCompiler::compile(def, NodeContext{});
     EXPECT_EQ(cg.nodes.size(), 2u);
     ASSERT_NE(cg.nodes.find("a"), cg.nodes.end());
-    EXPECT_EQ(cg.nodes["a"]->name(), "a");
-    EXPECT_EQ(cg.nodes["b"]->name(), "b");
+    EXPECT_EQ(cg.nodes["a"]->get_name(), "a");
+    EXPECT_EQ(cg.nodes["b"]->get_name(), "b");
 }
 
 TEST(GraphCompiler, BarrierSpecsCollected) {

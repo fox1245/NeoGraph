@@ -73,7 +73,7 @@ TEST(NodeTest, LLMCallNodeName) {
     NodeContext ctx;
     ctx.provider = std::make_shared<MockProvider>();
     LLMCallNode node("my_llm", ctx);
-    EXPECT_EQ(node.name(), "my_llm");
+    EXPECT_EQ(node.get_name(), "my_llm");
 }
 
 // ── ToolDispatchNode ──
@@ -193,7 +193,7 @@ public:
     std::vector<ChannelWrite> execute(const GraphState& /*state*/) override {
         return {ChannelWrite{"result", json("simple")}};
     }
-    std::string name() const override { return "simple"; }
+    std::string get_name() const override { return "simple"; }
 };
 
 TEST(NodeTest, DefaultExecuteFullWrapsExecute) {

@@ -45,7 +45,7 @@ public:
         std::cout << "[setup]    query='" << query << "' — initialised\n";
         return {ChannelWrite{"query", json(query)}};
     }
-    std::string name() const override { return "setup"; }
+    std::string get_name() const override { return "setup"; }
 };
 
 // =========================================================================
@@ -79,7 +79,7 @@ public:
         }
         return nr;
     }
-    std::string name() const override { return "planner"; }
+    std::string get_name() const override { return "planner"; }
 };
 
 // =========================================================================
@@ -115,7 +115,7 @@ public:
         };
         return {ChannelWrite{"findings", finding}};
     }
-    std::string name() const override { return "executor"; }
+    std::string get_name() const override { return "executor"; }
 };
 
 // =========================================================================

@@ -41,7 +41,7 @@ public:
         }
         return nr;
     }
-    std::string name() const override { return "planner"; }
+    std::string get_name() const override { return "planner"; }
 private:
     int fanout_;
 };
@@ -65,7 +65,7 @@ public:
         // append-reduced, so all successful sends accumulate.
         return {ChannelWrite{"results", json(idx * 10)}};
     }
-    std::string name() const override { return "executor"; }
+    std::string get_name() const override { return "executor"; }
 
 private:
     std::atomic<int>* counter_;
@@ -80,7 +80,7 @@ public:
     std::vector<ChannelWrite> execute(const GraphState&) override {
         return {ChannelWrite{"setup_done", json(true)}};
     }
-    std::string name() const override { return "setup"; }
+    std::string get_name() const override { return "setup"; }
 };
 
 static json make_plan_executor_graph(int fanout) {

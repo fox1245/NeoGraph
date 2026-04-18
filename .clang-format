@@ -1,0 +1,62 @@
+---
+Language: Cpp
+BasedOnStyle: Google
+
+# Indentation
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
+AccessModifierOffset: -4
+NamespaceIndentation: None
+
+# Line width
+ColumnLimit: 100
+
+# Braces (K&R / attach)
+BreakBeforeBraces: Attach
+
+# Pointer / reference alignment
+PointerAlignment: Left
+ReferenceAlignment: Pointer
+DerivePointerAlignment: false
+
+# Short statements — project uses `if (!x) return ...;` one-liners
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: false
+
+# Include ordering:
+#   0. Main header (auto-detected for .cpp)
+#   1. <neograph/...>     — project public headers
+#   2. other "..." / <...> third-party
+#   3. <standard>         — C/C++ standard library
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<neograph/.*>'
+    Priority: 1
+  - Regex: '^".*"'
+    Priority: 2
+  - Regex: '^<[A-Za-z0-9_/\-]+\.(h|hpp)>'
+    Priority: 2
+  - Regex: '^<[A-Za-z0-9_]+>'
+    Priority: 3
+
+# Misc
+Standard: c++17
+FixNamespaceComments: true
+SpacesBeforeTrailingComments: 2
+AlignTrailingComments: true
+AlignConsecutiveDeclarations: Consecutive
+AlignConsecutiveAssignments: Consecutive
+AlignAfterOpenBracket: Align
+BinPackParameters: false
+BinPackArguments: true
+AllowAllParametersOfDeclarationOnNextLine: true
+AllowAllArgumentsOnNextLine: true
+Cpp11BracedListStyle: true
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1

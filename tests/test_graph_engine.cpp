@@ -59,7 +59,7 @@ public:
     std::vector<ChannelWrite> execute(const GraphState& /*state*/) override {
         return {ChannelWrite{"result", json(value_)}};
     }
-    std::string name() const override { return name_; }
+    std::string get_name() const override { return name_; }
 private:
     std::string name_;
     std::string value_;
@@ -75,7 +75,7 @@ public:
     std::vector<ChannelWrite> execute(const GraphState& /*state*/) override {
         return {ChannelWrite{"__route__", json(route_)}};
     }
-    std::string name() const override { return name_; }
+    std::string get_name() const override { return name_; }
 private:
     std::string name_;
     std::string route_;
@@ -218,7 +218,7 @@ TEST_F(GraphEngineTest, EmptyInput) {
 
 TEST_F(GraphEngineTest, GraphName) {
     auto engine = GraphEngine::compile(make_linear_graph(), NodeContext{});
-    EXPECT_EQ(engine->graph_name(), "test_graph");
+    EXPECT_EQ(engine->get_graph_name(), "test_graph");
 }
 
 // ── Concurrency: shared engine, distinct thread_ids ──
@@ -245,7 +245,7 @@ public:
         if (counter_) counter_->fetch_add(1, std::memory_order_relaxed);
         return {ChannelWrite{"result", json(input * 2)}};
     }
-    std::string name() const override { return name_; }
+    std::string get_name() const override { return name_; }
 private:
     std::string name_;
     std::atomic<int>* counter_;
