@@ -282,8 +282,8 @@ int main(int argc, char** argv) {
     graph::DeepResearchConfig cfg;
     cfg.model = model;
     cfg.max_supervisor_iterations  = 2;
-    cfg.max_concurrent_researchers = 3;
-    cfg.max_researcher_iterations  = 3;
+    cfg.max_concurrent_researchers = 2;
+    cfg.max_researcher_iterations  = 2;
 
     auto engine = graph::create_deep_research_graph(
         provider, std::move(tools), cfg);

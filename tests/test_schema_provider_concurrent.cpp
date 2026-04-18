@@ -189,3 +189,112 @@ TEST(SchemaProviderConcurrent, ParallelCompletesNeverSendEmptyOrMalformedBody) {
         << "server saw malformed JSON — schema traversal corrupted output";
     EXPECT_EQ(kConcurrency * kIterations, mock.ok_hits.load());
 }
+
+// ---------------------------------------------------------------------------
+// Retry-After honouring.
+//
+// On a 429 the provider should read Retry-After and sleep exactly that long
+// before retrying once. A mock server that returns 429 on the first hit
+// (with Retry-After: 1) and 200 on the second hit validates the behaviour
+// end-to-end: the client must succeed without the caller lifting a finger.
+// ---------------------------------------------------------------------------
+
+struct RetryAfterMock {
+    httplib::Server svr;
+    std::thread t;
+    int port = 0;
+    std::atomic<int> hits{0};
+
+    explicit RetryAfterMock(int retry_after_sec) {
+        int wait = retry_after_sec;
+        svr.Post("/v1/messages",
+            [this, wait](const httplib::Request&, httplib::Response& res) {
+                int n = hits.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (n == 1) {
+                    res.status = 429;
+                    res.set_header("Retry-After", std::to_string(wait));
+                    res.set_content(
+                        R"({"type":"error","error":{"type":"rate_limit_error","message":"mock rate limit"}})",
+                        "application/json");
+                    return;
+                }
+                res.set_content(kClaudeBody, "application/json");
+            });
+        port = svr.bind_to_any_port("127.0.0.1");
+        t = std::thread([this] { svr.listen_after_bind(); });
+        for (int i = 0; i < 200 && !svr.is_running(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+    ~RetryAfterMock() {
+        svr.stop();
+        if (t.joinable()) t.join();
+    }
+};
+
+TEST(SchemaProviderConcurrent, RetryAfterOn429) {
+    RetryAfterMock mock(/*retry_after_sec=*/1);
+    ASSERT_GT(mock.port, 0);
+
+    llm::SchemaProvider::Config cfg;
+    cfg.schema_path = "claude";
+    cfg.api_key = "test-key";
+    cfg.default_model = "claude-sonnet-4-5";
+    cfg.timeout_seconds = 30;
+    cfg.base_url_override =
+        "http://127.0.0.1:" + std::to_string(mock.port);
+
+    auto provider = llm::SchemaProvider::create(cfg);
+
+    CompletionParams params;
+    params.model = "claude-sonnet-4-5";
+    params.max_tokens = 32;
+    ChatMessage u; u.role = "user"; u.content = "hi";
+    params.messages.push_back(u);
+
+    auto t0 = std::chrono::steady_clock::now();
+    auto result = provider->complete(params);  // must NOT throw
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+
+    EXPECT_EQ("ack", result.message.content);
+    EXPECT_EQ(2, mock.hits.load())  // first 429 + successful retry
+        << "expected exactly one retry after the 429";
+    // Slept at least the Retry-After duration — allow generous slack for
+    // scheduling jitter on busy CI.
+    EXPECT_GE(elapsed, 900)
+        << "provider returned too fast; Retry-After not honoured";
+    EXPECT_LT(elapsed, 5000)  // sanity upper bound
+        << "provider took unexpectedly long";
+}
+
+// Retry-After that exceeds the caller's timeout must NOT be honoured —
+// the caller explicitly budgeted less than the wait. Provider should
+// throw promptly so the outer RetryPolicy / user can decide.
+TEST(SchemaProviderConcurrent, RetryAfterRespectsTimeout) {
+    RetryAfterMock mock(/*retry_after_sec=*/60);
+    ASSERT_GT(mock.port, 0);
+
+    llm::SchemaProvider::Config cfg;
+    cfg.schema_path = "claude";
+    cfg.api_key = "test-key";
+    cfg.default_model = "claude-sonnet-4-5";
+    cfg.timeout_seconds = 2;  // shorter than retry-after
+    cfg.base_url_override =
+        "http://127.0.0.1:" + std::to_string(mock.port);
+
+    auto provider = llm::SchemaProvider::create(cfg);
+
+    CompletionParams params;
+    params.model = "claude-sonnet-4-5";
+    params.max_tokens = 32;
+    ChatMessage u; u.role = "user"; u.content = "hi";
+    params.messages.push_back(u);
+
+    auto t0 = std::chrono::steady_clock::now();
+    EXPECT_THROW(provider->complete(params), std::runtime_error);
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    EXPECT_LT(elapsed, 5)
+        << "provider waited for retry-after > timeout_seconds";
+}

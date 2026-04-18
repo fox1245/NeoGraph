@@ -27,8 +27,8 @@ namespace neograph::graph {
 struct DeepResearchConfig {
     std::string model = "claude-sonnet-4-5";  ///< Claude model identifier.
     int max_supervisor_iterations = 2;        ///< Supervisor planning rounds (keep ≤ 3 for low-tier Anthropic quotas).
-    int max_concurrent_researchers = 3;       ///< Cap per conduct_research fan-out batch.
-    int max_researcher_iterations = 3;        ///< Inner LLM↔tools loop cap per researcher.
+    int max_concurrent_researchers = 2;       ///< Cap per conduct_research fan-out batch. Default 2 so 3× parallel researchers don't collectively exceed the 30K-tokens-per-minute tier-1 Anthropic limit; raise on higher tiers.
+    int max_researcher_iterations = 2;        ///< Inner LLM↔tools loop cap per researcher.
 };
 
 /**
