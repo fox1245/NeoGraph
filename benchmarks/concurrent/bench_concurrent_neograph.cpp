@@ -89,14 +89,23 @@ int main(int argc, char** argv) {
 
     auto engine = GraphEngine::compile(seq_graph(), NodeContext{});
 
-    // Warm-up: prime the engine state + Taskflow pool.
+    tf::Executor exec;  // uses hardware_concurrency() by default
+
+    // Warm-up: prime the engine state AND wake every Taskflow worker
+    // thread so first-burst scheduling latency doesn't bias N=10 P99.
     for (int i = 0; i < 10; ++i) (void)engine->run(RunConfig{});
+    {
+        tf::Taskflow warm;
+        const size_t W = std::max<size_t>(exec.num_workers(), 8);
+        for (size_t i = 0; i < W * 4; ++i) {
+            warm.emplace([&engine]() { (void)engine->run(RunConfig{}); });
+        }
+        exec.run(warm).wait();
+    }
 
     std::vector<long> latencies_us(concurrency);
     std::atomic<int> ok_count{0};
     std::atomic<int> err_count{0};
-
-    tf::Executor exec;  // uses hardware_concurrency() by default
     tf::Taskflow tf;
     for (int i = 0; i < concurrency; ++i) {
         tf.emplace([i, &engine, &latencies_us, &ok_count, &err_count]() {
