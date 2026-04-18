@@ -4,6 +4,7 @@ docs/api/
 .env
 .claude/
 .playwright-mcp
+benchmarks/node_modules/
 
 # Session handoff note — local planning doc, not tracked.
 NEXT_SESSION.md
