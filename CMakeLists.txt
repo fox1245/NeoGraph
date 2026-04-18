@@ -90,6 +90,7 @@ add_library(neograph_core STATIC
     src/core/graph_checkpoint.cpp
     src/core/react_graph.cpp
     src/core/plan_execute_graph.cpp
+    src/core/deep_research_graph.cpp
     src/core/store.cpp
 )
 
@@ -230,6 +231,9 @@ if(NEOGRAPH_BUILD_EXAMPLES)
 
         add_executable(example_rewoo examples/19_rewoo.cpp)
         target_link_libraries(example_rewoo PRIVATE neograph::core neograph::llm)
+
+        add_executable(example_deep_research examples/25_deep_research.cpp)
+        target_link_libraries(example_deep_research PRIVATE neograph::core neograph::llm httplib OpenSSL::SSL OpenSSL::Crypto)
 
         if(NEOGRAPH_BUILD_MCP)
             add_executable(example_mcp_agent examples/03_mcp_agent.cpp)
