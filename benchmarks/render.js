@@ -1,4 +1,4 @@
-// Render the NeoGraph-vs-LangGraph bench charts to PNG.
+// Render the NeoGraph vs Python-frameworks bench chart to PNG.
 //
 // Server-side ECharts rendering via the `canvas` Node.js binding. No
 // browser, no http server — just Canvas → PNG.
@@ -11,8 +11,39 @@ echarts.setPlatformAPI({
     createCanvas: (width, height) => createCanvas(width, height)
 });
 
-const NEO = '#2ea44f';
-const LG  = '#8250df';
+// One color per framework. NeoGraph green to stand out; others a cool palette.
+const COLORS = {
+    NeoGraph:        '#2ea44f',
+    Haystack:        '#1f77b4',
+    'pydantic-graph':'#17a2b8',
+    LangGraph:       '#8250df',
+    LlamaIndex:      '#d3822a',
+    AutoGen:         '#c0392b',
+};
+
+const FRAMEWORKS = ['NeoGraph', 'Haystack', 'pydantic-graph', 'LangGraph', 'LlamaIndex', 'AutoGen'];
+
+const SEQ_US = [20.65, 150.70, 240.34, 645.30, 1842.58, 3226.79];
+const PAR_US = [150.70, 293.60, 308.32, 2225.12, 4781.24, 7389.42];
+
+// Whole-process peak RSS (MB) — full script / binary run:
+const RSS_MB = [4.9, 78.3, 34.9, 58.9, 101.5, 52.4];
+
+function seriesFor(values, unit) {
+    return FRAMEWORKS.map((fw, i) => ({
+        name: fw,
+        type: 'bar',
+        data: FRAMEWORKS.map((_, j) => (j === i ? values[i] : null)),
+        itemStyle: { color: COLORS[fw], borderRadius: [4, 4, 0, 0] },
+        label: {
+            show: true, position: 'top',
+            fontSize: 11, fontWeight: 'bold', color: COLORS[fw],
+            formatter: params => params.value != null ? `${params.value} ${unit}` : ''
+        },
+        barWidth: 42,
+        barGap: '0%',
+    }));
+}
 
 function renderLatency(canvas) {
     const chart = echarts.init(canvas);
@@ -20,58 +51,54 @@ function renderLatency(canvas) {
         animation: false,
         backgroundColor: '#ffffff',
         title: {
-            text: 'Per-iteration latency (µs) — lower is better',
-            subtext: 'NeoGraph is 31.2× faster on sequential, 14.8× faster on parallel fan-out',
+            text: 'Per-iteration engine overhead (µs, log scale) — lower is better',
+            subtext: 'NeoGraph: 20.65 µs seq / 150.7 µs par.  Next-fastest Python (Haystack): 7.3× / 1.9× slower.',
             left: 'center',
             top: 16,
-            textStyle: { fontSize: 18, fontWeight: 'bold', color: '#24292e' },
-            subtextStyle: { fontSize: 13, color: '#586069' }
+            textStyle: { fontSize: 17, fontWeight: 'bold', color: '#24292e' },
+            subtextStyle: { fontSize: 12, color: '#586069' }
         },
-        grid: { left: 88, right: 56, top: 100, bottom: 70 },
+        grid: { left: 80, right: 32, top: 104, bottom: 88, containLabel: true },
         legend: {
-            bottom: 16,
-            textStyle: { fontSize: 14, color: '#24292e' },
-            itemGap: 32
+            bottom: 12,
+            textStyle: { fontSize: 12, color: '#24292e' },
+            itemGap: 24,
+            data: ['seq (3-node chain)', 'par (fan-out 5 + join)'],
         },
-        xAxis: {
-            type: 'category',
-            data: ['3-node chain (seq)', 'Fan-out 5 + join (par)'],
-            axisLabel: { fontSize: 14, color: '#24292e' },
-            axisLine: { lineStyle: { color: '#d1d5da' } },
-            axisTick: { lineStyle: { color: '#d1d5da' } }
-        },
+        xAxis: [
+            {
+                type: 'category',
+                data: FRAMEWORKS,
+                axisLabel: { fontSize: 11, color: '#24292e', interval: 0 },
+                axisLine: { lineStyle: { color: '#d1d5da' } },
+                axisTick: { lineStyle: { color: '#d1d5da' } }
+            }
+        ],
         yAxis: {
-            type: 'value',
-            name: 'µs / iteration',
+            type: 'log',
+            name: 'µs / iteration (log)',
             nameGap: 44,
-            nameTextStyle: { fontSize: 13, color: '#586069' },
-            axisLabel: { fontSize: 12, color: '#586069' },
-            splitLine: { lineStyle: { color: '#eaecef' } }
+            nameTextStyle: { fontSize: 12, color: '#586069' },
+            axisLabel: { fontSize: 11, color: '#586069' },
+            splitLine: { lineStyle: { color: '#eaecef' } },
+            min: 10,
         },
         series: [
             {
-                name: 'NeoGraph',
+                name: 'seq (3-node chain)',
                 type: 'bar',
-                data: [20.65, 150.70],
-                itemStyle: { color: NEO, borderRadius: [4, 4, 0, 0] },
-                label: {
-                    show: true, position: 'top',
-                    fontSize: 13, fontWeight: 'bold', color: NEO,
-                    formatter: '{c} µs'
-                },
-                barWidth: 60
+                data: SEQ_US,
+                itemStyle: { color: '#2ea44f', borderRadius: [4, 4, 0, 0] },
+                label: { show: true, position: 'top', fontSize: 11, color: '#24292e', formatter: '{c}' },
+                barWidth: 26,
             },
             {
-                name: 'LangGraph',
+                name: 'par (fan-out 5 + join)',
                 type: 'bar',
-                data: [645.30, 2225.12],
-                itemStyle: { color: LG, borderRadius: [4, 4, 0, 0] },
-                label: {
-                    show: true, position: 'top',
-                    fontSize: 13, fontWeight: 'bold', color: LG,
-                    formatter: '{c} µs'
-                },
-                barWidth: 60
+                data: PAR_US,
+                itemStyle: { color: '#8250df', borderRadius: [4, 4, 0, 0] },
+                label: { show: true, position: 'top', fontSize: 11, color: '#24292e', formatter: '{c}' },
+                barWidth: 26,
             }
         ]
     });
@@ -84,22 +111,17 @@ function renderRss(canvas) {
         backgroundColor: '#ffffff',
         title: {
             text: 'Peak resident memory (MB) — lower is better',
-            subtext: 'Same workload, 12× less RAM',
+            subtext: 'Full bench process (warm-up + seq + par). NeoGraph: 4.9 MB.  7–21× less than Python field.',
             left: 'center',
             top: 16,
-            textStyle: { fontSize: 18, fontWeight: 'bold', color: '#24292e' },
-            subtextStyle: { fontSize: 13, color: '#586069' }
+            textStyle: { fontSize: 17, fontWeight: 'bold', color: '#24292e' },
+            subtextStyle: { fontSize: 12, color: '#586069' }
         },
-        grid: { left: 72, right: 40, top: 100, bottom: 70 },
-        legend: {
-            bottom: 16,
-            textStyle: { fontSize: 14, color: '#24292e' },
-            itemGap: 32
-        },
+        grid: { left: 64, right: 32, top: 104, bottom: 88, containLabel: true },
         xAxis: {
             type: 'category',
-            data: ['Peak RSS'],
-            axisLabel: { fontSize: 14, color: '#24292e' },
+            data: FRAMEWORKS,
+            axisLabel: { fontSize: 11, color: '#24292e', interval: 0 },
             axisLine: { lineStyle: { color: '#d1d5da' } },
             axisTick: { lineStyle: { color: '#d1d5da' } }
         },
@@ -107,53 +129,41 @@ function renderRss(canvas) {
             type: 'value',
             name: 'MB',
             nameGap: 36,
-            nameTextStyle: { fontSize: 13, color: '#586069' },
-            axisLabel: { fontSize: 12, color: '#586069' },
+            nameTextStyle: { fontSize: 12, color: '#586069' },
+            axisLabel: { fontSize: 11, color: '#586069' },
             splitLine: { lineStyle: { color: '#eaecef' } }
         },
         series: [
             {
-                name: 'NeoGraph',
+                name: 'Peak RSS',
                 type: 'bar',
-                data: [4.9],
-                itemStyle: { color: NEO, borderRadius: [4, 4, 0, 0] },
+                data: FRAMEWORKS.map((fw, i) => ({
+                    value: RSS_MB[i],
+                    itemStyle: { color: COLORS[fw], borderRadius: [4, 4, 0, 0] }
+                })),
                 label: {
                     show: true, position: 'top',
-                    fontSize: 14, fontWeight: 'bold', color: NEO,
+                    fontSize: 12, fontWeight: 'bold',
+                    color: '#24292e',
                     formatter: '{c} MB'
                 },
-                barWidth: 80
-            },
-            {
-                name: 'LangGraph',
-                type: 'bar',
-                data: [58.9],
-                itemStyle: { color: LG, borderRadius: [4, 4, 0, 0] },
-                label: {
-                    show: true, position: 'top',
-                    fontSize: 14, fontWeight: 'bold', color: LG,
-                    formatter: '{c} MB'
-                },
-                barWidth: 80
+                barWidth: 52,
             }
         ]
     });
 }
 
-// Produce a single wide PNG with both charts side-by-side.
-const w = 1400;
-const h = 520;
-const leftW = 880;
+const w = 1700;
+const h = 560;
+const leftW = 1020;
 const rightW = w - leftW;
 
 const fullCanvas = createCanvas(w, h);
 const ctx = fullCanvas.getContext('2d');
 
-// White canvas background
 ctx.fillStyle = '#ffffff';
 ctx.fillRect(0, 0, w, h);
 
-// Render each chart on its own canvas then composite.
 const leftCanvas = createCanvas(leftW, h);
 renderLatency(leftCanvas);
 ctx.drawImage(leftCanvas, 0, 0);
@@ -162,7 +172,6 @@ const rightCanvas = createCanvas(rightW, h);
 renderRss(rightCanvas);
 ctx.drawImage(rightCanvas, leftW, 0);
 
-// Subtle divider line.
 ctx.strokeStyle = '#e1e4e8';
 ctx.lineWidth = 1;
 ctx.beginPath();
@@ -170,16 +179,16 @@ ctx.moveTo(leftW, 40);
 ctx.lineTo(leftW, h - 40);
 ctx.stroke();
 
-// Footer
 ctx.fillStyle = '#6a737d';
-ctx.font = '12px sans-serif';
+ctx.font = '11px sans-serif';
 ctx.textAlign = 'center';
 ctx.fillText(
-    '2026-04-18  ·  x86_64 Linux, g++ 13 (-O2), CPython 3.12.3, langgraph 1.1.7  ·  Reproduction: benchmarks/README.md',
+    '2026-04-19  ·  x86_64 Linux, g++ 13 (-O2), CPython 3.12.3  ·  langgraph 1.1.7, haystack-ai 2.27, pydantic-graph 1.84, llama-index 0.14, autogen-agentchat 0.7.5  ·  Reproduction: benchmarks/README.md',
     w / 2, h - 10
 );
 
-const out = fs.createWriteStream('/tmp/bench/bench-engine-overhead.png');
+const outPath = '../docs/images/bench-engine-overhead.png';
+const out = fs.createWriteStream(outPath);
 const stream = fullCanvas.createPNGStream();
 stream.pipe(out);
-out.on('finish', () => console.log('wrote bench-engine-overhead.png'));
+out.on('finish', () => console.log('wrote', outPath));

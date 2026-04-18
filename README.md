@@ -442,28 +442,47 @@ NeoGraph/
 
 ## Benchmarks
 
-### Engine overhead vs LangGraph
+### Engine overhead vs. Python graph/pipeline frameworks
 
 Matched-topology, zero-I/O workloads: graph compiled once, invoked in a
 hot loop. Measures what the engine itself costs (dispatch, state
 writes, reducer calls) — no LLM, no sleep, no network.
 
-![NeoGraph vs LangGraph — per-iteration latency and peak RSS](docs/images/bench-engine-overhead.png)
+![NeoGraph vs Python frameworks — per-iteration latency and peak RSS](docs/images/bench-engine-overhead.png)
 
-|                           | NeoGraph    | LangGraph    | Ratio |
-|---------------------------|-------------|--------------|-------|
-| Per-iter, 3-node chain    | **20.65 µs** | 645.30 µs   | **31.2× faster** |
-| Per-iter, fan-out 5 + join| **150.7 µs** | 2,225 µs    | **14.8× faster** |
-| Peak RSS (whole process)  | **4.9 MB**   | 58.9 MB     | **12× less RAM** |
-| Total elapsed, full bench | 1.92 s       | 35.64 s     | 18.6× |
-| CPU utilization on fan-out| 407% (Taskflow multi-core) | 100% (GIL-bound) | — |
+Per-iteration engine overhead (µs, lower is better):
+
+| Framework | `seq` (3-node chain) | `par` (fan-out 5 + join) | `seq` vs. NeoGraph |
+|-----------|---------------------:|-------------------------:|-------------------:|
+| **NeoGraph** | **20.65 µs** | **150.7 µs** | 1× |
+| Haystack 2.27 | 150.7 µs | 293.6 µs | 7.3× |
+| pydantic-graph 1.84 | 240.3 µs | 308.3 µs¹ | 11.6× |
+| LangGraph 1.1.7 | 645.3 µs | 2,225 µs | 31.2× |
+| LlamaIndex Workflow 0.14 | 1,843 µs | 4,781 µs | 89.2× |
+| AutoGen GraphFlow 0.7.5 | 3,227 µs | 7,389 µs | 156.3× |
+
+¹ pydantic-graph is a single-next-node state machine and cannot fan
+out; `par` is a serial 6-node emulation.
+
+Whole-process metrics (warm-up + both workloads, 20k seq + 10k par
+iters):
+
+| | NeoGraph | best Python (Haystack) | worst (AutoGen) |
+|---|----------|------------------------|-----------------|
+| **Total elapsed** | **1.92 s** | 6.72 s | 138.79 s |
+| **Peak RSS** | **4.9 MB** | 78.3 MB | 52.4 MB² |
+| **CPU utilization on fan-out** | **407%** (Taskflow) | 100% (GIL) | 100% (GIL) |
+
+² AutoGen has a smaller footprint than Haystack but its per-iter cost
+is 50× higher — different tradeoff axes. Full matrix in
+[`benchmarks/README.md`](benchmarks/README.md).
 
 **Engine overhead disappears under LLM latency.** A 500 ms OpenAI round
-trip swamps both engines; the per-iter gap only shows up in non-LLM
+trip swamps every engine; the per-iter gap only shows up in non-LLM
 nodes (data transforms, routing decisions, pure-compute tool calls) and
 in dense agent orchestration. Where it does show up, it shows up big:
-on a Raspberry Pi 4 / Jetson Nano / any SBC class target, a 12× RAM
-delta is the difference between "fits" and "swap thrash."
+on a Raspberry Pi 4 / Jetson Nano / any SBC-class target, a 10–20×
+RAM delta is the difference between "fits" and "swap thrash."
 
 Reproduction and methodology: [`benchmarks/README.md`](benchmarks/README.md).
 
