@@ -1,0 +1,10 @@
+# Haystack concurrent bench image.
+
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir haystack-ai==2.27.0
+
+WORKDIR /app
+COPY benchmarks/concurrent/bench_concurrent_haystack.py /app/bench.py
+
+ENTRYPOINT ["python", "-u", "/app/bench.py"]

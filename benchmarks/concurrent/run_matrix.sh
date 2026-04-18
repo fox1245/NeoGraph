@@ -26,10 +26,22 @@ docker build -q -t ng-concurrent -f benchmarks/concurrent/Dockerfile.neograph . 
 log "Building LangGraph image..."
 docker build -q -t lg-concurrent -f benchmarks/concurrent/Dockerfile.langgraph . >&2
 
+log "Building Haystack image..."
+docker build -q -t hs-concurrent -f benchmarks/concurrent/Dockerfile.haystack . >&2
+
+log "Building pydantic-graph image..."
+docker build -q -t pg-concurrent -f benchmarks/concurrent/Dockerfile.pydantic_graph . >&2
+
+log "Building LlamaIndex image..."
+docker build -q -t li-concurrent -f benchmarks/concurrent/Dockerfile.llamaindex . >&2
+
+log "Building AutoGen image..."
+docker build -q -t ag-concurrent -f benchmarks/concurrent/Dockerfile.autogen . >&2
+
 # ── Matrix ────────────────────────────────────────────────────────────
 # profile = "cpus:mem"
 PROFILES=("2:1g" "1:512m")
-CONCURRENCIES=(10 100 1000 5000 10000)
+CONCURRENCIES=(10 100 1000 10000)
 
 run_cell() {
     local profile="$1"
@@ -80,11 +92,20 @@ for profile in "${PROFILES[@]}"; do
     log "=== profile $profile ==="
     for c in "${CONCURRENCIES[@]}"; do
         # Timeout scales with concurrency so 10k has room to breathe.
-        timeout_s=$(( 60 + c / 200 ))
+        # Larger for slow frameworks (LlamaIndex/AutoGen at N=10k = many minutes).
+        timeout_s=$(( 120 + c / 20 ))
 
         run_cell "$profile" "$c" "ng-concurrent" ""       "neograph-threadpool" "$timeout_s"
         run_cell "$profile" "$c" "lg-concurrent" "async"  "langgraph-asyncio"   "$timeout_s"
         run_cell "$profile" "$c" "lg-concurrent" "mp"     "langgraph-mp"        "$timeout_s"
+        run_cell "$profile" "$c" "hs-concurrent" "async"  "haystack-asyncio"    "$timeout_s"
+        run_cell "$profile" "$c" "hs-concurrent" "mp"     "haystack-mp"         "$timeout_s"
+        run_cell "$profile" "$c" "pg-concurrent" "async"  "pydantic-asyncio"    "$timeout_s"
+        run_cell "$profile" "$c" "pg-concurrent" "mp"     "pydantic-mp"         "$timeout_s"
+        run_cell "$profile" "$c" "li-concurrent" "async"  "llamaindex-asyncio"  "$timeout_s"
+        run_cell "$profile" "$c" "li-concurrent" "mp"     "llamaindex-mp"       "$timeout_s"
+        run_cell "$profile" "$c" "ag-concurrent" "async"  "autogen-asyncio"     "$timeout_s"
+        run_cell "$profile" "$c" "ag-concurrent" "mp"     "autogen-mp"          "$timeout_s"
     done
 done
 

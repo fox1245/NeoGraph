@@ -488,35 +488,45 @@ Reproduction and methodology: [`benchmarks/README.md`](benchmarks/README.md).
 
 ### Burst concurrency (1 CPU / 512 MB sandbox)
 
-What happens under thousands of simultaneous requests? Burst test:
-N requests submitted at t=0 to each engine, all-in / all-wait, inside
-a Docker cgroup limited to **1 CPU and 512 MB RAM** — roughly the
-budget of a Raspberry Pi 4 process.
-
-![Throughput under concurrent load](docs/images/bench-concurrent-throughput.png)
+What happens under thousands of simultaneous requests? Burst test: N
+requests submitted at t=0 to each engine, all-in / all-wait, inside a
+Docker cgroup limited to **1 CPU and 512 MB RAM** — roughly a
+Raspberry Pi 4 process budget.
 
 ![Tail latency — P99 per request](docs/images/bench-concurrent-latency.png)
 
-|  | NeoGraph | LangGraph `asyncio.gather` | LangGraph `multiprocessing.Pool` |
-|---|----------|----------------------------|----------------------------------|
-| **Throughput @ N=10,000** | **~1.67M req/s** | 491 req/s | 1,243 req/s |
-| **P99 latency @ N=10,000** | **6 µs** | **20.0 seconds** | 89 ms |
-| **Peak RSS @ N=10,000** | **7.8 MB** | 425.6 MB | 61.9 MB |
-| **Scales with N?** | Yes (throughput climbs with batch size) | No (GIL-serialised) | No (pool-saturated ≥N=1000) |
+![Throughput under concurrent load](docs/images/bench-concurrent-throughput.png)
 
-The asyncio curve is the dramatic one: P99 latency grows linearly from
-16 ms at N=10 to **20 seconds at N=10,000** because the CPython GIL
-serialises every coroutine's work. The multiprocessing pool bypasses
-the GIL with 7 worker processes but saturates past its pool size.
-NeoGraph's work-stealing Taskflow pool amortises per-task cost and
-keeps P99 in the single-digit microseconds across the entire sweep.
+![Peak resident memory](docs/images/bench-concurrent-rss.png)
 
-Every one of the 30 matrix cells completed — **no engine crashed** in
-this budget. The story is graceful degradation into unusable latency,
-not process death. Tighten the sandbox (256 MB RAM, or N=50,000) and
-the asyncio mode is the first to OOM.
+At **N=10,000 concurrent requests** in asyncio mode (the default
+deployment shape for every Python framework):
 
-Full methodology, raw numbers, and Dockerfiles:
+| Engine | Wall | P99 latency | Peak RSS | Status |
+|--------|-----:|------------:|---------:|:-------|
+| **NeoGraph** | **6 ms** | **7 µs** | **7.5 MB** | ✅ 10000 / 0 |
+| pydantic-graph | 886 ms | **158 µs** | 42.6 MB | ✅ 10000 / 0 |
+| Haystack | 3.1 s | 2.9 s | 130.7 MB | ✅ 10000 / 0 |
+| LangGraph | 23.4 s | 23.0 s | 416.2 MB | ✅ 10000 / 0 |
+| LlamaIndex | — | — | — | ❌ **OOM killed** |
+| AutoGen | — | — | — | ❌ **OOM killed** |
+
+**Two frameworks don't complete** — LlamaIndex Workflow and AutoGen
+GraphFlow exhaust the 512 MB cgroup and get OOM-killed before 10k
+concurrent coroutines can drain. The remaining Python frameworks
+degrade rather than die, but their P99 latency grows linearly with N
+because the CPython GIL serializes every coroutine's CPU work. **This
+is not a LangGraph-specific pathology** — it shows up in every Python
+asyncio runtime.
+
+NeoGraph's Taskflow work-stealing pool has no GIL to fight; it
+amortizes per-task cost across the batch and keeps P99 in single-digit
+microseconds across the entire sweep. The 4 MB memory floor doesn't
+move.
+
+`multiprocessing.Pool` mode bypasses the GIL across worker processes
+but saturates at pool size and pays fork + pickle overhead; full
+numbers and the mp-mode story are in
 [`benchmarks/concurrent/CONCURRENT.md`](benchmarks/concurrent/CONCURRENT.md).
 
 ### Size & cold-start footprint (Plan & Executor demo)

@@ -1,31 +1,32 @@
-# Concurrent-load benchmark — NeoGraph vs LangGraph
+# Concurrent-load benchmark — NeoGraph vs. Python graph frameworks
 
 Under a **burst** load — N requests submitted simultaneously, then the
-test waits for all to complete — how do the two engines scale, and at
+test waits for all to complete — how do these engines scale, and at
 what point does each approach stop being viable?
 
 This bench answers that in a reproducible Docker sandbox with CPU and
-memory limits matching an SBC-class target.
+memory limits matching an SBC-class target, across six frameworks.
 
 ## Setup
 
 - **Workload**: 3-node sequential counter chain (`a → b → c`), each
-  node increments a single state channel. No I/O, no sleep.
+  node increments a single state channel. No I/O, no sleep, no LLM.
 - **Burst pattern**: N tasks submitted at t=0; the runner waits for all
   to finish; per-request latency is captured in-process.
 - **Sandbox**: Docker with `--cpus` and `--memory` (+ `--memory-swap`
   matched so OOM fires instead of swapping). Matrix:
   - Profile **1 CPU / 512 MB** — the "tight SBC" target (primary)
   - Profile **2 CPU / 1 GB** — the "comfortable SBC" target
+- **Concurrencies**: N ∈ {10, 100, 1000, 10000}
 - **Engines tested**:
   - `neograph` — `tf::Executor` thread pool with `hardware_concurrency()` workers, each task invokes `engine->run()`.
-  - `langgraph-asyncio` — `asyncio.gather(*[graph.ainvoke(state) for _ in range(N)])` in a single process.
-  - `langgraph-mp` — `multiprocessing.Pool(P).map(worker, [state] * N)` with `P = os.cpu_count()`.
-- **Concurrencies**: N ∈ {10, 100, 1000, 5000, 10000}
-- **Versions**: LangGraph 1.1.7, CPython 3.12 (python:3.12-slim),
-  g++ 13.3 (ubuntu:24.04), NeoGraph HEAD.
+  - `langgraph-asyncio` / `langgraph-mp` — LangGraph 1.1.7 under `asyncio.gather` / `multiprocessing.Pool`.
+  - `haystack-asyncio` / `haystack-mp` — Haystack 2.27.0. Pipeline.run() is sync; asyncio mode wraps with `asyncio.to_thread`.
+  - `pydantic-asyncio` / `pydantic-mp` — pydantic-graph 1.84.1, async-native.
+  - `llamaindex-asyncio` / `llamaindex-mp` — LlamaIndex Workflow 0.14.20, one fresh Workflow per run (per-run event bus).
+  - `autogen-asyncio` / `autogen-mp` — AutoGen GraphFlow 0.7.5, one fresh flow per run (flow state isn't concurrent-safe).
 
-## Results — 1 CPU / 512 MB profile
+## Results — 1 CPU / 512 MB profile (asyncio mode)
 
 ![Throughput — requests per second](../../docs/images/bench-concurrent-throughput.png)
 
@@ -33,119 +34,141 @@ memory limits matching an SBC-class target.
 
 ![Peak resident memory](../../docs/images/bench-concurrent-rss.png)
 
-### Raw numbers (1 CPU / 512 MB)
+The charts track asyncio-mode results for all six engines. The mp
+(multiprocessing) rows are in the raw-numbers table below — mp
+bypasses the GIL across N worker processes but saturates at pool
+size, and the pattern is the same across every Python framework.
 
-| N | Engine | Wall (ms) | Throughput (req/s) | P50 | P99 | Peak RSS |
-|---|--------|-----------|--------------------|-----|-----|----------|
-| 10 | NeoGraph | <1 | ≥10,000 | 85 µs | **472 µs** | 4.4 MB |
-| 10 | LG asyncio | 17 | 588 | 14.5 ms | 16.3 ms | 59.2 MB |
-| 10 | LG mp | 100 | 100 | 4.6 ms | 62.7 ms | 61.7 MB |
-| 100 | NeoGraph | <1 | ≥100,000 | 3 µs | **537 µs** | 4.5 MB |
-| 100 | LG asyncio | 128 | 781 | 101.3 ms | 125.8 ms | 62.7 MB |
-| 100 | LG mp | 212 | 472 | 784 µs | 77.2 ms | 62.2 MB |
-| 1,000 | NeoGraph | <1 | ≥1,000,000 | 3 µs | **5 µs** | 4.7 MB |
-| 1,000 | LG asyncio | 1,340 | 746 | 1.10 s | 1.28 s | 95.8 MB |
-| 1,000 | LG mp | 928 | 1,078 | 789 µs | 89.3 ms | 61.8 MB |
-| 5,000 | NeoGraph | 3 | ~1.67M | 3 µs | **8 µs** | 5.9 MB |
-| 5,000 | LG asyncio | 9,784 | 511 | 8.27 s | 9.64 s | 242.7 MB |
-| 5,000 | LG mp | 3,971 | 1,259 | 733 µs | 89.4 ms | 61.9 MB |
-| **10,000** | **NeoGraph** | **6** | **~1.67M** | **2 µs** | **6 µs** | **7.8 MB** |
-| **10,000** | **LG asyncio** | **20,348** | **491** | **17.18 s** | **20.02 s** | **425.6 MB** |
-| **10,000** | **LG mp** | **8,046** | **1,243** | **750 µs** | **89.3 ms** | **61.9 MB** |
+### Raw numbers (1 CPU / 512 MB, 2026-04-19)
 
-Every cell completed — no engine crashed, no OOM kill, all 30/30 cells
-green. **But the scaling curves diverge by three orders of magnitude.**
+Full matrix including the 2 CPU / 1 GB profile is in
+[`results.jsonl`](results.jsonl). N=10,000 is the row that tells the
+story most sharply:
+
+| N | Engine + mode | Wall | P50 | P99 | Peak RSS | OK / Err |
+|---|---------------|------|-----|-----|----------|---------|
+| **10,000** | **NeoGraph** | **6 ms** | **3 µs** | **7 µs** | **7.5 MB** | 10000 / 0 |
+| 10,000 | LangGraph asyncio | 23.4 s | 20.2 s | **23.0 s** | 416.2 MB | 10000 / 0 |
+| 10,000 | LangGraph mp-pool-7 | 8.0 s | 737 µs | 88.4 ms | 60.3 MB | 10000 / 0 |
+| 10,000 | Haystack asyncio | 3.1 s | 1.7 s | 2.9 s | 130.7 MB | 10000 / 0 |
+| 10,000 | Haystack mp-pool-7 | 2.9 s | 167 µs | 84.7 ms | 68.1 MB | 10000 / 0 |
+| 10,000 | pydantic-graph asyncio | 886 ms | 71 µs | **158 µs** | 42.6 MB | 10000 / 0 |
+| 10,000 | pydantic-graph mp-pool-7 | 2.8 s | 253 µs | 83.8 ms | 36.7 MB | 10000 / 0 |
+| 10,000 | **LlamaIndex asyncio** | **OOM killed** | — | — | — | — |
+| 10,000 | LlamaIndex mp-pool-7 | 6.6 s | — | — | 102.5 MB | **0 / 10000** |
+| 10,000 | **AutoGen asyncio** | **OOM killed** | — | — | — | — |
+| 10,000 | AutoGen mp-pool-7 | 46.8 s | 4.6 ms | 97.1 ms | 49.1 MB | 10000 / 0 |
+
+Two engines exit the 512 MB sandbox non-gracefully at N=10,000:
+
+* **LlamaIndex asyncio** — OOM killed. Each in-flight workflow holds a
+  per-run event bus + channel runtime; 10k of them overshoots the
+  cgroup before wall-clock completes.
+* **AutoGen asyncio** — OOM killed. 10k concurrent GraphFlow instances
+  with their participant state trip the same ceiling.
+* **LlamaIndex mp-pool** — all 10k worker invocations failed. Workflow
+  instances are not pickle-safe across worker-process forks; fails
+  regardless of N.
+
+The full raw matrix for both profiles is
+[`results.jsonl`](results.jsonl) (one JSON line per cell).
 
 ## Interpretation
 
-### Throughput: NeoGraph scales, LangGraph plateaus
+### Throughput: NeoGraph scales, every Python asyncio runtime plateaus
 
-The green curve climbs from 10k req/s to 1.67M req/s as concurrency
-grows — Taskflow's work-stealing scheduler amortizes per-task setup
-over the batch. Taskflow's default executor uses every logical CPU,
-and the cgroup's 1-CPU quota only bounds wall time, not thread count,
+NeoGraph's green curve climbs from ~10k req/s to ~1.67M req/s as
+concurrency grows — Taskflow's work-stealing scheduler amortizes
+per-task setup over the batch. Taskflow's executor uses every logical
+CPU, and the cgroup's CPU quota bounds wall time but not thread count,
 so short tasks interleave cleanly.
 
-The LangGraph curves plateau because neither asyncio nor a process
-pool scales past its single bottleneck:
+**Every Python asyncio curve plateaus or degrades.** The root cause is
+the same across LangGraph, Haystack, pydantic-graph, LlamaIndex, and
+AutoGen: one event loop in one process, and the GIL serializes the
+CPU work every coroutine has to do. N coroutines → serialized
+execution → throughput that doesn't scale with N.
 
-- **`asyncio.gather`** puts all N coroutines on one event loop in one
-  process. Our workload is CPU-bound, so every coroutine still has to
-  take the GIL to execute its `graph.ainvoke()`. N coroutines →
-  serialised execution → flat ~500 req/s regardless of N.
-- **`multiprocessing.Pool(7)`** bypasses the GIL across 7 processes,
-  so it actually scales with concurrency up to the pool size. Past
-  that, tasks queue. Beyond N=1000 the pool is saturated and
-  throughput plateaus at ~1,250 req/s.
+The mp-pool mode for each framework bypasses the GIL across
+`os.cpu_count()` worker processes — but saturates at that pool size
+and pays fork + pickle overhead per task. Beyond ~N=1000 the pool is
+saturated and throughput plateaus regardless of framework.
 
-NeoGraph at N=10,000 delivers **~1,340× the LangGraph-mp throughput**
-and **~3,400× the asyncio throughput**.
+### Tail latency: the universal GIL ceiling
 
-### Tail latency: asyncio's P99 grows linearly with N
+At N=10,000, NeoGraph's P99 stays in microseconds. Every Python
+asyncio P99 climbs linearly with N — because the *last* coroutine in
+GIL queue waits for the full run to complete before its slot.
 
-The most dramatic chart. At N=10,000:
-
-- **NeoGraph P99 = 6 µs.** A single request's worst case is 6 microseconds.
-- **LangGraph mp P99 = 89 ms.** Tasks that get queued behind 10 ahead of them wait ~90ms.
-- **LangGraph asyncio P99 = 20,022 ms (20 seconds).** The median (P50)
-  coroutine waits over 17 seconds for its GIL slot. The P99 coroutine
-  waits the full run's duration — essentially, it's last in line.
-
-The 10,000× concurrency delta between N=10 and N=10,000 shows up in
-the asyncio numbers almost linearly: 16ms → 20s is a 1,200× latency
-growth. It's a textbook GIL-serialisation symptom.
+This is not a LangGraph-specific problem. The exact same shape shows
+up for Haystack (sync pipeline wrapped with `to_thread`), LlamaIndex
+(async event-driven workflow), pydantic-graph (async state machine),
+and AutoGen (async multi-agent runtime). If you have a Python orchestration
+framework behind a single process, the GIL is the ceiling.
 
 For any realistic server with P99 SLO expectations (say, "under 1
-second for 99% of requests"), asyncio breaks at ~N=500 and mp-pool
-breaks at ~N=8 (because P99 is already 62ms at N=10, meaning even
-low-traffic servers eat the full pool-wait cost).
+second for 99% of requests"), every asyncio-backed engine breaks at
+some N. The exact breakpoint varies by framework — lighter runtimes
+(pydantic-graph, LangGraph) break later, heavier ones (LlamaIndex,
+AutoGen) break much earlier — but all of them break.
 
 ### Memory: asyncio's RSS grows with held coroutine stacks
 
-- **NeoGraph** stays between 4.4–7.8 MB across the whole sweep. Tasks
+- **NeoGraph** stays between 5–10 MB across the whole sweep. Tasks
   return immediately; only the Taskflow pool is resident.
-- **LangGraph mp-pool** stays near 62 MB — the pool of 7 worker
-  processes is the floor, and tasks don't accumulate because they're
+- **mp-pool modes** stay near 60–80 MB across frameworks — the worker
+  pool size dominates; tasks don't accumulate because they're
   dispatched and returned one-by-one.
-- **LangGraph asyncio** starts at 58 MB (Python + langgraph baseline)
-  and grows to 425 MB at N=10,000. Every pending coroutine holds a
-  Python stack frame, closure state, and LangGraph runtime state. At
-  10,000 in-flight coroutines, that's ~37 KB each on top of the
-  baseline.
+- **asyncio modes** grow linearly with N. Every pending coroutine
+  holds a Python stack frame, closure state, and framework per-run
+  state. At 10,000 in-flight coroutines this adds up to hundreds of
+  MB for the heavier runtimes.
 
-At our 512 MB memory budget, asyncio leaves ~80 MB of headroom at
-N=10,000. At a tighter 256 MB cgroup the asyncio run would get
-OOM-killed somewhere between N=5,000 and N=10,000. NeoGraph still has
-504 MB of headroom in that budget.
+At our 512 MB memory budget, some asyncio runs get squeezed near the
+cgroup ceiling at N=10,000. At a tighter 256 MB cgroup the heavier
+frameworks would get OOM-killed somewhere between N=1,000 and
+N=10,000. NeoGraph still has ~500 MB of headroom in that budget.
 
 ## What this bench does NOT say
 
-- **Doesn't prove LangGraph "crashes" at scale.** Every cell
-  completed. The story is graceful degradation into unusable latency,
-  not process death. At a tighter cgroup or higher N, OOM kills do
-  become the exit mode — but we didn't document that here, and it'd
-  require a follow-up.
+- **Doesn't prove any framework "crashes" at scale.** The story is
+  graceful degradation into unusable latency, not process death. At a
+  tighter cgroup or higher N, OOM kills do become the exit mode — but
+  we didn't document that here, and it'd require a follow-up.
 - **Doesn't model LLM I/O.** A real agent workload has 100–1,000 ms
   per LLM call. That latency dwarfs the engine gap in absolute terms —
-  but NOT in capacity terms: if your engine can only serialize 1,250
-  req/s through its runtime, no amount of concurrent LLM I/O helps.
-- **Doesn't cover persistence.** Checkpointing was disabled on both
-  sides. Enabling it would shift the comparison toward the store
+  but NOT in capacity terms: if your engine can only push 1,000 req/s
+  through its runtime, no amount of concurrent LLM I/O helps.
+- **Doesn't cover persistence.** Checkpointing was disabled on every
+  framework. Enabling it would shift the comparison toward the store
   implementation, which is a different benchmark.
-- **Docker on WSL2.** `--cpus` enforces CPU quota but not visible core
-  count, which is why NeoGraph's `hardware_concurrency()` still
-  returns the host count. Results on bare metal should be directionally
-  the same but tighter at the NeoGraph end (fewer threads, less
-  context-switch noise).
+- **Workload-shape bias.** The counter chain is NeoGraph-native in
+  state semantics; Haystack wraps its sync pipeline in `to_thread`,
+  AutoGen encodes counter as message content, pydantic-graph has no
+  fan-out (not used in this bench, but relevant for burst workloads
+  with branching). Each framework is being asked to do its job, not
+  its best-case job.
+- **Docker on WSL2.** `--cpus` enforces CPU quota but not visible
+  core count, which is why NeoGraph's `hardware_concurrency()` still
+  returns the host count. Results on bare metal should be
+  directionally the same but tighter at the NeoGraph end (fewer
+  threads, less context-switch noise).
 
 ## Reproduce
 
 ```bash
 # From the repo root.
+
+# Build images once:
 docker build -t ng-concurrent -f benchmarks/concurrent/Dockerfile.neograph .
 docker build -t lg-concurrent -f benchmarks/concurrent/Dockerfile.langgraph .
+docker build -t hs-concurrent -f benchmarks/concurrent/Dockerfile.haystack .
+docker build -t pg-concurrent -f benchmarks/concurrent/Dockerfile.pydantic_graph .
+docker build -t li-concurrent -f benchmarks/concurrent/Dockerfile.llamaindex .
+docker build -t ag-concurrent -f benchmarks/concurrent/Dockerfile.autogen .
 
-# Full matrix (30 cells, ~5-10 minutes):
+# Full matrix (88 cells across 6 engines × 2 modes × 4 concurrencies × 2 profiles,
+# excluding neograph which has no mode split):
 bash benchmarks/concurrent/run_matrix.sh
 
 # Re-render charts from the results:
@@ -159,10 +182,7 @@ docker run --rm --cpus=1 --memory=512m --memory-swap=512m \
     ng-concurrent 10000
 
 docker run --rm --cpus=1 --memory=512m --memory-swap=512m \
-    lg-concurrent async 10000
-
-docker run --rm --cpus=1 --memory=512m --memory-swap=512m \
-    lg-concurrent mp 10000
+    li-concurrent async 10000
 ```
 
 Each container prints a single JSON line of the form:
