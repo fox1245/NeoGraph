@@ -739,7 +739,7 @@ public:
         const GraphState& state, const GraphStreamCallback& cb);
 
     // 노드 이름
-    virtual std::string name() const = 0;
+    virtual std::string get_name() const = 0;
 };
 ```
 
@@ -768,7 +768,7 @@ public:
     std::vector<ChannelWrite> execute(const GraphState& state) override;
     std::vector<ChannelWrite> execute_stream(
         const GraphState& state, const GraphStreamCallback& cb) override;
-    std::string name() const override;
+    std::string get_name() const override;
 };
 ```
 
@@ -792,7 +792,7 @@ public:
     ToolDispatchNode(const std::string& name, const NodeContext& ctx);
 
     std::vector<ChannelWrite> execute(const GraphState& state) override;
-    std::string name() const override;
+    std::string get_name() const override;
 };
 ```
 
@@ -815,7 +815,7 @@ public:
                          std::vector<std::string> valid_routes); // 유효한 경로 목록
 
     std::vector<ChannelWrite> execute(const GraphState& state) override;
-    std::string name() const override;
+    std::string get_name() const override;
 };
 ```
 
@@ -853,7 +853,7 @@ public:
     std::vector<ChannelWrite> execute(const GraphState& state) override;
     std::vector<ChannelWrite> execute_stream(
         const GraphState& state, const GraphStreamCallback& cb) override;
-    std::string name() const override;
+    std::string get_name() const override;
 };
 ```
 
@@ -960,7 +960,7 @@ public:
     void set_retry_policy(const RetryPolicy& policy);
     void set_node_retry_policy(const std::string& node_name,
                                const RetryPolicy& policy);
-    const std::string& graph_name() const;
+    const std::string& get_graph_name() const;
 };
 ```
 
@@ -1250,7 +1250,7 @@ void set_node_retry_policy(const std::string& node_name,
                            const RetryPolicy& policy);
 
 // 그래프 이름 조회
-const std::string& graph_name() const;
+const std::string& get_graph_name() const;
 ```
 
 **재시도 정책 설정 예:**
@@ -2503,7 +2503,7 @@ public:
         return execute_full(state).writes;
     }
 
-    std::string name() const override { return "planner"; }
+    std::string get_name() const override { return "planner"; }
 };
 
 // EvaluatorNode: 결과를 평가하고 Command로 분기
@@ -2532,7 +2532,7 @@ public:
         return execute_full(state).writes;
     }
 
-    std::string name() const override { return "evaluator"; }
+    std::string get_name() const override { return "evaluator"; }
 };
 ```
 

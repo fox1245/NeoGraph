@@ -8,15 +8,16 @@
  */
 #pragma once
 
-#include <neograph/graph/types.h>
-#include <neograph/graph/state.h>
-#include <neograph/graph/node.h>
 #include <neograph/graph/checkpoint.h>
-#include <neograph/graph/store.h>
-#include <neograph/graph/scheduler.h>
 #include <neograph/graph/compiler.h>
 #include <neograph/graph/coordinator.h>
 #include <neograph/graph/executor.h>
+#include <neograph/graph/node.h>
+#include <neograph/graph/scheduler.h>
+#include <neograph/graph/state.h>
+#include <neograph/graph/store.h>
+#include <neograph/graph/types.h>
+
 #include <memory>
 #include <set>
 
@@ -239,7 +240,7 @@ public:
      * @brief Get the graph name (from the JSON definition).
      * @return Graph name string.
      */
-    const std::string& graph_name() const { return name_; }
+    const std::string& get_graph_name() const { return name_; }
 
 private:
     GraphEngine() = default;

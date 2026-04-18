@@ -83,7 +83,7 @@ public:
      * @brief Get the node's unique name within the graph.
      * @return Node name string.
      */
-    virtual std::string name() const = 0;
+    virtual std::string get_name() const = 0;
 };
 
 /**
@@ -105,7 +105,7 @@ public:
     std::vector<ChannelWrite> execute(const GraphState& state) override;
     std::vector<ChannelWrite> execute_stream(
         const GraphState& state, const GraphStreamCallback& cb) override;
-    std::string name() const override { return name_; }
+    std::string get_name() const override { return name_; }
 
 private:
     std::string              name_;
@@ -133,7 +133,7 @@ public:
     ToolDispatchNode(const std::string& name, const NodeContext& ctx);
 
     std::vector<ChannelWrite> execute(const GraphState& state) override;
-    std::string name() const override { return name_; }
+    std::string get_name() const override { return name_; }
 
 private:
     std::string        name_;
@@ -164,7 +164,7 @@ public:
                          std::vector<std::string> valid_routes);
 
     std::vector<ChannelWrite> execute(const GraphState& state) override;
-    std::string name() const override { return name_; }
+    std::string get_name() const override { return name_; }
 
 private:
     std::string               name_;
@@ -204,7 +204,7 @@ public:
     std::vector<ChannelWrite> execute(const GraphState& state) override;
     std::vector<ChannelWrite> execute_stream(
         const GraphState& state, const GraphStreamCallback& cb) override;
-    std::string name() const override { return name_; }
+    std::string get_name() const override { return name_; }
 
 private:
     std::string name_;

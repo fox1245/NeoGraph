@@ -28,7 +28,7 @@ public:
         if (v.is_number()) cur = v.get<int>();
         return {ChannelWrite{"counter", json(cur + 1)}};
     }
-    std::string name() const override { return n_; }
+    std::string get_name() const override { return n_; }
 private:
     std::string n_;
 };
@@ -41,7 +41,7 @@ public:
     std::vector<ChannelWrite> execute(const GraphState&) override {
         return {ChannelWrite{"results", json::array({idx_})}};
     }
-    std::string name() const override { return n_; }
+    std::string get_name() const override { return n_; }
 private:
     std::string n_;
     int idx_;
@@ -54,7 +54,7 @@ public:
         int n = r.is_array() ? static_cast<int>(r.size()) : 0;
         return {ChannelWrite{"count", json(n)}};
     }
-    std::string name() const override { return "summarizer"; }
+    std::string get_name() const override { return "summarizer"; }
 };
 
 static void register_types() {

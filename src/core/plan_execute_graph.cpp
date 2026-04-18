@@ -96,7 +96,7 @@ public:
         , model_(std::move(model))
         , prompt_(std::move(prompt)) {}
 
-    std::string name() const override { return name_; }
+    std::string get_name() const override { return name_; }
 
     std::vector<ChannelWrite> execute(const GraphState& state) override {
         auto msgs = state.get_messages();
@@ -154,7 +154,7 @@ public:
         , prompt_(std::move(prompt))
         , max_iter_(max_iter) {}
 
-    std::string name() const override { return name_; }
+    std::string get_name() const override { return name_; }
 
     std::vector<ChannelWrite> execute(const GraphState& state) override {
         auto plan = state.get("plan");
@@ -251,7 +251,7 @@ public:
         , model_(std::move(model))
         , prompt_(std::move(prompt)) {}
 
-    std::string name() const override { return name_; }
+    std::string get_name() const override { return name_; }
 
     std::vector<ChannelWrite> execute(const GraphState& state) override {
         std::string objective;

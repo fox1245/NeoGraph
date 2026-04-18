@@ -41,7 +41,7 @@ public:
 
         return {ChannelWrite{"result", json("Payment complete: " + std::to_string(amount) + " KRW")}};
     }
-    std::string name() const override { return "payment"; }
+    std::string get_name() const override { return "payment"; }
 };
 
 // =========================================================================
@@ -58,7 +58,7 @@ public:
         }
         return {ChannelWrite{"api_result", json("External API response success (attempt " + std::to_string(count) + ")")}};
     }
-    std::string name() const override { return "unstable_api"; }
+    std::string get_name() const override { return "unstable_api"; }
 };
 std::atomic<int> UnstableAPINode::call_count_{0};
 
@@ -93,7 +93,7 @@ public:
 
         return writes;
     }
-    std::string name() const override { return "score_router"; }
+    std::string get_name() const override { return "score_router"; }
 };
 
 // Tier-specific processing node
@@ -106,7 +106,7 @@ public:
         auto tier = state.get("tier");
         return {ChannelWrite{"result", json(message_ + " (tier: " + tier.get<std::string>() + ")")}};
     }
-    std::string name() const override { return name_; }
+    std::string get_name() const override { return name_; }
 };
 
 // =========================================================================

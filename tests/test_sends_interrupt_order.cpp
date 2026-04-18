@@ -38,7 +38,7 @@ public:
         nr.sends.push_back(Send{"worker", json{{"payload", 7}}});
         return nr;
     }
-    std::string name() const override { return "planner"; }
+    std::string get_name() const override { return "planner"; }
 };
 
 // Worker: records that it ran and writes the payload back to an
@@ -52,7 +52,7 @@ public:
         int v = p.is_number_integer() ? p.get<int>() : -1;
         return {ChannelWrite{"results", json(v)}};
     }
-    std::string name() const override { return "worker"; }
+    std::string get_name() const override { return "worker"; }
 private:
     std::atomic<int>* counter_;
 };

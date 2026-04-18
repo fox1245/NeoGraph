@@ -41,7 +41,7 @@ public:
         }
         return {ChannelWrite{name_ + "_done", json(true)}};
     }
-    std::string name() const override { return name_; }
+    std::string get_name() const override { return name_; }
 
 private:
     std::string name_;
@@ -63,7 +63,7 @@ public:
         }
         return {ChannelWrite{name_ + "_done", json(true)}};
     }
-    std::string name() const override { return name_; }
+    std::string get_name() const override { return name_; }
 
 private:
     std::string name_;
@@ -113,7 +113,7 @@ public:
     std::vector<ChannelWrite> execute(const GraphState&) override {
         return {ChannelWrite{"setup_done", json(true)}};
     }
-    std::string name() const override { return "setup"; }
+    std::string get_name() const override { return "setup"; }
 };
 
 // Fan-out graph: setup → {a, b} → __end__. setup produces a committed

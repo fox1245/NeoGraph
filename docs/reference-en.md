@@ -751,7 +751,7 @@ public:
     virtual NodeResult execute_full_stream(
         const GraphState& state, const GraphStreamCallback& cb);
 
-    virtual std::string name() const = 0;
+    virtual std::string get_name() const = 0;
 };
 ```
 
@@ -761,7 +761,7 @@ public:
 | `execute_stream(state, cb)` | Streaming variant. Emits `GraphEvent`s via `cb` during execution. Default implementation delegates to `execute()` |
 | `execute_full(state)` | Extended execution returning `NodeResult`. Override this to use `Command` or `Send`. Default wraps `execute()` output |
 | `execute_full_stream(state, cb)` | Streaming extended execution. Default delegates to `execute_stream()` and wraps result |
-| `name()` | Returns the node's unique name within the graph |
+| `get_name()` | Returns the node's unique name within the graph |
 
 To support `Send` or `Command`, override `execute_full()` (or `execute_full_stream()`
 for streaming). The engine always calls the `execute_full*` variants internally.
@@ -780,7 +780,7 @@ public:
     std::vector<ChannelWrite> execute(const GraphState& state) override;
     std::vector<ChannelWrite> execute_stream(
         const GraphState& state, const GraphStreamCallback& cb) override;
-    std::string name() const override;
+    std::string get_name() const override;
 
 private:
     CompletionParams build_params(const GraphState& state) const;
@@ -805,7 +805,7 @@ public:
     ToolDispatchNode(const std::string& name, const NodeContext& ctx);
 
     std::vector<ChannelWrite> execute(const GraphState& state) override;
-    std::string name() const override;
+    std::string get_name() const override;
 };
 ```
 
@@ -828,7 +828,7 @@ public:
                          std::vector<std::string> valid_routes);
 
     std::vector<ChannelWrite> execute(const GraphState& state) override;
-    std::string name() const override;
+    std::string get_name() const override;
 };
 ```
 
@@ -856,7 +856,7 @@ public:
     std::vector<ChannelWrite> execute(const GraphState& state) override;
     std::vector<ChannelWrite> execute_stream(
         const GraphState& state, const GraphStreamCallback& cb) override;
-    std::string name() const override;
+    std::string get_name() const override;
 };
 ```
 
@@ -971,7 +971,7 @@ public:
     std::shared_ptr<Store> get_store() const;
     void set_retry_policy(const RetryPolicy& policy);
     void set_node_retry_policy(const std::string& node_name, const RetryPolicy& policy);
-    const std::string& graph_name() const;
+    const std::string& get_graph_name() const;
 };
 ```
 
@@ -1188,10 +1188,10 @@ void set_node_retry_policy(const std::string& node_name, const RetryPolicy& poli
 
 Sets a retry policy for a specific node, overriding the default.
 
-#### `graph_name`
+#### `get_graph_name`
 
 ```cpp
-const std::string& graph_name() const;
+const std::string& get_graph_name() const;
 ```
 
 Returns the name of the graph as specified in the definition.
@@ -2375,7 +2375,7 @@ Using `Send` for map-reduce patterns:
 ```cpp
 class FanOutNode : public GraphNode {
 public:
-    std::string name() const override { return "fan_out"; }
+    std::string get_name() const override { return "fan_out"; }
 
     // Override execute_full to return Send directives
     NodeResult execute_full(const GraphState& state) override {
@@ -2403,7 +2403,7 @@ Using `Command` to simultaneously update state and control routing:
 ```cpp
 class RouterNode : public GraphNode {
 public:
-    std::string name() const override { return "router"; }
+    std::string get_name() const override { return "router"; }
 
     NodeResult execute_full(const GraphState& state) override {
         auto messages = state.get_messages();

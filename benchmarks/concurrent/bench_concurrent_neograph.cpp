@@ -42,7 +42,7 @@ public:
         if (v.is_number()) cur = v.get<int>();
         return {ChannelWrite{"counter", json(cur + 1)}};
     }
-    std::string name() const override { return n_; }
+    std::string get_name() const override { return n_; }
 private:
     std::string n_;
 };

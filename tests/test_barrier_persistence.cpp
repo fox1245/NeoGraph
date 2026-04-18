@@ -35,7 +35,7 @@ public:
         counter_->fetch_add(1, std::memory_order_relaxed);
         return {ChannelWrite{name_ + "_done", json(true)}};
     }
-    std::string name() const override { return name_; }
+    std::string get_name() const override { return name_; }
 private:
     std::string name_;
     std::atomic<int>* counter_;
