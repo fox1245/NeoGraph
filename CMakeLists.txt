@@ -234,6 +234,21 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         if(NEOGRAPH_BUILD_MCP)
             add_executable(example_mcp_agent examples/03_mcp_agent.cpp)
             target_link_libraries(example_mcp_agent PRIVATE neograph::core neograph::llm neograph::mcp)
+
+            add_executable(example_mcp_hitl examples/20_mcp_hitl.cpp)
+            target_link_libraries(example_mcp_hitl PRIVATE neograph::core neograph::llm neograph::mcp)
+
+            add_executable(example_mcp_fanout examples/21_mcp_fanout.cpp)
+            target_link_libraries(example_mcp_fanout PRIVATE neograph::core neograph::mcp)
+
+            add_executable(example_mcp_stdio examples/22_mcp_stdio.cpp)
+            target_link_libraries(example_mcp_stdio PRIVATE neograph::core neograph::llm neograph::mcp)
+
+            add_executable(example_mcp_multi examples/23_mcp_multi.cpp)
+            target_link_libraries(example_mcp_multi PRIVATE neograph::core neograph::llm neograph::mcp)
+
+            add_executable(example_mcp_feedback examples/24_mcp_feedback.cpp)
+            target_link_libraries(example_mcp_feedback PRIVATE neograph::core neograph::llm neograph::mcp)
         endif()
 
         # Clay + Raylib chatbot (optional — requires Raylib)

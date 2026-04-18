@@ -2191,7 +2191,15 @@ std::string streamed = agent.run_stream(messages,
 **네임스페이스:** `neograph::mcp`
 
 [Model Context Protocol (MCP)](https://modelcontextprotocol.io) 서버에 연결하여
-도구를 자동으로 발견하고 실행하는 기능을 제공한다.
+도구를 자동으로 발견하고 실행하는 기능을 제공한다. 두 가지 전송 방식을 지원한다.
+
+- **HTTP** — `MCPClient("http://host:port")`. Streamable HTTP transport,
+  요청마다 `Mcp-Session-Id` 헤더로 세션 유지.
+- **stdio** — `MCPClient({"python", "server.py"})`. 자식 프로세스를
+  `fork`+`execvp`로 띄우고 양방향 pipe로 newline-delimited JSON-RPC 교환.
+  자식 프로세스의 수명은 `MCPClient` 또는 `get_tools()`가 돌려준 어떤
+  `MCPTool`이든 살아있는 한 유지됨. 소멸 시 SIGTERM → waitpid(약 500ms 내)
+  → SIGKILL 폴백.
 
 ### 13.1 MCPClient
 
@@ -2200,41 +2208,46 @@ MCP 서버 연결 및 도구 발견 클라이언트.
 ```cpp
 class MCPClient {
 public:
-    explicit MCPClient(const std::string& server_url);
+    explicit MCPClient(const std::string& server_url);     // HTTP
+    explicit MCPClient(std::vector<std::string> argv);     // stdio (subprocess)
 
-    // 서버 연결 초기화 + 핸드셰이크
     bool initialize(const std::string& client_name = "neograph");
-
-    // 서버에서 도구 목록을 발견하여 Tool 인스턴스로 반환
     std::vector<std::unique_ptr<Tool>> get_tools();
-
-    // 도구를 이름으로 직접 호출
     json call_tool(const std::string& name, const json& arguments);
 };
 ```
 
 | 메서드 | 설명 |
 |--------|------|
-| `MCPClient(url)` | MCP 서버 URL로 클라이언트 생성 |
+| `MCPClient(url)` | HTTP 모드 클라이언트 생성 |
+| `MCPClient(argv)` | 서브프로세스를 띄워 stdio 모드 클라이언트 생성. `argv[0]`은 `PATH`로 해결(execvp) |
 | `initialize()` | JSON-RPC 핸드셰이크 수행. 성공 시 `true` 반환 |
-| `get_tools()` | `tools/list`를 호출하여 `MCPTool` 인스턴스 벡터 반환 |
+| `get_tools()` | `tools/list`를 호출하여 `MCPTool` 인스턴스 벡터 반환. stdio 모드에서는 각 툴이 세션에 shared_ptr 역참조를 보관 |
 | `call_tool()` | `tools/call`을 호출하여 결과 JSON 반환 |
 
 ---
 
 ### 13.2 MCPTool
 
-MCP 서버의 원격 도구를 로컬 `Tool` 인터페이스로 래핑.
+MCP 서버의 원격 도구를 로컬 `Tool` 인터페이스로 래핑. 두 개의 생성자가 있으며,
+`MCPClient::get_tools()`가 전송 방식에 따라 자동으로 적절한 것을 선택한다.
 
 ```cpp
 class MCPTool : public Tool {
 public:
+    // HTTP 모드 — execute()마다 server_url에 대해 단명 세션을 연다.
     MCPTool(const std::string& server_url,
             const std::string& name,
             const std::string& description,
             const json& input_schema);
 
-    ChatTool get_definition() const override;
+    // stdio 모드 — 서브프로세스 세션을 shared_ptr로 역참조해 수명을 지탱한다.
+    MCPTool(std::shared_ptr<detail::StdioSession> session,
+            const std::string& name,
+            const std::string& description,
+            const json& input_schema);
+
+    ChatTool    get_definition() const override;
     std::string execute(const json& arguments) override;
     std::string get_name() const override;
 };
