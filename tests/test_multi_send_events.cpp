@@ -201,6 +201,116 @@ private:
     int fail_until_;
 };
 
+// =========================================================================
+// Command.updates parity: run_one applies command->updates after writes;
+// run_sends did not — so a Send target's Command(goto, updates) silently
+// dropped its `updates` into the void while the analogous pattern in
+// ready-set execution worked. Same family of omission as the retry gap.
+// =========================================================================
+
+// A Send target that emits Command{updates=[{"side_effect", <idx>}]}. The
+// goto_node is immaterial for Send semantics — what matters is that the
+// updates make it into the merged state.
+class CommandUpdateSendTarget : public GraphNode {
+public:
+    std::vector<ChannelWrite> execute(const GraphState&) override { return {}; }
+    NodeResult execute_full(const GraphState& state) override {
+        NodeResult nr;
+        json v = state.get("task_idx");
+        int idx = v.is_number_integer() ? v.get<int>() : -1;
+        // A normal write (baseline) and a Command.updates entry. If the
+        // engine drops command->updates, `side_effects` will stay empty
+        // even though `results` accumulates normally.
+        nr.writes.push_back(ChannelWrite{"results", json::array({idx})});
+        Command cmd;
+        cmd.goto_node = "__end__";
+        cmd.updates.push_back(
+            ChannelWrite{"side_effects", json::array({idx * 100})});
+        nr.command = std::move(cmd);
+        return nr;
+    }
+    std::string get_name() const override { return "worker"; }
+};
+
+TEST(MultiSendEvents, SingleSendAppliesCommandUpdates) {
+    NodeFactory::instance().register_type("__mse_cmd_worker",
+        [](const std::string&, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<CommandUpdateSendTarget>();
+        });
+    NodeFactory::instance().register_type("__mse_cmd_planner1",
+        [](const std::string&, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<FanoutPlannerNode>(1);  // single-send
+        });
+
+    json def = {
+        {"name", "cmd_update_single"},
+        {"channels", {
+            {"task_idx",     {{"reducer", "overwrite"}}},
+            {"results",      {{"reducer", "append"}}},
+            {"side_effects", {{"reducer", "append"}}}
+        }},
+        {"nodes", {
+            {"planner", {{"type", "__mse_cmd_planner1"}}},
+            {"worker",  {{"type", "__mse_cmd_worker"}}}
+        }},
+        {"edges", json::array({
+            {{"from", "__start__"}, {"to", "planner"}},
+            {{"from", "planner"},   {"to", "__end__"}}
+        })}
+    };
+
+    NodeContext ctx;
+    auto engine = GraphEngine::compile(def, ctx);
+    RunConfig rc; rc.max_steps = 10;
+    auto result = engine->run_stream(rc, {});
+
+    ASSERT_TRUE(result.output["channels"].contains("side_effects"));
+    EXPECT_EQ(1u, result.output["channels"]["side_effects"]["value"].size())
+        << "Single-Send must propagate Command.updates, not just .writes";
+}
+
+TEST(MultiSendEvents, MultiSendAppliesCommandUpdates) {
+    NodeFactory::instance().register_type("__mse_cmd_worker_m",
+        [](const std::string&, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<CommandUpdateSendTarget>();
+        });
+    NodeFactory::instance().register_type("__mse_cmd_planner3",
+        [](const std::string&, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<FanoutPlannerNode>(3);  // multi-send
+        });
+
+    json def = {
+        {"name", "cmd_update_multi"},
+        {"channels", {
+            {"task_idx",     {{"reducer", "overwrite"}}},
+            {"results",      {{"reducer", "append"}}},
+            {"side_effects", {{"reducer", "append"}}}
+        }},
+        {"nodes", {
+            {"planner", {{"type", "__mse_cmd_planner3"}}},
+            {"worker",  {{"type", "__mse_cmd_worker_m"}}}
+        }},
+        {"edges", json::array({
+            {{"from", "__start__"}, {"to", "planner"}},
+            {{"from", "planner"},   {"to", "__end__"}}
+        })}
+    };
+
+    NodeContext ctx;
+    auto engine = GraphEngine::compile(def, ctx);
+    RunConfig rc; rc.max_steps = 10;
+    auto result = engine->run_stream(rc, {});
+
+    ASSERT_TRUE(result.output["channels"].contains("side_effects"));
+    // All 3 fanned-out workers must have contributed their Command.updates.
+    EXPECT_EQ(3u, result.output["channels"]["side_effects"]["value"].size())
+        << "Multi-Send must propagate Command.updates from every worker";
+}
+
 TEST(MultiSendEvents, MultiSendHonoursRetryPolicy) {
     std::atomic<int> attempts{0};
     const int fail_until = 2;  // first 2 invocations throw, later ones succeed

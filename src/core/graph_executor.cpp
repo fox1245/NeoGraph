@@ -363,6 +363,11 @@ void NodeExecutor::run_sends(
                 task_id, task_id, s.target_node, nr, step);
         }
         state.apply_writes(nr.writes);
+        // Send targets can return Command{goto, updates}; goto is meaningless
+        // for a fan-out one-shot but `updates` are plain channel writes the
+        // node chose to emit via the Command channel rather than `.writes`,
+        // and must be merged — matches run_one's behaviour.
+        if (nr.command) state.apply_writes(nr.command->updates);
         trace.push_back(s.target_node + "[send]");
         return;
     }
@@ -423,8 +428,13 @@ void NodeExecutor::run_sends(
     if (send_exception) std::rethrow_exception(send_exception);
 
     // Fan writes from each isolated state back into the shared state.
+    // Command.updates are applied on par with .writes (same rationale as
+    // the single-Send branch above — goto is meaningless for a fan-out
+    // target, but updates are channel writes that must merge).
     for (size_t si = 0; si < sends.size(); ++si) {
         state.apply_writes(send_results[si].writes);
+        if (send_results[si].command)
+            state.apply_writes(send_results[si].command->updates);
         trace.push_back(sends[si].target_node + "[send]");
     }
 }
