@@ -4,7 +4,12 @@
  *
  * Provides MCPClient for discovering and calling tools on MCP servers,
  * and MCPTool for wrapping remote tools as local Tool objects.
- * Supports JSON-RPC 2.0 over HTTP (Streamable HTTP transport).
+ *
+ * Two transports are supported:
+ *   - **HTTP** (Streamable HTTP) — remote server, reachable over the network.
+ *   - **stdio** — subprocess launched by the client; newline-delimited
+ *     JSON-RPC messages exchanged over the child's stdin/stdout. The
+ *     subprocess lives as long as any MCPTool produced by the client.
  */
 #pragma once
 
@@ -15,23 +20,33 @@
 
 namespace neograph::mcp {
 
+namespace detail {
+/// Opaque stdio session. Holds the subprocess pid, pipe fds, read buffer,
+/// and a mutex serialising concurrent rpc_call() calls. Destroying the
+/// session sends SIGTERM to the child and reaps it via waitpid.
+class StdioSession;
+}
+
 /**
  * @brief Wraps a remote MCP server tool as a local Tool.
  *
  * MCPTool implements the Tool interface by forwarding execute() calls
- * to the remote MCP server via JSON-RPC. Created automatically by
- * MCPClient::get_tools().
+ * through the owning transport (HTTP or stdio). Created automatically
+ * by MCPClient::get_tools().
  */
 class MCPTool : public Tool {
   public:
-    /**
-     * @brief Construct an MCP tool wrapper.
-     * @param server_url URL of the MCP server (e.g., "http://localhost:8000").
-     * @param name Tool name as reported by the server.
-     * @param description Tool description as reported by the server.
-     * @param input_schema JSON Schema for the tool's input parameters.
-     */
+    /// HTTP-mode constructor. Each execute() opens an ephemeral
+    /// MCPClient against @p server_url.
     MCPTool(const std::string& server_url,
+            const std::string& name,
+            const std::string& description,
+            const json& input_schema);
+
+    /// stdio-mode constructor. The MCPTool keeps the session alive —
+    /// the subprocess stays up as long as any tool instance holds a
+    /// reference to it.
+    MCPTool(std::shared_ptr<detail::StdioSession> session,
             const std::string& name,
             const std::string& description,
             const json& input_schema);
@@ -39,41 +54,59 @@ class MCPTool : public Tool {
     ChatTool get_definition() const override;
 
     /**
-     * @brief Execute the tool on the remote MCP server.
+     * @brief Execute the tool on the MCP server.
      * @param arguments JSON object containing the tool's input parameters.
-     * @return Result string from the remote server.
+     * @return Result string (text content joined by newlines) or JSON dump.
      */
     std::string execute(const json& arguments) override;
 
     std::string get_name() const override { return name_; }
 
   private:
-    std::string server_url_;
+    std::string server_url_;                              ///< Non-empty in HTTP mode.
+    std::shared_ptr<detail::StdioSession> stdio_session_; ///< Non-null in stdio mode.
     std::string name_;
     std::string description_;
     json input_schema_;
-    std::string session_id_;
 };
 
 /**
  * @brief Client for connecting to MCP (Model Context Protocol) servers.
  *
  * Handles the initialization handshake, tool discovery, and tool
- * invocation over JSON-RPC 2.0.
+ * invocation. Both HTTP and stdio transports are available; pick via
+ * the appropriate constructor.
  *
  * @code
- * MCPClient client("http://localhost:8000");
- * client.initialize("my-agent");
- * auto tools = client.get_tools();  // Discover available tools
+ * // HTTP
+ * MCPClient http_client("http://localhost:8000");
+ * http_client.initialize("my-agent");
+ * auto tools = http_client.get_tools();
+ *
+ * // stdio — spawn a subprocess
+ * MCPClient stdio_client({"python", "server.py"});
+ * stdio_client.initialize("my-agent");
+ * auto tools2 = stdio_client.get_tools();
  * @endcode
  */
 class MCPClient {
   public:
     /**
-     * @brief Construct an MCP client.
-     * @param server_url URL of the MCP server (e.g., "http://localhost:8000/mcp").
+     * @brief Construct an HTTP-mode MCP client.
+     * @param server_url URL of the MCP server (e.g., "http://localhost:8000").
      */
     explicit MCPClient(const std::string& server_url);
+
+    /**
+     * @brief Construct a stdio-mode MCP client by spawning a subprocess.
+     * @param argv Command + arguments (e.g., {"python", "server.py"}). argv[0]
+     *             is resolved via PATH (execvp). Throws on fork/exec failure.
+     *
+     * The subprocess is terminated (SIGTERM + waitpid) when the last
+     * reference to the underlying session is dropped — this is either the
+     * MCPClient itself or any MCPTool produced by get_tools().
+     */
+    explicit MCPClient(std::vector<std::string> argv);
 
     /**
      * @brief Initialize the connection and perform the MCP handshake.
@@ -84,10 +117,6 @@ class MCPClient {
 
     /**
      * @brief Discover tools from the MCP server.
-     *
-     * Queries the server for available tools and returns them as
-     * Tool objects ready for use with Agent or GraphEngine.
-     *
      * @return Vector of Tool unique_ptrs (MCPTool instances).
      */
     std::vector<std::unique_ptr<Tool>> get_tools();
@@ -103,11 +132,15 @@ class MCPClient {
   private:
     json rpc_call(const std::string& method, const json& params = json::object());
 
+    // HTTP state (empty strings when in stdio mode).
     std::string server_url_;
     std::string host_;
     std::string path_prefix_;
     std::string session_id_;
     int request_id_ = 0;
+
+    // stdio state (null when in HTTP mode).
+    std::shared_ptr<detail::StdioSession> stdio_session_;
 };
 
 } // namespace neograph::mcp

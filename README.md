@@ -130,9 +130,13 @@ target_link_libraries(my_app PRIVATE neograph::core neograph::llm)
 
 ### MCP Client (`neograph::mcp`)
 
-- **JSON-RPC 2.0** over HTTP (Streamable HTTP transport)
-- **Tool discovery** — Auto-discover tools from any MCP server
-- **stdio transport** — Launch MCP servers as subprocesses
+- **HTTP transport** — JSON-RPC 2.0 over Streamable HTTP, session-aware
+- **stdio transport** — `MCPClient({"python", "server.py"})` spawns the
+  MCP server as a child subprocess and exchanges newline-delimited
+  JSON-RPC over its stdin / stdout; subprocess lifetime is tied to the
+  last MCPTool that references it
+- **Tool discovery** — `get_tools()` auto-discovers tools from either
+  transport; returned `MCPTool`s plug straight into `Agent` / `GraphEngine`
 
 ### Utilities (`neograph::util`)
 
@@ -161,6 +165,11 @@ target_link_libraries(my_app PRIVATE neograph::core neograph::llm)
 | 17 | `self_ask` | Follow-up decomposition across multiple hops | Required (Anthropic) |
 | 18 | `multi_agent_debate` | Proponent / opponent / judge pattern | Required (Anthropic) |
 | 19 | `rewoo` | Reasoning WithOut Observation — plan once, fan out, synthesize | Required (Anthropic) |
+| 20 | `mcp_hitl` | MCP + checkpoint HITL (`interrupt_before` tool dispatch, resume after approval) | Required (OpenAI) |
+| 21 | `mcp_fanout` | Parallel MCP tool calls via Send fan-out inside one super-step | No |
+| 22 | `mcp_stdio` | MCP over stdio transport — subprocess MCP server spawned by the client | Required (OpenAI) |
+| 23 | `mcp_multi` | One agent routing tools across two MCP servers (HTTP + stdio) | Required (OpenAI) |
+| 24 | `mcp_feedback` | Human-feedback loop — draft answer, operator pushes back, agent revises | Required (OpenAI) |
 
 ### Run with a real LLM
 

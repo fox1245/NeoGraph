@@ -2075,34 +2075,46 @@ set_path(data, "metadata.version", 2);
 Model Context Protocol (MCP) client implementation. Connects to MCP servers, discovers
 available tools, and wraps them as NeoGraph `Tool` instances.
 
+Two transports are available:
+
+- **HTTP** — `MCPClient("http://host:port")`. Each tool call opens a short-lived
+  session against the server (Streamable HTTP transport, `Mcp-Session-Id` header
+  echoed per-request).
+- **stdio** — `MCPClient({"python", "server.py"})`. The client `fork`+`execvp`s the
+  subprocess, wires bidirectional pipes, and exchanges newline-delimited JSON-RPC
+  over the child's stdin/stdout. The subprocess lives as long as the
+  `MCPClient` *or any `MCPTool`* it produced; destruction sends SIGTERM and
+  reaps via `waitpid` (SIGKILL fallback after ~500 ms).
+
 ### MCPTool
 
-Wraps a single remote MCP server tool as a local `Tool` implementation. Each call
-to `execute()` sends an HTTP request to the MCP server.
+Wraps a single MCP server tool as a local `Tool` implementation. Two
+constructors, one per transport; `MCPClient::get_tools()` picks the right one.
 
 ```cpp
 class MCPTool : public Tool {
 public:
+    // HTTP mode — each execute() opens a fresh session against server_url.
     MCPTool(const std::string& server_url,
             const std::string& name,
             const std::string& description,
             const json& input_schema);
 
-    ChatTool get_definition() const override;
+    // stdio mode — tool holds a shared_ptr back-ref to the subprocess
+    // session, keeping it alive as long as any tool is reachable.
+    MCPTool(std::shared_ptr<detail::StdioSession> session,
+            const std::string& name,
+            const std::string& description,
+            const json& input_schema);
+
+    ChatTool   get_definition() const override;
     std::string execute(const json& arguments) override;
     std::string get_name() const override;
 };
 ```
 
-| Constructor Parameter | Type | Description |
-|-----------------------|------|-------------|
-| `server_url` | `std::string` | Base URL of the MCP server |
-| `name` | `std::string` | Tool name as reported by the server |
-| `description` | `std::string` | Tool description |
-| `input_schema` | `json` | JSON Schema for the tool's input parameters |
-
-Usually you do not construct `MCPTool` directly. Instead, use `MCPClient::get_tools()`
-to automatically discover and create them.
+Usually you do not construct `MCPTool` directly — `MCPClient::get_tools()`
+discovers and wraps them.
 
 ### MCPClient
 
@@ -2112,37 +2124,41 @@ provides methods to discover and invoke tools.
 ```cpp
 class MCPClient {
 public:
+    // HTTP transport.
     explicit MCPClient(const std::string& server_url);
 
-    // Initialize connection and perform MCP handshake
+    // stdio transport — fork+exec the subprocess.
+    explicit MCPClient(std::vector<std::string> argv);
+
     bool initialize(const std::string& client_name = "neograph");
-
-    // Discover tools and return them as NeoGraph Tool instances
     std::vector<std::unique_ptr<Tool>> get_tools();
-
-    // Call a tool directly by name
     json call_tool(const std::string& name, const json& arguments);
 };
 ```
 
 | Method | Description |
 |--------|-------------|
-| `MCPClient(server_url)` | Construct a client pointing at the given MCP server URL |
+| `MCPClient(url)` | Construct an HTTP-mode client |
+| `MCPClient(argv)` | Spawn a subprocess and construct a stdio-mode client. `argv[0]` is resolved via `PATH` (execvp). Throws on fork/exec failure |
 | `initialize(client_name)` | Perform the MCP initialization handshake. Returns `true` on success. Must be called before `get_tools()` or `call_tool()` |
 | `get_tools()` | Discovers tools from the server and returns them as `std::unique_ptr<Tool>` instances ready for use with `Agent` or `GraphEngine` |
 | `call_tool(name, arguments)` | Invokes a tool by name with the given arguments. Returns the raw JSON response |
 
-**Usage:**
+**HTTP usage:**
 
 ```cpp
-neograph::mcp::MCPClient client("http://localhost:3000");
-if (client.initialize()) {
-    auto tools = client.get_tools();
-    // Use tools with Agent or GraphEngine
-    auto provider = neograph::llm::OpenAIProvider::create({.api_key = "sk-..."});
-    neograph::llm::Agent agent(provider, std::move(tools));
-    // ...
-}
+neograph::mcp::MCPClient client("http://localhost:8000");
+client.initialize();
+auto tools = client.get_tools();
+```
+
+**stdio usage:**
+
+```cpp
+// argv[0] is resolved via PATH; pipe fds are closed in the child before execvp.
+neograph::mcp::MCPClient client({"python", "/path/to/server.py"});
+client.initialize();
+auto tools = client.get_tools();   // MCPTools hold shared_ptr<StdioSession>
 ```
 
 ---
