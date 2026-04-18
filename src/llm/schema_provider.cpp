@@ -1037,36 +1037,22 @@ ChatCompletion SchemaProvider::complete(const CompletionParams& params)
     cli.set_read_timeout(user_config_.timeout_seconds, 0);
     cli.set_connection_timeout(10, 0);
 
-    // Single provider-internal wait+retry for HTTP 429. Anthropic's
-    // minute-window rate limits reset in predictable Retry-After seconds;
-    // without this, the engine's node-level RetryPolicy fires with a
-    // blind 15s/30s backoff that is often shorter than the reset window
-    // (users on low tiers kept burning retries into the same 429 wall).
-    //
-    // The outer RetryPolicy still catches anything this loop can't
-    // resolve — we only attempt ONE internal wait so we don't stall
-    // forever on a wedged provider.
-    httplib::Result res = cli.Post(endpoint, headers, body_str, "application/json");
-    if (res && res->status == 429) {
-        int wait_s = retry_after_seconds(res);
-        if (wait_s < 0) wait_s = 30;
-        // Cap at the caller's timeout (plus a little slack) so we don't
-        // exceed it. A user with timeout_seconds=5 clearly does not want
-        // to wait a minute here.
-        if (wait_s > user_config_.timeout_seconds + 5) {
-            // Re-throw immediately; outer RetryPolicy or the user can
-            // decide to keep going.
-        } else {
-            std::this_thread::sleep_for(std::chrono::seconds(wait_s + 1));
-            res = cli.Post(endpoint, headers, body_str, "application/json");
-        }
-    }
+    auto res = cli.Post(endpoint, headers, body_str, "application/json");
 
     if (!res) {
         throw std::runtime_error("HTTP request failed: " + httplib::to_string(res.error()));
     }
 
     if (res->status != 200) {
+        // Surface 429s as a typed exception so callers (typically a
+        // RateLimitedProvider decorator) can honour Retry-After without
+        // parsing strings. SchemaProvider itself stays policy-free: it
+        // neither sleeps nor retries — that's a separate concern.
+        if (res->status == 429) {
+            throw RateLimitError(
+                "API error (HTTP 429): " + res->body,
+                retry_after_seconds(res));
+        }
         throw std::runtime_error(
             "API error (HTTP " + std::to_string(res->status) + "): " + res->body);
     }
@@ -1354,6 +1340,11 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
     }
 
     if (res->status != 200) {
+        if (res->status == 429) {
+            throw RateLimitError(
+                "API error (HTTP 429): " + res->body,
+                retry_after_seconds(res));
+        }
         throw std::runtime_error(
             "API error (HTTP " + std::to_string(res->status) + "): " + res->body);
     }

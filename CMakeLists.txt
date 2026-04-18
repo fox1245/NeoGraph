@@ -118,6 +118,7 @@ if(NEOGRAPH_BUILD_LLM)
     add_library(neograph_llm STATIC
         src/llm/openai_provider.cpp
         src/llm/schema_provider.cpp
+        src/llm/rate_limited_provider.cpp
         src/llm/agent.cpp
     )
 

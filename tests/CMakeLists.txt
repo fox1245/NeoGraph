@@ -18,6 +18,7 @@ add_executable(neograph_tests
     test_sends_interrupt_order.cpp
     test_multi_send_events.cpp
     test_schema_provider_concurrent.cpp
+    test_rate_limited_provider.cpp
 )
 
 target_link_libraries(neograph_tests PRIVATE
