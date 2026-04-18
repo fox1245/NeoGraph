@@ -97,6 +97,21 @@ private:
  * multiple times with different inputs. All Send targets execute in parallel
  * via Taskflow.
  *
+ * ## Isolation semantics
+ *
+ * Each multi-Send worker runs on an **isolated GraphState copy**: channel
+ * writes made inside a Send target are scoped to that worker and only
+ * merged back (via each channel's reducer) after all siblings finish.
+ * Concurrent workers therefore cannot corrupt each other's channel view.
+ *
+ * This isolation does **NOT** extend to out-of-state side effects. If two
+ * Send workers call the same LLM provider instance, hit the same HTTP
+ * client, or write to the same file descriptor, they do so concurrently
+ * — whatever thread safety those external objects offer is what governs
+ * the outcome. Make sure any resource a Send target touches is either
+ * thread-safe or scoped per-invocation. (NeoGraph's own `SchemaProvider`
+ * and `OpenAIProvider` are both safe for concurrent use.)
+ *
  * @code
  * NodeResult result;
  * for (auto& item : work_items) {

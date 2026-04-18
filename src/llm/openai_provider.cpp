@@ -107,6 +107,12 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
 {
     auto body = build_body(params);
     body["stream"] = true;
+    // OpenAI omits usage from streamed responses unless this flag is set
+    // — without it, completion.usage stays zero after streaming. Users
+    // tracking token cost lose data silently. Safe for any OpenAI-
+    // compatible backend: endpoints that don't understand the field
+    // ignore it rather than rejecting the request.
+    body["stream_options"] = {{"include_usage", true}};
 
     auto [host, prefix] = parse_url(config_.base_url);
 
@@ -149,6 +155,27 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
 
                 try {
                     auto j = json::parse(payload);
+
+                    // The final chunk (after include_usage=true) has
+                    // usage populated but an empty choices array. Capture
+                    // it before falling through to per-choice delta
+                    // handling.
+                    if (j.contains("usage") && !j["usage"].is_null()) {
+                        auto u = j["usage"];
+                        completion.usage.prompt_tokens =
+                            u.value("prompt_tokens", 0);
+                        completion.usage.completion_tokens =
+                            u.value("completion_tokens", 0);
+                        completion.usage.total_tokens =
+                            u.value("total_tokens",
+                                    completion.usage.prompt_tokens +
+                                    completion.usage.completion_tokens);
+                    }
+
+                    if (!j.contains("choices") || !j["choices"].is_array()
+                        || j["choices"].empty()) {
+                        continue;
+                    }
                     auto delta = j["choices"][0]["delta"];
 
                     // Content token

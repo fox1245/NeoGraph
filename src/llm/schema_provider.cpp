@@ -1094,6 +1094,15 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
         if (!req_.stream_field.empty()) {
             body[req_.stream_field] = true;
         }
+        // OpenAI/Chat-completions-compatible endpoints omit `usage` from
+        // streamed responses unless this opt-in is set. Other providers
+        // (Claude via SSE_EVENTS, Gemini via usageMetadata on every chunk)
+        // emit usage unconditionally, so the flag is a no-op for them —
+        // worst case the server ignores an unknown field.
+        if (stream_.format == StreamFormat::SSE_DATA &&
+            stream_.delta_strategy != "candidates_parts") {
+            body["stream_options"] = {{"include_usage", true}};
+        }
         body_str = body.dump();
         std::string model = params.model.empty() ? user_config_.default_model : params.model;
         std::tie(host, prefix) = split_host_prefix(conn_.base_url);
@@ -1153,6 +1162,25 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
 
                     try {
                         auto j = json::parse(payload);
+
+                        // Usage capture: OpenAI-compatible endpoints emit
+                        // `usage` on the FINAL chunk (with empty choices,
+                        // enabled by include_usage). Gemini emits
+                        // `usageMetadata` on EVERY chunk. Either way,
+                        // overwrite-on-seen gives us the latest numbers.
+                        if (!resp_.usage_path.empty()) {
+                            auto u = json_path::at_path(j, resp_.usage_path);
+                            if (u && u->is_object()) {
+                                int p = u->value(resp_.prompt_tokens_field, 0);
+                                int c = u->value(resp_.completion_tokens_field, 0);
+                                if (p > 0) completion.usage.prompt_tokens = p;
+                                if (c > 0) completion.usage.completion_tokens = c;
+                                if (!resp_.total_tokens_field.empty()) {
+                                    int t = u->value(resp_.total_tokens_field, 0);
+                                    if (t > 0) completion.usage.total_tokens = t;
+                                }
+                            }
+                        }
 
                         if (stream_.delta_strategy == "candidates_parts") {
                             // Gemini streaming: candidates[0].content.parts[]
@@ -1235,6 +1263,25 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
 
                         if (action == "ignore") {
                             // noop
+                        }
+                        else if (action == "usage") {
+                            // SSE event dedicated to emitting usage numbers.
+                            // Schema declares `prompt_path` / `completion_path`
+                            // / `total_path` relative to the event's JSON
+                            // payload; any that resolves to a non-zero integer
+                            // overwrites the cumulative usage.
+                            auto read_int = [&](const std::string& p) -> int {
+                                if (p.empty()) return 0;
+                                auto v = json_path::at_path(j, p);
+                                if (!v || !v->is_number_integer()) return 0;
+                                return v->template get<int>();
+                            };
+                            int p = read_int(event_cfg.value("prompt_path", ""));
+                            int c = read_int(event_cfg.value("completion_path", ""));
+                            int t = read_int(event_cfg.value("total_path", ""));
+                            if (p > 0) completion.usage.prompt_tokens = p;
+                            if (c > 0) completion.usage.completion_tokens = c;
+                            if (t > 0) completion.usage.total_tokens = t;
                         }
                         else if (action == "block_start") {
                             // New content block / output item starting.

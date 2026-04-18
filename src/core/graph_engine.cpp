@@ -140,6 +140,11 @@ void GraphEngine::update_state(const std::string& thread_id,
     new_cp.current_node    = as_node.empty() ? cp.current_node : as_node;
     new_cp.next_nodes      = cp.next_nodes;
     new_cp.interrupt_phase = CheckpointPhase::Updated;
+    // Barrier accumulators must survive an admin update: if a user
+    // update_states during an in-flight AND-join, dropping barrier_state
+    // would silently discard partial arrivals. Coordinator-driven
+    // super-step saves propagate this for the same reason.
+    new_cp.barrier_state   = cp.barrier_state;
     new_cp.step            = cp.step;
     new_cp.timestamp       = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -171,6 +176,9 @@ std::string GraphEngine::fork(const std::string& source_thread_id,
     forked.current_node    = cp_opt->current_node;
     forked.next_nodes      = cp_opt->next_nodes;
     forked.interrupt_phase = cp_opt->interrupt_phase;
+    // Copy barrier_state so a fork taken mid-AND-join resumes with the
+    // same partial-arrival accumulator as its source.
+    forked.barrier_state   = cp_opt->barrier_state;
     forked.metadata        = {{"forked_from", {
         {"thread_id", source_thread_id},
         {"checkpoint_id", cp_opt->id}
