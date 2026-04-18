@@ -8,17 +8,41 @@
 // benchmarks/concurrent/results.jsonl — the tighter profile, where
 // the scaling story is sharpest. The 2 CPU / 1 GB numbers tell the
 // same story with a gentler slope.
+//
+// The headline charts show asyncio mode across all Python frameworks
+// + NeoGraph. The mp (multiprocessing) mode bypasses the GIL across N
+// processes, which flattens the P99 curve but saturates at pool size
+// — the asyncio curves are the story (the GIL ceiling is universal,
+// not a LangGraph-specific problem).
 
 const echarts = require('echarts');
 const { createCanvas } = require('canvas');
 const fs = require('fs');
-const path = require('path');
 
 echarts.setPlatformAPI({ createCanvas: (w, h) => createCanvas(w, h) });
 
-const NEO = '#2ea44f';
-const LG_ASYNC = '#8250df';
-const LG_MP    = '#cf222e';  // red — the "production Python" config
+// Per-framework color (NeoGraph green stays the hero color).
+const COLORS = {
+    'neograph':       '#2ea44f',
+    'langgraph':      '#8250df',
+    'haystack':       '#1f77b4',
+    'pydantic-graph': '#17a2b8',
+    'llamaindex':     '#d3822a',
+    'autogen':        '#c0392b',
+};
+
+const LABELS = {
+    'neograph':       'NeoGraph (std::thread pool)',
+    'langgraph':      'LangGraph asyncio',
+    'haystack':       'Haystack asyncio',
+    'pydantic-graph': 'pydantic-graph asyncio',
+    'llamaindex':     'LlamaIndex asyncio',
+    'autogen':        'AutoGen asyncio',
+};
+
+const ASYNCIO_ENGINES = [
+    'neograph', 'langgraph', 'haystack', 'pydantic-graph', 'llamaindex', 'autogen'
+];
 
 // ── Parse results.jsonl ───────────────────────────────────────────────
 
@@ -29,34 +53,26 @@ const PROFILE = '1:512m';
 const rows = fs.readFileSync(RESULTS_PATH, 'utf8')
     .split('\n').filter(Boolean).map(JSON.parse);
 
-function pick(engineMode) {
-    const out = rows
+function pickAsyncio(engine) {
+    return rows
         .filter(r => r.profile === PROFILE)
+        .filter(r => r.engine === engine)
         .filter(r => {
-            if (engineMode === 'neograph') return r.engine === 'neograph';
-            if (engineMode === 'lg-async') return r.engine === 'langgraph' && r.mode === 'asyncio';
-            if (engineMode === 'lg-mp') return r.engine === 'langgraph' && r.mode && r.mode.startsWith('mp');
-            return false;
+            if (engine === 'neograph') return true;              // NG has single mode
+            return r.mode === 'asyncio';
         })
+        .filter(r => r.status === 'ok' || r.status === undefined)  // drop timeout/oom rows
         .sort((a, b) => a.concurrency - b.concurrency);
-    return out;
 }
 
-const ng = pick('neograph');
-const la = pick('lg-async');
-const lm = pick('lg-mp');
-
-const concurrencies = [...new Set(rows.map(r => r.concurrency))].sort((a, b) => a - b);
-
 function throughput(row) {
-    // req/sec; clamp wall to 1ms so log scale handles the sub-ms NG case.
     const wallSec = Math.max(row.total_wall_ms, 1) / 1000.0;
     return row.concurrency / wallSec;
 }
 
-// ── Shared chart options ─────────────────────────────────────────────
+// ── Chart infrastructure ─────────────────────────────────────────────
 
-const CANVAS = { width: 1400, height: 620 };
+const CANVAS = { width: 1500, height: 680 };
 const FOOTER_TEXT =
     'Profile: 1 CPU / 512 MB (Docker --cpus=1 --memory=512m)  ·  Workload: 3-node seq counter chain  ·  See benchmarks/concurrent/ for reproduction';
 
@@ -84,116 +100,102 @@ function renderLine(optsBase, outPath) {
     stream.pipe(fs.createWriteStream(outPath));
 }
 
+// Shared series config for the asyncio-mode charts.
+function buildSeries(yExtractor, labelFormatter) {
+    return ASYNCIO_ENGINES.map(engine => ({
+        name: LABELS[engine],
+        type: 'line',
+        symbol: 'circle',
+        symbolSize: 8,
+        data: pickAsyncio(engine).map(r => [r.concurrency, yExtractor(r)]),
+        itemStyle: { color: COLORS[engine] },
+        lineStyle: {
+            color: COLORS[engine],
+            width: engine === 'neograph' ? 3.5 : 2.2,
+        },
+        label: {
+            show: engine === 'neograph',  // only label NG — 6 label clouds is unreadable
+            position: 'top',
+            formatter: labelFormatter,
+            fontSize: 11,
+            color: COLORS[engine],
+            fontWeight: 'bold'
+        }
+    }));
+}
+
 // ── Chart 1: Throughput (req/sec, log Y) ─────────────────────────────
 
 renderLine({
     title: {
         text: 'Throughput under concurrent load — requests per second (log scale, higher is better)',
-        subtext: 'At 10,000 simultaneous requests NeoGraph processes ~1340× the LangGraph-mp rate and ~3400× the asyncio rate',
-        left: 24, top: 16,
+        subtext: 'NeoGraph scales with batch size via Taskflow work-stealing. Every Python asyncio runtime plateaus — the GIL serializes coroutines regardless of framework.',
+        left: 'center', top: 20, itemGap: 10,
         textStyle: { fontSize: 18, fontWeight: 'bold', color: '#24292e' },
-        subtextStyle: { fontSize: 13, color: '#586069' }
+        subtextStyle: { fontSize: 12, color: '#586069' }
     },
-    grid: { left: 100, right: 48, top: 100, bottom: 130 },
+    grid: { left: 110, right: 48, top: 120, bottom: 130 },
     legend: {
         bottom: 50,
-        textStyle: { fontSize: 13, color: '#24292e' },
-        itemGap: 40
+        textStyle: { fontSize: 12, color: '#24292e' },
+        itemGap: 20
     },
     tooltip: { trigger: 'axis' },
     xAxis: {
         type: 'log',
-        axisLabel: {
-            fontSize: 12,
-            formatter: v => v.toLocaleString()
-        },
-        splitLine: { lineStyle: { color: '#eaecef' } },
-        minorSplitLine: { show: false }
+        name: 'Concurrency N',
+        nameLocation: 'middle',
+        nameGap: 32,
+        nameTextStyle: { fontSize: 12, color: '#586069' },
+        axisLabel: { fontSize: 12, formatter: v => v.toLocaleString() },
+        splitLine: { lineStyle: { color: '#eaecef' } }
     },
     yAxis: {
         type: 'log',
-        axisLabel: {
-            fontSize: 11,
-            formatter: v => v.toLocaleString() + ' req/s'
-        },
+        name: 'req / sec (log)',
+        nameLocation: 'middle',
+        nameRotate: 90,
+        nameGap: 72,
+        nameTextStyle: { fontSize: 12, color: '#586069' },
+        axisLabel: { fontSize: 11, formatter: v => v.toLocaleString() + ' req/s' },
         splitLine: { lineStyle: { color: '#eaecef' } }
     },
-    series: [
-        {
-            name: 'NeoGraph (std::thread pool)',
-            type: 'line',
-            symbol: 'circle', symbolSize: 9,
-            data: ng.map(r => [r.concurrency, throughput(r)]),
-            itemStyle: { color: NEO },
-            lineStyle: { color: NEO, width: 3 },
-            label: {
-                show: true,
-                position: 'top',
-                formatter: p => Math.round(p.value[1]).toLocaleString(),
-                fontSize: 11,
-                color: NEO,
-                fontWeight: 'bold'
-            }
-        },
-        {
-            name: 'LangGraph mp-pool (7 procs)',
-            type: 'line',
-            symbol: 'circle', symbolSize: 9,
-            data: lm.map(r => [r.concurrency, throughput(r)]),
-            itemStyle: { color: LG_MP },
-            lineStyle: { color: LG_MP, width: 3 },
-            label: {
-                show: true,
-                position: 'bottom',
-                formatter: p => Math.round(p.value[1]).toLocaleString(),
-                fontSize: 11,
-                color: LG_MP,
-                fontWeight: 'bold'
-            }
-        },
-        {
-            name: 'LangGraph asyncio (1 proc)',
-            type: 'line',
-            symbol: 'circle', symbolSize: 9,
-            data: la.map(r => [r.concurrency, throughput(r)]),
-            itemStyle: { color: LG_ASYNC },
-            lineStyle: { color: LG_ASYNC, width: 3 },
-            label: {
-                show: true,
-                position: 'bottom',
-                formatter: p => Math.round(p.value[1]).toLocaleString(),
-                fontSize: 11,
-                color: LG_ASYNC,
-                fontWeight: 'bold'
-            }
-        }
-    ]
-}, '/tmp/bench/bench-concurrent-throughput.png');
+    series: buildSeries(throughput, p => Math.round(p.value[1]).toLocaleString())
+}, '/root/Coding/NeoGraph/docs/images/bench-concurrent-throughput.png');
 
 // ── Chart 2: P99 latency (µs, log Y) ─────────────────────────────────
 
 renderLine({
     title: {
         text: 'Tail latency — P99 per request (log scale, lower is better)',
-        subtext: 'NeoGraph stays in microseconds as load scales; asyncio\'s P99 grows linearly because GIL serializes the 10k coroutines',
-        left: 24, top: 16,
+        subtext: 'NeoGraph stays in microseconds as load scales. Every Python asyncio runtime climbs linearly — once the GIL serializes N coroutines, P99 ≈ N × per-call cost.',
+        left: 'center', top: 20, itemGap: 10,
         textStyle: { fontSize: 18, fontWeight: 'bold', color: '#24292e' },
-        subtextStyle: { fontSize: 13, color: '#586069' }
+        subtextStyle: { fontSize: 12, color: '#586069' }
     },
-    grid: { left: 100, right: 48, top: 100, bottom: 130 },
+    grid: { left: 110, right: 48, top: 120, bottom: 130 },
     legend: {
         bottom: 50,
-        textStyle: { fontSize: 13, color: '#24292e' },
-        itemGap: 40
+        textStyle: { fontSize: 12, color: '#24292e' },
+        itemGap: 20
     },
     tooltip: { trigger: 'axis' },
     xAxis: {
         type: 'log',
+        name: 'Concurrency N',
+        nameLocation: 'middle',
+        nameGap: 32,
+        nameTextStyle: { fontSize: 12, color: '#586069' },
         axisLabel: { fontSize: 12, formatter: v => v.toLocaleString() },
         splitLine: { lineStyle: { color: '#eaecef' } }
     },
     yAxis: {
         type: 'log',
+        name: 'P99 latency (log)',
+        nameLocation: 'middle',
+        nameRotate: 90,
+        nameGap: 80,
+        nameTextStyle: { fontSize: 12, color: '#586069' },
         axisLabel: {
             fontSize: 11,
             formatter: v => {
@@ -204,107 +206,57 @@ renderLine({
         },
         splitLine: { lineStyle: { color: '#eaecef' } }
     },
-    series: [
-        {
-            name: 'NeoGraph',
-            type: 'line',
-            symbol: 'circle', symbolSize: 9,
-            data: ng.map(r => [r.concurrency, Math.max(r.p99_us, 1)]),
-            itemStyle: { color: NEO },
-            lineStyle: { color: NEO, width: 3 },
-            label: { show: true, position: 'top', fontSize: 11, color: NEO, fontWeight: 'bold',
-                     formatter: p => {
-                         const v = p.value[1];
-                         return v >= 1000 ? (v / 1000).toFixed(1) + ' ms' : v + ' µs';
-                     } }
-        },
-        {
-            name: 'LangGraph mp-pool',
-            type: 'line',
-            symbol: 'circle', symbolSize: 9,
-            data: lm.map(r => [r.concurrency, Math.max(r.p99_us, 1)]),
-            itemStyle: { color: LG_MP },
-            lineStyle: { color: LG_MP, width: 3 },
-            label: { show: true, position: 'bottom', fontSize: 11, color: LG_MP, fontWeight: 'bold',
-                     formatter: p => (p.value[1] / 1000).toFixed(0) + ' ms' }
-        },
-        {
-            name: 'LangGraph asyncio',
-            type: 'line',
-            symbol: 'circle', symbolSize: 9,
-            data: la.map(r => [r.concurrency, Math.max(r.p99_us, 1)]),
-            itemStyle: { color: LG_ASYNC },
-            lineStyle: { color: LG_ASYNC, width: 3 },
-            label: { show: true, position: 'top', fontSize: 11, color: LG_ASYNC, fontWeight: 'bold',
-                     formatter: p => {
-                         const v = p.value[1];
-                         if (v >= 1_000_000) return (v / 1_000_000).toFixed(1) + ' s';
-                         if (v >= 1000) return (v / 1000).toFixed(0) + ' ms';
-                         return v + ' µs';
-                     } }
+    series: buildSeries(
+        r => Math.max(r.p99_us, 1),
+        p => {
+            const v = p.value[1];
+            if (v >= 1_000_000) return (v / 1_000_000).toFixed(1) + ' s';
+            if (v >= 1000) return (v / 1000).toFixed(1) + ' ms';
+            return v + ' µs';
         }
-    ]
-}, '/tmp/bench/bench-concurrent-latency.png');
+    )
+}, '/root/Coding/NeoGraph/docs/images/bench-concurrent-latency.png');
 
-// ── Chart 3: Peak RSS (MB, linear Y) ─────────────────────────────────
+// ── Chart 3: Peak RSS (MB) ───────────────────────────────────────────
 
 renderLine({
     title: {
         text: 'Peak resident memory under concurrent load (MB, lower is better)',
-        subtext: 'NeoGraph stays near 5–8 MB at 10k concurrent; asyncio grows linearly to 426 MB because every coroutine holds a stack frame',
-        left: 24, top: 16,
+        subtext: 'NeoGraph stays near 5–10 MB at 10k concurrent. Python asyncio runtimes grow linearly — each coroutine holds a stack frame plus framework per-run state.',
+        left: 'center', top: 20, itemGap: 10,
         textStyle: { fontSize: 18, fontWeight: 'bold', color: '#24292e' },
-        subtextStyle: { fontSize: 13, color: '#586069' }
+        subtextStyle: { fontSize: 12, color: '#586069' }
     },
-    grid: { left: 100, right: 48, top: 100, bottom: 130 },
+    grid: { left: 100, right: 48, top: 120, bottom: 130 },
     legend: {
         bottom: 50,
-        textStyle: { fontSize: 13, color: '#24292e' },
-        itemGap: 40
+        textStyle: { fontSize: 12, color: '#24292e' },
+        itemGap: 20
     },
     tooltip: { trigger: 'axis' },
     xAxis: {
         type: 'log',
+        name: 'Concurrency N',
+        nameLocation: 'middle',
+        nameGap: 32,
+        nameTextStyle: { fontSize: 12, color: '#586069' },
         axisLabel: { fontSize: 12, formatter: v => v.toLocaleString() },
         splitLine: { lineStyle: { color: '#eaecef' } }
     },
     yAxis: {
         type: 'value',
+        name: 'Peak RSS',
+        nameLocation: 'middle',
+        nameRotate: 90,
+        nameGap: 56,
+        nameTextStyle: { fontSize: 12, color: '#586069' },
         axisLabel: { fontSize: 11, formatter: '{value} MB' },
         splitLine: { lineStyle: { color: '#eaecef' } }
     },
-    series: [
-        {
-            name: 'NeoGraph',
-            type: 'line',
-            symbol: 'circle', symbolSize: 9,
-            data: ng.map(r => [r.concurrency, r.peak_rss_kb / 1024]),
-            itemStyle: { color: NEO },
-            lineStyle: { color: NEO, width: 3 },
-            label: { show: true, position: 'bottom', fontSize: 11, color: NEO, fontWeight: 'bold',
-                     formatter: p => p.value[1].toFixed(1) + ' MB' }
-        },
-        {
-            name: 'LangGraph mp-pool',
-            type: 'line',
-            symbol: 'circle', symbolSize: 9,
-            data: lm.map(r => [r.concurrency, r.peak_rss_kb / 1024]),
-            itemStyle: { color: LG_MP },
-            lineStyle: { color: LG_MP, width: 3 },
-            label: { show: true, position: 'bottom', fontSize: 11, color: LG_MP, fontWeight: 'bold',
-                     formatter: p => p.value[1].toFixed(0) + ' MB' }
-        },
-        {
-            name: 'LangGraph asyncio',
-            type: 'line',
-            symbol: 'circle', symbolSize: 9,
-            data: la.map(r => [r.concurrency, r.peak_rss_kb / 1024]),
-            itemStyle: { color: LG_ASYNC },
-            lineStyle: { color: LG_ASYNC, width: 3 },
-            label: { show: true, position: 'top', fontSize: 11, color: LG_ASYNC, fontWeight: 'bold',
-                     formatter: p => p.value[1].toFixed(0) + ' MB' }
-        }
-    ]
-}, '/tmp/bench/bench-concurrent-rss.png');
+    series: buildSeries(
+        r => r.peak_rss_kb / 1024,
+        p => p.value[1].toFixed(1) + ' MB'
+    )
+}, '/root/Coding/NeoGraph/docs/images/bench-concurrent-rss.png');
 
 console.log('rendered 3 concurrent bench charts');

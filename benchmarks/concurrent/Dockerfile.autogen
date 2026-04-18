@@ -1,0 +1,13 @@
+# AutoGen GraphFlow concurrent bench image.
+
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir \
+    autogen-agentchat==0.7.5 \
+    autogen-core==0.7.5 \
+    autogen-ext==0.7.5
+
+WORKDIR /app
+COPY benchmarks/concurrent/bench_concurrent_autogen.py /app/bench.py
+
+ENTRYPOINT ["python", "-u", "/app/bench.py"]

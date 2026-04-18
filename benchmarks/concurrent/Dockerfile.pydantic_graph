@@ -1,0 +1,10 @@
+# pydantic-graph concurrent bench image.
+
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir pydantic-graph==1.84.1
+
+WORKDIR /app
+COPY benchmarks/concurrent/bench_concurrent_pydantic_graph.py /app/bench.py
+
+ENTRYPOINT ["python", "-u", "/app/bench.py"]

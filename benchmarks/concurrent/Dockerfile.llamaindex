@@ -1,0 +1,10 @@
+# LlamaIndex Workflow concurrent bench image.
+
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir llama-index-core==0.14.20 llama-index-workflows==2.19.0
+
+WORKDIR /app
+COPY benchmarks/concurrent/bench_concurrent_llamaindex.py /app/bench.py
+
+ENTRYPOINT ["python", "-u", "/app/bench.py"]
