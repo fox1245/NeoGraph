@@ -26,9 +26,9 @@ namespace neograph::graph {
 /// @brief Configuration knobs for the Deep Research graph.
 struct DeepResearchConfig {
     std::string model = "claude-sonnet-4-5";  ///< Claude model identifier.
-    int max_supervisor_iterations = 4;        ///< Supervisor planning rounds.
-    int max_concurrent_researchers = 3;       ///< Cap per ConductResearch fan-out batch.
-    int max_researcher_iterations = 4;        ///< Inner LLM↔tools loop cap per researcher.
+    int max_supervisor_iterations = 2;        ///< Supervisor planning rounds (keep ≤ 3 for low-tier Anthropic quotas).
+    int max_concurrent_researchers = 3;       ///< Cap per conduct_research fan-out batch.
+    int max_researcher_iterations = 3;        ///< Inner LLM↔tools loop cap per researcher.
 };
 
 /**
