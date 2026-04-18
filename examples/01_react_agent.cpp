@@ -10,15 +10,91 @@
 #include <neograph/llm/openai_provider.h>
 #include <neograph/llm/agent.h>
 
+#include <cmath>
+#include <cstdlib>
 #include <iostream>
+#include <sstream>
+#include <stdexcept>
 
-// A simple calculator tool
+namespace {
+
+// Tiny recursive-descent evaluator for + - * / and parentheses.
+// Leading unary minus is supported. Whitespace is skipped.
+struct ExprParser {
+    const char* p;
+
+    void skip() { while (*p == ' ' || *p == '\t') ++p; }
+
+    double number() {
+        skip();
+        char* end = nullptr;
+        double v = std::strtod(p, &end);
+        if (end == p) throw std::runtime_error("expected number");
+        p = end;
+        return v;
+    }
+
+    double factor() {
+        skip();
+        if (*p == '(') { ++p; double v = expr(); skip();
+            if (*p != ')') throw std::runtime_error("missing ')'"); ++p; return v; }
+        if (*p == '-') { ++p; return -factor(); }
+        if (*p == '+') { ++p; return  factor(); }
+        return number();
+    }
+
+    double term() {
+        double v = factor();
+        while (true) {
+            skip();
+            if (*p == '*')      { ++p; v *= factor(); }
+            else if (*p == '/') { ++p; double d = factor();
+                                  if (d == 0) throw std::runtime_error("division by zero");
+                                  v /= d; }
+            else break;
+        }
+        return v;
+    }
+
+    double expr() {
+        double v = term();
+        while (true) {
+            skip();
+            if (*p == '+')      { ++p; v += term(); }
+            else if (*p == '-') { ++p; v -= term(); }
+            else break;
+        }
+        return v;
+    }
+
+    double parse() {
+        double v = expr();
+        skip();
+        if (*p != '\0') throw std::runtime_error(std::string("unexpected '") + *p + "'");
+        return v;
+    }
+};
+
+// Render as an integer when the value is exactly representable as one.
+std::string format_number(double v) {
+    std::ostringstream os;
+    if (std::isfinite(v) && v == std::floor(v) && std::abs(v) < 1e15)
+        os << static_cast<long long>(v);
+    else
+        os << v;
+    return os.str();
+}
+
+} // namespace
+
+// A calculator tool with a real + - * / expression evaluator.
 class CalculatorTool : public neograph::Tool {
 public:
     neograph::ChatTool get_definition() const override {
         return {
             "calculator",
-            "Evaluate a mathematical expression. Input: {\"expression\": \"2 + 3 * 4\"}",
+            "Evaluate an arithmetic expression with + - * / and parentheses. "
+            "Input: {\"expression\": \"15 * 28 + 7\"}",
             neograph::json{
                 {"type", "object"},
                 {"properties", {
@@ -30,9 +106,20 @@ public:
     }
 
     std::string execute(const neograph::json& args) override {
-        auto expr = args.value("expression", "");
-        // Simple: just return a mock result for demonstration
-        return R"({"result": 42, "expression": ")" + expr + "\"}";
+        auto expression = args.value("expression", "");
+        try {
+            ExprParser parser{expression.c_str()};
+            double result = parser.parse();
+            return neograph::json{
+                {"result", format_number(result)},
+                {"expression", expression}
+            }.dump();
+        } catch (const std::exception& e) {
+            return neograph::json{
+                {"error", e.what()},
+                {"expression", expression}
+            }.dump();
+        }
     }
 
     std::string get_name() const override { return "calculator"; }
