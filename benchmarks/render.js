@@ -54,13 +54,14 @@ function renderLatency(canvas) {
             text: 'Per-iteration engine overhead (µs, log scale) — lower is better',
             subtext: 'NeoGraph: 20.65 µs seq / 150.7 µs par.  Next-fastest Python (Haystack): 7.3× / 1.9× slower.',
             left: 'center',
-            top: 16,
+            top: 24,
+            itemGap: 12,
             textStyle: { fontSize: 17, fontWeight: 'bold', color: '#24292e' },
             subtextStyle: { fontSize: 12, color: '#586069' }
         },
-        grid: { left: 80, right: 32, top: 104, bottom: 88, containLabel: true },
+        grid: { left: 80, right: 32, top: 150, bottom: 108, containLabel: true },
         legend: {
-            bottom: 12,
+            bottom: 24,
             textStyle: { fontSize: 12, color: '#24292e' },
             itemGap: 24,
             data: ['seq (3-node chain)', 'par (fan-out 5 + join)'],
@@ -77,7 +78,9 @@ function renderLatency(canvas) {
         yAxis: {
             type: 'log',
             name: 'µs / iteration (log)',
-            nameGap: 44,
+            nameLocation: 'middle',
+            nameRotate: 90,
+            nameGap: 52,
             nameTextStyle: { fontSize: 12, color: '#586069' },
             axisLabel: { fontSize: 11, color: '#586069' },
             splitLine: { lineStyle: { color: '#eaecef' } },
@@ -113,11 +116,12 @@ function renderRss(canvas) {
             text: 'Peak resident memory (MB) — lower is better',
             subtext: 'Full bench process (warm-up + seq + par). NeoGraph: 4.9 MB.  7–21× less than Python field.',
             left: 'center',
-            top: 16,
+            top: 24,
+            itemGap: 12,
             textStyle: { fontSize: 17, fontWeight: 'bold', color: '#24292e' },
             subtextStyle: { fontSize: 12, color: '#586069' }
         },
-        grid: { left: 64, right: 32, top: 104, bottom: 88, containLabel: true },
+        grid: { left: 64, right: 32, top: 150, bottom: 108, containLabel: true },
         xAxis: {
             type: 'category',
             data: FRAMEWORKS,
@@ -128,7 +132,9 @@ function renderRss(canvas) {
         yAxis: {
             type: 'value',
             name: 'MB',
-            nameGap: 36,
+            nameLocation: 'middle',
+            nameRotate: 90,
+            nameGap: 44,
             nameTextStyle: { fontSize: 12, color: '#586069' },
             axisLabel: { fontSize: 11, color: '#586069' },
             splitLine: { lineStyle: { color: '#eaecef' } }
@@ -154,7 +160,7 @@ function renderRss(canvas) {
 }
 
 const w = 1700;
-const h = 560;
+const h = 640;
 const leftW = 1020;
 const rightW = w - leftW;
 
