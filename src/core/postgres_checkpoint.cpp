@@ -8,11 +8,12 @@
 //                                with ON CONFLICT DO NOTHING for dedup
 //   neograph_checkpoint_writes — pending intra-super-step writes
 //
-// Every save() runs the blob upserts and the cp insert in a single
-// CTE-driven SQL statement, wrapped in one transaction, so a crash
-// mid-save never leaves a cp pointing at blobs that didn't make it.
-// ON CONFLICT DO NOTHING is what makes dedup work without a separate
-// refcount or "have I seen this before" cache.
+// Every save() collapses the blob upserts and the cp insert into a
+// single CTE-driven SQL statement. PG statement-level atomicity then
+// guarantees a crash mid-save never leaves a cp pointing at blobs
+// that didn't make it — no explicit BEGIN/COMMIT wrap is needed for
+// save(). ON CONFLICT DO NOTHING is what makes dedup work without a
+// separate refcount or "have I seen this before" cache.
 
 #include <neograph/graph/postgres_checkpoint.h>
 
@@ -198,13 +199,12 @@ DROP TABLE IF EXISTS neograph_checkpoints;
 // save on the PG planner side.
 //
 // `kStmtSaveAll` is a single CTE-driven statement that performs the
-// blob upsert AND the checkpoint-row upsert in one round-trip. The
-// previous design had two separate exec_prepared calls inside the
-// transaction, costing one extra RTT per save. With CTE batching,
-// save() is BEGIN → ONE statement → COMMIT; the CTE gives us
-// statement-level atomicity (blob + cp insert together) while the
-// outer pqxx::work keeps behaviour identical to the two-statement
-// version that preceded it.
+// blob upsert AND the checkpoint-row upsert in one round-trip. With
+// CTE batching, save() does: ONE statement, period — no BEGIN/COMMIT
+// wrap. The CTE gives us statement-level atomicity (blob + cp insert
+// together), so an explicit pqxx::work would only add wire round-trips
+// without strengthening the guarantee. This matches LangGraph's
+// autocommit psycopg-pipeline wire shape.
 namespace {
 constexpr const char* kStmtSaveAll = "neograph_save_all";
 
@@ -391,7 +391,14 @@ auto PostgresCheckpointStore::with_conn(Fn&& fn) {
 
 void PostgresCheckpointStore::save(const Checkpoint& cp) {
     with_conn([&](pqxx::connection& c) {
-        pqxx::work tx{c};
+        // Autocommit path: no BEGIN/COMMIT round-trips. Atomicity comes
+        // from the single CTE statement itself — the blob upsert and the
+        // cp upsert run inside one PG statement and PG guarantees
+        // statement-level atomicity at READ COMMITTED. A wrapping
+        // pqxx::work would add two wire round-trips (BEGIN, COMMIT) and
+        // one extra WAL fsync ack without buying any guarantee the
+        // statement doesn't already provide.
+        pqxx::nontransaction tx{c};
 
         // Build the four parallel arrays for the blob CTE.
         std::vector<std::string> threads, channels, values;
@@ -433,8 +440,6 @@ void PostgresCheckpointStore::save(const Checkpoint& cp) {
             cp.step,                                        // $15
             cp.timestamp,                                   // $16
             cp.schema_version);                             // $17
-
-        tx.commit();
     });
 }
 
