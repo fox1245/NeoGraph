@@ -8,10 +8,11 @@
 //                                with ON CONFLICT DO NOTHING for dedup
 //   neograph_checkpoint_writes — pending intra-super-step writes
 //
-// Every save() runs blob upserts and the cp insert in a single
-// transaction so a crash mid-save never leaves a cp pointing at blobs
-// that didn't make it. ON CONFLICT DO NOTHING is what makes dedup work
-// without a separate refcount or "have I seen this before" cache.
+// Every save() runs the blob upserts and the cp insert in a single
+// CTE-driven SQL statement, wrapped in one transaction, so a crash
+// mid-save never leaves a cp pointing at blobs that didn't make it.
+// ON CONFLICT DO NOTHING is what makes dedup work without a separate
+// refcount or "have I seen this before" cache.
 
 #include <neograph/graph/postgres_checkpoint.h>
 
@@ -195,42 +196,66 @@ DROP TABLE IF EXISTS neograph_checkpoints;
 // tx.exec_prepared(name, args) instead of tx.exec_params(sql, args)
 // which re-parses the SQL on every call. Saves a few hundred μs per
 // save on the PG planner side.
+//
+// `kStmtSaveAll` is a single CTE-driven statement that performs the
+// blob upsert AND the checkpoint-row upsert in one round-trip. The
+// previous design had two separate exec_prepared calls inside the
+// transaction, costing one extra RTT per save. With CTE batching,
+// save() is BEGIN → ONE statement → COMMIT; the CTE gives us
+// statement-level atomicity (blob + cp insert together) while the
+// outer pqxx::work keeps behaviour identical to the two-statement
+// version that preceded it.
 namespace {
-constexpr const char* kStmtBlobUpsert = "neograph_blob_upsert";
-constexpr const char* kStmtCpUpsert   = "neograph_cp_upsert";
-constexpr const char* kSqlBlobUpsert  =
-    "INSERT INTO neograph_checkpoint_blobs "
-    "(thread_id, channel, version, blob_data) "
-    "SELECT t, c, v, b::jsonb "
-    "  FROM UNNEST($1::text[], $2::text[], $3::bigint[], $4::text[]) "
-    "       AS u(t, c, v, b) "
-    "ON CONFLICT (thread_id, channel, version) DO NOTHING";
-constexpr const char* kSqlCpUpsert =
-    "INSERT INTO neograph_checkpoints "
-    "(thread_id, checkpoint_id, parent_id, current_node, next_nodes, "
-    " interrupt_phase, barrier_state, channel_versions, global_version, "
-    " metadata, step, timestamp_ms, schema_version) "
-    "VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, $8::jsonb, $9, "
-    "        $10::jsonb, $11, $12, $13) "
-    "ON CONFLICT (thread_id, checkpoint_id) DO UPDATE SET "
-    "  parent_id        = EXCLUDED.parent_id, "
-    "  current_node     = EXCLUDED.current_node, "
-    "  next_nodes       = EXCLUDED.next_nodes, "
-    "  interrupt_phase  = EXCLUDED.interrupt_phase, "
-    "  barrier_state    = EXCLUDED.barrier_state, "
-    "  channel_versions = EXCLUDED.channel_versions, "
-    "  global_version   = EXCLUDED.global_version, "
-    "  metadata         = EXCLUDED.metadata, "
-    "  step             = EXCLUDED.step, "
-    "  timestamp_ms     = EXCLUDED.timestamp_ms, "
-    "  schema_version   = EXCLUDED.schema_version";
+constexpr const char* kStmtSaveAll = "neograph_save_all";
 
-// Register the hot-path statements on a fresh connection. Run from the
+// Parameter map (1-indexed for libpq):
+//   $1..$4 — UNNEST inputs for the blobs upsert (text[], text[],
+//            bigint[], text[]). Empty arrays are valid; the SELECT
+//            yields zero rows and the INSERT is a no-op.
+//   $5..$17 — checkpoint row columns, same order as the previous
+//             standalone kStmtCpUpsert.
+//
+// CTE chaining note: the `blob_ins` CTE returns 1 row per blob inserted,
+// but we don't need the rows downstream — RETURNING 1 just keeps the
+// CTE non-empty in case an optimiser ever decided to elide a CTE with
+// no observable result. The trailing INSERT is what drives the
+// statement; PG executes both arms of the WITH together and commits
+// at the surrounding tx.commit().
+constexpr const char* kSqlSaveAll = R"SQL(
+WITH blob_ins AS (
+    INSERT INTO neograph_checkpoint_blobs
+        (thread_id, channel, version, blob_data)
+    SELECT t, c, v, b::jsonb
+      FROM UNNEST($1::text[], $2::text[], $3::bigint[], $4::text[])
+           AS u(t, c, v, b)
+    ON CONFLICT (thread_id, channel, version) DO NOTHING
+    RETURNING 1
+)
+INSERT INTO neograph_checkpoints
+    (thread_id, checkpoint_id, parent_id, current_node, next_nodes,
+     interrupt_phase, barrier_state, channel_versions, global_version,
+     metadata, step, timestamp_ms, schema_version)
+VALUES ($5, $6, $7, $8, $9::jsonb, $10, $11::jsonb, $12::jsonb, $13,
+        $14::jsonb, $15, $16, $17)
+ON CONFLICT (thread_id, checkpoint_id) DO UPDATE SET
+    parent_id        = EXCLUDED.parent_id,
+    current_node     = EXCLUDED.current_node,
+    next_nodes       = EXCLUDED.next_nodes,
+    interrupt_phase  = EXCLUDED.interrupt_phase,
+    barrier_state    = EXCLUDED.barrier_state,
+    channel_versions = EXCLUDED.channel_versions,
+    global_version   = EXCLUDED.global_version,
+    metadata         = EXCLUDED.metadata,
+    step             = EXCLUDED.step,
+    timestamp_ms     = EXCLUDED.timestamp_ms,
+    schema_version   = EXCLUDED.schema_version
+)SQL";
+
+// Register the hot-path statement on a fresh connection. Run from the
 // constructor for every pool slot, and from with_conn after a
 // reconnect so a replaced slot still has the same prepared cache.
 void prepare_statements(pqxx::connection& c) {
-    c.prepare(kStmtBlobUpsert, kSqlBlobUpsert);
-    c.prepare(kStmtCpUpsert,   kSqlCpUpsert);
+    c.prepare(kStmtSaveAll, kSqlSaveAll);
 }
 } // namespace
 
@@ -368,15 +393,13 @@ void PostgresCheckpointStore::save(const Checkpoint& cp) {
     with_conn([&](pqxx::connection& c) {
         pqxx::work tx{c};
 
-        // 1. Batched blob upsert via UNNEST. Build four parallel arrays
-        //    of (thread, channel, version, value) and hand them to PG
-        //    as a single statement.
+        // Build the four parallel arrays for the blob CTE.
+        std::vector<std::string> threads, channels, values;
+        std::vector<int64_t>     versions;
         if (cp.channel_values.is_object() &&
             cp.channel_values.contains("channels")) {
             json chs = cp.channel_values["channels"];
             if (chs.is_object()) {
-                std::vector<std::string> threads, channels, values;
-                std::vector<int64_t>     versions;
                 for (auto [name, ch] : chs.items()) {
                     if (!ch.is_object() || !ch.contains("version")) continue;
                     if (!ch.contains("value")) continue;
@@ -385,16 +408,9 @@ void PostgresCheckpointStore::save(const Checkpoint& cp) {
                     versions.push_back(ch["version"].get<int64_t>());
                     values.push_back(to_jsonb_text(ch["value"]));
                 }
-                if (!threads.empty()) {
-                    // Prepared UNNEST upsert — see kSqlBlobUpsert. PG
-                    // skips parse+plan on every call after the first.
-                    tx.exec_prepared(kStmtBlobUpsert,
-                        threads, channels, versions, values);
-                }
             }
         }
 
-        // 2. Checkpoint row.
         json channel_versions = extract_channel_versions(cp.channel_values);
         int64_t global_version = 0;
         if (cp.channel_values.is_object() &&
@@ -402,22 +418,21 @@ void PostgresCheckpointStore::save(const Checkpoint& cp) {
             global_version = cp.channel_values["global_version"].get<int64_t>();
         }
 
-        // Prepared cp upsert — see kSqlCpUpsert. Same statement on
-        // every save so PG planner caches the plan once per conn.
-        tx.exec_prepared(kStmtCpUpsert,
-            cp.thread_id,
-            cp.id,
-            cp.parent_id,
-            cp.current_node,
-            to_jsonb_text(next_nodes_to_json(cp.next_nodes)),
-            std::string(to_string(cp.interrupt_phase)),
-            to_jsonb_text(barrier_state_to_json(cp.barrier_state)),
-            to_jsonb_text(channel_versions),
-            global_version,
-            to_jsonb_text(cp.metadata),
-            cp.step,
-            cp.timestamp,
-            cp.schema_version);
+        tx.exec_prepared(kStmtSaveAll,
+            threads, channels, versions, values,           // $1..$4
+            cp.thread_id,                                   // $5
+            cp.id,                                          // $6
+            cp.parent_id,                                   // $7
+            cp.current_node,                                // $8
+            to_jsonb_text(next_nodes_to_json(cp.next_nodes)),                // $9
+            std::string(to_string(cp.interrupt_phase)),     // $10
+            to_jsonb_text(barrier_state_to_json(cp.barrier_state)),          // $11
+            to_jsonb_text(channel_versions),                // $12
+            global_version,                                 // $13
+            to_jsonb_text(cp.metadata),                     // $14
+            cp.step,                                        // $15
+            cp.timestamp,                                   // $16
+            cp.schema_version);                             // $17
 
         tx.commit();
     });
