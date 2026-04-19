@@ -22,6 +22,7 @@ add_executable(neograph_tests
     test_rate_limited_provider.cpp
     test_admin_api_barrier_preservation.cpp
     test_intent_classifier_streaming.cpp
+    test_incremental_checkpoint.cpp
 )
 
 target_link_libraries(neograph_tests PRIVATE
