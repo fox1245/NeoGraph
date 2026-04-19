@@ -16,6 +16,7 @@ endif()
 option(NEOGRAPH_BUILD_LLM      "Build neograph::llm (LLM providers)"     ON)
 option(NEOGRAPH_BUILD_MCP      "Build neograph::mcp (MCP client)"        ON)
 option(NEOGRAPH_BUILD_UTIL     "Build neograph::util (utilities)"        ON)
+option(NEOGRAPH_BUILD_POSTGRES "Build PostgresCheckpointStore (libpqxx)" ON)
 option(NEOGRAPH_BUILD_EXAMPLES "Build example programs"                  ON)
 
 # ===========================================================================
@@ -52,6 +53,30 @@ target_include_directories(cppdotenv INTERFACE ${DEPS_DIR})
 # OpenSSL — required by httplib for HTTPS
 if(NEOGRAPH_BUILD_LLM OR NEOGRAPH_BUILD_MCP)
     find_package(OpenSSL REQUIRED)
+endif()
+
+# libpqxx — required by neograph::postgres (PostgresCheckpointStore).
+# Distros expose it via pkg-config; fall back to a manual lookup for
+# systems where libpqxx-dev is installed but lacks a .pc file.
+if(NEOGRAPH_BUILD_POSTGRES)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(LIBPQXX libpqxx)
+    endif()
+    if(NOT LIBPQXX_FOUND)
+        # Fallback: search for the headers + library directly.
+        find_path(LIBPQXX_INCLUDE_DIR pqxx/pqxx)
+        find_library(LIBPQXX_LIBRARY NAMES pqxx)
+        find_library(LIBPQ_LIBRARY NAMES pq)
+        if(NOT LIBPQXX_INCLUDE_DIR OR NOT LIBPQXX_LIBRARY)
+            message(FATAL_ERROR
+                "NEOGRAPH_BUILD_POSTGRES is ON but libpqxx wasn't found. "
+                "Install libpqxx-dev (apt) / libpqxx-devel (rpm), or set "
+                "NEOGRAPH_BUILD_POSTGRES=OFF to skip the Postgres backend.")
+        endif()
+        set(LIBPQXX_INCLUDE_DIRS ${LIBPQXX_INCLUDE_DIR})
+        set(LIBPQXX_LIBRARIES ${LIBPQXX_LIBRARY} ${LIBPQ_LIBRARY})
+    endif()
 endif()
 
 # ===========================================================================
@@ -97,6 +122,9 @@ add_library(neograph_core STATIC
     src/core/deep_research_graph.cpp
     src/core/store.cpp
 )
+# postgres_checkpoint.cpp is built into a separate target below
+# (neograph_postgres) so projects without libpqxx can still link
+# neograph::core.
 
 target_include_directories(neograph_core
     PUBLIC
@@ -110,6 +138,35 @@ target_link_libraries(neograph_core
 )
 
 add_library(neograph::core ALIAS neograph_core)
+
+# ===========================================================================
+# neograph::postgres — PostgresCheckpointStore (libpqxx)
+#
+# Optional persistent CheckpointStore backed by PostgreSQL. Schema mirrors
+# LangGraph's PostgresSaver (three tables: checkpoints, blobs, writes)
+# with a `neograph_` prefix so a single database can host both NeoGraph
+# and LangGraph state without name collisions.
+# ===========================================================================
+if(NEOGRAPH_BUILD_POSTGRES)
+    add_library(neograph_postgres STATIC
+        src/core/postgres_checkpoint.cpp
+    )
+
+    target_include_directories(neograph_postgres
+        PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+        PRIVATE
+            ${LIBPQXX_INCLUDE_DIRS}
+    )
+
+    target_link_libraries(neograph_postgres
+        PUBLIC  neograph_core
+        PRIVATE ${LIBPQXX_LIBRARIES}
+    )
+
+    add_library(neograph::postgres ALIAS neograph_postgres)
+endif()
 
 # ===========================================================================
 # neograph::llm — LLM provider implementations (OpenAI, Schema, Agent)
