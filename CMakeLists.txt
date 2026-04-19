@@ -61,10 +61,9 @@ target_compile_definitions(asio INTERFACE ASIO_STANDALONE ASIO_NO_DEPRECATED)
 find_package(Threads REQUIRED)
 target_link_libraries(asio INTERFACE Threads::Threads)
 
-# OpenSSL — required by httplib for HTTPS
-if(NEOGRAPH_BUILD_LLM OR NEOGRAPH_BUILD_MCP)
-    find_package(OpenSSL REQUIRED)
-endif()
+# OpenSSL — required by httplib for HTTPS, and by neograph::async
+# (asio::ssl in the async HTTP client).
+find_package(OpenSSL REQUIRED)
 
 # SQLite3 — required by neograph::sqlite (SqliteCheckpointStore).
 # Available as a system package on every Linux distro; on macOS comes
@@ -173,7 +172,7 @@ add_library(neograph_async STATIC
 target_include_directories(neograph_async
     PUBLIC $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
 )
-target_link_libraries(neograph_async PUBLIC asio)
+target_link_libraries(neograph_async PUBLIC asio OpenSSL::SSL OpenSSL::Crypto)
 # C++20 coroutines require this on GCC < 14 when using -std=c++20.
 target_compile_features(neograph_async PUBLIC cxx_std_20)
 add_library(neograph::async ALIAS neograph_async)
@@ -181,6 +180,11 @@ add_library(neograph::async ALIAS neograph_async)
 # Smoke binary — just proves the async TU compiles, links, and runs.
 add_executable(neograph_async_smoke src/async/async_smoke_main.cpp)
 target_link_libraries(neograph_async_smoke PRIVATE neograph_async)
+
+# Live-network smoke for the TLS path. Not in ctest (offline-safe by
+# default). Run manually after touching http_client.cpp's TLS branch.
+add_executable(neograph_async_https_smoke src/async/async_https_smoke_main.cpp)
+target_link_libraries(neograph_async_https_smoke PRIVATE neograph_async)
 
 # ===========================================================================
 # neograph::postgres — PostgresCheckpointStore (libpqxx)

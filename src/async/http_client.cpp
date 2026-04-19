@@ -1,14 +1,19 @@
 // Minimal async HTTP/1.1 POST client. See header for scope + caveats.
 //
 // Wire shape per call:
-//   resolve → connect → write(request) → read_until("\r\n\r\n") →
-//   parse status + Content-Length → read_exactly(Content-Length) → close.
+//   resolve → connect → [TLS handshake] → write(request) →
+//   read_until("\r\n\r\n") → parse status + Content-Length →
+//   read_exactly(Content-Length) → close.
 //
 // The request line, headers, and body are assembled into a single
 // std::string and written with one async_write call. Response parse is
 // straightforward because we don't support chunked encoding: once we
 // see the header terminator we trust Content-Length and pull that many
 // bytes verbatim.
+//
+// The same exchange template runs over either a plain tcp::socket or
+// an asio::ssl::stream<tcp::socket&>; async_post picks one based on
+// the `tls` flag.
 
 #include <neograph/async/http_client.h>
 
@@ -18,6 +23,8 @@
 #include <asio/ip/tcp.hpp>
 #include <asio/read.hpp>
 #include <asio/read_until.hpp>
+#include <asio/ssl.hpp>
+#include <asio/ssl/host_name_verification.hpp>
 #include <asio/streambuf.hpp>
 #include <asio/use_awaitable.hpp>
 #include <asio/write.hpp>
@@ -26,6 +33,7 @@
 #include <cctype>
 #include <charconv>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 
 namespace neograph::async {
@@ -107,31 +115,17 @@ long extract_content_length(std::istream& in) {
     return content_length;
 }
 
-} // namespace
-
-asio::awaitable<HttpResponse> async_post(
-    asio::any_io_executor ex,
-    std::string_view host,
-    std::string_view port,
-    std::string_view path,
-    std::string_view body,
-    std::vector<std::pair<std::string, std::string>> headers) {
-
-    asio::ip::tcp::resolver resolver{ex};
-    auto endpoints = co_await resolver.async_resolve(
-        std::string(host), std::string(port), asio::use_awaitable);
-
-    asio::ip::tcp::socket sock{ex};
-    co_await asio::async_connect(sock, endpoints, asio::use_awaitable);
-
-    std::string req = build_request(host, path, body, headers);
-    co_await asio::async_write(sock, asio::buffer(req), asio::use_awaitable);
+// Drive the HTTP exchange over any AsyncReadStream+AsyncWriteStream.
+// Separate from async_post so we can share it between the plain TCP
+// and the TLS-wrapped stream without duplicating parsing logic.
+template <typename Stream>
+asio::awaitable<HttpResponse> run_exchange(Stream& stream, const std::string& req) {
+    co_await asio::async_write(stream, asio::buffer(req), asio::use_awaitable);
 
     // Read up to and including the blank line that terminates headers.
     asio::streambuf buf;
-    co_await asio::async_read_until(sock, buf, "\r\n\r\n", asio::use_awaitable);
+    co_await asio::async_read_until(stream, buf, "\r\n\r\n", asio::use_awaitable);
 
-    // Parse status + headers from the streambuf.
     std::istream is(&buf);
     std::string status_line;
     std::getline(is, status_line);
@@ -141,14 +135,13 @@ asio::awaitable<HttpResponse> async_post(
 
     long content_length = extract_content_length(is);
     if (content_length < 0) {
-        // chunked — bail out, PoC scope.
         throw std::runtime_error("async_post: chunked transfer-encoding not supported");
     }
 
     // buf may already contain part (or all) of the body beyond headers.
     // Extract whatever's there through the istream (same backing
     // streambuf, so advancing `is` also consumes from buf), then pull
-    // the remaining bytes from the socket if needed.
+    // the remaining bytes from the stream if needed.
     resp.body.resize(content_length);
     long filled = 0;
     auto already = buf.size();
@@ -159,21 +152,90 @@ asio::awaitable<HttpResponse> async_post(
     }
     if (filled < content_length) {
         long remaining = content_length - filled;
-        co_await asio::async_read(sock,
+        co_await asio::async_read(stream,
                                   asio::buffer(resp.body.data() + filled, remaining),
                                   asio::transfer_exactly(remaining),
                                   asio::use_awaitable);
     }
+    co_return resp;
+}
 
-    // SO_LINGER { on, 0 } → close() sends RST instead of FIN, skipping
-    // TIME_WAIT. Only safe in benches where the request/response is
-    // fully exchanged before close; for production HTTP a graceful
-    // shutdown is correct. This avoids ephemeral-port exhaustion when
-    // 1000s of agents each open one connection per LLM call.
+} // namespace
+
+asio::awaitable<HttpResponse> async_post(
+    asio::any_io_executor ex,
+    std::string_view host,
+    std::string_view port,
+    std::string_view path,
+    std::string_view body,
+    std::vector<std::pair<std::string, std::string>> headers,
+    bool tls) {
+
+    asio::ip::tcp::resolver resolver{ex};
+    auto endpoints = co_await resolver.async_resolve(
+        std::string(host), std::string(port), asio::use_awaitable);
+
+    asio::ip::tcp::socket sock{ex};
+    co_await asio::async_connect(sock, endpoints, asio::use_awaitable);
+
+    std::string req = build_request(host, path, body, headers);
+    HttpResponse resp;
+
+    if (!tls) {
+        resp = co_await run_exchange(sock, req);
+
+        // SO_LINGER { on, 0 } → close() sends RST instead of FIN,
+        // skipping TIME_WAIT. Only safe in benches where the
+        // request/response is fully exchanged before close; for
+        // production HTTP a graceful shutdown is correct. Avoids
+        // ephemeral-port exhaustion when 1000s of agents each open
+        // one connection per LLM call. Once the keep-alive pool
+        // (Semester 1.2) lands this hack goes away.
+        asio::error_code ec;
+        sock.set_option(asio::socket_base::linger(true, 0), ec);
+        sock.close(ec);
+        co_return resp;
+    }
+
+    // ── TLS path ──────────────────────────────────────────────────
+    // Fresh context per call is intentional for Semester 1.1: it
+    // keeps the TU standalone and avoids sharing mutable OpenSSL
+    // state across coroutines without a strand. Session resumption
+    // + context reuse arrives with the keep-alive pool in 1.2.
+    asio::ssl::context ctx{asio::ssl::context::tls_client};
+    ctx.set_default_verify_paths();
+    ctx.set_verify_mode(asio::ssl::verify_peer);
+
+    asio::ssl::stream<asio::ip::tcp::socket&> tls_stream{sock, ctx};
+
+    // SNI: without this the server returns a generic cert (or the
+    // wrong vhost) on shared hosting, and Anthropic/OpenAI both
+    // require SNI for TLS 1.3 cert selection.
+    std::string host_str(host);
+    if (!SSL_set_tlsext_host_name(tls_stream.native_handle(), host_str.c_str())) {
+        throw asio::system_error{
+            asio::error_code{static_cast<int>(::ERR_get_error()),
+                             asio::error::get_ssl_category()},
+            "SNI setup"};
+    }
+    tls_stream.set_verify_callback(asio::ssl::host_name_verification{host_str});
+
+    co_await tls_stream.async_handshake(
+        asio::ssl::stream_base::client, asio::use_awaitable);
+
+    resp = co_await run_exchange(tls_stream, req);
+
+    // Graceful TLS shutdown. Servers commonly close first and we
+    // receive a short_read / EOF — treat both as clean. We already
+    // have the full body; swallow shutdown errors rather than
+    // surfacing them as a failed request.
+    try {
+        co_await tls_stream.async_shutdown(asio::use_awaitable);
+    } catch (const std::exception&) {
+        // Benign: peer closed first, or TLS record-layer EOF.
+    }
     asio::error_code ec;
-    sock.set_option(asio::socket_base::linger(true, 0), ec);
     sock.close(ec);
-
     co_return resp;
 }
 
