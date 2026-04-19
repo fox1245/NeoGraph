@@ -168,6 +168,7 @@ add_library(neograph::core ALIAS neograph_core)
 # ===========================================================================
 add_library(neograph_async STATIC
     src/async/async_smoke.cpp
+    src/async/http_client.cpp
 )
 target_include_directories(neograph_async
     PUBLIC $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
@@ -444,6 +445,14 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
     add_executable(bench_async_fanout benchmarks/bench_async_fanout.cpp)
     target_link_libraries(bench_async_fanout PRIVATE neograph::async)
     target_compile_features(bench_async_fanout PRIVATE cxx_std_20)
+
+    # async-runtime PoC stage 2: mock HTTP server + sync/async clients.
+    # Confirms the timer-only advantage survives real TCP / HTTP parse
+    # / socket setup overhead.
+    add_executable(bench_async_http benchmarks/bench_async_http.cpp)
+    target_link_libraries(bench_async_http PRIVATE
+        neograph::async httplib OpenSSL::SSL OpenSSL::Crypto)
+    target_compile_features(bench_async_http PRIVATE cxx_std_20)
 endif()
 
 # ===========================================================================
