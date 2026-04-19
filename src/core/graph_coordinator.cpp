@@ -184,6 +184,14 @@ void CheckpointCoordinator::record_pending_write(
     int step) const {
 
     if (!enabled()) return;
+    // Symmetric with clear_pending_writes: an empty parent_cp_id means
+    // we're inside the very first super-step, before any checkpoint has
+    // been committed. Pending writes are only useful as a replay log
+    // anchored to a parent cp — without one, resume() would return
+    // "no checkpoint found" and the user has to restart from scratch
+    // anyway. Recording a leak-by-design bucket keyed at parent="" was
+    // the source of a single dead row per thread observed in PG.
+    if (parent_cp_id.empty()) return;
     store_->put_writes(thread_id_, parent_cp_id,
                        make_pending_write(task_id, task_path, node_name, nr, step));
 }

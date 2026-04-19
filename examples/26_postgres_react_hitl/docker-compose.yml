@@ -29,6 +29,12 @@ services:
       - "55432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # Bootstrap a separate `neograph_test` database for the
+      # CheckpointStore integration tests. Their SetUp calls
+      # `drop_schema()` which is destructive — keeping the test DB
+      # isolated stops a `ctest` invocation from wiping demo threads
+      # in the main `neograph` DB.
+      - ./pg-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 2s
