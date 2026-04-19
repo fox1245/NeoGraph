@@ -25,12 +25,23 @@ add_executable(neograph_tests
     test_incremental_checkpoint.cpp
 )
 
+# PostgresCheckpointStore integration tests are gated on NEOGRAPH_BUILD_POSTGRES
+# at the build level (so projects without libpqxx still build the test
+# binary) and on NEOGRAPH_TEST_POSTGRES_URL at runtime (skipped if unset).
+if(NEOGRAPH_BUILD_POSTGRES)
+    target_sources(neograph_tests PRIVATE test_postgres_checkpoint.cpp)
+endif()
+
 target_link_libraries(neograph_tests PRIVATE
     neograph::core
     neograph::llm
     httplib OpenSSL::SSL OpenSSL::Crypto
     GTest::gtest_main
 )
+
+if(NEOGRAPH_BUILD_POSTGRES)
+    target_link_libraries(neograph_tests PRIVATE neograph::postgres)
+endif()
 
 include(GoogleTest)
 gtest_discover_tests(neograph_tests)

@@ -308,6 +308,45 @@ condvar when idle — no busy-spin.
   implementations must be thread-safe. The bundled `InMemoryCheckpointStore`
   and `InMemoryStore` already are.
 
+### Persistent checkpointing with PostgreSQL
+
+For multi-process deployments or when checkpoints must survive a restart,
+link `neograph::postgres` and swap `InMemoryCheckpointStore` for
+`PostgresCheckpointStore`:
+
+```cpp
+#include <neograph/graph/postgres_checkpoint.h>
+
+auto store = std::make_shared<PostgresCheckpointStore>(
+    "postgresql://user:pass@host:5432/dbname");
+auto engine = GraphEngine::compile(def, ctx, store);
+```
+
+The schema mirrors LangGraph's `PostgresSaver` (three tables prefixed
+`neograph_*` to coexist with LangGraph state in the same database) and
+deduplicates channel values by `(thread_id, channel, version)`. A
+1000-step session that touches one channel per super-step costs roughly
+`O(steps + channels)` blob rows instead of `O(steps × channels)`.
+
+**Build flag**: `-DNEOGRAPH_BUILD_POSTGRES=ON` (default). Requires
+`libpqxx-dev` (apt) / `libpqxx-devel` (rpm). Set the flag `OFF` to skip
+the dependency entirely.
+
+**Running the integration tests**: spin up a throwaway local PG and
+point the test binary at it:
+
+```bash
+docker run -d --rm --name neograph-pg-test \
+    -e POSTGRES_PASSWORD=test -e POSTGRES_DB=neograph_test \
+    -p 55432:5432 postgres:16-alpine
+
+NEOGRAPH_TEST_POSTGRES_URL='postgresql://postgres:test@localhost:55432/neograph_test' \
+    ctest --test-dir build -R PostgresCheckpoint --output-on-failure
+```
+
+Without the env var the 19 PG tests are `GTEST_SKIP`'d so the rest of
+the suite stays green on machines without a Postgres handy.
+
 Coverage: `tests/test_graph_engine.cpp` contains
 `ConcurrentRunDifferentThreadIds` (16 threads × 25 runs = 400 parallel
 executions, validates per-session output + checkpoint isolation) and
@@ -353,7 +392,7 @@ executions, validates per-session output + checkpoint isolation) and
 | Feature | LangGraph (Python) | NeoGraph (C++) |
 |---------|-------------------|----------------|
 | Graph engine | StateGraph | GraphEngine |
-| Checkpointing | MemorySaver + Postgres/SQLite/Redis | CheckpointStore (interface) + InMemory |
+| Checkpointing | MemorySaver + Postgres/SQLite/Redis | CheckpointStore (interface) + InMemory + Postgres |
 | HITL | interrupt_before/after | interrupt_before/after + NodeInterrupt |
 | get_state / update_state | Yes | Yes |
 | Fork | Yes | Yes |
