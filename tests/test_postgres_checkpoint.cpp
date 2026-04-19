@@ -17,6 +17,8 @@
 #include <cstdlib>
 #include <map>
 #include <string>
+#include <thread>
+#include <vector>
 
 using namespace neograph::graph;
 using json = neograph::json;
@@ -323,18 +325,26 @@ TEST_F(PostgresCheckpointTest, LoadByIdMissingReturnsNullopt) {
 
 // Nested JSON values (arrays of objects) must round-trip exactly. This
 // is the "messages" channel shape — the most common real payload.
-// Reconnect-after-broken-connection path. Forces PG to drop the
-// store's backend via a sibling connection issuing
-// pg_terminate_backend; the store's NEXT operation must catch
-// pqxx::broken_connection, dial PG again, and retry — observable via
-// reconnect_count() going from 0 → 1 and the load returning data.
+// Reconnect-after-broken-connection path. Forces PG to drop every
+// pool slot's backend via a sibling connection issuing
+// pg_terminate_backend; subsequent operations must catch
+// pqxx::broken_connection on each slot they touch and replace it.
+//
+// With pool_size=8 and a single load_latest call the store will only
+// touch ONE slot, so reconnect_count goes 0 → 1. The test pins
+// pool_size=1 to make the assertion deterministic regardless of
+// which slot acquire_slot picks.
 TEST_F(PostgresCheckpointTest, RetriesAfterBrokenConnection) {
-    // Seed one cp so we have something to load after the kill.
+    // Re-construct the store with pool_size=1 so the assertion below
+    // doesn't depend on which slot the next acquire_slot returned.
+    store = std::make_unique<PostgresCheckpointStore>(pg_url(), /*pool_size=*/1);
+    store->drop_schema();
+
     store->save(make_state_cp("rt", 0, {{"x", {1, 1}}}));
     EXPECT_EQ(store->reconnect_count(), 0u);
 
     // Kill every backend on neograph_test EXCEPT our killer's own —
-    // that includes the store's connection. pg_terminate_backend is
+    // that includes the store's pool slot. pg_terminate_backend is
     // available to any superuser; the test container's `postgres` user
     // qualifies.
     {
@@ -346,12 +356,46 @@ TEST_F(PostgresCheckpointTest, RetriesAfterBrokenConnection) {
         tx.commit();
     }
 
-    // Next op on the store must transparently reconnect.
     auto loaded = store->load_latest("rt");
     ASSERT_TRUE(loaded.has_value());
     EXPECT_EQ(loaded->channel_values["channels"]["x"]["value"].get<int>(), 1);
     EXPECT_EQ(store->reconnect_count(), 1u)
-        << "with_conn must catch pqxx::broken_connection and dial PG once";
+        << "with_conn must catch pqxx::broken_connection and replace the slot";
+}
+
+// Pool sizing: constructor honours the requested pool_size and the
+// invalid argument 0 is rejected. The benchmark relies on >1 slots to
+// scale, so a regression here would silently re-serialize commits.
+TEST_F(PostgresCheckpointTest, PoolSizeIsHonoured) {
+    auto store4 = std::make_unique<PostgresCheckpointStore>(pg_url(), 4);
+    EXPECT_EQ(store4->pool_size(), 4u);
+
+    auto store1 = std::make_unique<PostgresCheckpointStore>(pg_url(), 1);
+    EXPECT_EQ(store1->pool_size(), 1u);
+
+    EXPECT_THROW(PostgresCheckpointStore(pg_url(), 0),
+                 std::invalid_argument);
+}
+
+// Concurrent saves across pool slots must all land — proves the pool
+// actually serves multiple acquire_slot callers in parallel and the
+// per-slot transactions don't trample each other.
+TEST_F(PostgresCheckpointTest, PoolHandlesConcurrentSaves) {
+    auto pooled = std::make_unique<PostgresCheckpointStore>(pg_url(), 4);
+    pooled->drop_schema();
+
+    constexpr int N = 32;
+    std::vector<std::thread> ts;
+    ts.reserve(N);
+    for (int i = 0; i < N; ++i) {
+        ts.emplace_back([&, i] {
+            pooled->save(make_state_cp("p", i, {{"x", {i, uint64_t(i + 1)}}}));
+        });
+    }
+    for (auto& t : ts) t.join();
+
+    auto cps = pooled->list("p", 100);
+    EXPECT_EQ(cps.size(), static_cast<size_t>(N));
 }
 
 TEST_F(PostgresCheckpointTest, NestedJsonRoundTrips) {
