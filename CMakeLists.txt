@@ -51,6 +51,16 @@ target_include_directories(concurrentqueue INTERFACE ${DEPS_DIR})
 add_library(cppdotenv INTERFACE)
 target_include_directories(cppdotenv INTERFACE ${DEPS_DIR})
 
+# standalone asio (header-only) — used by the async runtime layer.
+# Vendored as `deps/asio/include/` so the public macro ASIO_STANDALONE
+# turns off the Boost.System coupling. Any TU linking this must also
+# link a threads lib (std::thread backend).
+add_library(asio INTERFACE)
+target_include_directories(asio INTERFACE ${DEPS_DIR}/asio/include)
+target_compile_definitions(asio INTERFACE ASIO_STANDALONE ASIO_NO_DEPRECATED)
+find_package(Threads REQUIRED)
+target_link_libraries(asio INTERFACE Threads::Threads)
+
 # OpenSSL — required by httplib for HTTPS
 if(NEOGRAPH_BUILD_LLM OR NEOGRAPH_BUILD_MCP)
     find_package(OpenSSL REQUIRED)
@@ -146,6 +156,30 @@ target_link_libraries(neograph_core
 )
 
 add_library(neograph::core ALIAS neograph_core)
+
+# ===========================================================================
+# neograph::async — asio-based async runtime (PoC stage)
+#
+# Experimental. Not yet exposed through public headers. Goal: run a
+# single-core io_context that multiplexes many in-flight LLM / PG / MCP
+# calls so one agent no longer needs one OS thread. See
+# benchmarks/bench_async_fanout for the scaling measurement that
+# justifies (or kills) the bigger refactor.
+# ===========================================================================
+add_library(neograph_async STATIC
+    src/async/async_smoke.cpp
+)
+target_include_directories(neograph_async
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+)
+target_link_libraries(neograph_async PUBLIC asio)
+# C++20 coroutines require this on GCC < 14 when using -std=c++20.
+target_compile_features(neograph_async PUBLIC cxx_std_20)
+add_library(neograph::async ALIAS neograph_async)
+
+# Smoke binary — just proves the async TU compiles, links, and runs.
+add_executable(neograph_async_smoke src/async/async_smoke_main.cpp)
+target_link_libraries(neograph_async_smoke PRIVATE neograph_async)
 
 # ===========================================================================
 # neograph::postgres — PostgresCheckpointStore (libpqxx)
@@ -403,6 +437,13 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
             target_compile_definitions(bench_checkpoint_store PRIVATE NEOGRAPH_HAVE_POSTGRES)
         endif()
     endif()
+
+    # async-runtime PoC: pure-timer fan-out to compare thread-per-agent
+    # vs io_context + coroutines at 100/1K/10K concurrency. No HTTP in
+    # this cut — measures the scheduling primitive in isolation.
+    add_executable(bench_async_fanout benchmarks/bench_async_fanout.cpp)
+    target_link_libraries(bench_async_fanout PRIVATE neograph::async)
+    target_compile_features(bench_async_fanout PRIVATE cxx_std_20)
 endif()
 
 # ===========================================================================
