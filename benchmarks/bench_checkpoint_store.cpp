@@ -56,6 +56,10 @@ struct Config {
     std::string backends  = "auto";      // resolved to memory,sqlite[,postgres]
     std::string pg_url;
     std::string sqlite_path = "/tmp/neograph_bench.db";
+    // 0 = use library default (8). Exposed for apples-to-apples
+    // comparisons against per-thread LangGraph setups where LG opens
+    // as many PG backends as it has threads.
+    size_t pg_pool_size = 0;
 };
 
 Config parse_args(int argc, char** argv) {
@@ -71,6 +75,7 @@ Config parse_args(int argc, char** argv) {
         else if (a == "--backends")    c.backends         = next();
         else if (a == "--pg-url")      c.pg_url           = next();
         else if (a == "--sqlite-path") c.sqlite_path      = next();
+        else if (a == "--pg-pool-size") c.pg_pool_size    = std::stoul(next());
     }
     if (c.backends == "auto") {
         c.backends = c.pg_url.empty() ? "memory,sqlite"
@@ -272,7 +277,8 @@ int main(int argc, char** argv) {
             std::cerr << "skipping postgres: --pg-url not set "
                          "(or NEOGRAPH_BENCH_PG_URL env)\n";
         } else {
-            PostgresCheckpointStore store(cfg.pg_url);
+            PostgresCheckpointStore store(cfg.pg_url,
+                cfg.pg_pool_size ? cfg.pg_pool_size : 8);
             // Drop and recreate so the bench starts clean.
             store.drop_schema();
             auto r = run_one("postgres", store, cfg);
