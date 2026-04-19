@@ -40,6 +40,7 @@
 #pragma once
 
 #include <neograph/graph/checkpoint.h>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -64,6 +65,13 @@ public:
     /// @param conn_str libpq connection string. Anything libpq accepts.
     /// @throws std::runtime_error on connection or DDL failure.
     explicit PostgresCheckpointStore(const std::string& conn_str);
+
+    /// Number of times the store reconnected and retried after a
+    /// `pqxx::broken_connection` failure. Tracked at the store level
+    /// (not per-thread) — useful for monitoring (e.g. expose to a
+    /// Prometheus gauge) and for tests that want to assert the retry
+    /// path actually fired.
+    size_t reconnect_count() const { return reconnect_count_; }
 
     ~PostgresCheckpointStore() override;
 
@@ -105,8 +113,14 @@ private:
     template <typename Fn>
     auto with_conn(Fn&& fn);
 
+    /// Original connection string, retained so `with_conn` can rebuild
+    /// the connection on demand after a `pqxx::broken_connection`.
+    std::string conn_str_;
     std::unique_ptr<pqxx::connection> conn_;
     std::mutex conn_mutex_;
+    /// Incremented every time `with_conn` reconnects after a broken
+    /// connection. atomic so reads from monitoring threads don't race.
+    std::atomic<size_t> reconnect_count_{0};
 };
 
 } // namespace neograph::graph

@@ -33,6 +33,10 @@ if(NEOGRAPH_BUILD_POSTGRES)
     target_sources(neograph_tests PRIVATE test_postgres_checkpoint.cpp)
 endif()
 
+if(NEOGRAPH_BUILD_SQLITE)
+    target_sources(neograph_tests PRIVATE test_sqlite_checkpoint.cpp)
+endif()
+
 target_link_libraries(neograph_tests PRIVATE
     neograph::core
     neograph::llm
@@ -42,6 +46,10 @@ target_link_libraries(neograph_tests PRIVATE
 
 if(NEOGRAPH_BUILD_POSTGRES)
     target_link_libraries(neograph_tests PRIVATE neograph::postgres)
+endif()
+
+if(NEOGRAPH_BUILD_SQLITE)
+    target_link_libraries(neograph_tests PRIVATE neograph::sqlite)
 endif()
 
 include(GoogleTest)
