@@ -253,6 +253,24 @@ public:
  *
  * Stores checkpoints in memory using std::map. Thread-safe via mutex.
  * Not suitable for production use where persistence across restarts is needed.
+ *
+ * ## Incremental storage (channel-blob deduplication)
+ *
+ * Channel values are deduplicated internally by `(thread_id, channel,
+ * version)` — every write bumps `Channel::version`, so the same value at
+ * the same version across multiple checkpoints is stored exactly once.
+ * In a typical run only one or two channels change per super-step, so a
+ * 1000-step session pays roughly `(channels + steps) × value_size`
+ * instead of `channels × steps × value_size`.
+ *
+ * The dedup is purely an internal storage optimization: callers always
+ * receive (and pass in) Checkpoints whose `channel_values` carry full
+ * inline data. Engine code, tests, and migration paths are unaffected.
+ *
+ * Persistent CheckpointStore implementations are encouraged to apply
+ * the same pattern in their own backends (e.g. a `(channel, version) →
+ * blob` table referenced from a `(checkpoint_id, channel) → version`
+ * table) to get the same on-disk savings.
  */
 class InMemoryCheckpointStore : public CheckpointStore {
 public:
@@ -279,15 +297,42 @@ public:
     size_t size() const;
 
     /**
+     * @brief Number of distinct channel-value blobs currently held (test helper).
+     *
+     * Use this to verify dedup: writing N identical-state checkpoints
+     * leaves blob_count() at one entry per channel, not N × channels.
+     */
+    size_t blob_count() const;
+
+    /**
      * @brief Get the number of pending writes for a parent checkpoint (test helper).
      */
     size_t pending_writes_count(const std::string& thread_id,
                                 const std::string& parent_checkpoint_id) const;
 
 private:
+    /// Strip values out of `cp.channel_values["channels"][n]["value"]`,
+    /// store them in `blobs_` keyed by (thread_id, channel, version),
+    /// leave the rest of the cp shell intact. Idempotent on the blob
+    /// map — duplicate puts at the same key are dropped silently.
+    /// MUST be called with `mutex_` held.
+    Checkpoint split_blobs_locked(Checkpoint cp);
+
+    /// Inverse of split_blobs_locked: walk the cp's channel pointers
+    /// and copy values back from `blobs_` so the returned Checkpoint
+    /// looks identical to what the caller originally passed to save().
+    /// Channels whose blob is missing get a null `value` (defensive —
+    /// indicates either a v1/v2 legacy blob or store corruption).
+    /// MUST be called with `mutex_` held.
+    Checkpoint join_blobs_locked(Checkpoint cp) const;
+
     mutable std::mutex mutex_;
-    std::map<std::string, std::vector<Checkpoint>> by_thread_;
-    std::map<std::string, Checkpoint> by_id_;
+    std::map<std::string, std::vector<Checkpoint>> by_thread_;  ///< holds shells (no inline values)
+    std::map<std::string, Checkpoint> by_id_;                   ///< holds shells (no inline values)
+    /// Deduplicated channel values. A channel value at a given (thread,
+    /// channel, version) is identical across every cp that references
+    /// it, so a single entry serves all of them.
+    std::map<std::tuple<std::string, std::string, uint64_t>, json> blobs_;
     // Keyed by (thread_id, parent_checkpoint_id) → ordered list of pending writes
     std::map<std::pair<std::string, std::string>, std::vector<PendingWrite>> pending_;
 };
