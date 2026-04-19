@@ -16,6 +16,7 @@
 #include <asio/awaitable.hpp>
 #include <asio/any_io_executor.hpp>
 
+#include <chrono>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -27,6 +28,35 @@ namespace neograph::async {
 struct HttpResponse {
     int         status = 0;
     std::string body;
+
+    /// Verbatim `Retry-After` header, if present. Seconds-integer
+    /// ("120") or HTTP-date ("Wed, 21 Oct 2015 07:28:00 GMT") — the
+    /// caller parses based on shape. Empty when the server didn't
+    /// send one.
+    std::string retry_after;
+
+    /// Verbatim `Location` header, if present. Only populated when
+    /// the response is a 3xx that the client did *not* transparently
+    /// follow (because max_redirects was 0 or exhausted). Empty
+    /// otherwise.
+    std::string location;
+};
+
+/// Per-call knobs. Default-constructed instance preserves the
+/// library's historical behavior (no timeout, no redirect-following).
+struct RequestOptions {
+    /// Per-hop deadline covering connect + handshake + write + read
+    /// of one HTTP exchange. Zero = no timeout (the default).
+    /// Applied independently to each hop when following redirects
+    /// rather than as a total budget.
+    std::chrono::milliseconds timeout{0};
+
+    /// Max 3xx hops to follow automatically. Zero (default) = never
+    /// follow; the 3xx response comes straight back to the caller
+    /// with `location` populated. Redirects preserve the POST method
+    /// and body for all 3xx codes (pragmatic for the LLM/MCP hosts
+    /// we target — no 303 → GET downgrade).
+    int max_redirects = 0;
 };
 
 /// Async HTTP(S) POST. Returns the response body and status on the
@@ -54,7 +84,8 @@ asio::awaitable<HttpResponse> async_post(
     std::string_view path,
     std::string_view body,
     std::vector<std::pair<std::string, std::string>> headers = {},
-    bool tls = false);
+    bool tls = false,
+    RequestOptions opts = {});
 
 /// Metadata returned by async_post_stream after the body has been
 /// fully delivered via the callback. No `body` member — the body
@@ -89,6 +120,7 @@ asio::awaitable<HttpStreamResponse> async_post_stream(
     std::string_view body,
     std::vector<std::pair<std::string, std::string>> headers,
     bool tls,
-    std::function<void(std::string_view chunk)> on_chunk);
+    std::function<void(std::string_view chunk)> on_chunk,
+    RequestOptions opts = {});
 
 } // namespace neograph::async

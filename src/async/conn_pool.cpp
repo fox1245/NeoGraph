@@ -28,14 +28,17 @@
 #include "http_exchange_detail.h"
 
 #include <asio/connect.hpp>
+#include <asio/experimental/awaitable_operators.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/ssl.hpp>
 #include <asio/ssl/host_name_verification.hpp>
+#include <asio/steady_timer.hpp>
 #include <asio/use_awaitable.hpp>
 
 #include <chrono>
 #include <cstddef>
 #include <deque>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -121,6 +124,15 @@ struct ConnPool::Impl {
         bucket.push_back(std::move(c));
         ++total_idle;
     }
+
+    // Core dispatch: try to reuse an idle conn, fall back to fresh.
+    // Declared as a member so the Key / Connection types (defined in
+    // this TU's anonymous namespace) are accessible — making this a
+    // free function would force those types to be reachable from
+    // outside the TU or to be duplicated. Definition follows the
+    // anonymous-namespace helpers so `open`/`try_exchange`/
+    // `exchange_fresh` are in scope at the point of use.
+    asio::awaitable<HttpResponse> dispatch(Key key, const std::string& req);
 };
 
 namespace {
@@ -193,6 +205,28 @@ asio::awaitable<detail::ExchangeResult> exchange_fresh(
 
 }  // namespace
 
+asio::awaitable<HttpResponse> ConnPool::Impl::dispatch(
+    Key key, const std::string& req) {
+    auto reused = checkout(key);
+    if (reused) {
+        auto maybe = co_await try_exchange(*reused, req);
+        if (maybe) {
+            if (maybe->server_directive == detail::ConnDirective::keep_alive) {
+                checkin(key, std::move(reused));
+            }
+            co_return maybe->response;
+        }
+        reused.reset();
+    }
+
+    auto fresh = co_await open(ex, ssl_ctx, key);
+    auto r = co_await exchange_fresh(*fresh, req);
+    if (r.server_directive == detail::ConnDirective::keep_alive) {
+        checkin(key, std::move(fresh));
+    }
+    co_return r.response;
+}
+
 ConnPool::ConnPool(asio::any_io_executor ex, ConnPoolOptions opts)
     : impl_(std::make_unique<Impl>(std::move(ex), opts)) {}
 
@@ -209,34 +243,32 @@ asio::awaitable<HttpResponse> ConnPool::async_post(
     std::string_view path,
     std::string_view body,
     std::vector<std::pair<std::string, std::string>> headers,
-    bool tls) {
+    bool tls,
+    RequestOptions opts) {
 
     Key key{ std::string(host), std::string(port), tls };
     std::string req = detail::build_request(
         host, path, body, headers, detail::ConnDirective::keep_alive);
 
-    // Phase 1 — try a reused idle connection if one exists.
-    auto reused = impl_->checkout(key);
-    if (reused) {
-        auto maybe = co_await try_exchange(*reused, req);
-        if (maybe) {
-            if (maybe->server_directive == detail::ConnDirective::keep_alive) {
-                impl_->checkin(key, std::move(reused));
-            }
-            // else: server said close — let reused die at scope end.
-            co_return maybe->response;
-        }
-        // Stale — reused destructs at scope end, socket closes.
-        reused.reset();
+    if (opts.timeout.count() <= 0) {
+        co_return co_await impl_->dispatch(std::move(key), req);
     }
 
-    // Phase 2 — fresh connection. Failure here propagates.
-    auto fresh = co_await open(impl_->ex, impl_->ssl_ctx, key);
-    auto r = co_await exchange_fresh(*fresh, req);
-    if (r.server_directive == detail::ConnDirective::keep_alive) {
-        impl_->checkin(key, std::move(fresh));
+    // Bound the entire call (reuse attempt + fresh fallback) by a
+    // single timer. Same awaitable_operators shape as the free
+    // async_post uses — a plain steady_timer racing one awaitable,
+    // which GCC 13 codegen handles cleanly.
+    using asio::experimental::awaitable_operators::operator||;
+    asio::steady_timer timer(impl_->ex);
+    timer.expires_after(opts.timeout);
+    auto res = co_await (
+        impl_->dispatch(std::move(key), req)
+        || timer.async_wait(asio::use_awaitable));
+    if (res.index() == 1) {
+        throw asio::system_error(asio::error::timed_out,
+                                 "ConnPool::async_post: timeout");
     }
-    co_return r.response;
+    co_return std::get<0>(std::move(res));
 }
 
 }  // namespace neograph::async

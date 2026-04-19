@@ -65,13 +65,22 @@ public:
     /// semantics. Throws asio::system_error on fresh-connection
     /// failure (DNS, connect, TLS handshake, write/read of the
     /// second attempt). A stale-idle-conn failure is absorbed.
+    /// Pooled HTTP(S) POST. See free async_post for parameter
+    /// semantics. `opts.timeout` bounds the entire call, covering
+    /// both the reuse attempt (if any) and the fresh-connection
+    /// retry. `opts.max_redirects` is intentionally *not* honored
+    /// here — a redirect might cross host buckets, and silently
+    /// reaching into another bucket from a pooled request hides
+    /// too much for the library to do behind the caller's back.
+    /// Use the free async_post for redirect-following.
     asio::awaitable<HttpResponse> async_post(
         std::string_view host,
         std::string_view port,
         std::string_view path,
         std::string_view body,
         std::vector<std::pair<std::string, std::string>> headers = {},
-        bool tls = false);
+        bool tls = false,
+        RequestOptions opts = {});
 
     /// Total idle connections across all host buckets. Diagnostic.
     std::size_t idle_count() const;
