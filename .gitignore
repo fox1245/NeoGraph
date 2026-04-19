@@ -9,6 +9,9 @@ benchmarks/node_modules/
 # Session handoff note — local planning doc, not tracked.
 NEXT_SESSION.md
 
+# Local VSCode multi-folder workspace files.
+*.code-workspace
+
 # Stray CMake artifacts if cmake is ever run from the repo root by accident
 /CMakeCache.txt
 /CMakeFiles/
