@@ -297,6 +297,17 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_deep_research examples/25_deep_research.cpp)
         target_link_libraries(example_deep_research PRIVATE neograph::core neograph::llm httplib OpenSSL::SSL OpenSSL::Crypto cppdotenv)
 
+        # Example 26 needs both LLM (Claude provider) and the Postgres
+        # backend; gate it on both build flags so a project that turns
+        # off Postgres doesn't try to link a missing target.
+        if(NEOGRAPH_BUILD_POSTGRES)
+            add_executable(example_postgres_react_hitl
+                examples/26_postgres_react_hitl/main.cpp)
+            target_link_libraries(example_postgres_react_hitl PRIVATE
+                neograph::core neograph::llm neograph::postgres
+                httplib OpenSSL::SSL OpenSSL::Crypto cppdotenv)
+        endif()
+
         if(NEOGRAPH_BUILD_MCP)
             add_executable(example_mcp_agent examples/03_mcp_agent.cpp)
             target_link_libraries(example_mcp_agent PRIVATE neograph::core neograph::llm neograph::mcp)

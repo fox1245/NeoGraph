@@ -23,6 +23,7 @@ add_executable(neograph_tests
     test_admin_api_barrier_preservation.cpp
     test_intent_classifier_streaming.cpp
     test_incremental_checkpoint.cpp
+    test_deep_research_human_review.cpp
 )
 
 # PostgresCheckpointStore integration tests are gated on NEOGRAPH_BUILD_POSTGRES
@@ -44,4 +45,19 @@ if(NEOGRAPH_BUILD_POSTGRES)
 endif()
 
 include(GoogleTest)
-gtest_discover_tests(neograph_tests)
+
+if(NEOGRAPH_BUILD_POSTGRES)
+    # PostgresCheckpointTest cases share one DB and call drop_schema in
+    # SetUp/TearDown — running them in parallel collides on DDL. Mark
+    # them with a RESOURCE_LOCK so ctest serializes only this group
+    # while the other ~200 tests still run concurrently.
+    gtest_discover_tests(neograph_tests
+        TEST_FILTER "PostgresCheckpointTest.*"
+        PROPERTIES RESOURCE_LOCK postgres_test_db
+    )
+    gtest_discover_tests(neograph_tests
+        TEST_FILTER "-PostgresCheckpointTest.*"
+    )
+else()
+    gtest_discover_tests(neograph_tests)
+endif()

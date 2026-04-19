@@ -1,0 +1,65 @@
+# Stack for Example 26: Postgres + Crawl4AI + the agent binary.
+#
+# Two services run as long-lived containers (postgres, crawl4ai); the
+# `agent` service is short-lived and is invoked via `docker compose run`
+# so each `run`/`resume` invocation is its own process — that's the
+# whole point of the demo (proving checkpoints survive the process).
+#
+# Bring the supporting services up first:
+#   docker compose up -d postgres crawl4ai
+#
+# Then run the agent. THREAD_ID is printed at the end of `run`:
+#   docker compose run --rm agent run "current ViT papers"
+#   docker compose run --rm agent resume <thread_id> "give me URL citations"
+#   docker compose run --rm agent resume <thread_id> approve
+#
+# When done:
+#   docker compose down       # keeps the volume
+#   docker compose down -v    # nukes the PG volume too
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-test}
+      POSTGRES_DB: ${POSTGRES_DB:-neograph}
+    ports:
+      # Host port is non-default to avoid clashing with any local PG.
+      - "55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  crawl4ai:
+    image: unclecode/crawl4ai:latest
+    shm_size: 1gb
+    ports:
+      - "11235:11235"
+
+  agent:
+    build:
+      # Build context is the repo root so the Dockerfile can COPY in
+      # all of NeoGraph.
+      context: ../..
+      dockerfile: examples/26_postgres_react_hitl/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      crawl4ai:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      # Override the host-port-based POSTGRES_URL from .env with the
+      # in-network address of the postgres service. Keeps .env friendly
+      # to running the binary directly on the host without re-editing.
+      POSTGRES_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-test}@postgres:5432/${POSTGRES_DB:-neograph}
+      CRAWL4AI_URL: http://crawl4ai:11235
+
+volumes:
+  pgdata:
