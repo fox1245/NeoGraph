@@ -17,6 +17,7 @@ option(NEOGRAPH_BUILD_LLM      "Build neograph::llm (LLM providers)"     ON)
 option(NEOGRAPH_BUILD_MCP      "Build neograph::mcp (MCP client)"        ON)
 option(NEOGRAPH_BUILD_UTIL     "Build neograph::util (utilities)"        ON)
 option(NEOGRAPH_BUILD_POSTGRES "Build PostgresCheckpointStore (libpqxx)" ON)
+option(NEOGRAPH_BUILD_SQLITE   "Build SqliteCheckpointStore (libsqlite3)" ON)
 option(NEOGRAPH_BUILD_EXAMPLES "Build example programs"                  ON)
 
 # ===========================================================================
@@ -53,6 +54,13 @@ target_include_directories(cppdotenv INTERFACE ${DEPS_DIR})
 # OpenSSL — required by httplib for HTTPS
 if(NEOGRAPH_BUILD_LLM OR NEOGRAPH_BUILD_MCP)
     find_package(OpenSSL REQUIRED)
+endif()
+
+# SQLite3 — required by neograph::sqlite (SqliteCheckpointStore).
+# Available as a system package on every Linux distro; on macOS comes
+# with the system. find_package(SQLite3) is provided by CMake itself.
+if(NEOGRAPH_BUILD_SQLITE)
+    find_package(SQLite3 REQUIRED)
 endif()
 
 # libpqxx — required by neograph::postgres (PostgresCheckpointStore).
@@ -166,6 +174,33 @@ if(NEOGRAPH_BUILD_POSTGRES)
     )
 
     add_library(neograph::postgres ALIAS neograph_postgres)
+endif()
+
+# ===========================================================================
+# neograph::sqlite — SqliteCheckpointStore (libsqlite3)
+#
+# Single-file persistent CheckpointStore. Same schema shape as the
+# Postgres variant (neograph_* tables, blob dedup via ON CONFLICT) but
+# zero server. Picked when the deployment is single-process / embedded
+# / desktop-CLI.
+# ===========================================================================
+if(NEOGRAPH_BUILD_SQLITE)
+    add_library(neograph_sqlite STATIC
+        src/core/sqlite_checkpoint.cpp
+    )
+
+    target_include_directories(neograph_sqlite
+        PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+    )
+
+    target_link_libraries(neograph_sqlite
+        PUBLIC  neograph_core
+        PRIVATE SQLite::SQLite3
+    )
+
+    add_library(neograph::sqlite ALIAS neograph_sqlite)
 endif()
 
 # ===========================================================================
@@ -343,6 +378,29 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             add_executable(example_clay_chatbot examples/11_clay_chatbot.cpp examples/clay_impl.c)
             target_link_libraries(example_clay_chatbot PRIVATE neograph::core neograph::llm raylib)
             target_include_directories(example_clay_chatbot PRIVATE ${DEPS_DIR})
+        endif()
+    endif()
+endif()
+
+# ===========================================================================
+# Benchmarks (opt-in)
+# ===========================================================================
+option(NEOGRAPH_BUILD_BENCHMARKS "Build micro/load benchmark binaries" OFF)
+if(NEOGRAPH_BUILD_BENCHMARKS)
+    add_executable(bench_neograph benchmarks/bench_neograph.cpp)
+    target_link_libraries(bench_neograph PRIVATE neograph::core)
+
+    # Checkpoint-store load benchmark — compares InMemory / SQLite /
+    # Postgres under N×M synthetic save workload. Postgres is opt-in
+    # via NEOGRAPH_HAVE_POSTGRES so the binary still builds when the
+    # PG backend is off.
+    if(NEOGRAPH_BUILD_SQLITE)
+        add_executable(bench_checkpoint_store benchmarks/bench_checkpoint_store.cpp)
+        target_link_libraries(bench_checkpoint_store PRIVATE
+            neograph::core neograph::sqlite Threads::Threads)
+        if(NEOGRAPH_BUILD_POSTGRES)
+            target_link_libraries(bench_checkpoint_store PRIVATE neograph::postgres)
+            target_compile_definitions(bench_checkpoint_store PRIVATE NEOGRAPH_HAVE_POSTGRES)
         endif()
     endif()
 endif()

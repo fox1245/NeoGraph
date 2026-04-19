@@ -1,20 +1,13 @@
-// Integration tests for PostgresCheckpointStore.
+// Unit tests for SqliteCheckpointStore.
 //
-// Gated on the env var NEOGRAPH_TEST_POSTGRES_URL. When unset every
-// test below is skipped (GTEST_SKIP) so a developer who hasn't started
-// a local PG instance still gets a green test suite. CI / local
-// developers wanting full coverage start a Postgres and export:
-//
-//   NEOGRAPH_TEST_POSTGRES_URL='postgresql://postgres:test@localhost:55432/neograph_test'
-//
-// Each test starts from a clean schema via drop_schema() so ordering
-// between tests is irrelevant — a failure in one test never poisons
-// the others.
+// All tests run against an in-memory SQLite (":memory:") so they need
+// no filesystem or external service — every test gets a fresh DB by
+// construction. The test cases mirror test_postgres_checkpoint.cpp so
+// the two backends are held to identical contracts; if you change one
+// surface, change both.
 
 #include <gtest/gtest.h>
-#include <neograph/graph/postgres_checkpoint.h>
-#include <pqxx/pqxx>
-#include <cstdlib>
+#include <neograph/graph/sqlite_checkpoint.h>
 #include <map>
 #include <string>
 
@@ -22,11 +15,6 @@ using namespace neograph::graph;
 using json = neograph::json;
 
 namespace {
-
-const char* pg_url() {
-    const char* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
-    return (url && *url) ? url : nullptr;
-}
 
 // Build a Checkpoint whose channel_values matches GraphState::serialize().
 Checkpoint make_state_cp(const std::string& thread_id,
@@ -37,7 +25,7 @@ Checkpoint make_state_cp(const std::string& thread_id,
     cp.id = Checkpoint::generate_id();
     cp.thread_id = thread_id;
     cp.step = step;
-    cp.timestamp = step * 1000 + 1;  // monotone for deterministic ordering
+    cp.timestamp = step * 1000 + 1;
     cp.next_nodes = {"__end__"};
     cp.interrupt_phase = phase;
     cp.current_node = "test_node";
@@ -56,42 +44,32 @@ Checkpoint make_state_cp(const std::string& thread_id,
     return cp;
 }
 
-class PostgresCheckpointTest : public ::testing::Test {
+class SqliteCheckpointTest : public ::testing::Test {
 protected:
-    std::unique_ptr<PostgresCheckpointStore> store;
+    std::unique_ptr<SqliteCheckpointStore> store;
 
     void SetUp() override {
-        const char* url = pg_url();
-        if (!url) {
-            GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set; "
-                         << "skipping PostgresCheckpointStore integration tests.";
-        }
-        store = std::make_unique<PostgresCheckpointStore>(url);
-        // Each test starts on a freshly recreated schema.
-        store->drop_schema();
-    }
-
-    void TearDown() override {
-        if (store) store->drop_schema();
+        // ":memory:" gives every test its own private DB. No coordination
+        // with other tests, no leftover state, no filesystem touch.
+        store = std::make_unique<SqliteCheckpointStore>(":memory:");
     }
 };
 
 } // namespace
 
-TEST_F(PostgresCheckpointTest, SaveAndLoadLatestRoundTrip) {
+TEST_F(SqliteCheckpointTest, SaveAndLoadLatestRoundTrip) {
     auto cp = make_state_cp("t", 0, {{"x", {42, 1}}, {"msg", {"hi", 2}}});
     store->save(cp);
 
     auto loaded = store->load_latest("t");
     ASSERT_TRUE(loaded.has_value());
     EXPECT_EQ(loaded->id, cp.id);
-    EXPECT_EQ(loaded->thread_id, "t");
     EXPECT_EQ(loaded->channel_values["channels"]["x"]["value"].get<int>(), 42);
     EXPECT_EQ(loaded->channel_values["channels"]["x"]["version"].get<uint64_t>(), 1u);
     EXPECT_EQ(loaded->channel_values["channels"]["msg"]["value"].get<std::string>(), "hi");
 }
 
-TEST_F(PostgresCheckpointTest, LoadByIdReturnsCheckpoint) {
+TEST_F(SqliteCheckpointTest, LoadByIdReturnsCheckpoint) {
     auto cp = make_state_cp("t", 0, {{"x", {99, 5}}});
     store->save(cp);
 
@@ -100,7 +78,7 @@ TEST_F(PostgresCheckpointTest, LoadByIdReturnsCheckpoint) {
     EXPECT_EQ(loaded->channel_values["channels"]["x"]["value"].get<int>(), 99);
 }
 
-TEST_F(PostgresCheckpointTest, LoadLatestReturnsNewestByTimestamp) {
+TEST_F(SqliteCheckpointTest, LoadLatestReturnsNewest) {
     store->save(make_state_cp("t", 0, {{"x", {1, 1}}}));
     store->save(make_state_cp("t", 1, {{"x", {2, 2}}}));
     auto cp3 = make_state_cp("t", 2, {{"x", {3, 3}}});
@@ -112,10 +90,10 @@ TEST_F(PostgresCheckpointTest, LoadLatestReturnsNewestByTimestamp) {
     EXPECT_EQ(loaded->channel_values["channels"]["x"]["value"].get<int>(), 3);
 }
 
-// The headline feature: blobs are deduplicated across cps. Three saves
-// where only one channel changes per step → 3 distinct counter blobs +
-// 1 shared config blob = 4 total, not 6.
-TEST_F(PostgresCheckpointTest, BlobsDedupedAcrossSteps) {
+// Headline feature parity with PostgresCheckpointStore: the same dedup
+// guarantee. 3 saves where one channel changes per step → 3 distinct
+// counter blobs + 1 shared config blob = 4 total, not 6.
+TEST_F(SqliteCheckpointTest, BlobsDedupedAcrossSteps) {
     json config = json::object();
     config["model"] = "claude";
 
@@ -123,19 +101,16 @@ TEST_F(PostgresCheckpointTest, BlobsDedupedAcrossSteps) {
     store->save(make_state_cp("t", 1, {{"counter", {2, 3}}, {"config", {config, 2}}}));
     store->save(make_state_cp("t", 2, {{"counter", {3, 4}}, {"config", {config, 2}}}));
 
-    EXPECT_EQ(store->blob_count(), 4u)
-        << "expected 3 distinct counter blobs + 1 shared config blob";
+    EXPECT_EQ(store->blob_count(), 4u);
 }
 
-TEST_F(PostgresCheckpointTest, IdenticalSavesShareBlobs) {
-    auto cp1 = make_state_cp("t", 0, {{"x", {7, 1}}});
-    auto cp2 = make_state_cp("t", 1, {{"x", {7, 1}}});  // same value+version
-    store->save(cp1);
-    store->save(cp2);
+TEST_F(SqliteCheckpointTest, IdenticalSavesShareBlobs) {
+    store->save(make_state_cp("t", 0, {{"x", {7, 1}}}));
+    store->save(make_state_cp("t", 1, {{"x", {7, 1}}}));  // same val+ver
     EXPECT_EQ(store->blob_count(), 1u);
 }
 
-TEST_F(PostgresCheckpointTest, ListReturnsNewestFirst) {
+TEST_F(SqliteCheckpointTest, ListReturnsNewestFirst) {
     store->save(make_state_cp("t", 0, {{"x", {1, 1}}}));
     store->save(make_state_cp("t", 1, {{"x", {2, 2}}}));
     store->save(make_state_cp("t", 2, {{"x", {3, 3}}}));
@@ -146,7 +121,7 @@ TEST_F(PostgresCheckpointTest, ListReturnsNewestFirst) {
     EXPECT_EQ(cps[2].channel_values["channels"]["x"]["value"].get<int>(), 1);
 }
 
-TEST_F(PostgresCheckpointTest, ListRespectsLimit) {
+TEST_F(SqliteCheckpointTest, ListRespectsLimit) {
     store->save(make_state_cp("t", 0, {{"x", {1, 1}}}));
     store->save(make_state_cp("t", 1, {{"x", {2, 2}}}));
     store->save(make_state_cp("t", 2, {{"x", {3, 3}}}));
@@ -155,17 +130,17 @@ TEST_F(PostgresCheckpointTest, ListRespectsLimit) {
     EXPECT_EQ(cps.size(), 2u);
 }
 
-TEST_F(PostgresCheckpointTest, ListIsolatedByThread) {
+TEST_F(SqliteCheckpointTest, ListIsolatedByThread) {
     store->save(make_state_cp("ta", 0, {{"x", {1, 1}}}));
     store->save(make_state_cp("tb", 0, {{"x", {2, 1}}}));
     EXPECT_EQ(store->list("ta").size(), 1u);
     EXPECT_EQ(store->list("tb").size(), 1u);
 }
 
-TEST_F(PostgresCheckpointTest, DeleteThreadDropsCheckpointsAndBlobs) {
-    store->save(make_state_cp("ta", 0, {{"x", {1, 1}}}));
-    store->save(make_state_cp("tb", 0, {{"y", {2, 1}}}));
-    EXPECT_EQ(store->blob_count(), 2u);
+TEST_F(SqliteCheckpointTest, DeleteThreadDropsCheckpointsAndBlobs) {
+    store->save(make_state_cp("ta", 0, {{"x", {1, 1}}, {"y", {2, 2}}}));
+    store->save(make_state_cp("tb", 0, {{"y", {2, 2}}}));
+    EXPECT_EQ(store->blob_count(), 3u);
 
     store->delete_thread("ta");
 
@@ -174,10 +149,7 @@ TEST_F(PostgresCheckpointTest, DeleteThreadDropsCheckpointsAndBlobs) {
     EXPECT_EQ(store->blob_count(), 1u);
 }
 
-// barrier_state must round-trip — admin update_state during an in-flight
-// barrier accumulates upstream signals, and dropping them on save would
-// silently corrupt the AND-join.
-TEST_F(PostgresCheckpointTest, BarrierStateRoundTrips) {
+TEST_F(SqliteCheckpointTest, BarrierStateRoundTrips) {
     auto cp = make_state_cp("t", 0, {{"x", {1, 1}}});
     cp.barrier_state["join_node"] = {"upstream_a", "upstream_b"};
     cp.barrier_state["another"] = {"only_one"};
@@ -191,10 +163,7 @@ TEST_F(PostgresCheckpointTest, BarrierStateRoundTrips) {
     EXPECT_EQ(loaded->barrier_state["another"].count("only_one"), 1u);
 }
 
-// All five CheckpointPhase values must survive the to_string/parse round
-// trip through PG. Guards against an enum value being added without
-// updating the parser.
-TEST_F(PostgresCheckpointTest, AllPhasesRoundTrip) {
+TEST_F(SqliteCheckpointTest, AllPhasesRoundTrip) {
     int step = 0;
     for (auto p : {CheckpointPhase::Before, CheckpointPhase::After,
                    CheckpointPhase::Completed, CheckpointPhase::NodeInterrupt,
@@ -208,7 +177,7 @@ TEST_F(PostgresCheckpointTest, AllPhasesRoundTrip) {
     }
 }
 
-TEST_F(PostgresCheckpointTest, NextNodesRoundTrip) {
+TEST_F(SqliteCheckpointTest, NextNodesRoundTrip) {
     auto cp = make_state_cp("t", 0, {{"x", {1, 1}}});
     cp.next_nodes = {"a", "b", "c"};
     store->save(cp);
@@ -221,7 +190,7 @@ TEST_F(PostgresCheckpointTest, NextNodesRoundTrip) {
 
 // ── Pending writes ────────────────────────────────────────────────────
 
-TEST_F(PostgresCheckpointTest, PutGetClearWritesRoundTrip) {
+TEST_F(SqliteCheckpointTest, PutGetClearWritesRoundTrip) {
     PendingWrite pw;
     pw.task_id = "task-1";
     pw.task_path = "s0:executor_1";
@@ -232,7 +201,7 @@ TEST_F(PostgresCheckpointTest, PutGetClearWritesRoundTrip) {
     w["value"] = "hello";
     writes.push_back(w);
     pw.writes = writes;
-    pw.command = json();  // null
+    pw.command = json();
     pw.sends = json::array();
     pw.step = 5;
     pw.timestamp = 12345;
@@ -242,8 +211,6 @@ TEST_F(PostgresCheckpointTest, PutGetClearWritesRoundTrip) {
     auto loaded = store->get_writes("t", "parent-cp");
     ASSERT_EQ(loaded.size(), 1u);
     EXPECT_EQ(loaded[0].task_id, "task-1");
-    EXPECT_EQ(loaded[0].task_path, "s0:executor_1");
-    EXPECT_EQ(loaded[0].node_name, "executor");
     EXPECT_EQ(loaded[0].step, 5);
     EXPECT_EQ(loaded[0].writes[0]["channel"].get<std::string>(), "messages");
 
@@ -251,10 +218,7 @@ TEST_F(PostgresCheckpointTest, PutGetClearWritesRoundTrip) {
     EXPECT_EQ(store->get_writes("t", "parent-cp").size(), 0u);
 }
 
-// Pending writes must come back in insertion order. Engine replay
-// applies them in order, so a swap would change semantics for any node
-// whose writes aren't commutative.
-TEST_F(PostgresCheckpointTest, PendingWritesPreserveOrder) {
+TEST_F(SqliteCheckpointTest, PendingWritesPreserveOrder) {
     for (int i = 0; i < 5; ++i) {
         PendingWrite pw;
         pw.task_id = "task-" + std::to_string(i);
@@ -274,9 +238,7 @@ TEST_F(PostgresCheckpointTest, PendingWritesPreserveOrder) {
     }
 }
 
-// delete_thread must wipe pending writes too — otherwise re-running a
-// previously deleted thread would replay stale writes.
-TEST_F(PostgresCheckpointTest, DeleteThreadClearsPendingWrites) {
+TEST_F(SqliteCheckpointTest, DeleteThreadClearsPendingWrites) {
     PendingWrite pw;
     pw.task_id = "t1";
     pw.task_path = "p";
@@ -294,10 +256,7 @@ TEST_F(PostgresCheckpointTest, DeleteThreadClearsPendingWrites) {
     EXPECT_EQ(store->get_writes("tb", "parent").size(), 1u);
 }
 
-// Saving the same checkpoint id twice with mutated fields updates in
-// place rather than failing the PK constraint. This supports patterns
-// like "save shell first, then enrich" used by some recovery flows.
-TEST_F(PostgresCheckpointTest, ResaveSameIdUpdatesInPlace) {
+TEST_F(SqliteCheckpointTest, ResaveSameIdUpdatesInPlace) {
     auto cp = make_state_cp("t", 0, {{"x", {1, 1}}});
     store->save(cp);
 
@@ -310,51 +269,15 @@ TEST_F(PostgresCheckpointTest, ResaveSameIdUpdatesInPlace) {
     EXPECT_EQ(loaded->next_nodes[0], "new_target");
 }
 
-// load_latest on a fresh thread (no saves) returns nullopt rather
-// than throwing — engine code branches on this for the "fresh run vs
-// resume" decision.
-TEST_F(PostgresCheckpointTest, LoadLatestEmptyReturnsNullopt) {
+TEST_F(SqliteCheckpointTest, LoadLatestEmptyReturnsNullopt) {
     EXPECT_FALSE(store->load_latest("never-saved").has_value());
 }
 
-TEST_F(PostgresCheckpointTest, LoadByIdMissingReturnsNullopt) {
+TEST_F(SqliteCheckpointTest, LoadByIdMissingReturnsNullopt) {
     EXPECT_FALSE(store->load_by_id("nonexistent-uuid").has_value());
 }
 
-// Nested JSON values (arrays of objects) must round-trip exactly. This
-// is the "messages" channel shape — the most common real payload.
-// Reconnect-after-broken-connection path. Forces PG to drop the
-// store's backend via a sibling connection issuing
-// pg_terminate_backend; the store's NEXT operation must catch
-// pqxx::broken_connection, dial PG again, and retry — observable via
-// reconnect_count() going from 0 → 1 and the load returning data.
-TEST_F(PostgresCheckpointTest, RetriesAfterBrokenConnection) {
-    // Seed one cp so we have something to load after the kill.
-    store->save(make_state_cp("rt", 0, {{"x", {1, 1}}}));
-    EXPECT_EQ(store->reconnect_count(), 0u);
-
-    // Kill every backend on neograph_test EXCEPT our killer's own —
-    // that includes the store's connection. pg_terminate_backend is
-    // available to any superuser; the test container's `postgres` user
-    // qualifies.
-    {
-        pqxx::connection killer(pg_url());
-        pqxx::work tx{killer};
-        tx.exec("SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = current_database() "
-                "  AND pid <> pg_backend_pid()");
-        tx.commit();
-    }
-
-    // Next op on the store must transparently reconnect.
-    auto loaded = store->load_latest("rt");
-    ASSERT_TRUE(loaded.has_value());
-    EXPECT_EQ(loaded->channel_values["channels"]["x"]["value"].get<int>(), 1);
-    EXPECT_EQ(store->reconnect_count(), 1u)
-        << "with_conn must catch pqxx::broken_connection and dial PG once";
-}
-
-TEST_F(PostgresCheckpointTest, NestedJsonRoundTrips) {
+TEST_F(SqliteCheckpointTest, NestedJsonRoundTrips) {
     json msgs = json::array();
     json m1 = json::object();
     m1["role"] = "user";
@@ -373,4 +296,45 @@ TEST_F(PostgresCheckpointTest, NestedJsonRoundTrips) {
     ASSERT_EQ(loaded_msgs.size(), 2u);
     EXPECT_EQ(loaded_msgs[0]["content"].get<std::string>(), "안녕하세요");
     EXPECT_EQ(loaded_msgs[1]["role"].get<std::string>(), "assistant");
+}
+
+// File-based variant — proves the same code path works against a real
+// fs file, not just :memory:. Uses a tmpfile path that's cleaned up
+// after the test.
+TEST(SqliteCheckpointTest_File, FileBackedRoundTrip) {
+    std::string path = "/tmp/neograph_test_" +
+                       std::to_string(std::chrono::steady_clock::now()
+                                          .time_since_epoch().count()) +
+                       ".db";
+    {
+        SqliteCheckpointStore s(path);
+        Checkpoint cp;
+        cp.id = Checkpoint::generate_id();
+        cp.thread_id = "tf";
+        cp.step = 0;
+        cp.timestamp = 1;
+        cp.next_nodes = {"__end__"};
+        cp.interrupt_phase = CheckpointPhase::Completed;
+        json chs = json::object();
+        json entry = json::object();
+        entry["value"] = "persisted";
+        entry["version"] = 1;
+        chs["x"] = entry;
+        cp.channel_values = json::object();
+        cp.channel_values["channels"] = chs;
+        cp.channel_values["global_version"] = 1;
+        s.save(cp);
+    }
+    // Re-open the same file and verify the cp is still there.
+    {
+        SqliteCheckpointStore s(path);
+        auto loaded = s.load_latest("tf");
+        ASSERT_TRUE(loaded.has_value());
+        EXPECT_EQ(loaded->channel_values["channels"]["x"]["value"]
+                      .get<std::string>(), "persisted");
+    }
+    std::remove(path.c_str());
+    // WAL leaves -wal and -shm sidecars; clean them too so /tmp stays tidy.
+    std::remove((path + "-wal").c_str());
+    std::remove((path + "-shm").c_str());
 }

@@ -192,7 +192,8 @@ DROP TABLE IF EXISTS neograph_checkpoints;
 // ── Construction / lifetime ───────────────────────────────────────────
 
 PostgresCheckpointStore::PostgresCheckpointStore(const std::string& conn_str)
-    : conn_(std::make_unique<pqxx::connection>(conn_str)) {
+    : conn_str_(conn_str)
+    , conn_(std::make_unique<pqxx::connection>(conn_str)) {
     // Eager schema setup so credentials / DDL permissions surface now,
     // not on the first save() call deep inside an engine run.
     ensure_schema();
@@ -217,10 +218,41 @@ void PostgresCheckpointStore::drop_schema() {
     tx2.commit();
 }
 
+// Run `fn(connection&)` with the connection mutex held. If libpqxx
+// throws `pqxx::broken_connection` (the canonical signal that the TCP
+// socket to PG is dead — e.g. PG was restarted, network blip, idle
+// timeout in pgbouncer), reconnect once with the original URL and
+// retry the operation a single time.
+//
+// One retry, not many: if the new connection ALSO breaks immediately,
+// something is wrong (PG down, credentials revoked, network partition)
+// and a tight retry loop would just hammer it. Caller-level retry is
+// the right place for that.
+//
+// Exceptions other than broken_connection — query errors, constraint
+// violations, transaction conflicts — propagate as-is. Reconnecting
+// wouldn't help and would mask the real bug.
 template <typename Fn>
 auto PostgresCheckpointStore::with_conn(Fn&& fn) {
     std::lock_guard lock(conn_mutex_);
-    return fn(*conn_);
+    try {
+        return fn(*conn_);
+    } catch (const pqxx::broken_connection&) {
+        // Drop the dead socket and dial PG again. If THIS throws,
+        // propagate — the caller knows PG is unreachable.
+        conn_.reset();
+        conn_ = std::make_unique<pqxx::connection>(conn_str_);
+        // Re-materialise the schema in case the reconnect landed on a
+        // fresh DB (rare, but cheap to be defensive — every CREATE is
+        // IF NOT EXISTS so a healthy DB pays one trivial round trip).
+        {
+            pqxx::work tx{*conn_};
+            tx.exec(kSchemaDDL);
+            tx.commit();
+        }
+        reconnect_count_.fetch_add(1, std::memory_order_relaxed);
+        return fn(*conn_);
+    }
 }
 
 // ── save() ────────────────────────────────────────────────────────────

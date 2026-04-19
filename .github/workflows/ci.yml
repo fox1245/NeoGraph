@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+# Cancel any in-progress run on the same ref when a new push lands —
+# a stale CI on an outdated commit is wasted minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    # PostgresCheckpointStore integration tests run against this container.
+    # The job-level service exposes 5432 inside the runner; tests target it
+    # via NEOGRAPH_TEST_POSTGRES_URL below. The DB name matches what
+    # tests/test_postgres_checkpoint.cpp expects after drop_schema().
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: neograph_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            build-essential \
+            libpqxx-dev \
+            libpq-dev \
+            libsqlite3-dev \
+            libssl-dev \
+            pkg-config \
+            python3 \
+            ccache
+
+      # ccache turns repeat CI runs into mostly-link-time work.
+      # 500MB cap avoids cache.actions.io quota issues; warm hit on the
+      # 200+ object files saves about 4 minutes per run.
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
+
+      - name: Configure ccache
+        run: |
+          echo "PATH=/usr/lib/ccache:$PATH" >> $GITHUB_ENV
+          ccache --max-size=500M
+          ccache --zero-stats
+
+      - name: Configure (Release, all backends on)
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DNEOGRAPH_BUILD_LLM=ON \
+            -DNEOGRAPH_BUILD_MCP=ON \
+            -DNEOGRAPH_BUILD_UTIL=ON \
+            -DNEOGRAPH_BUILD_POSTGRES=ON \
+            -DNEOGRAPH_BUILD_TESTS=ON \
+            -DNEOGRAPH_BUILD_EXAMPLES=OFF
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: ccache stats
+        run: ccache --show-stats
+
+      - name: Run tests (with Postgres)
+        working-directory: build
+        env:
+          # The service container is reachable at localhost:5432 because
+          # the job maps the port. drop_schema() inside SetUp wipes any
+          # prior state, so this DB starts clean every run.
+          NEOGRAPH_TEST_POSTGRES_URL: postgresql://postgres:test@localhost:5432/neograph_test
+        run: ctest --output-on-failure -j$(nproc)
+
+      # On failure, surface the raw gtest log so a contributor can debug
+      # without re-running locally with PG provisioned.
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs
+          path: build/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
