@@ -234,6 +234,16 @@ TEST_F(PendingWritesTest, HappyPathLeavesNoPendingWrites) {
             << "leftover pending writes on cp " << cp.id
             << " (" << cp.current_node << ")";
     }
+
+    // Regression for the leak observed in real PG dumps: the very first
+    // super-step ran with `last_checkpoint_id == ""`, and the
+    // record-vs-clear asymmetry left a permanent dead bucket keyed at
+    // parent="". A clean run must leave NO leftover at parent=""
+    // either, otherwise every fresh thread accumulates one row of
+    // garbage in the writes table.
+    EXPECT_EQ(store->pending_writes_count("plan-exec-003", ""), 0u)
+        << "leftover pending writes at the empty-parent bucket "
+           "— record_pending_write must skip when parent_cp_id is empty";
 }
 
 // ── 4. Task ID determinism: planner → sends have stable hashed ids ──

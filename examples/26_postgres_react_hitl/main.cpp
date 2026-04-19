@@ -326,26 +326,30 @@ static int cmd_run(const std::string& query) {
     rc.stream_mode = graph::StreamMode::EVENTS | graph::StreamMode::DEBUG;
     rc.input       = {{"user_query", query}};
 
+    graph::RunResult result;
     try {
-        app.engine->run_stream(rc, make_logger());
-    } catch (const graph::NodeInterrupt& interrupt) {
-        // Expected: HumanReviewNode pauses the run.
-        std::cout << "\n--- HUMAN REVIEW REQUESTED ---\n"
-                  << interrupt.what() << "\n\n"
-                  << "To approve: ./example_postgres_react_hitl resume "
-                  << thread_id << " approve\n"
-                  << "To send feedback: ./example_postgres_react_hitl resume "
-                  << thread_id << " \"give me URL citations\"\n";
-        return 0;
+        result = app.engine->run_stream(rc, make_logger());
     } catch (const std::exception& e) {
         std::cerr << "[fatal] " << e.what() << "\n";
         return 1;
     }
 
-    // No interrupt happened — the graph completed (e.g. user disabled
-    // HITL or the agent failed before reaching final_report). Print
-    // whatever final_report we have on the latest cp.
-    std::cout << "\n--- Final report (no interrupt) ---\n"
+    // The engine catches NodeInterrupt internally and returns a normal
+    // RunResult with `interrupted = true`; it does NOT re-throw. So the
+    // HITL branch is a flag check, not an exception catch.
+    if (result.interrupted) {
+        std::cout << "\n--- HUMAN REVIEW REQUESTED ---\n"
+                  << "Interrupt reason:\n" << result.interrupt_node << "\n\n"
+                  << "To approve: ./example_postgres_react_hitl resume "
+                  << thread_id << " approve\n"
+                  << "To send feedback: ./example_postgres_react_hitl resume "
+                  << thread_id << " \"give me URL citations\"\n";
+        return 0;
+    }
+
+    // Reached __end__ without interrupting — usually means HITL was
+    // disabled or the supervisor terminated before final_report fired.
+    std::cout << "\n--- Final report (run completed without interrupt) ---\n"
               << load_latest_report(*app.store, thread_id) << "\n";
     return 0;
 }
@@ -358,21 +362,23 @@ static int cmd_resume(const std::string& thread_id,
               << "Feedback: " << (feedback.empty() ? "(empty → approve)" : feedback)
               << "\n\n";
 
+    graph::RunResult result;
     try {
-        app.engine->resume(thread_id, json(feedback), make_logger());
-    } catch (const graph::NodeInterrupt& interrupt) {
-        // The supervisor produced a NEW report → human_review fires
-        // again. Loop back to the user.
+        result = app.engine->resume(thread_id, json(feedback), make_logger());
+    } catch (const std::exception& e) {
+        std::cerr << "[fatal] " << e.what() << "\n";
+        return 1;
+    }
+
+    if (result.interrupted) {
+        // Supervisor produced a NEW report; human_review fires again.
         std::cout << "\n--- HUMAN REVIEW REQUESTED (round 2+) ---\n"
-                  << interrupt.what() << "\n\n"
+                  << "Interrupt reason:\n" << result.interrupt_node << "\n\n"
                   << "To approve: ./example_postgres_react_hitl resume "
                   << thread_id << " approve\n"
                   << "To send more feedback: ./example_postgres_react_hitl resume "
                   << thread_id << " \"...\"\n";
         return 0;
-    } catch (const std::exception& e) {
-        std::cerr << "[fatal] " << e.what() << "\n";
-        return 1;
     }
 
     std::cout << "\n--- Final report (approved) ---\n"

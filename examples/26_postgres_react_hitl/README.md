@@ -135,6 +135,53 @@ cmake --build build --target example_postgres_react_hitl -j
 The host-side .env's `POSTGRES_URL=postgresql://postgres:test@localhost:55432/neograph`
 points at the compose-published port; same for `CRAWL4AI_URL`.
 
+## Running the integration tests against this stack
+
+The compose file provisions a **separate `neograph_test` database** on
+the same Postgres instance specifically for the
+PostgresCheckpointStore integration tests (which call `drop_schema()`
+in SetUp and would otherwise wipe demo threads). Run them with:
+
+```bash
+NEOGRAPH_TEST_POSTGRES_URL='postgresql://postgres:test@localhost:55432/neograph_test' \
+    ctest --test-dir ../../build -R PostgresCheckpoint --output-on-failure
+```
+
+Pointing the test URL at `/neograph` instead of `/neograph_test` will
+nuke any thread data you have in the demo DB — don't do that.
+
+## Forensics tip — where the user's feedback lives in PG
+
+If you query the `messages` channel directly (the channel the engine
+uses to hand the resume value to `HumanReviewNode`) you will see only
+empty arrays:
+
+```
+SELECT version, blob_data FROM neograph_checkpoint_blobs
+ WHERE thread_id = '...' AND channel = 'messages';
+-- 0 | null
+-- N | []
+-- M | []
+```
+
+That's intentional, not data loss: `HumanReviewNode` consumes the
+incoming user message and immediately writes `messages: []` back into
+its `Command.updates` so a future interrupt cycle starts from a clean
+channel. By the time a checkpoint is taken, the array is already
+empty.
+
+The actual feedback text lives in the `supervisor_messages` channel,
+prefixed with the marker `[USER FOLLOW-UP after reviewing...]`:
+
+```
+SELECT blob_data::text FROM neograph_checkpoint_blobs
+ WHERE thread_id = '...' AND channel = 'supervisor_messages'
+ ORDER BY version DESC LIMIT 1;
+```
+
+`grep` for that marker to recover everything the user said across all
+HITL rounds in the thread.
+
 ## Implementation notes
 
 - The HITL gate is built into the Deep Research graph behind the
