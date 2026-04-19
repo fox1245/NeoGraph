@@ -24,6 +24,7 @@ add_executable(neograph_tests
     test_intent_classifier_streaming.cpp
     test_incremental_checkpoint.cpp
     test_deep_research_human_review.cpp
+    test_async_conn_pool.cpp
 )
 
 # PostgresCheckpointStore integration tests are gated on NEOGRAPH_BUILD_POSTGRES
@@ -40,6 +41,7 @@ endif()
 target_link_libraries(neograph_tests PRIVATE
     neograph::core
     neograph::llm
+    neograph::async
     httplib OpenSSL::SSL OpenSSL::Crypto
     GTest::gtest_main
 )

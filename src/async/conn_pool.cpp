@@ -1,0 +1,242 @@
+// Keep-alive HTTP(S) connection pool. See header for the user-facing
+// contract. Implementation notes:
+//
+//   - Idle buckets keyed by (host, port, tls). No ALPN / SNI-extra
+//     variations yet — good enough for the LLM / MCP traffic we
+//     target, where each host reliably speaks one scheme per port.
+//   - Check-out/check-in are O(1) under a mutex. Actual network I/O
+//     always happens outside the lock.
+//   - Retry-once semantics: a coroutine that checks out an idle
+//     connection, fails mid-exchange, transparently retries on a
+//     fresh connection. A fresh-conn failure is a real network
+//     error and propagates to the caller.
+//   - Stale conns are dropped by letting their unique_ptr go out of
+//     scope — the socket destructor closes the fd. We *do not* call
+//     async_shutdown on a stale conn: its state after the failed
+//     exchange is unknown, and the close_notify ack may never come.
+//
+// Semester 1.2 scope bounds:
+//   - No background idle reaper (lazy eviction on checkout is fine
+//     since the pool can't grow past max_idle_per_host anyway).
+//   - No TLS session cache tuning on the ssl::context.
+//   - No per-host in-flight cap / wait queue. Requests beyond the
+//     idle cap just open a temporary conn that doesn't return to
+//     the pool.
+//   - No HTTP/2. Keep-alive on HTTP/1.1 only.
+
+#include <neograph/async/conn_pool.h>
+#include "http_exchange_detail.h"
+
+#include <asio/connect.hpp>
+#include <asio/ip/tcp.hpp>
+#include <asio/ssl.hpp>
+#include <asio/ssl/host_name_verification.hpp>
+#include <asio/use_awaitable.hpp>
+
+#include <chrono>
+#include <cstddef>
+#include <deque>
+#include <functional>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <utility>
+
+namespace neograph::async {
+
+namespace {
+
+struct Key {
+    std::string host;
+    std::string port;
+    bool        tls;
+
+    bool operator==(const Key& o) const noexcept {
+        return tls == o.tls && host == o.host && port == o.port;
+    }
+};
+
+struct KeyHash {
+    std::size_t operator()(const Key& k) const noexcept {
+        std::size_t h1 = std::hash<std::string>{}(k.host);
+        std::size_t h2 = std::hash<std::string>{}(k.port);
+        return h1 ^ (h2 << 1) ^ (static_cast<std::size_t>(k.tls) << 2);
+    }
+};
+
+// One pooled connection. Exactly one of plain/tls is engaged based
+// on the bucket key. Owns the socket outright (no external refs),
+// so a Connection can migrate between the idle deque and a caller's
+// stack freely.
+struct Connection {
+    std::optional<asio::ip::tcp::socket>                    plain;
+    std::optional<asio::ssl::stream<asio::ip::tcp::socket>> tls;
+    std::chrono::steady_clock::time_point                   idle_since{};
+};
+
+}  // namespace
+
+struct ConnPool::Impl {
+    asio::any_io_executor ex;
+    ConnPoolOptions       opts;
+    // ssl_ctx must outlive every pooled TLS Connection, so declare it
+    // before `idle`. Unordered_map destroys its elements before its
+    // own destructor runs, so this ordering guarantees the ssl::stream
+    // destructors see a live context.
+    asio::ssl::context    ssl_ctx;
+
+    mutable std::mutex                                                        mu;
+    std::unordered_map<Key, std::deque<std::unique_ptr<Connection>>, KeyHash> idle;
+    std::size_t                                                               total_idle = 0;
+
+    Impl(asio::any_io_executor e, ConnPoolOptions o)
+        : ex(std::move(e)),
+          opts(o),
+          ssl_ctx(asio::ssl::context::tls_client) {
+        ssl_ctx.set_default_verify_paths();
+        ssl_ctx.set_verify_mode(asio::ssl::verify_peer);
+    }
+
+    std::unique_ptr<Connection> checkout(const Key& k) {
+        std::lock_guard lk(mu);
+        auto it = idle.find(k);
+        if (it == idle.end()) return nullptr;
+        auto now = std::chrono::steady_clock::now();
+        while (!it->second.empty()) {
+            auto c = std::move(it->second.back());
+            it->second.pop_back();
+            --total_idle;
+            if (now - c->idle_since <= opts.idle_ttl) return c;
+            // expired — drop c by letting it destruct here
+        }
+        return nullptr;
+    }
+
+    void checkin(const Key& k, std::unique_ptr<Connection> c) {
+        c->idle_since = std::chrono::steady_clock::now();
+        std::lock_guard lk(mu);
+        auto& bucket = idle[k];
+        if (bucket.size() >= opts.max_idle_per_host) return;  // drop
+        bucket.push_back(std::move(c));
+        ++total_idle;
+    }
+};
+
+namespace {
+
+// Open + (for TLS) handshake a fresh connection for the given key.
+asio::awaitable<std::unique_ptr<Connection>> open(
+    asio::any_io_executor ex,
+    asio::ssl::context&   ssl_ctx,
+    const Key&            k) {
+
+    asio::ip::tcp::resolver resolver{ex};
+    auto endpoints = co_await resolver.async_resolve(
+        k.host, k.port, asio::use_awaitable);
+
+    asio::ip::tcp::socket sock{ex};
+    co_await asio::async_connect(sock, endpoints, asio::use_awaitable);
+
+    auto conn = std::make_unique<Connection>();
+    if (!k.tls) {
+        conn->plain.emplace(std::move(sock));
+        co_return conn;
+    }
+
+    conn->tls.emplace(std::move(sock), ssl_ctx);
+    auto& s = *conn->tls;
+
+    // SNI: Anthropic/OpenAI require it for TLS 1.3 cert selection.
+    if (!SSL_set_tlsext_host_name(s.native_handle(), k.host.c_str())) {
+        throw asio::system_error{
+            asio::error_code{static_cast<int>(::ERR_get_error()),
+                             asio::error::get_ssl_category()},
+            "SNI setup"};
+    }
+    s.set_verify_callback(asio::ssl::host_name_verification{k.host});
+    co_await s.async_handshake(asio::ssl::stream_base::client,
+                               asio::use_awaitable);
+    co_return conn;
+}
+
+// Attempt an HTTP exchange over a pooled connection. Returns nullopt
+// if the exchange threw (conn was stale / server closed). Wrapping
+// the try/catch here keeps the caller free of catch-blocks that
+// contain co_await — a shape that hit GCC 13 coroutine ICEs during
+// earlier parts of this refactor.
+asio::awaitable<std::optional<detail::ExchangeResult>> try_exchange(
+    Connection& conn, const std::string& req) {
+    try {
+        if (conn.plain) {
+            auto r = co_await detail::run_exchange(*conn.plain, req);
+            co_return r;
+        }
+        auto r = co_await detail::run_exchange(*conn.tls, req);
+        co_return r;
+    } catch (const std::exception&) {
+        co_return std::nullopt;
+    }
+}
+
+// Exchange on a fresh connection. No internal catch: a failure on
+// a brand-new conn is a real network error worth surfacing.
+asio::awaitable<detail::ExchangeResult> exchange_fresh(
+    Connection& conn, const std::string& req) {
+    if (conn.plain) {
+        auto r = co_await detail::run_exchange(*conn.plain, req);
+        co_return r;
+    }
+    auto r = co_await detail::run_exchange(*conn.tls, req);
+    co_return r;
+}
+
+}  // namespace
+
+ConnPool::ConnPool(asio::any_io_executor ex, ConnPoolOptions opts)
+    : impl_(std::make_unique<Impl>(std::move(ex), opts)) {}
+
+ConnPool::~ConnPool() = default;
+
+std::size_t ConnPool::idle_count() const {
+    std::lock_guard lk(impl_->mu);
+    return impl_->total_idle;
+}
+
+asio::awaitable<HttpResponse> ConnPool::async_post(
+    std::string_view host,
+    std::string_view port,
+    std::string_view path,
+    std::string_view body,
+    std::vector<std::pair<std::string, std::string>> headers,
+    bool tls) {
+
+    Key key{ std::string(host), std::string(port), tls };
+    std::string req = detail::build_request(
+        host, path, body, headers, detail::ConnDirective::keep_alive);
+
+    // Phase 1 — try a reused idle connection if one exists.
+    auto reused = impl_->checkout(key);
+    if (reused) {
+        auto maybe = co_await try_exchange(*reused, req);
+        if (maybe) {
+            if (maybe->server_directive == detail::ConnDirective::keep_alive) {
+                impl_->checkin(key, std::move(reused));
+            }
+            // else: server said close — let reused die at scope end.
+            co_return maybe->response;
+        }
+        // Stale — reused destructs at scope end, socket closes.
+        reused.reset();
+    }
+
+    // Phase 2 — fresh connection. Failure here propagates.
+    auto fresh = co_await open(impl_->ex, impl_->ssl_ctx, key);
+    auto r = co_await exchange_fresh(*fresh, req);
+    if (r.server_directive == detail::ConnDirective::keep_alive) {
+        impl_->checkin(key, std::move(fresh));
+    }
+    co_return r.response;
+}
+
+}  // namespace neograph::async

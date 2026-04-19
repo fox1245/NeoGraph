@@ -168,6 +168,7 @@ add_library(neograph::core ALIAS neograph_core)
 add_library(neograph_async STATIC
     src/async/async_smoke.cpp
     src/async/http_client.cpp
+    src/async/conn_pool.cpp
 )
 target_include_directories(neograph_async
     PUBLIC $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
