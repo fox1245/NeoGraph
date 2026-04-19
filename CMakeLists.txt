@@ -169,6 +169,7 @@ add_library(neograph_async STATIC
     src/async/async_smoke.cpp
     src/async/http_client.cpp
     src/async/conn_pool.cpp
+    src/async/sse_parser.cpp
 )
 target_include_directories(neograph_async
     PUBLIC $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
