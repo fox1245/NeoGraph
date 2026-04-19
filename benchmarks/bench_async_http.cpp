@@ -39,6 +39,7 @@
 #include <httplib.h>
 #include <sys/socket.h>
 
+#include <neograph/async/conn_pool.h>
 #include <neograph/async/http_client.h>
 
 #include <atomic>
@@ -101,62 +102,84 @@ double peak_rss_mb() {
 constexpr const char* kRespBody =
     R"({"content":[{"type":"text","text":"ok"}]})";
 
+// Per-connection handler. Honors the client's Connection header —
+// when keep-alive, loops to serve subsequent requests on the same
+// socket; when close (or the request was malformed), exits after one
+// response. SO_LINGER-0 is used only on the close path so
+// keep-alive clients don't see an RST right after a clean response.
 asio::awaitable<void> handle_client(asio::ip::tcp::socket sock, int latency_ms) {
     try {
         asio::streambuf buf;
-        co_await asio::async_read_until(sock, buf, "\r\n\r\n", asio::use_awaitable);
+        for (;;) {
+            co_await asio::async_read_until(sock, buf, "\r\n\r\n",
+                                            asio::use_awaitable);
 
-        std::istream is(&buf);
-        std::string line;
-        long content_length = 0;
-        // request line
-        std::getline(is, line);
-        // headers
-        while (std::getline(is, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.empty()) break;
-            auto colon = line.find(':');
-            if (colon == std::string::npos) continue;
-            std::string name = line.substr(0, colon);
-            std::string value = line.substr(colon + 1);
-            auto first = value.find_first_not_of(" \t");
-            if (first != std::string::npos) value = value.substr(first);
-            for (auto& ch : name) ch = static_cast<char>(std::tolower(
-                static_cast<unsigned char>(ch)));
-            if (name == "content-length") content_length = std::stol(value);
+            std::istream is(&buf);
+            std::string line;
+            long content_length = 0;
+            bool client_keepalive = true;   // HTTP/1.1 default
+            std::getline(is, line);  // request line
+            while (std::getline(is, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line.empty()) break;
+                auto colon = line.find(':');
+                if (colon == std::string::npos) continue;
+                std::string name = line.substr(0, colon);
+                std::string value = line.substr(colon + 1);
+                auto first = value.find_first_not_of(" \t");
+                if (first != std::string::npos) value = value.substr(first);
+                for (auto& ch : name) ch = static_cast<char>(std::tolower(
+                    static_cast<unsigned char>(ch)));
+                if (name == "content-length") {
+                    content_length = std::stol(value);
+                } else if (name == "connection") {
+                    std::string lv;
+                    for (auto ch : value) lv.push_back(static_cast<char>(
+                        std::tolower(static_cast<unsigned char>(ch))));
+                    if (lv.find("close") != std::string::npos)
+                        client_keepalive = false;
+                }
+            }
+            auto already = buf.size();
+            if (static_cast<long>(already) < content_length) {
+                auto rem = content_length - static_cast<long>(already);
+                std::vector<char> tail(rem);
+                co_await asio::async_read(sock, asio::buffer(tail),
+                                          asio::transfer_exactly(rem),
+                                          asio::use_awaitable);
+            } else if (static_cast<long>(already) > content_length) {
+                buf.consume(content_length);
+            }
+
+            // simulate LLM latency
+            asio::steady_timer t{co_await asio::this_coro::executor};
+            t.expires_after(std::chrono::milliseconds(latency_ms));
+            co_await t.async_wait(asio::use_awaitable);
+
+            std::string body = kRespBody;
+            std::string resp;
+            resp.reserve(160 + body.size());
+            resp.append("HTTP/1.1 200 OK\r\n");
+            resp.append("Content-Type: application/json\r\n");
+            resp.append("Content-Length: ")
+                .append(std::to_string(body.size())).append("\r\n");
+            resp.append(client_keepalive ? "Connection: keep-alive\r\n\r\n"
+                                         : "Connection: close\r\n\r\n");
+            resp.append(body);
+            co_await asio::async_write(sock, asio::buffer(resp),
+                                       asio::use_awaitable);
+
+            if (!client_keepalive) {
+                // Non-keep-alive: match the old SO_LINGER-0 behavior so
+                // the --mode sync / --mode async numbers stay comparable
+                // to pre-1.6 runs.
+                asio::error_code ec;
+                sock.set_option(asio::socket_base::linger(true, 0), ec);
+                sock.close(ec);
+                co_return;
+            }
+            // Keep-alive: loop for the next request on the same socket.
         }
-        // drain body
-        auto already = buf.size();
-        if (static_cast<long>(already) < content_length) {
-            auto rem = content_length - static_cast<long>(already);
-            std::vector<char> tail(rem);
-            co_await asio::async_read(sock, asio::buffer(tail),
-                                      asio::transfer_exactly(rem),
-                                      asio::use_awaitable);
-        } else if (static_cast<long>(already) > content_length) {
-            buf.consume(content_length);
-        }
-
-        // simulate LLM latency
-        asio::steady_timer t{co_await asio::this_coro::executor};
-        t.expires_after(std::chrono::milliseconds(latency_ms));
-        co_await t.async_wait(asio::use_awaitable);
-
-        std::string body = kRespBody;
-        std::string resp;
-        resp.reserve(160 + body.size());
-        resp.append("HTTP/1.1 200 OK\r\n");
-        resp.append("Content-Type: application/json\r\n");
-        resp.append("Content-Length: ").append(std::to_string(body.size())).append("\r\n");
-        resp.append("Connection: close\r\n\r\n");
-        resp.append(body);
-        co_await asio::async_write(sock, asio::buffer(resp), asio::use_awaitable);
-
-        // SO_LINGER-0 → RST close. See note in async http_client about
-        // TIME_WAIT avoidance for high-concurrency benches.
-        asio::error_code ec;
-        sock.set_option(asio::socket_base::linger(true, 0), ec);
-        sock.close(ec);
     } catch (...) {
         // client disconnected / malformed request — drop
     }
@@ -283,6 +306,64 @@ void run_async(const Config& cfg) {
     for (auto& t : ts) t.join();
 }
 
+// ── Async client with keep-alive ConnPool ─────────────────────────
+// Same coroutine shape as async_agent, but routed through one
+// shared ConnPool so the TCP handshake is amortized across rounds
+// (and, at high concurrency, across coroutines that happen to reuse
+// recently-returned idle conns). Mock server honors keep-alive so
+// this actually exercises reuse.
+
+asio::awaitable<void> pool_agent(neograph::async::ConnPool& pool,
+                                  int rounds, int port) {
+    const std::string body = R"({"msg":"ping"})";
+    for (int r = 0; r < rounds; ++r) {
+        try {
+            auto resp = co_await pool.async_post(
+                "127.0.0.1", std::to_string(port),
+                "/v1/messages", body, {}, false);
+            if (resp.status != 200) {
+                std::fprintf(stderr, "pool call status=%d\n", resp.status);
+                co_return;
+            }
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "pool call err: %s\n", e.what());
+            co_return;
+        }
+    }
+}
+
+void run_async_pool(const Config& cfg) {
+    asio::io_context io;
+    auto work = asio::make_work_guard(io);
+    neograph::async::ConnPool pool(io.get_executor());
+
+    std::atomic<int> remaining{cfg.concur};
+    for (int i = 0; i < cfg.concur; ++i) {
+        asio::co_spawn(io,
+            [&pool, rounds = cfg.rounds, port = cfg.port]()
+                    -> asio::awaitable<void> {
+                co_await pool_agent(pool, rounds, port);
+            },
+            [&remaining](std::exception_ptr e) {
+                if (e) { try { std::rethrow_exception(e); }
+                         catch (const std::exception& ex) {
+                             std::fprintf(stderr, "coro err: %s\n", ex.what()); } }
+                --remaining;
+            });
+    }
+
+    std::vector<std::thread> ts;
+    ts.reserve(cfg.client_threads);
+    for (int i = 0; i < cfg.client_threads; ++i)
+        ts.emplace_back([&io] { io.run(); });
+
+    while (remaining.load(std::memory_order_relaxed) > 0)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    work.reset();
+    io.stop();
+    for (auto& t : ts) t.join();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -294,19 +375,22 @@ int main(int argc, char** argv) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     auto t0 = std::chrono::steady_clock::now();
-    if      (cfg.mode == "sync")  run_sync(cfg);
-    else if (cfg.mode == "async") run_async(cfg);
+    if      (cfg.mode == "sync")       run_sync(cfg);
+    else if (cfg.mode == "async")      run_async(cfg);
+    else if (cfg.mode == "async_pool") run_async_pool(cfg);
     else { std::cerr << "unknown mode: " << cfg.mode << "\n"; return 2; }
     auto wall = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t0).count();
 
+    const bool driver_is_async =
+        cfg.mode == "async" || cfg.mode == "async_pool";
     double total_ops = static_cast<double>(cfg.concur) * cfg.rounds;
-    std::printf("mode=%-5s concur=%6d rounds=%d lat_ms=%d  "
+    std::printf("mode=%-10s concur=%6d rounds=%d lat_ms=%d  "
                 "wall=%6.3fs  ops/s=%9.1f  rss_mb=%7.1f  "
                 "client_threads=%d server_threads=%d\n",
                 cfg.mode.c_str(), cfg.concur, cfg.rounds, cfg.latency_ms,
                 wall, total_ops / wall, peak_rss_mb(),
-                cfg.mode == "async" ? cfg.client_threads : cfg.concur,
+                driver_is_async ? cfg.client_threads : cfg.concur,
                 cfg.server_threads);
     return 0;
 }
