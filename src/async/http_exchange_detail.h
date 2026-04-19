@@ -85,11 +85,24 @@ inline int parse_status_line(std::string_view line) {
     return status;
 }
 
+// Extra per-response bits extracted while scanning headers.
+// Populated by extract_headers; empty when the corresponding header
+// was absent. The `response` pointer is optional — callers that
+// only want content-length pass nullptr and save the allocations.
+struct ResponseHeaderBits {
+    std::string retry_after;
+    std::string location;
+};
+
 // Parse the headers block up to (and consuming) the blank line.
 // Returns Content-Length (0 if absent), or -1 on unsupported chunked
 // encoding. Updates `directive` to `close` if the response says so;
-// caller seeds it with the HTTP/1.1 default (keep_alive).
-inline long extract_headers(std::istream& in, ConnDirective& directive) {
+// caller seeds it with the HTTP/1.1 default (keep_alive). When
+// `extra` is non-null, also captures Retry-After and Location
+// verbatim — used by redirect / 429-retry callers.
+inline long extract_headers(std::istream& in,
+                            ConnDirective& directive,
+                            ResponseHeaderBits* extra = nullptr) {
     std::string line;
     long content_length = 0;
     while (std::getline(in, line)) {
@@ -117,6 +130,10 @@ inline long extract_headers(std::istream& in, ConnDirective& directive) {
                            [](unsigned char c) { return std::tolower(c); });
             if (lv.find("close") != std::string::npos)
                 directive = ConnDirective::close;
+        } else if (extra && name == "retry-after") {
+            extra->retry_after = value;
+        } else if (extra && name == "location") {
+            extra->location = value;
         }
     }
     return content_length;
@@ -316,7 +333,10 @@ asio::awaitable<ExchangeResult> run_exchange(Stream& stream, const std::string& 
     r.response.status = parse_status_line(status_line);
     r.server_directive = ConnDirective::keep_alive;  // HTTP/1.1 default
 
-    long content_length = extract_headers(is, r.server_directive);
+    ResponseHeaderBits extra;
+    long content_length = extract_headers(is, r.server_directive, &extra);
+    r.response.retry_after = std::move(extra.retry_after);
+    r.response.location    = std::move(extra.location);
     if (content_length < 0) {
         throw std::runtime_error("async_post: chunked transfer-encoding not supported");
     }
