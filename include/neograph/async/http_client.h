@@ -16,6 +16,7 @@
 #include <asio/awaitable.hpp>
 #include <asio/any_io_executor.hpp>
 
+#include <functional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -54,5 +55,40 @@ asio::awaitable<HttpResponse> async_post(
     std::string_view body,
     std::vector<std::pair<std::string, std::string>> headers = {},
     bool tls = false);
+
+/// Metadata returned by async_post_stream after the body has been
+/// fully delivered via the callback. No `body` member — the body
+/// was handed out chunk-by-chunk while the call was in flight.
+struct HttpStreamResponse {
+    int status = 0;
+};
+
+/// Async HTTP(S) POST where the server emits a Transfer-Encoding:
+/// chunked response body. Each chunk is delivered to `on_chunk` in
+/// wire order; the returned HttpStreamResponse carries only the
+/// status line. Used for LLM streaming endpoints (OpenAI chat
+/// completions, Anthropic messages in `stream: true` mode).
+///
+/// Throws asio::system_error on transport failure or
+/// std::runtime_error if the response isn't chunked. HTTP-level
+/// errors (4xx, 5xx) surface as status + their usually-small body
+/// delivered to on_chunk — the caller decides what to do.
+///
+/// The request uses `Connection: close` — chunked streams are
+/// typically long-lived and sharing a conn afterwards offers little
+/// amortization. `ConnPool` integration is deferred to a later
+/// Semester if/when a streaming workload wants it.
+///
+/// The bytes passed to `on_chunk` are only valid for the duration
+/// of the callback invocation; copy them out if you need to retain.
+asio::awaitable<HttpStreamResponse> async_post_stream(
+    asio::any_io_executor ex,
+    std::string_view host,
+    std::string_view port,
+    std::string_view path,
+    std::string_view body,
+    std::vector<std::pair<std::string, std::string>> headers,
+    bool tls,
+    std::function<void(std::string_view chunk)> on_chunk);
 
 } // namespace neograph::async

@@ -24,7 +24,10 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <cstddef>
+#include <functional>
 #include <istream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -127,6 +130,176 @@ struct ExchangeResult {
 // Drive one HTTP/1.1 request/response cycle on `stream`. Caller has
 // already built `req` via build_request(). Throws asio::system_error /
 // std::runtime_error on wire or parse failure.
+// Result of a chunked-streaming exchange. No body field — the body
+// was delivered to the caller's on_chunk as it arrived.
+struct StreamExchangeResult {
+    int           status = 0;
+    ConnDirective server_directive = ConnDirective::keep_alive;
+};
+
+// Internal: scan headers from `is`, returning true if
+// Transfer-Encoding: chunked was present. Also updates `directive`
+// from a Connection header. Content-Length is read and discarded —
+// a chunked response is the only body framing we accept here, since
+// the streaming caller has no fixed end-of-body to synchronize on.
+inline bool extract_headers_for_stream(std::istream& is, ConnDirective& directive) {
+    std::string line;
+    bool chunked = false;
+    while (std::getline(is, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) break;
+        auto colon = line.find(':');
+        if (colon == std::string::npos) continue;
+        std::string name = line.substr(0, colon);
+        std::string value = line.substr(colon + 1);
+        auto first = value.find_first_not_of(" \t");
+        if (first == std::string::npos) value.clear();
+        else value = value.substr(first);
+        std::transform(name.begin(), name.end(), name.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        std::string lv;
+        std::transform(value.begin(), value.end(), std::back_inserter(lv),
+                       [](unsigned char c) { return std::tolower(c); });
+        if (name == "transfer-encoding") {
+            if (lv.find("chunked") != std::string::npos) chunked = true;
+        } else if (name == "connection") {
+            if (lv.find("close") != std::string::npos)
+                directive = ConnDirective::close;
+        }
+    }
+    return chunked;
+}
+
+// Drive a chunked-body HTTP/1.1 exchange. The response body is
+// delivered to `on_chunk` as each chunk arrives; when the terminator
+// chunk (size 0) is seen, returns with status + directive.
+//
+// Throws std::runtime_error if the response isn't chunked, or if
+// chunk parsing fails. HTTP-level errors (4xx, 5xx) still come
+// back as StreamExchangeResult with the status set — the caller
+// decides whether to care based on status alone, since 5xx bodies
+// from LLM endpoints are usually small error JSON worth handing to
+// the callback too.
+//
+// Trailers after the size-zero line are rejected (not supported).
+// Real SSE emitters never use them.
+template <typename Stream>
+asio::awaitable<StreamExchangeResult> run_exchange_stream(
+    Stream& stream,
+    const std::string& req,
+    const std::function<void(std::string_view)>& on_chunk) {
+
+    co_await asio::async_write(stream, asio::buffer(req), asio::use_awaitable);
+
+    asio::streambuf buf;
+    co_await asio::async_read_until(stream, buf, "\r\n\r\n", asio::use_awaitable);
+
+    StreamExchangeResult r;
+    r.server_directive = ConnDirective::keep_alive;
+
+    std::istream is(&buf);
+    std::string status_line;
+    std::getline(is, status_line);
+    if (!status_line.empty() && status_line.back() == '\r') status_line.pop_back();
+    r.status = parse_status_line(status_line);
+
+    bool chunked = extract_headers_for_stream(is, r.server_directive);
+    if (!chunked) {
+        throw std::runtime_error(
+            "async_post_stream: response must be Transfer-Encoding: chunked");
+    }
+
+    // Chunk loop. `buf` already holds whatever bytes came in past
+    // the header terminator; the istream above advanced past the
+    // headers, so buf.data() now starts at the first chunk size.
+    for (;;) {
+        // Ensure we have at least one full "<hex>\r\n" size line.
+        co_await asio::async_read_until(stream, buf, "\r\n", asio::use_awaitable);
+
+        // Pull the size line out of buf. read_until leaves the
+        // delimiter in buf; we extract the prefix ending at \r\n.
+        auto data_cb  = buf.data();
+        auto it_start = asio::buffers_begin(data_cb);
+        auto it_end   = asio::buffers_end(data_cb);
+
+        // Find \r\n in the readable area.
+        auto it_cr = it_start;
+        while (it_cr != it_end) {
+            if (*it_cr == '\r') {
+                auto it_next = it_cr;
+                ++it_next;
+                if (it_next != it_end && *it_next == '\n') break;
+            }
+            ++it_cr;
+        }
+        if (it_cr == it_end) {
+            // read_until guarantees the delimiter is present, so this
+            // path is unreachable — asserts the invariant.
+            throw std::runtime_error("async_post_stream: size line missing \\r\\n");
+        }
+
+        const std::size_t size_line_len =
+            static_cast<std::size_t>(std::distance(it_start, it_cr));
+        std::string size_str(it_start, it_cr);
+        // Drop ";ext" chunk extensions if present.
+        if (auto semi = size_str.find(';'); semi != std::string::npos) {
+            size_str = size_str.substr(0, semi);
+        }
+        // Strip surrounding whitespace — defensive; real servers don't
+        // pad, but we've seen odd implementations.
+        while (!size_str.empty() &&
+               (size_str.back() == ' ' || size_str.back() == '\t'))
+            size_str.pop_back();
+
+        std::size_t chunk_size = 0;
+        auto [p, pec] = std::from_chars(
+            size_str.data(), size_str.data() + size_str.size(),
+            chunk_size, 16);
+        (void)p;
+        if (pec != std::errc{}) {
+            throw std::runtime_error("async_post_stream: malformed chunk size");
+        }
+
+        buf.consume(size_line_len + 2);  // drop "<hex>[;ext]\r\n"
+
+        if (chunk_size == 0) {
+            // Terminator. Expect \r\n (no trailers supported).
+            if (buf.size() < 2) {
+                co_await asio::async_read(stream, buf,
+                    asio::transfer_exactly(2 - buf.size()),
+                    asio::use_awaitable);
+            }
+            auto term = buf.data();
+            auto ti = asio::buffers_begin(term);
+            auto ti_next = ti;
+            ++ti_next;
+            if (*ti != '\r' || ti_next == asio::buffers_end(term) || *ti_next != '\n') {
+                throw std::runtime_error(
+                    "async_post_stream: chunked trailers not supported");
+            }
+            buf.consume(2);
+            break;
+        }
+
+        // Ensure chunk_size + 2 bytes (payload + trailing \r\n) are buffered.
+        const std::size_t needed = chunk_size + 2;
+        if (buf.size() < needed) {
+            co_await asio::async_read(stream, buf,
+                asio::transfer_exactly(needed - buf.size()),
+                asio::use_awaitable);
+        }
+
+        std::string payload(chunk_size, '\0');
+        auto data_pb = buf.data();
+        std::copy_n(asio::buffers_begin(data_pb), chunk_size, payload.begin());
+        buf.consume(needed);
+
+        on_chunk(std::string_view(payload));
+    }
+
+    co_return r;
+}
+
 template <typename Stream>
 asio::awaitable<ExchangeResult> run_exchange(Stream& stream, const std::string& req) {
     co_await asio::async_write(stream, asio::buffer(req), asio::use_awaitable);

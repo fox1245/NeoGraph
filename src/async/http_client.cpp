@@ -103,4 +103,66 @@ asio::awaitable<HttpResponse> async_post(
     co_return r.response;
 }
 
+asio::awaitable<HttpStreamResponse> async_post_stream(
+    asio::any_io_executor ex,
+    std::string_view host,
+    std::string_view port,
+    std::string_view path,
+    std::string_view body,
+    std::vector<std::pair<std::string, std::string>> headers,
+    bool tls,
+    std::function<void(std::string_view chunk)> on_chunk) {
+
+    asio::ip::tcp::resolver resolver{ex};
+    auto endpoints = co_await resolver.async_resolve(
+        std::string(host), std::string(port), asio::use_awaitable);
+
+    asio::ip::tcp::socket sock{ex};
+    co_await asio::async_connect(sock, endpoints, asio::use_awaitable);
+
+    std::string req = detail::build_request(
+        host, path, body, headers, detail::ConnDirective::close);
+
+    HttpStreamResponse out;
+
+    if (!tls) {
+        auto r = co_await detail::run_exchange_stream(sock, req, on_chunk);
+        out.status = r.status;
+        asio::error_code ec;
+        sock.set_option(asio::socket_base::linger(true, 0), ec);
+        sock.close(ec);
+        co_return out;
+    }
+
+    asio::ssl::context ctx{asio::ssl::context::tls_client};
+    ctx.set_default_verify_paths();
+    ctx.set_verify_mode(asio::ssl::verify_peer);
+
+    asio::ssl::stream<asio::ip::tcp::socket&> tls_stream{sock, ctx};
+
+    std::string host_str(host);
+    if (!SSL_set_tlsext_host_name(tls_stream.native_handle(), host_str.c_str())) {
+        throw asio::system_error{
+            asio::error_code{static_cast<int>(::ERR_get_error()),
+                             asio::error::get_ssl_category()},
+            "SNI setup"};
+    }
+    tls_stream.set_verify_callback(asio::ssl::host_name_verification{host_str});
+
+    co_await tls_stream.async_handshake(
+        asio::ssl::stream_base::client, asio::use_awaitable);
+
+    auto r = co_await detail::run_exchange_stream(tls_stream, req, on_chunk);
+    out.status = r.status;
+
+    try {
+        co_await tls_stream.async_shutdown(asio::use_awaitable);
+    } catch (const std::exception&) {
+        // Peer commonly closes first on long streams — benign.
+    }
+    asio::error_code ec;
+    sock.close(ec);
+    co_return out;
+}
+
 } // namespace neograph::async
