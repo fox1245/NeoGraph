@@ -98,6 +98,27 @@ $ docker compose exec postgres psql -U postgres -d neograph -c "
 didn't change between super-steps (`user_query`, `research_brief`)
 have exactly one row total.
 
+### Reference numbers from a real run
+
+A complete run-resume-resume cycle on the multimodal-RAG demo above
+(2 supervisor rounds × 2 researchers each, claude-sonnet-4-5)
+produced these PG numbers:
+
+| Metric                      | Value      | Notes |
+|-----------------------------|------------|-------|
+| `neograph_checkpoints`      | 15 rows    | 6 super-steps + 1 NodeInterrupt + 6 super-steps + 1 NodeInterrupt + 1 approve cp |
+| `neograph_checkpoint_blobs` | 29 rows    | vs theoretical 15 cps × 9 channels = 135 — **78.5% dedup** |
+| `neograph_checkpoint_writes`| **0 rows** | clean — every super-step's pending log was cleared on commit |
+| `final_report` v13 (round 1)| 2806 B     | no arXiv URLs (model used `arXiv:NNNN.NNNNN` shorthand) |
+| `final_report` v27 (round 2)| 2752 B     | full `https://arxiv.org/abs/...` URLs after the user asked for them |
+| Total blob bytes            | 41 KB      | entire thread state, including all LLM transcripts |
+
+The `final_report` v13 → v27 diff is the smoking-gun proof that user
+feedback actually changed the agent's output: the second report
+trimmed prose AND added URL citations — a quality improvement the
+supervisor only reached because the HITL gate fed the feedback back
+into `supervisor_messages`.
+
 ## Setup
 
 1. Copy and fill in credentials:
