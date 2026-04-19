@@ -740,6 +740,118 @@ private:
 };
 
 // =========================================================================
+// HumanReviewNode — HITL gate after final_report.
+//
+// Two-phase behavior driven by the `messages` channel:
+//
+//   Phase 1 (fresh execution, messages empty):
+//     Throws NodeInterrupt. The engine catches it, saves a Checkpoint at
+//     phase NodeInterrupt with next_nodes=[this], and re-throws to the
+//     caller. The caller is expected to surface the report to a human
+//     and later call engine.resume(thread_id, feedback).
+//
+//   Phase 2 (resumed, messages contains the human's reply):
+//     Engine.resume writes the resume_value into the `messages` channel
+//     (overwrite reducer → single-element array). This node inspects
+//     that message:
+//       * empty / "approve" / "ok"  → Command(__end__), clears messages
+//       * anything else             → treats it as feedback:
+//           - Appends as user msg to `supervisor_messages`
+//           - Resets `supervisor_iterations` so dispatch lets the
+//             supervisor run another round
+//           - Clears `messages` so a hypothetical next interrupt starts
+//             fresh
+//           - Command(supervisor) routes back into the planning loop
+//
+// Why both phases live in one class: the engine's interrupt model means
+// the same node body is called twice — once to pause, once to resume.
+// Splitting it would require a separate "decision" node, more edges,
+// and a route channel the supervisor doesn't otherwise use.
+// =========================================================================
+class HumanReviewNode : public GraphNode {
+public:
+    explicit HumanReviewNode(std::string name) : name_(std::move(name)) {}
+    std::string get_name() const override { return name_; }
+
+    std::vector<ChannelWrite> execute(const GraphState&) override {
+        // Should never be called — execute_full handles both phases and
+        // emits a Command. Throwing here would mask a real issue, so
+        // return empty writes; the engine will then route via the
+        // (unused) `human_review → __end__` edge declared in the graph
+        // definition. The Command path in execute_full is the intended
+        // route.
+        return {};
+    }
+
+    NodeResult execute_full(const GraphState& state) override {
+        auto msgs = state.get("messages");
+        bool have_user_reply = msgs.is_array() && msgs.size() > 0;
+
+        if (!have_user_reply) {
+            // First execution. Pause for the human.
+            std::string report;
+            auto fr = state.get("final_report");
+            if (fr.is_string()) report = fr.get<std::string>();
+            throw NodeInterrupt(
+                "Awaiting human review of the report. Resume with "
+                "'approve' to finalize, or pass any other text as "
+                "feedback to trigger another research round.\n\n"
+                "--- REPORT ---\n" + report);
+        }
+
+        // Resumed. Inspect the latest message.
+        auto latest = msgs[msgs.size() - 1];
+        std::string content;
+        if (latest.is_object() && latest.contains("content") &&
+            latest["content"].is_string()) {
+            content = latest["content"].get<std::string>();
+        }
+        std::string trimmed = content;
+        // Trim ASCII whitespace; lower-case for the approve check.
+        while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.front())))
+            trimmed.erase(trimmed.begin());
+        while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.back())))
+            trimmed.pop_back();
+        std::string lower = trimmed;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+            [](unsigned char c) { return std::tolower(c); });
+
+        NodeResult r;
+        Command cmd;
+        if (trimmed.empty() || lower == "approve" || lower == "ok" ||
+            lower == "yes" || lower == "y") {
+            cmd.goto_node = std::string(END_NODE);
+            // Drain `messages` so a second resume cycle (if the user
+            // re-resumes the same thread) starts from an empty channel
+            // and the interrupt fires again instead of re-routing.
+            cmd.updates.push_back({"messages", json::array()});
+        } else {
+            cmd.goto_node = "supervisor";
+            json feedback_msg = json::object();
+            feedback_msg["role"] = "user";
+            feedback_msg["content"] =
+                "[USER FOLLOW-UP after reviewing your previous report] " +
+                content +
+                "\n\nDispatch additional research if needed to address "
+                "this, then call research_complete when done.";
+            cmd.updates.push_back({"supervisor_messages",
+                json::array({feedback_msg})});
+            // Reset the supervisor budget so the dispatch node lets the
+            // supervisor run another full round of conduct_research +
+            // research_complete instead of short-circuiting on the
+            // already-exhausted counter.
+            cmd.updates.push_back({"supervisor_iterations", 0});
+            cmd.updates.push_back({"messages", json::array()});
+        }
+        r.command = cmd;
+        return r;
+    }
+
+private:
+    std::string name_;
+};
+
+// =========================================================================
 // Node registration (idempotent, thread-safe).
 // =========================================================================
 void register_node_types_once() {
@@ -783,6 +895,12 @@ void register_node_types_once() {
                 return std::make_unique<FinalReportNode>(
                     name, ctx.provider, ctx.model);
             });
+
+        nf.register_type("__dr_human_review",
+            [](const std::string& name, const json&, const NodeContext&)
+                -> std::unique_ptr<GraphNode> {
+                return std::make_unique<HumanReviewNode>(name);
+            });
     });
 }
 
@@ -803,45 +921,65 @@ std::unique_ptr<GraphEngine> create_deep_research_graph(
     ctx.model = cfg.model;
     for (auto& t : tools) ctx.tools.push_back(t.get());
 
+    // Channels — common set always present.
+    json channels = {
+        {"user_query",             {{"reducer", "overwrite"}}},
+        {"research_brief",         {{"reducer", "overwrite"}}},
+        {"supervisor_messages",    {{"reducer", "append"}}},
+        {"supervisor_iterations",  {{"reducer", "overwrite"}}},
+        {"current_topic",          {{"reducer", "overwrite"}}},
+        {"current_call_id",        {{"reducer", "overwrite"}}},
+        {"raw_notes",              {{"reducer", "append"}}},
+        {"final_report",           {{"reducer", "overwrite"}}}
+    };
+
+    // Nodes — common set always present.
+    json nodes = {
+        {"brief",        {{"type", "__dr_brief"}}},
+        {"supervisor",   {{"type", "__dr_supervisor_llm"}}},
+        {"dispatch",     {
+            {"type", "__dr_supervisor_dispatch"},
+            {"max_iterations", cfg.max_supervisor_iterations},
+            {"max_concurrent", cfg.max_concurrent_researchers}
+        }},
+        {"researcher",   {
+            {"type", "__dr_researcher"},
+            {"max_iterations", cfg.max_researcher_iterations}
+        }},
+        {"final_report", {{"type", "__dr_final_report"}}}
+    };
+
+    // Edges — common set: start → brief → supervisor → dispatch loop;
+    // dispatch emits Command(final_report) to short-circuit when done.
+    json edges = json::array({
+        {{"from", "__start__"},    {"to", "brief"}},
+        {{"from", "brief"},        {"to", "supervisor"}},
+        {{"from", "supervisor"},   {"to", "dispatch"}},
+        {{"from", "dispatch"},     {"to", "supervisor"}}
+    });
+
+    if (cfg.enable_human_review) {
+        // Add the `messages` channel that engine.resume writes the user's
+        // resume_value into. Overwrite reducer keeps a single-element
+        // array semantically meaning "latest human input pending review".
+        channels["messages"] = json{{"reducer", "overwrite"}};
+        nodes["human_review"] = json{{"type", "__dr_human_review"}};
+        // Re-route final_report through the review gate. The terminal
+        // edge from human_review is decorative — HumanReviewNode emits
+        // a Command(__end__) or Command(supervisor) on every resume, so
+        // the static edge is only consulted if the Command path ever
+        // changes.
+        edges.push_back({{"from", "final_report"}, {"to", "human_review"}});
+        edges.push_back({{"from", "human_review"}, {"to", "__end__"}});
+    } else {
+        edges.push_back({{"from", "final_report"}, {"to", "__end__"}});
+    }
+
     json definition = {
         {"name", "deep_research_agent"},
-        {"channels", {
-            {"user_query",             {{"reducer", "overwrite"}}},
-            {"research_brief",         {{"reducer", "overwrite"}}},
-            {"supervisor_messages",    {{"reducer", "append"}}},
-            {"supervisor_iterations",  {{"reducer", "overwrite"}}},
-            {"current_topic",          {{"reducer", "overwrite"}}},
-            {"current_call_id",        {{"reducer", "overwrite"}}},
-            {"raw_notes",              {{"reducer", "append"}}},
-            {"final_report",           {{"reducer", "overwrite"}}}
-        }},
-        {"nodes", {
-            {"brief",        {{"type", "__dr_brief"}}},
-            {"supervisor",   {{"type", "__dr_supervisor_llm"}}},
-            {"dispatch",     {
-                {"type", "__dr_supervisor_dispatch"},
-                {"max_iterations", cfg.max_supervisor_iterations},
-                {"max_concurrent", cfg.max_concurrent_researchers}
-            }},
-            {"researcher",   {
-                {"type", "__dr_researcher"},
-                {"max_iterations", cfg.max_researcher_iterations}
-            }},
-            {"final_report", {{"type", "__dr_final_report"}}}
-        }},
-        // Edges:
-        //   start → brief → supervisor → dispatch
-        //   dispatch Sends → researcher (parallel fan-out/fan-in)
-        //   after fan-in completes, dispatch's outgoing edge fires → supervisor
-        //   dispatch emits Command(final_report) to short-circuit when done
-        //   final_report → end
-        {"edges", json::array({
-            {{"from", "__start__"},    {"to", "brief"}},
-            {{"from", "brief"},        {"to", "supervisor"}},
-            {{"from", "supervisor"},   {"to", "dispatch"}},
-            {{"from", "dispatch"},     {"to", "supervisor"}},
-            {{"from", "final_report"}, {"to", "__end__"}}
-        })}
+        {"channels", channels},
+        {"nodes", nodes},
+        {"edges", edges}
     };
 
     auto engine = GraphEngine::compile(definition, ctx);

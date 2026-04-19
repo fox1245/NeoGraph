@@ -29,6 +29,19 @@ struct DeepResearchConfig {
     int max_supervisor_iterations = 2;        ///< Supervisor planning rounds (keep ≤ 3 for low-tier Anthropic quotas).
     int max_concurrent_researchers = 2;       ///< Cap per conduct_research fan-out batch. Default 2 so 3× parallel researchers don't collectively exceed the 30K-tokens-per-minute tier-1 Anthropic limit; raise on higher tiers.
     int max_researcher_iterations = 2;        ///< Inner LLM↔tools loop cap per researcher.
+
+    /// When true, inserts a `human_review` node between `final_report`
+    /// and `__end__`. The node throws NodeInterrupt on first execution
+    /// so the engine saves a checkpoint and the caller can show the
+    /// report to a human; on resume it inspects the latest user message
+    /// in the `messages` channel and either:
+    ///   * routes to `__end__` if the message is empty / "approve" / "ok"
+    ///   * appends the message to `supervisor_messages` and routes back
+    ///     to `supervisor` (with `supervisor_iterations` reset) so the
+    ///     agent can address the feedback in another research round.
+    /// Pairs naturally with PostgresCheckpointStore for cross-process
+    /// resume — see examples/26_postgres_react_hitl.
+    bool enable_human_review = false;
 };
 
 /**
