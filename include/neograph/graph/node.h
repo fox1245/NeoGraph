@@ -83,6 +83,16 @@ public:
         const GraphState& state, const GraphStreamCallback& cb);
 
     /**
+     * @brief Async peer of execute_stream — Sem 3.4b.
+     *
+     * Default body co_returns execute_stream(state, cb). Same crossover
+     * shape as execute / execute_async. Override at least one of the
+     * sync/async pair when adding a streaming-aware async node.
+     */
+    virtual asio::awaitable<std::vector<ChannelWrite>> execute_stream_async(
+        const GraphState& state, const GraphStreamCallback& cb);
+
+    /**
      * @brief Extended execute returning a full NodeResult.
      *
      * Default implementation wraps execute() output into NodeResult::writes.
@@ -94,12 +104,29 @@ public:
     virtual NodeResult execute_full(const GraphState& state);
 
     /**
+     * @brief Async peer of execute_full — Sem 3.4b.
+     *
+     * Default routes through execute_full() via run_sync, which in turn
+     * wraps execute()'s writes into a NodeResult. Async-native nodes
+     * that emit Command/Send override this directly to keep the
+     * NodeResult assembly inside the coroutine.
+     */
+    virtual asio::awaitable<NodeResult> execute_full_async(
+        const GraphState& state);
+
+    /**
      * @brief Extended streaming execution returning a full NodeResult.
      * @param state The current graph state.
      * @param cb Callback for emitting streaming events.
      * @return NodeResult with writes, optional Command, and optional Sends.
      */
     virtual NodeResult execute_full_stream(
+        const GraphState& state, const GraphStreamCallback& cb);
+
+    /**
+     * @brief Async peer of execute_full_stream — Sem 3.4b.
+     */
+    virtual asio::awaitable<NodeResult> execute_full_stream_async(
         const GraphState& state, const GraphStreamCallback& cb);
 
     /**

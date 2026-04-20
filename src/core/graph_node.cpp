@@ -25,9 +25,20 @@ std::vector<ChannelWrite> GraphNode::execute_stream(
     return execute(state);
 }
 
+asio::awaitable<std::vector<ChannelWrite>>
+GraphNode::execute_stream_async(const GraphState& state,
+                                const GraphStreamCallback& cb) {
+    co_return execute_stream(state, cb);
+}
+
 // --- GraphNode default execute_full: wraps execute() ---
 NodeResult GraphNode::execute_full(const GraphState& state) {
     return NodeResult{execute(state)};
+}
+
+asio::awaitable<NodeResult>
+GraphNode::execute_full_async(const GraphState& state) {
+    co_return execute_full(state);
 }
 
 // --- GraphNode default execute_full_stream ---
@@ -44,6 +55,12 @@ NodeResult GraphNode::execute_full_stream(
         result.writes = execute_stream(state, cb);
     }
     return result;
+}
+
+asio::awaitable<NodeResult>
+GraphNode::execute_full_stream_async(const GraphState& state,
+                                     const GraphStreamCallback& cb) {
+    co_return execute_full_stream(state, cb);
 }
 
 // =========================================================================
