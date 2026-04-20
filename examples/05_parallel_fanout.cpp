@@ -1,23 +1,43 @@
-// NeoGraph Example 05: Parallel Fan-out / Fan-in
+// NeoGraph Example 05: Parallel Fan-out / Fan-in (async edition)
 //
-// Runs multiple nodes in parallel using Taskflow,
-// collects all results (fan-in), then proceeds to the next step.
+// Runs multiple nodes in parallel on a single asio::io_context using
+// engine->run_stream_async(). The parallel fan-out goes through
+// NodeExecutor::run_parallel_async (Stage 3 / Sem 3.7), which uses
+// asio::experimental::make_parallel_group on co_spawn-deferred
+// workers. Each researcher's "work" is an asio::steady_timer wait
+// (stand-in for a real async LLM or HTTP call), so the io_context's
+// worker thread stays free for siblings while any one researcher is
+// waiting — true overlap on a single OS thread.
 //
 // Scenario: Parallel research agent
 //   __start__ → [researcher_a, researcher_b, researcher_c] → summarizer → __end__
-//   3 researchers work concurrently, and the summarizer aggregates the results.
 //
-// No API key required (uses custom nodes)
+// Contrast with the pre-Stage-3 Taskflow path (still available via
+// engine->run_stream()): that uses an OS-thread pool for the fan-out
+// and achieves overlap via thread parallelism. The async variant
+// achieves the same overlap on ONE thread, so scaling to hundreds
+// of concurrent research runs doesn't pay per-run thread costs.
+//
+// No API key required (uses custom nodes).
 //
 // Usage: ./example_parallel_fanout
 
 #include <neograph/neograph.h>
 
+#include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
+#include <asio/io_context.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
+
+#include <chrono>
 #include <iostream>
 #include <thread>
-#include <chrono>
 
-// Custom node: Researcher (simulation — 100ms delay)
+// Async-native researcher — execute_async co_awaits an asio
+// steady_timer instead of std::this_thread::sleep_for, so the
+// io_context isn't frozen during the "work".
 class ResearcherNode : public neograph::graph::GraphNode {
     std::string name_;
     std::string topic_;
@@ -27,26 +47,46 @@ public:
     ResearcherNode(const std::string& name, const std::string& topic, int delay_ms)
         : name_(name), topic_(topic), delay_ms_(delay_ms) {}
 
-    std::vector<neograph::graph::ChannelWrite> execute(
-        const neograph::graph::GraphState& state) override {
-
+    asio::awaitable<std::vector<neograph::graph::ChannelWrite>>
+    execute_async(const neograph::graph::GraphState& /*state*/) override {
         auto start = std::chrono::steady_clock::now();
 
-        // In practice, this is where you'd call an LLM or web search
-        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms_));
+        auto ex = co_await asio::this_coro::executor;
+        asio::steady_timer timer(ex);
+        timer.expires_after(std::chrono::milliseconds(delay_ms_));
+        co_await timer.async_wait(asio::use_awaitable);
 
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start).count();
 
-        neograph::json result = {
-            {"researcher", name_},
-            {"topic", topic_},
-            {"finding", "Research findings on " + topic_ + ". (" + std::to_string(elapsed) + "ms)"},
-            {"elapsed_ms", elapsed}
-        };
+        // Build result without nested brace-init in the coroutine body
+        // (GCC 13 ICE workaround, same shape as Sem 2.7 / 3.6 step 3).
+        neograph::json result;
+        result["researcher"] = name_;
+        result["topic"]      = topic_;
+        result["finding"]    = "Research findings on " + topic_
+            + ". (" + std::to_string(elapsed) + "ms)";
+        result["elapsed_ms"] = elapsed;
 
-        // Append result to the "findings" channel
-        return {neograph::graph::ChannelWrite{"findings", neograph::json::array({result})}};
+        co_return std::vector<neograph::graph::ChannelWrite>{
+            neograph::graph::ChannelWrite{
+                "findings", neograph::json::array({result})}};
+    }
+
+    // Override the full_stream peer so the engine doesn't invoke our
+    // (already finished) work twice per super-step. The default
+    // GraphNode::execute_full_stream_async wraps execute_full_async
+    // *and then* replaces the writes with execute_stream_async's
+    // output if no Command/Send was emitted — that works for real
+    // streaming LLM nodes (where the token stream is what produces
+    // the writes) but for a node whose execute_async already did all
+    // the work it's a redundant second run. Short-circuit to a single
+    // execute_async call.
+    asio::awaitable<neograph::graph::NodeResult>
+    execute_full_stream_async(const neograph::graph::GraphState& state,
+                              const neograph::graph::GraphStreamCallback& /*cb*/) override {
+        auto writes = co_await execute_async(state);
+        co_return neograph::graph::NodeResult{std::move(writes)};
     }
 
     std::string get_name() const override { return name_; }
@@ -125,19 +165,32 @@ int main() {
     neograph::graph::NodeContext ctx;  // Custom nodes, no Provider/Tool needed
     auto engine = neograph::graph::GraphEngine::compile(definition, ctx);
 
-    // Execute
-    std::cout << "=== Parallel Fan-out / Fan-in ===\n\n";
+    std::cout << "=== Parallel Fan-out / Fan-in (async edition) ===\n\n";
 
     auto total_start = std::chrono::steady_clock::now();
 
     neograph::graph::RunConfig config;
-    auto result = engine->run_stream(config,
-        [](const neograph::graph::GraphEvent& event) {
-            if (event.type == neograph::graph::GraphEvent::Type::NODE_START)
-                std::cout << "[start] " << event.node_name << "\n";
-            if (event.type == neograph::graph::GraphEvent::Type::NODE_END)
-                std::cout << "[done]  " << event.node_name << "\n";
-        });
+
+    auto event_cb = [](const neograph::graph::GraphEvent& event) {
+        if (event.type == neograph::graph::GraphEvent::Type::NODE_START)
+            std::cout << "[start] " << event.node_name << "\n";
+        if (event.type == neograph::graph::GraphEvent::Type::NODE_END)
+            std::cout << "[done]  " << event.node_name << "\n";
+    };
+
+    // Drive the graph on a single io_context. The three researcher
+    // nodes co_await their timers in parallel via run_parallel_async
+    // inside execute_graph_async, so all three 100-150ms delays
+    // overlap on one thread.
+    asio::io_context io;
+    neograph::graph::RunResult result;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            result = co_await engine->run_stream_async(config, event_cb);
+        },
+        asio::detached);
+    io.run();
 
     auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - total_start).count();
@@ -149,14 +202,14 @@ int main() {
     }
     std::cout << " → END\n";
 
-    // Print summary
     if (result.output.contains("channels") &&
         result.output["channels"].contains("summary")) {
         std::cout << "\n" << result.output["channels"]["summary"]["value"].get<std::string>() << "\n";
     }
 
-    std::cout << "\nTotal elapsed: " << total_ms << "ms";
-    std::cout << " (sequential would be ~370ms)\n";
+    std::cout << "\nTotal elapsed: " << total_ms << "ms"
+              << " (sequential would be ~370ms; single-thread async "
+              << "overlap: ~longest-branch = ~150ms.)\n";
 
     return 0;
 }
