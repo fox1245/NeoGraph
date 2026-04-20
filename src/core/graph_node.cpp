@@ -1,9 +1,23 @@
 #include <neograph/graph/node.h>
 #include <neograph/graph/engine.h>
+#include <neograph/async/run_sync.h>
 #include <algorithm>
 #include <stdexcept>
 
 namespace neograph::graph {
+
+// --- GraphNode sync ↔ async crossover defaults (Sem 3.4) ---
+// Same shape as Provider::complete / complete_async. Override one,
+// the other comes free.
+
+std::vector<ChannelWrite> GraphNode::execute(const GraphState& state) {
+    return neograph::async::run_sync(execute_async(state));
+}
+
+asio::awaitable<std::vector<ChannelWrite>>
+GraphNode::execute_async(const GraphState& state) {
+    co_return execute(state);
+}
 
 // --- GraphNode default streaming: just delegates ---
 std::vector<ChannelWrite> GraphNode::execute_stream(
