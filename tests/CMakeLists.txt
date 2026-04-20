@@ -33,6 +33,10 @@ add_executable(neograph_tests
     test_openai_provider_async.cpp
 )
 
+if(NEOGRAPH_BUILD_MCP)
+    target_sources(neograph_tests PRIVATE test_mcp_client_async.cpp)
+endif()
+
 # PostgresCheckpointStore integration tests are gated on NEOGRAPH_BUILD_POSTGRES
 # at the build level (so projects without libpqxx still build the test
 # binary) and on NEOGRAPH_TEST_POSTGRES_URL at runtime (skipped if unset).
@@ -51,6 +55,10 @@ target_link_libraries(neograph_tests PRIVATE
     httplib OpenSSL::SSL OpenSSL::Crypto
     GTest::gtest_main
 )
+
+if(NEOGRAPH_BUILD_MCP)
+    target_link_libraries(neograph_tests PRIVATE neograph::mcp)
+endif()
 
 if(NEOGRAPH_BUILD_POSTGRES)
     target_link_libraries(neograph_tests PRIVATE neograph::postgres)
