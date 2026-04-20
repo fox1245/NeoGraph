@@ -34,6 +34,7 @@ add_executable(neograph_tests
     test_checkpoint_async_default.cpp
     test_node_async_default.cpp
     test_graph_engine_async_api.cpp
+    test_async_tool.cpp
 )
 
 if(NEOGRAPH_BUILD_MCP)
