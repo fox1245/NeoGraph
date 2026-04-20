@@ -119,6 +119,23 @@ public:
      * interrupting node (replay skips the siblings that already
      * completed via pending_writes).
      */
+    /// Async peer of execute_node_with_retry — Stage 3 / Sem 3.6
+    /// (incremental). Drives node->execute_full_(stream_)async via
+    /// co_await and replaces the backoff std::this_thread::sleep_for
+    /// with an asio::steady_timer.async_wait so the io_context is not
+    /// frozen during retry waits. NodeInterrupt + exception semantics
+    /// preserved bit-for-bit; GCC-13-safe (catch block captures the
+    /// exception via std::optional, co_await happens outside).
+    ///
+    /// Public for now so the regression test can drive it directly.
+    /// Once run_one_async / execute_graph_async land, this becomes an
+    /// internal helper again.
+    asio::awaitable<NodeResult> execute_node_with_retry_async(
+        const std::string& node_name,
+        GraphState& state,
+        const GraphStreamCallback& cb,
+        StreamMode stream_mode);
+
     std::vector<NodeResult> run_parallel(
         const std::vector<std::string>& ready,
         int step,

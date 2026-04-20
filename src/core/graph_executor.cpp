@@ -2,11 +2,16 @@
 #include <neograph/graph/state.h>
 #include <neograph/graph/loader.h>
 
+#include <asio/steady_timer.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
 #include <taskflow/taskflow.hpp>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 
@@ -172,6 +177,128 @@ NodeResult NodeExecutor::execute_node_with_retry(
     }
 
     throw std::runtime_error("Unreachable: retry loop exited without return or throw");
+}
+
+// =========================================================================
+// execute_node_with_retry_async: coroutine peer (Sem 3.6 incremental)
+// =========================================================================
+//
+// Mirrors the sync retry loop above but:
+//   * dispatches to node->execute_full_(stream_)async via co_await,
+//     so a node whose execute_async issues real non-blocking I/O lets
+//     the io_context serve other coroutines while this one is waiting.
+//   * replaces std::this_thread::sleep_for with an asio::steady_timer
+//     async_wait — backoff no longer freezes the worker.
+//   * NodeInterrupt and exception semantics are preserved bit-for-bit
+//     against the sync path; the GCC-13-safe shape (no co_await inside
+//     a catch block) requires capturing the result/error into
+//     std::optional inside try, then deciding what to do outside.
+
+asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
+    const std::string& node_name,
+    GraphState& state,
+    const GraphStreamCallback& cb,
+    StreamMode stream_mode) {
+
+    auto node_it = nodes_.find(node_name);
+    if (node_it == nodes_.end()) {
+        throw std::runtime_error("Node not found: " + node_name);
+    }
+
+    auto policy  = retry_policy_for_(node_name);
+    int delay_ms = policy.initial_delay_ms;
+
+    auto ex = co_await asio::this_coro::executor;
+
+    for (int attempt = 0; attempt <= policy.max_retries; ++attempt) {
+        if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
+            json data;
+            if (attempt > 0) data["retry_attempt"] = attempt;
+            cb(GraphEvent{GraphEvent::Type::NODE_START, node_name, data});
+        }
+
+        // Capture the outcome of one attempt without co_await inside a
+        // catch block (GCC 13 ICEs on that shape). NodeInterrupt is
+        // re-thrown immediately so it short-circuits the loop just
+        // like the sync path.
+        std::optional<NodeResult> ok_result;
+        std::exception_ptr  retryable_err;
+
+        try {
+            if (cb) {
+                ok_result.emplace(co_await node_it->second
+                    ->execute_full_stream_async(state, cb));
+            } else {
+                ok_result.emplace(co_await node_it->second
+                    ->execute_full_async(state));
+            }
+        } catch (const NodeInterrupt&) {
+            // NodeInterrupt is a control-flow signal, not a retryable
+            // error. Bubble out of the coroutine so the caller can save
+            // a NodeInterrupt checkpoint, matching the sync path.
+            throw;
+        } catch (...) {
+            retryable_err = std::current_exception();
+        }
+
+        if (ok_result) {
+            auto& nr = *ok_result;
+            if (cb) {
+                if (has_mode(stream_mode, StreamMode::UPDATES)) {
+                    for (const auto& w : nr.writes) {
+                        cb(GraphEvent{GraphEvent::Type::CHANNEL_WRITE, node_name,
+                                      json{{"channel", w.channel}, {"value", w.value}}});
+                    }
+                }
+                if (has_mode(stream_mode, StreamMode::EVENTS)) {
+                    json end_data;
+                    if (nr.command)
+                        end_data["command_goto"] = nr.command->goto_node;
+                    if (!nr.sends.empty())
+                        end_data["sends"] = (int)nr.sends.size();
+                    cb(GraphEvent{GraphEvent::Type::NODE_END, node_name, end_data});
+                }
+            }
+            co_return std::move(nr);
+        }
+
+        // Retry path. retryable_err must be populated since neither the
+        // result nor a NodeInterrupt path was taken.
+        if (attempt >= policy.max_retries) {
+            if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
+                std::string what;
+                try { std::rethrow_exception(retryable_err); }
+                catch (const std::exception& e) { what = e.what(); }
+                catch (...) { what = "unknown"; }
+                cb(GraphEvent{GraphEvent::Type::ERROR, node_name,
+                              json{{"error", what}, {"attempts", attempt + 1}}});
+            }
+            std::rethrow_exception(retryable_err);
+        }
+
+        if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
+            std::string what;
+            try { std::rethrow_exception(retryable_err); }
+            catch (const std::exception& e) { what = e.what(); }
+            catch (...) { what = "unknown"; }
+            cb(GraphEvent{GraphEvent::Type::ERROR, node_name,
+                          json{{"retry", attempt + 1},
+                               {"max_retries", policy.max_retries},
+                               {"delay_ms", delay_ms},
+                               {"error", what}}});
+        }
+
+        asio::steady_timer timer(ex);
+        timer.expires_after(std::chrono::milliseconds(delay_ms));
+        co_await timer.async_wait(asio::use_awaitable);
+
+        delay_ms = std::min(
+            static_cast<int>(delay_ms * policy.backoff_multiplier),
+            policy.max_delay_ms);
+    }
+
+    throw std::runtime_error(
+        "Unreachable: async retry loop exited without return or throw");
 }
 
 // =========================================================================
