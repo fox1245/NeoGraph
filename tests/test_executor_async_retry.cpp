@@ -104,6 +104,14 @@ void init_state(GraphState& state, const std::vector<ChannelDef>& defs) {
     }
 }
 
+// Mirror of the engine's static task_id scheme so the replay map test
+// can populate it correctly. NodeExecutor's make_static_task_id is
+// file-static; this duplicate keeps the test compile-only — they must
+// stay in sync ("s<step>:<node_name>").
+std::string make_static_task_id_for_test(int step, const std::string& node_name) {
+    return "s" + std::to_string(step) + ":" + node_name;
+}
+
 } // namespace
 
 TEST(ExecutorAsyncRetry, SucceedsFirstTryReturnsResult) {
@@ -206,6 +214,86 @@ TEST(ExecutorAsyncRetry, NodeInterruptShortCircuits) {
 
     ASSERT_TRUE(err);
     EXPECT_THROW(std::rethrow_exception(err), NodeInterrupt);
+}
+
+TEST(ExecutorAsyncRunOne, ReplayShortCircuitsExecute) {
+    // run_one_async should honor the replay map: when a task_id is
+    // already present, the cached NodeResult is applied without
+    // re-executing the node.
+    ExecutorHarness h(std::make_unique<FlakyNode>("worker", 100), RetryPolicy{});
+
+    NodeResult cached;
+    cached.writes.push_back(ChannelWrite{"result", json("from-replay")});
+
+    auto store = std::make_shared<InMemoryCheckpointStore>();
+    CheckpointCoordinator coord(store, "tid");
+    std::unordered_map<std::string, NodeResult> replay;
+    replay.emplace(make_static_task_id_for_test(0, "worker"), cached);
+
+    asio::io_context io;
+    std::optional<NodeResult> got;
+    std::vector<std::string> trace;
+    BarrierState barrier;
+
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            GraphState state; init_state(state, h.channel_defs);
+            got = co_await h.executor.run_one_async(
+                "worker", 0, state, replay, coord, "", barrier,
+                trace, nullptr, StreamMode::ALL);
+        },
+        asio::detached);
+    io.run();
+
+    ASSERT_TRUE(got.has_value());
+    ASSERT_EQ(got->writes.size(), 1u);
+    EXPECT_EQ(got->writes[0].value.get<std::string>(), "from-replay");
+    ASSERT_EQ(trace.size(), 1u);
+    EXPECT_EQ(trace[0], "worker");
+}
+
+TEST(ExecutorAsyncRunOne, NodeInterruptSavesDedicatedCheckpoint) {
+    ExecutorHarness h(std::make_unique<AlwaysInterruptNode>("hitl"),
+                      RetryPolicy{});
+    auto store = std::make_shared<InMemoryCheckpointStore>();
+    CheckpointCoordinator coord(store, "tid-interrupt");
+    BarrierState barrier;
+    std::vector<std::string> trace;
+    std::unordered_map<std::string, NodeResult> replay;
+
+    asio::io_context io;
+    std::exception_ptr err;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            try {
+                GraphState state; init_state(state, h.channel_defs);
+                co_await h.executor.run_one_async(
+                    "hitl", 0, state, replay, coord, "", barrier,
+                    trace, nullptr, StreamMode::ALL);
+            } catch (...) {
+                err = std::current_exception();
+            }
+        },
+        asio::detached);
+    io.run();
+
+    ASSERT_TRUE(err);
+    EXPECT_THROW(std::rethrow_exception(err), NodeInterrupt);
+
+    auto cps = store->list("tid-interrupt", 100);
+    ASSERT_GE(cps.size(), 1u)
+        << "NodeInterrupt path must save at least one checkpoint";
+    bool found_interrupt_phase = false;
+    for (const auto& cp : cps) {
+        if (cp.interrupt_phase == CheckpointPhase::NodeInterrupt) {
+            ASSERT_EQ(cp.next_nodes.size(), 1u);
+            EXPECT_EQ(cp.next_nodes[0], "hitl");
+            found_interrupt_phase = true;
+        }
+    }
+    EXPECT_TRUE(found_interrupt_phase);
 }
 
 TEST(ExecutorAsyncRetry, BackoffDoesNotBlockIoContext) {

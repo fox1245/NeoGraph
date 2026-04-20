@@ -102,6 +102,25 @@ public:
         const GraphStreamCallback& cb,
         StreamMode stream_mode);
 
+    /// Async peer of run_one (Sem 3.6 incremental). Same contract:
+    /// replay short-circuit, record_pending_write before apply_writes,
+    /// trace push after apply, NodeInterrupt path saves a dedicated
+    /// checkpoint via coord.save_super_step_async then rethrows. The
+    /// only behavioural difference is non-blocking: node dispatch and
+    /// checkpoint I/O all flow through co_await so other coroutines
+    /// on the same io_context keep moving.
+    asio::awaitable<NodeResult> run_one_async(
+        const std::string& node_name,
+        int step,
+        GraphState& state,
+        const std::unordered_map<std::string, NodeResult>& replay,
+        CheckpointCoordinator& coord,
+        const std::string& parent_cp_id,
+        const BarrierState& barrier_state,
+        std::vector<std::string>& trace,
+        const GraphStreamCallback& cb,
+        StreamMode stream_mode);
+
     /**
      * @brief Execute all `ready` nodes concurrently via Taskflow.
      *
