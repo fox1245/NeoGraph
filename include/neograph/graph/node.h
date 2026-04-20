@@ -125,7 +125,13 @@ public:
      */
     LLMCallNode(const std::string& name, const NodeContext& ctx);
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override;
+    /// Async-native execute — co_awaits provider_->complete_async so a
+    /// run on a shared io_context doesn't block during the LLM call.
+    /// The sync execute() is inherited from GraphNode and routes
+    /// through this via run_sync.
+    asio::awaitable<std::vector<ChannelWrite>>
+    execute_async(const GraphState& state) override;
+
     std::vector<ChannelWrite> execute_stream(
         const GraphState& state, const GraphStreamCallback& cb) override;
     std::string get_name() const override { return name_; }
@@ -193,7 +199,10 @@ public:
                          const std::string& prompt,
                          std::vector<std::string> valid_routes);
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override;
+    /// Async-native classify — same rationale as LLMCallNode.
+    asio::awaitable<std::vector<ChannelWrite>>
+    execute_async(const GraphState& state) override;
+
     std::vector<ChannelWrite> execute_stream(
         const GraphState& state, const GraphStreamCallback& cb) override;
     std::string get_name() const override { return name_; }

@@ -88,15 +88,16 @@ CompletionParams LLMCallNode::build_params(const GraphState& state) const {
     return params;
 }
 
-std::vector<ChannelWrite> LLMCallNode::execute(const GraphState& state) {
-    auto params     = build_params(state);
-    auto completion = provider_->complete(params);
+asio::awaitable<std::vector<ChannelWrite>>
+LLMCallNode::execute_async(const GraphState& state) {
+    auto params = build_params(state);
+    auto completion = co_await provider_->complete_async(params);
 
-    // Serialize assistant message and append to messages channel
     json msg_json;
     to_json(msg_json, completion.message);
 
-    return {ChannelWrite{"messages", json::array({msg_json})}};
+    co_return std::vector<ChannelWrite>{
+        ChannelWrite{"messages", json::array({msg_json})}};
 }
 
 std::vector<ChannelWrite> LLMCallNode::execute_stream(
@@ -239,10 +240,11 @@ std::vector<ChannelWrite> IntentClassifierNode::route_from(const std::string& in
     return {ChannelWrite{"__route__", json(best_route)}};
 }
 
-std::vector<ChannelWrite> IntentClassifierNode::execute(const GraphState& state) {
+asio::awaitable<std::vector<ChannelWrite>>
+IntentClassifierNode::execute_async(const GraphState& state) {
     auto params = build_params(state);
-    auto completion = provider_->complete(params);
-    return route_from(completion.message.content);
+    auto completion = co_await provider_->complete_async(params);
+    co_return route_from(completion.message.content);
 }
 
 std::vector<ChannelWrite> IntentClassifierNode::execute_stream(
