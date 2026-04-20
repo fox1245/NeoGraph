@@ -105,6 +105,11 @@ public:
      */
     ResumeContext load_for_resume() const;
 
+    /// Async peer of load_for_resume (Sem 3.7.5). Uses
+    /// `load_latest_async` + `get_writes_async` on the store so the
+    /// resume path doesn't block the io_context's worker.
+    asio::awaitable<ResumeContext> load_for_resume_async() const;
+
     /**
      * @brief Durably record a completed node's writes under parent_cp_id.
      *

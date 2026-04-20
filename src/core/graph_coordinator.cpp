@@ -260,4 +260,35 @@ asio::awaitable<void> CheckpointCoordinator::clear_pending_writes_async(
     co_await store_->clear_writes_async(thread_id_, parent_cp_id);
 }
 
+asio::awaitable<ResumeContext>
+CheckpointCoordinator::load_for_resume_async() const {
+    ResumeContext ctx;
+    if (!enabled()) co_return ctx;
+
+    auto cp_opt = co_await store_->load_latest_async(thread_id_);
+    if (!cp_opt) co_return ctx;
+
+    ctx.have_cp        = true;
+    ctx.checkpoint_id  = cp_opt->id;
+    ctx.channel_values = cp_opt->channel_values;
+    ctx.phase          = cp_opt->interrupt_phase;
+    ctx.next_nodes     = cp_opt->next_nodes;
+    ctx.barrier_state  = cp_opt->barrier_state;
+
+    // Same phase-aware step offset as load_for_resume.
+    ctx.start_step = static_cast<int>(cp_opt->step);
+    if (cp_opt->interrupt_phase == CheckpointPhase::After ||
+        cp_opt->interrupt_phase == CheckpointPhase::Completed ||
+        cp_opt->interrupt_phase == CheckpointPhase::Updated) {
+        ctx.start_step += 1;
+    }
+
+    auto pending = co_await store_->get_writes_async(thread_id_, ctx.checkpoint_id);
+    for (const auto& pw : pending) {
+        ctx.replay_results.emplace(pw.task_id, pending_to_node_result(pw));
+    }
+
+    co_return ctx;
+}
+
 } // namespace neograph::graph

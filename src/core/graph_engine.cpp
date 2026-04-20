@@ -279,7 +279,30 @@ asio::awaitable<RunResult>
 GraphEngine::resume_async(const std::string& thread_id,
                           const json& resume_value,
                           const GraphStreamCallback& cb) {
-    co_return resume(thread_id, resume_value, cb);
+    // Sem 3.7.5: real async resume. Mirrors sync resume() but the
+    // load_latest and the downstream super-step loop go through
+    // their *_async peers, so the whole resume path is non-blocking.
+    if (!checkpoint_store_)
+        throw std::runtime_error("Cannot resume: no checkpoint store configured");
+
+    auto cp_opt = co_await checkpoint_store_->load_latest_async(thread_id);
+    if (!cp_opt)
+        throw std::runtime_error("No checkpoint found for thread: " + thread_id);
+
+    if (cp_opt->next_nodes.size() == 1 &&
+        cp_opt->next_nodes[0] == std::string(END_NODE)) {
+        RunResult result;
+        result.output = cp_opt->channel_values;
+        result.checkpoint_id = cp_opt->id;
+        co_return result;
+    }
+
+    RunConfig config;
+    config.thread_id = thread_id;
+    config.max_steps = 50;
+
+    co_return co_await execute_graph_async(
+        config, cb, cp_opt->next_nodes, resume_value);
 }
 
 // =========================================================================
@@ -592,7 +615,7 @@ GraphEngine::execute_graph_async(const RunConfig& config,
     BarrierState barrier_state;
 
     if (is_resume) {
-        auto ctx = coord.load_for_resume();
+        auto ctx = co_await coord.load_for_resume_async();
         if (ctx.have_cp) {
             state.restore(ctx.channel_values);
             last_checkpoint_id = ctx.checkpoint_id;
