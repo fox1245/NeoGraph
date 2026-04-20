@@ -29,6 +29,7 @@ add_executable(neograph_tests
     test_async_sse_parser.cpp
     test_async_http_stream.cpp
     test_async_http_options.cpp
+    test_provider_async_default.cpp
 )
 
 # PostgresCheckpointStore integration tests are gated on NEOGRAPH_BUILD_POSTGRES

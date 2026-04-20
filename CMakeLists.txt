@@ -125,6 +125,7 @@ add_custom_target(generate_schemas DEPENDS ${GENERATED_DIR}/builtin_schemas.h)
 # ===========================================================================
 add_library(neograph_core STATIC
     src/core/json.cpp
+    src/core/provider.cpp
     src/core/graph_engine.cpp
     src/core/graph_compiler.cpp
     src/core/graph_coordinator.cpp
@@ -150,9 +151,13 @@ target_include_directories(neograph_core
 )
 
 target_link_libraries(neograph_core
-    PUBLIC  yyjson Threads::Threads
+    PUBLIC  yyjson Threads::Threads asio
     PRIVATE taskflow
 )
+
+# Coroutines are exposed through public headers (provider.h ships
+# asio::awaitable<ChatCompletion>); propagate C++20 to consumers.
+target_compile_features(neograph_core PUBLIC cxx_std_20)
 
 add_library(neograph::core ALIAS neograph_core)
 

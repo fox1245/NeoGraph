@@ -8,6 +8,9 @@
 #pragma once
 
 #include <neograph/types.h>
+
+#include <asio/awaitable.hpp>
+
 #include <functional>
 #include <memory>
 #include <stdexcept>
@@ -71,10 +74,39 @@ class Provider {
 
     /**
      * @brief Perform a synchronous LLM completion.
+     *
+     * Default implementation bridges to `complete_async()` via an
+     * internal io_context (see neograph::async::run_sync). Subclasses
+     * written against the sync path override this directly; async-
+     * native subclasses override `complete_async()` and inherit this.
+     *
      * @param params Completion parameters including model, messages, and tools.
      * @return The full completion response with message and usage statistics.
      */
-    virtual ChatCompletion complete(const CompletionParams& params) = 0;
+    virtual ChatCompletion complete(const CompletionParams& params);
+
+    /**
+     * @brief Perform an LLM completion as a coroutine.
+     *
+     * Returns an `asio::awaitable` that resolves to the completion
+     * response. The awaitable does no I/O on the caller's thread —
+     * resume it on an io_context to run the request.
+     *
+     * Default implementation delegates to the synchronous `complete()`
+     * (runs on whatever thread resumes the coroutine — caller's I/O
+     * loop will block on HTTP). Subclasses that perform async HTTP
+     * should override this to co_await non-blocking operations; when
+     * they do, `complete()` transparently bridges via `run_sync()`.
+     *
+     * @note Override at least one of `complete` / `complete_async`.
+     * Overriding neither results in infinite mutual recursion when
+     * the method is called.
+     *
+     * @param params Completion parameters.
+     * @return An awaitable yielding the full completion response.
+     */
+    virtual asio::awaitable<ChatCompletion>
+    complete_async(const CompletionParams& params);
 
     /**
      * @brief Perform a streaming LLM completion.
