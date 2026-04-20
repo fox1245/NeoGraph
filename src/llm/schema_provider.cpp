@@ -1,9 +1,13 @@
 #include <neograph/llm/schema_provider.h>
+#include <neograph/async/http_client.h>
 #include <builtin_schemas.h>
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
 
+#include <asio/this_coro.hpp>
+
+#include <charconv>
 #include <iostream>
 #include <stdexcept>
 #include <sstream>
@@ -380,6 +384,59 @@ static std::pair<std::string, std::string> split_host_prefix(const std::string& 
         }
     }
     return {host, prefix};
+}
+
+// Decomposed URL for the async client (host/port/path/tls separately).
+struct AsyncEndpoint {
+    std::string host;
+    std::string port;
+    std::string prefix;
+    bool        tls = false;
+};
+
+static AsyncEndpoint split_async_endpoint(const std::string& base_url) {
+    AsyncEndpoint out;
+    std::string rest = base_url;
+
+    auto scheme_end = rest.find("://");
+    if (scheme_end != std::string::npos) {
+        std::string scheme = rest.substr(0, scheme_end);
+        out.tls = (scheme == "https");
+        rest = rest.substr(scheme_end + 3);
+    }
+
+    auto path_start = rest.find('/');
+    std::string authority;
+    if (path_start != std::string::npos) {
+        authority = rest.substr(0, path_start);
+        out.prefix = rest.substr(path_start);
+    } else {
+        authority = rest;
+    }
+
+    auto colon = authority.find(':');
+    if (colon != std::string::npos) {
+        out.host = authority.substr(0, colon);
+        out.port = authority.substr(colon + 1);
+    } else {
+        out.host = authority;
+        out.port = out.tls ? "443" : "80";
+    }
+    return out;
+}
+
+// Parse Retry-After (seconds-integer shape only, matching the
+// httplib-based retry_after_seconds() above). Returns -1 when missing
+// or unparsable; clamps absurd values at 600s like the sync path.
+static int parse_retry_after_string(std::string_view raw) {
+    if (raw.empty()) return -1;
+    int seconds = 0;
+    auto begin = raw.data();
+    auto end = raw.data() + raw.size();
+    auto [ptr, ec] = std::from_chars(begin, end, seconds);
+    if (ec != std::errc{} || ptr != end || seconds < 0) return -1;
+    if (seconds > 600) return 600;
+    return seconds;
 }
 
 std::string SchemaProvider::build_endpoint(const std::string& model, bool streaming) const {
@@ -1012,52 +1069,66 @@ ChatCompletion::Usage SchemaProvider::parse_usage(const json& resp_json) const {
 // HTTP: complete()
 // ============================================================================
 
-ChatCompletion SchemaProvider::complete(const CompletionParams& params)
+asio::awaitable<ChatCompletion>
+SchemaProvider::complete_async(const CompletionParams& params)
 {
     // Build the request body under the schema lock so concurrent callers
     // don't race on shared yyjson_mut_doc templates. HTTP is issued OUTSIDE
     // the lock so parallel fan-out still overlaps on the wire.
     std::string body_str;
-    std::string endpoint;
-    httplib::Headers headers;
-    std::string host, prefix;
+    std::string endpoint_path;
+    std::vector<std::pair<std::string, std::string>> headers;
+    AsyncEndpoint endpoint;
     {
         std::lock_guard<std::mutex> lock(schema_mutex_);
         auto body = build_body(params);
         body_str = body.dump();
         std::string model = params.model.empty() ? user_config_.default_model : params.model;
-        std::tie(host, prefix) = split_host_prefix(conn_.base_url);
-        endpoint = prefix + build_endpoint(model, false);
+        endpoint = split_async_endpoint(conn_.base_url);
+        endpoint_path = endpoint.prefix + build_endpoint(model, false);
         for (const auto& [k, v] : build_headers()) {
-            headers.emplace(k, v);
+            headers.emplace_back(k, v);
         }
+        // async_post computes Content-Length from body but does not
+        // default Content-Type; httplib used to set it for us.
+        bool has_ct = false;
+        for (const auto& [k, _] : headers) {
+            if (k == "Content-Type" || k == "content-type") { has_ct = true; break; }
+        }
+        if (!has_ct) headers.emplace_back("Content-Type", "application/json");
     }
 
-    httplib::Client cli(host);
-    cli.set_read_timeout(user_config_.timeout_seconds, 0);
-    cli.set_connection_timeout(10, 0);
-
-    auto res = cli.Post(endpoint, headers, body_str, "application/json");
-
-    if (!res) {
-        throw std::runtime_error("HTTP request failed: " + httplib::to_string(res.error()));
+    async::RequestOptions opts;
+    if (user_config_.timeout_seconds > 0) {
+        opts.timeout = std::chrono::seconds(user_config_.timeout_seconds);
     }
 
-    if (res->status != 200) {
+    auto ex = co_await asio::this_coro::executor;
+    auto res = co_await async::async_post(
+        ex,
+        endpoint.host,
+        endpoint.port,
+        endpoint_path,
+        body_str,
+        std::move(headers),
+        endpoint.tls,
+        opts);
+
+    if (res.status != 200) {
         // Surface 429s as a typed exception so callers (typically a
         // RateLimitedProvider decorator) can honour Retry-After without
         // parsing strings. SchemaProvider itself stays policy-free: it
         // neither sleeps nor retries — that's a separate concern.
-        if (res->status == 429) {
+        if (res.status == 429) {
             throw RateLimitError(
-                "API error (HTTP 429): " + res->body,
-                retry_after_seconds(res));
+                "API error (HTTP 429): " + res.body,
+                parse_retry_after_string(res.retry_after));
         }
         throw std::runtime_error(
-            "API error (HTTP " + std::to_string(res->status) + "): " + res->body);
+            "API error (HTTP " + std::to_string(res.status) + "): " + res.body);
     }
 
-    auto resp_json = json::parse(res->body);
+    auto resp_json = json::parse(res.body);
 
     // parse_response / parse_usage read config strings + walk the freshly
     // parsed resp_json (thread-local). Still holding the lock is cheapest
@@ -1072,7 +1143,7 @@ ChatCompletion SchemaProvider::complete(const CompletionParams& params)
         completion.usage = parse_usage(resp_json);
     }
 
-    return completion;
+    co_return completion;
 }
 
 // ============================================================================
