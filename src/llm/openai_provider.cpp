@@ -1,8 +1,13 @@
 #include <neograph/llm/openai_provider.h>
 
+#include <neograph/async/http_client.h>
+
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
 
+#include <asio/this_coro.hpp>
+
+#include <charconv>
 #include <iostream>
 #include <stdexcept>
 #include <sstream>
@@ -45,7 +50,10 @@ OpenAIProvider::build_body(const CompletionParams& params) const
     return body;
 }
 
-// Parse base_url into host + path prefix
+// Parse base_url into host + path prefix (used by complete_stream which
+// still drives httplib synchronously). The httplib::Client constructor
+// is happy taking the scheme + authority verbatim, so we strip only the
+// path portion off the end.
 static std::pair<std::string, std::string> parse_url(const std::string& base_url) {
     std::string host = base_url;
     std::string prefix;
@@ -60,32 +68,103 @@ static std::pair<std::string, std::string> parse_url(const std::string& base_url
     return {host, prefix};
 }
 
-ChatCompletion
-OpenAIProvider::complete(const CompletionParams& params)
+namespace {
+
+// Decomposed URL for the async client, which wants host/port/path
+// separately and a tls flag.
+struct AsyncEndpoint {
+    std::string host;
+    std::string port;
+    std::string prefix;
+    bool        tls = false;
+};
+
+AsyncEndpoint split_base_url(const std::string& base_url) {
+    AsyncEndpoint out;
+    std::string rest = base_url;
+
+    auto scheme_end = rest.find("://");
+    if (scheme_end != std::string::npos) {
+        std::string scheme = rest.substr(0, scheme_end);
+        out.tls = (scheme == "https");
+        rest = rest.substr(scheme_end + 3);
+    }
+
+    auto path_start = rest.find('/');
+    std::string authority;
+    if (path_start != std::string::npos) {
+        authority = rest.substr(0, path_start);
+        out.prefix = rest.substr(path_start);
+    } else {
+        authority = rest;
+    }
+
+    auto colon = authority.find(':');
+    if (colon != std::string::npos) {
+        out.host = authority.substr(0, colon);
+        out.port = authority.substr(colon + 1);
+    } else {
+        out.host = authority;
+        out.port = out.tls ? "443" : "80";
+    }
+    return out;
+}
+
+// Parse Retry-After. Supports the seconds-integer shape only (the
+// HTTP-date shape is rare in practice for LLM endpoints; matching
+// SchemaProvider's behavior). Returns -1 when missing or unparsable.
+int parse_retry_after_seconds(std::string_view raw) {
+    if (raw.empty()) return -1;
+    int seconds = 0;
+    auto begin = raw.data();
+    auto end = raw.data() + raw.size();
+    auto [ptr, ec] = std::from_chars(begin, end, seconds);
+    if (ec != std::errc{} || ptr != end || seconds < 0) return -1;
+    return seconds;
+}
+
+} // namespace
+
+asio::awaitable<ChatCompletion>
+OpenAIProvider::complete_async(const CompletionParams& params)
 {
-    auto body = build_body(params);
-    auto [host, prefix] = parse_url(config_.base_url);
+    auto body_json = build_body(params);
+    auto body_str = body_json.dump();
+    auto endpoint = split_base_url(config_.base_url);
 
-    httplib::Client cli(host);
-    cli.set_read_timeout(config_.timeout_seconds, 0);
-    cli.set_connection_timeout(10, 0);
-
-    httplib::Headers headers = {
-        {"Authorization", "Bearer " + config_.api_key}
+    std::vector<std::pair<std::string, std::string>> headers = {
+        {"Authorization", "Bearer " + config_.api_key},
+        {"Content-Type",  "application/json"},
     };
 
-    auto res = cli.Post(prefix + "/v1/chat/completions", headers, body.dump(), "application/json");
-
-    if (!res) {
-        throw std::runtime_error("HTTP request failed: " + httplib::to_string(res.error()));
+    async::RequestOptions opts;
+    if (config_.timeout_seconds > 0) {
+        opts.timeout = std::chrono::seconds(config_.timeout_seconds);
     }
 
-    if (res->status != 200) {
+    auto ex = co_await asio::this_coro::executor;
+    auto res = co_await async::async_post(
+        ex,
+        endpoint.host,
+        endpoint.port,
+        endpoint.prefix + "/v1/chat/completions",
+        body_str,
+        std::move(headers),
+        endpoint.tls,
+        opts);
+
+    if (res.status == 429) {
+        throw RateLimitError(
+            "API error (HTTP 429): " + res.body,
+            parse_retry_after_seconds(res.retry_after));
+    }
+
+    if (res.status != 200) {
         throw std::runtime_error(
-            "API error (HTTP " + std::to_string(res->status) + "): " + res->body);
+            "API error (HTTP " + std::to_string(res.status) + "): " + res.body);
     }
 
-    auto resp_json = json::parse(res->body);
+    auto resp_json = json::parse(res.body);
     auto choice = resp_json.at("choices").at(0);
 
     ChatCompletion completion;
@@ -98,7 +177,7 @@ OpenAIProvider::complete(const CompletionParams& params)
         completion.usage.total_tokens = u.value("total_tokens", 0);
     }
 
-    return completion;
+    co_return completion;
 }
 
 ChatCompletion

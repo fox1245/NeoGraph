@@ -45,7 +45,19 @@ class OpenAIProvider : public Provider {
      */
     static std::unique_ptr<OpenAIProvider> create(const Config& config);
 
-    ChatCompletion complete(const CompletionParams& params) override;
+    /// Async completion — opens a fresh HTTP(S) connection per call
+    /// using `neograph::async::async_post`. No connection pool yet:
+    /// reusing a `ConnPool` across the sync facade is unsafe because
+    /// `run_sync` spins up a fresh io_context per call, leaving any
+    /// pooled sockets bound to a destroyed executor. Pool wiring
+    /// arrives once the engine guarantees a persistent executor
+    /// (Stage 3 / Semester 3).
+    asio::awaitable<ChatCompletion>
+    complete_async(const CompletionParams& params) override;
+
+    /// Sync completion is inherited from `Provider::complete()`, which
+    /// drives `complete_async` via `neograph::async::run_sync`.
+
     ChatCompletion complete_stream(const CompletionParams& params,
                                    const StreamCallback& on_chunk) override;
     std::string get_name() const override { return "openai"; }
