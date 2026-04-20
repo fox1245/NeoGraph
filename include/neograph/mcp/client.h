@@ -14,6 +14,9 @@
 #pragma once
 
 #include <neograph/tool.h>
+
+#include <asio/awaitable.hpp>
+
 #include <string>
 #include <vector>
 #include <memory>
@@ -129,7 +132,25 @@ class MCPClient {
      */
     json call_tool(const std::string& name, const json& arguments);
 
+    /**
+     * @brief Async variant of rpc_call for the HTTP transport.
+     *
+     * stdio sessions still drive their own blocking exchange (see 2.7
+     * for the asio::posix migration); this awaitable resolves to the
+     * stdio result on the calling thread when the client is in stdio
+     * mode, so callers can use one async path uniformly.
+     *
+     * @param method JSON-RPC method name.
+     * @param params Method parameters (defaults to empty object).
+     * @return Awaitable resolving to the `result` field of the JSON-RPC response.
+     */
+    asio::awaitable<json> rpc_call_async(
+        const std::string& method,
+        const json& params = json::object());
+
   private:
+    /// Sync rpc_call — for stdio it dispatches synchronously; for HTTP
+    /// it routes through `run_sync(rpc_call_async(...))`.
     json rpc_call(const std::string& method, const json& params = json::object());
 
     // HTTP state (empty strings when in stdio mode).

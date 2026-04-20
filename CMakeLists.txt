@@ -294,7 +294,7 @@ if(NEOGRAPH_BUILD_MCP)
 
     target_link_libraries(neograph_mcp
         PUBLIC  neograph_core
-        PRIVATE httplib OpenSSL::SSL OpenSSL::Crypto
+        PRIVATE neograph_async OpenSSL::SSL OpenSSL::Crypto
     )
 
     add_library(neograph::mcp ALIAS neograph_mcp)
