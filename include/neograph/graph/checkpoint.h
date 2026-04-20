@@ -9,6 +9,9 @@
 #pragma once
 
 #include <neograph/graph/types.h>
+
+#include <asio/awaitable.hpp>
+
 #include <optional>
 #include <mutex>
 #include <map>
@@ -163,25 +166,35 @@ class CheckpointStore {
 public:
     virtual ~CheckpointStore() = default;
 
+    // ── Sync API ────────────────────────────────────────────────────────
+    //
+    // Stage 3 / Semester 3.1: each sync method is now non-pure with a
+    // default implementation that bridges to its async peer via
+    // `neograph::async::run_sync`. The legacy stores (InMemory, SQLite,
+    // Postgres) still override these directly. Async-native stores can
+    // override only the *_async() variants and inherit these as facades.
+    // Override at least one side per method — overriding neither yields
+    // infinite mutual recursion at call time.
+
     /**
      * @brief Save a checkpoint.
      * @param cp The checkpoint to persist.
      */
-    virtual void save(const Checkpoint& cp) = 0;
+    virtual void save(const Checkpoint& cp);
 
     /**
      * @brief Load the most recent checkpoint for a thread.
      * @param thread_id Thread identifier.
      * @return The latest checkpoint, or std::nullopt if none exists.
      */
-    virtual std::optional<Checkpoint> load_latest(const std::string& thread_id) = 0;
+    virtual std::optional<Checkpoint> load_latest(const std::string& thread_id);
 
     /**
      * @brief Load a checkpoint by its unique ID.
      * @param id Checkpoint UUID.
      * @return The checkpoint, or std::nullopt if not found.
      */
-    virtual std::optional<Checkpoint> load_by_id(const std::string& id) = 0;
+    virtual std::optional<Checkpoint> load_by_id(const std::string& id);
 
     /**
      * @brief List checkpoints for a thread, ordered by timestamp (newest first).
@@ -190,13 +203,29 @@ public:
      * @return Vector of checkpoints.
      */
     virtual std::vector<Checkpoint> list(const std::string& thread_id,
-                                          int limit = 100) = 0;
+                                          int limit = 100);
 
     /**
      * @brief Delete all checkpoints for a thread.
      * @param thread_id Thread identifier to delete.
      */
-    virtual void delete_thread(const std::string& thread_id) = 0;
+    virtual void delete_thread(const std::string& thread_id);
+
+    // ── Async API ───────────────────────────────────────────────────────
+    //
+    // Each method's default body co_returns the matching sync call. Real
+    // async stores (libpq pipeline in Sem 3.3) override these to perform
+    // non-blocking I/O.
+
+    virtual asio::awaitable<void> save_async(const Checkpoint& cp);
+    virtual asio::awaitable<std::optional<Checkpoint>>
+    load_latest_async(const std::string& thread_id);
+    virtual asio::awaitable<std::optional<Checkpoint>>
+    load_by_id_async(const std::string& id);
+    virtual asio::awaitable<std::vector<Checkpoint>>
+    list_async(const std::string& thread_id, int limit = 100);
+    virtual asio::awaitable<void>
+    delete_thread_async(const std::string& thread_id);
 
     // ── Pending writes (fine-grained progress log) ──────────────────────
 
@@ -246,6 +275,21 @@ public:
      */
     virtual void clear_writes(const std::string& /*thread_id*/,
                               const std::string& /*parent_checkpoint_id*/) {}
+
+    // Async peers for the pending-writes API. Each defaults to calling
+    // the matching sync method (which itself is a no-op for stores that
+    // don't override it), so existing custom stores keep working.
+
+    virtual asio::awaitable<void> put_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id,
+        const PendingWrite& write);
+    virtual asio::awaitable<std::vector<PendingWrite>> get_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id);
+    virtual asio::awaitable<void> clear_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id);
 };
 
 /**
