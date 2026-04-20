@@ -34,7 +34,10 @@ add_executable(neograph_tests
 )
 
 if(NEOGRAPH_BUILD_MCP)
-    target_sources(neograph_tests PRIVATE test_mcp_client_async.cpp)
+    target_sources(neograph_tests PRIVATE
+        test_mcp_client_async.cpp
+        test_mcp_stdio_async.cpp
+    )
 endif()
 
 # PostgresCheckpointStore integration tests are gated on NEOGRAPH_BUILD_POSTGRES

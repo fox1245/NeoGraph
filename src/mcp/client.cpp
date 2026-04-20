@@ -3,12 +3,18 @@
 #include <neograph/async/http_client.h>
 #include <neograph/async/run_sync.h>
 
+#include <asio/posix/stream_descriptor.hpp>
+#include <asio/read_until.hpp>
+#include <asio/streambuf.hpp>
 #include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
+#include <asio/write.hpp>
 
 #include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <istream>
 #include <mutex>
 #include <stdexcept>
 #include <system_error>
@@ -33,8 +39,21 @@ public:
     ~StdioSession();
 
     // Send a JSON-RPC request, block until the matching response arrives.
-    // `id_out` receives the allocated request id for diagnostics / matching.
     json rpc_call(const std::string& method, const json& params);
+
+    /// Async variant — wraps the subprocess pipes in
+    /// asio::posix::stream_descriptor for non-blocking I/O. The mutex
+    /// that serialises concurrent rpc_call() calls is reused here, so
+    /// concurrent rpc_call_async invocations on the *same session* and
+    /// *same single-threaded io_context* will deadlock — the second
+    /// coroutine's lock acquire blocks the worker thread that the
+    /// first needs to drive its I/O completions. The pragmatic fix is
+    /// to not multi-call one session from one io_context; one MCP
+    /// session per logical caller is the typical usage. A proper
+    /// awaitable mutex (asio::experimental::channel-based) is future
+    /// work tracked under Sem 4 cleanup.
+    asio::awaitable<json> rpc_call_async(
+        const std::string& method, const json& params);
 
     // Send a JSON-RPC notification (no id, no response expected).
     void notify(const std::string& method, const json& params);
@@ -47,12 +66,18 @@ private:
     std::string read_line_locked();       ///< caller holds mtx_
     void write_frame_locked(const json& j); ///< caller holds mtx_
 
+    asio::awaitable<std::string> async_read_line_locked(
+        asio::posix::stream_descriptor& out);
+    asio::awaitable<void> async_write_frame_locked(
+        asio::posix::stream_descriptor& in, const json& j);
+
     pid_t pid_ = -1;
     int   stdin_fd_ = -1;   // parent → child
     int   stdout_fd_ = -1;  // child  → parent
 
     std::mutex   mtx_;
-    std::string  buffer_;
+    std::string  buffer_;     ///< sync read buffer
+    std::string  abuffer_;    ///< async read buffer (separate to avoid mixing)
     std::atomic<int> next_id_{0};
 };
 
@@ -225,6 +250,102 @@ void StdioSession::notify(const std::string& method, const json& params) {
     write_frame_locked(n);
 }
 
+asio::awaitable<void>
+StdioSession::async_write_frame_locked(asio::posix::stream_descriptor& in,
+                                       const json& j) {
+    std::string line = j.dump();
+    line.push_back('\n');
+    co_await asio::async_write(in, asio::buffer(line), asio::use_awaitable);
+}
+
+asio::awaitable<std::string>
+StdioSession::async_read_line_locked(asio::posix::stream_descriptor& out) {
+    auto nl = abuffer_.find('\n');
+    if (nl == std::string::npos) {
+        asio::streambuf sbuf;
+        // Seed asio's streambuf with whatever we already have so
+        // async_read_until doesn't re-read those bytes.
+        if (!abuffer_.empty()) {
+            std::ostream os(&sbuf);
+            os.write(abuffer_.data(), static_cast<std::streamsize>(abuffer_.size()));
+            abuffer_.clear();
+        }
+        std::size_t n = co_await asio::async_read_until(
+            out, sbuf, '\n', asio::use_awaitable);
+        // Re-merge into our string buffer so the rest of the trailing
+        // bytes (after the newline) are kept for the next call.
+        std::string drained(asio::buffers_begin(sbuf.data()),
+                            asio::buffers_begin(sbuf.data()) + sbuf.size());
+        abuffer_.append(drained);
+        nl = abuffer_.find('\n');
+        if (nl == std::string::npos) {
+            // async_read_until promised a delim was found within `n`
+            // bytes; this branch is defensive.
+            throw std::runtime_error(
+                "StdioSession::async_read_line: delimiter missing after "
+                + std::to_string(n) + " bytes");
+        }
+    }
+    std::string line = abuffer_.substr(0, nl);
+    abuffer_.erase(0, nl + 1);
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    co_return line;
+}
+
+asio::awaitable<json>
+StdioSession::rpc_call_async(const std::string& method, const json& params) {
+    const int id = ++next_id_;
+
+    json req = {
+        {"jsonrpc", "2.0"},
+        {"id", id},
+        {"method", method},
+        {"params", params}
+    };
+
+    auto ex = co_await asio::this_coro::executor;
+
+    // Wrap the raw pipe fds in stream_descriptors *without* taking
+    // ownership — we release() before destruction so the session
+    // retains the fds across calls. Fresh wrappers per call avoid the
+    // executor-lifetime issue that hits ConnPool when callers funnel
+    // through the run_sync facade (each run_sync uses a fresh
+    // io_context that dies on return).
+    asio::posix::stream_descriptor in_desc(ex, stdin_fd_);
+    asio::posix::stream_descriptor out_desc(ex, stdout_fd_);
+    struct ReleaseGuard {
+        asio::posix::stream_descriptor& d;
+        ~ReleaseGuard() { try { d.release(); } catch (...) {} }
+    } in_guard{in_desc}, out_guard{out_desc};
+
+    std::lock_guard<std::mutex> lock(mtx_);
+    co_await async_write_frame_locked(in_desc, req);
+
+    for (int guard = 0; guard < 1024; ++guard) {
+        std::string line = co_await async_read_line_locked(out_desc);
+        if (line.empty()) continue;
+
+        json resp;
+        try {
+            resp = json::parse(line);
+        } catch (const std::exception&) {
+            continue;
+        }
+
+        if (!resp.contains("id")) continue;
+        if (resp["id"] != id)     continue;
+
+        if (resp.contains("error")) {
+            auto err = resp["error"];
+            throw std::runtime_error(
+                "MCP stdio RPC error: " + err.value("message", "unknown"));
+        }
+        co_return resp.value("result", json::object());
+    }
+    throw std::runtime_error(
+        "StdioSession::rpc_call_async: giving up after 1024 lines");
+}
+
 } // namespace detail
 
 // ===========================================================================
@@ -379,11 +500,7 @@ json MCPClient::rpc_call(const std::string& method, const json& params) {
 asio::awaitable<json>
 MCPClient::rpc_call_async(const std::string& method, const json& params) {
     if (stdio_session_) {
-        // stdio sessions still drive a blocking rpc_call internally
-        // (Sem 2.7 migrates them to asio::posix::stream_descriptor).
-        // Yield to the executor first so callers see consistent
-        // suspend/resume shape, then run the sync call inline.
-        co_return stdio_session_->rpc_call(method, params);
+        co_return co_await stdio_session_->rpc_call_async(method, params);
     }
 
     json body;
