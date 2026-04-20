@@ -226,13 +226,13 @@ RunResult GraphEngine::run(const RunConfig& config) {
 
 asio::awaitable<RunResult>
 GraphEngine::run_async(const RunConfig& config) {
-    // Stage 3 / Sem 3.6 (API surface): thin wrapper today; the
-    // engine internals (super-step loop, node dispatch, checkpoint
-    // writes) are not yet coroutine-native, so this still blocks
-    // the resumed thread for the full run duration. Wrapper is
-    // intentional — external code can migrate to the async surface
-    // ahead of the internal refactor.
-    co_return run(config);
+    // Stage 3 / Sem 3.6 internal step 3: wired to the async super-
+    // step loop. Single-node steps and checkpoint I/O all flow through
+    // co_await; only parallel fan-out and Send dispatch still block
+    // the io_context (Sem 3.7 will fix those). For linear/conditional
+    // graphs this means real interleaving across concurrent runs on
+    // a shared io_context.
+    co_return co_await execute_graph_async(config, nullptr);
 }
 
 RunResult GraphEngine::run_stream(const RunConfig& config,
@@ -243,7 +243,7 @@ RunResult GraphEngine::run_stream(const RunConfig& config,
 asio::awaitable<RunResult>
 GraphEngine::run_stream_async(const RunConfig& config,
                               const GraphStreamCallback& cb) {
-    co_return run_stream(config, cb);
+    co_return co_await execute_graph_async(config, cb);
 }
 
 RunResult GraphEngine::resume(const std::string& thread_id,
@@ -548,6 +548,267 @@ RunResult GraphEngine::execute_graph(const RunConfig& config,
     }
 
     return result;
+}
+
+// =========================================================================
+// execute_graph_async — coroutine peer (Sem 3.6 internal step 3)
+// =========================================================================
+//
+// This is a near-mirror of execute_graph above. Diff vs the sync
+// version:
+//   * run_one     → co_await run_one_async
+//   * coord.save_super_step / clear_pending_writes → _async via co_await
+//   * run_parallel stays sync (Sem 3.7 will migrate it)
+//   * run_sends stays sync (also Sem 3.7-adjacent)
+//   * NodeInterrupt catch block keeps the sync coord.store()->load_latest
+//     call — load_latest itself is fine inside catch (only co_await is
+//     forbidden there per the GCC 13 ICE).
+//
+// The duplication is deliberate: trying to share the body via a
+// template or strategy object would either lose the coroutine
+// suspension points or force the sync path through run_sync. Both
+// trade off real value for less code; explicit twins are the
+// honest tradeoff until Sem 3.7 lets the parallel path also go
+// async, at which point the sync execute_graph becomes a thin
+// `return run_sync(execute_graph_async(...))` wrapper.
+
+asio::awaitable<RunResult>
+GraphEngine::execute_graph_async(const RunConfig& config,
+                                 const GraphStreamCallback& cb,
+                                 const std::vector<std::string>& resume_from,
+                                 const json& resume_value) {
+    const bool is_resume = !resume_from.empty();
+
+    GraphState state;
+    init_state(state);
+
+    StreamMode stream_mode = config.stream_mode;
+    CheckpointCoordinator coord(checkpoint_store_, config.thread_id);
+
+    std::string last_checkpoint_id;
+    int start_step = 0;
+
+    std::unordered_map<std::string, NodeResult> replay_results;
+    BarrierState barrier_state;
+
+    if (is_resume) {
+        auto ctx = coord.load_for_resume();
+        if (ctx.have_cp) {
+            state.restore(ctx.channel_values);
+            last_checkpoint_id = ctx.checkpoint_id;
+            start_step         = ctx.start_step;
+            replay_results     = std::move(ctx.replay_results);
+            barrier_state      = std::move(ctx.barrier_state);
+
+            if (!resume_value.is_null()) {
+                // Build the resume message outside the brace-init that
+                // would otherwise nest inside the coroutine body. Same
+                // GCC 13 ICE shape; same workaround.
+                std::string content = resume_value.is_string()
+                    ? resume_value.get<std::string>()
+                    : resume_value.dump();
+                json resume_msg;
+                resume_msg["role"]    = "user";
+                resume_msg["content"] = content;
+                state.write("messages", json::array({resume_msg}));
+            }
+        }
+    } else {
+        apply_input(state, config.input);
+    }
+
+    std::vector<std::string> ready =
+        is_resume ? resume_from : scheduler_->plan_start_step();
+
+    std::vector<std::string> trace;
+    bool hit_end = false;
+
+    std::vector<Send> pending_sends;
+
+    for (int step = start_step; step < config.max_steps + start_step; ++step) {
+        if (ready.empty() || hit_end) break;
+
+        // --- interrupt_before check ---
+        bool is_resume_entry = (is_resume && step == start_step);
+        if (!is_resume_entry) {
+            for (const auto& node_name : ready) {
+                if (interrupt_before_.count(node_name) && coord.enabled()) {
+                    auto cp_id = co_await coord.save_super_step_async(state,
+                        node_name, ready,
+                        CheckpointPhase::Before, step, last_checkpoint_id,
+                        barrier_state);
+
+                    RunResult result;
+                    result.output          = state.serialize();
+                    result.interrupted     = true;
+                    result.interrupt_node  = node_name;
+                    json iv;
+                    iv["message"] = "Interrupt before node: " + node_name;
+                    result.interrupt_value = iv;
+                    result.checkpoint_id   = cp_id;
+                    result.execution_trace = std::move(trace);
+
+                    if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
+                        json data;
+                        data["phase"]         = "before";
+                        data["checkpoint_id"] = cp_id;
+                        cb(GraphEvent{GraphEvent::Type::INTERRUPT, node_name, data});
+                    }
+                    co_return result;
+                }
+            }
+        }
+
+        // --- Execute ready nodes ---
+        pending_sends.clear();
+        std::vector<NodeResult> step_results;
+
+        // Capture NodeInterrupt outside the catch (GCC-13-safe) so the
+        // checkpoint lookup that follows can do its own work.
+        bool interrupted = false;
+        std::string interrupt_reason;
+
+        try {
+            if (ready.size() == 1) {
+                step_results.push_back(co_await executor_->run_one_async(
+                    ready[0], step, state, replay_results,
+                    coord, last_checkpoint_id, barrier_state,
+                    trace, cb, stream_mode));
+            } else {
+                // Sem 3.7 will replace this with an async parallel
+                // path. Today it blocks the io_context for the
+                // duration of the slowest fan-out worker.
+                step_results = executor_->run_parallel(
+                    ready, step, state, replay_results,
+                    coord, last_checkpoint_id, barrier_state,
+                    trace, cb, stream_mode);
+            }
+        } catch (const NodeInterrupt& ni) {
+            interrupted = true;
+            interrupt_reason = ni.reason();
+        }
+
+        if (interrupted) {
+            RunResult result;
+            result.output          = state.serialize();
+            result.interrupted     = true;
+            result.interrupt_node  = interrupt_reason;
+            json iv;
+            iv["reason"] = interrupt_reason;
+            iv["type"]   = "NodeInterrupt";
+            result.interrupt_value = iv;
+            result.execution_trace = std::move(trace);
+
+            if (coord.enabled()) {
+                auto cp_opt = coord.store()->load_latest(coord.thread_id());
+                if (cp_opt) result.checkpoint_id = cp_opt->id;
+            }
+            co_return result;
+        }
+
+        // --- Collect Send requests ---
+        for (auto& nr : step_results) {
+            for (auto& s : nr.sends) {
+                pending_sends.push_back(std::move(s));
+            }
+        }
+
+        // --- Execute pending Sends BEFORE interrupt_after ---
+        // Stays sync; same caveat as run_parallel.
+        executor_->run_sends(pending_sends, step, state, replay_results,
+                             coord, last_checkpoint_id,
+                             trace, cb, stream_mode);
+
+        if (cb && has_mode(stream_mode, StreamMode::VALUES)) {
+            cb(GraphEvent{GraphEvent::Type::CHANNEL_WRITE, "__state__",
+                          state.serialize()});
+        }
+
+        // --- interrupt_after check ---
+        for (const auto& node_name : ready) {
+            if (interrupt_after_.count(node_name) && coord.enabled()) {
+                std::set<std::string> union_next;
+                for (const auto& rn : ready) {
+                    for (const auto& nx : scheduler_->resolve_next_nodes(rn, state)) {
+                        union_next.insert(nx);
+                    }
+                }
+                std::vector<std::string> nexts(union_next.begin(), union_next.end());
+                if (nexts.empty()) nexts.push_back(std::string(END_NODE));
+
+                auto cp_id = co_await coord.save_super_step_async(state,
+                    node_name, nexts, CheckpointPhase::After, step,
+                    last_checkpoint_id, barrier_state);
+
+                RunResult result;
+                result.output          = state.serialize();
+                result.interrupted     = true;
+                result.interrupt_node  = node_name;
+                json iv;
+                iv["message"] = "Interrupt after node: " + node_name;
+                result.interrupt_value = iv;
+                result.checkpoint_id   = cp_id;
+                result.execution_trace = std::move(trace);
+
+                if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
+                    json data;
+                    data["phase"]         = "after";
+                    data["checkpoint_id"] = cp_id;
+                    cb(GraphEvent{GraphEvent::Type::INTERRUPT, node_name, data});
+                }
+                co_return result;
+            }
+        }
+
+        auto plan = scheduler_->plan_next_step(
+            ready, step_results, state, barrier_state);
+        hit_end = hit_end || plan.hit_end;
+        ready  = std::move(plan.ready);
+
+        if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
+            if (plan.winning_command_goto) {
+                json data;
+                data["command_goto"] = *plan.winning_command_goto;
+                cb(GraphEvent{GraphEvent::Type::NODE_START, "__routing__", data});
+            }
+            if (!ready.empty()) {
+                json next_nodes_arr = json::array();
+                for (const auto& n : ready) next_nodes_arr.push_back(n);
+                json data;
+                data["next_nodes"] = next_nodes_arr;
+                data["step"]       = step;
+                cb(GraphEvent{GraphEvent::Type::NODE_START, "__routing__", data});
+            }
+        }
+
+        if (coord.enabled()) {
+            std::vector<std::string> next_nodes_for_cp =
+                ready.empty() ? std::vector<std::string>{std::string(END_NODE)}
+                              : ready;
+            const std::string parent_cp_id = last_checkpoint_id;
+            auto cp_id = co_await coord.save_super_step_async(state,
+                trace.back(), next_nodes_for_cp, CheckpointPhase::Completed,
+                step, parent_cp_id, barrier_state);
+            last_checkpoint_id = cp_id;
+
+            co_await coord.clear_pending_writes_async(parent_cp_id);
+            replay_results.clear();
+        }
+    }
+
+    RunResult result;
+    result.output          = state.serialize();
+    result.execution_trace = std::move(trace);
+    if (!last_checkpoint_id.empty()) {
+        result.checkpoint_id = last_checkpoint_id;
+    }
+
+    auto messages = state.get_messages();
+    if (!messages.empty() && messages.back().role == "assistant") {
+        result.output["final_response"] = messages.back().content;
+    }
+
+    co_return result;
 }
 
 } // namespace neograph::graph

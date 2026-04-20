@@ -5,23 +5,18 @@
 // when they want to host many concurrent agents without paying the
 // thread-per-agent cost that the sync run() implies.
 //
-// **Today's behaviour (Stage 3 / Sem 3.6 API surface)**: the engine
-// internals (super-step loop, Taskflow fan-out, checkpoint writes)
-// are still synchronous, so the wrapper effectively serializes runs
-// on the io_context's worker thread. The example still exercises the
-// awaitable surface end-to-end and the API contract is the one users
-// will see once the engine internals get coroutinized.
-//
-// **Tomorrow's behaviour (Sem 3.6 internal)**: real interleaving
-// across runs — when one agent's LLM call is in flight (already
-// non-blocking via Provider::complete_async), other agents make
-// forward progress on the same thread.
+// As of Sem 3.6 internal step 3, GraphEngine::run_async dispatches
+// single-node super-steps through the coroutine path:
+// run_one_async → execute_node_with_retry_async → node->execute_full_async.
+// A node whose execute_async issues a real co_await (timer, HTTP,
+// MCP, db) yields the io_context's worker thread for siblings to run.
 //
 // Scenario: three agents each run a tiny graph that simulates a
-// 50ms work step. Sync would take ~150ms (3 × 50). Async on one
-// io_context takes ~50ms once the engine internals are coroutine-
-// native; today's wrapper still takes ~150ms. The point is the API
-// shape — switch your call sites now, gain the speed-up later.
+// 50ms work step using asio::steady_timer (NOT std::this_thread::
+// sleep_for). With a sync work node the io_context would still be
+// pinned for the full 50ms; with the async work node below all
+// three agents make progress in parallel on a single thread —
+// total elapsed converges on ~50ms, not 150ms.
 //
 // Usage: ./example_async_concurrent_runs
 
@@ -30,6 +25,9 @@
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
 
 #include <chrono>
 #include <iostream>
@@ -37,6 +35,11 @@
 
 namespace ng = neograph::graph;
 
+// Async-native work node — issues asio::steady_timer.async_wait
+// instead of std::this_thread::sleep_for. The sync execute() is
+// inherited from GraphNode and routes through run_sync; the async
+// path drives this directly, letting siblings on the same
+// io_context interleave during the wait.
 class WorkNode : public ng::GraphNode {
     std::string name_;
     int delay_ms_;
@@ -44,10 +47,14 @@ public:
     WorkNode(std::string name, int delay_ms)
         : name_(std::move(name)), delay_ms_(delay_ms) {}
 
-    std::vector<ng::ChannelWrite> execute(const ng::GraphState&) override {
-        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms_));
-        return {ng::ChannelWrite{"result",
-                                 neograph::json("done by " + name_)}};
+    asio::awaitable<std::vector<ng::ChannelWrite>>
+    execute_async(const ng::GraphState&) override {
+        auto ex = co_await asio::this_coro::executor;
+        asio::steady_timer t(ex);
+        t.expires_after(std::chrono::milliseconds(delay_ms_));
+        co_await t.async_wait(asio::use_awaitable);
+        co_return std::vector<ng::ChannelWrite>{
+            ng::ChannelWrite{"result", neograph::json("done by " + name_)}};
     }
     std::string get_name() const override { return name_; }
 };
@@ -113,8 +120,8 @@ int main() {
 
     std::cout << "\n" << completed.load() << "/" << N
               << " agents completed in " << elapsed_ms << "ms.\n"
-              << "(Sync sequential would be ~" << (50 * N) << "ms; future "
-              << "internal coroutines will collapse this toward the longest "
-              << "single run.)\n";
+              << "(Sync sequential would be ~" << (50 * N)
+              << "ms; the async work node collapses this toward the "
+              << "longest single run — ~50ms with full overlap.)\n";
     return 0;
 }

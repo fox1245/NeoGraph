@@ -28,7 +28,14 @@ std::vector<ChannelWrite> GraphNode::execute_stream(
 asio::awaitable<std::vector<ChannelWrite>>
 GraphNode::execute_stream_async(const GraphState& state,
                                 const GraphStreamCallback& cb) {
-    co_return execute_stream(state, cb);
+    // Default to async-native execute_async to keep the coroutine
+    // chain end-to-end async. Falling back to the sync execute_stream
+    // would funnel through run_sync, which blocks the calling
+    // io_context's worker for the duration — and break the io_context
+    // overlap that the async engine path is designed to produce.
+    // Stream-aware nodes that need callback events override this.
+    (void)cb;
+    co_return co_await execute_async(state);
 }
 
 // --- GraphNode default execute_full: wraps execute() ---
@@ -38,7 +45,15 @@ NodeResult GraphNode::execute_full(const GraphState& state) {
 
 asio::awaitable<NodeResult>
 GraphNode::execute_full_async(const GraphState& state) {
-    co_return execute_full(state);
+    // Async-native default: bridge through execute_async (not the sync
+    // execute_full) so the coroutine chain stays suspendable end-to-
+    // end. Overriding execute_full_async directly is the only way to
+    // emit Command/Send from an async node — that's expected; the
+    // default exists so a node that overrides only execute_async
+    // still gets a valid NodeResult assembly without forcing every
+    // implementer to write the wrapper.
+    auto writes = co_await execute_async(state);
+    co_return NodeResult{std::move(writes)};
 }
 
 // --- GraphNode default execute_full_stream ---
@@ -60,7 +75,16 @@ NodeResult GraphNode::execute_full_stream(
 asio::awaitable<NodeResult>
 GraphNode::execute_full_stream_async(const GraphState& state,
                                      const GraphStreamCallback& cb) {
-    co_return execute_full_stream(state, cb);
+    // Async-native default mirroring execute_full_stream's logic: get
+    // the full result first (Command/Send-aware), then if the node
+    // didn't override execute_full_async, replace its writes with the
+    // streaming variant so LLM_TOKEN events flow through cb. Stays
+    // entirely on the coroutine path — no run_sync detour.
+    auto result = co_await execute_full_async(state);
+    if (!result.command && result.sends.empty()) {
+        result.writes = co_await execute_stream_async(state, cb);
+    }
+    co_return result;
 }
 
 // =========================================================================
