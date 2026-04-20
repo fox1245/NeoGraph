@@ -675,10 +675,11 @@ GraphEngine::execute_graph_async(const RunConfig& config,
                     coord, last_checkpoint_id, barrier_state,
                     trace, cb, stream_mode));
             } else {
-                // Sem 3.7 will replace this with an async parallel
-                // path. Today it blocks the io_context for the
-                // duration of the slowest fan-out worker.
-                step_results = executor_->run_parallel(
+                // Sem 3.7: full async fan-out via
+                // asio::experimental::make_parallel_group. The
+                // io_context's worker thread now stays free for other
+                // coroutines while the parallel branches run.
+                step_results = co_await executor_->run_parallel_async(
                     ready, step, state, replay_results,
                     coord, last_checkpoint_id, barrier_state,
                     trace, cb, stream_mode);

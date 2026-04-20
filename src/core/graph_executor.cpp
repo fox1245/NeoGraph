@@ -2,6 +2,9 @@
 #include <neograph/graph/state.h>
 #include <neograph/graph/loader.h>
 
+#include <asio/co_spawn.hpp>
+#include <asio/deferred.hpp>
+#include <asio/experimental/parallel_group.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
@@ -514,6 +517,123 @@ std::vector<NodeResult> NodeExecutor::run_parallel(
         trace.push_back(node_name);
     }
     return step_results;
+}
+
+// =========================================================================
+// run_parallel_async: coroutine peer (Sem 3.7)
+// =========================================================================
+//
+// Uses asio::experimental::make_parallel_group on a vector of
+// co_spawn-deferred workers. wait_for_all gives back a
+// (completion_order, exception_ptrs, results) triple — we ignore
+// order (apply writes in ready-order, matching sync run_parallel)
+// and fold exceptions down to first_exception, mirroring the sync
+// taskflow contract.
+//
+// GCC-13-safe: no co_await inside a catch; no nested brace-init in
+// the coroutine body. The first-exception classifier uses a separate
+// try/catch to tag NodeInterrupt; the cp save happens outside.
+
+asio::awaitable<std::vector<NodeResult>>
+NodeExecutor::run_parallel_async(
+    const std::vector<std::string>& ready,
+    int step,
+    GraphState& state,
+    const std::unordered_map<std::string, NodeResult>& replay,
+    CheckpointCoordinator& coord,
+    const std::string& parent_cp_id,
+    const BarrierState& barrier_state,
+    std::vector<std::string>& trace,
+    const GraphStreamCallback& cb,
+    StreamMode stream_mode) {
+
+    auto ex = co_await asio::this_coro::executor;
+
+    // Per-branch worker. Captures by ref — all captured refs outlive
+    // co_await below (stack scope), and state reads are
+    // shared_mutex-guarded inside GraphState. No worker writes to
+    // shared state; the NodeResults are aggregated out-of-band by the
+    // parallel_group and applied in-order after wait_for_all returns.
+    auto worker = [&, this](std::string node_name) -> asio::awaitable<NodeResult> {
+        const std::string task_id = make_static_task_id(step, node_name);
+        auto replay_it = replay.find(task_id);
+        if (replay_it != replay.end()) {
+            co_return replay_it->second;
+        }
+        auto nr = co_await execute_node_with_retry_async(
+            node_name, state, cb, stream_mode);
+        co_await coord.record_pending_write_async(
+            parent_cp_id, task_id, task_id, node_name, nr, step);
+        co_return nr;
+    };
+
+    // Build deferred ops, one per ready node. co_spawn-with-deferred
+    // returns an op that, when awaited, runs the worker coroutine and
+    // completes with (exception_ptr, NodeResult).
+    using DeferredOp = decltype(asio::co_spawn(
+        ex, worker(std::declval<std::string>()), asio::deferred));
+    std::vector<DeferredOp> ops;
+    ops.reserve(ready.size());
+    for (const auto& node_name : ready) {
+        ops.push_back(asio::co_spawn(ex, worker(node_name), asio::deferred));
+    }
+
+    // wait_for_all returns:
+    //   completion_order : std::vector<std::size_t>
+    //   excs             : std::vector<std::exception_ptr>  (per-branch)
+    //   values           : std::vector<NodeResult>          (per-branch)
+    auto [order, excs, values] = co_await asio::experimental::make_parallel_group(
+        std::move(ops))
+        .async_wait(asio::experimental::wait_for_all(),
+                    asio::use_awaitable);
+    (void)order;  // we apply in ready-order regardless of completion-order
+
+    // Find first exception + classify. NodeInterrupt gets a dedicated
+    // cp-save with next_nodes={offender} so resume re-enters on just
+    // that node (siblings' pending writes are already recorded).
+    std::exception_ptr first_exception;
+    std::string        first_exception_node;
+    bool               is_node_interrupt = false;
+    for (std::size_t i = 0; i < ready.size(); ++i) {
+        if (excs[i] && !first_exception) {
+            first_exception      = excs[i];
+            first_exception_node = ready[i];
+            try {
+                std::rethrow_exception(first_exception);
+            } catch (const NodeInterrupt&) {
+                is_node_interrupt = true;
+            } catch (...) {
+                // non-interrupt; leave is_node_interrupt = false
+            }
+        }
+    }
+
+    if (first_exception) {
+        if (is_node_interrupt) {
+            // GCC-13 workaround: build the next_nodes vector outside
+            // the co_await arg list (nested brace-init trips the ICE).
+            std::vector<std::string> next_nodes;
+            next_nodes.push_back(first_exception_node);
+            co_await coord.save_super_step_async(state,
+                first_exception_node, next_nodes,
+                CheckpointPhase::NodeInterrupt, step, parent_cp_id,
+                barrier_state);
+        }
+        std::rethrow_exception(first_exception);
+    }
+
+    // Apply results in ready-order (scheduler pairs ready[i] ↔ results[i]).
+    std::vector<NodeResult> step_results;
+    step_results.reserve(ready.size());
+    for (std::size_t i = 0; i < ready.size(); ++i) {
+        state.apply_writes(values[i].writes);
+        if (values[i].command) {
+            state.apply_writes(values[i].command->updates);
+        }
+        step_results.push_back(std::move(values[i]));
+        trace.push_back(ready[i]);
+    }
+    co_return step_results;
 }
 
 // =========================================================================
