@@ -1,4 +1,5 @@
 #include <neograph/llm/schema_provider.h>
+#include <neograph/async/endpoint.h>
 #include <neograph/async/http_client.h>
 #include <builtin_schemas.h>
 
@@ -384,45 +385,6 @@ static std::pair<std::string, std::string> split_host_prefix(const std::string& 
         }
     }
     return {host, prefix};
-}
-
-// Decomposed URL for the async client (host/port/path/tls separately).
-struct AsyncEndpoint {
-    std::string host;
-    std::string port;
-    std::string prefix;
-    bool        tls = false;
-};
-
-static AsyncEndpoint split_async_endpoint(const std::string& base_url) {
-    AsyncEndpoint out;
-    std::string rest = base_url;
-
-    auto scheme_end = rest.find("://");
-    if (scheme_end != std::string::npos) {
-        std::string scheme = rest.substr(0, scheme_end);
-        out.tls = (scheme == "https");
-        rest = rest.substr(scheme_end + 3);
-    }
-
-    auto path_start = rest.find('/');
-    std::string authority;
-    if (path_start != std::string::npos) {
-        authority = rest.substr(0, path_start);
-        out.prefix = rest.substr(path_start);
-    } else {
-        authority = rest;
-    }
-
-    auto colon = authority.find(':');
-    if (colon != std::string::npos) {
-        out.host = authority.substr(0, colon);
-        out.port = authority.substr(colon + 1);
-    } else {
-        out.host = authority;
-        out.port = out.tls ? "443" : "80";
-    }
-    return out;
 }
 
 // Parse Retry-After (seconds-integer shape only, matching the
@@ -1078,13 +1040,13 @@ SchemaProvider::complete_async(const CompletionParams& params)
     std::string body_str;
     std::string endpoint_path;
     std::vector<std::pair<std::string, std::string>> headers;
-    AsyncEndpoint endpoint;
+    async::AsyncEndpoint endpoint;
     {
         std::lock_guard<std::mutex> lock(schema_mutex_);
         auto body = build_body(params);
         body_str = body.dump();
         std::string model = params.model.empty() ? user_config_.default_model : params.model;
-        endpoint = split_async_endpoint(conn_.base_url);
+        endpoint = async::split_async_endpoint(conn_.base_url);
         endpoint_path = endpoint.prefix + build_endpoint(model, false);
         for (const auto& [k, v] : build_headers()) {
             headers.emplace_back(k, v);

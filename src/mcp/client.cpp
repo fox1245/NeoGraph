@@ -1,5 +1,6 @@
 #include <neograph/mcp/client.h>
 
+#include <neograph/async/endpoint.h>
 #include <neograph/async/http_client.h>
 #include <neograph/async/run_sync.h>
 
@@ -417,52 +418,6 @@ std::string MCPTool::execute(const json& arguments) {
 // MCPClient — HTTP transport
 // ===========================================================================
 
-namespace {
-
-// Decompose an MCP server_url into the (host, port, prefix, tls)
-// shape that neograph::async::async_post expects. Mirrors the helpers
-// in OpenAIProvider/SchemaProvider — three copies is a cleanup target
-// for end-of-Semester-2 refactor, not for now.
-struct AsyncEndpoint {
-    std::string host;
-    std::string port;
-    std::string prefix;
-    bool        tls = false;
-};
-
-AsyncEndpoint split_async_endpoint(const std::string& server_url) {
-    AsyncEndpoint out;
-    std::string rest = server_url;
-
-    auto scheme_end = rest.find("://");
-    if (scheme_end != std::string::npos) {
-        std::string scheme = rest.substr(0, scheme_end);
-        out.tls = (scheme == "https");
-        rest = rest.substr(scheme_end + 3);
-    }
-
-    auto path_start = rest.find('/');
-    std::string authority;
-    if (path_start != std::string::npos) {
-        authority = rest.substr(0, path_start);
-        out.prefix = rest.substr(path_start);
-    } else {
-        authority = rest;
-    }
-
-    auto colon = authority.find(':');
-    if (colon != std::string::npos) {
-        out.host = authority.substr(0, colon);
-        out.port = authority.substr(colon + 1);
-    } else {
-        out.host = authority;
-        out.port = out.tls ? "443" : "80";
-    }
-    return out;
-}
-
-} // namespace
-
 MCPClient::MCPClient(const std::string& server_url)
   : server_url_(server_url)
 {
@@ -510,7 +465,7 @@ MCPClient::rpc_call_async(const std::string& method, const json& params) {
     body["params"]  = params;
     auto body_str = body.dump();
 
-    auto endpoint = split_async_endpoint(server_url_);
+    auto endpoint = async::split_async_endpoint(server_url_);
 
     std::vector<std::pair<std::string, std::string>> headers = {
         {"Content-Type", "application/json"},
@@ -599,7 +554,7 @@ bool MCPClient::initialize(const std::string& client_name) {
     notify["method"]  = "notifications/initialized";
     notify["params"]  = json::object();
 
-    auto endpoint = split_async_endpoint(server_url_);
+    auto endpoint = async::split_async_endpoint(server_url_);
     std::vector<std::pair<std::string, std::string>> headers = {
         {"Content-Type", "application/json"},
         {"Accept",       "application/json, text/event-stream"},

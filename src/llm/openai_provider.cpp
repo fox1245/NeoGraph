@@ -1,5 +1,6 @@
 #include <neograph/llm/openai_provider.h>
 
+#include <neograph/async/endpoint.h>
 #include <neograph/async/http_client.h>
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
@@ -70,46 +71,6 @@ static std::pair<std::string, std::string> parse_url(const std::string& base_url
 
 namespace {
 
-// Decomposed URL for the async client, which wants host/port/path
-// separately and a tls flag.
-struct AsyncEndpoint {
-    std::string host;
-    std::string port;
-    std::string prefix;
-    bool        tls = false;
-};
-
-AsyncEndpoint split_base_url(const std::string& base_url) {
-    AsyncEndpoint out;
-    std::string rest = base_url;
-
-    auto scheme_end = rest.find("://");
-    if (scheme_end != std::string::npos) {
-        std::string scheme = rest.substr(0, scheme_end);
-        out.tls = (scheme == "https");
-        rest = rest.substr(scheme_end + 3);
-    }
-
-    auto path_start = rest.find('/');
-    std::string authority;
-    if (path_start != std::string::npos) {
-        authority = rest.substr(0, path_start);
-        out.prefix = rest.substr(path_start);
-    } else {
-        authority = rest;
-    }
-
-    auto colon = authority.find(':');
-    if (colon != std::string::npos) {
-        out.host = authority.substr(0, colon);
-        out.port = authority.substr(colon + 1);
-    } else {
-        out.host = authority;
-        out.port = out.tls ? "443" : "80";
-    }
-    return out;
-}
-
 // Parse Retry-After. Supports the seconds-integer shape only (the
 // HTTP-date shape is rare in practice for LLM endpoints; matching
 // SchemaProvider's behavior). Returns -1 when missing or unparsable.
@@ -130,7 +91,7 @@ OpenAIProvider::complete_async(const CompletionParams& params)
 {
     auto body_json = build_body(params);
     auto body_str = body_json.dump();
-    auto endpoint = split_base_url(config_.base_url);
+    auto endpoint = async::split_async_endpoint(config_.base_url);
 
     std::vector<std::pair<std::string, std::string>> headers = {
         {"Authorization", "Bearer " + config_.api_key},
