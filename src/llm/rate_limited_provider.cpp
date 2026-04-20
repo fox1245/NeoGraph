@@ -1,6 +1,11 @@
 #include <neograph/llm/rate_limited_provider.h>
 
+#include <asio/steady_timer.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
+
 #include <chrono>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 
@@ -38,28 +43,49 @@ static int decide_sleep_seconds(const neograph::RateLimitError& e,
     return s + 1;
 }
 
-ChatCompletion
-RateLimitedProvider::complete(const CompletionParams& params) {
+asio::awaitable<ChatCompletion>
+RateLimitedProvider::complete_async(const CompletionParams& params) {
+    auto ex = co_await asio::this_coro::executor;
+
     for (int attempt = 0;; ++attempt) {
+        // Capture the outcome of one inner call without doing a co_await
+        // inside a catch block — GCC 13 ICEs on that shape (verified in
+        // Stage 3 / Sem 1.5 conn_pool work). The two optionals are
+        // mutually exclusive: either we got a result or we caught a
+        // typed rate-limit error. Other exceptions propagate normally.
+        std::optional<ChatCompletion> result;
+        std::optional<RateLimitError> rate_err;
         try {
-            return inner_->complete(params);
+            result.emplace(co_await inner_->complete_async(params));
         } catch (const RateLimitError& e) {
-            if (attempt >= cfg_.max_retries) throw;
-            int wait = decide_sleep_seconds(e, cfg_);
-            if (wait < 0) throw;  // retry-after too long; surface error
-            std::this_thread::sleep_for(std::chrono::seconds(wait));
+            rate_err.emplace(e);
         }
+
+        if (result) co_return std::move(*result);
+
+        // rate_err must be populated since we got past the try-block
+        // without re-throwing. Decide whether to retry, then sleep on
+        // an asio timer so the io_context isn't blocked.
+        const auto& e = *rate_err;
+        if (attempt >= cfg_.max_retries) throw e;
+        int wait = decide_sleep_seconds(e, cfg_);
+        if (wait < 0) throw e;
+
+        asio::steady_timer timer(ex);
+        timer.expires_after(std::chrono::seconds(wait));
+        co_await timer.async_wait(asio::use_awaitable);
     }
 }
 
 ChatCompletion
 RateLimitedProvider::complete_stream(const CompletionParams& params,
                                      const StreamCallback& on_chunk) {
-    // Same contract as complete(). Note that if the 429 happens mid-stream
-    // (after some tokens have already been emitted via on_chunk), a retry
-    // will re-emit tokens from the start — callers that assume "each
-    // callback invocation is unique output" need to be aware. In practice
-    // HTTP 429 is returned before any response body, so this case is rare.
+    // Same contract as complete_async but on the sync streaming path.
+    // Note that if the 429 happens mid-stream (after some tokens have
+    // already been emitted via on_chunk), a retry will re-emit tokens
+    // from the start — callers that assume "each callback invocation
+    // is unique output" need to be aware. In practice HTTP 429 is
+    // returned before any response body, so this case is rare.
     for (int attempt = 0;; ++attempt) {
         try {
             return inner_->complete_stream(params, on_chunk);
