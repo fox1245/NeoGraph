@@ -756,4 +756,138 @@ void NodeExecutor::run_sends(
     }
 }
 
+// =========================================================================
+// run_sends_async: coroutine peer (Sem 3.7.6)
+// =========================================================================
+//
+// Same two-branch shape as run_sends:
+//   * single Send — sequential on the shared state, with retry.
+//   * multi Send — make_parallel_group on deferred workers, each
+//     with its own isolated GraphState copy. Results fan back to
+//     the shared state after wait_for_all.
+//
+// GCC-13-safe: no co_await inside a catch. The multi-send worker
+// captures exceptions into the parallel_group's excs array; the
+// first exception (if any) is rethrown after the wait resolves.
+
+asio::awaitable<void> NodeExecutor::run_sends_async(
+    const std::vector<Send>& sends,
+    int step,
+    GraphState& state,
+    const std::unordered_map<std::string, NodeResult>& replay,
+    CheckpointCoordinator& coord,
+    const std::string& parent_cp_id,
+    std::vector<std::string>& trace,
+    const GraphStreamCallback& cb,
+    StreamMode stream_mode) {
+
+    if (sends.empty()) co_return;
+
+    if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
+        json send_info = json::array();
+        for (const auto& s : sends) {
+            json item;
+            item["target"] = s.target_node;
+            item["input"]  = s.input;
+            send_info.push_back(item);
+        }
+        json data;
+        data["sends"] = send_info;
+        cb(GraphEvent{GraphEvent::Type::NODE_START, "__send__", data});
+    }
+
+    // --- Single Send: sequential on shared state, with retry. ---
+    if (sends.size() == 1) {
+        const auto& s = sends[0];
+        auto node_it = nodes_.find(s.target_node);
+        if (node_it == nodes_.end()) co_return;
+
+        const std::string task_id = make_send_task_id(
+            step, 0, s.target_node, s.input);
+        NodeResult nr;
+
+        auto replay_it = replay.find(task_id);
+        if (replay_it != replay.end()) {
+            nr = replay_it->second;
+        } else {
+            apply_input(state, s.input);
+            nr = co_await execute_node_with_retry_async(
+                s.target_node, state, cb, stream_mode);
+            co_await coord.record_pending_write_async(parent_cp_id,
+                task_id, task_id, s.target_node, nr, step);
+        }
+        state.apply_writes(nr.writes);
+        if (nr.command) state.apply_writes(nr.command->updates);
+        trace.push_back(s.target_node + "[send]");
+        co_return;
+    }
+
+    // --- Multi Send: isolated per-target state + parallel_group. ---
+    //
+    // Each worker coroutine builds its own GraphState from a
+    // serialize/restore round-trip, applies the Send's input, then
+    // drives execute_node_with_retry_async. We can't share an
+    // isolated state across coroutines any more than across the
+    // sync Taskflow workers — each Send gets its own copy.
+    auto ex = co_await asio::this_coro::executor;
+
+    auto worker = [&, this](std::size_t si) -> asio::awaitable<NodeResult> {
+        const auto& s = sends[si];
+        auto node_it = nodes_.find(s.target_node);
+        if (node_it == nodes_.end()) {
+            co_return NodeResult{};  // silently skip missing target
+        }
+
+        const std::string task_id = make_send_task_id(
+            step, si, s.target_node, s.input);
+
+        auto replay_it = replay.find(task_id);
+        if (replay_it != replay.end()) {
+            co_return replay_it->second;
+        }
+
+        GraphState send_state;
+        init_state(send_state);
+        send_state.restore(state.serialize());
+        apply_input(send_state, s.input);
+
+        auto nr = co_await execute_node_with_retry_async(
+            s.target_node, send_state, cb, stream_mode);
+        co_await coord.record_pending_write_async(parent_cp_id,
+            task_id, task_id, s.target_node, nr, step);
+        co_return nr;
+    };
+
+    using DeferredOp = decltype(asio::co_spawn(
+        ex, worker(std::size_t{0}), asio::deferred));
+    std::vector<DeferredOp> ops;
+    ops.reserve(sends.size());
+    for (std::size_t si = 0; si < sends.size(); ++si) {
+        ops.push_back(asio::co_spawn(ex, worker(si), asio::deferred));
+    }
+
+    auto [order, excs, values] = co_await asio::experimental::make_parallel_group(
+        std::move(ops))
+        .async_wait(asio::experimental::wait_for_all(),
+                    asio::use_awaitable);
+    (void)order;
+
+    // First-exception pass — same shape as run_parallel_async, but
+    // run_sends doesn't emit a NodeInterrupt cp (matches the sync
+    // version's contract — see the inline comment there).
+    for (std::size_t i = 0; i < sends.size(); ++i) {
+        if (excs[i]) {
+            std::rethrow_exception(excs[i]);
+        }
+    }
+
+    // Fan back in send order.
+    for (std::size_t si = 0; si < sends.size(); ++si) {
+        state.apply_writes(values[si].writes);
+        if (values[si].command) state.apply_writes(values[si].command->updates);
+        trace.push_back(sends[si].target_node + "[send]");
+    }
+    co_return;
+}
+
 } // namespace neograph::graph

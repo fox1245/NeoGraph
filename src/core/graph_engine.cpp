@@ -715,10 +715,10 @@ GraphEngine::execute_graph_async(const RunConfig& config,
         }
 
         // --- Execute pending Sends BEFORE interrupt_after ---
-        // Stays sync; same caveat as run_parallel.
-        executor_->run_sends(pending_sends, step, state, replay_results,
-                             coord, last_checkpoint_id,
-                             trace, cb, stream_mode);
+        // Sem 3.7.6: async fan-out, parallel_group-backed.
+        co_await executor_->run_sends_async(
+            pending_sends, step, state, replay_results,
+            coord, last_checkpoint_id, trace, cb, stream_mode);
 
         if (cb && has_mode(stream_mode, StreamMode::VALUES)) {
             cb(GraphEvent{GraphEvent::Type::CHANNEL_WRITE, "__state__",

@@ -206,6 +206,23 @@ public:
         const GraphStreamCallback& cb,
         StreamMode stream_mode);
 
+    /// Async peer of run_sends (Sem 3.7.6). Single-send branch runs
+    /// sequentially via run_one's async path; multi-send branch uses
+    /// asio::experimental::make_parallel_group on deferred workers,
+    /// each with its own isolated GraphState copy (identical
+    /// semantics to the sync version). Result writes fan back into
+    /// the shared state after wait_for_all.
+    asio::awaitable<void> run_sends_async(
+        const std::vector<Send>& sends,
+        int step,
+        GraphState& state,
+        const std::unordered_map<std::string, NodeResult>& replay,
+        CheckpointCoordinator& coord,
+        const std::string& parent_cp_id,
+        std::vector<std::string>& trace,
+        const GraphStreamCallback& cb,
+        StreamMode stream_mode);
+
 private:
     /// Inner retry loop with exponential backoff + NodeInterrupt
     /// short-circuit. Shared by run_one, run_parallel, and the
