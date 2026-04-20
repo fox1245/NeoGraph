@@ -291,6 +291,22 @@ private:
                             const std::vector<std::string>& resume_from = {},
                             const json& resume_value = json());
 
+    /// Async peer of execute_graph (Sem 3.6 internal step 3). Mirrors
+    /// the sync implementation with these substitutions:
+    /// * single-node dispatch goes through `run_one_async`;
+    /// * checkpoint I/O goes through the coordinator's *_async peers;
+    /// * parallel fan-out still calls the sync `run_parallel` (the
+    ///   migration to a coroutine-friendly fan-out is Sem 3.7) — so a
+    ///   graph with concurrent ready sets blocks the io_context for
+    ///   the duration of that super-step's slowest worker. Linear /
+    ///   conditional graphs (the typical agent shape) gain the full
+    ///   non-blocking benefit.
+    asio::awaitable<RunResult> execute_graph_async(
+        const RunConfig& config,
+        const GraphStreamCallback& cb,
+        const std::vector<std::string>& resume_from = {},
+        const json& resume_value = json());
+
     RetryPolicy get_retry_policy(const std::string& node_name) const;
 
     // --- Graph definition ---
