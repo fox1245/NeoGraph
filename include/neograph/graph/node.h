@@ -247,7 +247,14 @@ public:
                  std::map<std::string, std::string> input_map = {},
                  std::map<std::string, std::string> output_map = {});
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override;
+    /// Async-native execute — co_awaits subgraph_->run_async so the
+    /// parent run shares its io_context with the child run instead
+    /// of stacking sync calls. Wires correctly through the engine
+    /// thin wrapper (Sem 3.6 API surface); when the engine internals
+    /// go coroutine-native, nested subgraphs benefit transparently.
+    asio::awaitable<std::vector<ChannelWrite>>
+    execute_async(const GraphState& state) override;
+
     std::vector<ChannelWrite> execute_stream(
         const GraphState& state, const GraphStreamCallback& cb) override;
     std::string get_name() const override { return name_; }
