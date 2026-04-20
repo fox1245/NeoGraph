@@ -272,7 +272,7 @@ if(NEOGRAPH_BUILD_LLM)
 
     target_link_libraries(neograph_llm
         PUBLIC  neograph_core
-        PRIVATE httplib OpenSSL::SSL OpenSSL::Crypto
+        PRIVATE httplib OpenSSL::SSL OpenSSL::Crypto neograph_async
     )
 
     add_library(neograph::llm ALIAS neograph_llm)
