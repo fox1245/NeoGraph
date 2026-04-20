@@ -1,4 +1,6 @@
 #include <neograph/graph/checkpoint.h>
+#include <neograph/async/run_sync.h>
+
 #include <random>
 #include <sstream>
 #include <iomanip>
@@ -6,6 +8,78 @@
 #include <stdexcept>
 
 namespace neograph::graph {
+
+// =========================================================================
+// CheckpointStore — sync ↔ async crossover defaults (Sem 3.1)
+// =========================================================================
+//
+// Each pair below is the same shape as Provider::complete /
+// complete_async: the sync method bridges to the async peer through
+// run_sync, the async peer co_returns the sync call. Subclasses
+// override one side and inherit the other.
+
+void CheckpointStore::save(const Checkpoint& cp) {
+    neograph::async::run_sync(save_async(cp));
+}
+asio::awaitable<void> CheckpointStore::save_async(const Checkpoint& cp) {
+    save(cp);
+    co_return;
+}
+
+std::optional<Checkpoint>
+CheckpointStore::load_latest(const std::string& thread_id) {
+    return neograph::async::run_sync(load_latest_async(thread_id));
+}
+asio::awaitable<std::optional<Checkpoint>>
+CheckpointStore::load_latest_async(const std::string& thread_id) {
+    co_return load_latest(thread_id);
+}
+
+std::optional<Checkpoint>
+CheckpointStore::load_by_id(const std::string& id) {
+    return neograph::async::run_sync(load_by_id_async(id));
+}
+asio::awaitable<std::optional<Checkpoint>>
+CheckpointStore::load_by_id_async(const std::string& id) {
+    co_return load_by_id(id);
+}
+
+std::vector<Checkpoint>
+CheckpointStore::list(const std::string& thread_id, int limit) {
+    return neograph::async::run_sync(list_async(thread_id, limit));
+}
+asio::awaitable<std::vector<Checkpoint>>
+CheckpointStore::list_async(const std::string& thread_id, int limit) {
+    co_return list(thread_id, limit);
+}
+
+void CheckpointStore::delete_thread(const std::string& thread_id) {
+    neograph::async::run_sync(delete_thread_async(thread_id));
+}
+asio::awaitable<void>
+CheckpointStore::delete_thread_async(const std::string& thread_id) {
+    delete_thread(thread_id);
+    co_return;
+}
+
+asio::awaitable<void> CheckpointStore::put_writes_async(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id,
+    const PendingWrite& write) {
+    put_writes(thread_id, parent_checkpoint_id, write);
+    co_return;
+}
+asio::awaitable<std::vector<PendingWrite>> CheckpointStore::get_writes_async(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id) {
+    co_return get_writes(thread_id, parent_checkpoint_id);
+}
+asio::awaitable<void> CheckpointStore::clear_writes_async(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id) {
+    clear_writes(thread_id, parent_checkpoint_id);
+    co_return;
+}
 
 // =========================================================================
 // CheckpointPhase <-> string
