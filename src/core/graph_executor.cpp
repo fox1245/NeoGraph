@@ -357,6 +357,76 @@ NodeResult NodeExecutor::run_one(
 }
 
 // =========================================================================
+// run_one_async: coroutine peer (Sem 3.6 incremental Step 2)
+// =========================================================================
+
+asio::awaitable<NodeResult> NodeExecutor::run_one_async(
+    const std::string& node_name,
+    int step,
+    GraphState& state,
+    const std::unordered_map<std::string, NodeResult>& replay,
+    CheckpointCoordinator& coord,
+    const std::string& parent_cp_id,
+    const BarrierState& barrier_state,
+    std::vector<std::string>& trace,
+    const GraphStreamCallback& cb,
+    StreamMode stream_mode) {
+
+    const std::string task_id = make_static_task_id(step, node_name);
+
+    // GCC-13-safe outcome capture: collect result or NodeInterrupt
+    // marker inside try, decide outside. Other exceptions propagate
+    // out of the coroutine the same way the sync run_one lets them.
+    std::optional<NodeResult> ok_result;
+    bool interrupted = false;
+
+    try {
+        auto replay_it = replay.find(task_id);
+        if (replay_it != replay.end()) {
+            // Replayed from a previous partial run — do NOT re-execute,
+            // do NOT re-record. Just apply the recorded writes.
+            ok_result.emplace(replay_it->second);
+        } else {
+            ok_result.emplace(co_await execute_node_with_retry_async(
+                node_name, state, cb, stream_mode));
+
+            // Record BEFORE apply_writes so a crash between the two
+            // still leaves a durable log for resume to replay.
+            co_await coord.record_pending_write_async(parent_cp_id,
+                task_id, task_id, node_name, *ok_result, step);
+        }
+    } catch (const NodeInterrupt&) {
+        interrupted = true;
+    }
+
+    if (interrupted) {
+        // NodeInterrupt pauses this specific node — resume must
+        // re-enter exactly here. Save a phase=NodeInterrupt cp with
+        // next_nodes={node_name} so load_for_resume restarts the super
+        // step at this step with only this node ready.
+        // GCC-13 ICE workaround: build the next_nodes vector outside
+        // the co_await arg list (nested brace-init in a coroutine
+        // body trips build_special_member_call).
+        std::vector<std::string> next_nodes;
+        next_nodes.push_back(node_name);
+        co_await coord.save_super_step_async(state,
+            node_name, next_nodes,
+            CheckpointPhase::NodeInterrupt, step, parent_cp_id,
+            barrier_state);
+        throw NodeInterrupt(node_name);
+    }
+
+    auto& nr = *ok_result;
+    state.apply_writes(nr.writes);
+    if (nr.command) {
+        state.apply_writes(nr.command->updates);
+    }
+
+    trace.push_back(node_name);
+    co_return std::move(nr);
+}
+
+// =========================================================================
 // run_parallel: Taskflow fan-out
 // =========================================================================
 
