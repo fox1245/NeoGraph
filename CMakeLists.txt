@@ -378,6 +378,11 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_deep_research examples/25_deep_research.cpp)
         target_link_libraries(example_deep_research PRIVATE neograph::core neograph::llm httplib OpenSSL::SSL OpenSSL::Crypto cppdotenv)
 
+        # Example 27: async concurrent runs (Stage 3 / Sem 4.1).
+        # Demonstrates engine->run_async() under asio::io_context.
+        add_executable(example_async_concurrent_runs examples/27_async_concurrent_runs.cpp)
+        target_link_libraries(example_async_concurrent_runs PRIVATE neograph::core)
+
         # Example 26 needs both LLM (Claude provider) and the Postgres
         # backend; gate it on both build flags so a project that turns
         # off Postgres doesn't try to link a missing target.
