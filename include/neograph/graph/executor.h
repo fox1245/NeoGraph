@@ -155,6 +155,25 @@ public:
         const GraphStreamCallback& cb,
         StreamMode stream_mode);
 
+    /// Async peer of run_parallel (Sem 3.7). Replaces the Taskflow
+    /// fan-out with asio::experimental::make_parallel_group +
+    /// wait_for_all, so a parallel super-step no longer blocks the
+    /// io_context's worker thread while children are running — other
+    /// coroutines on the same executor keep making progress.
+    /// Behaviour preserved: results applied in `ready` order, same
+    /// NodeInterrupt cp-save contract, same exception propagation.
+    asio::awaitable<std::vector<NodeResult>> run_parallel_async(
+        const std::vector<std::string>& ready,
+        int step,
+        GraphState& state,
+        const std::unordered_map<std::string, NodeResult>& replay,
+        CheckpointCoordinator& coord,
+        const std::string& parent_cp_id,
+        const BarrierState& barrier_state,
+        std::vector<std::string>& trace,
+        const GraphStreamCallback& cb,
+        StreamMode stream_mode);
+
     std::vector<NodeResult> run_parallel(
         const std::vector<std::string>& ready,
         int step,
