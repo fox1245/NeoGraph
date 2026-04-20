@@ -318,12 +318,13 @@ std::vector<ChannelWrite> SubgraphNode::extract_output(
     return writes;
 }
 
-std::vector<ChannelWrite> SubgraphNode::execute(const GraphState& state) {
+asio::awaitable<std::vector<ChannelWrite>>
+SubgraphNode::execute_async(const GraphState& state) {
     RunConfig config;
     config.input = build_subgraph_input(state);
 
-    auto result = subgraph_->run(config);
-    return extract_output(result.output);
+    auto result = co_await subgraph_->run_async(config);
+    co_return extract_output(result.output);
 }
 
 std::vector<ChannelWrite> SubgraphNode::execute_stream(

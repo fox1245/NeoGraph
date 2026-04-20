@@ -33,6 +33,7 @@ add_executable(neograph_tests
     test_openai_provider_async.cpp
     test_checkpoint_async_default.cpp
     test_node_async_default.cpp
+    test_graph_engine_async_api.cpp
 )
 
 if(NEOGRAPH_BUILD_MCP)

@@ -224,9 +224,26 @@ RunResult GraphEngine::run(const RunConfig& config) {
     return execute_graph(config, nullptr);
 }
 
+asio::awaitable<RunResult>
+GraphEngine::run_async(const RunConfig& config) {
+    // Stage 3 / Sem 3.6 (API surface): thin wrapper today; the
+    // engine internals (super-step loop, node dispatch, checkpoint
+    // writes) are not yet coroutine-native, so this still blocks
+    // the resumed thread for the full run duration. Wrapper is
+    // intentional — external code can migrate to the async surface
+    // ahead of the internal refactor.
+    co_return run(config);
+}
+
 RunResult GraphEngine::run_stream(const RunConfig& config,
                                    const GraphStreamCallback& cb) {
     return execute_graph(config, cb);
+}
+
+asio::awaitable<RunResult>
+GraphEngine::run_stream_async(const RunConfig& config,
+                              const GraphStreamCallback& cb) {
+    co_return run_stream(config, cb);
 }
 
 RunResult GraphEngine::resume(const std::string& thread_id,
@@ -256,6 +273,13 @@ RunResult GraphEngine::resume(const std::string& thread_id,
     config.max_steps = 50;
 
     return execute_graph(config, cb, cp_opt->next_nodes, resume_value);
+}
+
+asio::awaitable<RunResult>
+GraphEngine::resume_async(const std::string& thread_id,
+                          const json& resume_value,
+                          const GraphStreamCallback& cb) {
+    co_return resume(thread_id, resume_value, cb);
 }
 
 // =========================================================================
