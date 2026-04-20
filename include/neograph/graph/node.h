@@ -13,6 +13,8 @@
 #include <neograph/graph/types.h>
 #include <neograph/graph/state.h>
 
+#include <asio/awaitable.hpp>
+
 namespace neograph::graph {
 
 /**
@@ -41,10 +43,31 @@ public:
 
     /**
      * @brief Execute the node: read state, return channel writes.
+     *
+     * Stage 3 / Sem 3.4: defaults to bridging through `execute_async`
+     * via `neograph::async::run_sync`. Subclasses written against the
+     * sync path keep overriding this directly; async-native nodes (Sem
+     * 3.5+) override `execute_async` and inherit this. Override at
+     * least one — overriding neither yields infinite mutual recursion.
+     *
      * @param state The current graph state (read-only access).
      * @return Vector of channel writes to apply to the state.
      */
-    virtual std::vector<ChannelWrite> execute(const GraphState& state) = 0;
+    virtual std::vector<ChannelWrite> execute(const GraphState& state);
+
+    /**
+     * @brief Async peer for execute().
+     *
+     * Default body co_returns `execute(state)` — runs on whatever
+     * thread resumes the coroutine, blocking it for the duration.
+     * Override to issue non-blocking operations (typically
+     * `co_await provider->complete_async(...)` for LLM nodes).
+     *
+     * @param state The current graph state.
+     * @return Awaitable yielding the channel writes.
+     */
+    virtual asio::awaitable<std::vector<ChannelWrite>>
+    execute_async(const GraphState& state);
 
     /**
      * @brief Streaming execution variant.
