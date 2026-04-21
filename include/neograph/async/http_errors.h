@@ -111,37 +111,40 @@ inline HttpErrorKind classify_asio_error(const asio::error_code& ec) noexcept {
         return HttpErrorKind::TlsHandshakeReset;
     }
 
-    // Name resolution errors.
-    if (cat == asio::error::get_netdb_category()) {
-        switch (ec.value()) {
-            case asio::error::host_not_found:
-                return HttpErrorKind::DnsPermanent;
-            case asio::error::host_not_found_try_again:
-                return HttpErrorKind::DnsTemporary;
-            default:
-                return HttpErrorKind::DnsPermanent;
-        }
-    }
-
-    // Misc category — asio-specific codes (e.g. eof).
-    if (cat == asio::error::get_misc_category()) {
-        if (ec.value() == asio::error::eof) {
-            return HttpErrorKind::PeerEofEarly;
-        }
-        return HttpErrorKind::Unknown;
-    }
-
-    // System / socket category. Covers connect/read/write.
-    // Compare the error_code against asio::error::* enumerators so
-    // the mapping works on both POSIX (errno space) and Windows
-    // (WSA* space). A plain `switch (ec.value())` against ECONN*
-    // constants from <cerrno> would miss on Windows because WinSock
-    // error numbers (e.g. 10061) don't match errno's ECONNREFUSED.
+    // Match known asio enumerators directly. Doing this BEFORE any
+    // category-based dispatch is important on Windows, where
+    // asio::error::get_netdb_category() and get_misc_category() both
+    // alias to system_category() — so a system errno like
+    // WSAECONNREFUSED would hit the netdb branch first and fall out
+    // as DnsPermanent. The ec==enum comparison matches by numeric
+    // value within the enum's native category and is stable across
+    // POSIX (errno) and Windows (WSA*).
     if (ec == asio::error::connection_refused) return HttpErrorKind::ConnectRefused;
     if (ec == asio::error::timed_out)          return HttpErrorKind::ConnectTimeout;
     if (ec == asio::error::connection_reset)   return HttpErrorKind::PeerReset;
     if (ec == asio::error::broken_pipe)        return HttpErrorKind::PeerReset;
     if (ec == asio::error::not_connected)      return HttpErrorKind::PeerReset;
+    if (ec == asio::error::eof)                return HttpErrorKind::PeerEofEarly;
+    if (ec == asio::error::host_not_found)     return HttpErrorKind::DnsPermanent;
+    if (ec == asio::error::host_not_found_try_again)
+        return HttpErrorKind::DnsTemporary;
+
+    // Linux-only: netdb and misc categories are distinct from the
+    // system category, so unknown values there are still best
+    // classified as DNS / misc rather than fully Unknown. On Windows
+    // these checks are no-ops because the specific-enum block above
+    // already handled the real cases and the remaining system errors
+    // deserve Unknown (retry = false) rather than being misrouted.
+#if !defined(ASIO_WINDOWS) && !defined(_WIN32)
+    if (cat == asio::error::get_netdb_category()) {
+        return HttpErrorKind::DnsPermanent;
+    }
+    if (cat == asio::error::get_misc_category()) {
+        return HttpErrorKind::Unknown;
+    }
+#else
+    (void)cat;
+#endif
     return HttpErrorKind::Unknown;
 }
 
