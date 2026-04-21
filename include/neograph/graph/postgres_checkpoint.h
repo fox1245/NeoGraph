@@ -147,6 +147,39 @@ public:
     void clear_writes(const std::string& thread_id,
                       const std::string& parent_checkpoint_id) override;
 
+    // ── Async peers (Sem 4 follow-up) ───────────────────────────────────
+    //
+    // True async: libpq nonblocking mode + asio::posix::stream_descriptor
+    // on PQsocket() + co_await on write/read readiness. The io_context
+    // stays free for other coroutines during PG's commit fsync, so N
+    // concurrent save_async calls across pool slots actually overlap
+    // instead of serialising on the main worker thread.
+    //
+    // Behaviour identical to the sync peers (same retry semantics,
+    // same broken-connection auto-replacement, same schema). Only the
+    // wire-level wait is non-blocking.
+
+    asio::awaitable<void> save_async(const Checkpoint& cp) override;
+    asio::awaitable<std::optional<Checkpoint>>
+    load_latest_async(const std::string& thread_id) override;
+    asio::awaitable<std::optional<Checkpoint>>
+    load_by_id_async(const std::string& id) override;
+    asio::awaitable<std::vector<Checkpoint>>
+    list_async(const std::string& thread_id, int limit = 100) override;
+    asio::awaitable<void>
+    delete_thread_async(const std::string& thread_id) override;
+
+    asio::awaitable<void> put_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id,
+        const PendingWrite& write) override;
+    asio::awaitable<std::vector<PendingWrite>> get_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id) override;
+    asio::awaitable<void> clear_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id) override;
+
     /// Drop all `neograph_*` tables. Test-only utility — destroys data.
     /// Useful in test fixtures that want a clean slate per test case.
     void drop_schema();
@@ -163,6 +196,14 @@ private:
     /// the lock so save/load/etc. don't each repeat the boilerplate.
     template <typename Fn>
     auto with_conn(Fn&& fn);
+
+    /// Async peer of with_conn. `fn(pg_conn*)` must return an
+    /// asio::awaitable<T>; the helper co_awaits it, replaces the
+    /// slot's connection on BrokenConnection, and retries once.
+    /// Defined in the .cpp file — only instantiated from within
+    /// the same TU so no explicit instantiation is required.
+    template <typename Fn>
+    auto with_conn_async(Fn fn) -> decltype(fn(std::declval<pg_conn*>()));
 
     /// Acquire a free pool slot index (blocks if none available).
     /// MUST be paired with `release_slot`.
