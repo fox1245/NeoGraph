@@ -5,12 +5,23 @@
 #include <neograph/async/run_sync.h>
 
 #include <asio/experimental/channel.hpp>
-#include <asio/posix/stream_descriptor.hpp>
 #include <asio/read_until.hpp>
 #include <asio/streambuf.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 #include <asio/write.hpp>
+
+#ifdef _WIN32
+#  include <asio/windows/stream_handle.hpp>
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#else
+#  include <asio/posix/stream_descriptor.hpp>
+#  include <fcntl.h>
+#  include <signal.h>
+#  include <sys/wait.h>
+#  include <unistd.h>
+#endif
 
 #include <atomic>
 #include <cerrno>
@@ -18,21 +29,34 @@
 #include <cstring>
 #include <istream>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <system_error>
 #include <thread>
-
-#include <fcntl.h>
-#include <signal.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
 namespace neograph::mcp {
 
 // ===========================================================================
 // detail::StdioSession — subprocess-backed JSON-RPC channel
 // ===========================================================================
+//
+// Platform-split implementation:
+//   POSIX: fork+execvp spawn, anonymous pipe fds, asio::posix::stream_descriptor.
+//   Win32: CreateProcess spawn, named pipe with FILE_FLAG_OVERLAPPED,
+//          asio::windows::stream_handle.
+//
+// The public surface (spawn / rpc_call / rpc_call_async / notify) is
+// identical; members diverge where the handle type does. Members are
+// commented by platform below.
 namespace detail {
+
+#ifdef _WIN32
+using NativeHandle = HANDLE;
+using AsyncHandle  = asio::windows::stream_handle;
+#else
+using NativeHandle = int;
+using AsyncHandle  = asio::posix::stream_descriptor;
+#endif
 
 class StdioSession {
 public:
@@ -67,22 +91,24 @@ public:
     // Send a JSON-RPC notification (no id, no response expected).
     void notify(const std::string& method, const json& params);
 
-    pid_t pid() const { return pid_; }
-
 private:
     StdioSession() = default;
 
     std::string read_line_locked();       ///< caller holds mtx_
     void write_frame_locked(const json& j); ///< caller holds mtx_
 
-    asio::awaitable<std::string> async_read_line_locked(
-        asio::posix::stream_descriptor& out);
-    asio::awaitable<void> async_write_frame_locked(
-        asio::posix::stream_descriptor& in, const json& j);
+    asio::awaitable<std::string> async_read_line_locked(AsyncHandle& out);
+    asio::awaitable<void> async_write_frame_locked(AsyncHandle& in, const json& j);
 
+#ifdef _WIN32
+    HANDLE process_ = nullptr;   ///< child process handle (CloseHandle on dtor)
+    HANDLE stdin_h_ = nullptr;   ///< parent → child (write end of a pipe)
+    HANDLE stdout_h_ = nullptr;  ///< child → parent (read end of a pipe)
+#else
     pid_t pid_ = -1;
     int   stdin_fd_ = -1;   // parent → child
     int   stdout_fd_ = -1;  // child  → parent
+#endif
 
     std::mutex   mtx_;        ///< sync path serialisation
     std::string  buffer_;     ///< sync read buffer
@@ -97,6 +123,153 @@ private:
     std::unique_ptr<AsyncLock> async_lock_;
     std::mutex async_lock_init_mtx_;
 };
+
+#ifdef _WIN32
+
+namespace {
+// Build the Windows command line from an argv vector. CreateProcess
+// expects a single string; standard rules are quoting elements that
+// contain whitespace or quotes. This is the minimal-sufficient escape
+// for the cases the tests exercise (python3 script path).
+std::string build_win_cmdline(const std::vector<std::string>& argv) {
+    std::string out;
+    for (size_t i = 0; i < argv.size(); ++i) {
+        if (i) out.push_back(' ');
+        const auto& a = argv[i];
+        bool need_quote = a.empty() ||
+            a.find_first_of(" \t\"") != std::string::npos;
+        if (need_quote) {
+            out.push_back('"');
+            for (char c : a) {
+                if (c == '"') out.push_back('\\');
+                out.push_back(c);
+            }
+            out.push_back('"');
+        } else {
+            out.append(a);
+        }
+    }
+    return out;
+}
+
+// Create a named-pipe pair where the parent side supports
+// FILE_FLAG_OVERLAPPED (needed for asio::windows::stream_handle) and
+// the child side is a plain inheritable handle. CreatePipe's anonymous
+// pipes don't support overlapped I/O, hence the named-pipe dance.
+struct PipePair { HANDLE parent; HANDLE child; };
+PipePair make_overlapped_pipe(const char* name_prefix, bool parent_reads) {
+    static std::atomic<uint64_t> counter{0};
+    char name[128];
+    std::snprintf(name, sizeof(name),
+        "\\\\.\\pipe\\neograph_mcp_%s_%lu_%llu",
+        name_prefix,
+        static_cast<unsigned long>(GetCurrentProcessId()),
+        static_cast<unsigned long long>(counter.fetch_add(1)));
+
+    DWORD parent_mode = parent_reads
+        ? (PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED)
+        : (PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED);
+    HANDLE parent = CreateNamedPipeA(
+        name, parent_mode,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+        /*instances=*/1, /*outbuf=*/64*1024, /*inbuf=*/64*1024,
+        /*timeout=*/0, /*sa=*/nullptr);
+    if (parent == INVALID_HANDLE_VALUE) {
+        throw std::system_error(static_cast<int>(GetLastError()),
+            std::system_category(), "CreateNamedPipe");
+    }
+
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };  // inheritable
+    DWORD child_access = parent_reads ? GENERIC_WRITE : GENERIC_READ;
+    HANDLE child = CreateFileA(name, child_access,
+        0, &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (child == INVALID_HANDLE_VALUE) {
+        DWORD err = GetLastError();
+        CloseHandle(parent);
+        throw std::system_error(static_cast<int>(err),
+            std::system_category(), "CreateFile(child side)");
+    }
+
+    // Parent side must NOT be inherited by the child.
+    SetHandleInformation(parent, HANDLE_FLAG_INHERIT, 0);
+    return PipePair{parent, child};
+}
+} // namespace
+
+std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>& argv) {
+    if (argv.empty()) {
+        throw std::invalid_argument("StdioSession::spawn: argv is empty");
+    }
+
+    // Two pipes: in = parent writes (child reads on stdin),
+    //            out = child writes (parent reads on stdout).
+    PipePair in_p  = make_overlapped_pipe("in",  /*parent_reads=*/false);
+    PipePair out_p;
+    try {
+        out_p = make_overlapped_pipe("out", /*parent_reads=*/true);
+    } catch (...) {
+        CloseHandle(in_p.parent);
+        CloseHandle(in_p.child);
+        throw;
+    }
+
+    std::string cmdline = build_win_cmdline(argv);
+
+    STARTUPINFOA si = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput  = in_p.child;
+    si.hStdOutput = out_p.child;
+    si.hStdError  = GetStdHandle(STD_ERROR_HANDLE);  // inherit parent's stderr
+
+    PROCESS_INFORMATION pi = {};
+    // cmdline.data() is mutable per CreateProcess's contract.
+    BOOL ok = CreateProcessA(
+        /*application=*/nullptr,
+        cmdline.data(),
+        /*proc_sa=*/nullptr, /*thr_sa=*/nullptr,
+        /*inherit=*/TRUE, /*flags=*/0,
+        /*env=*/nullptr, /*cwd=*/nullptr,
+        &si, &pi);
+    // Child side handles belong to the child now (inherited) — we can
+    // close our copies regardless of success.
+    CloseHandle(in_p.child);
+    CloseHandle(out_p.child);
+    if (!ok) {
+        DWORD err = GetLastError();
+        CloseHandle(in_p.parent);
+        CloseHandle(out_p.parent);
+        throw std::system_error(static_cast<int>(err),
+            std::system_category(), "CreateProcess");
+    }
+    CloseHandle(pi.hThread);  // thread handle unused
+
+    auto sess = std::shared_ptr<StdioSession>(new StdioSession());
+    sess->process_  = pi.hProcess;
+    sess->stdin_h_  = in_p.parent;
+    sess->stdout_h_ = out_p.parent;
+    return sess;
+}
+
+StdioSession::~StdioSession() {
+    if (stdin_h_)  { CloseHandle(stdin_h_); stdin_h_ = nullptr; }
+    if (stdout_h_) { CloseHandle(stdout_h_); stdout_h_ = nullptr; }
+
+    if (process_) {
+        // Give the child a moment to exit cleanly on its own (closing
+        // its stdin pipe above typically causes a well-behaved server
+        // to exit). Fall back to TerminateProcess after ~500ms.
+        DWORD wait = WaitForSingleObject(process_, 500);
+        if (wait != WAIT_OBJECT_0) {
+            TerminateProcess(process_, 1);
+            WaitForSingleObject(process_, 1000);
+        }
+        CloseHandle(process_);
+        process_ = nullptr;
+    }
+}
+
+#else  // !_WIN32
 
 std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>& argv) {
     if (argv.empty()) {
@@ -175,6 +348,8 @@ StdioSession::~StdioSession() {
     }
 }
 
+#endif  // _WIN32
+
 void StdioSession::write_frame_locked(const json& j) {
     std::string line = j.dump();
     line.push_back('\n');
@@ -182,6 +357,19 @@ void StdioSession::write_frame_locked(const json& j) {
     const char* p = line.data();
     size_t      remaining = line.size();
     while (remaining > 0) {
+#ifdef _WIN32
+        DWORD written = 0;
+        // With an overlapped named pipe, WriteFile(hEvent=nullptr) still
+        // works synchronously on this thread — it just uses the pipe's
+        // internal event. That's fine for the sync path.
+        if (!WriteFile(stdin_h_, p, static_cast<DWORD>(remaining),
+                       &written, nullptr)) {
+            throw std::system_error(static_cast<int>(GetLastError()),
+                std::system_category(), "StdioSession::WriteFile()");
+        }
+        p         += written;
+        remaining -= static_cast<size_t>(written);
+#else
         ssize_t n = ::write(stdin_fd_, p, remaining);
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -190,6 +378,7 @@ void StdioSession::write_frame_locked(const json& j) {
         }
         p         += n;
         remaining -= static_cast<size_t>(n);
+#endif
     }
 }
 
@@ -204,6 +393,24 @@ std::string StdioSession::read_line_locked() {
         }
 
         char tmp[4096];
+#ifdef _WIN32
+        DWORD got = 0;
+        if (!ReadFile(stdout_h_, tmp, static_cast<DWORD>(sizeof(tmp)),
+                      &got, nullptr)) {
+            DWORD err = GetLastError();
+            if (err == ERROR_BROKEN_PIPE || err == ERROR_HANDLE_EOF) {
+                throw std::runtime_error(
+                    "StdioSession: child closed stdout");
+            }
+            throw std::system_error(static_cast<int>(err),
+                std::system_category(), "StdioSession::ReadFile()");
+        }
+        if (got == 0) {
+            throw std::runtime_error(
+                "StdioSession: child closed stdout");
+        }
+        buffer_.append(tmp, static_cast<size_t>(got));
+#else
         ssize_t n = ::read(stdout_fd_, tmp, sizeof(tmp));
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -214,6 +421,7 @@ std::string StdioSession::read_line_locked() {
             throw std::runtime_error("StdioSession: child closed stdout");
         }
         buffer_.append(tmp, static_cast<size_t>(n));
+#endif
     }
 }
 
@@ -268,7 +476,7 @@ void StdioSession::notify(const std::string& method, const json& params) {
 }
 
 asio::awaitable<void>
-StdioSession::async_write_frame_locked(asio::posix::stream_descriptor& in,
+StdioSession::async_write_frame_locked(AsyncHandle& in,
                                        const json& j) {
     std::string line = j.dump();
     line.push_back('\n');
@@ -276,7 +484,7 @@ StdioSession::async_write_frame_locked(asio::posix::stream_descriptor& in,
 }
 
 asio::awaitable<std::string>
-StdioSession::async_read_line_locked(asio::posix::stream_descriptor& out) {
+StdioSession::async_read_line_locked(AsyncHandle& out) {
     auto nl = abuffer_.find('\n');
     if (nl == std::string::npos) {
         asio::streambuf sbuf;
@@ -358,16 +566,22 @@ StdioSession::rpc_call_async(const std::string& method, const json& params) {
         }
     } lock_rel{async_lock_.get()};
 
-    // Wrap the raw pipe fds in stream_descriptors *without* taking
-    // ownership — we release() before destruction so the session
-    // retains the fds across calls. Fresh wrappers per call avoid the
-    // executor-lifetime issue that hits ConnPool when callers funnel
-    // through the run_sync facade (each run_sync uses a fresh
-    // io_context that dies on return).
-    asio::posix::stream_descriptor in_desc(ex, stdin_fd_);
-    asio::posix::stream_descriptor out_desc(ex, stdout_fd_);
+    // Wrap the raw pipe handles in an AsyncHandle (asio::posix::
+    // stream_descriptor on POSIX, asio::windows::stream_handle on
+    // Win32) *without* taking ownership — we release() before
+    // destruction so the session retains the handles across calls.
+    // Fresh wrappers per call avoid the executor-lifetime issue that
+    // hits ConnPool when callers funnel through the run_sync facade
+    // (each run_sync uses a fresh io_context that dies on return).
+#ifdef _WIN32
+    AsyncHandle in_desc(ex, stdin_h_);
+    AsyncHandle out_desc(ex, stdout_h_);
+#else
+    AsyncHandle in_desc(ex, stdin_fd_);
+    AsyncHandle out_desc(ex, stdout_fd_);
+#endif
     struct ReleaseGuard {
-        asio::posix::stream_descriptor& d;
+        AsyncHandle& d;
         ~ReleaseGuard() { try { d.release(); } catch (...) {} }
     } in_guard{in_desc}, out_guard{out_desc};
 

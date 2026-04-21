@@ -36,9 +36,23 @@ std::filesystem::path fixture_path() {
     return here.parent_path() / "fixtures" / "mcp_stdio_echo.py";
 }
 
-bool python3_available() {
-    return std::system("command -v python3 >/dev/null 2>&1") == 0;
+// Locate a usable Python interpreter — `python3` on POSIX, `python`
+// on Windows where most installs don't expose the versioned name.
+// Returned string is whatever `system()` will accept as argv[0].
+const char* python_cmd() {
+#ifdef _WIN32
+    // `where python` on Windows shells; `where` returns 0 if found.
+    if (std::system("where python >nul 2>&1") == 0)  return "python";
+    if (std::system("where python3 >nul 2>&1") == 0) return "python3";
+    return nullptr;
+#else
+    if (std::system("command -v python3 >/dev/null 2>&1") == 0) return "python3";
+    if (std::system("command -v python  >/dev/null 2>&1") == 0) return "python";
+    return nullptr;
+#endif
 }
+
+bool python3_available() { return python_cmd() != nullptr; }
 
 } // namespace
 
@@ -50,7 +64,7 @@ TEST(MCPStdioAsync, RpcCallAsyncRoundTripsThroughSubprocess) {
     ASSERT_TRUE(std::filesystem::exists(fixture))
         << "fixture missing: " << fixture;
 
-    mcp::MCPClient client({"python3", fixture.string()});
+    mcp::MCPClient client({python_cmd(), fixture.string()});
 
     // Build init params outside the coroutine — nested brace-init list
     // inside a coroutine body triggers a GCC 13 ICE (build_special_
@@ -103,7 +117,7 @@ TEST(MCPStdioAsync, ConcurrentAsyncCallsOnSameSessionSerializeSafely) {
     auto fixture = fixture_path();
     ASSERT_TRUE(std::filesystem::exists(fixture));
 
-    mcp::MCPClient client({"python3", fixture.string()});
+    mcp::MCPClient client({python_cmd(), fixture.string()});
     json init_params;
     init_params["protocolVersion"] = "2025-03-26";
     init_params["capabilities"] = json::object();
@@ -161,7 +175,7 @@ TEST(MCPStdioAsync, SyncFacadeStillWorksAlongsideAsync) {
     }
     auto fixture = fixture_path();
 
-    mcp::MCPClient client({"python3", fixture.string()});
+    mcp::MCPClient client({python_cmd(), fixture.string()});
     ASSERT_TRUE(client.initialize());
 
     auto tools = client.get_tools();

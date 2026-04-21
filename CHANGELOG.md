@@ -96,6 +96,21 @@ Measured on the feat/async-api branch against Stage 2 sync baselines:
   can be replaced by `run_sync(*_async)` so the dependency can
   drop entirely.
 
+### Cross-platform
+
+* **Linux** (Ubuntu 24.04, GCC 13): reference platform. Full
+  coverage — engine, async HTTP + TLS, Provider / MCP (HTTP +
+  stdio) / Checkpoint (memory + SQLite + Postgres sync + async).
+* **macOS** (macos-latest, Clang): CI verifies build + non-
+  Postgres tests. MCP stdio uses the POSIX fork/pipe path.
+* **Windows** (windows-latest, MSVC): CI verifies build + tests.
+  MCP stdio uses CreateProcess + named-pipe + asio::windows::
+  stream_handle (FILE_FLAG_OVERLAPPED). Postgres async peers
+  wrap `PQsocket` via `asio::ip::tcp::socket::assign` (SOCKET is
+  `UINT_PTR` on Windows, cast at the boundary). libpq via vcpkg.
+  Postgres integration tests skip on Windows CI (no service
+  container — build-level link verification only).
+
 ### Fixed post-bump
 
 - **`async::HttpResponse` headers map** — the response surface now

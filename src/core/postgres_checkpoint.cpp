@@ -18,7 +18,15 @@
 
 #include <libpq-fe.h>
 
-#include <asio/posix/stream_descriptor.hpp>
+// PG socket wrapping is platform-split: on POSIX PQsocket returns an
+// int fd and asio::posix::stream_descriptor wraps it directly; on
+// Windows it returns a SOCKET and we reach for asio::ip::tcp::socket
+// which can take over an existing native SOCKET via assign().
+#ifdef _WIN32
+#  include <asio/ip/tcp.hpp>
+#else
+#  include <asio/posix/stream_descriptor.hpp>
+#endif
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 
@@ -819,11 +827,29 @@ asio::awaitable<PgResult> exec_params_async(
     // Wrap PQsocket without taking ownership — asio would close it
     // on destruction otherwise, and the PGconn needs to keep it
     // across calls. release() before unwind strips the ownership.
+#ifdef _WIN32
+    // On Windows PQsocket returns int but the underlying handle is
+    // a SOCKET (UINT_PTR). Explicit cast back to the asio native
+    // handle type silences the narrowing warning and keeps us safe
+    // on 64-bit where SOCKET values can exceed INT_MAX.
+    asio::ip::tcp::socket sock(ex);
+    using NativeSock = asio::ip::tcp::socket::native_handle_type;
+    sock.assign(asio::ip::tcp::v4(), static_cast<NativeSock>(PQsocket(c)));
+    struct SockRelease {
+        asio::ip::tcp::socket& s;
+        ~SockRelease() { try { (void)s.release(); } catch (...) {} }
+    } rel{sock};
+    constexpr auto kWaitWrite = asio::ip::tcp::socket::wait_write;
+    constexpr auto kWaitRead  = asio::ip::tcp::socket::wait_read;
+#else
     asio::posix::stream_descriptor sock(ex, PQsocket(c));
     struct SockRelease {
         asio::posix::stream_descriptor& s;
         ~SockRelease() { try { s.release(); } catch (...) {} }
     } rel{sock};
+    constexpr auto kWaitWrite = asio::posix::stream_descriptor::wait_write;
+    constexpr auto kWaitRead  = asio::posix::stream_descriptor::wait_read;
+#endif
 
     // Flush loop: PQflush returns 0 (done), 1 (more to send), -1 (error).
     while (true) {
@@ -834,17 +860,13 @@ asio::awaitable<PgResult> exec_params_async(
             if (PQstatus(c) != CONNECTION_OK) throw BrokenConnection(msg);
             throw std::runtime_error(msg);
         }
-        co_await sock.async_wait(
-            asio::posix::stream_descriptor::wait_write,
-            asio::use_awaitable);
+        co_await sock.async_wait(kWaitWrite, asio::use_awaitable);
     }
 
     // Consume loop: PQisBusy returns 1 while results are still on the
     // wire. Wait for readable, pull bytes in via PQconsumeInput, repeat.
     while (PQisBusy(c)) {
-        co_await sock.async_wait(
-            asio::posix::stream_descriptor::wait_read,
-            asio::use_awaitable);
+        co_await sock.async_wait(kWaitRead, asio::use_awaitable);
         if (PQconsumeInput(c) != 1) {
             std::string msg = std::string("PQconsumeInput: ")
                             + PQerrorMessage(c);
