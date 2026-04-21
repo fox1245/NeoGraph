@@ -122,6 +122,34 @@ private:
     using AsyncLock = asio::experimental::channel<void(asio::error_code)>;
     std::unique_ptr<AsyncLock> async_lock_;
     std::mutex async_lock_init_mtx_;
+
+    // Cached AsyncHandle wrappers for the async path. Lazy-created on
+    // first rpc_call_async using the caller's executor, then reused
+    // for every subsequent call.
+    //
+    // Why caching, not per-call construction:
+    //   Windows pins the IOCP association on the kernel FILE_OBJECT,
+    //   not on the HANDLE. Once the first call registers a handle
+    //   with the io_context's IOCP, the pipe's FILE_OBJECT is bound
+    //   forever. DuplicateHandle produces a new HANDLE referring to
+    //   the SAME FILE_OBJECT, so re-registering a duplicate in a
+    //   second call returns ERROR_INVALID_PARAMETER (already bound),
+    //   asio::windows::stream_handle's ctor throws, and the coroutine
+    //   dies before reaching any I/O. Caching side-steps this: bind
+    //   once, reuse forever.
+    //
+    //   POSIX is fine either way (epoll is per-fd, not per-file), but
+    //   we cache there too for symmetry and to avoid the per-call
+    //   wrapper churn.
+    //
+    //   We wrap DUPLICATES of the native handles so the session keeps
+    //   ownership of stdin_h_/stdout_h_; the wrappers close the dups
+    //   on their own destruction. Callers must ensure the io_context
+    //   driving rpc_call_async outlives the session (reverse order of
+    //   declaration in tests and call sites).
+    std::unique_ptr<AsyncHandle> async_in_;
+    std::unique_ptr<AsyncHandle> async_out_;
+    std::mutex async_handles_init_mtx_;
 };
 
 #ifdef _WIN32
@@ -566,51 +594,72 @@ StdioSession::rpc_call_async(const std::string& method, const json& params) {
         }
     } lock_rel{async_lock_.get()};
 
-    // Wrap the raw pipe handles in an AsyncHandle (asio::posix::
-    // stream_descriptor on POSIX, asio::windows::stream_handle on
-    // Win32). Fresh wrappers per call avoid the executor-lifetime
-    // issue that hits ConnPool when callers funnel through run_sync
-    // (each run_sync uses a fresh io_context that dies on return).
-    //
-    // POSIX: release() before destruction so the session keeps the fd.
-    // Win32: a HANDLE can be associated with at most one IOCP for its
-    //        lifetime. Re-wrapping the same HANDLE on a second call
-    //        crashes inside the handle_service. Duplicate the HANDLE
-    //        per call instead and let the wrapper's destructor close
-    //        the duplicate; the session keeps its original.
+    // Cached AsyncHandle wrappers. See member-field comments for why
+    // we bind once per session instead of per call. Lazy-init under a
+    // mutex so concurrent first-callers on the same session don't
+    // double-bind; subsequent calls take the fast path with no lock.
+    if (!async_in_ || !async_out_) {
+        std::lock_guard<std::mutex> g(async_handles_init_mtx_);
+        if (!async_in_ || !async_out_) {
 #ifdef _WIN32
-    HANDLE dup_in = nullptr, dup_out = nullptr;
-    const HANDLE self = GetCurrentProcess();
-    if (!DuplicateHandle(self, stdin_h_, self, &dup_in,
-                         0, FALSE, DUPLICATE_SAME_ACCESS)) {
-        throw std::system_error(static_cast<int>(GetLastError()),
-            std::system_category(), "DuplicateHandle(stdin)");
-    }
-    if (!DuplicateHandle(self, stdout_h_, self, &dup_out,
-                         0, FALSE, DUPLICATE_SAME_ACCESS)) {
-        DWORD err = GetLastError();
-        CloseHandle(dup_in);
-        throw std::system_error(static_cast<int>(err),
-            std::system_category(), "DuplicateHandle(stdout)");
-    }
-    AsyncHandle in_desc(ex, dup_in);
-    AsyncHandle out_desc(ex, dup_out);
-    // No release(): wrapper destructor closes dup_in / dup_out, which
-    // is what we want — the session's stdin_h_ / stdout_h_ are
-    // separate HANDLEs and unaffected.
+            HANDLE dup_in = nullptr, dup_out = nullptr;
+            const HANDLE self = GetCurrentProcess();
+            if (!DuplicateHandle(self, stdin_h_, self, &dup_in,
+                                 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+                throw std::system_error(static_cast<int>(GetLastError()),
+                    std::system_category(), "DuplicateHandle(stdin)");
+            }
+            if (!DuplicateHandle(self, stdout_h_, self, &dup_out,
+                                 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+                DWORD err = GetLastError();
+                CloseHandle(dup_in);
+                throw std::system_error(static_cast<int>(err),
+                    std::system_category(), "DuplicateHandle(stdout)");
+            }
+            try {
+                async_in_  = std::make_unique<AsyncHandle>(ex, dup_in);
+                async_out_ = std::make_unique<AsyncHandle>(ex, dup_out);
+            } catch (...) {
+                // On partial success, close whichever dup the failed
+                // wrapper didn't take. Wrappers that succeeded already
+                // own their dup and will close on reset/destruction.
+                if (!async_in_)  CloseHandle(dup_in);
+                if (!async_out_) CloseHandle(dup_out);
+                async_in_.reset();
+                async_out_.reset();
+                throw;
+            }
 #else
-    AsyncHandle in_desc(ex, stdin_fd_);
-    AsyncHandle out_desc(ex, stdout_fd_);
-    struct ReleaseGuard {
-        AsyncHandle& d;
-        ~ReleaseGuard() { try { d.release(); } catch (...) {} }
-    } in_guard{in_desc}, out_guard{out_desc};
+            int dup_in  = ::dup(stdin_fd_);
+            if (dup_in < 0) {
+                throw std::system_error(errno, std::system_category(),
+                    "dup(stdin_fd)");
+            }
+            int dup_out = ::dup(stdout_fd_);
+            if (dup_out < 0) {
+                int err = errno;
+                ::close(dup_in);
+                throw std::system_error(err, std::system_category(),
+                    "dup(stdout_fd)");
+            }
+            try {
+                async_in_  = std::make_unique<AsyncHandle>(ex, dup_in);
+                async_out_ = std::make_unique<AsyncHandle>(ex, dup_out);
+            } catch (...) {
+                if (!async_in_)  ::close(dup_in);
+                if (!async_out_) ::close(dup_out);
+                async_in_.reset();
+                async_out_.reset();
+                throw;
+            }
 #endif
+        }
+    }
 
-    co_await async_write_frame_locked(in_desc, req);
+    co_await async_write_frame_locked(*async_in_, req);
 
     for (int guard = 0; guard < 1024; ++guard) {
-        std::string line = co_await async_read_line_locked(out_desc);
+        std::string line = co_await async_read_line_locked(*async_out_);
         if (line.empty()) continue;
 
         json resp;
