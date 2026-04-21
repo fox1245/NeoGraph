@@ -42,6 +42,15 @@ target_include_directories(taskflow INTERFACE ${DEPS_DIR})
 # cpp-httplib (header-only) — used by llm and mcp (PRIVATE)
 add_library(httplib INTERFACE)
 target_include_directories(httplib INTERFACE ${DEPS_DIR})
+# Windows: httplib hard-errors unless _WIN32_WINNT >= 0x0A00 (Windows 10).
+# Set it on the INTERFACE so every TU that links httplib picks it up,
+# regardless of whether it also links asio.
+if(WIN32)
+    target_compile_definitions(httplib INTERFACE
+        _WIN32_WINNT=0x0A00
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX)
+endif()
 # httplib's TLS path on Apple pulls in system certs via
 # SecTrustCopyAnchorCertificates (Security.framework) and
 # CFArray/CFData (CoreFoundation.framework). These must be on the
@@ -67,6 +76,15 @@ target_include_directories(cppdotenv INTERFACE ${DEPS_DIR})
 add_library(asio INTERFACE)
 target_include_directories(asio INTERFACE ${DEPS_DIR}/asio/include)
 target_compile_definitions(asio INTERFACE ASIO_STANDALONE ASIO_NO_DEPRECATED)
+# Windows: target Windows 10+ so httplib compiles (it hard-errors on
+# _WIN32_WINNT < 0x0A00) and asio's newer overlapped/pipe paths light up.
+# Also scrub min/max macros from <windows.h> that clobber std::min/max.
+if(WIN32)
+    target_compile_definitions(asio INTERFACE
+        _WIN32_WINNT=0x0A00
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX)
+endif()
 find_package(Threads REQUIRED)
 target_link_libraries(asio INTERFACE Threads::Threads)
 
