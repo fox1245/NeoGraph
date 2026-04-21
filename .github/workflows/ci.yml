@@ -108,6 +108,106 @@ jobs:
           if-no-files-found: ignore
 
   # ──────────────────────────────────────────────────────────────────
+  # Cross-platform build verification (Stage 3 / Sem 4 follow-up).
+  #
+  # 2.0 added platform-split code in two places — `src/mcp/client.cpp`
+  # (fork/pipe vs CreateProcess/named-pipe) and `src/core/
+  # postgres_checkpoint.cpp` (asio::posix vs asio::ip::tcp socket wrap
+  # of libpq PQsocket). These jobs prove both branches compile and
+  # that the core + async HTTP path runs on macOS and Windows, so
+  # contributors editing either branch get CI coverage regardless of
+  # which host they build on.
+  #
+  # Tests skipped here:
+  # * Postgres integration — no `services:` container on macOS /
+  #   Windows runners; re-enabling later means either a hosted PG or
+  #   setup-postgresql action. Build still exercises libpq link.
+  # * Full ctest on Windows — MCP stdio test wants python3 and is
+  #   covered on Ubuntu already; Windows runs the rest.
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          brew update
+          brew install cmake libpq openssl@3 sqlite
+          # Homebrew's libpq is keg-only; expose it so CMake's
+          # FindPostgreSQL picks it up.
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix libpq):$(brew --prefix openssl@3)" >> $GITHUB_ENV
+
+      - name: Configure (all backends on, Postgres build-only)
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DNEOGRAPH_BUILD_LLM=ON \
+            -DNEOGRAPH_BUILD_MCP=ON \
+            -DNEOGRAPH_BUILD_UTIL=ON \
+            -DNEOGRAPH_BUILD_POSTGRES=ON \
+            -DNEOGRAPH_BUILD_TESTS=ON \
+            -DNEOGRAPH_BUILD_EXAMPLES=OFF
+
+      - name: Build
+        run: cmake --build build -j$(sysctl -n hw.ncpu)
+
+      - name: Run tests (no Postgres service — PG cases skip themselves)
+        working-directory: build
+        run: ctest --output-on-failure -j$(sysctl -n hw.ncpu)
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-macos
+          path: build/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libpq + OpenSSL via vcpkg
+        shell: pwsh
+        run: |
+          vcpkg install libpq:x64-windows openssl:x64-windows
+          "VCPKG_TOOLCHAIN=$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" `
+            | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+
+      - name: Configure (all backends on; Postgres build-only, no service)
+        shell: pwsh
+        run: |
+          cmake -B build `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_TOOLCHAIN" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DNEOGRAPH_BUILD_LLM=ON `
+            -DNEOGRAPH_BUILD_MCP=ON `
+            -DNEOGRAPH_BUILD_UTIL=ON `
+            -DNEOGRAPH_BUILD_POSTGRES=ON `
+            -DNEOGRAPH_BUILD_TESTS=ON `
+            -DNEOGRAPH_BUILD_EXAMPLES=OFF
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release -j
+
+      - name: Run tests (no Postgres; MCP stdio uses bundled `python`)
+        shell: pwsh
+        working-directory: build
+        run: ctest -C Release --output-on-failure -j
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-windows
+          path: build/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+
+  # ──────────────────────────────────────────────────────────────────
   # Async benchmark regression gate (Stage 3 / Sem 4.6).
   #
   # The async wire's value axis is burst concurrency — engine-overhead
