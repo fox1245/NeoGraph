@@ -21,6 +21,8 @@
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
 
+#include <array>
+#include <atomic>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
