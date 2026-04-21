@@ -66,6 +66,12 @@ TEST(MCPStdioAsync, RpcCallAsyncRoundTripsThroughSubprocess) {
     ASSERT_TRUE(std::filesystem::exists(fixture))
         << "fixture missing: " << fixture;
 
+    // io_context before client: the session caches AsyncHandle
+    // wrappers whose destructors need the executor's services still
+    // alive. Declaration order here -> reverse-destruction puts client
+    // (and its session) away FIRST, then io, so the cached wrappers
+    // unregister from a live IOCP/epoll service.
+    asio::io_context io;
     mcp::MCPClient client({python_cmd(), fixture.string()});
 
     // Build init params outside the coroutine — nested brace-init list
@@ -78,7 +84,6 @@ TEST(MCPStdioAsync, RpcCallAsyncRoundTripsThroughSubprocess) {
     init_params["clientInfo"]["name"] = "test";
     init_params["clientInfo"]["version"] = "0";
 
-    asio::io_context io;
     json initialize_result;
     json tools_result;
     asio::co_spawn(
@@ -119,6 +124,10 @@ TEST(MCPStdioAsync, ConcurrentAsyncCallsOnSameSessionSerializeSafely) {
     auto fixture = fixture_path();
     ASSERT_TRUE(std::filesystem::exists(fixture));
 
+    // Same declaration-order constraint as above: io before client so
+    // the session's cached AsyncHandle wrappers tear down against a
+    // live executor.
+    asio::io_context io;
     mcp::MCPClient client({python_cmd(), fixture.string()});
     json init_params;
     init_params["protocolVersion"] = "2025-03-26";
@@ -127,7 +136,6 @@ TEST(MCPStdioAsync, ConcurrentAsyncCallsOnSameSessionSerializeSafely) {
     init_params["clientInfo"]["name"] = "test";
     init_params["clientInfo"]["version"] = "0";
 
-    asio::io_context io;
     std::atomic<int> done{0};
     std::array<json, 3> results;
 
