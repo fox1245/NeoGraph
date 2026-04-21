@@ -98,18 +98,62 @@ Measured on the feat/async-api branch against Stage 2 sync baselines:
 
 ### Cross-platform
 
-* **Linux** (Ubuntu 24.04, GCC 13): reference platform. Full
-  coverage — engine, async HTTP + TLS, Provider / MCP (HTTP +
-  stdio) / Checkpoint (memory + SQLite + Postgres sync + async).
-* **macOS** (macos-latest, Clang): CI verifies build + non-
-  Postgres tests. MCP stdio uses the POSIX fork/pipe path.
-* **Windows** (windows-latest, MSVC): CI verifies build + tests.
-  MCP stdio uses CreateProcess + named-pipe + asio::windows::
-  stream_handle (FILE_FLAG_OVERLAPPED). Postgres async peers
-  wrap `PQsocket` via `asio::ip::tcp::socket::assign` (SOCKET is
-  `UINT_PTR` on Windows, cast at the boundary). libpq via vcpkg.
-  Postgres integration tests skip on Windows CI (no service
-  container — build-level link verification only).
+Three platforms are supported in 2.0.0 at different stability tiers.
+The tier reflects how much real-world validation the platform has
+seen before release — not feature coverage (the codebase is single-
+sourced with `#ifdef _WIN32` splits; features are equivalent across
+platforms once tests pass).
+
+#### Linux — **GA** (production-ready)
+
+* Ubuntu 24.04, GCC 13.
+* Full 332/332 ctest green locally (Postgres via docker
+  `postgres:16-alpine`) plus all benches inside committed CI floors.
+* MCP stdio on fork/pipe/execvp + `asio::posix::stream_descriptor`.
+* Postgres async peers on libpq nonblocking + `asio::posix::stream_
+  descriptor` wrapping `PQsocket`.
+* Reference platform for every performance number quoted above.
+
+#### macOS — **beta**
+
+* macos-latest (Apple Silicon), Clang via Xcode.
+* CI builds + runs non-Postgres tests; Postgres integration cases
+  self-skip without a service container. POSIX paths (same fork/
+  pipe + asio::posix code) are exercised.
+* `CoreFoundation` + `Security` frameworks linked through httplib
+  for system cert loading on TLS.
+* Treat as beta until 2-4 weeks of CI runs and user reports
+  confirm no runtime-behaviour differences (coroutine scheduling,
+  SIGPIPE / EPIPE shape, pipe buffer sizing). Targeted promotion
+  to GA once those roll in without incident.
+
+#### Windows — **alpha**
+
+* windows-latest, MSVC 19.44 (VS 2022), x64.
+* CI builds + runs non-Postgres tests via vcpkg-installed libpq +
+  openssl + sqlite3. Postgres integration cases self-skip (same
+  as macOS).
+* MCP stdio: `CreateProcess` + named-pipe (FILE_FLAG_OVERLAPPED) +
+  `asio::windows::stream_handle`. The overlapped-pipe path was
+  written against MSDN spec without local Windows validation;
+  expect first-users to surface edge cases (ERROR_IO_PENDING
+  handling, pipe buffer boundary on large JSON responses).
+* Postgres async peers: `asio::ip::tcp::socket::assign` wrapping
+  the SOCKET returned by `PQsocket` (cast through
+  `native_handle_type` to preserve 64-bit SOCKET values).
+* Coroutine machinery lives in MSVC's `<coroutine>`; behaviour
+  expected to match GCC/Clang by spec but `examples/27` cross-run
+  overlap measurements haven't been confirmed on Windows yet.
+* Treat as **alpha** through 2.0.0. Promote to beta once one
+  production user runs a multi-agent workload for a week without
+  hitting stdio/pipe or coroutine-scheduler issues.
+
+> **Pattern**: CI green is a floor, not a ceiling. Layer 3 runtime
+> behaviour differences (coroutine scheduling timing, pipe buffer
+> boundaries, socket takeover semantics) only surface under real
+> workloads. The tier language above gives users the right
+> expectation for each platform rather than pretending all three
+> are interchangeable on day one.
 
 ### Fixed post-bump
 
