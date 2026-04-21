@@ -165,45 +165,36 @@ jobs:
 
   build-windows:
     runs-on: windows-latest
-    # Windows vcpkg cold cache compiles OpenSSL from source — can
-    # take 20+ min on a fresh runner. Warm cache drops this to
-    # ~30s. Bump total budget so the first run doesn't get killed
-    # by the default 360m but new runs surface genuine hangs.
-    timeout-minutes: 90
-    env:
-      # Route vcpkg's binary cache through GHA's cache backend.
-      # First job populates it; subsequent jobs on the same PR/branch
-      # skip the from-source build of OpenSSL/libpq/sqlite entirely.
-      VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+    # Windows tier is **alpha** for 2.0.0 — CI gates the Windows-
+    # specific code paths (MCP stdio named-pipe + PG async socket
+    # wrap) compile-wise, not full integration. Scope is deliberately
+    # trimmed so the job finishes in ~5 min on the stock runner:
+    #   * Postgres + SQLite backends OFF — both would require vcpkg
+    #     to compile openssl/libpq/etc from source, which took ~20
+    #     minutes every run (vcpkg's x-gha binary cache backend was
+    #     removed upstream). Windows users compile these locally
+    #     with their own vcpkg / choco setup.
+    #   * OpenSSL comes from the runner's preinstalled copy (choco
+    #     installs it by default into `C:\Program Files\OpenSSL-Win64`).
+    # This still exercises neograph_core / neograph_async (TLS path) /
+    # neograph_mcp (both HTTP and stdio transports) / neograph_llm
+    # — the layers with 2.0 Windows-specific code.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Export GitHub Actions cache environment variables
-        uses: actions/github-script@v7
-        with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-
-      - name: Install libpq + OpenSSL + SQLite3 via vcpkg (GHA-cached)
-        shell: pwsh
-        run: |
-          vcpkg install libpq:x64-windows openssl:x64-windows sqlite3:x64-windows
-          "VCPKG_TOOLCHAIN=$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" `
-            | Out-File -Append -Encoding ascii $env:GITHUB_ENV
-
-      - name: Configure (all backends on; Postgres build-only, no service)
+      - name: Configure (MCP + async only; PG + SQLite disabled on Windows CI)
         shell: pwsh
         run: |
           cmake -B build `
             -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_TOOLCHAIN" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DOPENSSL_ROOT_DIR="C:/Program Files/OpenSSL-Win64" `
             -DNEOGRAPH_BUILD_LLM=ON `
             -DNEOGRAPH_BUILD_MCP=ON `
             -DNEOGRAPH_BUILD_UTIL=ON `
-            -DNEOGRAPH_BUILD_POSTGRES=ON `
+            -DNEOGRAPH_BUILD_POSTGRES=OFF `
+            -DNEOGRAPH_BUILD_SQLITE=OFF `
             -DNEOGRAPH_BUILD_TESTS=ON `
             -DNEOGRAPH_BUILD_EXAMPLES=OFF
 
