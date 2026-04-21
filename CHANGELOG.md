@@ -7,7 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [2.0.0] — 2026-04-21 (unreleased, `feat/async-api` branch)
+## [2.0.0] — 2026-04-22
 
 First public release with the Stage 3 async API. This is a breaking
 release; the changes below affect compilation (C++ standard) and
