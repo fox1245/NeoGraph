@@ -179,3 +179,81 @@ TEST(RateLimitedProvider, NullInnerRejected) {
         llm::RateLimitedProvider::create(nullptr),
         std::invalid_argument);
 }
+
+// ---------------------------------------------------------------------------
+// Async path (Stage 3 / Semester 2.5)
+//
+// The Retry-After sleep migrated from std::this_thread::sleep_for to an
+// asio::steady_timer co_await. The behavioural guarantees are unchanged
+// (the existing tests above verify this through the sync facade), but
+// the new property is "the wait does not block other work scheduled on
+// the same io_context". This case pins exactly that.
+
+#include <neograph/async/run_sync.h>
+#include <asio/awaitable.hpp>
+#include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
+#include <asio/io_context.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
+#include <optional>
+
+TEST(RateLimitedProviderAsync, RetrySleepDoesNotBlockOtherCoroutines) {
+    // Inner: 429(Retry-After=1s) -> Ok. Wrapper sleeps 2s (1s + 1s slack).
+    auto inner = make_inner({
+        {K::RateLimit, 1},
+        {K::Ok, 0}
+    });
+    auto wrapped = llm::RateLimitedProvider::create(inner);
+
+    asio::io_context io;
+
+    std::optional<ChatCompletion> wrapped_result;
+    auto driver = [&]() -> asio::awaitable<void> {
+        wrapped_result.emplace(co_await wrapped->complete_async({}));
+    };
+
+    // Ticks every 100ms while the wait is in flight. If the rate-limit
+    // sleep blocks the io_context, this can't tick.
+    std::atomic<int> ticks{0};
+    auto ticker = [&]() -> asio::awaitable<void> {
+        auto ex = co_await asio::this_coro::executor;
+        for (int i = 0; i < 25; ++i) {
+            asio::steady_timer t(ex);
+            t.expires_after(std::chrono::milliseconds(100));
+            co_await t.async_wait(asio::use_awaitable);
+            ticks.fetch_add(1, std::memory_order_relaxed);
+            if (wrapped_result) co_return;
+        }
+    };
+
+    asio::co_spawn(io, driver(), asio::detached);
+    asio::co_spawn(io, ticker(), asio::detached);
+
+    auto t0 = std::chrono::steady_clock::now();
+    io.run();
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+
+    ASSERT_TRUE(wrapped_result.has_value());
+    EXPECT_EQ(wrapped_result->message.content, "ok #1");
+    EXPECT_EQ(inner->call_count(), 2);
+    // Wrapper waits ~2s; ticker should have fired ~20 times if non-
+    // blocking. Allow generous slack against scheduling jitter — anything
+    // >= 5 proves the io_context wasn't frozen the whole time. A blocking
+    // sleep would yield 0 ticks before the driver resumes.
+    EXPECT_GE(ticks.load(), 5)
+        << "ticker fired " << ticks.load() << " times in "
+        << elapsed_ms << " ms — async sleep appears to block io_context";
+}
+
+TEST(RateLimitedProviderAsync, AsyncBubblesNonRateLimitErrors) {
+    auto inner = make_inner({{K::OtherError, 0}});
+    auto wrapped = llm::RateLimitedProvider::create(inner);
+
+    EXPECT_THROW(
+        neograph::async::run_sync(wrapped->complete_async({})),
+        std::runtime_error);
+    EXPECT_EQ(1, inner->call_count());
+}

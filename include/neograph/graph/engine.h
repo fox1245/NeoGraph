@@ -18,6 +18,8 @@
 #include <neograph/graph/store.h>
 #include <neograph/graph/types.h>
 
+#include <asio/awaitable.hpp>
+
 #include <memory>
 #include <set>
 
@@ -122,6 +124,31 @@ public:
     RunResult run(const RunConfig& config);
 
     /**
+     * @brief Async peer of run() — Stage 3 / Semester 3.6 (API surface).
+     *
+     * Returns an `asio::awaitable<RunResult>` so callers driving an
+     * io_context can `co_await engine->run_async(cfg)` alongside other
+     * coroutines (typically multiple concurrent agents).
+     *
+     * **Current implementation is a thin wrapper that co_returns
+     * run(cfg).** This means the call still blocks the resumed
+     * thread for the entire run duration — including all I/O —
+     * because the engine's super-step loop, node dispatch, and
+     * checkpoint writes are not yet coroutine-native. The non-
+     * blocking benefit only materializes once the engine internals
+     * are coroutinized (planned follow-up; node-level async already
+     * exists via execute_async, so the building blocks are in place).
+     *
+     * Adding the wrapper now lets external callers migrate to the
+     * async surface ahead of the internal refactor — when that lands,
+     * no API breaks.
+     *
+     * @param config Run configuration.
+     * @return Awaitable yielding the execution result.
+     */
+    asio::awaitable<RunResult> run_async(const RunConfig& config);
+
+    /**
      * @brief Execute the graph with streaming event callbacks.
      * @param config Run configuration.
      * @param cb Callback invoked for each graph event (filtered by config.stream_mode).
@@ -129,6 +156,11 @@ public:
      */
     RunResult run_stream(const RunConfig& config,
                          const GraphStreamCallback& cb);
+
+    /// Async peer of run_stream — same caveat as run_async: thin
+    /// wrapper today, real coroutine internals later.
+    asio::awaitable<RunResult> run_stream_async(
+        const RunConfig& config, const GraphStreamCallback& cb);
 
     /**
      * @brief Resume execution from a HITL interrupt.
@@ -144,6 +176,12 @@ public:
     RunResult resume(const std::string& thread_id,
                      const json& resume_value = json(),
                      const GraphStreamCallback& cb = nullptr);
+
+    /// Async peer of resume — same caveat as run_async.
+    asio::awaitable<RunResult> resume_async(
+        const std::string& thread_id,
+        const json& resume_value = json(),
+        const GraphStreamCallback& cb = nullptr);
 
     // ── State inspection & manipulation (LangGraph Checkpointer API) ──
 
@@ -252,6 +290,22 @@ private:
                             const GraphStreamCallback& cb,
                             const std::vector<std::string>& resume_from = {},
                             const json& resume_value = json());
+
+    /// Async peer of execute_graph (Sem 3.6 internal step 3). Mirrors
+    /// the sync implementation with these substitutions:
+    /// * single-node dispatch goes through `run_one_async`;
+    /// * checkpoint I/O goes through the coordinator's *_async peers;
+    /// * parallel fan-out still calls the sync `run_parallel` (the
+    ///   migration to a coroutine-friendly fan-out is Sem 3.7) — so a
+    ///   graph with concurrent ready sets blocks the io_context for
+    ///   the duration of that super-step's slowest worker. Linear /
+    ///   conditional graphs (the typical agent shape) gain the full
+    ///   non-blocking benefit.
+    asio::awaitable<RunResult> execute_graph_async(
+        const RunConfig& config,
+        const GraphStreamCallback& cb,
+        const std::vector<std::string>& resume_from = {},
+        const json& resume_value = json());
 
     RetryPolicy get_retry_policy(const std::string& node_name) const;
 

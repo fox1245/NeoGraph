@@ -20,6 +20,27 @@
 #include <vector>
 #include <cstdint>
 
+// Windows SDK (pulled in transitively via asio on Win32) defines a
+// bunch of ALL-CAPS macros — notably ERROR (wingdi.h) and DEBUG —
+// that silently clobber enumerator names. `enum class Type { ERROR }`
+// below becomes `enum class Type { 0 }` and every downstream parse
+// collapses. Scrub the ones we actually use before declaring the
+// enums. No-op outside of Windows.
+#ifdef _WIN32
+#  ifdef ERROR
+#    undef ERROR
+#  endif
+#  ifdef DEBUG
+#    undef DEBUG
+#  endif
+#  ifdef IN
+#    undef IN
+#  endif
+#  ifdef OUT
+#    undef OUT
+#  endif
+#endif
+
 namespace neograph::graph {
 
 // Forward declaration

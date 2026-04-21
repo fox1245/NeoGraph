@@ -13,6 +13,8 @@
 #include <neograph/graph/types.h>
 #include <neograph/graph/state.h>
 
+#include <asio/awaitable.hpp>
+
 namespace neograph::graph {
 
 /**
@@ -41,10 +43,31 @@ public:
 
     /**
      * @brief Execute the node: read state, return channel writes.
+     *
+     * Stage 3 / Sem 3.4: defaults to bridging through `execute_async`
+     * via `neograph::async::run_sync`. Subclasses written against the
+     * sync path keep overriding this directly; async-native nodes (Sem
+     * 3.5+) override `execute_async` and inherit this. Override at
+     * least one — overriding neither yields infinite mutual recursion.
+     *
      * @param state The current graph state (read-only access).
      * @return Vector of channel writes to apply to the state.
      */
-    virtual std::vector<ChannelWrite> execute(const GraphState& state) = 0;
+    virtual std::vector<ChannelWrite> execute(const GraphState& state);
+
+    /**
+     * @brief Async peer for execute().
+     *
+     * Default body co_returns `execute(state)` — runs on whatever
+     * thread resumes the coroutine, blocking it for the duration.
+     * Override to issue non-blocking operations (typically
+     * `co_await provider->complete_async(...)` for LLM nodes).
+     *
+     * @param state The current graph state.
+     * @return Awaitable yielding the channel writes.
+     */
+    virtual asio::awaitable<std::vector<ChannelWrite>>
+    execute_async(const GraphState& state);
 
     /**
      * @brief Streaming execution variant.
@@ -60,6 +83,16 @@ public:
         const GraphState& state, const GraphStreamCallback& cb);
 
     /**
+     * @brief Async peer of execute_stream — Sem 3.4b.
+     *
+     * Default body co_returns execute_stream(state, cb). Same crossover
+     * shape as execute / execute_async. Override at least one of the
+     * sync/async pair when adding a streaming-aware async node.
+     */
+    virtual asio::awaitable<std::vector<ChannelWrite>> execute_stream_async(
+        const GraphState& state, const GraphStreamCallback& cb);
+
+    /**
      * @brief Extended execute returning a full NodeResult.
      *
      * Default implementation wraps execute() output into NodeResult::writes.
@@ -71,12 +104,29 @@ public:
     virtual NodeResult execute_full(const GraphState& state);
 
     /**
+     * @brief Async peer of execute_full — Sem 3.4b.
+     *
+     * Default routes through execute_full() via run_sync, which in turn
+     * wraps execute()'s writes into a NodeResult. Async-native nodes
+     * that emit Command/Send override this directly to keep the
+     * NodeResult assembly inside the coroutine.
+     */
+    virtual asio::awaitable<NodeResult> execute_full_async(
+        const GraphState& state);
+
+    /**
      * @brief Extended streaming execution returning a full NodeResult.
      * @param state The current graph state.
      * @param cb Callback for emitting streaming events.
      * @return NodeResult with writes, optional Command, and optional Sends.
      */
     virtual NodeResult execute_full_stream(
+        const GraphState& state, const GraphStreamCallback& cb);
+
+    /**
+     * @brief Async peer of execute_full_stream — Sem 3.4b.
+     */
+    virtual asio::awaitable<NodeResult> execute_full_stream_async(
         const GraphState& state, const GraphStreamCallback& cb);
 
     /**
@@ -102,7 +152,13 @@ public:
      */
     LLMCallNode(const std::string& name, const NodeContext& ctx);
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override;
+    /// Async-native execute — co_awaits provider_->complete_async so a
+    /// run on a shared io_context doesn't block during the LLM call.
+    /// The sync execute() is inherited from GraphNode and routes
+    /// through this via run_sync.
+    asio::awaitable<std::vector<ChannelWrite>>
+    execute_async(const GraphState& state) override;
+
     std::vector<ChannelWrite> execute_stream(
         const GraphState& state, const GraphStreamCallback& cb) override;
     std::string get_name() const override { return name_; }
@@ -170,7 +226,10 @@ public:
                          const std::string& prompt,
                          std::vector<std::string> valid_routes);
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override;
+    /// Async-native classify — same rationale as LLMCallNode.
+    asio::awaitable<std::vector<ChannelWrite>>
+    execute_async(const GraphState& state) override;
+
     std::vector<ChannelWrite> execute_stream(
         const GraphState& state, const GraphStreamCallback& cb) override;
     std::string get_name() const override { return name_; }
@@ -215,7 +274,14 @@ public:
                  std::map<std::string, std::string> input_map = {},
                  std::map<std::string, std::string> output_map = {});
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override;
+    /// Async-native execute — co_awaits subgraph_->run_async so the
+    /// parent run shares its io_context with the child run instead
+    /// of stacking sync calls. Wires correctly through the engine
+    /// thin wrapper (Sem 3.6 API surface); when the engine internals
+    /// go coroutine-native, nested subgraphs benefit transparently.
+    asio::awaitable<std::vector<ChannelWrite>>
+    execute_async(const GraphState& state) override;
+
     std::vector<ChannelWrite> execute_stream(
         const GraphState& state, const GraphStreamCallback& cb) override;
     std::string get_name() const override { return name_; }

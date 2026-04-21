@@ -61,7 +61,17 @@ class SchemaProvider : public Provider {
      */
     static std::unique_ptr<SchemaProvider> create(const Config& config);
 
-    ChatCompletion complete(const CompletionParams& params) override;
+    /// Async completion — single wire path implemented over
+    /// neograph::async::async_post. The schema_mutex_ still serializes
+    /// the body-build and response-parse phases (yyjson_mut_doc traversal
+    /// is not thread-safe even for reads), but the network I/O happens
+    /// off-lock so concurrent fan-out still overlaps.
+    asio::awaitable<ChatCompletion>
+    complete_async(const CompletionParams& params) override;
+
+    /// Sync completion is inherited from `Provider::complete()`, which
+    /// drives `complete_async` via `neograph::async::run_sync`.
+
     ChatCompletion complete_stream(const CompletionParams& params,
                                    const StreamCallback& on_chunk) override;
 
