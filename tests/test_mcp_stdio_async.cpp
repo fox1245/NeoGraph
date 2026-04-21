@@ -85,6 +85,72 @@ TEST(MCPStdioAsync, RpcCallAsyncRoundTripsThroughSubprocess) {
     EXPECT_EQ(tools[0].value("name", std::string{}), "echo");
 }
 
+TEST(MCPStdioAsync, ConcurrentAsyncCallsOnSameSessionSerializeSafely) {
+    // Awaitable-mutex regression (Sem 4 follow-up). Before the lock
+    // migrated off std::mutex, two coroutines on the same single-
+    // threaded io_context calling the same session would deadlock:
+    // the second's lock_guard blocked the worker the first needed
+    // to drive its async read completions. Now the channel-backed
+    // lock lets the second suspend cooperatively.
+    //
+    // Three concurrent rpc_call_async invocations — if the lock
+    // worked, all three complete; if it deadlocked, io.run() never
+    // returns (test harness would hang and time out). We also
+    // assert they all got valid results.
+    if (!python3_available()) {
+        GTEST_SKIP() << "python3 not available";
+    }
+    auto fixture = fixture_path();
+    ASSERT_TRUE(std::filesystem::exists(fixture));
+
+    mcp::MCPClient client({"python3", fixture.string()});
+    json init_params;
+    init_params["protocolVersion"] = "2025-03-26";
+    init_params["capabilities"] = json::object();
+    init_params["clientInfo"] = json::object();
+    init_params["clientInfo"]["name"] = "test";
+    init_params["clientInfo"]["version"] = "0";
+
+    asio::io_context io;
+    std::atomic<int> done{0};
+    std::array<json, 3> results;
+
+    // First: a sequential initialize so subsequent calls hit the
+    // post-handshake state. (The echo fixture tolerates any order
+    // but real MCP servers require initialize first.)
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            co_await client.rpc_call_async("initialize", init_params);
+            // Now fan out three parallel calls on the same session.
+            // Each nested co_spawn returns a deferred op for a
+            // parallel_group... but we can also just co_await three
+            // sequential — the point of the regression is that the
+            // FIRST starts holding the lock and the SECOND/THIRD
+            // suspend on it cooperatively. We verify via co_spawn of
+            // siblings on the same io_context.
+            for (int i = 0; i < 3; ++i) {
+                asio::co_spawn(
+                    io,
+                    [&, i]() -> asio::awaitable<void> {
+                        results[i] = co_await client.rpc_call_async(
+                            "tools/list", json::object());
+                        done.fetch_add(1, std::memory_order_relaxed);
+                    },
+                    asio::detached);
+            }
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_EQ(done.load(), 3);
+    for (const auto& r : results) {
+        ASSERT_TRUE(r.is_object())
+            << "one of the concurrent calls produced no result";
+        EXPECT_TRUE(r.contains("tools"));
+    }
+}
+
 TEST(MCPStdioAsync, SyncFacadeStillWorksAlongsideAsync) {
     // The sync rpc_call() path was left intact (Sem 2.7 only added the
     // async peer). Verify a sync initialize+get_tools+call_tool still

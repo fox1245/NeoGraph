@@ -4,6 +4,7 @@
 #include <neograph/async/http_client.h>
 #include <neograph/async/run_sync.h>
 
+#include <asio/experimental/channel.hpp>
 #include <asio/posix/stream_descriptor.hpp>
 #include <asio/read_until.hpp>
 #include <asio/streambuf.hpp>
@@ -43,16 +44,23 @@ public:
     json rpc_call(const std::string& method, const json& params);
 
     /// Async variant — wraps the subprocess pipes in
-    /// asio::posix::stream_descriptor for non-blocking I/O. The mutex
-    /// that serialises concurrent rpc_call() calls is reused here, so
-    /// concurrent rpc_call_async invocations on the *same session* and
-    /// *same single-threaded io_context* will deadlock — the second
-    /// coroutine's lock acquire blocks the worker thread that the
-    /// first needs to drive its I/O completions. The pragmatic fix is
-    /// to not multi-call one session from one io_context; one MCP
-    /// session per logical caller is the typical usage. A proper
-    /// awaitable mutex (asio::experimental::channel-based) is future
-    /// work tracked under Sem 4 cleanup.
+    /// asio::posix::stream_descriptor for non-blocking I/O. The
+    /// awaitable serialises concurrent rpc_call_async() invocations
+    /// on the same session via an asio::experimental::channel-backed
+    /// lock (capacity 1, token-passing). A second coroutine's
+    /// acquire suspends at its own `co_await async_receive` — no OS
+    /// thread is held, so other coroutines on the io_context keep
+    /// progressing and the first call's I/O completions fire normally.
+    ///
+    /// The lock is lazy-initialised on first call using the caller's
+    /// executor. Subsequent calls on executors that can't interoperate
+    /// with that executor would break the serialisation — in practice
+    /// all callers of one session go through one engine and thus one
+    /// io_context, so this isn't a concern.
+    ///
+    /// Sync rpc_call() continues to use the std::mutex mtx_ and must
+    /// NOT be mixed with rpc_call_async on the same session (the two
+    /// locks don't know about each other).
     asio::awaitable<json> rpc_call_async(
         const std::string& method, const json& params);
 
@@ -76,10 +84,18 @@ private:
     int   stdin_fd_ = -1;   // parent → child
     int   stdout_fd_ = -1;  // child  → parent
 
-    std::mutex   mtx_;
+    std::mutex   mtx_;        ///< sync path serialisation
     std::string  buffer_;     ///< sync read buffer
     std::string  abuffer_;    ///< async read buffer (separate to avoid mixing)
     std::atomic<int> next_id_{0};
+
+    // Awaitable lock for the async path (Sem 4 follow-up). Capacity-1
+    // channel behaves as a binary semaphore: holder takes the token
+    // via `async_receive`, releases via `try_send`. Second acquirer
+    // suspends cooperatively rather than blocking the worker thread.
+    using AsyncLock = asio::experimental::channel<void(asio::error_code)>;
+    std::unique_ptr<AsyncLock> async_lock_;
+    std::mutex async_lock_init_mtx_;
 };
 
 std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>& argv) {
@@ -306,6 +322,42 @@ StdioSession::rpc_call_async(const std::string& method, const json& params) {
 
     auto ex = co_await asio::this_coro::executor;
 
+    // Lazy-init the awaitable lock on first call. Bound to this
+    // caller's executor; subsequent calls assume a compatible executor
+    // (in practice: the engine's single io_context — no cross-executor
+    // mix for one session). std::mutex guards only the one-time
+    // init, not the lock itself.
+    {
+        std::lock_guard<std::mutex> g(async_lock_init_mtx_);
+        if (!async_lock_) {
+            async_lock_ = std::make_unique<AsyncLock>(ex, 1);
+            // Seed with the initial token — the first acquirer can
+            // take it without blocking. try_send returns false if
+            // the channel is already full, which we never hit here
+            // because we just created it with capacity 1 and empty.
+            async_lock_->try_send(asio::error_code{});
+        }
+    }
+
+    // Acquire the awaitable lock. Second coroutine on the same
+    // session suspends here until the holder releases via try_send
+    // below — cooperative, no OS-thread block.
+    co_await async_lock_->async_receive(asio::use_awaitable);
+
+    // RAII release: put the token back on every exit path, including
+    // exception / cancellation. Destructor runs on coroutine frame
+    // unwind so no co_await inside — safe under GCC 13's catch/await
+    // ICE rules.
+    struct LockReleaser {
+        AsyncLock* ch;
+        ~LockReleaser() {
+            // try_send is noexcept-ish (no throw on a healthy
+            // channel). We're on the hot unwind path; swallow any
+            // residual error rather than abort the program.
+            try { ch->try_send(asio::error_code{}); } catch (...) {}
+        }
+    } lock_rel{async_lock_.get()};
+
     // Wrap the raw pipe fds in stream_descriptors *without* taking
     // ownership — we release() before destruction so the session
     // retains the fds across calls. Fresh wrappers per call avoid the
@@ -319,7 +371,6 @@ StdioSession::rpc_call_async(const std::string& method, const json& params) {
         ~ReleaseGuard() { try { d.release(); } catch (...) {} }
     } in_guard{in_desc}, out_guard{out_desc};
 
-    std::lock_guard<std::mutex> lock(mtx_);
     co_await async_write_frame_locked(in_desc, req);
 
     for (int guard = 0; guard < 1024; ++guard) {
