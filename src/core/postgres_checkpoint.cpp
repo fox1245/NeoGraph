@@ -18,6 +18,10 @@
 
 #include <libpq-fe.h>
 
+#include <asio/posix/stream_descriptor.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
+
 #include <chrono>
 #include <cstring>
 #include <memory>
@@ -752,6 +756,387 @@ size_t PostgresCheckpointStore::blob_count() {
         auto res = exec_params(c,
             "SELECT COUNT(*) AS n FROM neograph_checkpoint_blobs", {});
         return col_sz(res, 0, 0);
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Async path — libpq nonblocking mode driven by asio::posix
+// ─────────────────────────────────────────────────────────────────────
+//
+// Contract mirrors the sync helpers above, but every wait (flush,
+// consume) yields via `co_await sock.async_wait(...)`. The connection
+// is temporarily flipped to nonblocking for the exchange and flipped
+// back on every exit path — so the pool slot remains usable by the
+// sync path after the async call returns.
+//
+// One wire quirk worth noting: asio::posix::stream_descriptor tries to
+// close its fd on destruction. We wrap PQsocket(conn) without wanting
+// that — the fd belongs to the PGconn, PQfinish closes it. A RAII
+// `release()` guard strips the ownership before the descriptor's
+// destructor runs, so the fd survives.
+
+namespace {
+
+asio::awaitable<PgResult> exec_params_async(
+    pg_conn* c,
+    const char* sql,
+    const std::vector<std::string>& params,
+    const std::vector<bool>& nulls = {}) {
+
+    auto ex = co_await asio::this_coro::executor;
+
+    std::vector<const char*> vals(params.size(), nullptr);
+    for (size_t i = 0; i < params.size(); ++i) {
+        bool is_null = (i < nulls.size() && nulls[i]);
+        vals[i] = is_null ? nullptr : params[i].c_str();
+    }
+
+    // Flip to nonblocking for this exchange; restore on every exit
+    // (exception, cancellation, normal return) so subsequent sync
+    // calls on this slot still work.
+    if (PQsetnonblocking(c, 1) != 0) {
+        throw std::runtime_error(
+            std::string("PQsetnonblocking(1): ") + PQerrorMessage(c));
+    }
+    struct ModeRestore {
+        pg_conn* c;
+        ~ModeRestore() { PQsetnonblocking(c, 0); }
+    } restore{c};
+
+    int send_r = PQsendQueryParams(c, sql,
+                                    static_cast<int>(params.size()),
+                                    /*paramTypes=*/nullptr, vals.data(),
+                                    /*lengths=*/nullptr,
+                                    /*formats=*/nullptr,
+                                    /*resultFormat=*/0);
+    if (send_r != 1) {
+        std::string msg = std::string("PQsendQueryParams: ")
+                        + PQerrorMessage(c);
+        if (PQstatus(c) != CONNECTION_OK) throw BrokenConnection(msg);
+        throw std::runtime_error(msg);
+    }
+
+    // Wrap PQsocket without taking ownership — asio would close it
+    // on destruction otherwise, and the PGconn needs to keep it
+    // across calls. release() before unwind strips the ownership.
+    asio::posix::stream_descriptor sock(ex, PQsocket(c));
+    struct SockRelease {
+        asio::posix::stream_descriptor& s;
+        ~SockRelease() { try { s.release(); } catch (...) {} }
+    } rel{sock};
+
+    // Flush loop: PQflush returns 0 (done), 1 (more to send), -1 (error).
+    while (true) {
+        int f = PQflush(c);
+        if (f == 0) break;
+        if (f < 0) {
+            std::string msg = std::string("PQflush: ") + PQerrorMessage(c);
+            if (PQstatus(c) != CONNECTION_OK) throw BrokenConnection(msg);
+            throw std::runtime_error(msg);
+        }
+        co_await sock.async_wait(
+            asio::posix::stream_descriptor::wait_write,
+            asio::use_awaitable);
+    }
+
+    // Consume loop: PQisBusy returns 1 while results are still on the
+    // wire. Wait for readable, pull bytes in via PQconsumeInput, repeat.
+    while (PQisBusy(c)) {
+        co_await sock.async_wait(
+            asio::posix::stream_descriptor::wait_read,
+            asio::use_awaitable);
+        if (PQconsumeInput(c) != 1) {
+            std::string msg = std::string("PQconsumeInput: ")
+                            + PQerrorMessage(c);
+            if (PQstatus(c) != CONNECTION_OK) throw BrokenConnection(msg);
+            throw std::runtime_error(msg);
+        }
+    }
+
+    // Collect the single result (non-pipeline sends produce exactly
+    // one). Drain defensively in case the wire had spurious extras.
+    PGresult* res = PQgetResult(c);
+    while (auto* next = PQgetResult(c)) PQclear(next);
+    if (!res) {
+        throw std::runtime_error("PQgetResult: no result");
+    }
+    check_ok(res, c, "exec_params_async");  // throws BrokenConnection or runtime_error
+    co_return PgResult{res};
+}
+
+} // namespace
+
+// Async peer of with_conn. Template — definition here (same TU as the
+// only instantiation points) so the Fn → awaitable<T> inference works
+// without explicit instantiation. The retry-on-broken-connection path
+// avoids co_await inside a catch block (GCC 13 ICE): the catch marks
+// `need_retry = true`, then the retry co_await happens outside the try.
+template <typename Fn>
+auto PostgresCheckpointStore::with_conn_async(Fn fn)
+    -> decltype(fn(std::declval<pg_conn*>())) {
+    size_t idx = acquire_slot();
+    struct Releaser {
+        PostgresCheckpointStore* self;
+        size_t idx;
+        ~Releaser() { self->release_slot(idx); }
+    } guard{this, idx};
+
+    bool need_retry = false;
+    // First attempt under try — any co_await happens here, not in catch.
+    try {
+        co_return co_await fn(pool_[idx]->raw);
+    } catch (const BrokenConnection&) {
+        need_retry = true;
+    }
+
+    // need_retry == true (otherwise co_return above already happened).
+    // Replace the slot's connection synchronously (cold path, happens
+    // at most once per pool slot per failure — not a throughput hot
+    // point) and re-run.
+    pool_[idx].reset();
+    pool_[idx] = open_conn(conn_str_);
+    exec_sql(pool_[idx]->raw, kSchemaDDL);
+    reconnect_count_.fetch_add(1, std::memory_order_relaxed);
+    co_return co_await fn(pool_[idx]->raw);
+}
+
+// ── Async method overrides ────────────────────────────────────────────
+
+asio::awaitable<void> PostgresCheckpointStore::save_async(const Checkpoint& cp) {
+    // GCC-13 ICE workaround: build all the params outside the
+    // coroutine-awaitable lambda captured below. Nested brace-init
+    // inside a coroutine body trips build_special_member_call.
+    json payload = json::array();
+    if (cp.channel_values.is_object() &&
+        cp.channel_values.contains("channels")) {
+        json chs = cp.channel_values["channels"];
+        if (chs.is_object()) {
+            for (auto [name, ch] : chs.items()) {
+                if (!ch.is_object() || !ch.contains("version")) continue;
+                if (!ch.contains("value")) continue;
+                json row;
+                row["t"] = cp.thread_id;
+                row["c"] = name;
+                row["v"] = ch["version"].get<int64_t>();
+                row["b"] = to_jsonb_text(ch["value"]);
+                payload.push_back(std::move(row));
+            }
+        }
+    }
+
+    json channel_versions = extract_channel_versions(cp.channel_values);
+    int64_t global_version = 0;
+    if (cp.channel_values.is_object() &&
+        cp.channel_values.contains("global_version")) {
+        global_version = cp.channel_values["global_version"].get<int64_t>();
+    }
+
+    std::vector<std::string> params{
+        payload.dump(),
+        cp.thread_id,
+        cp.id,
+        cp.parent_id,
+        cp.current_node,
+        to_jsonb_text(next_nodes_to_json(cp.next_nodes)),
+        std::string(to_string(cp.interrupt_phase)),
+        to_jsonb_text(barrier_state_to_json(cp.barrier_state)),
+        to_jsonb_text(channel_versions),
+        std::to_string(global_version),
+        to_jsonb_text(cp.metadata),
+        std::to_string(cp.step),
+        std::to_string(cp.timestamp),
+        std::to_string(cp.schema_version),
+    };
+
+    co_await with_conn_async([&](pg_conn* c) -> asio::awaitable<void> {
+        (void)co_await exec_params_async(c, kSqlSaveAll, params);
+        co_return;
+    });
+}
+
+asio::awaitable<std::optional<Checkpoint>>
+PostgresCheckpointStore::load_latest_async(const std::string& thread_id) {
+    std::string sql = std::string("SELECT ") + kSelectCols +
+        " FROM neograph_checkpoints WHERE thread_id = $1 "
+        "ORDER BY timestamp_ms DESC, step DESC LIMIT 1";
+    // GCC 13 ICE workaround: build the param vector outside the
+    // coroutine lambda; brace-init inside a coroutine body hits
+    // build_special_member_call.
+    std::vector<std::string> params{thread_id};
+
+    co_return co_await with_conn_async(
+        [&, sql, params](pg_conn* c) -> asio::awaitable<std::optional<Checkpoint>> {
+            auto res = co_await exec_params_async(c, sql.c_str(), params);
+            if (PQntuples(res) == 0) co_return std::nullopt;
+            // Blob fetch still sync on the same connection — keeps
+            // the load hot path simple. For a thread with 10+ channels
+            // a future pipeline-mode batch could reduce round-trips,
+            // but typical channel counts are 2-5 so it's not load-bearing.
+            co_return finish_load(c, row_to_loaded(res, 0));
+        });
+}
+
+asio::awaitable<std::optional<Checkpoint>>
+PostgresCheckpointStore::load_by_id_async(const std::string& id) {
+    std::string sql = std::string("SELECT ") + kSelectCols +
+        " FROM neograph_checkpoints WHERE checkpoint_id = $1 LIMIT 1";
+    std::vector<std::string> params{id};
+
+    co_return co_await with_conn_async(
+        [&, sql, params](pg_conn* c) -> asio::awaitable<std::optional<Checkpoint>> {
+            auto res = co_await exec_params_async(c, sql.c_str(), params);
+            if (PQntuples(res) == 0) co_return std::nullopt;
+            co_return finish_load(c, row_to_loaded(res, 0));
+        });
+}
+
+asio::awaitable<std::vector<Checkpoint>>
+PostgresCheckpointStore::list_async(const std::string& thread_id, int limit) {
+    std::string sql = std::string("SELECT ") + kSelectCols +
+        " FROM neograph_checkpoints WHERE thread_id = $1 "
+        "ORDER BY timestamp_ms DESC, step DESC LIMIT $2";
+    std::vector<std::string> params{thread_id, std::to_string(limit)};
+
+    co_return co_await with_conn_async(
+        [&, sql](pg_conn* c) -> asio::awaitable<std::vector<Checkpoint>> {
+            auto res = co_await exec_params_async(c, sql.c_str(), params);
+            std::vector<Checkpoint> out;
+            int n = PQntuples(res);
+            out.reserve(n);
+            for (int i = 0; i < n; ++i) {
+                out.push_back(finish_load(c, row_to_loaded(res, i)));
+            }
+            co_return out;
+        });
+}
+
+asio::awaitable<void>
+PostgresCheckpointStore::delete_thread_async(const std::string& thread_id) {
+    std::vector<std::string> params{thread_id};
+    co_await with_conn_async([&, params](pg_conn* c) -> asio::awaitable<void> {
+        (void)co_await exec_params_async(c,
+            "DELETE FROM neograph_checkpoint_writes WHERE thread_id = $1",
+            params);
+        (void)co_await exec_params_async(c,
+            "DELETE FROM neograph_checkpoint_blobs WHERE thread_id = $1",
+            params);
+        (void)co_await exec_params_async(c,
+            "DELETE FROM neograph_checkpoints WHERE thread_id = $1",
+            params);
+        co_return;
+    });
+}
+
+asio::awaitable<void> PostgresCheckpointStore::put_writes_async(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id,
+    const PendingWrite& write) {
+
+    // Build params outside the coroutine lambda (GCC 13 ICE avoidance).
+    std::vector<std::string> insert_params{
+        thread_id, parent_checkpoint_id, "",  // $3 = seq — filled per-attempt
+        write.task_id, write.task_path, write.node_name,
+        to_jsonb_text(write.writes),
+        to_jsonb_text(write.command),
+        to_jsonb_text(write.sends),
+        std::to_string(write.step),
+        std::to_string(write.timestamp),
+    };
+
+    std::vector<std::string> seq_params{thread_id, parent_checkpoint_id};
+    std::vector<std::string> empty_params{};
+    co_await with_conn_async([&, insert_params, seq_params, empty_params]
+                             (pg_conn* c) mutable
+                             -> asio::awaitable<void> {
+        // Async BEGIN/COMMIT — matches sync put_writes's seq+INSERT
+        // transactionality so concurrent puts on the same parent
+        // don't collide.
+        (void)co_await exec_params_async(c, "BEGIN", empty_params);
+        try {
+            auto seq_res = co_await exec_params_async(c,
+                "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq "
+                "FROM neograph_checkpoint_writes "
+                "WHERE thread_id = $1 AND parent_checkpoint_id = $2",
+                seq_params);
+            int next_seq = col_int(seq_res, 0, 0);
+            insert_params[2] = std::to_string(next_seq);
+
+            (void)co_await exec_params_async(c,
+                "INSERT INTO neograph_checkpoint_writes "
+                "(thread_id, parent_checkpoint_id, seq, task_id, task_path, "
+                " node_name, writes_json, command_json, sends_json, step, "
+                " timestamp_ms) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, "
+                "        $10, $11)",
+                insert_params);
+
+            (void)co_await exec_params_async(c, "COMMIT", empty_params);
+        } catch (...) {
+            // Best-effort rollback. Can't co_await inside catch (GCC 13
+            // ICE), so use the sync exec_sql helper — fast path since
+            // connection is still nonblocking-set but PQexec works on
+            // either mode.
+            PQsetnonblocking(c, 0);
+            PGresult* r = PQexec(c, "ROLLBACK");
+            if (r) PQclear(r);
+            throw;
+        }
+        co_return;
+    });
+}
+
+asio::awaitable<std::vector<PendingWrite>>
+PostgresCheckpointStore::get_writes_async(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id) {
+
+    std::vector<std::string> params{thread_id, parent_checkpoint_id};
+    co_return co_await with_conn_async(
+        [&, params](pg_conn* c) -> asio::awaitable<std::vector<PendingWrite>> {
+            auto res = co_await exec_params_async(c,
+                "SELECT task_id, task_path, node_name, writes_json, command_json, "
+                "       sends_json, step, timestamp_ms "
+                "FROM neograph_checkpoint_writes "
+                "WHERE thread_id = $1 AND parent_checkpoint_id = $2 "
+                "ORDER BY seq ASC",
+                params);
+            std::vector<PendingWrite> out;
+            int n = PQntuples(res);
+            out.reserve(n);
+            int task_id_col   = col_idx(res, "task_id");
+            int task_path_col = col_idx(res, "task_path");
+            int node_name_col = col_idx(res, "node_name");
+            int writes_col    = col_idx(res, "writes_json");
+            int command_col   = col_idx(res, "command_json");
+            int sends_col     = col_idx(res, "sends_json");
+            int step_col      = col_idx(res, "step");
+            int ts_col        = col_idx(res, "timestamp_ms");
+            for (int i = 0; i < n; ++i) {
+                PendingWrite pw;
+                pw.task_id   = col_text(res, i, task_id_col);
+                pw.task_path = col_text(res, i, task_path_col);
+                pw.node_name = col_text(res, i, node_name_col);
+                pw.writes    = parse_jsonb_text(col_text(res, i, writes_col));
+                pw.command   = parse_jsonb_text(col_text(res, i, command_col));
+                pw.sends     = parse_jsonb_text(col_text(res, i, sends_col));
+                pw.step      = col_i64(res, i, step_col);
+                pw.timestamp = col_i64(res, i, ts_col);
+                out.push_back(std::move(pw));
+            }
+            co_return out;
+        });
+}
+
+asio::awaitable<void> PostgresCheckpointStore::clear_writes_async(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id) {
+    std::vector<std::string> params{thread_id, parent_checkpoint_id};
+    co_await with_conn_async([&, params](pg_conn* c) -> asio::awaitable<void> {
+        (void)co_await exec_params_async(c,
+            "DELETE FROM neograph_checkpoint_writes "
+            "WHERE thread_id = $1 AND parent_checkpoint_id = $2",
+            params);
+        co_return;
     });
 }
 
