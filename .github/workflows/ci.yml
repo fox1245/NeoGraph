@@ -45,7 +45,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             cmake \
             build-essential \
-            libpqxx-dev \
             libpq-dev \
             libsqlite3-dev \
             libssl-dev \

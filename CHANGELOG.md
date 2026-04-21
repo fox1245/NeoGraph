@@ -25,8 +25,10 @@ work unchanged**.
 - **libpqxx dependency dropped.** `neograph::postgres` now links
   libpq directly. Ubuntu 24.04 users no longer hit the
   `pqxx::argument_error::argument_error(..., std::source_location)`
-  link error introduced by libpqxx-7.8t64's C++17/C++20 mismatch.
-  **Scheduled for Stage 3 Sem 3.3** — not yet in this branch.
+  link error introduced by libpqxx-7.8t64's C++17/C++20 ABI split.
+  CMake find now targets `PostgreSQL::PostgreSQL` (CMake-bundled
+  FindPostgreSQL). Consumers who installed only `libpqxx-dev`
+  must now also install / retain `libpq-dev`.
 - **`Provider`, `CheckpointStore`, `GraphNode`, `MCPClient` ABIs
   extended.** Each grew async peer virtual functions
   (`complete_async`, `save_async`, `execute_async`, `rpc_call_async`
@@ -89,9 +91,14 @@ Measured on the feat/async-api branch against Stage 2 sync baselines:
 
 ### Not yet in 2.0.0
 
-- **Postgres checkpoint store** still uses libpqxx sync under the
-  hood; `save_async` routes through `run_sync`. Sem 3.3 replaces
-  this with a libpq pipeline-mode implementation.
+- **Postgres async pipeline mode** — `PostgresCheckpointStore` now
+  uses libpq sync under the hood, so `save_async` still routes
+  through the `CheckpointStore` crossover `run_sync` bridge.
+  libpq's pipeline mode + `asio::posix::stream_descriptor` on
+  `PQsocket()` would let concurrent saves on one connection
+  overlap at the wire level; deferred as a separate optimization
+  since current tests show per-connection throughput is dominated
+  by WAL fsync, not wire round-trips.
 - **Taskflow dependency** remains. The sync `engine.run()` path
   still uses it for fan-out; Sem 4.5 revisits whether sync paths
   can be replaced by `run_sync(*_async)` so the dependency can

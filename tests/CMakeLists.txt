@@ -70,7 +70,10 @@ if(NEOGRAPH_BUILD_MCP)
 endif()
 
 if(NEOGRAPH_BUILD_POSTGRES)
-    target_link_libraries(neograph_tests PRIVATE neograph::postgres)
+    # The test TU pokes libpq directly (PQconnectdb + pg_terminate_backend
+    # sibling path in RetriesAfterBrokenConnection), so it needs the
+    # libpq include / link in addition to neograph::postgres.
+    target_link_libraries(neograph_tests PRIVATE neograph::postgres PostgreSQL::PostgreSQL)
 endif()
 
 if(NEOGRAPH_BUILD_SQLITE)
