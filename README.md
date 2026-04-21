@@ -219,6 +219,82 @@ for the full API surface.
 
 ## Concurrency & Async
 
+NeoGraph supports two concurrency models out of the box — pick the
+one that fits your hosting pattern:
+
+* **Thread-per-agent (sync)** — `run()` / `run_stream()` / `resume()`
+  dispatched onto any executor you already use. Safe up to roughly a
+  thousand concurrent agents; ~30 µs engine overhead per call. Detailed
+  below.
+* **Coroutine-based async** — `run_async()` / `run_stream_async()` /
+  `resume_async()` returning `asio::awaitable<RunResult>`. One
+  `asio::io_context` hosts thousands of concurrent agents without a
+  thread per run; all Provider / MCP / checkpoint I/O points are
+  non-blocking `co_await` under the hood. Short intro below; full
+  migration guide in [`docs/ASYNC_GUIDE.md`](docs/ASYNC_GUIDE.md).
+
+### Async (Stage 3)
+
+```cpp
+#include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
+#include <asio/io_context.hpp>
+
+asio::io_context io;
+for (const auto& user : users) {
+    asio::co_spawn(
+        io,
+        [&, user]() -> asio::awaitable<void> {
+            RunConfig cfg;
+            cfg.thread_id = user.session_id;
+            cfg.input     = {{"messages", user.history}};
+            auto result = co_await engine->run_async(cfg);
+            handle(result);
+        },
+        asio::detached);
+}
+io.run();  // drives all agents on one thread — real interleaving
+```
+
+Measured: three agents each doing 50ms of async work run on one
+`io_context` thread complete in ~50ms total (perfect overlap), vs.
+150ms sequential. Three parallel fan-out researchers collapse from
+370ms to 150ms. The value axis is burst concurrency — the engine
+overhead per call is unchanged.
+
+Custom nodes join the async path by overriding `execute_async`
+instead of `execute`:
+
+```cpp
+class FetchNode : public GraphNode {
+  public:
+    asio::awaitable<std::vector<ChannelWrite>>
+    execute_async(const GraphState& state) override {
+        auto ex = co_await asio::this_coro::executor;
+        auto res = co_await neograph::async::async_post(ex, /*...*/);
+        co_return std::vector<ChannelWrite>{/*...*/};
+    }
+    std::string get_name() const override { return "fetch"; }
+};
+```
+
+Async-shaped tools derive from `AsyncTool`:
+
+```cpp
+class FetchTool : public neograph::AsyncTool {
+  public:
+    asio::awaitable<std::string>
+    execute_async(const json& args) override { /* co_await HTTP */ }
+    // sync execute() is final, routes through run_sync automatically.
+};
+```
+
+See `examples/27_async_concurrent_runs.cpp` for the multi-agent
+pattern and `examples/05_parallel_fanout.cpp` for fan-out within
+one run.
+
+### Sync (thread-per-agent)
+
 NeoGraph does not ship its own async runtime — it exposes synchronous
 `run()` / `run_stream()` / `resume()` and lets you pick the executor.
 A single compiled `GraphEngine` is safe to share across threads that
