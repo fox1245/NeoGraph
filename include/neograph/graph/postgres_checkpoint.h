@@ -8,6 +8,13 @@
  * `neograph_` table prefix to avoid collisions with LangGraph's
  * unprefixed tables, which carry a different column shape).
  *
+ * Stage 3 / Sem 3.3: migrated off libpqxx onto libpq directly. The
+ * libpqxx-7.8t64 package on Ubuntu 24.04 has a C++17/C++20 ABI split
+ * (link error on `pqxx::conversion_error(..., std::source_location)`)
+ * that made it unbuildable against NeoGraph 2.0's C++20 baseline.
+ * libpq has a stable C ABI and is what libpqxx wraps internally, so
+ * the migration is a net simplification.
+ *
  * ## Schema
  *
  * Three tables, all auto-created on first use via `ensure_schema()`:
@@ -24,7 +31,7 @@
  *
  * ## Concurrency — connection pool
  *
- * The store owns a **fixed-size pool** of libpqxx connections sized by
+ * The store owns a **fixed-size pool** of libpq connections sized by
  * the constructor's `pool_size` parameter (default 8). Each method
  * acquires one connection for its work and releases it back to the
  * pool when done. With N workers ≤ pool_size, there is no
@@ -46,12 +53,15 @@
  *
  * ## Failure model
  *
- * `pqxx::broken_connection` (PG restart, network blip, pgbouncer idle
- * timeout) is caught per-slot: the dead connection is replaced with a
- * fresh one (using the original connection string) and the operation
- * is retried once. `reconnect_count()` exposes the cumulative number
- * of slot replacements for monitoring. Other libpqxx exceptions
- * (constraint violations, query errors) propagate as-is.
+ * A broken connection (PG restart, network blip, pgbouncer idle timeout)
+ * is detected after each operation via `PQstatus(conn) != CONNECTION_OK`
+ * or by matching the `08xxx` SQLSTATE class on an error result. The
+ * dead connection is replaced with a fresh one (using the original
+ * connection string) and the operation is retried once.
+ * `reconnect_count()` exposes the cumulative number of slot
+ * replacements for monitoring. Other errors (constraint violations,
+ * query errors) propagate as std::runtime_error with the PG server's
+ * error message.
  */
 #pragma once
 
@@ -64,14 +74,28 @@
 #include <string>
 #include <vector>
 
-// Forward-declare libpqxx types so this header doesn't drag pqxx into
-// every translation unit that includes it.
-namespace pqxx { class connection; }
+// Forward-declare libpq's opaque PGconn. Keeps libpq-fe.h out of
+// every translation unit that includes this header.
+struct pg_conn;
 
 namespace neograph::graph {
 
+/// RAII wrapper around a libpq PGconn. Owns the connection; closes
+/// via PQfinish in the destructor. Non-copyable, non-movable to match
+/// the pool's slot-index access pattern (pool owns unique_ptr<PgConn>).
+struct PgConn {
+    pg_conn* raw = nullptr;
+    PgConn() = default;
+    explicit PgConn(pg_conn* p) : raw(p) {}
+    ~PgConn();
+    PgConn(const PgConn&) = delete;
+    PgConn& operator=(const PgConn&) = delete;
+    PgConn(PgConn&&) = delete;
+    PgConn& operator=(PgConn&&) = delete;
+};
+
 /**
- * @brief Persistent CheckpointStore backed by PostgreSQL via libpqxx.
+ * @brief Persistent CheckpointStore backed by PostgreSQL via libpq.
  *
  * Construct with a libpq connection string (e.g.
  * `"postgresql://user:pass@host:5432/dbname"`). The constructor opens
@@ -91,9 +115,9 @@ public:
                                       size_t pool_size = 8);
 
     /// Number of times a pool slot's connection was replaced after a
-    /// `pqxx::broken_connection` failure. Cumulative across the whole
-    /// store; useful for monitoring (e.g. Prometheus gauge) and for
-    /// tests that want to assert the retry path fired.
+    /// broken-connection detection. Cumulative across the whole store;
+    /// useful for monitoring (e.g. Prometheus gauge) and for tests that
+    /// want to assert the retry path fired.
     size_t reconnect_count() const { return reconnect_count_; }
 
     /// Number of connections in the pool. Useful for benchmarks and
@@ -102,8 +126,8 @@ public:
 
     ~PostgresCheckpointStore() override;
 
-    // Non-copyable, non-movable — pqxx::connection isn't copyable and the
-    // mutex would need rebinding on move.
+    // Non-copyable, non-movable — mutex would need rebinding on move
+    // and connection pool slots are keyed by stable indices.
     PostgresCheckpointStore(const PostgresCheckpointStore&) = delete;
     PostgresCheckpointStore& operator=(const PostgresCheckpointStore&) = delete;
 
@@ -146,12 +170,12 @@ private:
     void release_slot(size_t idx);
 
     /// Original connection string, retained so individual pool slots
-    /// can be rebuilt on demand after a `pqxx::broken_connection`.
+    /// can be rebuilt on demand after a broken-connection detection.
     std::string conn_str_;
 
     /// Fixed-size pool of connections. Indexed; slots are individually
     /// borrowed via the free-index queue.
-    std::vector<std::unique_ptr<pqxx::connection>> pool_;
+    std::vector<std::unique_ptr<PgConn>> pool_;
 
     /// Free slot indices, drained on acquire and refilled on release.
     /// Guarded by `pool_mutex_`; callers wait on `pool_cv_` when empty.

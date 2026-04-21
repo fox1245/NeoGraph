@@ -13,7 +13,7 @@
 
 #include <gtest/gtest.h>
 #include <neograph/graph/postgres_checkpoint.h>
-#include <pqxx/pqxx>
+#include <libpq-fe.h>
 #include <cstdlib>
 #include <map>
 #include <string>
@@ -327,8 +327,9 @@ TEST_F(PostgresCheckpointTest, LoadByIdMissingReturnsNullopt) {
 // is the "messages" channel shape — the most common real payload.
 // Reconnect-after-broken-connection path. Forces PG to drop every
 // pool slot's backend via a sibling connection issuing
-// pg_terminate_backend; subsequent operations must catch
-// pqxx::broken_connection on each slot they touch and replace it.
+// pg_terminate_backend; subsequent operations must detect the dead
+// socket (PQstatus != CONNECTION_OK, or SQLSTATE 08xxx on the next
+// exec) and replace the slot.
 //
 // With pool_size=8 and a single load_latest call the store will only
 // touch ONE slot, so reconnect_count goes 0 → 1. The test pins
@@ -348,19 +349,21 @@ TEST_F(PostgresCheckpointTest, RetriesAfterBrokenConnection) {
     // available to any superuser; the test container's `postgres` user
     // qualifies.
     {
-        pqxx::connection killer(pg_url());
-        pqxx::work tx{killer};
-        tx.exec("SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = current_database() "
-                "  AND pid <> pg_backend_pid()");
-        tx.commit();
+        PGconn* killer = PQconnectdb(pg_url());
+        ASSERT_EQ(PQstatus(killer), CONNECTION_OK) << PQerrorMessage(killer);
+        PGresult* r = PQexec(killer,
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+            "WHERE datname = current_database() "
+            "  AND pid <> pg_backend_pid()");
+        PQclear(r);
+        PQfinish(killer);
     }
 
     auto loaded = store->load_latest("rt");
     ASSERT_TRUE(loaded.has_value());
     EXPECT_EQ(loaded->channel_values["channels"]["x"]["value"].get<int>(), 1);
     EXPECT_EQ(store->reconnect_count(), 1u)
-        << "with_conn must catch pqxx::broken_connection and replace the slot";
+        << "with_conn must detect the dead connection and replace the slot";
 }
 
 // Pool sizing: constructor honours the requested pool_size and the
