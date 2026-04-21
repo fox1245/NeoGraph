@@ -102,6 +102,25 @@ public:
         const GraphStreamCallback& cb,
         StreamMode stream_mode);
 
+    /// Async peer of run_one (Sem 3.6 incremental). Same contract:
+    /// replay short-circuit, record_pending_write before apply_writes,
+    /// trace push after apply, NodeInterrupt path saves a dedicated
+    /// checkpoint via coord.save_super_step_async then rethrows. The
+    /// only behavioural difference is non-blocking: node dispatch and
+    /// checkpoint I/O all flow through co_await so other coroutines
+    /// on the same io_context keep moving.
+    asio::awaitable<NodeResult> run_one_async(
+        const std::string& node_name,
+        int step,
+        GraphState& state,
+        const std::unordered_map<std::string, NodeResult>& replay,
+        CheckpointCoordinator& coord,
+        const std::string& parent_cp_id,
+        const BarrierState& barrier_state,
+        std::vector<std::string>& trace,
+        const GraphStreamCallback& cb,
+        StreamMode stream_mode);
+
     /**
      * @brief Execute all `ready` nodes concurrently via Taskflow.
      *
@@ -119,6 +138,42 @@ public:
      * interrupting node (replay skips the siblings that already
      * completed via pending_writes).
      */
+    /// Async peer of execute_node_with_retry — Stage 3 / Sem 3.6
+    /// (incremental). Drives node->execute_full_(stream_)async via
+    /// co_await and replaces the backoff std::this_thread::sleep_for
+    /// with an asio::steady_timer.async_wait so the io_context is not
+    /// frozen during retry waits. NodeInterrupt + exception semantics
+    /// preserved bit-for-bit; GCC-13-safe (catch block captures the
+    /// exception via std::optional, co_await happens outside).
+    ///
+    /// Public for now so the regression test can drive it directly.
+    /// Once run_one_async / execute_graph_async land, this becomes an
+    /// internal helper again.
+    asio::awaitable<NodeResult> execute_node_with_retry_async(
+        const std::string& node_name,
+        GraphState& state,
+        const GraphStreamCallback& cb,
+        StreamMode stream_mode);
+
+    /// Async peer of run_parallel (Sem 3.7). Replaces the Taskflow
+    /// fan-out with asio::experimental::make_parallel_group +
+    /// wait_for_all, so a parallel super-step no longer blocks the
+    /// io_context's worker thread while children are running — other
+    /// coroutines on the same executor keep making progress.
+    /// Behaviour preserved: results applied in `ready` order, same
+    /// NodeInterrupt cp-save contract, same exception propagation.
+    asio::awaitable<std::vector<NodeResult>> run_parallel_async(
+        const std::vector<std::string>& ready,
+        int step,
+        GraphState& state,
+        const std::unordered_map<std::string, NodeResult>& replay,
+        CheckpointCoordinator& coord,
+        const std::string& parent_cp_id,
+        const BarrierState& barrier_state,
+        std::vector<std::string>& trace,
+        const GraphStreamCallback& cb,
+        StreamMode stream_mode);
+
     std::vector<NodeResult> run_parallel(
         const std::vector<std::string>& ready,
         int step,
@@ -141,6 +196,23 @@ public:
      * back into the shared state after the Taskflow barrier.
      */
     void run_sends(
+        const std::vector<Send>& sends,
+        int step,
+        GraphState& state,
+        const std::unordered_map<std::string, NodeResult>& replay,
+        CheckpointCoordinator& coord,
+        const std::string& parent_cp_id,
+        std::vector<std::string>& trace,
+        const GraphStreamCallback& cb,
+        StreamMode stream_mode);
+
+    /// Async peer of run_sends (Sem 3.7.6). Single-send branch runs
+    /// sequentially via run_one's async path; multi-send branch uses
+    /// asio::experimental::make_parallel_group on deferred workers,
+    /// each with its own isolated GraphState copy (identical
+    /// semantics to the sync version). Result writes fan back into
+    /// the shared state after wait_for_all.
+    asio::awaitable<void> run_sends_async(
         const std::vector<Send>& sends,
         int step,
         GraphState& state,

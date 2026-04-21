@@ -1,28 +1,62 @@
 #include <neograph/mcp/client.h>
 
-#define CPPHTTPLIB_OPENSSL_SUPPORT
-#include <httplib.h>
+#include <neograph/async/endpoint.h>
+#include <neograph/async/http_client.h>
+#include <neograph/async/run_sync.h>
+
+#include <asio/experimental/channel.hpp>
+#include <asio/read_until.hpp>
+#include <asio/streambuf.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
+#include <asio/write.hpp>
+
+#ifdef _WIN32
+#  include <asio/windows/stream_handle.hpp>
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#else
+#  include <asio/posix/stream_descriptor.hpp>
+#  include <fcntl.h>
+#  include <signal.h>
+#  include <sys/wait.h>
+#  include <unistd.h>
+#endif
 
 #include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <istream>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <system_error>
 #include <thread>
-
-#include <fcntl.h>
-#include <signal.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
 namespace neograph::mcp {
 
 // ===========================================================================
 // detail::StdioSession — subprocess-backed JSON-RPC channel
 // ===========================================================================
+//
+// Platform-split implementation:
+//   POSIX: fork+execvp spawn, anonymous pipe fds, asio::posix::stream_descriptor.
+//   Win32: CreateProcess spawn, named pipe with FILE_FLAG_OVERLAPPED,
+//          asio::windows::stream_handle.
+//
+// The public surface (spawn / rpc_call / rpc_call_async / notify) is
+// identical; members diverge where the handle type does. Members are
+// commented by platform below.
 namespace detail {
+
+#ifdef _WIN32
+using NativeHandle = HANDLE;
+using AsyncHandle  = asio::windows::stream_handle;
+#else
+using NativeHandle = int;
+using AsyncHandle  = asio::posix::stream_descriptor;
+#endif
 
 class StdioSession {
 public:
@@ -31,13 +65,31 @@ public:
     ~StdioSession();
 
     // Send a JSON-RPC request, block until the matching response arrives.
-    // `id_out` receives the allocated request id for diagnostics / matching.
     json rpc_call(const std::string& method, const json& params);
+
+    /// Async variant — wraps the subprocess pipes in
+    /// asio::posix::stream_descriptor for non-blocking I/O. The
+    /// awaitable serialises concurrent rpc_call_async() invocations
+    /// on the same session via an asio::experimental::channel-backed
+    /// lock (capacity 1, token-passing). A second coroutine's
+    /// acquire suspends at its own `co_await async_receive` — no OS
+    /// thread is held, so other coroutines on the io_context keep
+    /// progressing and the first call's I/O completions fire normally.
+    ///
+    /// The lock is lazy-initialised on first call using the caller's
+    /// executor. Subsequent calls on executors that can't interoperate
+    /// with that executor would break the serialisation — in practice
+    /// all callers of one session go through one engine and thus one
+    /// io_context, so this isn't a concern.
+    ///
+    /// Sync rpc_call() continues to use the std::mutex mtx_ and must
+    /// NOT be mixed with rpc_call_async on the same session (the two
+    /// locks don't know about each other).
+    asio::awaitable<json> rpc_call_async(
+        const std::string& method, const json& params);
 
     // Send a JSON-RPC notification (no id, no response expected).
     void notify(const std::string& method, const json& params);
-
-    pid_t pid() const { return pid_; }
 
 private:
     StdioSession() = default;
@@ -45,14 +97,207 @@ private:
     std::string read_line_locked();       ///< caller holds mtx_
     void write_frame_locked(const json& j); ///< caller holds mtx_
 
+    asio::awaitable<std::string> async_read_line_locked(AsyncHandle& out);
+    asio::awaitable<void> async_write_frame_locked(AsyncHandle& in, const json& j);
+
+#ifdef _WIN32
+    HANDLE process_ = nullptr;   ///< child process handle (CloseHandle on dtor)
+    HANDLE stdin_h_ = nullptr;   ///< parent → child (write end of a pipe)
+    HANDLE stdout_h_ = nullptr;  ///< child → parent (read end of a pipe)
+#else
     pid_t pid_ = -1;
     int   stdin_fd_ = -1;   // parent → child
     int   stdout_fd_ = -1;  // child  → parent
+#endif
 
-    std::mutex   mtx_;
-    std::string  buffer_;
+    std::mutex   mtx_;        ///< sync path serialisation
+    std::string  buffer_;     ///< sync read buffer
+    std::string  abuffer_;    ///< async read buffer (separate to avoid mixing)
     std::atomic<int> next_id_{0};
+
+    // Awaitable lock for the async path (Sem 4 follow-up). Capacity-1
+    // channel behaves as a binary semaphore: holder takes the token
+    // via `async_receive`, releases via `try_send`. Second acquirer
+    // suspends cooperatively rather than blocking the worker thread.
+    using AsyncLock = asio::experimental::channel<void(asio::error_code)>;
+    std::unique_ptr<AsyncLock> async_lock_;
+    std::mutex async_lock_init_mtx_;
+
+    // Cached AsyncHandle wrappers for the async path. Lazy-created on
+    // first rpc_call_async using the caller's executor, then reused
+    // for every subsequent call.
+    //
+    // Why caching, not per-call construction:
+    //   Windows pins the IOCP association on the kernel FILE_OBJECT,
+    //   not on the HANDLE. Once the first call registers a handle
+    //   with the io_context's IOCP, the pipe's FILE_OBJECT is bound
+    //   forever. DuplicateHandle produces a new HANDLE referring to
+    //   the SAME FILE_OBJECT, so re-registering a duplicate in a
+    //   second call returns ERROR_INVALID_PARAMETER (already bound),
+    //   asio::windows::stream_handle's ctor throws, and the coroutine
+    //   dies before reaching any I/O. Caching side-steps this: bind
+    //   once, reuse forever.
+    //
+    //   POSIX is fine either way (epoll is per-fd, not per-file), but
+    //   we cache there too for symmetry and to avoid the per-call
+    //   wrapper churn.
+    //
+    //   We wrap DUPLICATES of the native handles so the session keeps
+    //   ownership of stdin_h_/stdout_h_; the wrappers close the dups
+    //   on their own destruction. Callers must ensure the io_context
+    //   driving rpc_call_async outlives the session (reverse order of
+    //   declaration in tests and call sites).
+    std::unique_ptr<AsyncHandle> async_in_;
+    std::unique_ptr<AsyncHandle> async_out_;
+    std::mutex async_handles_init_mtx_;
 };
+
+#ifdef _WIN32
+
+namespace {
+// Build the Windows command line from an argv vector. CreateProcess
+// expects a single string; standard rules are quoting elements that
+// contain whitespace or quotes. This is the minimal-sufficient escape
+// for the cases the tests exercise (python3 script path).
+std::string build_win_cmdline(const std::vector<std::string>& argv) {
+    std::string out;
+    for (size_t i = 0; i < argv.size(); ++i) {
+        if (i) out.push_back(' ');
+        const auto& a = argv[i];
+        bool need_quote = a.empty() ||
+            a.find_first_of(" \t\"") != std::string::npos;
+        if (need_quote) {
+            out.push_back('"');
+            for (char c : a) {
+                if (c == '"') out.push_back('\\');
+                out.push_back(c);
+            }
+            out.push_back('"');
+        } else {
+            out.append(a);
+        }
+    }
+    return out;
+}
+
+// Create a named-pipe pair where the parent side supports
+// FILE_FLAG_OVERLAPPED (needed for asio::windows::stream_handle) and
+// the child side is a plain inheritable handle. CreatePipe's anonymous
+// pipes don't support overlapped I/O, hence the named-pipe dance.
+struct PipePair { HANDLE parent; HANDLE child; };
+PipePair make_overlapped_pipe(const char* name_prefix, bool parent_reads) {
+    static std::atomic<uint64_t> counter{0};
+    char name[128];
+    std::snprintf(name, sizeof(name),
+        "\\\\.\\pipe\\neograph_mcp_%s_%lu_%llu",
+        name_prefix,
+        static_cast<unsigned long>(GetCurrentProcessId()),
+        static_cast<unsigned long long>(counter.fetch_add(1)));
+
+    DWORD parent_mode = parent_reads
+        ? (PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED)
+        : (PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED);
+    HANDLE parent = CreateNamedPipeA(
+        name, parent_mode,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+        /*instances=*/1, /*outbuf=*/64*1024, /*inbuf=*/64*1024,
+        /*timeout=*/0, /*sa=*/nullptr);
+    if (parent == INVALID_HANDLE_VALUE) {
+        throw std::system_error(static_cast<int>(GetLastError()),
+            std::system_category(), "CreateNamedPipe");
+    }
+
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };  // inheritable
+    DWORD child_access = parent_reads ? GENERIC_WRITE : GENERIC_READ;
+    HANDLE child = CreateFileA(name, child_access,
+        0, &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (child == INVALID_HANDLE_VALUE) {
+        DWORD err = GetLastError();
+        CloseHandle(parent);
+        throw std::system_error(static_cast<int>(err),
+            std::system_category(), "CreateFile(child side)");
+    }
+
+    // Parent side must NOT be inherited by the child.
+    SetHandleInformation(parent, HANDLE_FLAG_INHERIT, 0);
+    return PipePair{parent, child};
+}
+} // namespace
+
+std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>& argv) {
+    if (argv.empty()) {
+        throw std::invalid_argument("StdioSession::spawn: argv is empty");
+    }
+
+    // Two pipes: in = parent writes (child reads on stdin),
+    //            out = child writes (parent reads on stdout).
+    PipePair in_p  = make_overlapped_pipe("in",  /*parent_reads=*/false);
+    PipePair out_p;
+    try {
+        out_p = make_overlapped_pipe("out", /*parent_reads=*/true);
+    } catch (...) {
+        CloseHandle(in_p.parent);
+        CloseHandle(in_p.child);
+        throw;
+    }
+
+    std::string cmdline = build_win_cmdline(argv);
+
+    STARTUPINFOA si = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput  = in_p.child;
+    si.hStdOutput = out_p.child;
+    si.hStdError  = GetStdHandle(STD_ERROR_HANDLE);  // inherit parent's stderr
+
+    PROCESS_INFORMATION pi = {};
+    // cmdline.data() is mutable per CreateProcess's contract.
+    BOOL ok = CreateProcessA(
+        /*application=*/nullptr,
+        cmdline.data(),
+        /*proc_sa=*/nullptr, /*thr_sa=*/nullptr,
+        /*inherit=*/TRUE, /*flags=*/0,
+        /*env=*/nullptr, /*cwd=*/nullptr,
+        &si, &pi);
+    // Child side handles belong to the child now (inherited) — we can
+    // close our copies regardless of success.
+    CloseHandle(in_p.child);
+    CloseHandle(out_p.child);
+    if (!ok) {
+        DWORD err = GetLastError();
+        CloseHandle(in_p.parent);
+        CloseHandle(out_p.parent);
+        throw std::system_error(static_cast<int>(err),
+            std::system_category(), "CreateProcess");
+    }
+    CloseHandle(pi.hThread);  // thread handle unused
+
+    auto sess = std::shared_ptr<StdioSession>(new StdioSession());
+    sess->process_  = pi.hProcess;
+    sess->stdin_h_  = in_p.parent;
+    sess->stdout_h_ = out_p.parent;
+    return sess;
+}
+
+StdioSession::~StdioSession() {
+    if (stdin_h_)  { CloseHandle(stdin_h_); stdin_h_ = nullptr; }
+    if (stdout_h_) { CloseHandle(stdout_h_); stdout_h_ = nullptr; }
+
+    if (process_) {
+        // Give the child a moment to exit cleanly on its own (closing
+        // its stdin pipe above typically causes a well-behaved server
+        // to exit). Fall back to TerminateProcess after ~500ms.
+        DWORD wait = WaitForSingleObject(process_, 500);
+        if (wait != WAIT_OBJECT_0) {
+            TerminateProcess(process_, 1);
+            WaitForSingleObject(process_, 1000);
+        }
+        CloseHandle(process_);
+        process_ = nullptr;
+    }
+}
+
+#else  // !_WIN32
 
 std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>& argv) {
     if (argv.empty()) {
@@ -131,6 +376,8 @@ StdioSession::~StdioSession() {
     }
 }
 
+#endif  // _WIN32
+
 void StdioSession::write_frame_locked(const json& j) {
     std::string line = j.dump();
     line.push_back('\n');
@@ -138,6 +385,19 @@ void StdioSession::write_frame_locked(const json& j) {
     const char* p = line.data();
     size_t      remaining = line.size();
     while (remaining > 0) {
+#ifdef _WIN32
+        DWORD written = 0;
+        // With an overlapped named pipe, WriteFile(hEvent=nullptr) still
+        // works synchronously on this thread — it just uses the pipe's
+        // internal event. That's fine for the sync path.
+        if (!WriteFile(stdin_h_, p, static_cast<DWORD>(remaining),
+                       &written, nullptr)) {
+            throw std::system_error(static_cast<int>(GetLastError()),
+                std::system_category(), "StdioSession::WriteFile()");
+        }
+        p         += written;
+        remaining -= static_cast<size_t>(written);
+#else
         ssize_t n = ::write(stdin_fd_, p, remaining);
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -146,6 +406,7 @@ void StdioSession::write_frame_locked(const json& j) {
         }
         p         += n;
         remaining -= static_cast<size_t>(n);
+#endif
     }
 }
 
@@ -160,6 +421,24 @@ std::string StdioSession::read_line_locked() {
         }
 
         char tmp[4096];
+#ifdef _WIN32
+        DWORD got = 0;
+        if (!ReadFile(stdout_h_, tmp, static_cast<DWORD>(sizeof(tmp)),
+                      &got, nullptr)) {
+            DWORD err = GetLastError();
+            if (err == ERROR_BROKEN_PIPE || err == ERROR_HANDLE_EOF) {
+                throw std::runtime_error(
+                    "StdioSession: child closed stdout");
+            }
+            throw std::system_error(static_cast<int>(err),
+                std::system_category(), "StdioSession::ReadFile()");
+        }
+        if (got == 0) {
+            throw std::runtime_error(
+                "StdioSession: child closed stdout");
+        }
+        buffer_.append(tmp, static_cast<size_t>(got));
+#else
         ssize_t n = ::read(stdout_fd_, tmp, sizeof(tmp));
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -170,6 +449,7 @@ std::string StdioSession::read_line_locked() {
             throw std::runtime_error("StdioSession: child closed stdout");
         }
         buffer_.append(tmp, static_cast<size_t>(n));
+#endif
     }
 }
 
@@ -221,6 +501,186 @@ void StdioSession::notify(const std::string& method, const json& params) {
     };
     std::lock_guard<std::mutex> lock(mtx_);
     write_frame_locked(n);
+}
+
+asio::awaitable<void>
+StdioSession::async_write_frame_locked(AsyncHandle& in,
+                                       const json& j) {
+    std::string line = j.dump();
+    line.push_back('\n');
+    co_await asio::async_write(in, asio::buffer(line), asio::use_awaitable);
+}
+
+asio::awaitable<std::string>
+StdioSession::async_read_line_locked(AsyncHandle& out) {
+    auto nl = abuffer_.find('\n');
+    if (nl == std::string::npos) {
+        asio::streambuf sbuf;
+        // Seed asio's streambuf with whatever we already have so
+        // async_read_until doesn't re-read those bytes.
+        if (!abuffer_.empty()) {
+            std::ostream os(&sbuf);
+            os.write(abuffer_.data(), static_cast<std::streamsize>(abuffer_.size()));
+            abuffer_.clear();
+        }
+        std::size_t n = co_await asio::async_read_until(
+            out, sbuf, '\n', asio::use_awaitable);
+        // Re-merge into our string buffer so the rest of the trailing
+        // bytes (after the newline) are kept for the next call.
+        std::string drained(asio::buffers_begin(sbuf.data()),
+                            asio::buffers_begin(sbuf.data()) + sbuf.size());
+        abuffer_.append(drained);
+        nl = abuffer_.find('\n');
+        if (nl == std::string::npos) {
+            // async_read_until promised a delim was found within `n`
+            // bytes; this branch is defensive.
+            throw std::runtime_error(
+                "StdioSession::async_read_line: delimiter missing after "
+                + std::to_string(n) + " bytes");
+        }
+    }
+    std::string line = abuffer_.substr(0, nl);
+    abuffer_.erase(0, nl + 1);
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    co_return line;
+}
+
+asio::awaitable<json>
+StdioSession::rpc_call_async(const std::string& method, const json& params) {
+    const int id = ++next_id_;
+
+    json req = {
+        {"jsonrpc", "2.0"},
+        {"id", id},
+        {"method", method},
+        {"params", params}
+    };
+
+    auto ex = co_await asio::this_coro::executor;
+
+    // Lazy-init the awaitable lock on first call. Bound to this
+    // caller's executor; subsequent calls assume a compatible executor
+    // (in practice: the engine's single io_context — no cross-executor
+    // mix for one session). std::mutex guards only the one-time
+    // init, not the lock itself.
+    {
+        std::lock_guard<std::mutex> g(async_lock_init_mtx_);
+        if (!async_lock_) {
+            async_lock_ = std::make_unique<AsyncLock>(ex, 1);
+            // Seed with the initial token — the first acquirer can
+            // take it without blocking. try_send returns false if
+            // the channel is already full, which we never hit here
+            // because we just created it with capacity 1 and empty.
+            async_lock_->try_send(asio::error_code{});
+        }
+    }
+
+    // Acquire the awaitable lock. Second coroutine on the same
+    // session suspends here until the holder releases via try_send
+    // below — cooperative, no OS-thread block.
+    co_await async_lock_->async_receive(asio::use_awaitable);
+
+    // RAII release: put the token back on every exit path, including
+    // exception / cancellation. Destructor runs on coroutine frame
+    // unwind so no co_await inside — safe under GCC 13's catch/await
+    // ICE rules.
+    struct LockReleaser {
+        AsyncLock* ch;
+        ~LockReleaser() {
+            // try_send is noexcept-ish (no throw on a healthy
+            // channel). We're on the hot unwind path; swallow any
+            // residual error rather than abort the program.
+            try { ch->try_send(asio::error_code{}); } catch (...) {}
+        }
+    } lock_rel{async_lock_.get()};
+
+    // Cached AsyncHandle wrappers. See member-field comments for why
+    // we bind once per session instead of per call. Lazy-init under a
+    // mutex so concurrent first-callers on the same session don't
+    // double-bind; subsequent calls take the fast path with no lock.
+    if (!async_in_ || !async_out_) {
+        std::lock_guard<std::mutex> g(async_handles_init_mtx_);
+        if (!async_in_ || !async_out_) {
+#ifdef _WIN32
+            HANDLE dup_in = nullptr, dup_out = nullptr;
+            const HANDLE self = GetCurrentProcess();
+            if (!DuplicateHandle(self, stdin_h_, self, &dup_in,
+                                 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+                throw std::system_error(static_cast<int>(GetLastError()),
+                    std::system_category(), "DuplicateHandle(stdin)");
+            }
+            if (!DuplicateHandle(self, stdout_h_, self, &dup_out,
+                                 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+                DWORD err = GetLastError();
+                CloseHandle(dup_in);
+                throw std::system_error(static_cast<int>(err),
+                    std::system_category(), "DuplicateHandle(stdout)");
+            }
+            try {
+                async_in_  = std::make_unique<AsyncHandle>(ex, dup_in);
+                async_out_ = std::make_unique<AsyncHandle>(ex, dup_out);
+            } catch (...) {
+                // On partial success, close whichever dup the failed
+                // wrapper didn't take. Wrappers that succeeded already
+                // own their dup and will close on reset/destruction.
+                if (!async_in_)  CloseHandle(dup_in);
+                if (!async_out_) CloseHandle(dup_out);
+                async_in_.reset();
+                async_out_.reset();
+                throw;
+            }
+#else
+            int dup_in  = ::dup(stdin_fd_);
+            if (dup_in < 0) {
+                throw std::system_error(errno, std::system_category(),
+                    "dup(stdin_fd)");
+            }
+            int dup_out = ::dup(stdout_fd_);
+            if (dup_out < 0) {
+                int err = errno;
+                ::close(dup_in);
+                throw std::system_error(err, std::system_category(),
+                    "dup(stdout_fd)");
+            }
+            try {
+                async_in_  = std::make_unique<AsyncHandle>(ex, dup_in);
+                async_out_ = std::make_unique<AsyncHandle>(ex, dup_out);
+            } catch (...) {
+                if (!async_in_)  ::close(dup_in);
+                if (!async_out_) ::close(dup_out);
+                async_in_.reset();
+                async_out_.reset();
+                throw;
+            }
+#endif
+        }
+    }
+
+    co_await async_write_frame_locked(*async_in_, req);
+
+    for (int guard = 0; guard < 1024; ++guard) {
+        std::string line = co_await async_read_line_locked(*async_out_);
+        if (line.empty()) continue;
+
+        json resp;
+        try {
+            resp = json::parse(line);
+        } catch (const std::exception&) {
+            continue;
+        }
+
+        if (!resp.contains("id")) continue;
+        if (resp["id"] != id)     continue;
+
+        if (resp.contains("error")) {
+            auto err = resp["error"];
+            throw std::runtime_error(
+                "MCP stdio RPC error: " + err.value("message", "unknown"));
+        }
+        co_return resp.value("result", json::object());
+    }
+    throw std::runtime_error(
+        "StdioSession::rpc_call_async: giving up after 1024 lines");
 }
 
 } // namespace detail
@@ -325,56 +785,79 @@ json MCPClient::rpc_call(const std::string& method, const json& params) {
     if (stdio_session_) {
         return stdio_session_->rpc_call(method, params);
     }
+    return async::run_sync(rpc_call_async(method, params));
+}
 
-    // --- HTTP path (unchanged from 0.1.x) ---
+asio::awaitable<json>
+MCPClient::rpc_call_async(const std::string& method, const json& params) {
+    if (stdio_session_) {
+        co_return co_await stdio_session_->rpc_call_async(method, params);
+    }
+
     json body;
     body["jsonrpc"] = "2.0";
     body["id"]      = ++request_id_;
     body["method"]  = method;
     body["params"]  = params;
+    auto body_str = body.dump();
 
-    httplib::Client cli(host_);
-    cli.set_read_timeout(30, 0);
-    cli.set_connection_timeout(10, 0);
+    auto endpoint = async::split_async_endpoint(server_url_);
 
-    httplib::Headers headers = {
+    std::vector<std::pair<std::string, std::string>> headers = {
         {"Content-Type", "application/json"},
-        {"Accept", "application/json, text/event-stream"},
-        {"Host", "localhost"}
+        {"Accept",       "application/json, text/event-stream"},
+        {"Host",         "localhost"},
     };
-
     if (!session_id_.empty()) {
-        headers.insert({"Mcp-Session-Id", session_id_});
+        headers.emplace_back("Mcp-Session-Id", session_id_);
     }
 
-    auto res = cli.Post(path_prefix_ + "/mcp", headers, body.dump(), "application/json");
+    async::RequestOptions opts;
+    opts.timeout = std::chrono::seconds(30);
 
-    if (!res) {
-        throw std::runtime_error("MCP request failed: " + httplib::to_string(res.error()));
+    auto ex = co_await asio::this_coro::executor;
+    async::HttpResponse res;
+    try {
+        res = co_await async::async_post(
+            ex,
+            endpoint.host,
+            endpoint.port,
+            endpoint.prefix + "/mcp",
+            body_str,
+            std::move(headers),
+            endpoint.tls,
+            opts);
+    } catch (const std::system_error& e) {
+        throw std::runtime_error(std::string("MCP request failed: ") + e.what());
     }
 
-    auto sid = res->get_header_value("Mcp-Session-Id");
-    if (!sid.empty()) session_id_ = sid;
+    // Restore Mcp-Session-Id header tracking now that HttpResponse
+    // exposes a generic headers map (see async/http_client.h). The
+    // MCP spec (2025-03-26) sends this header on the initialize
+    // response; subsequent rpc calls must echo it back so the server
+    // routes to the same session. Sem 2.6 had to drop this when we
+    // migrated off httplib; Sem 4 follow-up restores it.
+    if (auto sid = res.get_header("Mcp-Session-Id"); !sid.empty()) {
+        session_id_ = std::string(sid);
+    }
 
-    if (res->status != 200) {
+    if (res.status != 200) {
         throw std::runtime_error(
-            "MCP error (HTTP " + std::to_string(res->status) + "): " + res->body);
+            "MCP error (HTTP " + std::to_string(res.status) + "): " + res.body);
     }
 
     // Parse response — may be plain JSON or SSE (event: message\ndata: {...})
-    std::string body_str = res->body;
     json resp;
-
-    auto data_pos = body_str.find("data: ");
+    auto data_pos = res.body.find("data: ");
     if (data_pos != std::string::npos) {
         auto json_start = data_pos + 6;
-        auto json_end   = body_str.find('\n', json_start);
+        auto json_end   = res.body.find('\n', json_start);
         std::string json_str = (json_end != std::string::npos)
-            ? body_str.substr(json_start, json_end - json_start)
-            : body_str.substr(json_start);
+            ? res.body.substr(json_start, json_end - json_start)
+            : res.body.substr(json_start);
         resp = json::parse(json_str);
     } else {
-        resp = json::parse(body_str);
+        resp = json::parse(res.body);
     }
 
     if (resp.contains("error")) {
@@ -382,7 +865,7 @@ json MCPClient::rpc_call(const std::string& method, const json& params) {
         throw std::runtime_error("MCP RPC error: " + err.value("message", "unknown"));
     }
 
-    return resp.value("result", json::object());
+    co_return resp.value("result", json::object());
 }
 
 bool MCPClient::initialize(const std::string& client_name) {
@@ -409,28 +892,35 @@ bool MCPClient::initialize(const std::string& client_name) {
     notify["method"]  = "notifications/initialized";
     notify["params"]  = json::object();
 
-    httplib::Client cli(host_);
-    httplib::Headers headers = {
+    auto endpoint = async::split_async_endpoint(server_url_);
+    std::vector<std::pair<std::string, std::string>> headers = {
         {"Content-Type", "application/json"},
-        {"Accept", "application/json, text/event-stream"},
-        {"Host", "localhost"}
+        {"Accept",       "application/json, text/event-stream"},
+        {"Host",         "localhost"},
     };
     if (!session_id_.empty()) {
-        headers.insert({"Mcp-Session-Id", session_id_});
+        headers.emplace_back("Mcp-Session-Id", session_id_);
     }
-    auto res = cli.Post(path_prefix_ + "/mcp", headers, notify.dump(),
-                        "application/json");
-    if (!res) {
-        throw std::runtime_error(
-            "MCP initialize notification failed: "
-            + httplib::to_string(res.error()));
-    }
+
+    auto notify_body = notify.dump();
+    auto res = async::run_sync([&]() -> asio::awaitable<async::HttpResponse> {
+        auto ex = co_await asio::this_coro::executor;
+        co_return co_await async::async_post(
+            ex,
+            endpoint.host,
+            endpoint.port,
+            endpoint.prefix + "/mcp",
+            notify_body,
+            headers,
+            endpoint.tls);
+    }());
+
     // 200 OK and 202 Accepted are both valid per MCP spec for
     // notifications. Anything else is an error.
-    if (res->status != 200 && res->status != 202 && res->status != 204) {
+    if (res.status != 200 && res.status != 202 && res.status != 204) {
         throw std::runtime_error(
             "MCP initialize notification returned HTTP "
-            + std::to_string(res->status) + ": " + res->body);
+            + std::to_string(res.status) + ": " + res.body);
     }
 
     return true;

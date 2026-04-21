@@ -1,9 +1,23 @@
 #include <neograph/graph/node.h>
 #include <neograph/graph/engine.h>
+#include <neograph/async/run_sync.h>
 #include <algorithm>
 #include <stdexcept>
 
 namespace neograph::graph {
+
+// --- GraphNode sync ↔ async crossover defaults (Sem 3.4) ---
+// Same shape as Provider::complete / complete_async. Override one,
+// the other comes free.
+
+std::vector<ChannelWrite> GraphNode::execute(const GraphState& state) {
+    return neograph::async::run_sync(execute_async(state));
+}
+
+asio::awaitable<std::vector<ChannelWrite>>
+GraphNode::execute_async(const GraphState& state) {
+    co_return execute(state);
+}
 
 // --- GraphNode default streaming: just delegates ---
 std::vector<ChannelWrite> GraphNode::execute_stream(
@@ -11,9 +25,35 @@ std::vector<ChannelWrite> GraphNode::execute_stream(
     return execute(state);
 }
 
+asio::awaitable<std::vector<ChannelWrite>>
+GraphNode::execute_stream_async(const GraphState& state,
+                                const GraphStreamCallback& cb) {
+    // Default to async-native execute_async to keep the coroutine
+    // chain end-to-end async. Falling back to the sync execute_stream
+    // would funnel through run_sync, which blocks the calling
+    // io_context's worker for the duration — and break the io_context
+    // overlap that the async engine path is designed to produce.
+    // Stream-aware nodes that need callback events override this.
+    (void)cb;
+    co_return co_await execute_async(state);
+}
+
 // --- GraphNode default execute_full: wraps execute() ---
 NodeResult GraphNode::execute_full(const GraphState& state) {
     return NodeResult{execute(state)};
+}
+
+asio::awaitable<NodeResult>
+GraphNode::execute_full_async(const GraphState& state) {
+    // Async-native default: bridge through execute_async (not the sync
+    // execute_full) so the coroutine chain stays suspendable end-to-
+    // end. Overriding execute_full_async directly is the only way to
+    // emit Command/Send from an async node — that's expected; the
+    // default exists so a node that overrides only execute_async
+    // still gets a valid NodeResult assembly without forcing every
+    // implementer to write the wrapper.
+    auto writes = co_await execute_async(state);
+    co_return NodeResult{std::move(writes)};
 }
 
 // --- GraphNode default execute_full_stream ---
@@ -30,6 +70,21 @@ NodeResult GraphNode::execute_full_stream(
         result.writes = execute_stream(state, cb);
     }
     return result;
+}
+
+asio::awaitable<NodeResult>
+GraphNode::execute_full_stream_async(const GraphState& state,
+                                     const GraphStreamCallback& cb) {
+    // Async-native default mirroring execute_full_stream's logic: get
+    // the full result first (Command/Send-aware), then if the node
+    // didn't override execute_full_async, replace its writes with the
+    // streaming variant so LLM_TOKEN events flow through cb. Stays
+    // entirely on the coroutine path — no run_sync detour.
+    auto result = co_await execute_full_async(state);
+    if (!result.command && result.sends.empty()) {
+        result.writes = co_await execute_stream_async(state, cb);
+    }
+    co_return result;
 }
 
 // =========================================================================
@@ -74,15 +129,16 @@ CompletionParams LLMCallNode::build_params(const GraphState& state) const {
     return params;
 }
 
-std::vector<ChannelWrite> LLMCallNode::execute(const GraphState& state) {
-    auto params     = build_params(state);
-    auto completion = provider_->complete(params);
+asio::awaitable<std::vector<ChannelWrite>>
+LLMCallNode::execute_async(const GraphState& state) {
+    auto params = build_params(state);
+    auto completion = co_await provider_->complete_async(params);
 
-    // Serialize assistant message and append to messages channel
     json msg_json;
     to_json(msg_json, completion.message);
 
-    return {ChannelWrite{"messages", json::array({msg_json})}};
+    co_return std::vector<ChannelWrite>{
+        ChannelWrite{"messages", json::array({msg_json})}};
 }
 
 std::vector<ChannelWrite> LLMCallNode::execute_stream(
@@ -225,10 +281,11 @@ std::vector<ChannelWrite> IntentClassifierNode::route_from(const std::string& in
     return {ChannelWrite{"__route__", json(best_route)}};
 }
 
-std::vector<ChannelWrite> IntentClassifierNode::execute(const GraphState& state) {
+asio::awaitable<std::vector<ChannelWrite>>
+IntentClassifierNode::execute_async(const GraphState& state) {
     auto params = build_params(state);
-    auto completion = provider_->complete(params);
-    return route_from(completion.message.content);
+    auto completion = co_await provider_->complete_async(params);
+    co_return route_from(completion.message.content);
 }
 
 std::vector<ChannelWrite> IntentClassifierNode::execute_stream(
@@ -302,12 +359,13 @@ std::vector<ChannelWrite> SubgraphNode::extract_output(
     return writes;
 }
 
-std::vector<ChannelWrite> SubgraphNode::execute(const GraphState& state) {
+asio::awaitable<std::vector<ChannelWrite>>
+SubgraphNode::execute_async(const GraphState& state) {
     RunConfig config;
     config.input = build_subgraph_input(state);
 
-    auto result = subgraph_->run(config);
-    return extract_output(result.output);
+    auto result = co_await subgraph_->run_async(config);
+    co_return extract_output(result.output);
 }
 
 std::vector<ChannelWrite> SubgraphNode::execute_stream(

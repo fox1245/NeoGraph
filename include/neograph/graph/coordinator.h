@@ -105,6 +105,11 @@ public:
      */
     ResumeContext load_for_resume() const;
 
+    /// Async peer of load_for_resume (Sem 3.7.5). Uses
+    /// `load_latest_async` + `get_writes_async` on the store so the
+    /// resume path doesn't block the io_context's worker.
+    asio::awaitable<ResumeContext> load_for_resume_async() const;
+
     /**
      * @brief Durably record a completed node's writes under parent_cp_id.
      *
@@ -128,6 +133,32 @@ public:
      * data if a crash landed between the two calls.
      */
     void clear_pending_writes(const std::string& parent_cp_id) const;
+
+    // ── Async peers (Stage 3 / Sem 3.6 incremental) ─────────────────────
+    //
+    // Each routes to the matching CheckpointStore::*_async so the
+    // coroutine engine path doesn't block the io_context on
+    // checkpoint I/O. Behaviour identical to the sync versions.
+
+    asio::awaitable<std::string> save_super_step_async(
+        const GraphState& state,
+        const std::string& current_node,
+        const std::vector<std::string>& next_nodes,
+        CheckpointPhase phase,
+        int step,
+        const std::string& parent_id,
+        const BarrierState& barrier_state) const;
+
+    asio::awaitable<void> record_pending_write_async(
+        const std::string& parent_cp_id,
+        const std::string& task_id,
+        const std::string& task_path,
+        const std::string& node_name,
+        const NodeResult& nr,
+        int step) const;
+
+    asio::awaitable<void> clear_pending_writes_async(
+        const std::string& parent_cp_id) const;
 
 private:
     std::shared_ptr<CheckpointStore> store_;

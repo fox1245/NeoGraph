@@ -64,7 +64,18 @@ public:
         return create(std::move(inner), Config{});
     }
 
-    ChatCompletion complete(const CompletionParams& params) override;
+    /// Async completion that retries on RateLimitError with a non-
+    /// blocking `asio::steady_timer` sleep. Sync `complete()` is
+    /// inherited from `Provider` and routes through this via
+    /// `run_sync` — the inner timer drives a fresh io_context, so
+    /// caller-thread blocking semantics are preserved.
+    asio::awaitable<ChatCompletion>
+    complete_async(const CompletionParams& params) override;
+
+    /// Streaming retry path remains synchronous — `complete_stream()`
+    /// has no awaitable peer on Provider, and async streaming through
+    /// the schema/openai providers still uses httplib. Once those
+    /// migrate this method can grow an awaitable cousin.
     ChatCompletion complete_stream(const CompletionParams& params,
                                    const StreamCallback& on_chunk) override;
 

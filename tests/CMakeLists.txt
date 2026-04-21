@@ -24,7 +24,27 @@ add_executable(neograph_tests
     test_intent_classifier_streaming.cpp
     test_incremental_checkpoint.cpp
     test_deep_research_human_review.cpp
+    test_async_conn_pool.cpp
+    test_async_http_errors.cpp
+    test_async_sse_parser.cpp
+    test_async_http_stream.cpp
+    test_async_http_options.cpp
+    test_provider_async_default.cpp
+    test_openai_provider_async.cpp
+    test_checkpoint_async_default.cpp
+    test_node_async_default.cpp
+    test_graph_engine_async_api.cpp
+    test_async_tool.cpp
+    test_executor_async_retry.cpp
+    test_executor_async_parallel.cpp
 )
+
+if(NEOGRAPH_BUILD_MCP)
+    target_sources(neograph_tests PRIVATE
+        test_mcp_client_async.cpp
+        test_mcp_stdio_async.cpp
+    )
+endif()
 
 # PostgresCheckpointStore integration tests are gated on NEOGRAPH_BUILD_POSTGRES
 # at the build level (so projects without libpqxx still build the test
@@ -40,12 +60,20 @@ endif()
 target_link_libraries(neograph_tests PRIVATE
     neograph::core
     neograph::llm
+    neograph::async
     httplib OpenSSL::SSL OpenSSL::Crypto
     GTest::gtest_main
 )
 
+if(NEOGRAPH_BUILD_MCP)
+    target_link_libraries(neograph_tests PRIVATE neograph::mcp)
+endif()
+
 if(NEOGRAPH_BUILD_POSTGRES)
-    target_link_libraries(neograph_tests PRIVATE neograph::postgres)
+    # The test TU pokes libpq directly (PQconnectdb + pg_terminate_backend
+    # sibling path in RetriesAfterBrokenConnection), so it needs the
+    # libpq include / link in addition to neograph::postgres.
+    target_link_libraries(neograph_tests PRIVATE neograph::postgres PostgreSQL::PostgreSQL)
 endif()
 
 if(NEOGRAPH_BUILD_SQLITE)

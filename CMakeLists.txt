@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(NeoGraph VERSION 0.1.0 LANGUAGES C CXX)
+project(NeoGraph VERSION 2.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,7 +16,7 @@ endif()
 option(NEOGRAPH_BUILD_LLM      "Build neograph::llm (LLM providers)"     ON)
 option(NEOGRAPH_BUILD_MCP      "Build neograph::mcp (MCP client)"        ON)
 option(NEOGRAPH_BUILD_UTIL     "Build neograph::util (utilities)"        ON)
-option(NEOGRAPH_BUILD_POSTGRES "Build PostgresCheckpointStore (libpqxx)" ON)
+option(NEOGRAPH_BUILD_POSTGRES "Build PostgresCheckpointStore (libpq)" ON)
 option(NEOGRAPH_BUILD_SQLITE   "Build SqliteCheckpointStore (libsqlite3)" ON)
 option(NEOGRAPH_BUILD_EXAMPLES "Build example programs"                  ON)
 
@@ -42,6 +42,24 @@ target_include_directories(taskflow INTERFACE ${DEPS_DIR})
 # cpp-httplib (header-only) — used by llm and mcp (PRIVATE)
 add_library(httplib INTERFACE)
 target_include_directories(httplib INTERFACE ${DEPS_DIR})
+# Windows: httplib hard-errors unless _WIN32_WINNT >= 0x0A00 (Windows 10).
+# Set it on the INTERFACE so every TU that links httplib picks it up,
+# regardless of whether it also links asio.
+if(WIN32)
+    target_compile_definitions(httplib INTERFACE
+        _WIN32_WINNT=0x0A00
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX)
+endif()
+# httplib's TLS path on Apple pulls in system certs via
+# SecTrustCopyAnchorCertificates (Security.framework) and
+# CFArray/CFData (CoreFoundation.framework). These must be on the
+# final link line for any target that links httplib with SSL.
+if(APPLE)
+    target_link_libraries(httplib INTERFACE
+        "-framework CoreFoundation"
+        "-framework Security")
+endif()
 
 # moodycamel::ConcurrentQueue (header-only) — used by util (PRIVATE)
 add_library(concurrentqueue INTERFACE)
@@ -51,10 +69,28 @@ target_include_directories(concurrentqueue INTERFACE ${DEPS_DIR})
 add_library(cppdotenv INTERFACE)
 target_include_directories(cppdotenv INTERFACE ${DEPS_DIR})
 
-# OpenSSL — required by httplib for HTTPS
-if(NEOGRAPH_BUILD_LLM OR NEOGRAPH_BUILD_MCP)
-    find_package(OpenSSL REQUIRED)
+# standalone asio (header-only) — used by the async runtime layer.
+# Vendored as `deps/asio/include/` so the public macro ASIO_STANDALONE
+# turns off the Boost.System coupling. Any TU linking this must also
+# link a threads lib (std::thread backend).
+add_library(asio INTERFACE)
+target_include_directories(asio INTERFACE ${DEPS_DIR}/asio/include)
+target_compile_definitions(asio INTERFACE ASIO_STANDALONE ASIO_NO_DEPRECATED)
+# Windows: target Windows 10+ so httplib compiles (it hard-errors on
+# _WIN32_WINNT < 0x0A00) and asio's newer overlapped/pipe paths light up.
+# Also scrub min/max macros from <windows.h> that clobber std::min/max.
+if(WIN32)
+    target_compile_definitions(asio INTERFACE
+        _WIN32_WINNT=0x0A00
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX)
 endif()
+find_package(Threads REQUIRED)
+target_link_libraries(asio INTERFACE Threads::Threads)
+
+# OpenSSL — required by httplib for HTTPS, and by neograph::async
+# (asio::ssl in the async HTTP client).
+find_package(OpenSSL REQUIRED)
 
 # SQLite3 — required by neograph::sqlite (SqliteCheckpointStore).
 # Available as a system package on every Linux distro; on macOS comes
@@ -63,28 +99,13 @@ if(NEOGRAPH_BUILD_SQLITE)
     find_package(SQLite3 REQUIRED)
 endif()
 
-# libpqxx — required by neograph::postgres (PostgresCheckpointStore).
-# Distros expose it via pkg-config; fall back to a manual lookup for
-# systems where libpqxx-dev is installed but lacks a .pc file.
+# libpq — required by neograph::postgres (PostgresCheckpointStore).
+# Stage 3 / Sem 3.3: dropped libpqxx in favour of libpq directly.
+# libpqxx-7.8t64 on Ubuntu 24.04 has a C++17/C++20 ABI split that
+# broke the C++20 build; libpq's C ABI is stable.
+# PostgreSQL::PostgreSQL target comes from CMake's bundled FindPostgreSQL.
 if(NEOGRAPH_BUILD_POSTGRES)
-    find_package(PkgConfig QUIET)
-    if(PkgConfig_FOUND)
-        pkg_check_modules(LIBPQXX libpqxx)
-    endif()
-    if(NOT LIBPQXX_FOUND)
-        # Fallback: search for the headers + library directly.
-        find_path(LIBPQXX_INCLUDE_DIR pqxx/pqxx)
-        find_library(LIBPQXX_LIBRARY NAMES pqxx)
-        find_library(LIBPQ_LIBRARY NAMES pq)
-        if(NOT LIBPQXX_INCLUDE_DIR OR NOT LIBPQXX_LIBRARY)
-            message(FATAL_ERROR
-                "NEOGRAPH_BUILD_POSTGRES is ON but libpqxx wasn't found. "
-                "Install libpqxx-dev (apt) / libpqxx-devel (rpm), or set "
-                "NEOGRAPH_BUILD_POSTGRES=OFF to skip the Postgres backend.")
-        endif()
-        set(LIBPQXX_INCLUDE_DIRS ${LIBPQXX_INCLUDE_DIR})
-        set(LIBPQXX_LIBRARIES ${LIBPQXX_LIBRARY} ${LIBPQ_LIBRARY})
-    endif()
+    find_package(PostgreSQL REQUIRED)
 endif()
 
 # ===========================================================================
@@ -116,6 +137,8 @@ add_custom_target(generate_schemas DEPENDS ${GENERATED_DIR}/builtin_schemas.h)
 # ===========================================================================
 add_library(neograph_core STATIC
     src/core/json.cpp
+    src/core/provider.cpp
+    src/core/tool.cpp
     src/core/graph_engine.cpp
     src/core/graph_compiler.cpp
     src/core/graph_coordinator.cpp
@@ -131,7 +154,7 @@ add_library(neograph_core STATIC
     src/core/store.cpp
 )
 # postgres_checkpoint.cpp is built into a separate target below
-# (neograph_postgres) so projects without libpqxx can still link
+# (neograph_postgres) so projects without libpq can still link
 # neograph::core.
 
 target_include_directories(neograph_core
@@ -141,14 +164,50 @@ target_include_directories(neograph_core
 )
 
 target_link_libraries(neograph_core
-    PUBLIC  yyjson Threads::Threads
+    PUBLIC  yyjson Threads::Threads asio
     PRIVATE taskflow
 )
+
+# Coroutines are exposed through public headers (provider.h ships
+# asio::awaitable<ChatCompletion>); propagate C++20 to consumers.
+target_compile_features(neograph_core PUBLIC cxx_std_20)
 
 add_library(neograph::core ALIAS neograph_core)
 
 # ===========================================================================
-# neograph::postgres — PostgresCheckpointStore (libpqxx)
+# neograph::async — asio-based async runtime (PoC stage)
+#
+# Experimental. Not yet exposed through public headers. Goal: run a
+# single-core io_context that multiplexes many in-flight LLM / PG / MCP
+# calls so one agent no longer needs one OS thread. See
+# benchmarks/bench_async_fanout for the scaling measurement that
+# justifies (or kills) the bigger refactor.
+# ===========================================================================
+add_library(neograph_async STATIC
+    src/async/async_smoke.cpp
+    src/async/http_client.cpp
+    src/async/conn_pool.cpp
+    src/async/sse_parser.cpp
+)
+target_include_directories(neograph_async
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+)
+target_link_libraries(neograph_async PUBLIC asio OpenSSL::SSL OpenSSL::Crypto)
+# C++20 coroutines require this on GCC < 14 when using -std=c++20.
+target_compile_features(neograph_async PUBLIC cxx_std_20)
+add_library(neograph::async ALIAS neograph_async)
+
+# Smoke binary — just proves the async TU compiles, links, and runs.
+add_executable(neograph_async_smoke src/async/async_smoke_main.cpp)
+target_link_libraries(neograph_async_smoke PRIVATE neograph_async)
+
+# Live-network smoke for the TLS path. Not in ctest (offline-safe by
+# default). Run manually after touching http_client.cpp's TLS branch.
+add_executable(neograph_async_https_smoke src/async/async_https_smoke_main.cpp)
+target_link_libraries(neograph_async_https_smoke PRIVATE neograph_async)
+
+# ===========================================================================
+# neograph::postgres — PostgresCheckpointStore (libpq)
 #
 # Optional persistent CheckpointStore backed by PostgreSQL. Schema mirrors
 # LangGraph's PostgresSaver (three tables: checkpoints, blobs, writes)
@@ -164,13 +223,11 @@ if(NEOGRAPH_BUILD_POSTGRES)
         PUBLIC
             $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
-        PRIVATE
-            ${LIBPQXX_INCLUDE_DIRS}
     )
 
     target_link_libraries(neograph_postgres
         PUBLIC  neograph_core
-        PRIVATE ${LIBPQXX_LIBRARIES}
+        PRIVATE PostgreSQL::PostgreSQL
     )
 
     add_library(neograph::postgres ALIAS neograph_postgres)
@@ -226,7 +283,7 @@ if(NEOGRAPH_BUILD_LLM)
 
     target_link_libraries(neograph_llm
         PUBLIC  neograph_core
-        PRIVATE httplib OpenSSL::SSL OpenSSL::Crypto
+        PRIVATE httplib OpenSSL::SSL OpenSSL::Crypto neograph_async
     )
 
     add_library(neograph::llm ALIAS neograph_llm)
@@ -248,7 +305,7 @@ if(NEOGRAPH_BUILD_MCP)
 
     target_link_libraries(neograph_mcp
         PUBLIC  neograph_core
-        PRIVATE httplib OpenSSL::SSL OpenSSL::Crypto
+        PRIVATE neograph_async OpenSSL::SSL OpenSSL::Crypto
     )
 
     add_library(neograph::mcp ALIAS neograph_mcp)
@@ -332,6 +389,11 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_deep_research examples/25_deep_research.cpp)
         target_link_libraries(example_deep_research PRIVATE neograph::core neograph::llm httplib OpenSSL::SSL OpenSSL::Crypto cppdotenv)
 
+        # Example 27: async concurrent runs (Stage 3 / Sem 4.1).
+        # Demonstrates engine->run_async() under asio::io_context.
+        add_executable(example_async_concurrent_runs examples/27_async_concurrent_runs.cpp)
+        target_link_libraries(example_async_concurrent_runs PRIVATE neograph::core)
+
         # Example 26 needs both LLM (Claude provider) and the Postgres
         # backend; gate it on both build flags so a project that turns
         # off Postgres doesn't try to link a missing target.
@@ -403,6 +465,21 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
             target_compile_definitions(bench_checkpoint_store PRIVATE NEOGRAPH_HAVE_POSTGRES)
         endif()
     endif()
+
+    # async-runtime PoC: pure-timer fan-out to compare thread-per-agent
+    # vs io_context + coroutines at 100/1K/10K concurrency. No HTTP in
+    # this cut — measures the scheduling primitive in isolation.
+    add_executable(bench_async_fanout benchmarks/bench_async_fanout.cpp)
+    target_link_libraries(bench_async_fanout PRIVATE neograph::async)
+    target_compile_features(bench_async_fanout PRIVATE cxx_std_20)
+
+    # async-runtime PoC stage 2: mock HTTP server + sync/async clients.
+    # Confirms the timer-only advantage survives real TCP / HTTP parse
+    # / socket setup overhead.
+    add_executable(bench_async_http benchmarks/bench_async_http.cpp)
+    target_link_libraries(bench_async_http PRIVATE
+        neograph::async httplib OpenSSL::SSL OpenSSL::Crypto)
+    target_compile_features(bench_async_http PRIVATE cxx_std_20)
 endif()
 
 # ===========================================================================

@@ -204,4 +204,91 @@ void CheckpointCoordinator::clear_pending_writes(
     store_->clear_writes(thread_id_, parent_cp_id);
 }
 
+// ── Async peers (Sem 3.6 incremental) ────────────────────────────────
+//
+// Each builds the same Checkpoint / PendingWrite shape as the sync
+// peer above, then dispatches to the matching CheckpointStore::*_async
+// via co_await. The cp/write construction is pure CPU; only the store
+// I/O suspends.
+
+asio::awaitable<std::string>
+CheckpointCoordinator::save_super_step_async(
+    const GraphState& state,
+    const std::string& current_node,
+    const std::vector<std::string>& next_nodes,
+    CheckpointPhase phase,
+    int step,
+    const std::string& parent_id,
+    const BarrierState& barrier_state) const {
+
+    if (!enabled()) co_return std::string{};
+
+    Checkpoint cp;
+    cp.id              = Checkpoint::generate_id();
+    cp.thread_id       = thread_id_;
+    cp.channel_values  = state.serialize();
+    cp.parent_id       = parent_id;
+    cp.current_node    = current_node;
+    cp.next_nodes      = next_nodes;
+    cp.interrupt_phase = phase;
+    cp.barrier_state   = barrier_state;
+    cp.step            = step;
+    cp.timestamp       = now_ms();
+
+    auto id = cp.id;
+    co_await store_->save_async(cp);
+    co_return id;
+}
+
+asio::awaitable<void> CheckpointCoordinator::record_pending_write_async(
+    const std::string& parent_cp_id,
+    const std::string& task_id,
+    const std::string& task_path,
+    const std::string& node_name,
+    const NodeResult& nr,
+    int step) const {
+
+    if (!enabled() || parent_cp_id.empty()) co_return;
+    co_await store_->put_writes_async(thread_id_, parent_cp_id,
+        make_pending_write(task_id, task_path, node_name, nr, step));
+}
+
+asio::awaitable<void> CheckpointCoordinator::clear_pending_writes_async(
+    const std::string& parent_cp_id) const {
+
+    if (!enabled() || parent_cp_id.empty()) co_return;
+    co_await store_->clear_writes_async(thread_id_, parent_cp_id);
+}
+
+asio::awaitable<ResumeContext>
+CheckpointCoordinator::load_for_resume_async() const {
+    ResumeContext ctx;
+    if (!enabled()) co_return ctx;
+
+    auto cp_opt = co_await store_->load_latest_async(thread_id_);
+    if (!cp_opt) co_return ctx;
+
+    ctx.have_cp        = true;
+    ctx.checkpoint_id  = cp_opt->id;
+    ctx.channel_values = cp_opt->channel_values;
+    ctx.phase          = cp_opt->interrupt_phase;
+    ctx.next_nodes     = cp_opt->next_nodes;
+    ctx.barrier_state  = cp_opt->barrier_state;
+
+    // Same phase-aware step offset as load_for_resume.
+    ctx.start_step = static_cast<int>(cp_opt->step);
+    if (cp_opt->interrupt_phase == CheckpointPhase::After ||
+        cp_opt->interrupt_phase == CheckpointPhase::Completed ||
+        cp_opt->interrupt_phase == CheckpointPhase::Updated) {
+        ctx.start_step += 1;
+    }
+
+    auto pending = co_await store_->get_writes_async(thread_id_, ctx.checkpoint_id);
+    for (const auto& pw : pending) {
+        ctx.replay_results.emplace(pw.task_id, pending_to_node_result(pw));
+    }
+
+    co_return ctx;
+}
+
 } // namespace neograph::graph
