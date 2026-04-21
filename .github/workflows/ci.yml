@@ -107,3 +107,72 @@ jobs:
           name: ctest-logs
           path: build/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
+
+  # ──────────────────────────────────────────────────────────────────
+  # Async benchmark regression gate (Stage 3 / Sem 4.6).
+  #
+  # The async wire's value axis is burst concurrency — engine-overhead
+  # µs measured by bench_neograph is a secondary guard. CI fails fast
+  # if any of the three gates drop below the committed floors on PR,
+  # so a regression is caught before merge.
+  #
+  # Thresholds are intentionally loose (30%+ headroom over measured
+  # values on the feat/async-api branch as of 2026-04-21) to tolerate
+  # GitHub runner noise. Tighten later with baselined JSON if the
+  # numbers prove stable across several weeks of runs.
+  #
+  # Runs in parallel with build-and-test; separate job so the bench
+  # result is isolated from the main test failure mode. Postgres
+  # isn't needed here — the benches only exercise the async HTTP
+  # layer + engine core.
+  bench-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake build-essential libssl-dev pkg-config
+
+      - name: Configure (Release, benches on, postgres off)
+        run: |
+          cmake -B build-bench \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DNEOGRAPH_BUILD_BENCHMARKS=ON \
+            -DNEOGRAPH_BUILD_POSTGRES=OFF \
+            -DNEOGRAPH_BUILD_TESTS=OFF
+
+      - name: Build benches
+        run: cmake --build build-bench -j$(nproc) \
+             --target bench_async_http bench_async_fanout bench_neograph
+
+      - name: Gate — bench_async_http async_pool @ 1000 concur (floor 12000 ops/s)
+        run: |
+          out=$(./build-bench/bench_async_http --mode async_pool \
+                --concur 1000 --rounds 5 --latency-ms 5)
+          echo "$out"
+          # bench prints `ops/s=  14817.2` with variable spacing — sed
+          # pulls out the number after `ops/s=`.
+          ops=$(echo "$out" | sed -n 's/.*ops\/s=[[:space:]]*\([0-9.]*\).*/\1/p')
+          awk -v v="$ops" 'BEGIN{ if (v+0 < 12000) { print "FAIL: " v " < 12000"; exit 1 } print "ok: " v " >= 12000" }'
+
+      - name: Gate — bench_async_fanout 50K concur (floor 300K ops/s, rss <= 120MB)
+        run: |
+          out=$(./build-bench/bench_async_fanout --concur 50000)
+          echo "$out"
+          ops=$(echo "$out" | sed -n 's/.*ops\/s=[[:space:]]*\([0-9.]*\).*/\1/p')
+          rss=$(echo "$out" | sed -n 's/.*rss_mb=[[:space:]]*\([0-9.]*\).*/\1/p')
+          awk -v v="$ops" 'BEGIN{ if (v+0 < 300000) { print "FAIL ops/s: " v " < 300000"; exit 1 } print "ok ops/s: " v }'
+          awk -v v="$rss" 'BEGIN{ if (v+0 > 120)    { print "FAIL rss: "   v " > 120 MB"; exit 1 } print "ok rss: " v " MB" }'
+
+      - name: Gate — bench_neograph (engine overhead ceiling seq 60µs / par 300µs)
+        run: |
+          out=$(./build-bench/bench_neograph)
+          echo "$out"
+          # Output: tab-separated `seq<TAB>count<TAB>total_ms<TAB>per_op_us`
+          seq_us=$(echo "$out" | awk -F'\t' '$1=="seq" {print $4}')
+          par_us=$(echo "$out" | awk -F'\t' '$1=="par" {print $4}')
+          awk -v v="$seq_us" 'BEGIN{ if (v+0 > 60)  { print "FAIL seq: " v "us > 60"; exit 1 } print "ok seq: " v "us" }'
+          awk -v v="$par_us" 'BEGIN{ if (v+0 > 300) { print "FAIL par: " v "us > 300"; exit 1 } print "ok par: " v "us" }'
