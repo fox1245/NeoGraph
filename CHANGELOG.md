@@ -130,23 +130,32 @@ platforms once tests pass).
 #### Windows — **alpha**
 
 * windows-latest, MSVC 19.44 (VS 2022), x64.
-* CI builds + runs non-Postgres tests via vcpkg-installed libpq +
-  openssl + sqlite3. Postgres integration cases self-skip (same
-  as macOS).
+* CI scope: **core + async + MCP + LLM only**. Postgres and
+  SQLite backends are disabled on the Windows CI job because
+  vcpkg would compile OpenSSL / libpq / zlib / lz4 from source
+  on every run (~20 min, no working binary cache backend upstream
+  since `x-gha` was removed). Windows users compile these
+  locally via their own vcpkg / choco setup.
+* OpenSSL via the runner's preinstalled choco package
+  (`C:/Program Files/OpenSSL-Win64/`). TLS paths in httplib +
+  asio::ssl compile and link.
 * MCP stdio: `CreateProcess` + named-pipe (FILE_FLAG_OVERLAPPED) +
   `asio::windows::stream_handle`. The overlapped-pipe path was
   written against MSDN spec without local Windows validation;
   expect first-users to surface edge cases (ERROR_IO_PENDING
   handling, pipe buffer boundary on large JSON responses).
-* Postgres async peers: `asio::ip::tcp::socket::assign` wrapping
-  the SOCKET returned by `PQsocket` (cast through
-  `native_handle_type` to preserve 64-bit SOCKET values).
+* Postgres async peers (when enabled locally): `asio::ip::tcp::
+  socket::assign` wrapping the SOCKET returned by `PQsocket`
+  (cast through `native_handle_type` to preserve 64-bit SOCKET
+  values). Not exercised by Windows CI — local only.
 * Coroutine machinery lives in MSVC's `<coroutine>`; behaviour
   expected to match GCC/Clang by spec but `examples/27` cross-run
   overlap measurements haven't been confirmed on Windows yet.
 * Treat as **alpha** through 2.0.0. Promote to beta once one
   production user runs a multi-agent workload for a week without
-  hitting stdio/pipe or coroutine-scheduler issues.
+  hitting stdio/pipe or coroutine-scheduler issues, AND Postgres
+  async peers get locally validated by a user willing to run
+  vcpkg's full libpq build.
 
 > **Pattern**: CI green is a floor, not a ceiling. Layer 3 runtime
 > behaviour differences (coroutine scheduling timing, pipe buffer
