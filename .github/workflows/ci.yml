@@ -183,13 +183,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Chocolatey's openssl package is a prebuilt binary (no source
+      # compile) — installs in ~20 s and lands at a predictable path
+      # that CMake's FindOpenSSL picks up via OPENSSL_ROOT_DIR.
+      # Faster and more reliable than the mutable "preinstalled on
+      # the runner image" story, which drifts between image versions.
+      - name: Install OpenSSL (choco, prebuilt)
+        shell: pwsh
+        run: |
+          choco install openssl -y --no-progress
+          $ssl = Get-ChildItem "C:\Program Files\OpenSSL*" -Directory |
+                 Select-Object -First 1 -ExpandProperty FullName
+          if (-not $ssl) { throw "OpenSSL install directory not found" }
+          echo "OpenSSL installed at: $ssl"
+          "OPENSSL_ROOT_DIR=$ssl" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+
       - name: Configure (MCP + async only; PG + SQLite disabled on Windows CI)
         shell: pwsh
         run: |
           cmake -B build `
             -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
-            -DOPENSSL_ROOT_DIR="C:/Program Files/OpenSSL-Win64" `
+            -DOPENSSL_ROOT_DIR="$env:OPENSSL_ROOT_DIR" `
             -DNEOGRAPH_BUILD_LLM=ON `
             -DNEOGRAPH_BUILD_MCP=ON `
             -DNEOGRAPH_BUILD_UTIL=ON `
