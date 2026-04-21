@@ -42,6 +42,15 @@ target_include_directories(taskflow INTERFACE ${DEPS_DIR})
 # cpp-httplib (header-only) — used by llm and mcp (PRIVATE)
 add_library(httplib INTERFACE)
 target_include_directories(httplib INTERFACE ${DEPS_DIR})
+# httplib's TLS path on Apple pulls in system certs via
+# SecTrustCopyAnchorCertificates (Security.framework) and
+# CFArray/CFData (CoreFoundation.framework). These must be on the
+# final link line for any target that links httplib with SSL.
+if(APPLE)
+    target_link_libraries(httplib INTERFACE
+        "-framework CoreFoundation"
+        "-framework Security")
+endif()
 
 # moodycamel::ConcurrentQueue (header-only) — used by util (PRIVATE)
 add_library(concurrentqueue INTERFACE)

@@ -168,10 +168,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install libpq + OpenSSL via vcpkg
+      - name: Install libpq + OpenSSL + SQLite3 via vcpkg
         shell: pwsh
         run: |
-          vcpkg install libpq:x64-windows openssl:x64-windows
+          vcpkg install libpq:x64-windows openssl:x64-windows sqlite3:x64-windows
           "VCPKG_TOOLCHAIN=$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" `
             | Out-File -Append -Encoding ascii $env:GITHUB_ENV
 
@@ -244,8 +244,9 @@ jobs:
             -DNEOGRAPH_BUILD_TESTS=OFF
 
       - name: Build benches
-        run: cmake --build build-bench -j$(nproc) \
-             --target bench_async_http bench_async_fanout bench_neograph
+        run: |
+          cmake --build build-bench -j$(nproc) \
+            --target bench_async_http bench_async_fanout bench_neograph
 
       - name: Gate — bench_async_http async_pool @ 1000 concur (floor 12000 ops/s)
         run: |
