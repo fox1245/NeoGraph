@@ -167,3 +167,57 @@ TEST(MCPClientAsync, NonOkHttpStatusSurfacesAsRuntimeError) {
 
     EXPECT_THROW(client.call_tool("x", json::object()), std::runtime_error);
 }
+
+TEST(MCPClientAsync, SessionIdHeaderRoundTrips) {
+    // Regression for the Mcp-Session-Id tracking that was lost in the
+    // Sem 2.6 httplib → async_post migration and restored in the
+    // follow-up commit. The server sends Mcp-Session-Id on the first
+    // response; subsequent requests must echo it back verbatim, so
+    // server-side session state stays routable.
+    std::atomic<int> seen_session_echoes{0};
+    std::string assigned_sid = "sess-abc123";
+
+    httplib::Server svr;
+    svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+        // If the client already carries a session id, it must be the
+        // one we issued. Count those echoes.
+        auto client_sid = req.get_header_value("Mcp-Session-Id");
+        if (!client_sid.empty()) {
+            EXPECT_EQ(client_sid, assigned_sid);
+            seen_session_echoes.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        // Always reply with the assigned session id so the client's
+        // tracking stays refreshed.
+        res.set_header("Mcp-Session-Id", assigned_sid);
+        int id = 0;
+        try {
+            auto parsed = json::parse(req.body);
+            if (parsed.is_object()) id = parsed.value("id", 0);
+        } catch (...) { }
+        std::string body = R"({"jsonrpc":"2.0","id":)"
+            + std::to_string(id) + R"(,"result":{"ok":true}})";
+        res.set_content(body, "application/json");
+    });
+
+    int port = svr.bind_to_any_port("127.0.0.1");
+    std::thread t([&] { svr.listen_after_bind(); });
+    for (int i = 0; i < 200 && !svr.is_running(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_TRUE(svr.is_running());
+
+    mcp::MCPClient client("http://127.0.0.1:" + std::to_string(port));
+    // First call: no session id yet — server assigns one.
+    client.call_tool("first", json::object());
+    // Subsequent calls: must carry the assigned id back.
+    client.call_tool("second", json::object());
+    client.call_tool("third",  json::object());
+
+    svr.stop();
+    if (t.joinable()) t.join();
+
+    // 3 requests total, 2 of which should have echoed the session id
+    // (the very first didn't have one yet).
+    EXPECT_EQ(seen_session_echoes.load(), 2);
+}

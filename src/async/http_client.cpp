@@ -38,6 +38,24 @@
 
 namespace neograph::async {
 
+std::string_view HttpResponse::get_header(std::string_view name) const noexcept {
+    // HTTP header names are case-insensitive (RFC 7230 §3.2). Compare
+    // by per-char tolower — headers is a small vector in practice
+    // (response typically has 5-20 entries), so a linear scan beats
+    // allocating a lowercase name key + map lookup.
+    auto ieq = [](char a, char b) {
+        return std::tolower(static_cast<unsigned char>(a))
+            == std::tolower(static_cast<unsigned char>(b));
+    };
+    for (const auto& [k, v] : headers) {
+        if (k.size() == name.size() &&
+            std::equal(k.begin(), k.end(), name.begin(), ieq)) {
+            return v;
+        }
+    }
+    return {};
+}
+
 namespace {
 
 // Decomposed Location. When `absolute` is false, host/port/tls carry

@@ -495,14 +495,16 @@ MCPClient::rpc_call_async(const std::string& method, const json& params) {
         throw std::runtime_error(std::string("MCP request failed: ") + e.what());
     }
 
-    // Note: the previous httplib code captured Mcp-Session-Id from
-    // response headers. async::HttpResponse only surfaces a couple of
-    // hot fields (status/body/retry_after/location) — extending it
-    // for arbitrary response headers is a Sem 1 follow-up. For now
-    // we still get the session id back via the RPC body when the
-    // server includes it; pure-header sessioning would need that
-    // extension. None of the existing MCP tests rely on the header
-    // shape since they hit a stdio server.
+    // Restore Mcp-Session-Id header tracking now that HttpResponse
+    // exposes a generic headers map (see async/http_client.h). The
+    // MCP spec (2025-03-26) sends this header on the initialize
+    // response; subsequent rpc calls must echo it back so the server
+    // routes to the same session. Sem 2.6 had to drop this when we
+    // migrated off httplib; Sem 4 follow-up restores it.
+    if (auto sid = res.get_header("Mcp-Session-Id"); !sid.empty()) {
+        session_id_ = std::string(sid);
+    }
+
     if (res.status != 200) {
         throw std::runtime_error(
             "MCP error (HTTP " + std::to_string(res.status) + "): " + res.body);
