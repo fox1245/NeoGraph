@@ -568,22 +568,44 @@ StdioSession::rpc_call_async(const std::string& method, const json& params) {
 
     // Wrap the raw pipe handles in an AsyncHandle (asio::posix::
     // stream_descriptor on POSIX, asio::windows::stream_handle on
-    // Win32) *without* taking ownership — we release() before
-    // destruction so the session retains the handles across calls.
-    // Fresh wrappers per call avoid the executor-lifetime issue that
-    // hits ConnPool when callers funnel through the run_sync facade
+    // Win32). Fresh wrappers per call avoid the executor-lifetime
+    // issue that hits ConnPool when callers funnel through run_sync
     // (each run_sync uses a fresh io_context that dies on return).
+    //
+    // POSIX: release() before destruction so the session keeps the fd.
+    // Win32: a HANDLE can be associated with at most one IOCP for its
+    //        lifetime. Re-wrapping the same HANDLE on a second call
+    //        crashes inside the handle_service. Duplicate the HANDLE
+    //        per call instead and let the wrapper's destructor close
+    //        the duplicate; the session keeps its original.
 #ifdef _WIN32
-    AsyncHandle in_desc(ex, stdin_h_);
-    AsyncHandle out_desc(ex, stdout_h_);
+    HANDLE dup_in = nullptr, dup_out = nullptr;
+    const HANDLE self = GetCurrentProcess();
+    if (!DuplicateHandle(self, stdin_h_, self, &dup_in,
+                         0, FALSE, DUPLICATE_SAME_ACCESS)) {
+        throw std::system_error(static_cast<int>(GetLastError()),
+            std::system_category(), "DuplicateHandle(stdin)");
+    }
+    if (!DuplicateHandle(self, stdout_h_, self, &dup_out,
+                         0, FALSE, DUPLICATE_SAME_ACCESS)) {
+        DWORD err = GetLastError();
+        CloseHandle(dup_in);
+        throw std::system_error(static_cast<int>(err),
+            std::system_category(), "DuplicateHandle(stdout)");
+    }
+    AsyncHandle in_desc(ex, dup_in);
+    AsyncHandle out_desc(ex, dup_out);
+    // No release(): wrapper destructor closes dup_in / dup_out, which
+    // is what we want — the session's stdin_h_ / stdout_h_ are
+    // separate HANDLEs and unaffected.
 #else
     AsyncHandle in_desc(ex, stdin_fd_);
     AsyncHandle out_desc(ex, stdout_fd_);
-#endif
     struct ReleaseGuard {
         AsyncHandle& d;
         ~ReleaseGuard() { try { d.release(); } catch (...) {} }
     } in_guard{in_desc}, out_guard{out_desc};
+#endif
 
     co_await async_write_frame_locked(in_desc, req);
 
