@@ -60,9 +60,24 @@ section below for the reproduction command.
 
 ### Requirements
 
-- C++17 compiler (GCC 9+, Clang 10+, MSVC 2019+)
-- CMake 3.16+
-- OpenSSL (for HTTPS)
+- **C++20** compiler (GCC 13+, Clang 15+, MSVC 2022+) — coroutines
+  are on the public API surface as of 2.0.0.
+- CMake 3.16+.
+- OpenSSL (HTTPS), libpq (optional, Postgres checkpoint),
+  SQLite3 (optional, SQLite checkpoint).
+
+### Platform support (2.0.0)
+
+| Platform | Tier | Notes |
+|---|---|---|
+| Linux (Ubuntu 24.04, GCC 13) | **GA** | Reference — 332/332 ctest + benches, all paths validated locally |
+| macOS (Apple Silicon, Clang) | **beta** | CI builds + non-Postgres tests; runtime differences (coroutine scheduling, SIGPIPE) not yet exercised in production |
+| Windows (MSVC 2022, x64) | **alpha** | CI builds + non-Postgres tests; MCP stdio (named-pipe overlapped) + PG async socket wrap written against MSDN spec but unvalidated under load |
+
+CI matrix (GitHub Actions): `build-and-test` (Ubuntu, full with PG
+service), `build-macos`, `build-windows`, `bench-regression` (3
+committed floors). See [`CHANGELOG.md`](CHANGELOG.md) for the full
+stability rationale per platform.
 
 ### Build
 
