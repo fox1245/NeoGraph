@@ -131,16 +131,18 @@ inline HttpErrorKind classify_asio_error(const asio::error_code& ec) noexcept {
         return HttpErrorKind::Unknown;
     }
 
-    // System / socket errno category. Covers connect/read/write.
-    // Compare against asio::error::* — values are ECONNREFUSED etc.
-    switch (ec.value()) {
-        case ECONNREFUSED:      return HttpErrorKind::ConnectRefused;
-        case ETIMEDOUT:         return HttpErrorKind::ConnectTimeout;
-        case ECONNRESET:        return HttpErrorKind::PeerReset;
-        case EPIPE:             return HttpErrorKind::PeerReset;
-        case ENOTCONN:          return HttpErrorKind::PeerReset;
-        default:                return HttpErrorKind::Unknown;
-    }
+    // System / socket category. Covers connect/read/write.
+    // Compare the error_code against asio::error::* enumerators so
+    // the mapping works on both POSIX (errno space) and Windows
+    // (WSA* space). A plain `switch (ec.value())` against ECONN*
+    // constants from <cerrno> would miss on Windows because WinSock
+    // error numbers (e.g. 10061) don't match errno's ECONNREFUSED.
+    if (ec == asio::error::connection_refused) return HttpErrorKind::ConnectRefused;
+    if (ec == asio::error::timed_out)          return HttpErrorKind::ConnectTimeout;
+    if (ec == asio::error::connection_reset)   return HttpErrorKind::PeerReset;
+    if (ec == asio::error::broken_pipe)        return HttpErrorKind::PeerReset;
+    if (ec == asio::error::not_connected)      return HttpErrorKind::PeerReset;
+    return HttpErrorKind::Unknown;
 }
 
 /// Classify an HTTP status code on its own. 2xx/3xx don't surface
