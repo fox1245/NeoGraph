@@ -96,9 +96,20 @@ Measured on the feat/async-api branch against Stage 2 sync baselines:
   still uses it for fan-out; Sem 4.5 revisits whether sync paths
   can be replaced by `run_sync(*_async)` so the dependency can
   drop entirely.
-- **`async::HttpResponse` headers map** — response surface is
-  still status / body / retry_after / location only. Arbitrary
-  header access (MCP session ID tracking etc.) is a Sem 1 follow-up.
+
+### Fixed post-bump
+
+- **`async::HttpResponse` headers map** — the response surface now
+  exposes a `headers` vector of `(name, value)` pairs preserving wire
+  order and original casing, plus `get_header(name)` as a
+  case-insensitive accessor. Retry-After and Location remain as
+  dedicated fields for backward compatibility. Unblocks the MCP
+  session tracking fix below.
+- **MCP `Mcp-Session-Id` header tracking** — the Sem 2.6
+  httplib→async_post migration silently dropped this. Every post-
+  initialize RPC now echoes the server-assigned session id back
+  via the new headers accessor, so the server's session state
+  stays routable.
 
 ---
 

@@ -92,6 +92,12 @@ inline int parse_status_line(std::string_view line) {
 struct ResponseHeaderBits {
     std::string retry_after;
     std::string location;
+    /// Every header seen on the response, in wire order. Preserves
+    /// the original-cased name exactly as the server sent it so
+    /// callers that want to round-trip (e.g. proxies) don't need to
+    /// reconstruct capitalization. Case-insensitive lookup against
+    /// this vector is provided by HttpResponse::get_header.
+    std::vector<std::pair<std::string, std::string>> all;
 };
 
 // Parse the headers block up to (and consuming) the blank line.
@@ -110,13 +116,20 @@ inline long extract_headers(std::istream& in,
         if (line.empty()) break;  // end of headers
         auto colon = line.find(':');
         if (colon == std::string::npos) continue;
-        std::string name = line.substr(0, colon);
-        std::string value = line.substr(colon + 1);
+        // Preserve original-cased name; lowercase copy for comparisons.
+        std::string raw_name  = line.substr(0, colon);
+        std::string value     = line.substr(colon + 1);
         auto first = value.find_first_not_of(" \t");
         if (first == std::string::npos) value.clear();
         else value = value.substr(first);
+
+        std::string name = raw_name;
         std::transform(name.begin(), name.end(), name.begin(),
                        [](unsigned char c) { return std::tolower(c); });
+
+        if (extra) {
+            extra->all.emplace_back(raw_name, value);
+        }
         if (name == "content-length") {
             std::from_chars(value.data(), value.data() + value.size(), content_length);
         } else if (name == "transfer-encoding") {
@@ -337,6 +350,7 @@ asio::awaitable<ExchangeResult> run_exchange(Stream& stream, const std::string& 
     long content_length = extract_headers(is, r.server_directive, &extra);
     r.response.retry_after = std::move(extra.retry_after);
     r.response.location    = std::move(extra.location);
+    r.response.headers     = std::move(extra.all);
     if (content_length < 0) {
         throw std::runtime_error("async_post: chunked transfer-encoding not supported");
     }

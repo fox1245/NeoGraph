@@ -40,6 +40,23 @@ struct HttpResponse {
     /// follow (because max_redirects was 0 or exhausted). Empty
     /// otherwise.
     std::string location;
+
+    /// All response headers, preserved in wire order. Name comparisons
+    /// against this vector should be case-insensitive (HTTP header
+    /// names are case-insensitive per RFC 7230 §3.2); `get_header`
+    /// below is the convenience accessor that does that correctly.
+    ///
+    /// Retry-After / Location are also represented here (in addition
+    /// to being lifted into the dedicated fields above) — those two
+    /// stay for backward-compatibility with callers that used them
+    /// before the generic map existed. New code should prefer this
+    /// vector for consistency.
+    std::vector<std::pair<std::string, std::string>> headers;
+
+    /// Case-insensitive header lookup. Returns the first match's value
+    /// or an empty string_view when the header is absent. The returned
+    /// view is valid as long as `headers` isn't mutated.
+    std::string_view get_header(std::string_view name) const noexcept;
 };
 
 /// Per-call knobs. Default-constructed instance preserves the

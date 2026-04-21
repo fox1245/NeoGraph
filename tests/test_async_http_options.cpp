@@ -409,4 +409,84 @@ TEST(RequestOptions, PoolTimeoutTriggers) {
     EXPECT_EQ(pool.idle_count(), 0u);
 }
 
+// ---------------------------------------------------------------------------
+// HttpResponse::headers map (Sem 2.6 follow-up). The generic headers
+// vector preserves wire order and original-cased names; get_header is
+// case-insensitive. Regression: MCPClient relies on Mcp-Session-Id
+// tracking which moved from httplib header accessors to this field.
+
+TEST(HttpResponseHeaders, PreservesAllHeadersInWireOrder) {
+    RoutedMock srv([](const std::string&) {
+        return http_response(200, "ok",
+            "X-Alpha: one\r\n"
+            "X-Beta: two\r\n"
+            "Mcp-Session-Id: sess-42\r\n"
+            "X-Upper-MixedCase: three\r\n");
+    });
+
+    asio::io_context io;
+    neograph::async::HttpResponse resp;
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> {
+            resp = co_await neograph::async::async_post(
+                io.get_executor(), "127.0.0.1",
+                std::to_string(srv.port), "/any",
+                "body", {}, false);
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_EQ(resp.status, 200);
+    // Every custom header should be present; order matches what the
+    // server sent (asserted loosely via find-by-value since
+    // Content-Length / Connection land in the list too).
+    bool saw_alpha = false, saw_beta = false, saw_sid = false, saw_mixed = false;
+    for (const auto& [k, v] : resp.headers) {
+        if (k == "X-Alpha" && v == "one") saw_alpha = true;
+        if (k == "X-Beta"  && v == "two") saw_beta = true;
+        if (k == "Mcp-Session-Id" && v == "sess-42") saw_sid = true;
+        // Original-cased name preserved — not lowercased.
+        if (k == "X-Upper-MixedCase" && v == "three") saw_mixed = true;
+    }
+    EXPECT_TRUE(saw_alpha);
+    EXPECT_TRUE(saw_beta);
+    EXPECT_TRUE(saw_sid);
+    EXPECT_TRUE(saw_mixed);
+
+    // Case-insensitive accessor.
+    EXPECT_EQ(resp.get_header("Mcp-Session-Id"), "sess-42");
+    EXPECT_EQ(resp.get_header("mcp-session-id"), "sess-42");
+    EXPECT_EQ(resp.get_header("MCP-SESSION-ID"), "sess-42");
+    EXPECT_EQ(resp.get_header("X-Does-Not-Exist"), "");
+}
+
+TEST(HttpResponseHeaders, RetryAfterAndLocationAlsoInHeadersMap) {
+    // Retry-After and Location were already exposed as dedicated
+    // fields before the generic map. They now also appear in the
+    // generic vector — callers that already use the dedicated fields
+    // keep working, new code can prefer the uniform surface.
+    RoutedMock srv([](const std::string&) {
+        return http_response(429, "rate limited",
+            "Retry-After: 42\r\n"
+            "Location: /queue\r\n");
+    });
+
+    asio::io_context io;
+    neograph::async::HttpResponse resp;
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> {
+            resp = co_await neograph::async::async_post(
+                io.get_executor(), "127.0.0.1",
+                std::to_string(srv.port), "/any",
+                "body", {}, false);
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_EQ(resp.retry_after, "42");
+    EXPECT_EQ(resp.location, "/queue");
+    EXPECT_EQ(resp.get_header("Retry-After"), "42");
+    EXPECT_EQ(resp.get_header("Location"), "/queue");
+}
+
 }  // namespace
