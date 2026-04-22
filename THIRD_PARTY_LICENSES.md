@@ -18,7 +18,7 @@ loop now routes through `neograph::async::run_sync(execute_graph_async)`).
 | `deps/yyjson/` | [ibireme/yyjson](https://github.com/ibireme/yyjson) | MIT | `neograph::core` (JSON parse/dump) |
 | `deps/httplib.h` | [yhirose/cpp-httplib](https://github.com/yhirose/cpp-httplib) | MIT | `neograph::llm` (OpenAI-compatible HTTP), `neograph::mcp` (HTTP transport) |
 | `deps/concurrentqueue.h` | [cameron314/concurrentqueue](https://github.com/cameron314/concurrentqueue) | Simplified BSD (2-clause) | `neograph::util` (`RequestQueue` — lock-free MPMC) |
-| `deps/cppdotenv/` | [theskumar/python-dotenv](https://github.com/theskumar/python-dotenv) (C++ port) | MIT | `examples/13_deep_research` (`.env` loader) |
+| `deps/cppdotenv/` | [fox1245/cppdotenv](https://github.com/fox1245/cppdotenv) (same author; header-only C++17 `.env` reader, inspired by python-dotenv) | MIT | `examples/25_deep_research`, `examples/26_postgres_react_hitl` (`.env` loader) |
 | `deps/clay.h`, `deps/clay_renderer_raylib.c` | [nicbarker/clay](https://github.com/nicbarker/clay) | zlib | `examples/99_clay_chatbot` (opt-in UI) |
 
 ## OpenSSL (system, linked dynamically)
