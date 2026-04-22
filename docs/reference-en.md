@@ -257,6 +257,11 @@ of missing fields.
 
 The abstract interface for LLM backends. Implement this to add support for any LLM API.
 
+> **Writing a custom Provider subclass?** See
+> [`ASYNC_GUIDE.md` §9.3](ASYNC_GUIDE.md#93-provider) for the
+> decision matrix on whether to override `complete()`,
+> `complete_async()`, or both.
+
 ### StreamCallback
 
 Type alias for the streaming token callback.
@@ -326,6 +331,11 @@ public:
 
 Abstract interface for tools that LLMs can call. Implement this to expose functions
 to the agent.
+
+> **Writing a custom Tool subclass?** See
+> [`ASYNC_GUIDE.md` §9.6](ASYNC_GUIDE.md#96-tool-vs-asynctool) for
+> when to inherit `Tool` (sync) vs `AsyncTool` (async). The two are
+> mutually exclusive — pick one.
 
 ### Tool
 
@@ -726,6 +736,13 @@ public:
 
 Nodes are the computational units of a graph. The library provides an abstract base
 class and four built-in node types.
+
+> **Writing a custom GraphNode subclass?** There are four `execute*`
+> virtuals and their four async peers (8 total). Picking the wrong
+> one silently drops `Command` / `Send`, freezes the event loop, or
+> infinite-recurses. See
+> [`ASYNC_GUIDE.md` §9.2](ASYNC_GUIDE.md#92-graphnode--the-four-quadrant-matrix)
+> for the full decision matrix and the known pitfalls.
 
 ### GraphNode (abstract)
 
@@ -1533,6 +1550,11 @@ struct Checkpoint {
 Abstract interface for checkpoint persistence. Implement this to store checkpoints
 in a database, file system, or any other backend.
 
+> **Writing a custom store?** 8 sync methods have 8 async peers.
+> See [`ASYNC_GUIDE.md` §9.4](ASYNC_GUIDE.md#94-checkpointstore) —
+> override all-sync or all-async (not mixed), depending on whether
+> your backend is blocking or async-capable.
+
 ```cpp
 class CheckpointStore {
 public:
@@ -2151,6 +2173,10 @@ discovers and wraps them.
 
 Client that connects to an MCP server, performs the initialization handshake, and
 provides methods to discover and invoke tools.
+
+> `MCPClient` is not designed to be subclassed — you use it as-is.
+> `rpc_call_async()` is the real implementation and `rpc_call()` is
+> a thin sync facade. See [`ASYNC_GUIDE.md` §9.5](ASYNC_GUIDE.md#95-mcpclient).
 
 ```cpp
 class MCPClient {

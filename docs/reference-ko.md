@@ -190,6 +190,11 @@ ChatMessage parse_response_message(const json& choice);
 
 LLM provider의 추상 인터페이스를 정의한다. OpenAI, Claude, Gemini 등 모든 provider가 이 인터페이스를 구현한다.
 
+> **커스텀 Provider를 작성하신다면?**
+> [`ASYNC_GUIDE.md` §9.3](ASYNC_GUIDE.md#93-provider) 의
+> 결정표 참조 — `complete()`, `complete_async()`, 혹은 둘 다
+> override할지 결정 가이드.
+
 ### 2.1 StreamCallback
 
 스트리밍 응답에서 토큰 단위로 호출되는 콜백.
@@ -274,6 +279,11 @@ public:
 **네임스페이스:** `neograph`
 
 LLM이 호출할 수 있는 도구의 추상 인터페이스.
+
+> **커스텀 Tool을 작성하신다면?** sync 용으로 `Tool`을 상속할지,
+> async 용으로 `AsyncTool`을 상속할지 둘 중 하나만 골라야 함 (동시
+> 상속 불가 — `AsyncTool::execute`가 `final`).
+> [`ASYNC_GUIDE.md` §9.6](ASYNC_GUIDE.md#96-tool-vs-asynctool) 참조.
 
 ```cpp
 class Tool {
@@ -713,6 +723,13 @@ state.write("messages", json::array({msg2})); // -> [msg1, msg2]
 
 **헤더:** `neograph/graph/node.h`
 **네임스페이스:** `neograph::graph`
+
+> **커스텀 GraphNode를 작성하신다면?** `execute*` 가상함수가
+> 4개 있고 각각의 async peer까지 총 8개. 잘못 고르면
+> `Command`/`Send`가 조용히 드롭되거나, 이벤트 루프가 얼거나,
+> 무한 재귀. 전체 결정 매트릭스 + 알려진 함정은
+> [`ASYNC_GUIDE.md` §9.2](ASYNC_GUIDE.md#92-graphnode--the-four-quadrant-matrix)
+> 참조.
 
 ### 6.1 GraphNode (추상 클래스)
 
@@ -1586,6 +1603,11 @@ struct Checkpoint {
 
 checkpoint 영속화 인터페이스. 데이터베이스, 파일 시스템 등으로 구현 가능.
 
+> **커스텀 store를 작성하신다면?** sync 8개, async peer 8개.
+> [`ASYNC_GUIDE.md` §9.4](ASYNC_GUIDE.md#94-checkpointstore) 참조 —
+> 백엔드가 async-capable이면 async 전부 override, blocking이면 sync
+> 전부 override (섞지 말 것).
+
 ```cpp
 class CheckpointStore {
 public:
@@ -2231,6 +2253,10 @@ std::string streamed = agent.run_stream(messages,
 ### 13.1 MCPClient
 
 MCP 서버 연결 및 도구 발견 클라이언트.
+
+> `MCPClient`는 subclass를 전제로 설계되지 않음 — 그대로 사용.
+> `rpc_call_async()`가 실구현이고 `rpc_call()`은 sync 파사드.
+> [`ASYNC_GUIDE.md` §9.5](ASYNC_GUIDE.md#95-mcpclient) 참조.
 
 ```cpp
 class MCPClient {
