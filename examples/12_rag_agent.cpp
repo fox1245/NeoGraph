@@ -11,13 +11,17 @@
 //   4. Generates an answer grounded in the retrieved context
 //
 // Usage:
-//   OPENAI_API_KEY=sk-... ./example_rag_agent
+//   echo 'OPENAI_API_KEY=sk-...' > .env
+//   ./example_rag_agent
+// (auto-loads .env from the cwd or any parent directory.)
 //
 // For production RAG with PGVector + gRPC, see NexaGraph.
 
 #include <neograph/neograph.h>
 #include <neograph/llm/openai_provider.h>
 #include <neograph/graph/react_graph.h>
+
+#include <cppdotenv/dotenv.hpp>
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
@@ -235,7 +239,8 @@ static std::vector<Document> create_knowledge_base() {
         {"doc_1", "NeoGraph Overview",
          "NeoGraph is a C++17 graph-based agent orchestration engine. "
          "It brings LangGraph-level capabilities to C++ with zero Python dependency. "
-         "Key features include JSON-defined graphs, parallel fan-out via Taskflow, "
+         "Key features include JSON-defined graphs, parallel fan-out via "
+         "asio::experimental::make_parallel_group, "
          "checkpointing for time-travel debugging, and HITL support.",
          "README.md", {}},
 
@@ -251,8 +256,8 @@ static std::vector<Document> create_knowledge_base() {
          "Send enables dynamic fan-out: a node can spawn N parallel tasks at runtime "
          "by returning Send objects. Command enables routing override: a node can "
          "simultaneously update state AND control which node executes next, "
-         "bypassing normal edge-based routing. Both are processed by the Taskflow "
-         "work-stealing scheduler.",
+         "bypassing normal edge-based routing. Both are processed by the asio "
+         "coroutine fan-out runtime (no Taskflow as of 3.0).",
          "docs/features.md", {}},
 
         {"doc_4", "Checkpointing and HITL",
@@ -266,9 +271,11 @@ static std::vector<Document> create_knowledge_base() {
         {"doc_5", "Performance Comparison",
          "NeoGraph produces a ~5MB static binary vs ~500MB for Python+LangGraph. "
          "Memory usage is ~10MB vs ~300MB. Cold start is instant vs seconds. "
-         "Parallel fan-out of 3 workers completing in 150ms tasks takes 151ms "
-         "(parallel) vs 370ms (sequential). NeoGraph uses Taskflow work-stealing "
-         "for true CPU parallelism, unlike Python's GIL-limited asyncio.",
+         "Parallel fan-out of 3 workers completing in 150ms tasks takes ~150ms "
+         "(parallel) vs 370ms (sequential). NeoGraph uses asio coroutines on a "
+         "shared io_context for cooperative I/O overlap, unlike Python's GIL-"
+         "limited asyncio. CPU-parallel fan-out is opt-in via "
+         "engine->set_worker_count(N), which installs an asio::thread_pool.",
          "README.md", {}},
 
         {"doc_6", "LLM Provider Support",
@@ -302,10 +309,14 @@ static std::vector<Document> create_knowledge_base() {
 // =========================================================================
 
 int main() {
+    cppdotenv::auto_load_dotenv();
+
+    try {
     // 1. Check API key
     const char* api_key = std::getenv("OPENAI_API_KEY");
     if (!api_key) {
-        std::cerr << "Set OPENAI_API_KEY environment variable\n";
+        std::cerr << "Set OPENAI_API_KEY environment variable "
+                     "(or put it in .env beside the binary)\n";
         return 1;
     }
 
@@ -373,4 +384,8 @@ int main() {
 
     std::cout << "Goodbye!\n";
     return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "\nError: " << e.what() << "\n";
+        return 1;
+    }
 }

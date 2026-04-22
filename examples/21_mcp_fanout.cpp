@@ -1,7 +1,8 @@
 // NeoGraph Example 21: MCP + Send Fan-out
 //
-// Pattern: one planner emits a Send per MCP tool call; Taskflow runs them
-// concurrently; each fan-out branch hits the MCP server independently; a
+// Pattern: one planner emits a Send per MCP tool call;
+// asio::experimental::make_parallel_group runs them concurrently;
+// each fan-out branch hits the MCP server independently; a
 // summarizer aggregates the results.
 //
 // Compared to a plain ReAct loop, this collapses N sequential tool calls

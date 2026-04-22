@@ -10,30 +10,25 @@
 // keeps them alive (each MCPTool retains the right back-reference).
 //
 // Usage:
-//   OPENAI_API_KEY=sk-... ./example_mcp_multi \
-//       http://localhost:8000 \
-//       /tmp/mcp_venv/bin/python examples/demo_mcp_stdio_server.py
+//   echo 'OPENAI_API_KEY=sk-...' > .env
+//   ./example_mcp_multi http://localhost:8000 \
+//       python3 examples/demo_mcp_stdio_server.py
+// (auto-loads .env from the cwd or any parent directory.)
 
 #include <neograph/neograph.h>
 #include <neograph/llm/openai_provider.h>
 #include <neograph/mcp/client.h>
 #include <neograph/graph/react_graph.h>
 
+#include <cppdotenv/dotenv.hpp>
+
 #include <iostream>
-#include <fstream>
 #include <cstdlib>
 
-static std::string load_env(const std::string& k) {
-    if (const char* v = std::getenv(k.c_str())) return v;
-    std::ifstream f(".env"); std::string line;
-    while (std::getline(f, line)) {
-        auto e = line.find('=');
-        if (e != std::string::npos && line.substr(0, e) == k) return line.substr(e + 1);
-    }
-    return {};
-}
-
 int main(int argc, char** argv) {
+    cppdotenv::auto_load_dotenv();
+
+    try {
     if (argc < 4) {
         std::cerr << "Usage: " << argv[0]
                   << " <http-url> <python-path> <stdio-server.py> [question]\n";
@@ -45,8 +40,12 @@ int main(int argc, char** argv) {
     const std::string question   = (argc >= 5) ? argv[4]
         : "What is the weather in Tokyo, and then save a note summarizing the answer.";
 
-    std::string api_key = load_env("OPENAI_API_KEY");
-    if (api_key.empty()) { std::cerr << "OPENAI_API_KEY missing\n"; return 1; }
+    const char* key_env = std::getenv("OPENAI_API_KEY");
+    if (!key_env) {
+        std::cerr << "OPENAI_API_KEY missing (set it or put it in .env)\n";
+        return 1;
+    }
+    std::string api_key = key_env;
 
     // --- Two MCP clients, different transports ---
     std::cout << "[*] Connecting HTTP MCP: " << http_url << "\n";
@@ -104,4 +103,8 @@ int main(int argc, char** argv) {
     }
     std::cout << " → END\n";
     return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "\nError: " << e.what() << "\n";
+        return 1;
+    }
 }

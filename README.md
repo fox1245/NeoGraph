@@ -185,11 +185,19 @@ target_link_libraries(my_app PRIVATE neograph::core neograph::llm)
 | 22 | `mcp_stdio` | MCP over stdio transport — subprocess MCP server spawned by the client | Required (OpenAI) |
 | 23 | `mcp_multi` | One agent routing tools across two MCP servers (HTTP + stdio) | Required (OpenAI) |
 | 24 | `mcp_feedback` | Human-feedback loop — draft answer, operator pushes back, agent revises | Required (OpenAI) |
+| 25 | `deep_research` | open_deep_research-style multi-step web research loop (Crawl4AI + Anthropic) | Required (Anthropic) |
+| 26 | `postgres_react_hitl` | ReAct + Postgres-backed checkpoint HITL — survives process restart | Required (Anthropic + Postgres) |
+| 27 | `async_concurrent_runs` | Hosting many concurrent agent runs on one shared `asio::io_context` | No |
+
+Every API-using example above auto-loads `.env` from the cwd or any
+parent directory via the bundled `cppdotenv`, so the recipe is just
+`echo 'OPENAI_API_KEY=...' > .env && ./example_*`. Process-environment
+values still take precedence if both are set.
 
 ### Run with a real LLM
 
 ```bash
-# Set your API key
+# Set your API key (auto-loaded by every API-using example via cppdotenv)
 echo "OPENAI_API_KEY=sk-..." > .env
 
 # ReAct agent with OpenAI
@@ -272,14 +280,20 @@ for (const auto& user : users) {
         },
         asio::detached);
 }
-io.run();  // drives all agents on one thread — real interleaving
+io.run();  // drives all agents on this thread
 ```
 
-Measured: three agents each doing 50ms of async work run on one
-`io_context` thread complete in ~50ms total (perfect overlap), vs.
-150ms sequential. Three parallel fan-out researchers collapse from
-370ms to 150ms. The value axis is burst concurrency — the engine
-overhead per call is unchanged.
+3.0 reality: each `engine->run_async()` drives its own internal
+io_context to completion, so the three runs above are still serial on
+the caller thread (~150 ms for three 50 ms steps). The wiring above is
+the call shape we want users locking in today; full inside-the-engine
+coroutine-ification is the Stage 4 work that turns the same code into
+true single-thread overlap (~50 ms). For burst concurrency *now*,
+dispatch each `run()` onto a shared `asio::thread_pool` — that's the
+pattern measured in [`benchmarks/concurrent/CONCURRENT.md`](benchmarks/concurrent/CONCURRENT.md)
+where N=10,000 finishes in 52 ms. Within a single run, the
+`make_parallel_group` fan-out *does* overlap: three parallel-fanout
+researchers collapse from 370 ms sequential to 150 ms.
 
 Custom nodes join the async path by overriding `execute_async`
 instead of `execute`:

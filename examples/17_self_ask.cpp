@@ -15,10 +15,14 @@
 // a SQL tool, or RAG retrieval.
 //
 // Usage:
-//   OPENAI_API_KEY=sk-... ./example_self_ask
+//   echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
+//   ./example_self_ask
+// (auto-loads .env from the cwd or any parent directory.)
 
 #include <neograph/neograph.h>
 #include <neograph/llm/schema_provider.h>
+
+#include <cppdotenv/dotenv.hpp>
 
 #include <cstdlib>
 #include <iostream>
@@ -71,9 +75,13 @@ static std::string lookup(Provider& p, const std::string& sub_question) {
 }
 
 int main() {
+    cppdotenv::auto_load_dotenv();
+
+    try {
     const char* api_key = std::getenv("ANTHROPIC_API_KEY");
     if (!api_key) {
-        std::cerr << "Set ANTHROPIC_API_KEY environment variable\n";
+        std::cerr << "Set ANTHROPIC_API_KEY environment variable "
+                     "(or put it in .env beside the binary)\n";
         return 1;
     }
 
@@ -153,4 +161,8 @@ int main() {
 
     std::cout << "⚠ Reached max hops (" << MAX_HOPS << ") without final answer.\n";
     return 1;
+    } catch (const std::exception& e) {
+        std::cerr << "\nError: " << e.what() << "\n";
+        return 1;
+    }
 }

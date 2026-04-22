@@ -11,25 +11,18 @@
 // *accept and incorporate*.
 //
 // Usage (after starting examples/demo_mcp_server.py):
-//   OPENAI_API_KEY=sk-... ./example_mcp_feedback
+//   echo 'OPENAI_API_KEY=sk-...' > .env
+//   ./example_mcp_feedback
+// (auto-loads .env from the cwd or any parent directory.)
 
 #include <neograph/neograph.h>
 #include <neograph/llm/openai_provider.h>
 #include <neograph/mcp/client.h>
 
-#include <iostream>
-#include <fstream>
-#include <cstdlib>
+#include <cppdotenv/dotenv.hpp>
 
-static std::string load_env(const std::string& k) {
-    if (const char* v = std::getenv(k.c_str())) return v;
-    std::ifstream f(".env"); std::string line;
-    while (std::getline(f, line)) {
-        auto e = line.find('=');
-        if (e != std::string::npos && line.substr(0, e) == k) return line.substr(e + 1);
-    }
-    return {};
-}
+#include <iostream>
+#include <cstdlib>
 
 static neograph::json channel_messages(neograph::graph::GraphEngine* eng,
                                        const std::string& thread) {
@@ -58,12 +51,19 @@ static bool trace_used_tools(const std::vector<std::string>& trace) {
 }
 
 int main(int argc, char** argv) {
+    cppdotenv::auto_load_dotenv();
+
+    try {
     const std::string mcp_url  = (argc >= 2) ? argv[1] : "http://localhost:8000";
     const std::string question = (argc >= 3) ? argv[2]
         : "What's the weather in Seoul right now?";
 
-    std::string api_key = load_env("OPENAI_API_KEY");
-    if (api_key.empty()) { std::cerr << "OPENAI_API_KEY missing\n"; return 1; }
+    const char* key_env = std::getenv("OPENAI_API_KEY");
+    if (!key_env) {
+        std::cerr << "OPENAI_API_KEY missing (set it or put it in .env)\n";
+        return 1;
+    }
+    std::string api_key = key_env;
 
     neograph::mcp::MCPClient mcp_client(mcp_url);
     auto tools = mcp_client.get_tools();
@@ -158,4 +158,8 @@ int main(int argc, char** argv) {
                       : "no — feedback was ignored")
               << "\n";
     return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "\nError: " << e.what() << "\n";
+        return 1;
+    }
 }

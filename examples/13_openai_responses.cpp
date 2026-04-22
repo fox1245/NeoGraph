@@ -7,11 +7,15 @@
 // by swapping one built-in schema name — no provider subclass required.
 //
 // Usage:
-//   OPENAI_API_KEY=sk-... ./example_openai_responses
+//   echo 'OPENAI_API_KEY=sk-...' > .env
+//   ./example_openai_responses
+// (auto-loads .env from the cwd or any parent directory.)
 
 #include <neograph/neograph.h>
 #include <neograph/llm/schema_provider.h>
 #include <neograph/llm/agent.h>
+
+#include <cppdotenv/dotenv.hpp>
 
 #include <iostream>
 
@@ -40,9 +44,13 @@ public:
 };
 
 int main() {
+    cppdotenv::auto_load_dotenv();
+
+    try {
     const char* api_key = std::getenv("OPENAI_API_KEY");
     if (!api_key) {
-        std::cerr << "Set OPENAI_API_KEY environment variable\n";
+        std::cerr << "Set OPENAI_API_KEY environment variable "
+                     "(or put it in .env beside the binary)\n";
         return 1;
     }
 
@@ -75,4 +83,8 @@ int main() {
 
     std::cout << "\n";
     return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "\nError: " << e.what() << "\n";
+        return 1;
+    }
 }

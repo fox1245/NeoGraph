@@ -1,22 +1,25 @@
-// NeoGraph Example 27: Async Concurrent Runs (Stage 3 / Sem 3.6 + 4.1)
+// NeoGraph Example 27: Async Concurrent Runs (Stage 3 — pattern preview)
 //
 // Drives multiple agent runs through a single shared asio::io_context
-// using engine->run_async(). This is the canonical pattern users adopt
+// using engine->run_async(). This is the wiring pattern users adopt
 // when they want to host many concurrent agents without paying the
 // thread-per-agent cost that the sync run() implies.
 //
-// As of Sem 3.6 internal step 3, GraphEngine::run_async dispatches
-// single-node super-steps through the coroutine path:
-// run_one_async → execute_node_with_retry_async → node->execute_full_async.
-// A node whose execute_async issues a real co_await (timer, HTTP,
-// MCP, db) yields the io_context's worker thread for siblings to run.
+// **Current behaviour (3.0):** each engine->run_async() drives its own
+// internal io_context to completion via run_sync_pool, so the three
+// agents run *serially* on the caller's io_context. Wall time on the
+// 50 ms-per-step workload below is ~150 ms (3 × 50 ms), not the ideal
+// ~50 ms a fully coroutine-ified engine would achieve. Hosting
+// thousands of independent runs is still the right shape — drive them
+// with a shared asio::thread_pool (see CONCURRENT.md), or co_spawn
+// each onto the io_context as shown here for the eventual upgrade.
 //
-// Scenario: three agents each run a tiny graph that simulates a
-// 50ms work step using asio::steady_timer (NOT std::this_thread::
-// sleep_for). With a sync work node the io_context would still be
-// pinned for the full 50ms; with the async work node below all
-// three agents make progress in parallel on a single thread —
-// total elapsed converges on ~50ms, not 150ms.
+// Scenario: three agents each run a tiny graph that simulates a 50 ms
+// work step using asio::steady_timer (NOT std::this_thread::sleep_for).
+// The work node yields cleanly to the timer, so once internal
+// coroutine-ification lands the three runs will overlap on one
+// thread; until then the example exists to lock in the *call shape*
+// users should write today.
 //
 // Usage: ./example_async_concurrent_runs
 
@@ -96,9 +99,10 @@ int main() {
 
     for (int i = 0; i < N; ++i) {
         // co_spawn each agent run as an independent coroutine on the
-        // shared io_context. With the current Sem 3.6 thin wrapper the
-        // io_context's worker thread runs them serially; with the
-        // future internal coroutine-ification they will overlap.
+        // shared io_context. The io_context worker runs them serially
+        // today (each run_async drives its own internal io_context to
+        // completion); future coroutine-ification of the engine will
+        // make them overlap on this io_context without code changes.
         asio::co_spawn(
             io,
             [&engine, &completed, i]() -> asio::awaitable<void> {
@@ -120,8 +124,10 @@ int main() {
 
     std::cout << "\n" << completed.load() << "/" << N
               << " agents completed in " << elapsed_ms << "ms.\n"
-              << "(Sync sequential would be ~" << (50 * N)
-              << "ms; the async work node collapses this toward the "
-              << "longest single run — ~50ms with full overlap.)\n";
+              << "(Each engine->run_async() drives its own internal io_context to\n"
+              << " completion in 3.0, so the three runs are still serial here —\n"
+              << " expected ~" << (50 * N) << "ms. The call shape is what locks in;\n"
+              << " for true overlap today, dispatch each run() onto a shared\n"
+              << " asio::thread_pool — see benchmarks/concurrent/CONCURRENT.md.)\n";
     return 0;
 }
