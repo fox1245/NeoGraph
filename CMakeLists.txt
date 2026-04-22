@@ -393,6 +393,10 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_corrective_rag examples/28_corrective_rag.cpp)
         target_link_libraries(example_corrective_rag PRIVATE neograph::core neograph::llm cppdotenv)
 
+        # Example 29: /v1/responses raw envelope dump — debug / pedagogy aid.
+        add_executable(example_responses_envelope examples/29_responses_envelope.cpp)
+        target_link_libraries(example_responses_envelope PRIVATE neograph::core neograph::llm cppdotenv)
+
         # Example 26 needs both LLM (Claude provider) and the Postgres
         # backend; gate it on both build flags so a project that turns
         # off Postgres doesn't try to link a missing target.
