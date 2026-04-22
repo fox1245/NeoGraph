@@ -22,10 +22,14 @@
 // (web search, SQL, RAG) without touching the orchestration.
 //
 // Usage:
-//   OPENAI_API_KEY=sk-... ./example_rewoo
+//   echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
+//   ./example_rewoo
+// (auto-loads .env from the cwd or any parent directory.)
 
 #include <neograph/neograph.h>
 #include <neograph/llm/schema_provider.h>
+
+#include <cppdotenv/dotenv.hpp>
 
 #include <chrono>
 #include <cstdlib>
@@ -117,9 +121,13 @@ static std::vector<Step> parse_plan(const std::string& plan_text) {
 }
 
 int main() {
+    cppdotenv::auto_load_dotenv();
+
+    try {
     const char* api_key_env = std::getenv("ANTHROPIC_API_KEY");
     if (!api_key_env) {
-        std::cerr << "Set ANTHROPIC_API_KEY environment variable\n";
+        std::cerr << "Set ANTHROPIC_API_KEY environment variable "
+                     "(or put it in .env beside the binary)\n";
         return 1;
     }
     const std::string api_key = api_key_env;
@@ -256,4 +264,8 @@ int main() {
               << "(" << steps.size() << " tool calls across " << layer
               << " layers, work phase took " << ms << " ms)\n\n";
     return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "\nError: " << e.what() << "\n";
+        return 1;
+    }
 }

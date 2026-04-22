@@ -331,7 +331,7 @@ endif()
 if(NEOGRAPH_BUILD_EXAMPLES)
     if(NEOGRAPH_BUILD_LLM)
         add_executable(example_react_agent examples/01_react_agent.cpp)
-        target_link_libraries(example_react_agent PRIVATE neograph::core neograph::llm)
+        target_link_libraries(example_react_agent PRIVATE neograph::core neograph::llm cppdotenv)
 
         add_executable(example_custom_graph examples/02_custom_graph.cpp)
         target_link_libraries(example_custom_graph PRIVATE neograph::core neograph::llm)
@@ -358,28 +358,28 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         target_link_libraries(example_send_command PRIVATE neograph::core)
 
         add_executable(example_rag_agent examples/12_rag_agent.cpp)
-        target_link_libraries(example_rag_agent PRIVATE neograph::core neograph::llm httplib OpenSSL::SSL OpenSSL::Crypto)
+        target_link_libraries(example_rag_agent PRIVATE neograph::core neograph::llm httplib OpenSSL::SSL OpenSSL::Crypto cppdotenv)
 
         add_executable(example_openai_responses examples/13_openai_responses.cpp)
-        target_link_libraries(example_openai_responses PRIVATE neograph::core neograph::llm)
+        target_link_libraries(example_openai_responses PRIVATE neograph::core neograph::llm cppdotenv)
 
         add_executable(example_plan_executor examples/14_plan_executor.cpp)
         target_link_libraries(example_plan_executor PRIVATE neograph::core)
 
         add_executable(example_reflexion examples/15_reflexion.cpp)
-        target_link_libraries(example_reflexion PRIVATE neograph::core neograph::llm)
+        target_link_libraries(example_reflexion PRIVATE neograph::core neograph::llm cppdotenv)
 
         add_executable(example_tree_of_thoughts examples/16_tree_of_thoughts.cpp)
-        target_link_libraries(example_tree_of_thoughts PRIVATE neograph::core neograph::llm)
+        target_link_libraries(example_tree_of_thoughts PRIVATE neograph::core neograph::llm cppdotenv)
 
         add_executable(example_self_ask examples/17_self_ask.cpp)
-        target_link_libraries(example_self_ask PRIVATE neograph::core neograph::llm)
+        target_link_libraries(example_self_ask PRIVATE neograph::core neograph::llm cppdotenv)
 
         add_executable(example_multi_agent_debate examples/18_multi_agent_debate.cpp)
-        target_link_libraries(example_multi_agent_debate PRIVATE neograph::core neograph::llm)
+        target_link_libraries(example_multi_agent_debate PRIVATE neograph::core neograph::llm cppdotenv)
 
         add_executable(example_rewoo examples/19_rewoo.cpp)
-        target_link_libraries(example_rewoo PRIVATE neograph::core neograph::llm)
+        target_link_libraries(example_rewoo PRIVATE neograph::core neograph::llm cppdotenv)
 
         add_executable(example_deep_research examples/25_deep_research.cpp)
         target_link_libraries(example_deep_research PRIVATE neograph::core neograph::llm httplib OpenSSL::SSL OpenSSL::Crypto cppdotenv)
@@ -402,22 +402,22 @@ if(NEOGRAPH_BUILD_EXAMPLES)
 
         if(NEOGRAPH_BUILD_MCP)
             add_executable(example_mcp_agent examples/03_mcp_agent.cpp)
-            target_link_libraries(example_mcp_agent PRIVATE neograph::core neograph::llm neograph::mcp)
+            target_link_libraries(example_mcp_agent PRIVATE neograph::core neograph::llm neograph::mcp cppdotenv)
 
             add_executable(example_mcp_hitl examples/20_mcp_hitl.cpp)
-            target_link_libraries(example_mcp_hitl PRIVATE neograph::core neograph::llm neograph::mcp)
+            target_link_libraries(example_mcp_hitl PRIVATE neograph::core neograph::llm neograph::mcp cppdotenv)
 
             add_executable(example_mcp_fanout examples/21_mcp_fanout.cpp)
             target_link_libraries(example_mcp_fanout PRIVATE neograph::core neograph::mcp)
 
             add_executable(example_mcp_stdio examples/22_mcp_stdio.cpp)
-            target_link_libraries(example_mcp_stdio PRIVATE neograph::core neograph::llm neograph::mcp)
+            target_link_libraries(example_mcp_stdio PRIVATE neograph::core neograph::llm neograph::mcp cppdotenv)
 
             add_executable(example_mcp_multi examples/23_mcp_multi.cpp)
-            target_link_libraries(example_mcp_multi PRIVATE neograph::core neograph::llm neograph::mcp)
+            target_link_libraries(example_mcp_multi PRIVATE neograph::core neograph::llm neograph::mcp cppdotenv)
 
             add_executable(example_mcp_feedback examples/24_mcp_feedback.cpp)
-            target_link_libraries(example_mcp_feedback PRIVATE neograph::core neograph::llm neograph::mcp)
+            target_link_libraries(example_mcp_feedback PRIVATE neograph::core neograph::llm neograph::mcp cppdotenv)
         endif()
 
         # Clay + Raylib chatbot (optional — requires Raylib)
@@ -433,7 +433,7 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             FetchContent_MakeAvailable(raylib)
 
             add_executable(example_clay_chatbot examples/11_clay_chatbot.cpp examples/clay_impl.c)
-            target_link_libraries(example_clay_chatbot PRIVATE neograph::core neograph::llm raylib)
+            target_link_libraries(example_clay_chatbot PRIVATE neograph::core neograph::llm raylib cppdotenv)
             target_include_directories(example_clay_chatbot PRIVATE ${DEPS_DIR})
         endif()
     endif()

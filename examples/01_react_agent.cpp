@@ -4,11 +4,16 @@
 // The agent calls the LLM, detects tool calls, executes them, and loops.
 //
 // Usage:
-//   OPENAI_API_KEY=sk-... ./example_react_agent
+//   echo 'OPENAI_API_KEY=sk-...' > .env
+//   ./example_react_agent
+// (auto-loads .env from the cwd or any parent directory; OPENAI_API_KEY
+// from the process environment takes precedence if already set.)
 
 #include <neograph/neograph.h>
 #include <neograph/llm/openai_provider.h>
 #include <neograph/llm/agent.h>
+
+#include <cppdotenv/dotenv.hpp>
 
 #include <cmath>
 #include <cstdlib>
@@ -126,39 +131,47 @@ public:
 };
 
 int main() {
-    // 1. Create provider
-    const char* api_key = std::getenv("OPENAI_API_KEY");
-    if (!api_key) {
-        std::cerr << "Set OPENAI_API_KEY environment variable\n";
+    cppdotenv::auto_load_dotenv();
+
+    try {
+        // 1. Create provider
+        const char* api_key = std::getenv("OPENAI_API_KEY");
+        if (!api_key) {
+            std::cerr << "Set OPENAI_API_KEY environment variable "
+                         "(or put it in .env beside the binary)\n";
+            return 1;
+        }
+
+        neograph::llm::OpenAIProvider::Config config;
+        config.api_key = api_key;
+        config.default_model = "gpt-4o-mini";
+        auto provider = neograph::llm::OpenAIProvider::create(config);
+
+        // 2. Create tools
+        std::vector<std::unique_ptr<neograph::Tool>> tools;
+        tools.push_back(std::make_unique<CalculatorTool>());
+
+        // 3. Create agent
+        neograph::llm::Agent agent(
+            std::move(provider),
+            std::move(tools),
+            "You are a helpful assistant with a calculator tool."
+        );
+
+        // 4. Run
+        std::vector<neograph::ChatMessage> messages;
+        messages.push_back({"user", "What is 15 * 28 + 7?"});
+
+        std::cout << "User: What is 15 * 28 + 7?\n";
+        std::cout << "Assistant: " << std::flush;
+
+        auto response = agent.run_stream(messages,
+            [](const std::string& token) { std::cout << token << std::flush; });
+
+        std::cout << "\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "\nError: " << e.what() << "\n";
         return 1;
     }
-
-    neograph::llm::OpenAIProvider::Config config;
-    config.api_key = api_key;
-    config.default_model = "gpt-4o-mini";
-    auto provider = neograph::llm::OpenAIProvider::create(config);
-
-    // 2. Create tools
-    std::vector<std::unique_ptr<neograph::Tool>> tools;
-    tools.push_back(std::make_unique<CalculatorTool>());
-
-    // 3. Create agent
-    neograph::llm::Agent agent(
-        std::move(provider),
-        std::move(tools),
-        "You are a helpful assistant with a calculator tool."
-    );
-
-    // 4. Run
-    std::vector<neograph::ChatMessage> messages;
-    messages.push_back({"user", "What is 15 * 28 + 7?"});
-
-    std::cout << "User: What is 15 * 28 + 7?\n";
-    std::cout << "Assistant: " << std::flush;
-
-    auto response = agent.run_stream(messages,
-        [](const std::string& token) { std::cout << token << std::flush; });
-
-    std::cout << "\n";
-    return 0;
 }

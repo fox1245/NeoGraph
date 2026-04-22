@@ -275,7 +275,7 @@ int main() {
     }
 
     std::cout << "\nTotal time: " << elapsed << "ms\n";
-    std::cout << "(Researchers ran in parallel via Send + Taskflow)\n";
+    std::cout << "(Researchers ran in parallel via Send + asio::experimental::make_parallel_group)\n";
 
     return 0;
 }

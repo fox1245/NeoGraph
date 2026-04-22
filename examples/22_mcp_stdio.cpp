@@ -12,8 +12,9 @@
 //   - Drive a ReAct loop against OpenAI, letting the LLM pick which tool to call.
 //
 // Usage:
-//   OPENAI_API_KEY=sk-... ./example_mcp_stdio \
-//       /tmp/mcp_venv/bin/python /path/to/examples/demo_mcp_stdio_server.py
+//   echo 'OPENAI_API_KEY=sk-...' > .env
+//   ./example_mcp_stdio python3 examples/demo_mcp_stdio_server.py
+// (auto-loads .env from the cwd or any parent directory.)
 //
 // Equivalent to the HTTP example 03 but with transport=stdio.
 
@@ -22,25 +23,16 @@
 #include <neograph/mcp/client.h>
 #include <neograph/graph/react_graph.h>
 
+#include <cppdotenv/dotenv.hpp>
+
 #include <iostream>
-#include <fstream>
 #include <string>
 #include <cstdlib>
 
-static std::string load_env_var(const std::string& key) {
-    // Prefer environment variable. Fall back to a .env file in CWD.
-    if (const char* v = std::getenv(key.c_str())) return v;
-    std::ifstream f(".env");
-    std::string line;
-    while (std::getline(f, line)) {
-        auto eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        if (line.substr(0, eq) == key) return line.substr(eq + 1);
-    }
-    return {};
-}
-
 int main(int argc, char** argv) {
+    cppdotenv::auto_load_dotenv();
+
+    try {
     if (argc < 3) {
         std::cerr << "Usage: " << argv[0]
                   << " <python-path> <path/to/demo_mcp_stdio_server.py> [question]\n"
@@ -53,11 +45,12 @@ int main(int argc, char** argv) {
         ? std::string(argv[3])
         : "Look up what NeoGraph is, then save a note containing the result.";
 
-    std::string api_key = load_env_var("OPENAI_API_KEY");
-    if (api_key.empty()) {
+    const char* key_env = std::getenv("OPENAI_API_KEY");
+    if (!key_env) {
         std::cerr << "OPENAI_API_KEY not set (env or .env file)\n";
         return 1;
     }
+    std::string api_key = key_env;
 
     // --- Spawn the MCP server as a subprocess ---
     std::vector<std::string> server_argv{argv[1], argv[2]};
@@ -114,4 +107,8 @@ int main(int argc, char** argv) {
 
     // MCPClient destructor reaps the subprocess.
     return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "\nError: " << e.what() << "\n";
+        return 1;
+    }
 }

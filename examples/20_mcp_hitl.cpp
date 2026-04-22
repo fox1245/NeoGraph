@@ -7,33 +7,33 @@
 // machinery keeps earlier successful steps from re-executing.
 //
 // Usage (after starting examples/demo_mcp_server.py on port 8000):
-//   OPENAI_API_KEY=sk-... ./example_mcp_hitl
+//   echo 'OPENAI_API_KEY=sk-...' > .env
+//   ./example_mcp_hitl
+// (auto-loads .env from the cwd or any parent directory.)
 
 #include <neograph/neograph.h>
 #include <neograph/llm/openai_provider.h>
 #include <neograph/mcp/client.h>
 
+#include <cppdotenv/dotenv.hpp>
+
 #include <iostream>
-#include <fstream>
 #include <cstdlib>
 
-static std::string load_env(const std::string& k) {
-    if (const char* v = std::getenv(k.c_str())) return v;
-    std::ifstream f(".env"); std::string line;
-    while (std::getline(f, line)) {
-        auto e = line.find('=');
-        if (e != std::string::npos && line.substr(0, e) == k) return line.substr(e + 1);
-    }
-    return {};
-}
-
 int main(int argc, char** argv) {
+    cppdotenv::auto_load_dotenv();
+
+    try {
     const std::string mcp_url  = (argc >= 2) ? argv[1] : "http://localhost:8000";
     const std::string question = (argc >= 3) ? argv[2]
         : "What's the weather in Tokyo right now?";
 
-    std::string api_key = load_env("OPENAI_API_KEY");
-    if (api_key.empty()) { std::cerr << "OPENAI_API_KEY missing\n"; return 1; }
+    const char* key_env = std::getenv("OPENAI_API_KEY");
+    if (!key_env) {
+        std::cerr << "OPENAI_API_KEY missing (set it or put it in .env)\n";
+        return 1;
+    }
+    std::string api_key = key_env;
 
     // --- Discover MCP tools ---
     neograph::mcp::MCPClient mcp_client(mcp_url);
@@ -143,4 +143,8 @@ int main(int argc, char** argv) {
     }
     std::cout << " → END\n";
     return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "\nError: " << e.what() << "\n";
+        return 1;
+    }
 }

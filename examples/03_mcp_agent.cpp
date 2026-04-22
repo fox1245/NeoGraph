@@ -19,51 +19,16 @@
 #include <neograph/graph/react_graph.h>
 #include <neograph/mcp/client.h>
 
+#include <cppdotenv/dotenv.hpp>
+
 #include <iostream>
-#include <fstream>
 #include <string>
 #include <cstdlib>
 
-// .env file loader — parses KEY=VALUE pairs and sets them as environment variables
-static void load_dotenv(const std::string& path = ".env") {
-    std::ifstream file(path);
-    if (!file.is_open()) {
-        // Also try the parent directory (for running from build/)
-        file.open("../" + path);
-        if (!file.is_open()) return;
-    }
-
-    std::string line;
-    while (std::getline(file, line)) {
-        // Skip empty lines and comments
-        if (line.empty() || line[0] == '#') continue;
-
-        auto eq = line.find('=');
-        if (eq == std::string::npos) continue;
-
-        std::string key = line.substr(0, eq);
-        std::string val = line.substr(eq + 1);
-
-        // Trim leading/trailing whitespace
-        while (!key.empty() && key.back() == ' ') key.pop_back();
-        while (!val.empty() && val.front() == ' ') val.erase(val.begin());
-
-        // Remove surrounding quotes
-        if (val.size() >= 2 &&
-            ((val.front() == '"' && val.back() == '"') ||
-             (val.front() == '\'' && val.back() == '\''))) {
-            val = val.substr(1, val.size() - 2);
-        }
-
-#ifdef _WIN32
-        _putenv_s(key.c_str(), val.c_str());
-#else
-        setenv(key.c_str(), val.c_str(), 0);  // 0 = do not overwrite existing values
-#endif
-    }
-}
-
 int main(int argc, char* argv[]) {
+    cppdotenv::auto_load_dotenv();
+
+    try {
     if (argc < 3) {
         std::cerr << "Usage: " << argv[0] << " <MCP_SERVER_URL> \"<question>\"\n"
                   << "Example: " << argv[0] << " http://localhost:8000 \"Recommend dog food for me\"\n";
@@ -73,12 +38,9 @@ int main(int argc, char* argv[]) {
     std::string mcp_url = argv[1];
     std::string question = argv[2];
 
-    // 1. Load .env
-    load_dotenv();
-
     const char* api_key = std::getenv("OPENAI_API_KEY");
     if (!api_key) {
-        std::cerr << "Error: OPENAI_API_KEY not set (check .env file)\n";
+        std::cerr << "Error: OPENAI_API_KEY not set (env or .env file)\n";
         return 1;
     }
 
@@ -146,4 +108,8 @@ int main(int argc, char* argv[]) {
     std::cout << " → END\n";
 
     return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "\nError: " << e.what() << "\n";
+        return 1;
+    }
 }

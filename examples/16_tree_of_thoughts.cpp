@@ -13,13 +13,17 @@
 // later ones and exploring multiple continuations pays off.
 //
 // Usage:
-//   OPENAI_API_KEY=sk-... ./example_tree_of_thoughts
+//   echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
+//   ./example_tree_of_thoughts
+// (auto-loads .env from the cwd or any parent directory.)
 
 // Wired through SchemaProvider ("claude" schema) so the calls go to
 // Anthropic's /v1/messages endpoint. Sonnet can reliably evaluate simple
 // arithmetic — mini-tier models cannot, and the beam search degenerates.
 #include <neograph/neograph.h>
 #include <neograph/llm/schema_provider.h>
+
+#include <cppdotenv/dotenv.hpp>
 
 #include <algorithm>
 #include <cstdlib>
@@ -124,9 +128,13 @@ static float evaluate(Provider& p,
 }
 
 int main() {
+    cppdotenv::auto_load_dotenv();
+
+    try {
     const char* api_key = std::getenv("ANTHROPIC_API_KEY");
     if (!api_key) {
-        std::cerr << "Set ANTHROPIC_API_KEY environment variable\n";
+        std::cerr << "Set ANTHROPIC_API_KEY environment variable "
+                     "(or put it in .env beside the binary)\n";
         return 1;
     }
 
@@ -205,4 +213,8 @@ int main() {
     std::cout << "── Final expression ─────────────────────────────────\n"
               << final_reply.message.content << "\n\n";
     return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "\nError: " << e.what() << "\n";
+        return 1;
+    }
 }

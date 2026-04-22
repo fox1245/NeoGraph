@@ -11,11 +11,12 @@
 #include <neograph/llm/openai_provider.h>
 #include <neograph/llm/agent.h>
 
+#include <cppdotenv/dotenv.hpp>
+
 #include <raylib.h>
 
 #include <string>
 #include <vector>
-#include <fstream>
 #include <thread>
 #include <mutex>
 #include <atomic>
@@ -89,20 +90,6 @@ public:
 // =========================================================================
 // Helpers
 // =========================================================================
-static void load_dotenv() {
-    for (auto p : {"../.env", ".env"}) {
-        std::ifstream f(p); if (!f) continue;
-        std::string line;
-        while (std::getline(f, line)) {
-            if (line.empty() || line[0]=='#') continue;
-            auto eq = line.find('=');
-            if (eq == std::string::npos) continue;
-            setenv(line.substr(0,eq).c_str(), line.substr(eq+1).c_str(), 0);
-        }
-        break;
-    }
-}
-
 static void send_message() {
     if (g_input_len == 0 || g_generating) return;
     std::string msg(g_input, g_input_len);
@@ -157,7 +144,7 @@ static void sync_to_clay() {
 // =========================================================================
 int main(int argc, char** argv) {
     g_live = (argc > 1 && std::string(argv[1]) == "--live");
-    load_dotenv();
+    cppdotenv::auto_load_dotenv();
 
     std::shared_ptr<neograph::Provider> provider;
     if (g_live) {

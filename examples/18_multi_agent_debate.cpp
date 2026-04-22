@@ -14,10 +14,14 @@
 // not framework machinery.
 //
 // Usage:
-//   OPENAI_API_KEY=sk-... ./example_multi_agent_debate
+//   echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
+//   ./example_multi_agent_debate
+// (auto-loads .env from the cwd or any parent directory.)
 
 #include <neograph/neograph.h>
 #include <neograph/llm/schema_provider.h>
+
+#include <cppdotenv/dotenv.hpp>
 
 #include <cstdlib>
 #include <iostream>
@@ -39,9 +43,13 @@ static std::string speak(Provider& p,
 }
 
 int main() {
+    cppdotenv::auto_load_dotenv();
+
+    try {
     const char* api_key = std::getenv("ANTHROPIC_API_KEY");
     if (!api_key) {
-        std::cerr << "Set ANTHROPIC_API_KEY environment variable\n";
+        std::cerr << "Set ANTHROPIC_API_KEY environment variable "
+                     "(or put it in .env beside the binary)\n";
         return 1;
     }
 
@@ -115,4 +123,8 @@ int main() {
     std::cout << verdict << "\n\n";
 
     return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "\nError: " << e.what() << "\n";
+        return 1;
+    }
 }

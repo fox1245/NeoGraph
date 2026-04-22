@@ -12,11 +12,11 @@
 // Scenario: Parallel research agent
 //   __start__ → [researcher_a, researcher_b, researcher_c] → summarizer → __end__
 //
-// Contrast with the pre-Stage-3 Taskflow path (still available via
-// engine->run_stream()): that uses an OS-thread pool for the fan-out
-// and achieves overlap via thread parallelism. The async variant
-// achieves the same overlap on ONE thread, so scaling to hundreds
-// of concurrent research runs doesn't pay per-run thread costs.
+// Both run() and run_async() now share the same coroutine machinery
+// (asio::experimental::make_parallel_group, no Taskflow). The async
+// variant overlaps the I/O on ONE thread, so scaling to hundreds of
+// concurrent research runs doesn't pay per-run thread costs; sync
+// run() bridges to the same path through neograph::async::run_sync.
 //
 // No API key required (uses custom nodes).
 //
