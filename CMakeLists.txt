@@ -397,6 +397,10 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_responses_envelope examples/29_responses_envelope.cpp)
         target_link_libraries(example_responses_envelope PRIVATE neograph::core neograph::llm cppdotenv)
 
+        # Example 30: reasoning_effort tradeoff sweep on /v1/responses.
+        add_executable(example_reasoning_effort examples/30_reasoning_effort.cpp)
+        target_link_libraries(example_reasoning_effort PRIVATE neograph::core neograph::llm cppdotenv)
+
         # Example 26 needs both LLM (Claude provider) and the Postgres
         # backend; gate it on both build flags so a project that turns
         # off Postgres doesn't try to link a missing target.
