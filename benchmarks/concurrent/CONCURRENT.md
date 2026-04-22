@@ -47,7 +47,7 @@ story most sharply:
 
 | N | Engine + mode | Wall | P50 | P99 | Peak RSS | OK / Err |
 |---|---------------|------|-----|-----|----------|---------|
-| **10,000** | **NeoGraph 3.0** | **443 ms** | **41 µs** | **16.7 ms** | **5.9 MB** | 10000 / 0 |
+| **10,000** | **NeoGraph 3.0** | **52 ms** | **4 µs** | **7 µs** | **5.5 MB** | 10000 / 0 |
 | 10,000 | LangGraph asyncio | 23.4 s | 20.2 s | **23.0 s** | 416.2 MB | 10000 / 0 |
 | 10,000 | LangGraph mp-pool-7 | 8.0 s | 737 µs | 88.4 ms | 60.3 MB | 10000 / 0 |
 | 10,000 | Haystack asyncio | 3.1 s | 1.7 s | 2.9 s | 130.7 MB | 10000 / 0 |
@@ -116,7 +116,7 @@ AutoGen) break much earlier — but all of them break.
 
 ### Memory: asyncio's RSS grows with held coroutine stacks
 
-- **NeoGraph 3.0** stays between 4.6–5.9 MB across the whole sweep.
+- **NeoGraph 3.0** stays between 4.2–5.5 MB across the whole sweep.
   Tasks return immediately; only the caller-side `asio::thread_pool`
   and one io_context per in-flight `run()` are resident.
 - **mp-pool modes** stay near 60–80 MB across frameworks — the worker

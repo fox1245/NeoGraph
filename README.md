@@ -241,9 +241,10 @@ one that fits your hosting pattern:
 
 * **Thread-per-agent (sync)** — `run()` / `run_stream()` / `resume()`
   dispatched onto any executor you already use. Safe up to roughly a
-  thousand concurrent agents; ~47 µs engine overhead per call in 3.0
-  (the super-step loop routes through `run_sync(execute_graph_async)`
-  so both entry points share one coroutine path). Detailed below.
+  thousand concurrent agents; ~5 µs engine overhead per call on a
+  Release `-O3 -DNDEBUG` build (the super-step loop routes through
+  `run_sync(execute_graph_async)` so both entry points share one
+  coroutine path). Detailed below.
 * **Coroutine-based async** — `run_async()` / `run_stream_async()` /
   `resume_async()` returning `asio::awaitable<RunResult>`. One
   `asio::io_context` hosts thousands of concurrent agents without a
@@ -589,39 +590,33 @@ writes, reducer calls) — no LLM, no sleep, no network.
 
 ![NeoGraph vs Python frameworks — per-iteration latency and peak RSS](docs/images/bench-engine-overhead.png)
 
-Per-iteration engine overhead (µs, lower is better):
+Per-iteration engine overhead (µs, lower is better). All rows
+measured 2026-04-22 on the same x86_64 Linux host. NeoGraph built
+with Release `-O3 -DNDEBUG` (10-run median); Python rows are 3-run
+median through CPython 3.12.3.
 
 | Framework | `seq` (3-node chain) | `par` (fan-out 5 + join) | `seq` vs. NeoGraph |
 |-----------|---------------------:|-------------------------:|-------------------:|
-| **NeoGraph 3.0** | **46.1 µs** | **114.4 µs** | 1× |
-| Haystack 2.27 | 150.7 µs | 293.6 µs | 3.3× |
-| pydantic-graph 1.84 | 240.3 µs | 308.3 µs¹ | 5.2× |
-| LangGraph 1.1.9 | 671.2 µs | 2,396 µs | 14.6× |
-| LlamaIndex Workflow 0.14 | 1,843 µs | 4,781 µs | 40.0× |
-| AutoGen GraphFlow 0.7.5 | 3,227 µs | 7,389 µs | 70.0× |
+| **NeoGraph 3.0** | **5.0 µs** | **11.8 µs** | 1× |
+| Haystack 2.28.0 | 144.1 µs | 290.0 µs | 28.8× |
+| pydantic-graph 1.85.1 | 235.9 µs | 286.1 µs¹ | 47.2× |
+| LangGraph 1.1.9 | 656.7 µs | 2,348.7 µs | 131.3× |
+| LlamaIndex Workflow 0.14.21 | 1,780.3 µs | 4,683.5 µs | 356.1× |
+| AutoGen GraphFlow 0.7.5 | 3,209.2 µs | 7,292.7 µs | 641.8× |
 
 ¹ pydantic-graph is a single-next-node state machine and cannot fan
 out; `par` is a serial 6-node emulation.
-
-3.0 trades some sync-path speed for a unified coroutine architecture:
-seq went from ~21 µs (2.0, Taskflow sync path) to ~46 µs (3.0,
-`run_sync(execute_graph_async)`). par went the other direction
-(150 µs → 114 µs) because `make_parallel_group` on a single-thread
-io_context dispatches cheaper than Taskflow's scheduler for the
-fan-out-5 workload. The [3.0 CHANGELOG](CHANGELOG.md) covers the
-architecture rationale; see the [CHANGELOG migration guide](CHANGELOG.md)
-for opting back into CPU-parallel fan-out via `set_worker_count`.
 
 Whole-process metrics (warm-up + both workloads, 10k seq + 5k par iters):
 
 | | NeoGraph 3.0 | best Python (Haystack) | worst (AutoGen) |
 |---|----------|------------------------|-----------------|
-| **Total elapsed** | **~1.04 s** | 6.72 s | 138.79 s |
-| **Peak RSS** | **5.5 MB** | 78.3 MB | 52.4 MB² |
+| **Total elapsed** | **~0.16 s** | 2.91 s | 68.29 s |
+| **Peak RSS** | **4.8 MB** | 80.3 MB | 52.4 MB² |
 | **Parallel fan-out executor** | `asio::experimental::make_parallel_group` | single-thread asyncio (GIL) | single-thread asyncio (GIL) |
 
-² AutoGen has a smaller footprint than Haystack but its per-iter cost
-is 50× higher — different tradeoff axes. Full matrix in
+² AutoGen has a smaller RSS than LlamaIndex but its per-iter cost
+is 64× higher — different tradeoff axes. Full matrix in
 [`benchmarks/README.md`](benchmarks/README.md).
 
 **Engine overhead disappears under LLM latency.** A 500 ms OpenAI round
@@ -651,7 +646,7 @@ deployment shape for every Python framework):
 
 | Engine | Wall | P99 latency | Peak RSS | Status |
 |--------|-----:|------------:|---------:|:-------|
-| **NeoGraph 3.0** | **443 ms** | **16.7 ms** | **5.9 MB** | ✅ 10000 / 0 |
+| **NeoGraph 3.0** | **52 ms** | **7 µs** | **5.5 MB** | ✅ 10000 / 0 |
 | pydantic-graph | 886 ms | **158 µs** | 42.6 MB | ✅ 10000 / 0 |
 | Haystack | 3.1 s | 2.9 s | 130.7 MB | ✅ 10000 / 0 |
 | LangGraph | 23.4 s | 23.0 s | 416.2 MB | ✅ 10000 / 0 |
@@ -666,12 +661,11 @@ because the CPython GIL serializes every coroutine's CPU work. **This
 is not a LangGraph-specific pathology** — it shows up in every Python
 asyncio runtime.
 
-NeoGraph 3.0 beats every Python asyncio runtime on throughput and
-RSS — the 5.9 MB memory floor under 10k concurrent requests is
-**~70×** lower than LangGraph at the same load. On tail latency
-pydantic-graph's single-next-node state machine is faster per call
-(it has no super-step loop to run), but blows past NeoGraph's RSS
-budget by 7×. See the chart subtitles for full context.
+NeoGraph 3.0 beats every Python asyncio runtime on throughput,
+tail latency, and RSS: 7 µs P99 at N=10k, ~76× lower RSS than
+LangGraph at the same load, and 3 orders of magnitude ahead of the
+GIL-serialized Python curves. Even pydantic-graph — the leanest
+Python state-machine — sits at 158 µs P99 and ~8× NeoGraph's RSS.
 
 `multiprocessing.Pool` mode bypasses the GIL across worker processes
 but saturates at pool size and pays fork + pickle overhead; full
@@ -704,14 +698,16 @@ anyway, so its removal doesn't offset the coroutine growth.
 | Metric | Value |
 |---|---|
 | Peak RSS (full Plan & Executor run, crash + resume included) | **2.9 MB** |
-| Wall-clock (cold start → both phases complete) | **~750 ms** |
+| Wall-clock (cold start → both phases complete) | **~720 ms** |
 | Dynamic dependencies | `libc.so.6` only |
 
-The wall-clock went up from 2.0's ~240 ms because each internal
-`engine->run()` now pays ~47 µs of coroutine + run_sync setup, and
-the Plan & Executor demo runs a dense super-step pattern (5-way Send
-fan-out, crash detection, resume). Steady-state footprint (RSS) is
-unchanged.
+`example_plan_executor` sleeps 120 ms per Send target to simulate an
+LLM call; the 5-way fan-out runs serially on the default
+single-threaded super-step loop (5 × 120 ms × 2 phases ≈ wall
+time). Call `engine->set_worker_count(N)` after `compile()` to get
+the 2.x-style multi-threaded fan-out (cuts this demo's wall time
+roughly in half on a 2-core host). Steady-state footprint (RSS) is
+unchanged between 2.0 and 3.0.
 
 ### Reproduction
 
