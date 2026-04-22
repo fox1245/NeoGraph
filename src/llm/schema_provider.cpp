@@ -1404,7 +1404,19 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
                             event_block_index = -1;
                         }
                         else if (action == "done") {
-                            // Stream complete
+                            // OpenAI Responses' `response.completed` event
+                            // carries the full response object (including
+                            // `usage`) under the "response" key. Reuse
+                            // parse_usage so the streaming and non-stream
+                            // paths report identical numbers — without this,
+                            // every streamed call returned usage={0,0,0}
+                            // even though the server sent input/output
+                            // token counts on the final event.
+                            if (j.contains("response") &&
+                                j["response"].is_object()) {
+                                completion.usage =
+                                    parse_usage(j["response"]);
+                            }
                         }
                     } catch (...) {
                         // Skip malformed
