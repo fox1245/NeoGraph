@@ -19,6 +19,7 @@ add_executable(neograph_tests
     test_multi_send_events.cpp
     test_schema_provider_concurrent.cpp
     test_schema_provider_stream_usage.cpp
+    test_schema_provider_responses_stream.cpp
     test_rate_limited_provider.cpp
     test_admin_api_barrier_preservation.cpp
     test_intent_classifier_streaming.cpp
