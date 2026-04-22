@@ -32,7 +32,7 @@ const COLORS = {
 };
 
 const LABELS = {
-    'neograph':       'NeoGraph (std::thread pool)',
+    'neograph':       'NeoGraph (asio::thread_pool)',
     'langgraph':      'LangGraph asyncio',
     'haystack':       'Haystack asyncio',
     'pydantic-graph': 'pydantic-graph asyncio',
@@ -129,7 +129,7 @@ function buildSeries(yExtractor, labelFormatter) {
 renderLine({
     title: {
         text: 'Throughput under concurrent load — requests per second (log scale, higher is better)',
-        subtext: 'NeoGraph scales with batch size via Taskflow work-stealing. Every Python asyncio runtime plateaus — the GIL serializes coroutines regardless of framework.',
+        subtext: 'NeoGraph scales with batch size via asio::thread_pool dispatch. Every Python asyncio runtime plateaus — the GIL serializes coroutines regardless of framework.',
         left: 'center', top: 20, itemGap: 10,
         textStyle: { fontSize: 18, fontWeight: 'bold', color: '#24292e' },
         subtextStyle: { fontSize: 12, color: '#586069' }

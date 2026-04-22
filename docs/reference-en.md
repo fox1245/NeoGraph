@@ -937,7 +937,7 @@ public:
         const NodeContext& default_context,
         std::shared_ptr<CheckpointStore> store = nullptr);
 
-    // ---- Execution ----
+    // ---- Execution (sync) ----
 
     RunResult run(const RunConfig& config);
 
@@ -947,6 +947,18 @@ public:
     RunResult resume(const std::string& thread_id,
                      const json& resume_value = json(),
                      const GraphStreamCallback& cb = nullptr);
+
+    // ---- Execution (async, 3.0) ----
+
+    asio::awaitable<RunResult> run_async(const RunConfig& config);
+
+    asio::awaitable<RunResult> run_stream_async(
+        const RunConfig& config, const GraphStreamCallback& cb);
+
+    asio::awaitable<RunResult> resume_async(
+        const std::string& thread_id,
+        const json& resume_value = json(),
+        const GraphStreamCallback& cb = nullptr);
 
     // ---- State Inspection & Manipulation ----
 
@@ -971,6 +983,7 @@ public:
     std::shared_ptr<Store> get_store() const;
     void set_retry_policy(const RetryPolicy& policy);
     void set_node_retry_policy(const std::string& node_name, const RetryPolicy& policy);
+    void set_worker_count(std::size_t n);  // 3.0: opt-in fan-out pool
     const std::string& get_graph_name() const;
 };
 ```
@@ -1385,7 +1398,10 @@ logic.
 **Header:** `<neograph/graph/executor.h>`
 
 Owns per-super-step node invocation: retry loop, replay lookup,
-pending-write recording, Taskflow fan-out, and Send dispatch.
+pending-write recording, parallel fan-out via
+`asio::experimental::make_parallel_group`, and Send dispatch. 3.0
+removed the sync `run_one` / `run_parallel` / `run_sends` twins;
+callers use the `_async` peers.
 
 ```cpp
 namespace neograph::graph {
@@ -1397,9 +1413,10 @@ public:
     NodeExecutor(
         const std::map<std::string, std::unique_ptr<GraphNode>>& nodes,
         const std::vector<ChannelDef>& channel_defs,
-        RetryPolicyLookup retry_policy_for);
+        RetryPolicyLookup retry_policy_for,
+        asio::thread_pool* fan_out_pool = nullptr);
 
-    NodeResult run_one(
+    asio::awaitable<NodeResult> run_one_async(
         const std::string& node_name, int step,
         GraphState& state,
         const std::unordered_map<std::string, NodeResult>& replay,
@@ -1409,7 +1426,7 @@ public:
         std::vector<std::string>& trace,
         const GraphStreamCallback& cb, StreamMode stream_mode);
 
-    std::vector<NodeResult> run_parallel(
+    asio::awaitable<std::vector<NodeResult>> run_parallel_async(
         const std::vector<std::string>& ready, int step,
         GraphState& state,
         const std::unordered_map<std::string, NodeResult>& replay,
@@ -1419,13 +1436,18 @@ public:
         std::vector<std::string>& trace,
         const GraphStreamCallback& cb, StreamMode stream_mode);
 
-    void run_sends(
+    asio::awaitable<void> run_sends_async(
         const std::vector<Send>& sends, int step,
         GraphState& state,
         const std::unordered_map<std::string, NodeResult>& replay,
         CheckpointCoordinator& coord,
         const std::string& parent_cp_id,
         std::vector<std::string>& trace,
+        const GraphStreamCallback& cb, StreamMode stream_mode);
+
+    asio::awaitable<NodeResult> execute_node_with_retry_async(
+        const std::string& node_name,
+        GraphState& state,
         const GraphStreamCallback& cb, StreamMode stream_mode);
 };
 
@@ -1434,18 +1456,27 @@ public:
 
 **Invariants:**
 
-- `run_one` and `run_parallel` both save a `phase=NodeInterrupt`
-  checkpoint scoped to the interrupting node before rethrowing
-  `NodeInterrupt`, so resume re-enters just that node (sibling writes
-  are already in `pending_writes` and replay via the map).
-- `run_parallel` applies writes + `Command.updates` in `ready` order so
-  `ready[i] ↔ results[i]` pairing holds for the subsequent Scheduler
-  call.
-- `run_sends`: single Send runs on the shared state with retry; multi
-  Send gives each target an isolated state copy (init + restore + apply
-  input) without retry — preserves pre-extraction semantics.
-- A process-wide Taskflow executor is shared across calls; each invoke
-  is synchronous to the caller.
+- `run_one_async` and `run_parallel_async` both save a
+  `phase=NodeInterrupt` checkpoint scoped to the interrupting node
+  before rethrowing `NodeInterrupt`, so resume re-enters just that
+  node (sibling writes are already in `pending_writes` and replay via
+  the map).
+- `run_parallel_async` applies writes + `Command.updates` in `ready`
+  order so `ready[i] ↔ results[i]` pairing holds for the subsequent
+  Scheduler call.
+- `run_sends_async`: single Send runs on the shared state with retry;
+  multi Send gives each target an isolated state copy (init + restore
+  + apply input) without retry — preserves pre-3.0 semantics.
+- `fan_out_pool` (optional) determines where parallel branches
+  dispatch. When null, branches run on `co_await asio::this_coro::
+  executor` — fine for single-thread async callers, but CPU-bound
+  fan-out serializes. When non-null, `run_parallel_async` and the
+  multi-Send branch `co_spawn` onto `pool->get_executor()` for real
+  thread parallelism. `GraphEngine::set_worker_count(N)` installs the
+  pool for sync `run()` callers.
+- `execute_node_with_retry_async` is the inner retry loop: backoff
+  uses an `asio::steady_timer` so the executor isn't frozen during
+  retry waits.
 
 ---
 
