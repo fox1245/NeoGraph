@@ -10,8 +10,8 @@ Frameworks compared:
 
 | Framework | Version | Abstraction |
 |-----------|---------|-------------|
-| NeoGraph | master | state-channel graph, Taskflow executor (C++) |
-| LangGraph | 1.1.7 | state-channel graph (Python) |
+| NeoGraph | 3.0 (`feat/taskflow-removal`) | state-channel graph, C++20 coroutines + asio |
+| LangGraph | 1.1.9 | state-channel graph (Python) |
 | Haystack | 2.27 | pipeline of components with typed sockets |
 | pydantic-graph | 1.84 | single-next-node state machine |
 | LlamaIndex Workflow | 0.14 | event-driven async workflow |
@@ -42,7 +42,7 @@ Two ports required per-framework workload shape translation:
   encoded as text message content. The summarizer counts incoming
   worker messages. Same graph shape, different state model.
 
-## Results (2026-04-19)
+## Results (NeoGraph 2026-04-22 on 3.0, Python field 2026-04-19)
 
 ![Engine-overhead benchmark: per-iteration latency and peak RSS](../docs/images/bench-engine-overhead.png)
 
@@ -50,12 +50,12 @@ Two ports required per-framework workload shape translation:
 
 | Framework | `seq` (3-node chain) | `par` (fan-out 5 + join) | `seq` vs. NeoGraph | `par` vs. NeoGraph |
 |-----------|---------------------:|-------------------------:|-------------------:|-------------------:|
-| **NeoGraph** | **20.65** | **150.70** | 1× | 1× |
-| Haystack | 150.70 | 293.60 | 7.3× | 1.9× |
-| pydantic-graph | 240.34 | 308.32¹ | 11.6× | 2.0×¹ |
-| LangGraph | 645.30 | 2,225.12 | 31.2× | 14.8× |
-| LlamaIndex Workflow | 1,842.58 | 4,781.24 | 89.2× | 31.7× |
-| AutoGen GraphFlow | 3,226.79 | 7,389.42 | 156.3× | 49.0× |
+| **NeoGraph 3.0** | **46.10** | **114.40** | 1× | 1× |
+| Haystack | 150.70 | 293.60 | 3.3× | 2.6× |
+| pydantic-graph | 240.34 | 308.32¹ | 5.2× | 2.7×¹ |
+| LangGraph | 671.18 | 2,396.30 | 14.6× | 20.9× |
+| LlamaIndex Workflow | 1,842.58 | 4,781.24 | 40.0× | 41.8× |
+| AutoGen GraphFlow | 3,226.79 | 7,389.42 | 70.0× | 64.6× |
 
 ¹ pydantic-graph `par` is a serial 6-node emulation — it does not
 support fan-out. Not a parallel workload; included for completeness.
@@ -63,44 +63,61 @@ support fan-out. Not a parallel workload; included for completeness.
 ### End-to-end process metrics
 
 Whole binary/script runtime including warm-up + both workloads.
-`seq` = 20,000 iters, `par` = 10,000 iters.
+`seq` = 10,000 iters, `par` = 5,000 iters (3.0 bench parameters).
+Python rows are carried over from the 2026-04-19 20k/10k run and
+scale linearly in the engine overhead, so the absolute elapsed
+numbers aren't directly comparable across rows — the per-iter
+µs column above is the apples-to-apples axis.
 
 | Framework | Total elapsed | Peak RSS | CPU utilization |
 |-----------|--------------:|---------:|----------------:|
-| **NeoGraph** | **1.92 s** | **4.9 MB** | 407% (Taskflow multi-core) |
+| **NeoGraph 3.0** | **~1.04 s** | **5.5 MB** | 100% (single-thread io_context by default) |
 | Haystack | 6.72 s | 78.3 MB | 100% (GIL) |
 | pydantic-graph | 8.05 s | 34.9 MB | 100% (GIL) |
 | LangGraph | 35.64 s | 58.9 MB | 100% (GIL) |
 | LlamaIndex Workflow | 85.77 s | 101.5 MB | 100% (GIL) |
 | AutoGen GraphFlow | 138.79 s | 52.4 MB | 100% (GIL) |
 
+NeoGraph 3.0's default super-step loop runs the coroutine on a
+single-threaded io_context via `run_sync`; CPU-parallel fan-out is
+opt-in via `engine->set_worker_count(N)`. For I/O-bound node
+workloads the single thread still overlaps via co_await suspension —
+the `par` iteration still beats every Python framework's apples-to-
+apples number.
+
 ## What the numbers mean
 
-1. **Per-run engine overhead spans ~7× to ~150× across the Python
+1. **Per-run engine overhead spans ~3× to ~70× across the Python
    field.** Haystack is the leanest competitor (DAG with typed
    sockets, minimal runtime). At the other end, AutoGen and LlamaIndex
    are async/event-driven with per-run state setup that dominates when
    there's no real work to amortize over.
-2. **The gap narrows on `par`.** Every Python framework pays fixed
-   setup cost per run; once the graph is richer, per-node overhead is
-   a smaller share. NeoGraph's lead shrinks from 7–156× to 2–49×.
+2. **3.0 narrowed the seq gap vs. 2.0** — NeoGraph traded some sync-
+   path speed (21 µs → 46 µs on seq) for a unified coroutine
+   architecture. In exchange, `par` actually got faster (150 µs → 114
+   µs) because `make_parallel_group` on a single-thread io_context
+   dispatches cheaper than Taskflow's scheduler for the fan-out-5
+   workload. The CPU-parallel path is still available — opt in via
+   `engine->set_worker_count(N)`.
 3. **Memory footprint favors NeoGraph by an order of magnitude or
-   more.** 4.9 MB (NeoGraph) vs. 35–101 MB across the Python field.
+   more.** 5.5 MB (NeoGraph) vs. 35–101 MB across the Python field.
    On SBC-class targets (Raspberry Pi-class RAM) this is the
    load-bearing metric — the difference between "runs comfortably" and
    "run it carefully".
-4. **Fan-out is actually parallel.** NeoGraph's Taskflow backend hit
-   400%+ CPU on a 5-way fan-out; every Python framework sits at 100%
-   because the interpreter's GIL serializes user nodes. For I/O-free
-   workers this matters; for LLM-heavy workers where I/O releases the
-   GIL, it matters less.
+4. **Parallel fan-out is available but no longer default.** NeoGraph 2.x
+   shipped Taskflow's work-stealing pool as the default, which hit 400%+
+   CPU on 5-way fan-out. 3.0 ships the coroutine path as default
+   (single-thread dispatch, cheap) and exposes the multi-threaded pool
+   as opt-in — the right default for agent workloads that are
+   I/O-bound (LLM latency dominates) and would otherwise pay
+   thread-creation overhead with no speedup.
 
 ## Caveats — what this bench does NOT measure
 
 * **Real agent workloads.** LLM-dominated pipelines are bottlenecked
   by provider latency (100ms–10s per call). Engine overhead disappears
-  at that scale. Mental model: NeoGraph costs ~20µs/call, Haystack
-  ~150µs, LangGraph ~650µs, LlamaIndex/AutoGen ~2–8ms — all invisible
+  at that scale. Mental model: NeoGraph 3.0 costs ~46 µs/call, Haystack
+  ~150µs, LangGraph ~670µs, LlamaIndex/AutoGen ~2–8ms — all invisible
   next to a 500ms API round trip. This bench matters for non-LLM
   nodes, dense agent orchestration, and startup-heavy deployments.
 * **Framework-appropriate workloads.** AutoGen, LlamaIndex, and
@@ -125,13 +142,16 @@ Whole binary/script runtime including warm-up + both workloads.
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
-# Build + run the C++ bench:
+# Build + run the C++ bench (built by CMake above):
+./build/bench_neograph                   # defaults: seq=10000, par=5000
+
+# Or rebuild standalone with the same flags CMake uses:
 g++ -std=c++20 -O2 -DNDEBUG \
-    -Iinclude -Ideps -Ideps/yyjson \
+    -Iinclude -Ideps -Ideps/yyjson -Ideps/asio/include \
+    -DASIO_STANDALONE \
     benchmarks/bench_neograph.cpp \
     build/libneograph_core.a build/libyyjson.a \
     -pthread -o /tmp/bench_neograph
-/tmp/bench_neograph 20000 10000
 
 # Shared Python venv for every Python framework:
 python3 -m venv /tmp/bench_venv

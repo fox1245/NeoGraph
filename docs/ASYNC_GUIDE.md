@@ -365,7 +365,83 @@ and so on.
   exposes status / body / retry_after / location. Arbitrary header
   access (e.g. MCP session ID header tracking) is a Sem 1
   follow-up.
-* **2.0 version bump** — the `feat/async-api` branch hasn't been
-  merged yet; the version in `CMakeLists.txt` still reads 1.x.
-  A proper breaking-change ledger + release notes accompany the
-  bump when Sem 3.3 closes.
+
+---
+
+## 8. What changed in 3.0
+
+3.0 (`feat/taskflow-removal`) collapsed sync and async onto one
+coroutine runtime by removing Taskflow and routing sync entry points
+through `run_sync(execute_graph_async)`. The 2.0 async API shape is
+unchanged — the differences are in the defaults and the new opt-ins.
+
+### 8.1 `execute_full_async` default now bridges through sync `execute_full`
+
+In 2.0 the default was:
+
+```cpp
+auto writes = co_await execute_async(state);
+co_return NodeResult{std::move(writes)};
+```
+
+Which silently dropped `Command` / `Send` emitted from a sync
+`execute_full` override — never caught in 2.0 because sync `run()`
+bypassed the coroutine path. 3.0 switched the default to:
+
+```cpp
+co_return execute_full(state);
+```
+
+So nodes that override **sync** `execute_full` to emit `Command` /
+`Send` now work through every entry point. Nodes that override
+**async** `execute_async` but need non-blocking I/O AND
+`Command` / `Send` must override `execute_full_async` directly (see
+`examples/05_parallel_fanout.cpp` for the shape).
+
+### 8.2 `GraphEngine::set_worker_count(N)` — opt-in CPU parallel fan-out
+
+Default: `run_parallel_async` and the multi-Send branch of
+`run_sends_async` dispatch branches on whichever executor drives the
+current coroutine. For sync `run()` that's a single-threaded
+io_context — I/O-bound branches still overlap via co_await suspension,
+but CPU-bound branches serialize.
+
+```cpp
+auto engine = GraphEngine::compile(def, ctx, store);
+engine->set_worker_count(std::thread::hardware_concurrency());
+// Now run_parallel_async dispatches branches to an engine-owned
+// asio::thread_pool of that size.
+```
+
+Must be called before any concurrent `run()`; rebuilding the pool
+across in-flight runs is not safe. `run_async` callers who drive a
+multi-threaded `asio::thread_pool` themselves don't need this — their
+caller-side executor already parallelizes the branches.
+
+### 8.3 `neograph::async::run_sync_pool(aw, n_threads)` — N-worker sync bridge
+
+```cpp
+#include <neograph/async/run_sync.h>
+
+int result = neograph::async::run_sync_pool(
+    my_coroutine_that_uses_make_parallel_group(), /*n_threads=*/4);
+```
+
+Companion to the existing single-threaded `run_sync`. Spins a fresh
+`asio::thread_pool` for the call so inner `make_parallel_group`
+branches execute on separate workers. Per-call pool construction
+spawns one `std::thread` per worker — cost is non-trivial for hot
+paths, so this is for occasional sync-at-the-boundary bridges, not
+per-request code.
+
+### 8.4 Removed surfaces
+
+- `NodeExecutor::run_one` / `run_parallel` / `run_sends` (sync) — use
+  the `_async` peers.
+- `GraphEngine::execute_graph` (sync) — deleted; `run()` /
+  `run_stream()` / `resume()` route through the async peer via
+  `run_sync`.
+- `tf::Executor`, `tf::Taskflow`, the `deps/taskflow/` directory —
+  gone. Benchmarks that used Taskflow as a caller-side driver
+  (`bench_concurrent_neograph.cpp`) switched to `asio::thread_pool` +
+  `asio::post`.
