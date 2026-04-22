@@ -23,16 +23,15 @@ const COLORS = {
 
 const FRAMEWORKS = ['NeoGraph', 'Haystack', 'pydantic-graph', 'LangGraph', 'LlamaIndex', 'AutoGen'];
 
-// NeoGraph numbers are 3.0 (feat/taskflow-removal, commit b95be11):
-// the sync super-step loop now goes through run_sync(execute_graph_async),
-// so seq ~46µs reflects one run_sync io_context per call. Other
-// framework numbers are carried over from the 2.0-era measurement
-// (2026-04-19) since those runtimes have not been re-baselined.
-const SEQ_US = [46.10, 150.70, 240.34, 671.18, 1842.58, 3226.79];
-const PAR_US = [114.40, 293.60, 308.32, 2396.30, 4781.24, 7389.42];
+// All six frameworks measured fresh 2026-04-22 on the same host.
+// NeoGraph: v3.0.0 Release build (-O3 -DNDEBUG). Median of 10 runs.
+// Python field: median of 3 runs each through CPython 3.12.3.
+const SEQ_US = [5.0, 144.10, 235.90, 656.73, 1780.34, 3209.20];
+const PAR_US = [11.8, 290.00, 286.13, 2348.66, 4683.45, 7292.67];
 
-// Whole-process peak RSS (MB) — full script / binary run:
-const RSS_MB = [5.5, 78.3, 34.9, 58.9, 101.5, 52.4];
+// Whole-process peak RSS (MB) — /usr/bin/time -f "%M KB" around one
+// full bench run at 10k seq + 5k par iters.
+const RSS_MB = [4.8, 80.3, 35.3, 60.2, 101.3, 52.4];
 
 function seriesFor(values, unit) {
     return FRAMEWORKS.map((fw, i) => ({
@@ -57,7 +56,7 @@ function renderLatency(canvas) {
         backgroundColor: '#ffffff',
         title: {
             text: 'Per-iteration engine overhead (µs, log scale) — lower is better',
-            subtext: 'NeoGraph 3.0: 46.1 µs seq / 114.4 µs par.  Next-fastest Python (Haystack): 3.3× / 2.6× slower.',
+            subtext: 'NeoGraph 3.0 Release: 5.0 µs seq / 11.8 µs par.  Next-fastest Python (Haystack 2.28): 28.8× / 24.6× slower.',
             left: 'center',
             top: 24,
             itemGap: 12,
@@ -89,7 +88,7 @@ function renderLatency(canvas) {
             nameTextStyle: { fontSize: 12, color: '#586069' },
             axisLabel: { fontSize: 11, color: '#586069' },
             splitLine: { lineStyle: { color: '#eaecef' } },
-            min: 10,
+            min: 1,
         },
         series: [
             {
@@ -119,7 +118,7 @@ function renderRss(canvas) {
         backgroundColor: '#ffffff',
         title: {
             text: 'Peak resident memory (MB) — lower is better',
-            subtext: 'Full bench process (warm-up + seq + par). NeoGraph: 5.5 MB.  6–19× less than Python field.',
+            subtext: 'Full bench process (warm-up + seq + par). NeoGraph: 4.8 MB.  7–21× less than Python field.',
             left: 'center',
             top: 24,
             itemGap: 12,
@@ -194,7 +193,7 @@ ctx.fillStyle = '#6a737d';
 ctx.font = '11px sans-serif';
 ctx.textAlign = 'center';
 ctx.fillText(
-    'NeoGraph 2026-04-22 (3.0), Python field 2026-04-19  ·  x86_64 Linux, g++ 13 (-O2), CPython 3.12.3  ·  langgraph 1.1.9, haystack-ai 2.27, pydantic-graph 1.84, llama-index 0.14, autogen-agentchat 0.7.5  ·  Reproduction: benchmarks/README.md',
+    'All frameworks measured 2026-04-22 on the same host  ·  x86_64 Linux, g++ 13 (-O3 -DNDEBUG Release), CPython 3.12.3  ·  neograph v3.0.0, langgraph 1.1.9, haystack-ai 2.28.0, pydantic-graph 1.85.1, llama-index-core 0.14.21, autogen-agentchat 0.7.5  ·  Reproduction: benchmarks/README.md',
     w / 2, h - 10
 );
 

@@ -42,7 +42,13 @@ Two ports required per-framework workload shape translation:
   encoded as text message content. The summarizer counts incoming
   worker messages. Same graph shape, different state model.
 
-## Results (NeoGraph 2026-04-22 on 3.0, Python field 2026-04-19)
+## Results — all frameworks measured 2026-04-22 on the same host
+
+x86_64 Linux, g++ 13 Release `-O3 -DNDEBUG`, CPython 3.12.3.
+NeoGraph: 10-run median of `bench_neograph`. Python field: 3-run
+median per framework. Versions: neograph v3.0.0, langgraph 1.1.9,
+haystack-ai 2.28.0, pydantic-graph 1.85.1, llama-index-core 0.14.21,
+autogen-agentchat 0.7.5.
 
 ![Engine-overhead benchmark: per-iteration latency and peak RSS](../docs/images/bench-engine-overhead.png)
 
@@ -50,12 +56,12 @@ Two ports required per-framework workload shape translation:
 
 | Framework | `seq` (3-node chain) | `par` (fan-out 5 + join) | `seq` vs. NeoGraph | `par` vs. NeoGraph |
 |-----------|---------------------:|-------------------------:|-------------------:|-------------------:|
-| **NeoGraph 3.0** | **46.10** | **114.40** | 1× | 1× |
-| Haystack | 150.70 | 293.60 | 3.3× | 2.6× |
-| pydantic-graph | 240.34 | 308.32¹ | 5.2× | 2.7×¹ |
-| LangGraph | 671.18 | 2,396.30 | 14.6× | 20.9× |
-| LlamaIndex Workflow | 1,842.58 | 4,781.24 | 40.0× | 41.8× |
-| AutoGen GraphFlow | 3,226.79 | 7,389.42 | 70.0× | 64.6× |
+| **NeoGraph 3.0** | **5.0** | **11.8** | 1× | 1× |
+| Haystack | 144.10 | 290.00 | 28.8× | 24.6× |
+| pydantic-graph | 235.90 | 286.13¹ | 47.2× | 24.2×¹ |
+| LangGraph | 656.73 | 2,348.66 | 131.3× | 199.0× |
+| LlamaIndex Workflow | 1,780.34 | 4,683.45 | 356.1× | 396.9× |
+| AutoGen GraphFlow | 3,209.20 | 7,292.67 | 641.8× | 618.0× |
 
 ¹ pydantic-graph `par` is a serial 6-node emulation — it does not
 support fan-out. Not a parallel workload; included for completeness.
@@ -63,63 +69,57 @@ support fan-out. Not a parallel workload; included for completeness.
 ### End-to-end process metrics
 
 Whole binary/script runtime including warm-up + both workloads.
-`seq` = 10,000 iters, `par` = 5,000 iters (3.0 bench parameters).
-Python rows are carried over from the 2026-04-19 20k/10k run and
-scale linearly in the engine overhead, so the absolute elapsed
-numbers aren't directly comparable across rows — the per-iter
-µs column above is the apples-to-apples axis.
+`seq` = 10,000 iters, `par` = 5,000 iters. Measured with
+`/usr/bin/time -f "%e s, %M KB"`.
 
-| Framework | Total elapsed | Peak RSS | CPU utilization |
-|-----------|--------------:|---------:|----------------:|
-| **NeoGraph 3.0** | **~1.04 s** | **5.5 MB** | 100% (single-thread io_context by default) |
-| Haystack | 6.72 s | 78.3 MB | 100% (GIL) |
-| pydantic-graph | 8.05 s | 34.9 MB | 100% (GIL) |
-| LangGraph | 35.64 s | 58.9 MB | 100% (GIL) |
-| LlamaIndex Workflow | 85.77 s | 101.5 MB | 100% (GIL) |
-| AutoGen GraphFlow | 138.79 s | 52.4 MB | 100% (GIL) |
+| Framework | Total elapsed | Peak RSS | Executor |
+|-----------|--------------:|---------:|---------:|
+| **NeoGraph 3.0** | **0.11 s** | **4.5 MB** | single-thread io_context by default |
+| pydantic-graph | 3.98 s | 35.1 MB | single-thread asyncio (GIL) |
+| Haystack | 3.85 s | 80.3 MB | single-thread asyncio (GIL) |
+| LangGraph | 18.95 s | 60.1 MB | single-thread asyncio (GIL) |
+| LlamaIndex Workflow | 39.49 s | 101.4 MB | single-thread asyncio (GIL) |
+| AutoGen GraphFlow | 63.29 s | 52.3 MB | single-thread asyncio (GIL) |
 
 NeoGraph 3.0's default super-step loop runs the coroutine on a
 single-threaded io_context via `run_sync`; CPU-parallel fan-out is
 opt-in via `engine->set_worker_count(N)`. For I/O-bound node
-workloads the single thread still overlaps via co_await suspension —
-the `par` iteration still beats every Python framework's apples-to-
-apples number.
+workloads the single thread still overlaps via co_await suspension.
 
 ## What the numbers mean
 
-1. **Per-run engine overhead spans ~3× to ~70× across the Python
+1. **Per-run engine overhead spans ~29× to ~642× across the Python
    field.** Haystack is the leanest competitor (DAG with typed
-   sockets, minimal runtime). At the other end, AutoGen and LlamaIndex
-   are async/event-driven with per-run state setup that dominates when
-   there's no real work to amortize over.
-2. **3.0 narrowed the seq gap vs. 2.0** — NeoGraph traded some sync-
-   path speed (21 µs → 46 µs on seq) for a unified coroutine
-   architecture. In exchange, `par` actually got faster (150 µs → 114
-   µs) because `make_parallel_group` on a single-thread io_context
-   dispatches cheaper than Taskflow's scheduler for the fan-out-5
-   workload. The CPU-parallel path is still available — opt in via
-   `engine->set_worker_count(N)`.
+   sockets, minimal runtime); even so, it costs 28.8× more per seq
+   iter than NeoGraph. At the other end, AutoGen sits at 642× the
+   NeoGraph cost because of its per-run multi-agent state setup.
+2. **NeoGraph 3.0 is a win over 2.0 on both axes.** Collapsing sync
+   and async onto one coroutine path didn't regress engine
+   overhead — the full coroutine machinery (`run_sync` + io_context
+   per call) is under 5 µs in Release builds, versus 2.0's
+   advertised 20.65 µs on the sync Taskflow path.
 3. **Memory footprint favors NeoGraph by an order of magnitude or
-   more.** 5.5 MB (NeoGraph) vs. 35–101 MB across the Python field.
+   more.** 4.8 MB (NeoGraph) vs. 35–101 MB across the Python field.
    On SBC-class targets (Raspberry Pi-class RAM) this is the
    load-bearing metric — the difference between "runs comfortably" and
    "run it carefully".
-4. **Parallel fan-out is available but no longer default.** NeoGraph 2.x
-   shipped Taskflow's work-stealing pool as the default, which hit 400%+
-   CPU on 5-way fan-out. 3.0 ships the coroutine path as default
-   (single-thread dispatch, cheap) and exposes the multi-threaded pool
-   as opt-in — the right default for agent workloads that are
-   I/O-bound (LLM latency dominates) and would otherwise pay
-   thread-creation overhead with no speedup.
+4. **Parallel fan-out is opt-in in 3.0.** NeoGraph 2.x shipped
+   Taskflow's work-stealing pool as the default. 3.0 ships the
+   coroutine path as default (single-thread dispatch, cheap) and
+   exposes the multi-threaded pool as opt-in via
+   `engine->set_worker_count(N)` — the right default for agent
+   workloads that are I/O-bound (LLM latency dominates) and would
+   otherwise pay thread-creation overhead with no speedup.
 
 ## Caveats — what this bench does NOT measure
 
 * **Real agent workloads.** LLM-dominated pipelines are bottlenecked
   by provider latency (100ms–10s per call). Engine overhead disappears
-  at that scale. Mental model: NeoGraph 3.0 costs ~46 µs/call, Haystack
-  ~150µs, LangGraph ~670µs, LlamaIndex/AutoGen ~2–8ms — all invisible
-  next to a 500ms API round trip. This bench matters for non-LLM
-  nodes, dense agent orchestration, and startup-heavy deployments.
+  at that scale. Mental model: NeoGraph 3.0 costs ~5 µs/call,
+  Haystack ~144 µs, LangGraph ~657 µs, LlamaIndex/AutoGen ~2–7 ms —
+  all invisible next to a 500 ms API round trip. This bench matters
+  for non-LLM nodes, dense agent orchestration, and startup-heavy
+  deployments.
 * **Framework-appropriate workloads.** AutoGen, LlamaIndex, and
   pydantic-graph each optimize for paradigms (multi-agent chat,
   event-driven long-running workflows, state-machine control flow)
@@ -131,27 +131,23 @@ apples number.
   before measurement. Full-process numbers include Python interpreter
   boot (~200ms) and framework import time, which varies widely (LlamaIndex
   and AutoGen import substantial trees).
-* **Fairness.** NeoGraph was built with `-O2 -DNDEBUG`. Every Python
-  framework is stock CPython 3.12 with current pip-installed versions
-  — production-typical deployments, no custom tuning.
+* **Fairness.** NeoGraph was built with CMake `-DCMAKE_BUILD_TYPE=Release`
+  which resolves to `-O3 -DNDEBUG` on GCC. Every Python framework is
+  stock CPython 3.12 with current pip-installed versions —
+  production-typical deployments, no custom tuning. Historical note:
+  pre-3.0 versions of this README advertised `-O2` because that was
+  what the standalone bench command used; the CMake build has always
+  resolved `Release` to `-O3`.
 
 ## Reproduce
 
 ```bash
-# Build NeoGraph (release) once:
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
+# Build NeoGraph (Release — MUST set BUILD_TYPE explicitly; the
+# empty default configures the build without -O3):
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DNEOGRAPH_BUILD_BENCHMARKS=ON
+cmake --build build --target bench_neograph -j
 
-# Build + run the C++ bench (built by CMake above):
 ./build/bench_neograph                   # defaults: seq=10000, par=5000
-
-# Or rebuild standalone with the same flags CMake uses:
-g++ -std=c++20 -O2 -DNDEBUG \
-    -Iinclude -Ideps -Ideps/yyjson -Ideps/asio/include \
-    -DASIO_STANDALONE \
-    benchmarks/bench_neograph.cpp \
-    build/libneograph_core.a build/libyyjson.a \
-    -pthread -o /tmp/bench_neograph
 
 # Shared Python venv for every Python framework:
 python3 -m venv /tmp/bench_venv
@@ -162,14 +158,15 @@ python3 -m venv /tmp/bench_venv
     llama-index-core \
     "autogen-agentchat" "autogen-core" "autogen-ext"
 
-# Run each bench:
-/tmp/bench_venv/bin/python benchmarks/bench_langgraph.py      20000 10000
-/tmp/bench_venv/bin/python benchmarks/bench_haystack.py       20000 10000
-/tmp/bench_venv/bin/python benchmarks/bench_pydantic_graph.py 20000 10000
-/tmp/bench_venv/bin/python benchmarks/bench_llamaindex.py     20000 10000
-/tmp/bench_venv/bin/python benchmarks/bench_autogen.py        20000 10000
+# Run each bench (10k seq + 5k par matches the C++ side):
+/tmp/bench_venv/bin/python benchmarks/bench_langgraph.py      10000 5000
+/tmp/bench_venv/bin/python benchmarks/bench_haystack.py       10000 5000
+/tmp/bench_venv/bin/python benchmarks/bench_pydantic_graph.py 10000 5000
+/tmp/bench_venv/bin/python benchmarks/bench_llamaindex.py     10000 5000
+/tmp/bench_venv/bin/python benchmarks/bench_autogen.py        10000 5000
 
-# Peak RSS: wrap any of the above with `/usr/bin/time -v`.
+# Peak RSS + wall time:
+/usr/bin/time -f "%e s, %M KB" ./build/bench_neograph
 ```
 
 Output format is `workload<TAB>iters<TAB>total_ms<TAB>per_iter_us` on

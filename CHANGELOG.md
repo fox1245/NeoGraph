@@ -64,15 +64,24 @@ the break is confined to `GraphNode` subclasses that emit
   from `tf::Executor` / `tf::Taskflow` to `asio::thread_pool` +
   `asio::post` for the caller-side driver.
 
-### Perf (bench_neograph on reference Linux hardware)
+### Perf (bench_neograph Release -O3 -DNDEBUG on reference Linux, 10-run median)
 
-- `seq` engine overhead: ~28µs → ~47µs per call. The single-thread
-  coroutine + `run_sync` hop costs ~20µs; under the 60µs CI ceiling
-  but up from 2.0.
-- `par` engine overhead (5-worker fan-out + summarizer, trivial CPU
-  work): ~154µs → ~115µs per call. `make_parallel_group` on a
-  single-thread io_context dispatches cheaper than Taskflow's
-  scheduler for small work items.
+- `seq` engine overhead (3-node chain, counter): **~5.0 µs** per call.
+- `par` engine overhead (5-worker fan-out + summarizer): **~11.8 µs**
+  per call.
+- Peak RSS of the whole bench process (warm-up + seq + par iters):
+  **4.8 MB**.
+- vs LangGraph 1.1.9 on the same workload: **131× faster seq, 199×
+  faster par** per iteration; RSS ~12× lighter.
+
+Prior drafts of this CHANGELOG listed "~46 µs seq / ~114 µs par"
+as a 3.0 regression. Those numbers came from a build tree where
+`CMAKE_BUILD_TYPE` was unset, so the bench binary was compiled
+without `-O3 -DNDEBUG`. On a proper Release build the async-peer
+collapse is a **win** vs 2.0's Taskflow sync path (which the 2.0
+README advertised at 20.65 µs seq / 150.7 µs par on the same
+host). The corrected chart is at
+[`docs/images/bench-engine-overhead.png`](docs/images/bench-engine-overhead.png).
 
 ### Migration
 
