@@ -445,3 +445,177 @@ per-request code.
   gone. Benchmarks that used Taskflow as a caller-side driver
   (`bench_concurrent_neograph.cpp`) switched to `asio::thread_pool` +
   `asio::post`.
+
+---
+
+## 9. Override decision guide — which virtual(s) to pick
+
+NeoGraph exposes sync and async peers as **separate public virtuals**
+across every extension point (`GraphNode`, `Provider`,
+`CheckpointStore`). The sync ↔ async bridging happens in the
+base-class defaults (§2), but the user still has to choose **which
+member of each pair to override**. Picking wrong produces subtle
+failure modes — silent `Command` / `Send` drops, frozen event
+loops, or infinite recursion.
+
+This section is the decision table. Headers claim the contract; this
+guide tells you which member of the contract to implement.
+
+### 9.1 Two-minute version
+
+| You write a… | Override | Inherit as-is |
+|---|---|---|
+| CPU-only `GraphNode`, no `Command` / `Send` | `execute()` | every async peer + both `_full` variants |
+| `GraphNode` that emits `Command` / `Send` | `execute_full()` | every async peer |
+| Async-I/O `GraphNode`, no `Command` / `Send` | `execute_async()` | sync `execute()` + both `_full` variants (but see §9.2.2 pitfall #2) |
+| Async-I/O `GraphNode` that emits `Command` / `Send` | `execute_full_async()` | every other peer |
+| Streaming LLM node (cb-driven token emission) | see §9.2 quadrant table | — |
+| Custom `Provider` (real HTTP/LLM backend) | `complete_async()` | sync `complete()` bridges via `run_sync` |
+| Custom `CheckpointStore`, async-capable backend | all eight `*_async` peers | sync peers bridge via `run_sync` |
+| Custom `CheckpointStore`, sync-only backend | all eight sync peers | async peers bridge via `run_sync` |
+| Custom sync `Tool` | inherit `Tool`, override `execute()` | — |
+| Custom async `Tool` | inherit `AsyncTool`, override `execute_async()` | sync `execute()` is `final`, bridges |
+
+### 9.2 `GraphNode` — the four-quadrant matrix
+
+Two orthogonal axes: **streaming?** and **emits `Command` / `Send`?**.
+Pick the quadrant, then pick sync or async inside it based on
+whether your implementation does blocking work.
+
+|  | no `Command` / `Send` | emits `Command` / `Send` |
+|---|---|---|
+| **no streaming** | `execute` (sync) or `execute_async` (async) | `execute_full` (sync) or `execute_full_async` (async) |
+| **streaming-aware** (cb-driven tokens) | `execute_stream` (sync) or `execute_stream_async` (async) | `execute_full_stream` (sync) or `execute_full_stream_async` (async) |
+
+Rule of thumb: **if you don't know, override `execute()`**. That
+gives you the widest default-bridge coverage — every other virtual
+has a default that eventually calls back to `execute()`.
+
+#### 9.2.1 How the defaults wire up (3.0)
+
+```
+execute                    → run_sync(execute_async)
+execute_async              → co_return execute()
+execute_stream(state, cb)  → execute(state)        // cb is ignored unless overridden
+execute_stream_async       → co_await execute_async(state)
+execute_full               → NodeResult{execute()}
+execute_full_async         → co_return execute_full()            (3.0 fix)
+execute_full_stream        → execute_full(), replace writes via execute_stream if no Command/Send
+execute_full_stream_async  → co_await execute_full_async(state), replace writes via execute_stream_async
+```
+
+**Golden rule**: as long as you override **at least one of the
+sync/async pair at the level you care about**, you won't
+infinite-recurse. Overriding **neither** `execute` nor `execute_async`
+makes the two defaults call each other forever — the first invocation
+stack-overflows.
+
+#### 9.2.2 Pitfalls
+
+1. **Override `execute_async` only + emit `Command` / `Send` from
+   `execute_full`** → **silently dropped in async path**. The default
+   `execute_full_async` now calls sync `execute_full` (3.0 fix), but
+   sync `execute_full`'s default is `NodeResult{execute()}` which
+   calls your `execute_async` through `run_sync`. The writes come
+   through, but `Command` / `Send` added by overriding
+   `execute_full` (sync) only are lost because the async path
+   actually went through `execute` → `execute_async`, not through
+   your `execute_full`. **Fix**: override `execute_full_async`
+   directly.
+2. **Override `execute()` only + engine driven on a single-thread
+   `io_context`** → **blocks the event loop**. The default
+   `execute_full_async` calls sync `execute_full` → sync `execute`
+   on the current coroutine thread. Other coroutines on that
+   `io_context` freeze for the duration. **Fix**: if `execute()` is
+   fast (< ~100 µs), no action needed. Otherwise port to
+   `execute_async` with coroutine-friendly waits, or drive the
+   engine on an `asio::thread_pool` instead of a single-thread
+   context (via `run_async` on a multi-threaded executor, or
+   `engine->set_worker_count(N)` for sync `run()` callers).
+3. **Override `execute_full_stream_async` for a non-streaming node**
+   → **node runs twice**. The default streams by first calling
+   `execute_full_async` for full NodeResult + directives, then if
+   no `Command` / `Send` was emitted, discards the writes and
+   re-invokes `execute_stream_async` to collect fresh writes via
+   the cb. Correct for token-streaming LLM nodes; wasteful
+   elsewhere. **Fix**: override `execute_full_stream_async` with
+   `{ auto w = co_await execute_async(state); co_return NodeResult{std::move(w)}; }`.
+4. **Override neither `execute` nor `execute_async`** → **infinite
+   recursion**. Both defaults call each other. Compile-time
+   undetectable. **Fix**: override at least one.
+
+### 9.3 `Provider`
+
+Three virtuals: `complete`, `complete_async`, `complete_stream`
+(sync-only — no `complete_stream_async`).
+
+| Override | Behaviour |
+|---|---|
+| `complete()` only | Sync works directly; async `complete_async` bridges via the base-class default `co_return complete()`. Fine for CPU-only mock providers. |
+| `complete_async()` only (**recommended** for real backends) | Async works directly; sync `complete` bridges via `run_sync(complete_async())`. One fresh `io_context` per sync call — acceptable for the admin-tool sync surface, would be wasteful for hot loops. |
+| Both | Hand-tune both paths. Only worth it if the async peer needs to avoid `run_sync` init overhead on the sync path. |
+
+`complete_stream(params, cb)` is sync-only by design — SSE delivery
+is inherently per-chunk, and the cb-based shape maps poorly to
+awaitable-returning wrappers. The default delegates to `complete()`
+and invokes `cb` once with the full result. Override when your
+backend natively streams and you want per-token emission.
+
+### 9.4 `CheckpointStore`
+
+Eight sync methods, eight async peers, matched 1:1. The shipping
+stores (`InMemoryCheckpointStore`, `SqliteCheckpointStore`,
+`PostgresCheckpointStore`) all implement the async side and let
+sync bridge through the base-class default.
+
+- **Async-capable backend** (libpq non-blocking, async MongoDB
+  driver, etc.): override all eight `*_async` peers. The sync-call
+  path pays one `run_sync` per invocation — fine for `get_state` /
+  `update_state` admin calls, not on a hot loop (but the engine
+  never calls sync checkpoint methods; only user tooling does).
+- **Blocking-only backend** (old file I/O, some ODBC wrappers):
+  override the eight sync methods. Async callers block the
+  coroutine thread through `run_sync` on each call, which is
+  usually acceptable because checkpoint writes are infrequent
+  relative to node dispatch.
+- **Don't mix**: if you override `save()` but leave `save_async()` at
+  the default, the async peer bridges BACK to sync through the
+  base-class default — correct, but loses the async I/O benefit. Go
+  all-sync or all-async per interface.
+
+### 9.5 `MCPClient`
+
+`rpc_call_async()` is the real implementation; `rpc_call()` is a
+thin `run_sync(rpc_call_async(...))` facade. **Not user-extensible**
+— `MCPClient` is not designed to be subclassed, you use it as-is.
+If you need a custom MCP transport, write a new class; don't
+inherit.
+
+### 9.6 `Tool` vs `AsyncTool`
+
+Asymmetric by design. Pick one at class declaration time:
+
+```cpp
+class MyCpuTool : public Tool {
+  public:
+    std::string execute(const json& args) override { /* sync */ }
+    ChatTool get_definition() const override { /* ... */ }
+    std::string get_name() const override { return "cpu-tool"; }
+};
+
+class MyHttpTool : public AsyncTool {
+  public:
+    asio::awaitable<std::string> execute_async(const json& args) override {
+        auto ex = co_await asio::this_coro::executor;
+        auto r = co_await neograph::async::async_post(ex, /* ... */);
+        co_return r.body;
+    }
+    // sync execute() is final and routes through run_sync automatically.
+    ChatTool get_definition() const override { /* ... */ }
+    std::string get_name() const override { return "http-tool"; }
+};
+```
+
+Do **not** try to inherit from both or override both surfaces of
+one class — the `AsyncTool::execute` is `final` precisely to
+prevent that.
