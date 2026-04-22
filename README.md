@@ -45,7 +45,7 @@ auto result = engine->run(config);
 | ~500 MB runtime (Python + deps) | **1.1 MB static binary** (stripped, `example_plan_executor`) |
 | ~300 MB steady RSS | **2.9 MB peak RSS** (Plan & Executor run) |
 | 2–8 s import / cold start | **< 250 ms** end-to-end (crash + resume cycle included) |
-| GIL-limited parallelism | Taskflow work-stealing + lock-free RequestQueue |
+| GIL-limited parallelism | `asio::thread_pool` fan-out + lock-free RequestQueue |
 | Cloud / server only | Raspberry Pi Zero 2W, Jetson, drones, IoT, edge |
 
 All figures are from `example_plan_executor` on x86_64 Linux built with
@@ -66,11 +66,11 @@ section below for the reproduction command.
 - OpenSSL (HTTPS), libpq (optional, Postgres checkpoint),
   SQLite3 (optional, SQLite checkpoint).
 
-### Platform support (2.0.0)
+### Platform support (3.0 draft, `feat/taskflow-removal`)
 
 | Platform | Tier | Notes |
 |---|---|---|
-| Linux (Ubuntu 24.04, GCC 13) | **GA** | Reference — 332/332 ctest + benches, all paths validated locally |
+| Linux (Ubuntu 24.04, GCC 13) | **GA** | Reference — 338/338 ctest green (292 under Valgrind memcheck + ASan/UBSan clean), all paths validated locally |
 | macOS (Apple Silicon, Clang) | **beta** | CI builds + non-Postgres tests; runtime differences (coroutine scheduling, SIGPIPE) not yet exercised in production |
 | Windows (MSVC 2022, x64) | **alpha** | CI builds + non-Postgres tests; MCP stdio (named-pipe overlapped) + PG async socket wrap written against MSDN spec but unvalidated under load |
 
@@ -122,7 +122,7 @@ target_link_libraries(my_app PRIVATE neograph::core neograph::llm)
 
 - **JSON-defined graphs** — No recompilation to change agent workflows
 - **Super-step execution** — Pregel BSP model with cycle support
-- **Parallel fan-out/fan-in** — Taskflow work-stealing scheduler
+- **Parallel fan-out/fan-in** — `asio::experimental::make_parallel_group` on the engine's executor; opt-in `asio::thread_pool` for CPU-bound branches via `set_worker_count(N)`
 - **Send (dynamic fan-out)** — Nodes spawn N parallel tasks at runtime
 - **Command (routing override)** — Nodes control routing + state in one return
 - **Checkpointing** — Full state snapshots at every super-step
@@ -165,7 +165,7 @@ target_link_libraries(my_app PRIVATE neograph::core neograph::llm)
 | 02 | `custom_graph` | JSON-defined graph with mock provider | No |
 | 03 | `mcp_agent` | Real MCP server tool integration | Required |
 | 04 | `checkpoint_hitl` | Checkpointing + Human-in-the-Loop (interrupt/resume) | No |
-| 05 | `parallel_fanout` | Taskflow parallel fan-out/fan-in (3 workers) | No |
+| 05 | `parallel_fanout` | Parallel fan-out/fan-in via `make_parallel_group` (3 workers) | No |
 | 06 | `subgraph` | Hierarchical graph composition (Supervisor pattern) | No |
 | 07 | `intent_routing` | Intent classification + expert routing | No |
 | 08 | `state_management` | get_state / update_state / fork / time-travel | No |
@@ -212,7 +212,7 @@ purpose-built classes extracted in the 0.1 refactor:
 
 - **`GraphCompiler`** — pure `JSON → CompiledGraph` parser.
 - **`Scheduler`** — signal-dispatch routing plus barrier accumulation.
-- **`NodeExecutor`** — retry loop, Taskflow parallel fan-out, Send dispatch.
+- **`NodeExecutor`** — retry loop (async-native with timer-based backoff), parallel fan-out via `asio::experimental::make_parallel_group`, Send dispatch.
 - **`CheckpointCoordinator`** — save / resume / pending-writes lifecycle
   behind a `(store, thread_id)` façade.
 
@@ -225,12 +225,14 @@ for the full API surface.
 
 | Link target               | What gets pulled in |
 |---------------------------|---------------------|
-| `neograph::core`          | `yyjson` (compiled, bundled), `Taskflow` (header-only) |
+| `neograph::core`          | `yyjson` (compiled, bundled), `asio` (header-only, standalone) |
 | `neograph::core + llm`    | + OpenSSL (`httplib` stays PRIVATE) |
 | `neograph::core + mcp`    | + OpenSSL (`httplib` stays PRIVATE) |
 | `neograph::util`          | + `moodycamel::ConcurrentQueue` (header-only) |
 
 `httplib` is never exposed to your code. `core` has zero network dependencies.
+Taskflow was removed in 3.0 — parallel fan-out now runs on asio's
+coroutine primitives (see [Features](#core-engine-neographcore)).
 
 ## Concurrency & Async
 
@@ -239,8 +241,9 @@ one that fits your hosting pattern:
 
 * **Thread-per-agent (sync)** — `run()` / `run_stream()` / `resume()`
   dispatched onto any executor you already use. Safe up to roughly a
-  thousand concurrent agents; ~30 µs engine overhead per call. Detailed
-  below.
+  thousand concurrent agents; ~47 µs engine overhead per call in 3.0
+  (the super-step loop routes through `run_sync(execute_graph_async)`
+  so both entry points share one coroutine path). Detailed below.
 * **Coroutine-based async** — `run_async()` / `run_stream_async()` /
   `resume_async()` returning `asio::awaitable<RunResult>`. One
   `asio::io_context` hosts thousands of concurrent agents without a
@@ -333,9 +336,13 @@ for (const auto& user : users) {
 for (auto& f : sessions) handle(f.get());
 ```
 
-Works the same way with a `boost::asio::thread_pool`, a `taskflow::Executor`,
-or your web framework's worker pool — NeoGraph stays out of the executor
-decision.
+Works the same way with an `asio::thread_pool`, a `std::async`-backed
+task system, or your web framework's worker pool — NeoGraph stays out
+of the executor decision. If you need CPU-parallel fan-out *inside*
+a single sync `run()` call (rather than N sync `run()`s on N threads),
+call `engine->set_worker_count(N)` once after `compile()` to install
+an engine-owned `asio::thread_pool` that `run_parallel_async` and the
+multi-Send branch dispatch onto.
 
 ### Using the bundled `RequestQueue`
 
@@ -489,15 +496,15 @@ executions, validates per-session output + checkpoint isolation) and
 | Fork | Yes | Yes |
 | Time travel | get_state_history | get_state_history |
 | Subgraphs | CompiledGraph as node | SubgraphNode (JSON inline) |
-| Parallel fan-out | Static | Taskflow work-stealing |
-| Send (dynamic fan-out) | Send() | NodeResult::sends → Taskflow parallel |
+| Parallel fan-out | Static | `make_parallel_group` (+ opt-in `asio::thread_pool`) |
+| Send (dynamic fan-out) | Send() | NodeResult::sends → parallel_group fan-out |
 | Command (routing+state) | Command(goto, update) | NodeResult::command |
 | Retry policy | RetryPolicy | RetryPolicy + exponential backoff |
 | Stream modes | values/updates/messages | EVENTS/TOKENS/VALUES/UPDATES/DEBUG |
 | Cross-thread Store | Store (Postgres) | Store (interface) + InMemory |
 | Multi-LLM | LangChain required | SchemaProvider built-in (3 vendors) |
 | MCP support | None (separate impl) | MCPClient built-in |
-| Performance | Python (GIL) | C++ + Taskflow |
+| Performance | Python (GIL) | C++20 coroutines + asio |
 | Memory footprint | ~300MB+ | ~10MB |
 | Edge/embedded | Not possible | Raspberry Pi, Jetson, IoT |
 
@@ -540,9 +547,10 @@ NeoGraph/
 │   └── gemini.json
 ├── deps/                       # Vendored dependencies
 │   ├── yyjson/                 # Compiled C JSON library (yyjson.c + yyjson.h)
-│   ├── taskflow/               # Header-only parallel task engine
+│   ├── asio/                   # Standalone asio (header-only, C++20 coroutines)
 │   ├── httplib.h               # cpp-httplib (PRIVATE to llm/mcp)
 │   ├── concurrentqueue.h       # moodycamel lock-free queue
+│   ├── cppdotenv/              # .env loader (example 13)
 │   ├── clay.h                  # Clay UI layout
 │   └── clay_renderer_raylib.c  # Clay + raylib renderer glue (example 11)
 ├── benchmarks/                 # NeoGraph vs LangGraph engine-overhead bench
@@ -555,10 +563,11 @@ NeoGraph/
 
 | Target | Description | Dependencies |
 |--------|-------------|--------------|
-| `neograph::core` | Graph engine + types | yyjson (bundled), Taskflow, Threads |
+| `neograph::core` | Graph engine + types | yyjson (bundled), asio (header-only), Threads |
 | `neograph::llm` | LLM providers + Agent | core + OpenSSL (httplib PRIVATE) |
 | `neograph::mcp` | MCP client | core + OpenSSL (httplib PRIVATE) |
 | `neograph::util` | RequestQueue | core + concurrentqueue |
+| `neograph::async` | asio HTTP/SSE helpers | core + OpenSSL |
 
 ## Build Options
 
@@ -584,24 +593,32 @@ Per-iteration engine overhead (µs, lower is better):
 
 | Framework | `seq` (3-node chain) | `par` (fan-out 5 + join) | `seq` vs. NeoGraph |
 |-----------|---------------------:|-------------------------:|-------------------:|
-| **NeoGraph** | **20.65 µs** | **150.7 µs** | 1× |
-| Haystack 2.27 | 150.7 µs | 293.6 µs | 7.3× |
-| pydantic-graph 1.84 | 240.3 µs | 308.3 µs¹ | 11.6× |
-| LangGraph 1.1.7 | 645.3 µs | 2,225 µs | 31.2× |
-| LlamaIndex Workflow 0.14 | 1,843 µs | 4,781 µs | 89.2× |
-| AutoGen GraphFlow 0.7.5 | 3,227 µs | 7,389 µs | 156.3× |
+| **NeoGraph 3.0** | **46.1 µs** | **114.4 µs** | 1× |
+| Haystack 2.27 | 150.7 µs | 293.6 µs | 3.3× |
+| pydantic-graph 1.84 | 240.3 µs | 308.3 µs¹ | 5.2× |
+| LangGraph 1.1.9 | 671.2 µs | 2,396 µs | 14.6× |
+| LlamaIndex Workflow 0.14 | 1,843 µs | 4,781 µs | 40.0× |
+| AutoGen GraphFlow 0.7.5 | 3,227 µs | 7,389 µs | 70.0× |
 
 ¹ pydantic-graph is a single-next-node state machine and cannot fan
 out; `par` is a serial 6-node emulation.
 
-Whole-process metrics (warm-up + both workloads, 20k seq + 10k par
-iters):
+3.0 trades some sync-path speed for a unified coroutine architecture:
+seq went from ~21 µs (2.0, Taskflow sync path) to ~46 µs (3.0,
+`run_sync(execute_graph_async)`). par went the other direction
+(150 µs → 114 µs) because `make_parallel_group` on a single-thread
+io_context dispatches cheaper than Taskflow's scheduler for the
+fan-out-5 workload. The [3.0 CHANGELOG](CHANGELOG.md) covers the
+architecture rationale; see the [CHANGELOG migration guide](CHANGELOG.md)
+for opting back into CPU-parallel fan-out via `set_worker_count`.
 
-| | NeoGraph | best Python (Haystack) | worst (AutoGen) |
+Whole-process metrics (warm-up + both workloads, 10k seq + 5k par iters):
+
+| | NeoGraph 3.0 | best Python (Haystack) | worst (AutoGen) |
 |---|----------|------------------------|-----------------|
-| **Total elapsed** | **1.92 s** | 6.72 s | 138.79 s |
-| **Peak RSS** | **4.9 MB** | 78.3 MB | 52.4 MB² |
-| **CPU utilization on fan-out** | **407%** (Taskflow) | 100% (GIL) | 100% (GIL) |
+| **Total elapsed** | **~1.04 s** | 6.72 s | 138.79 s |
+| **Peak RSS** | **5.5 MB** | 78.3 MB | 52.4 MB² |
+| **Parallel fan-out executor** | `asio::experimental::make_parallel_group` | single-thread asyncio (GIL) | single-thread asyncio (GIL) |
 
 ² AutoGen has a smaller footprint than Haystack but its per-iter cost
 is 50× higher — different tradeoff axes. Full matrix in
@@ -634,7 +651,7 @@ deployment shape for every Python framework):
 
 | Engine | Wall | P99 latency | Peak RSS | Status |
 |--------|-----:|------------:|---------:|:-------|
-| **NeoGraph** | **6 ms** | **7 µs** | **7.5 MB** | ✅ 10000 / 0 |
+| **NeoGraph 3.0** | **443 ms** | **16.7 ms** | **5.9 MB** | ✅ 10000 / 0 |
 | pydantic-graph | 886 ms | **158 µs** | 42.6 MB | ✅ 10000 / 0 |
 | Haystack | 3.1 s | 2.9 s | 130.7 MB | ✅ 10000 / 0 |
 | LangGraph | 23.4 s | 23.0 s | 416.2 MB | ✅ 10000 / 0 |
@@ -649,10 +666,12 @@ because the CPython GIL serializes every coroutine's CPU work. **This
 is not a LangGraph-specific pathology** — it shows up in every Python
 asyncio runtime.
 
-NeoGraph's Taskflow work-stealing pool has no GIL to fight; it
-amortizes per-task cost across the batch and keeps P99 in single-digit
-microseconds across the entire sweep. The 4 MB memory floor doesn't
-move.
+NeoGraph 3.0 beats every Python asyncio runtime on throughput and
+RSS — the 5.9 MB memory floor under 10k concurrent requests is
+**~70×** lower than LangGraph at the same load. On tail latency
+pydantic-graph's single-next-node state machine is faster per call
+(it has no super-step loop to run), but blows past NeoGraph's RSS
+budget by 7×. See the chart subtitles for full context.
 
 `multiprocessing.Pool` mode bypasses the GIL across worker processes
 but saturates at pool size and pays fork + pickle overhead; full
@@ -670,31 +689,29 @@ resumes with the failure cleared. No LLM calls, no API keys, no network.
 
 | Build configuration | Size |
 |---|---|
-| **MinSizeRel `-Os`, static libstdc++, `--gc-sections`, stripped** | **1,119 KB (1.1 MB)** |
+| **MinSizeRel `-Os`, static libstdc++, `--gc-sections`, stripped** | **1,203 KB (1.2 MB)** |
 
 The MinSizeRel binary's only dynamic dependency is `libc.so.6` —
 `libstdc++` and `libgcc_s` are linked in statically. Drop it onto any
-Linux host with a matching libc and it runs.
-
-Per-object contribution (Release, `.text` section):
-
-| Object | Size | Role |
-|---|---|---|
-| `graph_engine.cpp.o` | 263 KB | Super-step loop, Taskflow fan-out, Send, pending writes |
-| `graph_node.cpp.o` | 120 KB | Built-in node types (LLMCall, ToolDispatch, Subgraph, IntentClassifier) |
-| `graph_loader.cpp.o` | 112 KB | JSON → graph compiler |
-| `graph_checkpoint.cpp.o` | 67 KB | CheckpointStore + PendingWrite machinery |
-| `graph_state.cpp.o` | 63 KB | Thread-safe channel store |
-| `react_graph.cpp.o` | 39 KB | `create_react_graph()` convenience |
-| `store.cpp.o` | 28 KB | Cross-thread Store |
+Linux host with a matching libc and it runs. 3.0 is ~80 KB larger
+than 2.0 because asio's coroutine machinery (steady_timer,
+make_parallel_group, use_future) is pulled into the engine path;
+Taskflow was header-only and `--gc-sections` stripped most of it
+anyway, so its removal doesn't offset the coroutine growth.
 
 ### Runtime footprint
 
 | Metric | Value |
 |---|---|
 | Peak RSS (full Plan & Executor run, crash + resume included) | **2.9 MB** |
-| Wall-clock (cold start → both phases complete) | **~240 ms** |
+| Wall-clock (cold start → both phases complete) | **~750 ms** |
 | Dynamic dependencies | `libc.so.6` only |
+
+The wall-clock went up from 2.0's ~240 ms because each internal
+`engine->run()` now pays ~47 µs of coroutine + run_sync setup, and
+the Plan & Executor demo runs a dense super-step pattern (5-way Send
+fan-out, crash detection, resume). Steady-state footprint (RSS) is
+unchanged.
 
 ### Reproduction
 
@@ -736,11 +753,16 @@ ldd       build-minsize/example_plan_executor        # dynamic deps (libc only)
 Inspired by:
 - [LangGraph](https://github.com/langchain-ai/langgraph) — Graph agent orchestration for Python
 - [agent.cpp](https://github.com/mozilla-ai/agent.cpp) — Local LLM agent framework for C++
-- [Taskflow](https://github.com/taskflow/taskflow) — Parallel task programming in C++
+- [asio](https://think-async.com/Asio/) — Cross-platform C++ networking and coroutine primitives (the 3.0 engine runtime)
 - [Clay](https://github.com/nicbarker/clay) — High-performance UI layout library
+
+Previously (2.x): also built on [Taskflow](https://github.com/taskflow/taskflow)
+for parallel fan-out. 3.0 replaced that path with
+`asio::experimental::make_parallel_group` to unify sync and async
+execution on one coroutine runtime.
 
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
 
-Third-party licenses: [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES)
+Third-party licenses: [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)

@@ -925,7 +925,7 @@ public:
         const NodeContext& default_context,
         std::shared_ptr<CheckpointStore> store = nullptr);
 
-    // ── 실행 ──
+    // ── 실행 (sync) ──
 
     RunResult run(const RunConfig& config);
 
@@ -935,6 +935,18 @@ public:
     RunResult resume(const std::string& thread_id,
                      const json& resume_value = json(),
                      const GraphStreamCallback& cb = nullptr);
+
+    // ── 실행 (async, 3.0) ──
+
+    asio::awaitable<RunResult> run_async(const RunConfig& config);
+
+    asio::awaitable<RunResult> run_stream_async(
+        const RunConfig& config, const GraphStreamCallback& cb);
+
+    asio::awaitable<RunResult> resume_async(
+        const std::string& thread_id,
+        const json& resume_value = json(),
+        const GraphStreamCallback& cb = nullptr);
 
     // ── 상태 조회/조작 ──
 
@@ -960,6 +972,7 @@ public:
     void set_retry_policy(const RetryPolicy& policy);
     void set_node_retry_policy(const std::string& node_name,
                                const RetryPolicy& policy);
+    void set_worker_count(std::size_t n);  // 3.0: opt-in fan-out pool
     const std::string& get_graph_name() const;
 };
 ```
@@ -1450,7 +1463,9 @@ public:
 **헤더:** `<neograph/graph/executor.h>`
 
 super-step당 노드 호출을 소유한다: 재시도 루프, replay 조회, pending write 기록,
-Taskflow fan-out, Send 디스패치.
+`asio::experimental::make_parallel_group` 기반 fan-out, Send 디스패치. 3.0에서
+sync `run_one` / `run_parallel` / `run_sends` 트윈은 제거됐고 호출자는 `_async`
+피어를 사용한다.
 
 ```cpp
 namespace neograph::graph {
@@ -1462,9 +1477,10 @@ public:
     NodeExecutor(
         const std::map<std::string, std::unique_ptr<GraphNode>>& nodes,
         const std::vector<ChannelDef>& channel_defs,
-        RetryPolicyLookup retry_policy_for);
+        RetryPolicyLookup retry_policy_for,
+        asio::thread_pool* fan_out_pool = nullptr);
 
-    NodeResult run_one(
+    asio::awaitable<NodeResult> run_one_async(
         const std::string& node_name, int step,
         GraphState& state,
         const std::unordered_map<std::string, NodeResult>& replay,
@@ -1474,7 +1490,7 @@ public:
         std::vector<std::string>& trace,
         const GraphStreamCallback& cb, StreamMode stream_mode);
 
-    std::vector<NodeResult> run_parallel(
+    asio::awaitable<std::vector<NodeResult>> run_parallel_async(
         const std::vector<std::string>& ready, int step,
         GraphState& state,
         const std::unordered_map<std::string, NodeResult>& replay,
@@ -1484,13 +1500,18 @@ public:
         std::vector<std::string>& trace,
         const GraphStreamCallback& cb, StreamMode stream_mode);
 
-    void run_sends(
+    asio::awaitable<void> run_sends_async(
         const std::vector<Send>& sends, int step,
         GraphState& state,
         const std::unordered_map<std::string, NodeResult>& replay,
         CheckpointCoordinator& coord,
         const std::string& parent_cp_id,
         std::vector<std::string>& trace,
+        const GraphStreamCallback& cb, StreamMode stream_mode);
+
+    asio::awaitable<NodeResult> execute_node_with_retry_async(
+        const std::string& node_name,
+        GraphState& state,
         const GraphStreamCallback& cb, StreamMode stream_mode);
 };
 
@@ -1499,17 +1520,23 @@ public:
 
 **불변식:**
 
-- `run_one`과 `run_parallel`은 모두 `NodeInterrupt`를 rethrow하기 전에
-  `phase=NodeInterrupt`인 체크포인트를 저장하되, `next_nodes`를 해당 노드 하나로
-  좁힌다. 성공한 형제 노드들의 writes는 `pending_writes`에 이미 기록돼 있어
-  resume의 replay 맵이 그들을 건너뛰고 문제의 노드만 재실행한다.
-- `run_parallel`은 writes와 `Command.updates`를 `ready` 순서로 적용해
+- `run_one_async`와 `run_parallel_async`는 모두 `NodeInterrupt`를 rethrow하기
+  전에 `phase=NodeInterrupt`인 체크포인트를 저장하되, `next_nodes`를 해당 노드
+  하나로 좁힌다. 성공한 형제 노드들의 writes는 `pending_writes`에 이미 기록돼
+  있어 resume의 replay 맵이 그들을 건너뛰고 문제의 노드만 재실행한다.
+- `run_parallel_async`는 writes와 `Command.updates`를 `ready` 순서로 적용해
   이후 Scheduler 호출의 `ready[i] ↔ results[i]` pairing이 그대로 유지된다.
-- `run_sends`: 단일 Send는 공유 state에서 재시도 포함으로 실행, 다중 Send는
-  각 타겟에 독립 state 복사(init + restore + input 적용)를 주고 재시도 없이
-  실행 — 리팩토링 이전 의미론을 보존한다.
-- 프로세스 전역의 Taskflow executor가 모든 호출에 공유되지만, 각 호출은
-  호출자 입장에서는 동기 실행이다.
+- `run_sends_async`: 단일 Send는 공유 state에서 재시도 포함으로 실행, 다중
+  Send는 각 타겟에 독립 state 복사(init + restore + input 적용)를 주고 재시도
+  없이 실행 — pre-3.0 의미론을 보존한다.
+- `fan_out_pool` (선택)이 parallel branch dispatch 위치를 결정한다. null이면
+  branch는 `co_await asio::this_coro::executor`에서 실행 — 단일 스레드 async
+  caller에는 문제 없지만 CPU-bound fan-out은 직렬화된다. non-null이면
+  `run_parallel_async`와 multi-Send branch가 `pool->get_executor()`에
+  `co_spawn`한다. sync `run()` caller는 `GraphEngine::set_worker_count(N)`으로
+  pool을 설치한다.
+- `execute_node_with_retry_async`가 안쪽 retry 루프: backoff는
+  `asio::steady_timer`를 사용해 retry 대기 중에도 executor가 멈추지 않는다.
 
 ---
 

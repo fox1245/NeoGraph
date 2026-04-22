@@ -45,15 +45,15 @@ NodeResult GraphNode::execute_full(const GraphState& state) {
 
 asio::awaitable<NodeResult>
 GraphNode::execute_full_async(const GraphState& state) {
-    // Async-native default: bridge through execute_async (not the sync
-    // execute_full) so the coroutine chain stays suspendable end-to-
-    // end. Overriding execute_full_async directly is the only way to
-    // emit Command/Send from an async node — that's expected; the
-    // default exists so a node that overrides only execute_async
-    // still gets a valid NodeResult assembly without forcing every
-    // implementer to write the wrapper.
-    auto writes = co_await execute_async(state);
-    co_return NodeResult{std::move(writes)};
+    // Default routes through sync execute_full so a subclass that
+    // overrode only the sync path — including Command/Send emission
+    // via NodeResult — still surfaces in the async path. Async-
+    // native nodes that want non-blocking I/O AND Command/Send
+    // should override execute_full_async directly; the sync detour
+    // here will otherwise freeze the calling coroutine for the
+    // duration of execute_full, which cascades through execute()
+    // and, for async-only overrides, through run_sync(execute_async).
+    co_return execute_full(state);
 }
 
 // --- GraphNode default execute_full_stream ---

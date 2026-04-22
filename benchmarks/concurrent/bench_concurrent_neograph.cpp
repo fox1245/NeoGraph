@@ -1,7 +1,7 @@
 // Concurrent-load bench for NeoGraph.
 //
-// Submits N simultaneous graph invocations to a shared Taskflow
-// executor, waits for all to finish, and reports:
+// Submits N simultaneous graph invocations to a shared
+// asio::thread_pool, waits for all to finish, and reports:
 //
 //   total_wall_ms  — from first submit to last completion
 //   p50/p95/p99_us — per-request latency distribution
@@ -14,7 +14,8 @@
 
 #include <neograph/neograph.h>
 
-#include <taskflow/taskflow.hpp>
+#include <asio/post.hpp>
+#include <asio/thread_pool.hpp>
 
 #include <atomic>
 #include <algorithm>
@@ -22,11 +23,12 @@
 #include <cstdlib>
 #include <cstdio>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <memory>
-#include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace neograph;
@@ -89,26 +91,40 @@ int main(int argc, char** argv) {
 
     auto engine = GraphEngine::compile(seq_graph(), NodeContext{});
 
-    tf::Executor exec;  // uses hardware_concurrency() by default
+    const std::size_t num_workers =
+        std::max<std::size_t>(std::thread::hardware_concurrency(), 1);
+    asio::thread_pool caller_pool(num_workers);
 
-    // Warm-up: prime the engine state AND wake every Taskflow worker
-    // thread so first-burst scheduling latency doesn't bias N=10 P99.
+    // Warm-up: prime the engine state AND wake every caller-side
+    // worker so first-burst scheduling latency doesn't bias N=10 P99.
     for (int i = 0; i < 10; ++i) (void)engine->run(RunConfig{});
     {
-        tf::Taskflow warm;
-        const size_t W = std::max<size_t>(exec.num_workers(), 8);
-        for (size_t i = 0; i < W * 4; ++i) {
-            warm.emplace([&engine]() { (void)engine->run(RunConfig{}); });
+        const std::size_t W = std::max<std::size_t>(num_workers, 8);
+        std::atomic<std::size_t> warm_remaining{W * 4};
+        std::promise<void> warm_done;
+        auto warm_fut = warm_done.get_future();
+        for (std::size_t i = 0; i < W * 4; ++i) {
+            asio::post(caller_pool, [&engine, &warm_remaining, &warm_done]() {
+                (void)engine->run(RunConfig{});
+                if (warm_remaining.fetch_sub(1, std::memory_order_acq_rel) == 1)
+                    warm_done.set_value();
+            });
         }
-        exec.run(warm).wait();
+        warm_fut.wait();
     }
 
     std::vector<long> latencies_us(concurrency);
     std::atomic<int> ok_count{0};
     std::atomic<int> err_count{0};
-    tf::Taskflow tf;
+    std::atomic<int> done_count{0};
+    std::promise<void> all_done;
+    auto all_done_fut = all_done.get_future();
+
+    auto t_start = std::chrono::steady_clock::now();
     for (int i = 0; i < concurrency; ++i) {
-        tf.emplace([i, &engine, &latencies_us, &ok_count, &err_count]() {
+        asio::post(caller_pool,
+            [i, concurrency, &engine, &latencies_us,
+             &ok_count, &err_count, &done_count, &all_done]() {
             auto t0 = std::chrono::steady_clock::now();
             try {
                 RunConfig cfg;  // no thread_id — coordinator is a no-op
@@ -121,11 +137,11 @@ int main(int argc, char** argv) {
                 latencies_us[i] = -1;
                 err_count.fetch_add(1, std::memory_order_relaxed);
             }
+            if (done_count.fetch_add(1, std::memory_order_acq_rel) + 1 == concurrency)
+                all_done.set_value();
         });
     }
-
-    auto t_start = std::chrono::steady_clock::now();
-    exec.run(tf).wait();
+    all_done_fut.wait();
     auto t_end = std::chrono::steady_clock::now();
     long total_wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         t_end - t_start).count();

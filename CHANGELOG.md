@@ -7,6 +7,94 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [3.0.0] — 2026-04-22
+
+3.0 removes the Taskflow dependency and unifies sync and async
+super-step execution on a single asio coroutine path. Graph-definition
+JSON, node ABI, checkpoint schema, and public entry points (`run`,
+`run_async`, `run_stream`, `resume`) are source-compatible with 2.0;
+the break is confined to `GraphNode` subclasses that emit
+`Command`/`Send` from the **sync** `execute_full` override only.
+
+### Breaking
+
+- **`deps/taskflow/` and the Taskflow INTERFACE target are gone.**
+  The sync super-step loop, `run_one`, `run_parallel`, `run_sends`,
+  and the process-wide `tf::Executor` static are deleted. Downstream
+  consumers that `#include <taskflow/...>` via NeoGraph's include
+  path must vendor Taskflow separately.
+- **`GraphNode::execute_full_async` default now bridges to the sync
+  `execute_full` via direct call (no `co_await execute_async`).**
+  This preserves `Command`/`Send` emitted from a sync-only override
+  — the common 2.0 pattern — through the async path that all entry
+  points now share. Async-native nodes that need non-blocking I/O
+  AND `Command`/`Send` must override `execute_full_async` directly;
+  the docstring has said this since 2.0, but 2.0 never exercised it
+  because sync `run()` bypassed the coroutine path entirely.
+- **`NodeExecutor::run_one` / `run_parallel` / `run_sends` sync
+  methods removed.** Use the `_async` peers.
+- **CPU parallel fan-out is opt-in.** Previously Taskflow provided a
+  process-wide thread pool by default. In 3.0 `run_parallel_async`
+  and the multi-Send branch of `run_sends_async` dispatch branches
+  on whichever executor drives the coroutine — the single-threaded
+  io_context spun up by sync `run()`, or the caller's own executor
+  for `run_async()`. I/O-bound fan-out still overlaps (co_await
+  suspension on a single thread); CPU-bound fan-out serializes
+  unless the caller uses a multi-threaded executor for `run_async()`
+  or opts into an engine-owned pool via `engine->set_worker_count(N)`.
+
+### Added
+
+- `neograph::async::run_sync_pool(awaitable, n_threads)` — N-worker
+  sync↔async bridge alongside the existing single-threaded
+  `run_sync`. Spins a fresh `asio::thread_pool` for the call so
+  inner `make_parallel_group` branches execute on separate workers.
+- `GraphEngine::set_worker_count(n)` — opt-in engine-owned
+  thread_pool used by `NodeExecutor` for parallel fan-out dispatch.
+  Rebuilds the executor; must be called before any concurrent run.
+
+### Changed
+
+- `GraphEngine::execute_graph` (sync) is gone. All entry points
+  (`run`, `run_stream`, `resume`) route through
+  `execute_graph_async` via `neograph::async::run_sync`, so the
+  super-step loop, retry backoff, checkpoint I/O, and parallel
+  fan-out now live on one coroutine path end-to-end.
+- `benchmarks/concurrent/bench_concurrent_neograph.cpp` switched
+  from `tf::Executor` / `tf::Taskflow` to `asio::thread_pool` +
+  `asio::post` for the caller-side driver.
+
+### Perf (bench_neograph on reference Linux hardware)
+
+- `seq` engine overhead: ~28µs → ~47µs per call. The single-thread
+  coroutine + `run_sync` hop costs ~20µs; under the 60µs CI ceiling
+  but up from 2.0.
+- `par` engine overhead (5-worker fan-out + summarizer, trivial CPU
+  work): ~154µs → ~115µs per call. `make_parallel_group` on a
+  single-thread io_context dispatches cheaper than Taskflow's
+  scheduler for small work items.
+
+### Migration
+
+- No action needed if your nodes override `execute()` / `execute_async()`
+  and don't emit `Command` / `Send`.
+- If you override sync `execute_full` to emit `Command` / `Send`:
+  no change required — the 3.0 async-path default now calls your
+  sync override directly. `Command.goto_node` routing works via
+  sync and async entry points alike.
+- If you override `execute_async` (async-native I/O) AND want
+  `Command` / `Send`: override `execute_full_async` directly and
+  assemble `NodeResult` there. Overriding only `execute_async`
+  silently drops `Command` / `Send` because the default
+  `execute_full_async` now routes through sync `execute_full`, not
+  async `execute_async`.
+- If you relied on Taskflow's process-wide pool for CPU parallel
+  fan-out via `engine->run()`: call `engine->set_worker_count(N)`
+  once after compile(), or drive the engine via `run_async()` on
+  your own multi-threaded `asio::thread_pool` / io_context.
+
+---
+
 ## [2.0.0] — 2026-04-22
 
 First public release with the Stage 3 async API. This is a breaking

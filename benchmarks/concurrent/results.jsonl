@@ -1,4 +1,4 @@
-{"profile": "2:1g", "status": "ok", "engine": "neograph", "mode": "threadpool", "concurrency": 10, "total_wall_ms": 0, "p50_us": 4, "p95_us": 9, "p99_us": 9, "ok": 10, "err": 0, "peak_rss_kb": 4480}
+{"profile": "2:1g", "status": "ok", "engine": "neograph", "mode": "threadpool", "concurrency": 10, "total_wall_ms": 0, "p50_us": 43, "p95_us": 94, "p99_us": 94, "ok": 10, "err": 0, "peak_rss_kb": 4736}
 {"profile": "2:1g", "status": "ok", "engine": "langgraph", "mode": "asyncio", "concurrency": 10, "total_wall_ms": 19, "p50_us": 15306, "p95_us": 17171, "p99_us": 17171, "ok": 10, "err": 0, "peak_rss_kb": 59004}
 {"profile": "2:1g", "status": "ok", "engine": "langgraph", "mode": "mp-pool-7", "concurrency": 10, "total_wall_ms": 56, "p50_us": 5518, "p95_us": 7250, "p99_us": 7250, "ok": 10, "err": 0, "peak_rss_kb": 61180}
 {"profile": "2:1g", "status": "ok", "engine": "haystack", "mode": "asyncio", "concurrency": 10, "total_wall_ms": 5, "p50_us": 2701, "p95_us": 4276, "p99_us": 4276, "ok": 10, "err": 0, "peak_rss_kb": 74784}
@@ -9,7 +9,7 @@
 {"profile": "2:1g", "status": "ok", "engine": "llamaindex", "mode": "mp-pool-7", "concurrency": 10, "total_wall_ms": 86, "p50_us": 0, "p95_us": 0, "p99_us": 0, "ok": 0, "err": 10, "peak_rss_kb": 105388}
 {"profile": "2:1g", "status": "ok", "engine": "autogen", "mode": "asyncio", "concurrency": 10, "total_wall_ms": 37, "p50_us": 34300, "p95_us": 36924, "p99_us": 36924, "ok": 10, "err": 0, "peak_rss_kb": 48036}
 {"profile": "2:1g", "status": "ok", "engine": "autogen", "mode": "mp-pool-7", "concurrency": 10, "total_wall_ms": 77, "p50_us": 12851, "p95_us": 15080, "p99_us": 15080, "ok": 10, "err": 0, "peak_rss_kb": 49768}
-{"profile": "2:1g", "status": "ok", "engine": "neograph", "mode": "threadpool", "concurrency": 100, "total_wall_ms": 0, "p50_us": 3, "p95_us": 9, "p99_us": 40, "ok": 100, "err": 0, "peak_rss_kb": 4352}
+{"profile": "2:1g", "status": "ok", "engine": "neograph", "mode": "threadpool", "concurrency": 100, "total_wall_ms": 2, "p50_us": 44, "p95_us": 61, "p99_us": 89, "ok": 100, "err": 0, "peak_rss_kb": 4608}
 {"profile": "2:1g", "status": "ok", "engine": "langgraph", "mode": "asyncio", "concurrency": 100, "total_wall_ms": 130, "p50_us": 102749, "p95_us": 114933, "p99_us": 116682, "ok": 100, "err": 0, "peak_rss_kb": 62452}
 {"profile": "2:1g", "status": "ok", "engine": "langgraph", "mode": "mp-pool-7", "concurrency": 100, "total_wall_ms": 110, "p50_us": 843, "p95_us": 5044, "p99_us": 44659, "ok": 100, "err": 0, "peak_rss_kb": 61388}
 {"profile": "2:1g", "status": "ok", "engine": "haystack", "mode": "asyncio", "concurrency": 100, "total_wall_ms": 35, "p50_us": 19622, "p95_us": 31315, "p99_us": 33008, "ok": 100, "err": 0, "peak_rss_kb": 75952}
@@ -20,7 +20,7 @@
 {"profile": "2:1g", "status": "ok", "engine": "llamaindex", "mode": "mp-pool-7", "concurrency": 100, "total_wall_ms": 156, "p50_us": 0, "p95_us": 0, "p99_us": 0, "ok": 0, "err": 100, "peak_rss_kb": 104872}
 {"profile": "2:1g", "status": "ok", "engine": "autogen", "mode": "asyncio", "concurrency": 100, "total_wall_ms": 389, "p50_us": 356085, "p95_us": 384476, "p99_us": 388543, "ok": 100, "err": 0, "peak_rss_kb": 56400}
 {"profile": "2:1g", "status": "ok", "engine": "autogen", "mode": "mp-pool-7", "concurrency": 100, "total_wall_ms": 265, "p50_us": 4794, "p95_us": 73957, "p99_us": 77618, "ok": 100, "err": 0, "peak_rss_kb": 49956}
-{"profile": "2:1g", "status": "ok", "engine": "neograph", "mode": "threadpool", "concurrency": 1000, "total_wall_ms": 0, "p50_us": 3, "p95_us": 3, "p99_us": 11, "ok": 1000, "err": 0, "peak_rss_kb": 4736}
+{"profile": "2:1g", "status": "ok", "engine": "neograph", "mode": "threadpool", "concurrency": 1000, "total_wall_ms": 25, "p50_us": 51, "p95_us": 69, "p99_us": 4054, "ok": 1000, "err": 0, "peak_rss_kb": 4736}
 {"profile": "2:1g", "status": "ok", "engine": "langgraph", "mode": "asyncio", "concurrency": 1000, "total_wall_ms": 1394, "p50_us": 1135913, "p95_us": 1294958, "p99_us": 1310244, "ok": 1000, "err": 0, "peak_rss_kb": 95964}
 {"profile": "2:1g", "status": "ok", "engine": "langgraph", "mode": "mp-pool-7", "concurrency": 1000, "total_wall_ms": 483, "p50_us": 854, "p95_us": 1455, "p99_us": 73126, "ok": 1000, "err": 0, "peak_rss_kb": 61780}
 {"profile": "2:1g", "status": "ok", "engine": "haystack", "mode": "asyncio", "concurrency": 1000, "total_wall_ms": 272, "p50_us": 185345, "p95_us": 247941, "p99_us": 256622, "ok": 1000, "err": 0, "peak_rss_kb": 79908}
@@ -31,7 +31,7 @@
 {"profile": "2:1g", "status": "ok", "engine": "llamaindex", "mode": "mp-pool-7", "concurrency": 1000, "total_wall_ms": 472, "p50_us": 0, "p95_us": 0, "p99_us": 0, "ok": 0, "err": 1000, "peak_rss_kb": 105348}
 {"profile": "2:1g", "status": "ok", "engine": "autogen", "mode": "asyncio", "concurrency": 1000, "total_wall_ms": 5648, "p50_us": 5228638, "p95_us": 5603818, "p99_us": 5628808, "ok": 1000, "err": 0, "peak_rss_kb": 137792}
 {"profile": "2:1g", "status": "ok", "engine": "autogen", "mode": "mp-pool-7", "concurrency": 1000, "total_wall_ms": 2892, "p50_us": 5246, "p95_us": 79231, "p99_us": 83548, "ok": 1000, "err": 0, "peak_rss_kb": 50200}
-{"profile": "2:1g", "status": "ok", "engine": "neograph", "mode": "threadpool", "concurrency": 10000, "total_wall_ms": 7, "p50_us": 3, "p95_us": 5, "p99_us": 9, "ok": 10000, "err": 0, "peak_rss_kb": 7680}
+{"profile": "2:1g", "status": "ok", "engine": "neograph", "mode": "threadpool", "concurrency": 10000, "total_wall_ms": 229, "p50_us": 42, "p95_us": 60, "p99_us": 8058, "ok": 10000, "err": 0, "peak_rss_kb": 5888}
 {"profile": "2:1g", "status": "ok", "engine": "langgraph", "mode": "asyncio", "concurrency": 10000, "total_wall_ms": 22274, "p50_us": 18849343, "p95_us": 21288414, "p99_us": 21474097, "ok": 10000, "err": 0, "peak_rss_kb": 426188}
 {"profile": "2:1g", "status": "ok", "engine": "langgraph", "mode": "mp-pool-7", "concurrency": 10000, "total_wall_ms": 4587, "p50_us": 838, "p95_us": 1592, "p99_us": 73655, "ok": 10000, "err": 0, "peak_rss_kb": 61476}
 {"profile": "2:1g", "status": "ok", "engine": "haystack", "mode": "asyncio", "concurrency": 10000, "total_wall_ms": 2953, "p50_us": 1570720, "p95_us": 2732883, "p99_us": 2833811, "ok": 10000, "err": 0, "peak_rss_kb": 133904}
@@ -42,7 +42,7 @@
 {"profile": "2:1g", "status": "ok", "engine": "llamaindex", "mode": "mp-pool-7", "concurrency": 10000, "total_wall_ms": 3351, "p50_us": 0, "p95_us": 0, "p99_us": 0, "ok": 0, "err": 10000, "peak_rss_kb": 105408}
 {"profile": "2:1g", "status": "ok", "engine": "autogen", "mode": "asyncio", "concurrency": 10000, "total_wall_ms": 65341, "p50_us": 60946577, "p95_us": 64842890, "p99_us": 65117523, "ok": 10000, "err": 0, "peak_rss_kb": 940660}
 {"profile": "2:1g", "status": "ok", "engine": "autogen", "mode": "mp-pool-7", "concurrency": 10000, "total_wall_ms": 22931, "p50_us": 4277, "p95_us": 76871, "p99_us": 80692, "ok": 10000, "err": 0, "peak_rss_kb": 49960}
-{"profile": "1:512m", "status": "ok", "engine": "neograph", "mode": "threadpool", "concurrency": 10, "total_wall_ms": 0, "p50_us": 3, "p95_us": 14, "p99_us": 14, "ok": 10, "err": 0, "peak_rss_kb": 4352}
+{"profile": "1:512m", "status": "ok", "engine": "neograph", "mode": "threadpool", "concurrency": 10, "total_wall_ms": 0, "p50_us": 43, "p95_us": 98, "p99_us": 98, "ok": 10, "err": 0, "peak_rss_kb": 4736}
 {"profile": "1:512m", "status": "ok", "engine": "langgraph", "mode": "asyncio", "concurrency": 10, "total_wall_ms": 18, "p50_us": 14429, "p95_us": 16257, "p99_us": 16257, "ok": 10, "err": 0, "peak_rss_kb": 59084}
 {"profile": "1:512m", "status": "ok", "engine": "langgraph", "mode": "mp-pool-7", "concurrency": 10, "total_wall_ms": 107, "p50_us": 4289, "p95_us": 6533, "p99_us": 6533, "ok": 10, "err": 0, "peak_rss_kb": 61372}
 {"profile": "1:512m", "status": "ok", "engine": "haystack", "mode": "asyncio", "concurrency": 10, "total_wall_ms": 6, "p50_us": 3328, "p95_us": 4990, "p99_us": 4990, "ok": 10, "err": 0, "peak_rss_kb": 75116}
@@ -53,7 +53,7 @@
 {"profile": "1:512m", "status": "ok", "engine": "llamaindex", "mode": "mp-pool-7", "concurrency": 10, "total_wall_ms": 265, "p50_us": 0, "p95_us": 0, "p99_us": 0, "ok": 0, "err": 10, "peak_rss_kb": 105496}
 {"profile": "1:512m", "status": "ok", "engine": "autogen", "mode": "asyncio", "concurrency": 10, "total_wall_ms": 37, "p50_us": 34298, "p95_us": 36799, "p99_us": 36799, "ok": 10, "err": 0, "peak_rss_kb": 47968}
 {"profile": "1:512m", "status": "ok", "engine": "autogen", "mode": "mp-pool-7", "concurrency": 10, "total_wall_ms": 152, "p50_us": 25497, "p95_us": 115001, "p99_us": 115001, "ok": 10, "err": 0, "peak_rss_kb": 50188}
-{"profile": "1:512m", "status": "ok", "engine": "neograph", "mode": "threadpool", "concurrency": 100, "total_wall_ms": 0, "p50_us": 3, "p95_us": 10, "p99_us": 33, "ok": 100, "err": 0, "peak_rss_kb": 4352}
+{"profile": "1:512m", "status": "ok", "engine": "neograph", "mode": "threadpool", "concurrency": 100, "total_wall_ms": 4, "p50_us": 41, "p95_us": 68, "p99_us": 548, "ok": 100, "err": 0, "peak_rss_kb": 4608}
 {"profile": "1:512m", "status": "ok", "engine": "langgraph", "mode": "asyncio", "concurrency": 100, "total_wall_ms": 123, "p50_us": 95554, "p95_us": 118460, "p99_us": 120202, "ok": 100, "err": 0, "peak_rss_kb": 62456}
 {"profile": "1:512m", "status": "ok", "engine": "langgraph", "mode": "mp-pool-7", "concurrency": 100, "total_wall_ms": 189, "p50_us": 868, "p95_us": 85291, "p99_us": 89003, "ok": 100, "err": 0, "peak_rss_kb": 61764}
 {"profile": "1:512m", "status": "ok", "engine": "haystack", "mode": "asyncio", "concurrency": 100, "total_wall_ms": 34, "p50_us": 18702, "p95_us": 29836, "p99_us": 31600, "ok": 100, "err": 0, "peak_rss_kb": 75352}
@@ -64,7 +64,7 @@
 {"profile": "1:512m", "status": "ok", "engine": "llamaindex", "mode": "mp-pool-7", "concurrency": 100, "total_wall_ms": 267, "p50_us": 0, "p95_us": 0, "p99_us": 0, "ok": 0, "err": 100, "peak_rss_kb": 104912}
 {"profile": "1:512m", "status": "ok", "engine": "autogen", "mode": "asyncio", "concurrency": 100, "total_wall_ms": 379, "p50_us": 345143, "p95_us": 374553, "p99_us": 378519, "ok": 100, "err": 0, "peak_rss_kb": 56232}
 {"profile": "1:512m", "status": "ok", "engine": "autogen", "mode": "mp-pool-7", "concurrency": 100, "total_wall_ms": 591, "p50_us": 4750, "p95_us": 92808, "p99_us": 154365, "ok": 100, "err": 0, "peak_rss_kb": 50024}
-{"profile": "1:512m", "status": "ok", "engine": "neograph", "mode": "threadpool", "concurrency": 1000, "total_wall_ms": 0, "p50_us": 3, "p95_us": 4, "p99_us": 10, "ok": 1000, "err": 0, "peak_rss_kb": 4736}
+{"profile": "1:512m", "status": "ok", "engine": "neograph", "mode": "threadpool", "concurrency": 1000, "total_wall_ms": 44, "p50_us": 41, "p95_us": 64, "p99_us": 2415, "ok": 1000, "err": 0, "peak_rss_kb": 4864}
 {"profile": "1:512m", "status": "ok", "engine": "langgraph", "mode": "asyncio", "concurrency": 1000, "total_wall_ms": 1312, "p50_us": 1072849, "p95_us": 1258404, "p99_us": 1273008, "ok": 1000, "err": 0, "peak_rss_kb": 95424}
 {"profile": "1:512m", "status": "ok", "engine": "langgraph", "mode": "mp-pool-7", "concurrency": 1000, "total_wall_ms": 1043, "p50_us": 897, "p95_us": 85228, "p99_us": 89917, "ok": 1000, "err": 0, "peak_rss_kb": 61448}
 {"profile": "1:512m", "status": "ok", "engine": "haystack", "mode": "asyncio", "concurrency": 1000, "total_wall_ms": 294, "p50_us": 175313, "p95_us": 263287, "p99_us": 271582, "ok": 1000, "err": 0, "peak_rss_kb": 80056}
@@ -75,7 +75,7 @@
 {"profile": "1:512m", "status": "ok", "engine": "llamaindex", "mode": "mp-pool-7", "concurrency": 1000, "total_wall_ms": 981, "p50_us": 0, "p95_us": 0, "p99_us": 0, "ok": 0, "err": 1000, "peak_rss_kb": 105044}
 {"profile": "1:512m", "status": "ok", "engine": "autogen", "mode": "asyncio", "concurrency": 1000, "total_wall_ms": 5173, "p50_us": 4798198, "p95_us": 5131091, "p99_us": 5154063, "ok": 1000, "err": 0, "peak_rss_kb": 137932}
 {"profile": "1:512m", "status": "ok", "engine": "autogen", "mode": "mp-pool-7", "concurrency": 1000, "total_wall_ms": 4997, "p50_us": 4785, "p95_us": 93236, "p99_us": 96233, "ok": 1000, "err": 0, "peak_rss_kb": 50120}
-{"profile": "1:512m", "status": "ok", "engine": "neograph", "mode": "threadpool", "concurrency": 10000, "total_wall_ms": 6, "p50_us": 3, "p95_us": 5, "p99_us": 7, "ok": 10000, "err": 0, "peak_rss_kb": 7808}
+{"profile": "1:512m", "status": "ok", "engine": "neograph", "mode": "threadpool", "concurrency": 10000, "total_wall_ms": 443, "p50_us": 41, "p95_us": 55, "p99_us": 16723, "ok": 10000, "err": 0, "peak_rss_kb": 5888}
 {"profile": "1:512m", "status": "ok", "engine": "langgraph", "mode": "asyncio", "concurrency": 10000, "total_wall_ms": 23403, "p50_us": 20226821, "p95_us": 22845404, "p99_us": 23026918, "ok": 10000, "err": 0, "peak_rss_kb": 426240}
 {"profile": "1:512m", "status": "ok", "engine": "langgraph", "mode": "mp-pool-7", "concurrency": 10000, "total_wall_ms": 7988, "p50_us": 737, "p95_us": 76338, "p99_us": 88354, "ok": 10000, "err": 0, "peak_rss_kb": 61784}
 {"profile": "1:512m", "status": "ok", "engine": "haystack", "mode": "asyncio", "concurrency": 10000, "total_wall_ms": 3060, "p50_us": 1732638, "p95_us": 2923052, "p99_us": 2935384, "ok": 10000, "err": 0, "peak_rss_kb": 133824}

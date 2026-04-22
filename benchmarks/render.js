@@ -23,11 +23,16 @@ const COLORS = {
 
 const FRAMEWORKS = ['NeoGraph', 'Haystack', 'pydantic-graph', 'LangGraph', 'LlamaIndex', 'AutoGen'];
 
-const SEQ_US = [20.65, 150.70, 240.34, 645.30, 1842.58, 3226.79];
-const PAR_US = [150.70, 293.60, 308.32, 2225.12, 4781.24, 7389.42];
+// NeoGraph numbers are 3.0 (feat/taskflow-removal, commit b95be11):
+// the sync super-step loop now goes through run_sync(execute_graph_async),
+// so seq ~46µs reflects one run_sync io_context per call. Other
+// framework numbers are carried over from the 2.0-era measurement
+// (2026-04-19) since those runtimes have not been re-baselined.
+const SEQ_US = [46.10, 150.70, 240.34, 671.18, 1842.58, 3226.79];
+const PAR_US = [114.40, 293.60, 308.32, 2396.30, 4781.24, 7389.42];
 
 // Whole-process peak RSS (MB) — full script / binary run:
-const RSS_MB = [4.9, 78.3, 34.9, 58.9, 101.5, 52.4];
+const RSS_MB = [5.5, 78.3, 34.9, 58.9, 101.5, 52.4];
 
 function seriesFor(values, unit) {
     return FRAMEWORKS.map((fw, i) => ({
@@ -52,7 +57,7 @@ function renderLatency(canvas) {
         backgroundColor: '#ffffff',
         title: {
             text: 'Per-iteration engine overhead (µs, log scale) — lower is better',
-            subtext: 'NeoGraph: 20.65 µs seq / 150.7 µs par.  Next-fastest Python (Haystack): 7.3× / 1.9× slower.',
+            subtext: 'NeoGraph 3.0: 46.1 µs seq / 114.4 µs par.  Next-fastest Python (Haystack): 3.3× / 2.6× slower.',
             left: 'center',
             top: 24,
             itemGap: 12,
@@ -114,7 +119,7 @@ function renderRss(canvas) {
         backgroundColor: '#ffffff',
         title: {
             text: 'Peak resident memory (MB) — lower is better',
-            subtext: 'Full bench process (warm-up + seq + par). NeoGraph: 4.9 MB.  7–21× less than Python field.',
+            subtext: 'Full bench process (warm-up + seq + par). NeoGraph: 5.5 MB.  6–19× less than Python field.',
             left: 'center',
             top: 24,
             itemGap: 12,
@@ -189,7 +194,7 @@ ctx.fillStyle = '#6a737d';
 ctx.font = '11px sans-serif';
 ctx.textAlign = 'center';
 ctx.fillText(
-    '2026-04-19  ·  x86_64 Linux, g++ 13 (-O2), CPython 3.12.3  ·  langgraph 1.1.7, haystack-ai 2.27, pydantic-graph 1.84, llama-index 0.14, autogen-agentchat 0.7.5  ·  Reproduction: benchmarks/README.md',
+    'NeoGraph 2026-04-22 (3.0), Python field 2026-04-19  ·  x86_64 Linux, g++ 13 (-O2), CPython 3.12.3  ·  langgraph 1.1.9, haystack-ai 2.27, pydantic-graph 1.84, llama-index 0.14, autogen-agentchat 0.7.5  ·  Reproduction: benchmarks/README.md',
     w / 2, h - 10
 );
 

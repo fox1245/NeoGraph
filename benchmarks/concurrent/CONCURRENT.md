@@ -19,8 +19,8 @@ memory limits matching an SBC-class target, across six frameworks.
   - Profile **2 CPU / 1 GB** — the "comfortable SBC" target
 - **Concurrencies**: N ∈ {10, 100, 1000, 10000}
 - **Engines tested**:
-  - `neograph` — `tf::Executor` thread pool with `hardware_concurrency()` workers, each task invokes `engine->run()`.
-  - `langgraph-asyncio` / `langgraph-mp` — LangGraph 1.1.7 under `asyncio.gather` / `multiprocessing.Pool`.
+  - `neograph` (3.0) — caller-side `asio::thread_pool` with `hardware_concurrency()` workers dispatching `engine->run()`. The engine itself drives the super-step loop on a single-threaded `run_sync` by default; each invocation uses its own io_context, so scheduling is bounded by the caller pool, not the engine.
+  - `langgraph-asyncio` / `langgraph-mp` — LangGraph 1.1.9 under `asyncio.gather` / `multiprocessing.Pool`.
   - `haystack-asyncio` / `haystack-mp` — Haystack 2.27.0. Pipeline.run() is sync; asyncio mode wraps with `asyncio.to_thread`.
   - `pydantic-asyncio` / `pydantic-mp` — pydantic-graph 1.84.1, async-native.
   - `llamaindex-asyncio` / `llamaindex-mp` — LlamaIndex Workflow 0.14.20, one fresh Workflow per run (per-run event bus).
@@ -39,7 +39,7 @@ The charts track asyncio-mode results for all six engines. The mp
 bypasses the GIL across N worker processes but saturates at pool
 size, and the pattern is the same across every Python framework.
 
-### Raw numbers (1 CPU / 512 MB, 2026-04-19)
+### Raw numbers (1 CPU / 512 MB, NeoGraph 2026-04-22 on 3.0, Python field 2026-04-19)
 
 Full matrix including the 2 CPU / 1 GB profile is in
 [`results.jsonl`](results.jsonl). N=10,000 is the row that tells the
@@ -47,7 +47,7 @@ story most sharply:
 
 | N | Engine + mode | Wall | P50 | P99 | Peak RSS | OK / Err |
 |---|---------------|------|-----|-----|----------|---------|
-| **10,000** | **NeoGraph** | **6 ms** | **3 µs** | **7 µs** | **7.6 MB** | 10000 / 0 |
+| **10,000** | **NeoGraph 3.0** | **443 ms** | **41 µs** | **16.7 ms** | **5.9 MB** | 10000 / 0 |
 | 10,000 | LangGraph asyncio | 23.4 s | 20.2 s | **23.0 s** | 416.2 MB | 10000 / 0 |
 | 10,000 | LangGraph mp-pool-7 | 8.0 s | 737 µs | 88.4 ms | 60.3 MB | 10000 / 0 |
 | 10,000 | Haystack asyncio | 3.1 s | 1.7 s | 2.9 s | 130.7 MB | 10000 / 0 |
@@ -77,11 +77,13 @@ The full raw matrix for both profiles is
 
 ### Throughput: NeoGraph scales, every Python asyncio runtime plateaus
 
-NeoGraph's green curve climbs from ~10k req/s to ~1.67M req/s as
-concurrency grows — Taskflow's work-stealing scheduler amortizes
-per-task setup over the batch. Taskflow's executor uses every logical
-CPU, and the cgroup's CPU quota bounds wall time but not thread count,
-so short tasks interleave cleanly.
+NeoGraph's green curve stays in the 22-25K req/s range across the
+sweep while every Python asyncio curve degrades. The caller-side
+`asio::thread_pool` dispatches `engine->run()` calls across all
+available cores; each call then drives its own single-threaded
+super-step loop through `run_sync` — the cgroup's CPU quota bounds
+wall time but not thread count, so short tasks interleave cleanly
+across the caller pool.
 
 **Every Python asyncio curve plateaus or degrades.** The root cause is
 the same across LangGraph, Haystack, pydantic-graph, LlamaIndex, and
@@ -114,8 +116,9 @@ AutoGen) break much earlier — but all of them break.
 
 ### Memory: asyncio's RSS grows with held coroutine stacks
 
-- **NeoGraph** stays between 5–10 MB across the whole sweep. Tasks
-  return immediately; only the Taskflow pool is resident.
+- **NeoGraph 3.0** stays between 4.6–5.9 MB across the whole sweep.
+  Tasks return immediately; only the caller-side `asio::thread_pool`
+  and one io_context per in-flight `run()` are resident.
 - **mp-pool modes** stay near 60–80 MB across frameworks — the worker
   pool size dominates; tasks don't accumulate because they're
   dispatched and returned one-by-one.

@@ -55,6 +55,18 @@ public:
         append.push_back("done-by-" + name_);
         co_return std::vector<ChannelWrite>{ChannelWrite{"findings", append}};
     }
+
+    // 3.0: execute_full_async default bridges to sync execute_full
+    // (for Command/Send preservation), which would serialize this
+    // node's async timer under a fresh io_context per call. Override
+    // here to keep the non-blocking timer on the caller's executor —
+    // the contract documented on GraphNode::execute_full_async.
+    asio::awaitable<NodeResult>
+    execute_full_async(const GraphState& state) override {
+        auto writes = co_await execute_async(state);
+        co_return NodeResult{std::move(writes)};
+    }
+
     std::string get_name() const override { return name_; }
 };
 
