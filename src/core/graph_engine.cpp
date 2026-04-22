@@ -2,10 +2,15 @@
 #include <neograph/graph/loader.h>
 #include <neograph/graph/coordinator.h>
 
+#include <neograph/async/run_sync.h>
+
+#include <asio/thread_pool.hpp>
+
 #include <stdexcept>
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <thread>
 
 namespace neograph::graph {
 
@@ -49,13 +54,20 @@ std::unique_ptr<GraphEngine> GraphEngine::compile(
     // NodeExecutor owns retry + fan-out + Send invocation. Bind the
     // retry-policy lookup to this engine's per-node override map so
     // set_node_retry_policy continues to work after compile() returns.
+    // fan_out_pool defaults to nullptr — parallel branches then run
+    // on whichever executor drives the coroutine (single-threaded
+    // run_sync for sync run(), the caller's io_context for
+    // run_async). I/O-bound fan-out still overlaps via co_await
+    // suspension on a single thread; CPU-bound fan-out serializes
+    // unless the user opts into a pool via set_worker_count.
     GraphEngine* raw_engine = engine.get();
     engine->executor_ = std::make_unique<NodeExecutor>(
         engine->nodes_,
         engine->channel_defs_,
         [raw_engine](const std::string& node_name) {
             return raw_engine->get_retry_policy(node_name);
-        });
+        },
+        nullptr);
 
     engine->checkpoint_store_ = std::move(store);
     return engine;
@@ -83,6 +95,24 @@ void GraphEngine::set_retry_policy(const RetryPolicy& policy) {
 
 void GraphEngine::set_node_retry_policy(const std::string& node_name, const RetryPolicy& policy) {
     node_retry_policies_[node_name] = policy;
+}
+
+void GraphEngine::set_worker_count(std::size_t n) {
+    if (n < 1) n = 1;
+    // thread_pool is not resizable — rebuild. Dtor joins the old
+    // pool's workers (none, if this is the first enable), so callers
+    // must not resize across an in-flight run() (documented on the
+    // declaration). n == 1 is a no-op path: we still wire a 1-worker
+    // pool so executor_ keeps the same contract, but fan-out gains
+    // nothing over the default single-thread co_await dispatch.
+    pool_ = std::make_unique<asio::thread_pool>(n);
+    GraphEngine* self = this;
+    executor_ = std::make_unique<NodeExecutor>(
+        nodes_, channel_defs_,
+        [self](const std::string& node_name) {
+            return self->get_retry_policy(node_name);
+        },
+        pool_.get());
 }
 
 RetryPolicy GraphEngine::get_retry_policy(const std::string& node_name) const {
@@ -221,23 +251,23 @@ void GraphEngine::apply_input(GraphState& state, const json& input) const {
 // =========================================================================
 
 RunResult GraphEngine::run(const RunConfig& config) {
-    return execute_graph(config, nullptr);
+    // Drive the async super-step loop on a single-threaded io_context
+    // owned by the caller's stack — the coroutine machinery adds
+    // roughly a promise/future per call, so we skip the extra
+    // thread-pool hop. Parallel fan-out inside run_parallel_async /
+    // run_sends_async still uses pool_ explicitly for CPU
+    // parallelism (see NodeExecutor::fan_out_pool_).
+    return neograph::async::run_sync(execute_graph_async(config, nullptr));
 }
 
 asio::awaitable<RunResult>
 GraphEngine::run_async(const RunConfig& config) {
-    // Stage 3 / Sem 3.6 internal step 3: wired to the async super-
-    // step loop. Single-node steps and checkpoint I/O all flow through
-    // co_await; only parallel fan-out and Send dispatch still block
-    // the io_context (Sem 3.7 will fix those). For linear/conditional
-    // graphs this means real interleaving across concurrent runs on
-    // a shared io_context.
     co_return co_await execute_graph_async(config, nullptr);
 }
 
 RunResult GraphEngine::run_stream(const RunConfig& config,
                                    const GraphStreamCallback& cb) {
-    return execute_graph(config, cb);
+    return neograph::async::run_sync(execute_graph_async(config, cb));
 }
 
 asio::awaitable<RunResult>
@@ -249,30 +279,7 @@ GraphEngine::run_stream_async(const RunConfig& config,
 RunResult GraphEngine::resume(const std::string& thread_id,
                                const json& resume_value,
                                const GraphStreamCallback& cb) {
-    if (!checkpoint_store_)
-        throw std::runtime_error("Cannot resume: no checkpoint store configured");
-
-    auto cp_opt = checkpoint_store_->load_latest(thread_id);
-    if (!cp_opt)
-        throw std::runtime_error("No checkpoint found for thread: " + thread_id);
-
-    // "Completed to END" means the original run finished cleanly — nothing
-    // left to resume. Under multi-node checkpoints this is encoded as
-    // next_nodes == {END} (a single-element vector), so check for exactly
-    // that shape.
-    if (cp_opt->next_nodes.size() == 1 &&
-        cp_opt->next_nodes[0] == std::string(END_NODE)) {
-        RunResult result;
-        result.output = cp_opt->channel_values;
-        result.checkpoint_id = cp_opt->id;
-        return result;
-    }
-
-    RunConfig config;
-    config.thread_id = thread_id;
-    config.max_steps = 50;
-
-    return execute_graph(config, cb, cp_opt->next_nodes, resume_value);
+    return neograph::async::run_sync(resume_async(thread_id, resume_value, cb));
 }
 
 asio::awaitable<RunResult>
@@ -306,294 +313,18 @@ GraphEngine::resume_async(const std::string& thread_id,
 }
 
 // =========================================================================
-// execute_graph(): super-step loop
+// execute_graph_async — super-step loop (coroutine)
+// =========================================================================
 //   Owns: state init, interrupt_before/after gates, resume load,
 //         super-step commit, routing via Scheduler.
 //   Delegates: node invocation (single/parallel/Send) → NodeExecutor,
 //              checkpoint lifecycle → CheckpointCoordinator,
 //              routing decisions → Scheduler.
-// =========================================================================
-
-RunResult GraphEngine::execute_graph(const RunConfig& config,
-                                      const GraphStreamCallback& cb,
-                                      const std::vector<std::string>& resume_from,
-                                      const json& resume_value) {
-    const bool is_resume = !resume_from.empty();
-    // 1. Initialize state
-    GraphState state;
-    init_state(state);
-
-    StreamMode stream_mode = config.stream_mode;
-    CheckpointCoordinator coord(checkpoint_store_, config.thread_id);
-
-    std::string last_checkpoint_id;
-    int start_step = 0;
-
-    // Replay map for crash / partial-failure recovery: task_id -> NodeResult
-    // that was already recorded as a pending write under last_checkpoint_id.
-    // Tasks whose id hits this map are skipped during execution and their
-    // results are applied exactly as originally recorded.
-    std::unordered_map<std::string, NodeResult> replay_results;
-
-    // Per-run barrier accumulation. Scheduler mutates this across
-    // super-steps so partial upstream-signal sets add up over time.
-    // Since schema v2 the map is persisted into every checkpoint and
-    // restored below on resume, so an interrupt mid-accumulation no
-    // longer loses upstream signals.
-    BarrierState barrier_state;
-
-    if (is_resume) {
-        auto ctx = coord.load_for_resume();
-        if (ctx.have_cp) {
-            state.restore(ctx.channel_values);
-            last_checkpoint_id = ctx.checkpoint_id;
-            start_step         = ctx.start_step;
-            replay_results     = std::move(ctx.replay_results);
-            barrier_state      = std::move(ctx.barrier_state);
-
-            if (!resume_value.is_null()) {
-                json resume_msg = {
-                    {"role", "user"},
-                    {"content", resume_value.is_string()
-                        ? resume_value.get<std::string>()
-                        : resume_value.dump()}
-                };
-                state.write("messages", json::array({resume_msg}));
-            }
-        }
-    } else {
-        apply_input(state, config.input);
-    }
-
-    // 2. Determine initial ready set
-    std::vector<std::string> ready =
-        is_resume ? resume_from : scheduler_->plan_start_step();
-
-    // 3. Super-step loop
-    std::vector<std::string> trace;
-    bool hit_end = false;
-
-    // Pending Send requests (dynamic fan-out)
-    std::vector<Send> pending_sends;
-
-    for (int step = start_step; step < config.max_steps + start_step; ++step) {
-        if (ready.empty() || hit_end) break;
-
-        // --- interrupt_before check (compile-time) ---
-        bool is_resume_entry = (is_resume && step == start_step);
-        if (!is_resume_entry) {
-            for (const auto& node_name : ready) {
-                if (interrupt_before_.count(node_name) && coord.enabled()) {
-
-                    // The interrupt happens before this node runs. Resume
-                    // must re-enter the WHOLE super-step (this node PLUS
-                    // every sibling that was also ready) — saving just
-                    // this one would silently drop the siblings.
-                    auto cp_id = coord.save_super_step(state,
-                        node_name, ready,
-                        CheckpointPhase::Before, step, last_checkpoint_id,
-                        barrier_state);
-
-                    RunResult result;
-                    result.output          = state.serialize();
-                    result.interrupted     = true;
-                    result.interrupt_node  = node_name;
-                    result.interrupt_value = json{{"message", "Interrupt before node: " + node_name}};
-                    result.checkpoint_id   = cp_id;
-                    result.execution_trace = std::move(trace);
-
-                    if (cb && has_mode(stream_mode, StreamMode::EVENTS))
-                        cb(GraphEvent{GraphEvent::Type::INTERRUPT, node_name,
-                            json{{"phase", "before"}, {"checkpoint_id", cp_id}}});
-                    return result;
-                }
-            }
-        }
-
-        // --- Execute ready nodes ---
-        pending_sends.clear();
-        std::vector<NodeResult> step_results;
-
-        try {
-            if (ready.size() == 1) {
-                step_results.push_back(executor_->run_one(
-                    ready[0], step, state, replay_results,
-                    coord, last_checkpoint_id, barrier_state,
-                    trace, cb, stream_mode));
-            } else {
-                step_results = executor_->run_parallel(
-                    ready, step, state, replay_results,
-                    coord, last_checkpoint_id, barrier_state,
-                    trace, cb, stream_mode);
-            }
-        } catch (const NodeInterrupt& ni) {
-            RunResult result;
-            result.output          = state.serialize();
-            result.interrupted     = true;
-            result.interrupt_node  = ni.reason();
-            result.interrupt_value = json{{"reason", ni.reason()}, {"type", "NodeInterrupt"}};
-            result.execution_trace = std::move(trace);
-            // The NodeInterrupt cp was already written by execute_single
-            // above; find it by loading the most recent entry for this
-            // thread so the RunResult surfaces its id to the caller.
-            if (coord.enabled()) {
-                auto cp_opt = coord.store()->load_latest(coord.thread_id());
-                if (cp_opt) result.checkpoint_id = cp_opt->id;
-            }
-            return result;
-        }
-
-        // --- Collect Send requests (pending_sends are drained below).
-        // Command.goto_node is consumed later by the Scheduler; we
-        // only need to surface Sends here. ---
-        for (auto& nr : step_results) {
-            for (auto& s : nr.sends) {
-                pending_sends.push_back(std::move(s));
-            }
-        }
-
-        // --- Execute pending Sends BEFORE interrupt_after ---
-        // Rationale: interrupt_after semantically means "pause after
-        // this node's super-step has fully completed", which includes
-        // any dynamic fan-out it emitted. If we gate before Sends and
-        // a node with interrupt_after emits them, the interrupt cp
-        // captures pre-Sends state, resume's start_step advances past
-        // this super-step, and the Sends vanish permanently.
-        executor_->run_sends(pending_sends, step, state, replay_results,
-                             coord, last_checkpoint_id,
-                             trace, cb, stream_mode);
-
-        // --- Stream VALUES mode: emit full state after each step
-        // (post-Sends so the emitted snapshot matches what will land
-        // in the super-step's committed checkpoint). ---
-        if (cb && has_mode(stream_mode, StreamMode::VALUES)) {
-            cb(GraphEvent{GraphEvent::Type::CHANNEL_WRITE, "__state__",
-                          state.serialize()});
-        }
-
-        // --- interrupt_after check ---
-        for (const auto& node_name : ready) {
-            if (interrupt_after_.count(node_name) && coord.enabled()) {
-
-                // Every node in `ready` has already executed by this
-                // point, so resume must re-enter with the union of all
-                // their successors — not just the interrupted node's.
-                std::set<std::string> union_next;
-                for (const auto& rn : ready) {
-                    for (const auto& nx : scheduler_->resolve_next_nodes(rn, state)) {
-                        union_next.insert(nx);
-                    }
-                }
-                std::vector<std::string> nexts(union_next.begin(), union_next.end());
-                if (nexts.empty()) nexts.push_back(std::string(END_NODE));
-
-                auto cp_id = coord.save_super_step(state,
-                    node_name, nexts, CheckpointPhase::After, step, last_checkpoint_id,
-                    barrier_state);
-
-                RunResult result;
-                result.output          = state.serialize();
-                result.interrupted     = true;
-                result.interrupt_node  = node_name;
-                result.interrupt_value = json{{"message", "Interrupt after node: " + node_name}};
-                result.checkpoint_id   = cp_id;
-                result.execution_trace = std::move(trace);
-
-                if (cb && has_mode(stream_mode, StreamMode::EVENTS))
-                    cb(GraphEvent{GraphEvent::Type::INTERRUPT, node_name,
-                        json{{"phase", "after"}, {"checkpoint_id", cp_id}}});
-                return result;
-            }
-        }
-
-        // --- Plan next super-step via Scheduler ---
-        // Scheduler internally pairs ready[i] ↔ step_results[i],
-        // extracts Command.goto_node, and applies barrier gating
-        // against `barrier_state` (shared across super-steps).
-        auto plan = scheduler_->plan_next_step(
-            ready, step_results, state, barrier_state);
-        hit_end = hit_end || plan.hit_end;
-        ready  = std::move(plan.ready);
-
-        // --- Debug: emit routing decision ---
-        if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
-            if (plan.winning_command_goto) {
-                cb(GraphEvent{GraphEvent::Type::NODE_START, "__routing__",
-                              json{{"command_goto", *plan.winning_command_goto}}});
-            }
-            if (!ready.empty()) {
-                json next_nodes = json::array();
-                for (const auto& n : ready) next_nodes.push_back(n);
-                cb(GraphEvent{GraphEvent::Type::NODE_START, "__routing__",
-                              json{{"next_nodes", next_nodes}, {"step", step}}});
-            }
-        }
-
-        // --- Checkpoint after each super-step ---
-        if (coord.enabled()) {
-            // Persist the ENTIRE ready set — under signal dispatch multiple
-            // nodes can be simultaneously scheduled, and resume must pick
-            // up all of them (not just the first) or sibling branches are
-            // silently dropped across a crash.
-            std::vector<std::string> next_nodes =
-                ready.empty() ? std::vector<std::string>{std::string(END_NODE)}
-                              : ready;
-            const std::string parent_cp_id = last_checkpoint_id;
-            auto cp_id = coord.save_super_step(state,
-                trace.back(), next_nodes, CheckpointPhase::Completed, step, parent_cp_id,
-                barrier_state);
-            last_checkpoint_id = cp_id;
-
-            // Pending writes for the just-committed super-step are now
-            // superseded by the fresh checkpoint — safe to discard.
-            // Ordering matters: clear ONLY after save_super_step returned,
-            // so a crash between save and clear is harmless (stale writes
-            // will simply be ignored once a newer cp exists).
-            coord.clear_pending_writes(parent_cp_id);
-
-            // Replay map is scoped to the parent cp we just superseded;
-            // subsequent steps start with a clean slate.
-            replay_results.clear();
-        }
-    }
-
-    // 4. Build result
-    RunResult result;
-    result.output          = state.serialize();
-    result.execution_trace = std::move(trace);
-    if (!last_checkpoint_id.empty()) {
-        result.checkpoint_id = last_checkpoint_id;
-    }
-
-    auto messages = state.get_messages();
-    if (!messages.empty() && messages.back().role == "assistant") {
-        result.output["final_response"] = messages.back().content;
-    }
-
-    return result;
-}
-
-// =========================================================================
-// execute_graph_async — coroutine peer (Sem 3.6 internal step 3)
-// =========================================================================
 //
-// This is a near-mirror of execute_graph above. Diff vs the sync
-// version:
-//   * run_one     → co_await run_one_async
-//   * coord.save_super_step / clear_pending_writes → _async via co_await
-//   * run_parallel stays sync (Sem 3.7 will migrate it)
-//   * run_sends stays sync (also Sem 3.7-adjacent)
-//   * NodeInterrupt catch block keeps the sync coord.store()->load_latest
-//     call — load_latest itself is fine inside catch (only co_await is
-//     forbidden there per the GCC 13 ICE).
-//
-// The duplication is deliberate: trying to share the body via a
-// template or strategy object would either lose the coroutine
-// suspension points or force the sync path through run_sync. Both
-// trade off real value for less code; explicit twins are the
-// honest tradeoff until Sem 3.7 lets the parallel path also go
-// async, at which point the sync execute_graph becomes a thin
-// `return run_sync(execute_graph_async(...))` wrapper.
+// Sync entry points (run / run_stream / resume) drive this through
+// `block_on_pool`, which co_spawns onto the engine's thread_pool
+// and blocks via std::future. Async callers on their own executor
+// co_await it directly.
 
 asio::awaitable<RunResult>
 GraphEngine::execute_graph_async(const RunConfig& config,

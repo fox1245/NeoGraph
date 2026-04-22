@@ -8,15 +8,12 @@
 #include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
-#include <taskflow/taskflow.hpp>
 
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
-#include <mutex>
 #include <optional>
 #include <stdexcept>
-#include <thread>
 
 namespace neograph::graph {
 
@@ -41,8 +38,8 @@ inline std::string fnv1a_hex(const std::string& s) {
 }
 
 // Stable task_id for a static node in a given super-step. Used by
-// run_one and run_parallel; both must agree on the scheme so resume
-// replay matches across restarts.
+// run_one_async and run_parallel_async; both must agree on the
+// scheme so resume replay matches across restarts.
 inline std::string make_static_task_id(int step, const std::string& node_name) {
     return "s" + std::to_string(step) + ":" + node_name;
 }
@@ -57,13 +54,6 @@ inline std::string make_send_task_id(int step, size_t idx,
            + "]:" + target + ":" + fnv1a_hex(input.dump());
 }
 
-// Process-wide Taskflow executor for parallel fan-out / multi-send.
-// Kept as a static local so all NodeExecutor instances share one pool.
-tf::Executor& global_executor() {
-    static tf::Executor exec;
-    return exec;
-}
-
 } // namespace
 
 // =========================================================================
@@ -73,10 +63,12 @@ tf::Executor& global_executor() {
 NodeExecutor::NodeExecutor(
     const std::map<std::string, std::unique_ptr<GraphNode>>& nodes,
     const std::vector<ChannelDef>& channel_defs,
-    RetryPolicyLookup retry_policy_for)
+    RetryPolicyLookup retry_policy_for,
+    asio::thread_pool* fan_out_pool)
     : nodes_(nodes),
       channel_defs_(channel_defs),
-      retry_policy_for_(std::move(retry_policy_for)) {}
+      retry_policy_for_(std::move(retry_policy_for)),
+      fan_out_pool_(fan_out_pool) {}
 
 void NodeExecutor::init_state(GraphState& state) const {
     for (const auto& cd : channel_defs_) {
@@ -100,102 +92,17 @@ void NodeExecutor::apply_input(GraphState& state, const json& input) const {
 }
 
 // =========================================================================
-// execute_node_with_retry: inner retry loop
-// =========================================================================
-
-NodeResult NodeExecutor::execute_node_with_retry(
-    const std::string& node_name,
-    GraphState& state,
-    const GraphStreamCallback& cb,
-    StreamMode stream_mode) {
-
-    auto node_it = nodes_.find(node_name);
-    if (node_it == nodes_.end()) {
-        throw std::runtime_error("Node not found: " + node_name);
-    }
-
-    auto policy  = retry_policy_for_(node_name);
-    int delay_ms = policy.initial_delay_ms;
-
-    for (int attempt = 0; attempt <= policy.max_retries; ++attempt) {
-        try {
-            if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
-                json data;
-                if (attempt > 0) data["retry_attempt"] = attempt;
-                cb(GraphEvent{GraphEvent::Type::NODE_START, node_name, data});
-            }
-
-            auto node_result = cb
-                ? node_it->second->execute_full_stream(state, cb)
-                : node_it->second->execute_full(state);
-
-            if (cb) {
-                if (has_mode(stream_mode, StreamMode::UPDATES)) {
-                    for (const auto& w : node_result.writes) {
-                        cb(GraphEvent{GraphEvent::Type::CHANNEL_WRITE, node_name,
-                                      json{{"channel", w.channel}, {"value", w.value}}});
-                    }
-                }
-                if (has_mode(stream_mode, StreamMode::EVENTS)) {
-                    json end_data;
-                    if (node_result.command)
-                        end_data["command_goto"] = node_result.command->goto_node;
-                    if (!node_result.sends.empty())
-                        end_data["sends"] = (int)node_result.sends.size();
-                    cb(GraphEvent{GraphEvent::Type::NODE_END, node_name, end_data});
-                }
-            }
-
-            return node_result;
-
-        } catch (const NodeInterrupt&) {
-            // NodeInterrupt is a control-flow signal, not a retryable
-            // error. Short-circuit the retry loop and let the caller
-            // (run_one / run_parallel) decide whether to save a
-            // NodeInterrupt checkpoint.
-            throw;
-
-        } catch (const std::exception& e) {
-            if (attempt >= policy.max_retries) {
-                if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
-                    cb(GraphEvent{GraphEvent::Type::ERROR, node_name,
-                                  json{{"error", e.what()}, {"attempts", attempt + 1}}});
-                }
-                throw;
-            }
-
-            if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
-                cb(GraphEvent{GraphEvent::Type::ERROR, node_name,
-                              json{{"retry", attempt + 1},
-                                   {"max_retries", policy.max_retries},
-                                   {"delay_ms", delay_ms},
-                                   {"error", e.what()}}});
-            }
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-            delay_ms = std::min(
-                static_cast<int>(delay_ms * policy.backoff_multiplier),
-                policy.max_delay_ms);
-        }
-    }
-
-    throw std::runtime_error("Unreachable: retry loop exited without return or throw");
-}
-
-// =========================================================================
-// execute_node_with_retry_async: coroutine peer (Sem 3.6 incremental)
+// execute_node_with_retry_async: inner retry loop
 // =========================================================================
 //
-// Mirrors the sync retry loop above but:
-//   * dispatches to node->execute_full_(stream_)async via co_await,
-//     so a node whose execute_async issues real non-blocking I/O lets
-//     the io_context serve other coroutines while this one is waiting.
-//   * replaces std::this_thread::sleep_for with an asio::steady_timer
-//     async_wait — backoff no longer freezes the worker.
-//   * NodeInterrupt and exception semantics are preserved bit-for-bit
-//     against the sync path; the GCC-13-safe shape (no co_await inside
-//     a catch block) requires capturing the result/error into
-//     std::optional inside try, then deciding what to do outside.
+// Drives node->execute_full_(stream_)async via co_await so a node
+// whose execute_async issues real non-blocking I/O lets the executor
+// serve other coroutines while this one is waiting. Backoff uses an
+// asio::steady_timer.async_wait so retry waits do not freeze workers.
+// NodeInterrupt and exception semantics match the pre-3.0 sync
+// retry loop bit-for-bit; the GCC-13-safe shape (no co_await inside a
+// catch block) requires capturing the result/error into std::optional
+// inside try, then deciding what to do outside.
 
 asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
     const std::string& node_name,
@@ -305,62 +212,7 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
 }
 
 // =========================================================================
-// run_one: single-node path
-// =========================================================================
-
-NodeResult NodeExecutor::run_one(
-    const std::string& node_name,
-    int step,
-    GraphState& state,
-    const std::unordered_map<std::string, NodeResult>& replay,
-    CheckpointCoordinator& coord,
-    const std::string& parent_cp_id,
-    const BarrierState& barrier_state,
-    std::vector<std::string>& trace,
-    const GraphStreamCallback& cb,
-    StreamMode stream_mode) {
-
-    try {
-        const std::string task_id = make_static_task_id(step, node_name);
-        NodeResult nr;
-
-        auto replay_it = replay.find(task_id);
-        if (replay_it != replay.end()) {
-            // Replayed from a previous partial run — do NOT re-execute,
-            // do NOT re-record. Just apply the recorded writes.
-            nr = replay_it->second;
-        } else {
-            nr = execute_node_with_retry(node_name, state, cb, stream_mode);
-
-            // Record BEFORE apply_writes so a crash between the two
-            // still leaves a durable log for resume to replay.
-            coord.record_pending_write(parent_cp_id,
-                task_id, task_id, node_name, nr, step);
-        }
-
-        state.apply_writes(nr.writes);
-        if (nr.command) {
-            state.apply_writes(nr.command->updates);
-        }
-
-        trace.push_back(node_name);
-        return nr;
-
-    } catch (const NodeInterrupt& ni) {
-        // NodeInterrupt pauses this specific node — resume must
-        // re-enter exactly here. Save a phase=NodeInterrupt cp with
-        // next_nodes={node_name} so load_for_resume restarts the super
-        // step at this step with only this node ready.
-        coord.save_super_step(state,
-            node_name, std::vector<std::string>{node_name},
-            CheckpointPhase::NodeInterrupt, step, parent_cp_id,
-            barrier_state);
-        throw;
-    }
-}
-
-// =========================================================================
-// run_one_async: coroutine peer (Sem 3.6 incremental Step 2)
+// run_one_async: single-node path
 // =========================================================================
 
 asio::awaitable<NodeResult> NodeExecutor::run_one_async(
@@ -379,7 +231,7 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
 
     // GCC-13-safe outcome capture: collect result or NodeInterrupt
     // marker inside try, decide outside. Other exceptions propagate
-    // out of the coroutine the same way the sync run_one lets them.
+    // out of the coroutine untouched.
     std::optional<NodeResult> ok_result;
     bool interrupted = false;
 
@@ -430,105 +282,14 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
 }
 
 // =========================================================================
-// run_parallel: Taskflow fan-out
-// =========================================================================
-
-std::vector<NodeResult> NodeExecutor::run_parallel(
-    const std::vector<std::string>& ready,
-    int step,
-    GraphState& state,
-    const std::unordered_map<std::string, NodeResult>& replay,
-    CheckpointCoordinator& coord,
-    const std::string& parent_cp_id,
-    const BarrierState& barrier_state,
-    std::vector<std::string>& trace,
-    const GraphStreamCallback& cb,
-    StreamMode stream_mode) {
-
-    std::map<std::string, NodeResult> all_results;
-    std::mutex results_mutex;
-    std::exception_ptr first_exception;
-    // Captured alongside first_exception so a NodeInterrupt from any
-    // parallel worker can still produce the same narrow resume
-    // (phase=NodeInterrupt, next_nodes={this_one}) that run_one does.
-    std::string first_exception_node;
-
-    tf::Taskflow taskflow("fan-out");
-    for (const auto& node_name : ready) {
-        taskflow.emplace([&, node_name]() {
-            try {
-                const std::string task_id = make_static_task_id(step, node_name);
-                NodeResult nr;
-
-                auto replay_it = replay.find(task_id);
-                if (replay_it != replay.end()) {
-                    nr = replay_it->second;
-                } else {
-                    nr = execute_node_with_retry(node_name, state, cb, stream_mode);
-                    coord.record_pending_write(parent_cp_id,
-                        task_id, task_id, node_name, nr, step);
-                }
-
-                std::lock_guard lock(results_mutex);
-                all_results[node_name] = std::move(nr);
-            } catch (...) {
-                std::lock_guard lock(results_mutex);
-                if (!first_exception) {
-                    first_exception = std::current_exception();
-                    first_exception_node = node_name;
-                }
-            }
-        }).name(node_name);
-    }
-    global_executor().run(taskflow).wait();
-
-    if (first_exception) {
-        // If this is a NodeInterrupt, match run_one's contract: save a
-        // phase=NodeInterrupt cp scoped to just the interrupting node
-        // BEFORE rethrowing. Successful siblings have already recorded
-        // pending writes against parent_cp_id, so resume's replay map
-        // will skip them and only the throwing node will re-execute.
-        try {
-            std::rethrow_exception(first_exception);
-        } catch (const NodeInterrupt&) {
-            coord.save_super_step(state,
-                first_exception_node,
-                std::vector<std::string>{first_exception_node},
-                CheckpointPhase::NodeInterrupt, step, parent_cp_id,
-                barrier_state);
-            throw;
-        }
-        // Non-NodeInterrupt: propagate as-is, no cp save (matches
-        // non-retry failure of run_one, which also doesn't save).
-    }
-
-    // Apply results in ready order so caller can pair them 1:1 with
-    // Scheduler's routing input (ready[i] ↔ step_results[i]).
-    std::vector<NodeResult> step_results;
-    step_results.reserve(ready.size());
-    for (const auto& node_name : ready) {
-        auto it = all_results.find(node_name);
-        if (it != all_results.end()) {
-            state.apply_writes(it->second.writes);
-            if (it->second.command)
-                state.apply_writes(it->second.command->updates);
-            step_results.push_back(std::move(it->second));
-        }
-        trace.push_back(node_name);
-    }
-    return step_results;
-}
-
-// =========================================================================
-// run_parallel_async: coroutine peer (Sem 3.7)
+// run_parallel_async: fan-out via make_parallel_group
 // =========================================================================
 //
 // Uses asio::experimental::make_parallel_group on a vector of
 // co_spawn-deferred workers. wait_for_all gives back a
 // (completion_order, exception_ptrs, results) triple — we ignore
-// order (apply writes in ready-order, matching sync run_parallel)
-// and fold exceptions down to first_exception, mirroring the sync
-// taskflow contract.
+// order (apply writes in ready-order so scheduler pairs ready[i] ↔
+// results[i]) and fold exceptions down to first_exception.
 //
 // GCC-13-safe: no co_await inside a catch; no nested brace-init in
 // the coroutine body. The first-exception classifier uses a separate
@@ -547,7 +308,16 @@ NodeExecutor::run_parallel_async(
     const GraphStreamCallback& cb,
     StreamMode stream_mode) {
 
-    auto ex = co_await asio::this_coro::executor;
+    auto outer_ex = co_await asio::this_coro::executor;
+    // Branches dispatch to the engine's owned pool when available so
+    // CPU-bound fan-out actually parallelizes even if the outer
+    // coroutine is driven on a single-threaded executor (e.g. sync
+    // run() routing through run_sync). With no pool, branches share
+    // the outer executor — matches the single-threaded contract the
+    // async peer tests assert.
+    asio::any_io_executor branch_ex = fan_out_pool_
+        ? asio::any_io_executor(fan_out_pool_->get_executor())
+        : asio::any_io_executor(outer_ex);
 
     // Per-branch worker. Captures by ref — all captured refs outlive
     // co_await below (stack scope), and state reads are
@@ -571,11 +341,11 @@ NodeExecutor::run_parallel_async(
     // returns an op that, when awaited, runs the worker coroutine and
     // completes with (exception_ptr, NodeResult).
     using DeferredOp = decltype(asio::co_spawn(
-        ex, worker(std::declval<std::string>()), asio::deferred));
+        branch_ex, worker(std::declval<std::string>()), asio::deferred));
     std::vector<DeferredOp> ops;
     ops.reserve(ready.size());
     for (const auto& node_name : ready) {
-        ops.push_back(asio::co_spawn(ex, worker(node_name), asio::deferred));
+        ops.push_back(asio::co_spawn(branch_ex, worker(node_name), asio::deferred));
     }
 
     // wait_for_all returns:
@@ -637,130 +407,10 @@ NodeExecutor::run_parallel_async(
 }
 
 // =========================================================================
-// run_sends: single-send (retry on shared state) + multi-send (isolated)
-// =========================================================================
-
-void NodeExecutor::run_sends(
-    const std::vector<Send>& sends,
-    int step,
-    GraphState& state,
-    const std::unordered_map<std::string, NodeResult>& replay,
-    CheckpointCoordinator& coord,
-    const std::string& parent_cp_id,
-    std::vector<std::string>& trace,
-    const GraphStreamCallback& cb,
-    StreamMode stream_mode) {
-
-    if (sends.empty()) return;
-
-    if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
-        json send_info = json::array();
-        for (const auto& s : sends)
-            send_info.push_back({{"target", s.target_node}, {"input", s.input}});
-        cb(GraphEvent{GraphEvent::Type::NODE_START, "__send__",
-                      json{{"sends", send_info}}});
-    }
-
-    if (sends.size() == 1) {
-        // Single send: sequential on shared state, with retry.
-        const auto& s = sends[0];
-        auto node_it = nodes_.find(s.target_node);
-        if (node_it == nodes_.end()) return;
-
-        const std::string task_id = make_send_task_id(step, 0, s.target_node, s.input);
-        NodeResult nr;
-
-        auto replay_it = replay.find(task_id);
-        if (replay_it != replay.end()) {
-            nr = replay_it->second;
-        } else {
-            apply_input(state, s.input);
-            nr = execute_node_with_retry(s.target_node, state, cb, stream_mode);
-            coord.record_pending_write(parent_cp_id,
-                task_id, task_id, s.target_node, nr, step);
-        }
-        state.apply_writes(nr.writes);
-        // Send targets can return Command{goto, updates}; goto is meaningless
-        // for a fan-out one-shot but `updates` are plain channel writes the
-        // node chose to emit via the Command channel rather than `.writes`,
-        // and must be merged — matches run_one's behaviour.
-        if (nr.command) state.apply_writes(nr.command->updates);
-        trace.push_back(s.target_node + "[send]");
-        return;
-    }
-
-    // Multi-send: Taskflow fan-out with isolated state per target. Each
-    // worker routes through execute_node_with_retry, matching the parallel
-    // ready-set fan-out path — so NODE_START/END events fire and the
-    // retry policy is honoured, just as for single-Send and
-    // non-Send parallel execution. Callback thread-safety is the user's
-    // responsibility, same contract as the existing parallel ready-set
-    // path; nodes still execute on isolated per-worker GraphState copies.
-    std::vector<NodeResult> send_results(sends.size());
-    std::mutex send_mutex;
-    std::exception_ptr send_exception;
-
-    tf::Taskflow taskflow("send-fan-out");
-    for (size_t si = 0; si < sends.size(); ++si) {
-        taskflow.emplace([&, si]() {
-            try {
-                const auto& s = sends[si];
-                auto node_it = nodes_.find(s.target_node);
-                if (node_it == nodes_.end()) return;
-
-                const std::string task_id = make_send_task_id(
-                    step, si, s.target_node, s.input);
-
-                auto replay_it = replay.find(task_id);
-                if (replay_it != replay.end()) {
-                    std::lock_guard lock(send_mutex);
-                    send_results[si] = replay_it->second;
-                    return;
-                }
-
-                // Isolated state: fresh init + restore from shared state
-                // + apply this Send's input. Ensures concurrent Sends
-                // don't interfere with each other's channel writes.
-                GraphState send_state;
-                init_state(send_state);
-                send_state.restore(state.serialize());
-                apply_input(send_state, s.input);
-
-                auto nr = execute_node_with_retry(
-                    s.target_node, send_state, cb, stream_mode);
-
-                coord.record_pending_write(parent_cp_id,
-                    task_id, task_id, s.target_node, nr, step);
-
-                std::lock_guard lock(send_mutex);
-                send_results[si] = std::move(nr);
-            } catch (...) {
-                std::lock_guard lock(send_mutex);
-                if (!send_exception) send_exception = std::current_exception();
-            }
-        }).name(sends[si].target_node);
-    }
-    global_executor().run(taskflow).wait();
-
-    if (send_exception) std::rethrow_exception(send_exception);
-
-    // Fan writes from each isolated state back into the shared state.
-    // Command.updates are applied on par with .writes (same rationale as
-    // the single-Send branch above — goto is meaningless for a fan-out
-    // target, but updates are channel writes that must merge).
-    for (size_t si = 0; si < sends.size(); ++si) {
-        state.apply_writes(send_results[si].writes);
-        if (send_results[si].command)
-            state.apply_writes(send_results[si].command->updates);
-        trace.push_back(sends[si].target_node + "[send]");
-    }
-}
-
-// =========================================================================
-// run_sends_async: coroutine peer (Sem 3.7.6)
+// run_sends_async: single-send + multi-send dynamic fan-out
 // =========================================================================
 //
-// Same two-branch shape as run_sends:
+// Two-branch shape:
 //   * single Send — sequential on the shared state, with retry.
 //   * multi Send — make_parallel_group on deferred workers, each
 //     with its own isolated GraphState copy. Results fan back to
@@ -826,10 +476,12 @@ asio::awaitable<void> NodeExecutor::run_sends_async(
     //
     // Each worker coroutine builds its own GraphState from a
     // serialize/restore round-trip, applies the Send's input, then
-    // drives execute_node_with_retry_async. We can't share an
-    // isolated state across coroutines any more than across the
-    // sync Taskflow workers — each Send gets its own copy.
-    auto ex = co_await asio::this_coro::executor;
+    // drives execute_node_with_retry_async. Isolated state can't be
+    // shared across concurrent Sends — each gets its own copy.
+    auto outer_ex = co_await asio::this_coro::executor;
+    asio::any_io_executor ex = fan_out_pool_
+        ? asio::any_io_executor(fan_out_pool_->get_executor())
+        : asio::any_io_executor(outer_ex);
 
     auto worker = [&, this](std::size_t si) -> asio::awaitable<NodeResult> {
         const auto& s = sends[si];
@@ -873,8 +525,9 @@ asio::awaitable<void> NodeExecutor::run_sends_async(
     (void)order;
 
     // First-exception pass — same shape as run_parallel_async, but
-    // run_sends doesn't emit a NodeInterrupt cp (matches the sync
-    // version's contract — see the inline comment there).
+    // a Send's NodeInterrupt does not emit a dedicated cp: Send
+    // targets are fan-out one-shots without an obvious resume
+    // scope, so interrupts propagate for the caller to surface.
     for (std::size_t i = 0; i < sends.size(); ++i) {
         if (excs[i]) {
             std::rethrow_exception(excs[i]);

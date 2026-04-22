@@ -35,10 +35,6 @@ if(NOT MSVC)
     target_compile_options(yyjson PRIVATE -O2)
 endif()
 
-# Taskflow (header-only) — used by core (graph engine parallelism)
-add_library(taskflow INTERFACE)
-target_include_directories(taskflow INTERFACE ${DEPS_DIR})
-
 # cpp-httplib (header-only) — used by llm and mcp (PRIVATE)
 add_library(httplib INTERFACE)
 target_include_directories(httplib INTERFACE ${DEPS_DIR})
@@ -165,7 +161,6 @@ target_include_directories(neograph_core
 
 target_link_libraries(neograph_core
     PUBLIC  yyjson Threads::Threads asio
-    PRIVATE taskflow
 )
 
 # Coroutines are exposed through public headers (provider.h ships
