@@ -389,6 +389,10 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_async_concurrent_runs examples/27_async_concurrent_runs.cpp)
         target_link_libraries(example_async_concurrent_runs PRIVATE neograph::core)
 
+        # Example 28: Corrective RAG (arXiv:2401.15884) over /v1/responses.
+        add_executable(example_corrective_rag examples/28_corrective_rag.cpp)
+        target_link_libraries(example_corrective_rag PRIVATE neograph::core neograph::llm cppdotenv)
+
         # Example 26 needs both LLM (Claude provider) and the Postgres
         # backend; gate it on both build flags so a project that turns
         # off Postgres doesn't try to link a missing target.
