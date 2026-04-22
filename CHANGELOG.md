@@ -7,7 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased] — 3.0.0 (draft)
+## [3.0.0] — 2026-04-22
 
 3.0 removes the Taskflow dependency and unifies sync and async
 super-step execution on a single asio coroutine path. Graph-definition

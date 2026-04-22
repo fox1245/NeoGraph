@@ -1,5 +1,6 @@
-// cppdotenv — a C++17 header-only port of python-dotenv
-// https://github.com/theskumar/python-dotenv
+// cppdotenv — a C++17 header-only .env reader, inspired by python-dotenv.
+// https://github.com/fox1245/cppdotenv
+// Copyright (c) 2026 fox1245 — MIT License (see LICENSE beside this file).
 
 #ifndef CPPDOTENV_DOTENV_HPP
 #define CPPDOTENV_DOTENV_HPP
