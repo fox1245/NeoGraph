@@ -138,6 +138,41 @@ TEST(AsyncPostStream, ChunksDeliveredInOrder) {
     EXPECT_EQ(received[2], "gamma");
 }
 
+// Non-streaming async_post must also handle Transfer-Encoding: chunked
+// — modern HTTP/1.1 servers (OpenAI, fastmcp 3.x) use chunked even for
+// single-shot JSON responses when the body isn't buffered up front.
+TEST(AsyncPost, ChunkedResponseReassembledIntoBody) {
+    ChunkedMockServer srv({
+        R"({"part1":"hello",)",
+        R"("part2":"world"})",
+    });
+    asio::io_context client_io;
+
+    int status = 0;
+    std::string body;
+    std::string err;
+    asio::co_spawn(client_io,
+        [&]() -> asio::awaitable<void> {
+            try {
+                auto resp = co_await neograph::async::async_post(
+                    client_io.get_executor(),
+                    "127.0.0.1", std::to_string(srv.port),
+                    "/v1/chat/completions", "{}", {}, false);
+                status = resp.status;
+                body   = resp.body;
+            } catch (const std::exception& e) {
+                err = e.what();
+            }
+        },
+        asio::detached);
+
+    client_io.run();
+
+    EXPECT_EQ(err, "") << "async_post threw: " << err;
+    EXPECT_EQ(status, 200);
+    EXPECT_EQ(body, R"({"part1":"hello","part2":"world"})");
+}
+
 TEST(AsyncPostStream, SseEventsReconstructed) {
     // Split SSE data across multiple chunks including mid-event and
     // mid-newline boundaries — the parser must handle both.
