@@ -189,6 +189,7 @@ target_link_libraries(my_app PRIVATE neograph::core neograph::llm)
 | 26 | `postgres_react_hitl` | ReAct + Postgres-backed checkpoint HITL — survives process restart | Required (Anthropic + Postgres) |
 | 27 | `async_concurrent_runs` | Hosting many concurrent agent runs on one shared `asio::io_context` | No |
 | 28 | `corrective_rag` | Corrective RAG (arXiv:2401.15884) — retrieve → evaluator routes to refine / web / both → generate, all over `/v1/responses` | Required (OpenAI) |
+| 29 | `responses_envelope` | Wire-level dump of `/v1/responses`'s `output[]` envelope — debug/pedagogy aid for understanding tool-calling shape before SchemaProvider flattens it | Required (OpenAI) |
 
 Every API-using example above auto-loads `.env` from the cwd or any
 parent directory via the bundled `cppdotenv`, so the recipe is just
