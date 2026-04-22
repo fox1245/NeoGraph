@@ -101,16 +101,24 @@ struct ResponseHeaderBits {
 };
 
 // Parse the headers block up to (and consuming) the blank line.
-// Returns Content-Length (0 if absent), or -1 on unsupported chunked
-// encoding. Updates `directive` to `close` if the response says so;
-// caller seeds it with the HTTP/1.1 default (keep_alive). When
-// `extra` is non-null, also captures Retry-After and Location
+// Returns Content-Length (0 if absent), or -1 when Transfer-Encoding:
+// chunked is present. Updates `directive` to `close` if the response
+// says so; caller seeds it with the HTTP/1.1 default (keep_alive).
+// When `extra` is non-null, also captures Retry-After and Location
 // verbatim — used by redirect / 429-retry callers.
+//
+// Invariant: on return, `in` has consumed the entire header block —
+// including the blank-line terminator — regardless of which headers
+// were seen. This matters for chunked responses: if we early-returned
+// on seeing Transfer-Encoding, any headers that followed would stay
+// buffered and the chunk-size parser would then misread them as a
+// chunk size. Drain first, decide after.
 inline long extract_headers(std::istream& in,
                             ConnDirective& directive,
                             ResponseHeaderBits* extra = nullptr) {
     std::string line;
     long content_length = 0;
+    bool chunked = false;
     while (std::getline(in, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
         if (line.empty()) break;  // end of headers
@@ -136,7 +144,7 @@ inline long extract_headers(std::istream& in,
             std::string lv;
             std::transform(value.begin(), value.end(), std::back_inserter(lv),
                            [](unsigned char c) { return std::tolower(c); });
-            if (lv.find("chunked") != std::string::npos) return -1;
+            if (lv.find("chunked") != std::string::npos) chunked = true;
         } else if (name == "connection") {
             std::string lv;
             std::transform(value.begin(), value.end(), std::back_inserter(lv),
@@ -149,7 +157,7 @@ inline long extract_headers(std::istream& in,
             extra->location = value;
         }
     }
-    return content_length;
+    return chunked ? -1 : content_length;
 }
 
 struct ExchangeResult {
@@ -287,7 +295,8 @@ asio::awaitable<StreamExchangeResult> run_exchange_stream(
             chunk_size, 16);
         (void)p;
         if (pec != std::errc{}) {
-            throw std::runtime_error("async_post_stream: malformed chunk size");
+            throw std::runtime_error("async_post_stream: malformed chunk size '"
+                                     + size_str + "'");
         }
 
         buf.consume(size_line_len + 2);  // drop "<hex>[;ext]\r\n"
@@ -330,6 +339,120 @@ asio::awaitable<StreamExchangeResult> run_exchange_stream(
     co_return r;
 }
 
+// Read one "<hex>\r\n" chunk-size line out of `buf`, filling from
+// `stream` if needed. Returns the parsed size and drops the line (and
+// its trailing CRLF) from the buffer.
+template <typename Stream>
+asio::awaitable<std::size_t> read_chunk_size(Stream& stream, asio::streambuf& buf) {
+    co_await asio::async_read_until(stream, buf, "\r\n", asio::use_awaitable);
+
+    auto data_cb  = buf.data();
+    auto it_start = asio::buffers_begin(data_cb);
+    auto it_end   = asio::buffers_end(data_cb);
+    auto it_cr    = it_start;
+    while (it_cr != it_end) {
+        if (*it_cr == '\r') {
+            auto nx = it_cr; ++nx;
+            if (nx != it_end && *nx == '\n') break;
+        }
+        ++it_cr;
+    }
+    if (it_cr == it_end) {
+        throw std::runtime_error("async_post: chunk size line missing \\r\\n");
+    }
+
+    const std::size_t size_line_len =
+        static_cast<std::size_t>(std::distance(it_start, it_cr));
+    std::string size_str(it_start, it_cr);
+    if (auto semi = size_str.find(';'); semi != std::string::npos) {
+        size_str = size_str.substr(0, semi);
+    }
+    while (!size_str.empty() &&
+           (size_str.back() == ' ' || size_str.back() == '\t'))
+        size_str.pop_back();
+
+    std::size_t chunk_size = 0;
+    auto [p, ec] = std::from_chars(
+        size_str.data(), size_str.data() + size_str.size(),
+        chunk_size, 16);
+    (void)p;
+    if (ec != std::errc{}) {
+        // Include the string so regressions in header/body boundary
+        // math are obvious from the message alone.
+        throw std::runtime_error("async_post: malformed chunk size '"
+                                 + size_str + "'");
+    }
+
+    buf.consume(size_line_len + 2);
+    co_return chunk_size;
+}
+
+// Read a chunked-encoded body into `out`. `buf` may already contain
+// bytes carried over from the header read. Stops at the size-zero
+// terminator; trailers are consumed (as CRLF) but their contents
+// discarded — the LLM/MCP servers we target don't send them.
+template <typename Stream>
+asio::awaitable<void> read_chunked_body(Stream& stream,
+                                        asio::streambuf& buf,
+                                        std::string& out) {
+    for (;;) {
+        std::size_t chunk_size = co_await read_chunk_size(stream, buf);
+
+        if (chunk_size == 0) {
+            // Terminator chunk. Consume the trailing CRLF (or optional
+            // trailers terminated by a blank line — we drain until
+            // "\r\n" is seen as an empty line).
+            if (buf.size() < 2) {
+                co_await asio::async_read(stream, buf,
+                    asio::transfer_exactly(2 - buf.size()),
+                    asio::use_awaitable);
+            }
+            auto d  = buf.data();
+            auto it = asio::buffers_begin(d);
+            if (*it == '\r') {
+                auto nx = it; ++nx;
+                if (nx != asio::buffers_end(d) && *nx == '\n') {
+                    buf.consume(2);
+                    co_return;
+                }
+            }
+            // Trailers path (rare). Read until blank line.
+            co_await asio::async_read_until(stream, buf, "\r\n\r\n",
+                                            asio::use_awaitable);
+            // Find "\r\n\r\n" and consume through it.
+            auto d2  = buf.data();
+            auto it2 = asio::buffers_begin(d2);
+            auto e2  = asio::buffers_end(d2);
+            std::size_t pos = 0;
+            for (auto it3 = it2; it3 != e2; ++it3, ++pos) {
+                if (*it3 == '\r') {
+                    auto a = it3; ++a;
+                    auto b = a;   if (b != e2) ++b;
+                    auto c = b;   if (c != e2) ++c;
+                    if (a != e2 && b != e2 && c != e2 &&
+                        *a == '\n' && *b == '\r' && *c == '\n') {
+                        buf.consume(pos + 4);
+                        co_return;
+                    }
+                }
+            }
+            co_return;  // best-effort; defensive
+        }
+
+        // Payload + trailing CRLF.
+        const std::size_t needed = chunk_size + 2;
+        if (buf.size() < needed) {
+            co_await asio::async_read(stream, buf,
+                asio::transfer_exactly(needed - buf.size()),
+                asio::use_awaitable);
+        }
+        auto d  = buf.data();
+        auto it = asio::buffers_begin(d);
+        out.append(it, it + static_cast<std::ptrdiff_t>(chunk_size));
+        buf.consume(needed);
+    }
+}
+
 template <typename Stream>
 asio::awaitable<ExchangeResult> run_exchange(Stream& stream, const std::string& req) {
     co_await asio::async_write(stream, asio::buffer(req), asio::use_awaitable);
@@ -351,8 +474,20 @@ asio::awaitable<ExchangeResult> run_exchange(Stream& stream, const std::string& 
     r.response.retry_after = std::move(extra.retry_after);
     r.response.location    = std::move(extra.location);
     r.response.headers     = std::move(extra.all);
+
     if (content_length < 0) {
-        throw std::runtime_error("async_post: chunked transfer-encoding not supported");
+        // Chunked transfer-encoding. OpenAI HTTP/1.1, fastmcp
+        // Streamable HTTP, and most modern servers behind a reverse
+        // proxy all fall into this path — Content-Length only shows up
+        // when the body was fully buffered before headers were flushed.
+        // After draining chunks, the body is the concatenation of
+        // payloads as if Content-Length had been set.
+        //
+        // The `is` istream above drained the headers up to and
+        // including the "\r\n\r\n" terminator, leaving the first chunk
+        // size (or more) sitting in `buf`.
+        co_await read_chunked_body(stream, buf, r.response.body);
+        co_return r;
     }
 
     r.response.body.resize(content_length);
