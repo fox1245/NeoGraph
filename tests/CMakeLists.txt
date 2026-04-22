@@ -37,6 +37,7 @@ add_executable(neograph_tests
     test_async_tool.cpp
     test_executor_async_retry.cpp
     test_executor_async_parallel.cpp
+    test_async_run_sync_pool.cpp
 )
 
 if(NEOGRAPH_BUILD_MCP)
