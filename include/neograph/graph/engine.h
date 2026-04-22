@@ -19,7 +19,9 @@
 #include <neograph/graph/types.h>
 
 #include <asio/awaitable.hpp>
+#include <asio/thread_pool.hpp>
 
+#include <cstddef>
 #include <memory>
 #include <set>
 
@@ -53,7 +55,8 @@ struct RunResult {
  * GraphEngine compiles a JSON graph definition into an executable workflow,
  * then runs it using the Pregel BSP model. Key capabilities:
  *
- * - **Parallel execution**: Multiple independent nodes run concurrently via Taskflow.
+ * - **Parallel execution**: Multiple independent nodes run concurrently on an
+ *   engine-owned `asio::thread_pool`; sync and async entry points share it.
  * - **Checkpointing**: Full state snapshots at every super-step for time-travel.
  * - **HITL**: interrupt_before/after + resume() for human-in-the-loop workflows.
  * - **Send/Command**: Dynamic fan-out and routing overrides from nodes.
@@ -124,24 +127,13 @@ public:
     RunResult run(const RunConfig& config);
 
     /**
-     * @brief Async peer of run() — Stage 3 / Semester 3.6 (API surface).
+     * @brief Async peer of run() — returns an awaitable yielding the result.
      *
-     * Returns an `asio::awaitable<RunResult>` so callers driving an
-     * io_context can `co_await engine->run_async(cfg)` alongside other
-     * coroutines (typically multiple concurrent agents).
-     *
-     * **Current implementation is a thin wrapper that co_returns
-     * run(cfg).** This means the call still blocks the resumed
-     * thread for the entire run duration — including all I/O —
-     * because the engine's super-step loop, node dispatch, and
-     * checkpoint writes are not yet coroutine-native. The non-
-     * blocking benefit only materializes once the engine internals
-     * are coroutinized (planned follow-up; node-level async already
-     * exists via execute_async, so the building blocks are in place).
-     *
-     * Adding the wrapper now lets external callers migrate to the
-     * async surface ahead of the internal refactor — when that lands,
-     * no API breaks.
+     * Callers driving an io_context can `co_await engine->run_async(cfg)`
+     * alongside other coroutines (typically multiple concurrent agents).
+     * The super-step loop, node dispatch, checkpoint I/O, parallel
+     * fan-out, and retry backoff are all coroutine-native (3.0) — the
+     * caller's executor is never blocked by engine work.
      *
      * @param config Run configuration.
      * @return Awaitable yielding the execution result.
@@ -157,8 +149,7 @@ public:
     RunResult run_stream(const RunConfig& config,
                          const GraphStreamCallback& cb);
 
-    /// Async peer of run_stream — same caveat as run_async: thin
-    /// wrapper today, real coroutine internals later.
+    /// Async peer of run_stream — non-blocking coroutine surface.
     asio::awaitable<RunResult> run_stream_async(
         const RunConfig& config, const GraphStreamCallback& cb);
 
@@ -177,7 +168,7 @@ public:
                      const json& resume_value = json(),
                      const GraphStreamCallback& cb = nullptr);
 
-    /// Async peer of resume — same caveat as run_async.
+    /// Async peer of resume — non-blocking coroutine surface.
     asio::awaitable<RunResult> resume_async(
         const std::string& thread_id,
         const json& resume_value = json(),
@@ -275,6 +266,32 @@ public:
     void set_node_retry_policy(const std::string& node_name, const RetryPolicy& policy);
 
     /**
+     * @brief Opt into a dedicated worker pool for parallel fan-out.
+     *
+     * Default behaviour (no call to this method): concurrent ready
+     * sets and multi-Send dispatch run on whichever executor drives
+     * the current coroutine. For `run()` that's a single-threaded
+     * io_context spun up by `run_sync`, so CPU-bound branches
+     * serialize on one thread (I/O-bound branches still overlap via
+     * co_await suspension). For `run_async()` it's the caller's own
+     * executor — a multi-threaded `asio::thread_pool` gives real CPU
+     * parallelism without this method.
+     *
+     * Calling this builds an engine-owned N-worker thread_pool that
+     * `run_parallel_async` and the multi-Send branch of
+     * `run_sends_async` dispatch onto explicitly, so `run()` regains
+     * CPU parallel fan-out without the caller having to switch to
+     * `run_async()`.
+     *
+     * Must be called before any concurrent `run()`; resizing rebuilds
+     * both the pool and the internal executor and is not safe against
+     * in-flight runs. Values < 1 are clamped to 1.
+     *
+     * @param n Number of worker threads in the fan-out pool.
+     */
+    void set_worker_count(std::size_t n);
+
+    /**
      * @brief Get the graph name (from the JSON definition).
      * @return Graph name string.
      */
@@ -286,21 +303,11 @@ private:
     void init_state(GraphState& state) const;
     void apply_input(GraphState& state, const json& input) const;
 
-    RunResult execute_graph(const RunConfig& config,
-                            const GraphStreamCallback& cb,
-                            const std::vector<std::string>& resume_from = {},
-                            const json& resume_value = json());
-
-    /// Async peer of execute_graph (Sem 3.6 internal step 3). Mirrors
-    /// the sync implementation with these substitutions:
-    /// * single-node dispatch goes through `run_one_async`;
-    /// * checkpoint I/O goes through the coordinator's *_async peers;
-    /// * parallel fan-out still calls the sync `run_parallel` (the
-    ///   migration to a coroutine-friendly fan-out is Sem 3.7) — so a
-    ///   graph with concurrent ready sets blocks the io_context for
-    ///   the duration of that super-step's slowest worker. Linear /
-    ///   conditional graphs (the typical agent shape) gain the full
-    ///   non-blocking benefit.
+    /// Super-step loop (coroutine). Owns: state init, interrupt
+    /// gates, resume load, super-step commit, routing via Scheduler.
+    /// Delegates: node invocation to NodeExecutor, checkpoint
+    /// lifecycle to CheckpointCoordinator, routing decisions to
+    /// Scheduler. All internal I/O is non-blocking via co_await.
     asio::awaitable<RunResult> execute_graph_async(
         const RunConfig& config,
         const GraphStreamCallback& cb,
@@ -327,9 +334,9 @@ private:
     std::unique_ptr<Scheduler> scheduler_;
 
     /// Owns per-super-step node invocation (retry, replay, pending
-    /// writes, Taskflow fan-out, Send dispatch). Holds references into
-    /// nodes_ / channel_defs_ above, so must be declared after them —
-    /// reverse destruction order keeps the references valid.
+    /// writes, parallel fan-out, Send dispatch). Holds references
+    /// into nodes_ / channel_defs_ above, so must be declared after
+    /// them — reverse destruction order keeps the references valid.
     std::unique_ptr<NodeExecutor> executor_;
 
     std::set<std::string> interrupt_before_;
@@ -342,6 +349,15 @@ private:
     // Retry policies
     RetryPolicy default_retry_policy_;
     std::map<std::string, RetryPolicy> node_retry_policies_;
+
+    /// Optional fan-out worker pool. Null by default; populated only
+    /// when set_worker_count() is called. When present,
+    /// NodeExecutor dispatches parallel-branch co_spawns onto this
+    /// pool's executor so CPU-bound fan-out parallelizes across
+    /// cores. Declared after executor_ so reverse-order destruction
+    /// joins the pool workers *before* executor_ and its node refs
+    /// are freed.
+    std::unique_ptr<asio::thread_pool> pool_;
 };
 
 } // namespace neograph::graph

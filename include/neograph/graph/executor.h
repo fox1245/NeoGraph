@@ -6,30 +6,36 @@
  * paths that used to be open-coded inside the super-step loop sit
  * behind named methods with their own invariants:
  *
- *   * run_one — single-node path. Handles replay lookup, retry,
+ *   * run_one_async — single-node path. Handles replay lookup, retry,
  *     pending-write recording, state.apply_writes, trace append, and
  *     (on NodeInterrupt) a phase=NodeInterrupt checkpoint save via the
  *     coordinator. Rethrows the interrupt after the save.
- *   * run_parallel — fan-out via Taskflow. Records per-worker pending
- *     writes, captures the first worker exception, and rethrows after
- *     every task has finished. After the barrier, applies each
- *     result's writes + Command.updates to the shared state.
- *   * run_sends — dynamic fan-out. Single-send path runs on the shared
- *     state with retry; multi-send path gives each target an isolated
- *     state copy (fresh init + restore + input apply) and no retry,
- *     preserving the pre-extraction behavior exactly.
+ *   * run_parallel_async — fan-out via
+ *     `asio::experimental::make_parallel_group`. Records per-worker
+ *     pending writes, captures the first worker exception, and
+ *     rethrows after every branch has finished. After the barrier,
+ *     applies each result's writes + Command.updates to the shared
+ *     state.
+ *   * run_sends_async — dynamic fan-out. Single-send path runs on the
+ *     shared state with retry; multi-send path gives each target an
+ *     isolated state copy (fresh init + restore + input apply) and no
+ *     retry, preserving the pre-3.0 behavior exactly.
  *
- * The executor owns `execute_node_with_retry` — the innermost retry
- * loop with exponential backoff + NodeInterrupt pass-through. Retry
- * policies are resolved per node via a lookup callback supplied by
- * GraphEngine at construction; the executor itself is agnostic about
- * where the policy came from.
+ * The executor owns `execute_node_with_retry_async` — the innermost
+ * retry loop with exponential backoff + NodeInterrupt pass-through.
+ * Retry policies are resolved per node via a lookup callback supplied
+ * by GraphEngine at construction; the executor itself is agnostic
+ * about where the policy came from.
  *
- * Thread safety: run_parallel and run_sends internally use a shared
- * tf::Executor (one per process), but each call is synchronous to the
- * caller — run_parallel blocks until every worker has finished or
- * thrown. Multiple concurrent executions against the same NodeExecutor
- * instance are safe iff the underlying GraphNode subclasses are safe.
+ * Thread safety: all fan-out runs on whichever executor `co_await
+ * asio::this_coro::executor` yields — typically GraphEngine's owned
+ * thread_pool. Multiple concurrent executions against the same
+ * NodeExecutor instance are safe iff the underlying GraphNode
+ * subclasses are safe.
+ *
+ * 3.0 removed the sync `run_one`/`run_parallel`/`run_sends` twins and
+ * their process-wide Taskflow executor; sync callers drive the async
+ * peers via GraphEngine's thread_pool (see engine.cpp).
  */
 #pragma once
 
@@ -38,6 +44,9 @@
 #include <neograph/graph/compiler.h>
 #include <neograph/graph/coordinator.h>
 #include <neograph/graph/scheduler.h>
+
+#include <asio/thread_pool.hpp>
+
 #include <functional>
 #include <map>
 #include <memory>
@@ -71,10 +80,17 @@ public:
     ///                         executor has no opinion about fallback
     ///                         behavior — the callback is free to
     ///                         return a default policy.
+    /// @param fan_out_pool Optional non-owning pool used for parallel
+    ///                    fan-out (run_parallel_async and multi-Send
+    ///                    run_sends_async). If nullptr, branches run
+    ///                    on the current coroutine's executor — fine
+    ///                    for single-thread async callers, but
+    ///                    serializes CPU-bound fan-out.
     NodeExecutor(
         const std::map<std::string, std::unique_ptr<GraphNode>>& nodes,
         const std::vector<ChannelDef>& channel_defs,
-        RetryPolicyLookup retry_policy_for);
+        RetryPolicyLookup retry_policy_for,
+        asio::thread_pool* fan_out_pool = nullptr);
 
     /**
      * @brief Execute a single node in the current super-step.
@@ -87,28 +103,10 @@ public:
      * On NodeInterrupt: saves a phase=NodeInterrupt checkpoint with
      * barrier_state via coord, then rethrows.
      * On any other exception: propagates after the retry policy is
-     * exhausted (execute_node_with_retry handles the retry loop
-     * internally).
+     * exhausted (execute_node_with_retry_async handles the retry loop
+     * internally). Node dispatch and checkpoint I/O flow through
+     * co_await so other coroutines on the same executor keep moving.
      */
-    NodeResult run_one(
-        const std::string& node_name,
-        int step,
-        GraphState& state,
-        const std::unordered_map<std::string, NodeResult>& replay,
-        CheckpointCoordinator& coord,
-        const std::string& parent_cp_id,
-        const BarrierState& barrier_state,
-        std::vector<std::string>& trace,
-        const GraphStreamCallback& cb,
-        StreamMode stream_mode);
-
-    /// Async peer of run_one (Sem 3.6 incremental). Same contract:
-    /// replay short-circuit, record_pending_write before apply_writes,
-    /// trace push after apply, NodeInterrupt path saves a dedicated
-    /// checkpoint via coord.save_super_step_async then rethrows. The
-    /// only behavioural difference is non-blocking: node dispatch and
-    /// checkpoint I/O all flow through co_await so other coroutines
-    /// on the same io_context keep moving.
     asio::awaitable<NodeResult> run_one_async(
         const std::string& node_name,
         int step,
@@ -121,10 +119,27 @@ public:
         const GraphStreamCallback& cb,
         StreamMode stream_mode);
 
+    /// Inner retry loop with exponential backoff + NodeInterrupt
+    /// short-circuit. Drives node->execute_full_(stream_)async via
+    /// co_await and uses asio::steady_timer.async_wait for backoff so
+    /// the executor is not frozen during retry waits. NodeInterrupt +
+    /// exception semantics preserved bit-for-bit; GCC-13-safe (catch
+    /// block captures the exception via std::optional, co_await
+    /// happens outside).
+    ///
+    /// Public so regression tests can drive it directly without
+    /// reconstructing a full super-step.
+    asio::awaitable<NodeResult> execute_node_with_retry_async(
+        const std::string& node_name,
+        GraphState& state,
+        const GraphStreamCallback& cb,
+        StreamMode stream_mode);
+
     /**
-     * @brief Execute all `ready` nodes concurrently via Taskflow.
+     * @brief Execute all `ready` nodes concurrently via
+     * `asio::experimental::make_parallel_group` + wait_for_all.
      *
-     * After every worker has finished: if any threw, the first
+     * After every branch has finished: if any threw, the first
      * exception is rethrown; otherwise writes + command.updates from
      * each result are applied to the shared state in `ready` order,
      * trace is appended in `ready` order, and results are returned
@@ -134,47 +149,11 @@ public:
      * If the first thrown exception is a NodeInterrupt, the offending
      * node's name is captured and a phase=NodeInterrupt checkpoint is
      * saved with `next_nodes={interrupted_node}` before rethrow —
-     * matching run_one's behavior so resume re-enters on just the
-     * interrupting node (replay skips the siblings that already
+     * matching run_one_async's behavior so resume re-enters on just
+     * the interrupting node (replay skips the siblings that already
      * completed via pending_writes).
      */
-    /// Async peer of execute_node_with_retry — Stage 3 / Sem 3.6
-    /// (incremental). Drives node->execute_full_(stream_)async via
-    /// co_await and replaces the backoff std::this_thread::sleep_for
-    /// with an asio::steady_timer.async_wait so the io_context is not
-    /// frozen during retry waits. NodeInterrupt + exception semantics
-    /// preserved bit-for-bit; GCC-13-safe (catch block captures the
-    /// exception via std::optional, co_await happens outside).
-    ///
-    /// Public for now so the regression test can drive it directly.
-    /// Once run_one_async / execute_graph_async land, this becomes an
-    /// internal helper again.
-    asio::awaitable<NodeResult> execute_node_with_retry_async(
-        const std::string& node_name,
-        GraphState& state,
-        const GraphStreamCallback& cb,
-        StreamMode stream_mode);
-
-    /// Async peer of run_parallel (Sem 3.7). Replaces the Taskflow
-    /// fan-out with asio::experimental::make_parallel_group +
-    /// wait_for_all, so a parallel super-step no longer blocks the
-    /// io_context's worker thread while children are running — other
-    /// coroutines on the same executor keep making progress.
-    /// Behaviour preserved: results applied in `ready` order, same
-    /// NodeInterrupt cp-save contract, same exception propagation.
     asio::awaitable<std::vector<NodeResult>> run_parallel_async(
-        const std::vector<std::string>& ready,
-        int step,
-        GraphState& state,
-        const std::unordered_map<std::string, NodeResult>& replay,
-        CheckpointCoordinator& coord,
-        const std::string& parent_cp_id,
-        const BarrierState& barrier_state,
-        std::vector<std::string>& trace,
-        const GraphStreamCallback& cb,
-        StreamMode stream_mode);
-
-    std::vector<NodeResult> run_parallel(
         const std::vector<std::string>& ready,
         int step,
         GraphState& state,
@@ -192,26 +171,11 @@ public:
      * Single-send path: the target runs on the shared state with
      * retry and the Send.input is applied to that state. Multi-send
      * path: each target runs on an isolated state copy (fresh init +
-     * restore + apply_input) without retry, and the writes are fanned
-     * back into the shared state after the Taskflow barrier.
+     * restore + apply_input) via
+     * `asio::experimental::make_parallel_group` on deferred workers,
+     * without retry, and the writes are fanned back into the shared
+     * state after wait_for_all.
      */
-    void run_sends(
-        const std::vector<Send>& sends,
-        int step,
-        GraphState& state,
-        const std::unordered_map<std::string, NodeResult>& replay,
-        CheckpointCoordinator& coord,
-        const std::string& parent_cp_id,
-        std::vector<std::string>& trace,
-        const GraphStreamCallback& cb,
-        StreamMode stream_mode);
-
-    /// Async peer of run_sends (Sem 3.7.6). Single-send branch runs
-    /// sequentially via run_one's async path; multi-send branch uses
-    /// asio::experimental::make_parallel_group on deferred workers,
-    /// each with its own isolated GraphState copy (identical
-    /// semantics to the sync version). Result writes fan back into
-    /// the shared state after wait_for_all.
     asio::awaitable<void> run_sends_async(
         const std::vector<Send>& sends,
         int step,
@@ -224,15 +188,6 @@ public:
         StreamMode stream_mode);
 
 private:
-    /// Inner retry loop with exponential backoff + NodeInterrupt
-    /// short-circuit. Shared by run_one, run_parallel, and the
-    /// single-send branch of run_sends.
-    NodeResult execute_node_with_retry(
-        const std::string& node_name,
-        GraphState& state,
-        const GraphStreamCallback& cb,
-        StreamMode stream_mode);
-
     /// Initialize a clean GraphState using the engine's channel defs.
     /// Used by the multi-send path to build each target's isolated copy.
     void init_state(GraphState& state) const;
@@ -244,6 +199,7 @@ private:
     const std::map<std::string, std::unique_ptr<GraphNode>>& nodes_;
     const std::vector<ChannelDef>& channel_defs_;
     RetryPolicyLookup retry_policy_for_;
+    asio::thread_pool* fan_out_pool_ = nullptr;
 };
 
 } // namespace neograph::graph
