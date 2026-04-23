@@ -56,6 +56,52 @@ section below for the reproduction command.
 
 **NeoGraph is the only graph agent engine for C++.** If you're building agents in robotics, embedded systems, games, high-frequency trading, or anywhere Python isn't an option — this is it.
 
+## The agent runtime that fits in L3 cache
+
+NeoGraph's hot code path is small enough that N concurrent agents share
+one L3-resident working set. We measured this with Valgrind cachegrind
+on a Ryzen 7 5800X (Zen 3: 32 KB L1i/d 8-way, **32 MB L3 16-way**),
+sweeping N = 1 → 10,000 concurrent requests through
+`benchmarks/concurrent/bench_concurrent_neograph`:
+
+| N | I refs | **L3 instruction misses** | L3i miss rate | Native p50 |
+|---:|---:|---:|---:|---:|
+| 1 | 5.3 M | **4,313** | 0.08% | 17 µs |
+| 10 | 5.9 M | **4,304** | 0.07% | 16 µs |
+| 100 | 11.8 M | **4,320** | 0.04% | 6 µs |
+| 1,000 | 69.7 M | **4,327** | 0.01% | 6 µs |
+| 10,000 | **648 M** | **4,329** | **0.00%** | **5 µs** |
+
+**L3 instruction misses stay flat at ~4,320** across four orders of
+magnitude of N. The unique hot code working set is roughly
+`4,330 × 64 B = 277 KB` — **0.85 % of the 32 MB L3**. At N = 10,000
+we processed **648 million instructions** and only **4,329 of them
+reached DRAM** (≈ 1 miss per 150,000 instructions).
+
+Native per-request latency drops from 17 µs (cold) to 5 µs (warm) as N
+grows — the 3.4× improvement is pure I-cache warming. Throughput at
+N = 10,000 is ~1.1 M req/s on the single thread pool, with 5.2 MB
+peak RSS (≈ 100 B / agent marginal cost).
+
+**Why this matters:** DRAM access on Zen 3 is ~250 cycles vs ~46 for
+an L3 hit — roughly 5.5× slower per access. If NeoGraph's working set
+had overflowed L3 (as Python interpreters + dict-heavy state typically
+do), the same N = 10,000 sweep would have paid **+420 to +840 ms in
+memory stalls** instead of the measured **9 ms total wall time** —
+47–94× slower depending on how much of the miss chain reaches DRAM.
+The whole L3 stays available for *your* workload (conversation history,
+embeddings, tool responses): the engine itself is a rounding error.
+
+_Reproduce:_
+```bash
+g++ -std=c++20 -O2 -DNDEBUG -Iinclude -Ideps -Ideps/yyjson -Ideps/asio/include \
+    -DASIO_STANDALONE benchmarks/concurrent/bench_concurrent_neograph.cpp \
+    build-release/libneograph_core.a build-release/libyyjson.a -pthread -o bench_ng
+
+valgrind --tool=cachegrind --cache-sim=yes \
+    --I1=32768,8,64 --D1=32768,8,64 --LL=33554432,16,64 ./bench_ng 10000
+```
+
 ## Quick Start
 
 ### Requirements
@@ -66,12 +112,13 @@ section below for the reproduction command.
 - OpenSSL (HTTPS), libpq (optional, Postgres checkpoint),
   SQLite3 (optional, SQLite checkpoint).
 
-### Platform support (3.0 draft, `feat/taskflow-removal`)
+### Platform support
 
 | Platform | Tier | Notes |
 |---|---|---|
-| Linux (Ubuntu 24.04, GCC 13) | **GA** | Reference — 338/338 ctest green (292 under Valgrind memcheck + ASan/UBSan clean), all paths validated locally |
+| Linux x86_64 (Ubuntu 24.04, GCC 13) | **GA** | Reference — 341/341 ctest green, 295/295 ASan+UBSan, Valgrind clean on coroutine subset |
 | macOS (Apple Silicon, Clang) | **beta** | CI builds + non-Postgres tests; runtime differences (coroutine scheduling, SIGPIPE) not yet exercised in production |
+| Linux ARM64 (Ubuntu 24.04, GCC 13) | **alpha** | 306/306 ctest green via `docker buildx --platform linux/arm64` under QEMU emulation — see [`Dockerfile.arm64-smoke`](Dockerfile.arm64-smoke). Native ARM64 hardware validation pending (Raspberry Pi, Graviton, Apple Silicon Linux). Stripped binary 0.81–0.88 MB. |
 | Windows (MSVC 2022, x64) | **alpha** | CI builds + non-Postgres tests; MCP stdio (named-pipe overlapped) + PG async socket wrap written against MSDN spec but unvalidated under load |
 
 CI matrix (GitHub Actions): `build-and-test` (Ubuntu, full with PG
