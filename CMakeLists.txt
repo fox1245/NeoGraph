@@ -408,6 +408,45 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_local_transformer examples/31_local_transformer.cpp)
         target_link_libraries(example_local_transformer PRIVATE neograph::core neograph::llm)
 
+        # Example 32: in-process sibling of 31. Links TransformerCPP
+        # (https://github.com/fox1245/TransformerCPP) directly into the
+        # agent process so there's no HTTP round trip to the model. Both
+        # examples together show both halves of a C++ LLM-agent stack:
+        # external inference server (31) vs single-binary edge (32).
+        # Opt-in because TransformerCPP is an external dep.
+        option(NEOGRAPH_BUILD_LOCAL_INFERENCE_EXAMPLE
+            "Build example 32 (in-process local GGUF via TransformerCPP). Requires TRANSFORMERCPP_DIR pointing at a built sibling clone." OFF)
+        if(NEOGRAPH_BUILD_LOCAL_INFERENCE_EXAMPLE)
+            if(NOT TRANSFORMERCPP_DIR)
+                message(FATAL_ERROR "NEOGRAPH_BUILD_LOCAL_INFERENCE_EXAMPLE=ON requires -DTRANSFORMERCPP_DIR=/path/to/TransformerCPP (must be a built sibling clone with build/libtransformercpp.a).")
+            endif()
+            if(NOT EXISTS "${TRANSFORMERCPP_DIR}/include/transformercpp/neograph/transformer_provider.h")
+                message(FATAL_ERROR "TRANSFORMERCPP_DIR='${TRANSFORMERCPP_DIR}' does not contain include/transformercpp/neograph/transformer_provider.h — check the path.")
+            endif()
+            if(NOT EXISTS "${TRANSFORMERCPP_DIR}/build/libtransformercpp.a")
+                message(FATAL_ERROR "TRANSFORMERCPP_DIR='${TRANSFORMERCPP_DIR}' has no build/libtransformercpp.a — build TransformerCPP first.")
+            endif()
+
+            add_executable(example_inproc_gemma examples/32_inproc_gemma.cpp)
+            target_include_directories(example_inproc_gemma PRIVATE
+                ${TRANSFORMERCPP_DIR}/include)
+            # TransformerCPP's static lib carries undefined refs into
+            # llama.cpp + ggml, which live in the shared libs under
+            # build/bin/. Link those explicitly and add an RPATH so the
+            # binary finds them at run time without LD_LIBRARY_PATH.
+            target_link_libraries(example_inproc_gemma PRIVATE
+                neograph::core neograph::llm
+                ${TRANSFORMERCPP_DIR}/build/libtransformercpp.a
+                ${TRANSFORMERCPP_DIR}/build/bin/libllama.so
+                ${TRANSFORMERCPP_DIR}/build/bin/libggml.so
+                ${TRANSFORMERCPP_DIR}/build/bin/libggml-cpu.so
+                ${TRANSFORMERCPP_DIR}/build/bin/libggml-base.so)
+            set_target_properties(example_inproc_gemma PROPERTIES
+                BUILD_RPATH "${TRANSFORMERCPP_DIR}/build/bin"
+                INSTALL_RPATH "${TRANSFORMERCPP_DIR}/build/bin")
+            message(STATUS "  [+] example_inproc_gemma (TRANSFORMERCPP_DIR=${TRANSFORMERCPP_DIR})")
+        endif()
+
         # Example 26 needs both LLM (Claude provider) and the Postgres
         # backend; gate it on both build flags so a project that turns
         # off Postgres doesn't try to link a missing target.
