@@ -262,6 +262,14 @@ public:
         return execute_full(state).writes;
     }
 
+    // Stage-4 async bridge: forwards to sync execute_full so Command/Send
+    // still propagate on the run_async path. Without this, the Stage-4
+    // async-first default would drop the Command we emit here.
+    asio::awaitable<NodeResult>
+    execute_full_async(const GraphState& state) override {
+        co_return execute_full(state);
+    }
+
     NodeResult execute_full(const GraphState& state) override {
         NodeResult nr;
 
@@ -781,6 +789,11 @@ public:
         // definition. The Command path in execute_full is the intended
         // route.
         return {};
+    }
+
+    asio::awaitable<NodeResult>
+    execute_full_async(const GraphState& state) override {
+        co_return execute_full(state);
     }
 
     NodeResult execute_full(const GraphState& state) override {

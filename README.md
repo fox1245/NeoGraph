@@ -286,16 +286,16 @@ for (const auto& user : users) {
 io.run();  // drives all agents on this thread
 ```
 
-3.0 reality: each `engine->run_async()` drives its own internal
-io_context to completion, so the three runs above are still serial on
-the caller thread (~150 ms for three 50 ms steps). The wiring above is
-the call shape we want users locking in today; full inside-the-engine
-coroutine-ification is the Stage 4 work that turns the same code into
-true single-thread overlap (~50 ms). For burst concurrency *now*,
-dispatch each `run()` onto a shared `asio::thread_pool` — that's the
-pattern measured in [`benchmarks/concurrent/CONCURRENT.md`](benchmarks/concurrent/CONCURRENT.md)
-where N=10,000 finishes in 52 ms. Within a single run, the
-`make_parallel_group` fan-out *does* overlap: three parallel-fanout
+Stage 4 reality: `engine->run_async()` stays on the caller's
+executor end-to-end — every super-step suspension point (node
+dispatch, checkpoint I/O, parallel fan-out, retry backoff) is a real
+`co_await`. The three 50 ms steps above therefore overlap on one
+io_context thread and the wall time lands at ~50 ms, not 3 × 50 ms.
+One thread, N concurrent agents. For CPU-bound fan-out across cores,
+switch the driver to a shared `asio::thread_pool` — that's the
+pattern in [`benchmarks/concurrent/CONCURRENT.md`](benchmarks/concurrent/CONCURRENT.md)
+where N = 10,000 finishes in 52 ms. Within a single run, the
+`make_parallel_group` fan-out overlaps too: three parallel-fanout
 researchers collapse from 370 ms sequential to 150 ms.
 
 Custom nodes join the async path by overriding `execute_async`

@@ -65,6 +65,13 @@ public:
         return execute_full(state).writes;
     }
 
+    // Stage-4 bridge: the async-first default would drop Sends, so
+    // forward to the sync path that owns them.
+    asio::awaitable<NodeResult>
+    execute_full_async(const GraphState& state) override {
+        co_return execute_full(state);
+    }
+
     std::string get_name() const override { return "planner"; }
 };
 int PlannerNode::round_ = 0;
@@ -127,6 +134,11 @@ public:
 
     std::vector<ChannelWrite> execute(const GraphState& state) override {
         return execute_full(state).writes;
+    }
+
+    asio::awaitable<NodeResult>
+    execute_full_async(const GraphState& state) override {
+        co_return execute_full(state);
     }
 
     std::string get_name() const override { return "evaluator"; }

@@ -45,15 +45,23 @@ NodeResult GraphNode::execute_full(const GraphState& state) {
 
 asio::awaitable<NodeResult>
 GraphNode::execute_full_async(const GraphState& state) {
-    // Default routes through sync execute_full so a subclass that
-    // overrode only the sync path — including Command/Send emission
-    // via NodeResult — still surfaces in the async path. Async-
-    // native nodes that want non-blocking I/O AND Command/Send
-    // should override execute_full_async directly; the sync detour
-    // here will otherwise freeze the calling coroutine for the
-    // duration of execute_full, which cascades through execute()
-    // and, for async-only overrides, through run_sync(execute_async).
-    co_return execute_full(state);
+    // Async-first default (Stage 4): wraps execute_async() into a
+    // NodeResult directly instead of routing through sync execute_full.
+    // Rationale: the prior default funneled async callers through
+    // execute_full → execute → run_sync(execute_async), spawning a new
+    // io_context per super-step. That silently serialized async-native
+    // nodes on their own executor — defeating the whole point of
+    // run_async() overlap.
+    //
+    // Contract for Command/Send emitters: if your subclass overrides
+    // sync execute_full() to return Command/Send, you MUST also
+    // override execute_full_async() with a one-line bridge:
+    //     co_return execute_full(state);
+    // otherwise Command/Send will be silently dropped in the async
+    // path (the v2.0 latent-dispatch bug — fixed in 3.0 at the cost
+    // of the run_sync hop this flip now removes).
+    auto writes = co_await execute_async(state);
+    co_return NodeResult{std::move(writes)};
 }
 
 // --- GraphNode default execute_full_stream ---

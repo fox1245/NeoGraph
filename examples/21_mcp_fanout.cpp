@@ -58,6 +58,13 @@ public:
     std::vector<ChannelWrite> execute(const GraphState& state) override {
         return execute_full(state).writes;
     }
+
+    // Stage-4 bridge: keep the Sends on the async path.
+    asio::awaitable<NodeResult>
+    execute_full_async(const GraphState& state) override {
+        co_return execute_full(state);
+    }
+
     std::string get_name() const override { return "planner"; }
 };
 

@@ -42,6 +42,10 @@ public:
         }
         return nr;
     }
+    asio::awaitable<NodeResult>
+    execute_full_async(const GraphState& state) override {
+        co_return execute_full(state);
+    }
     std::string get_name() const override { return "planner"; }
 private:
     int fanout_;
@@ -228,6 +232,10 @@ public:
             ChannelWrite{"side_effects", json::array({idx * 100})});
         nr.command = std::move(cmd);
         return nr;
+    }
+    asio::awaitable<NodeResult>
+    execute_full_async(const GraphState& state) override {
+        co_return execute_full(state);
     }
     std::string get_name() const override { return "worker"; }
 };

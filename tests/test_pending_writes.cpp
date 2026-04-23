@@ -41,6 +41,10 @@ public:
         }
         return nr;
     }
+    asio::awaitable<NodeResult>
+    execute_full_async(const GraphState& state) override {
+        co_return execute_full(state);
+    }
     std::string get_name() const override { return "planner"; }
 private:
     int fanout_;

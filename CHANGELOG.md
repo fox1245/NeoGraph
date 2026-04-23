@@ -7,6 +7,48 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased] — Stage 4
+
+Stage 4 closes the last `run_sync` hop on the async path. `run_async`
+now stays on the caller's executor end-to-end: three 50 ms agents
+on one `io_context` thread drop from ~150 ms (serial) to ~50 ms
+(overlapping) in `examples/27_async_concurrent_runs`.
+
+### Breaking
+
+- **`GraphNode::execute_full_async` default flipped to async-first.**
+  It now wraps `co_await execute_async(state)` into a `NodeResult`
+  instead of calling sync `execute_full(state)`. Any subclass that
+  emits `Command`/`Send` only from a sync `execute_full` override
+  MUST add a one-line `execute_full_async` bridge:
+  ```cpp
+  asio::awaitable<NodeResult>
+  execute_full_async(const GraphState& state) override {
+      co_return execute_full(state);
+  }
+  ```
+  Without the bridge, `Command`/`Send` are silently dropped on the
+  async path — the 2.0 latent dispatch bug that 3.0 fixed by routing
+  through sync at the cost of an `io_context` spawn per super-step.
+  All in-tree subclasses (`deep_research_graph`, examples 10/14/21,
+  tests 5 sites) now carry the bridge.
+
+### Performance
+
+- Example 27 wall time: **152 ms → 53 ms** (3 agents × 50 ms timer
+  step on one `io_context` thread, full overlap).
+- No measurable regression on single-run benchmarks; `run()` still
+  drives the same coroutine through a fresh single-threaded
+  `io_context` via `run_sync`.
+
+### Tests
+
+- 341/341 ctest green
+- 295/295 ASan+UBSan green
+- Valgrind clean on coroutine-heavy subset (20 tests, 2.4 s)
+
+---
+
 ## [3.0.0] — 2026-04-22
 
 3.0 removes the Taskflow dependency and unifies sync and async

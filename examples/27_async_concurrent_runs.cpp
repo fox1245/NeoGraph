@@ -1,25 +1,21 @@
-// NeoGraph Example 27: Async Concurrent Runs (Stage 3 — pattern preview)
+// NeoGraph Example 27: Async Concurrent Runs
 //
 // Drives multiple agent runs through a single shared asio::io_context
 // using engine->run_async(). This is the wiring pattern users adopt
 // when they want to host many concurrent agents without paying the
 // thread-per-agent cost that the sync run() implies.
 //
-// **Current behaviour (3.0):** each engine->run_async() drives its own
-// internal io_context to completion via run_sync_pool, so the three
-// agents run *serially* on the caller's io_context. Wall time on the
-// 50 ms-per-step workload below is ~150 ms (3 × 50 ms), not the ideal
-// ~50 ms a fully coroutine-ified engine would achieve. Hosting
-// thousands of independent runs is still the right shape — drive them
-// with a shared asio::thread_pool (see CONCURRENT.md), or co_spawn
-// each onto the io_context as shown here for the eventual upgrade.
+// **Current behaviour (Stage 4):** run_async stays on the caller's
+// executor end-to-end — every super-step suspension point (node
+// dispatch, checkpoint I/O, parallel fan-out, retry backoff) is a
+// real co_await. The three 50 ms steps below therefore overlap on
+// one io_context thread and the wall time lands at ~50 ms, not
+// 3×50 ms. One thread, N concurrent agents — no thread-per-agent cost.
 //
 // Scenario: three agents each run a tiny graph that simulates a 50 ms
 // work step using asio::steady_timer (NOT std::this_thread::sleep_for).
-// The work node yields cleanly to the timer, so once internal
-// coroutine-ification lands the three runs will overlap on one
-// thread; until then the example exists to lock in the *call shape*
-// users should write today.
+// The work node yields cleanly to the timer, so the three agent runs
+// interleave on one thread during the wait.
 //
 // Usage: ./example_async_concurrent_runs
 
@@ -99,10 +95,10 @@ int main() {
 
     for (int i = 0; i < N; ++i) {
         // co_spawn each agent run as an independent coroutine on the
-        // shared io_context. The io_context worker runs them serially
-        // today (each run_async drives its own internal io_context to
-        // completion); future coroutine-ification of the engine will
-        // make them overlap on this io_context without code changes.
+        // shared io_context. With the Stage-4 engine, run_async never
+        // spawns an inner io_context — the three agents' timer waits
+        // overlap on this single io_context thread and finish in ~50 ms
+        // wall-clock, not 3×50 ms.
         asio::co_spawn(
             io,
             [&engine, &completed, i]() -> asio::awaitable<void> {
@@ -124,10 +120,9 @@ int main() {
 
     std::cout << "\n" << completed.load() << "/" << N
               << " agents completed in " << elapsed_ms << "ms.\n"
-              << "(Each engine->run_async() drives its own internal io_context to\n"
-              << " completion in 3.0, so the three runs are still serial here —\n"
-              << " expected ~" << (50 * N) << "ms. The call shape is what locks in;\n"
-              << " for true overlap today, dispatch each run() onto a shared\n"
-              << " asio::thread_pool — see benchmarks/concurrent/CONCURRENT.md.)\n";
+              << "(Stage 4: run_async stays on the caller's executor end-to-end,\n"
+              << " so the three 50 ms timer waits overlap on one io_context\n"
+              << " thread — expected ~50ms. For CPU-bound fan-out, switch the\n"
+              << " driver to a shared asio::thread_pool — see CONCURRENT.md.)\n";
     return 0;
 }
