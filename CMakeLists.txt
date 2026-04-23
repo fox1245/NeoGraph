@@ -25,7 +25,7 @@ option(NEOGRAPH_BUILD_EXAMPLES "Build example programs"                  ON)
 # ===========================================================================
 find_package(Threads REQUIRED)
 
-set(DEPS_DIR ${CMAKE_SOURCE_DIR}/deps)
+set(DEPS_DIR ${PROJECT_SOURCE_DIR}/deps)
 
 # yyjson (C, compiled) — used by all modules for JSON parse/write
 add_library(yyjson STATIC ${DEPS_DIR}/yyjson/yyjson.c)
@@ -115,15 +115,15 @@ file(MAKE_DIRECTORY ${GENERATED_DIR})
 add_custom_command(
     OUTPUT ${GENERATED_DIR}/builtin_schemas.h
     COMMAND Python3::Interpreter
-            ${CMAKE_SOURCE_DIR}/scripts/embed_schemas.py
-            ${CMAKE_SOURCE_DIR}/schemas
+            ${PROJECT_SOURCE_DIR}/scripts/embed_schemas.py
+            ${PROJECT_SOURCE_DIR}/schemas
             ${GENERATED_DIR}/builtin_schemas.h
     DEPENDS
-        ${CMAKE_SOURCE_DIR}/schemas/openai.json
-        ${CMAKE_SOURCE_DIR}/schemas/openai_responses.json
-        ${CMAKE_SOURCE_DIR}/schemas/claude.json
-        ${CMAKE_SOURCE_DIR}/schemas/gemini.json
-        ${CMAKE_SOURCE_DIR}/scripts/embed_schemas.py
+        ${PROJECT_SOURCE_DIR}/schemas/openai.json
+        ${PROJECT_SOURCE_DIR}/schemas/openai_responses.json
+        ${PROJECT_SOURCE_DIR}/schemas/claude.json
+        ${PROJECT_SOURCE_DIR}/schemas/gemini.json
+        ${PROJECT_SOURCE_DIR}/scripts/embed_schemas.py
     COMMENT "Embedding LLM provider schemas"
 )
 add_custom_target(generate_schemas DEPENDS ${GENERATED_DIR}/builtin_schemas.h)
@@ -155,7 +155,7 @@ add_library(neograph_core STATIC
 
 target_include_directories(neograph_core
     PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
 
@@ -185,7 +185,7 @@ add_library(neograph_async STATIC
     src/async/sse_parser.cpp
 )
 target_include_directories(neograph_async
-    PUBLIC $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+    PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
 )
 target_link_libraries(neograph_async PUBLIC asio OpenSSL::SSL OpenSSL::Crypto)
 # C++20 coroutines require this on GCC < 14 when using -std=c++20.
@@ -216,7 +216,7 @@ if(NEOGRAPH_BUILD_POSTGRES)
 
     target_include_directories(neograph_postgres
         PUBLIC
-            $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+            $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
     )
 
@@ -243,7 +243,7 @@ if(NEOGRAPH_BUILD_SQLITE)
 
     target_include_directories(neograph_sqlite
         PUBLIC
-            $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+            $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
     )
 
@@ -270,7 +270,7 @@ if(NEOGRAPH_BUILD_LLM)
 
     target_include_directories(neograph_llm
         PUBLIC
-            $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+            $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
         PRIVATE
             ${GENERATED_DIR}
@@ -294,7 +294,7 @@ if(NEOGRAPH_BUILD_MCP)
 
     target_include_directories(neograph_mcp
         PUBLIC
-            $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+            $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
     )
 
@@ -314,7 +314,7 @@ if(NEOGRAPH_BUILD_UTIL)
 
     target_include_directories(neograph_util
         INTERFACE
-            $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+            $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
     )
 
