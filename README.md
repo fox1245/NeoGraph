@@ -102,6 +102,38 @@ valgrind --tool=cachegrind --cache-sim=yes \
     --I1=32768,8,64 --D1=32768,8,64 --LL=33554432,16,64 ./bench_ng 10000
 ```
 
+### Holds end-to-end with a real LLM in the loop
+
+The L3 story survives full-stack production: we point NeoGraph at a
+locally-hosted Gemma-4 E2B (Q4_K_M, 4.65 B params, 2.9 GB GGUF) served
+by [TransformerCPP](https://github.com/fox1245/TransformerCPP)'s
+OpenAI-compatible HTTP endpoint — zero NeoGraph code changes, just
+`OpenAIProvider::Config::base_url = "http://localhost:8090"`. See
+[`examples/31_local_transformer.cpp`](examples/31_local_transformer.cpp).
+
+| | Pure NeoGraph | **NeoGraph + local Gemma (HTTP)** |
+|---|---:|---:|
+| L3 instruction misses | 4,320 | **7,262** |
+| Hot code working set | 277 KB | **465 KB** (1.42% of L3) |
+| Per-request TTFT | — | **25–27 ms** (curl baseline 9–10 ms → ~15 ms NeoGraph overhead) |
+| Per-request total | — | 146–213 ms @ 19–27 tokens (~130 tok/s) |
+| **NeoGraph agent RSS** | 5.2 MB | **7.6 MB** (+2.4 MB for httplib + JSON streaming) |
+| Gemma server RSS | n/a | 2.45 GB (mmap GGUF) |
+| VRAM (RTX 4070 Ti) | n/a | 3.06 GB |
+
+The inference process lives in a **separate address space**, so its
+2.5 GB of model weights never touch NeoGraph's L3 cache lines. The
+agent's 465 KB working set stays L3-resident regardless of how large
+the model is. That's the architectural payoff of the two-process
+split: you can swap in a 70 B model without inflating the agent.
+
+Burst-tested with 5 concurrent NeoGraph agents against the same server:
+aggregate wall 1.58 s / 5 requests (2.65× speedup from coroutine
+overlap). Per-agent throughput drops under queue pressure because the
+Gemma server doesn't implement continuous batching — that's a
+TransformerCPP concern, not an agent one. NeoGraph dispatched all 5
+cleanly with no resource pressure and the RSS stayed flat at ~7 MB.
+
 ## Quick Start
 
 ### Requirements

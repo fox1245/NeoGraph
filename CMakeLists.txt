@@ -401,6 +401,13 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_reasoning_effort examples/30_reasoning_effort.cpp)
         target_link_libraries(example_reasoning_effort PRIVATE neograph::core neograph::llm cppdotenv)
 
+        # Example 31: NeoGraph driving a local OpenAI-compatible inference
+        # server (TransformerCPP, llama.cpp server, vLLM OpenAI-compat,
+        # etc.). Demonstrates that the two-process agent/inference split
+        # keeps the agent L3-resident even when the model is multi-GB.
+        add_executable(example_local_transformer examples/31_local_transformer.cpp)
+        target_link_libraries(example_local_transformer PRIVATE neograph::core neograph::llm)
+
         # Example 26 needs both LLM (Claude provider) and the Postgres
         # backend; gate it on both build flags so a project that turns
         # off Postgres doesn't try to link a missing target.
