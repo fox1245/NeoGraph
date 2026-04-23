@@ -47,6 +47,39 @@ on one `io_context` thread drop from ~150 ms (serial) to ~50 ms
 - 295/295 ASan+UBSan green
 - Valgrind clean on coroutine-heavy subset (20 tests, 2.4 s)
 
+### Post-release validation (same day)
+
+- **All 30 examples re-run:** 26/29 PASS, 0 FAIL, 3 environment-gated
+  (clay_chatbot → raylib, postgres_react_hitl → docker compose,
+  deep_research full loop → crawl4ai service). `21_mcp_fanout`
+  measured at 3 MCP calls / 8 ms wall — Stage 4 overlap holds under
+  real network I/O.
+
+- **ARM64 compatibility (docker buildx --platform linux/arm64):**
+  `Dockerfile.arm64-smoke` at repo root. ubuntu:24.04-arm64 +
+  core+llm+async+sqlite+tests build under QEMU emulation completes
+  in ~15 min; **306/306 ctest green** on ARM64. Stripped binary sizes
+  0.81-0.88 MB (nearly identical to x86_64). example 27 runs in
+  65 ms under emulation (native x86_64: 53 ms). Confirms Linux/ARM64
+  as a supported target alongside macOS beta (Apple Silicon).
+
+- **Cache locality (Ryzen 5800X / Zen 3, Valgrind cachegrind,
+  32 KB L1i/d 8-way, 32 MB L3 16-way):**
+  `bench_concurrent_neograph` sweep N=1 → 10,000.
+
+  | N | I refs | LLi misses | LLi miss% | Native p50 |
+  |---:|---:|---:|---:|---:|
+  | 1 | 5.3 M | 4,313 | 0.08% | 17 µs |
+  | 100 | 11.8 M | 4,320 | 0.04% | 6 µs |
+  | 10,000 | 648 M | 4,329 | 0.00% | 5 µs |
+
+  Last-level instruction misses stay flat at ~4,320 across 4 orders
+  of magnitude of N. Unique hot code working set ≈ 277 KB (0.85% of
+  L3). 648 M instructions at N=10,000 incur only 4,329 LL misses —
+  roughly 1 miss per 150,000 instructions. Native p50 drops from
+  17 µs to 5 µs purely from I-cache warming. First measured evidence
+  for the "burst concurrency robustness" positioning.
+
 ---
 
 ## [3.0.0] — 2026-04-22

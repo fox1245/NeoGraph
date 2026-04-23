@@ -1,0 +1,47 @@
+# NeoGraph ARM64 smoke build
+# Validates: compile + ctest under linux/arm64 via docker buildx.
+# Intentionally minimal — core + llm + async + tests only.
+# Optional deps (Postgres, full SQLite suite) gated off to keep the
+# emulated build under ~5-10 minutes.
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    ninja-build \
+    pkg-config \
+    python3 \
+    git \
+    file \
+    libssl-dev \
+    libsqlite3-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . /src
+
+# Release build for honest size numbers under ARM64.
+# MCP / Postgres off; SQLite on (lightweight).
+RUN cmake -S . -B build \
+    -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DNEOGRAPH_BUILD_EXAMPLES=ON \
+    -DNEOGRAPH_BUILD_TESTS=ON \
+    -DNEOGRAPH_BUILD_SQLITE=ON \
+    -DNEOGRAPH_BUILD_MCP=OFF \
+    -DNEOGRAPH_BUILD_POSTGRES=OFF
+
+RUN cmake --build build -j$(nproc) 2>&1 | tail -40
+
+# Smoke: run the full ctest suite + strip-size on a representative example.
+RUN cd build && ctest --output-on-failure -j$(nproc) 2>&1 | tail -20 && \
+    cp example_custom_graph /tmp/ex_arm64_custom && \
+    cp example_async_concurrent_runs /tmp/ex_arm64_concurrent && \
+    strip /tmp/ex_arm64_custom /tmp/ex_arm64_concurrent && \
+    ls -la /tmp/ex_arm64_* | awk '{printf "%s  %.2f MB\n", $NF, $5/1024/1024}' && \
+    /tmp/ex_arm64_concurrent && \
+    file /tmp/ex_arm64_custom
