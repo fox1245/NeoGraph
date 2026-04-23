@@ -79,6 +79,13 @@ public:
         }
         return nr;
     }
+
+    // Stage-4 bridge: async-first default would drop these Sends.
+    asio::awaitable<NodeResult>
+    execute_full_async(const GraphState& state) override {
+        co_return execute_full(state);
+    }
+
     std::string get_name() const override { return "planner"; }
 };
 
