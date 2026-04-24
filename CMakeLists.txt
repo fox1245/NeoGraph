@@ -364,6 +364,9 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_openai_responses examples/13_openai_responses.cpp)
         target_link_libraries(example_openai_responses PRIVATE neograph::core neograph::llm cppdotenv)
 
+        add_executable(example_openai_responses_ws examples/33_openai_responses_ws.cpp)
+        target_link_libraries(example_openai_responses_ws PRIVATE neograph::core neograph::llm cppdotenv)
+
         add_executable(example_plan_executor examples/14_plan_executor.cpp)
         target_link_libraries(example_plan_executor PRIVATE neograph::core)
 
