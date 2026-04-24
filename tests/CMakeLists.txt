@@ -30,6 +30,7 @@ add_executable(neograph_tests
     test_async_sse_parser.cpp
     test_async_ws_codec.cpp
     test_async_ws_loopback.cpp
+    test_schema_provider_ws_responses.cpp
     test_async_http_stream.cpp
     test_async_http_options.cpp
     test_provider_async_default.cpp

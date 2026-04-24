@@ -1,7 +1,13 @@
 #include <neograph/llm/schema_provider.h>
 #include <neograph/async/endpoint.h>
 #include <neograph/async/http_client.h>
+#include <neograph/async/run_sync.h>
+#include <neograph/async/ws_client.h>
 #include <builtin_schemas.h>
+
+#include <asio/co_spawn.hpp>
+#include <asio/io_context.hpp>
+#include <asio/use_future.hpp>
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
@@ -1115,6 +1121,18 @@ SchemaProvider::complete_async(const CompletionParams& params)
 ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
                                                const StreamCallback& on_chunk)
 {
+    // WebSocket mode dispatch — only the openai-responses schema is
+    // supported (that's the one OpenAI's WS endpoint speaks). Other
+    // providers fall through to the HTTP/SSE path below.
+    if (user_config_.use_websocket) {
+        if (provider_name_ != "openai-responses") {
+            throw std::runtime_error(
+                "SchemaProvider: use_websocket is only supported for "
+                "the openai-responses schema (got: " + provider_name_ + ")");
+        }
+        return async::run_sync(complete_stream_ws_responses(params, on_chunk));
+    }
+
     // See complete() for the locking rationale. Same pattern: build the
     // request under the schema lock, issue the streaming HTTP call outside.
     std::string body_str;
@@ -1447,6 +1465,265 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
     }
 
     return completion;
+}
+
+// ============================================================================
+// WebSocket: complete_stream_ws_responses()
+// ============================================================================
+//
+// OpenAI's WebSocket mode for /v1/responses (per
+// developers.openai.com/api/docs/guides/websocket-mode):
+//
+//   - Connect: wss://<host>/v1/responses with Authorization: Bearer header
+//   - Send:    a JSON text frame `{"type":"response.create", ...body}`
+//              where ...body mirrors the HTTP Responses request shape
+//              (model, input, instructions, tools, ...).
+//   - Recv:    the same SSE event payloads, but each one as a discrete
+//              text frame (one event per frame). The `event:` SSE prefix
+//              is replaced by an inline `"type"` field on the JSON
+//              itself, so dispatch is `j["type"]` instead of parsing a
+//              separate event line.
+//
+// The dispatch state machine here is a focused subset of what
+// complete_stream's SSE_EVENTS branch handles: it processes only the
+// openai-responses event vocabulary. No `usage` or `delta`-action paths
+// — those are Anthropic shapes that the openai-responses schema doesn't
+// emit. If we extend WS to other providers later, lifting the dispatcher
+// into a shared helper becomes worthwhile; until then, inline keeps the
+// scope contained and the SSE path untouched (no test regression risk).
+
+asio::awaitable<ChatCompletion>
+SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
+                                             const StreamCallback& on_chunk)
+{
+    // Build request body under the schema lock — same pattern as the
+    // HTTP path. The lock is released before any I/O.
+    json request_body;
+    async::AsyncEndpoint endpoint;
+    {
+        std::lock_guard<std::mutex> lock(schema_mutex_);
+        request_body = build_body(params);
+        endpoint = async::split_async_endpoint(conn_.base_url);
+    }
+
+    // OpenAI WS framing: a single JSON object with `"type":"response.create"`
+    // merged with the standard Responses request body (model, input,
+    // tools, ...). Per the docs, transport-only fields like `stream`
+    // and `background` are omitted on the wire — the socket itself IS
+    // the streaming transport. build_body() doesn't add either, and
+    // we don't add them here, so this is by construction.
+    request_body["type"] = "response.create";
+
+    std::vector<std::pair<std::string, std::string>> ws_headers = {
+        {"Authorization", "Bearer " + get_api_key()},
+    };
+    // Schema-declared extra headers (rarely set for OpenAI but the
+    // contract is that build_headers() reflects them; we apply the
+    // same set here, minus auth which we just put in).
+    {
+        std::lock_guard<std::mutex> lock(schema_mutex_);
+        for (const auto& [k, v] : conn_.extra_headers) {
+            ws_headers.emplace_back(k, v);
+        }
+    }
+
+    auto ex = co_await asio::this_coro::executor;
+    auto ws = co_await async::ws_connect(
+        ex,
+        endpoint.host,
+        endpoint.port,
+        endpoint.prefix.empty() ? std::string("/v1/responses")
+                                : (endpoint.prefix + "/v1/responses"),
+        std::move(ws_headers),
+        endpoint.tls);
+
+    co_await ws->send_text(request_body.dump());
+
+    // ── Streaming dispatch state ──
+    ChatCompletion completion;
+    completion.message.role = "assistant";
+    std::string full_content;
+    std::map<int, ToolCall> tc_map;
+
+    struct EventBlock {
+        std::string type;
+        std::string id;
+        std::string name;
+        std::string text;
+        std::string args;
+        int index = -1;
+    };
+    std::vector<EventBlock> event_blocks;
+    int event_block_index = -1;
+
+    bool got_done = false;
+
+    // Snapshot the bits we need from stream_/resp_ under the lock so
+    // the recv loop runs lock-free.
+    json   events_config;
+    std::string usage_path, prompt_field, completion_field, total_field;
+    {
+        std::lock_guard<std::mutex> lock(schema_mutex_);
+        events_config = stream_.events_config;
+        usage_path        = resp_.usage_path;
+        prompt_field      = resp_.prompt_tokens_field;
+        completion_field  = resp_.completion_tokens_field;
+        total_field       = resp_.total_tokens_field;
+    }
+
+    auto read_usage_into = [&](const json& container) {
+        if (usage_path.empty()) return;
+        auto u = json_path::at_path(container, usage_path);
+        if (!u || !u->is_object()) return;
+        int p = u->value(prompt_field, 0);
+        int c = u->value(completion_field, 0);
+        if (p > 0) completion.usage.prompt_tokens = p;
+        if (c > 0) completion.usage.completion_tokens = c;
+        if (!total_field.empty()) {
+            int t = u->value(total_field, 0);
+            if (t > 0) completion.usage.total_tokens = t;
+        }
+        if (completion.usage.total_tokens == 0) {
+            completion.usage.total_tokens =
+                completion.usage.prompt_tokens +
+                completion.usage.completion_tokens;
+        }
+    };
+
+    while (!got_done) {
+        auto msg = co_await ws->recv();
+        if (msg.op == async::WsOpcode::Close) {
+            // Server closed before sending response.completed — surface
+            // as an error rather than silently returning a partial
+            // ChatCompletion (which would be hard to distinguish from
+            // a successful empty completion). The Close frame payload
+            // is `[uint16 status BE][optional UTF-8 reason]` per RFC
+            // 6455 §5.5.1; lift both into the message so auth / quota
+            // / model-not-found rejections are debuggable.
+            std::string detail;
+            if (msg.payload.size() >= 2) {
+                std::uint16_t code =
+                    (static_cast<std::uint8_t>(msg.payload[0]) << 8) |
+                     static_cast<std::uint8_t>(msg.payload[1]);
+                detail = " (close=" + std::to_string(code);
+                if (msg.payload.size() > 2) {
+                    detail += " reason=\"" + msg.payload.substr(2) + "\"";
+                }
+                detail += ")";
+            }
+            throw std::runtime_error(
+                "openai-responses ws: server closed before response.completed"
+                + detail);
+        }
+
+        json j;
+        try {
+            j = json::parse(msg.payload);
+        } catch (const json::parse_error&) {
+            // Skip malformed events to mirror the HTTP/SSE path's
+            // tolerance — the server occasionally sends keep-alive
+            // shaped frames that aren't application events.
+            continue;
+        }
+
+        std::string event_type = j.value("type", "");
+        if (event_type.empty()) continue;
+
+        // Server-side error frames terminate the stream with detail.
+        if (event_type == "error") {
+            std::string err_msg = j.value("message", "");
+            if (err_msg.empty() && j.contains("error") && j["error"].is_object()) {
+                err_msg = j["error"].value("message", "unknown");
+            }
+            throw std::runtime_error(
+                "openai-responses ws error: " + err_msg);
+        }
+
+        if (!events_config.contains(event_type)) continue;
+        const auto& event_cfg = events_config[event_type];
+        const std::string action = event_cfg.value("action", "ignore");
+
+        if (action == "ignore") {
+            continue;
+        } else if (action == "block_start") {
+            // Mirrors complete_stream's block_start: openai-responses
+            // schema sets block_path="item", tool_call_type="function_call",
+            // id_field="call_id".
+            std::string block_path = event_cfg.value("block_path", "item");
+            std::string type_field = event_cfg.value("type_field", "type");
+            std::string tool_type   = event_cfg.value("tool_call_type", "function_call");
+            std::string id_fld      = event_cfg.value("id_field", "call_id");
+            std::string name_fld    = event_cfg.value("name_field", "name");
+
+            auto block = json_path::at_path(j, block_path);
+            if (block) {
+                EventBlock cb;
+                cb.type = block->value(type_field, "");
+                cb.index = static_cast<int>(event_blocks.size());
+                if (cb.type == tool_type) {
+                    cb.id   = block->value(id_fld, "");
+                    cb.name = block->value(name_fld, "");
+                }
+                event_blocks.push_back(cb);
+                event_block_index = cb.index;
+            }
+        } else if (action == "text_delta") {
+            if (event_block_index < 0 ||
+                event_block_index >= static_cast<int>(event_blocks.size())) continue;
+            auto& cur = event_blocks[event_block_index];
+            std::string fld = event_cfg.value("delta_field", "delta");
+            std::string token = j.value(fld, "");
+            full_content += token;
+            cur.text += token;
+            if (on_chunk) on_chunk(token);
+        } else if (action == "tool_args_delta") {
+            if (event_block_index < 0 ||
+                event_block_index >= static_cast<int>(event_blocks.size())) continue;
+            auto& cur = event_blocks[event_block_index];
+            std::string fld = event_cfg.value("delta_field", "delta");
+            cur.args += j.value(fld, "");
+        } else if (action == "block_stop") {
+            std::string tool_type = event_cfg.value("tool_call_type", "function_call");
+            if (event_block_index >= 0 &&
+                event_block_index < static_cast<int>(event_blocks.size())) {
+                auto& cb = event_blocks[event_block_index];
+                if (cb.type == tool_type) {
+                    ToolCall call;
+                    call.id        = cb.id;
+                    call.name      = cb.name;
+                    call.arguments = cb.args;
+                    tc_map[cb.index] = call;
+                }
+            }
+            event_block_index = -1;
+        } else if (action == "done") {
+            // response.completed carries the full response object
+            // (including usage) under "response". Same shape as the
+            // HTTP path so we reuse the usage extractor.
+            if (j.contains("response") && j["response"].is_object()) {
+                read_usage_into(j["response"]);
+            }
+            got_done = true;
+        }
+        // Other action values (delta/usage etc.) are Anthropic shapes
+        // that the openai-responses schema doesn't emit — ignore.
+    }
+
+    // Polite close so the server doesn't log a transport reset. Drain
+    // the close echo to keep the socket state clean.
+    try {
+        co_await ws->send_close(1000, "done");
+        auto echo = co_await ws->recv();
+        (void)echo;
+    } catch (const std::exception&) {
+        // Server may have already closed; ignore.
+    }
+
+    completion.message.content = full_content;
+    for (auto& [_, tc] : tc_map) {
+        completion.message.tool_calls.push_back(tc);
+    }
+    co_return completion;
 }
 
 } // namespace neograph::llm

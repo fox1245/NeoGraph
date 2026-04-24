@@ -47,6 +47,16 @@ class SchemaProvider : public Provider {
         std::string default_model = "gpt-4o-mini";  ///< Default model name.
         int timeout_seconds = 60;                   ///< HTTP request timeout in seconds.
         std::string base_url_override;              ///< If non-empty, overrides the schema's `connection.base_url`. Useful for test doubles and self-hosted OpenAI-compatible endpoints.
+
+        /// Drive `complete_stream` over `wss://` instead of HTTP/SSE.
+        /// Currently supported only for the "openai-responses" schema —
+        /// matches OpenAI's WebSocket mode at /v1/responses, which
+        /// claims ~40% lower latency on agentic rollouts with 20+ tool
+        /// calls (per developers.openai.com/api/docs/guides/websocket-mode).
+        /// Throws on `complete_stream` for any other schema. Has no
+        /// effect on `complete_async` / `complete()` (non-streaming
+        /// path stays HTTP).
+        bool use_websocket = false;
     };
 
     /**
@@ -243,6 +253,13 @@ class SchemaProvider : public Provider {
     json serialize_messages(const std::vector<ChatMessage>& messages) const;
     json serialize_tools(const std::vector<ChatTool>& tools) const;
     json serialize_single_message(const ChatMessage& msg) const;
+
+    /// WebSocket-mode streaming for OpenAI Responses. Async-native;
+    /// `complete_stream` bridges via `neograph::async::run_sync`.
+    /// Throws if `provider_name_ != "openai-responses"`.
+    asio::awaitable<ChatCompletion>
+    complete_stream_ws_responses(const CompletionParams& params,
+                                 const StreamCallback& on_chunk);
 
     ChatMessage parse_response(const json& resp_json) const;
     ChatCompletion::Usage parse_usage(const json& resp_json) const;
