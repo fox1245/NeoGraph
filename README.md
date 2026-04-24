@@ -138,8 +138,17 @@ cleanly with no resource pressure and the RSS stayed flat at ~7 MB.
 
 ### Requirements
 
-- **C++20** compiler (GCC 13+, Clang 15+, MSVC 2022+) — coroutines
-  are on the public API surface as of 2.0.0.
+- **C++20** compiler — coroutines are on the public API surface as
+  of 2.0.0. Verified toolchains:
+  - **GCC 13.3** — core + all tests green. The OpenAI Responses
+    built-in-tools demo (`example_openai_responses_ws_tools`) is
+    skipped because GCC 13 trips a coroutine-cleanup ICE
+    (`build_special_member_call` at `cp/call.cc:11096`); the rest
+    of the project is unaffected and the skip is automatic.
+  - **GCC 14.2+** — everything including the tools demo.
+  - **Clang 18+** — everything including the tools demo.
+  - **MSVC 2022** — core builds + non-Postgres tests in CI; runtime
+    not yet load-tested.
 - CMake 3.16+.
 - OpenSSL (HTTPS), libpq (optional, Postgres checkpoint),
   SQLite3 (optional, SQLite checkpoint).
