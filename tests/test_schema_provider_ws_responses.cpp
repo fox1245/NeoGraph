@@ -63,6 +63,9 @@ TEST(SchemaProviderWs, LiveRoundTripIfEnabled) {
     params.messages.push_back(
         {"user", "Reply with the single word: pong."});
     params.max_tokens = 16;
+    // No temperature override — the provider must strip it internally
+    // for the WS path. Default CompletionParams.temperature=0.7f used
+    // to make OpenAI close the socket with code=1000 + zero events.
 
     std::string streamed;
     auto completion = provider->complete_stream(
