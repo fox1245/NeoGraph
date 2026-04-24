@@ -26,6 +26,8 @@
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 
+#include <iostream>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -489,6 +491,8 @@ std::string build_upgrade_request(
     req.append("Connection: Upgrade\r\n");
     req.append("Sec-WebSocket-Key: ").append(sec_key).append("\r\n");
     req.append("Sec-WebSocket-Version: 13\r\n");
+
+    bool caller_set_user_agent = false;
     for (const auto& [k, v] : extra_headers) {
         // Block the handshake-controlled headers — callers don't
         // need them and silently overwriting is worse than throwing.
@@ -498,7 +502,16 @@ std::string build_upgrade_request(
             throw std::runtime_error(
                 "ws: handshake-reserved header in extra headers: " + k);
         }
+        if (ieq(k, "User-Agent")) caller_set_user_agent = true;
         req.append(k).append(": ").append(v).append("\r\n");
+    }
+    // Default User-Agent. RFC 6455 doesn't require it, but cloud
+    // edges (notably api.openai.com's Responses WS) reject the
+    // request — handshake succeeds, then they immediately Close 1000
+    // with no events — when User-Agent is absent. Curl, Python
+    // websockets, and browsers all send one; we match.
+    if (!caller_set_user_agent) {
+        req.append("User-Agent: neograph-ws/1.0\r\n");
     }
     req.append("\r\n");
     return req;
@@ -545,6 +558,9 @@ asio::awaitable<std::unique_ptr<WsClient>> ws_connect(
 
     std::string sec_key = detail::generate_sec_websocket_key();
     std::string req = build_upgrade_request(host, path, sec_key, headers);
+    if (std::getenv("NEOGRAPH_WS_DEBUG")) {
+        std::cerr << "[WS DEBUG] upgrade request:\n" << req;
+    }
     co_await impl->write_all(asio::buffer(req));
 
     // Read until headers complete.

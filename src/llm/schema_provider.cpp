@@ -1502,7 +1502,21 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
     async::AsyncEndpoint endpoint;
     {
         std::lock_guard<std::mutex> lock(schema_mutex_);
-        request_body = build_body(params);
+        // OpenAI's Responses WS endpoint has a known quirk: when the
+        // request body contains a `temperature` field, the server
+        // accepts the WebSocket upgrade, then immediately closes with
+        // code 1000 and zero events instead of returning an error.
+        // The HTTP /v1/responses endpoint accepts temperature happily,
+        // so this is WS-specific. Cross-checked against the official
+        // Python `websockets` client — same key, same model, same
+        // body MINUS temperature → 9 events delivered cleanly.
+        //
+        // CompletionParams::temperature defaults to 0.7, so this hits
+        // every caller that doesn't opt out. Force temperature off
+        // for the WS body while leaving HTTP behavior untouched.
+        CompletionParams ws_params = params;
+        ws_params.temperature = -1.0f;  // suppresses temperature in build_body
+        request_body = build_body(ws_params);
         endpoint = async::split_async_endpoint(conn_.base_url);
     }
 
