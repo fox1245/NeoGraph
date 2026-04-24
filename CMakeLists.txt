@@ -367,6 +367,23 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_openai_responses_ws examples/33_openai_responses_ws.cpp)
         target_link_libraries(example_openai_responses_ws PRIVATE neograph::core neograph::llm cppdotenv)
 
+        # Tools-tour demo exercises a C++20 coroutine pattern that
+        # trips a GCC 13 internal compiler error (build_special_member_call
+        # at cp/call.cc:11096). GCC 14 and Clang 18+ codegen the same
+        # source without source-level workarounds. Gate the target so
+        # Ubuntu 24.04 default toolchain users (GCC 13.3) still build
+        # the rest of the project cleanly.
+        if((CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+            AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "14")
+           OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            add_executable(example_openai_responses_ws_tools examples/34_openai_responses_ws_tools.cpp)
+            target_link_libraries(example_openai_responses_ws_tools PRIVATE neograph::core neograph::async cppdotenv)
+        else()
+            message(STATUS
+                "Skipping example_openai_responses_ws_tools: needs GCC >= 14 or Clang "
+                "(current: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
+        endif()
+
         add_executable(example_plan_executor examples/14_plan_executor.cpp)
         target_link_libraries(example_plan_executor PRIVATE neograph::core)
 
