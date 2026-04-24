@@ -1537,7 +1537,11 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
         std::move(ws_headers),
         endpoint.tls);
 
-    co_await ws->send_text(request_body.dump());
+    auto dumped = request_body.dump();
+    if (std::getenv("NEOGRAPH_WS_DEBUG")) {
+        std::cerr << "[WS DEBUG] sending: " << dumped << "\n";
+    }
+    co_await ws->send_text(dumped);
 
     // ── Streaming dispatch state ──
     ChatCompletion completion;
@@ -1590,8 +1594,14 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
         }
     };
 
+    bool ws_debug = std::getenv("NEOGRAPH_WS_DEBUG") != nullptr;
     while (!got_done) {
         auto msg = co_await ws->recv();
+        if (ws_debug) {
+            std::cerr << "[WS DEBUG] recv op=" << static_cast<int>(msg.op)
+                      << " bytes=" << msg.payload.size()
+                      << " payload=" << msg.payload << "\n";
+        }
         if (msg.op == async::WsOpcode::Close) {
             // Server closed before sending response.completed — surface
             // as an error rather than silently returning a partial
