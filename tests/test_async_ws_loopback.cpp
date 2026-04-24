@@ -160,6 +160,15 @@ TEST_F(WsLoopback, HandshakeAndTextEcho) {
     std::string host = "127.0.0.1";
     std::string port = std::to_string(port_);
 
+    // NOTE: pass the lambda UNINVOKED (no trailing `()`) so asio's
+    // co_spawn overload that takes `F` moves the lambda into its own
+    // storage. If we called the lambda inline (`[...](){...}()`), the
+    // lambda temporary would die at the end of this full-expression
+    // while the resulting coroutine still holds pointers back into
+    // its `[&]` capture members — ASan catches this as a
+    // stack-use-after-scope. Release/Debug builds happen to get away
+    // with it because the stack slot isn't reused before the
+    // coroutine resumes, but it's UB either way.
     auto fut = asio::co_spawn(
         client_ioc,
         [&]() -> asio::awaitable<std::string> {
@@ -174,7 +183,7 @@ TEST_F(WsLoopback, HandshakeAndTextEcho) {
             auto echo = co_await ws->recv();
             EXPECT_EQ(echo.op, WsOpcode::Close);
             co_return std::move(msg.payload);
-        }(),
+        },
         asio::use_future);
 
     client_ioc.run();
@@ -190,6 +199,8 @@ TEST_F(WsLoopback, LargeBinaryEcho) {
     std::string host = "127.0.0.1";
     std::string port = std::to_string(port_);
 
+    // Same uninvoked-lambda pattern as HandshakeAndTextEcho; see
+    // its comment for why.
     auto fut = asio::co_spawn(
         client_ioc,
         [&]() -> asio::awaitable<std::string> {
@@ -202,7 +213,7 @@ TEST_F(WsLoopback, LargeBinaryEcho) {
             auto echo = co_await ws->recv();
             EXPECT_EQ(echo.op, WsOpcode::Close);
             co_return std::move(msg.payload);
-        }(),
+        },
         asio::use_future);
 
     client_ioc.run();
