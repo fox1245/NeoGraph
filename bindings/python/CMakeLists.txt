@@ -44,6 +44,7 @@ pybind11_add_module(_neograph
     src/bind_provider.cpp
     src/bind_state.cpp
     src/bind_graph.cpp
+    src/bind_node.cpp
 )
 
 target_link_libraries(_neograph PRIVATE
