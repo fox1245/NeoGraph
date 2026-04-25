@@ -40,12 +40,22 @@ read decompilation and write back names / comments to the live Ghidra project.
 
 Workflow — follow it exactly:
   1. Call `list_methods` to enumerate every function.
-  2. Filter out libc/runtime glue. Skip ANY function whose name matches:
-       _start, _init, _fini, frame_dummy, register_tm_clones, deregister_tm_clones,
-       __do_global_*, __libc_*, _dl_*, __cxa_finalize, __gmon_start__, __stack_chk_fail,
-       and any name starting with "FUN_" that decompiles to a single jump/thunk.
-     The remaining FUN_xxxxxx names are the user functions you must analyze.
-  3. For EACH user function:
+  2. SKIP these — they are libc / CRT scaffolding, NOT user code, even if
+     list_methods returns them with no underscore prefix:
+       _start, _init, _fini, _INIT_0, _FINI_0, _DT_INIT, _DT_FINI,
+       entry, __libc_start_main, __libc_csu_init, __libc_csu_fini,
+       frame_dummy, register_tm_clones, deregister_tm_clones,
+       __do_global_dtors_aux, __do_global_ctors_aux, __cxa_finalize,
+       __gmon_start__, __stack_chk_fail, __printf_chk,
+       _dl_*, _ITM_*, puts, strlen, fwrite,
+       init_function, empty_function_*  (these names appear in stripped
+         ELF binaries as small CRT stubs — they are NOT user code; do not
+         rename them and do not include them in your final JSON),
+       any FUN_xxxxxx that decompiles to a single jump/return/thunk.
+     If unsure: decompile first; if the body has no real business logic
+     (only a tail-call to __libc_start_main, a few register moves, or just
+     `return;`) — SKIP it.
+  3. For EACH remaining USER function (typically 5–10 in a small binary):
        a. `decompile_function` with its current name. Read the pseudo-C carefully.
        b. Decide a precise, idiomatic snake_case name (e.g. `xor_decrypt`, `compute_checksum`).
        c. `rename_function` from the old FUN_xxxxxx name to your chosen name.
@@ -60,6 +70,8 @@ Workflow — follow it exactly:
        ]
      }
      Output the JSON ONLY in your final message — no prose, no markdown fence.
+     Include ONLY the user functions you renamed; do NOT list the CRT
+     scaffolding you skipped.
 
 Be decisive. Do not over-explore. The binary is small (under 10 user functions).
 )";
@@ -138,9 +150,8 @@ int main(int argc, char** argv) {
                 using T = neograph::graph::GraphEvent::Type;
                 if (ev.type == T::LLM_TOKEN) {
                     std::cerr << ev.data.get<std::string>() << std::flush;
-                } else if (ev.type == T::CHANNEL_WRITE) {
-                    std::cerr << "\n[WRITE " << ev.node_name << "] "
-                              << ev.data.dump().substr(0, 800) << "\n";
+                } else if (ev.type == T::NODE_START && ev.node_name == "tools") {
+                    std::cerr << "\n[ghidra-mcp call]\n";
                 } else if (ev.type == T::ERROR) {
                     std::cerr << "\n[ERROR " << ev.node_name << "] "
                               << ev.data.dump() << "\n";
@@ -153,18 +164,33 @@ int main(int argc, char** argv) {
             std::cerr << result.execution_trace[i]
                       << (i + 1 < result.execution_trace.size() ? " → " : "");
         }
-        std::cerr << "\n\n--- final JSON (stdout) ---\n";
+        std::cerr << "\n--- final JSON (stdout) ---\n";
 
-        // The ReAct graph appends to channel "messages" (list reducer);
-        // the final assistant message is the last element.
-        if (result.output.contains("channels") &&
-            result.output["channels"].contains("messages") &&
-            result.output["channels"]["messages"].contains("value")) {
+        // Primary path: ReAct sets result.output["final_response"] when the
+        // last message in the channel is an assistant message (see
+        // graph_engine.cpp). Other examples (02, 04, 06) use the same path.
+        if (result.output.contains("final_response") &&
+            result.output["final_response"].is_string()) {
+            std::cout << result.output["final_response"].get<std::string>() << "\n";
+        } else if (result.output.contains("channels") &&
+                   result.output["channels"].contains("messages") &&
+                   result.output["channels"]["messages"].contains("value")) {
+            // Fallback: walk messages backward for the last non-empty assistant
+            // content. Only reached if final_response wasn't set (e.g. the run
+            // hit max_steps mid-tool-loop and the last message is a tool result).
             auto msgs = result.output["channels"]["messages"]["value"];
-            if (msgs.is_array() && !msgs.empty()) {
-                auto last = msgs[msgs.size() - 1];
-                if (last.contains("content") && last["content"].is_string()) {
-                    std::cout << last["content"].get<std::string>() << "\n";
+            if (msgs.is_array()) {
+                for (size_t i = msgs.size(); i-- > 0;) {
+                    auto m = msgs[i];
+                    if (m.contains("role") && m["role"] == "assistant" &&
+                        m.contains("content") && m["content"].is_string() &&
+                        !m["content"].get<std::string>().empty()) {
+                        std::cerr << "[*] final_response missing — using "
+                                     "channels.messages["
+                                  << i << "] fallback\n";
+                        std::cout << m["content"].get<std::string>() << "\n";
+                        break;
+                    }
                 }
             }
         }
