@@ -106,6 +106,18 @@ logging.level = "DEBUG"
 # httplib's MCP client). Examples / tests / benchmarks are dead weight
 # for an end-user wheel.
 cmake.args = [
+    # `-G Ninja` is here (not just CMAKE_GENERATOR=Ninja env var) so
+    # scikit-build-core's `get_generator(*args)` detection actually
+    # sees it. Without it, scikit-build-core leaves
+    # `single_config = not platform.startswith("win")` at its
+    # Windows default of False, then passes `--config Release` to
+    # cmake --install. Even though Ninja itself ignores --config,
+    # the multi-config code paths inside scikit-build-core differ
+    # enough that the staged Windows wheel ends up missing the
+    # engine .dll siblings (observed: 1 MB Windows wheels through
+    # iters 6-12 vs 4.4 MB Linux wheels with the same install
+    # rules).
+    "-G", "Ninja",
     "-DBUILD_SHARED_LIBS=ON",
     "-DNEOGRAPH_BUILD_PYBIND=ON",
     "-DNEOGRAPH_BUILD_LLM=ON",
@@ -223,12 +235,11 @@ vcpkg install openssl:x64-windows && \
 echo VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%\
 """
 
-# Forward the vcpkg OpenSSL prefix into CMake, and pin Ninja as the
-# cmake generator (single-config). Without CMAKE_GENERATOR=Ninja,
-# CMake on Windows defaults to the Visual Studio multi-config
-# generator, which produced wheel staging that silently dropped
-# the engine .dll files (iter 6: 1 MB wheel; expected ~5 MB).
-environment = { CMAKE_TOOLCHAIN_FILE = "C:\\\\vcpkg\\\\scripts\\\\buildsystems\\\\vcpkg.cmake", CMAKE_GENERATOR = "Ninja" }
+# Forward the vcpkg OpenSSL prefix into CMake. Ninja is pinned via
+# `-G Ninja` in the global cmake.args above (so scikit-build-core's
+# generator-detection sees it and switches to single-config code
+# paths); CMAKE_GENERATOR env var alone wasn't enough for that.
+environment = { CMAKE_TOOLCHAIN_FILE = "C:\\\\vcpkg\\\\scripts\\\\buildsystems\\\\vcpkg.cmake" }
 
 # delvewheel auto-discovers the engine .dlls beside the binding (we
 # install them via the same cmake install rule as Linux/macOS) and
