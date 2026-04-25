@@ -276,14 +276,23 @@ target_link_libraries(neograph_async PUBLIC asio OpenSSL::SSL OpenSSL::Crypto)
 target_compile_features(neograph_async PUBLIC cxx_std_20)
 add_library(neograph::async ALIAS neograph_async)
 
-# Smoke binary — just proves the async TU compiles, links, and runs.
-add_executable(neograph_async_smoke src/async/async_smoke_main.cpp)
-target_link_libraries(neograph_async_smoke PRIVATE neograph_async)
+# Smoke binaries — dev-only; their *_main.cpp uses internal symbols
+# (e.g. run_smoke) that aren't part of the engine's exported public
+# surface. On Windows BUILD_SHARED_LIBS=ON they fail with LNK2019
+# because run_smoke isn't NEOGRAPH_API-decorated, and there's no
+# reason to ship them in a wheel either way. Gate behind
+# NEOGRAPH_BUILD_EXAMPLES (default ON for source builds, OFF in the
+# pyproject.toml cibw config).
+if(NEOGRAPH_BUILD_EXAMPLES)
+    add_executable(neograph_async_smoke src/async/async_smoke_main.cpp)
+    target_link_libraries(neograph_async_smoke PRIVATE neograph_async)
 
-# Live-network smoke for the TLS path. Not in ctest (offline-safe by
-# default). Run manually after touching http_client.cpp's TLS branch.
-add_executable(neograph_async_https_smoke src/async/async_https_smoke_main.cpp)
-target_link_libraries(neograph_async_https_smoke PRIVATE neograph_async)
+    # Live-network smoke for the TLS path. Not in ctest (offline-safe
+    # by default). Run manually after touching http_client.cpp's TLS
+    # branch.
+    add_executable(neograph_async_https_smoke src/async/async_https_smoke_main.cpp)
+    target_link_libraries(neograph_async_https_smoke PRIVATE neograph_async)
+endif()
 
 # ===========================================================================
 # neograph::postgres — PostgresCheckpointStore (libpq)
