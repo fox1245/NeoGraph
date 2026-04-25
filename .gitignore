@@ -6,7 +6,7 @@ docs/api/
 .playwright-mcp
 benchmarks/node_modules/
 
-# Python venvs (e.g. projects/re_agent/.venv for the scorer).
+# Python venvs.
 .venv/
 __pycache__/
 *.pyc
@@ -24,8 +24,8 @@ NEXT_SESSION.md
 /cmake_install.cmake
 /compile_commands.json
 
-# RE analysis artifacts — may be derivative work, not for public push.
-# Keep them on disk for personal use; private repo backup if needed.
-projects/re_agent/results/
-projects/re_agent/targets/j2kengine_ground_truth.json
+# RE analysis pipeline now lives in https://github.com/fox1245/re-agent
+# (private). examples/35_re_agent.cpp stays here as the engine showcase.
+
+# CTest output dir (re-agent's stale pre-split artifact, plus future test runs)
 Testing/

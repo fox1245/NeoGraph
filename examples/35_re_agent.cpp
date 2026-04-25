@@ -1,33 +1,39 @@
-// NeoGraph Example 35: Reverse-Engineering Agent (self-test MVP)
+// NeoGraph Example 35: Reverse-Engineering Agent (showcase)
 //
-// Drives ghidra-mcp (stdio bridge → Ghidra GUI 8080 plugin) via a ReAct loop
-// to recover meaningful names + summaries for every user-defined function in
-// a stripped binary.
+// Wires ghidra-mcp (stdio bridge → Ghidra GUI 18080 plugin) into a NeoGraph
+// ReAct loop and recovers meaningful names + summaries for every user-defined
+// function in a stripped binary. Verified end-to-end: matched_score 0.92 on
+// a 6-function crackme (gpt-5.4-mini) and 62 functions on a real ~100-func
+// PE DLL (z-ai/glm-5.1 via OpenRouter).
 //
-// Self-test rig:
-//   projects/re_agent/targets/crackme01    (stripped, 6 user functions)
-//   projects/re_agent/targets/ground_truth.json
+// This example is the "engine showcase" cut: the cpp + re_agent_common.h
+// are everything you need to drive ghidra-mcp from NeoGraph. The full RE
+// pipeline (Docker compose for Ghidra + GhidraMCPPlugin, target binaries,
+// ground-truth oracle, scorer.py LLM judge, Phase 3 parallel fan-out, etc.)
+// lives in the standalone repo:
+//
+//     https://github.com/fox1245/re-agent  (private)
 //
 // Prerequisites (run once):
-//   1. /root/ghidra_11.0.3_PUBLIC/ghidraRun   (start GUI, WSLg)
-//   2. New project → Import the crackme01 binary → CodeBrowser
-//   3. Accept auto-analysis. Plugin opens HTTP server on 127.0.0.1:8080.
-//   4. echo "OPENAI_API_KEY=sk-..." > .env
+//   1. Start Ghidra (native or via the re-agent docker/compose.yaml).
+//   2. New project → Import a stripped binary → CodeBrowser → auto-analyze.
+//      Plugin exposes HTTP on 127.0.0.1:18080 (or :8080 for native install).
+//   3. echo "OPENAI_API_KEY=sk-..." > .env
 //
 // Usage:
 //   ./example_re_agent
 //   ./example_re_agent --max-steps 80 --model gpt-5.4-mini
 //   # OpenAI-compat HTTP backend (OpenRouter / Ollama / vLLM / trtllm-serve):
 //   LLM_BASE_URL=https://openrouter.ai/api LLM_API_KEY=sk-or-v1-... \
-//     ./example_re_agent --model deepseek/deepseek-v4-pro
+//     ./example_re_agent --model z-ai/glm-5.1
 //
-// The agent's final tool-free message should be a JSON summary; we dump it
-// to stdout for diff against ground_truth.json (human eyeball for now —
-// next iteration will add an automated scorer).
+// The agent's final tool-free message is a JSON summary on stdout; trace
+// goes to stderr.
 //
 // NOTE: prompt + provider/MCP setup + final-response extraction live in
-// `re_agent_common.h` so the upcoming parallel fan-out example (36)
-// reuses them verbatim.
+// re_agent_common.h so the upcoming parallel fan-out variant reuses them
+// verbatim. That fan-out work (`36_re_agent_fanout.cpp`) lives in the
+// standalone re-agent repo.
 
 #include "re_agent_common.h"
 
