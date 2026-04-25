@@ -89,17 +89,9 @@ build-dir = "build/{wheel_tag}"
 # Reproducible-ish: Release with assertions off, no debug info.
 cmake.build-type = "Release"
 
-# Print every cmake install action so wheel-build problems show
-# up in the cibuildwheel log instead of being silently swallowed
-# by `pip wheel`.
+# Surface cmake install actions in the cibuildwheel log so future
+# wheel-content debugging isn't silent.
 cmake.define = { CMAKE_INSTALL_MESSAGE = "ALWAYS" }
-
-# Force scikit-build-core to surface its cmake-install steps in the
-# pip wheel output. Without this, scikit-build-core captures the
-# subprocess output and prints nothing on success, making
-# wheel-content debugging effectively blind. Set to DEBUG for the
-# Windows-debug iteration; downgrade after Windows lands.
-logging.level = "DEBUG"
 
 # Engine config: shared libs (so the wheel can ship .so siblings),
 # turn off optional subsystems that pull system deps (libpq, libsqlite3,
