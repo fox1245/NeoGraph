@@ -201,8 +201,17 @@ environment = { CMAKE_TOOLCHAIN_FILE = "C:\\\\vcpkg\\\\scripts\\\\buildsystems\\
 # delvewheel auto-discovers the engine .dlls beside the binding (we
 # install them via the same cmake install rule as Linux/macOS) and
 # pulls in libssl/libcrypto from vcpkg's bin dir.
+#
+# NOTE: cibuildwheel auto-installs delvewheel ONLY when using its
+# default repair-wheel-command. Overriding repair-wheel-command (as
+# we do here to inject --add-path) skips that install — the first
+# attempt failed with "'delvewheel' is not recognized as an internal
+# or external command". Solution: pip install delvewheel right
+# before invoking it, and call via `python -m delvewheel` so we don't
+# depend on PATH plumbing for newly installed scripts.
 repair-wheel-command = """\
-delvewheel repair -w {dest_dir} {wheel} \
+pip install delvewheel && \
+python -m delvewheel repair -w {dest_dir} {wheel} \
   --add-path C:\\\\vcpkg\\\\installed\\\\x64-windows\\\\bin\
 """
 
