@@ -692,29 +692,40 @@ if(NEOGRAPH_BUILD_PYBIND)
 endif()
 
 # ===========================================================================
-# Install (TODO: proper install with generator expressions for deps)
+# Install
 #
 # Two consumer paths:
 #
-#   a) Standard `cmake --install`: ships headers, schemas, libs to a
-#      conventional system prefix (`/usr/local`, etc.). All the
-#      install rules below WITHOUT a COMPONENT name belong to this
-#      path (CMake's default "Unspecified" component).
+#   a) Standard `cmake --install`: ships headers, schemas, and engine
+#      libs to a conventional system prefix (/usr/local, etc.).
+#      Headers + schemas are gated behind NEOGRAPH_INSTALL_HEADERS
+#      (default ON for source builds, OFF for the Python wheel build
+#      via pyproject.toml). Engine libs are unconditional.
 #
-#   b) Python wheel via scikit-build-core: ships only the engine .so
-#      siblings + the `_neograph.so` binding into the wheel staging
-#      dir at `neograph/`. These rules are tagged with COMPONENT
-#      `NeoGraphPyBindWheel` and only fire when scikit-build-core
-#      runs `cmake --install --component NeoGraphPyBindWheel`. See
-#      pyproject.toml at the repo root.
+#   b) Python wheel via scikit-build-core: pyproject.toml sets
+#      -DNEOGRAPH_INSTALL_HEADERS=OFF + -DNEOGRAPH_BUILD_PYBIND=ON.
+#      cmake --install then drops only the engine .so/.dll/.dylib
+#      siblings into <wheel-staging>/neograph_engine/, alongside the
+#      _neograph.{so,pyd} that bindings/python/CMakeLists.txt's own
+#      install rule contributes. The earlier COMPONENT-based filter
+#      (NeoGraphPyBindWheel) was abandoned — scikit-build-core's
+#      install.components handling didn't reliably propagate to
+#      cmake --install --component on Windows, leaving the engine
+#      .dlls out of the wheel.
 # ===========================================================================
 include(GNUInstallDirs)
 
-install(DIRECTORY include/neograph
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+option(NEOGRAPH_INSTALL_HEADERS
+    "Install C++ headers + schemas to the system prefix (off for wheel builds)"
+    ON)
 
-install(DIRECTORY schemas/
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/neograph/schemas)
+if(NEOGRAPH_INSTALL_HEADERS)
+    install(DIRECTORY include/neograph
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+    install(DIRECTORY schemas/
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/neograph/schemas)
+endif()
 
 # ── Pybind11 wheel install ───────────────────────────────────────────────
 #
@@ -748,14 +759,8 @@ if(NEOGRAPH_BUILD_PYBIND)
             INSTALL_RPATH_USE_LINK_PATH TRUE)
     endforeach()
 
-    # CMake's install(TARGETS ...) attaches a single trailing COMPONENT
-    # only to the LAST output-keyword group (ARCHIVE here). We want
-    # all three under the same component, so spell COMPONENT out per
-    # keyword. Without this the LIBRARY/RUNTIME installs get tagged
-    # "Unspecified" and silently dump engine .so files into a normal
-    # `cmake --install` run.
     install(TARGETS ${NEOGRAPH_PYBIND_LIBS}
-            LIBRARY DESTINATION neograph_engine COMPONENT NeoGraphPyBindWheel
-            RUNTIME DESTINATION neograph_engine COMPONENT NeoGraphPyBindWheel
-            ARCHIVE DESTINATION neograph_engine COMPONENT NeoGraphPyBindWheel)
+            LIBRARY DESTINATION neograph_engine
+            RUNTIME DESTINATION neograph_engine
+            ARCHIVE DESTINATION neograph_engine)
 endif()

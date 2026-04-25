@@ -127,11 +127,9 @@ configure_file(neograph_engine/llm.py      "${_NEOGRAPH_PY_PKG_DIR}/llm.py"     
 # the engine .so files in the root CMakeLists, so a single
 # `cmake --install --component NeoGraphPyBindWheel` brings everything
 # into the wheel staging dir.
-# Per-keyword COMPONENT (see comment in root CMakeLists about why a
-# single trailing COMPONENT silently mis-attaches).
 install(TARGETS _neograph
-    LIBRARY DESTINATION neograph_engine COMPONENT NeoGraphPyBindWheel
-    RUNTIME DESTINATION neograph_engine COMPONENT NeoGraphPyBindWheel)
+    LIBRARY DESTINATION neograph_engine
+    RUNTIME DESTINATION neograph_engine)
 
 # Make smoke tests runnable straight from the build tree:
 #   ctest -V -R pybind_smoke
