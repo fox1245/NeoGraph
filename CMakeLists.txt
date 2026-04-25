@@ -20,6 +20,58 @@ option(NEOGRAPH_BUILD_POSTGRES "Build PostgresCheckpointStore (libpq)" ON)
 option(NEOGRAPH_BUILD_SQLITE   "Build SqliteCheckpointStore (libsqlite3)" ON)
 option(NEOGRAPH_BUILD_EXAMPLES "Build example programs"                  ON)
 
+# ---------------------------------------------------------------------------
+# Shared-vs-static library mode
+#
+# Standard CMake convention: respect BUILD_SHARED_LIBS. The neograph_*
+# `add_library()` calls below pass NO type keyword so the user-supplied
+# value of BUILD_SHARED_LIBS picks STATIC (default) or SHARED.
+#
+# Why someone would flip BUILD_SHARED_LIBS=ON:
+#   - Patch a single subsystem (e.g. libneograph_llm.so when an LLM API
+#     surface changes) without rebuilding/redeploying the whole agent.
+#   - Cut the per-agent binary size when shipping multiple NeoGraph-based
+#     agents on the same host: they share one libneograph_core.so instead
+#     of statically linking the engine into each.
+#   - Ship the engine as an OS package; user agents link against the
+#     installed .so.
+#
+# Caveats:
+#   - Windows DLL export annotations (__declspec(dllexport)/dllimport on
+#     every public symbol) are NOT yet wired up. BUILD_SHARED_LIBS=ON on
+#     Windows will compile but link-time will fail with undefined
+#     symbols. Stay STATIC on Windows until that lands. The check below
+#     warns the user up-front rather than letting them discover it at
+#     link time.
+#   - Static-only deps (yyjson, httplib INTERFACE, asio INTERFACE,
+#     cppdotenv INTERFACE, concurrentqueue INTERFACE) get absorbed into
+#     whichever neograph_* library uses them, regardless of mode.
+# ---------------------------------------------------------------------------
+if(BUILD_SHARED_LIBS AND WIN32)
+    message(WARNING
+        "NeoGraph: BUILD_SHARED_LIBS=ON on Windows requires "
+        "__declspec(dllexport)/dllimport annotations that are not yet in "
+        "the public headers. Linking will fail with undefined symbols. "
+        "Use BUILD_SHARED_LIBS=OFF on Windows until that work lands.")
+endif()
+
+# All TUs that might end up linked into a shared library need PIC. Setting
+# this globally is harmless on static builds and saves per-target -fPIC
+# annotations on the static deps that get absorbed (yyjson, etc.).
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+# When the engine is built as shared libs, executables that link them
+# (examples, tests, downstream agents) need to find the .so at runtime.
+# `$ORIGIN`-relative RPATHs make the build-tree binaries self-contained
+# (they look for libneograph_*.so beside themselves) and downstream
+# installers can decide their own INSTALL_RPATH.
+set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
+if(UNIX AND NOT APPLE)
+    set(CMAKE_BUILD_RPATH "$ORIGIN")
+elseif(APPLE)
+    set(CMAKE_BUILD_RPATH "@loader_path")
+endif()
+
 # ===========================================================================
 # Dependencies
 # ===========================================================================
@@ -131,7 +183,7 @@ add_custom_target(generate_schemas DEPENDS ${GENERATED_DIR}/builtin_schemas.h)
 # ===========================================================================
 # neograph::core — Graph engine + foundation types
 # ===========================================================================
-add_library(neograph_core STATIC
+add_library(neograph_core
     src/core/json.cpp
     src/core/provider.cpp
     src/core/tool.cpp
@@ -178,7 +230,7 @@ add_library(neograph::core ALIAS neograph_core)
 # benchmarks/bench_async_fanout for the scaling measurement that
 # justifies (or kills) the bigger refactor.
 # ===========================================================================
-add_library(neograph_async STATIC
+add_library(neograph_async
     src/async/async_smoke.cpp
     src/async/http_client.cpp
     src/async/conn_pool.cpp
@@ -211,7 +263,7 @@ target_link_libraries(neograph_async_https_smoke PRIVATE neograph_async)
 # and LangGraph state without name collisions.
 # ===========================================================================
 if(NEOGRAPH_BUILD_POSTGRES)
-    add_library(neograph_postgres STATIC
+    add_library(neograph_postgres
         src/core/postgres_checkpoint.cpp
     )
 
@@ -238,7 +290,7 @@ endif()
 # / desktop-CLI.
 # ===========================================================================
 if(NEOGRAPH_BUILD_SQLITE)
-    add_library(neograph_sqlite STATIC
+    add_library(neograph_sqlite
         src/core/sqlite_checkpoint.cpp
     )
 
@@ -260,7 +312,7 @@ endif()
 # neograph::llm — LLM provider implementations (OpenAI, Schema, Agent)
 # ===========================================================================
 if(NEOGRAPH_BUILD_LLM)
-    add_library(neograph_llm STATIC
+    add_library(neograph_llm
         src/llm/openai_provider.cpp
         src/llm/schema_provider.cpp
         src/llm/rate_limited_provider.cpp
@@ -289,7 +341,7 @@ endif()
 # neograph::mcp — MCP client (JSON-RPC over HTTP/stdio)
 # ===========================================================================
 if(NEOGRAPH_BUILD_MCP)
-    add_library(neograph_mcp STATIC
+    add_library(neograph_mcp
         src/mcp/client.cpp
     )
 
@@ -411,16 +463,21 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         target_link_libraries(example_async_concurrent_runs PRIVATE neograph::core)
 
         # Example 28: Corrective RAG (arXiv:2401.15884) over /v1/responses.
+        # Links neograph::async explicitly: 28/29/30 directly call
+        # neograph::async::async_post(). Worked transitively under STATIC
+        # builds (neograph::llm pulls neograph::async PRIVATE), but SHARED
+        # libs don't propagate PRIVATE deps to executables — needs to be
+        # spelled out so BUILD_SHARED_LIBS=ON also links cleanly.
         add_executable(example_corrective_rag examples/28_corrective_rag.cpp)
-        target_link_libraries(example_corrective_rag PRIVATE neograph::core neograph::llm cppdotenv)
+        target_link_libraries(example_corrective_rag PRIVATE neograph::core neograph::llm neograph::async cppdotenv)
 
         # Example 29: /v1/responses raw envelope dump — debug / pedagogy aid.
         add_executable(example_responses_envelope examples/29_responses_envelope.cpp)
-        target_link_libraries(example_responses_envelope PRIVATE neograph::core neograph::llm cppdotenv)
+        target_link_libraries(example_responses_envelope PRIVATE neograph::core neograph::llm neograph::async cppdotenv)
 
         # Example 30: reasoning_effort tradeoff sweep on /v1/responses.
         add_executable(example_reasoning_effort examples/30_reasoning_effort.cpp)
-        target_link_libraries(example_reasoning_effort PRIVATE neograph::core neograph::llm cppdotenv)
+        target_link_libraries(example_reasoning_effort PRIVATE neograph::core neograph::llm neograph::async cppdotenv)
 
         # Example 31: NeoGraph driving a local OpenAI-compatible inference
         # server (TransformerCPP, llama.cpp server, vLLM OpenAI-compat,
