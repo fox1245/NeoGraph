@@ -73,6 +73,17 @@ jobs:
         with:
           fetch-depth: 0  # cibuildwheel reads tags for version tagging
 
+      # MSVC environment for the Windows row only. Without this,
+      # CMake (using Ninja per pyproject.toml's CMAKE_GENERATOR=Ninja)
+      # picks up MinGW from PATH and the build collapses with
+      # "collect2.exe: error: ld returned 1 exit status". The
+      # Visual Studio generator activates vcvarsall implicitly, but
+      # Ninja does not — so the runner needs MSVC env set up
+      # explicitly before cibuildwheel runs.
+      - name: Activate MSVC env (Windows only)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
       # cibuildwheel pulls the manylinux container image and drives
       # the CMake build inside. All build-time deps (cmake, gcc,
       # OpenSSL headers) are installed by `before-all` in pyproject.toml
