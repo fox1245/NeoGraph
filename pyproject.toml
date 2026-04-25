@@ -254,6 +254,7 @@ environment = { CMAKE_TOOLCHAIN_FILE = "C:\\\\vcpkg\\\\scripts\\\\buildsystems\\
 # depend on PATH plumbing for newly installed scripts.
 repair-wheel-command = """\
 pip install delvewheel && \
+python -c "import zipfile, sys; print('=== WHEEL CONTENTS ==='); [print(f'{i.file_size:>10} {i.filename}') for i in zipfile.ZipFile(r'{wheel}').infolist()]; print('=== END ===')" && \
 python -m delvewheel repair -w {dest_dir} {wheel} \
   --add-path C:\\\\vcpkg\\\\installed\\\\x64-windows\\\\bin\
 """
