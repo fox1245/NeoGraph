@@ -221,17 +221,44 @@ void init_graph(py::module_& m) {
         "then call run() or run_stream(). Single instance is safe to "
         "share across threads with distinct thread_ids.")
         .def_static("compile",
-            [](py::object definition, const NodeContext& ctx) {
+            [](py::object definition, py::object ctx_obj) {
+                // Take the Python wrapper as py::object (rather than
+                // const NodeContext&) so we can read the `_pytools`
+                // dynamic attr carrying user-defined Python Tool
+                // instances. The C++ NodeContext data still comes
+                // through .cast<NodeContext>() — same struct, just
+                // accessed via the Python side first.
+                NodeContext ctx = ctx_obj.cast<NodeContext>();
+
+                // Materialize the Python Tools as PyToolOwner-backed
+                // unique_ptrs. After compile(), we transfer ownership
+                // to the engine via own_tools() so the engine keeps
+                // them alive for as long as it lives — and the raw
+                // pointers we stash in ctx.tools below stay valid.
+                std::vector<std::unique_ptr<neograph::Tool>> owned_tools;
+                if (py::hasattr(ctx_obj, "_pytools")) {
+                    owned_tools = wrap_python_tools(ctx_obj.attr("_pytools"));
+                    ctx.tools.clear();
+                    ctx.tools.reserve(owned_tools.size());
+                    for (auto& up : owned_tools) {
+                        ctx.tools.push_back(up.get());
+                    }
+                }
+
                 auto j = py_to_json(definition);
                 // GIL held: compile is fast (just walks the JSON).
                 auto unique = GraphEngine::compile(j, ctx, nullptr);
+                if (!owned_tools.empty()) {
+                    unique->own_tools(std::move(owned_tools));
+                }
                 return std::shared_ptr<GraphEngine>(unique.release());
             },
             py::arg("definition"),
             py::arg("ctx"),
             "Compile a graph from a JSON-shaped Python dict. The "
-            "context provides the LLM provider and (later) tools used "
-            "by built-in node types. Raises RuntimeError on bad shape.")
+            "context provides the LLM provider, tools, model, and "
+            "system instructions used by built-in node types. Raises "
+            "RuntimeError on bad shape.")
 
         .def("run",
             [](GraphEngine& self, const RunConfig& cfg) {

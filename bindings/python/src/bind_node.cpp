@@ -135,6 +135,43 @@ NodeResult coerce_to_node_result(py::handle obj) {
         std::string(py::str(obj.get_type()).cast<std::string>()));
 }
 
+// PyToolOwner: bridges the C++ Tool interface to a held Python user
+// object. Created at GraphEngine.compile() time from the
+// `_pytools` attribute on the Python NodeContext wrapper, then
+// transferred to the engine via own_tools(). Pattern parallels
+// PyGraphNodeOwner — same GIL handshake, same destructor caveat.
+class PyToolOwner final : public neograph::Tool {
+public:
+    explicit PyToolOwner(py::object py_obj)
+        : py_obj_(std::move(py_obj)) {}
+
+    ~PyToolOwner() override {
+        py::gil_scoped_acquire g;
+        py_obj_ = py::object();
+    }
+
+    neograph::ChatTool get_definition() const override {
+        py::gil_scoped_acquire g;
+        return py_obj_.attr("get_definition")()
+            .cast<neograph::ChatTool>();
+    }
+
+    std::string execute(const json& arguments) override {
+        py::gil_scoped_acquire g;
+        py::object args_py = json_to_py(arguments);
+        return py_obj_.attr("execute")(args_py)
+            .cast<std::string>();
+    }
+
+    std::string get_name() const override {
+        py::gil_scoped_acquire g;
+        return py_obj_.attr("get_name")().cast<std::string>();
+    }
+
+private:
+    py::object py_obj_;
+};
+
 // PyGraphNodeOwner: bridges the C++ GraphNode interface to a held
 // Python user object. One instance per node-in-the-graph; created
 // by NodeFactory.register_type() factory callbacks.
@@ -299,6 +336,21 @@ std::shared_ptr<PyCallable> make_gil_safe(PyCallable&& fn) {
 }
 
 } // namespace
+
+// Public helper exposed via json_bridge.h. Wraps each item in the
+// list as a unique_ptr<Tool> backed by a PyToolOwner trampoline.
+// Caller (GraphEngine.compile binding) is responsible for transferring
+// ownership to the engine via own_tools().
+std::vector<std::unique_ptr<neograph::Tool>>
+wrap_python_tools(py::handle tools_list) {
+    std::vector<std::unique_ptr<neograph::Tool>> out;
+    if (tools_list.is_none()) return out;
+    for (auto t : tools_list) {
+        out.push_back(std::make_unique<PyToolOwner>(
+            py::reinterpret_borrow<py::object>(t)));
+    }
+    return out;
+}
 
 void init_node(py::module_& m) {
     using namespace neograph::graph;

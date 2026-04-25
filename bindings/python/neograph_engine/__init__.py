@@ -25,7 +25,6 @@ from ._neograph import (
 
     # Provider surface
     Provider,
-    Tool,
     CompletionParams,
     ChatMessage,
     ToolCall,
@@ -33,7 +32,6 @@ from ._neograph import (
     ChatCompletion,
 
     # Graph types
-    NodeContext,
     ChannelWrite,
     Send,
     Command,
@@ -56,6 +54,90 @@ from ._neograph import (
     START_NODE,
     END_NODE,
 )
+
+# Re-import the C++ Tool / NodeContext bindings under private names so
+# we can shadow them with Python-side wrappers below.
+from ._neograph import Tool as _CppTool
+from ._neograph import NodeContext as _CppNodeContext
+
+
+class Tool:
+    """Base class for Python-defined tools.
+
+    Subclass and override:
+      - ``get_name(self) -> str``               (required)
+      - ``get_definition(self) -> ChatTool``    (required — sent to LLM)
+      - ``execute(self, arguments) -> str``     (required — `arguments` is a dict)
+
+    The ``ChatTool`` returned by ``get_definition()`` describes what
+    arguments the LLM may pass — its ``name`` MUST match
+    ``get_name()``, otherwise the engine's tool-dispatch lookup misses.
+    Pass instances into ``NodeContext(tools=[...])``; the engine takes
+    ownership at compile time so a Python reference isn't required to
+    keep them alive.
+
+    Example::
+
+        class CalculatorTool(neograph_engine.Tool):
+            def get_name(self):
+                return "calculator"
+
+            def get_definition(self):
+                return neograph_engine.ChatTool(
+                    name="calculator",
+                    description="Evaluate a math expression",
+                    parameters={
+                        "type": "object",
+                        "properties": {"expression": {"type": "string"}},
+                        "required": ["expression"],
+                    },
+                )
+
+            def execute(self, arguments):
+                import ast, operator
+                tree = ast.parse(arguments["expression"], mode="eval")
+                return str(eval(compile(tree, "", "eval")))
+    """
+
+    def get_name(self) -> str:
+        raise NotImplementedError(
+            "Tool subclasses must override get_name() to return the "
+            "tool's name (must match the name in get_definition()).")
+
+    def get_definition(self):
+        raise NotImplementedError(
+            "Tool subclasses must override get_definition() to return "
+            "a ChatTool describing the tool's parameter schema.")
+
+    def execute(self, arguments) -> str:
+        raise NotImplementedError(
+            "Tool subclasses must override execute(arguments) to "
+            "perform the tool's work and return a string result.")
+
+
+class NodeContext(_CppNodeContext):
+    """Engine context — provider, tools, model, instructions.
+
+    Subclasses the C++ ``_CppNodeContext`` binding. The C++ struct
+    has a ``vector<Tool*>`` for tools, but we can't populate it from
+    Python directly (raw-pointer ownership doesn't translate). Instead,
+    the Python-side ``tools`` list lives in a ``_pytools`` dynamic
+    attribute, and ``GraphEngine.compile()`` reads it back to wrap each
+    Python Tool in a C++ trampoline (``PyToolOwner``) and transfer
+    ownership to the engine.
+    """
+
+    def __init__(self, provider=None, tools=None,
+                 model="", instructions="", extra_config=None):
+        super().__init__(
+            provider=provider,
+            model=model,
+            instructions=instructions,
+            extra_config=extra_config or {},
+        )
+        # Stash the Python tool list on the wrapper. compile() reads
+        # it via py::hasattr / py::object.attr("_pytools").
+        self._pytools = list(tools or [])
 
 
 class GraphNode:
