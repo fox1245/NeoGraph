@@ -12,6 +12,7 @@ namespace neograph::pybind {
 void init_provider(py::module_& m);
 void init_state(py::module_& m);
 void init_graph(py::module_& m);
+void init_node(py::module_& m);
 } // namespace neograph::pybind
 
 PYBIND11_MODULE(_neograph, m) {
@@ -28,4 +29,5 @@ PYBIND11_MODULE(_neograph, m) {
     neograph::pybind::init_provider(m);
     neograph::pybind::init_state(m);
     neograph::pybind::init_graph(m);
+    neograph::pybind::init_node(m);
 }
