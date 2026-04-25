@@ -84,6 +84,21 @@ build-dir = "build/{wheel_tag}"
 # Reproducible-ish: Release with assertions off, no debug info.
 cmake.build-type = "Release"
 
+# Force Ninja on every platform so CMake stays single-config. The
+# Visual Studio generator (default on Windows when Ninja isn't
+# requested) is multi-config, and cmake-install with multi-config
+# can silently produce a wheel missing the engine .dll files —
+# observed in iter 6 where the Windows wheel came out at 1 MB
+# (just the binding .pyd) instead of the expected ~5 MB. Linux
+# and macOS already pick Ninja by default; this just pins the
+# Windows behaviour.
+cmake.generator = "Ninja"
+
+# Print every cmake install action so wheel-build problems show
+# up in the cibuildwheel log instead of being silently swallowed
+# by `pip wheel`.
+cmake.define = { CMAKE_INSTALL_MESSAGE = "ALWAYS" }
+
 # Engine config: shared libs (so the wheel can ship .so siblings),
 # turn off optional subsystems that pull system deps (libpq, libsqlite3,
 # httplib's MCP client). Examples / tests / benchmarks are dead weight
