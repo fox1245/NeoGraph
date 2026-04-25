@@ -16,66 +16,29 @@
 //
 // Usage:
 //   ./example_re_agent
-//   ./example_re_agent --max-steps 80 --model gpt-4o
+//   ./example_re_agent --max-steps 80 --model gpt-5.4-mini
+//   # OpenAI-compat HTTP backend (OpenRouter / Ollama / vLLM / trtllm-serve):
+//   LLM_BASE_URL=https://openrouter.ai/api LLM_API_KEY=sk-or-v1-... \
+//     ./example_re_agent --model deepseek/deepseek-v4-pro
 //
 // The agent's final tool-free message should be a JSON summary; we dump it
 // to stdout for diff against ground_truth.json (human eyeball for now —
 // next iteration will add an automated scorer).
+//
+// NOTE: prompt + provider/MCP setup + final-response extraction live in
+// `re_agent_common.h` so the upcoming parallel fan-out example (36)
+// reuses them verbatim.
+
+#include "re_agent_common.h"
 
 #include <neograph/neograph.h>
-#include <neograph/llm/schema_provider.h>
-#include <neograph/mcp/client.h>
 #include <neograph/graph/react_graph.h>
 
 #include <cppdotenv/dotenv.hpp>
 
+#include <cstdlib>
 #include <iostream>
 #include <string>
-#include <cstdlib>
-
-namespace {
-constexpr const char* kSystemPrompt = R"(You are a senior binary reverse-engineering analyst.
-The user has loaded a STRIPPED ELF binary into Ghidra. The ghidra-mcp tools below let you
-read decompilation and write back names / comments to the live Ghidra project.
-
-Workflow — follow it exactly:
-  1. Call `list_methods` to enumerate every function.
-  2. SKIP these — they are libc / CRT scaffolding, NOT user code, even if
-     list_methods returns them with no underscore prefix:
-       _start, _init, _fini, _INIT_0, _FINI_0, _DT_INIT, _DT_FINI,
-       entry, __libc_start_main, __libc_csu_init, __libc_csu_fini,
-       frame_dummy, register_tm_clones, deregister_tm_clones,
-       __do_global_dtors_aux, __do_global_ctors_aux, __cxa_finalize,
-       __gmon_start__, __stack_chk_fail, __printf_chk,
-       _dl_*, _ITM_*, puts, strlen, fwrite,
-       init_function, empty_function_*  (these names appear in stripped
-         ELF binaries as small CRT stubs — they are NOT user code; do not
-         rename them and do not include them in your final JSON),
-       any FUN_xxxxxx that decompiles to a single jump/return/thunk.
-     If unsure: decompile first; if the body has no real business logic
-     (only a tail-call to __libc_start_main, a few register moves, or just
-     `return;`) — SKIP it.
-  3. For EACH remaining USER function (typically 5–10 in a small binary):
-       a. `decompile_function` with its current name. Read the pseudo-C carefully.
-       b. Decide a precise, idiomatic snake_case name (e.g. `xor_decrypt`, `compute_checksum`).
-       c. `rename_function` from the old FUN_xxxxxx name to your chosen name.
-       d. `set_decompiler_comment` at the function's entry address with a one-line summary
-          starting with a verb (e.g. "Validates argv length and stores license string").
-  4. When every user function is renamed, your FINAL message must be a JSON object:
-     {
-       "recovered": [
-         {"original": "FUN_00101234", "renamed": "xor_decrypt",
-          "summary": "...", "tags": ["crypto", "xor"]},
-         ...
-       ]
-     }
-     Output the JSON ONLY in your final message — no prose, no markdown fence.
-     Include ONLY the user functions you renamed; do NOT list the CRT
-     scaffolding you skipped.
-
-Be decisive. Do not over-explore. The binary is small (under 10 user functions).
-)";
-}  // namespace
 
 int main(int argc, char** argv) {
     cppdotenv::auto_load_dotenv();
@@ -98,50 +61,22 @@ int main(int argc, char** argv) {
     }
 
     try {
-        // 1. Spawn ghidra-mcp stdio bridge. It HTTP-talks to the Ghidra
-        //    plugin's embedded HTTP server. Override target via env vars:
-        //      GHIDRA_MCP_BRIDGE  — path to bridge_mcp_ghidra.py launcher
-        //      GHIDRA_SERVER_URL  — http://host:port/ of the plugin server
-        //    Defaults match the dockerized setup (compose maps 18080→8080).
-        const char* bridge_path = std::getenv("GHIDRA_MCP_BRIDGE");
-        const char* server_url  = std::getenv("GHIDRA_SERVER_URL");
-        std::vector<std::string> bridge_argv = {
-            "/root/mcp-servers/GhidraMCP/.venv/bin/python",
-            bridge_path ? bridge_path
-                        : "/root/mcp-servers/GhidraMCP/bridge_mcp_ghidra.py",
-            "--ghidra-server",
-            server_url ? server_url : "http://127.0.0.1:18080/",
-            "--transport", "stdio",
-        };
-        std::cerr << "[*] Spawning ghidra-mcp stdio bridge...\n";
-        neograph::mcp::MCPClient mcp(bridge_argv);
-
-        auto tools = mcp.get_tools();
-        std::cerr << "[*] " << tools.size() << " ghidra-mcp tools discovered:\n";
-        for (const auto& t : tools) {
-            auto def = t->get_definition();
-            std::cerr << "    - " << def.name << "\n";
-        }
-        if (tools.empty()) {
-            std::cerr << "[!] No tools — is the Ghidra GUI running with a project open?\n";
+        // 1. Spawn ghidra-mcp stdio bridge + discover tools (env-controlled
+        //    bridge path / server URL / LOCAL_TOOL_SUBSET filter — see
+        //    re_agent_common.h::spawn_ghidra_bridge for details).
+        auto bridge = neograph::re_agent::spawn_ghidra_bridge();
+        if (bridge.tools.empty()) {
             return 2;
         }
 
-        // 2. LLM provider — OpenAI Responses API over WebSocket. The single
-        //    `use_websocket = true` swaps SSE for ws://api.openai.com/v1/responses
-        //    (per OpenAI websocket-mode docs). Same Provider interface, so
-        //    create_react_graph below doesn't care which transport is in use.
-        neograph::llm::SchemaProvider::Config llm_cfg;
-        llm_cfg.schema_path   = "openai_responses";
-        llm_cfg.api_key       = api_key;
-        llm_cfg.default_model = model;
-        llm_cfg.use_websocket = true;
-        std::shared_ptr<neograph::Provider> provider =
-            neograph::llm::SchemaProvider::create(llm_cfg);
+        // 2. LLM provider — env-selected (LLM_BASE_URL → OpenAIProvider HTTP,
+        //    else SchemaProvider WS Responses). See re_agent_common.h.
+        auto provider = neograph::re_agent::make_provider(model, api_key);
 
         // 3. ReAct graph with ghidra-mcp tools wired in.
         auto engine = neograph::graph::create_react_graph(
-            provider, std::move(tools), kSystemPrompt);
+            provider, std::move(bridge.tools),
+            neograph::re_agent::kSystemPrompt);
 
         // 4. Kick it off.
         neograph::graph::RunConfig run_cfg;
@@ -172,35 +107,43 @@ int main(int argc, char** argv) {
             std::cerr << result.execution_trace[i]
                       << (i + 1 < result.execution_trace.size() ? " → " : "");
         }
-        std::cerr << "\n--- final JSON (stdout) ---\n";
-
-        // Primary path: ReAct sets result.output["final_response"] when the
-        // last message in the channel is an assistant message (see
-        // graph_engine.cpp). Other examples (02, 04, 06) use the same path.
-        if (result.output.contains("final_response") &&
-            result.output["final_response"].is_string()) {
-            std::cout << result.output["final_response"].get<std::string>() << "\n";
-        } else if (result.output.contains("channels") &&
-                   result.output["channels"].contains("messages") &&
-                   result.output["channels"]["messages"].contains("value")) {
-            // Fallback: walk messages backward for the last non-empty assistant
-            // content. Only reached if final_response wasn't set (e.g. the run
-            // hit max_steps mid-tool-loop and the last message is a tool result).
+        std::cerr << "\n--- DIAG: result.output keys + msg roles ---\n";
+        for (auto it = result.output.begin(); it != result.output.end(); ++it) {
+            std::cerr << "  ." << it.key();
+            if (it.key() == "final_response" && it.value().is_string()) {
+                std::cerr << " (len=" << it.value().get<std::string>().size() << ")";
+            }
+            std::cerr << "\n";
+        }
+        if (result.output.contains("channels") &&
+            result.output["channels"].contains("messages") &&
+            result.output["channels"]["messages"].contains("value")) {
             auto msgs = result.output["channels"]["messages"]["value"];
             if (msgs.is_array()) {
-                for (size_t i = msgs.size(); i-- > 0;) {
-                    auto m = msgs[i];
-                    if (m.contains("role") && m["role"] == "assistant" &&
-                        m.contains("content") && m["content"].is_string() &&
-                        !m["content"].get<std::string>().empty()) {
-                        std::cerr << "[*] final_response missing — using "
-                                     "channels.messages["
-                                  << i << "] fallback\n";
-                        std::cout << m["content"].get<std::string>() << "\n";
-                        break;
-                    }
+                std::cerr << "  channels.messages.value size=" << msgs.size() << "\n";
+                size_t start = msgs.size() > 4 ? msgs.size() - 4 : 0;
+                for (size_t i = start; i < msgs.size(); ++i) {
+                    std::cerr << "    [" << i << "] role="
+                              << (msgs[i].contains("role")
+                                      ? msgs[i]["role"].get<std::string>() : "?")
+                              << " content_len="
+                              << (msgs[i].contains("content") && msgs[i]["content"].is_string()
+                                      ? msgs[i]["content"].get<std::string>().size() : 0)
+                              << " tool_calls="
+                              << msgs[i].contains("tool_calls") << "\n";
                 }
             }
+        }
+        std::cerr << "\n--- final JSON (stdout) ---\n";
+
+        // Single helper covers both the primary path
+        // (result.output["final_response"]) and the channels.messages
+        // backward-walk fallback. Empty string → no output (caller can
+        // diff stdout against ground_truth.json either way).
+        const std::string final_resp =
+            neograph::re_agent::extract_final_response(result);
+        if (!final_resp.empty()) {
+            std::cout << final_resp << "\n";
         }
         return 0;
     } catch (const std::exception& e) {

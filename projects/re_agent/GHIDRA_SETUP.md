@@ -111,9 +111,21 @@ _DT_FINI
 
 ## 6. RE agent 실행
 
-NeoGraph repo root에서:
+NeoGraph repo root에서. LLM backend는 env로 선택 (default = OpenAI
+Responses over WebSocket, `OPENAI_API_KEY` 사용):
+
 ```
 ./build-release/example_re_agent > /tmp/agent_out.json 2> /tmp/agent_trace.log
+```
+
+비용 절감 또는 다른 모델 선호 시 OpenAI-compat HTTP backend로 전환:
+
+```
+# OpenRouter (DeepSeek V4 Pro 추천 — 1.6T MoE, 49B activated, $1.74/$3.48 per M)
+LLM_BASE_URL=https://openrouter.ai/api \
+LLM_API_KEY=sk-or-v1-... \
+  ./build-release/example_re_agent --model deepseek/deepseek-v4-pro \
+  > /tmp/agent_out.json 2> /tmp/agent_trace.log
 ```
 
 - stderr (`agent_trace.log`): tool 발견 + ReAct trace
@@ -122,6 +134,13 @@ NeoGraph repo root에서:
 기대 결과: 6개 user 함수가 모두 의미있는 이름으로 rename되고, 각 함수에
 한 줄 summary comment 추가됨. Ghidra GUI의 Symbol Tree → Functions에서
 시각 확인 가능.
+
+**모델 선택 가이드**:
+- `gpt-5.4-mini` (OpenAI WS) — 최고 정확도, 가장 비쌈
+- `deepseek/deepseek-v4-pro` (OpenRouter) — 90%+ 정확도 추정, 1/10 비용
+- `gpt-5-mini`, `claude-haiku-4.5` 등 OpenRouter 다른 모델도 같은 패턴
+- 로컬 (Ollama) — 27 tools + ReAct 워크플로우는 8B 미만 모델로 어려움.
+  실용적으로 70B+ 또는 cloud API 권장.
 
 ## 트러블슈팅
 
