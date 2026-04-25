@@ -107,7 +107,12 @@ class NEOGRAPH_API WsClient {
     asio::awaitable<WsMessage> recv();
 
   private:
-    friend asio::awaitable<std::unique_ptr<WsClient>> ws_connect(
+    // Friend forward-declaration; the trailing standalone declaration
+    // (further down) also carries NEOGRAPH_API. MSVC C2375 fires if
+    // the two declarations disagree on linkage, so the macro must
+    // appear here too even though it's redundant on POSIX.
+    friend NEOGRAPH_API asio::awaitable<std::unique_ptr<WsClient>>
+    ws_connect(
         asio::any_io_executor, std::string_view, std::string_view,
         std::string_view, std::vector<std::pair<std::string, std::string>>,
         bool);
