@@ -19,7 +19,14 @@ void init_state(py::module_& m) {
     using namespace neograph::graph;
 
     // ── NodeContext ──────────────────────────────────────────────────────
-    py::class_<NodeContext>(m, "NodeContext",
+    //
+    // py::dynamic_attr() lets the Python wrapper carry attributes that
+    // aren't in the C++ struct — specifically `_pytools`, the list of
+    // Python Tool instances. The Python `NodeContext` subclass (in
+    // neograph_engine/__init__.py) sets `_pytools` in its __init__,
+    // and GraphEngine.compile() reads it back to materialize the
+    // PyToolOwner unique_ptrs that the engine takes ownership of.
+    py::class_<NodeContext>(m, "NodeContext", py::dynamic_attr(),
         "Dependency-injection container for graph nodes: provider, "
         "tools, model, system instructions, plus an extra_config dict "
         "for node-type-specific settings.")
