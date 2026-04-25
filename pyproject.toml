@@ -104,3 +104,84 @@ install.components = ["NeoGraphPyBindWheel"]
 # `_neograph.so` and the engine `.so` siblings are added next to them
 # by the cmake install rules above.
 wheel.packages = ["bindings/python/neograph"]
+
+# ─── cibuildwheel ────────────────────────────────────────────────────────
+#
+# Drives the multi-platform wheel matrix in CI (.github/workflows/wheels.yml).
+# Locally, you can dry-run a single variant:
+#
+#     pip install cibuildwheel
+#     CIBW_BUILD=cp312-manylinux_x86_64 cibuildwheel --platform linux
+#
+# Coverage:
+#   - Linux x86_64 + aarch64 (manylinux_2_28 — glibc >= 2.28; covers
+#     RHEL 8, Ubuntu 20.04+, Debian 11+, Amazon Linux 2023).
+#   - macOS arm64 (Apple Silicon native; the macOS runner already runs
+#     arm64 so no cross-compile).
+#   - Windows: deferred. The engine's public headers don't carry
+#     __declspec(dllexport) annotations yet (NEOGRAPH_API macro pass);
+#     BUILD_SHARED_LIBS=ON on Windows would link-fail with undefined
+#     symbols. Re-enable in pyproject.toml + the workflow once that
+#     macro pass lands.
+#
+# Python: cp39-cp313 (5 versions × 3 platforms = 15 wheels per release).
+# musllinux skipped — different glibc lineage; covers Alpine which is
+# not our target audience yet. PyPy skipped — pybind11 type-caster
+# overhead largely cancels out PyPy's interpreter wins for I/O-bound
+# agent code, and the maintenance cost is real.
+[tool.cibuildwheel]
+build  = "cp39-* cp310-* cp311-* cp312-* cp313-*"
+# Skip:
+#   - musllinux: Alpine's musl libc, different from glibc-based manylinux
+#   - i686: 32-bit x86, no production target
+#   - pypy: pybind11 type-cast overhead cancels PyPy's interpreter wins
+skip   = "*-musllinux_* *_i686 pp*"
+
+# Inside the wheel-test venv, install pytest and run the binding's
+# pytest suite plus a one-line import smoke. The {project} placeholder
+# resolves to the source tree path inside the cibw container.
+test-requires = ["pytest"]
+test-command  = """\
+python -c "import neograph; print('cibw smoke version:', neograph.__version__)" && \
+python -m pytest -q {project}/bindings/python/tests/\
+"""
+
+# Ensure the binding's RPATH actually resolves the bundled engine
+# .so siblings — cibuildwheel auditwheel-repairs the wheel after
+# build, but a sanity check that imports work even after repair is
+# how we'd catch a broken RPATH or missing .so.
+test-skip = ""
+
+[tool.cibuildwheel.linux]
+# manylinux_2_34 (AlmaLinux 9 base) ships OpenSSL 3.0 — required by
+# `deps/httplib.h` whose TLS path explicitly errors out on OpenSSL
+# < 3.0:
+#
+#     #error Sorry, OpenSSL versions prior to 3.0.0 are not supported
+#
+# manylinux_2_28 (AlmaLinux 8) ships OpenSSL 1.1.1; manylinux2014
+# (CentOS 7) ships OpenSSL 1.0.2 — neither works without vendoring
+# our own OpenSSL build.
+#
+# Coverage trade-off: 2_34 corresponds to glibc 2.34 (Sep 2021),
+# meaning the wheels need RHEL 9 / Ubuntu 22.04 / Debian 12 or
+# newer. Older distros fall back to the sdist (which builds
+# against whatever OpenSSL the user supplies).
+manylinux-x86_64-image  = "quay.io/pypa/manylinux_2_34_x86_64"
+manylinux-aarch64-image = "quay.io/pypa/manylinux_2_34_aarch64"
+
+# Container has gcc/cmake but not openssl-devel. Install the headers
+# so find_package(OpenSSL) succeeds during the wheel cmake config.
+# The async runtime + httplib both link OpenSSL 3.
+before-all = "dnf install -y openssl-devel"
+
+[tool.cibuildwheel.macos]
+# Apple Silicon only for now. universal2 needs the engine to cross-
+# compile cleanly to x86_64 on an arm64 runner — extra setup that
+# isn't justified given Apple's own arm64 transition is mostly done.
+archs = ["arm64"]
+
+# macOS deployment target: 12.0 (Monterey, 2021). pybind11 v2.13
+# requires C++17; gcc/clang on macOS 12+ ship a C++17-capable
+# toolchain by default. Older targets would force a Homebrew clang.
+environment = { MACOSX_DEPLOYMENT_TARGET = "12.0" }
