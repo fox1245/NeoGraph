@@ -23,3 +23,9 @@ NEXT_SESSION.md
 /Makefile
 /cmake_install.cmake
 /compile_commands.json
+
+# RE analysis artifacts — may be derivative work, not for public push.
+# Keep them on disk for personal use; private repo backup if needed.
+projects/re_agent/results/
+projects/re_agent/targets/j2kengine_ground_truth.json
+Testing/

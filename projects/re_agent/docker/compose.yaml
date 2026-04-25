@@ -37,6 +37,10 @@ services:
       - /mnt/wslg:/mnt/wslg:rw
       # Self-test target (read-only — agent shouldn't be able to clobber it).
       - ../targets:/samples:ro
+      # External binaries the agent can analyze. Mounted read-only so the
+      # agent (and Ghidra) can never write back to host source trees.
+      # Add new entries here as new analysis targets show up.
+      - /root/Coding/smart_translator/j2k/engine:/external/j2k:ro
       # Persisted per-user Ghidra state (plugin enablement, projects, prefs).
       - ghidra-home:/root
     # Base image's CMD is "client" → opens the Ghidra GUI.

@@ -54,14 +54,29 @@ curl -s http://127.0.0.1:18080/methods | head      # 검증
 
 ## Run the agent
 
-From the NeoGraph repo root (docker 경로 default — `:18080`):
+세 가지 LLM backend 선택 (env-driven, 코드 변경 없음):
+
+### A. OpenAI Responses over WebSocket (default — `OPENAI_API_KEY` 사용)
 ```
 ./build-release/example_re_agent > /tmp/agent_out.json 2> /tmp/agent_trace.log
-# or with a stronger model / more steps:
 ./build-release/example_re_agent --model gpt-5.4-mini --max-steps 120
 ```
 
-Native install (Ghidra가 호스트에서 직접 :8080 띄움):
+### B. OpenRouter (또는 vLLM / trtllm-serve / 기타 OpenAI-compat HTTP)
+```
+LLM_BASE_URL=https://openrouter.ai/api \
+LLM_API_KEY=sk-or-v1-... \
+  ./build-release/example_re_agent --model deepseek/deepseek-v4-pro
+```
+(`.env`에 `LLM_BASE_URL` / `LLM_API_KEY`를 두면 cppdotenv가 자동 로드.)
+
+### C. Ollama 로컬 (실험적 — 8B 이하 모델은 27 tools 처리에 약함)
+```
+LLM_BASE_URL=http://127.0.0.1:11434 \
+  ./build-release/example_re_agent --model qwen2.5:7b-instruct
+```
+
+### Ghidra native install (8080 직접 사용 시)
 ```
 GHIDRA_SERVER_URL=http://127.0.0.1:8080/ ./build-release/example_re_agent
 ```
@@ -96,6 +111,16 @@ Trace and tool calls go to **stderr**; the final JSON summary goes to
 ./build-release/example_re_agent > agent_out.json 2> agent_trace.log
 diff <(jq -S . agent_out.json) <(jq -S '.functions' projects/re_agent/targets/ground_truth.json)
 ```
+
+### External-binary ground truths (no source available)
+
+For binaries without source (e.g. `targets/j2kengine_ground_truth.json`),
+the GT file is **a self-consistency baseline derived from the agent's own
+first-pass output**, not a verified oracle. Treat these as drafts that
+require human domain review (rename obviously wrong entries, drop CRT
+false positives, fill `signature` placeholders) before the
+`matched_score` numbers carry any weight. Source-derived GTs like
+`crackme01` remain the trusted reference.
 
 ## Scoring (next iteration — not yet built)
 
