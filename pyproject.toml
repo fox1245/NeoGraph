@@ -132,10 +132,13 @@ cmake.args = [
 # 6-9 as a 1 MB wheel followed by `delvewheel: Unable to find
 # library: neograph_llm.dll`.)
 
-# Bring the Python sources into the wheel. The pybind11 extension
-# `_neograph.so` and the engine `.so` siblings are added next to them
-# by the cmake install rules above.
-wheel.packages = ["bindings/python/neograph_engine"]
+# Python sources (__init__.py, llm.py) are now installed by the
+# cmake install(FILES ...) rule in bindings/python/CMakeLists.txt
+# alongside the binding _neograph.{so,pyd} and the engine
+# .so/.dll siblings. Routing everything through cmake-install
+# avoids a Windows-specific scikit-build-core staging quirk
+# observed in iters 6-11 where wheel.packages = [...] appeared
+# to interfere with cmake-installed engine .dlls.
 
 # ─── cibuildwheel ────────────────────────────────────────────────────────
 #
