@@ -682,8 +682,41 @@ NeoGraph/
 | `NEOGRAPH_BUILD_LLM` | ON | Build LLM provider module |
 | `NEOGRAPH_BUILD_MCP` | ON | Build MCP client module |
 | `NEOGRAPH_BUILD_UTIL` | ON | Build utility module |
+| `NEOGRAPH_BUILD_POSTGRES` | ON | Build PostgresCheckpointStore (libpq) |
+| `NEOGRAPH_BUILD_SQLITE` | ON | Build SqliteCheckpointStore (libsqlite3) |
 | `NEOGRAPH_BUILD_EXAMPLES` | ON | Build example programs |
 | `NEOGRAPH_BUILD_CLAY_EXAMPLE` | OFF | Build Clay+Raylib chatbot (fetches Raylib) |
+| `BUILD_SHARED_LIBS` | OFF | Build `neograph_*` as `.so`/`.dylib` instead of `.a` (Linux/macOS — Windows DLL exports not yet wired) |
+
+### Shared library mode
+
+Pass `-DBUILD_SHARED_LIBS=ON` at configure time to ship `libneograph_core.so`,
+`libneograph_llm.so`, `libneograph_mcp.so`, `libneograph_async.so`, and
+`libneograph_sqlite.so` instead of static archives. Build-tree binaries
+get an `$ORIGIN`-relative RPATH so they find the libraries beside
+themselves with no `LD_LIBRARY_PATH` gymnastics.
+
+Trade-offs (Linux, stripped, measured 2026-04-25):
+
+| Configuration | Single agent binary | N agents on same host |
+|---------------|--------------------:|----------------------:|
+| Static (default) | ~2.2 MB per agent | N × 2.2 MB |
+| Shared           | ~0.25 MB per agent | N × 0.25 MB + 13.1 MB shared `.so` set (one-time) |
+
+Crossover at N≈7 agents. For deployments shipping multiple NeoGraph
+agents on the same host (or for staged-rollout scenarios where one
+subsystem like the LLM provider is patched independently of the rest)
+shared mode is strictly better. For a single-agent embedded edge
+deployment, static keeps everything in one self-contained binary.
+
+Patch-update size example: replacing `libneograph_llm.so` (one
+subsystem, ~4 MB) updates every agent on the host without rebuilding
+or redeploying any of them.
+
+Windows: `BUILD_SHARED_LIBS=ON` will warn at configure time and fail at
+link with undefined symbols — the public-symbol `__declspec` annotations
+have not yet been added to the headers. Use STATIC on Windows until
+that work lands.
 
 ## Benchmarks
 
