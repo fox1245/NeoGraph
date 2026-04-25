@@ -160,7 +160,7 @@ public:
     bool operator!=(const json& other) const { return !(*this == other); }
 
     // ----- Iteration -----
-    class iterator {
+    class NEOGRAPH_API iterator {
     public:
         iterator() = default;
         json operator*() const;
@@ -248,10 +248,10 @@ private:
 };
 
 // ----- items() proxy (defined outside json so it can hold a json member) -----
-class json::items_proxy {
+class NEOGRAPH_API json::items_proxy {
 public:
     explicit items_proxy(const json& j) : j_(j) {}
-    class iterator {
+    class NEOGRAPH_API iterator {
     public:
         iterator() = default;
         std::pair<std::string, json> operator*() const {
@@ -283,20 +283,27 @@ inline std::ostream& operator<<(std::ostream& os, const json& j) {
 
 // ===========================================================================
 // Explicit specializations declared here so template `value<T>()` sees them.
+//
+// NEOGRAPH_API on each one is required for MSVC: explicit specializations
+// declared at namespace scope (outside the class body) don't inherit the
+// class's dllexport. The implementations live in src/core/json.cpp;
+// without per-specialization annotation, neograph_llm and other downstream
+// libraries hit `LNK2019: unresolved external symbol json::get<T>` even
+// though the symbols are present in neograph_core.dll.
 // ===========================================================================
 
-template <> json        json::get<json>() const;
-template <> std::string json::get<std::string>() const;
-template <> bool        json::get<bool>() const;
-template <> int         json::get<int>() const;
-template <> unsigned    json::get<unsigned>() const;
-template <> long        json::get<long>() const;
-template <> unsigned long json::get<unsigned long>() const;
-template <> long long   json::get<long long>() const;
-template <> unsigned long long json::get<unsigned long long>() const;
-template <> double      json::get<double>() const;
-template <> float       json::get<float>() const;
-template <> std::vector<std::string> json::get<std::vector<std::string>>() const;
+template <> NEOGRAPH_API json        json::get<json>() const;
+template <> NEOGRAPH_API std::string json::get<std::string>() const;
+template <> NEOGRAPH_API bool        json::get<bool>() const;
+template <> NEOGRAPH_API int         json::get<int>() const;
+template <> NEOGRAPH_API unsigned    json::get<unsigned>() const;
+template <> NEOGRAPH_API long        json::get<long>() const;
+template <> NEOGRAPH_API unsigned long json::get<unsigned long>() const;
+template <> NEOGRAPH_API long long   json::get<long long>() const;
+template <> NEOGRAPH_API unsigned long long json::get<unsigned long long>() const;
+template <> NEOGRAPH_API double      json::get<double>() const;
+template <> NEOGRAPH_API float       json::get<float>() const;
+template <> NEOGRAPH_API std::vector<std::string> json::get<std::vector<std::string>>() const;
 
 template <typename T>
 T json::value(const std::string& key, const T& default_val) const {
