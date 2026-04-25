@@ -13,6 +13,8 @@
  */
 #pragma once
 
+#include <neograph/api.h>
+
 #include <asio/awaitable.hpp>
 #include <asio/any_io_executor.hpp>
 
@@ -25,7 +27,7 @@
 
 namespace neograph::async {
 
-struct HttpResponse {
+struct NEOGRAPH_API HttpResponse {
     int         status = 0;
     std::string body;
 
@@ -94,7 +96,7 @@ struct RequestOptions {
 /// @param tls     When true, wrap the socket in asio::ssl::stream, do
 ///                TLS handshake with SNI=host, and verify the peer
 ///                certificate against the system trust store.
-asio::awaitable<HttpResponse> async_post(
+NEOGRAPH_API asio::awaitable<HttpResponse> async_post(
     asio::any_io_executor ex,
     std::string_view host,
     std::string_view port,
@@ -129,7 +131,7 @@ struct HttpStreamResponse {
 ///
 /// The bytes passed to `on_chunk` are only valid for the duration
 /// of the callback invocation; copy them out if you need to retain.
-asio::awaitable<HttpStreamResponse> async_post_stream(
+NEOGRAPH_API asio::awaitable<HttpStreamResponse> async_post_stream(
     asio::any_io_executor ex,
     std::string_view host,
     std::string_view port,
