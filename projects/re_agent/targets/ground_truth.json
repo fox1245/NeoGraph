@@ -1,0 +1,48 @@
+{
+  "binary": "crackme01",
+  "source": "crackme01.c",
+  "functions": [
+    {
+      "name": "print_help",
+      "signature": "void print_help(const char *prog)",
+      "summary": "Prints CLI usage to stdout, expects program name as argument.",
+      "tags": ["io", "help", "boilerplate"]
+    },
+    {
+      "name": "parse_args",
+      "signature": "int parse_args(int argc, char **argv, const char **out_license)",
+      "summary": "Validates argc==2 and that argv[1] has length LICENSE_LEN (16); writes license string out via pointer. Returns 0 on success, -1 on failure.",
+      "tags": ["argv", "validation", "length-check"]
+    },
+    {
+      "name": "xor_decrypt",
+      "signature": "void xor_decrypt(const char *in, uint8_t *out, size_t n)",
+      "summary": "Byte-wise XOR each input byte with constant 0x5A into output buffer.",
+      "tags": ["crypto", "xor", "transform"]
+    },
+    {
+      "name": "compute_checksum",
+      "signature": "uint32_t compute_checksum(const uint8_t *buf, size_t n)",
+      "summary": "Polynomial rolling hash with multiplier 31, masked to 16 bits.",
+      "tags": ["hash", "checksum", "rolling"]
+    },
+    {
+      "name": "validate_license",
+      "signature": "int validate_license(const char *license)",
+      "summary": "Decrypts license via xor_decrypt, computes checksum, compares to EXPECTED_SUM (0x1F4A). Returns 0 if match.",
+      "tags": ["validation", "crypto", "compare"]
+    },
+    {
+      "name": "main",
+      "signature": "int main(int argc, char **argv)",
+      "summary": "Entry: parses args (prints help on failure with exit 2), validates license (exit 1 on fail), prints success on accept.",
+      "tags": ["entry", "orchestration"]
+    }
+  ],
+  "constants": [
+    {"name": "LICENSE_LEN", "value": 16, "kind": "int"},
+    {"name": "XOR_KEY", "value": "0x5A", "kind": "byte"},
+    {"name": "EXPECTED_SUM", "value": "0x1F4A", "kind": "u16"}
+  ],
+  "notes": "Agent recovery is scored on three axes: (1) function name semantic match — agent's name vs ground-truth name (e.g. 'decrypt_bytes' counts for 'xor_decrypt'); (2) signature shape match (arg count + return polarity); (3) summary tag overlap with `tags` field."
+}

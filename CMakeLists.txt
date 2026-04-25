@@ -497,6 +497,9 @@ if(NEOGRAPH_BUILD_EXAMPLES)
 
             add_executable(example_mcp_feedback examples/24_mcp_feedback.cpp)
             target_link_libraries(example_mcp_feedback PRIVATE neograph::core neograph::llm neograph::mcp cppdotenv)
+
+            add_executable(example_re_agent examples/35_re_agent.cpp)
+            target_link_libraries(example_re_agent PRIVATE neograph::core neograph::llm neograph::mcp cppdotenv)
         endif()
 
         # Clay + Raylib chatbot (optional — requires Raylib)
