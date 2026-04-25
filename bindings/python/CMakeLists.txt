@@ -27,14 +27,33 @@
 # default), and the binding's only consumer is this directory.
 # ===========================================================================
 
-include(FetchContent)
-FetchContent_Declare(
-    pybind11
-    GIT_REPOSITORY https://github.com/pybind/pybind11.git
-    GIT_TAG v2.13.6
-    GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(pybind11)
+# Resolve pybind11. Two paths:
+#
+#   1. `pip install .` / scikit-build-core supplies pybind11 via the
+#      build-system requirement; CMAKE_PREFIX_PATH already includes
+#      its install dir. `find_package(pybind11 CONFIG)` succeeds and
+#      we use the pip-managed version (no network during install).
+#   2. Direct `cmake -DNEOGRAPH_BUILD_PYBIND=ON` from a developer
+#      checkout: `find_package` fails, fall through to FetchContent
+#      to download pybind11. Vendored into the build dir; no commit
+#      to the source tree.
+#
+# Both produce the same `pybind11::module` import target.
+find_package(pybind11 CONFIG QUIET)
+if(NOT pybind11_FOUND)
+    message(STATUS
+        "pybind11 not found via CMAKE_PREFIX_PATH — falling back to "
+        "FetchContent. Set pybind11_DIR or install pybind11 via pip "
+        "to avoid the download.")
+    include(FetchContent)
+    FetchContent_Declare(
+        pybind11
+        GIT_REPOSITORY https://github.com/pybind/pybind11.git
+        GIT_TAG v2.13.6
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(pybind11)
+endif()
 
 # pybind11_add_module produces a Python extension target with the right
 # suffix (.cpython-XYZ-PLATFORM.so / .pyd) and CXX visibility flags.
@@ -67,23 +86,47 @@ set_target_properties(_neograph PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${_NEOGRAPH_PY_PKG_DIR}"
 )
 
-# RPATH on the binding so it finds libneograph_core.so (and friends) at
-# import time without LD_LIBRARY_PATH. The libs sit one level up from
-# `build/neograph/_neograph.so` → `build/libneograph_*.so`.
+# RPATH on the binding so it finds libneograph_core.so (and friends).
+#
+# Build tree: the engine .so files live one level up from the binding
+# (`build/libneograph_*.so` vs `build/neograph/_neograph.so`), so the
+# build RPATH includes both `$ORIGIN/..` and `$ORIGIN`.
+#
+# Install / wheel: the engine .so files are bundled NEXT TO the
+# binding (`neograph/_neograph.so` and `neograph/libneograph_*.so`),
+# so the install RPATH is just `$ORIGIN`. CMake honours the install
+# RPATH only on `cmake --install`; the build-tree binary still uses
+# the BUILD_RPATH above.
 if(UNIX AND NOT APPLE)
     set_target_properties(_neograph PROPERTIES
-        BUILD_RPATH "$ORIGIN/..;$ORIGIN")
+        BUILD_RPATH   "$ORIGIN/..;$ORIGIN"
+        INSTALL_RPATH "$ORIGIN")
 elseif(APPLE)
     set_target_properties(_neograph PROPERTIES
-        BUILD_RPATH "@loader_path/..;@loader_path")
+        BUILD_RPATH   "@loader_path/..;@loader_path"
+        INSTALL_RPATH "@loader_path")
 endif()
 
 # Stage the Python source files alongside the binding in the build tree.
 # Configure-time copy so editing __init__.py in source re-runs CMake; for
 # day-to-day iteration use -DNEOGRAPH_BUILD_PYBIND=ON ; cmake --build then
 # re-run cmake -B build to refresh.
+#
+# (For the wheel build path: scikit-build-core copies these via the
+# `wheel.packages = ["bindings/python/neograph"]` directive in
+# pyproject.toml — no install rule needed here for them.)
 configure_file(neograph/__init__.py "${_NEOGRAPH_PY_PKG_DIR}/__init__.py" COPYONLY)
 configure_file(neograph/llm.py      "${_NEOGRAPH_PY_PKG_DIR}/llm.py"      COPYONLY)
+
+# Install rule for the wheel build. Tagged with the same component as
+# the engine .so files in the root CMakeLists, so a single
+# `cmake --install --component NeoGraphPyBindWheel` brings everything
+# into the wheel staging dir.
+# Per-keyword COMPONENT (see comment in root CMakeLists about why a
+# single trailing COMPONENT silently mis-attaches).
+install(TARGETS _neograph
+    LIBRARY DESTINATION neograph COMPONENT NeoGraphPyBindWheel
+    RUNTIME DESTINATION neograph COMPONENT NeoGraphPyBindWheel)
 
 # Make smoke tests runnable straight from the build tree:
 #   ctest -V -R pybind_smoke

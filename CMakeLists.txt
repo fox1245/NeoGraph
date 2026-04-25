@@ -160,7 +160,18 @@ endif()
 # ===========================================================================
 # Schema embedding (build-time code generation)
 # ===========================================================================
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
+# Python3: always need Interpreter (drives the schema-embedding code
+# generator). When the pybind11 binding is on, also need
+# Development.Module so pybind11_add_module's underlying
+# `python3_add_library` is available. Asking for both up-front avoids
+# CMake's "package already found, ignoring new components" caching
+# behaviour from short-circuiting a second find_package() call deeper
+# in the tree.
+if(NEOGRAPH_BUILD_PYBIND)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
+else()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+endif()
 
 set(GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${GENERATED_DIR})
@@ -650,6 +661,20 @@ endif()
 
 # ===========================================================================
 # Install (TODO: proper install with generator expressions for deps)
+#
+# Two consumer paths:
+#
+#   a) Standard `cmake --install`: ships headers, schemas, libs to a
+#      conventional system prefix (`/usr/local`, etc.). All the
+#      install rules below WITHOUT a COMPONENT name belong to this
+#      path (CMake's default "Unspecified" component).
+#
+#   b) Python wheel via scikit-build-core: ships only the engine .so
+#      siblings + the `_neograph.so` binding into the wheel staging
+#      dir at `neograph/`. These rules are tagged with COMPONENT
+#      `NeoGraphPyBindWheel` and only fire when scikit-build-core
+#      runs `cmake --install --component NeoGraphPyBindWheel`. See
+#      pyproject.toml at the repo root.
 # ===========================================================================
 include(GNUInstallDirs)
 
@@ -658,3 +683,47 @@ install(DIRECTORY include/neograph
 
 install(DIRECTORY schemas/
     DESTINATION ${CMAKE_INSTALL_DATADIR}/neograph/schemas)
+
+# ── Pybind11 wheel install ───────────────────────────────────────────────
+#
+# When NEOGRAPH_BUILD_PYBIND is on (typical: pip install .), bundle the
+# engine .so files into the wheel right next to the binding so the
+# `$ORIGIN` RPATH on `_neograph.so` resolves at import time without
+# LD_LIBRARY_PATH.
+#
+# Only the libraries the binding actually links against get bundled —
+# that's `neograph_core` (always), `neograph_async` (always; binding's
+# transitive dep through engine.h coroutines), and `neograph_llm`
+# (when LLM is on; needed for OpenAIProvider / SchemaProvider).
+if(NEOGRAPH_BUILD_PYBIND)
+    set(NEOGRAPH_PYBIND_LIBS neograph_core neograph_async)
+    if(TARGET neograph_llm)
+        list(APPEND NEOGRAPH_PYBIND_LIBS neograph_llm)
+    endif()
+
+    # Set INSTALL_RPATH so the bundled libs find each other via
+    # `$ORIGIN` (libneograph_llm.so → libneograph_core.so etc.).
+    # Build-tree RPATH is set globally above (CMAKE_BUILD_RPATH);
+    # this is the parallel for the installed wheel layout.
+    if(UNIX AND NOT APPLE)
+        set(_NEOGRAPH_PYBIND_INSTALL_RPATH "$ORIGIN")
+    elseif(APPLE)
+        set(_NEOGRAPH_PYBIND_INSTALL_RPATH "@loader_path")
+    endif()
+    foreach(_lib IN LISTS NEOGRAPH_PYBIND_LIBS)
+        set_target_properties(${_lib} PROPERTIES
+            INSTALL_RPATH "${_NEOGRAPH_PYBIND_INSTALL_RPATH}"
+            INSTALL_RPATH_USE_LINK_PATH TRUE)
+    endforeach()
+
+    # CMake's install(TARGETS ...) attaches a single trailing COMPONENT
+    # only to the LAST output-keyword group (ARCHIVE here). We want
+    # all three under the same component, so spell COMPONENT out per
+    # keyword. Without this the LIBRARY/RUNTIME installs get tagged
+    # "Unspecified" and silently dump engine .so files into a normal
+    # `cmake --install` run.
+    install(TARGETS ${NEOGRAPH_PYBIND_LIBS}
+            LIBRARY DESTINATION neograph COMPONENT NeoGraphPyBindWheel
+            RUNTIME DESTINATION neograph COMPONENT NeoGraphPyBindWheel
+            ARCHIVE DESTINATION neograph COMPONENT NeoGraphPyBindWheel)
+endif()

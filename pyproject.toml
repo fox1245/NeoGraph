@@ -1,0 +1,106 @@
+# NeoGraph — Python wheel build (commit 3 of the pybind11 plan)
+#
+# This file builds a Python wheel of the NeoGraph engine + its
+# pybind11 binding. It does NOT attempt to package the full C++
+# headers / install layout — for that use `cmake --install` directly.
+#
+# Use:
+#     pip install .                         # build & install from source
+#     pip install --no-build-isolation .    # reuse system pybind11
+#     python -m build --wheel               # produce dist/*.whl
+#
+# Wheel contents (Linux x86_64):
+#     neograph/__init__.py
+#     neograph/llm.py
+#     neograph/_neograph.cpython-*-linux-gnu.so       (binding)
+#     neograph/libneograph_core.so                    (engine)
+#     neograph/libneograph_async.so
+#     neograph/libneograph_llm.so                     (when LLM enabled)
+#
+# RPATH on _neograph.so is `$ORIGIN` so the binding finds its sibling
+# engine .so files inside the wheel without LD_LIBRARY_PATH.
+#
+# Cibuildwheel/manylinux + macOS/Windows multi-platform packaging is
+# scoped for commit 4+. Today's wheel is Linux-only and not yet
+# manylinux-compliant (it links against the Ubuntu OpenSSL ABI).
+
+[build-system]
+requires = [
+    "scikit-build-core>=0.10",
+    "pybind11>=2.13",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "neograph"
+version = "0.1.0"
+description = "C++ graph agent engine — Python bindings (LangGraph-equivalent semantics, microsecond engine overhead)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "fox1245", email = "procoinmac0@gmail.com" }]
+keywords = ["agent", "graph", "langgraph", "llm", "pybind11", "cpp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: C++",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage      = "https://github.com/fox1245/NeoGraph"
+Repository    = "https://github.com/fox1245/NeoGraph"
+Documentation = "https://github.com/fox1245/NeoGraph#readme"
+Issues        = "https://github.com/fox1245/NeoGraph/issues"
+
+# ─── scikit-build-core ───────────────────────────────────────────────────
+#
+# Drives CMake during pip install. The CMake invocation builds the
+# engine in shared-library mode plus the `_neograph` extension, then
+# `cmake --install --component NeoGraphPyBindWheel` stages just the
+# wheel-relevant artefacts (engine .so files + binding .so) — without
+# dragging in headers, schemas, or anything else the engine's
+# default install rules ship.
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+
+# Drop the cmake build dir under build/ — the same convention as
+# manual cmake builds in this repo.
+build-dir = "build/{wheel_tag}"
+
+# Reproducible-ish: Release with assertions off, no debug info.
+cmake.build-type = "Release"
+
+# Engine config: shared libs (so the wheel can ship .so siblings),
+# turn off optional subsystems that pull system deps (libpq, libsqlite3,
+# httplib's MCP client). Examples / tests / benchmarks are dead weight
+# for an end-user wheel.
+cmake.args = [
+    "-DBUILD_SHARED_LIBS=ON",
+    "-DNEOGRAPH_BUILD_PYBIND=ON",
+    "-DNEOGRAPH_BUILD_LLM=ON",
+    "-DNEOGRAPH_BUILD_MCP=OFF",
+    "-DNEOGRAPH_BUILD_POSTGRES=OFF",
+    "-DNEOGRAPH_BUILD_SQLITE=OFF",
+    "-DNEOGRAPH_BUILD_EXAMPLES=OFF",
+    "-DNEOGRAPH_BUILD_TESTS=OFF",
+    "-DNEOGRAPH_BUILD_BENCHMARKS=OFF",
+]
+
+# Only fire the `NeoGraphPyBindWheel` install component. Rules without
+# that component (the engine's headers/schemas install) stay out of
+# the wheel.
+install.components = ["NeoGraphPyBindWheel"]
+
+# Bring the Python sources into the wheel. The pybind11 extension
+# `_neograph.so` and the engine `.so` siblings are added next to them
+# by the cmake install rules above.
+wheel.packages = ["bindings/python/neograph"]
