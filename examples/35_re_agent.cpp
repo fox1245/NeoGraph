@@ -23,7 +23,7 @@
 // next iteration will add an automated scorer).
 
 #include <neograph/neograph.h>
-#include <neograph/llm/openai_provider.h>
+#include <neograph/llm/schema_provider.h>
 #include <neograph/mcp/client.h>
 #include <neograph/graph/react_graph.h>
 
@@ -81,7 +81,10 @@ int main(int argc, char** argv) {
     cppdotenv::auto_load_dotenv();
 
     int max_steps = 80;
-    std::string model = "gpt-4o-mini";
+    // Default to OpenAI Responses over WebSocket (commit d7c61d0). Avoids
+    // v1/chat_completions REST entirely. gpt-5.4-mini chosen for stronger
+    // tool-use reasoning at low cost.
+    std::string model = "gpt-5.4-mini";
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--max-steps" && i + 1 < argc) max_steps = std::atoi(argv[++i]);
@@ -124,12 +127,17 @@ int main(int argc, char** argv) {
             return 2;
         }
 
-        // 2. LLM provider.
-        neograph::llm::OpenAIProvider::Config llm_cfg;
-        llm_cfg.api_key = api_key;
+        // 2. LLM provider — OpenAI Responses API over WebSocket. The single
+        //    `use_websocket = true` swaps SSE for ws://api.openai.com/v1/responses
+        //    (per OpenAI websocket-mode docs). Same Provider interface, so
+        //    create_react_graph below doesn't care which transport is in use.
+        neograph::llm::SchemaProvider::Config llm_cfg;
+        llm_cfg.schema_path   = "openai_responses";
+        llm_cfg.api_key       = api_key;
         llm_cfg.default_model = model;
+        llm_cfg.use_websocket = true;
         std::shared_ptr<neograph::Provider> provider =
-            neograph::llm::OpenAIProvider::create(llm_cfg);
+            neograph::llm::SchemaProvider::create(llm_cfg);
 
         // 3. ReAct graph with ghidra-mcp tools wired in.
         auto engine = neograph::graph::create_react_graph(
