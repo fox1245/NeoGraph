@@ -3,19 +3,20 @@
 This package re-exports the symbols of the underlying ``_neograph`` C
 extension. The C extension is what links against ``libneograph_*.so``;
 this file is the stable Python import surface so editor tooling and
-``help(neograph)`` see something more useful than ``<module>``.
+``help(neograph_engine)`` see something more useful than ``<module>``.
+
+Distribution name on PyPI: ``neograph-engine``. The bare ``neograph``
+name was already taken on PyPI (a Python LangGraph wrapper); the
+``-engine`` suffix makes the positioning explicit — this package IS
+the C++ runtime, not a Python wrapper around someone else's runtime.
 
 Example:
-    >>> import neograph
-    >>> from neograph.llm import SchemaProvider
+    >>> import neograph_engine as ng
+    >>> from neograph_engine.llm import SchemaProvider
     >>> provider = SchemaProvider(schema_path="openai", api_key="sk-...")
-    >>> ctx = neograph.NodeContext(provider=provider)
-    >>> engine = neograph.GraphEngine.compile(my_graph_dict, ctx)
-    >>> result = engine.run({"thread_id": "demo", "input": {...}})
-
-The first commit of the binding focuses on a sync surface — `engine.run()`,
-`engine.run_stream(cb)`, `engine.get_state(thread_id)`. Async (`run_async`,
-`run_stream_async`) and Python-native custom nodes ship in commit 2.
+    >>> ctx = ng.NodeContext(provider=provider)
+    >>> engine = ng.GraphEngine.compile(my_graph_dict, ctx)
+    >>> result = engine.run(ng.RunConfig(thread_id="demo", input={...}))
 """
 
 from ._neograph import (
@@ -69,7 +70,7 @@ class GraphNode:
     Register a factory so the JSON graph definition can reference your
     node by type name::
 
-        class CounterNode(neograph.GraphNode):
+        class CounterNode(neograph_engine.GraphNode):
             def __init__(self, name):
                 super().__init__()
                 self._name = name
@@ -79,9 +80,9 @@ class GraphNode:
 
             def execute(self, state):
                 current = state.get("count") or 0
-                return [neograph.ChannelWrite("count", current + 1)]
+                return [neograph_engine.ChannelWrite("count", current + 1)]
 
-        neograph.NodeFactory.register_type(
+        neograph_engine.NodeFactory.register_type(
             "counter",
             lambda name, config, ctx: CounterNode(name),
         )
@@ -126,9 +127,9 @@ def node(type_name=None):
 
     ::
 
-        @neograph.node("greet")
+        @neograph_engine.node("greet")
         def greet_node(state):
-            return [neograph.ChannelWrite("messages",
+            return [neograph_engine.ChannelWrite("messages",
                 [{"role": "assistant", "content": "hi!"}])]
 
     The decorated function is registered as a node type. Its name in
@@ -161,8 +162,8 @@ def node(type_name=None):
 
     return decorator
 
-# `from neograph.llm import OpenAIProvider, SchemaProvider` — defined in
-# llm.py so consumers can `from neograph.llm import ...` mirroring the
+# `from neograph_engine.llm import OpenAIProvider, SchemaProvider` — defined in
+# llm.py so consumers can `from neograph_engine.llm import ...` mirroring the
 # C++ neograph::llm:: namespace.
 
 __all__ = [

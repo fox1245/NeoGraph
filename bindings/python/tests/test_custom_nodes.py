@@ -11,7 +11,8 @@ Covers:
 
 import threading
 
-import neograph
+import neograph_engine as neograph  # PyPI dist name is `neograph-engine`;
+                                     # bare `neograph` was already taken
 
 
 # Each test registers a unique type name so the global NodeFactory

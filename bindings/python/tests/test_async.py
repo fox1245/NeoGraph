@@ -13,7 +13,8 @@ import threading
 
 import pytest
 
-import neograph
+import neograph_engine as neograph  # PyPI dist name is `neograph-engine`;
+                                     # bare `neograph` was already taken
 
 
 _uid = 0

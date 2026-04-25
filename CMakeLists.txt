@@ -723,7 +723,7 @@ if(NEOGRAPH_BUILD_PYBIND)
     # "Unspecified" and silently dump engine .so files into a normal
     # `cmake --install` run.
     install(TARGETS ${NEOGRAPH_PYBIND_LIBS}
-            LIBRARY DESTINATION neograph COMPONENT NeoGraphPyBindWheel
-            RUNTIME DESTINATION neograph COMPONENT NeoGraphPyBindWheel
-            ARCHIVE DESTINATION neograph COMPONENT NeoGraphPyBindWheel)
+            LIBRARY DESTINATION neograph_engine COMPONENT NeoGraphPyBindWheel
+            RUNTIME DESTINATION neograph_engine COMPONENT NeoGraphPyBindWheel
+            ARCHIVE DESTINATION neograph_engine COMPONENT NeoGraphPyBindWheel)
 endif()

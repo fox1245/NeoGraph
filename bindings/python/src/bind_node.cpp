@@ -261,7 +261,7 @@ private:
         py::object cls = py_obj_.attr("__class__");
         py::object base_module;
         try {
-            base_module = py::module_::import("neograph");
+            base_module = py::module_::import("neograph_engine");
         } catch (const py::error_already_set&) {
             // Should never happen — if neograph isn't importable we
             // wouldn't be here. Conservative fallback: hasattr.
@@ -410,7 +410,7 @@ void init_node(py::module_& m) {
                     // module-level dict each invocation. Cheap dict
                     // lookup, GIL held throughout.
                     py::module_ mod =
-                        py::module_::import("neograph._neograph");
+                        py::module_::import("neograph_engine._neograph");
                     py::dict registry =
                         mod.attr("_python_factories").cast<py::dict>();
                     if (!registry.contains(type.c_str())) {
