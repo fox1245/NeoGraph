@@ -108,12 +108,22 @@ cmake.args = [
     "-DNEOGRAPH_BUILD_EXAMPLES=OFF",
     "-DNEOGRAPH_BUILD_TESTS=OFF",
     "-DNEOGRAPH_BUILD_BENCHMARKS=OFF",
+    # Skip the include/ + share/ install rules so they don't end up
+    # in the wheel layout.
+    "-DNEOGRAPH_INSTALL_HEADERS=OFF",
 ]
 
-# Only fire the `NeoGraphPyBindWheel` install component. Rules without
-# that component (the engine's headers/schemas install) stay out of
-# the wheel.
-install.components = ["NeoGraphPyBindWheel"]
+# Headers + schemas would otherwise land in the wheel under
+# include/ and share/. Gate them off via the new
+# NEOGRAPH_INSTALL_HEADERS flag (default ON; the cmake.args above
+# turn it OFF for the wheel build). Engine libs are unconditional.
+#
+# (Earlier we tried CMake COMPONENTs + scikit-build-core's
+# install.components filter, but it didn't reliably propagate the
+# --component flag through to cmake --install on Windows, leaving
+# the engine .dll files out of the wheel — observed across iters
+# 6-9 as a 1 MB wheel followed by `delvewheel: Unable to find
+# library: neograph_llm.dll`.)
 
 # Bring the Python sources into the wheel. The pybind11 extension
 # `_neograph.so` and the engine `.so` siblings are added next to them
