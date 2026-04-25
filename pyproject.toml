@@ -180,6 +180,32 @@ manylinux-aarch64-image = "quay.io/pypa/manylinux_2_34_aarch64"
 # The async runtime + httplib both link OpenSSL 3.
 before-all = "dnf install -y openssl-devel"
 
+[tool.cibuildwheel.windows]
+# Windows wheel build:
+#   - vcpkg supplies OpenSSL (httplib needs >= 3.0; system Windows has none).
+#   - delvewheel bundles the engine .dll + libssl/libcrypto into the wheel,
+#     mirroring auditwheel/delocate on Linux/macOS.
+#   - The NEOGRAPH_API macro pass (include/neograph/api.h, commit 7) makes
+#     BUILD_SHARED_LIBS=ON link cleanly on MSVC by tagging public symbols
+#     dllexport in the engine and dllimport in the binding.
+before-all = """\
+vcpkg install openssl:x64-windows && \
+echo VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%\
+"""
+
+# Forward the vcpkg OpenSSL prefix into CMake. The runner image
+# already has VCPKG_INSTALLATION_ROOT set to C:\\vcpkg, and `vcpkg
+# install` drops the install tree under installed/x64-windows.
+environment = { CMAKE_TOOLCHAIN_FILE = "C:\\\\vcpkg\\\\scripts\\\\buildsystems\\\\vcpkg.cmake" }
+
+# delvewheel auto-discovers the engine .dlls beside the binding (we
+# install them via the same cmake install rule as Linux/macOS) and
+# pulls in libssl/libcrypto from vcpkg's bin dir.
+repair-wheel-command = """\
+delvewheel repair -w {dest_dir} {wheel} \
+  --add-path C:\\\\vcpkg\\\\installed\\\\x64-windows\\\\bin\
+"""
+
 [tool.cibuildwheel.macos]
 # Apple Silicon only for now. universal2 needs the engine to cross-
 # compile cleanly to x86_64 on an arm64 runner — extra setup that

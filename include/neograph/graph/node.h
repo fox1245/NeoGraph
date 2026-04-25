@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/graph/types.h>
 #include <neograph/graph/state.h>
 
@@ -37,7 +38,7 @@ namespace neograph::graph {
  * Per-execution state belongs in the channels: read inputs from
  * `state.get(...)` and emit outputs as `ChannelWrite`s.
  */
-class GraphNode {
+class NEOGRAPH_API GraphNode {
 public:
     virtual ~GraphNode() = default;
 
@@ -156,7 +157,7 @@ public:
  * calls the LLM provider, and writes the response back to "messages".
  * Mirrors the Agent::run() LLM call logic.
  */
-class LLMCallNode : public GraphNode {
+class NEOGRAPH_API LLMCallNode : public GraphNode {
 public:
     /**
      * @brief Construct an LLM call node.
@@ -199,7 +200,7 @@ private:
  * intended behaviour. Emit your own progress events from inside your
  * Tool if you need fine-grained observability.
  */
-class ToolDispatchNode : public GraphNode {
+class NEOGRAPH_API ToolDispatchNode : public GraphNode {
 public:
     /**
      * @brief Construct a tool dispatch node.
@@ -226,7 +227,7 @@ class GraphEngine;
  * to the "__route__" channel. Used with the "route_channel" condition
  * for dynamic routing based on user intent.
  */
-class IntentClassifierNode : public GraphNode {
+class NEOGRAPH_API IntentClassifierNode : public GraphNode {
 public:
     /**
      * @brief Construct an intent classifier node.
@@ -273,7 +274,7 @@ private:
  *     {{"result", "findings"}});    // output_map: child -> parent
  * @endcode
  */
-class SubgraphNode : public GraphNode {
+class NEOGRAPH_API SubgraphNode : public GraphNode {
 public:
     /**
      * @brief Construct a subgraph node.

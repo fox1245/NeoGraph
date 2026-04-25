@@ -48,12 +48,23 @@ option(NEOGRAPH_BUILD_PYBIND   "Build Python bindings (pybind11)"        OFF)
 #     cppdotenv INTERFACE, concurrentqueue INTERFACE) get absorbed into
 #     whichever neograph_* library uses them, regardless of mode.
 # ---------------------------------------------------------------------------
-if(BUILD_SHARED_LIBS AND WIN32)
-    message(WARNING
-        "NeoGraph: BUILD_SHARED_LIBS=ON on Windows requires "
-        "__declspec(dllexport)/dllimport annotations that are not yet in "
-        "the public headers. Linking will fail with undefined symbols. "
-        "Use BUILD_SHARED_LIBS=OFF on Windows until that work lands.")
+# Public symbol export — `NEOGRAPH_API` macro defined in
+# include/neograph/api.h decorates public class/function declarations
+# with the right linkage attribute on every platform:
+#
+#   - Static builds (BUILD_SHARED_LIBS=OFF) → empty (no-op).
+#   - Shared builds, Windows → __declspec(dllexport) inside engine TUs
+#     (those that get NEOGRAPH_BUILDING_LIBRARY defined below);
+#     __declspec(dllimport) for downstream consumers.
+#   - Shared builds, Linux/macOS → visibility("default") inside engine
+#     TUs; no-op for consumers.
+#
+# We set NEOGRAPH_STATIC_BUILD when BUILD_SHARED_LIBS is OFF so the
+# api.h macro skips its Windows decoration entirely. Without this,
+# a static build on Windows would still try to dllimport — fine for
+# the binary but breaks LTO and silly warning noise.
+if(NOT BUILD_SHARED_LIBS)
+    add_compile_definitions(NEOGRAPH_STATIC_BUILD)
 endif()
 
 # All TUs that might end up linked into a shared library need PIC. Setting
@@ -223,6 +234,13 @@ target_include_directories(neograph_core
         $<INSTALL_INTERFACE:include>
 )
 
+# NEOGRAPH_BUILDING_LIBRARY toggles the NEOGRAPH_API macro in
+# include/neograph/api.h to dllexport on Windows. The flag is PRIVATE
+# because downstream consumers (binding, tests, other neograph_*
+# libraries) must see dllimport — which is what they get when this
+# define is absent from their compile line.
+target_compile_definitions(neograph_core PRIVATE NEOGRAPH_BUILDING_LIBRARY)
+
 target_link_libraries(neograph_core
     PUBLIC  yyjson Threads::Threads asio
 )
@@ -252,6 +270,7 @@ add_library(neograph_async
 target_include_directories(neograph_async
     PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
 )
+target_compile_definitions(neograph_async PRIVATE NEOGRAPH_BUILDING_LIBRARY)
 target_link_libraries(neograph_async PUBLIC asio OpenSSL::SSL OpenSSL::Crypto)
 # C++20 coroutines require this on GCC < 14 when using -std=c++20.
 target_compile_features(neograph_async PUBLIC cxx_std_20)
@@ -285,6 +304,7 @@ if(NEOGRAPH_BUILD_POSTGRES)
             $<INSTALL_INTERFACE:include>
     )
 
+    target_compile_definitions(neograph_postgres PRIVATE NEOGRAPH_BUILDING_LIBRARY)
     target_link_libraries(neograph_postgres
         PUBLIC  neograph_core
         PRIVATE PostgreSQL::PostgreSQL
@@ -312,6 +332,7 @@ if(NEOGRAPH_BUILD_SQLITE)
             $<INSTALL_INTERFACE:include>
     )
 
+    target_compile_definitions(neograph_sqlite PRIVATE NEOGRAPH_BUILDING_LIBRARY)
     target_link_libraries(neograph_sqlite
         PUBLIC  neograph_core
         PRIVATE SQLite::SQLite3
@@ -341,6 +362,7 @@ if(NEOGRAPH_BUILD_LLM)
             ${GENERATED_DIR}
     )
 
+    target_compile_definitions(neograph_llm PRIVATE NEOGRAPH_BUILDING_LIBRARY)
     target_link_libraries(neograph_llm
         PUBLIC  neograph_core
         PRIVATE httplib OpenSSL::SSL OpenSSL::Crypto neograph_async
@@ -363,6 +385,7 @@ if(NEOGRAPH_BUILD_MCP)
             $<INSTALL_INTERFACE:include>
     )
 
+    target_compile_definitions(neograph_mcp PRIVATE NEOGRAPH_BUILDING_LIBRARY)
     target_link_libraries(neograph_mcp
         PUBLIC  neograph_core
         PRIVATE neograph_async OpenSSL::SSL OpenSSL::Crypto

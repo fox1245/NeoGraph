@@ -8,6 +8,7 @@
  */
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/graph/types.h>
 
 #include <asio/awaitable.hpp>
@@ -162,7 +163,7 @@ struct PendingWrite {
  *
  * @see InMemoryCheckpointStore for a reference implementation.
  */
-class CheckpointStore {
+class NEOGRAPH_API CheckpointStore {
 public:
     virtual ~CheckpointStore() = default;
 
@@ -316,7 +317,7 @@ public:
  * blob` table referenced from a `(checkpoint_id, channel) → version`
  * table) to get the same on-disk savings.
  */
-class InMemoryCheckpointStore : public CheckpointStore {
+class NEOGRAPH_API InMemoryCheckpointStore : public CheckpointStore {
 public:
     void save(const Checkpoint& cp) override;
     std::optional<Checkpoint> load_latest(const std::string& thread_id) override;

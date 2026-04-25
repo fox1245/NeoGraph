@@ -59,6 +59,14 @@ jobs:
           # cross-compile or universal2 packaging in this commit.
           - os: macos-14
             arch: arm64
+          # Windows x64 — MSVC + vcpkg OpenSSL. NEOGRAPH_API decorations
+          # in include/neograph/api.h flip to __declspec(dllexport) inside
+          # engine TUs (NEOGRAPH_BUILDING_LIBRARY private compile def per
+          # library) and __declspec(dllimport) for downstream consumers
+          # like the binding. delvewheel bundles the engine .dll +
+          # OpenSSL .dll into the wheel via the cibw repair-command.
+          - os: windows-latest
+            arch: AMD64
 
     steps:
       - uses: actions/checkout@v4

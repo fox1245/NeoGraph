@@ -7,6 +7,7 @@
  */
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/types.h>
 #include <string>
 #include <vector>
@@ -45,7 +46,7 @@ struct StoreItem {
  *
  * @see InMemoryStore for a reference implementation.
  */
-class Store {
+class NEOGRAPH_API Store {
 public:
     virtual ~Store() = default;
 
@@ -94,7 +95,7 @@ public:
  * Thread-safe via mutex. Items are stored in a std::map keyed by
  * a composite string of namespace + key.
  */
-class InMemoryStore : public Store {
+class NEOGRAPH_API InMemoryStore : public Store {
 public:
     void put(const Namespace& ns, const std::string& key, const json& value) override;
     std::optional<StoreItem> get(const Namespace& ns, const std::string& key) const override;

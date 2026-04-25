@@ -39,6 +39,7 @@
  */
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/graph/types.h>
 #include <neograph/graph/node.h>
 #include <neograph/graph/compiler.h>
@@ -68,7 +69,7 @@ class GraphState;
  * parameters so tests can drive individual invocations without
  * reconstructing the surrounding super-step.
  */
-class NodeExecutor {
+class NEOGRAPH_API NodeExecutor {
 public:
     using RetryPolicyLookup = std::function<RetryPolicy(const std::string&)>;
 

@@ -8,6 +8,7 @@
  */
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/graph/types.h>
 #include <mutex>
 #include <shared_mutex>
@@ -22,7 +23,7 @@ namespace neograph::graph {
  * access (unique lock) to state channels. Supports serialization
  * for checkpointing and version tracking for change detection.
  */
-class GraphState {
+class NEOGRAPH_API GraphState {
 public:
     /**
      * @brief Initialize a new channel with a reducer and optional initial value.

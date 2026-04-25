@@ -11,6 +11,7 @@
  */
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/provider.h>
 #include <neograph/llm/json_path.h>
 #include <fstream>
@@ -38,7 +39,7 @@ namespace neograph::llm {
  *
  * @see OpenAIProvider for a simpler OpenAI-only provider.
  */
-class SchemaProvider : public Provider {
+class NEOGRAPH_API SchemaProvider : public Provider {
   public:
     /// Configuration for schema-based provider.
     struct Config {

@@ -7,6 +7,7 @@
  */
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/types.h>
 
 #include <asio/awaitable.hpp>
@@ -24,7 +25,7 @@ namespace neograph {
  *
  * @see neograph::mcp::MCPTool for remote MCP server tools.
  */
-class Tool {
+class NEOGRAPH_API Tool {
   public:
     virtual ~Tool() = default;
 
@@ -84,7 +85,7 @@ class Tool {
  * Implementation is in async/run_sync.h via the run_sync template,
  * so this header only needs the asio::awaitable forward declaration.
  */
-class AsyncTool : public Tool {
+class NEOGRAPH_API AsyncTool : public Tool {
   public:
     /// Async work — override this. Default would infinitely recurse
     /// against execute(), so an override is mandatory; left non-pure

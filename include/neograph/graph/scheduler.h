@@ -20,6 +20,7 @@
  */
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/graph/types.h>
 #include <map>
 #include <optional>
@@ -83,7 +84,7 @@ using BarrierSpecs = std::map<std::string, std::set<std::string>>;
  * the caller-supplied `GraphState` is read-thread-safe (which
  * `GraphState` guarantees via its shared_mutex).
  */
-class Scheduler {
+class NEOGRAPH_API Scheduler {
 public:
     /**
      * @brief Bind the scheduler to the graph's edge topology.

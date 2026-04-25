@@ -25,6 +25,7 @@
  */
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/graph/types.h>
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/scheduler.h>
@@ -71,7 +72,7 @@ struct ResumeContext {
  * out of scope when the run ends. Holds no state beyond the store
  * handle + thread_id.
  */
-class CheckpointCoordinator {
+class NEOGRAPH_API CheckpointCoordinator {
 public:
     /// @param store Checkpoint store (may be nullptr — everything is a no-op).
     /// @param thread_id Per-run thread identifier (may be empty — same effect).

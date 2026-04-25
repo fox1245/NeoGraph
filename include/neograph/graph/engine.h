@@ -8,6 +8,7 @@
  */
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/compiler.h>
 #include <neograph/graph/coordinator.h>
@@ -95,7 +96,7 @@ struct RunResult {
  *
  * @see RunConfig, RunResult, GraphNode
  */
-class GraphEngine {
+class NEOGRAPH_API GraphEngine {
 public:
     /**
      * @brief Compile a graph from a JSON definition.
