@@ -33,6 +33,8 @@
  */
 #pragma once
 
+#include <neograph/api.h>
+
 #include <asio/any_io_executor.hpp>
 #include <asio/awaitable.hpp>
 
@@ -70,7 +72,7 @@ struct WsMessage {
 /// on the returned instance. Destruction closes the socket
 /// unconditionally (no graceful close unless you called send_close
 /// first).
-class WsClient {
+class NEOGRAPH_API WsClient {
   public:
     ~WsClient();
     WsClient(const WsClient&) = delete;
@@ -131,7 +133,7 @@ class WsClient {
 ///
 /// Throws asio::system_error on transport failure, std::runtime_error
 /// if the server refuses the upgrade (non-101 status or bad Accept).
-asio::awaitable<std::unique_ptr<WsClient>> ws_connect(
+NEOGRAPH_API asio::awaitable<std::unique_ptr<WsClient>> ws_connect(
     asio::any_io_executor ex,
     std::string_view host,
     std::string_view port,
