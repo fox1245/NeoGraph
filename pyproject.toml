@@ -181,7 +181,18 @@ before-all = "dnf install -y openssl-devel"
 # isn't justified given Apple's own arm64 transition is mostly done.
 archs = ["arm64"]
 
-# macOS deployment target: 12.0 (Monterey, 2021). pybind11 v2.13
-# requires C++17; gcc/clang on macOS 12+ ship a C++17-capable
-# toolchain by default. Older targets would force a Homebrew clang.
-environment = { MACOSX_DEPLOYMENT_TARGET = "12.0" }
+# macOS deployment target: 14.0 (Sonoma, Sep 2023). The pinch is
+# Homebrew OpenSSL on the macos-14 GitHub runner — its bottles are
+# built with a min target of 14.0:
+#
+#     delocate.libsana.DelocationError: Library dependencies do not
+#     satisfy target MacOS version 12.0
+#     ...libcrypto.3.dylib has a minimum target of 14.0
+#     ...libssl.3.dylib has a minimum target of 14.0
+#
+# Setting the wheel target to 12.0 produced a wheel that bundled
+# OpenSSL needing 14.0 — broken on macOS 12 / 13 users despite
+# the wheel claiming to support them. Bumping to 14.0 makes the
+# claim honest. Users on older macOS install via sdist (with their
+# own OpenSSL).
+environment = { MACOSX_DEPLOYMENT_TARGET = "14.0" }
