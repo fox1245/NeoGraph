@@ -19,6 +19,7 @@ option(NEOGRAPH_BUILD_UTIL     "Build neograph::util (utilities)"        ON)
 option(NEOGRAPH_BUILD_POSTGRES "Build PostgresCheckpointStore (libpq)" ON)
 option(NEOGRAPH_BUILD_SQLITE   "Build SqliteCheckpointStore (libsqlite3)" ON)
 option(NEOGRAPH_BUILD_EXAMPLES "Build example programs"                  ON)
+option(NEOGRAPH_BUILD_PYBIND   "Build Python bindings (pybind11)"        OFF)
 
 # ---------------------------------------------------------------------------
 # Shared-vs-static library mode
@@ -633,6 +634,18 @@ if(NEOGRAPH_BUILD_TESTS)
 
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+# ===========================================================================
+# Python bindings (pybind11)
+#
+# Optional. Builds the `_neograph` C extension under build/neograph/, with
+# the `neograph/` package layout next to it so a `PYTHONPATH=build python`
+# can `import neograph`. Wheel packaging is downstream of this option;
+# see bindings/python/README for details.
+# ===========================================================================
+if(NEOGRAPH_BUILD_PYBIND)
+    add_subdirectory(bindings/python)
 endif()
 
 # ===========================================================================
