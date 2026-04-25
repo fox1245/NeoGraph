@@ -252,10 +252,23 @@ environment = { CMAKE_TOOLCHAIN_FILE = "C:\\\\vcpkg\\\\scripts\\\\buildsystems\\
 # or external command". Solution: pip install delvewheel right
 # before invoking it, and call via `python -m delvewheel` so we don't
 # depend on PATH plumbing for newly installed scripts.
+#
+# `--ignore-existing` is REQUIRED so delvewheel actually searches the
+# wheel's own directories for sibling DLLs. Reading the delvewheel
+# 1.12 source (_wheel_repair.py:WheelRepair.__init__): without
+# --ignore-existing, `self._wheel_dirs = None` and `get_all_needed()`
+# only consults system PATH + --add-path. The engine .dlls bundled
+# inside `neograph_engine/` by cmake-install are then "missing"
+# from delvewheel's perspective even though they're sitting in the
+# wheel right next to the binding.
+#
+# With --ignore-existing, delvewheel walks the wheel's tree, adds
+# every directory to its search list, and skips re-bundling DLLs
+# it finds there. That's exactly the behaviour we want — the
+# engine .dlls are already where they need to be at import time.
 repair-wheel-command = """\
 pip install delvewheel && \
-python -c "import zipfile, sys; print('=== WHEEL CONTENTS ==='); [print(f'{i.file_size:>10} {i.filename}') for i in zipfile.ZipFile(r'{wheel}').infolist()]; print('=== END ===')" && \
-python -m delvewheel repair -w {dest_dir} {wheel} \
+python -m delvewheel repair --ignore-existing -w {dest_dir} {wheel} \
   --add-path C:\\\\vcpkg\\\\installed\\\\x64-windows\\\\bin\
 """
 
