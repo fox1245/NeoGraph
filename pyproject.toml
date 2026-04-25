@@ -94,6 +94,13 @@ cmake.build-type = "Release"
 # by `pip wheel`.
 cmake.define = { CMAKE_INSTALL_MESSAGE = "ALWAYS" }
 
+# Force scikit-build-core to surface its cmake-install steps in the
+# pip wheel output. Without this, scikit-build-core captures the
+# subprocess output and prints nothing on success, making
+# wheel-content debugging effectively blind. Set to DEBUG for the
+# Windows-debug iteration; downgrade after Windows lands.
+logging.level = "DEBUG"
+
 # Engine config: shared libs (so the wheel can ship .so siblings),
 # turn off optional subsystems that pull system deps (libpq, libsqlite3,
 # httplib's MCP client). Examples / tests / benchmarks are dead weight
