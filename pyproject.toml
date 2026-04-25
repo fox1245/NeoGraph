@@ -28,6 +28,11 @@
 requires = [
     "scikit-build-core>=0.10",
     "pybind11>=2.13",
+    # Ninja explicitly so Windows builds use it as the cmake generator
+    # (Linux/macOS auto-pick Ninja when present; Windows can default
+    # to Visual Studio's multi-config generator otherwise, which
+    # complicates cmake --install / wheel staging).
+    "ninja>=1.10",
 ]
 build-backend = "scikit_build_core.build"
 
@@ -83,16 +88,6 @@ build-dir = "build/{wheel_tag}"
 
 # Reproducible-ish: Release with assertions off, no debug info.
 cmake.build-type = "Release"
-
-# Force Ninja on every platform so CMake stays single-config. The
-# Visual Studio generator (default on Windows when Ninja isn't
-# requested) is multi-config, and cmake-install with multi-config
-# can silently produce a wheel missing the engine .dll files —
-# observed in iter 6 where the Windows wheel came out at 1 MB
-# (just the binding .pyd) instead of the expected ~5 MB. Linux
-# and macOS already pick Ninja by default; this just pins the
-# Windows behaviour.
-cmake.generator = "Ninja"
 
 # Print every cmake install action so wheel-build problems show
 # up in the cibuildwheel log instead of being silently swallowed
@@ -208,10 +203,12 @@ vcpkg install openssl:x64-windows && \
 echo VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%\
 """
 
-# Forward the vcpkg OpenSSL prefix into CMake. The runner image
-# already has VCPKG_INSTALLATION_ROOT set to C:\\vcpkg, and `vcpkg
-# install` drops the install tree under installed/x64-windows.
-environment = { CMAKE_TOOLCHAIN_FILE = "C:\\\\vcpkg\\\\scripts\\\\buildsystems\\\\vcpkg.cmake" }
+# Forward the vcpkg OpenSSL prefix into CMake, and pin Ninja as the
+# cmake generator (single-config). Without CMAKE_GENERATOR=Ninja,
+# CMake on Windows defaults to the Visual Studio multi-config
+# generator, which produced wheel staging that silently dropped
+# the engine .dll files (iter 6: 1 MB wheel; expected ~5 MB).
+environment = { CMAKE_TOOLCHAIN_FILE = "C:\\\\vcpkg\\\\scripts\\\\buildsystems\\\\vcpkg.cmake", CMAKE_GENERATOR = "Ninja" }
 
 # delvewheel auto-discovers the engine .dlls beside the binding (we
 # install them via the same cmake install rule as Linux/macOS) and
