@@ -56,15 +56,38 @@ curl -s http://127.0.0.1:18080/methods | head      # 검증
 
 From the NeoGraph repo root (docker 경로 default — `:18080`):
 ```
-./build-release/example_re_agent
+./build-release/example_re_agent > /tmp/agent_out.json 2> /tmp/agent_trace.log
 # or with a stronger model / more steps:
-./build-release/example_re_agent --model gpt-4o --max-steps 120
+./build-release/example_re_agent --model gpt-5.4-mini --max-steps 120
 ```
 
 Native install (Ghidra가 호스트에서 직접 :8080 띄움):
 ```
 GHIDRA_SERVER_URL=http://127.0.0.1:8080/ ./build-release/example_re_agent
 ```
+
+## Score the result
+
+`scorer.py` runs an LLM judge (gpt-5.4-mini, OpenAI Responses) comparing
+the agent's `recovered` list against `targets/ground_truth.json` on three
+axes per function: name semantics, summary semantics, and rationale.
+Exit 0 = pass (default threshold `matched_score >= 0.83` == 5/6).
+
+One-time venv setup (the scorer is the only Python in this project):
+```
+cd projects/re_agent
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+```
+
+Score a run:
+```
+projects/re_agent/.venv/bin/python projects/re_agent/scorer.py /tmp/agent_out.json
+```
+
+Output: per-function table (PASS/PARTIAL/FAIL on name + summary) +
+extra-agent-entries (likely false positives like CRT glue the agent
+mistook for user code) + aggregate score. Use `--report-json` to also
+dump the raw judge JSON for CI archival.
 
 Trace and tool calls go to **stderr**; the final JSON summary goes to
 **stdout** so you can pipe / diff:

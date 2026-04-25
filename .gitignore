@@ -6,6 +6,11 @@ docs/api/
 .playwright-mcp
 benchmarks/node_modules/
 
+# Python venvs (e.g. projects/re_agent/.venv for the scorer).
+.venv/
+__pycache__/
+*.pyc
+
 # Session handoff note — local planning doc, not tracked.
 NEXT_SESSION.md
 
