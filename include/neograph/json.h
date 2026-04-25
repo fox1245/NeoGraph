@@ -20,6 +20,8 @@
  */
 #pragma once
 
+#include <neograph/api.h>
+
 #include <yyjson.h>
 
 #include <cstdint>
@@ -37,7 +39,7 @@
 
 namespace neograph {
 
-class json {
+class NEOGRAPH_API json {
 public:
     // ----- Exceptions -----
     class exception : public std::runtime_error {

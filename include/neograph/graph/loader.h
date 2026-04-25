@@ -11,6 +11,7 @@
  */
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/graph/types.h>
 #include <unordered_map>
 #include <memory>
@@ -32,7 +33,7 @@ class GraphNode;
  *     });
  * @endcode
  */
-class ReducerRegistry {
+class NEOGRAPH_API ReducerRegistry {
 public:
     /// @brief Get the singleton instance.
     /// @return Reference to the global ReducerRegistry.
@@ -70,7 +71,7 @@ private:
  *     });
  * @endcode
  */
-class ConditionRegistry {
+class NEOGRAPH_API ConditionRegistry {
 public:
     /// @brief Get the singleton instance.
     /// @return Reference to the global ConditionRegistry.
@@ -121,7 +122,7 @@ using NodeFactoryFn = std::function<std::unique_ptr<GraphNode>(
  *     });
  * @endcode
  */
-class NodeFactory {
+class NEOGRAPH_API NodeFactory {
 public:
     /// @brief Get the singleton instance.
     /// @return Reference to the global NodeFactory.

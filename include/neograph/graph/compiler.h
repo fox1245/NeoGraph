@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/graph/types.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/scheduler.h>
@@ -75,7 +76,7 @@ struct CompiledGraph {
  * execution tests build a CompiledGraph fixture directly (bypassing
  * JSON) and lets parsing tests run without touching the runtime.
  */
-class GraphCompiler {
+class NEOGRAPH_API GraphCompiler {
 public:
     /**
      * @brief Parse a JSON graph definition into a CompiledGraph.

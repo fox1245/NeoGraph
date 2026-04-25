@@ -7,6 +7,7 @@
  */
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/provider.h>
 #include <memory>
 #include <string>
@@ -28,7 +29,7 @@ namespace neograph::llm {
  *
  * @see SchemaProvider for multi-vendor support (Claude, Gemini).
  */
-class OpenAIProvider : public Provider {
+class NEOGRAPH_API OpenAIProvider : public Provider {
   public:
     /// Configuration for OpenAI-compatible API connections.
     struct Config {

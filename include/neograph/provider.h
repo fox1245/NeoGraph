@@ -7,6 +7,7 @@
  */
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/types.h>
 
 #include <asio/awaitable.hpp>
@@ -31,7 +32,7 @@ namespace neograph {
  * Decorators should prefer the honest value when positive and fall
  * back to their own default when -1.
  */
-class RateLimitError : public std::runtime_error {
+class NEOGRAPH_API RateLimitError : public std::runtime_error {
 public:
     RateLimitError(const std::string& message, int retry_after_seconds = -1)
         : std::runtime_error(message)
@@ -68,7 +69,7 @@ struct CompletionParams {
  * @see neograph::llm::OpenAIProvider
  * @see neograph::llm::SchemaProvider
  */
-class Provider {
+class NEOGRAPH_API Provider {
   public:
     virtual ~Provider() = default;
 
