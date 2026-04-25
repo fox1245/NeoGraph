@@ -10,7 +10,8 @@ binding boundary works end-to-end: dict-shaped graph definition →
 GraphEngine.compile → GraphEngine.run → result.output.
 """
 
-import neograph
+import neograph_engine as neograph  # PyPI dist name is `neograph-engine`;
+                                     # bare `neograph` was already taken
 
 
 def test_module_metadata():

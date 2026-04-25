@@ -32,7 +32,12 @@ requires = [
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "neograph"
+# Distribution name on PyPI: ``neograph-engine``. The bare ``neograph``
+# was already taken on PyPI (a Python LangGraph wrapper, ironically with
+# a similar one-liner pitch). The ``-engine`` suffix makes our positioning
+# explicit — this package IS the C++ runtime, not a Python wrapper around
+# someone else's runtime. Python import name is ``neograph_engine``.
+name = "neograph-engine"
 version = "0.1.0"
 description = "C++ graph agent engine — Python bindings (LangGraph-equivalent semantics, microsecond engine overhead)"
 readme = "README.md"
@@ -103,7 +108,7 @@ install.components = ["NeoGraphPyBindWheel"]
 # Bring the Python sources into the wheel. The pybind11 extension
 # `_neograph.so` and the engine `.so` siblings are added next to them
 # by the cmake install rules above.
-wheel.packages = ["bindings/python/neograph"]
+wheel.packages = ["bindings/python/neograph_engine"]
 
 # ─── cibuildwheel ────────────────────────────────────────────────────────
 #
@@ -142,7 +147,7 @@ skip   = "*-musllinux_* *_i686 pp*"
 # resolves to the source tree path inside the cibw container.
 test-requires = ["pytest"]
 test-command  = """\
-python -c "import neograph; print('cibw smoke version:', neograph.__version__)" && \
+python -c "import neograph_engine; print('cibw smoke version:', neograph_engine.__version__)" && \
 python -m pytest -q {project}/bindings/python/tests/\
 """
 

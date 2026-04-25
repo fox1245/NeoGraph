@@ -9,13 +9,18 @@
 #     libneograph_llm.so
 #     libneograph_async.so
 #     ...
-#     neograph/                    ← Python package (this target)
+#     neograph_engine/             ← Python package (this target)
 #       __init__.py                ← copied from source tree at configure
 #       _neograph.cpython-*.so     ← pybind11 module (build target)
 #
 # So a user running from the build dir can do:
 #
-#   PYTHONPATH=build python -c "import neograph; print(neograph.__version__)"
+#   PYTHONPATH=build python -c "import neograph_engine; print(neograph_engine.__version__)"
+#
+# Note: distribution name (PyPI) is `neograph-engine`, Python import
+# name is `neograph_engine`. The C extension itself stays `_neograph`
+# (private; lives inside the package). The bare `neograph` name on
+# PyPI was already taken by an unrelated LangGraph wrapper.
 #
 # RPATH on `_neograph.so` is `$ORIGIN/..` so it finds the libneograph_*.so
 # siblings without LD_LIBRARY_PATH. Wheel-packaging downstream relocates
@@ -77,11 +82,11 @@ if(TARGET neograph::llm)
     target_compile_definitions(_neograph PRIVATE NEOGRAPH_PYBIND_HAS_LLM)
 endif()
 
-# Locate the binding next to neograph/__init__.py inside the build tree
-# so PYTHONPATH=build works out of the box. CMAKE_LIBRARY_OUTPUT_DIRECTORY
+# Locate the binding next to neograph_engine/__init__.py inside the build
+# tree so PYTHONPATH=build works out of the box. CMAKE_LIBRARY_OUTPUT_DIRECTORY
 # is the canonical place for module-style libraries (which pybind11_add_module
 # creates as MODULE-typed).
-set(_NEOGRAPH_PY_PKG_DIR "${CMAKE_BINARY_DIR}/neograph")
+set(_NEOGRAPH_PY_PKG_DIR "${CMAKE_BINARY_DIR}/neograph_engine")
 set_target_properties(_neograph PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${_NEOGRAPH_PY_PKG_DIR}"
 )
@@ -89,11 +94,11 @@ set_target_properties(_neograph PROPERTIES
 # RPATH on the binding so it finds libneograph_core.so (and friends).
 #
 # Build tree: the engine .so files live one level up from the binding
-# (`build/libneograph_*.so` vs `build/neograph/_neograph.so`), so the
+# (`build/libneograph_*.so` vs `build/neograph_engine/_neograph.so`), so the
 # build RPATH includes both `$ORIGIN/..` and `$ORIGIN`.
 #
 # Install / wheel: the engine .so files are bundled NEXT TO the
-# binding (`neograph/_neograph.so` and `neograph/libneograph_*.so`),
+# binding (`neograph_engine/_neograph.so` + `neograph_engine/libneograph_*.so`),
 # so the install RPATH is just `$ORIGIN`. CMake honours the install
 # RPATH only on `cmake --install`; the build-tree binary still uses
 # the BUILD_RPATH above.
@@ -115,8 +120,8 @@ endif()
 # (For the wheel build path: scikit-build-core copies these via the
 # `wheel.packages = ["bindings/python/neograph"]` directive in
 # pyproject.toml — no install rule needed here for them.)
-configure_file(neograph/__init__.py "${_NEOGRAPH_PY_PKG_DIR}/__init__.py" COPYONLY)
-configure_file(neograph/llm.py      "${_NEOGRAPH_PY_PKG_DIR}/llm.py"      COPYONLY)
+configure_file(neograph_engine/__init__.py "${_NEOGRAPH_PY_PKG_DIR}/__init__.py" COPYONLY)
+configure_file(neograph_engine/llm.py      "${_NEOGRAPH_PY_PKG_DIR}/llm.py"      COPYONLY)
 
 # Install rule for the wheel build. Tagged with the same component as
 # the engine .so files in the root CMakeLists, so a single
@@ -125,8 +130,8 @@ configure_file(neograph/llm.py      "${_NEOGRAPH_PY_PKG_DIR}/llm.py"      COPYON
 # Per-keyword COMPONENT (see comment in root CMakeLists about why a
 # single trailing COMPONENT silently mis-attaches).
 install(TARGETS _neograph
-    LIBRARY DESTINATION neograph COMPONENT NeoGraphPyBindWheel
-    RUNTIME DESTINATION neograph COMPONENT NeoGraphPyBindWheel)
+    LIBRARY DESTINATION neograph_engine COMPONENT NeoGraphPyBindWheel
+    RUNTIME DESTINATION neograph_engine COMPONENT NeoGraphPyBindWheel)
 
 # Make smoke tests runnable straight from the build tree:
 #   ctest -V -R pybind_smoke
