@@ -131,6 +131,16 @@ install(TARGETS _neograph
     LIBRARY DESTINATION neograph_engine
     RUNTIME DESTINATION neograph_engine)
 
+# Install the Python sources via cmake too (instead of relying on
+# scikit-build-core's `wheel.packages = [...]` directive). Empirically
+# wheel.packages produced an inconsistent result with cmake-install on
+# Windows (engine .dll siblings missing from the staged wheel even
+# though Linux/macOS staged correctly). Routing both Python sources
+# AND engine .dlls through the same install mechanism keeps the
+# Windows wheel consistent with the other platforms.
+install(FILES neograph_engine/__init__.py neograph_engine/llm.py
+    DESTINATION neograph_engine)
+
 # Make smoke tests runnable straight from the build tree:
 #   ctest -V -R pybind_smoke
 # Skipped if pytest isn't on the system Python.
