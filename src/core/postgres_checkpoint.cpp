@@ -325,7 +325,7 @@ CREATE TABLE IF NOT EXISTS neograph_checkpoint_writes (
     sends_json           JSONB  NOT NULL DEFAULT '[]'::jsonb,
     step                 BIGINT NOT NULL DEFAULT 0,
     timestamp_ms         BIGINT NOT NULL DEFAULT 0,
-    PRIMARY KEY (thread_id, parent_checkpoint_id, seq)
+    PRIMARY KEY (thread_id, parent_checkpoint_id, task_id, seq)
 );
 )SQL";
 
