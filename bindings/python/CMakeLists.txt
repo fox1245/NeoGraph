@@ -156,6 +156,7 @@ endif()
 configure_file(neograph_engine/__init__.py  "${_NEOGRAPH_PY_PKG_DIR}/__init__.py"  COPYONLY)
 configure_file(neograph_engine/llm.py       "${_NEOGRAPH_PY_PKG_DIR}/llm.py"       COPYONLY)
 configure_file(neograph_engine/streaming.py "${_NEOGRAPH_PY_PKG_DIR}/streaming.py" COPYONLY)
+configure_file(neograph_engine/tracing.py   "${_NEOGRAPH_PY_PKG_DIR}/tracing.py"   COPYONLY)
 
 # Install rule for the wheel build. Tagged with the same component as
 # the engine .so files in the root CMakeLists, so a single
