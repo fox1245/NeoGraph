@@ -1,5 +1,6 @@
 #include <neograph/llm/openai_provider.h>
 
+#include <neograph/async/conn_pool.h>
 #include <neograph/async/endpoint.h>
 #include <neograph/async/http_client.h>
 
@@ -20,6 +21,20 @@ namespace neograph::llm {
 OpenAIProvider::OpenAIProvider(Config config)
   : config_(std::move(config))
 {
+    // Long-lived HTTP loop + ConnPool. Same pattern as SchemaProvider
+    // (commit 6da4810): Provider::complete()'s run_sync builds a
+    // throw-away io_context per call, so the pool can't live there.
+    http_io_ = std::make_unique<asio::io_context>();
+    http_work_.emplace(asio::make_work_guard(*http_io_));
+    http_thread_ = std::thread([io = http_io_.get()]{ io->run(); });
+    conn_pool_ = std::make_unique<async::ConnPool>(http_io_->get_executor());
+}
+
+OpenAIProvider::~OpenAIProvider()
+{
+    if (http_work_) http_work_.reset();
+    if (http_io_) http_io_->stop();
+    if (http_thread_.joinable()) http_thread_.join();
 }
 
 std::unique_ptr<OpenAIProvider>
@@ -103,9 +118,7 @@ OpenAIProvider::complete_async(const CompletionParams& params)
         opts.timeout = std::chrono::seconds(config_.timeout_seconds);
     }
 
-    auto ex = co_await asio::this_coro::executor;
-    auto res = co_await async::async_post(
-        ex,
+    auto res = co_await conn_pool_->async_post(
         endpoint.host,
         endpoint.port,
         endpoint.prefix + "/v1/chat/completions",
