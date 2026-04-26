@@ -318,7 +318,6 @@ if __name__ == "__main__":
 
     gr.ChatInterface(
         fn=chat,
-        type="messages",
         title="NeoGraph — multi-turn chat + deep research",
         description=(
             "일반 질문은 그냥 chat. **'조사해줘 / research / "
