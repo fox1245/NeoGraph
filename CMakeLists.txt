@@ -743,6 +743,16 @@ if(NEOGRAPH_BUILD_PYBIND)
     if(TARGET neograph_llm)
         list(APPEND NEOGRAPH_PYBIND_LIBS neograph_llm)
     endif()
+    # neograph_postgres ships when libpq was found at engine-build
+    # time. The binding's PostgresCheckpointStore class hard-links
+    # against it (bindings/python/CMakeLists.txt:91), so the wheel
+    # must carry libneograph_postgres.{so,dylib,dll} as a sibling
+    # alongside the binding — otherwise auditwheel/delocate fail
+    # with "required library libneograph_postgres.* could not be
+    # located" during repair.
+    if(TARGET neograph_postgres)
+        list(APPEND NEOGRAPH_PYBIND_LIBS neograph_postgres)
+    endif()
 
     # Set INSTALL_RPATH so the bundled libs find each other via
     # `$ORIGIN` (libneograph_llm.so → libneograph_core.so etc.).

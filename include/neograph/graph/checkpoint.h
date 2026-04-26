@@ -57,14 +57,14 @@ enum class CheckpointPhase {
 /// The returned value is the same as the legacy stringly-typed phase
 /// so persistent stores serializing with to_string() produce identical
 /// blobs to pre-enum NeoGraph.
-const char* to_string(CheckpointPhase phase);
+NEOGRAPH_API const char* to_string(CheckpointPhase phase);
 
 /// @brief Parse a phase string back to the enum.
 ///
 /// Useful for deserializing checkpoints from persistent stores. Unknown
 /// strings throw std::invalid_argument — deliberate, because silent
 /// fallback would mask wire-format drift.
-CheckpointPhase parse_checkpoint_phase(std::string_view s);
+NEOGRAPH_API CheckpointPhase parse_checkpoint_phase(std::string_view s);
 
 /**
  * @brief Serialized snapshot of graph execution state at a single super-step.
