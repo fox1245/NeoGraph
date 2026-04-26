@@ -94,9 +94,10 @@ cmake.build-type = "Release"
 cmake.define = { CMAKE_INSTALL_MESSAGE = "ALWAYS" }
 
 # Engine config: shared libs (so the wheel can ship .so siblings),
-# turn off optional subsystems that pull system deps (libpq, libsqlite3,
-# httplib's MCP client). Examples / tests / benchmarks are dead weight
-# for an end-user wheel.
+# turn off optional subsystems that pull dead-weight deps (libsqlite3,
+# httplib's MCP client). Postgres stays ON — each platform's before-all
+# installs libpq dev headers and the wheel-repair step bundles libpq +
+# transitive deps. Examples / tests / benchmarks dropped for end-user wheels.
 cmake.args = [
     # `-G Ninja` is here (not just CMAKE_GENERATOR=Ninja env var) so
     # scikit-build-core's `get_generator(*args)` detection actually
@@ -114,7 +115,11 @@ cmake.args = [
     "-DNEOGRAPH_BUILD_PYBIND=ON",
     "-DNEOGRAPH_BUILD_LLM=ON",
     "-DNEOGRAPH_BUILD_MCP=OFF",
-    "-DNEOGRAPH_BUILD_POSTGRES=OFF",
+    # NEOGRAPH_BUILD_POSTGRES default ON (CMakeLists.txt:19). Each platform's
+    # before-all installs libpq dev headers; auditwheel/delocate/delvewheel
+    # bundle libpq.{so,dylib,dll} + its transitive deps into the wheel so
+    # `neograph_engine.PostgresCheckpointStore` works on a fresh
+    # `pip install` without requiring system libpq.
     "-DNEOGRAPH_BUILD_SQLITE=OFF",
     "-DNEOGRAPH_BUILD_EXAMPLES=OFF",
     "-DNEOGRAPH_BUILD_TESTS=OFF",
@@ -209,10 +214,15 @@ test-skip = ""
 manylinux-x86_64-image  = "quay.io/pypa/manylinux_2_34_x86_64"
 manylinux-aarch64-image = "quay.io/pypa/manylinux_2_34_aarch64"
 
-# Container has gcc/cmake but not openssl-devel. Install the headers
-# so find_package(OpenSSL) succeeds during the wheel cmake config.
-# The async runtime + httplib both link OpenSSL 3.
-before-all = "dnf install -y openssl-devel"
+# Container has gcc/cmake but not openssl-devel/libpq-devel. Install the
+# headers so find_package(OpenSSL) and find_package(PostgreSQL) succeed
+# during the wheel cmake config.
+#   - openssl-devel: async runtime + httplib link OpenSSL 3.
+#   - libpq-devel:   PostgresCheckpointStore links libpq. AlmaLinux 9 ships
+#                    libpq 13.x in AppStream. auditwheel-repair pulls
+#                    libpq.so.5 (and its transitive deps libldap, libsasl2,
+#                    libgssapi_krb5, etc.) into the wheel.
+before-all = "dnf install -y openssl-devel libpq-devel"
 
 [tool.cibuildwheel.windows]
 # Windows wheel build:
@@ -223,7 +233,7 @@ before-all = "dnf install -y openssl-devel"
 #     BUILD_SHARED_LIBS=ON link cleanly on MSVC by tagging public symbols
 #     dllexport in the engine and dllimport in the binding.
 before-all = """\
-vcpkg install openssl:x64-windows && \
+vcpkg install openssl:x64-windows libpq:x64-windows && \
 echo VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%\
 """
 
@@ -270,6 +280,12 @@ python -m delvewheel repair --ignore-existing -w {dest_dir} {wheel} \
 # isn't justified given Apple's own arm64 transition is mostly done.
 archs = ["arm64"]
 
+# Install libpq for PostgresCheckpointStore. openssl@3 is already
+# pre-installed on the macos-14 runner image; libpq is not. Both are
+# keg-only on Homebrew (not in the standard /opt/homebrew/lib search
+# path), so we point CMake at them via CMAKE_PREFIX_PATH below.
+before-all = "brew install libpq"
+
 # macOS deployment target: 14.0 (Sonoma, Sep 2023). The pinch is
 # Homebrew OpenSSL on the macos-14 GitHub runner — its bottles are
 # built with a min target of 14.0:
@@ -284,4 +300,10 @@ archs = ["arm64"]
 # the wheel claiming to support them. Bumping to 14.0 makes the
 # claim honest. Users on older macOS install via sdist (with their
 # own OpenSSL).
-environment = { MACOSX_DEPLOYMENT_TARGET = "14.0" }
+#
+# CMAKE_PREFIX_PATH exposes Homebrew's keg-only libpq and openssl@3
+# to find_package() — same trick ci.yml's macOS job uses. Apple
+# Silicon brew prefix is /opt/homebrew (no shell expansion in TOML,
+# so the paths are hardcoded; safe because the matrix only runs on
+# macos-14 arm64).
+environment = { MACOSX_DEPLOYMENT_TARGET = "14.0", CMAKE_PREFIX_PATH = "/opt/homebrew/opt/libpq:/opt/homebrew/opt/openssl@3" }
