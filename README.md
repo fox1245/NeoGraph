@@ -1,14 +1,22 @@
 <p align="center">
   <h1 align="center">NeoGraph</h1>
   <p align="center">
-    <strong>A C++ Graph Agent Engine Library</strong><br>
-    Microsecond tail latency under 10k concurrent requests on 512 MB — LangGraph's semantics, without the Python runtime tax.
+    <strong>A C++ Graph Agent Engine — with Python bindings</strong><br>
+    Microsecond tail latency under 10k concurrent requests on 512 MB.<br>
+    LangGraph's semantics, without the Python runtime tax — and now reachable from Python too.
   </p>
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/neograph-engine/"><img alt="PyPI" src="https://img.shields.io/pypi/v/neograph-engine?label=pip%20install%20neograph-engine&color=blue"></a>
+  <a href="https://pypi.org/project/neograph-engine/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/neograph-engine"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
 </p>
 
 <p align="center">
   <a href="https://fox1245.github.io/NeoGraph/">API Reference</a> &middot;
   <a href="#quick-start">Quick Start</a> &middot;
+  <a href="#python-binding">Python Binding</a> &middot;
   <a href="#features">Features</a> &middot;
   <a href="#examples">Examples</a> &middot;
   <a href="#architecture">Architecture</a> &middot;
@@ -55,6 +63,63 @@ Only runtime dependency is `libc.so.6`. See the [Benchmarks](#benchmarks)
 section below for the reproduction command.
 
 **NeoGraph is the only graph agent engine for C++.** If you're building agents in robotics, embedded systems, games, high-frequency trading, or anywhere Python isn't an option — this is it.
+
+## Python Binding
+
+NeoGraph also ships as a `pip`-installable Python package, so the same
+C++ engine can drive a LangGraph-style workflow from a Jupyter
+notebook, a Gradio app, or a FastAPI service:
+
+```bash
+pip install neograph-engine
+```
+
+```python
+import neograph_engine as ng
+from neograph_engine.llm import OpenAIProvider
+
+class CalcTool(ng.Tool):
+    def get_name(self):       return "calc"
+    def get_definition(self): return ng.ChatTool(name="calc", description="multiply by 2",
+        parameters={"type":"object","properties":{"x":{"type":"number"}}})
+    def execute(self, args):  return str(args["x"] * 2)
+
+ctx = ng.NodeContext(
+    provider=OpenAIProvider(api_key="sk-..."),
+    tools=[CalcTool()],
+    instructions="Use `calc` for arithmetic.",
+)
+
+definition = {
+    "name": "react",
+    "channels": {"messages": {"reducer": "append"}},
+    "nodes":    {"llm": {"type": "llm_call"}, "dispatch": {"type": "tool_dispatch"}},
+    "edges":    [{"from": ng.START_NODE, "to": "llm"}, {"from": "dispatch", "to": "llm"}],
+    "conditional_edges": [{"from": "llm", "condition": "has_tool_calls",
+                           "routes": {"true": "dispatch", "false": ng.END_NODE}}],
+}
+engine = ng.GraphEngine.compile(definition, ctx)
+result = engine.run(ng.RunConfig(thread_id="t1",
+    input={"messages": [{"role": "user", "content": "What is 21 * 2?"}]}))
+```
+
+What's covered by the binding:
+
+- **Engine surface** — `GraphEngine.compile / run / run_stream / run_async / run_stream_async / resume_async`, `RunConfig`, `RunResult`, `set_worker_count`, `set_checkpoint_store`.
+- **Custom Python nodes** — subclass `neograph_engine.GraphNode`, register via `NodeFactory.register_type` or the `@neograph_engine.node` decorator. Engine dispatches under proper GIL handling, including from fan-out worker threads.
+- **Custom Python tools** — subclass `neograph_engine.Tool`, pass into `NodeContext(tools=[...])`. Engine takes ownership at compile time.
+- **Async** — every `*_async` binding returns an `asyncio.Future` bound to the calling thread's running loop. Stream callbacks are hopped to the loop thread via `loop.call_soon_threadsafe` so callbacks run where asyncio expects.
+- **Checkpoints** — `InMemoryCheckpointStore` always; `PostgresCheckpointStore` when the binding is built from source with `-DNEOGRAPH_BUILD_POSTGRES=ON` (libpq bundling for the PyPI wheel is pending).
+- **OpenAI Responses over WebSocket** — `SchemaProvider(schema="openai_responses", use_websocket=True)`.
+
+Wheels: Linux x86_64 (manylinux_2_34), Linux aarch64 (manylinux_2_34),
+macOS arm64 (14+), Windows x64 (MSVC), for Python 3.9 → 3.13. **20 wheels
++ sdist per release** via cibuildwheel.
+
+See [`bindings/python/examples/`](bindings/python/examples/) for the
+full example index — minimal graph, ReAct, HITL, intent routing, async,
+multi-agent debate, JSON graph round-trip, and a Gradio chat with a
+deep-research subgraph (Crawl4AI + Postgres optional).
 
 ## The agent runtime that fits in L3 cache
 

@@ -45,6 +45,10 @@
 #include <neograph/graph/engine.h>
 #include <neograph/graph/types.h>
 
+#ifdef NEOGRAPH_PYBIND_HAS_POSTGRES
+#include <neograph/graph/postgres_checkpoint.h>
+#endif
+
 #include <asio/co_spawn.hpp>
 #include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
@@ -229,9 +233,51 @@ void init_graph(py::module_& m) {
         "InMemoryCheckpointStore",
         "Process-lifetime checkpoint store. State survives across "
         "runs sharing the same engine + thread_id, but is lost when "
-        "the engine is destroyed. Pick the SQLite or Postgres store "
-        "(NeoGraph-side, binding TBD) for durable state.")
+        "the engine is destroyed. Pick PostgresCheckpointStore for "
+        "durable, multi-process state.")
         .def(py::init<>());
+
+#ifdef NEOGRAPH_PYBIND_HAS_POSTGRES
+    // ── PostgresCheckpointStore (NEOGRAPH_BUILD_POSTGRES=ON) ──────────
+    //
+    // libpq-backed durable store, schema mirrors LangGraph's
+    // PostgresSaver (with a `neograph_` table prefix to coexist).
+    // Eagerly opens the connection pool in the constructor and runs
+    // ensure_schema(); raises RuntimeError on bad credentials or DDL
+    // failure rather than waiting until first save().
+    //
+    // Available only when the binding wheel was built with
+    // NEOGRAPH_BUILD_POSTGRES=ON (default OFF in cibw config — the
+    // shipped PyPI wheel doesn't include this; install from source
+    // with -DNEOGRAPH_BUILD_POSTGRES=ON to use). Wheel inclusion
+    // pending a libpq-bundling cibw setup.
+    py::class_<PostgresCheckpointStore, CheckpointStore,
+               std::shared_ptr<PostgresCheckpointStore>>(m,
+        "PostgresCheckpointStore",
+        "Durable, multi-process checkpoint store backed by PostgreSQL "
+        "(libpq). Schema mirrors LangGraph's PostgresSaver under a "
+        "`neograph_` prefix; the same database can host both. The "
+        "constructor opens a fixed-size connection pool eagerly and "
+        "runs DDL — credential or permission errors surface "
+        "immediately rather than at first save().")
+        .def(py::init<const std::string&, std::size_t>(),
+             py::arg("conn_str"),
+             py::arg("pool_size") = 8,
+             "conn_str is any libpq connection URI "
+             "(e.g. 'postgresql://user:pass@host:5432/dbname').\n"
+             "pool_size controls how many libpq backends the store "
+             "opens; default 8 matches a typical small worker pool. "
+             "Set to 1 for embedded / single-thread use to save one "
+             "PG backend per store.")
+        .def_property_readonly("pool_size",
+            &PostgresCheckpointStore::pool_size,
+            "Number of connections in the pool (set at construction).")
+        .def_property_readonly("reconnect_count",
+            &PostgresCheckpointStore::reconnect_count,
+            "Cumulative number of pool slots replaced after a broken-"
+            "connection detection (PG restart, pgbouncer idle timeout, "
+            "network blip). Useful as a Prometheus gauge.");
+#endif
 
     // ── GraphEngine ──────────────────────────────────────────────────────
     //

@@ -82,6 +82,39 @@ if(TARGET neograph::llm)
     target_compile_definitions(_neograph PRIVATE NEOGRAPH_PYBIND_HAS_LLM)
 endif()
 
+# Optional Postgres checkpoint store. Only bound when the engine was
+# built with -DNEOGRAPH_BUILD_POSTGRES=ON (default OFF in the wheel
+# build — bundling libpq into the wheel is a separate cibw setup).
+# Source-build users get `neograph_engine.PostgresCheckpointStore`
+# as a CheckpointStore subclass.
+if(TARGET neograph::postgres)
+    target_link_libraries(_neograph PRIVATE neograph::postgres)
+    target_compile_definitions(_neograph PRIVATE NEOGRAPH_PYBIND_HAS_POSTGRES)
+endif()
+
+# ── Version sync: pyproject.toml → C extension's __version__ ────────
+#
+# Read the [project].version line out of the repo-root pyproject.toml
+# and pass it to module.cpp as a compile-time string. Single source
+# of truth — `neograph_engine.__version__` (Python), the wheel's
+# METADATA / dist-info, and `pip show` all agree by construction.
+#
+# Without this, module.cpp had a hard-coded "0.1.0" that drifted
+# silently when pyproject.toml's version was bumped (caught after
+# v0.1.1: METADATA said 0.1.1, __version__ printed 0.1.0).
+file(READ "${PROJECT_SOURCE_DIR}/pyproject.toml" _NEOGRAPH_PYPROJECT_TXT)
+string(REGEX MATCH "version *= *\"([0-9]+\\.[0-9]+\\.[0-9]+(\\.[a-zA-Z0-9]+)?)\""
+       _NEOGRAPH_VERSION_MATCH "${_NEOGRAPH_PYPROJECT_TXT}")
+if(NOT CMAKE_MATCH_1)
+    message(WARNING "Could not parse [project].version from pyproject.toml; "
+                    "falling back to 0.0.0+unknown for the binding's __version__.")
+    set(_NEOGRAPH_VERSION "0.0.0+unknown")
+else()
+    set(_NEOGRAPH_VERSION "${CMAKE_MATCH_1}")
+endif()
+target_compile_definitions(_neograph PRIVATE
+    "NEOGRAPH_PY_VERSION=\"${_NEOGRAPH_VERSION}\"")
+
 # Locate the binding next to neograph_engine/__init__.py inside the build
 # tree so PYTHONPATH=build works out of the box. CMAKE_LIBRARY_OUTPUT_DIRECTORY
 # is the canonical place for module-style libraries (which pybind11_add_module
