@@ -242,7 +242,12 @@ _definition = {
 }
 
 _engine = ng.GraphEngine.compile(_definition, ng.NodeContext())
-_engine.set_worker_count(int(os.environ.get("NG_WORKER_COUNT", "4")))
+# compile() already sizes the pool to hardware_concurrency(), which
+# covers FANOUT for typical machines. NG_WORKER_COUNT is honored only
+# if explicitly set, so legacy bench invocations still pin the old
+# `set_worker_count(4)` ceiling for A/B comparison.
+if "NG_WORKER_COUNT" in os.environ:
+    _engine.set_worker_count(int(os.environ["NG_WORKER_COUNT"]))
 if USE_INMEMORY or LLM_MOCK_MS >= 0:
     _engine.set_checkpoint_store(ng.InMemoryCheckpointStore())
 elif PG_DSN and getattr(ng, "_HAVE_POSTGRES", False):

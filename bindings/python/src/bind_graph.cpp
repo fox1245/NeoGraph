@@ -412,8 +412,18 @@ void init_graph(py::module_& m) {
 
         .def("set_worker_count", &GraphEngine::set_worker_count,
             py::arg("n"),
-            "Opt into a dedicated N-worker pool for parallel fan-out. "
+            "Resize the worker pool used for parallel fan-out. "
+            "compile() already sizes the pool to hardware_concurrency() "
+            "so FANOUT > 1 workloads parallelize by default; call this "
+            "only to override (e.g. set_worker_count(1) for nodes with "
+            "non-thread-safe state, or a wider pool than core count). "
             "Must be called before any run(). Values < 1 clamp to 1.")
+
+        .def("set_worker_count_auto", &GraphEngine::set_worker_count_auto,
+            "Resize the worker pool back to hardware_concurrency() (the "
+            "compile-time default). Useful after an explicit "
+            "set_worker_count(N) override to return to the auto-sized "
+            "pool. Must be called before any run().")
 
         .def("set_checkpoint_store", &GraphEngine::set_checkpoint_store,
             py::arg("store"),

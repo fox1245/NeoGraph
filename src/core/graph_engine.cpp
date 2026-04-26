@@ -14,6 +14,17 @@
 
 namespace neograph::graph {
 
+namespace {
+// Default fan-out pool size. hardware_concurrency() can return 0 on
+// platforms that fail to detect; fall back to 4 so we always have
+// real parallelism instead of the old single-thread default that
+// pinned multi-Send fan-out behind one worker.
+std::size_t default_worker_count() {
+    auto n = std::thread::hardware_concurrency();
+    return n > 0 ? static_cast<std::size_t>(n) : 4u;
+}
+} // namespace
+
 // =========================================================================
 // compile(): JSON definition -> GraphEngine
 //
@@ -54,20 +65,11 @@ std::unique_ptr<GraphEngine> GraphEngine::compile(
     // NodeExecutor owns retry + fan-out + Send invocation. Bind the
     // retry-policy lookup to this engine's per-node override map so
     // set_node_retry_policy continues to work after compile() returns.
-    // fan_out_pool defaults to nullptr — parallel branches then run
-    // on whichever executor drives the coroutine (single-threaded
-    // run_sync for sync run(), the caller's io_context for
-    // run_async). I/O-bound fan-out still overlaps via co_await
-    // suspension on a single thread; CPU-bound fan-out serializes
-    // unless the user opts into a pool via set_worker_count.
-    GraphEngine* raw_engine = engine.get();
-    engine->executor_ = std::make_unique<NodeExecutor>(
-        engine->nodes_,
-        engine->channel_defs_,
-        [raw_engine](const std::string& node_name) {
-            return raw_engine->get_retry_policy(node_name);
-        },
-        nullptr);
+    // The default pool is sized to hardware_concurrency() so a
+    // FANOUT > 1 workload parallelizes out of the box; users who need
+    // serial semantics (e.g. nodes with non-thread-safe state) can
+    // call set_worker_count(1).
+    engine->set_worker_count(default_worker_count());
 
     engine->checkpoint_store_ = std::move(store);
     return engine;
@@ -100,11 +102,11 @@ void GraphEngine::set_node_retry_policy(const std::string& node_name, const Retr
 void GraphEngine::set_worker_count(std::size_t n) {
     if (n < 1) n = 1;
     // thread_pool is not resizable — rebuild. Dtor joins the old
-    // pool's workers (none, if this is the first enable), so callers
-    // must not resize across an in-flight run() (documented on the
-    // declaration). n == 1 is a no-op path: we still wire a 1-worker
-    // pool so executor_ keeps the same contract, but fan-out gains
-    // nothing over the default single-thread co_await dispatch.
+    // pool's workers, so callers must not resize across an in-flight
+    // run() (documented on the declaration). n == 1 is a no-op path:
+    // we still wire a 1-worker pool so executor_ keeps the same
+    // contract, but fan-out gains nothing over single-thread co_await
+    // dispatch.
     pool_ = std::make_unique<asio::thread_pool>(n);
     GraphEngine* self = this;
     executor_ = std::make_unique<NodeExecutor>(
@@ -113,6 +115,10 @@ void GraphEngine::set_worker_count(std::size_t n) {
             return self->get_retry_policy(node_name);
         },
         pool_.get());
+}
+
+void GraphEngine::set_worker_count_auto() {
+    set_worker_count(default_worker_count());
 }
 
 RetryPolicy GraphEngine::get_retry_policy(const std::string& node_name) const {
