@@ -63,10 +63,13 @@ if LLM_MOCK_MS >= 0:
 else:
     # Single ChatOpenAI client; httpx reuses an HTTP/2 connection pool
     # under the hood so successive calls amortise TCP/TLS setup.
-    _LLM = ChatOpenAI(
-        model=DR_MODEL,
-        api_key=os.environ.get("OPENAI_API_KEY"),
-    )
+    # OPENAI_API_BASE routes to Groq / vLLM / etc. when set — same
+    # env var the NeoGraph side reads in _common.schema_provider().
+    _api_base = os.environ.get("OPENAI_API_BASE", "").rstrip("/")
+    _kwargs = {"model": DR_MODEL, "api_key": os.environ.get("OPENAI_API_KEY")}
+    if _api_base:
+        _kwargs["base_url"] = _api_base + ("/v1" if not _api_base.endswith("/v1") else "")
+    _LLM = ChatOpenAI(**_kwargs)
 
 
 class Crawl4AIClient:

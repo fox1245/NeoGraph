@@ -79,11 +79,17 @@ def schema_provider(
     use_websocket: bool = False,
 ) -> SchemaProvider:
     """Schema-driven provider — the right pick for OpenAI Responses
-    or vendor-specific shapes (Claude, Gemini)."""
+    or vendor-specific shapes (Claude, Gemini).
+
+    Honours `OPENAI_API_BASE` for routing to OpenAI-compatible endpoints
+    (Groq, vLLM, llama.cpp server, etc.). The schema's
+    `connection.base_url` is used when the env var is empty.
+    """
     return SchemaProvider(
         schema_path=schema,
         api_key=_require_key(),
         default_model=os.getenv("OPENAI_MODEL", default_model),
+        base_url_override=os.getenv("OPENAI_API_BASE", ""),
         use_websocket=use_websocket,
     )
 
