@@ -21,11 +21,9 @@ Mirrors the C++ example 25_deep_research.cpp's web-search path
         -e POSTGRES_PASSWORD=test -e POSTGRES_DB=neograph \\
         --name neograph-pg postgres:16-alpine
 
-    # 3. The binding needs to ship PostgresCheckpointStore. The PyPI
-    #    wheel skips it (libpq bundling pending); install from source:
-    pip install scikit-build-core pybind11 ninja
-    pip install --no-build-isolation \\
-        -e /path/to/NeoGraph -C cmake.args=-DNEOGRAPH_BUILD_POSTGRES=ON
+    # 3. neograph-engine wheel (>= 0.1.3) ships libpq bundled, so
+    #    PostgresCheckpointStore works out of the box — no source build:
+    pip install 'neograph-engine>=0.1.3'
 
     # 4. Env (drop into examples/.env or export):
     export OPENAI_API_KEY=sk-...
@@ -37,9 +35,8 @@ Mirrors the C++ example 25_deep_research.cpp's web-search path
     python 17_deep_research_crawl4ai.py
 
 If `CRAWL4AI_URL` is unset, researchers fall back to LLM-only
-answers (same as example 16). If `NEOGRAPH_PG_DSN` is unset OR the
-binding wasn't built with NEOGRAPH_BUILD_POSTGRES=ON, the example
-falls back to InMemoryCheckpointStore.
+answers (same as example 16). If `NEOGRAPH_PG_DSN` is unset, the
+example falls back to InMemoryCheckpointStore.
 """
 
 from __future__ import annotations
@@ -63,7 +60,7 @@ RESEARCH_TRIGGER_PATTERN = re.compile(
 
 PROVIDER = schema_provider(
     schema="openai_responses",
-    default_model="gpt-4o-mini",
+    default_model=os.environ.get("DR_MODEL", "gpt-5.4-mini"),
     use_websocket=True,
 )
 
@@ -181,7 +178,15 @@ class FanOutResearchNode(ng.GraphNode):
 
     def execute_full(self, state):
         questions = state.get("sub_questions") or []
-        return [ng.Send("researcher", {"current_question": q}) for q in questions]
+        # Send fan-out + Command(goto=synthesize) on the same return.
+        # NeoGraph engine doesn't currently follow Send-spawned tasks'
+        # outgoing edges or their per-task Command(goto) after fan-in
+        # (sibling-path style miss). Issuing the goto from the fan-out
+        # node itself works around it: Sends execute first, then the
+        # super-step transitions to synthesize once all tasks join.
+        return [ng.Send("researcher", {"current_question": q}) for q in questions] + [
+            ng.Command(goto_node="synthesize")
+        ]
 
 
 class ResearcherNode(ng.GraphNode):
@@ -197,6 +202,7 @@ class ResearcherNode(ng.GraphNode):
     def execute(self, state):
         q = state.get("current_question") or ""
 
+        evidence = ""
         if SEARCH_CLIENT:
             try:
                 evidence = SEARCH_CLIENT.search_markdown(q)
@@ -220,10 +226,15 @@ class ResearcherNode(ng.GraphNode):
         completion = PROVIDER.complete(ng.CompletionParams(
             messages=[ng.ChatMessage(role="user", content=prompt)],
         ))
+        # Bare ChannelWrite — the goto-synthesize transition is issued
+        # by FanOutResearchNode along with the Sends, not by us.
+        # evidence_excerpt lets the UI show what the researcher saw
+        # before answering (collapsed <details> in the chat trace).
         return [ng.ChannelWrite("research_findings", [{
             "question": q,
             "answer":   completion.message.content.strip(),
-            "had_web_evidence": SEARCH_CLIENT is not None,
+            "had_web_evidence": bool(SEARCH_CLIENT),
+            "evidence_excerpt": evidence[:1500],
         }])]
 
 
@@ -280,6 +291,10 @@ definition = {
         "research_topic":    {"reducer": "overwrite"},
         "sub_questions":     {"reducer": "overwrite"},
         "research_findings": {"reducer": "append"},
+        # Per-researcher input via Send.input — needs an explicit
+        # channel definition or the engine drops it before the
+        # researcher node sees it.
+        "current_question":  {"reducer": "overwrite"},
     },
     "nodes": {
         "router":           {"type": "router"},
@@ -326,7 +341,28 @@ def _make_checkpoint_store():
 engine.set_checkpoint_store(_make_checkpoint_store())
 
 
-# ─── Gradio frontend ─────────────────────────────────────────────────
+# ─── Gradio frontend (streaming) ────────────────────────────────────
+#
+# Streaming via run_stream: engine emits GraphEvent on a worker thread,
+# a queue bridges them to the Gradio chat generator. We don't have
+# token-level streaming here (PROVIDER.complete() is non-stream), but
+# node-level progress + the final synthesized message updates live so
+# the user sees what's happening instead of staring at a spinner.
+
+import queue
+import threading
+
+
+def _node_label(name: str) -> str:
+    return {
+        "router":          "🔀 router",
+        "general_chat":    "💬 chat",
+        "research_plan":   "🧭 sub-question 분해",
+        "research_fanout": "📡 fan-out",
+        "researcher":      "🔎 researcher",
+        "synthesize":      "📝 보고서 합성",
+    }.get(name, name)
+
 
 def chat(message, history):
     msgs = []
@@ -345,12 +381,106 @@ def chat(message, history):
         thread_id="gradio-session",
         input={"messages": msgs},
         max_steps=20,
+        stream_mode=ng.StreamMode.ALL,
     )
-    result = engine.run(cfg)
-    out_msgs = result.output["channels"]["messages"]["value"]
-    last = next(
-        (m for m in reversed(out_msgs) if m.get("role") == "assistant"), None)
-    return last["content"] if last else "(no response)"
+
+    q: queue.Queue = queue.Queue()
+    DONE = object()
+    final_assistant: list[str] = []
+    sub_questions: list[str] = []
+    findings: list[dict] = []  # per-researcher {question, answer, evidence_excerpt}
+
+    def on_event(ev):
+        try:
+            t = ev.type
+            if t == ng.GraphEvent.Type.NODE_START:
+                if not ev.node_name.startswith("__"):
+                    q.put(("progress", f"▶ {_node_label(ev.node_name)}"))
+            elif t == ng.GraphEvent.Type.NODE_END:
+                if not ev.node_name.startswith("__"):
+                    q.put(("progress", f"✓ {_node_label(ev.node_name)}"))
+            elif t == ng.GraphEvent.Type.CHANNEL_WRITE:
+                ch = ev.data.get("channel") if isinstance(ev.data, dict) else None
+                if ch == "messages":
+                    val = ev.data.get("value")
+                    items = val if isinstance(val, list) else [val]
+                    for m in items:
+                        if isinstance(m, dict) and m.get("role") == "assistant":
+                            final_assistant.append(m.get("content", ""))
+                elif ch == "sub_questions":
+                    val = ev.data.get("value")
+                    if isinstance(val, list) and val:
+                        sub_questions[:] = list(val)
+                elif ch == "research_findings":
+                    val = ev.data.get("value")
+                    items = val if isinstance(val, list) else [val]
+                    for f in items:
+                        if isinstance(f, dict):
+                            findings.append(f)
+            elif t == ng.GraphEvent.Type.ERROR:
+                q.put(("error", str(ev.data)))
+        except Exception as exc:
+            q.put(("error", f"event handler crash: {exc}"))
+
+    def runner():
+        try:
+            engine.run_stream(cfg, on_event)
+        except Exception as exc:
+            q.put(("error", str(exc)))
+        finally:
+            q.put(DONE)
+
+    threading.Thread(target=runner, daemon=True).start()
+
+    progress_lines: list[str] = []
+    while True:
+        item = q.get()
+        if item is DONE:
+            break
+        kind, payload = item
+        if kind == "error":
+            yield "\n".join(progress_lines + [f"\n❌ {payload}"])
+            return
+        progress_lines.append(payload)
+        yield "\n".join(progress_lines)
+
+    # ── Final render: keep a collapsed trace + show the report ─────────
+    parts: list[str] = []
+
+    if sub_questions or findings:
+        trace_md = ["<details><summary>🔍 사고 과정 보기 (클릭)</summary>", ""]
+        if sub_questions:
+            trace_md.append("**Sub-questions**")
+            for i, sq in enumerate(sub_questions, 1):
+                trace_md.append(f"{i}. {sq}")
+            trace_md.append("")
+        for i, f in enumerate(findings, 1):
+            ev_block = (f.get("evidence_excerpt") or "").strip()
+            answer = (f.get("answer") or "").strip()
+            web_tag = "🌐 web" if f.get("had_web_evidence") else "🧠 LLM-only"
+            trace_md.append(
+                f"<details><summary>🔎 researcher #{i} — {web_tag}</summary>\n"
+            )
+            q_text = f.get("question") or (
+                sub_questions[i-1] if i-1 < len(sub_questions) else "")
+            if q_text:
+                trace_md.append(f"**Q:** {q_text}\n")
+            if ev_block:
+                trace_md.append("**Web evidence (excerpt):**\n")
+                trace_md.append(f"```\n{ev_block}\n```\n")
+            if answer:
+                trace_md.append("**Researcher answer:**\n")
+                trace_md.append(answer + "\n")
+            trace_md.append("</details>\n")
+        trace_md.append("</details>")
+        parts.append("\n".join(trace_md))
+
+    if final_assistant:
+        parts.append(final_assistant[-1])
+    else:
+        parts.append("\n".join(progress_lines + ["\n(no assistant message produced)"]))
+
+    yield "\n\n".join(parts)
 
 
 if __name__ == "__main__":
@@ -365,7 +495,6 @@ if __name__ == "__main__":
         title += " [LLM-only fallback]"
     gr.ChatInterface(
         fn=chat,
-        type="messages",
         title=title,
         description=(
             "조사어가 들어가면 web-search 기반 deep research → 마크다운 보고서. "
