@@ -52,7 +52,7 @@ struct ConnPoolOptions {
     std::chrono::seconds idle_ttl{30};
 };
 
-class ConnPool {
+class NEOGRAPH_API ConnPool {
 public:
     explicit ConnPool(asio::any_io_executor ex,
                       ConnPoolOptions opts = {});
