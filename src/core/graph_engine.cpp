@@ -470,7 +470,10 @@ GraphEngine::execute_graph_async(const RunConfig& config,
 
         // --- Execute pending Sends BEFORE interrupt_after ---
         // Sem 3.7.6: async fan-out, parallel_group-backed.
-        co_await executor_->run_sends_async(
+        // 4.x: per-task StepRoutings flow back so each spawned task's
+        //      Command.goto / default outgoing edge contribute to the
+        //      next super-step routing decision (LangGraph parity).
+        auto send_routings = co_await executor_->run_sends_async(
             pending_sends, step, state, replay_results,
             coord, last_checkpoint_id, trace, cb, stream_mode);
 
@@ -486,6 +489,20 @@ GraphEngine::execute_graph_async(const RunConfig& config,
                 for (const auto& rn : ready) {
                     for (const auto& nx : scheduler_->resolve_next_nodes(rn, state)) {
                         union_next.insert(nx);
+                    }
+                }
+                // Send-spawned tasks also influence the next super-step;
+                // include their goto / default edges in the snapshot so
+                // a checkpoint resumed after the interrupt knows the
+                // full successor set.
+                for (const auto& sr : send_routings) {
+                    if (sr.command_goto) {
+                        union_next.insert(*sr.command_goto);
+                    } else {
+                        for (const auto& nx :
+                                scheduler_->resolve_next_nodes(sr.node_name, state)) {
+                            union_next.insert(nx);
+                        }
                     }
                 }
                 std::vector<std::string> nexts(union_next.begin(), union_next.end());
@@ -515,8 +532,28 @@ GraphEngine::execute_graph_async(const RunConfig& config,
             }
         }
 
+        // Build the unified routing list: original ready-set first,
+        // then Send-spawned tasks in fan-in order. plan_impl unions
+        // everyone's edges and applies barrier gating. Per-task
+        // command_goto preempts via plan_impl's Pass 1, matching the
+        // documented "any command_goto wins" semantic.
+        std::vector<StepRouting> unified_routings;
+        unified_routings.reserve(step_results.size() + send_routings.size());
+        for (size_t i = 0; i < step_results.size(); ++i) {
+            StepRouting r;
+            r.node_name = ready[i];
+            if (step_results[i].command
+                && !step_results[i].command->goto_node.empty()) {
+                r.command_goto = step_results[i].command->goto_node;
+            }
+            unified_routings.push_back(std::move(r));
+        }
+        for (auto& sr : send_routings) {
+            unified_routings.push_back(std::move(sr));
+        }
+
         auto plan = scheduler_->plan_next_step(
-            ready, step_results, state, barrier_state);
+            unified_routings, state, barrier_state);
         hit_end = hit_end || plan.hit_end;
         ready  = std::move(plan.ready);
 

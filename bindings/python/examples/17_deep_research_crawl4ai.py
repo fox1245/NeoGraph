@@ -178,15 +178,7 @@ class FanOutResearchNode(ng.GraphNode):
 
     def execute_full(self, state):
         questions = state.get("sub_questions") or []
-        # Send fan-out + Command(goto=synthesize) on the same return.
-        # NeoGraph engine doesn't currently follow Send-spawned tasks'
-        # outgoing edges or their per-task Command(goto) after fan-in
-        # (sibling-path style miss). Issuing the goto from the fan-out
-        # node itself works around it: Sends execute first, then the
-        # super-step transitions to synthesize once all tasks join.
-        return [ng.Send("researcher", {"current_question": q}) for q in questions] + [
-            ng.Command(goto_node="synthesize")
-        ]
+        return [ng.Send("researcher", {"current_question": q}) for q in questions]
 
 
 class ResearcherNode(ng.GraphNode):
@@ -199,7 +191,7 @@ class ResearcherNode(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute(self, state):
+    def execute_full(self, state):
         q = state.get("current_question") or ""
 
         evidence = ""
@@ -226,16 +218,19 @@ class ResearcherNode(ng.GraphNode):
         completion = PROVIDER.complete(ng.CompletionParams(
             messages=[ng.ChatMessage(role="user", content=prompt)],
         ))
-        # Bare ChannelWrite — the goto-synthesize transition is issued
-        # by FanOutResearchNode along with the Sends, not by us.
-        # evidence_excerpt lets the UI show what the researcher saw
-        # before answering (collapsed <details> in the chat trace).
-        return [ng.ChannelWrite("research_findings", [{
-            "question": q,
-            "answer":   completion.message.content.strip(),
-            "had_web_evidence": bool(SEARCH_CLIENT),
-            "evidence_excerpt": evidence[:1500],
-        }])]
+        # ChannelWrite + Command(goto=synthesize). Each Send-spawned
+        # researcher routes itself to synthesize; the engine joins the
+        # five gotos into a single ready=[synthesize] for the next
+        # super-step (LangGraph parity).
+        return [
+            ng.ChannelWrite("research_findings", [{
+                "question": q,
+                "answer":   completion.message.content.strip(),
+                "had_web_evidence": bool(SEARCH_CLIENT),
+                "evidence_excerpt": evidence[:1500],
+            }]),
+            ng.Command(goto_node="synthesize"),
+        ]
 
 
 class SynthesizeNode(ng.GraphNode):
