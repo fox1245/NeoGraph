@@ -263,6 +263,7 @@ add_library(neograph::core ALIAS neograph_core)
 add_library(neograph_async
     src/async/async_smoke.cpp
     src/async/http_client.cpp
+    src/async/http2_client.cpp
     src/async/conn_pool.cpp
     src/async/sse_parser.cpp
     src/async/ws_client.cpp
@@ -271,7 +272,11 @@ target_include_directories(neograph_async
     PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
 )
 target_compile_definitions(neograph_async PRIVATE NEOGRAPH_BUILDING_LIBRARY)
+# nghttp2 is a small C library (~100KB) shipped in every distro we
+# target; linking unconditionally keeps the build matrix simple.
+find_library(NGHTTP2_LIB nghttp2 REQUIRED)
 target_link_libraries(neograph_async PUBLIC asio OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(neograph_async PRIVATE ${NGHTTP2_LIB})
 # C++20 coroutines require this on GCC < 14 when using -std=c++20.
 target_compile_features(neograph_async PUBLIC cxx_std_20)
 add_library(neograph::async ALIAS neograph_async)
@@ -292,6 +297,10 @@ if(NEOGRAPH_BUILD_EXAMPLES)
     # branch.
     add_executable(neograph_async_https_smoke src/async/async_https_smoke_main.cpp)
     target_link_libraries(neograph_async_https_smoke PRIVATE neograph_async)
+
+    # Live HTTP/2 smoke (api.openai.com). Run with OPENAI_API_KEY set.
+    add_executable(neograph_h2_smoke src/async/h2_smoke_main.cpp)
+    target_link_libraries(neograph_h2_smoke PRIVATE neograph_async)
 endif()
 
 # ===========================================================================
