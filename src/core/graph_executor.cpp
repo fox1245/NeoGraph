@@ -64,11 +64,13 @@ NodeExecutor::NodeExecutor(
     const std::map<std::string, std::unique_ptr<GraphNode>>& nodes,
     const std::vector<ChannelDef>& channel_defs,
     RetryPolicyLookup retry_policy_for,
-    asio::thread_pool* fan_out_pool)
+    asio::thread_pool* fan_out_pool,
+    NodeCache* node_cache)
     : nodes_(nodes),
       channel_defs_(channel_defs),
       retry_policy_for_(std::move(retry_policy_for)),
-      fan_out_pool_(fan_out_pool) {}
+      fan_out_pool_(fan_out_pool),
+      node_cache_(node_cache) {}
 
 void NodeExecutor::init_state(GraphState& state) const {
     for (const auto& cd : channel_defs_) {
@@ -113,6 +115,20 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
     auto node_it = nodes_.find(node_name);
     if (node_it == nodes_.end()) {
         throw std::runtime_error("Node not found: " + node_name);
+    }
+
+    // Node-level cache: opt-in per node, only consulted when caller is
+    // not streaming (cached hits cannot replay LLM_TOKEN events). Hash
+    // is computed once per call so retries reuse the same lookup key.
+    const bool cache_eligible =
+        node_cache_ && !cb && node_cache_->is_enabled(node_name);
+    std::string cache_state_hash;
+    if (cache_eligible) {
+        cache_state_hash = hash_state_for_cache(state.serialize());
+        if (auto cached = node_cache_->lookup(node_name, cache_state_hash);
+            cached) {
+            co_return std::move(*cached);
+        }
     }
 
     auto policy  = retry_policy_for_(node_name);
@@ -168,6 +184,9 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
                         end_data["sends"] = (int)nr.sends.size();
                     cb(GraphEvent{GraphEvent::Type::NODE_END, node_name, end_data});
                 }
+            }
+            if (cache_eligible) {
+                node_cache_->store(node_name, cache_state_hash, nr);
             }
             co_return std::move(nr);
         }

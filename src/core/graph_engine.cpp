@@ -114,11 +114,21 @@ void GraphEngine::set_worker_count(std::size_t n) {
         [self](const std::string& node_name) {
             return self->get_retry_policy(node_name);
         },
-        pool_.get());
+        pool_.get(),
+        &node_cache_);
 }
 
 void GraphEngine::set_worker_count_auto() {
     set_worker_count(default_worker_count());
+}
+
+void GraphEngine::set_node_cache_enabled(const std::string& node_name,
+                                          bool enabled) {
+    node_cache_.set_enabled(node_name, enabled);
+}
+
+void GraphEngine::clear_node_cache() {
+    node_cache_.clear();
 }
 
 RetryPolicy GraphEngine::get_retry_policy(const std::string& node_name) const {

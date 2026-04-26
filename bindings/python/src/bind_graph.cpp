@@ -425,6 +425,31 @@ void init_graph(py::module_& m) {
             "set_worker_count(N) override to return to the auto-sized "
             "pool. Must be called before any run().")
 
+        .def("set_node_cache_enabled", &GraphEngine::set_node_cache_enabled,
+            py::arg("node_name"), py::arg("enabled"),
+            "Opt a node into result caching. The executor hashes the "
+            "input state and replays a cached NodeResult on hit, "
+            "skipping the node's execute() entirely. Off by default — "
+            "only enable for pure nodes (deterministic, no side "
+            "effects). Streaming runs (run_stream) bypass the cache "
+            "for the affected node because cached hits cannot replay "
+            "LLM_TOKEN events.")
+
+        .def("clear_node_cache", &GraphEngine::clear_node_cache,
+            "Drop all cached NodeResults. Per-node enable state is "
+            "preserved. Useful between bench iterations or after "
+            "external state changes the cached results would no "
+            "longer reflect.")
+
+        .def("node_cache_stats", [](const GraphEngine& self) {
+            const auto& nc = self.node_cache();
+            py::dict d;
+            d["size"]   = nc.size();
+            d["hits"]   = nc.hit_count();
+            d["misses"] = nc.miss_count();
+            return d;
+        }, "Return a dict with current cache size, hit count, miss count.")
+
         .def("set_checkpoint_store", &GraphEngine::set_checkpoint_store,
             py::arg("store"),
             "Wire a CheckpointStore instance into the engine. Required "
