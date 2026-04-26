@@ -44,6 +44,7 @@
 #include <neograph/graph/node.h>
 #include <neograph/graph/compiler.h>
 #include <neograph/graph/coordinator.h>
+#include <neograph/graph/node_cache.h>
 #include <neograph/graph/scheduler.h>
 
 #include <asio/thread_pool.hpp>
@@ -91,7 +92,8 @@ public:
         const std::map<std::string, std::unique_ptr<GraphNode>>& nodes,
         const std::vector<ChannelDef>& channel_defs,
         RetryPolicyLookup retry_policy_for,
-        asio::thread_pool* fan_out_pool = nullptr);
+        asio::thread_pool* fan_out_pool = nullptr,
+        NodeCache* node_cache = nullptr);
 
     /**
      * @brief Execute a single node in the current super-step.
@@ -207,6 +209,7 @@ private:
     const std::vector<ChannelDef>& channel_defs_;
     RetryPolicyLookup retry_policy_for_;
     asio::thread_pool* fan_out_pool_ = nullptr;
+    NodeCache*         node_cache_   = nullptr;
 };
 
 } // namespace neograph::graph

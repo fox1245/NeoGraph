@@ -14,6 +14,7 @@
 #include <neograph/graph/coordinator.h>
 #include <neograph/graph/executor.h>
 #include <neograph/graph/node.h>
+#include <neograph/graph/node_cache.h>
 #include <neograph/graph/scheduler.h>
 #include <neograph/graph/state.h>
 #include <neograph/graph/store.h>
@@ -298,6 +299,33 @@ public:
     void set_worker_count_auto();
 
     /**
+     * @brief Enable or disable per-node result caching.
+     *
+     * When enabled for a node, the executor hashes the input state and
+     * looks up `(node_name, hash)` in the engine's NodeCache. On hit,
+     * the cached NodeResult is replayed without invoking the node — no
+     * LLM call, no tool execution. On miss, the node runs and the
+     * result is stored.
+     *
+     * Cache is OFF by default. Only opt in for nodes that are pure
+     * (deterministic, no external side effects, no time dependence).
+     * Streaming runs (`run_stream`) bypass the cache for the affected
+     * nodes because cached hits cannot replay LLM_TOKEN events.
+     *
+     * @param node_name Name of the node to enable / disable.
+     * @param enabled   True to enable caching; false to disable.
+     */
+    void set_node_cache_enabled(const std::string& node_name, bool enabled);
+
+    /**
+     * @brief Drop all cached entries (per-node enable state preserved).
+     */
+    void clear_node_cache();
+
+    /// @brief Borrow the engine's NodeCache for stats inspection.
+    const NodeCache& node_cache() const { return node_cache_; }
+
+    /**
      * @brief Get the graph name (from the JSON definition).
      * @return Graph name string.
      */
@@ -364,6 +392,11 @@ private:
     /// joins the pool workers *before* executor_ and its node refs
     /// are freed.
     std::unique_ptr<asio::thread_pool> pool_;
+
+    /// Per-node result cache (opt-in via set_node_cache_enabled).
+    /// Stored by value so the engine owns it; NodeExecutor holds a
+    /// non-owning pointer threaded through set_worker_count() rebuilds.
+    NodeCache node_cache_;
 };
 
 } // namespace neograph::graph
