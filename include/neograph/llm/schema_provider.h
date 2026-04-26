@@ -24,7 +24,7 @@
 #include <thread>
 #include <map>
 
-namespace neograph::async { class ConnPool; class CurlH2Pool; }
+namespace neograph::async { class ConnPool; }
 
 namespace neograph::llm {
 
@@ -64,18 +64,6 @@ class NEOGRAPH_API SchemaProvider : public Provider {
         /// effect on `complete_async` / `complete()` (non-streaming
         /// path stays HTTP).
         bool use_websocket = false;
-
-        /// Switch the non-streaming HTTP transport to libcurl (HTTP/2
-        /// + multiplexing + Cloudflare-friendly fingerprint). Default
-        /// off: empirical bench (dr_compare 2026-04-26) showed parity
-        /// or slight regression on the LangGraph-equivalent
-        /// deep-research workload vs the default HTTP/1.1 ConnPool;
-        /// the multiplex win only materialises when fan-out width
-        /// dominates per-call latency, and our default config doesn't
-        /// hit that yet. Flip on if you have parallel-fan-out code
-        /// hitting Cloudflare-WAF endpoints (where the default httplib
-        /// path may get fingerprinted out).
-        bool prefer_libcurl = false;
     };
 
     /**
@@ -267,12 +255,7 @@ class NEOGRAPH_API SchemaProvider : public Provider {
     std::unique_ptr<asio::io_context> http_io_;
     std::optional<asio::executor_work_guard<asio::io_context::executor_type>> http_work_;
     std::thread http_thread_;
-    std::unique_ptr<async::ConnPool>    conn_pool_;
-    // libcurl-backed HTTP/2 pool with multiplexing. Default transport
-    // for SchemaProvider — passes Cloudflare/anti-bot WAFs (it IS curl)
-    // and gives us native HTTP/2 stream multiplexing for parallel
-    // fan-out workloads.
-    std::unique_ptr<async::CurlH2Pool>  curl_pool_;
+    std::unique_ptr<async::ConnPool> conn_pool_;
 
     // --- Parsed config ---
     Config user_config_;
