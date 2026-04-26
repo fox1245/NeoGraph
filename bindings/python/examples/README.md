@@ -32,6 +32,7 @@ the key is missing.
 | 13 | [`13_multi_agent_debate.py`](13_multi_agent_debate.py) | **OpenAI** | Two-debater + judge. Debaters fan out via `Send`. |
 | 14 | [`14_graph_to_json.py`](14_graph_to_json.py) | offline | Serialize a graph definition to a `.json` file. |
 | 15 | [`15_graph_from_json.py`](15_graph_from_json.py) | offline | Load a `.json` graph and run it (companion to 14). |
+| 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | **OpenAI WS** | Multi-turn Gradio chat that switches into a parallel deep-research subgraph on `조사해줘 / research / investigate`. Uses `SchemaProvider("openai_responses", use_websocket=True)`. Requires `pip install gradio`. |
 
 Run any one with:
 

@@ -1,0 +1,26 @@
+{
+  "name": "doubler_graph",
+  "channels": {
+    "seed": {
+      "reducer": "overwrite"
+    },
+    "doubled": {
+      "reducer": "overwrite"
+    }
+  },
+  "nodes": {
+    "d": {
+      "type": "doubler"
+    }
+  },
+  "edges": [
+    {
+      "from": "__start__",
+      "to": "d"
+    },
+    {
+      "from": "d",
+      "to": "__end__"
+    }
+  ]
+}
