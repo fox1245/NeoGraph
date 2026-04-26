@@ -176,8 +176,14 @@ public:
      * `asio::experimental::make_parallel_group` on deferred workers,
      * without retry, and the writes are fanned back into the shared
      * state after wait_for_all.
+     *
+     * Returns one StepRouting per Send-spawned task, in send order.
+     * The caller merges these with the original ready-set's routings
+     * before invoking the Scheduler so that per-task `Command.goto`
+     * and the Send target's default outgoing edges flow into the next
+     * super-step's routing decision (LangGraph parity).
      */
-    asio::awaitable<void> run_sends_async(
+    asio::awaitable<std::vector<StepRouting>> run_sends_async(
         const std::vector<Send>& sends,
         int step,
         GraphState& state,

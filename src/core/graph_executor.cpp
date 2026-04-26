@@ -420,7 +420,7 @@ NodeExecutor::run_parallel_async(
 // captures exceptions into the parallel_group's excs array; the
 // first exception (if any) is rethrown after the wait resolves.
 
-asio::awaitable<void> NodeExecutor::run_sends_async(
+asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
     const std::vector<Send>& sends,
     int step,
     GraphState& state,
@@ -431,7 +431,8 @@ asio::awaitable<void> NodeExecutor::run_sends_async(
     const GraphStreamCallback& cb,
     StreamMode stream_mode) {
 
-    if (sends.empty()) co_return;
+    std::vector<StepRouting> routings;
+    if (sends.empty()) co_return routings;
 
     if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
         json send_info = json::array();
@@ -450,7 +451,7 @@ asio::awaitable<void> NodeExecutor::run_sends_async(
     if (sends.size() == 1) {
         const auto& s = sends[0];
         auto node_it = nodes_.find(s.target_node);
-        if (node_it == nodes_.end()) co_return;
+        if (node_it == nodes_.end()) co_return routings;
 
         const std::string task_id = make_send_task_id(
             step, 0, s.target_node, s.input);
@@ -469,7 +470,14 @@ asio::awaitable<void> NodeExecutor::run_sends_async(
         state.apply_writes(nr.writes);
         if (nr.command) state.apply_writes(nr.command->updates);
         trace.push_back(s.target_node + "[send]");
-        co_return;
+
+        StepRouting r;
+        r.node_name = s.target_node;
+        if (nr.command && !nr.command->goto_node.empty()) {
+            r.command_goto = nr.command->goto_node;
+        }
+        routings.push_back(std::move(r));
+        co_return routings;
     }
 
     // --- Multi Send: isolated per-target state + parallel_group. ---
@@ -534,13 +542,23 @@ asio::awaitable<void> NodeExecutor::run_sends_async(
         }
     }
 
-    // Fan back in send order.
+    // Fan back in send order. Each Send-spawned task contributes one
+    // StepRouting so its `Command.goto` and / or default outgoing edges
+    // flow into the next super-step's routing decision.
+    routings.reserve(sends.size());
     for (std::size_t si = 0; si < sends.size(); ++si) {
         state.apply_writes(values[si].writes);
         if (values[si].command) state.apply_writes(values[si].command->updates);
         trace.push_back(sends[si].target_node + "[send]");
+
+        StepRouting r;
+        r.node_name = sends[si].target_node;
+        if (values[si].command && !values[si].command->goto_node.empty()) {
+            r.command_goto = values[si].command->goto_node;
+        }
+        routings.push_back(std::move(r));
     }
-    co_return;
+    co_return routings;
 }
 
 } // namespace neograph::graph
