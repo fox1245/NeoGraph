@@ -51,6 +51,9 @@ from ._neograph import (
     # Streaming
     StreamMode,
     GraphEvent,
+    # Streaming helpers (Python module — no C++ side)
+    # exposed via `from neograph_engine.streaming import message_stream`
+    # but also re-exported here for discoverability.
 
     # Constants
     START_NODE,
@@ -293,3 +296,9 @@ __all__ = [
 
 if _HAVE_POSTGRES:
     __all__.append("PostgresCheckpointStore")
+
+# Streaming helpers — pure-Python, no C++ side. Re-exported here so a
+# `from neograph_engine import message_stream` import works alongside
+# the more explicit `from neograph_engine.streaming import message_stream`.
+from .streaming import message_stream  # noqa: E402
+__all__.append("message_stream")
