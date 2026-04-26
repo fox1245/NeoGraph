@@ -14,11 +14,17 @@
 #include <neograph/api.h>
 #include <neograph/provider.h>
 #include <neograph/llm/json_path.h>
+#include <asio/executor_work_guard.hpp>
+#include <asio/io_context.hpp>
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <thread>
 #include <map>
+
+namespace neograph::async { class ConnPool; }
 
 namespace neograph::llm {
 
@@ -72,8 +78,13 @@ class NEOGRAPH_API SchemaProvider : public Provider {
      */
     static std::unique_ptr<SchemaProvider> create(const Config& config);
 
-    /// Async completion — single wire path implemented over
-    /// neograph::async::async_post. The schema_mutex_ still serializes
+    /// Destructor — shuts down the background HTTP loop + worker
+    /// thread held alongside the ConnPool. Out-of-line so the
+    /// ConnPool forward declaration is enough at this header.
+    ~SchemaProvider();
+
+    /// Async completion — single wire path implemented over the owned
+    /// ConnPool (HTTP keep-alive). The schema_mutex_ still serializes
     /// the body-build and response-parse phases (yyjson_mut_doc traversal
     /// is not thread-safe even for reads), but the network I/O happens
     /// off-lock so concurrent fan-out still overlaps.
@@ -231,6 +242,20 @@ class NEOGRAPH_API SchemaProvider : public Provider {
     // thread-unsafe for mutable docs. HTTP I/O is issued OUTSIDE this lock
     // so concurrent fan-out requests still overlap on the network.
     mutable std::mutex schema_mutex_;
+
+    // --- Connection pool for HTTP keep-alive ---
+    //
+    // Each Provider::complete() goes through run_sync, which creates a
+    // fresh asio::io_context per call. A ConnPool bound to that
+    // throw-away executor would survive only one request — defeating
+    // its purpose. So SchemaProvider owns its own long-lived
+    // io_context + worker thread; the pool is bound to that, and
+    // every complete_async dispatches through it. Successive calls to
+    // the same host then amortise TCP connect + TLS handshake.
+    std::unique_ptr<asio::io_context> http_io_;
+    std::optional<asio::executor_work_guard<asio::io_context::executor_type>> http_work_;
+    std::thread http_thread_;
+    std::unique_ptr<async::ConnPool> conn_pool_;
 
     // --- Parsed config ---
     Config user_config_;

@@ -1,4 +1,5 @@
 #include <neograph/llm/schema_provider.h>
+#include <neograph/async/conn_pool.h>
 #include <neograph/async/endpoint.h>
 #include <neograph/async/http_client.h>
 #include <neograph/async/run_sync.h>
@@ -34,6 +35,25 @@ SchemaProvider::SchemaProvider(Config config, json schema)
     , schema_(std::move(schema))
 {
     parse_schema();
+
+    // Stand up the long-lived HTTP loop + ConnPool. The pool is bound
+    // to http_io_'s executor, so it survives the run_sync io_context
+    // that drives any individual Provider::complete() call. Sync and
+    // async completers both dispatch their HTTP work onto this loop;
+    // successive calls to the same model host now amortise TCP+TLS.
+    http_io_ = std::make_unique<asio::io_context>();
+    http_work_.emplace(asio::make_work_guard(*http_io_));
+    http_thread_ = std::thread([io = http_io_.get()]{ io->run(); });
+    conn_pool_ = std::make_unique<async::ConnPool>(http_io_->get_executor());
+}
+
+SchemaProvider::~SchemaProvider()
+{
+    // Order: drop the work guard so io_context.run() can return, stop
+    // the io_context (cancels in-flight ops), then join the worker.
+    if (http_work_) http_work_.reset();
+    if (http_io_) http_io_->stop();
+    if (http_thread_.joinable()) http_thread_.join();
 }
 
 std::unique_ptr<SchemaProvider>
@@ -1071,9 +1091,13 @@ SchemaProvider::complete_async(const CompletionParams& params)
         opts.timeout = std::chrono::seconds(user_config_.timeout_seconds);
     }
 
-    auto ex = co_await asio::this_coro::executor;
-    auto res = co_await async::async_post(
-        ex,
+    // Dispatch through the owned ConnPool so subsequent calls to the
+    // same host reuse an idle connection (TCP + TLS amortised). The
+    // pool runs on http_io_, not on the caller's executor — but
+    // co_await across executors is safe in asio: the pool completes
+    // its work on its bound executor and re-suspends back onto ours
+    // when the awaitable resolves.
+    auto res = co_await conn_pool_->async_post(
         endpoint.host,
         endpoint.port,
         endpoint_path,
