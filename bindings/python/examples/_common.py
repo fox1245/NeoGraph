@@ -73,7 +73,7 @@ def openai_provider(default_model: str = "gpt-4o-mini") -> OpenAIProvider:
 
 
 def schema_provider(
-    schema: str = "openai-responses",
+    schema: str = "openai_responses",
     default_model: str = "gpt-4o-mini",
     *,
     use_websocket: bool = False,
