@@ -103,7 +103,7 @@ struct PgConn {
  * an immediate failure if credentials or DDL permissions are wrong,
  * rather than a delayed surprise on first save().
  */
-class PostgresCheckpointStore : public CheckpointStore {
+class NEOGRAPH_API PostgresCheckpointStore : public CheckpointStore {
 public:
     /// @param conn_str libpq connection string. Anything libpq accepts.
     /// @param pool_size Number of connections to open eagerly. Defaults
