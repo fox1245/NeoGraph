@@ -22,9 +22,16 @@ PYBIND11_MODULE(_neograph, m) {
         "This module is the C extension; the public Python surface is\n"
         "the `neograph` package, which re-exports the symbols below.\n";
 
-    // Version string lives here so it travels with the binding rather
-    // than the Python wrapper. Bumped per binding ABI break.
-    m.attr("__version__") = "0.1.0";
+    // Version string is injected at compile time via NEOGRAPH_PY_VERSION
+    // in bindings/python/CMakeLists.txt, which reads pyproject.toml's
+    // [project].version. Single source of truth — the Python wrapper,
+    // PyPI METADATA, and `import neograph_engine; ng.__version__` all
+    // agree by construction. See bindings/python/CMakeLists.txt for the
+    // cmake-side wiring.
+#ifndef NEOGRAPH_PY_VERSION
+    #define NEOGRAPH_PY_VERSION "0.0.0+unknown"
+#endif
+    m.attr("__version__") = NEOGRAPH_PY_VERSION;
 
     neograph::pybind::init_provider(m);
     neograph::pybind::init_state(m);

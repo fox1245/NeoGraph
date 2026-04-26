@@ -57,6 +57,17 @@ from ._neograph import (
     END_NODE,
 )
 
+# PostgresCheckpointStore is only present when the binding was built
+# with -DNEOGRAPH_BUILD_POSTGRES=ON. The PyPI wheel ships with it OFF
+# (libpq bundling is a separate cibw step). Re-export when available
+# so source-build users / advanced installs get the durable store
+# under the same `neograph_engine.PostgresCheckpointStore` name.
+try:
+    from ._neograph import PostgresCheckpointStore  # noqa: F401
+    _HAVE_POSTGRES = True
+except ImportError:
+    _HAVE_POSTGRES = False
+
 # Re-import the C++ Tool / NodeContext bindings under private names so
 # we can shadow them with Python-side wrappers below.
 from ._neograph import Tool as _CppTool
@@ -273,8 +284,12 @@ __all__ = [
     "RunResult",
     "CheckpointStore",
     "InMemoryCheckpointStore",
+    # PostgresCheckpointStore appended dynamically below when present.
     "StreamMode",
     "GraphEvent",
     "START_NODE",
     "END_NODE",
 ]
+
+if _HAVE_POSTGRES:
+    __all__.append("PostgresCheckpointStore")
