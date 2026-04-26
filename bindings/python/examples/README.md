@@ -1,6 +1,6 @@
 # Python API examples
 
-Fifteen scripts covering the binding surface end-to-end.
+Twenty scripts covering the binding surface end-to-end.
 
 ## Setup
 
@@ -34,6 +34,9 @@ the key is missing.
 | 15 | [`15_graph_from_json.py`](15_graph_from_json.py) | offline | Load a `.json` graph and run it (companion to 14). |
 | 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | **OpenAI WS** | Multi-turn Gradio chat that switches into a parallel deep-research subgraph on `조사해줘 / research / investigate`. Uses `SchemaProvider("openai_responses", use_websocket=True)`. Requires `pip install gradio`. |
 | 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | **OpenAI WS + Crawl4AI + Postgres** | Same chat shape as 16, but researchers actually search the web via a local Crawl4AI container (`docker run unclecode/crawl4ai`) and state is durable in Postgres (`PostgresCheckpointStore`). Both are optional via env vars; falls back gracefully when absent. Source-build with `-DNEOGRAPH_BUILD_POSTGRES=ON` for the Postgres path. |
+| 18 | [`18_node_cache.py`](18_node_cache.py) | **OpenAI** | `engine.set_node_cache_enabled("ask", True)` — second run on the same input replays the cached `NodeResult` in 0 ms, no LLM call. Stats via `engine.node_cache_stats()`. |
+| 19 | [`19_streaming_messages.py`](19_streaming_messages.py) | offline | `from neograph_engine import message_stream` — wraps a callback so `LLM_TOKEN` events arrive as LangChain-shape message dicts (`{role, content, content_so_far, node, metadata}`). |
+| 20 | [`20_otel_tracing.py`](20_otel_tracing.py) | offline | `from neograph_engine.tracing import otel_tracer` — bridge engine events to OpenTelemetry spans. Ships ConsoleSpanExporter; swap for OTLP to send to Jaeger / Tempo / Honeycomb / Datadog. |
 
 Run any one with:
 
