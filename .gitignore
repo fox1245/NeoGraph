@@ -36,3 +36,9 @@ bindings/python/examples/my_graph.json
 
 # Session-local investigation log — kept untracked (personal diagnostic).
 benchmarks/dr_compare/SESSION_REPORT.md
+
+# WASM build artifacts — wasm/smoke.cpp + README.md track; binaries don't.
+wasm/*.wasm
+wasm/*.js
+wasm/*.html
+wasm/*.data
