@@ -41,6 +41,7 @@
 
 #include "json_bridge.h"
 
+#include <neograph/graph/checkpoint.h>
 #include <neograph/graph/engine.h>
 #include <neograph/graph/types.h>
 
@@ -211,6 +212,27 @@ void init_graph(py::module_& m) {
         .def_readonly("checkpoint_id",   &RunResult::checkpoint_id)
         .def_readonly("execution_trace", &RunResult::execution_trace);
 
+    // ── CheckpointStore (abstract base) + InMemoryCheckpointStore ────────
+    //
+    // Required for engine.update_state() / engine.fork() to work — both
+    // mutate the checkpoint store, and refuse to run when one isn't
+    // configured. The in-memory store is the simplest option; SQLite /
+    // Postgres backends are NeoGraph-side targets (binding deferred).
+    py::class_<CheckpointStore, std::shared_ptr<CheckpointStore>>(m,
+        "CheckpointStore",
+        "Abstract checkpoint persistence interface. Construct a "
+        "concrete subclass like InMemoryCheckpointStore and pass it "
+        "to engine.set_checkpoint_store().");
+
+    py::class_<InMemoryCheckpointStore, CheckpointStore,
+               std::shared_ptr<InMemoryCheckpointStore>>(m,
+        "InMemoryCheckpointStore",
+        "Process-lifetime checkpoint store. State survives across "
+        "runs sharing the same engine + thread_id, but is lost when "
+        "the engine is destroyed. Pick the SQLite or Postgres store "
+        "(NeoGraph-side, binding TBD) for durable state.")
+        .def(py::init<>());
+
     // ── GraphEngine ──────────────────────────────────────────────────────
     //
     // Holder is shared_ptr so NodeContext sharing across engines stays
@@ -346,6 +368,13 @@ void init_graph(py::module_& m) {
             py::arg("n"),
             "Opt into a dedicated N-worker pool for parallel fan-out. "
             "Must be called before any run(). Values < 1 clamp to 1.")
+
+        .def("set_checkpoint_store", &GraphEngine::set_checkpoint_store,
+            py::arg("store"),
+            "Wire a CheckpointStore instance into the engine. Required "
+            "before update_state() / fork(); without it those methods "
+            "raise. Pass an InMemoryCheckpointStore() for ephemeral "
+            "in-process state. Must be called before any run().")
 
         // ── Async surface (asyncio-compatible) ───────────────────────────
         //

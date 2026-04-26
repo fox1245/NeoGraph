@@ -45,6 +45,8 @@ from ._neograph import (
     GraphEngine,
     RunConfig,
     RunResult,
+    CheckpointStore,
+    InMemoryCheckpointStore,
 
     # Streaming
     StreamMode,
@@ -269,6 +271,8 @@ __all__ = [
     "GraphEngine",
     "RunConfig",
     "RunResult",
+    "CheckpointStore",
+    "InMemoryCheckpointStore",
     "StreamMode",
     "GraphEvent",
     "START_NODE",

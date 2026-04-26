@@ -1,4 +1,4 @@
-"""05 — Real LLM call via OpenAIProvider (requires OPENAI_API_KEY).
+"""05 — Real LLM call via OpenAIProvider (requires .env / OPENAI_API_KEY).
 
 Wire an OpenAI-compatible provider into NodeContext, build a graph
 that uses the built-in `llm_call` node, and run a one-shot
@@ -6,34 +6,18 @@ completion. Works with OpenAI, Groq, Together, vLLM, Ollama —
 any endpoint speaking the /v1/chat/completions shape.
 
 Run:
-    pip install neograph-engine
-    export OPENAI_API_KEY=sk-...
+    pip install neograph-engine python-dotenv
+    cp .env.example .env  # fill in OPENAI_API_KEY
     python 05_openai_provider.py
 
-To target a different OpenAI-compatible endpoint:
-    export OPENAI_API_BASE=https://api.groq.com  # for Groq
-    export OPENAI_MODEL=llama-3.3-70b-versatile
+To target a different OpenAI-compatible endpoint or model, set
+OPENAI_API_BASE / OPENAI_MODEL in .env. See .env.example.
 """
 
-import os
-import sys
-
-import neograph_engine as ng
-from neograph_engine.llm import OpenAIProvider
+from _common import ng, openai_provider
 
 
-api_key = os.environ.get("OPENAI_API_KEY")
-if not api_key:
-    print("OPENAI_API_KEY not set — skipping the live LLM call.")
-    print("Set it and re-run, or point OPENAI_API_BASE at any "
-          "OpenAI-compatible endpoint (Groq, Together, vLLM, ...).")
-    sys.exit(0)
-
-provider = OpenAIProvider(
-    api_key=api_key,
-    base_url=os.environ.get("OPENAI_API_BASE", "https://api.openai.com"),
-    default_model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
-)
+provider = openai_provider()  # exits cleanly if no key
 
 # Built-in `llm_call` node: reads the messages channel, calls the
 # provider, writes the assistant message back. No subclassing needed
