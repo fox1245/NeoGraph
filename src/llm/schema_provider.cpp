@@ -1,6 +1,5 @@
 #include <neograph/llm/schema_provider.h>
 #include <neograph/async/conn_pool.h>
-#include <neograph/async/curl_h2_pool.h>
 #include <neograph/async/endpoint.h>
 #include <neograph/async/http_client.h>
 #include <neograph/async/run_sync.h>
@@ -46,9 +45,6 @@ SchemaProvider::SchemaProvider(Config config, json schema)
     http_work_.emplace(asio::make_work_guard(*http_io_));
     http_thread_ = std::thread([io = http_io_.get()]{ io->run(); });
     conn_pool_ = std::make_unique<async::ConnPool>(http_io_->get_executor());
-    if (user_config_.prefer_libcurl) {
-        curl_pool_ = std::make_unique<async::CurlH2Pool>();
-    }
 }
 
 SchemaProvider::~SchemaProvider()
@@ -1095,33 +1091,20 @@ SchemaProvider::complete_async(const CompletionParams& params)
         opts.timeout = std::chrono::seconds(user_config_.timeout_seconds);
     }
 
-    // Two transports — pick at construction time via Config:
-    //   * default (ConnPool, HTTP/1.1 keep-alive): fewer hops over
-    //     asio, lower per-call constant cost. Best for the typical
-    //     1-3 concurrent inflight pattern.
-    //   * libcurl (HTTP/2 + multiplexing + Cloudflare-friendly): for
-    //     wide-fan-out workloads against WAF-protected endpoints.
-    async::HttpResponse res;
-    if (curl_pool_) {
-        std::string url = (endpoint.tls ? "https://" : "http://") + endpoint.host
-                        + (endpoint.port == "443" || endpoint.port == "80"
-                            ? "" : ":" + endpoint.port)
-                        + endpoint_path;
-        res = co_await curl_pool_->async_post(
-            std::move(url),
-            body_str,
-            std::move(headers),
-            opts);
-    } else {
-        res = co_await conn_pool_->async_post(
-            endpoint.host,
-            endpoint.port,
-            endpoint_path,
-            body_str,
-            std::move(headers),
-            endpoint.tls,
-            opts);
-    }
+    // Dispatch through the owned ConnPool so subsequent calls to the
+    // same host reuse an idle connection (TCP + TLS amortised). The
+    // pool runs on http_io_, not on the caller's executor — but
+    // co_await across executors is safe in asio: the pool completes
+    // its work on its bound executor and re-suspends back onto ours
+    // when the awaitable resolves.
+    auto res = co_await conn_pool_->async_post(
+        endpoint.host,
+        endpoint.port,
+        endpoint_path,
+        body_str,
+        std::move(headers),
+        endpoint.tls,
+        opts);
 
     if (res.status != 200) {
         // Surface 429s as a typed exception so callers (typically a
