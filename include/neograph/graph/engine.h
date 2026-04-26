@@ -267,30 +267,35 @@ public:
     void set_node_retry_policy(const std::string& node_name, const RetryPolicy& policy);
 
     /**
-     * @brief Opt into a dedicated worker pool for parallel fan-out.
+     * @brief Resize the dedicated worker pool for parallel fan-out.
      *
-     * Default behaviour (no call to this method): concurrent ready
-     * sets and multi-Send dispatch run on whichever executor drives
-     * the current coroutine. For `run()` that's a single-threaded
-     * io_context spun up by `run_sync`, so CPU-bound branches
-     * serialize on one thread (I/O-bound branches still overlap via
-     * co_await suspension). For `run_async()` it's the caller's own
-     * executor — a multi-threaded `asio::thread_pool` gives real CPU
-     * parallelism without this method.
-     *
-     * Calling this builds an engine-owned N-worker thread_pool that
-     * `run_parallel_async` and the multi-Send branch of
-     * `run_sends_async` dispatch onto explicitly, so `run()` regains
-     * CPU parallel fan-out without the caller having to switch to
-     * `run_async()`.
+     * `compile()` already wires up a pool sized to
+     * `std::thread::hardware_concurrency()` (with a fallback of 4 if
+     * the platform fails to detect), so multi-Send fan-out
+     * parallelizes by default. Call this only to override that
+     * default — for example, `set_worker_count(1)` for nodes that
+     * hold non-thread-safe state, or a larger value if the workload's
+     * fan-out width exceeds the core count.
      *
      * Must be called before any concurrent `run()`; resizing rebuilds
      * both the pool and the internal executor and is not safe against
      * in-flight runs. Values < 1 are clamped to 1.
      *
      * @param n Number of worker threads in the fan-out pool.
+     * @see set_worker_count_auto()
      */
     void set_worker_count(std::size_t n);
+
+    /**
+     * @brief Resize the worker pool to `hardware_concurrency()`.
+     *
+     * Equivalent to
+     * `set_worker_count(std::thread::hardware_concurrency())`, with
+     * the same fallback (4) if the runtime cannot detect. `compile()`
+     * already calls this; use it only to revert after an explicit
+     * `set_worker_count(N)` overrode the default.
+     */
+    void set_worker_count_auto();
 
     /**
      * @brief Get the graph name (from the JSON definition).
