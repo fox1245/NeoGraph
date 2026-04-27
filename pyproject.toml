@@ -173,6 +173,19 @@ cmake.args = [
 # not our target audience yet. PyPy skipped — pybind11 type-caster
 # overhead largely cancels out PyPy's interpreter wins for I/O-bound
 # agent code, and the maintenance cost is real.
+
+# ─── scikit-build-core per-platform overrides ─────────────────────────────
+#
+# Turn off the libcurl HTTP/2 backend on Windows wheel builds. vcpkg's
+# curl pulls a chain of TLS/zlib/idn deps that delvewheel would have to
+# bundle, ballooning wheel size and adding ~5 min per-wheel build time.
+# The libcurl backend is opt-in (SchemaProvider::prefer_libcurl=true);
+# Linux + macOS wheels keep it ON via the per-platform before-all
+# (libcurl-devel / brew curl).
+[[tool.scikit-build.overrides]]
+if.platform-system = "win32"
+cmake.define.NEOGRAPH_USE_LIBCURL = "OFF"
+
 [tool.cibuildwheel]
 build  = "cp39-* cp310-* cp311-* cp312-* cp313-*"
 # Skip:
@@ -248,7 +261,7 @@ echo VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%\
 # `-G Ninja` in the global cmake.args above (so scikit-build-core's
 # generator-detection sees it and switches to single-config code
 # paths); CMAKE_GENERATOR env var alone wasn't enough for that.
-environment = { CMAKE_TOOLCHAIN_FILE = "C:\\\\vcpkg\\\\scripts\\\\buildsystems\\\\vcpkg.cmake", SKBUILD_CMAKE_ARGS = "-DNEOGRAPH_USE_LIBCURL=OFF" }
+environment = { CMAKE_TOOLCHAIN_FILE = "C:\\\\vcpkg\\\\scripts\\\\buildsystems\\\\vcpkg.cmake" }
 
 # delvewheel auto-discovers the engine .dlls beside the binding (we
 # install them via the same cmake install rule as Linux/macOS) and
