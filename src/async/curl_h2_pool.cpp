@@ -26,6 +26,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdlib>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -104,6 +105,15 @@ struct CurlH2Pool::Impl {
     void worker_loop() {
         // 1.62+ default; explicit so older runtimes also multiplex.
         curl_multi_setopt(multi, CURLMOPT_PIPELINING, CURLPIPE_MULTIPLEX);
+        // DIAG: allow multiple H/2 connections per host (default 0 = 1).
+        // Lets libcurl spread N parallel streams across M conns instead of
+        // funneling everything onto a single TCP (where TCP-level HoL
+        // serializes interleaved DATA frames). Tunable via env so we can
+        // A/B without rebuilding.
+        if (const char* s = std::getenv("NG_CURL_MAX_HOST_CONNS")) {
+            curl_multi_setopt(multi, CURLMOPT_MAX_HOST_CONNECTIONS,
+                              static_cast<long>(std::atol(s)));
+        }
 
         while (!stop.load(std::memory_order_acquire)) {
             // Drain whatever's in the queue. We *don't* condvar-wait
@@ -143,10 +153,27 @@ struct CurlH2Pool::Impl {
         }
 
         // Drain remaining handlers with an error so awaiters wake up.
+        // BOTH queues need draining — `active` for already-on-multi work,
+        // and `queue` for submissions that arrived between our last
+        // queue-drain and the stop check. Without this, a coroutine that
+        // posts a request right before pool dtor would await forever
+        // because its handler is sitting in `queue` with no worker to run it.
+        std::deque<std::unique_ptr<Pending>> stranded;
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            stranded.swap(queue);
+        }
+        for (auto& p : stranded) {
+            auto on_done   = std::move(p->on_done);
+            auto caller_ex = std::move(p->caller_ex);
+            asio::post(caller_ex, [on_done = std::move(on_done)]() mutable {
+                on_done(HttpResponse{},
+                        std::make_exception_ptr(std::runtime_error(
+                            "CurlH2Pool destroyed before request was started")));
+            });
+        }
         for (auto& p : active) {
             curl_multi_remove_handle(multi, p->easy);
-            HttpResponse r;
-            r.status = 0;
             // Move the handler off so it doesn't run under our lock.
             auto on_done   = std::move(p->on_done);
             auto caller_ex = std::move(p->caller_ex);
@@ -190,7 +217,12 @@ struct CurlH2Pool::Impl {
         curl_easy_setopt(p->easy, CURLOPT_HEADERFUNCTION, header_line_cb);
         curl_easy_setopt(p->easy, CURLOPT_HEADERDATA,     p.get());
         curl_easy_setopt(p->easy, CURLOPT_HTTP_VERSION,   CURL_HTTP_VERSION_2TLS);
-        curl_easy_setopt(p->easy, CURLOPT_PIPEWAIT,       1L);  // wait to multiplex
+        // DIAG: PIPEWAIT=1 makes a request wait for an in-flight TLS handshake
+        // to complete so it can multiplex onto the same conn. PIPEWAIT=0 lets
+        // libcurl open a fresh conn instead of waiting. Tunable via env.
+        long pipewait = 1L;
+        if (const char* s = std::getenv("NG_CURL_PIPEWAIT")) pipewait = std::atol(s);
+        curl_easy_setopt(p->easy, CURLOPT_PIPEWAIT,       pipewait);
         if (p->timeout_seconds > 0) {
             curl_easy_setopt(p->easy, CURLOPT_TIMEOUT, p->timeout_seconds);
         }
