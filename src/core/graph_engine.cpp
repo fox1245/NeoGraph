@@ -406,7 +406,16 @@ GraphEngine::execute_graph_async(const RunConfig& config,
     std::vector<Send> pending_sends;
 
     for (int step = start_step; step < config.max_steps + start_step; ++step) {
-        if (ready.empty() || hit_end) break;
+        // hit_end is informational only — a Send target with no outgoing
+        // edges resolves to __end__ in the scheduler and flips hit_end,
+        // but that shouldn't kill the loop when other ready paths still
+        // have work (e.g. dispatch → supervisor static edge fires after
+        // dispatch's researcher Sends complete; previously the
+        // researchers' implicit __end__ resolution shadowed supervisor
+        // and ended the run early — visible on example 25 deep_research).
+        // Command{__end__} terminates by leaving ready empty (plan_impl
+        // pass 1, scheduler.cpp:79-83), so ready.empty() is sufficient.
+        if (ready.empty()) break;
 
         // --- interrupt_before check ---
         bool is_resume_entry = (is_resume && step == start_step);
