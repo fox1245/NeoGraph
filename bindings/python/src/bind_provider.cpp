@@ -179,7 +179,8 @@ void init_provider(py::module_& m) {
                             const py::sequence& messages,
                             const std::string& model,
                             double temperature,
-                            int max_tokens) {
+                            int max_tokens,
+                            const py::sequence& tools) {
             neograph::CompletionParams p;
             p.model       = model;
             p.temperature = temperature;
@@ -202,13 +203,32 @@ void init_provider(py::module_& m) {
                     m.tool_name = d["tool_name"].cast<std::string>();
                 p.messages.push_back(std::move(m));
             }
+            // Tool definitions — accept ChatTool objects or
+            // {name, description, parameters} dicts.
+            p.tools.reserve(py::len(tools));
+            for (const auto& item : tools) {
+                if (py::isinstance<neograph::ChatTool>(item)) {
+                    p.tools.push_back(item.cast<neograph::ChatTool>());
+                    continue;
+                }
+                auto d = item.cast<py::dict>();
+                neograph::ChatTool t;
+                if (d.contains("name"))
+                    t.name = d["name"].cast<std::string>();
+                if (d.contains("description"))
+                    t.description = d["description"].cast<std::string>();
+                if (d.contains("parameters"))
+                    t.parameters = py_to_json(d["parameters"]);
+                p.tools.push_back(std::move(t));
+            }
             py::gil_scoped_release release;
             return self.complete(p);
         },
             py::arg("messages"),
             py::arg("model")       = "",
             py::arg("temperature") = 0.7,
-            py::arg("max_tokens")  = -1)
+            py::arg("max_tokens")  = -1,
+            py::arg("tools")       = py::list{})
         .def("get_name", &neograph::Provider::get_name);
 
     // ── Tool base (opaque, no Python subclass yet) ───────────────────────
