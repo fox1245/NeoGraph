@@ -101,21 +101,31 @@ void GraphEngine::set_node_retry_policy(const std::string& node_name, const Retr
 
 void GraphEngine::set_worker_count(std::size_t n) {
     if (n < 1) n = 1;
-    // thread_pool is not resizable — rebuild. Dtor joins the old
-    // pool's workers, so callers must not resize across an in-flight
-    // run() (documented on the declaration). n == 1 is a no-op path:
-    // we still wire a 1-worker pool so executor_ keeps the same
-    // contract, but fan-out gains nothing over single-thread co_await
-    // dispatch.
-    pool_ = std::make_unique<asio::thread_pool>(n);
+    // n == 1 means "no engine-owned thread pool" — fan-out branches
+    // dispatch on whichever executor drives the coroutine (single-
+    // thread io_context for run_sync, the caller's pool for
+    // run_async). This matches the pre-b59444f fast path and keeps
+    // worker=1 cheap for CPU-tiny / non-thread-safe workloads
+    // (par micro-bench: ~12µs vs the cross-thread-submit path's
+    // ~94µs at the same worker count). For n >= 2 we wire a real
+    // thread_pool — rebuild it because asio::thread_pool isn't
+    // resizable. Dtor joins the old pool's workers, so callers must
+    // not resize across an in-flight run() (documented on declaration).
     GraphEngine* self = this;
+    auto retry_lookup = [self](const std::string& node_name) {
+        return self->get_retry_policy(node_name);
+    };
+    if (n == 1) {
+        pool_.reset();
+        executor_ = std::make_unique<NodeExecutor>(
+            nodes_, channel_defs_, std::move(retry_lookup),
+            nullptr, &node_cache_);
+        return;
+    }
+    pool_ = std::make_unique<asio::thread_pool>(n);
     executor_ = std::make_unique<NodeExecutor>(
-        nodes_, channel_defs_,
-        [self](const std::string& node_name) {
-            return self->get_retry_policy(node_name);
-        },
-        pool_.get(),
-        &node_cache_);
+        nodes_, channel_defs_, std::move(retry_lookup),
+        pool_.get(), &node_cache_);
 }
 
 void GraphEngine::set_worker_count_auto() {
