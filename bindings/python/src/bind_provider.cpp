@@ -215,7 +215,8 @@ void init_provider(py::module_& m) {
                          const std::string& default_model,
                          int timeout_seconds,
                          const std::string& base_url_override,
-                         bool use_websocket) {
+                         bool use_websocket,
+                         bool prefer_libcurl) {
             neograph::llm::SchemaProvider::Config cfg;
             cfg.schema_path = schema_path;
             cfg.api_key = api_key;
@@ -223,6 +224,7 @@ void init_provider(py::module_& m) {
             cfg.timeout_seconds = timeout_seconds;
             cfg.base_url_override = base_url_override;
             cfg.use_websocket = use_websocket;
+            cfg.prefer_libcurl = prefer_libcurl;
             return std::shared_ptr<neograph::llm::SchemaProvider>(
                 neograph::llm::SchemaProvider::create(cfg).release());
         }),
@@ -231,7 +233,8 @@ void init_provider(py::module_& m) {
             py::arg("default_model") = "gpt-4o-mini",
             py::arg("timeout_seconds") = 60,
             py::arg("base_url_override") = "",
-            py::arg("use_websocket") = false);
+            py::arg("use_websocket") = false,
+            py::arg("prefer_libcurl") = false);
 #endif // NEOGRAPH_PYBIND_HAS_LLM
 }
 

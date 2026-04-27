@@ -91,6 +91,7 @@ def schema_provider(
         default_model=os.getenv("OPENAI_MODEL", default_model),
         base_url_override=os.getenv("OPENAI_API_BASE", ""),
         use_websocket=use_websocket,
+        prefer_libcurl=os.getenv("NG_PREFER_LIBCURL", "0") == "1",
     )
 
 
