@@ -327,6 +327,51 @@ NodeExecutor::run_parallel_async(
     const GraphStreamCallback& cb,
     StreamMode stream_mode) {
 
+    // Single-ready bypass: skip the parallel_group machinery entirely.
+    // When the super-step has only one ready node, building deferred
+    // ops, allocating excs/values/order vectors, and wrapping in
+    // wait_for_all is pure overhead. Run the worker inline on the
+    // outer executor instead. Hit by every linear-chain step (seq
+    // bench's 3-step path, par bench's summarizer fan-in step) and
+    // by any super-step where conditional routing collapses to one
+    // target.
+    if (ready.size() == 1) {
+        const auto& node_name = ready[0];
+        const std::string task_id = make_static_task_id(step, node_name);
+        auto replay_it = replay.find(task_id);
+        NodeResult nr;
+        std::exception_ptr interrupt_exc;
+        if (replay_it != replay.end()) {
+            nr = replay_it->second;
+        } else {
+            // GCC-13: cannot co_await inside a catch handler. Classify
+            // here, save + rethrow outside the try/catch.
+            try {
+                nr = co_await execute_node_with_retry_async(
+                    node_name, state, cb, stream_mode);
+            } catch (const NodeInterrupt&) {
+                interrupt_exc = std::current_exception();
+            }
+            if (interrupt_exc) {
+                std::vector<std::string> next_nodes;
+                next_nodes.push_back(node_name);
+                co_await coord.save_super_step_async(state,
+                    node_name, next_nodes,
+                    CheckpointPhase::NodeInterrupt, step, parent_cp_id,
+                    barrier_state);
+                std::rethrow_exception(interrupt_exc);
+            }
+            co_await coord.record_pending_write_async(
+                parent_cp_id, task_id, task_id, node_name, nr, step);
+        }
+        state.apply_writes(nr.writes);
+        if (nr.command) state.apply_writes(nr.command->updates);
+        trace.push_back(node_name);
+        std::vector<NodeResult> result;
+        result.push_back(std::move(nr));
+        co_return result;
+    }
+
     auto outer_ex = co_await asio::this_coro::executor;
     // Branches dispatch to the engine's owned pool when available so
     // CPU-bound fan-out actually parallelizes even if the outer
@@ -505,6 +550,17 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
     // serialize/restore round-trip, applies the Send's input, then
     // drives execute_node_with_retry_async. Isolated state can't be
     // shared across concurrent Sends — each gets its own copy.
+    //
+    // PERF: serialize the source state once and have every worker
+    // restore from the same snapshot. Pre-fix every worker called
+    // state.serialize() inside its lambda — N workers paid N full
+    // serializations of the entire channel set, which dominated the
+    // par micro-bench (callgrind: yyjson_mut_doc_new + val_pool_grow
+    // + mut_val_mut_copy = ~9% of total instructions). The state is
+    // logically immutable across the worker batch (state mutations
+    // happen post-join, line ~568 below) so a single snapshot is
+    // safe to share.
+    auto state_snapshot = state.serialize();
     auto outer_ex = co_await asio::this_coro::executor;
     asio::any_io_executor ex = fan_out_pool_
         ? asio::any_io_executor(fan_out_pool_->get_executor())
@@ -527,7 +583,7 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
 
         GraphState send_state;
         init_state(send_state);
-        send_state.restore(state.serialize());
+        send_state.restore(state_snapshot);
         apply_input(send_state, s.input);
 
         auto nr = co_await execute_node_with_retry_async(
