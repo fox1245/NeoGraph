@@ -222,7 +222,7 @@ manylinux-aarch64-image = "quay.io/pypa/manylinux_2_34_aarch64"
 #                    libpq 13.x in AppStream. auditwheel-repair pulls
 #                    libpq.so.5 (and its transitive deps libldap, libsasl2,
 #                    libgssapi_krb5, etc.) into the wheel.
-before-all = "dnf install -y openssl-devel libpq-devel"
+before-all = "dnf install -y openssl-devel libpq-devel libcurl-devel"
 
 [tool.cibuildwheel.windows]
 # Windows wheel build:
@@ -237,11 +237,18 @@ vcpkg install openssl:x64-windows libpq:x64-windows && \
 echo VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%\
 """
 
+# Skip libcurl on Windows wheel builds — vcpkg's curl pulls a chain
+# of TLS/zlib/idn deps that delvewheel then has to bundle, ballooning
+# wheel size and adding ~5 min to the per-wheel build. The libcurl
+# HTTP/2 backend is opt-in (SchemaProvider.prefer_libcurl=true);
+# Windows users who actually need it can build from source with their
+# own vcpkg install of curl. The default ConnPool path is unaffected.
+
 # Forward the vcpkg OpenSSL prefix into CMake. Ninja is pinned via
 # `-G Ninja` in the global cmake.args above (so scikit-build-core's
 # generator-detection sees it and switches to single-config code
 # paths); CMAKE_GENERATOR env var alone wasn't enough for that.
-environment = { CMAKE_TOOLCHAIN_FILE = "C:\\\\vcpkg\\\\scripts\\\\buildsystems\\\\vcpkg.cmake" }
+environment = { CMAKE_TOOLCHAIN_FILE = "C:\\\\vcpkg\\\\scripts\\\\buildsystems\\\\vcpkg.cmake", SKBUILD_CMAKE_ARGS = "-DNEOGRAPH_USE_LIBCURL=OFF" }
 
 # delvewheel auto-discovers the engine .dlls beside the binding (we
 # install them via the same cmake install rule as Linux/macOS) and
@@ -284,7 +291,7 @@ archs = ["arm64"]
 # pre-installed on the macos-14 runner image; libpq is not. Both are
 # keg-only on Homebrew (not in the standard /opt/homebrew/lib search
 # path), so we point CMake at them via CMAKE_PREFIX_PATH below.
-before-all = "brew install libpq"
+before-all = "brew install libpq curl"
 
 # macOS deployment target: 14.0 (Sonoma, Sep 2023). The pinch is
 # Homebrew OpenSSL on the macos-14 GitHub runner — its bottles are

@@ -20,6 +20,14 @@ option(NEOGRAPH_BUILD_POSTGRES "Build PostgresCheckpointStore (libpq)" ON)
 option(NEOGRAPH_BUILD_SQLITE   "Build SqliteCheckpointStore (libsqlite3)" ON)
 option(NEOGRAPH_BUILD_EXAMPLES "Build example programs"                  ON)
 option(NEOGRAPH_BUILD_PYBIND   "Build Python bindings (pybind11)"        OFF)
+# libcurl drives the opt-in HTTP/2 transport (CurlH2Pool, used when
+# SchemaProvider::Config::prefer_libcurl=true). Default ON because the
+# library is on every Linux/macOS distro by default; turn OFF when
+# building on Windows CI without vcpkg/curl. With OFF, the engine
+# still builds and the default ConnPool HTTP/1.1 path works — only the
+# `prefer_libcurl=true` opt-in becomes a runtime no-op (an error from
+# the SchemaProvider constructor if the user requests it).
+option(NEOGRAPH_USE_LIBCURL    "Build libcurl HTTP/2 backend (CurlH2Pool)" ON)
 
 # ---------------------------------------------------------------------------
 # Shared-vs-static library mode
@@ -264,6 +272,11 @@ add_library(neograph::core ALIAS neograph_core)
 add_library(neograph_async
     src/async/async_smoke.cpp
     src/async/http_client.cpp
+    # curl_h2_pool.cpp always compiles — its body is #ifdef'd on
+    # NEOGRAPH_HAVE_LIBCURL so the destructor (referenced by
+    # SchemaProvider::~SchemaProvider via unique_ptr<CurlH2Pool>)
+    # always has a definition the linker can resolve, even when
+    # the libcurl backend itself is disabled.
     src/async/curl_h2_pool.cpp
     src/async/conn_pool.cpp
     src/async/sse_parser.cpp
@@ -273,12 +286,15 @@ target_include_directories(neograph_async
     PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
 )
 target_compile_definitions(neograph_async PRIVATE NEOGRAPH_BUILDING_LIBRARY)
-# libcurl drives our HTTP/2 client (CurlH2Pool). On every target distro
-# this also pulls in HTTP/2 (via nghttp2), keep-alive pool, ALPN, and
-# eventually HTTP/3 if the runtime libcurl was compiled with it.
-find_package(CURL REQUIRED)
 target_link_libraries(neograph_async PUBLIC asio OpenSSL::SSL OpenSSL::Crypto)
-target_link_libraries(neograph_async PRIVATE CURL::libcurl)
+if(NEOGRAPH_USE_LIBCURL)
+    # libcurl drives the opt-in HTTP/2 client (CurlH2Pool). Pulls in
+    # HTTP/2 (via nghttp2), keep-alive pool, ALPN, and HTTP/3 if the
+    # runtime libcurl was compiled with it.
+    find_package(CURL REQUIRED)
+    target_link_libraries(neograph_async PRIVATE CURL::libcurl)
+    target_compile_definitions(neograph_async PUBLIC NEOGRAPH_HAVE_LIBCURL)
+endif()
 # C++20 coroutines require this on GCC < 14 when using -std=c++20.
 target_compile_features(neograph_async PUBLIC cxx_std_20)
 add_library(neograph::async ALIAS neograph_async)
@@ -300,15 +316,17 @@ if(NEOGRAPH_BUILD_EXAMPLES)
     add_executable(neograph_async_https_smoke src/async/async_https_smoke_main.cpp)
     target_link_libraries(neograph_async_https_smoke PRIVATE neograph_async)
 
-    # Libcurl-backend HTTP/2 smoke. Bench candidate: passes CF WAF (it
-    # IS curl), gives us multiplexing + pool + future HTTP/3 for free.
-    add_executable(neograph_h2_curl_smoke src/async/h2_curl_smoke_main.cpp)
-    target_link_libraries(neograph_h2_curl_smoke PRIVATE CURL::libcurl)
+    if(NEOGRAPH_USE_LIBCURL)
+        # Libcurl-backend HTTP/2 smoke. Bench candidate: passes CF WAF (it
+        # IS curl), gives us multiplexing + pool + future HTTP/3 for free.
+        add_executable(neograph_h2_curl_smoke src/async/h2_curl_smoke_main.cpp)
+        target_link_libraries(neograph_h2_curl_smoke PRIVATE CURL::libcurl)
 
-    # Multiplex check — 5 parallel POSTs over libcurl HTTP/2.
-    # NUM_CONNECTS should be 1 across all handles when multiplex works.
-    add_executable(neograph_h2_curl_multiplex src/async/h2_curl_multiplex_main.cpp)
-    target_link_libraries(neograph_h2_curl_multiplex PRIVATE CURL::libcurl)
+        # Multiplex check — 5 parallel POSTs over libcurl HTTP/2.
+        # NUM_CONNECTS should be 1 across all handles when multiplex works.
+        add_executable(neograph_h2_curl_multiplex src/async/h2_curl_multiplex_main.cpp)
+        target_link_libraries(neograph_h2_curl_multiplex PRIVATE CURL::libcurl)
+    endif()
 endif()
 
 # ===========================================================================
