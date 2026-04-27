@@ -80,11 +80,18 @@ def otel_tracer(
     """
     _require_otel()
     from opentelemetry import trace
-    from opentelemetry.trace import Status, StatusCode
+    from opentelemetry.trace import Status, StatusCode, set_span_in_context
 
     pending: dict[str, list] = {}
     root_span = tracer.start_span(root_name)
-    root_token = trace.use_span(root_span, end_on_exit=False).__enter__()
+    # Build the context that has root_span as the active span. Pass this
+    # explicitly to every child start_span so the parent-child link is
+    # recorded regardless of whether contextvars survive the C++ → Python
+    # callback hop. Earlier versions used `trace.use_span(...).__enter__()`
+    # without ever calling `__exit__`, which leaked the contextvar AND
+    # didn't reliably propagate through the binding boundary — every
+    # node span ended up as a separate orphan trace.
+    parent_ctx = set_span_in_context(root_span)
 
     def _close_all():
         for stack in pending.values():
@@ -102,7 +109,8 @@ def otel_tracer(
         node = ev.node_name
         try:
             if t == GraphEvent.Type.NODE_START:
-                span = tracer.start_span(node_span_prefix + node)
+                span = tracer.start_span(
+                    node_span_prefix + node, context=parent_ctx)
                 span.set_attribute(f"{attribute_prefix}.node", node)
                 if hasattr(ev.data, "items"):
                     for k, v in ev.data.items():
