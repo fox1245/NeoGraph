@@ -30,9 +30,23 @@ unless one of these applies to you:
      with quictls/ngtcp2, flipping `prefer_libcurl=True` enables
      it transparently.
 
-If none of the above apply, keep the default. We measured
-ConnPool ~23% faster at p50 on a 5-way parallel-burst probe to
-api.openai.com.
+Why isn't HTTP/2 faster on OpenAI?
+----------------------------------
+
+We instrumented both paths with tshark + strace. libcurl really did
+multiplex 25 calls over a single TCP (1 SYN, 1 TLS handshake);
+ConnPool used 3-5 keep-alive TCPs. No RST, no TLS alerts, no
+retransmissions on either side — the wire is clean. Yet libcurl is
+~25% slower at p50. The most plausible explanation is TCP-level
+head-of-line blocking on a single connection: when 5 streams'
+response packets interleave, any reorder stalls all five. ConnPool's
+N independent TCPs avoid this entirely (HTTP/3 / QUIC fixes it but
+needs ngtcp2-built libcurl). We also measured `CURLOPT_PIPEWAIT=0`
++ `CURLMOPT_MAX_HOST_CONNECTIONS=8` (lets libcurl open multiple H/2
+connections rather than funneling onto one); didn't help. The
+escape hatches `NG_CURL_PIPEWAIT` and `NG_CURL_MAX_HOST_CONNS` are
+exposed for further experimentation if you want to try on your own
+endpoint.
 
 Run:
     pip install neograph-engine python-dotenv
@@ -82,16 +96,35 @@ def make_provider(*, http2: bool) -> SchemaProvider:
     )
 
 
+_TRANSIENT_5XX = ("502", "503", "504")
+
+
+def _one_call_with_retry(provider: SchemaProvider) -> None:
+    """One `.complete()` with a single retry on Cloudflare/upstream
+    transients. OpenAI's edge surfaces 502/503/504 a few times per
+    thousand calls; without a retry one bad call kills the whole burst
+    measurement (and confuses anyone trying to A/B the two transports).
+    Retry once, then propagate."""
+    params = CompletionParams(
+        model=MODEL, messages=[ChatMessage("user", PROMPT)])
+    try:
+        provider.complete(params)
+    except RuntimeError as exc:
+        # Provider raises RuntimeError("API error (HTTP NNN): ...") —
+        # peek at the code without parsing too aggressively.
+        msg = str(exc)
+        if any(code in msg for code in _TRANSIENT_5XX):
+            time.sleep(0.2)
+            provider.complete(params)
+        else:
+            raise
+
+
 def parallel_burst(provider: SchemaProvider) -> float:
     """Fire PARALLEL `complete()` calls concurrently; return wall-clock."""
-    def one() -> None:
-        provider.complete(CompletionParams(
-            model=MODEL,
-            messages=[ChatMessage("user", PROMPT)],
-        ))
     t0 = time.perf_counter()
     with cf.ThreadPoolExecutor(max_workers=PARALLEL) as ex:
-        list(ex.map(lambda _: one(), range(PARALLEL)))
+        list(ex.map(lambda _: _one_call_with_retry(provider), range(PARALLEL)))
     return time.perf_counter() - t0
 
 
