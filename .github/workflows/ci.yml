@@ -48,6 +48,7 @@ jobs:
             libpq-dev \
             libsqlite3-dev \
             libssl-dev \
+            libcurl4-openssl-dev \
             pkg-config \
             python3 \
             ccache
@@ -132,7 +133,7 @@ jobs:
       - name: Install build dependencies
         run: |
           brew update
-          brew install cmake libpq openssl@3 sqlite
+          brew install cmake libpq openssl@3 sqlite curl
           # Homebrew's libpq is keg-only; expose it so CMake's
           # FindPostgreSQL picks it up.
           echo "CMAKE_PREFIX_PATH=$(brew --prefix libpq):$(brew --prefix openssl@3)" >> $GITHUB_ENV
@@ -198,13 +199,14 @@ jobs:
           echo "OpenSSL installed at: $ssl"
           "OPENSSL_ROOT_DIR=$ssl" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
 
-      - name: Configure (MCP + async only; PG + SQLite disabled on Windows CI)
+      - name: Configure (MCP + async only; PG + SQLite + libcurl disabled on Windows CI)
         shell: pwsh
         run: |
           cmake -B build `
             -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
             -DOPENSSL_ROOT_DIR="$env:OPENSSL_ROOT_DIR" `
+            -DNEOGRAPH_USE_LIBCURL=OFF `
             -DNEOGRAPH_BUILD_LLM=ON `
             -DNEOGRAPH_BUILD_MCP=ON `
             -DNEOGRAPH_BUILD_UTIL=ON `
@@ -256,7 +258,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake build-essential libssl-dev pkg-config
+            cmake build-essential libssl-dev libcurl4-openssl-dev pkg-config
 
       - name: Configure (Release, benches on, postgres off)
         run: |

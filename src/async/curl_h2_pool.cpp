@@ -17,6 +17,31 @@
 
 #include <neograph/async/curl_h2_pool.h>
 
+#include <stdexcept>
+
+#ifndef NEOGRAPH_HAVE_LIBCURL
+// Stub implementation when the libcurl backend is disabled at build
+// time. Keeps the destructor symbol available for SchemaProvider's
+// unique_ptr<CurlH2Pool> member; constructor + async_post throw the
+// same way the runtime would on a misconfigured prefer_libcurl=true.
+namespace neograph::async {
+struct CurlH2Pool::Impl {};
+CurlH2Pool::CurlH2Pool() : impl_(nullptr) {
+    throw std::runtime_error(
+        "CurlH2Pool: libcurl backend not compiled "
+        "(rebuild with -DNEOGRAPH_USE_LIBCURL=ON)");
+}
+CurlH2Pool::~CurlH2Pool() = default;
+asio::awaitable<HttpResponse> CurlH2Pool::async_post(
+    std::string, std::string,
+    std::vector<std::pair<std::string, std::string>>,
+    RequestOptions) {
+    throw std::runtime_error("CurlH2Pool: libcurl backend not compiled");
+    co_return HttpResponse{};
+}
+} // namespace neograph::async
+#else  // NEOGRAPH_HAVE_LIBCURL
+
 #include <curl/curl.h>
 
 #include <asio/post.hpp>
@@ -31,7 +56,6 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -360,3 +384,5 @@ asio::awaitable<HttpResponse> CurlH2Pool::async_post(
 }
 
 } // namespace neograph::async
+
+#endif  // NEOGRAPH_HAVE_LIBCURL
