@@ -264,6 +264,7 @@ add_library(neograph::core ALIAS neograph_core)
 add_library(neograph_async
     src/async/async_smoke.cpp
     src/async/http_client.cpp
+    src/async/curl_h2_pool.cpp
     src/async/conn_pool.cpp
     src/async/sse_parser.cpp
     src/async/ws_client.cpp
@@ -272,7 +273,12 @@ target_include_directories(neograph_async
     PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
 )
 target_compile_definitions(neograph_async PRIVATE NEOGRAPH_BUILDING_LIBRARY)
+# libcurl drives our HTTP/2 client (CurlH2Pool). On every target distro
+# this also pulls in HTTP/2 (via nghttp2), keep-alive pool, ALPN, and
+# eventually HTTP/3 if the runtime libcurl was compiled with it.
+find_package(CURL REQUIRED)
 target_link_libraries(neograph_async PUBLIC asio OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(neograph_async PRIVATE CURL::libcurl)
 # C++20 coroutines require this on GCC < 14 when using -std=c++20.
 target_compile_features(neograph_async PUBLIC cxx_std_20)
 add_library(neograph::async ALIAS neograph_async)
@@ -293,6 +299,16 @@ if(NEOGRAPH_BUILD_EXAMPLES)
     # branch.
     add_executable(neograph_async_https_smoke src/async/async_https_smoke_main.cpp)
     target_link_libraries(neograph_async_https_smoke PRIVATE neograph_async)
+
+    # Libcurl-backend HTTP/2 smoke. Bench candidate: passes CF WAF (it
+    # IS curl), gives us multiplexing + pool + future HTTP/3 for free.
+    add_executable(neograph_h2_curl_smoke src/async/h2_curl_smoke_main.cpp)
+    target_link_libraries(neograph_h2_curl_smoke PRIVATE CURL::libcurl)
+
+    # Multiplex check — 5 parallel POSTs over libcurl HTTP/2.
+    # NUM_CONNECTS should be 1 across all handles when multiplex works.
+    add_executable(neograph_h2_curl_multiplex src/async/h2_curl_multiplex_main.cpp)
+    target_link_libraries(neograph_h2_curl_multiplex PRIVATE CURL::libcurl)
 endif()
 
 # ===========================================================================
