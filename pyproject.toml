@@ -43,7 +43,7 @@ build-backend = "scikit_build_core.build"
 # explicit — this package IS the C++ runtime, not a Python wrapper around
 # someone else's runtime. Python import name is ``neograph_engine``.
 name = "neograph-engine"
-version = "0.1.6"
+version = "0.1.7"
 description = "C++ graph agent engine — Python bindings (LangGraph-equivalent semantics, microsecond engine overhead)"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -64,6 +64,13 @@ classifiers = [
     "Operating System :: MacOS",
     "Topic :: Software Development :: Libraries",
 ]
+# certifi ships the Mozilla CA bundle. The wheel's __init__.py uses it
+# to point the manylinux-bundled libssl at a CA store the host actually
+# has — without this the libssl baked into our manylinux wheel looks
+# for AlmaLinux paths (`/etc/pki/tls/certs/...`) that don't exist on
+# Ubuntu/Debian/Alpine/macOS and TLS handshakes hang for the full
+# request timeout. ~250 KB install, no transitive deps.
+dependencies = ["certifi"]
 
 [project.urls]
 Homepage      = "https://github.com/fox1245/NeoGraph"

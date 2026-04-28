@@ -19,6 +19,46 @@ Example:
     >>> result = engine.run(ng.RunConfig(thread_id="demo", input={...}))
 """
 
+import os as _os
+
+
+def _ensure_ssl_ca_bundle() -> None:
+    """Auto-point the manylinux-bundled OpenSSL at a CA store the host
+    actually has.
+
+    The PyPI manylinux_2_34 wheel links the OpenSSL that AlmaLinux 9
+    ships in the build container — its compiled-in CA store paths are
+    ``/etc/pki/tls/certs/ca-bundle.crt`` and friends. Hosts that don't
+    follow the RHEL layout (Ubuntu/Debian/Alpine/macOS) end up with
+    libssl unable to verify any peer cert, and TLS handshakes against
+    api.openai.com / api.anthropic.com hang silently for the full
+    request timeout (60 s default) before the engine surfaces them as
+    ``ConnPool::async_post: timeout``. curl works because curl uses
+    the system libssl, not the wheel-bundled one.
+
+    We unblock by pointing libssl at the ``certifi`` Mozilla CA bundle
+    via ``SSL_CERT_FILE`` whenever the caller hasn't set it themselves.
+    Idempotent and explicit — the user can override either by setting
+    ``SSL_CERT_FILE`` to a different path before importing or by
+    setting ``NEOGRAPH_SKIP_CERT_AUTOFIX=1``.
+    """
+    if _os.environ.get("NEOGRAPH_SKIP_CERT_AUTOFIX"):
+        return
+    if _os.environ.get("SSL_CERT_FILE"):
+        return  # honour an explicit override
+    try:
+        import certifi  # type: ignore[import-untyped]
+    except ImportError:
+        return  # certifi missing — trust the host store, surface the
+                # 60 s hang to the user with a clear hint via __doc__.
+    bundle = certifi.where()
+    if bundle and _os.path.isfile(bundle):
+        _os.environ["SSL_CERT_FILE"] = bundle
+
+
+_ensure_ssl_ca_bundle()
+
+
 from ._neograph import (
     # Versioning
     __version__,
