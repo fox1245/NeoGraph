@@ -130,6 +130,7 @@ demonstrate, not by file number.
 |---|------|-------|---------------|
 | 11 | [`11_clay_chatbot.cpp`](11_clay_chatbot.cpp) | Clay + Raylib (`-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON`) | Multi-turn chat with a Clay/Raylib UI. Pure-C++ desktop app, NeoGraph backend. Mock or `--live`. |
 | 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | OpenAI + Ghidra + ghidra-mcp | Reverse-engineering agent — recovers function names + summaries from a stripped binary via Ghidra. End-to-end verified (matched_score 0.92, 6-fn crackme). Full pipeline in [`fox1245/re-agent`](https://github.com/fox1245/re-agent). |
+| 36 | [`36_classifier_fanout.cpp`](36_classifier_fanout.cpp) | offline | Five small "classifiers" (sentiment / toxicity / language / topic / intent) fan out via Send and run in parallel. Wall time ≈ max(per-classifier), not sum — the small-model edge story. Mock 5 ms latency stand-in for a DistilBERT/MiniLM pass; inline `[ONNX SWAP-IN]` block shows the 30-line replacement using `Ort::Session`. No inference runtime dependency. |
 
 ## Mental model — three layers, JSON in the middle
 
@@ -158,9 +159,9 @@ show how the same definition round-trips through `json.dumps` and back.
 | `OPENAI_API_KEY` | 01, 03, 12, 13, 20, 22, 23, 24, 28, 29, 30, 33, 34, 35 |
 | `ANTHROPIC_API_KEY` | 15, 16, 17, 18, 19, 25 |
 | local server (no key) | 31, 32 |
-| **none** | 02, 04, 05, 06, 07, 08, 09, 10, 14, 21, 27 |
+| **none** | 02, 04, 05, 06, 07, 08, 09, 10, 14, 21, 27, 36 |
 
-Eleven examples run with no API key — that is the "kick the tyres"
+Twelve examples run with no API key — that is the "kick the tyres"
 floor. Examples 21 (MCP fanout, deterministic planner) and 27 (async
 concurrency, `steady_timer` stand-in for LLM latency) in particular
 demonstrate engine plumbing without spending a token.

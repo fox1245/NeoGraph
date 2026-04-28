@@ -638,6 +638,13 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             target_link_libraries(example_re_agent PRIVATE neograph::core neograph::llm neograph::mcp cppdotenv)
         endif()
 
+        # Example 36: small-model classifier fan-out — pure orchestration
+        # demo (no inference runtime dependency). The example body shows
+        # how to wrap an Ort::Session in a GraphNode but uses a mock
+        # latency stand-in so the build doesn't pull onnxruntime headers.
+        add_executable(example_classifier_fanout examples/36_classifier_fanout.cpp)
+        target_link_libraries(example_classifier_fanout PRIVATE neograph::core)
+
         # Clay + Raylib chatbot (optional — requires Raylib)
         option(NEOGRAPH_BUILD_CLAY_EXAMPLE "Build Clay chatbot example (fetches Raylib)" OFF)
         if(NEOGRAPH_BUILD_CLAY_EXAMPLE)
