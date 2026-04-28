@@ -18,14 +18,21 @@ namespace neograph::graph {
 // roughly 90,000 frames deep, with no clue where the bug is. The
 // guard turns that mystery crash into a clear runtime_error pointing
 // straight at the missing override (see feedback_async_bridge_required).
+//
+// Keying on the GraphNode pointer (not on a global depth counter) means
+// the guard catches "this node's defaults call each other in a loop"
+// without false-firing on legitimate nesting like a subgraph node whose
+// inner engine dispatches a different node through the same defaults.
 namespace {
-thread_local int execute_default_depth = 0;
+thread_local const GraphNode* current_default_node = nullptr;
 
 struct ExecuteDefaultGuard {
-    explicit ExecuteDefaultGuard(const std::string& node_name) {
-        if (execute_default_depth > 0) {
+    const GraphNode* prev_;
+
+    explicit ExecuteDefaultGuard(const GraphNode* node) : prev_(current_default_node) {
+        if (current_default_node == node) {
             throw std::runtime_error(
-                "GraphNode '" + node_name + "': must override at least one of "
+                "GraphNode '" + node->get_name() + "': must override at least one of "
                 "execute(), execute_async(), execute_full(), or "
                 "execute_full_async() — the default implementations call "
                 "each other and would recurse infinitely. The most common "
@@ -33,20 +40,20 @@ struct ExecuteDefaultGuard {
                 "sync `execute_full(state)`; for async-native nodes, "
                 "override `execute_async(state)`.");
         }
-        ++execute_default_depth;
+        current_default_node = node;
     }
-    ~ExecuteDefaultGuard() { --execute_default_depth; }
+    ~ExecuteDefaultGuard() { current_default_node = prev_; }
 };
 } // anonymous namespace
 
 std::vector<ChannelWrite> GraphNode::execute(const GraphState& state) {
-    ExecuteDefaultGuard guard(get_name());
+    ExecuteDefaultGuard guard(this);
     return neograph::async::run_sync(execute_async(state));
 }
 
 asio::awaitable<std::vector<ChannelWrite>>
 GraphNode::execute_async(const GraphState& state) {
-    ExecuteDefaultGuard guard(get_name());
+    ExecuteDefaultGuard guard(this);
     co_return execute(state);
 }
 

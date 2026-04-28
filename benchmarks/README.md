@@ -65,15 +65,17 @@ line via `engine->set_worker_count(1)` — see *Notes* after the table.
 | Framework | `seq` (3-node chain) | `par` (fan-out 5 + join) | `seq` vs. NeoGraph | `par` vs. NeoGraph |
 |-----------|---------------------:|-------------------------:|-------------------:|-------------------:|
 | **NeoGraph v3.0.0** *(reference, 2026-04-22)* | **5.0** | **11.8** | 1× | 1× |
-| **NeoGraph master** *(today, default `worker_count=hardware_concurrency`)* | **5.5** | **283** | 1× | 1× |
-| **NeoGraph master** *(today, `set_worker_count(1)`)* | **5.5** | **14.4** | 1× | 1× |
-| Haystack | 144.10 | 290.00 | 28.8× / 26.2× / 26.2× | 24.6× / 1.0× / 20.1× |
-| pydantic-graph | 235.90 | 286.13¹ | 47.2× / 42.9× / 42.9× | 24.2×¹ / 1.0×¹ / 19.9×¹ |
-| LangGraph | 656.73 | 2,348.66 | 131.3× / 119.4× / 119.4× | 199.0× / 8.3× / 163.1× |
-| LlamaIndex Workflow | 1,780.34 | 4,683.45 | 356.1× / 323.7× / 323.7× | 396.9× / 16.5× / 325.2× |
-| AutoGen GraphFlow | 3,209.20 | 7,292.67 | 641.8× / 583.5× / 583.5× | 618.0× / 25.8× / 506.4× |
+| **NeoGraph master** *(today, default `worker_count=hardware_concurrency`)* | **5.25** | **278** | 1× | 1× |
+| **NeoGraph master** *(today, `set_worker_count(1)`)* | **5.25** | **14.4** | 1× | 1× |
+| Haystack 2.28.0 | 139.85 | 278.48 | 28.0× / 26.6× / 26.6× | 23.6× / 1.0× / 19.3× |
+| pydantic-graph 1.87.0 | 227.14 | 280.26¹ | 45.4× / 43.3× / 43.3× | 23.7×¹ / 1.0×¹ / 19.5×¹ |
+| LangGraph 1.1.10 | 642.62 | 2,261.55 | 128.5× / 122.4× / 122.4× | 191.7× / 8.1× / 157.1× |
+| LlamaIndex Workflow 0.14.21 | 1,564.54 | 4,373.76 | 312.9× / 298.0× / 298.0× | 370.7× / 15.7× / 303.7× |
+| AutoGen GraphFlow 0.7.5 | 3,126.86 | 7,281.08 | 625.4× / 595.6× / 595.6× | 617.0× / 26.2× / 505.6× |
 
 Rightmost two columns show three ratios: vs. v3.0.0 reference / vs. master default / vs. master worker=1.
+
+The 2026-04-29 re-measurement (above) reproduces the 2026-04-22 reference within ±10 % per row — same machine, same toolchain, same workload. The README's headline claims (130× LangGraph, 600× AutoGen on `seq`) hold on master HEAD.
 
 ¹ pydantic-graph `par` is a serial 6-node emulation — it does not
 support fan-out. Not a parallel workload; included for completeness.
