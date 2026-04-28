@@ -4,7 +4,9 @@
 # Project
 #---------------------------------------------------------------------------
 PROJECT_NAME           = "NeoGraph"
-PROJECT_NUMBER         = "0.1.0"
+# PROJECT_NUMBER is sed-replaced from pyproject.toml at workflow build time
+# (see .github/workflows/docs.yml). Default 0.0.0-dev for local doxygen runs.
+PROJECT_NUMBER         = "0.0.0-dev"
 PROJECT_BRIEF          = "A C++17 Graph Agent Engine Library — LangGraph for C++"
 PROJECT_LOGO           =
 OUTPUT_DIRECTORY       = docs/api
@@ -12,10 +14,24 @@ OUTPUT_DIRECTORY       = docs/api
 #---------------------------------------------------------------------------
 # Input
 #---------------------------------------------------------------------------
-INPUT                  = include/neograph
-FILE_PATTERNS          = *.h *.hpp
+# include/neograph     → C++ public headers (the canonical API surface)
+# docs/doxygen-mainpage.md → landing page rendered as Main Page
+# docs/concepts.md     → narrative concepts guide, indexed for search
+# docs/troubleshooting.md → symptom-first fixes
+INPUT                  = include/neograph \
+                         docs/doxygen-mainpage.md \
+                         docs/concepts.md \
+                         docs/troubleshooting.md
+FILE_PATTERNS          = *.h *.hpp *.md
 RECURSIVE              = YES
 EXCLUDE_PATTERNS       = */deps/*
+
+# C++ examples are referenced via @example blocks (TBD) and as raw
+# code samples. Doxygen also surfaces them under the "Examples" tab
+# when EXAMPLE_PATH is set.
+EXAMPLE_PATH           = examples
+EXAMPLE_PATTERNS       = *.cpp *.h
+EXAMPLE_RECURSIVE      = YES
 
 #---------------------------------------------------------------------------
 # Build
@@ -87,7 +103,7 @@ SORT_MEMBER_DOCS       = YES
 SORT_BRIEF_DOCS        = YES
 ALPHABETICAL_INDEX     = YES
 SHOW_NAMESPACES        = YES
-USE_MDFILE_AS_MAINPAGE =
+USE_MDFILE_AS_MAINPAGE = docs/doxygen-mainpage.md
 JAVADOC_AUTOBRIEF      = YES
 MULTILINE_CPP_IS_BRIEF = NO
 TAB_SIZE               = 4
