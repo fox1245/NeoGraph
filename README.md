@@ -75,6 +75,37 @@ notebook, a Gradio app, or a FastAPI service:
 pip install neograph-engine
 ```
 
+### Five-second demo (no API key)
+
+The shortest thing that proves the install worked — one decorator-defined
+node, run it, read the output:
+
+```python
+import neograph_engine as ng
+
+@ng.node("greet")
+def greet(state):
+    return [ng.ChannelWrite("messages",
+        [{"role": "assistant", "content": f"Hello, {state.get('name')}!"}])]
+
+definition = {
+    "name": "demo",
+    "channels": {"name":     {"reducer": "overwrite"},
+                 "messages": {"reducer": "append"}},
+    "nodes":    {"greet": {"type": "greet"}},
+    "edges":    [{"from": ng.START_NODE, "to": "greet"},
+                 {"from": "greet",       "to": ng.END_NODE}],
+}
+
+engine = ng.GraphEngine.compile(definition, ng.NodeContext())
+result = engine.run(ng.RunConfig(thread_id="t1", input={"name": "NeoGraph"}))
+
+print(result.output["channels"]["messages"]["value"])
+# [{'role': 'assistant', 'content': 'Hello, NeoGraph!'}]
+```
+
+### ReAct agent with a real LLM
+
 ```python
 import neograph_engine as ng
 from neograph_engine.llm import OpenAIProvider
@@ -101,12 +132,50 @@ definition = {
 }
 engine = ng.GraphEngine.compile(definition, ctx)
 result = engine.run(ng.RunConfig(thread_id="t1",
-    input={"messages": [{"role": "user", "content": "What is 21 * 2?"}]}))
+    input={"messages": [{"role": "user", "content": "What is 21 * 2?"}]},
+    max_steps=10))
 ```
 
-What's covered by the binding:
+### Reading the output
 
-- **Engine surface** — `GraphEngine.compile / run / run_stream / run_async / run_stream_async / resume_async`, `RunConfig`, `RunResult`, `set_worker_count`, `set_checkpoint_store`.
+`engine.run(...)` returns a `RunResult` with these fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `output` | `dict` | Final state — `{"channels": {...}, "global_version": int}`. Use `output["channels"][name]["value"]` to read a channel. |
+| `interrupted` | `bool` | `True` if the run paused at an `interrupt_before` / `interrupt_after` / `NodeInterrupt`. |
+| `interrupt_node` | `str` | Name of the node that triggered the interrupt (when `interrupted`). |
+| `interrupt_value` | `dict` | Diagnostic payload — `{"reason": ...}` or `{"message": ...}`. |
+| `checkpoint_id` | `str` | ID of the latest checkpoint saved during the run. Pass to `engine.resume_async(checkpoint_id=...)` to continue. |
+| `execution_trace` | `list[str]` | Node names in the order they executed — useful for debugging routing. |
+
+`RunConfig` mirrors the LangGraph `RunnableConfig` idea:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `thread_id` | required | Conversation / session identifier — keeps checkpoint streams separate. |
+| `input` | `{}` | Initial channel values — keys must match the graph's `channels` definition. |
+| `max_steps` | 25 | Super-step ceiling; ReAct loops typically need 10+. |
+| `stream_mode` | `StreamMode.OFF` | Bitmask: `EVENTS \| TOKENS \| DEBUG \| VALUES \| UPDATES \| ALL`. Only consulted by `run_stream` / `run_stream_async`. |
+
+### Built-in reducers
+
+Channels need a reducer — how new writes combine with existing values.
+Two built-ins ship today:
+
+| Reducer | Behavior | Typical use |
+|---|---|---|
+| `"overwrite"` | New value replaces old. | Single-value channels: `name`, `current_question`, intermediate scratch. |
+| `"append"` | New list concatenated to existing list. | Conversation history, intermediate results, anything you want to accumulate across nodes. |
+
+Custom reducers can be registered in C++ via
+`ReducerRegistry::register_reducer(...)`. The Python binding exposes a
+hook here is on the v0.2 roadmap (see [Issue #5.5](../../issues)) —
+today, custom reducers require a from-source build.
+
+### What's covered by the binding
+
+- **Engine surface** — `GraphEngine.compile / run / run_stream / run_async / run_stream_async / resume_async / get_state / update_state / fork`, `RunConfig`, `RunResult`, `set_worker_count`, `set_checkpoint_store`, `set_node_cache_enabled`.
 - **Custom Python nodes** — subclass `neograph_engine.GraphNode`, register via `NodeFactory.register_type` or the `@neograph_engine.node` decorator. Engine dispatches under proper GIL handling, including from fan-out worker threads.
 - **Custom Python tools** — subclass `neograph_engine.Tool`, pass into `NodeContext(tools=[...])`. Engine takes ownership at compile time.
 - **Async** — every `*_async` binding returns an `asyncio.Future` bound to the calling thread's running loop. Stream callbacks are hopped to the loop thread via `loop.call_soon_threadsafe` so callbacks run where asyncio expects.
