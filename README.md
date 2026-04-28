@@ -14,7 +14,8 @@
 </p>
 
 <p align="center">
-  <a href="https://fox1245.github.io/NeoGraph/">API Reference</a> &middot;
+  <a href="docs/reference-en.md">Python API</a> &middot;
+  <a href="https://fox1245.github.io/NeoGraph/">C++ API (Doxygen)</a> &middot;
   <a href="#quick-start">Quick Start</a> &middot;
   <a href="#python-binding">Python Binding</a> &middot;
   <a href="#features">Features</a> &middot;
