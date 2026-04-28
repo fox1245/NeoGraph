@@ -146,18 +146,6 @@ public:
         return r;
     }
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        return execute_full(state).writes;
-    }
-
-    // Stage-4 async bridge — keep Sends on the async path. Without
-    // this override, the engine's default execute_full_async falls
-    // back to a path that doesn't surface our Sends, and recursion
-    // through the awaitable_thread machinery overflows the stack.
-    asio::awaitable<NodeResult>
-    execute_full_async(const GraphState& state) override {
-        co_return execute_full(state);
-    }
 };
 
 class SummarizerNode : public GraphNode {
