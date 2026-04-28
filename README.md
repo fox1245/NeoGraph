@@ -14,16 +14,16 @@
 </p>
 
 <p align="center">
-  <a href="docs/reference-en.md">Python API</a> &middot;
-  <a href="https://fox1245.github.io/NeoGraph/">C++ API (Doxygen)</a> &middot;
+  <a href="docs/concepts.md">Concepts</a> &middot;
   <a href="#quick-start">Quick Start</a> &middot;
   <a href="#python-binding">Python Binding</a> &middot;
-  <a href="#features">Features</a> &middot;
-  <a href="#examples">Examples</a> &middot;
-  <a href="#architecture">Architecture</a> &middot;
-  <a href="#comparison">vs LangGraph</a> &middot;
-  <a href="#benchmarks">Benchmarks</a> &middot;
-  <a href="#license">License</a>
+  <a href="examples/README.md">C++ Examples</a> &middot;
+  <a href="bindings/python/examples/README.md">Python Examples</a> &middot;
+  <a href="docs/troubleshooting.md">Troubleshooting</a> &middot;
+  <a href="docs/reference-en.md">API Reference</a> &middot;
+  <a href="https://fox1245.github.io/NeoGraph/">Doxygen</a> &middot;
+  <a href="#comparison-with-langgraph">vs LangGraph</a> &middot;
+  <a href="#benchmarks">Benchmarks</a>
 </p>
 
 ---

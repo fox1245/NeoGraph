@@ -1,12 +1,29 @@
 name: Deploy Doxygen to GitHub Pages
 
+# Re-publish whenever anything that the Doxygen site reflects changes:
+# public headers, the Doxyfile itself, the workflow, or any of the
+# Markdown files we feed in via Doxyfile's INPUT/USE_MDFILE_AS_MAINPAGE
+# (mainpage / concepts / troubleshooting / READMEs that link from the
+# generated site). Without these triggers the site lagged behind any
+# doc-only update for as long as no header changed.
 on:
+  # YAML doesn't allow two `push` keys, but a single `push` block can
+  # combine `branches` + `tags` + `paths`. Branch pushes are filtered
+  # by `paths`; tag pushes (v*) always fire so the published site's
+  # version label matches the wheel built from that tag.
   push:
     branches: [master]
+    tags: ['v*']
     paths:
       - 'include/**'
       - 'Doxyfile'
+      - 'pyproject.toml'                          # PROJECT_NUMBER source
       - '.github/workflows/docs.yml'
+      - 'docs/**.md'
+      - 'examples/**.cpp'
+      - 'examples/**/README.md'
+      - 'bindings/python/examples/README.md'
+      - 'README.md'
 
   workflow_dispatch:
 
@@ -28,8 +45,29 @@ jobs:
       - name: Install Doxygen & Graphviz
         run: sudo apt-get update && sudo apt-get install -y doxygen graphviz
 
+      - name: Inject project version into Doxyfile
+        # Pull "version = "X.Y.Z"" from pyproject.toml and substitute the
+        # placeholder in Doxyfile so the generated site is labelled with
+        # the same number as the PyPI wheel that the master branch will
+        # build into. Avoids the previous failure mode where Doxyfile
+        # was stuck at 0.1.0 across eight releases.
+        run: |
+          version=$(grep -E '^version[[:space:]]*=' pyproject.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ -z "$version" ]; then
+            echo "::error::Could not extract version from pyproject.toml"
+            exit 1
+          fi
+          echo "Injecting version: $version"
+          sed -i "s/^PROJECT_NUMBER         = \"0\\.0\\.0-dev\"/PROJECT_NUMBER         = \"$version\"/" Doxyfile
+          grep '^PROJECT_NUMBER' Doxyfile
+
       - name: Generate documentation
         run: doxygen Doxyfile
+
+      - name: Verify HTML output
+        run: |
+          test -f docs/api/html/index.html || { echo "::error::Doxygen produced no index.html"; exit 1; }
+          echo "Generated $(find docs/api/html -name '*.html' | wc -l) HTML pages"
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
