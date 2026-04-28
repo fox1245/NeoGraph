@@ -43,6 +43,8 @@
 
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/engine.h>
+#include <neograph/graph/loader.h>
+#include <neograph/graph/state.h>
 #include <neograph/graph/types.h>
 
 #ifdef NEOGRAPH_PYBIND_HAS_POSTGRES
@@ -629,6 +631,142 @@ void init_graph(py::module_& m) {
             "value (typically the human's response in HITL flows).")
 
         .def_property_readonly("name", &GraphEngine::get_graph_name);
+
+    // ── ReducerRegistry / ConditionRegistry — Python registration hooks ──
+    //
+    // Both are C++ process-lifetime singletons. Same Py_DECREF-after-
+    // Py_Finalize hazard as NodeFactory (see bind_node.cpp), so we
+    // mirror the pattern: stash the Python callable in a module-level
+    // dict (Python-owned lifetime) and have the C++ closure capture
+    // only the name string. Lookup happens at call time, under GIL.
+    m.attr("_python_reducers")   = py::dict();
+    m.attr("_python_conditions") = py::dict();
+
+    m.def("_register_python_reducer_internal",
+        [m](const std::string& name) {
+            ReducerRegistry::instance().register_reducer(name,
+                [name](const json& current,
+                       const json& incoming) -> json {
+                    py::gil_scoped_acquire g;
+                    py::module_ mod =
+                        py::module_::import("neograph_engine._neograph");
+                    py::dict registry =
+                        mod.attr("_python_reducers").cast<py::dict>();
+                    if (!registry.contains(name.c_str())) {
+                        throw std::runtime_error(
+                            "neograph: reducer '" + name +
+                            "' is registered with the C++ ReducerRegistry "
+                            "but missing from the Python reducer "
+                            "registry — did you call register_reducer "
+                            "from a different interpreter?");
+                    }
+                    py::function fn =
+                        registry[name.c_str()].cast<py::function>();
+                    py::object out = fn(json_to_py(current),
+                                        json_to_py(incoming));
+                    return py_to_json(out);
+                });
+        },
+        py::arg("name"),
+        "Internal: wires the C++ ReducerRegistry slot for `name` to "
+        "the Python callable in `_python_reducers[name]`. Called by "
+        "ReducerRegistry.register_reducer.");
+
+    m.def("_register_python_condition_internal",
+        [m](const std::string& name) {
+            ConditionRegistry::instance().register_condition(name,
+                [name](const GraphState& state) -> std::string {
+                    py::gil_scoped_acquire g;
+                    py::module_ mod =
+                        py::module_::import("neograph_engine._neograph");
+                    py::dict registry =
+                        mod.attr("_python_conditions").cast<py::dict>();
+                    if (!registry.contains(name.c_str())) {
+                        throw std::runtime_error(
+                            "neograph: condition '" + name +
+                            "' is registered with the C++ "
+                            "ConditionRegistry but missing from the "
+                            "Python condition registry — did you call "
+                            "register_condition from a different "
+                            "interpreter?");
+                    }
+                    py::function fn =
+                        registry[name.c_str()].cast<py::function>();
+                    // The Python callable receives the GraphState
+                    // wrapper (already bound in bind_state.cpp), not
+                    // a serialised dict — gives the user state.get(),
+                    // state.get_messages() &c. just like @ng.node.
+                    py::object out = fn(py::cast(&state,
+                        py::return_value_policy::reference));
+                    return out.cast<std::string>();
+                });
+        },
+        py::arg("name"),
+        "Internal: wires the C++ ConditionRegistry slot for `name` to "
+        "the Python callable in `_python_conditions[name]`. Called by "
+        "ConditionRegistry.register_condition.");
+
+    py::class_<ReducerRegistry>(m, "ReducerRegistry",
+        "Singleton registry mapping reducer names to merge functions. "
+        "Built-in reducers: \"overwrite\", \"append\". Use "
+        "register_reducer() to add custom Python reducers; the "
+        "callable is invoked as `fn(current, incoming) -> merged` "
+        "where current/incoming are Python objects (dict / list / "
+        "scalar) decoded from the channel JSON.")
+        .def_static("register_reducer",
+            [m](const std::string& name, py::function py_reducer) {
+                py::dict registry =
+                    m.attr("_python_reducers").cast<py::dict>();
+                registry[name.c_str()] = py_reducer;
+                m.attr("_register_python_reducer_internal")(name);
+            },
+            py::arg("name"),
+            py::arg("reducer"),
+            "Register a Python callable as a reducer. The callable is "
+            "invoked as `reducer(current, incoming)` — both are decoded "
+            "from JSON into Python objects — and must return a JSON-"
+            "serialisable result. Re-registering an existing name "
+            "replaces the previous reducer.\n\n"
+            "Example::\n\n"
+            "    def sum_reducer(current, incoming):\n"
+            "        return (current or 0) + incoming\n\n"
+            "    ng.ReducerRegistry.register_reducer(\"sum\", sum_reducer)\n\n"
+            "    # Now `\"reducer\": \"sum\"` works in your channels.")
+        .def_static("instance",
+            []() { return std::ref(ReducerRegistry::instance()); },
+            py::return_value_policy::reference,
+            "Return the singleton ReducerRegistry instance.");
+
+    py::class_<ConditionRegistry>(m, "ConditionRegistry",
+        "Singleton registry mapping conditional-edge condition names "
+        "to predicate functions. Built-in conditions: "
+        "\"has_tool_calls\", \"route_channel\". Use "
+        "register_condition() to add custom Python conditions; the "
+        "callable is invoked as `fn(state) -> str` and must return "
+        "one of the keys in the conditional edge's `routes` map.")
+        .def_static("register_condition",
+            [m](const std::string& name, py::function py_condition) {
+                py::dict registry =
+                    m.attr("_python_conditions").cast<py::dict>();
+                registry[name.c_str()] = py_condition;
+                m.attr("_register_python_condition_internal")(name);
+            },
+            py::arg("name"),
+            py::arg("condition"),
+            "Register a Python callable as a condition. The callable "
+            "is invoked as `condition(state)` where state is a "
+            "GraphState wrapper (use state.get(channel) / "
+            "state.get_messages() to inspect). Must return a string "
+            "key matching one of the routes in the conditional edge.\n\n"
+            "Example::\n\n"
+            "    def is_long(state):\n"
+            "        msgs = state.get(\"messages\") or []\n"
+            "        return \"long\" if len(msgs) > 10 else \"short\"\n\n"
+            "    ng.ConditionRegistry.register_condition(\"is_long\", is_long)")
+        .def_static("instance",
+            []() { return std::ref(ConditionRegistry::instance()); },
+            py::return_value_policy::reference,
+            "Return the singleton ConditionRegistry instance.");
 }
 
 } // namespace neograph::pybind

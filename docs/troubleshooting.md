@@ -113,9 +113,18 @@ Track [Issue #wasm-cors](../../issues) for status.
 ### `RuntimeError: Unknown reducer: <name>`
 
 Two reducers ship with the binding: `"overwrite"` and `"append"`.
-Anything else fails to compile. Custom reducers require building from
-source and registering via `ReducerRegistry::register_reducer(name, fn)`
-in C++. A Python registration hook is on the v0.2 roadmap.
+Anything else fails to compile unless you've registered it.
+
+**Register a custom reducer (from Python, since v0.1.9):**
+
+```python
+ng.ReducerRegistry.register_reducer("sum",
+    lambda current, incoming: (current or 0) + incoming)
+```
+
+Re-registering an existing name replaces the previous reducer. The
+callable runs under the GIL; concurrent Send fan-outs serialise on
+it the same way Python custom nodes do.
 
 If you typed `"last_value"` (a common LangGraph alias) — that's
 `"overwrite"` here. Same semantics, different name.
@@ -123,8 +132,21 @@ If you typed `"last_value"` (a common LangGraph alias) — that's
 ### `RuntimeError: Unknown condition: <name>`
 
 Built-in conditions: `has_tool_calls`, `route_channel`. Other names
-are custom and must be registered in C++ via
-`ConditionRegistry::register_condition(name, fn)`.
+must be registered.
+
+**Register a custom condition (from Python, since v0.1.9):**
+
+```python
+def is_long(state):
+    msgs = state.get("messages") or []
+    return "long" if len(msgs) > 10 else "short"
+
+ng.ConditionRegistry.register_condition("is_long", is_long)
+```
+
+The callable receives the live `GraphState` (with `state.get(channel)` /
+`state.get_messages()` available) and must return a string matching
+one of the conditional edge's `routes` keys.
 
 ### `RuntimeError: Write to unknown channel: <name>`
 

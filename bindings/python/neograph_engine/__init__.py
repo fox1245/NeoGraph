@@ -80,6 +80,8 @@ from ._neograph import (
     # Custom-node surface
     GraphState,
     NodeFactory,
+    ReducerRegistry,
+    ConditionRegistry,
 
     # Engine
     GraphEngine,
@@ -321,6 +323,8 @@ __all__ = [
     "GraphState",
     "GraphNode",
     "NodeFactory",
+    "ReducerRegistry",
+    "ConditionRegistry",
     "node",
     "GraphEngine",
     "RunConfig",

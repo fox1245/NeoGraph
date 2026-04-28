@@ -83,10 +83,19 @@ nodes and across super-steps; nodes communicate by writing to them.
 | `"overwrite"` | New value replaces old. Last-writer-wins on parallel writes. | Single-value scratch (current node, current question, route hint). |
 | `"append"` | New list (must be a list!) is concatenated to the existing list. Order: previous-step values first, this-step writes appended in node-execution order. | Conversation messages, search results, fan-out collection. |
 
-> Both reducers are registered in `ConditionRegistry::ConditionRegistry()`
+> Both reducers are registered in `ReducerRegistry::ReducerRegistry()`
 > at engine startup ([`src/core/graph_loader.cpp`](../src/core/graph_loader.cpp)).
-> Custom reducers from C++ via `ReducerRegistry::register_reducer(name, fn)`.
-> A Python registration hook is on the v0.2 roadmap.
+> Custom reducers register from C++ via `ReducerRegistry::register_reducer(name, fn)`
+> or from Python (since v0.1.9):
+>
+> ```python
+> ng.ReducerRegistry.register_reducer("sum",
+>     lambda current, incoming: (current or 0) + incoming)
+> ```
+>
+> The Python callable runs under the GIL; concurrent Send fan-outs
+> serialise on it the same way Python custom nodes do. Re-registering
+> a name replaces the previous reducer.
 
 ### Writing to channels
 
@@ -250,7 +259,20 @@ engine. Two ship as built-ins:
 | `has_tool_calls` | `"true"` if the latest assistant message has non-empty `tool_calls`; `"false"` otherwise. | ReAct loops — keep dispatching tools until the LLM stops asking. |
 | `route_channel` | Whatever string is in the `__route__` channel; falls back to `"default"`. | Pair with `intent_classifier` for explicit intent routing. |
 
-Custom conditions in C++ via `ConditionRegistry::register_condition(name, fn)`.
+Custom conditions register from C++ via `ConditionRegistry::register_condition(name, fn)`
+or from Python (since v0.1.9):
+
+```python
+def is_long(state):
+    msgs = state.get("messages") or []
+    return "long" if len(msgs) > 10 else "short"
+
+ng.ConditionRegistry.register_condition("is_long", is_long)
+```
+
+The callable receives the live `GraphState` (so `state.get(channel)` and
+`state.get_messages()` work) and must return a string matching one of
+the conditional edge's `routes` keys.
 
 ### Two equivalent forms — both work since v0.1.8
 
