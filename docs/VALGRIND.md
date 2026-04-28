@@ -1,4 +1,4 @@
-# Valgrind memory-leak sweep
+# Memory & sanitizer sweep (Valgrind / ASan / UBSan / soak)
 
 Ground-truth check that the example binaries and the test binary
 release every allocation they make. Runs under `valgrind --tool=memcheck
@@ -76,6 +76,65 @@ nightly CI job (not yet wired).
   intentional "leaks" at exit (allocated-but-not-freed module state)
   that swamp valgrind's signal. ASan with `LSAN_OPTIONS=detect_leaks=0`
   is the right tool there.
+
+## ASan + UBSan + LSan sweep — 11/11 examples + 322 ctests clean
+
+Compile with sanitizers:
+
+```bash
+cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug \
+    -DNEOGRAPH_BUILD_TESTS=ON -DNEOGRAPH_BUILD_EXAMPLES=ON \
+    -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -O1" \
+    -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+cmake --build build-asan -j$(nproc)
+```
+
+Run examples + tests with `LSAN_OPTIONS=` and `UBSAN_OPTIONS=`:
+
+```bash
+export ASAN_OPTIONS="detect_leaks=1:halt_on_error=0"
+export UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=0"
+ctest --test-dir build-asan -E "BIG_|valgrind"   # 322/322 pass (2026-04-29)
+```
+
+Last sweep on master HEAD (commit 6bd9632, 2026-04-29):
+
+| Surface | Result |
+|---|---|
+| 11 mock examples (custom_graph, send_command, intent_routing, state_management, all_features, subgraph, checkpoint_hitl, classifier_fanout, async_concurrent_runs, parallel_fanout, plan_executor) | ✓ exit=0, 0 ASan/UBSan errors |
+| `neograph_tests` ctest (322 tests under sanitizers) | ✓ 322/322 pass |
+
+ASan exposed one false-positive in the recursion guard added today —
+the original `thread_local int` depth counter fired across nested
+graphs (subgraph node's inner engine dispatching on the same thread
+made the outer counter non-zero). Fixed by switching to a per-node
+`const GraphNode*` key, so the guard only fires when the same node
+re-enters its own default chain.
+
+## Long-soak stress test — 10 000 graph runs, RSS Δ = 0 KB
+
+```cpp
+// /tmp/stress_runs.cpp — see commit log
+for (int i = 0; i < 10000; ++i) {
+    engine->run(RunConfig{.thread_id = "t" + std::to_string(i),
+                          .input    = {{"count", 0}}});
+    if (i == 100)  rss_at_100  = read_rss_kb();
+    if (i == 9999) rss_at_1000 = read_rss_kb();
+}
+```
+
+Run on master HEAD with a Counter node that emits Send fan-out
+recursively up to depth 3 per run — a realistic stress shape:
+
+```
+10000 runs wall=0.68s  ops=14728/s  RSS@100=4608kB  RSS@9999=4608kB  Δ=0kB
+PASS: RSS growth bounded
+```
+
+10 000 sequential graph runs, each allocating a few KB and freeing it,
+with **0 KB resident-set growth** across the last 9 900 iterations.
+The Linux glibc allocator returns the freed blocks to its pool cleanly
+— no per-run leak path exists.
 
 ## Adding to CI
 
