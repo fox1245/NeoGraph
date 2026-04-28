@@ -168,10 +168,17 @@ Two built-ins ship today:
 | `"overwrite"` | New value replaces old. | Single-value channels: `name`, `current_question`, intermediate scratch. |
 | `"append"` | New list concatenated to existing list. | Conversation history, intermediate results, anything you want to accumulate across nodes. |
 
-Custom reducers can be registered in C++ via
-`ReducerRegistry::register_reducer(...)`. The Python binding exposes a
-hook here is on the v0.2 roadmap (see [Issue #5.5](../../issues)) —
-today, custom reducers require a from-source build.
+Custom reducers register from Python (since v0.1.9):
+
+```python
+ng.ReducerRegistry.register_reducer("sum",
+    lambda current, incoming: (current or 0) + incoming)
+
+# Now `"reducer": "sum"` works in your channel definitions.
+```
+
+Same pattern for conditional routing — `ng.ConditionRegistry.register_condition("name", fn)`
+where `fn(state) -> str` returns one of the route keys.
 
 ### What's covered by the binding
 
