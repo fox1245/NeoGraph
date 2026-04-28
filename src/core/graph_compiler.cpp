@@ -53,27 +53,42 @@ CompiledGraph GraphCompiler::compile(const json& definition,
     }
 
     // --- Edges (regular + conditional) ---
+    // Accept either form for conditionals:
+    //   1. Inline in `edges` with a `condition` field (legacy).
+    //   2. Top-level `conditional_edges` array (LangGraph parity, matches
+    //      our README + Python examples). The compiler used to silently
+    //      drop form 2, which made the documented Python ReAct example
+    //      degenerate to a single LLM call with no tool dispatch.
+    auto parse_conditional = [&](const json& edge_def) {
+        ConditionalEdge ce;
+        ce.from      = edge_def.at("from").get<std::string>();
+        ce.condition = edge_def.at("condition").get<std::string>();
+        if (edge_def.contains("routes")) {
+            for (const auto& [key, target] : edge_def["routes"].items()) {
+                ce.routes[key] = target.get<std::string>();
+            }
+        }
+        cg.conditional_edges.push_back(std::move(ce));
+    };
+
     if (definition.contains("edges")) {
         for (const auto& edge_def : definition["edges"]) {
             bool is_conditional = edge_def.contains("condition")
                                || edge_def.value("type", "") == "conditional";
 
             if (is_conditional) {
-                ConditionalEdge ce;
-                ce.from      = edge_def.at("from").get<std::string>();
-                ce.condition = edge_def.at("condition").get<std::string>();
-                if (edge_def.contains("routes")) {
-                    for (const auto& [key, target] : edge_def["routes"].items()) {
-                        ce.routes[key] = target.get<std::string>();
-                    }
-                }
-                cg.conditional_edges.push_back(std::move(ce));
+                parse_conditional(edge_def);
             } else {
                 Edge e;
                 e.from = edge_def.at("from").get<std::string>();
                 e.to   = edge_def.at("to").get<std::string>();
                 cg.edges.push_back(std::move(e));
             }
+        }
+    }
+    if (definition.contains("conditional_edges")) {
+        for (const auto& edge_def : definition["conditional_edges"]) {
+            parse_conditional(edge_def);
         }
     }
 
