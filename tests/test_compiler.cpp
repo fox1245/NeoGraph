@@ -199,6 +199,55 @@ TEST(GraphCompiler, ConditionalEdgeViaTypeField) {
     EXPECT_TRUE(cg.conditional_edges[0].routes.empty());
 }
 
+TEST(GraphCompiler, ConditionalEdgesTopLevelKey) {
+    // LangGraph-parity form: a separate `conditional_edges` array at the
+    // top of the definition. Used by the README quickstart and every
+    // Python example. Pre-fix, this block was silently dropped, leaving
+    // ReAct graphs degenerate (single LLM call, no tool dispatch).
+    json def = {
+        {"edges", json::array({
+            {{"from", "__start__"}, {"to", "llm"}},
+            {{"from", "dispatch"},  {"to", "llm"}}
+        })},
+        {"conditional_edges", json::array({
+            {{"from", "llm"},
+             {"condition", "has_tool_calls"},
+             {"routes", {{"true", "dispatch"}, {"false", "__end__"}}}}
+        })}
+    };
+    auto cg = GraphCompiler::compile(def, NodeContext{});
+    EXPECT_EQ(cg.edges.size(), 2u);
+    ASSERT_EQ(cg.conditional_edges.size(), 1u);
+    EXPECT_EQ(cg.conditional_edges[0].from, "llm");
+    EXPECT_EQ(cg.conditional_edges[0].condition, "has_tool_calls");
+    EXPECT_EQ(cg.conditional_edges[0].routes.at("true"), "dispatch");
+    EXPECT_EQ(cg.conditional_edges[0].routes.at("false"), "__end__");
+}
+
+TEST(GraphCompiler, ConditionalEdgesBothForms) {
+    // Mixing inline-in-edges + top-level conditional_edges should
+    // accumulate both, not overwrite either.
+    json def = {
+        {"edges", json::array({
+            {{"from", "a"}, {"to", "b"}},
+            {{"from", "router1"},
+             {"condition", "state.x"},
+             {"routes", {{"yes", "b"}}}}
+        })},
+        {"conditional_edges", json::array({
+            {{"from", "router2"},
+             {"condition", "state.y"},
+             {"routes", {{"go", "b"}}}}
+        })}
+    };
+    auto cg = GraphCompiler::compile(def, NodeContext{});
+    EXPECT_EQ(cg.edges.size(), 1u);
+    ASSERT_EQ(cg.conditional_edges.size(), 2u);
+    std::set<std::string> froms;
+    for (const auto& ce : cg.conditional_edges) froms.insert(ce.from);
+    EXPECT_EQ(froms, (std::set<std::string>{"router1", "router2"}));
+}
+
 // =========================================================================
 // Interrupts
 // =========================================================================
