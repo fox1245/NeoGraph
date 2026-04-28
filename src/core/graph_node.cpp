@@ -9,13 +9,44 @@ namespace neograph::graph {
 // --- GraphNode sync ↔ async crossover defaults (Sem 3.4) ---
 // Same shape as Provider::complete / complete_async. Override one,
 // the other comes free.
+//
+// Recursion-guard rationale: the two defaults below call each other.
+// Override ONE of {execute, execute_async, execute_full,
+// execute_full_async} and the cycle terminates at the user's override.
+// Override NONE of them and the cycle is unbroken — without the guard,
+// you'd hit a stack overflow inside asio's awaitable_thread machinery
+// roughly 90,000 frames deep, with no clue where the bug is. The
+// guard turns that mystery crash into a clear runtime_error pointing
+// straight at the missing override (see feedback_async_bridge_required).
+namespace {
+thread_local int execute_default_depth = 0;
+
+struct ExecuteDefaultGuard {
+    explicit ExecuteDefaultGuard(const std::string& node_name) {
+        if (execute_default_depth > 0) {
+            throw std::runtime_error(
+                "GraphNode '" + node_name + "': must override at least one of "
+                "execute(), execute_async(), execute_full(), or "
+                "execute_full_async() — the default implementations call "
+                "each other and would recurse infinitely. The most common "
+                "shape for Send/Command-emitting nodes is to override the "
+                "sync `execute_full(state)`; for async-native nodes, "
+                "override `execute_async(state)`.");
+        }
+        ++execute_default_depth;
+    }
+    ~ExecuteDefaultGuard() { --execute_default_depth; }
+};
+} // anonymous namespace
 
 std::vector<ChannelWrite> GraphNode::execute(const GraphState& state) {
+    ExecuteDefaultGuard guard(get_name());
     return neograph::async::run_sync(execute_async(state));
 }
 
 asio::awaitable<std::vector<ChannelWrite>>
 GraphNode::execute_async(const GraphState& state) {
+    ExecuteDefaultGuard guard(get_name());
     co_return execute(state);
 }
 
@@ -45,23 +76,26 @@ NodeResult GraphNode::execute_full(const GraphState& state) {
 
 asio::awaitable<NodeResult>
 GraphNode::execute_full_async(const GraphState& state) {
-    // Async-first default (Stage 4): wraps execute_async() into a
-    // NodeResult directly instead of routing through sync execute_full.
-    // Rationale: the prior default funneled async callers through
-    // execute_full → execute → run_sync(execute_async), spawning a new
-    // io_context per super-step. That silently serialized async-native
-    // nodes on their own executor — defeating the whole point of
-    // run_async() overlap.
+    // Default route: call sync `execute_full(state)` directly. This is
+    // the right thing to do for both common cases:
     //
-    // Contract for Command/Send emitters: if your subclass overrides
-    // sync execute_full() to return Command/Send, you MUST also
-    // override execute_full_async() with a one-line bridge:
-    //     co_return execute_full(state);
-    // otherwise Command/Send will be silently dropped in the async
-    // path (the v2.0 latent-dispatch bug — fixed in 3.0 at the cost
-    // of the run_sync hop this flip now removes).
-    auto writes = co_await execute_async(state);
-    co_return NodeResult{std::move(writes)};
+    //   1. User overrode `execute_full` (sync) to return Command/Send.
+    //      We pick that up and the directives reach the engine. (The
+    //      previous default routed through `execute_async` → `execute`,
+    //      which strips down to `vector<ChannelWrite>` only — silently
+    //      dropping Command/Send. Worse, in v3.0 it stack-overflowed
+    //      because execute and execute_async default into each other —
+    //      see ExecuteDefaultGuard above.)
+    //
+    //   2. User overrode `execute_async` (async-native, no Send/Command).
+    //      Default `execute_full` calls default `execute` which calls
+    //      `run_sync(execute_async)` → user's override. Single
+    //      sync→async hop, same as v3.0's behaviour.
+    //
+    // Async-native Send/Command emitters should override THIS method
+    // directly with their own awaitable body — the default never has
+    // to fabricate one.
+    co_return execute_full(state);
 }
 
 // --- GraphNode default execute_full_stream ---
