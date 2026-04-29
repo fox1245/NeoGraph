@@ -22,6 +22,7 @@
 #include <asio/awaitable.hpp>
 
 #include <chrono>
+#include <functional>
 #include <string>
 
 namespace neograph::a2a {
@@ -86,6 +87,23 @@ class NEOGRAPH_API A2AClient {
     /// `tasks/cancel` — request cancellation. Returns updated Task.
     Task cancel_task(const std::string& task_id);
     asio::awaitable<Task> cancel_task_async(const std::string& task_id);
+
+    /// `message/stream` — send a message and receive SSE-framed status
+    /// updates as the agent progresses, plus the final Task.
+    ///
+    /// `on_event` is invoked synchronously on the network thread for
+    /// each parsed StreamEvent. Return `true` to keep reading or
+    /// `false` to abort early. The final Task (or a status-update with
+    /// `final=true`) ends the stream regardless.
+    using StreamCallback = std::function<bool(const StreamEvent&)>;
+
+    Task send_message_stream(const std::string& text,
+                             StreamCallback on_event,
+                             const std::string& task_id    = "",
+                             const std::string& context_id = "");
+
+    Task send_message_stream(const MessageSendParams& params,
+                             StreamCallback on_event);
 
     /// Lower-level: arbitrary JSON-RPC method.
     json rpc_call(const std::string& method, const json& params);

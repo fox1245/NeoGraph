@@ -517,6 +517,7 @@ if(NEOGRAPH_BUILD_A2A)
     add_library(neograph_a2a
         src/a2a/types.cpp
         src/a2a/client.cpp
+        src/a2a/server.cpp
         src/a2a/a2a_caller_node.cpp
     )
 
@@ -529,7 +530,7 @@ if(NEOGRAPH_BUILD_A2A)
     target_compile_definitions(neograph_a2a PRIVATE NEOGRAPH_BUILDING_LIBRARY)
     target_link_libraries(neograph_a2a
         PUBLIC  neograph_core
-        PRIVATE neograph_async OpenSSL::SSL OpenSSL::Crypto
+        PRIVATE neograph_async httplib OpenSSL::SSL OpenSSL::Crypto
     )
 
     add_library(neograph::a2a ALIAS neograph_a2a)
@@ -715,6 +716,10 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         if(NEOGRAPH_BUILD_A2A)
             add_executable(example_a2a_client examples/37_a2a_client.cpp)
             target_link_libraries(example_a2a_client PRIVATE
+                neograph::core neograph::a2a)
+
+            add_executable(example_a2a_server examples/38_a2a_server.cpp)
+            target_link_libraries(example_a2a_server PRIVATE
                 neograph::core neograph::a2a)
         endif()
 

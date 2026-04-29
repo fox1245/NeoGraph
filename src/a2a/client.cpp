@@ -335,4 +335,126 @@ Task A2AClient::cancel_task(const std::string& task_id) {
     return async::run_sync(cancel_task_async(task_id));
 }
 
+// ---------------------------------------------------------------------------
+// message/stream — SSE consumer
+// ---------------------------------------------------------------------------
+namespace {
+
+/// Carve `data: {...}` frames out of an SSE byte stream. Holds a tail
+/// buffer across calls so a frame split across two chunks survives.
+struct SseFrameSplitter {
+    std::string carry;
+
+    /// Append @p chunk and call @p on_frame for each complete `data:`
+    /// line found. Returns when the stream tail does not contain a
+    /// terminator yet.
+    void feed(std::string_view chunk,
+              const std::function<void(std::string_view)>& on_frame) {
+        carry.append(chunk);
+        std::size_t pos = 0;
+        for (;;) {
+            auto end = carry.find("\n\n", pos);
+            if (end == std::string::npos) break;
+            std::string_view frame(carry.data() + pos, end - pos);
+            // Each SSE event may have multiple lines: "event: ...\ndata: {...}".
+            // We only care about the data field.
+            std::size_t line_start = 0;
+            while (line_start < frame.size()) {
+                auto line_end = frame.find('\n', line_start);
+                std::string_view line = (line_end == std::string::npos)
+                                          ? frame.substr(line_start)
+                                          : frame.substr(line_start, line_end - line_start);
+                if (line.rfind("data:", 0) == 0) {
+                    auto payload = line.substr(5);
+                    while (!payload.empty() && payload.front() == ' ')
+                        payload.remove_prefix(1);
+                    on_frame(payload);
+                }
+                if (line_end == std::string::npos) break;
+                line_start = line_end + 1;
+            }
+            pos = end + 2;
+        }
+        carry.erase(0, pos);
+    }
+};
+
+}  // namespace
+
+Task A2AClient::send_message_stream(const MessageSendParams& params,
+                                    StreamCallback on_event) {
+    json p;
+    to_json(p, params);
+    json body = {
+        {"jsonrpc", "2.0"},
+        {"id",      ++request_id_},
+        {"method",  "message/stream"},
+        {"params",  p},
+    };
+    auto body_str = body.dump();
+    auto endpoint = async::split_async_endpoint(base_url_);
+    std::vector<std::pair<std::string, std::string>> headers = {
+        {"Content-Type", "application/json"},
+        {"Accept",       "text/event-stream"},
+    };
+
+    async::RequestOptions opts;
+    opts.timeout = timeout_;
+
+    Task last_task;
+    SseFrameSplitter splitter;
+    bool aborted = false;
+
+    auto frame_handler = [&](std::string_view payload) {
+        if (aborted) return;
+        json frame_json;
+        try {
+            frame_json = json::parse(std::string(payload));
+        } catch (...) {
+            return;
+        }
+        json result = frame_json.contains("result")
+                        ? frame_json["result"]
+                        : frame_json;
+        StreamEvent ev = parse_stream_event(result);
+        if (ev.type == StreamEvent::Type::Task && ev.task) {
+            last_task = *ev.task;
+        }
+        if (on_event && !on_event(ev)) aborted = true;
+    };
+
+    auto chunk_callback = [&](std::string_view chunk) {
+        splitter.feed(chunk, frame_handler);
+    };
+
+    async::run_sync([&]() -> asio::awaitable<void> {
+        auto ex = co_await asio::this_coro::executor;
+        co_await async::async_post_stream(
+            ex,
+            endpoint.host,
+            endpoint.port,
+            endpoint.prefix.empty() ? "/" : endpoint.prefix,
+            body_str,
+            std::move(headers),
+            endpoint.tls,
+            chunk_callback,
+            opts);
+    }());
+
+    return last_task;
+}
+
+Task A2AClient::send_message_stream(const std::string& text,
+                                    StreamCallback on_event,
+                                    const std::string& task_id,
+                                    const std::string& context_id) {
+    MessageSendParams params;
+    params.message.message_id = fresh_uuid_like();
+    params.message.role       = Role::User;
+    params.message.parts.push_back(Part::text_part(text));
+    if (!task_id.empty())    params.message.task_id    = task_id;
+    if (!context_id.empty()) params.message.context_id = context_id;
+    return send_message_stream(params, std::move(on_event));
+}
+
 }  // namespace neograph::a2a
