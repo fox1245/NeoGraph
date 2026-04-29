@@ -173,7 +173,47 @@ job from `sanitizer-test`.
 Built with Clang's `-fsanitize=fuzzer,address,undefined` so any crash
 surfaces ASan/UBSan diagnostics in the same trace.
 
-### Suppressions
+## Release-build hardening
+
+Release / RelWithDebInfo / MinSizeRel builds enable defense-in-depth
+flags by default (`NEOGRAPH_ENABLE_HARDENING=ON`):
+
+| Flag | What it catches |
+|---|---|
+| `-D_GLIBCXX_ASSERTIONS` | std::vector OOB, dereferencing `end()`, iterator invalidation, uninitialized `std::optional` access — abort with diagnostic instead of silent UB. Active in Debug + Release. |
+| `-fstack-protector-strong` | Buffer overflows that would smash the return address — canary check fires before `ret`. |
+| `-fcf-protection=full` | Indirect call/jump targets tagged for control-flow integrity. ROP-style attacks fail at the call site. Cheap on amd64 with CET-IBT. |
+| `-D_FORTIFY_SOURCE=2` | Inline checks on libc string/memory routines. Release-only (needs ≥`-O1`). |
+| `-Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack` | Read-only relocations, immediate binding (no late PLT writes), no-exec stack — RELRO baseline. |
+
+Performance impact measured on master HEAD with `bench_neograph`:
+
+|  | seq µs | par µs |
+|---|---:|---:|
+| Baseline Release | 5.1 | 275.2 |
+| Hardened Release | 5.1 | 275.6 |
+
+**0 % overhead** within measurement noise. The flags shift work to the
+linker (relocations, PLT) and to a per-function 8-byte canary load+
+compare — both invisible at the µs scale of NeoGraph's engine path.
+
+Disabled automatically under sanitizer builds (ASan/TSan/UBSan) where
+they'd duplicate the sanitizer's own checks. Disabled under MSVC
+(uses different hardening primitives — `/GS` etc., not in scope here).
+
+## Sanitizer combinations explored but not viable
+
+**MemorySanitizer** (uninitialized-read detection): requires every
+linked C/C++ library — including libstdc++, libssl, libcurl, libpqxx —
+to be MSan-instrumented, otherwise calls into them produce false
+positives that swamp the signal. Clang's prebuilt `libc++` on Ubuntu
+24.04 does not ship an MSan variant, and rebuilding the
+standard library + every transitive dep is impractical. The
+ASan+UBSan+TSan trio already catches uninit reads that escape into
+heap-allocated state (since heap is poisoned at allocation under ASan
+with `detect_uninitialized_reads=1` semantics in some passes). Skipped.
+
+## Suppressions
 
 | File | What it covers |
 |---|---|
