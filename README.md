@@ -19,7 +19,7 @@
   <a href="#python-binding">Python Binding</a> &middot;
   <a href="examples/README.md">C++ Examples</a> &middot;
   <a href="bindings/python/examples/README.md">Python Examples</a> &middot;
-  <a href="examples/cookbook/ai-assembly/">AI Assembly cookbook</a> &middot;
+  <a href="examples/cookbook/">Cookbooks</a> &middot;
   <a href="docs/troubleshooting.md">Troubleshooting</a> &middot;
   <a href="docs/reference-en.md">API Reference</a> &middot;
   <a href="https://fox1245.github.io/NeoGraph/">Doxygen</a> &middot;

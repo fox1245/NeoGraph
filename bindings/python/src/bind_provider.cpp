@@ -36,6 +36,65 @@ namespace py = pybind11;
 
 namespace neograph::pybind {
 
+namespace {
+
+// pybind11 trampoline so Python classes can subclass neograph.Provider
+// and have their `complete()` / `get_name()` overrides called from
+// graph nodes (LLMCallNode, etc.). The C++ engine sees a Provider*;
+// its virtual dispatch resolves to PyProvider, which then bounces
+// into the Python override under the GIL.
+//
+// Streaming fallback: if the Python subclass doesn't override
+// `complete_stream`, we just call `complete()` and emit the whole
+// content as a single chunk. That lets a non-streaming Python wrapper
+// still work in graphs that requested stream mode.
+class PyProvider : public neograph::Provider {
+  public:
+    using neograph::Provider::Provider;
+
+    neograph::ChatCompletion
+    complete(const neograph::CompletionParams& params) override {
+        PYBIND11_OVERRIDE(neograph::ChatCompletion,
+                          neograph::Provider, complete, params);
+    }
+
+    neograph::ChatCompletion
+    complete_stream(const neograph::CompletionParams& params,
+                    const neograph::StreamCallback& on_chunk) override {
+        // If the Python subclass overrode this, dispatch. Otherwise
+        // synthesise a one-chunk stream from `complete()` so callers
+        // that asked for streaming still see the content via the
+        // callback — no ABCMeta flailing required of the user.
+        py::gil_scoped_acquire gil;
+        py::function override =
+            py::get_override(static_cast<const neograph::Provider*>(this),
+                             "complete_stream");
+        if (override) {
+            // Python on_chunk: pass a callable that re-locks the GIL
+            // before forwarding to the C++ callback so the user can
+            // call `on_chunk(token)` cleanly.
+            auto py_on_chunk = py::cpp_function([&on_chunk](const std::string& tok) {
+                if (on_chunk) on_chunk(tok);
+            });
+            auto r = override(params, py_on_chunk);
+            return r.cast<neograph::ChatCompletion>();
+        }
+        // Fallback: complete() + single chunk.
+        auto result = complete(params);
+        if (on_chunk && !result.message.content.empty()) {
+            on_chunk(result.message.content);
+        }
+        return result;
+    }
+
+    std::string get_name() const override {
+        PYBIND11_OVERRIDE_PURE(std::string,
+                               neograph::Provider, get_name,);
+    }
+};
+
+}  // namespace
+
 void init_provider(py::module_& m) {
     // ── ToolCall ─────────────────────────────────────────────────────────
     py::class_<neograph::ToolCall>(m, "ToolCall",
@@ -152,15 +211,25 @@ void init_provider(py::module_& m) {
         .def_readwrite("completion_tokens", &neograph::ChatCompletion::Usage::completion_tokens)
         .def_readwrite("total_tokens",      &neograph::ChatCompletion::Usage::total_tokens);
 
-    // ── Provider base (shared_ptr holder so NodeContext can store it) ────
+    // ── Provider base — Python subclassable via trampoline (v0.2.3+) ─────
     //
-    // Subclassing Provider from Python isn't enabled in commit 1 — we
-    // expose only the sync `complete()` method so a Python caller can
-    // round-trip a CompletionParams against a concrete provider for
-    // smoke tests.
-    py::class_<neograph::Provider, std::shared_ptr<neograph::Provider>>(m, "Provider",
-        "Abstract LLM provider. Construct a concrete subclass like "
-        "neograph.llm.OpenAIProvider or neograph.llm.SchemaProvider.")
+    // Lets a Python user bring their own LLM client (the official
+    // openai SDK, anthropic SDK, langchain wrapper, etc.) and plug it
+    // into NeoGraph nodes by subclassing `Provider` and implementing
+    // `complete(params)` + `get_name()`. Streaming defaults to a
+    // no-op single-chunk fallback that just calls `complete()` —
+    // override `complete_stream` if your underlying client supports
+    // token streams.
+    py::class_<neograph::Provider, PyProvider,
+               std::shared_ptr<neograph::Provider>>(m, "Provider",
+        "Abstract LLM provider. Subclass and override "
+        "`complete(params: CompletionParams) -> ChatCompletion` and "
+        "`get_name() -> str` to plug your own LLM client (openai SDK, "
+        "anthropic SDK, langchain, etc.) into NeoGraph graphs. "
+        "Construct a concrete subclass directly, e.g. "
+        "neograph_engine.llm.OpenAIProvider, when you want NeoGraph's "
+        "built-in async HTTP path instead.")
+        .def(py::init<>())
         .def("complete", [](neograph::Provider& self,
                             const neograph::CompletionParams& p) {
             // Release the GIL while the provider does network I/O so
