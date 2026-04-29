@@ -286,8 +286,17 @@ RunResult GraphEngine::run(const RunConfig& config) {
     return neograph::async::run_sync(execute_graph_async(config, nullptr));
 }
 
+// Public async entry — takes RunConfig BY VALUE so the coroutine frame
+// owns its own copy. Callers commonly co_spawn this awaitable, defer
+// the await, and let the source RunConfig go out of scope before the
+// engine actually drives the run — that pattern would dangling-
+// reference the config if we took const& here. ASan caught this in
+// the concurrent-stress test (commit-introducing-this-fix). The
+// internal `execute_graph_async` still takes const& because its
+// callers (run_sync, run_async, resume_async) all keep the config
+// alive on their own stack frame.
 asio::awaitable<RunResult>
-GraphEngine::run_async(const RunConfig& config) {
+GraphEngine::run_async(RunConfig config) {
     co_return co_await execute_graph_async(config, nullptr);
 }
 
@@ -297,8 +306,11 @@ RunResult GraphEngine::run_stream(const RunConfig& config,
 }
 
 asio::awaitable<RunResult>
-GraphEngine::run_stream_async(const RunConfig& config,
-                              const GraphStreamCallback& cb) {
+GraphEngine::run_stream_async(RunConfig config,
+                              GraphStreamCallback cb) {
+    // Same lifetime concern as run_async — both config and cb might
+    // be stack-local at the callsite, captured into a co_spawn'd
+    // awaitable that outlives the callsite. Take both by value.
     co_return co_await execute_graph_async(config, cb);
 }
 

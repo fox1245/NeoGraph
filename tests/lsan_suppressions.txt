@@ -1,0 +1,52 @@
+# LSan suppressions for NeoGraph's sanitizer-test CI gate.
+#
+# These libraries either intentionally leak per-process state (e.g.
+# OpenSSL's algorithm tables) or do reachable allocations that LSan
+# flags as "still reachable" at exit. None of these are NeoGraph code.
+# If you find yourself adding a NeoGraph symbol to this file, that's a
+# real bug — fix the leak in NeoGraph, don't suppress.
+#
+# Format: `leak:<symbol_substring>` — applied to any allocation whose
+# stack contains a frame whose mangled name matches the substring.
+
+# OpenSSL — algorithm tables, error queue per-thread, lazy ENGINE init.
+# These persist for the life of the process by design.
+leak:CRYPTO_zalloc
+leak:OPENSSL_init_crypto
+leak:OPENSSL_LH_insert
+leak:ERR_load_strings
+leak:ENGINE_load_
+
+# libcurl — DNS cache + alt-svc + cookie engine pre-allocations that
+# never get released because curl is treated as a process singleton.
+leak:Curl_resolv
+leak:Curl_share_init
+leak:Curl_init_userdefined
+
+# libstdc++ ABI — the demangler caches symbol tables in TLS that
+# isn't released on dlclose.
+leak:__cxa_get_globals
+leak:__cxa_demangle
+
+# Unwinder & exception machinery (libgcc/libstdc++ runtime).
+leak:_Unwind_
+
+# pthread thread-local storage — TLS blocks are released on thread
+# exit, but if a worker thread is alive at process exit, LSan treats
+# its TLS as a leak. Engine thread pools shut down before exit, but
+# detached io_context threads occasionally outlive the cleanup.
+leak:__tls_get_addr
+
+# libpq — connection-cache + per-connection state caches that PG's
+# C client treats as process-global. Cleared by PQfinish / atexit
+# on most paths but LSan racing with atexit reports them.
+leak:PQconnectStart
+leak:PQconnectdb
+leak:pgthreadlock
+leak:pq_initstack
+
+# libpqxx — connection-pool internal caches and prepared-statement
+# tables. Lifetime tied to neograph::graph::PostgresCheckpointStore
+# which destructs cleanly, but residual state from libpqxx itself
+# pre-allocates per-process tables.
+leak:pqxx::connection

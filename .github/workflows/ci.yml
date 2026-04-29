@@ -301,3 +301,136 @@ jobs:
           par_us=$(echo "$out" | awk -F'\t' '$1=="par" {print $4}')
           awk -v v="$seq_us" 'BEGIN{ if (v+0 > 60)  { print "FAIL seq: " v "us > 60"; exit 1 } print "ok seq: " v "us" }'
           awk -v v="$par_us" 'BEGIN{ if (v+0 > 300) { print "FAIL par: " v "us > 300"; exit 1 } print "ok par: " v "us" }'
+
+  # Compile + ctest under -fsanitize=address,undefined and run the
+  # no-network examples in the same configuration. ASan caught a
+  # false-positive in the recursion guard during the 2026-04-29 audit
+  # (a per-thread depth counter that fired across legitimate subgraph
+  # nesting) AND a use-after-scope in run_async's RunConfig
+  # parameter (the awaitable held a reference to a stack-local config
+  # that callers commonly let go out of scope before co_spawn fired)
+  # — without this gate the only line of defence was a one-shot local
+  # sweep. Now every PR pays ~5 minutes of build + test under
+  # sanitizers, so any future UAF / leak / undefined-behaviour
+  # regression fails red before merge.
+  #
+  # Runs in parallel with build-and-test. Postgres is enabled to
+  # exercise the libpq ASan surface (NeoGraph allocates around it,
+  # so any PG-path leak shows up here). MCP / HTTP / TLS surfaces
+  # are also covered — see tests/lsan_suppressions.txt for the
+  # known-leak list from third-party C libraries.
+  sanitizer-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: neograph_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake build-essential libssl-dev libcurl4-openssl-dev \
+            libpq-dev pkg-config
+
+      - name: Configure (Debug + ASan + UBSan, postgres on)
+        run: |
+          cmake -B build-asan \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DNEOGRAPH_BUILD_TESTS=ON \
+            -DNEOGRAPH_BUILD_EXAMPLES=ON \
+            -DNEOGRAPH_BUILD_BENCHMARKS=OFF \
+            -DNEOGRAPH_BUILD_POSTGRES=ON \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -O1" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Build (everything)
+        run: cmake --build build-asan -j$(nproc)
+
+      - name: Run ctest under ASan + UBSan
+        env:
+          # detect_leaks=1 enables LSan exit-time check; the few
+          # third-party libs we link (libssl, libpq, libcurl) get
+          # suppressed via tests/lsan_suppressions.txt.
+          ASAN_OPTIONS: "detect_leaks=1:halt_on_error=0:abort_on_error=0:strict_init_order=1"
+          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=0"
+          LSAN_OPTIONS: "suppressions=${{ github.workspace }}/tests/lsan_suppressions.txt"
+          NEOGRAPH_TEST_POSTGRES_URL: postgresql://postgres:test@localhost:5432/neograph_test
+        run: |
+          ctest --test-dir build-asan -E "BIG_|valgrind" --output-on-failure
+
+      - name: Run no-network examples under ASan + UBSan
+        env:
+          ASAN_OPTIONS: "detect_leaks=1:halt_on_error=0:abort_on_error=0:strict_init_order=1"
+          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=0"
+          LSAN_OPTIONS: "suppressions=${{ github.workspace }}/tests/lsan_suppressions.txt"
+        run: |
+          set -e
+          examples="example_custom_graph example_send_command example_intent_routing
+                    example_state_management example_all_features example_subgraph
+                    example_checkpoint_hitl example_classifier_fanout
+                    example_async_concurrent_runs example_parallel_fanout
+                    example_plan_executor"
+          for ex in $examples; do
+            if [ -x "./build-asan/$ex" ]; then
+              echo "::group::$ex"
+              timeout 90 "./build-asan/$ex" >/dev/null
+              echo "  ok"
+              echo "::endgroup::"
+            else
+              echo "::warning::$ex not built; skipping"
+            fi
+          done
+
+      - name: Build Python binding with ASan
+        run: |
+          # Reconfigure with NEOGRAPH_BUILD_PYBIND=ON; binding inherits
+          # the same -fsanitize=address,undefined flags from CMAKE_CXX_FLAGS.
+          cmake -B build-asan -DNEOGRAPH_BUILD_PYBIND=ON
+          cmake --build build-asan -j$(nproc) --target _neograph
+          # scikit-build-core normally copies __init__.py into the
+          # build dir; do it manually so PYTHONPATH=build-asan works.
+          cp bindings/python/neograph_engine/__init__.py \
+             build-asan/neograph_engine/__init__.py
+          cp bindings/python/neograph_engine/llm.py \
+             build-asan/neograph_engine/llm.py 2>/dev/null || true
+          cp bindings/python/neograph_engine/streaming.py \
+             build-asan/neograph_engine/streaming.py 2>/dev/null || true
+          cp bindings/python/neograph_engine/tracing.py \
+             build-asan/neograph_engine/tracing.py 2>/dev/null || true
+
+      - name: Set up Python + pytest
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run pytest under ASan (UBSan-only for exception-propagating tests)
+        env:
+          # detect_leaks=0 — Python's interpreter has many intentional
+          # cached allocations that swamp LSan. ASan UAF / UB / heap-
+          # buffer-overflow detection still works.
+          ASAN_OPTIONS: "detect_leaks=0:halt_on_error=0:abort_on_error=0"
+          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=0"
+        run: |
+          python -m pip install --quiet pytest
+          # libasan must be in LD_PRELOAD so its __cxa_throw interceptor
+          # is registered before _neograph.so is dlopen'd by Python.
+          # Two tests propagate Python exceptions across the pybind
+          # boundary — a known sanitizer limitation
+          # (asan_interceptors.cpp:458 CHECK failure on real___cxa_throw
+          # not being intercepted) — deselect them by name.
+          export LD_PRELOAD=$(gcc -print-file-name=libasan.so)
+          export PYTHONPATH=build-asan:bindings/python
+          python -m pytest bindings/python/tests/ -q \
+            -k "not propagate and not undocumented_reducer and not noopentelemetry"

@@ -45,6 +45,7 @@ add_executable(neograph_tests
     test_async_run_sync_pool.cpp
     test_node_cache.cpp
     test_node_default_dispatch.cpp
+    test_concurrent_stress.cpp
 )
 
 if(NEOGRAPH_BUILD_MCP)
