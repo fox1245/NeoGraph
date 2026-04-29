@@ -2,6 +2,8 @@
 # explore new code paths. Don't commit those — only the canonical
 # seed JSON files (extension-named) ship with the repo. The fuzzer
 # bootstraps from those and regrows the corpus on each run.
-*
-!.gitignore
-!*.json
+#
+# Default-ignore everything in subdirectories EXCEPT *.json seeds and
+# the .gitignore itself.
+*/*
+!*/*.json
