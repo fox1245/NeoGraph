@@ -137,10 +137,16 @@ public:
      * fan-out, and retry backoff are all coroutine-native (3.0) — the
      * caller's executor is never blocked by engine work.
      *
-     * @param config Run configuration.
+     * The config is taken **by value** so the awaitable owns its own
+     * copy in the coroutine frame. This makes the common
+     * `asio::co_spawn(io.get_executor(), engine->run_async(stack_cfg),
+     * use_future)` shape safe — `stack_cfg` may go out of scope before
+     * the awaitable resolves without dangling-referencing the config.
+     *
+     * @param config Run configuration (moved into the coroutine frame).
      * @return Awaitable yielding the execution result.
      */
-    asio::awaitable<RunResult> run_async(const RunConfig& config);
+    asio::awaitable<RunResult> run_async(RunConfig config);
 
     /**
      * @brief Execute the graph with streaming event callbacks.
@@ -152,8 +158,10 @@ public:
                          const GraphStreamCallback& cb);
 
     /// Async peer of run_stream — non-blocking coroutine surface.
+    /// `config` and `cb` are taken by value for the same reason as
+    /// run_async() — see that overload's docstring.
     asio::awaitable<RunResult> run_stream_async(
-        const RunConfig& config, const GraphStreamCallback& cb);
+        RunConfig config, GraphStreamCallback cb);
 
     /**
      * @brief Resume execution from a HITL interrupt.

@@ -136,11 +136,36 @@ with **0 KB resident-set growth** across the last 9 900 iterations.
 The Linux glibc allocator returns the freed blocks to its pool cleanly
 — no per-run leak path exists.
 
-## Adding to CI
+## CI gate (sanitizer-test job)
 
-Wiring this as a GitHub Actions job: copy the loop above into a step
-under `ci.yml`'s `build-and-test` job (after `make`), gate on
-`runs-on: ubuntu-latest` (valgrind preinstalled), expect ~5–8 minutes
-wall on CI hardware. Emits per-example pass/fail to the workflow log.
+Wired as `sanitizer-test` in `.github/workflows/ci.yml`. Every push to
+master and every PR runs:
 
-Not yet wired — the local sweep above is the current verification floor.
+| Step | Surface |
+|---|---|
+| `ctest -E "BIG_\|valgrind"` under `-fsanitize=address,undefined` | All 322 unit tests including external surfaces (Postgres via service container, MCP HTTP/stdio, libssl/libcurl ConnPool) |
+| 11 mock examples under same flags | full engine-path orchestration coverage |
+| `pytest bindings/python/tests/` with `LD_PRELOAD=libasan.so` | 46 / 48 Python tests (deselects 2 that propagate Python exceptions across pybind — known ASan `__cxa_throw` interception limitation, not a NeoGraph bug) |
+
+Suppressions for known third-party leaks (libssl, libcurl, libpq, libpqxx,
+libstdc++ ABI cache, glibc TLS) live in
+[`tests/lsan_suppressions.txt`](../tests/lsan_suppressions.txt). Adding
+a NeoGraph symbol there is a real bug — fix the leak, don't suppress.
+
+## Concurrent stress test
+
+`tests/test_concurrent_stress.cpp` runs as part of the standard ctest
+suite (so it runs under both Debug and ASan):
+
+- **TwoHundredOverlappingRunsAllSucceed** — 200 `engine->run_async()`
+  calls overlap on one io_context, each with 3-way Send fan-out.
+  Verifies parallel-group + pending-writes machinery is race-free under
+  ASan and that all 200 runs produce the expected `{0, 1, 4}` worker
+  outputs.
+- **RssBoundedOverHundredsOfConcurrentRuns** — 5 bursts of 200 runs
+  (1 000 concurrent total) with RSS Δ ≤ 10 MB threshold. Skipped under
+  ASan (sanitizer's shadow-memory growth dominates the signal).
+
+The Debug-build run produced RSS Δ=128 kB across 1 000 concurrent
+runs — engine-side memory profile is flat under sustained concurrent
+load.
