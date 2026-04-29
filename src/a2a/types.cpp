@@ -376,4 +376,73 @@ void from_json(const json& j, AgentCard& c) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Streaming events
+// ---------------------------------------------------------------------------
+void to_json(json& j, const TaskStatusUpdateEvent& e) {
+    j = json::object();
+    j["kind"]      = "status-update";
+    j["taskId"]    = e.task_id;
+    j["contextId"] = e.context_id;
+    json sj;
+    to_json(sj, e.status);
+    j["status"] = std::move(sj);
+    j["final"]  = e.final;
+    if (!e.metadata.is_null() && !e.metadata.empty()) j["metadata"] = e.metadata;
+}
+
+void from_json(const json& j, TaskStatusUpdateEvent& e) {
+    e.kind       = j.value("kind", std::string("status-update"));
+    e.task_id    = j.value("taskId", std::string());
+    e.context_id = j.value("contextId", std::string());
+    if (j.contains("status")) from_json(j["status"], e.status);
+    e.final      = j.value("final", false);
+    if (j.contains("metadata")) e.metadata = j["metadata"];
+}
+
+void to_json(json& j, const TaskArtifactUpdateEvent& e) {
+    j = json::object();
+    j["kind"]      = "artifact-update";
+    j["taskId"]    = e.task_id;
+    j["contextId"] = e.context_id;
+    json aj;
+    to_json(aj, e.artifact);
+    j["artifact"] = std::move(aj);
+    j["append"]    = e.append;
+    j["lastChunk"] = e.last_chunk;
+    if (!e.metadata.is_null() && !e.metadata.empty()) j["metadata"] = e.metadata;
+}
+
+void from_json(const json& j, TaskArtifactUpdateEvent& e) {
+    e.kind       = j.value("kind", std::string("artifact-update"));
+    e.task_id    = j.value("taskId", std::string());
+    e.context_id = j.value("contextId", std::string());
+    if (j.contains("artifact")) from_json(j["artifact"], e.artifact);
+    e.append     = j.value("append", false);
+    e.last_chunk = j.value("lastChunk", false);
+    if (j.contains("metadata")) e.metadata = j["metadata"];
+}
+
+StreamEvent parse_stream_event(const json& j) {
+    StreamEvent ev;
+    auto kind = j.value("kind", std::string());
+    if (kind == "status-update") {
+        ev.type = StreamEvent::Type::StatusUpdate;
+        TaskStatusUpdateEvent s;
+        from_json(j, s);
+        ev.status_update = std::move(s);
+    } else if (kind == "artifact-update") {
+        ev.type = StreamEvent::Type::ArtifactUpdate;
+        TaskArtifactUpdateEvent a;
+        from_json(j, a);
+        ev.artifact_update = std::move(a);
+    } else {
+        ev.type = StreamEvent::Type::Task;
+        Task t;
+        from_json(j, t);
+        ev.task = std::move(t);
+    }
+    return ev;
+}
+
 }  // namespace neograph::a2a

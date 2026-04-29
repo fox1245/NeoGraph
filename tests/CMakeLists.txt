@@ -59,8 +59,14 @@ if(NEOGRAPH_BUILD_A2A)
     target_sources(neograph_tests PRIVATE
         test_a2a_types.cpp
         test_a2a_client.cpp
+        test_a2a_server.cpp
     )
 endif()
+
+# Smoke tests for the async::async_get helper added with the A2A client
+# — the GET path was new and build_request gained a method parameter,
+# so these guard the surface against future POST/GET regressions.
+target_sources(neograph_tests PRIVATE test_async_get.cpp)
 
 # PostgresCheckpointStore integration tests are gated on NEOGRAPH_BUILD_POSTGRES
 # at the build level (so projects without libpqxx still build the test

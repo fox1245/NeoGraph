@@ -112,6 +112,48 @@ struct NEOGRAPH_API MessageSendParams {
     json                                     metadata;
 };
 
+/// SSE event emitted by `message/stream` and `tasks/resubscribe`
+/// while a Task is running. Discriminated by `kind` ∈
+/// {"status-update", "artifact-update"}.
+///
+/// `final` set to true on the last event of the stream — clients use
+/// this to stop reading without closing the underlying SSE socket.
+struct NEOGRAPH_API TaskStatusUpdateEvent {
+    std::string  task_id;
+    std::string  context_id;
+    TaskStatus   status;
+    bool         final = false;
+    json         metadata;
+    std::string  kind = "status-update";
+};
+
+struct NEOGRAPH_API TaskArtifactUpdateEvent {
+    std::string  task_id;
+    std::string  context_id;
+    Artifact     artifact;
+    bool         append    = false;
+    bool         last_chunk = false;
+    json         metadata;
+    std::string  kind = "artifact-update";
+};
+
+/// Tagged union over the two streaming event types + the terminal
+/// Task message. The client's stream callback receives one of these
+/// per SSE frame.
+struct NEOGRAPH_API StreamEvent {
+    enum class Type { StatusUpdate, ArtifactUpdate, Task };
+    Type                                    type = Type::Task;
+    std::optional<TaskStatusUpdateEvent>    status_update;
+    std::optional<TaskArtifactUpdateEvent>  artifact_update;
+    std::optional<a2a::Task>                task;
+
+    bool is_final() const noexcept {
+        if (type == Type::StatusUpdate && status_update) return status_update->final;
+        if (type == Type::Task) return true;
+        return false;
+    }
+};
+
 /// Subset of AgentCard required to interact (spec §5.5).
 /// We deserialise only fields the client actually consumes; unknown
 /// fields are kept verbatim in `raw` for forward-compat.
@@ -163,5 +205,16 @@ NEOGRAPH_API void from_json(const json& j, MessageSendParams& p);
 
 NEOGRAPH_API void to_json(json& j, const AgentCard& c);
 NEOGRAPH_API void from_json(const json& j, AgentCard& c);
+
+NEOGRAPH_API void to_json(json& j, const TaskStatusUpdateEvent& e);
+NEOGRAPH_API void from_json(const json& j, TaskStatusUpdateEvent& e);
+
+NEOGRAPH_API void to_json(json& j, const TaskArtifactUpdateEvent& e);
+NEOGRAPH_API void from_json(const json& j, TaskArtifactUpdateEvent& e);
+
+/// Parse a single SSE `data: {...}` JSON object into the right variant.
+/// Discriminator priority: kind="status-update" | "artifact-update" |
+/// "task". Anything else falls back to Task.
+NEOGRAPH_API StreamEvent parse_stream_event(const json& j);
 
 } // namespace neograph::a2a
