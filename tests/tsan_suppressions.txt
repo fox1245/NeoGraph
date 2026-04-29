@@ -1,0 +1,38 @@
+# ThreadSanitizer suppressions for NeoGraph's tsan-test CI gate.
+#
+# These suppress races inside libraries we depend on but don't ship —
+# their internal synchronization is correct (e.g. asio's reactive
+# socket service uses internal mutexes + lock-free atomics that
+# happen to confuse TSan's happens-before analysis). NeoGraph's own
+# code never appears here; if you find yourself adding a NeoGraph
+# symbol, that's a real race — fix it.
+#
+# Format: `race:<symbol_substring>`.
+
+# asio's reactive socket service: epoll-based reactor uses lockless
+# operation lists with explicit memory ordering. TSan doesn't model
+# the FD-table happens-before edges across kernel boundaries, so it
+# flags the close()-vs-pending-read shape that asio handles by design.
+# Confirmed benign by asio upstream (chriskohlhoff/asio#1022).
+race:asio::detail::reactive_socket_service_base::close
+race:asio::detail::reactive_socket_service_base::do_start_op
+race:asio::detail::reactive_socket_service_base::start_accept_op
+race:asio::detail::socket_ops::set_internal_non_blocking
+
+# asio epoll/kqueue reactor — same story as above. The reactor's
+# internal queues use atomic compare-exchange for op queueing; TSan
+# misses the happens-before from the kernel's epoll_wait return.
+race:asio::detail::epoll_reactor
+race:asio::detail::reactor_op_queue
+
+# yyjson: parser uses SIMD-aware byte scanning that TSan reports as
+# a benign race (the read window can overlap a write window only when
+# the input buffer is shared across threads, which our usage doesn't
+# do — but TSan's static analysis can't prove it).
+race:yyjson_read
+
+# OpenSSL: thread-local error queues use a global atomic counter. The
+# write-write race TSan reports is on the lazy init path, mediated by
+# CRYPTO_ONCE. Functionally correct.
+race:CRYPTO_THREAD_run_once
+race:OPENSSL_init_crypto

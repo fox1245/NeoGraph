@@ -1,0 +1,1 @@
+{"name":"barrier","channels":{"verdicts":{"reducer":"append"}},"nodes":{"a":{"type":"llm_call"},"b":{"type":"llm_call"},"summ":{"type":"llm_call","barrier":{"wait_for":["a","b"]}}},"edges":[{"from":"__start__","to":"a"},{"from":"__start__","to":"b"},{"from":"a","to":"summ"},{"from":"b","to":"summ"},{"from":"summ","to":"__end__"}]}

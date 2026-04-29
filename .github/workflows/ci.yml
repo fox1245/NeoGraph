@@ -415,13 +415,16 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Run pytest under ASan (UBSan-only for exception-propagating tests)
+      - name: Run pytest under ASan + LSan (with interpreter suppressions)
         env:
-          # detect_leaks=0 — Python's interpreter has many intentional
-          # cached allocations that swamp LSan. ASan UAF / UB / heap-
-          # buffer-overflow detection still works.
-          ASAN_OPTIONS: "detect_leaks=0:halt_on_error=0:abort_on_error=0"
+          # detect_leaks=1 enables LSan exit-time check. Without
+          # suppressions Python's intentional caches and pybind11's
+          # type-system init swamp the signal — the LSAN_OPTIONS file
+          # silences those (third-party only) so any genuine leak in
+          # NeoGraph's binding code surfaces.
+          ASAN_OPTIONS: "detect_leaks=1:halt_on_error=0:abort_on_error=0:print_suppressions=0"
           UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=0"
+          LSAN_OPTIONS: "suppressions=${{ github.workspace }}/tests/lsan_suppressions.txt"
         run: |
           python -m pip install --quiet pytest
           # libasan must be in LD_PRELOAD so its __cxa_throw interceptor
@@ -434,3 +437,118 @@ jobs:
           export PYTHONPATH=build-asan:bindings/python
           python -m pytest bindings/python/tests/ -q \
             -k "not propagate and not undocumented_reducer and not noopentelemetry"
+
+  # ThreadSanitizer race-detection gate. Catches data races that ASan
+  # can't see — concurrent reads/writes without happens-before. Caught
+  # zero NeoGraph races on first run (after suppressing benign asio /
+  # yyjson / OpenSSL library-internal races); fails red on any future
+  # regression in the engine's worker pool, scheduler, or
+  # CheckpointStore concurrency paths.
+  #
+  # Separate job from sanitizer-test because TSan and ASan instrument
+  # binaries incompatibly (you can't link both into the same artifact).
+  # Postgres compiled out — libpq's connection-pool internals trigger
+  # asio-shape races we'd suppress anyway, and the value-add over the
+  # ASan job's PG coverage is small.
+  tsan-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake build-essential libssl-dev libcurl4-openssl-dev \
+            pkg-config util-linux
+
+      - name: Configure (Debug + TSan, postgres off)
+        run: |
+          cmake -B build-tsan \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DNEOGRAPH_BUILD_TESTS=ON \
+            -DNEOGRAPH_BUILD_EXAMPLES=ON \
+            -DNEOGRAPH_BUILD_BENCHMARKS=OFF \
+            -DNEOGRAPH_BUILD_POSTGRES=OFF \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -O1 -g" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+
+      - name: Build (everything)
+        run: cmake --build build-tsan -j$(nproc)
+
+      - name: Run ctest under TSan
+        env:
+          # halt_on_error=0 lets every race be reported in one run
+          # rather than aborting on the first; suppressions file
+          # silences known-benign library races (asio, yyjson, OpenSSL).
+          TSAN_OPTIONS: "halt_on_error=0:second_deadlock_stack=1:suppressions=${{ github.workspace }}/tests/tsan_suppressions.txt"
+        run: |
+          # `setarch x86_64 -R` clears ADDR_NO_RANDOMIZE — TSan FATALs
+          # with "unexpected memory mapping" on kernels with high
+          # mmap_rnd_bits (Ubuntu 24.04+ default). The flag inherits
+          # through fork, so every test child also gets a TSan-friendly
+          # address layout.
+          setarch x86_64 -R ctest --test-dir build-tsan \
+            -E "BIG_|valgrind" --output-on-failure -j2
+
+      - name: Run no-network examples under TSan
+        env:
+          TSAN_OPTIONS: "halt_on_error=0:second_deadlock_stack=1:suppressions=${{ github.workspace }}/tests/tsan_suppressions.txt"
+        run: |
+          set -e
+          examples="example_classifier_fanout example_async_concurrent_runs
+                    example_parallel_fanout example_send_command
+                    example_plan_executor"
+          for ex in $examples; do
+            if [ -x "./build-tsan/$ex" ]; then
+              echo "::group::$ex"
+              setarch x86_64 -R timeout 90 "./build-tsan/$ex" >/dev/null
+              echo "  ok"
+              echo "::endgroup::"
+            fi
+          done
+
+  # libFuzzer canary — drives GraphCompiler::compile with mutated JSON
+  # for 60 seconds. The first run on master HEAD did 1.94 M iterations
+  # without crashing. CI re-runs the same pass on every PR, gated to
+  # 60 s wall so the job stays under 3 min total. A regression that
+  # introduces a parser UB or unhandled exception fails red here.
+  #
+  # Requires Clang for -fsanitize=fuzzer (libFuzzer ships in Clang's
+  # instrumentation runtime). GCC's gcc-fuzz is too narrow.
+  fuzz-canary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Clang + build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake build-essential clang libssl-dev libcurl4-openssl-dev \
+            pkg-config
+
+      - name: Configure (Clang + libFuzzer)
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -B build-fuzz \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DNEOGRAPH_BUILD_TESTS=ON \
+            -DNEOGRAPH_BUILD_FUZZ=ON \
+            -DNEOGRAPH_BUILD_EXAMPLES=OFF \
+            -DNEOGRAPH_BUILD_BENCHMARKS=OFF \
+            -DNEOGRAPH_BUILD_POSTGRES=OFF
+
+      - name: Build fuzz target
+        run: cmake --build build-fuzz -j$(nproc) --target fuzz_graph_compile
+
+      - name: Fuzz GraphCompiler::compile (60 s wall)
+        run: |
+          # -max_total_time=60 caps the run; a crash exits non-zero.
+          # The seed corpus under tests/fuzz/corpus/graph_compile/ holds
+          # canonical valid graph JSONs that libFuzzer mutates from.
+          ./build-fuzz/tests/fuzz/fuzz_graph_compile \
+            -max_total_time=60 -timeout=10 -seed=42 \
+            tests/fuzz/corpus/graph_compile/

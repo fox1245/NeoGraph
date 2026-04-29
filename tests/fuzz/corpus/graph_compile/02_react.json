@@ -1,0 +1,1 @@
+{"name":"react","channels":{"messages":{"reducer":"append"}},"nodes":{"llm":{"type":"llm_call"},"dispatch":{"type":"tool_dispatch"}},"edges":[{"from":"__start__","to":"llm"},{"from":"dispatch","to":"llm"}],"conditional_edges":[{"from":"llm","condition":"has_tool_calls","routes":{"true":"dispatch","false":"__end__"}}]}
