@@ -426,6 +426,37 @@ CMake. The build dir's compiled object files reference symbols from
 older headers. Either `make clean && make` or delete and reconfigure
 the build directory.
 
+### `OPENAI_API_KEY not set` when launching A2A servers from a script
+
+`cppdotenv::auto_load_dotenv()` reads `.env` inside the binary that
+calls it, but a child process forked from a launcher script does
+**not** inherit anything the launcher hasn't already exported. If
+your script does:
+
+```bash
+./member_server 8101 ...   # forks before any env is set up
+```
+
+…each child sees an empty environment and refuses to start. Source
+the `.env` first, in the launcher, so the variables are exported into
+the shell that does the fork:
+
+```bash
+set -a; . ./.env; set +a            # marks every assignment as exported
+./member_server 8101 ... &
+```
+
+The cookbook's `scripts/run_session.sh` shows the full pattern with
+fallback to a sibling `.env`.
+
+### Multi-persona / multi-process A2A: where to share an OpenAI provider
+
+Use `OpenAIProvider::create_shared(cfg)` (returns `shared_ptr<Provider>`)
+instead of `create(cfg)` (returns `unique_ptr`). The shared form is
+captureable into a `NodeFactory` lambda and reusable across every
+graph node and A2A request — `create()`'s `unique_ptr` would force
+you to manually `release()` and rewrap.
+
 ---
 
 ## Reporting a bug

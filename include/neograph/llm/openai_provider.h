@@ -52,6 +52,16 @@ class NEOGRAPH_API OpenAIProvider : public Provider {
      */
     static std::unique_ptr<OpenAIProvider> create(const Config& config);
 
+    /**
+     * @brief Same as @ref create but returns a `shared_ptr<Provider>`.
+     *
+     * Useful when one provider needs to be reused across multiple
+     * NodeFactory closures, A2A servers, or threads — capturing a
+     * `unique_ptr` into a copyable lambda is impossible without an
+     * explicit `release()`. This peer drops the boilerplate.
+     */
+    static std::shared_ptr<Provider> create_shared(const Config& config);
+
     /// Destructor — shuts down the long-lived HTTP loop + worker
     /// thread held alongside the ConnPool.
     ~OpenAIProvider();

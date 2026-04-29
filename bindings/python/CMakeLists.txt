@@ -71,6 +71,14 @@ pybind11_add_module(_neograph
     src/bind_node.cpp
 )
 
+# A2A client (Agent-to-Agent protocol). Bound only when neograph::a2a
+# was built; surfaces as `neograph_engine.a2a.A2AClient` etc.
+if(TARGET neograph::a2a)
+    target_sources(_neograph PRIVATE src/bind_a2a.cpp)
+    target_link_libraries(_neograph PRIVATE neograph::a2a)
+    target_compile_definitions(_neograph PRIVATE NEOGRAPH_PYBIND_HAS_A2A)
+endif()
+
 target_link_libraries(_neograph PRIVATE
     neograph::core
 )
