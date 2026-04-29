@@ -93,8 +93,70 @@ Output:
 - The native HTTP path (asio + connection pool) — at ~1.5× faster than
   the SDK and zero GIL contention. If your bottleneck is OpenAI calls,
   the SDK is fine; if it's framework overhead, the native one wins.
-- Tool dispatch is not auto-translated yet (this cookbook ignores
-  `params.tools`). Add the conversion if you use tool-calling agents.
+
+## Tool calling — three working patterns
+
+The Provider trampoline lets `complete()` return `tool_calls` cleanly.
+What's currently **not working** is the C++ `tool_dispatch` graph node
+calling back into a Python `Tool` subclass — that path segfaults
+(pre-existing issue; tracked for v0.3). Three patterns work today:
+
+### A. Agentic Provider (recommended for `byo-openai`)
+
+Do the tool loop **inside** `complete()`. The user's `openai.OpenAI`
+client already supports tool-calling; let it finish the agentic loop
+(call → dispatch in Python → result → call → text) and return only
+the final assistant message to NeoGraph. The graph sees exactly one
+`complete()` per "turn", no `tool_dispatch` node needed.
+
+```python
+class AgenticOpenAIProvider(ng.Provider):
+    def __init__(self, client, tools_by_name):
+        super().__init__()
+        self.client = client
+        self.tools  = tools_by_name      # {"calc": calc_fn, ...}
+    def complete(self, params):
+        messages = [{"role": m.role, "content": m.content} for m in params.messages]
+        sdk_tools = [{"type":"function",
+                      "function":{"name":n,"description":fn.__doc__ or "",
+                                  "parameters":fn.schema}}
+                     for n, fn in self.tools.items()]
+        for _ in range(10):  # cap loops
+            r = self.client.chat.completions.create(
+                model=params.model or "gpt-5.4-mini",
+                messages=messages, tools=sdk_tools)
+            choice = r.choices[0]
+            if not choice.message.tool_calls:
+                out = ng.ChatCompletion()
+                out.message.role    = "assistant"
+                out.message.content = choice.message.content or ""
+                return out
+            messages.append(choice.message.model_dump())
+            for tc in choice.message.tool_calls:
+                fn = self.tools[tc.function.name]
+                result = fn(**stdjson.loads(tc.function.arguments))
+                messages.append({"role":"tool","tool_call_id":tc.id,
+                                 "content":str(result)})
+```
+
+Tradeoff: NeoGraph doesn't see intermediate steps (no checkpoint per
+tool call), but you keep all SDK behavior and there's no dispatch
+boundary friction.
+
+### B. C++ tools + Python Provider
+
+Use the built-in C++ tools (`MCPTool` from `neograph_engine.mcp`,
+or any other C++-side `Tool`) for the dispatch path, and your Python
+Provider for the LLM call. The graph's `tool_dispatch` node calls
+the C++ tool fine; only the call back into a Python `Tool` subclass
+crashes.
+
+### C. Provider returns tool_calls; custom Python node dispatches
+
+Skip the built-in `tool_dispatch` node. Write your own
+`@ng.node("dispatch")` that reads `messages[-1].tool_calls`, calls
+your Python tools directly, and writes the tool-result messages
+back. Stays entirely in Python.
 
 ## A2A + custom Provider
 
