@@ -934,6 +934,13 @@ if(NEOGRAPH_BUILD_PYBIND)
     if(TARGET neograph_postgres)
         list(APPEND NEOGRAPH_PYBIND_LIBS neograph_postgres)
     endif()
+    # neograph_a2a ships when A2A is built. Same reasoning as above:
+    # bindings/python/src/bind_a2a.cpp links against it (added in
+    # v0.2.1), so the wheel must carry libneograph_a2a.{so,dylib,dll}
+    # next to the binding or auditwheel/delocate refuses to repair.
+    if(TARGET neograph_a2a)
+        list(APPEND NEOGRAPH_PYBIND_LIBS neograph_a2a)
+    endif()
 
     # Set INSTALL_RPATH so the bundled libs find each other via
     # `$ORIGIN` (libneograph_llm.so → libneograph_core.so etc.).
