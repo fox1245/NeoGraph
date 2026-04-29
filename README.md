@@ -68,13 +68,13 @@ section below for the reproduction command.
 
 Per-invocation overhead on identically-shaped graphs, no I/O / no LLM —
 just node dispatch + state writes + reducer calls. Lower is better.
-Reproduced 2026-04-29 against NeoGraph v0.2.0 (g++ 13 Release `-O3
+Reproduced 2026-04-29 against NeoGraph v0.2.3 (g++ 13 Release `-O3
 -DNDEBUG`); Python framework rows from the 2026-04-22 reference run,
 re-validated within ±10 % at the same date.
 
 | Framework | `seq` (3-node chain) | `par` (fan-out 5 + join, worker=1 fast path)¹ | Slowdown vs. NeoGraph |
 |-----------|---------------------:|---------------------------------------------:|-------------------:|
-| **NeoGraph v0.2.0** (this repo) | **5.0 µs**  | **14.4 µs** | 1× |
+| **NeoGraph v0.2.3** (this repo) | **5.0 µs**  | **14.4 µs** | 1× |
 | Haystack 2.28 | 140 µs   | 278 µs   | **28× / 19×** |
 | pydantic-graph 1.87 | 227 µs | 280 µs²  | **45× / 19×**² |
 | LangGraph 1.1.10 | 643 µs  | 2,262 µs | **128× / 157×** |
@@ -107,7 +107,7 @@ include(FetchContent)
 FetchContent_Declare(
     NeoGraph
     GIT_REPOSITORY https://github.com/fox1245/NeoGraph.git
-    GIT_TAG        v0.2.0
+    GIT_TAG        v0.2.3
 )
 # Optional: turn off heavy components you don't need.
 set(NEOGRAPH_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -358,9 +358,9 @@ cleanly with no resource pressure and the RSS stayed flat at ~7 MB.
 
 | Platform | Tier | Notes |
 |---|---|---|
-| Linux x86_64 (Ubuntu 24.04, GCC 13) | **GA** | Reference — 356/356 ctest green, 310/310 ASan+UBSan, Valgrind clean on coroutine subset |
+| Linux x86_64 (Ubuntu 24.04, GCC 13) | **GA** | Reference — 397/397 ctest green, ASan/UBSan/LSan/TSan clean (CI gates), Valgrind clean on coroutine subset |
 | macOS (Apple Silicon, Clang) | **beta** | CI builds + non-Postgres tests; runtime differences (coroutine scheduling, SIGPIPE) not yet exercised in production |
-| Linux ARM64 (Ubuntu 24.04, GCC 13) | **alpha** | 306/306 ctest green via `docker buildx --platform linux/arm64` under QEMU emulation — see [`Dockerfile.arm64-smoke`](Dockerfile.arm64-smoke). Native ARM64 hardware validation pending (Raspberry Pi, Graviton, Apple Silicon Linux). Stripped binary 0.81–0.88 MB. |
+| Linux ARM64 (Ubuntu 24.04, GCC 13) | **alpha** | ctest green via `docker buildx --platform linux/arm64` under QEMU emulation — see [`Dockerfile.arm64-smoke`](Dockerfile.arm64-smoke). Native ARM64 hardware validation pending (Raspberry Pi, Graviton, Apple Silicon Linux). Stripped binary 0.81–0.88 MB. |
 | Windows (MSVC 2022, x64) | **alpha** | CI builds + non-Postgres tests; MCP stdio (named-pipe overlapped) + PG async socket wrap written against MSDN spec but unvalidated under load |
 
 CI matrix (GitHub Actions): `build-and-test` (Ubuntu, full with PG
@@ -861,7 +861,7 @@ NeoGraph/
 │   ├── clay.h                  # Clay UI layout
 │   └── clay_renderer_raylib.c  # Clay + raylib renderer glue (example 11)
 ├── benchmarks/                 # NeoGraph vs LangGraph engine-overhead bench
-├── examples/                   # 18 runnable examples + Clay chatbot
+├── examples/                   # 30+ runnable C++ examples + cookbooks (multi-file scenarios)
 └── scripts/
     └── embed_schemas.py        # Build-time schema embedding
 ```
@@ -871,10 +871,13 @@ NeoGraph/
 | Target | Description | Dependencies |
 |--------|-------------|--------------|
 | `neograph::core` | Graph engine + types | yyjson (bundled), asio (header-only), Threads |
+| `neograph::async` | asio HTTP/SSE helpers | core + OpenSSL |
 | `neograph::llm` | LLM providers + Agent | core + OpenSSL (httplib PRIVATE) |
 | `neograph::mcp` | MCP client | core + OpenSSL (httplib PRIVATE) |
+| `neograph::a2a` | Agent-to-Agent client + server + caller node | core + async + OpenSSL (httplib PRIVATE) |
+| `neograph::postgres` | PostgresCheckpointStore | core + libpq |
+| `neograph::sqlite` | SqliteCheckpointStore | core + libsqlite3 |
 | `neograph::util` | RequestQueue | core + concurrentqueue |
-| `neograph::async` | asio HTTP/SSE helpers | core + OpenSSL |
 
 ## Build Options
 
@@ -882,11 +885,15 @@ NeoGraph/
 |--------|---------|-------------|
 | `NEOGRAPH_BUILD_LLM` | ON | Build LLM provider module |
 | `NEOGRAPH_BUILD_MCP` | ON | Build MCP client module |
+| `NEOGRAPH_BUILD_A2A` | ON | Build Agent-to-Agent module (client + server + caller node) |
 | `NEOGRAPH_BUILD_UTIL` | ON | Build utility module |
 | `NEOGRAPH_BUILD_POSTGRES` | ON | Build PostgresCheckpointStore (libpq) |
 | `NEOGRAPH_BUILD_SQLITE` | ON | Build SqliteCheckpointStore (libsqlite3) |
 | `NEOGRAPH_BUILD_EXAMPLES` | ON | Build example programs |
 | `NEOGRAPH_BUILD_CLAY_EXAMPLE` | OFF | Build Clay+Raylib chatbot (fetches Raylib) |
+| `NEOGRAPH_BUILD_BENCHMARKS` | OFF | Build micro/load benchmark binaries |
+| `NEOGRAPH_BUILD_TESTS` | OFF | Build unit tests (GoogleTest auto-fetched) |
+| `NEOGRAPH_BUILD_PYBIND` | OFF | Build Python bindings (pybind11 auto-fetched) |
 | `BUILD_SHARED_LIBS` | OFF | Build `neograph_*` as `.so`/`.dylib` instead of `.a` (Linux/macOS — Windows DLL exports not yet wired) |
 
 ### Shared library mode
