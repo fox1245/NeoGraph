@@ -113,6 +113,16 @@ try:
 except ImportError:
     _HAVE_POSTGRES = False
 
+# A2A (Agent-to-Agent protocol) — present when the binding was built
+# with neograph::a2a (the default for v0.2.1+). The submodule wraps
+# A2AClient + AgentCard + Task/Message/Part/TaskState/Role and is
+# reachable as `neograph_engine.a2a.A2AClient(...)`.
+try:
+    from ._neograph import a2a  # noqa: F401
+    _HAVE_A2A = True
+except ImportError:
+    _HAVE_A2A = False
+
 # Re-import the C++ Tool / NodeContext bindings under private names so
 # we can shadow them with Python-side wrappers below.
 from ._neograph import Tool as _CppTool

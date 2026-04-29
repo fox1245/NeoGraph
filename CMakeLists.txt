@@ -721,6 +721,23 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             add_executable(example_a2a_server examples/38_a2a_server.cpp)
             target_link_libraries(example_a2a_server PRIVATE
                 neograph::core neograph::a2a)
+
+            # AI National Assembly cookbook — multi-persona A2A demo
+            # built as a fresh NeoGraph user from the public docs only.
+            # Binaries land in the top-level build dir so the cookbook's
+            # run_session.sh finds them at the same path as other
+            # examples.
+            if(NEOGRAPH_BUILD_LLM)
+                add_executable(cookbook_ai_assembly_member
+                    examples/cookbook/ai-assembly/member_server.cpp)
+                target_link_libraries(cookbook_ai_assembly_member PRIVATE
+                    neograph::core neograph::llm neograph::a2a neograph::async)
+
+                add_executable(cookbook_ai_assembly_speaker
+                    examples/cookbook/ai-assembly/speaker.cpp)
+                target_link_libraries(cookbook_ai_assembly_speaker PRIVATE
+                    neograph::core neograph::a2a neograph::async)
+            endif()
         endif()
 
         if(NEOGRAPH_BUILD_MCP)

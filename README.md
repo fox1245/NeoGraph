@@ -19,6 +19,7 @@
   <a href="#python-binding">Python Binding</a> &middot;
   <a href="examples/README.md">C++ Examples</a> &middot;
   <a href="bindings/python/examples/README.md">Python Examples</a> &middot;
+  <a href="examples/cookbook/ai-assembly/">AI Assembly cookbook</a> &middot;
   <a href="docs/troubleshooting.md">Troubleshooting</a> &middot;
   <a href="docs/reference-en.md">API Reference</a> &middot;
   <a href="https://fox1245.github.io/NeoGraph/">Doxygen</a> &middot;
@@ -94,6 +95,34 @@ that NeoGraph spends in 5 seconds. Reproducible end-to-end:
 [`benchmarks/README.md`](benchmarks/README.md).
 
 **NeoGraph is the only graph agent engine for C++.** If you're building agents in robotics, embedded systems, games, high-frequency trading, or anywhere Python isn't an option — this is it.
+
+## Using NeoGraph from your CMake project
+
+The `pip install` route is Python-only — the wheel doesn't ship C++
+headers. For a C++ project, the simplest path is `FetchContent`,
+which behaves like `pip install` for CMake:
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(
+    NeoGraph
+    GIT_REPOSITORY https://github.com/fox1245/NeoGraph.git
+    GIT_TAG        v0.2.0
+)
+# Optional: turn off heavy components you don't need.
+set(NEOGRAPH_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(NEOGRAPH_BUILD_PYBIND   OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(NeoGraph)
+
+add_executable(my_agent main.cpp)
+target_link_libraries(my_agent PRIVATE
+    neograph::core neograph::llm neograph::a2a)
+```
+
+That's the entire integration. See the [AI National Assembly
+cookbook](examples/cookbook/ai-assembly/) for a 600-line demo built
+this way (4 personas, A2A multi-process, OpenAI-backed) — including
+a friction journal of what a fresh user trips over.
 
 ## Python Binding
 

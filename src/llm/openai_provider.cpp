@@ -43,6 +43,12 @@ OpenAIProvider::create(const Config& config)
     return std::unique_ptr<OpenAIProvider>(new OpenAIProvider(config));
 }
 
+std::shared_ptr<Provider>
+OpenAIProvider::create_shared(const Config& config)
+{
+    return std::shared_ptr<Provider>(new OpenAIProvider(config));
+}
+
 json
 OpenAIProvider::build_body(const CompletionParams& params) const
 {
