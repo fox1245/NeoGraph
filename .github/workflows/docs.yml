@@ -77,6 +77,14 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    # Only master deploys to github-pages — the env's protection rule
+    # rejects tag refs anyway, and tag pushes always sit on the same
+    # commit as a master push (we tag master HEAD), so master's deploy
+    # has already published the right content. Skipping the deploy on
+    # tags keeps the Actions tab clean of redundant "rejected by
+    # environment" failures while still letting the build job run on
+    # tags as a Doxygen-builds-clean smoke test.
+    if: github.ref == 'refs/heads/master'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
