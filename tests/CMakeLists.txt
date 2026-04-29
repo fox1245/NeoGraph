@@ -55,6 +55,13 @@ if(NEOGRAPH_BUILD_MCP)
     )
 endif()
 
+if(NEOGRAPH_BUILD_A2A)
+    target_sources(neograph_tests PRIVATE
+        test_a2a_types.cpp
+        test_a2a_client.cpp
+    )
+endif()
+
 # PostgresCheckpointStore integration tests are gated on NEOGRAPH_BUILD_POSTGRES
 # at the build level (so projects without libpqxx still build the test
 # binary) and on NEOGRAPH_TEST_POSTGRES_URL at runtime (skipped if unset).
@@ -76,6 +83,10 @@ target_link_libraries(neograph_tests PRIVATE
 
 if(NEOGRAPH_BUILD_MCP)
     target_link_libraries(neograph_tests PRIVATE neograph::mcp)
+endif()
+
+if(NEOGRAPH_BUILD_A2A)
+    target_link_libraries(neograph_tests PRIVATE neograph::a2a)
 endif()
 
 if(NEOGRAPH_BUILD_POSTGRES)

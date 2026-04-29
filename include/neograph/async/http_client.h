@@ -106,6 +106,19 @@ NEOGRAPH_API asio::awaitable<HttpResponse> async_post(
     bool tls = false,
     RequestOptions opts = {});
 
+/// Async HTTP(S) GET. Same shape as async_post but issues a GET
+/// request with an empty body and no Content-Length / Content-Type
+/// headers — used for resources like the A2A `/.well-known/agent-card.json`
+/// discovery endpoint.
+NEOGRAPH_API asio::awaitable<HttpResponse> async_get(
+    asio::any_io_executor ex,
+    std::string_view host,
+    std::string_view port,
+    std::string_view path,
+    std::vector<std::pair<std::string, std::string>> headers = {},
+    bool tls = false,
+    RequestOptions opts = {});
+
 /// Metadata returned by async_post_stream after the body has been
 /// fully delivered via the callback. No `body` member — the body
 /// was handed out chunk-by-chunk while the call was in flight.
