@@ -136,21 +136,49 @@ with **0 KB resident-set growth** across the last 9 900 iterations.
 The Linux glibc allocator returns the freed blocks to its pool cleanly
 — no per-run leak path exists.
 
-## CI gate (sanitizer-test job)
+## CI gates (sanitizer-test, tsan-test, fuzz-canary)
 
-Wired as `sanitizer-test` in `.github/workflows/ci.yml`. Every push to
-master and every PR runs:
+Three CI jobs in `.github/workflows/ci.yml` enforce the following on
+every PR and push to master:
+
+### `sanitizer-test` — ASan + UBSan + LSan
 
 | Step | Surface |
 |---|---|
-| `ctest -E "BIG_\|valgrind"` under `-fsanitize=address,undefined` | All 322 unit tests including external surfaces (Postgres via service container, MCP HTTP/stdio, libssl/libcurl ConnPool) |
+| `ctest -E "BIG_\|valgrind"` under `-fsanitize=address,undefined` | All unit tests including external surfaces (Postgres via service container, MCP HTTP/stdio, libssl/libcurl ConnPool) |
 | 11 mock examples under same flags | full engine-path orchestration coverage |
-| `pytest bindings/python/tests/` with `LD_PRELOAD=libasan.so` | 46 / 48 Python tests (deselects 2 that propagate Python exceptions across pybind — known ASan `__cxa_throw` interception limitation, not a NeoGraph bug) |
+| `pytest bindings/python/tests/` with `LD_PRELOAD=libasan.so` + `detect_leaks=1` | 46/48 Python tests with leak detection enabled (deselects 2 that propagate Python exceptions across pybind — known ASan `__cxa_throw` interception limitation, not a NeoGraph bug) |
 
-Suppressions for known third-party leaks (libssl, libcurl, libpq, libpqxx,
-libstdc++ ABI cache, glibc TLS) live in
-[`tests/lsan_suppressions.txt`](../tests/lsan_suppressions.txt). Adding
-a NeoGraph symbol there is a real bug — fix the leak, don't suppress.
+### `tsan-test` — race detection on the engine's concurrency paths
+
+| Step | Coverage |
+|---|---|
+| `setarch x86_64 -R ctest -E "BIG_\|valgrind"` under `-fsanitize=thread` | All 344 unit tests including the new `ConcurrentStress.TwoHundredOverlappingRunsAllSucceed` (200 simultaneous `run_async` × 3-way Send fan-out — catches data races in the worker pool, scheduler, parallel_group, and CheckpointStore concurrency paths) |
+| 5 fan-out / async examples under TSan | `example_classifier_fanout` + `parallel_fanout` + `send_command` + `plan_executor` + `async_concurrent_runs` |
+
+The `setarch x86_64 -R` wrap clears `ADDR_NO_RANDOMIZE` (kernel
+`mmap_rnd_bits` defaults on Ubuntu 24.04+ trigger a TSan `unexpected
+memory mapping` FATAL); the flag inherits through `fork`, so every
+test child also gets a TSan-friendly address layout.
+
+TSan + ASan are mutually exclusive at link time, so this is a separate
+job from `sanitizer-test`.
+
+### `fuzz-canary` — libFuzzer on `GraphCompiler::compile`
+
+| Step | Coverage |
+|---|---|
+| `fuzz_graph_compile` for 60 s wall (`-max_total_time=60`) | Mutates the seed corpus under `tests/fuzz/corpus/graph_compile/` and feeds the bytes into `neograph::json::parse` → `GraphCompiler::compile`. Catches parser UB, unhandled exceptions, heap-buffer-overflow regressions. First run on master HEAD did 1.94 M iterations without a crash. |
+
+Built with Clang's `-fsanitize=fuzzer,address,undefined` so any crash
+surfaces ASan/UBSan diagnostics in the same trace.
+
+### Suppressions
+
+| File | What it covers |
+|---|---|
+| [`tests/lsan_suppressions.txt`](../tests/lsan_suppressions.txt) | libssl / libcurl / libpq / libpqxx / libstdc++ ABI / glibc TLS / CPython interpreter / pybind11 type init / pydantic-core. Third-party only — adding a NeoGraph symbol is a real bug, fix the leak instead. |
+| [`tests/tsan_suppressions.txt`](../tests/tsan_suppressions.txt) | asio reactor & socket service (epoll happens-before), yyjson SIMD reads, OpenSSL CRYPTO_THREAD_run_once. Library-internal benign races. |
 
 ## Concurrent stress test
 

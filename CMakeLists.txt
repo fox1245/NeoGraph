@@ -721,6 +721,20 @@ if(NEOGRAPH_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
+# Fuzz targets — libFuzzer-driven, Clang only. Separate flag so
+# Debug/Release builds aren't impacted by the libFuzzer link
+# requirement.
+option(NEOGRAPH_BUILD_FUZZ "Build libFuzzer fuzz targets (Clang only)" OFF)
+if(NEOGRAPH_BUILD_FUZZ)
+    if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        message(WARNING
+            "NEOGRAPH_BUILD_FUZZ=ON requires Clang for -fsanitize=fuzzer; "
+            "current compiler is ${CMAKE_CXX_COMPILER_ID}. Skipping.")
+    else()
+        add_subdirectory(tests/fuzz)
+    endif()
+endif()
+
 # ===========================================================================
 # Python bindings (pybind11)
 #

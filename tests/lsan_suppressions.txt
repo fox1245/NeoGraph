@@ -50,3 +50,35 @@ leak:pq_initstack
 # which destructs cleanly, but residual state from libpqxx itself
 # pre-allocates per-process tables.
 leak:pqxx::connection
+
+# CPython interpreter — PyObject_Malloc, PyType creation, module
+# import caches. Python intentionally leaks these for the process
+# lifetime because they're amortized over the whole program. Only
+# triggered when running the Python pytest suite under ASan via
+# LD_PRELOAD=libasan.so.
+leak:PyObject_Malloc
+leak:PyImport_ImportModuleLevelObject
+leak:_PyObject_GenericSetAttrWithDict
+leak:PyType_Ready
+leak:_PyEval_EvalFrameDefault
+leak:_PyType_AllocNoTrack
+leak:_PyMem_RawMalloc
+
+# pybind11 — class binding init creates Python type objects that
+# live for the process lifetime (one per `py::class_<T>` declaration).
+# Counts as still-reachable, not a NeoGraph leak.
+leak:pybind11::detail::make_new_python_type
+leak:pybind11::detail::generic_type::initialize
+leak:pybind11::class_
+leak:pybind11_meta_setattro
+leak:pybind11::setattr
+
+# pydantic-core — Rust-built C extension with its own static caches.
+# Pulled in transitively by some test deps (e.g. anyio, langsmith,
+# pydantic). Not NeoGraph code.
+leak:_pydantic_core
+leak:pydantic_core
+
+# certifi / cryptography pre-allocated module-level constants.
+leak:certifi
+leak:cryptography
