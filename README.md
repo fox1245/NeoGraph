@@ -33,7 +33,14 @@
   <a href="docs/videos/neograph-promo.mp4">
     <img src="docs/images/neograph-promo.gif" alt="NeoGraph 16-second promo — 5µs engine overhead, 5.5MB RSS at 10K concurrent, 1.2MB static binary, fits Raspberry Pi" width="900">
   </a>
-  <br><sub><i>16s · click for the 1080p MP4 (662 KB)</i></sub>
+  <br><sub><i>16s · the numbers · click for the 1080p MP4 (662 KB)</i></sub>
+</p>
+
+<p align="center">
+  <a href="docs/videos/neograph-promo-v2.mp4">
+    <img src="docs/images/neograph-promo-v2.gif" alt="NeoGraph 15-second promo v2 — graph engine in motion, 10-line Python, every LangGraph capability built in" width="900">
+  </a>
+  <br><sub><i>15s · what you actually ship · click for the 1080p MP4 (740 KB)</i></sub>
 </p>
 
 ## What is NeoGraph?
