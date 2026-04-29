@@ -91,6 +91,17 @@ class NEOGRAPH_API A2AClient {
     json rpc_call(const std::string& method, const json& params);
     asio::awaitable<json> rpc_call_async(const std::string& method, const json& params);
 
+    /// Two A2A protocol generations are deployed in the wild:
+    /// v1 (PascalCase, e.g. "SendMessage") used by a2a-sdk Python ≥1.0.0,
+    /// and v0.3 (slash-form, e.g. "message/send") used by a2a-js HEAD and
+    /// pre-v1 deployments. Try @p v1_method first; on a -32601
+    /// "method not found" reply, retry with @p v03_method on the same
+    /// params. Other JSON-RPC errors propagate.
+    asio::awaitable<json> rpc_call_with_fallback(
+        const std::string& v1_method,
+        const std::string& v03_method,
+        const json& params);
+
     const std::string& base_url() const { return base_url_; }
 
   private:

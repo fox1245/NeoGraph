@@ -120,6 +120,64 @@ json A2AClient::rpc_call(const std::string& method, const json& params) {
     return async::run_sync(rpc_call_async(method, params));
 }
 
+namespace {
+
+asio::awaitable<std::pair<bool, json>>
+try_rpc(A2AClient& self, const std::string& method, const json& params) {
+    // co_await is forbidden inside catch blocks (g++14, clang
+    // matches), so the try wraps a delegated awaitable and returns a
+    // (ok, value-or-error-message) pair. Caller dispatches outside.
+    try {
+        json r = co_await self.rpc_call_async(method, params);
+        co_return std::make_pair(true, std::move(r));
+    } catch (const std::exception& e) {
+        json err = std::string(e.what());
+        co_return std::make_pair(false, std::move(err));
+    }
+}
+
+}  // namespace
+
+asio::awaitable<json> A2AClient::rpc_call_with_fallback(
+    const std::string& v1_method,
+    const std::string& v03_method,
+    const json& params) {
+
+    // Slash-form first — this is the JSON Schema spec form (a2a-js
+    // canonical) and is also accepted by a2a-sdk Python ≥1.0.0 when
+    // run with `enable_v0_3_compat=True`. PascalCase is the fallback
+    // for v1-only deployments. The two protocol generations differ
+    // not just in method name but in body shape (PascalCase form
+    // doesn't accept the `kind` discriminator); slash-form keeps a
+    // single body shape across both server generations.
+    auto [ok, value] = co_await try_rpc(*this, v03_method, params);
+    if (ok) co_return value;
+
+    std::string err_msg = value.is_string() ? value.get<std::string>() : value.dump();
+    bool method_not_found =
+        err_msg.find("Method not found") != std::string::npos
+        || err_msg.find("-32601")          != std::string::npos;
+    if (!method_not_found) {
+        throw std::runtime_error(err_msg);
+    }
+    co_return co_await rpc_call_async(v1_method, params);
+}
+
+namespace {
+// Two A2A protocol generations are deployed in the wild (both under the
+// a2aproject org):
+//   - v1   : PascalCase method names ("SendMessage", "GetTask", ...)
+//            used by a2a-sdk Python ≥1.0.0.
+//   - v0.3 : slash-form method names ("message/send", "tasks/get", ...)
+//            still used by a2a-js HEAD and pre-v1 deployments.
+// We default to PascalCase and fall back to slash-form on "method not
+// found", so a single client connects to either generation.
+struct MethodPair { const char* v1; const char* v03; };
+constexpr MethodPair k_send_message  = {"SendMessage",  "message/send"};
+constexpr MethodPair k_get_task      = {"GetTask",      "tasks/get"};
+constexpr MethodPair k_cancel_task   = {"CancelTask",   "tasks/cancel"};
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // AgentCard discovery
 // ---------------------------------------------------------------------------
@@ -227,7 +285,8 @@ asio::awaitable<Task>
 A2AClient::send_message_async(const MessageSendParams& params) {
     json p;
     to_json(p, params);
-    auto result = co_await rpc_call_async("message/send", p);
+    auto result = co_await rpc_call_with_fallback(
+        k_send_message.v1, k_send_message.v03, p);
     co_return coerce_to_task(result);
 }
 
@@ -255,7 +314,8 @@ asio::awaitable<Task>
 A2AClient::get_task_async(const std::string& task_id, int history_length) {
     json params = {{"id", task_id}};
     if (history_length > 0) params["historyLength"] = history_length;
-    auto result = co_await rpc_call_async("tasks/get", params);
+    auto result = co_await rpc_call_with_fallback(
+        k_get_task.v1, k_get_task.v03, params);
     co_return coerce_to_task(result);
 }
 
@@ -266,7 +326,8 @@ Task A2AClient::get_task(const std::string& task_id, int history_length) {
 asio::awaitable<Task>
 A2AClient::cancel_task_async(const std::string& task_id) {
     json params = {{"id", task_id}};
-    auto result = co_await rpc_call_async("tasks/cancel", params);
+    auto result = co_await rpc_call_with_fallback(
+        k_cancel_task.v1, k_cancel_task.v03, params);
     co_return coerce_to_task(result);
 }
 
