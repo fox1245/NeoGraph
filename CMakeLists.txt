@@ -39,25 +39,44 @@ if(NEOGRAPH_ENABLE_HARDENING
         # Catches buffer overflows that would otherwise smash the
         # return address — the canary check fires before ret.
         -fstack-protector-strong
-        # Control-flow integrity: tags indirect call/jump targets so
-        # ROP-style attacks fail at the call site. Cheap on amd64 with
-        # CET-IBT (most modern CPUs since Tiger Lake / Zen 3).
-        -fcf-protection=full
     )
-    # _FORTIFY_SOURCE needs at least -O1 to function (the inline
-    # checks rely on optimizer constant-folding). Apply it only in
-    # Release / RelWithDebInfo / MinSizeRel.
+    # Control-flow integrity (CET-IBT on amd64 + Linux). Apple Silicon
+    # uses arm64e PAC instead — different toolchain knob; skip the
+    # flag there. Reject the flag on Windows (MSVC) and on any non-
+    # x86_64 host. CMAKE_SYSTEM_PROCESSOR matches "x86_64" / "AMD64".
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
+       AND (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64"
+            OR CMAKE_SYSTEM_PROCESSOR STREQUAL "AMD64"))
+        list(APPEND _NEOGRAPH_HARDEN_FLAGS -fcf-protection=full)
+    endif()
+
     add_compile_options(${_NEOGRAPH_HARDEN_FLAGS})
-    add_compile_options(
-        $<$<CONFIG:Release>:-D_FORTIFY_SOURCE=2>
-        $<$<CONFIG:RelWithDebInfo>:-D_FORTIFY_SOURCE=2>
-        $<$<CONFIG:MinSizeRel>:-D_FORTIFY_SOURCE=2>
-    )
+
+    # _FORTIFY_SOURCE needs at least -O1 to function (the inline
+    # checks rely on optimizer constant-folding). Linux glibc only —
+    # Apple's libSystem and bionic don't ship the fortified peers
+    # for everything we touch and the missing-symbol link errors
+    # would dominate any benefit.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_compile_options(
+            $<$<CONFIG:Release>:-D_FORTIFY_SOURCE=2>
+            $<$<CONFIG:RelWithDebInfo>:-D_FORTIFY_SOURCE=2>
+            $<$<CONFIG:MinSizeRel>:-D_FORTIFY_SOURCE=2>
+        )
+    endif()
+
     # PIE is needed for CFI to be effective; emit position-independent
     # code by default. Linker takes -pie for executables.
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-    add_link_options(-Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack)
-    message(STATUS "NeoGraph hardening: enabled (canaries, FORTIFY, CFI, RELRO).")
+
+    # ELF-only linker flags. macOS uses Mach-O + ld64 (different syntax),
+    # Windows uses link.exe/lld-link with /DYNAMICBASE etc.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_link_options(-Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack)
+    endif()
+
+    message(STATUS "NeoGraph hardening: enabled "
+                   "(canaries always; CFI/FORTIFY/RELRO Linux-only).")
 elseif(NEOGRAPH_ENABLE_HARDENING AND CMAKE_CXX_FLAGS MATCHES "fsanitize=")
     message(STATUS "NeoGraph hardening: skipped (sanitizer build — ASan/TSan/MSan provide stronger checks).")
 endif()
