@@ -63,6 +63,36 @@ All figures are from `example_plan_executor` on x86_64 Linux built with
 Only runtime dependency is `libc.so.6`. See the [Benchmarks](#benchmarks)
 section below for the reproduction command.
 
+### Engine overhead vs. leading frameworks
+
+Per-invocation overhead on identically-shaped graphs, no I/O / no LLM —
+just node dispatch + state writes + reducer calls. Lower is better.
+Reproduced 2026-04-29 against NeoGraph v0.2.0 (g++ 13 Release `-O3
+-DNDEBUG`); Python framework rows from the 2026-04-22 reference run,
+re-validated within ±10 % at the same date.
+
+| Framework | `seq` (3-node chain) | `par` (fan-out 5 + join, worker=1 fast path)¹ | Slowdown vs. NeoGraph |
+|-----------|---------------------:|---------------------------------------------:|-------------------:|
+| **NeoGraph v0.2.0** (this repo) | **5.0 µs**  | **14.4 µs** | 1× |
+| Haystack 2.28 | 140 µs   | 278 µs   | **28× / 19×** |
+| pydantic-graph 1.87 | 227 µs | 280 µs²  | **45× / 19×**² |
+| LangGraph 1.1.10 | 643 µs  | 2,262 µs | **128× / 157×** |
+| LlamaIndex Workflow 0.14 | 1,565 µs | 4,374 µs | **313× / 304×** |
+| AutoGen GraphFlow 0.7.5 | 3,127 µs | 7,281 µs | **625× / 505×** |
+
+¹ NeoGraph's `par` row uses `engine->set_worker_count(1)` to compare
+the scheduling cost, not the thread-pool spin-up cost. With the default
+(hw\_concurrency) the engine pays \~280 µs of pool coordination — same
+total as Haystack but parallelizes any actual node work, which is the
+real LLM-workload payoff.
+² pydantic-graph cannot fan out; emulated as a 6-node chain.
+
+This is the cost of **one engine round-trip**. Real LLM graphs spend
+most of their time in network I/O, but every super-step pays this
+once — at 100k requests/day a 600 µs framework sheds an hour of CPU
+that NeoGraph spends in 5 seconds. Reproducible end-to-end:
+[`benchmarks/README.md`](benchmarks/README.md).
+
 **NeoGraph is the only graph agent engine for C++.** If you're building agents in robotics, embedded systems, games, high-frequency trading, or anywhere Python isn't an option — this is it.
 
 ## Python Binding
