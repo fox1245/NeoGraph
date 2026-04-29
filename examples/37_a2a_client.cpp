@@ -133,10 +133,17 @@ int main(int argc, char** argv) {
     cfg.input["prompt"] = prompt + " (via NeoGraph node)";
 
     auto res = engine->run(cfg);
-    std::cout << "  graph reply:         "
-              << res.output.value("reply", std::string("(empty)")) << "\n"
-              << "  graph reply_task_id: "
-              << res.output.value("reply_task_id", std::string("(none)")) << "\n";
+    auto channel_value = [&](const char* k) -> std::string {
+        if (res.output.contains("channels")) {
+            auto ch = res.output["channels"];
+            if (ch.contains(k) && ch[k].contains("value"))
+                return ch[k]["value"].dump();
+        }
+        return "(missing)";
+    };
+    std::cout << "  graph reply:            " << channel_value("reply")            << "\n"
+              << "  graph reply_task_id:    " << channel_value("reply_task_id")    << "\n"
+              << "  graph reply_context_id: " << channel_value("reply_context_id") << "\n";
 
     return 0;
 }

@@ -148,6 +148,10 @@ TEST(A2AClient, SendMessageUsesCanonicalMethodName) {
     A2AClient client(srv.url());
     auto task = client.send_message_sync("hi there");
 
+    // Spec form (a2a-js canonical, also accepted by a2a-sdk Python ≥1.0.0
+    // with `enable_v0_3_compat=True`) is slash-form. PascalCase is the
+    // fallback for v1-only deployments — see
+    // RpcFallsBackToPascalCaseMethodName below.
     EXPECT_EQ(srv.last_method, "message/send");
     ASSERT_TRUE(srv.last_params.contains("message"));
     auto msg = srv.last_params["message"];
@@ -229,6 +233,70 @@ TEST(A2AClient, CancelTaskUsesCanonicalMethod) {
 
     EXPECT_EQ(srv.last_method, "tasks/cancel");
     EXPECT_EQ(srv.last_params.value("id", std::string()), "task-y");
+}
+
+// Standalone v1-only mock: rejects slash-form methods with -32601,
+// accepts the PascalCase form. Mirrors an a2a-sdk v1 deployment without
+// `enable_v0_3_compat`.
+struct MockV03OnlyServer {
+    httplib::Server svr;
+    std::thread     t;
+    int             port = 0;
+    std::string     last_method;
+
+    json result_for_v1 = json::parse(R"({
+        "kind": "task",
+        "id": "t-v1",
+        "contextId": "c-v1",
+        "status": {"state": "completed"},
+        "history": [{
+            "kind": "message", "messageId": "agent-1", "role": "agent",
+            "parts": [{"kind":"text","text":"v1 ok"}]
+        }]
+    })");
+
+    MockV03OnlyServer() {
+        svr.Post("/", [this](const httplib::Request& req, httplib::Response& res) {
+            int id = 0; std::string method;
+            try {
+                auto parsed = json::parse(req.body);
+                if (parsed.is_object()) {
+                    id     = parsed.value("id", 0);
+                    method = parsed.value("method", std::string());
+                }
+            } catch (...) {}
+            last_method = method;
+
+            json envelope = {{"jsonrpc", "2.0"}, {"id", id}};
+            const bool is_v03 = method == "message/send" || method == "tasks/get"
+                             || method == "tasks/cancel";
+            if (is_v03) {
+                envelope["error"] = {{"code", -32601},
+                                     {"message", "Method not found"}};
+            } else {
+                envelope["result"] = result_for_v1;
+            }
+            res.status = 200;
+            res.set_content(envelope.dump(), "application/json");
+        });
+        port = svr.bind_to_any_port("127.0.0.1");
+        t = std::thread([this] { svr.listen_after_bind(); });
+        for (int i = 0; i < 200 && !svr.is_running(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+    ~MockV03OnlyServer() { svr.stop(); if (t.joinable()) t.join(); }
+    std::string url() const { return "http://127.0.0.1:" + std::to_string(port); }
+};
+
+TEST(A2AClient, RpcFallsBackToPascalCaseMethodName) {
+    // v1-only server: rejects "message/send" → -32601; accepts "SendMessage".
+    MockV03OnlyServer srv;
+    A2AClient client(srv.url());
+    auto task = client.send_message_sync("hi");
+    EXPECT_EQ(srv.last_method, "SendMessage");
+    EXPECT_EQ(task.status.state, TaskState::Completed);
+    EXPECT_EQ(task.id,           "t-v1");
 }
 
 TEST(A2AClient, NormalizeBaseUrlStripsWellKnownPath) {
