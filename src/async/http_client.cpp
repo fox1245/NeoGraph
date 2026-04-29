@@ -336,6 +336,101 @@ asio::awaitable<HttpResponse> async_post(
     }
 }
 
+// ── Async GET ─────────────────────────────────────────────────────
+//
+// Bare-bones GET path used today only by the A2A client for
+// `/.well-known/agent-card.json` discovery. No timeout / redirect
+// loop — discovery URLs are stable, and the caller's timeout (set via
+// RequestOptions) is enforced through the same pattern as POST.
+
+asio::awaitable<HttpResponse> async_get_once(
+    asio::any_io_executor ex,
+    std::string host, std::string port, std::string path,
+    std::vector<std::pair<std::string, std::string>> headers,
+    bool tls) {
+
+    asio::ip::tcp::resolver resolver{ex};
+    auto endpoints = co_await resolver.async_resolve(
+        host, port, asio::use_awaitable);
+
+    asio::ip::tcp::socket sock{ex};
+    co_await asio::async_connect(sock, endpoints, asio::use_awaitable);
+
+    std::string req = detail::build_request(
+        host, path, /*body=*/"", headers, detail::ConnDirective::close, "GET");
+
+    if (!tls) {
+        auto r = co_await detail::run_exchange(sock, req);
+        asio::error_code ec;
+        sock.set_option(asio::socket_base::linger(true, 0), ec);
+        sock.close(ec);
+        co_return r.response;
+    }
+
+    asio::ssl::context ctx{asio::ssl::context::tls_client};
+    ctx.set_default_verify_paths();
+    ctx.set_verify_mode(asio::ssl::verify_peer);
+
+    asio::ssl::stream<asio::ip::tcp::socket&> tls_stream{sock, ctx};
+    if (!SSL_set_tlsext_host_name(tls_stream.native_handle(), host.c_str())) {
+        throw asio::system_error{
+            asio::error_code{static_cast<int>(::ERR_get_error()),
+                             asio::error::get_ssl_category()},
+            "SNI setup"};
+    }
+    tls_stream.set_verify_callback(asio::ssl::host_name_verification{host});
+    co_await tls_stream.async_handshake(
+        asio::ssl::stream_base::client, asio::use_awaitable);
+
+    auto r = co_await detail::run_exchange(tls_stream, req);
+    try {
+        co_await tls_stream.async_shutdown(asio::use_awaitable);
+    } catch (const std::exception&) {
+        // Peer commonly closes first after responding — benign.
+    }
+    asio::error_code ec;
+    sock.close(ec);
+    co_return r.response;
+}
+
+asio::awaitable<HttpResponse> async_get_once_timed(
+    asio::any_io_executor ex,
+    std::string host, std::string port, std::string path,
+    std::vector<std::pair<std::string, std::string>> headers,
+    bool tls, std::chrono::milliseconds timeout) {
+    if (timeout.count() <= 0) {
+        co_return co_await async_get_once(
+            ex, std::move(host), std::move(port), std::move(path),
+            std::move(headers), tls);
+    }
+    using asio::experimental::awaitable_operators::operator||;
+    asio::steady_timer timer(ex);
+    timer.expires_after(timeout);
+    auto res = co_await (
+        async_get_once(ex, std::move(host), std::move(port), std::move(path),
+                       std::move(headers), tls)
+        || timer.async_wait(asio::use_awaitable));
+    if (res.index() == 1) {
+        throw asio::system_error(asio::error::timed_out,
+                                 "async_get: per-hop timeout");
+    }
+    co_return std::get<0>(std::move(res));
+}
+
+asio::awaitable<HttpResponse> async_get(
+    asio::any_io_executor ex,
+    std::string_view host,
+    std::string_view port,
+    std::string_view path,
+    std::vector<std::pair<std::string, std::string>> headers,
+    bool tls,
+    RequestOptions opts) {
+
+    co_return co_await async_get_once_timed(
+        ex, std::string(host), std::string(port), std::string(path),
+        std::move(headers), tls, opts.timeout);
+}
+
 asio::awaitable<HttpStreamResponse> async_post_stream(
     asio::any_io_executor ex,
     std::string_view host,

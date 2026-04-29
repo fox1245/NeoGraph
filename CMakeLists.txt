@@ -86,6 +86,7 @@ endif()
 # ===========================================================================
 option(NEOGRAPH_BUILD_LLM      "Build neograph::llm (LLM providers)"     ON)
 option(NEOGRAPH_BUILD_MCP      "Build neograph::mcp (MCP client)"        ON)
+option(NEOGRAPH_BUILD_A2A      "Build neograph::a2a (Agent-to-Agent client)" ON)
 option(NEOGRAPH_BUILD_UTIL     "Build neograph::util (utilities)"        ON)
 option(NEOGRAPH_BUILD_POSTGRES "Build PostgresCheckpointStore (libpq)" ON)
 option(NEOGRAPH_BUILD_SQLITE   "Build SqliteCheckpointStore (libsqlite3)" ON)
@@ -510,6 +511,31 @@ if(NEOGRAPH_BUILD_MCP)
 endif()
 
 # ===========================================================================
+# neograph::a2a — Agent-to-Agent client (JSON-RPC over Streamable HTTP)
+# ===========================================================================
+if(NEOGRAPH_BUILD_A2A)
+    add_library(neograph_a2a
+        src/a2a/types.cpp
+        src/a2a/client.cpp
+        src/a2a/a2a_caller_node.cpp
+    )
+
+    target_include_directories(neograph_a2a
+        PUBLIC
+            $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+    )
+
+    target_compile_definitions(neograph_a2a PRIVATE NEOGRAPH_BUILDING_LIBRARY)
+    target_link_libraries(neograph_a2a
+        PUBLIC  neograph_core
+        PRIVATE neograph_async OpenSSL::SSL OpenSSL::Crypto
+    )
+
+    add_library(neograph::a2a ALIAS neograph_a2a)
+endif()
+
+# ===========================================================================
 # neograph::util — Utilities (RequestQueue, header-only)
 # ===========================================================================
 if(NEOGRAPH_BUILD_UTIL)
@@ -684,6 +710,12 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             target_link_libraries(example_postgres_react_hitl PRIVATE
                 neograph::core neograph::llm neograph::postgres
                 httplib OpenSSL::SSL OpenSSL::Crypto cppdotenv)
+        endif()
+
+        if(NEOGRAPH_BUILD_A2A)
+            add_executable(example_a2a_client examples/37_a2a_client.cpp)
+            target_link_libraries(example_a2a_client PRIVATE
+                neograph::core neograph::a2a)
         endif()
 
         if(NEOGRAPH_BUILD_MCP)

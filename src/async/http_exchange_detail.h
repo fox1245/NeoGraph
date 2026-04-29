@@ -43,12 +43,16 @@ inline std::string build_request(
     std::string_view path,
     std::string_view body,
     const std::vector<std::pair<std::string, std::string>>& headers,
-    ConnDirective directive) {
+    ConnDirective directive,
+    std::string_view method = "POST") {
+    const bool is_get = method == "GET";
     std::string out;
     out.reserve(256 + body.size());
-    out.append("POST ").append(path).append(" HTTP/1.1\r\n");
+    out.append(method).append(" ").append(path).append(" HTTP/1.1\r\n");
     out.append("Host: ").append(host).append("\r\n");
-    out.append("Content-Length: ").append(std::to_string(body.size())).append("\r\n");
+    if (!is_get) {
+        out.append("Content-Length: ").append(std::to_string(body.size())).append("\r\n");
+    }
     out.append(directive == ConnDirective::keep_alive
                    ? "Connection: keep-alive\r\n"
                    : "Connection: close\r\n");
@@ -63,9 +67,9 @@ inline std::string build_request(
             lower == "connection") continue;  // we set these
         out.append(k).append(": ").append(v).append("\r\n");
     }
-    if (!has_ctype) out.append("Content-Type: application/json\r\n");
+    if (!is_get && !has_ctype) out.append("Content-Type: application/json\r\n");
     out.append("\r\n");
-    out.append(body);
+    if (!is_get) out.append(body);
     return out;
 }
 
