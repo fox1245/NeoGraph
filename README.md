@@ -29,6 +29,13 @@
 
 ---
 
+<p align="center">
+  <a href="docs/videos/neograph-promo.mp4">
+    <img src="docs/images/neograph-promo.gif" alt="NeoGraph 16-second promo — 5µs engine overhead, 5.5MB RSS at 10K concurrent, 1.2MB static binary, fits Raspberry Pi" width="900">
+  </a>
+  <br><sub><i>16s · click for the 1080p MP4 (662 KB)</i></sub>
+</p>
+
 ## What is NeoGraph?
 
 NeoGraph is a **C++17 graph-based agent orchestration engine** that brings LangGraph-level capabilities to C++. Define agent workflows as JSON, execute them with parallel fan-out, checkpoint state for time-travel debugging, and integrate any LLM provider — all without Python.
