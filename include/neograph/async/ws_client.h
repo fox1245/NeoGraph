@@ -163,11 +163,11 @@ struct WsFrameHeader {
 /// `buf` is too short to contain a complete header (caller must read
 /// more bytes and retry). Throws std::runtime_error on malformed
 /// framing (RSV bits set — we don't negotiate extensions).
-std::optional<WsFrameHeader> parse_frame_header(std::string_view buf);
+NEOGRAPH_API std::optional<WsFrameHeader> parse_frame_header(std::string_view buf);
 
 /// Append an encoded frame header to `out`. Writes either 2, 4, 6,
 /// 10, or 14 bytes depending on payload_len and the `masked` flag.
-void encode_frame_header(
+NEOGRAPH_API void encode_frame_header(
     std::string& out,
     WsOpcode opcode,
     bool fin,
@@ -176,15 +176,15 @@ void encode_frame_header(
     const std::uint8_t mask_key[4] = nullptr);
 
 /// XOR `data` in place with the 4-byte `mask_key` per §5.3.
-void apply_mask(char* data, std::size_t len, const std::uint8_t mask_key[4]) noexcept;
+NEOGRAPH_API void apply_mask(char* data, std::size_t len, const std::uint8_t mask_key[4]) noexcept;
 
 /// Generate the 16-byte Sec-WebSocket-Key value (random) as its
 /// base64 encoding per §4.1. Exposed for testability.
-std::string generate_sec_websocket_key();
+NEOGRAPH_API std::string generate_sec_websocket_key();
 
 /// Compute the expected Sec-WebSocket-Accept value for a given
 /// client key per §4.2.2: base64(SHA-1(key + GUID)).
-std::string compute_sec_websocket_accept(std::string_view client_key);
+NEOGRAPH_API std::string compute_sec_websocket_accept(std::string_view client_key);
 
 }  // namespace detail
 

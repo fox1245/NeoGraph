@@ -374,7 +374,7 @@ cleanly with no resource pressure and the RSS stayed flat at ~7 MB.
 |---|---|---|
 | Linux x86_64 (Ubuntu 24.04, GCC 13) | **GA** | Reference — 429/429 ctest green, ASan/UBSan/LSan/TSan clean (CI gates), Valgrind clean on coroutine subset |
 | macOS (Apple Silicon, Clang) | **beta** | CI builds + non-Postgres tests; runtime differences (coroutine scheduling, SIGPIPE) not yet exercised in production |
-| Linux ARM64 (Ubuntu 24.04, GCC 13) | **alpha** | ctest green via `docker buildx --platform linux/arm64` under QEMU emulation — see [`Dockerfile.arm64-smoke`](Dockerfile.arm64-smoke). Native ARM64 hardware validation pending (Raspberry Pi, Graviton, Apple Silicon Linux). Stripped binary 0.81–0.88 MB. |
+| Linux ARM64 (Ubuntu 24.04, GCC 13) | **beta** | Native ARM64 CI gate via GitHub-hosted `ubuntu-24.04-arm` runner — full ctest green every push (no QEMU). Wheel CI uses the same native runner. Bare-metal ARM64 hardware (Raspberry Pi, Graviton) load testing still pending. Stripped binary ~1 MB. |
 | Windows (MSVC 2022, x64) | **alpha** | CI builds + non-Postgres tests; MCP stdio (named-pipe overlapped) + PG async socket wrap written against MSDN spec but unvalidated under load |
 
 CI matrix (GitHub Actions): `build-and-test` (Ubuntu, full with PG
@@ -935,10 +935,14 @@ Patch-update size example: replacing `libneograph_llm.so` (one
 subsystem, ~4 MB) updates every agent on the host without rebuilding
 or redeploying any of them.
 
-Windows: `BUILD_SHARED_LIBS=ON` will warn at configure time and fail at
-link with undefined symbols — the public-symbol `__declspec` annotations
-have not yet been added to the headers. Use STATIC on Windows until
-that work lands.
+Windows: `BUILD_SHARED_LIBS=ON` should now link cleanly — every public
+class / free function with an out-of-line .cpp definition carries
+`NEOGRAPH_API`, which expands to `__declspec(dllexport)` inside the
+engine's TUs and `__declspec(dllimport)` for downstream consumers
+(see `include/neograph/api.h`). Verified end-to-end on Linux shared
+builds (`libneograph_*.so` + 429/429 ctest green); native MSVC load
+testing has not yet happened, so if you hit LNK2019 on a public
+symbol please file an issue with the unresolved name.
 
 ## Benchmarks
 

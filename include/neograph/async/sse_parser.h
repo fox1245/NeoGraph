@@ -21,6 +21,8 @@
  */
 #pragma once
 
+#include <neograph/api.h>
+
 #include <string>
 #include <string_view>
 #include <vector>
@@ -33,7 +35,7 @@ struct SseEvent {
     std::string id;      ///< "id:" field.
 };
 
-class SseEventParser {
+class NEOGRAPH_API SseEventParser {
 public:
     /// Append raw bytes from the wire. Line terminators may be split
     /// across calls — the parser holds partial lines internally.
