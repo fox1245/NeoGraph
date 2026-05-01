@@ -8,6 +8,7 @@
  */
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/provider.h>
 #include <neograph/tool.h>
 #include <functional>
@@ -32,7 +33,7 @@ namespace neograph::llm {
  *
  * @see neograph::graph::create_react_graph for the graph-based equivalent.
  */
-class Agent {
+class NEOGRAPH_API Agent {
   public:
     /**
      * @brief Construct an agent with a provider and tools.

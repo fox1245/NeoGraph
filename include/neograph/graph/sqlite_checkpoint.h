@@ -44,6 +44,7 @@
  */
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/graph/checkpoint.h>
 #include <memory>
 #include <mutex>
@@ -62,7 +63,7 @@ namespace neograph::graph {
  * The DB file is created if missing; the schema is materialised on
  * first connect via `CREATE TABLE IF NOT EXISTS`.
  */
-class SqliteCheckpointStore : public CheckpointStore {
+class NEOGRAPH_API SqliteCheckpointStore : public CheckpointStore {
 public:
     /// @param db_path Filesystem path or ":memory:". Anything sqlite3_open accepts.
     /// @throws std::runtime_error on open or DDL failure.

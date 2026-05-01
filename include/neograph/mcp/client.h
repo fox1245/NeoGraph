@@ -13,6 +13,7 @@
  */
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/tool.h>
 
 #include <asio/awaitable.hpp>
@@ -38,7 +39,7 @@ class StdioSession;
  * through the owning transport (HTTP or stdio). Created automatically
  * by MCPClient::get_tools().
  */
-class MCPTool : public Tool {
+class NEOGRAPH_API MCPTool : public Tool {
   public:
     /// HTTP-mode constructor. Each execute() opens an ephemeral
     /// MCPClient against @p server_url.
@@ -93,7 +94,7 @@ class MCPTool : public Tool {
  * auto tools2 = stdio_client.get_tools();
  * @endcode
  */
-class MCPClient {
+class NEOGRAPH_API MCPClient {
   public:
     /**
      * @brief Construct an HTTP-mode MCP client.

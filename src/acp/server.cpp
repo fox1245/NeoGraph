@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <set>
 #include <future>
 #include <iostream>
 #include <map>
@@ -123,6 +124,10 @@ struct ACPServer::Impl {
     AgentCapabilities                             caps;
     std::atomic<bool>                             initialized{false};
     std::atomic<bool>                             stop_flag{false};
+    /// Toggled on by run() entry, off on exit. Mirrors
+    /// A2AServer::is_running so a generic protocol-server supervisor
+    /// can poll either uniformly.
+    std::atomic<bool>                             running{false};
 
     /// Notification sink — published to atomically as a shared_ptr so
     /// readers (worker threads issuing emit()) can take a stable snapshot
@@ -151,10 +156,26 @@ struct ACPServer::Impl {
                        std::shared_ptr<std::promise<neograph::json>>>
                                                   pending;
 
-    /// In-flight session/prompt workers. Joined on destruction so the
-    /// engine isn't called after the server is gone.
+    /// Worker bookkeeping for session/prompt dispatch.
+    ///
+    /// `max_inflight_prompts` caps total concurrent prompts across all
+    /// sessions (default 32) — prevents a misbehaving / malicious peer
+    /// that pipelines prompts faster than the engine completes from
+    /// exhausting the host's thread quota and unbounded-growing the
+    /// worker tracking. `inflight_sessions` enforces single-flight
+    /// per session_id so two prompts on the same session don't race
+    /// the engine on the same thread_id (which is what the engine's
+    /// checkpoint store keys on).
+    ///
+    /// Workers are spawned detached and accounted via `inflight_count`
+    /// (incremented before std::thread launches, decremented + cv
+    /// notified at the end of the worker body). Destructor waits on
+    /// the cv until inflight_count drains to zero.
     std::mutex                                    workers_mu;
-    std::vector<std::thread>                      workers;
+    std::condition_variable                       workers_cv;
+    int                                           inflight_count = 0;
+    std::set<std::string>                         inflight_sessions;
+    int                                           max_inflight_prompts = 32;
 
     /// Cached client handle returned by ACPServer::client().
     std::shared_ptr<ACPClient>                    client_handle;
@@ -259,9 +280,40 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
         }
     }
 
-    // Run the engine on a worker thread so the run-loop reader can keep
-    // pumping inbound messages — including responses to fs/* requests
-    // the engine issues mid-run via ACPClient::call_client.
+    // Backpressure: refuse new prompts when the in-flight cap is hit
+    // or the same session_id is already executing. Without these
+    // guards a misbehaving peer that pipelines prompts faster than
+    // the engine completes would (a) exhaust the host's thread quota
+    // and unbounded-grow the worker tracking, or (b) race two prompts
+    // on the same session_id, which the engine's checkpoint store
+    // (keyed by thread_id) cannot disambiguate.
+    {
+        std::lock_guard lk(workers_mu);
+        if (inflight_count >= max_inflight_prompts) {
+            // -32000 Server error per JSON-RPC §5.1 (server-defined range).
+            emit(jsonrpc_error(-32000,
+                std::string("ACP server overloaded: ")
+                + std::to_string(max_inflight_prompts)
+                + " concurrent prompts in flight; retry shortly", id));
+            return;
+        }
+        if (inflight_sessions.count(req.session_id)) {
+            emit(jsonrpc_error(-32000,
+                std::string("session_id ") + req.session_id
+                + " already has a prompt in flight; ACP requires "
+                  "single-flight per session", id));
+            return;
+        }
+        ++inflight_count;
+        inflight_sessions.insert(req.session_id);
+    }
+
+    // Run the engine on a detached worker so the run-loop reader can
+    // keep pumping inbound messages — including responses to fs/*
+    // requests the engine issues mid-run via ACPClient::call_client.
+    // The thread is detached because completed workers don't need
+    // joining individually; the dtor / drain path waits on
+    // inflight_count via workers_cv instead.
     std::thread worker([this, req = std::move(req), id, my_cancel]() mutable {
         auto& a = *adapter;
 
@@ -311,12 +363,19 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
         neograph::json rj;
         to_json(rj, resp);
         emit(jsonrpc_result(std::move(rj), id));
+
+        // Decrement inflight + clear single-flight reservation.
+        // Must happen even on exception above (those are caught
+        // earlier), but use a final lock here to be sure.
+        {
+            std::lock_guard lk(workers_mu);
+            --inflight_count;
+            inflight_sessions.erase(req.session_id);
+        }
+        workers_cv.notify_all();
     });
 
-    {
-        std::lock_guard lk(workers_mu);
-        workers.push_back(std::move(worker));
-    }
+    worker.detach();
 }
 
 void
@@ -361,14 +420,17 @@ ACPServer::~ACPServer() {
     // Make sure no in-flight worker is mid-engine-run when the server
     // dies — that would dereference a freed engine pointer through the
     // captured shared_ptr (which is safe) but would also try to write to
-    // an output stream that's about to disappear.
+    // an output stream that's about to disappear. Workers are detached
+    // (see handle_session_prompt) so we don't join them; we wait on
+    // inflight_count via workers_cv until every worker has decremented
+    // and cleared its single-flight session.
     impl_->stop_flag.store(true, std::memory_order_release);
-    std::vector<std::thread> drained;
     {
-        std::lock_guard lk(impl_->workers_mu);
-        drained = std::move(impl_->workers);
+        std::unique_lock lk(impl_->workers_mu);
+        impl_->workers_cv.wait(lk, [this]{
+            return impl_->inflight_count == 0;
+        });
     }
-    for (auto& t : drained) if (t.joinable()) t.join();
 
     // Wake any pending outbound RPC waiters with an error so they don't
     // hang the caller forever.
@@ -396,6 +458,10 @@ void ACPServer::set_notification_sink(NotificationSink sink) {
 
 void ACPServer::stop() {
     impl_->stop_flag.store(true, std::memory_order_release);
+}
+
+bool ACPServer::is_running() const {
+    return impl_->running.load(std::memory_order_acquire);
 }
 
 bool ACPServer::initialized() const {
@@ -510,14 +576,22 @@ ACPServer::handle_message(const neograph::json& env) {
 }
 
 void ACPServer::run(std::istream& in, std::ostream& out) {
+    impl_->running.store(true, std::memory_order_release);
+    // Always clear `running` on exit (including via exception), so
+    // is_running() never reports a stale `true`.
+    struct RunningGuard {
+        std::atomic<bool>* flag;
+        ~RunningGuard() {
+            if (flag) flag->store(false, std::memory_order_release);
+        }
+    };
+    RunningGuard running_guard{&impl_->running};
+
     auto out_mu = std::make_shared<std::mutex>();
     auto out_ptr = &out;
 
     auto run_sink = std::make_shared<NotificationSink>(
         [out_ptr, out_mu](const neograph::json& env) {
-            // Strip trailing CR if a CRLF-emitting peer wrote one — the
-            // other side's getline leaves it on the line; we never want
-            // to emit one ourselves either.
             auto s = env.dump();
             std::lock_guard lk(*out_mu);
             (*out_ptr) << s << '\n';
@@ -554,13 +628,13 @@ void ACPServer::run(std::istream& in, std::ostream& out) {
 
     // Drain workers before tearing the sink down — otherwise a worker
     // that finishes after run() returns would write through a dangling
-    // stream pointer.
-    std::vector<std::thread> drained;
+    // stream pointer. Workers are detached; wait on inflight_count.
     {
-        std::lock_guard lk(impl_->workers_mu);
-        drained = std::move(impl_->workers);
+        std::unique_lock lk(impl_->workers_mu);
+        impl_->workers_cv.wait(lk, [this]{
+            return impl_->inflight_count == 0;
+        });
     }
-    for (auto& t : drained) if (t.joinable()) t.join();
 
     std::atomic_store_explicit(&impl_->sink_,
                                std::shared_ptr<NotificationSink>{},
@@ -622,7 +696,7 @@ ACPClient::write_text_file(std::string_view session_id,
 
 RequestPermissionOutcome
 ACPClient::request_permission(std::string_view session_id,
-                              const ToolCall& tool_call,
+                              const ToolCallUpdate& tool_call,
                               const std::vector<PermissionOption>& options) {
     if (!server_) throw std::runtime_error(
         "ACPClient::request_permission: not bound to a server (call ACPServer::attach_client)");

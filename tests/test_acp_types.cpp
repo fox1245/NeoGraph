@@ -147,7 +147,7 @@ TEST(ACPTypes, SessionNotificationCarriesUpdate) {
     EXPECT_EQ(j["update"]["content"].value("text", std::string()), "partial answer");
 }
 
-TEST(ACPTypes, ToolCallRoundTripPreservesUnknownFields) {
+TEST(ACPTypes, ToolCallUpdateRoundTripPreservesUnknownFields) {
     // Spec carries fields we don't model (locations, rawInput, ...). The
     // `raw` bag must hold them so to_json round-trips without loss.
     json incoming = {
@@ -157,7 +157,7 @@ TEST(ACPTypes, ToolCallRoundTripPreservesUnknownFields) {
         {"kind",       "edit"},
         {"locations",  json::array({json{{"path", "x.cpp"}, {"line", 10}}})},
     };
-    ToolCall tc;
+    ToolCallUpdate tc;
     from_json(incoming, tc);
     EXPECT_EQ(tc.tool_call_id, "tc-1");
     EXPECT_EQ(tc.tool_name,    "edit_file");

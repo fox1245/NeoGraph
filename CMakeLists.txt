@@ -1,5 +1,23 @@
 cmake_minimum_required(VERSION 3.16)
-project(NeoGraph VERSION 2.0.0 LANGUAGES C CXX)
+
+# Single source of version truth — read from pyproject.toml so the
+# wheel ships the same number as `find_package(NeoGraph 0.2)` and
+# `set_target_properties(... VERSION SOVERSION)`. Previously this was
+# hard-coded to 2.0.0 and drifted multiple minor versions behind the
+# real release line, with side-effects on Doxygen PROJECT_NUMBER and
+# the installed CMake config package.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/pyproject.toml" _NG_PYPROJECT)
+string(REGEX MATCH "version[ \t]*=[ \t]*\"([0-9]+\\.[0-9]+\\.[0-9]+)\""
+       _NG_VER_MATCH "${_NG_PYPROJECT}")
+if(NOT CMAKE_MATCH_1)
+    message(FATAL_ERROR
+        "NeoGraph: failed to parse version from pyproject.toml. "
+        "Expected `version = \"X.Y.Z\"` in the [project] table.")
+endif()
+set(NEOGRAPH_VERSION "${CMAKE_MATCH_1}")
+unset(_NG_PYPROJECT)
+unset(_NG_VER_MATCH)
+project(NeoGraph VERSION ${NEOGRAPH_VERSION} LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

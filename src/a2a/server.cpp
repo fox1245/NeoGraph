@@ -9,7 +9,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <list>
 #include <map>
+#include <unordered_map>
 #include <mutex>
 #include <random>
 #include <sstream>
@@ -163,15 +165,50 @@ struct A2AServer::Impl {
     /// In-memory task store. tasks/get and tasks/cancel hit this; we
     /// don't persist across server restarts — A2A spec allows that.
     ///
+    /// LRU bounded by `max_tasks` (default 1024) — without this a
+    /// long-running A2A server unbounded-grows its task history,
+    /// eventually OOMing. `task_lru` holds task_ids in
+    /// least-recently-touched-first order; on insert/touch we move
+    /// the id to the back. On insert that would exceed the cap, we
+    /// evict from the front.
+    ///
     /// `cancel_flags` holds atomics behind shared_ptrs so a worker
     /// thread can capture the pointer at dispatch time (under the
     /// lock) and read/write the flag thereafter without re-traversing
     /// the map — `std::map<…, std::atomic<bool>>` would otherwise
     /// invite concurrent-rebalance UB when a parallel insert from
     /// `tasks/cancel` rotates a tree node the worker is reading.
-    std::mutex                  tasks_mu;
-    std::map<std::string, Task> tasks;
-    std::map<std::string, std::shared_ptr<std::atomic<bool>>> cancel_flags;
+    std::mutex                                                tasks_mu;
+    std::unordered_map<std::string, Task>                     tasks;
+    std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>>
+                                                              cancel_flags;
+    std::list<std::string>                                    task_lru;
+    std::unordered_map<std::string, std::list<std::string>::iterator>
+                                                              task_lru_pos;
+    std::size_t max_tasks = 1024;
+
+    /// Move a task_id to the most-recently-used (back) position, or
+    /// insert it if it's new. Caller must hold tasks_mu.
+    void touch_task_unlocked(const std::string& tid) {
+        auto it = task_lru_pos.find(tid);
+        if (it != task_lru_pos.end()) {
+            task_lru.erase(it->second);
+        }
+        task_lru.push_back(tid);
+        task_lru_pos[tid] = std::prev(task_lru.end());
+    }
+
+    /// Evict LRU entries until tasks.size() <= max_tasks. Caller must
+    /// hold tasks_mu.
+    void evict_lru_unlocked() {
+        while (tasks.size() > max_tasks && !task_lru.empty()) {
+            auto victim = task_lru.front();
+            task_lru.pop_front();
+            task_lru_pos.erase(victim);
+            tasks.erase(victim);
+            cancel_flags.erase(victim);
+        }
+    }
 
     void register_routes();
 
@@ -275,6 +312,8 @@ Task A2AServer::Impl::run_graph(
         tasks[task_id]        = working;
         my_cancel             = std::make_shared<std::atomic<bool>>(false);
         cancel_flags[task_id] = my_cancel;
+        touch_task_unlocked(task_id);
+        evict_lru_unlocked();
     }
 
     if (on_event) {
@@ -305,6 +344,7 @@ Task A2AServer::Impl::run_graph(
     {
         std::lock_guard lk(tasks_mu);
         tasks[task_id] = result;
+        touch_task_unlocked(task_id);
     }
 
     if (on_event) {
@@ -413,7 +453,11 @@ void A2AServer::Impl::handle_tasks_get(const neograph::json& params,
     {
         std::lock_guard lk(tasks_mu);
         auto it = tasks.find(task_id);
-        if (it != tasks.end()) { t = it->second; found = true; }
+        if (it != tasks.end()) {
+            t = it->second;
+            found = true;
+            touch_task_unlocked(task_id);  // tasks/get is a recency signal
+        }
     }
     if (!found) {
         res.status = 200;
@@ -453,6 +497,7 @@ void A2AServer::Impl::handle_tasks_cancel(const neograph::json& params,
                 || t.status.state == TaskState::Submitted) {
                 t.status.state = TaskState::Canceled;
                 tasks[task_id] = t;
+                touch_task_unlocked(task_id);
             }
         }
     }

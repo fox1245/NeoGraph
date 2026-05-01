@@ -172,11 +172,34 @@ asio::awaitable<std::unique_ptr<Connection>> open(
     co_return conn;
 }
 
+// Inspect the HTTP request line to decide whether a stale-idle
+// failure is safe to retry on a fresh connection. Per RFC 7231 §4.2.2,
+// GET / HEAD / OPTIONS / TRACE are *safe* (read-only, side-effect-
+// free); PUT / DELETE are idempotent but not safe; POST / PATCH are
+// neither. Retrying a non-safe request on stale-idle would re-send
+// the same body, double-applying any side effect the server already
+// committed (token charge, email tool action, checkpoint write) when
+// the failure landed on the response side rather than the request
+// side.
+//
+// We can't tell from a generic exception whether bytes left the
+// kernel before the failure, so the conservative rule is: retry only
+// safe methods. Unsafe methods bubble the exception up; callers that
+// know their POST is idempotent (LLM completions are stateless on
+// the server) can layer their own retry on top.
+bool is_safe_method(const std::string& req) {
+    // Request line: "METHOD SP URI SP HTTP/1.1\r\n..."
+    auto sp = req.find(' ');
+    if (sp == std::string::npos) return false;
+    std::string_view m(req.data(), sp);
+    return m == "GET" || m == "HEAD" || m == "OPTIONS" || m == "TRACE";
+}
+
 // Attempt an HTTP exchange over a pooled connection. Returns nullopt
-// if the exchange threw (conn was stale / server closed). Wrapping
-// the try/catch here keeps the caller free of catch-blocks that
-// contain co_await — a shape that hit GCC 13 coroutine ICEs during
-// earlier parts of this refactor.
+// only when the exchange threw AND the request method is safe to
+// replay; otherwise the exception propagates so the caller can
+// surface it (rather than silently double-applying a non-idempotent
+// side effect on the retry path).
 asio::awaitable<std::optional<detail::ExchangeResult>> try_exchange(
     Connection& conn, const std::string& req) {
     try {
@@ -187,7 +210,8 @@ asio::awaitable<std::optional<detail::ExchangeResult>> try_exchange(
         auto r = co_await detail::run_exchange(*conn.tls, req);
         co_return r;
     } catch (const std::exception&) {
-        co_return std::nullopt;
+        if (is_safe_method(req)) co_return std::nullopt;
+        throw;
     }
 }
 
