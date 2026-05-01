@@ -242,7 +242,15 @@ struct ConditionalEdge {
  */
 struct NodeContext {
     std::shared_ptr<Provider> provider;    ///< LLM provider for making completions.
-    std::vector<Tool*>        tools;       ///< Non-owning tool pointers (engine owns the unique_ptrs).
+    /// Non-owning tool pointers consumed by node factories at compile()
+    /// time. **Lifetime contract**: the pointees must outlive the
+    /// GraphEngine. Typical pattern: hand the engine ownership via
+    /// `engine.own_tools(std::move(unique_ptr_vec))` after compile, or
+    /// keep the owning unique_ptrs alive in the caller's scope for at
+    /// least as long as the engine. Constructing NodeContext from a
+    /// throwaway unique_ptr collection that goes out of scope before
+    /// `engine->run()` returns leaves these pointers dangling and is UB.
+    std::vector<Tool*>        tools;
     std::string               model;       ///< Model name override (empty = use provider default).
     std::string               instructions; ///< System prompt / instructions for the LLM.
     json                      extra_config; ///< Additional configuration (node-type specific).

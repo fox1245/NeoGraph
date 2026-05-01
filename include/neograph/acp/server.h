@@ -226,6 +226,22 @@ class NEOGRAPH_API ACPServer {
     void set_notification_sink(NotificationSink sink);
 
     /// Signal a running run() loop to exit at the next message boundary.
+    ///
+    /// **Cancellation semantics**: ACP `session/cancel` flips a flag
+    /// that the server consults *after* `engine->run()` naturally
+    /// returns — it does NOT preempt an in-flight graph turn. The
+    /// session/prompt response will carry `StopReason::Cancelled` if
+    /// the flag was set by the time the graph finished, but a
+    /// long-running LLM call inside a node still completes in full.
+    /// Wire cancel into your nodes (or set a tight `max_steps` on
+    /// `RunConfig`) for shorter cancel latency.
+    ///
+    /// **Destructor semantics**: ~ACPServer joins all in-flight
+    /// session/prompt worker threads before returning. Each worker
+    /// blocks until its `engine->run()` completes, so destroying the
+    /// server during a 60-second LLM call blocks the destroying
+    /// thread for the full duration. Drain or cancel before
+    /// destruction if you need a bounded-latency teardown.
     void stop();
 
     /// True after at least one initialize has been processed.

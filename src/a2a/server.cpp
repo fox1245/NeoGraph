@@ -162,9 +162,16 @@ struct A2AServer::Impl {
 
     /// In-memory task store. tasks/get and tasks/cancel hit this; we
     /// don't persist across server restarts — A2A spec allows that.
+    ///
+    /// `cancel_flags` holds atomics behind shared_ptrs so a worker
+    /// thread can capture the pointer at dispatch time (under the
+    /// lock) and read/write the flag thereafter without re-traversing
+    /// the map — `std::map<…, std::atomic<bool>>` would otherwise
+    /// invite concurrent-rebalance UB when a parallel insert from
+    /// `tasks/cancel` rotates a tree node the worker is reading.
     std::mutex                  tasks_mu;
     std::map<std::string, Task> tasks;
-    std::map<std::string, std::atomic<bool>> cancel_flags;
+    std::map<std::string, std::shared_ptr<std::atomic<bool>>> cancel_flags;
 
     void register_routes();
 
@@ -211,10 +218,21 @@ void A2AServer::Impl::handle_jsonrpc(const httplib::Request& req,
             "application/json");
         return;
     }
+    bool is_notification = !req_json.contains("id");
     auto id     = req_json.contains("id") ? req_json["id"] : neograph::json();
     auto method = req_json.value("method", std::string());
     auto params = req_json.contains("params") ? req_json["params"]
                                               : neograph::json::object();
+
+    // JSON-RPC 2.0 §4.1: "The Server MUST NOT reply to a Notification."
+    // A2A's defined methods (message/send, message/stream, tasks/get,
+    // tasks/cancel) are all request/response, so a notification of any
+    // of them is malformed by spec — but we still must not reply with
+    // a JSON envelope. Drop on the floor with HTTP 204 No Content.
+    if (is_notification) {
+        res.status = 204;
+        return;
+    }
 
     if (method == "message/send" || method == "SendMessage") {
         handle_message_send(params, id, res);
@@ -244,6 +262,10 @@ Task A2AServer::Impl::run_graph(
     cfg.thread_id = task_id;
     cfg.input     = a.build_initial_state(user_text);
 
+    // Capture the cancel-flag shared_ptr while holding the mutex so the
+    // worker can read/write it later without re-traversing the map (see
+    // tasks_mu / cancel_flags doc comment for the rationale).
+    std::shared_ptr<std::atomic<bool>> my_cancel;
     {
         std::lock_guard lk(tasks_mu);
         Task working;
@@ -251,7 +273,8 @@ Task A2AServer::Impl::run_graph(
         working.context_id    = context_id;
         working.status.state  = TaskState::Working;
         tasks[task_id]        = working;
-        cancel_flags[task_id] = false;
+        my_cancel             = std::make_shared<std::atomic<bool>>(false);
+        cancel_flags[task_id] = my_cancel;
     }
 
     if (on_event) {
@@ -265,11 +288,8 @@ Task A2AServer::Impl::run_graph(
 
     Task result;
     try {
-        bool& cancel_flag_ref =
-            *reinterpret_cast<bool*>(&cancel_flags.at(task_id));
-        (void)cancel_flag_ref;
         auto rr = engine->run(cfg);
-        if (cancel_flags[task_id].load(std::memory_order_relaxed)) {
+        if (my_cancel->load(std::memory_order_acquire)) {
             result = build_failure_task(task_id, context_id, "(canceled)");
             result.status.state = TaskState::Canceled;
         } else {
@@ -347,6 +367,15 @@ void A2AServer::Impl::handle_message_stream(const neograph::json& params,
     auto rpc_id     = id;
     auto self       = this;
 
+    // Note on SSE resumability: this stream emits no `id:` field per
+    // event and no `retry:` hints, so a client reconnecting with
+    // `Last-Event-ID` cannot replay missed frames. A2A's documented
+    // recovery path is `tasks/resubscribe` (issue a fresh
+    // message/stream against the existing task_id), which works fine
+    // here because the in-memory task store survives the dropped HTTP
+    // connection. If you need finer-grained resumability for a
+    // long-running task, run an external SSE proxy in front of this
+    // server.
     res.set_chunked_content_provider(
         "text/event-stream",
         [self, inbound, task_id, context_id, rpc_id](
@@ -416,7 +445,10 @@ void A2AServer::Impl::handle_tasks_cancel(const neograph::json& params,
         if (it != tasks.end()) {
             t = it->second;
             found = true;
-            cancel_flags[task_id].store(true, std::memory_order_relaxed);
+            auto cf_it = cancel_flags.find(task_id);
+            if (cf_it != cancel_flags.end() && cf_it->second) {
+                cf_it->second->store(true, std::memory_order_release);
+            }
             if (t.status.state == TaskState::Working
                 || t.status.state == TaskState::Submitted) {
                 t.status.state = TaskState::Canceled;

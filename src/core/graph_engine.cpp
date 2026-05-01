@@ -101,6 +101,17 @@ void GraphEngine::set_node_retry_policy(const std::string& node_name, const Retr
 
 void GraphEngine::set_worker_count(std::size_t n) {
     if (n < 1) n = 1;
+    // Refuse to resize the pool while a run is mid-flight. The old
+    // pool's workers may be holding tasks the executor swap would
+    // drop; safer to make this a hard runtime check than to rely on
+    // the docs. NDEBUG builds keep the throw — debug-only would
+    // hide the same bug in release.
+    if (active_runs_.load(std::memory_order_acquire) != 0) {
+        throw std::logic_error(
+            "GraphEngine::set_worker_count called while a run is in "
+            "flight — resizing the executor would drop tasks queued "
+            "on the old pool. Drain runs before resizing.");
+    }
     // n == 1 means "no engine-owned thread pool" — fan-out branches
     // dispatch on whichever executor drives the coroutine (single-
     // thread io_context for run_sync, the caller's pool for
@@ -371,6 +382,18 @@ GraphEngine::execute_graph_async(const RunConfig& config,
                                  const json& resume_value) {
     const bool is_resume = !resume_from.empty();
 
+    // RAII inc/dec on the inflight-run counter — set_worker_count()
+    // checks this is zero before swapping executors. Designed to run
+    // through coroutine completion, including exception unwinding.
+    struct ActiveRunGuard {
+        std::atomic<int>* counter;
+        ~ActiveRunGuard() {
+            if (counter) counter->fetch_sub(1, std::memory_order_release);
+        }
+    };
+    active_runs_.fetch_add(1, std::memory_order_acq_rel);
+    ActiveRunGuard active_run_guard{&active_runs_};
+
     GraphState state;
     init_state(state);
 
@@ -625,8 +648,18 @@ GraphEngine::execute_graph_async(const RunConfig& config,
                 ready.empty() ? std::vector<std::string>{std::string(END_NODE)}
                               : ready;
             const std::string parent_cp_id = last_checkpoint_id;
+            // Guard against an executor path that returns without
+            // pushing to `trace` (e.g. all-Send-targets-missing in
+            // run_sends_async, or future cancellation paths). The
+            // checkpoint store keys on a single "executed node" string;
+            // a synthesised __step__<N> tag keeps the invariant
+            // "every super-step's checkpoint has a non-empty key"
+            // without crashing on UB.
+            const std::string trace_tag = trace.empty()
+                ? (std::string("__step__") + std::to_string(step))
+                : trace.back();
             auto cp_id = co_await coord.save_super_step_async(state,
-                trace.back(), next_nodes_for_cp, CheckpointPhase::Completed,
+                trace_tag, next_nodes_for_cp, CheckpointPhase::Completed,
                 step, parent_cp_id, barrier_state);
             last_checkpoint_id = cp_id;
 

@@ -124,11 +124,24 @@ struct ACPServer::Impl {
     std::atomic<bool>                             initialized{false};
     std::atomic<bool>                             stop_flag{false};
 
-    NotificationSink                              sink;
+    /// Notification sink — published to atomically as a shared_ptr so
+    /// readers (worker threads issuing emit()) can take a stable snapshot
+    /// without holding a mutex. Writers (`run()`, `set_notification_sink`)
+    /// store a fresh shared_ptr; the previous one is kept alive by any
+    /// thread that already loaded it. Avoids the data race a bare
+    /// `std::function` assignment would have during SBO reseating.
+    std::shared_ptr<NotificationSink>             sink_;
 
     std::mutex                                    sessions_mu;
     std::map<std::string, std::string>            sessions;
-    std::map<std::string, std::atomic<bool>>      cancel_flags;
+    /// Per-session cancel flags held behind shared_ptrs so a worker
+    /// thread can capture the pointer at dispatch time (under the
+    /// lock) and read/write the flag thereafter without re-traversing
+    /// the map — `std::map<…, std::atomic<bool>>` would otherwise
+    /// invite concurrent-rebalance UB when a parallel session/cancel
+    /// rotates a tree node the worker is reading.
+    std::map<std::string, std::shared_ptr<std::atomic<bool>>>
+                                                  cancel_flags;
 
     /// Outbound JSON-RPC: id → promise that the run-loop reader fulfils
     /// when it sees a response with that id.
@@ -158,7 +171,11 @@ struct ACPServer::Impl {
     void           handle_session_cancel(const neograph::json& params);
 
     void emit(const neograph::json& env) {
-        if (sink) sink(env);
+        // Take a stable snapshot of the current sink shared_ptr — even
+        // if `set_notification_sink` swaps the pointer concurrently,
+        // this thread keeps the old callable alive until it returns.
+        auto s = std::atomic_load_explicit(&sink_, std::memory_order_acquire);
+        if (s && *s) (*s)(env);
     }
 };
 
@@ -203,7 +220,7 @@ ACPServer::Impl::handle_session_new(const neograph::json& params,
     {
         std::lock_guard lk(sessions_mu);
         sessions[sid] = req.cwd;
-        cancel_flags[sid] = false;
+        cancel_flags[sid] = std::make_shared<std::atomic<bool>>(false);
     }
 
     NewSessionResponse resp;
@@ -225,18 +242,27 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
         return;
     }
 
+    // Capture the cancel-flag shared_ptr while holding sessions_mu so the
+    // worker can read/write it later without re-traversing the map.
+    std::shared_ptr<std::atomic<bool>> my_cancel;
     {
         std::lock_guard lk(sessions_mu);
         if (sessions.count(req.session_id) == 0) {
             sessions[req.session_id] = "";
-            cancel_flags[req.session_id] = false;
+        }
+        auto it = cancel_flags.find(req.session_id);
+        if (it == cancel_flags.end() || !it->second) {
+            my_cancel = std::make_shared<std::atomic<bool>>(false);
+            cancel_flags[req.session_id] = my_cancel;
+        } else {
+            my_cancel = it->second;
         }
     }
 
     // Run the engine on a worker thread so the run-loop reader can keep
     // pumping inbound messages — including responses to fs/* requests
     // the engine issues mid-run via ACPClient::call_client.
-    std::thread worker([this, req = std::move(req), id]() mutable {
+    std::thread worker([this, req = std::move(req), id, my_cancel]() mutable {
         auto& a = *adapter;
 
         neograph::graph::RunConfig cfg;
@@ -266,7 +292,7 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
         }
 
         if (!graph_failed) {
-            bool was_cancelled = cancel_flags[req.session_id].exchange(
+            bool was_cancelled = my_cancel->exchange(
                 false, std::memory_order_acq_rel);
             if (was_cancelled) {
                 stop = StopReason::Cancelled;
@@ -299,11 +325,23 @@ ACPServer::Impl::handle_session_cancel(const neograph::json& params) {
     try { from_json(params, n); }
     catch (...) { return; }
 
-    std::lock_guard lk(sessions_mu);
-    auto it = cancel_flags.find(n.session_id);
-    if (it != cancel_flags.end()) {
-        it->second.store(true, std::memory_order_relaxed);
+    std::shared_ptr<std::atomic<bool>> flag;
+    {
+        std::lock_guard lk(sessions_mu);
+        auto it = cancel_flags.find(n.session_id);
+        if (it != cancel_flags.end() && it->second) {
+            flag = it->second;
+        } else {
+            // Cancel arriving for a session whose prompt hasn't been
+            // dispatched yet — pre-create the flag so the eventual
+            // handle_session_prompt picks it up. Aligns with the
+            // documented semantic ("cancel-before-prompt sticks until
+            // the next prompt observes and consumes it").
+            flag = std::make_shared<std::atomic<bool>>(false);
+            cancel_flags[n.session_id] = flag;
+        }
     }
+    flag->store(true, std::memory_order_release);
 }
 
 // ---------------------------------------------------------------------------
@@ -351,7 +389,9 @@ AgentCapabilities&       ACPServer::capabilities()       { return impl_->caps; }
 const AgentCapabilities& ACPServer::capabilities() const { return impl_->caps; }
 
 void ACPServer::set_notification_sink(NotificationSink sink) {
-    impl_->sink = std::move(sink);
+    auto s = std::make_shared<NotificationSink>(std::move(sink));
+    std::atomic_store_explicit(&impl_->sink_, std::move(s),
+                               std::memory_order_release);
 }
 
 void ACPServer::stop() {
@@ -380,7 +420,9 @@ neograph::json
 ACPServer::call_client(std::string method,
                        neograph::json params,
                        std::chrono::milliseconds timeout) {
-    if (!impl_->sink) {
+    auto s_snap = std::atomic_load_explicit(&impl_->sink_,
+                                            std::memory_order_acquire);
+    if (!s_snap || !*s_snap) {
         throw std::runtime_error(
             "ACPServer::call_client: no transport connected — call run() first "
             "or set_notification_sink() before issuing fs/* requests");
@@ -471,16 +513,24 @@ void ACPServer::run(std::istream& in, std::ostream& out) {
     auto out_mu = std::make_shared<std::mutex>();
     auto out_ptr = &out;
 
-    impl_->sink = [out_ptr, out_mu](const neograph::json& env) {
-        auto s = env.dump();
-        std::lock_guard lk(*out_mu);
-        (*out_ptr) << s << '\n';
-        out_ptr->flush();
-    };
+    auto run_sink = std::make_shared<NotificationSink>(
+        [out_ptr, out_mu](const neograph::json& env) {
+            // Strip trailing CR if a CRLF-emitting peer wrote one — the
+            // other side's getline leaves it on the line; we never want
+            // to emit one ourselves either.
+            auto s = env.dump();
+            std::lock_guard lk(*out_mu);
+            (*out_ptr) << s << '\n';
+            out_ptr->flush();
+        });
+    std::atomic_store_explicit(&impl_->sink_, run_sink,
+                               std::memory_order_release);
 
     std::string line;
     while (!impl_->stop_flag.load(std::memory_order_acquire)
            && std::getline(in, line)) {
+        // Tolerate CRLF input — strip a trailing \r left by getline().
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         if (line.empty()) continue;
 
         neograph::json env;
@@ -512,7 +562,9 @@ void ACPServer::run(std::istream& in, std::ostream& out) {
     }
     for (auto& t : drained) if (t.joinable()) t.join();
 
-    impl_->sink = {};
+    std::atomic_store_explicit(&impl_->sink_,
+                               std::shared_ptr<NotificationSink>{},
+                               std::memory_order_release);
 }
 
 void ACPServer::run() {
