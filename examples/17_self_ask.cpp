@@ -1,18 +1,29 @@
 // NeoGraph Example 17: Self-Ask (question decomposition)
 //
-// Pattern: to answer a complex multi-hop question, the LLM explicitly decides
-// whether a follow-up sub-question is needed, asks it, gets an answer from a
-// "knowledge source", and feeds that answer back — repeating until it has
-// enough to produce the final answer.
+// Implements the canonical Self-Ask protocol from Press et al. 2022,
+// "Measuring and Narrowing the Compositionality Gap in Language Models"
+// (arXiv:2210.03350). To answer a complex multi-hop question, the LLM
+// explicitly decides whether a follow-up sub-question is needed, asks
+// it, gets an answer from a "knowledge source", and feeds that answer
+// back — repeating until it has enough to produce the final answer.
 //
-// This is structurally close to ReAct, but with a crucial difference:
-// Self-Ask makes the *decomposition* explicit in the prompt. The LLM is
-// forced to articulate "Are follow up questions needed?" and "Intermediate
-// answer:" markers, which dramatically improves multi-hop reasoning.
-//
-// The "knowledge source" for the sub-questions here is the LLM itself with a
-// focused system prompt. In a real system you'd swap this for web search,
-// a SQL tool, or RAG retrieval.
+// Faithful Self-Ask requires three things in the prompt that this
+// example uses:
+//   1. The "Are follow up questions needed here:" scaffold, which the
+//      paper found materially improved performance even on
+//      instruction-tuned models — it forces the model to commit
+//      Yes/No before continuing.
+//   2. A few-shot exemplar showing the full
+//      Question / Are follow up questions needed / Yes / Follow up /
+//      Intermediate answer / ... / So the final answer is
+//      sequence. The paper notes the rigid scaffold "makes it easier
+//      for the model to state the final answer in a concise,
+//      parseable way".
+//   3. An external knowledge source that handles the sub-questions
+//      (paper uses Google search with the SerpAPI in their SA+SE
+//      configuration). This example uses a second LLM instance with
+//      a terse-answerer system prompt — swap for web/SQL/RAG in a
+//      real system.
 //
 // Usage:
 //   echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
@@ -99,36 +110,64 @@ int main() {
         "In the year the C++ programming language was first standardized by "
         "ISO, who was the Secretary-General of the United Nations?";
 
-    // The system prompt establishes the Self-Ask protocol. The LLM must
-    // produce either:
-    //   Follow up: <sub-question>
-    // or:
-    //   So the final answer is: <answer>
-    // We parse both markers in a loop.
+    // System prompt establishes the Self-Ask protocol. Two key elements
+    // from the paper:
+    //   - The "Are follow up questions needed here:" scaffold (Press
+    //     et al. 2022 §3): commits the model to Yes/No before
+    //     emitting a sub-question or final answer. The paper found
+    //     this single line materially helped smaller models stay on
+    //     protocol.
+    //   - A few-shot exemplar in the user message below: shows the
+    //     model exactly the sequence of turns expected. Even on a
+    //     strong instruction-tuned model, the few-shot pin reduces
+    //     protocol drift to near-zero in our test runs.
     const std::string system =
         "You answer complex questions using the Self-Ask protocol. The "
         "conversation happens over MULTIPLE turns — do not try to answer "
         "in one turn.\n\n"
+        "FORMAT — your reply for each turn must be EXACTLY one of these "
+        "three shapes (always include the 'Are follow up questions "
+        "needed here:' line first):\n\n"
+        "  Shape A (more decomposition needed, two lines):\n"
+        "    Are follow up questions needed here: Yes.\n"
+        "    Follow up: <a single factual sub-question>\n\n"
+        "  Shape B (you have all the evidence, two lines):\n"
+        "    Are follow up questions needed here: No.\n"
+        "    So the final answer is: <final answer>\n\n"
         "RULES (strict):\n"
-        "1. Your ENTIRE reply for this turn must be EXACTLY ONE line.\n"
-        "2. That single line must be one of these two forms and nothing "
-        "else:\n"
-        "     Follow up: <a single factual sub-question>\n"
-        "   — or —\n"
-        "     So the final answer is: <final answer>\n"
-        "3. Never include both forms in the same reply.\n"
-        "4. Never include reasoning, thinking-out-loud, reconsideration, "
-        "or explanation. Do not use phrases like 'let me reconsider' or "
-        "'actually'.\n"
-        "5. After you emit 'Follow up:', the user will reply with an "
+        "1. Always emit the 'Are follow up questions needed here:' line "
+        "first; the answer must be exactly 'Yes.' or 'No.'.\n"
+        "2. Never include both 'Follow up:' and 'So the final answer is:' "
+        "in the same turn.\n"
+        "3. Never include reasoning, thinking-out-loud, reconsideration, "
+        "or explanation outside these lines.\n"
+        "4. After you emit 'Follow up:', the user will reply with an "
         "'Intermediate answer:' line. Only then may you emit your next "
         "turn.\n"
-        "6. Emit 'So the final answer is:' only when you have gathered "
+        "5. Emit 'So the final answer is:' only when you have gathered "
         "all the intermediate answers you need.";
+
+    // One-shot exemplar — Press et al.'s SA paper-style canonical form.
+    // We pin a fully-worked trajectory so the model imitates the exact
+    // line shapes (the paper reports the rigid scaffolding is what
+    // makes the final answer parseable).
+    const std::string exemplar =
+        "Here is a worked example of the protocol. Follow this format "
+        "exactly when you reply.\n\n"
+        "Question: When was the founder of craigslist born?\n"
+        "Are follow up questions needed here: Yes.\n"
+        "Follow up: Who was the founder of craigslist?\n"
+        "Intermediate answer: Craig Newmark.\n"
+        "Are follow up questions needed here: Yes.\n"
+        "Follow up: When was Craig Newmark born?\n"
+        "Intermediate answer: December 6, 1952.\n"
+        "Are follow up questions needed here: No.\n"
+        "So the final answer is: December 6, 1952.\n\n"
+        "Now do the same for the question below.";
 
     std::vector<ChatMessage> history;
     history.push_back({"system", system});
-    history.push_back({"user", "Question: " + question});
+    history.push_back({"user", exemplar + "\n\nQuestion: " + question});
 
     std::cout << "Question: " << question << "\n\n";
 

@@ -154,9 +154,15 @@ int main() {
         "equals 24. You may not introduce any other numbers. Show the "
         "final expression when you have one.";
 
-    const int DEPTH       = 3;   // search depth
-    const int BRANCHING   = 3;   // candidates per expansion
-    const int BEAM_WIDTH  = 2;   // top-K kept per depth
+    // Hyperparameters per Yao et al. 2023, Table 2 (Game of 24): the
+    // paper uses T≤3 steps with b=5 for ToT-BFS. Below b=5 the beam
+    // narrows fast and a single bad evaluator score can prune the
+    // correct path; the paper's 74% solve-rate on 100 puzzles is at
+    // b=5. Branching k=3 candidates per state matches the propose-prompt
+    // design where the LLM emits 3 next-step continuations.
+    const int DEPTH       = 3;   // search depth (T)
+    const int BRANCHING   = 3;   // candidates per expansion (k)
+    const int BEAM_WIDTH  = 5;   // top-K kept per depth (b)
 
     // Start with one empty root
     std::vector<Node> frontier = {{"", 0.0f}};
