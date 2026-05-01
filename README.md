@@ -372,7 +372,7 @@ cleanly with no resource pressure and the RSS stayed flat at ~7 MB.
 
 | Platform | Tier | Notes |
 |---|---|---|
-| Linux x86_64 (Ubuntu 24.04, GCC 13) | **GA** | Reference — 397/397 ctest green, ASan/UBSan/LSan/TSan clean (CI gates), Valgrind clean on coroutine subset |
+| Linux x86_64 (Ubuntu 24.04, GCC 13) | **GA** | Reference — 429/429 ctest green, ASan/UBSan/LSan/TSan clean (CI gates), Valgrind clean on coroutine subset |
 | macOS (Apple Silicon, Clang) | **beta** | CI builds + non-Postgres tests; runtime differences (coroutine scheduling, SIGPIPE) not yet exercised in production |
 | Linux ARM64 (Ubuntu 24.04, GCC 13) | **alpha** | ctest green via `docker buildx --platform linux/arm64` under QEMU emulation — see [`Dockerfile.arm64-smoke`](Dockerfile.arm64-smoke). Native ARM64 hardware validation pending (Raspberry Pi, Graviton, Apple Silicon Linux). Stripped binary 0.81–0.88 MB. |
 | Windows (MSVC 2022, x64) | **alpha** | CI builds + non-Postgres tests; MCP stdio (named-pipe overlapped) + PG async socket wrap written against MSDN spec but unvalidated under load |
