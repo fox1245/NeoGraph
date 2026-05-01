@@ -1,18 +1,49 @@
-# NeoGraph API Reference
+# NeoGraph API — Narrative Tour
 
-**NeoGraph** is a C++ graph agent engine library -- a C++ alternative to LangGraph.
-It provides a modular architecture for building LLM-powered agent workflows as
-directed graphs with state management, checkpointing, streaming, and tool integration.
+This document is a **guided narrative tour** of NeoGraph's public API,
+not a complete reference. It walks through the modules in the order
+you'll meet them when building a real agent: foundation types →
+provider/tool interfaces → graph types → engine → checkpoint store →
+multi-LLM → MCP. The shapes shown below are accurate against master
+HEAD and audited against `include/neograph/`, but several modules
+(`neograph::a2a`, `neograph::acp`, `neograph::async`,
+`SqliteCheckpointStore`, `PostgresCheckpointStore`,
+`RateLimitedProvider`, `NodeCache`, `AsyncTool`, `create_deep_research_graph`)
+have **public API in the headers that this tour does not cover**.
 
-**Modules:**
+> **For the complete, type-by-type API surface — including every
+> module above — use the Doxygen output at
+> [fox1245.github.io/NeoGraph/](https://fox1245.github.io/NeoGraph/),
+> generated directly from the headers and refreshed every push to
+> master. This narrative tour is the recommended entry point;
+> Doxygen is the canonical reference.**
 
-| Module | Namespace | Description |
-|--------|-----------|-------------|
-| Core | `neograph` | Foundation types, Provider and Tool interfaces |
-| Graph | `neograph::graph` | Graph engine, nodes, state, checkpointing, store |
-| LLM | `neograph::llm` | LLM provider implementations and Agent |
-| MCP | `neograph::mcp` | Model Context Protocol client |
-| Util | `neograph::util` | Concurrency utilities |
+The trade-off this split buys: the narrative stays small enough to
+read end-to-end, while the auto-generated Doxygen guarantees no
+drift between the published API and the doc surface — a 1:1
+shape map onto `include/neograph/`.
+
+**Modules at a glance:**
+
+| Module | Namespace | Description | Tour | Doxygen |
+|--------|-----------|-------------|------|---------|
+| Core | `neograph` | Foundation types, Provider and Tool interfaces | [§1–§3](#1-foundation-types) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph.html) |
+| Graph | `neograph::graph` | Graph engine, nodes, state, checkpointing, store | [§4–§11](#4-graph-types) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1graph.html) |
+| LLM | `neograph::llm` | LLM provider implementations and Agent | [§12](#12-llm-module) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1llm.html) |
+| MCP | `neograph::mcp` | Model Context Protocol client | [§13](#13-mcp-module) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1mcp.html) |
+| Util | `neograph::util` | Concurrency utilities | [§14](#14-util-module) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1util.html) |
+| **A2A** | `neograph::a2a` | Agent-to-Agent JSON-RPC bridge (client + server + streaming) | _Doxygen-only_ | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1a2a.html) |
+| **ACP** | `neograph::acp` | Agent Client Protocol — editor↔agent bidirectional RPC over stdio | _Doxygen-only_ | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1acp.html) |
+| **Async** | `neograph::async` | Asio HTTP/SSE/WS helpers, ConnPool, run_sync | _Doxygen-only_ | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1async.html) |
+
+The three "_Doxygen-only_" rows are net-new modules added across
+recent audit and protocol-bridge work. They have full headers under
+`include/neograph/{a2a,acp,async}/` and are exercised by ctest
+suites, but writing dedicated narrative sections has been deferred
+in favour of pointing to Doxygen — both because they're large
+(A2A alone is ~5 classes + types module + caller node) and because
+new modules tend to keep evolving for one or two more releases
+before a hand-written tour is worth the maintenance.
 
 **Convenience header:** `#include <neograph/neograph.h>` includes the full core + graph engine API.
 
@@ -2672,3 +2703,85 @@ int main() {
     std::cout << response << "\n";
 }
 ```
+
+---
+
+## Beyond this tour
+
+The headers under `include/neograph/` carry public surface that
+isn't walked through above. Each block below is a one-paragraph
+pointer — the canonical doc lives in Doxygen, generated 1:1 from
+the headers and refreshed on every push to master.
+
+### `neograph::a2a` — Agent-to-Agent protocol
+
+**Header:** `<neograph/a2a/{client,server,types,a2a_caller_node}.h>`
+JSON-RPC 2.0 over Streamable HTTP. `A2AClient` calls a remote
+agent (`message/send`, `tasks/get`, `tasks/cancel`, AgentCard
+discovery, `message/stream` SSE); the server side adapts a
+NeoGraph `GraphEngine` into an A2A endpoint via
+`GraphAgentAdapter`. Dual `v0.3` / `v1` method-name dispatch —
+see commit `bc675a1`. Streaming uses `SseFrameSplitter` (client)
+and httplib chunked (server). Caller node embeds an A2A call as
+a graph node. **Full reference:**
+[Doxygen `namespaceneograph_1_1a2a`](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1a2a.html).
+
+### `neograph::acp` — Agent Client Protocol
+
+**Header:** `<neograph/acp/{server,types}.h>`
+Editor↔agent JSON-RPC over newline-delimited JSON on stdio (Zed,
+Gemini CLI, Neovim CodeCompanion). Bidirectional: client→agent
+(`initialize`, `session/{new,prompt,cancel}`) and agent→client
+(`fs/{read,write}_text_file`, `session/request_permission`) via
+late-bound `ACPClient`. `ACPServer::handle_message` async-dispatches
+prompts on a worker thread, capped at `max_inflight_prompts=32`
+with per-session single-flight + `-32000` backpressure. **Full
+reference:** [Doxygen `namespaceneograph_1_1acp`](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1acp.html).
+
+### `neograph::async` — HTTP/SSE/WS helpers
+
+**Header:** `<neograph/async/{conn_pool,http_client,sse_parser,ws_client,curl_h2_pool,run_sync}.h>`
+Coroutine-based HTTP/1.1 client + ConnPool with safe-method-only
+stale-idle retry (RFC 7231 §4.2.2 — POST etc. rethrow rather than
+silently double-apply); `SseEventParser` for OpenAI/Claude
+streaming; `WsClient` for OpenAI Responses WebSocket; libcurl
+`CurlH2Pool` for HTTP/2 + multiplexing on Cloudflare-fronted
+endpoints; `run_sync` for awaitable→sync bridges in the engine
+defaults. **Full reference:**
+[Doxygen `namespaceneograph_1_1async`](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1async.html).
+
+### Persistent checkpoint backends
+
+**Header:** `<neograph/graph/postgres_checkpoint.h>`,
+`<neograph/graph/sqlite_checkpoint.h>`
+`PostgresCheckpointStore` — libpq-based, 3-table schema (`neograph_*`)
+with channel-blob deduplication keyed on
+`(thread_id, channel, version)`; LangGraph `PostgresSaver` parity.
+`SqliteCheckpointStore` — same shape, single-file backend, fits the
+edge / single-host deployments.
+**Full reference:**
+[`PostgresCheckpointStore`](https://fox1245.github.io/NeoGraph/classneograph_1_1graph_1_1PostgresCheckpointStore.html) ·
+[`SqliteCheckpointStore`](https://fox1245.github.io/NeoGraph/classneograph_1_1graph_1_1SqliteCheckpointStore.html).
+
+### Other public surface not in this tour
+
+- **`neograph::llm::RateLimitedProvider`** — wraps any `Provider`
+  with retry on 429 + Retry-After honour + capped exponential
+  backoff + max-total-wait gate (Round 5).
+  [Doxygen](https://fox1245.github.io/NeoGraph/classneograph_1_1llm_1_1RateLimitedProvider.html).
+- **`neograph::AsyncTool`** — `Tool` peer that exposes
+  `execute_async(json)` for tools whose work is naturally
+  coroutine-shaped (HTTP fetch, MCP call). Sync `execute()` is
+  `final`-routed through `run_sync`.
+- **`neograph::graph::NodeCache`** — per-node memoization, opt-in
+  via `engine->set_node_cache_enabled(name, true)`.
+- **`neograph::graph::create_deep_research_graph`** —
+  open_deep_research-style supervisor + sub-researcher fan-out,
+  used by `examples/25_deep_research.cpp`. Round 2 audit added
+  `BriefNode` LLM rewrite, `FinalReportNode` token-limit retry,
+  `ClarifyNode` HITL gate.
+
+If the type you need isn't in this tour and you can't find it in
+Doxygen either, check `include/neograph/` directly — every public
+header carries the same Doxygen-style comments that drive the
+generated reference.
