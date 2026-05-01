@@ -226,10 +226,17 @@ NEOGRAPH_API void to_json(json& j, const WriteTextFileRequest& r);
 NEOGRAPH_API void from_json(const json& j, WriteTextFileRequest& r);
 
 // ---------------------------------------------------------------------------
-// ToolCall — modeled minimally: spec carries more fields, preserved in `raw`
+// ToolCallUpdate — name matches the official ACP schema
+// (`session/request_permission.toolCall: ToolCallUpdate`). Modeled
+// minimally: spec carries more fields, preserved verbatim in `raw`.
+//
+// Renamed from `ToolCall` (which collided with the LLM-side
+// `neograph::ToolCall` in `<neograph/types.h>` whenever both
+// namespaces were brought in via `using namespace`). The two are
+// genuinely different concepts — keep them under distinct names.
 // ---------------------------------------------------------------------------
 
-struct NEOGRAPH_API ToolCall {
+struct NEOGRAPH_API ToolCallUpdate {
     std::string tool_call_id;   ///< toolCallId — REQUIRED
     std::string tool_name;      ///< toolName  — REQUIRED
     json        input;          ///< tool input (free-form object)
@@ -240,8 +247,8 @@ struct NEOGRAPH_API ToolCall {
     json        raw;
 };
 
-NEOGRAPH_API void to_json(json& j, const ToolCall& t);
-NEOGRAPH_API void from_json(const json& j, ToolCall& t);
+NEOGRAPH_API void to_json(json& j, const ToolCallUpdate& t);
+NEOGRAPH_API void from_json(const json& j, ToolCallUpdate& t);
 
 // ---------------------------------------------------------------------------
 // session/request_permission — agent → client (the agent asks the editor
@@ -259,7 +266,7 @@ NEOGRAPH_API void from_json(const json& j, PermissionOption& o);
 
 struct NEOGRAPH_API RequestPermissionRequest {
     std::string                 session_id;
-    ToolCall                    tool_call;
+    ToolCallUpdate                    tool_call;
     std::vector<PermissionOption> options;
 };
 

@@ -8,6 +8,7 @@
  */
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/types.h>
 #include <neograph/provider.h>
 #include <neograph/tool.h>
@@ -97,7 +98,7 @@ struct ChannelWrite {
  * throw NodeInterrupt("Need human approval for this action");
  * @endcode
  */
-class NodeInterrupt : public std::runtime_error {
+class NEOGRAPH_API NodeInterrupt : public std::runtime_error {
 public:
     /// @brief Construct a NodeInterrupt with a reason message.
     /// @param reason Human-readable explanation of why the interrupt was triggered.

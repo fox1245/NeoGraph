@@ -332,9 +332,9 @@ void from_json(const json& j, WriteTextFileRequest& r) {
 }
 
 // ---------------------------------------------------------------------------
-// ToolCall
+// ToolCallUpdate
 // ---------------------------------------------------------------------------
-void to_json(json& j, const ToolCall& t) {
+void to_json(json& j, const ToolCallUpdate& t) {
     j = t.raw.is_null() || t.raw.empty() ? json::object() : t.raw;
     j["toolCallId"] = t.tool_call_id;
     j["toolName"]   = t.tool_name;
@@ -351,7 +351,7 @@ void to_json(json& j, const ToolCall& t) {
     }
 }
 
-void from_json(const json& j, ToolCall& t) {
+void from_json(const json& j, ToolCallUpdate& t) {
     t.raw          = j;
     t.tool_call_id = j.value("toolCallId", std::string());
     t.tool_name    = j.value("toolName",   std::string());

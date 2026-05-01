@@ -159,7 +159,7 @@ class NEOGRAPH_API ACPClient {
     /// Throws if not yet bound to a server.
     RequestPermissionOutcome request_permission(
         std::string_view session_id,
-        const ToolCall&  tool_call,
+        const ToolCallUpdate&  tool_call,
         const std::vector<PermissionOption>& options);
 
   private:
@@ -208,10 +208,23 @@ class NEOGRAPH_API ACPServer {
     /// Drive the server loop reading newline-delimited JSON-RPC envelopes
     /// from `in` and writing them to `out`. Returns when `in` reaches EOF
     /// or @ref stop() is called from another thread.
+    ///
+    /// Lifecycle parallel with @ref neograph::a2a::A2AServer:
+    /// `run()` here is the synchronous read-loop equivalent of A2A's
+    /// `start()` (also synchronous, blocks until shutdown). Neither
+    /// server exposes a built-in async-spawn helper because the host
+    /// embedder usually picks the threading model; spawn `run()` on a
+    /// `std::thread` if you want it to run in the background.
     void run(std::istream& in, std::ostream& out);
 
     /// Convenience overload — uses std::cin / std::cout.
     void run();
+
+    /// True while `run()` is actively reading from its input stream.
+    /// Set on entry, cleared on exit. Mirrors @ref
+    /// neograph::a2a::A2AServer::is_running so a generic supervisor can
+    /// poll either without protocol-specific casing.
+    bool is_running() const;
 
     /// Process exactly one parsed JSON-RPC envelope. Returns:
     ///   - the response envelope for requests (`{ "jsonrpc","id","result"|"error" }`)

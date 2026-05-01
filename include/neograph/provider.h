@@ -123,6 +123,27 @@ class NEOGRAPH_API Provider {
                                            const StreamCallback& on_chunk) = 0;
 
     /**
+     * @brief Async streaming completion. Awaitable peer of @ref complete_stream.
+     *
+     * Default implementation bridges synchronously: it spawns a thread
+     * that runs `complete_stream`, posting tokens onto the awaiter's
+     * executor via `dispatch`, and resumes the coroutine when the
+     * streaming finishes. Subclasses with a native async-streaming
+     * transport (WebSocket Responses, server-sent events, etc.)
+     * SHOULD override this to drop the bridging thread and stream
+     * tokens straight onto the coroutine's executor.
+     *
+     * @param params   Completion parameters.
+     * @param on_chunk Callback invoked per received token (runs on the
+     *                 awaiting coroutine's executor when the default
+     *                 bridge is used).
+     * @return Awaitable resolving to the full completion response.
+     */
+    virtual asio::awaitable<ChatCompletion>
+    complete_stream_async(const CompletionParams& params,
+                          const StreamCallback& on_chunk);
+
+    /**
      * @brief Get the provider name (e.g., "openai", "claude").
      * @return Provider identifier string.
      */

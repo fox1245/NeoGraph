@@ -430,7 +430,7 @@ TEST(ACPClient, UnboundCallThrows) {
     EXPECT_FALSE(unbound.bound());
     EXPECT_THROW(unbound.read_text_file("sess", "/x"), std::runtime_error);
     EXPECT_THROW(unbound.write_text_file("sess", "/x", "data"), std::runtime_error);
-    EXPECT_THROW(unbound.request_permission("sess", acp::ToolCall{}, {}), std::runtime_error);
+    EXPECT_THROW(unbound.request_permission("sess", acp::ToolCallUpdate{}, {}), std::runtime_error);
 }
 
 // ---------------------------------------------------------------------------
@@ -450,7 +450,7 @@ class GatedNode : public GraphNode {
         auto sid_v = state.get("_acp_session_id");
         std::string sid = sid_v.is_string() ? sid_v.get<std::string>() : "";
 
-        acp::ToolCall tc;
+        acp::ToolCallUpdate tc;
         tc.tool_call_id = "tc-1";
         tc.tool_name    = "edit_file";
         tc.kind         = "edit";
@@ -602,6 +602,227 @@ TEST(ACPServer, RequestPermissionCancelledRoundTrip) {
         }
     }
     EXPECT_TRUE(saw_cancelled_chunk);
+}
+
+// ---------------------------------------------------------------------------
+// Bidirectional: fs/write_text_file round-trip
+// ---------------------------------------------------------------------------
+
+namespace {
+
+class WriteFileNode : public GraphNode {
+  public:
+    WriteFileNode(std::string n, std::shared_ptr<ACPClient> client,
+                  std::string path, std::string body)
+        : name_(std::move(n)), client_(std::move(client)),
+          path_(std::move(path)), body_(std::move(body)) {}
+    std::vector<ChannelWrite> execute(const GraphState& state) override {
+        auto sid_v = state.get("_acp_session_id");
+        std::string sid = sid_v.is_string() ? sid_v.get<std::string>() : "";
+        client_->write_text_file(sid, path_, body_);
+        return {{"response", "wrote:" + path_}};
+    }
+    std::string get_name() const override { return name_; }
+  private:
+    std::string                name_;
+    std::shared_ptr<ACPClient> client_;
+    std::string                path_;
+    std::string                body_;
+};
+
+}  // namespace
+
+TEST(ACPServer, FsWriteTextFileRoundTrip) {
+    auto client = std::make_shared<ACPClient>();
+    NodeFactory::instance().register_type("acp_write_file",
+        [client](const std::string& n, const neograph::json& cfg, const NodeContext&) {
+            // Compiler passes the full node-def (including the "config"
+            // sub-object) as the second arg.
+            auto sub = cfg.contains("config") ? cfg["config"]
+                                              : neograph::json::object();
+            return std::make_unique<WriteFileNode>(
+                n, client,
+                sub.value("path", std::string("/tmp/x")),
+                sub.value("body", std::string("hello")));
+        });
+    neograph::json def = {
+        {"name", "acp-write"},
+        {"channels", {
+            {"prompt",          {{"reducer", "overwrite"}}},
+            {"response",        {{"reducer", "overwrite"}}},
+            {"_acp_session_id", {{"reducer", "overwrite"}}},
+        }},
+        {"nodes", {
+            {"writer", {{"type", "acp_write_file"},
+                        {"config", {{"path", "/work/out.txt"},
+                                    {"body", "hello world"}}}}},
+        }},
+        {"edges", neograph::json::array({
+            neograph::json{{"from", "__start__"}, {"to", "writer"}},
+            neograph::json{{"from", "writer"},   {"to", "__end__"}},
+        })},
+    };
+    NodeContext ctx;
+    auto unique = GraphEngine::compile(def, ctx);
+    auto engine = std::shared_ptr<GraphEngine>(std::move(unique));
+
+    neograph::json info = {{"name", "acp-write-test"}, {"version", "0.0.1"}};
+    auto server = std::make_shared<ACPServer>(engine, info);
+    server->attach_client(client);
+
+    CapturingSink cap;
+    auto cap_sink = cap.as_sink();
+    std::string seen_path, seen_body;
+    server->set_notification_sink([&, cap_sink, server](const neograph::json& env) {
+        cap_sink(env);
+        if (env.value("method", std::string()) == "fs/write_text_file"
+            && env.contains("id")) {
+            // Capture what the client sent the editor.
+            auto p = env["params"];
+            seen_path = p.value("path", std::string());
+            seen_body = p.value("content", std::string());
+            auto reply_id = env["id"];
+            std::thread([server, reply_id]() {
+                neograph::json reply;
+                reply["jsonrpc"] = "2.0";
+                reply["id"]      = reply_id;
+                reply["result"]  = neograph::json::object();
+                server->handle_message(reply);
+            }).detach();
+        }
+    });
+
+    auto sess_resp = server->handle_message(make_request(1, "session/new",
+        {{"cwd", "/work"}, {"mcpServers", neograph::json::array()}}));
+    auto sid = sess_resp["result"].value("sessionId", std::string());
+
+    server->handle_message(make_request(2, "session/prompt",
+        {{"sessionId", sid},
+         {"prompt", neograph::json::array({neograph::json{{"type", "text"}, {"text", "go"}}})}}));
+
+    auto resp = cap.wait_for_response(2, std::chrono::seconds(5));
+    ASSERT_TRUE(resp.contains("result"));
+    EXPECT_EQ(resp["result"].value("stopReason", std::string()), "end_turn");
+    EXPECT_EQ(seen_path, "/work/out.txt");
+    EXPECT_EQ(seen_body, "hello world");
+}
+
+// ---------------------------------------------------------------------------
+// call_client timeout: throws + cleans pending map
+// ---------------------------------------------------------------------------
+
+TEST(ACPServer, CallClientTimeoutThrowsAndCleansPending) {
+    auto engine = build_echo_engine();
+    neograph::json info = {{"name", "acp-timeout"}, {"version", "0.0.1"}};
+    ACPServer server(engine, info);
+
+    // Set a sink that records but never replies — every call_client
+    // must time out.
+    std::vector<neograph::json> emitted;
+    server.set_notification_sink([&](const neograph::json& env) {
+        emitted.push_back(env);
+    });
+
+    auto client = server.client();
+    // Tight timeout so the test runs in milliseconds, not the default 30s.
+    client->set_timeout(std::chrono::milliseconds(100));
+    auto t0 = std::chrono::steady_clock::now();
+    EXPECT_THROW(client->read_text_file("sess-x", "/y"), std::runtime_error);
+    auto elapsed = std::chrono::steady_clock::now() - t0;
+    EXPECT_GE(elapsed, std::chrono::milliseconds(100));
+    EXPECT_LT(elapsed, std::chrono::seconds(2));
+
+    // Second call also times out — verifies the first-call's pending
+    // entry was erased rather than left as a zombie that future calls
+    // could (theoretically) collide with.
+    EXPECT_THROW(client->read_text_file("sess-x", "/y"), std::runtime_error);
+
+    // Sanity: emitted at least one outbound fs/read_text_file request.
+    bool saw_outbound = false;
+    for (auto& e : emitted) {
+        if (e.value("method", std::string()) == "fs/read_text_file") {
+            saw_outbound = true;
+        }
+    }
+    EXPECT_TRUE(saw_outbound);
+}
+
+// ---------------------------------------------------------------------------
+// Bounded worker pool: per-session single-flight + concurrent cap
+// ---------------------------------------------------------------------------
+
+TEST(ACPServer, RejectsSecondPromptOnSameSession) {
+    // Build an engine whose node deliberately stalls so the first
+    // prompt's worker is still in flight when the second arrives.
+    class StallNode : public GraphNode {
+      public:
+        StallNode(std::string n, std::shared_ptr<std::atomic<bool>> stall)
+            : name_(std::move(n)), stall_(std::move(stall)) {}
+        std::vector<ChannelWrite> execute(const GraphState&) override {
+            while (stall_->load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            return {{"response", "done"}};
+        }
+        std::string get_name() const override { return name_; }
+      private:
+        std::string                          name_;
+        std::shared_ptr<std::atomic<bool>>   stall_;
+    };
+
+    auto stall = std::make_shared<std::atomic<bool>>(true);
+    NodeFactory::instance().register_type("acp_stall",
+        [stall](const std::string& n, const neograph::json&, const NodeContext&) {
+            return std::make_unique<StallNode>(n, stall);
+        });
+    neograph::json def = {
+        {"name", "acp-stall"},
+        {"channels", {
+            {"prompt",          {{"reducer", "overwrite"}}},
+            {"response",        {{"reducer", "overwrite"}}},
+            {"_acp_session_id", {{"reducer", "overwrite"}}},
+        }},
+        {"nodes", {{"stall", {{"type", "acp_stall"}}}}},
+        {"edges", neograph::json::array({
+            neograph::json{{"from", "__start__"}, {"to", "stall"}},
+            neograph::json{{"from", "stall"},     {"to", "__end__"}},
+        })},
+    };
+    NodeContext ctx;
+    auto unique = GraphEngine::compile(def, ctx);
+    auto engine = std::shared_ptr<GraphEngine>(std::move(unique));
+    neograph::json info = {{"name", "acp-stall-test"}, {"version", "0.0.1"}};
+
+    ACPServer server(engine, info);
+    CapturingSink cap;
+    server.set_notification_sink(cap.as_sink());
+
+    auto sess_resp = server.handle_message(make_request(1, "session/new",
+        {{"cwd", "."}, {"mcpServers", neograph::json::array()}}));
+    auto sid = sess_resp["result"].value("sessionId", std::string());
+
+    // First prompt — dispatched async, will stall in StallNode.
+    auto first = server.handle_message(make_request(2, "session/prompt",
+        {{"sessionId", sid},
+         {"prompt", neograph::json::array({neograph::json{{"type", "text"}, {"text", "a"}}})}}));
+    EXPECT_TRUE(first.is_null());
+
+    // Give the worker a moment to enter StallNode.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // Second prompt on SAME session — must be rejected with -32000.
+    auto second = server.handle_message(make_request(3, "session/prompt",
+        {{"sessionId", sid},
+         {"prompt", neograph::json::array({neograph::json{{"type", "text"}, {"text", "b"}}})}}));
+    EXPECT_TRUE(second.is_null());
+
+    // The async error envelope arrives via the sink.
+    auto err_env = cap.wait_for_response(3, std::chrono::seconds(2));
+    ASSERT_TRUE(err_env.contains("error")) << "expected error envelope, got: " << err_env.dump();
+    EXPECT_EQ(err_env["error"].value("code", 0), -32000);
+
+    // Release the stall so the first worker can finish + dtor drain works.
+    stall->store(false, std::memory_order_release);
 }
 
 }  // namespace

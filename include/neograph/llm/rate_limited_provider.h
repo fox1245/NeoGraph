@@ -9,6 +9,7 @@
  */
 #pragma once
 
+#include <neograph/api.h>
 #include <neograph/provider.h>
 
 #include <memory>
@@ -40,7 +41,7 @@ namespace neograph::llm {
  * // use `provider` like any other Provider
  * @endcode
  */
-class RateLimitedProvider : public Provider {
+class NEOGRAPH_API RateLimitedProvider : public Provider {
 public:
     /// Configuration for rate-limit handling.
     struct Config {
