@@ -48,6 +48,15 @@ public:
         int max_retries          = 3;   ///< Number of additional attempts after a RateLimitError.
         int default_wait_seconds = 30;  ///< Sleep duration when Retry-After is absent or invalid.
         int max_wait_seconds     = 120; ///< Upper cap per sleep, prevents runaway stalls.
+        /// Wall-clock cap across all retries combined. 0 = unbounded
+        /// (back-compat with the original behaviour). Set this when
+        /// the caller has its own SLA and doesn't want
+        /// `max_retries * max_wait_seconds` worth of backoff to stack
+        /// up — e.g. a 5×60s = 5-minute pure-sleep window. When the
+        /// next sleep would push elapsed time past the cap, the
+        /// decorator surfaces the latest RateLimitError immediately
+        /// instead of waiting again.
+        int max_total_wait_seconds = 0;
     };
 
     /**

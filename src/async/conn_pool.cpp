@@ -61,10 +61,19 @@ struct Key {
 };
 
 struct KeyHash {
+    // boost::hash_combine pattern: rotate seed and XOR. The previous
+    // `h1 ^ (h2 << 1) ^ (tls << 2)` form gave port a 1-bit shift and
+    // tls a 2-bit shift, leaving most of port's bits aliased onto
+    // host's, which collided for hosts that differed only in port
+    // (e.g. localhost:8080 vs localhost:9090).
+    static void hash_combine(std::size_t& seed, std::size_t v) noexcept {
+        seed ^= v + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+    }
     std::size_t operator()(const Key& k) const noexcept {
-        std::size_t h1 = std::hash<std::string>{}(k.host);
-        std::size_t h2 = std::hash<std::string>{}(k.port);
-        return h1 ^ (h2 << 1) ^ (static_cast<std::size_t>(k.tls) << 2);
+        std::size_t seed = std::hash<std::string>{}(k.host);
+        hash_combine(seed, std::hash<std::string>{}(k.port));
+        hash_combine(seed, static_cast<std::size_t>(k.tls));
+        return seed;
     }
 };
 

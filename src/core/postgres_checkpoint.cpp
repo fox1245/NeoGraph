@@ -544,9 +544,18 @@ auto PostgresCheckpointStore::with_conn(Fn&& fn) {
     try {
         return fn(pool_[idx]->raw);
     } catch (const BrokenConnection&) {
-        pool_[idx].reset();
-        pool_[idx] = open_conn(conn_str_);
-        exec_sql(pool_[idx]->raw, kSchemaDDL);
+        // Reconnection: open the replacement into a local first, then
+        // hand it to the pool only after both open_conn AND the schema
+        // DDL succeeded. If either throws, the slot keeps its old
+        // (broken) connection and the exception propagates — better
+        // than handing the next acquirer an empty std::unique_ptr
+        // that would crash on `pool_[idx]->raw` dereference. The
+        // Releaser still runs and the slot is returned to free_; the
+        // next acquirer hits the same broken conn and triggers
+        // another reconnect attempt, naturally retrying the recovery.
+        auto fresh = open_conn(conn_str_);  // throws → original slot intact
+        exec_sql(fresh->raw, kSchemaDDL);   // throws → original slot intact
+        pool_[idx] = std::move(fresh);
         reconnect_count_.fetch_add(1, std::memory_order_relaxed);
         return fn(pool_[idx]->raw);
     }
@@ -912,12 +921,18 @@ auto PostgresCheckpointStore::with_conn_async(Fn fn)
     }
 
     // need_retry == true (otherwise co_return above already happened).
-    // Replace the slot's connection synchronously (cold path, happens
-    // at most once per pool slot per failure — not a throughput hot
-    // point) and re-run.
-    pool_[idx].reset();
-    pool_[idx] = open_conn(conn_str_);
-    exec_sql(pool_[idx]->raw, kSchemaDDL);
+    // Replace the slot's connection synchronously. Open the fresh
+    // connection into a local first; only swap into pool_[idx] after
+    // both open AND DDL succeed, so a recurring transient failure
+    // doesn't leave the slot holding an empty unique_ptr that the
+    // next acquirer would dereference (covered by the audit's
+    // "with_conn poisons slot if reconnection itself throws"
+    // finding). On open/DDL failure the original (broken) connection
+    // stays in the slot, the exception propagates, and the next
+    // acquirer naturally retries the recovery.
+    auto fresh = open_conn(conn_str_);
+    exec_sql(fresh->raw, kSchemaDDL);
+    pool_[idx] = std::move(fresh);
     reconnect_count_.fetch_add(1, std::memory_order_relaxed);
     co_return co_await fn(pool_[idx]->raw);
 }

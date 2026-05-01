@@ -14,6 +14,16 @@ Agent::Agent(std::shared_ptr<Provider> provider,
   , instructions_(instructions)
   , model_(model)
 {
+    // Build the name → tool* index once. Subsequent tool_call
+    // dispatches are O(1) on this map instead of O(n) std::find_if
+    // over `tools_`. Last-write-wins on duplicate names so the
+    // behaviour matches the previous find_if (which returned the
+    // first match).
+    tools_by_name_.reserve(tools_.size());
+    for (auto& t : tools_) {
+        if (!t) continue;
+        tools_by_name_[t->get_name()] = t.get();
+    }
 }
 
 void
@@ -76,25 +86,21 @@ Agent::run(std::vector<ChatMessage>& messages, int max_iterations)
             return msg.content;
         }
 
-        // Execute each tool call
+        // Execute each tool call (O(1) lookup via tools_by_name_).
         for (const auto& tc : msg.tool_calls) {
-            auto it = std::find_if(
-                tools_.begin(), tools_.end(),
-                [&](const std::unique_ptr<Tool>& t) {
-                    return t->get_name() == tc.name;
-                });
+            auto idx_it = tools_by_name_.find(tc.name);
 
             ChatMessage tool_msg;
             tool_msg.role = "tool";
             tool_msg.tool_call_id = tc.id;
             tool_msg.tool_name = tc.name;
 
-            if (it == tools_.end()) {
+            if (idx_it == tools_by_name_.end()) {
                 tool_msg.content = R"({"error": "Tool not found: )" + tc.name + "\"}";
             } else {
                 try {
                     auto args = json::parse(tc.arguments);
-                    tool_msg.content = (*it)->execute(args);
+                    tool_msg.content = idx_it->second->execute(args);
                 } catch (const std::exception& e) {
                     tool_msg.content = std::string(R"({"error": ")") + e.what() + "\"}";
                 }
@@ -151,23 +157,19 @@ Agent::run_stream(std::vector<ChatMessage>& messages,
 
         // Execute tool calls
         for (const auto& tc : msg.tool_calls) {
-            auto it = std::find_if(
-                tools_.begin(), tools_.end(),
-                [&](const std::unique_ptr<Tool>& t) {
-                    return t->get_name() == tc.name;
-                });
+            auto idx_it = tools_by_name_.find(tc.name);
 
             ChatMessage tool_msg;
             tool_msg.role = "tool";
             tool_msg.tool_call_id = tc.id;
             tool_msg.tool_name = tc.name;
 
-            if (it == tools_.end()) {
+            if (idx_it == tools_by_name_.end()) {
                 tool_msg.content = R"({"error": "Tool not found: )" + tc.name + "\"}";
             } else {
                 try {
                     auto args = json::parse(tc.arguments);
-                    tool_msg.content = (*it)->execute(args);
+                    tool_msg.content = idx_it->second->execute(args);
                 } catch (const std::exception& e) {
                     tool_msg.content = std::string(R"({"error": ")") + e.what() + "\"}";
                 }

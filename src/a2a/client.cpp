@@ -382,7 +382,7 @@ struct SseFrameSplitter {
 }  // namespace
 
 Task A2AClient::send_message_stream(const MessageSendParams& params,
-                                    StreamCallback on_event) {
+                                    EventCallback on_event) {
     json p;
     to_json(p, params);
     json body = {
@@ -445,7 +445,7 @@ Task A2AClient::send_message_stream(const MessageSendParams& params,
 }
 
 Task A2AClient::send_message_stream(const std::string& text,
-                                    StreamCallback on_event,
+                                    EventCallback on_event,
                                     const std::string& task_id,
                                     const std::string& context_id) {
     MessageSendParams params;

@@ -55,8 +55,10 @@ public:
         for (size_t i = 0; i < num_workers; ++i) {
             workers_.emplace_back([this] { worker_loop(); });
         }
-        std::cout << "[RequestQueue] " << num_workers
-                  << " workers, max queue: " << max_queue_size << "\n";
+        // No banner on stdout — library code shouldn't pollute the
+        // host process's stdout (breaks scripts that parse it). If
+        // observability is desired, route through an injected logger
+        // instead of std::cout.
     }
 
     /// Destructor: stops all workers and waits for them to finish.

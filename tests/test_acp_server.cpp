@@ -825,4 +825,75 @@ TEST(ACPServer, RejectsSecondPromptOnSameSession) {
     stall->store(false, std::memory_order_release);
 }
 
+// ---------------------------------------------------------------------------
+// Malformed JSON-RPC envelope handling
+// ---------------------------------------------------------------------------
+
+TEST(ACPServer, MalformedEnvelope_ParamsArrayInsteadOfObject) {
+    auto server = make_server();
+    // session/new with params as an ARRAY (spec: object). Our
+    // from_json bridge tolerates this by returning defaults; the
+    // server should NOT crash and should return a result envelope.
+    neograph::json env;
+    env["jsonrpc"] = "2.0";
+    env["id"]      = 99;
+    env["method"]  = "session/new";
+    env["params"]  = neograph::json::array({"oops"});
+    auto resp = server.handle_message(env);
+    // Either a result (default-tolerant parse) or an error — must be
+    // one or the other, never both, and never crash.
+    bool has_result = resp.contains("result");
+    bool has_error  = resp.contains("error");
+    EXPECT_NE(has_result, has_error);
+}
+
+TEST(ACPServer, MalformedEnvelope_MissingMethodOnRequest) {
+    auto server = make_server();
+    // Has `id` but no `method`. handle_message treats it as a
+    // response-to-an-outbound-request. With no matching pending
+    // entry, it's silently dropped (returns null). Verify no crash
+    // and no spurious response.
+    neograph::json env;
+    env["jsonrpc"] = "2.0";
+    env["id"]      = 12345;
+    env["result"]  = neograph::json::object();  // wire-shape valid response
+    auto resp = server.handle_message(env);
+    EXPECT_TRUE(resp.is_null());
+}
+
+TEST(ACPServer, MalformedEnvelope_PromptWithoutSessionId) {
+    auto server = make_server();
+    CapturingSink cap;
+    server.set_notification_sink(cap.as_sink());
+
+    neograph::json env;
+    env["jsonrpc"] = "2.0";
+    env["id"]      = 7;
+    env["method"]  = "session/prompt";
+    // sessionId missing — from_json will populate empty string;
+    // server creates a stub session for it on the fly. Either way,
+    // must not crash.
+    env["params"]  = {{"prompt",
+        neograph::json::array({neograph::json{{"type", "text"}, {"text", "x"}}})}};
+    auto immediate = server.handle_message(env);
+    EXPECT_TRUE(immediate.is_null());
+
+    // Async response arrives via the sink. Must surface a result with
+    // a valid stopReason — not crash, not silently lose.
+    auto resp = cap.wait_for_response(7, std::chrono::seconds(5));
+    ASSERT_TRUE(resp.contains("result") || resp.contains("error"));
+}
+
+TEST(ACPServer, MalformedEnvelope_UnknownMethodWithoutId) {
+    auto server = make_server();
+    // method present, id absent → notification per JSON-RPC §4.1.
+    // Unknown notification is silently dropped — no error envelope.
+    neograph::json env;
+    env["jsonrpc"] = "2.0";
+    env["method"]  = "completely/made_up";
+    env["params"]  = neograph::json::object();
+    auto resp = server.handle_message(env);
+    EXPECT_TRUE(resp.is_null());
+}
+
 }  // namespace

@@ -107,23 +107,22 @@ public:
     /**
      * @brief Async peer of execute_full — Sem 3.4b / Stage 4.
      *
-     * Default wraps `execute_async(state)`'s writes into a NodeResult
-     * directly — stays fully on the caller's coroutine executor and
-     * never spawns an inner io_context. Async-native nodes that
-     * override only `execute_async` get the async run path for free.
+     * Default routes through `execute_full(state)` directly so that:
+     *   - Sync overrides of `execute_full` that emit Command/Send
+     *     work correctly on the async path (no silent dropping).
+     *   - Async-native overrides of `execute_async` flow through
+     *     `execute_full → execute → run_sync(execute_async)` for a
+     *     single sync→async hop.
      *
-     * **Contract for sync Command/Send emitters:** if your subclass
-     * overrides sync `execute_full` to emit Command/Send, you MUST
-     * also override this method with a one-line bridge:
-     * @code
-     *     asio::awaitable<NodeResult>
-     *     execute_full_async(const GraphState& state) override {
-     *         co_return execute_full(state);
-     *     }
-     * @endcode
-     * Otherwise the async path runs the default which routes through
-     * `execute_async` → `execute` — producing only `writes`, silently
-     * dropping your Command/Send.
+     * **Recommended override pattern**:
+     *   - Async-native Send/Command emitters: override THIS method
+     *     directly, build the NodeResult inside the awaitable.
+     *   - Sync-only emitters: don't need to override this — the
+     *     default already calls your sync `execute_full`.
+     *
+     * The pre-6bd9632 contract required a one-line bridge override
+     * here for sync Send/Command emitters; that contract is no longer
+     * needed but is harmless if you have it.
      */
     virtual asio::awaitable<NodeResult> execute_full_async(
         const GraphState& state);
