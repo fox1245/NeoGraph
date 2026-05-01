@@ -896,6 +896,16 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
     target_link_libraries(bench_async_http PRIVATE
         neograph::async httplib OpenSSL::SSL OpenSSL::Crypto)
     target_compile_features(bench_async_http PRIVATE cxx_std_20)
+
+    # Sustained-burst stress harness — Phase 3 operational-readiness
+    # gate. Holds N runs in flight for M wall-clock seconds, samples
+    # RSS + per-window p99 latency at fixed intervals, and exits 1 if
+    # RSS drift exceeds the configured tolerance (best-effort leak
+    # signal — Valgrind / LSan stays the authoritative tool). See
+    # benchmarks/stress/README.md for the recipe.
+    add_executable(bench_sustained_concurrent
+        benchmarks/stress/bench_sustained_concurrent.cpp)
+    target_link_libraries(bench_sustained_concurrent PRIVATE neograph::core)
 endif()
 
 # ===========================================================================
