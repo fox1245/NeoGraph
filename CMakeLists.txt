@@ -87,6 +87,7 @@ endif()
 option(NEOGRAPH_BUILD_LLM      "Build neograph::llm (LLM providers)"     ON)
 option(NEOGRAPH_BUILD_MCP      "Build neograph::mcp (MCP client)"        ON)
 option(NEOGRAPH_BUILD_A2A      "Build neograph::a2a (Agent-to-Agent client)" ON)
+option(NEOGRAPH_BUILD_ACP      "Build neograph::acp (Agent Client Protocol server)" ON)
 option(NEOGRAPH_BUILD_UTIL     "Build neograph::util (utilities)"        ON)
 option(NEOGRAPH_BUILD_POSTGRES "Build PostgresCheckpointStore (libpq)" ON)
 option(NEOGRAPH_BUILD_SQLITE   "Build SqliteCheckpointStore (libsqlite3)" ON)
@@ -537,6 +538,37 @@ if(NEOGRAPH_BUILD_A2A)
 endif()
 
 # ===========================================================================
+# neograph::acp — Agent Client Protocol server (JSON-RPC over stdio)
+#
+# Editor↔agent protocol — analogous to LSP, popularised by Zed +
+# Gemini CLI + Neovim/CodeCompanion. Exposes a NeoGraph engine as the
+# "agent" side. The default transport is newline-delimited JSON over
+# std::cin/std::cout, which is what every editor uses to talk to a
+# locally-launched agent sub-process. HTTP/WebSocket transport remains
+# a future addition (the dispatcher is transport-agnostic — feed JSON
+# envelopes into ACPServer::handle_message and you're done).
+# ===========================================================================
+if(NEOGRAPH_BUILD_ACP)
+    add_library(neograph_acp
+        src/acp/types.cpp
+        src/acp/server.cpp
+    )
+
+    target_include_directories(neograph_acp
+        PUBLIC
+            $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+    )
+
+    target_compile_definitions(neograph_acp PRIVATE NEOGRAPH_BUILDING_LIBRARY)
+    target_link_libraries(neograph_acp
+        PUBLIC neograph_core
+    )
+
+    add_library(neograph::acp ALIAS neograph_acp)
+endif()
+
+# ===========================================================================
 # neograph::util — Utilities (RequestQueue, header-only)
 # ===========================================================================
 if(NEOGRAPH_BUILD_UTIL)
@@ -721,6 +753,18 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             add_executable(example_a2a_server examples/38_a2a_server.cpp)
             target_link_libraries(example_a2a_server PRIVATE
                 neograph::core neograph::a2a)
+
+        endif()
+
+        if(NEOGRAPH_BUILD_ACP)
+            add_executable(example_acp_server examples/39_acp_server.cpp)
+            target_link_libraries(example_acp_server PRIVATE
+                neograph::core neograph::acp)
+        endif()
+
+        # Reopen the A2A guarded block for the cookbook executables that
+        # follow — they need NEOGRAPH_BUILD_A2A AND NEOGRAPH_BUILD_LLM.
+        if(NEOGRAPH_BUILD_A2A)
 
             # AI National Assembly cookbook — multi-persona A2A demo
             # built as a fresh NeoGraph user from the public docs only.

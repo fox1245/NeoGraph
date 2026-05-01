@@ -63,6 +63,13 @@ if(NEOGRAPH_BUILD_A2A)
     )
 endif()
 
+if(NEOGRAPH_BUILD_ACP)
+    target_sources(neograph_tests PRIVATE
+        test_acp_types.cpp
+        test_acp_server.cpp
+    )
+endif()
+
 # Smoke tests for the async::async_get helper added with the A2A client
 # — the GET path was new and build_request gained a method parameter,
 # so these guard the surface against future POST/GET regressions.
@@ -93,6 +100,10 @@ endif()
 
 if(NEOGRAPH_BUILD_A2A)
     target_link_libraries(neograph_tests PRIVATE neograph::a2a)
+endif()
+
+if(NEOGRAPH_BUILD_ACP)
+    target_link_libraries(neograph_tests PRIVATE neograph::acp)
 endif()
 
 if(NEOGRAPH_BUILD_POSTGRES)
