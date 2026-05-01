@@ -42,6 +42,16 @@ struct DeepResearchConfig {
     /// Pairs naturally with PostgresCheckpointStore for cross-process
     /// resume — see examples/26_postgres_react_hitl.
     bool enable_human_review = false;
+
+    /// When true, inserts a `clarify` node between `__start__` and
+    /// `brief`. The node asks the LLM whether the user's query is
+    /// specific enough to research; if not it throws NodeInterrupt
+    /// with a clarifying question, expecting the caller to resume()
+    /// with the user's answer. On resume the answer is appended to
+    /// the user_query and the run proceeds to the brief node. This is
+    /// the analogue of langchain-ai/open_deep_research's
+    /// `clarify_with_user` step.
+    bool enable_clarification = false;
 };
 
 /**

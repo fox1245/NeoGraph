@@ -42,6 +42,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <set>
 #include <chrono>
 #include <iostream>
 #include <sstream>
@@ -187,20 +188,130 @@ static Verdict evaluate(Provider& p, const std::string& question,
     return Verdict::Incorrect;
 }
 
-// Refine: pull just the relevant sentences out of the retrieved docs so
-// the generator isn't distracted by peripheral content. The paper calls
-// this "knowledge refinement".
+// Split docs into atomic strips. The paper's "decompose" step uses
+// strip-level granularity (a strip = "one or two sentences" in
+// Yan et al. §3.4). We split on sentence terminators (. ! ?) plus
+// paragraph breaks, preserving doc-section markers ("## title") as
+// their own strips so they survive recomposition unchanged.
+static std::vector<std::string> split_into_strips(const std::string& text) {
+    std::vector<std::string> strips;
+    std::string cur;
+    auto flush = [&]() {
+        // Trim leading whitespace.
+        size_t a = 0;
+        while (a < cur.size() && (cur[a] == ' ' || cur[a] == '\t' || cur[a] == '\n')) ++a;
+        std::string s = cur.substr(a);
+        if (!s.empty()) strips.push_back(std::move(s));
+        cur.clear();
+    };
+    for (size_t i = 0; i < text.size(); ++i) {
+        char c = text[i];
+        cur.push_back(c);
+        if (c == '\n') {
+            // Section header on its own line — keep as separate strip.
+            if (cur.size() >= 2 && cur[0] == '#') {
+                flush();
+            } else if (i + 1 < text.size() && text[i + 1] == '\n') {
+                // Paragraph break.
+                flush();
+            }
+        } else if (c == '.' || c == '!' || c == '?') {
+            // End of sentence — flush after the punctuation.
+            if (i + 1 < text.size() && (text[i + 1] == ' ' || text[i + 1] == '\n')) {
+                flush();
+            }
+        }
+    }
+    if (!cur.empty()) flush();
+    return strips;
+}
+
+// Refine (Yan et al. §3.4 "knowledge refinement"): decompose docs into
+// strips, score each strip's relevance to the question with the same
+// kind of evaluator that ran in evaluate(), drop low-scoring strips,
+// recompose the survivors in original order.
+//
+// In the paper the strip evaluator is the same fine-tuned T5 used for
+// retrieval grading; here we use one bulk-classify LLM call (one
+// KEEP/DROP per strip) for cost — the algorithmic shape (per-strip
+// independent decision, original-order recomposition) matches the
+// paper. This is structurally different from "ask the LLM to extract
+// relevant sentences" — that fold-into-one-prompt approach was the
+// pre-audit form and let the model paraphrase or invent.
 static std::string refine(Provider& p, const std::string& question,
                           const std::string& kb_context) {
+    auto strips = split_into_strips(kb_context);
+    if (strips.empty()) return "";
+
+    std::ostringstream listing;
+    for (size_t i = 0; i < strips.size(); ++i) {
+        listing << "[" << (i + 1) << "] " << strips[i] << "\n";
+    }
+
     CompletionParams cp;
     cp.messages.push_back({"system",
-        "Extract from the documents only the sentences that directly "
-        "address the question. Return them as a bulleted list. Quote "
-        "verbatim — do not paraphrase or invent."});
+        "You are scoring text strips for relevance to a question. For "
+        "EACH numbered strip, output exactly one line of the form:\n"
+        "  N. KEEP    (strip directly helps answer the question)\n"
+        "  N. DROP    (strip is off-topic or only loosely related)\n"
+        "Be strict — only KEEP strips that contain a fact, definition, "
+        "or relationship the answerer would actually quote. Output the "
+        "verdicts in numerical order, one per line, nothing else."});
     cp.messages.push_back({"user",
-        "Question: " + question + "\n\nDocuments:\n" + kb_context});
+        "Question: " + question + "\n\nStrips:\n" + listing.str()});
     cp.temperature = 0.0f;
-    return p.complete(cp).message.content;
+    auto verdicts = p.complete(cp).message.content;
+
+    // Parse "N. KEEP" / "N. DROP" lines tolerantly.
+    std::set<size_t> kept;
+    std::istringstream vs(verdicts);
+    std::string line;
+    while (std::getline(vs, line)) {
+        // Find the leading integer.
+        size_t i = 0;
+        while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+        size_t num_start = i;
+        while (i < line.size() && std::isdigit(static_cast<unsigned char>(line[i]))) ++i;
+        if (i == num_start) continue;
+        size_t n = std::stoul(line.substr(num_start, i - num_start));
+        std::string lc = lowercase(line);
+        if (lc.find("keep") != std::string::npos) kept.insert(n);
+    }
+
+    // Recompose in original order.
+    std::ostringstream out;
+    bool first = true;
+    for (size_t i = 0; i < strips.size(); ++i) {
+        if (!kept.count(i + 1)) continue;
+        if (!first) out << ' ';
+        out << strips[i];
+        first = false;
+    }
+    auto result = out.str();
+    return result.empty() ? "(no strip survived refinement)" : result;
+}
+
+// Query rewriter (Yan et al. §3.5) — rewrites the user question into a
+// concise keyword query suitable for a web search engine. The paper's
+// INCORRECT branch routes through this *before* invoking external
+// search; previously this example fed the raw question to OpenAI's
+// hosted web_search tool, which works but skips the documented
+// rewriting step.
+static std::string rewrite_query(Provider& p, const std::string& question) {
+    CompletionParams cp;
+    cp.messages.push_back({"system",
+        "Rewrite the user's question as a concise keyword query for a "
+        "web search engine. Drop articles, modal verbs, polite framing. "
+        "Output ONLY the keyword query — no quotes, no commentary, no "
+        "trailing punctuation."});
+    cp.messages.push_back({"user", question});
+    cp.temperature = 0.0f;
+    auto out = p.complete(cp).message.content;
+    // Strip trailing newlines / whitespace.
+    while (!out.empty()
+           && (out.back() == '\n' || out.back() == ' ' || out.back() == '\t'))
+        out.pop_back();
+    return out;
 }
 
 // Coroutine wrapped in a free function so the GCC frontend doesn't
@@ -375,24 +486,41 @@ int main() {
             std::cout << "[evaluate] " << tag << "\n";
 
             // 3. Route + assemble final context
+            //
+            // Per Yan et al. §3.5 "Algorithm 1":
+            //   - CORRECT   → refine(KB) → generate
+            //   - INCORRECT → rewrite query → web search → refine(web) → generate
+            //   - AMBIGUOUS → refine(KB) ∪ refine(web) → generate
+            //
+            // External (web) knowledge goes through the same refinement as
+            // KB knowledge — the previous form fed raw web_search output
+            // straight to the generator.
             std::string final_ctx;
             switch (v) {
                 case Verdict::Correct:
                     std::cout << "[route   ] refine(KB) → generate\n";
                     final_ctx = refine(*provider, q, kb_ctx);
                     break;
-                case Verdict::Incorrect:
-                    std::cout << "[route   ] web → generate (KB rejected)\n";
-                    final_ctx = web_search(api_key, model, q);
+                case Verdict::Incorrect: {
+                    auto rewritten = rewrite_query(*provider, q);
+                    std::cout << "[rewrite ] '" << rewritten << "'\n";
+                    std::cout << "[route   ] web → refine(web) → generate (KB rejected)\n";
+                    auto web_raw = web_search(api_key, model, rewritten);
+                    final_ctx    = refine(*provider, q, web_raw);
                     break;
-                case Verdict::Ambiguous:
-                    std::cout << "[route   ] refine(KB) + web → generate\n";
+                }
+                case Verdict::Ambiguous: {
+                    auto rewritten = rewrite_query(*provider, q);
+                    std::cout << "[rewrite ] '" << rewritten << "'\n";
+                    std::cout << "[route   ] refine(KB) + refine(web) → generate\n";
+                    auto web_raw = web_search(api_key, model, rewritten);
                     final_ctx =
                         "## From the local knowledge base\n"
                         + refine(*provider, q, kb_ctx) +
                         "\n\n## From external web search\n"
-                        + web_search(api_key, model, q);
+                        + refine(*provider, q, web_raw);
                     break;
+                }
             }
 
             // 4. Generate

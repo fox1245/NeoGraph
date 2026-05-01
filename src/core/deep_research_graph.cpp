@@ -654,7 +654,15 @@ private:
 
 // =========================================================================
 // FinalReportNode — reads `research_brief` + `raw_notes` and produces
-// `final_report`. Single LLM call.
+// `final_report`.
+//
+// Token-limit retry loop (mirrors open_deep_research's
+// final_report_generation): on context-length-exceeded errors from the
+// provider, progressively truncate the findings text by 25% and retry
+// up to MAX_RETRIES times. Without this, a successful research run
+// with many lengthy researcher summaries would fail the synthesis
+// stage and leave the user with no report at all — the worst possible
+// outcome since the expensive work has already been done.
 // =========================================================================
 class FinalReportNode : public GraphNode {
 public:
@@ -688,9 +696,8 @@ public:
             }
         }
 
-        if (findings.str().empty()) {
-            // No researcher output at all — write a terse placeholder so
-            // downstream consumers see *something*.
+        std::string findings_text = findings.str();
+        if (findings_text.empty()) {
             return {
                 ChannelWrite{"final_report", json(std::string(
                     "# Research Report\n\n"
@@ -700,25 +707,64 @@ public:
             };
         }
 
-        std::vector<ChatMessage> convo;
-        {
-            ChatMessage s; s.role = "system"; s.content = FINAL_REPORT_SYSTEM;
-            convo.push_back(std::move(s));
-            ChatMessage u; u.role = "user";
-            u.content = "## Research brief\n" + brief +
-                        "\n\n## Collected findings\n" + findings.str();
-            convo.push_back(std::move(u));
+        // Retry loop on token-limit / context-length errors. Each retry
+        // truncates findings_text by 25% (keeping the prefix — earlier
+        // findings come from earlier supervisor rounds and are usually
+        // higher-priority since the supervisor decides what to research
+        // first).
+        constexpr int MAX_RETRIES = 3;
+        std::string last_error;
+        for (int attempt = 0; attempt < MAX_RETRIES; ++attempt) {
+            std::vector<ChatMessage> convo;
+            {
+                ChatMessage s; s.role = "system"; s.content = FINAL_REPORT_SYSTEM;
+                convo.push_back(std::move(s));
+                ChatMessage u; u.role = "user";
+                u.content = "## Research brief\n" + brief +
+                            "\n\n## Collected findings\n" + findings_text;
+                convo.push_back(std::move(u));
+            }
+
+            CompletionParams params;
+            params.model = model_;
+            params.messages = std::move(convo);
+            params.temperature = 0.4f;
+            params.max_tokens = 4096;
+
+            try {
+                auto completion = provider_->complete(params);
+                return {
+                    ChannelWrite{"final_report", json(completion.message.content)}
+                };
+            } catch (const std::exception& e) {
+                last_error = e.what();
+                std::string lc = last_error;
+                std::transform(lc.begin(), lc.end(), lc.begin(),
+                               [](unsigned char c){ return std::tolower(c); });
+                bool is_context_overflow =
+                    lc.find("context") != std::string::npos
+                    || lc.find("token") != std::string::npos
+                    || lc.find("length") != std::string::npos
+                    || lc.find("too long") != std::string::npos
+                    || lc.find("max_tokens") != std::string::npos;
+                if (!is_context_overflow || attempt == MAX_RETRIES - 1) {
+                    throw;  // not a token-limit issue, or out of retries
+                }
+                // Truncate findings by 25% and retry. Keep at least 1 KB.
+                size_t new_size = std::max<size_t>(
+                    1024, findings_text.size() * 3 / 4);
+                if (new_size >= findings_text.size()) {
+                    throw;  // can't truncate further
+                }
+                findings_text.resize(new_size);
+                findings_text += "\n\n[... truncated to fit context window]\n";
+            }
         }
-
-        CompletionParams params;
-        params.model = model_;
-        params.messages = std::move(convo);
-        params.temperature = 0.4f;
-        params.max_tokens = 4096;
-
-        auto completion = provider_->complete(params);
+        // Unreachable, but the compiler can't prove it.
         return {
-            ChannelWrite{"final_report", json(completion.message.content)}
+            ChannelWrite{"final_report", json(
+                std::string("# Research Report\n\nFinal-report synthesis "
+                            "failed after retries: ") + last_error)}
         };
     }
 
@@ -729,22 +775,203 @@ private:
 };
 
 // =========================================================================
-// BriefNode — trivial pass-through for MVP: copies `user_query` into
-// `research_brief`. A later iteration can promote this to an LLM call that
-// rewrites the user's message into a structured brief.
+// BriefNode — LLM-driven research-brief synthesis. Rewrites the raw
+// user_query into a focused, structured brief that the supervisor's
+// planner can decompose more reliably. Mirrors LangGraph's
+// `transform_messages_into_research_topic_prompt` step in
+// open_deep_research/deep_researcher.py — without it the supervisor
+// has to interpret colloquial user phrasing and tends to over-broaden
+// the search.
+//
+// Falls back to a verbatim pass-through if the LLM call fails so a
+// transient provider error doesn't sink the whole run.
 // =========================================================================
 class BriefNode : public GraphNode {
 public:
-    explicit BriefNode(std::string name) : name_(std::move(name)) {}
+    BriefNode(std::string name, std::shared_ptr<Provider> provider, std::string model)
+        : name_(std::move(name))
+        , provider_(std::move(provider))
+        , model_(std::move(model)) {}
+
     std::string get_name() const override { return name_; }
 
     std::vector<ChannelWrite> execute(const GraphState& state) override {
         auto q = state.get("user_query");
-        std::string brief = q.is_string() ? q.get<std::string>() : "";
-        return {ChannelWrite{"research_brief", json(brief)}};
+        std::string user_query = q.is_string() ? q.get<std::string>() : "";
+
+        if (user_query.empty()) {
+            return {ChannelWrite{"research_brief", json(std::string{})}};
+        }
+
+        const char* BRIEF_SYSTEM = R"(You convert a user's research question into a focused research brief.
+
+The brief must:
+1. Restate the core question precisely, preserving every constraint the user named (dates, scope, comparators).
+2. List the specific sub-questions a researcher should answer to produce a complete report. Aim for 3-6 sub-questions.
+3. State what is OUT of scope so researchers don't go on tangents.
+4. Be self-contained — no references to "the user" or to context the supervisor doesn't have.
+
+Output ONLY the brief, in plain markdown. No preamble. Keep it under 200 words.)";
+
+        try {
+            std::vector<ChatMessage> convo;
+            ChatMessage s; s.role = "system"; s.content = BRIEF_SYSTEM;
+            convo.push_back(std::move(s));
+            ChatMessage u; u.role = "user";
+            u.content = "User research question:\n" + user_query;
+            convo.push_back(std::move(u));
+
+            CompletionParams params;
+            params.model = model_;
+            params.messages = std::move(convo);
+            params.temperature = 0.2f;
+            params.max_tokens = 800;
+
+            auto completion = provider_->complete(params);
+            std::string brief = completion.message.content;
+            if (brief.empty()) brief = user_query;  // pass-through guard
+            return {ChannelWrite{"research_brief", json(std::move(brief))}};
+        } catch (const std::exception&) {
+            // Provider failure → degrade gracefully to pass-through so
+            // the rest of the graph still gets a (degraded) brief.
+            return {ChannelWrite{"research_brief", json(user_query)}};
+        }
     }
 private:
-    std::string name_;
+    std::string               name_;
+    std::shared_ptr<Provider> provider_;
+    std::string               model_;
+};
+
+// =========================================================================
+// ClarifyNode — optional HITL gate between __start__ and brief.
+//
+// Mirrors langchain-ai/open_deep_research's `clarify_with_user` step:
+// before the supervisor commits to a research plan, an LLM judges
+// whether the user_query is specific enough to research. If yes
+// (DECISION: PROCEED), it's a no-op pass-through. If no
+// (DECISION: ASK <question>), it throws NodeInterrupt with the
+// clarifying question; the caller is expected to resume() with the
+// user's answer, which gets appended to user_query for the next pass.
+//
+// Two-phase like HumanReviewNode: same node body called twice (pause
+// then resume) to keep the routing simple.
+// =========================================================================
+class ClarifyNode : public GraphNode {
+public:
+    ClarifyNode(std::string name, std::shared_ptr<Provider> provider, std::string model)
+        : name_(std::move(name))
+        , provider_(std::move(provider))
+        , model_(std::move(model)) {}
+
+    std::string get_name() const override { return name_; }
+
+    std::vector<ChannelWrite> execute(const GraphState&) override { return {}; }
+
+    asio::awaitable<NodeResult>
+    execute_full_async(const GraphState& state) override {
+        co_return execute_full(state);
+    }
+
+    NodeResult execute_full(const GraphState& state) override {
+        std::string query;
+        {
+            auto q = state.get("user_query");
+            if (q.is_string()) query = q.get<std::string>();
+        }
+
+        // Phase 2: messages channel populated by engine.resume() with
+        // the user's clarification reply. Append it to user_query and
+        // continue.
+        auto msgs = state.get("messages");
+        if (msgs.is_array() && msgs.size() > 0) {
+            auto latest = msgs[msgs.size() - 1];
+            std::string answer;
+            if (latest.is_object() && latest.contains("content")
+                && latest["content"].is_string()) {
+                answer = latest["content"].get<std::string>();
+            }
+            std::string augmented = query;
+            if (!answer.empty()) {
+                augmented += "\n\n[user clarification]\n" + answer;
+            }
+            NodeResult r;
+            r.writes.push_back(ChannelWrite{"user_query", json(augmented)});
+            // Clear the messages channel so a future interrupt starts fresh.
+            r.writes.push_back(ChannelWrite{"messages", json::array()});
+            return r;
+        }
+
+        // Phase 1: ask the LLM whether the query needs clarification.
+        const char* CLARIFY_SYSTEM = R"(You decide whether a user's research request is specific enough to investigate.
+
+If the request is concrete and self-contained, output exactly:
+  DECISION: PROCEED
+
+If a critical detail is missing (scope, time period, comparison target, definition of an ambiguous term), output exactly:
+  DECISION: ASK
+  QUESTION: <one short clarifying question>
+
+Bias toward PROCEED — only ASK when the question would clearly fork the research direction. Do not ask cosmetic preference questions.)";
+
+        std::string verdict;
+        try {
+            std::vector<ChatMessage> convo;
+            ChatMessage s; s.role = "system"; s.content = CLARIFY_SYSTEM;
+            convo.push_back(std::move(s));
+            ChatMessage u; u.role = "user"; u.content = "Request:\n" + query;
+            convo.push_back(std::move(u));
+
+            CompletionParams params;
+            params.model = model_;
+            params.messages = std::move(convo);
+            params.temperature = 0.0f;
+            params.max_tokens = 200;
+
+            verdict = provider_->complete(params).message.content;
+        } catch (const std::exception&) {
+            // Provider failure — degrade to PROCEED so the run isn't sunk.
+            return NodeResult{};
+        }
+
+        // Parse the decision. Tolerant — accept "DECISION: PROCEED" anywhere
+        // in the reply.
+        std::string lc = verdict;
+        std::transform(lc.begin(), lc.end(), lc.begin(),
+                       [](unsigned char c){ return std::tolower(c); });
+        if (lc.find("proceed") != std::string::npos
+            && lc.find("ask") == std::string::npos) {
+            return NodeResult{};
+        }
+
+        // Extract the clarifying question (line starting with "QUESTION:").
+        std::string question;
+        {
+            auto pos = verdict.find("QUESTION:");
+            if (pos == std::string::npos) pos = verdict.find("question:");
+            if (pos != std::string::npos) {
+                pos += 9;
+                while (pos < verdict.size()
+                       && (verdict[pos] == ' ' || verdict[pos] == '\t'))
+                    ++pos;
+                auto end = verdict.find('\n', pos);
+                question = verdict.substr(
+                    pos, end == std::string::npos ? std::string::npos : end - pos);
+            }
+        }
+        if (question.empty()) {
+            question = "Could you clarify the scope of your research request?";
+        }
+        throw NodeInterrupt(
+            "Clarification needed before research begins.\n\n"
+            "QUESTION: " + question +
+            "\n\nResume with the user's answer to continue.");
+    }
+
+private:
+    std::string               name_;
+    std::shared_ptr<Provider> provider_;
+    std::string               model_;
 };
 
 // =========================================================================
@@ -872,10 +1099,18 @@ void register_node_types_once() {
     std::call_once(once, [] {
         auto& nf = NodeFactory::instance();
 
-        nf.register_type("__dr_brief",
-            [](const std::string& name, const json&, const NodeContext&)
+        nf.register_type("__dr_clarify",
+            [](const std::string& name, const json&, const NodeContext& ctx)
                 -> std::unique_ptr<GraphNode> {
-                return std::make_unique<BriefNode>(name);
+                return std::make_unique<ClarifyNode>(
+                    name, ctx.provider, ctx.model);
+            });
+
+        nf.register_type("__dr_brief",
+            [](const std::string& name, const json&, const NodeContext& ctx)
+                -> std::unique_ptr<GraphNode> {
+                return std::make_unique<BriefNode>(
+                    name, ctx.provider, ctx.model);
             });
 
         nf.register_type("__dr_supervisor_llm",
@@ -964,12 +1199,21 @@ std::unique_ptr<GraphEngine> create_deep_research_graph(
 
     // Edges — common set: start → brief → supervisor → dispatch loop;
     // dispatch emits Command(final_report) to short-circuit when done.
-    json edges = json::array({
-        {{"from", "__start__"},    {"to", "brief"}},
-        {{"from", "brief"},        {"to", "supervisor"}},
-        {{"from", "supervisor"},   {"to", "dispatch"}},
-        {{"from", "dispatch"},     {"to", "supervisor"}}
-    });
+    // The clarify gate (when enabled) sits between __start__ and brief.
+    json edges = json::array();
+    if (cfg.enable_clarification) {
+        // The `messages` channel is shared between clarify and human_review.
+        // Both nodes consume the resume_value engine.resume() drops here.
+        channels["messages"] = json{{"reducer", "overwrite"}};
+        nodes["clarify"] = json{{"type", "__dr_clarify"}};
+        edges.push_back({{"from", "__start__"}, {"to", "clarify"}});
+        edges.push_back({{"from", "clarify"},   {"to", "brief"}});
+    } else {
+        edges.push_back({{"from", "__start__"}, {"to", "brief"}});
+    }
+    edges.push_back({{"from", "brief"},      {"to", "supervisor"}});
+    edges.push_back({{"from", "supervisor"}, {"to", "dispatch"}});
+    edges.push_back({{"from", "dispatch"},   {"to", "supervisor"}});
 
     if (cfg.enable_human_review) {
         // Add the `messages` channel that engine.resume writes the user's
