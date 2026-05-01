@@ -125,6 +125,58 @@ jobs:
   #   setup-postgresql action. Build still exercises libpq link.
   # * Full ctest on Windows — MCP stdio test wants python3 and is
   #   covered on Ubuntu already; Windows runs the rest.
+  # Native ARM64 ctest gate — the GitHub-hosted ubuntu-24.04-arm runner
+  # is a real ARM64 machine (not QEMU), so this catches arch-specific
+  # bugs (atomic codegen, alignment, narrow-int wraparound) that an
+  # x86_64 runner can't see. PG service is omitted — same trade-off as
+  # macOS, the libpq link is exercised via build but the integration
+  # tests `GTEST_SKIP` themselves when NEOGRAPH_TEST_POSTGRES_URL isn't
+  # set. Mirrors build-and-test (Linux x86_64) otherwise.
+  build-and-test-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            build-essential \
+            libpq-dev \
+            libsqlite3-dev \
+            libssl-dev \
+            libcurl4-openssl-dev \
+            pkg-config \
+            python3
+
+      - name: Configure (Release, all backends on)
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DNEOGRAPH_BUILD_LLM=ON \
+            -DNEOGRAPH_BUILD_MCP=ON \
+            -DNEOGRAPH_BUILD_UTIL=ON \
+            -DNEOGRAPH_BUILD_POSTGRES=ON \
+            -DNEOGRAPH_BUILD_SQLITE=ON \
+            -DNEOGRAPH_BUILD_TESTS=ON \
+            -DNEOGRAPH_BUILD_EXAMPLES=OFF
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Run tests (no Postgres service — PG cases skip themselves)
+        working-directory: build
+        run: ctest --output-on-failure -j$(nproc)
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-arm64
+          path: build/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+
   build-macos:
     runs-on: macos-latest
     steps:

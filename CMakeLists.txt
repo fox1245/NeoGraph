@@ -138,11 +138,15 @@ option(NEOGRAPH_USE_LIBCURL    "Build libcurl HTTP/2 backend (CurlH2Pool)" ON)
 #
 # Caveats:
 #   - Windows DLL export annotations (__declspec(dllexport)/dllimport on
-#     every public symbol) are NOT yet wired up. BUILD_SHARED_LIBS=ON on
-#     Windows will compile but link-time will fail with undefined
-#     symbols. Stay STATIC on Windows until that lands. The check below
-#     warns the user up-front rather than letting them discover it at
-#     link time.
+#     every public symbol) are now in place via NEOGRAPH_API on every
+#     class / free function with out-of-line .cpp definitions, including
+#     async/sse_parser.h SseEventParser and async/ws_client.h's `detail`
+#     codec helpers (the test suite exercises those across the .so
+#     boundary). The shape was verified end-to-end on Linux
+#     `BUILD_SHARED_LIBS=ON` (libneograph_*.so + 429/429 ctest green) —
+#     under MSVC the same annotations resolve to dllexport/dllimport
+#     and should link cleanly, but native MSVC load testing has not yet
+#     happened. Report any LNK2019 you see.
 #   - Static-only deps (yyjson, httplib INTERFACE, asio INTERFACE,
 #     cppdotenv INTERFACE, concurrentqueue INTERFACE) get absorbed into
 #     whichever neograph_* library uses them, regardless of mode.
