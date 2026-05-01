@@ -304,23 +304,45 @@ class Provider {
 public:
     virtual ~Provider() = default;
 
-    // Synchronous completion
-    virtual ChatCompletion complete(const CompletionParams& params) = 0;
+    // Synchronous completion. Default body bridges to complete_async via
+    // run_sync — backends that override the async peer get sync for
+    // free, and vice versa. Override at least one side.
+    virtual ChatCompletion complete(const CompletionParams& params);
 
-    // Streaming completion: calls on_chunk per token, returns full result when done
+    // Async completion (asio coroutine). Default body co_returns
+    // complete(params).
+    virtual asio::awaitable<ChatCompletion>
+    complete_async(const CompletionParams& params);
+
+    // Streaming completion (sync). Default body bridges to async peer.
     virtual ChatCompletion complete_stream(const CompletionParams& params,
-                                           const StreamCallback& on_chunk) = 0;
+                                           const StreamCallback& on_chunk);
 
-    // Provider name (e.g. "openai", "claude")
+    // Async streaming peer. Added in audit Round 4 so async-native
+    // backends can override only this side. Default body bridges to
+    // complete_stream via run_sync.
+    virtual asio::awaitable<ChatCompletion>
+    complete_stream_async(const CompletionParams& params,
+                          const StreamCallback& on_chunk);
+
+    // Only pure virtual on this interface — every backend must name
+    // itself.
     virtual std::string get_name() const = 0;
 };
 ```
 
 | Method | Description |
 |--------|-------------|
-| `complete(params)` | Perform a blocking completion. Returns the full `ChatCompletion` |
-| `complete_stream(params, on_chunk)` | Streaming completion. Calls `on_chunk` for each token as it arrives, then returns the assembled `ChatCompletion` |
-| `get_name()` | Returns a human-readable provider identifier |
+| `complete(params)` | Blocking completion. Default-bridges to `complete_async` via `neograph::async::run_sync`. |
+| `complete_async(params)` | Coroutine peer. Default `co_return complete(params)`. |
+| `complete_stream(params, on_chunk)` | Streaming completion. Calls `on_chunk` per chunk, returns the assembled `ChatCompletion`. |
+| `complete_stream_async(params, on_chunk)` | Async streaming peer (Round 4). Same `on_chunk` semantics. |
+| `get_name()` | Human-readable provider identifier (only pure virtual). |
+
+**Override-at-least-one-side contract**: each `(sync, async)` pair
+defaults to the other; overriding neither yields infinite mutual
+recursion at call time. Same shape as `CheckpointStore`'s sync↔async
+bridge below.
 
 ---
 
@@ -518,10 +540,16 @@ struct RetryPolicy {
     int   initial_delay_ms   = 100;    // First retry delay in milliseconds
     float backoff_multiplier = 2.0f;   // Exponential backoff factor
     int   max_delay_ms       = 5000;   // Maximum delay cap in milliseconds
+    float jitter_pct         = 0.0f;   // Per-retry jitter as a fraction of
+                                       // the computed delay (0.25 = ±25%).
+                                       // Default 0 = back-compat. Per-thread
+                                       // RNG, no global state.
 };
 ```
 
-Delay for retry `n` is `min(initial_delay_ms * backoff_multiplier^n, max_delay_ms)`.
+Delay for retry `n` is `min(initial_delay_ms * backoff_multiplier^n, max_delay_ms)`,
+optionally multiplied by `1 + uniform(-jitter_pct, +jitter_pct)` when
+`jitter_pct > 0`.
 
 ### StreamMode
 
@@ -1000,7 +1028,23 @@ public:
     std::shared_ptr<Store> get_store() const;
     void set_retry_policy(const RetryPolicy& policy);
     void set_node_retry_policy(const std::string& node_name, const RetryPolicy& policy);
-    void set_worker_count(std::size_t n);  // 3.0: opt-in fan-out pool
+
+    // Fan-out worker pool. n==1 keeps the engine on the caller's
+    // executor (no engine-owned thread_pool); n>=2 installs an
+    // owned `asio::thread_pool` of size n. Throws `std::logic_error`
+    // if called while a run is in flight (Round 3 guard —
+    // `active_runs_` counter prevents tasks queued on the old pool
+    // from being silently dropped on swap).
+    void set_worker_count(std::size_t n);
+
+    // Convenience: set_worker_count(hardware_concurrency()).
+    void set_worker_count_auto();
+
+    // Per-node result caching. Disabled by default; opt in per node.
+    void set_node_cache_enabled(const std::string& node_name, bool enabled);
+    void clear_node_cache();
+    const NodeCache& node_cache() const;
+
     const std::string& get_graph_name() const;
 };
 ```
@@ -1523,10 +1567,16 @@ struct Checkpoint {
     json        metadata;          // User-defined metadata
     int64_t     step;              // Super-step number
     int64_t     timestamp;         // Unix epoch milliseconds
-    int         schema_version = CHECKPOINT_SCHEMA_VERSION;  // Layout version
+    std::uint32_t schema_version = CHECKPOINT_SCHEMA_VERSION;  // Layout version
 
     static std::string generate_id();  // Generate UUID v4
 };
+
+// Wire-stable schema version. Bump on layout-incompatible changes.
+// Currently 2 (added `barrier_state`). Typed `uint32_t` (Round 5
+// fix — was a platform-variable `int` round-tripping through JSON,
+// which left an undocumented door for `-1` sentinel values).
+constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 2;
 ```
 
 | Field | Type | Description |
@@ -1543,43 +1593,82 @@ struct Checkpoint {
 | `metadata` | `json` | Arbitrary user-defined data |
 | `step` | `int64_t` | Super-step counter |
 | `timestamp` | `int64_t` | Creation time in Unix epoch milliseconds |
-| `schema_version` | `int` | On-wire layout version (see `CHECKPOINT_SCHEMA_VERSION`, currently `2`). Fresh checkpoints from the engine always carry the current version. Persistent `CheckpointStore` implementations should serialize it and treat `0` on a deserialized blob as "pre-versioned" (e.g. the field was absent — migration is the caller's responsibility) |
+| `schema_version` | `std::uint32_t` | On-wire layout version (see `CHECKPOINT_SCHEMA_VERSION`, currently `2`). Round 5 widened this from `int` to fixed-width unsigned — schema versions are non-negative and a platform-variable `int` width was wrong for a value persisted to disk and round-tripped through JSON. Persistent `CheckpointStore` implementations should serialize it and treat `0` on a deserialized blob as "pre-versioned" (e.g. the field was absent — migration is the caller's responsibility) |
 
 ### CheckpointStore
 
 Abstract interface for checkpoint persistence. Implement this to store checkpoints
 in a database, file system, or any other backend.
 
-> **Writing a custom store?** 8 sync methods have 8 async peers.
-> See [`ASYNC_GUIDE.md` §9.4](ASYNC_GUIDE.md#94-checkpointstore) —
-> override all-sync or all-async (not mixed), depending on whether
-> your backend is blocking or async-capable.
+> **Writing a custom store?** This is a fat interface (5 sync core +
+> 5 async peers + 3 sync pending-writes + 3 async pending-writes =
+> **16 virtuals**). Defaults bridge sync↔async in both directions
+> (sync calls `run_sync(async)`; async calls `execute_in_pool(sync)`)
+> so a backend can override only one side per method — but
+> overriding NEITHER yields infinite mutual recursion at call time.
+> See [`ASYNC_GUIDE.md` §9.4](ASYNC_GUIDE.md#94-checkpointstore).
 
 ```cpp
 class CheckpointStore {
 public:
     virtual ~CheckpointStore() = default;
 
-    virtual void save(const Checkpoint& cp) = 0;
+    // ── Sync core (5 virtuals, non-pure with bridge defaults) ──────
+    virtual void save(const Checkpoint& cp);
+    virtual std::optional<Checkpoint> load_latest(const std::string& thread_id);
+    virtual std::optional<Checkpoint> load_by_id(const std::string& id);
+    virtual std::vector<Checkpoint>   list(const std::string& thread_id,
+                                           int limit = 100);
+    virtual void delete_thread(const std::string& thread_id);
 
-    virtual std::optional<Checkpoint> load_latest(const std::string& thread_id) = 0;
+    // ── Async peers (5 virtuals, default co_return the sync call) ──
+    virtual asio::awaitable<void> save_async(const Checkpoint& cp);
+    virtual asio::awaitable<std::optional<Checkpoint>>
+        load_latest_async(const std::string& thread_id);
+    virtual asio::awaitable<std::optional<Checkpoint>>
+        load_by_id_async(const std::string& id);
+    virtual asio::awaitable<std::vector<Checkpoint>>
+        list_async(const std::string& thread_id, int limit = 100);
+    virtual asio::awaitable<void>
+        delete_thread_async(const std::string& thread_id);
 
-    virtual std::optional<Checkpoint> load_by_id(const std::string& id) = 0;
+    // ── Pending writes — fine-grained super-step progress log ──────
+    //
+    // Default no-ops: backends that don't support per-node durable
+    // writes fall back to "full super-step replay" on resume.
+    virtual void put_writes(const std::string& thread_id,
+                            const std::string& parent_checkpoint_id,
+                            const PendingWrite& write) {}
+    virtual std::vector<PendingWrite> get_writes(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id) { return {}; }
+    virtual void clear_writes(const std::string& thread_id,
+                              const std::string& parent_checkpoint_id) {}
 
-    virtual std::vector<Checkpoint> list(const std::string& thread_id,
-                                          int limit = 100) = 0;
-
-    virtual void delete_thread(const std::string& thread_id) = 0;
+    // ── Async pending-writes peers (default-bridge to sync) ────────
+    virtual asio::awaitable<void> put_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id,
+        const PendingWrite& write);
+    virtual asio::awaitable<std::vector<PendingWrite>> get_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id);
+    virtual asio::awaitable<void> clear_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id);
 };
 ```
 
 | Method | Description |
 |--------|-------------|
-| `save(cp)` | Persist a checkpoint |
-| `load_latest(thread_id)` | Load the most recent checkpoint for a thread |
-| `load_by_id(id)` | Load a specific checkpoint by UUID |
-| `list(thread_id, limit)` | List checkpoints for a thread, newest first, up to `limit` |
-| `delete_thread(thread_id)` | Delete all checkpoints for a thread |
+| `save(cp)` / `save_async(cp)` | Persist a checkpoint. Engine writes one per super-step. |
+| `load_latest(thread_id)` / `_async` | Load the most recent checkpoint for a thread. |
+| `load_by_id(id)` / `_async` | Load a specific checkpoint by UUID (time-travel). |
+| `list(thread_id, limit)` / `_async` | List checkpoints for a thread, newest first, up to `limit`. |
+| `delete_thread(thread_id)` / `_async` | Delete all checkpoints for a thread. |
+| `put_writes(thread_id, parent_cp, write)` / `_async` | Record a successful node execution mid-super-step. Engine calls this immediately after a node returns and *before* its writes apply to GraphState. Default no-op. |
+| `get_writes(thread_id, parent_cp)` / `_async` | Load pending writes attached to a parent checkpoint. Engine calls this on resume to skip already-completed tasks. Default empty. |
+| `clear_writes(thread_id, parent_cp)` / `_async` | Discard pending writes after the successor super-step's checkpoint has been durably saved. Default no-op. |
 
 ### InMemoryCheckpointStore
 
@@ -1938,15 +2027,21 @@ describes how to format requests, parse responses, and handle streaming for any 
 class SchemaProvider : public Provider {
 public:
     struct Config {
-        std::string schema_path;     // Schema name or file path
-        std::string api_key;         // API key (overrides env var)
+        std::string schema_path;       // Schema name or file path
+        std::string api_key;           // API key (overrides env var)
         std::string default_model = "gpt-4o-mini";
-        int timeout_seconds = 60;
+        int         timeout_seconds = 60;
+        std::string base_url_override;  // Overrides schema's connection.base_url
+        bool        use_websocket = false;  // OpenAI Responses /v1/responses WS mode
+        bool        prefer_libcurl = false; // Switch HTTP transport to libcurl HTTP/2
     };
 
     static std::unique_ptr<SchemaProvider> create(const Config& config);
+    static std::shared_ptr<Provider>       create_shared(const Config& config);
 
     ChatCompletion complete(const CompletionParams& params) override;
+    asio::awaitable<ChatCompletion>
+    complete_async(const CompletionParams& params) override;
     ChatCompletion complete_stream(const CompletionParams& params,
                                    const StreamCallback& on_chunk) override;
     std::string get_name() const override;
@@ -1961,6 +2056,9 @@ public:
 | `api_key` | `std::string` | | API key. If empty, falls back to the env var specified in the schema |
 | `default_model` | `std::string` | `"gpt-4o-mini"` | Default model identifier |
 | `timeout_seconds` | `int` | `60` | HTTP timeout |
+| `base_url_override` | `std::string` | `""` | If non-empty, overrides the schema's `connection.base_url`. Useful for test doubles and self-hosted OpenAI-compatible endpoints. |
+| `use_websocket` | `bool` | `false` | Drive `complete_stream` over `wss://` instead of HTTP/SSE. Currently supported only for the `"openai_responses"` schema (matches OpenAI's WebSocket mode at /v1/responses). |
+| `prefer_libcurl` | `bool` | `false` | Switch the non-streaming HTTP transport to libcurl (HTTP/2 + multiplexing + Cloudflare-friendly fingerprint). Build-time gated on `NEOGRAPH_USE_LIBCURL`. |
 
 **Built-in schemas:**
 
@@ -2190,16 +2288,33 @@ public:
     bool initialize(const std::string& client_name = "neograph");
     std::vector<std::unique_ptr<Tool>> get_tools();
     json call_tool(const std::string& name, const json& arguments);
+
+    // Lower-level: arbitrary JSON-RPC method dispatch. Used internally
+    // by initialize / get_tools / call_tool; exposed for callers that
+    // want to drive a non-tool MCP method (resources/list,
+    // prompts/list, etc.) without breaking out of NeoGraph's transport.
+    json rpc_call(const std::string& method, const json& params);
+    asio::awaitable<json>
+    rpc_call_async(const std::string& method, const json& params);
 };
 ```
+
+**Wire protocol:** NeoGraph's MCP client speaks
+`protocolVersion = "2025-11-25"`. HTTP transport sends the
+`MCP-Protocol-Version` header on every JSON-RPC request (Round 1 +
+Round 3 spec alignment); stdio transport carries the same version
+in the `initialize` payload. Servers running older protocol
+versions may reject these requests — pin server-side or upgrade.
 
 | Method | Description |
 |--------|-------------|
 | `MCPClient(url)` | Construct an HTTP-mode client |
-| `MCPClient(argv)` | Spawn a subprocess and construct a stdio-mode client. `argv[0]` is resolved via `PATH` (execvp). Throws on fork/exec failure |
+| `MCPClient(argv)` | Spawn a subprocess and construct a stdio-mode client. `argv[0]` is resolved via `PATH` (execvp). Throws on fork/exec failure. Refuses Windows `.bat`/`.cmd` for safety (Round 3 hardening) |
 | `initialize(client_name)` | Perform the MCP initialization handshake. Returns `true` on success. Must be called before `get_tools()` or `call_tool()` |
 | `get_tools()` | Discovers tools from the server and returns them as `std::unique_ptr<Tool>` instances ready for use with `Agent` or `GraphEngine` |
 | `call_tool(name, arguments)` | Invokes a tool by name with the given arguments. Returns the raw JSON response |
+| `rpc_call(method, params)` | Arbitrary JSON-RPC method on the same transport. Sync facade over `rpc_call_async`. |
+| `rpc_call_async(method, params)` | Coroutine version. The "real" implementation — `rpc_call` is a thin sync wrapper. |
 
 **HTTP usage:**
 
