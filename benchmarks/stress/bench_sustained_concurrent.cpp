@@ -49,6 +49,19 @@
 #include <thread>
 #include <vector>
 
+#if defined(_WIN32)
+// Avoid Windows.h pulling in <winsock.h> (collides with asio's winsock2).
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#  include <psapi.h>
+#  pragma comment(lib, "psapi.lib")
+#endif
+
 using namespace neograph;
 using namespace neograph::graph;
 
@@ -89,6 +102,22 @@ static json seq_graph() {
     };
 }
 
+#if defined(_WIN32)
+// Win32: GetProcessMemoryInfo reports working-set in bytes. PeakWorkingSetSize
+// is the high-water mark (analogue of Linux VmHWM); WorkingSetSize is the
+// current set (analogue of VmRSS). Convert to kB so the JSON field shape
+// matches the Linux runner exactly.
+static std::size_t peak_rss_kb() {
+    PROCESS_MEMORY_COUNTERS pmc{};
+    if (!GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) return 0;
+    return static_cast<std::size_t>(pmc.PeakWorkingSetSize / 1024);
+}
+static std::size_t current_rss_kb() {
+    PROCESS_MEMORY_COUNTERS pmc{};
+    if (!GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) return 0;
+    return static_cast<std::size_t>(pmc.WorkingSetSize / 1024);
+}
+#else
 // /proc/self/status VmHWM (peak resident set, kB) — same source the
 // single-shot bench uses, so the two report comparable numbers.
 static std::size_t peak_rss_kb() {
@@ -119,6 +148,7 @@ static std::size_t current_rss_kb() {
     }
     return 0;
 }
+#endif
 
 struct Args {
     int concurrency       = 1000;
