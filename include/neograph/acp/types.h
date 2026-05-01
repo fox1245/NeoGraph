@@ -167,19 +167,26 @@ struct NEOGRAPH_API PromptRequest {
     std::vector<ContentBlock>  prompt;
 };
 
-/// Why the agent stopped responding for this turn.
+/// Why the agent stopped responding for this turn. Values mirror the
+/// official ACP schema (zed-industries/agent-client-protocol,
+/// schema/schema.json: StopReason). Stop reasons that don't apply to
+/// NeoGraph today (max_tokens, max_turn_requests, refusal) are
+/// modelled so consumers can still round-trip them through to_json /
+/// from_json without loss; the runtime only ever emits EndTurn or
+/// Cancelled in the baseline server.
 enum class StopReason {
-    Completed,   ///< Turn finished normally.
-    Cancelled,   ///< Cancelled via session/cancel.
-    ToolCalls,   ///< Awaiting tool execution result (deferred — not used yet).
-    Error,       ///< Internal error during the run.
+    EndTurn,         ///< "end_turn" — turn finished normally.
+    MaxTokens,       ///< "max_tokens" — model hit the token cap.
+    MaxTurnRequests, ///< "max_turn_requests" — agent reached its turn-request budget.
+    Refusal,         ///< "refusal" — agent refused to continue.
+    Cancelled,       ///< "cancelled" — cancelled via session/cancel.
 };
 
 NEOGRAPH_API std::string stop_reason_to_string(StopReason s);
 NEOGRAPH_API StopReason  stop_reason_from_string(std::string_view s);
 
 struct NEOGRAPH_API PromptResponse {
-    StopReason stop_reason = StopReason::Completed;
+    StopReason stop_reason = StopReason::EndTurn;
 };
 
 // ---------------------------------------------------------------------------

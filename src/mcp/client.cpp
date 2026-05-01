@@ -811,6 +811,15 @@ MCPClient::rpc_call_async(const std::string& method, const json& params) {
     if (!session_id_.empty()) {
         headers.emplace_back("Mcp-Session-Id", session_id_);
     }
+    // Spec MUST (transports / Streamable HTTP § "Protocol Version Header"):
+    // include MCP-Protocol-Version on every HTTP request after initialize.
+    // Strict 2025-11-25 servers respond 400 Bad Request to requests
+    // without it. Skip on the initialize call itself —
+    // negotiated_protocol_version_ is empty until initialize returns.
+    if (!negotiated_protocol_version_.empty()) {
+        headers.emplace_back("MCP-Protocol-Version",
+                             negotiated_protocol_version_);
+    }
 
     async::RequestOptions opts;
     opts.timeout = std::chrono::seconds(30);
@@ -833,10 +842,10 @@ MCPClient::rpc_call_async(const std::string& method, const json& params) {
 
     // Restore Mcp-Session-Id header tracking now that HttpResponse
     // exposes a generic headers map (see async/http_client.h). The
-    // MCP spec (2025-03-26) sends this header on the initialize
-    // response; subsequent rpc calls must echo it back so the server
-    // routes to the same session. Sem 2.6 had to drop this when we
-    // migrated off httplib; Sem 4 follow-up restores it.
+    // MCP spec sends this header on the initialize response;
+    // subsequent rpc calls must echo it back so the server routes to
+    // the same session. Sem 2.6 had to drop this when we migrated off
+    // httplib; Sem 4 follow-up restores it.
     if (auto sid = res.get_header("Mcp-Session-Id"); !sid.empty()) {
         session_id_ = std::string(sid);
     }
@@ -870,11 +879,24 @@ MCPClient::rpc_call_async(const std::string& method, const json& params) {
 
 bool MCPClient::initialize(const std::string& client_name) {
     json params;
-    params["protocolVersion"] = "2025-03-26";
+    // Latest MCP spec at the time of writing — see
+    // https://modelcontextprotocol.io/specification/2025-11-25/. The server
+    // negotiates back via InitializeResult.protocolVersion (typically the
+    // same value, or downgraded if the server only knows an older version);
+    // we capture that and echo it on every subsequent HTTP request.
+    params["protocolVersion"] = "2025-11-25";
     params["capabilities"]    = json::object();
     params["clientInfo"]      = {{"name", client_name}, {"version", "0.1.0"}};
 
-    rpc_call("initialize", params);
+    auto init_result = rpc_call("initialize", params);
+    if (init_result.contains("protocolVersion")
+        && init_result["protocolVersion"].is_string()) {
+        negotiated_protocol_version_ =
+            init_result["protocolVersion"].get<std::string>();
+    } else {
+        // Server didn't echo a version back — assume it agreed to ours.
+        negotiated_protocol_version_ = "2025-11-25";
+    }
 
     // Send initialized notification.
     if (stdio_session_) {
@@ -900,6 +922,15 @@ bool MCPClient::initialize(const std::string& client_name) {
     };
     if (!session_id_.empty()) {
         headers.emplace_back("Mcp-Session-Id", session_id_);
+    }
+    // Spec MUST (transports / Streamable HTTP § "Protocol Version Header"):
+    // include MCP-Protocol-Version on every HTTP request after initialize.
+    // Strict 2025-11-25 servers respond 400 Bad Request to requests
+    // without it. Skip on the initialize call itself —
+    // negotiated_protocol_version_ is empty until initialize returns.
+    if (!negotiated_protocol_version_.empty()) {
+        headers.emplace_back("MCP-Protocol-Version",
+                             negotiated_protocol_version_);
     }
 
     auto notify_body = notify.dump();

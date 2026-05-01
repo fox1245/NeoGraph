@@ -1,7 +1,18 @@
 // NeoGraph Example 01: Simple ReAct Agent
 //
-// A minimal example that creates a ReAct agent with a calculator tool.
-// The agent calls the LLM, detects tool calls, executes them, and loops.
+// Implements ReAct (Yao et al. 2022, "ReAct: Synergizing Reasoning and
+// Acting in Language Models", arXiv:2210.03629). ReAct's defining
+// feature is the *interleaved reasoning trace*: at every step the agent
+// emits a Thought before deciding on an Action, and the Observation
+// from the previous tool call feeds back into the next Thought.
+//
+// To make this a faithful ReAct demonstration (and not just OpenAI
+// function calling) the system prompt below explicitly elicits a
+// "Thought:" line before every tool call, plus one few-shot exemplar
+// showing the Thought / Action / Observation pattern. Without these,
+// the model can (and does) skip the reasoning trace and call the tool
+// silently — that's the OpenAI tool-use baseline ReAct is meant to
+// improve on.
 //
 // Usage:
 //   echo 'OPENAI_API_KEY=sk-...' > .env
@@ -151,11 +162,40 @@ int main() {
         std::vector<std::unique_ptr<neograph::Tool>> tools;
         tools.push_back(std::make_unique<CalculatorTool>());
 
-        // 3. Create agent
+        // 3. Create agent.
+        //
+        // The system prompt forces ReAct's interleaved Thought/Action/
+        // Observation pattern. The one-shot exemplar shows the model
+        // exactly what to emit before each tool call — without it,
+        // strong instruction-tuned models often jump straight to a
+        // silent tool call (which is OpenAI function calling, not
+        // ReAct).
+        const std::string react_system =
+            "You are a ReAct agent. For every step, follow this format:\n"
+            "  Thought: <one sentence — what you need next and why>\n"
+            "  Action: <call a tool, OR write 'finish' to give the final answer>\n"
+            "After a tool returns, the result is the Observation. Use it to\n"
+            "form the next Thought. Stop only when you have enough to answer.\n"
+            "\n"
+            "Example trajectory:\n"
+            "  User: What is 12 * 7 plus 5?\n"
+            "  Thought: I need 12 * 7 first, then add 5. I'll compute the multiplication.\n"
+            "  Action: calculator({\"expression\": \"12 * 7\"})\n"
+            "  Observation: {\"result\": \"84\"}\n"
+            "  Thought: Now add 5 to 84.\n"
+            "  Action: calculator({\"expression\": \"84 + 5\"})\n"
+            "  Observation: {\"result\": \"89\"}\n"
+            "  Thought: I have the answer.\n"
+            "  Final answer: 89\n"
+            "\n"
+            "Always emit the Thought line in plain text before any tool call,\n"
+            "even when the next step is obvious. The reasoning trace is\n"
+            "load-bearing — do not skip it.";
+
         neograph::llm::Agent agent(
             std::move(provider),
             std::move(tools),
-            "You are a helpful assistant with a calculator tool."
+            react_system
         );
 
         // 4. Run

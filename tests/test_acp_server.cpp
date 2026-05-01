@@ -181,7 +181,7 @@ TEST(ACPServer, PromptRunsGraphAndEmitsUpdate) {
 
     auto resp = cap.wait_for_response(2);
     ASSERT_TRUE(resp.contains("result"));
-    EXPECT_EQ(resp["result"].value("stopReason", std::string()), "completed");
+    EXPECT_EQ(resp["result"].value("stopReason", std::string()), "end_turn");
 
     auto chunks = cap.notifications_for("session/update");
     bool saw_chunk = false;
@@ -305,7 +305,7 @@ TEST(ACPServer, RunPumpsNdjsonThroughStreams) {
                 saw_chunk = true;
             }
         } else if (j.contains("result")
-                   && j["result"].value("stopReason", std::string()) == "completed") {
+                   && j["result"].value("stopReason", std::string()) == "end_turn") {
             saw_resp = true;
         }
     }
@@ -412,7 +412,7 @@ TEST(ACPServer, NodeCallsBackToEditorViaFsRead) {
 
     auto resp = cap.wait_for_response(2, std::chrono::seconds(5));
     ASSERT_TRUE(resp.contains("result")) << "no PromptResponse arrived: " << resp.dump();
-    EXPECT_EQ(resp["result"].value("stopReason", std::string()), "completed");
+    EXPECT_EQ(resp["result"].value("stopReason", std::string()), "end_turn");
 
     bool saw_expected = false;
     for (auto& n : cap.notifications_for("session/update")) {
@@ -549,7 +549,7 @@ TEST(ACPServer, RequestPermissionSelectedRoundTrip) {
 
     auto resp = cap.wait_for_response(2, std::chrono::seconds(5));
     ASSERT_TRUE(resp.contains("result"));
-    EXPECT_EQ(resp["result"].value("stopReason", std::string()), "completed");
+    EXPECT_EQ(resp["result"].value("stopReason", std::string()), "end_turn");
 
     bool saw_chunk = false;
     for (auto& n : cap.notifications_for("session/update")) {

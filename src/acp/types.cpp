@@ -3,24 +3,27 @@
 namespace neograph::acp {
 
 // ---------------------------------------------------------------------------
-// StopReason
+// StopReason — wire-format strings per the official ACP schema
+// (zed-industries/agent-client-protocol, schema/schema.json).
 // ---------------------------------------------------------------------------
 std::string stop_reason_to_string(StopReason s) {
     switch (s) {
-        case StopReason::Completed: return "completed";
-        case StopReason::Cancelled: return "cancelled";
-        case StopReason::ToolCalls: return "tool_calls";
-        case StopReason::Error:     return "error";
+        case StopReason::EndTurn:         return "end_turn";
+        case StopReason::MaxTokens:       return "max_tokens";
+        case StopReason::MaxTurnRequests: return "max_turn_requests";
+        case StopReason::Refusal:         return "refusal";
+        case StopReason::Cancelled:       return "cancelled";
     }
-    return "completed";
+    return "end_turn";
 }
 
 StopReason stop_reason_from_string(std::string_view s) {
-    if (s == "completed")  return StopReason::Completed;
-    if (s == "cancelled")  return StopReason::Cancelled;
-    if (s == "tool_calls") return StopReason::ToolCalls;
-    if (s == "error")      return StopReason::Error;
-    return StopReason::Completed;
+    if (s == "end_turn")          return StopReason::EndTurn;
+    if (s == "max_tokens")        return StopReason::MaxTokens;
+    if (s == "max_turn_requests") return StopReason::MaxTurnRequests;
+    if (s == "refusal")           return StopReason::Refusal;
+    if (s == "cancelled")         return StopReason::Cancelled;
+    return StopReason::EndTurn;
 }
 
 // ---------------------------------------------------------------------------

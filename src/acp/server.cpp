@@ -243,13 +243,18 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
         cfg.thread_id = req.session_id;
         cfg.input     = a.build_initial_state(req.prompt, req.session_id);
 
-        StopReason  stop = StopReason::Completed;
+        StopReason  stop          = StopReason::EndTurn;
+        bool        graph_failed  = false;
         std::string agent_text;
 
         try {
             auto rr = engine->run(cfg);
             agent_text = a.extract_agent_text(rr.output);
         } catch (const std::exception& e) {
+            // ACP's StopReason vocabulary doesn't include a generic
+            // "error" value — surface engine failures as a final
+            // agent_message_chunk and end the turn normally. The chunk
+            // text carries the diagnostic.
             SessionNotification n;
             n.session_id = req.session_id;
             n.update.session_update = "agent_message_chunk";
@@ -257,10 +262,10 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                 std::string("(graph error: ") + e.what() + ")");
             neograph::json nj; to_json(nj, n);
             emit(jsonrpc_notify("session/update", std::move(nj)));
-            stop = StopReason::Error;
+            graph_failed = true;
         }
 
-        if (stop != StopReason::Error) {
+        if (!graph_failed) {
             bool was_cancelled = cancel_flags[req.session_id].exchange(
                 false, std::memory_order_acq_rel);
             if (was_cancelled) {

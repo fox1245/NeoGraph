@@ -158,6 +158,12 @@ class MCPClient {
     std::string host_;
     std::string path_prefix_;
     std::string session_id_;
+    /// Protocol version negotiated during initialize. The MCP spec
+    /// requires the client to echo this on every subsequent HTTP request
+    /// in the `MCP-Protocol-Version` header (transports/Streamable HTTP §
+    /// "Protocol Version Header", spec 2025-11-25). Empty until
+    /// initialize completes.
+    std::string negotiated_protocol_version_;
     int request_id_ = 0;
 
     // stdio state (null when in HTTP mode).
