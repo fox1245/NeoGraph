@@ -4,6 +4,16 @@
 // Uses OpenAI text-embedding-3-small for vector similarity search and
 // an in-memory vector store. In production, replace with PGVector / Pinecone.
 //
+// NOTE — this is the inference-only "retrieve-then-generate" pattern that
+// has become the dominant industry usage of "RAG", NOT the original
+// formulation in Lewis et al. 2020 (arXiv:2005.11401). The paper defines
+// RAG as a *trained* model that marginalises top-k retrieval probabilities
+// against a generator with end-to-end gradient flow between DPR-style
+// retriever and BART-style generator. This example does not train anything;
+// retrieval and generation are two independent inference calls. If you
+// need the original RAG formulation (RAG-Sequence / RAG-Token with joint
+// training), this example is not it.
+//
 // The agent:
 //   1. On startup, embeds 8 documents into vectors
 //   2. Receives a user question via CLI

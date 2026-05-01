@@ -17,10 +17,14 @@
 #  include <windows.h>
 #else
 #  include <asio/posix/stream_descriptor.hpp>
+#  include <dirent.h>
 #  include <fcntl.h>
 #  include <signal.h>
 #  include <sys/wait.h>
 #  include <unistd.h>
+#  if defined(__linux__)
+#    include <sys/syscall.h>
+#  endif
 #endif
 
 #include <atomic>
@@ -241,6 +245,28 @@ std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>
         throw;
     }
 
+    // Refuse to spawn `.bat` / `.cmd` targets via CreateProcess with
+    // a null lpApplicationName. cmd.exe parses CommandLine for those
+    // and `build_win_cmdline` only escapes the double-quote / quoted-
+    // whitespace cases — `^`, `&`, `|`, `<`, `>`, parentheses are
+    // passed through, which is a command-injection surface (CVE-2024-
+    // 1874-class). Callers who genuinely need to launch a batch file
+    // should resolve it to its interpreter first (e.g. cmd.exe /c).
+    if (!argv.empty()) {
+        const auto& exe = argv[0];
+        if (exe.size() >= 4) {
+            std::string ext = exe.substr(exe.size() - 4);
+            for (auto& c : ext) c = static_cast<char>(::tolower(c));
+            if (ext == ".bat" || ext == ".cmd") {
+                throw std::runtime_error(
+                    "StdioSession: refusing to spawn .bat/.cmd target via "
+                    "CreateProcess (cmd.exe metacharacter injection risk). "
+                    "Wrap the script in `cmd.exe /c <script>` and re-quote "
+                    "the arguments yourself if you really need it.");
+            }
+        }
+    }
+
     std::string cmdline = build_win_cmdline(argv);
 
     STARTUPINFOA si = {};
@@ -333,6 +359,42 @@ std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>
         ::close(in_pipe[0]);  ::close(in_pipe[1]);
         ::close(out_pipe[0]); ::close(out_pipe[1]);
 
+        // Close every other inherited file descriptor before exec.
+        // Without this, the child inherits whatever the parent had
+        // open: TLS sockets, sqlite/postgres connection fds, asio's
+        // timerfd / eventfd, OpenSSL's RNG fd, etc. — both a resource
+        // leak and a security issue (the spawned MCP server could
+        // read or write the parent's TLS sessions or DB).
+        //
+        // Linux: prefer close_range(3, ~0u, 0) (kernel ≥ 5.9). Fall
+        // back to walking /proc/self/fd. macOS / BSD: closefrom() is
+        // the standard call. We don't enable closefrom on macOS at
+        // build time without a feature probe, so the /proc fallback
+        // is the portable belt-and-braces path.
+#if defined(__linux__) && defined(SYS_close_range)
+        if (::syscall(SYS_close_range, 3u, ~0u, 0u) != 0) {
+#endif
+        DIR* d = ::opendir("/proc/self/fd");
+        if (d) {
+            int dfd = ::dirfd(d);
+            struct dirent* ent;
+            while ((ent = ::readdir(d)) != nullptr) {
+                if (ent->d_name[0] < '0' || ent->d_name[0] > '9') continue;
+                int fd = std::atoi(ent->d_name);
+                if (fd > 2 && fd != dfd) ::close(fd);
+            }
+            ::closedir(d);
+        } else {
+            // Last-resort sweep — best effort, bounded so a high
+            // RLIMIT_NOFILE doesn't make exec take seconds.
+            int max_fd = static_cast<int>(::sysconf(_SC_OPEN_MAX));
+            if (max_fd <= 0 || max_fd > 65536) max_fd = 65536;
+            for (int fd = 3; fd < max_fd; ++fd) ::close(fd);
+        }
+#if defined(__linux__) && defined(SYS_close_range)
+        }
+#endif
+
         std::vector<char*> cargv;
         cargv.reserve(argv.size() + 1);
         for (const auto& a : argv) cargv.push_back(const_cast<char*>(a.c_str()));
@@ -411,6 +473,12 @@ void StdioSession::write_frame_locked(const json& j) {
 }
 
 std::string StdioSession::read_line_locked() {
+    // Hard cap on a single line. Without this a malicious or buggy
+    // server that never emits a newline would let `buffer_` grow until
+    // the parent OOMs. 16 MB is the same order of magnitude as the
+    // HTTP body limits in async/http_client.h and well above any
+    // legitimate MCP message.
+    constexpr size_t MAX_LINE_BYTES = 16 * 1024 * 1024;
     while (true) {
         auto nl = buffer_.find('\n');
         if (nl != std::string::npos) {
@@ -418,6 +486,12 @@ std::string StdioSession::read_line_locked() {
             buffer_.erase(0, nl + 1);
             if (!line.empty() && line.back() == '\r') line.pop_back();
             return line;
+        }
+        if (buffer_.size() > MAX_LINE_BYTES) {
+            throw std::runtime_error(
+                "StdioSession: incoming line exceeded "
+                + std::to_string(MAX_LINE_BYTES)
+                + " bytes without newline (peer misbehaving)");
         }
 
         char tmp[4096];
@@ -794,32 +868,43 @@ MCPClient::rpc_call_async(const std::string& method, const json& params) {
         co_return co_await stdio_session_->rpc_call_async(method, params);
     }
 
+    // Build the request envelope + headers under http_state_mu_ — the
+    // shared fields (request_id_, session_id_, negotiated_protocol_version_)
+    // would otherwise race across concurrent rpc_call_async invocations.
+    // We hold the lock only while reading/writing those fields, NOT
+    // across the network call below.
+    int                                              this_id;
+    std::vector<std::pair<std::string, std::string>> headers;
+    {
+        std::lock_guard lk(http_state_mu_);
+        this_id = ++request_id_;
+        headers = {
+            {"Content-Type", "application/json"},
+            {"Accept",       "application/json, text/event-stream"},
+            {"Host",         "localhost"},
+        };
+        if (!session_id_.empty()) {
+            headers.emplace_back("Mcp-Session-Id", session_id_);
+        }
+        // Spec MUST (transports / Streamable HTTP § "Protocol Version
+        // Header"): include MCP-Protocol-Version on every HTTP request
+        // after initialize. Strict 2025-11-25 servers respond 400 Bad
+        // Request without it. Skip on the initialize call itself —
+        // negotiated_protocol_version_ is empty until initialize returns.
+        if (!negotiated_protocol_version_.empty()) {
+            headers.emplace_back("MCP-Protocol-Version",
+                                 negotiated_protocol_version_);
+        }
+    }
+
     json body;
     body["jsonrpc"] = "2.0";
-    body["id"]      = ++request_id_;
+    body["id"]      = this_id;
     body["method"]  = method;
     body["params"]  = params;
     auto body_str = body.dump();
 
     auto endpoint = async::split_async_endpoint(server_url_);
-
-    std::vector<std::pair<std::string, std::string>> headers = {
-        {"Content-Type", "application/json"},
-        {"Accept",       "application/json, text/event-stream"},
-        {"Host",         "localhost"},
-    };
-    if (!session_id_.empty()) {
-        headers.emplace_back("Mcp-Session-Id", session_id_);
-    }
-    // Spec MUST (transports / Streamable HTTP § "Protocol Version Header"):
-    // include MCP-Protocol-Version on every HTTP request after initialize.
-    // Strict 2025-11-25 servers respond 400 Bad Request to requests
-    // without it. Skip on the initialize call itself —
-    // negotiated_protocol_version_ is empty until initialize returns.
-    if (!negotiated_protocol_version_.empty()) {
-        headers.emplace_back("MCP-Protocol-Version",
-                             negotiated_protocol_version_);
-    }
 
     async::RequestOptions opts;
     opts.timeout = std::chrono::seconds(30);
@@ -840,13 +925,12 @@ MCPClient::rpc_call_async(const std::string& method, const json& params) {
         throw std::runtime_error(std::string("MCP request failed: ") + e.what());
     }
 
-    // Restore Mcp-Session-Id header tracking now that HttpResponse
-    // exposes a generic headers map (see async/http_client.h). The
-    // MCP spec sends this header on the initialize response;
-    // subsequent rpc calls must echo it back so the server routes to
-    // the same session. Sem 2.6 had to drop this when we migrated off
-    // httplib; Sem 4 follow-up restores it.
+    // Absorb response state under the mutex — `Mcp-Session-Id` may
+    // change mid-conversation if the server rotates it. The MCP spec
+    // sends this header on the initialize response; subsequent rpc
+    // calls must echo it back so the server routes to the same session.
     if (auto sid = res.get_header("Mcp-Session-Id"); !sid.empty()) {
+        std::lock_guard lk(http_state_mu_);
         session_id_ = std::string(sid);
     }
 
@@ -855,16 +939,68 @@ MCPClient::rpc_call_async(const std::string& method, const json& params) {
             "MCP error (HTTP " + std::to_string(res.status) + "): " + res.body);
     }
 
-    // Parse response — may be plain JSON or SSE (event: message\ndata: {...})
+    // Parse response — may be plain JSON or SSE. Streamable HTTP can
+    // pack multiple SSE events into one response (e.g. an in-stream
+    // server→client request followed by the JSON-RPC response). Walk
+    // the events and pick the first one whose payload's `id` matches
+    // our request, falling back to the last-seen JSON if none matches.
+    // This replaces a previous implementation that grabbed only the
+    // first `data:` line and dropped any subsequent events.
     json resp;
-    auto data_pos = res.body.find("data: ");
-    if (data_pos != std::string::npos) {
-        auto json_start = data_pos + 6;
-        auto json_end   = res.body.find('\n', json_start);
-        std::string json_str = (json_end != std::string::npos)
-            ? res.body.substr(json_start, json_end - json_start)
-            : res.body.substr(json_start);
-        resp = json::parse(json_str);
+    if (res.body.find("data:") != std::string::npos) {
+        // Parse SSE event stream: events separated by "\n\n", lines
+        // within an event starting with "data:" are concatenated with
+        // newlines per the W3C SSE spec.
+        json matched;
+        json last;
+        bool have_last = false;
+        size_t pos = 0;
+        while (pos < res.body.size()) {
+            auto event_end = res.body.find("\n\n", pos);
+            std::string event = (event_end == std::string::npos)
+                                ? res.body.substr(pos)
+                                : res.body.substr(pos, event_end - pos);
+            pos = (event_end == std::string::npos)
+                  ? res.body.size()
+                  : event_end + 2;
+
+            std::string data;
+            size_t lp = 0;
+            while (lp < event.size()) {
+                auto nl = event.find('\n', lp);
+                std::string line = (nl == std::string::npos)
+                                   ? event.substr(lp)
+                                   : event.substr(lp, nl - lp);
+                lp = (nl == std::string::npos) ? event.size() : nl + 1;
+                if (line.rfind("data:", 0) == 0) {
+                    auto value = line.substr(5);
+                    if (!value.empty() && value.front() == ' ') value.erase(0, 1);
+                    if (!data.empty()) data.push_back('\n');
+                    data.append(value);
+                }
+            }
+            if (data.empty()) continue;
+            try {
+                json frame = json::parse(data);
+                last = frame;
+                have_last = true;
+                if (frame.contains("id")
+                    && frame["id"].is_number_integer()
+                    && frame["id"].get<int>() == this_id) {
+                    matched = std::move(frame);
+                    break;
+                }
+            } catch (...) {
+                // Tolerate keep-alive / comment events; skip.
+            }
+        }
+        if (!matched.is_null()) {
+            resp = std::move(matched);
+        } else if (have_last) {
+            resp = std::move(last);
+        } else {
+            throw std::runtime_error("MCP SSE response had no parseable events");
+        }
     } else {
         resp = json::parse(res.body);
     }
@@ -889,13 +1025,16 @@ bool MCPClient::initialize(const std::string& client_name) {
     params["clientInfo"]      = {{"name", client_name}, {"version", "0.1.0"}};
 
     auto init_result = rpc_call("initialize", params);
-    if (init_result.contains("protocolVersion")
-        && init_result["protocolVersion"].is_string()) {
-        negotiated_protocol_version_ =
-            init_result["protocolVersion"].get<std::string>();
-    } else {
-        // Server didn't echo a version back — assume it agreed to ours.
-        negotiated_protocol_version_ = "2025-11-25";
+    {
+        std::lock_guard lk(http_state_mu_);
+        if (init_result.contains("protocolVersion")
+            && init_result["protocolVersion"].is_string()) {
+            negotiated_protocol_version_ =
+                init_result["protocolVersion"].get<std::string>();
+        } else {
+            // Server didn't echo a version back — assume it agreed to ours.
+            negotiated_protocol_version_ = "2025-11-25";
+        }
     }
 
     // Send initialized notification.
@@ -915,22 +1054,23 @@ bool MCPClient::initialize(const std::string& client_name) {
     notify["params"]  = json::object();
 
     auto endpoint = async::split_async_endpoint(server_url_);
-    std::vector<std::pair<std::string, std::string>> headers = {
-        {"Content-Type", "application/json"},
-        {"Accept",       "application/json, text/event-stream"},
-        {"Host",         "localhost"},
-    };
-    if (!session_id_.empty()) {
-        headers.emplace_back("Mcp-Session-Id", session_id_);
-    }
-    // Spec MUST (transports / Streamable HTTP § "Protocol Version Header"):
-    // include MCP-Protocol-Version on every HTTP request after initialize.
-    // Strict 2025-11-25 servers respond 400 Bad Request to requests
-    // without it. Skip on the initialize call itself —
-    // negotiated_protocol_version_ is empty until initialize returns.
-    if (!negotiated_protocol_version_.empty()) {
-        headers.emplace_back("MCP-Protocol-Version",
-                             negotiated_protocol_version_);
+    std::vector<std::pair<std::string, std::string>> headers;
+    {
+        std::lock_guard lk(http_state_mu_);
+        headers = {
+            {"Content-Type", "application/json"},
+            {"Accept",       "application/json, text/event-stream"},
+            {"Host",         "localhost"},
+        };
+        if (!session_id_.empty()) {
+            headers.emplace_back("Mcp-Session-Id", session_id_);
+        }
+        // Spec MUST (transports / Streamable HTTP § "Protocol Version
+        // Header"). Strict 2025-11-25 servers respond 400 without it.
+        if (!negotiated_protocol_version_.empty()) {
+            headers.emplace_back("MCP-Protocol-Version",
+                                 negotiated_protocol_version_);
+        }
     }
 
     auto notify_body = notify.dump();

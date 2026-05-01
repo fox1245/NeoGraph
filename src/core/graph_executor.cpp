@@ -388,6 +388,16 @@ NodeExecutor::run_parallel_async(
     // shared_mutex-guarded inside GraphState. No worker writes to
     // shared state; the NodeResults are aggregated out-of-band by the
     // parallel_group and applied in-order after wait_for_all returns.
+    // INVARIANT (capture-by-reference safety): the outer awaitable
+    // suspends at make_parallel_group::async_wait below and stays
+    // suspended until every worker finishes. The captured locals
+    // (state, replay, coord, parent_cp_id, trace, cb, stream_mode)
+    // therefore live for the full lifetime of every worker frame.
+    // No worker mutates the captured state — NodeResult outputs are
+    // aggregated out-of-band and applied in-order after wait_for_all
+    // returns. If a future change introduces opportunistic
+    // cancellation that abandons the parallel_group early, switch
+    // these captures to by-value copies first.
     auto worker = [&, this](std::string node_name) -> asio::awaitable<NodeResult> {
         const std::string task_id = make_static_task_id(step, node_name);
         auto replay_it = replay.find(task_id);

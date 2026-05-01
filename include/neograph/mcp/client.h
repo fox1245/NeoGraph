@@ -17,9 +17,10 @@
 
 #include <asio/awaitable.hpp>
 
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
-#include <memory>
 
 namespace neograph::mcp {
 
@@ -157,6 +158,16 @@ class MCPClient {
     std::string server_url_;
     std::string host_;
     std::string path_prefix_;
+    /// Mutex guarding the HTTP-state fields below
+    /// (`session_id_`, `negotiated_protocol_version_`, `request_id_`).
+    /// Concurrent `rpc_call_async` invocations on the same client would
+    /// otherwise race on string assignment from the InitializeResult /
+    /// `Mcp-Session-Id` header read paths — `std::string` SSO writes
+    /// are not atomic. The mutex is held only while building the
+    /// outgoing header list and absorbing the response state, NOT
+    /// across the network call itself, so concurrent in-flight RPCs
+    /// remain possible.
+    mutable std::mutex http_state_mu_;
     std::string session_id_;
     /// Protocol version negotiated during initialize. The MCP spec
     /// requires the client to echo this on every subsequent HTTP request

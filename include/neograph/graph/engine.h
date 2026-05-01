@@ -23,6 +23,7 @@
 #include <asio/awaitable.hpp>
 #include <asio/thread_pool.hpp>
 
+#include <atomic>
 #include <cstddef>
 #include <memory>
 #include <set>
@@ -405,6 +406,13 @@ private:
     /// Stored by value so the engine owns it; NodeExecutor holds a
     /// non-owning pointer threaded through set_worker_count() rebuilds.
     NodeCache node_cache_;
+
+    /// Inflight-run counter. Incremented at the top of
+    /// execute_graph_async and decremented at coroutine completion
+    /// via an RAII guard. set_worker_count() asserts this is zero
+    /// before swapping the executor — resizing the pool while a run
+    /// is mid-flight would drop tasks deferred onto the old pool.
+    std::atomic<int> active_runs_{0};
 };
 
 } // namespace neograph::graph
