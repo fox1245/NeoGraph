@@ -97,6 +97,18 @@ struct RunResult {
  * @endcode
  *
  * @see RunConfig, RunResult, GraphNode
+ *
+ * @note Public surface size — this class exposes ~23 public methods
+ * spanning three concerns: graph execution (run/run_async/run_stream/
+ * resume), state administration (get_state/update_state/fork), and
+ * runtime configuration (set_retry_policy/set_worker_count/
+ * set_node_cache_enabled/set_checkpoint_store/own_tools). A future
+ * major version (v1.0) is expected to split into `GraphEngine` (run
+ * + resume only), `GraphAdmin` (state inspection/update/fork), and a
+ * `GraphConfigBuilder` consumed at compile time. The current shape
+ * is kept so existing examples and downstream consumers don't break;
+ * the class-level docs above flag mutator setters as "configuration,
+ * not runtime" already.
  */
 class NEOGRAPH_API GraphEngine {
 public:

@@ -33,6 +33,24 @@ class GraphNode;
  *     });
  * @endcode
  */
+/// @note Process-wide singleton.
+///
+/// `ReducerRegistry`, `ConditionRegistry`, and `NodeFactory` are global
+/// state shared across every GraphEngine in the process. This is fine
+/// for most embeddings (a single host process compiling its graphs
+/// once), but it has caveats:
+///   - Two embedders coexisting in the same process can't register
+///     conflicting reducer/condition/node-type names without stepping
+///     on each other.
+///   - Test isolation: the registries persist across test cases, so
+///     a node-type registered in one test is visible in subsequent
+///     tests; tests must use unique type names or deregister.
+///   - Pybind users: state survives pytest-case boundaries.
+///
+/// A future major version (v1.0) is expected to thread per-engine
+/// `Registry` instances through `NodeContext`/`compile()`, with the
+/// global singleton kept as a default-fallback layer. Until then,
+/// avoid duplicate registrations across test cases / embedders.
 class NEOGRAPH_API ReducerRegistry {
 public:
     /// @brief Get the singleton instance.

@@ -135,8 +135,15 @@ struct CurlH2Pool::Impl {
         // serializes interleaved DATA frames). Tunable via env so we can
         // A/B without rebuilding.
         if (const char* s = std::getenv("NG_CURL_MAX_HOST_CONNS")) {
-            curl_multi_setopt(multi, CURLMOPT_MAX_HOST_CONNECTIONS,
-                              static_cast<long>(std::atol(s)));
+            // Validate before forwarding to libcurl. Negative or
+            // absurdly large values pass straight through `std::atol`
+            // and would either be reinterpreted as ULONG_MAX or
+            // silently overflow libcurl's internal counters. Clamp
+            // to a sensible engineering range.
+            long v = std::atol(s);
+            if (v >= 1 && v <= 4096) {
+                curl_multi_setopt(multi, CURLMOPT_MAX_HOST_CONNECTIONS, v);
+            }
         }
 
         while (!stop.load(std::memory_order_acquire)) {
@@ -245,7 +252,12 @@ struct CurlH2Pool::Impl {
         // to complete so it can multiplex onto the same conn. PIPEWAIT=0 lets
         // libcurl open a fresh conn instead of waiting. Tunable via env.
         long pipewait = 1L;
-        if (const char* s = std::getenv("NG_CURL_PIPEWAIT")) pipewait = std::atol(s);
+        if (const char* s = std::getenv("NG_CURL_PIPEWAIT")) {
+            // PIPEWAIT is a boolean (0 or 1); reject anything else
+            // rather than passing arbitrary integers to libcurl.
+            long v = std::atol(s);
+            if (v == 0 || v == 1) pipewait = v;
+        }
         curl_easy_setopt(p->easy, CURLOPT_PIPEWAIT,       pipewait);
         if (p->timeout_seconds > 0) {
             curl_easy_setopt(p->easy, CURLOPT_TIMEOUT, p->timeout_seconds);

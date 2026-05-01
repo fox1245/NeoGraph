@@ -13,6 +13,8 @@
 
 #include <asio/awaitable.hpp>
 
+#include <cstdint>
+
 #include <optional>
 #include <mutex>
 #include <map>
@@ -36,7 +38,11 @@ namespace neograph::graph {
 ///       v1 would have lost them anyway (the pre-v2 contract), so the
 ///       v2 engine simply resumes with zero accumulated signals and
 ///       waits for the full set again.
-constexpr int CHECKPOINT_SCHEMA_VERSION = 2;
+// Unsigned + fixed-width: schema versions are non-negative and a
+// platform-variable `int` width is wrong for a value persisted to
+// disk and round-tripped through JSON. Old `int` left the door open
+// to a `-1` sentinel value that wasn't documented anywhere.
+constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 2;
 
 /// Phase at which a Checkpoint was produced. Drives resume semantics —
 /// `Before` means "re-enter before the target node runs", `After` /
@@ -106,7 +112,7 @@ struct Checkpoint {
     /// migration (e.g. promoting a single next_node field into a one-
     /// element next_nodes vector). In-memory checkpoints created
     /// through the engine always carry CHECKPOINT_SCHEMA_VERSION.
-    int         schema_version = CHECKPOINT_SCHEMA_VERSION;
+    std::uint32_t schema_version = CHECKPOINT_SCHEMA_VERSION;
 
     /**
      * @brief Generate a new UUID v4 string.
@@ -163,6 +169,21 @@ struct PendingWrite {
  *
  * @see InMemoryCheckpointStore for a reference implementation.
  */
+/// @note Backend authors: this is a "fat" interface (5 sync core +
+///       5 async peers + 3 pending-writes + 1 async pending = 14
+///       virtuals). Defaults bridge sync↔async in both directions
+///       (sync calls run_sync(async); async calls execute_in_pool(sync))
+///       so a backend can override only one side per method — but
+///       overriding NEITHER yields infinite mutual recursion at call
+///       time. The contract is enforced at runtime, not at compile
+///       time. A future major version (v1.0) is expected to split
+///       this into:
+///         - `CheckpointStoreCore`         — 5 sync mandatory virtuals
+///         - `AsyncCheckpointStore`        — async peer mixin (optional)
+///         - `PendingWritesCheckpointStore` — pending-writes mixin
+///       The current monolithic shape is kept for back-compat. New
+///       backends should override at least one of (sync, async) per
+///       method to avoid infinite recursion.
 class NEOGRAPH_API CheckpointStore {
 public:
     virtual ~CheckpointStore() = default;

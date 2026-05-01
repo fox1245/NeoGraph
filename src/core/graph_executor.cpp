@@ -10,6 +10,7 @@
 #include <asio/use_awaitable.hpp>
 
 #include <algorithm>
+#include <random>
 #include <chrono>
 #include <cstdio>
 #include <optional>
@@ -163,7 +164,23 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
             // error. Bubble out of the coroutine so the caller can save
             // a NodeInterrupt checkpoint, matching the sync path.
             throw;
+        } catch (const std::bad_alloc&) {
+            // OOM is not retryable. Sleeping then re-running won't
+            // free memory; it just delays the inevitable failure
+            // and risks compounding allocator pressure.
+            throw;
+        } catch (const std::logic_error&) {
+            // logic_error and its subclasses (invalid_argument,
+            // out_of_range, length_error, domain_error, future_error)
+            // signal programming bugs — assertions, contract
+            // violations. Retrying produces the same bug. Surface
+            // immediately so the bug shows up loud rather than as
+            // a slow retry-exhaustion timeout.
+            throw;
         } catch (...) {
+            // runtime_error, network/timeout errors, third-party
+            // exceptions: assume transient and let the retry loop
+            // decide based on attempt count + policy.
             retryable_err = std::current_exception();
         }
 
@@ -217,8 +234,23 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
                                {"error", what}}});
         }
 
+        // Apply jitter to break thundering-herd lockstep when N
+        // parallel branches retry against the same upstream. The
+        // policy default is jitter_pct=0 (deterministic, back-compat);
+        // callers configuring fan-out workloads should set ~0.2.
+        int actual_delay = delay_ms;
+        if (policy.jitter_pct > 0.0f && delay_ms > 0) {
+            // Per-thread RNG so concurrent branches don't share state.
+            thread_local std::mt19937 rng{std::random_device{}()};
+            float pct = std::min(1.0f, policy.jitter_pct);
+            std::uniform_real_distribution<float> dist(-pct, pct);
+            float scaled = delay_ms * (1.0f + dist(rng));
+            if (scaled < 0.0f) scaled = 0.0f;
+            actual_delay = static_cast<int>(scaled);
+        }
+
         asio::steady_timer timer(ex);
-        timer.expires_after(std::chrono::milliseconds(delay_ms));
+        timer.expires_after(std::chrono::milliseconds(actual_delay));
         co_await timer.async_wait(asio::use_awaitable);
 
         delay_ms = std::min(

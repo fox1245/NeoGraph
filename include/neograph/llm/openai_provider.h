@@ -42,7 +42,17 @@ class NEOGRAPH_API OpenAIProvider : public Provider {
         std::string api_key;                              ///< API key for authentication.
         std::string base_url = "https://api.openai.com";  ///< Base URL of the API endpoint.
         std::string default_model = "gpt-4o-mini";        ///< Default model name.
-        int timeout_seconds = 60;                         ///< HTTP request timeout in seconds.
+        /// HTTP request timeout in seconds. Note: NeoGraph's public
+        /// surface currently uses a mix of `int seconds` (here, in
+        /// SchemaProvider, A2AClient default), `std::chrono::milliseconds`
+        /// (ACPClient, ACPServer::call_client, async::HttpClient::Options),
+        /// and dimensionless step counts (RunConfig::max_steps). A
+        /// future v1.0 standardisation pass will move all timeouts to
+        /// `std::chrono::milliseconds` on a process-level
+        /// `NeoGraphConfig` defaults struct that individual configs
+        /// inherit from. Until then, watch the unit when configuring
+        /// across modules.
+        int timeout_seconds = 60;
     };
 
     /**

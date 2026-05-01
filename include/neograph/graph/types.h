@@ -174,6 +174,13 @@ struct RetryPolicy {
     int    initial_delay_ms = 100;     ///< Delay before the first retry (milliseconds).
     float  backoff_multiplier = 2.0f;  ///< Multiplier applied to delay after each retry.
     int    max_delay_ms     = 5000;    ///< Maximum delay cap (milliseconds).
+    /// Random jitter as a fraction of the computed delay, in [0, 1].
+    /// The actual sleep is `delay * (1 + uniform(-jitter_pct, +jitter_pct))`.
+    /// Default 0.0 = deterministic backoff (back-compat). Set to ~0.2 in
+    /// fan-out scenarios where N parallel branches hit the same upstream
+    /// rate-limit; without jitter they all retry in lockstep, producing
+    /// thundering-herd 429 second waves.
+    float  jitter_pct       = 0.0f;
 };
 
 /**

@@ -47,6 +47,11 @@ asio::awaitable<ChatCompletion>
 RateLimitedProvider::complete_async(const CompletionParams& params) {
     auto ex = co_await asio::this_coro::executor;
 
+    // Track total elapsed wall-clock so cfg_.max_total_wait_seconds
+    // can cap stacked retries (e.g. 5 × 60s would otherwise stall
+    // for 5 minutes).
+    auto start = std::chrono::steady_clock::now();
+
     for (int attempt = 0;; ++attempt) {
         // Capture the outcome of one inner call without doing a co_await
         // inside a catch block — GCC 13 ICEs on that shape (verified in
@@ -71,6 +76,13 @@ RateLimitedProvider::complete_async(const CompletionParams& params) {
         int wait = decide_sleep_seconds(e, cfg_);
         if (wait < 0) throw e;
 
+        // max_total_wait_seconds budget check: refuse to sleep past it.
+        if (cfg_.max_total_wait_seconds > 0) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - start).count();
+            if (elapsed + wait > cfg_.max_total_wait_seconds) throw e;
+        }
+
         asio::steady_timer timer(ex);
         timer.expires_after(std::chrono::seconds(wait));
         co_await timer.async_wait(asio::use_awaitable);
@@ -86,6 +98,7 @@ RateLimitedProvider::complete_stream(const CompletionParams& params,
     // from the start — callers that assume "each callback invocation
     // is unique output" need to be aware. In practice HTTP 429 is
     // returned before any response body, so this case is rare.
+    auto start = std::chrono::steady_clock::now();
     for (int attempt = 0;; ++attempt) {
         try {
             return inner_->complete_stream(params, on_chunk);
@@ -93,6 +106,11 @@ RateLimitedProvider::complete_stream(const CompletionParams& params,
             if (attempt >= cfg_.max_retries) throw;
             int wait = decide_sleep_seconds(e, cfg_);
             if (wait < 0) throw;
+            if (cfg_.max_total_wait_seconds > 0) {
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - start).count();
+                if (elapsed + wait > cfg_.max_total_wait_seconds) throw;
+            }
             std::this_thread::sleep_for(std::chrono::seconds(wait));
         }
     }

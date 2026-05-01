@@ -8,8 +8,11 @@
 
 #include <gtest/gtest.h>
 #include <neograph/graph/sqlite_checkpoint.h>
+#include <chrono>
+#include <cstdio>
 #include <map>
 #include <string>
+#include <unistd.h>
 
 using namespace neograph::graph;
 using json = neograph::json;
@@ -303,9 +306,22 @@ TEST_F(SqliteCheckpointTest, NestedJsonRoundTrips) {
 // after the test.
 TEST(SqliteCheckpointTest_File, FileBackedRoundTrip) {
     std::string path = "/tmp/neograph_test_" +
+                       std::to_string(::geteuid()) + "_" +
                        std::to_string(std::chrono::steady_clock::now()
                                           .time_since_epoch().count()) +
                        ".db";
+    // RAII cleanup so an early ASSERT_* doesn't orphan /tmp files.
+    // Pre-fix this only ran on the happy path (after the assertions).
+    struct PathCleanup {
+        std::string path;
+        ~PathCleanup() {
+            std::remove(path.c_str());
+            std::remove((path + "-wal").c_str());
+            std::remove((path + "-shm").c_str());
+        }
+    };
+    PathCleanup cleanup{path};
+
     {
         SqliteCheckpointStore s(path);
         Checkpoint cp;
@@ -333,8 +349,6 @@ TEST(SqliteCheckpointTest_File, FileBackedRoundTrip) {
         EXPECT_EQ(loaded->channel_values["channels"]["x"]["value"]
                       .get<std::string>(), "persisted");
     }
-    std::remove(path.c_str());
-    // WAL leaves -wal and -shm sidecars; clean them too so /tmp stays tidy.
-    std::remove((path + "-wal").c_str());
-    std::remove((path + "-shm").c_str());
+    // RAII PathCleanup runs at scope exit (covering both happy path
+    // and ASSERT_* early-return).
 }

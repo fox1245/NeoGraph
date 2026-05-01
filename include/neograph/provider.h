@@ -145,7 +145,24 @@ class NEOGRAPH_API Provider {
 
     /**
      * @brief Get the provider name (e.g., "openai", "claude").
-     * @return Provider identifier string.
+     *
+     * **Opaque debug identifier**, not a typed dispatch key. Different
+     * subclasses pick different conventions:
+     *   - `OpenAIProvider` always returns `"openai"`.
+     *   - `SchemaProvider` returns whatever's in the schema's `name`
+     *     field — could be `"openai"`, `"claude"`, `"openai-responses"`,
+     *     `"gemini"`, or a user-defined schema id.
+     *   - `RateLimitedProvider` delegates to its inner provider.
+     *
+     * Code branching on the exact string (e.g. `if (get_name() ==
+     * "openai-responses")`) is brittle — a custom schema named
+     * `"openai-responses-v2"` slips through, or a future rename
+     * silently breaks the branch. Use it for logging, telemetry, or
+     * version-pinning diagnostics. For typed behaviour, add a typed
+     * `ProviderKind` accessor or branch on the schema's actual
+     * fields.
+     *
+     * @return Opaque provider identifier string.
      */
     virtual std::string get_name() const = 0;
 };

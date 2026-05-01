@@ -14,6 +14,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace neograph::llm {
@@ -84,6 +85,11 @@ class NEOGRAPH_API Agent {
   private:
     std::shared_ptr<Provider> provider_;
     std::vector<std::unique_ptr<Tool>> tools_;
+    /// Name → tool* lookup built once at construction. Keeps tool
+    /// dispatch O(1) per call rather than O(n) scan over `tools_` —
+    /// matters when N is large (e.g. an MCP server with 30+ tools)
+    /// and the run loop fires many tool_call iterations.
+    std::unordered_map<std::string, Tool*> tools_by_name_;
     std::string instructions_;
     std::string model_;
 

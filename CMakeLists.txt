@@ -384,7 +384,12 @@ if(NEOGRAPH_USE_LIBCURL)
     # runtime libcurl was compiled with it.
     find_package(CURL REQUIRED)
     target_link_libraries(neograph_async PRIVATE CURL::libcurl)
-    target_compile_definitions(neograph_async PUBLIC NEOGRAPH_HAVE_LIBCURL)
+    # PRIVATE: NEOGRAPH_HAVE_LIBCURL is consulted only inside
+    # src/async/curl_h2_pool.cpp. Demoting from PUBLIC keeps the
+    # build-time toggle out of consumer ABI — a downstream binary
+    # built against a libcurl-less SDK shouldn't compile differently
+    # vs one built against a libcurl-enabled SDK.
+    target_compile_definitions(neograph_async PRIVATE NEOGRAPH_HAVE_LIBCURL)
 endif()
 # C++20 coroutines require this on GCC < 14 when using -std=c++20.
 target_compile_features(neograph_async PUBLIC cxx_std_20)

@@ -24,6 +24,22 @@
 namespace neograph::graph {
 
 /// @brief Configuration knobs for the Deep Research graph.
+///
+/// The default values are calibrated for **Anthropic tier-1 quotas
+/// (30K input TPM)** running Claude Sonnet 4.5. They are the
+/// safest-shipping defaults for a fresh user pointed at Anthropic
+/// without rate-limit wallpaper, but they are NOT optimal for other
+/// providers / higher tiers:
+///   - tier-3 Anthropic users have ~5× headroom — bump
+///     `max_concurrent_researchers` to 5–8.
+///   - Self-hosted vLLM / OpenAI: no minute-window TPM throttle,
+///     `max_concurrent_researchers` 8–16.
+///   - Different provider: also override `model` to a non-Claude id;
+///     the default is set up for SchemaProvider("claude").
+/// A future major version may move these magic-number defaults out
+/// of the public struct and into a `DeepResearchConfig::for_anthropic_tier(N)`
+/// factory; for now they stay here and the doc string carries the
+/// caveat.
 struct DeepResearchConfig {
     std::string model = "claude-sonnet-4-5";  ///< Claude model identifier.
     int max_supervisor_iterations = 2;        ///< Supervisor planning rounds (keep ≤ 3 for low-tier Anthropic quotas).
