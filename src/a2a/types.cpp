@@ -321,16 +321,26 @@ void to_json(json& j, const AgentCard& c) {
     json caps = json::object();
     caps["streaming"]         = c.streaming;
     caps["pushNotifications"] = c.push_notifications;
-    caps["extendedAgentCard"] = c.extended_card;
+    // Note: `capabilities.extendedAgentCard` is NOT in the A2A spec
+    // (was a NeoGraph fabrication). The spec signals authenticated
+    // extended-card support via the top-level
+    // `supportsAuthenticatedExtendedCard` boolean below.
     j["capabilities"] = std::move(caps);
 
     j["supportsAuthenticatedExtendedCard"] = c.supports_authenticated_extended;
 
+    // A2A AgentCard.skills entries REQUIRE description + tags per
+    // spec §5.5.4. When the caller only populated skill_names we emit a
+    // stub description and an empty tags array — strict consumers
+    // accept this; the fully-populated form should be set on c.raw or
+    // by the caller via a richer struct (future surface work).
     auto skills = json::array();
     for (auto& name : c.skill_names) {
-        json s = json::object();
-        s["id"]   = name;
-        s["name"] = name;
+        json s        = json::object();
+        s["id"]       = name;
+        s["name"]     = name;
+        s["description"] = std::string("Skill: ") + name;
+        s["tags"]     = json::array();
         skills.push_back(std::move(s));
     }
     j["skills"] = std::move(skills);
@@ -360,6 +370,10 @@ void from_json(const json& j, AgentCard& c) {
         if (cap.is_object()) {
             c.streaming          = cap.value("streaming", false);
             c.push_notifications = cap.value("pushNotifications", false);
+            // Tolerant read of legacy/non-spec field for cards produced
+            // by older NeoGraph builds that emitted `extendedAgentCard`.
+            // New cards should rely on `supportsAuthenticatedExtendedCard`
+            // at the top level.
             c.extended_card      = cap.value("extendedAgentCard", false);
         }
     }

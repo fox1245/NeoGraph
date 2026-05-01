@@ -1,13 +1,27 @@
-// NeoGraph Example 18: Multi-Agent Debate (Researcher / Skeptic / Judge)
+// NeoGraph Example 18: Adversarial Multi-Agent Debate (Pro / Con / Judge)
 //
-// Pattern: three agents with distinct system prompts argue about a claim,
+// Pattern: two agents with opposing assigned positions argue about a claim,
 // each seeing the shared transcript. After N rounds, a neutral Judge reads
 // the full debate and renders a verdict with reasoning.
 //
-// Why this beats a single agent: forcing one agent to argue FOR a position
-// and another to argue AGAINST it tends to surface failure modes that a
-// single "be balanced" prompt glosses over. The Judge then adjudicates with
-// full context of both strongest cases.
+// References:
+//   - Closest published pattern: Liang et al. 2024, "Encouraging Divergent
+//     Thinking in Large Language Models through Multi-Agent Debate"
+//     (arXiv:2305.19118) — adversarial Affirmative/Negative agents + Judge.
+//   - Earlier theoretical framing: Irving et al. 2018, "AI safety via debate"
+//     (arXiv:1805.00899) — two agents argue, a (human or model) judge picks.
+//
+// NOTE — what this is NOT:
+//   Du et al. 2023 "Improving Factuality and Reasoning… via Multiagent Debate"
+//   (arXiv:2305.14325) uses N≥3 IDENTICAL agents (no opposing personas, no
+//   judge); convergence to truth comes from each agent re-answering with peer
+//   answers as context, with the final answer extracted by majority vote.
+//   That algorithm is structurally different from this example.
+//
+// Why this pattern beats a single agent: forcing one agent to argue FOR a
+// position and another to argue AGAINST it tends to surface failure modes
+// that a single "be balanced" prompt glosses over. The Judge then
+// adjudicates with full context of both strongest cases.
 //
 // Each agent is just a separate system prompt + a shared message history.
 // That's the entire implementation — the pattern is about prompt design,

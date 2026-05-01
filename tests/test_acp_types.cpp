@@ -13,16 +13,20 @@ using neograph::json;
 namespace {
 
 TEST(ACPTypes, StopReasonRoundTrip) {
-    EXPECT_EQ(stop_reason_to_string(StopReason::Completed), "completed");
-    EXPECT_EQ(stop_reason_to_string(StopReason::Cancelled), "cancelled");
-    EXPECT_EQ(stop_reason_to_string(StopReason::ToolCalls), "tool_calls");
-    EXPECT_EQ(stop_reason_to_string(StopReason::Error),     "error");
+    // Wire-format strings come from the official ACP schema:
+    // zed-industries/agent-client-protocol@main schema/schema.json.
+    EXPECT_EQ(stop_reason_to_string(StopReason::EndTurn),         "end_turn");
+    EXPECT_EQ(stop_reason_to_string(StopReason::MaxTokens),       "max_tokens");
+    EXPECT_EQ(stop_reason_to_string(StopReason::MaxTurnRequests), "max_turn_requests");
+    EXPECT_EQ(stop_reason_to_string(StopReason::Refusal),         "refusal");
+    EXPECT_EQ(stop_reason_to_string(StopReason::Cancelled),       "cancelled");
 
-    EXPECT_EQ(stop_reason_from_string("completed"),  StopReason::Completed);
-    EXPECT_EQ(stop_reason_from_string("cancelled"),  StopReason::Cancelled);
-    EXPECT_EQ(stop_reason_from_string("tool_calls"), StopReason::ToolCalls);
-    EXPECT_EQ(stop_reason_from_string("error"),      StopReason::Error);
-    EXPECT_EQ(stop_reason_from_string("garbage"),    StopReason::Completed);
+    EXPECT_EQ(stop_reason_from_string("end_turn"),          StopReason::EndTurn);
+    EXPECT_EQ(stop_reason_from_string("max_tokens"),        StopReason::MaxTokens);
+    EXPECT_EQ(stop_reason_from_string("max_turn_requests"), StopReason::MaxTurnRequests);
+    EXPECT_EQ(stop_reason_from_string("refusal"),           StopReason::Refusal);
+    EXPECT_EQ(stop_reason_from_string("cancelled"),         StopReason::Cancelled);
+    EXPECT_EQ(stop_reason_from_string("garbage"),           StopReason::EndTurn);
 }
 
 TEST(ACPTypes, TextContentBlockRoundTrip) {
