@@ -210,6 +210,33 @@ std::vector<ChannelWrite> LLMCallNode::execute_stream(
     return {ChannelWrite{"messages", json::array({msg_json})}};
 }
 
+asio::awaitable<std::vector<ChannelWrite>>
+LLMCallNode::execute_stream_async(const GraphState& state,
+                                   const GraphStreamCallback& cb) {
+    auto params = build_params(state);
+
+    // Bridge Provider::StreamCallback -> GraphStreamCallback. Same
+    // shape as the sync execute_stream but uses the async-native
+    // provider entry so the engine's coroutine never blocks on a
+    // synchronous call inside a worker. Subclasses with real async
+    // streaming transport (WebSocket Responses, SSE) deliver tokens
+    // directly onto the awaiter's executor.
+    auto on_token = [&cb, this](const std::string& token) {
+        if (cb) {
+            cb(GraphEvent{GraphEvent::Type::LLM_TOKEN, name_, json(token)});
+        }
+    };
+
+    auto completion = co_await provider_->complete_stream_async(
+        params, on_token);
+
+    json msg_json;
+    to_json(msg_json, completion.message);
+
+    co_return std::vector<ChannelWrite>{
+        ChannelWrite{"messages", json::array({msg_json})}};
+}
+
 // =========================================================================
 // ToolDispatchNode
 // =========================================================================
