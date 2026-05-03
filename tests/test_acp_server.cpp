@@ -793,8 +793,16 @@ TEST(ACPServer, RejectsSecondPromptOnSameSession) {
     auto engine = std::shared_ptr<GraphEngine>(std::move(unique));
     neograph::json info = {{"name", "acp-stall-test"}, {"version", "0.0.1"}};
 
-    ACPServer server(engine, info);
+    // `cap` MUST be declared before `server` — the sink lambda captures
+    // `&cap` and the worker's final `emit(jsonrpc_result(...))` for the
+    // first prompt fires during `~ACPServer`'s drain. If `cap` were
+    // declared after `server`, it would be destroyed first (reverse-of-
+    // construction), and the worker would lock a destroyed `cap.mu` →
+    // macOS libc++ aborts with EINVAL ("mutex lock failed: Invalid
+    // argument"). Linux pthread limps through silently. Same gotcha
+    // applies to every test that wires a stack-local sink.
     CapturingSink cap;
+    ACPServer server(engine, info);
     server.set_notification_sink(cap.as_sink());
 
     auto sess_resp = server.handle_message(make_request(1, "session/new",
