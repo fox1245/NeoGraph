@@ -48,6 +48,18 @@ class NEOGRAPH_API Agent {
           const std::string& instructions = "",
           const std::string& model = "");
 
+    // Move-only — `tools_` is `vector<unique_ptr<Tool>>`. Explicit
+    // declarations are required because Agent is NEOGRAPH_API and MSVC
+    // eagerly instantiates all special members for dll-exported classes
+    // (the implicit copy-assign tries to copy the vector → deleted →
+    // C2280). GCC/Clang only instantiate on use, so the bug was Windows-
+    // only and silently broke the wheel build.
+    Agent(const Agent&)                     = delete;
+    Agent& operator=(const Agent&)          = delete;
+    Agent(Agent&&) noexcept                 = default;
+    Agent& operator=(Agent&&) noexcept      = default;
+    ~Agent()                                = default;
+
     /**
      * @brief Run the agent loop until completion.
      *

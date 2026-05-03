@@ -367,12 +367,19 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
         // Decrement inflight + clear single-flight reservation.
         // Must happen even on exception above (those are caught
         // earlier), but use a final lock here to be sure.
+        //
+        // notify_all MUST run inside the lock — otherwise the dtor's
+        // cv.wait can wake on count==0, exit the wait scope, and tear
+        // the server down before this worker finishes notify_all,
+        // touching a destroyed cv. Linux pthread is permissive enough
+        // to limp through; macOS libc++ aborts with EINVAL. (Reproduced
+        // by ACPServer.RejectsSecondPromptOnSameSession on macos-14.)
         {
             std::lock_guard lk(workers_mu);
             --inflight_count;
             inflight_sessions.erase(req.session_id);
+            workers_cv.notify_all();
         }
-        workers_cv.notify_all();
     });
 
     worker.detach();

@@ -160,8 +160,14 @@ make_provider(const std::string& model, const char* api_key) {
 /// the spawned subprocess) alongside the discovered tool list. Caller
 /// must move both out (or hold the MCPClient at least as long as any
 /// MCPTool that still holds a session reference internally).
+///
+/// `client` is held via unique_ptr because MCPClient owns a std::mutex
+/// (Round 3 audit, NeoGraph 7457a09) and is therefore neither copyable
+/// nor movable — but `GhidraBridge` itself needs to be returned by
+/// value from `spawn_ghidra_bridge`, so the heap indirection restores
+/// move semantics without touching the upstream class.
 struct GhidraBridge {
-    neograph::mcp::MCPClient client;
+    std::unique_ptr<neograph::mcp::MCPClient> client;
     std::vector<std::unique_ptr<neograph::Tool>> tools;
 };
 
@@ -192,8 +198,9 @@ inline GhidraBridge spawn_ghidra_bridge() {
     };
     std::cerr << "[*] Spawning ghidra-mcp stdio bridge...\n";
 
-    GhidraBridge out{neograph::mcp::MCPClient(bridge_argv), {}};
-    out.tools = out.client.get_tools();
+    GhidraBridge out{
+        std::make_unique<neograph::mcp::MCPClient>(bridge_argv), {}};
+    out.tools = out.client->get_tools();
     std::cerr << "[*] " << out.tools.size() << " ghidra-mcp tools discovered.\n";
 
     if (out.tools.empty()) {
