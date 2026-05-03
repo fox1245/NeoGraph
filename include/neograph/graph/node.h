@@ -174,6 +174,16 @@ public:
 
     std::vector<ChannelWrite> execute_stream(
         const GraphState& state, const GraphStreamCallback& cb) override;
+
+    /// Async streaming peer of execute_stream. Bridges Provider::
+    /// complete_stream_async to GraphStreamCallback. Without this
+    /// override the base GraphNode::execute_stream_async drops `cb`,
+    /// so under the engine's default async coroutine path NO
+    /// LLM_TOKEN events fire — even for callers using run_stream().
+    asio::awaitable<std::vector<ChannelWrite>>
+    execute_stream_async(const GraphState& state,
+                          const GraphStreamCallback& cb) override;
+
     std::string get_name() const override { return name_; }
 
 private:
