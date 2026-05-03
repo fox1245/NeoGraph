@@ -1,0 +1,87 @@
+name: Nightly Stress
+
+on:
+  # 09:30 UTC = 18:30 KST. Off-peak GitHub-hosted runner so the 5-min
+  # soak doesn't queue behind PR CI bursts.
+  schedule:
+    - cron: '30 9 * * *'
+  workflow_dispatch:
+
+# A nightly run only needs the latest result; cancel earlier runs if a
+# manual dispatch lands while the cron is mid-flight.
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Long-window soak gate. The PR-time `bench-regression` job catches
+  # single-shot throughput / engine-overhead regressions in seconds;
+  # this job catches the things that only show up after sustained
+  # arrivals: RSS drift / leaks, latency walk-up, pool exhaustion.
+  #
+  # Floors are intentionally loose vs. the 2026-05-01 Linux baseline
+  # (commit 9759b61: 290M runs @ 969K ops/s, drift +3.2% over 5 min)
+  # to absorb GitHub runner noise. Tighten once a few weeks of nightly
+  # runs establish steady-state numbers.
+  sustained-burst:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake build-essential libssl-dev libcurl4-openssl-dev pkg-config
+
+      - name: Configure (Release, benchmarks on, postgres off)
+        run: |
+          cmake -B build-stress \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DNEOGRAPH_BUILD_BENCHMARKS=ON \
+            -DNEOGRAPH_BUILD_POSTGRES=OFF \
+            -DNEOGRAPH_BUILD_TESTS=OFF
+
+      - name: Build sustained-burst harness
+        run: |
+          cmake --build build-stress -j$(nproc) \
+            --target bench_sustained_concurrent
+
+      - name: Run 5-min soak @ 1000 concur
+        id: soak
+        run: |
+          set -o pipefail
+          ./build-stress/bench_sustained_concurrent \
+            --concurrency 1000 \
+            --duration-s 300 \
+            --sample-s 30 \
+            --rss-tolerance-pct 25 \
+            | tee soak.jsonl
+
+      - name: Gate — ops/s floor (>= 600K), 0 errors, no leak suspect
+        run: |
+          # bench prints one summary JSON line at end with `summary:true`.
+          summary=$(grep '"summary":true' soak.jsonl)
+          echo "summary: $summary"
+
+          ok=$(echo "$summary"   | sed -n 's/.*"ok_total":\([0-9]*\).*/\1/p')
+          err=$(echo "$summary"  | sed -n 's/.*"err_total":\([0-9]*\).*/\1/p')
+          dur=$(echo "$summary"  | sed -n 's/.*"duration_s":\([0-9]*\).*/\1/p')
+          leak=$(echo "$summary" | sed -n 's/.*"leak_suspect":\(true\|false\).*/\1/p')
+          drift=$(echo "$summary"| sed -n 's/.*"rss_drift_pct":\(-*[0-9.]*\).*/\1/p')
+
+          ops=$(awk -v o="$ok" -v d="$dur" 'BEGIN{ if (d+0>0) printf "%.0f", o/d; else print "0" }')
+          echo "computed: ops/s=$ops  err=$err  drift=$drift%  leak=$leak"
+
+          [ "$err" = "0" ]      || { echo "FAIL: err_total=$err (expected 0)"; exit 1; }
+          [ "$leak" = "false" ] || { echo "FAIL: leak_suspect=true (drift=$drift%)"; exit 1; }
+          awk -v v="$ops" 'BEGIN{ if (v+0 < 600000) { print "FAIL ops/s: " v " < 600000"; exit 1 } print "ok ops/s: " v }'
+
+      - name: Upload soak samples on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-samples
+          path: soak.jsonl
+          if-no-files-found: ignore
