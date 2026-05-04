@@ -70,7 +70,14 @@ classifiers = [
 # for AlmaLinux paths (`/etc/pki/tls/certs/...`) that don't exist on
 # Ubuntu/Debian/Alpine/macOS and TLS handshakes hang for the full
 # request timeout. ~250 KB install, no transitive deps.
-dependencies = ["certifi"]
+#
+# pydantic backs ``StateView`` (TODO_v0.3.md #6 / v0.3.2): a flat
+# dot-access wrapper for ``engine.get_state(...)``'s nested dict.
+# Pydantic v2 is small and ubiquitous in modern Python (FastAPI,
+# LangChain, datamodel libs). Adding it as a hard dep beats the
+# soft-import dance — every code path that reaches a NeoGraph user
+# already has pydantic in the env.
+dependencies = ["certifi", "pydantic>=2.0"]
 
 [project.urls]
 Homepage      = "https://github.com/fox1245/NeoGraph"

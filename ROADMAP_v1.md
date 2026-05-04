@@ -271,3 +271,57 @@ exposes a new architectural seam, or when a candidate lands
 | 1 | Single `run()` dispatch + tags | Proposed | v0.3.1 #2, v0.3.2 #10 (×2 langs) |
 | 2 | Explicit `RunContext` arg | Proposed | v0.3.1 multi-Send, v0.3.2 C++ scope |
 | 3 | Hierarchical CancelToken | Proposed | v0.3.2 hooks, v0.3.2 emit-vs-bind |
+| 4 | Self-evolving graph runtime hooks | Research | TODO_v0.3.md #8 |
+
+---
+
+# Research track (less load-bearing than the v1.0 sharpenings above)
+
+## Candidate 4 — Self-evolving JSON agent v2 (research)
+
+### Context
+
+`bindings/python/examples/22_self_evolving_graph.py` proves the loop
+closes: an LLM modifier proposes a JSON edit to the running graph,
+the engine recompiles, the new graph runs. PoC works but the LLM
+struggles to reason about channel data flow when proposing edits —
+it doesn't "see" which nodes read/write which channels, so its
+proposals frequently route data through the wrong wires.
+
+### Research direction
+
+Expose channel topology to the modifier prompt explicitly. Two
+forms to investigate:
+
+1. **Topology summary in prompt** — engine emits a per-node
+   spec like ``"node X reads {a,b}, writes {c}"`` derived from
+   compiled channel access patterns. Modifier prompt receives
+   this alongside the JSON definition.
+
+2. **Per-stage channel proposals** — modifier proposes channels
+   *per stage* (split / synthesize / etc.) rather than as a flat
+   set. Engine compose-checks that each proposed stage's channel
+   set is consistent with the upstream/downstream stages.
+
+### Why it's not a v1.0 must-have
+
+- Not a user blocker for the shipped engine — the PoC's gap is
+  in the *prompt engineering*, not the engine.
+- Requires LLM eval harness (correctness rate per topology
+  variant, cost, edit-cycles-to-converge) before any engine-
+  side surface change is justified.
+- May fold into a broader "graph introspection API" v1.x
+  feature once the eval shows what introspection LLMs actually
+  use.
+
+### Cost
+
+- Engine surface addition (topology accessor) is small if
+  research validates it.
+- Most of the work is LLM-side experimentation outside this
+  repo's hot path.
+
+### Triggering round
+
+TODO_v0.3.md item #8 — deferred from v0.3.x as research, not a
+user blocker.

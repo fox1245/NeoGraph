@@ -372,3 +372,51 @@ if _HAVE_POSTGRES:
 # the more explicit `from neograph_engine.streaming import message_stream`.
 from .streaming import message_stream  # noqa: E402
 __all__.append("message_stream")
+
+
+# StateView — flat dot-access wrapper around engine.get_state(). Pydantic
+# v2 backed; the base class allows arbitrary channel names so it works
+# without a user-declared model. Subclass for typed access. (TODO_v0.3.md
+# item #6 / v0.3.2.)
+from .state_view import StateView  # noqa: E402
+__all__.append("StateView")
+
+
+def _engine_get_state_view(self, thread_id, model=None):
+    """Flat dot-access wrapper around ``self.get_state(thread_id)``.
+
+    Args:
+        thread_id: Thread / session id whose state to read.
+        model:     Optional ``StateView`` subclass with declared fields
+                   for typed access. Defaults to the base ``StateView``,
+                   which allows any channel name via Pydantic
+                   ``extra="allow"``.
+
+    Returns:
+        ``StateView`` instance (or the user's ``model``), or ``None`` if
+        no checkpoint exists for ``thread_id``.
+
+    Example:
+        >>> view = engine.get_state_view("t1")
+        >>> view.messages          # → list, no nested ['channels']['x']['value']
+        >>> view.raw['global_version']  # the unflattened dict for metadata
+        >>>
+        >>> class ChatState(ng.StateView):
+        ...     messages: list[dict] = []
+        >>> typed = engine.get_state_view("t1", model=ChatState)
+        >>> typed.messages         # → list[dict], pydantic-validated
+    """
+    state = self.get_state(thread_id)
+    if state is None:
+        return None
+    cls = model if model is not None else StateView
+    return cls.from_state(state)
+
+
+# Pybind classes accept attribute assignment on the *class* object even
+# when they're not built with py::dynamic_attr — adding a method is just
+# setting a callable on the type. Instance-level dynamic attrs would be
+# rejected, but we're not doing that here. This way the natural shape
+# `engine.get_state_view(...)` works out of the box without a free
+# function or a wrapper subclass.
+GraphEngine.get_state_view = _engine_get_state_view  # type: ignore[attr-defined]
