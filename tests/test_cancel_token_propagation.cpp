@@ -279,3 +279,145 @@ TEST(CancelTokenPropagation, CancelMidFanOutHaltsLoop) {
     // bails.
     EXPECT_EQ(started.load(), 1);
 }
+
+// =========================================================================
+// End-to-end cancel ACROSS Send-spawned siblings.
+//
+// This is the test that proves the v0.3.1 multi-Send fix actually
+// closes the cost-leak — not just that the token pointer reaches
+// each isolated state, but that a cancel tripped from inside ONE
+// Send branch is observed by SIBLING Send branches via the shared
+// token, and that those siblings can cooperatively abort instead of
+// running to completion.
+//
+// Shape:
+//   dispatcher → 8 Sends to "race_worker"
+//   First worker to run records started++, trips cancel, returns.
+//   Every other worker checks `state.run_cancel_token()->is_cancelled()`
+//   on entry; if set, throws cooperatively.
+//
+// Expected:
+//   - CancelledException propagates out of engine->run().
+//   - completed_count < 8: at least one sibling aborted instead of
+//     finishing. With the v0.3.1 fix, siblings see the same cancel
+//     flag the dispatcher set; without the fix (token dropped at
+//     restore), siblings see is_cancelled()=false and all 8
+//     complete normally — the cost-leak case.
+// =========================================================================
+TEST(CancelTokenPropagation, MidFlightCancelAbortsSendSiblings) {
+    auto token = std::make_shared<CancelToken>();
+    std::atomic<int> entered{0};   // every worker bumps on entry
+    std::atomic<int> completed{0}; // only non-aborted ones bump on exit
+    std::atomic<bool> first_done{false};
+
+    class RaceWorker : public GraphNode {
+    public:
+        RaceWorker(std::string n,
+                   std::shared_ptr<CancelToken> tok,
+                   std::atomic<int>* entered,
+                   std::atomic<int>* completed,
+                   std::atomic<bool>* first_done)
+            : n_(std::move(n)), tok_(std::move(tok)),
+              entered_(entered), completed_(completed),
+              first_done_(first_done) {}
+
+        NodeResult execute_full(const GraphState& state) override {
+            entered_->fetch_add(1, std::memory_order_relaxed);
+
+            // The first worker to win the race trips cancel. Use a CAS
+            // so exactly one worker takes this path regardless of how
+            // the parallel_group schedules them.
+            bool expected = false;
+            const bool won = first_done_->compare_exchange_strong(expected, true);
+
+            if (won) {
+                // Tiny sleep so siblings have a window to be polling
+                // for cancel before we set the flag.
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                tok_->cancel();
+                completed_->fetch_add(1, std::memory_order_relaxed);
+                return NodeResult{{ChannelWrite{"saw_token", json::array({n_})}}};
+            }
+
+            // Siblings: simulate "in-flight long work" by polling cancel
+            // for up to 200 ms. This mirrors the real-world LLM HTTP
+            // case the cost-leak test guards — a node mid-call must
+            // observe a sibling's cancel and abort, not run to
+            // completion. Without the v0.3.1 fix, run_cancel_token() is
+            // null on the isolated send_state and the loop polls
+            // forever (until the deadline) → completed_ bumps as if
+            // nothing happened.
+            auto* t = state.run_cancel_token();
+            const auto deadline =
+                std::chrono::steady_clock::now() +
+                std::chrono::milliseconds(200);
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (t && t->is_cancelled()) {
+                    t->throw_if_cancelled("sibling " + n_);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+
+            // Reaching here means we never observed the cancel within
+            // the 200 ms window — the propagation is broken.
+            completed_->fetch_add(1, std::memory_order_relaxed);
+            return NodeResult{{ChannelWrite{"saw_token", json::array({n_})}}};
+        }
+        std::string get_name() const override { return n_; }
+    private:
+        std::string n_;
+        std::shared_ptr<CancelToken> tok_;
+        std::atomic<int>* entered_;
+        std::atomic<int>* completed_;
+        std::atomic<bool>* first_done_;
+    };
+
+    NodeFactory::instance().register_type("race_worker",
+        [tok = token, &entered, &completed, &first_done](
+            const std::string& name, const json&, const NodeContext&) {
+            return std::unique_ptr<GraphNode>(
+                new RaceWorker(name, tok, &entered, &completed, &first_done));
+        });
+
+    register_fanout_factory("race_dispatcher", "race_worker", 8);
+
+    json graph = {
+        {"name", "race_cancel"},
+        {"channels", {{"saw_token", {{"reducer", "append"}}}}},
+        {"nodes", {
+            {"dispatcher",  {{"type", "race_dispatcher"}}},
+            {"race_worker", {{"type", "race_worker"}}}
+        }},
+        {"edges", json::array({
+            {{"from", "__start__"}, {"to", "dispatcher"}}
+        })}
+    };
+
+    auto engine = GraphEngine::compile(graph, NodeContext{});
+    RunConfig cfg;
+    cfg.thread_id    = "race-001";
+    cfg.cancel_token = token;
+
+    EXPECT_THROW({
+        engine->run(cfg);
+    }, neograph::graph::CancelledException);
+
+    const int e = entered.load();
+    const int c = completed.load();
+
+    // At least one worker must have entered and tripped cancel.
+    EXPECT_GE(e, 1);
+
+    // Critical assertion: at least one sibling observed the cancel
+    // and aborted before completion. completed < entered iff some
+    // worker bumped entered_ then threw before bumping completed_.
+    // With the v0.3.1 fix, siblings see is_cancelled()=true and
+    // throw — completed stays strictly below entered. Without the
+    // fix, siblings see a null/wrong token and all run to completion
+    // (entered == completed).
+    EXPECT_LT(c, e)
+        << "expected at least one Send sibling to observe cancel and "
+        << "abort, but all " << c << " entered workers completed — "
+        << "the cancel signal did not propagate through the isolated "
+        << "send_state.";
+}
