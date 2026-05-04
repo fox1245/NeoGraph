@@ -31,14 +31,22 @@ struct ExecuteDefaultGuard {
 
     explicit ExecuteDefaultGuard(const GraphNode* node) : prev_(current_default_node) {
         if (current_default_node == node) {
-            throw std::runtime_error(
+            // v0.3.2: throw the dedicated subclass so default
+            // execute_full_stream can catch *only* this case and fall
+            // through to execute_stream — streaming-only nodes work
+            // under run_stream without losing real user-thrown errors.
+            // GraphNodeMissingOverride inherits from std::runtime_error,
+            // so existing catch(std::runtime_error&) sites unchanged.
+            throw GraphNodeMissingOverride(
                 "GraphNode '" + node->get_name() + "': must override at least one of "
                 "execute(), execute_async(), execute_full(), or "
-                "execute_full_async() — the default implementations call "
-                "each other and would recurse infinitely. The most common "
-                "shape for Send/Command-emitting nodes is to override the "
-                "sync `execute_full(state)`; for async-native nodes, "
-                "override `execute_async(state)`.");
+                "execute_full_async() — or, for streaming-only nodes, "
+                "override execute_stream() / execute_full_stream() and "
+                "run via run_stream() / run_stream_async(). The default "
+                "implementations call each other and would recurse "
+                "infinitely. The most common shape for Send/Command-"
+                "emitting nodes is to override the sync `execute_full(state)`; "
+                "for async-native nodes, override `execute_async(state)`.");
         }
         current_default_node = node;
     }
@@ -66,14 +74,44 @@ std::vector<ChannelWrite> GraphNode::execute_stream(
 asio::awaitable<std::vector<ChannelWrite>>
 GraphNode::execute_stream_async(const GraphState& state,
                                 const GraphStreamCallback& cb) {
-    // Default to async-native execute_async to keep the coroutine
-    // chain end-to-end async. Falling back to the sync execute_stream
-    // would funnel through run_sync, which blocks the calling
-    // io_context's worker for the duration — and break the io_context
-    // overlap that the async engine path is designed to produce.
-    // Stream-aware nodes that need callback events override this.
-    (void)cb;
-    co_return co_await execute_async(state);
+    // Default keeps the existing async-native priority — chain
+    // through execute_async so a node overriding only
+    // ``execute_async`` (async-native, no execute_stream / cb need)
+    // stays on the coroutine path with no run_sync detour.
+    //
+    // v0.3.2 fallback: if the async chain default-throws because
+    // the user only overrode the sync ``execute_stream``, route
+    // through execute_stream(state, cb) instead. The sync hop here
+    // is acceptable — that user is already on the sync path by
+    // virtue of overriding execute_stream. Without this fallback
+    // run_stream() / run_stream_async() would be useless for
+    // execute_stream-only subclasses (TODO_v0.3.md item #10).
+    //
+    // GCC-13 coroutine codegen rejects ``catch (const T&)`` directly
+    // around a co_await; capture into exception_ptr and rethrow in
+    // a plain non-coroutine try/catch outside the await.
+    std::vector<ChannelWrite> result;
+    std::exception_ptr eptr;
+    try {
+        result = co_await execute_async(state);
+    } catch (...) {
+        eptr = std::current_exception();
+    }
+    if (!eptr) {
+        co_return result;
+    }
+    bool missing_override = false;
+    try {
+        std::rethrow_exception(eptr);
+    } catch (const GraphNodeMissingOverride&) {
+        missing_override = true;
+    } catch (...) {
+        std::rethrow_exception(eptr);
+    }
+    if (missing_override) {
+        co_return execute_stream(state, cb);
+    }
+    co_return result;  // unreachable
 }
 
 // --- GraphNode default execute_full: wraps execute() ---
@@ -106,15 +144,33 @@ GraphNode::execute_full_async(const GraphState& state) {
 }
 
 // --- GraphNode default execute_full_stream ---
-// Calls execute_full() first to capture any Command/Send directives,
-// then replaces the writes with execute_stream() output so that
-// LLM_TOKEN events are properly emitted during graph execution.
-// Nodes that need both streaming AND Command/Send should override this.
+//
+// Priority chain (preserves the v0.3.1 "Command/Send beats writes-only"
+// semantic, plus closes the v0.3.2 streaming-only gap):
+//
+//   1. Call execute_full(state) — picks up any Command/Send the user
+//      emits via an execute_full override.
+//   2. If execute_full default-throws GraphNodeMissingOverride (user
+//      didn't override any of execute / execute_async / execute_full /
+//      execute_full_async), fall through to execute_stream — that's
+//      the streaming-only-node case. Pre-v0.3.2 the throw escaped and
+//      run_stream was useless for execute_stream-only subclasses.
+//   3. Otherwise, if execute_full returned writes-only (no Command/Send),
+//      replace its writes with execute_stream output so LLM_TOKEN events
+//      reach cb.
+//
+// Real user-thrown exceptions in execute / execute_full propagate
+// untouched — only the dedicated default-recursion exception triggers
+// the fall-through, so we don't silently swallow errors.
 NodeResult GraphNode::execute_full_stream(
     const GraphState& state, const GraphStreamCallback& cb) {
-    auto result = execute_full(state);
-    // If the node didn't override execute_full (i.e., no Command/Send),
-    // re-execute with streaming to emit tokens.
+    NodeResult result;
+    try {
+        result = execute_full(state);
+    } catch (const GraphNodeMissingOverride&) {
+        // Streaming-only override path.
+        return NodeResult{execute_stream(state, cb)};
+    }
     if (!result.command && result.sends.empty()) {
         result.writes = execute_stream(state, cb);
     }
@@ -124,12 +180,39 @@ NodeResult GraphNode::execute_full_stream(
 asio::awaitable<NodeResult>
 GraphNode::execute_full_stream_async(const GraphState& state,
                                      const GraphStreamCallback& cb) {
-    // Async-native default mirroring execute_full_stream's logic: get
-    // the full result first (Command/Send-aware), then if the node
-    // didn't override execute_full_async, replace its writes with the
-    // streaming variant so LLM_TOKEN events flow through cb. Stays
-    // entirely on the coroutine path — no run_sync detour.
-    auto result = co_await execute_full_async(state);
+    // Async-native peer of the sync default above. Same priority
+    // chain, same GraphNodeMissingOverride catch — kept on the asio
+    // coroutine path (no run_sync detour) so executor overlap with
+    // sibling coroutines is preserved.
+    //
+    // GCC-13 workaround: ``catch (const GraphNodeMissingOverride&)``
+    // sitting directly around a ``co_await`` does not match the
+    // exception (the same family of codegen bugs the rest of this
+    // file works around — search "GCC 13" / "GCC-13"). Capture into
+    // an exception_ptr and dispatch with a plain non-coroutine
+    // try/catch outside the co_await — that matches reliably.
+    NodeResult result;
+    std::exception_ptr eptr;
+    try {
+        result = co_await execute_full_async(state);
+    } catch (...) {
+        eptr = std::current_exception();
+    }
+    if (eptr) {
+        bool missing_override = false;
+        try {
+            std::rethrow_exception(eptr);
+        } catch (const GraphNodeMissingOverride&) {
+            missing_override = true;
+        } catch (...) {
+            // Legitimate user-thrown error — propagate untouched.
+            std::rethrow_exception(eptr);
+        }
+        if (missing_override) {
+            auto writes = co_await execute_stream_async(state, cb);
+            co_return NodeResult{std::move(writes)};
+        }
+    }
     if (!result.command && result.sends.empty()) {
         result.writes = co_await execute_stream_async(state, cb);
     }

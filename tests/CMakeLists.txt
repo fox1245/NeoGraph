@@ -12,6 +12,7 @@ add_executable(neograph_tests
     test_multi_node_resume.cpp
     test_resume_if_exists.cpp
     test_cancel_token_propagation.cpp
+    test_execute_stream_only_dispatch.cpp
     test_scheduler.cpp
     test_node_execution.cpp
     test_compiler.cpp

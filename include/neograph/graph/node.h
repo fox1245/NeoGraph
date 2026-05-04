@@ -16,7 +16,27 @@
 
 #include <asio/awaitable.hpp>
 
+#include <stdexcept>
+
 namespace neograph::graph {
+
+/**
+ * @brief Thrown by the GraphNode default-execute chain when none of
+ *        ``execute`` / ``execute_async`` / ``execute_full`` /
+ *        ``execute_full_async`` is overridden in a subclass.
+ *
+ * Inherits from ``std::runtime_error`` for back-compat — existing
+ * test code catching ``runtime_error`` continues to work. The
+ * dedicated type lets the engine (and the streaming default below)
+ * distinguish "user forgot to override" from "user override threw
+ * for legitimate reasons", so we can fall through to
+ * ``execute_stream`` for streaming-only nodes without silently
+ * swallowing real errors. (TODO_v0.3.md item #10 / v0.3.2.)
+ */
+class NEOGRAPH_API GraphNodeMissingOverride : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 /**
  * @brief Abstract base class for all graph nodes.

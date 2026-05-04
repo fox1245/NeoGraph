@@ -77,12 +77,32 @@ infrastructure.
 ## ✅ Closed in v0.3.2
 
 10. **`execute_stream`-only nodes dispatch through `run_stream`** —
-    `PyGraphNode::execute_full_stream` now consults
+    fixed both at the Python binding AND the C++ engine level.
+
+    **Python**: `PyGraphNode::execute_full_stream` now consults
     `execute_stream` before falling back to `execute_full`, so a
-    node that only overrides `execute_stream(state, cb)` works
-    correctly under `engine.run_stream()` / `run_stream_async()`.
-    The v0.3.1 hint message in `GraphNode.execute()` no longer
-    misdirects — calling `run_stream` like the hint suggests now
-    actually dispatches. `execute_full_stream` retains priority
-    when both are defined. Tests:
-    `bindings/python/tests/test_execute_stream_dispatch.py` (5).
+    Python node that only overrides `execute_stream(state, cb)`
+    works correctly under `engine.run_stream()` /
+    `run_stream_async()`. The v0.3.1 hint message in
+    `GraphNode.execute()` no longer misdirects.
+
+    **C++** (sister fix): a C++ subclass with only
+    `execute_stream` override hit the same problem — the default
+    `GraphNode::execute_full_stream` called `execute_full` first,
+    which chained through `execute` / `execute_async` defaults
+    and tripped `ExecuteDefaultGuard`'s recursion check. The
+    `runtime_error` it threw escaped before
+    `result.writes = execute_stream(state, cb)` could run. Fixed
+    by introducing `GraphNodeMissingOverride` (subclass of
+    `runtime_error` for back-compat) — the default-recursion
+    guard throws this dedicated type, and both
+    `execute_full_stream{,_async}` defaults catch *only* this
+    type and fall through to `execute_stream{,_async}`. Real
+    user-thrown errors propagate untouched.
+
+    Priority order (preserved, both languages): execute_full_stream
+    → execute_stream → execute_full → execute.
+
+    Tests:
+    `bindings/python/tests/test_execute_stream_dispatch.py` (5),
+    `tests/test_execute_stream_only_dispatch.cpp` (2).
