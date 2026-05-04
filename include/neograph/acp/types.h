@@ -21,9 +21,13 @@
  *
  * Deferred (modelled as free-form `json` for forward-compat):
  *   session/load, session/resume, session/list, session/close,
- *   session/set_config_option, session/set_mode, fs/* and terminal/*
+ *   session/set_config_option, session/set_mode, fs/&#42; and terminal/&#42;
  *   (these are agent→client requests — added when the engine wants to
- *    use them).
+ *    use them). The wildcards are HTML-entity-escaped because the
+ *    literal slash-star token opens a nested comment inside this
+ *    Doxygen block — backticks and backslash escape don't help (the
+ *    tokenizer runs before markdown, and ``\`` renders literally).
+ *    HTML entities are the cleanest source-and-render fix.
  */
 #pragma once
 
@@ -79,7 +83,7 @@ struct NEOGRAPH_API FsCapabilities {
 /// Capabilities advertised by the editor in InitializeRequest.
 struct NEOGRAPH_API ClientCapabilities {
     FsCapabilities fs;
-    bool           terminal = false;  ///< terminal/* methods supported.
+    bool           terminal = false;  ///< terminal/&#42; methods supported.
 };
 
 // ---------------------------------------------------------------------------
