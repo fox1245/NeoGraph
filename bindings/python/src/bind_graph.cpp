@@ -238,28 +238,39 @@ void init_graph(py::module_& m) {
     // ── RunConfig ────────────────────────────────────────────────────────
     py::class_<RunConfig>(m, "RunConfig",
         "Per-run configuration: thread_id, input dict, max_steps, "
-        "and stream_mode for run_stream().")
+        "stream_mode for run_stream(), and resume_if_exists for "
+        "multi-turn chat semantics.")
         .def(py::init([](const std::string& thread_id,
                          py::object input,
                          int max_steps,
-                         StreamMode stream_mode) {
+                         StreamMode stream_mode,
+                         bool resume_if_exists) {
             RunConfig c;
             c.thread_id = thread_id;
             c.input = py_to_json(input);
             c.max_steps = max_steps;
             c.stream_mode = stream_mode;
+            c.resume_if_exists = resume_if_exists;
             return c;
         }),
             py::arg("thread_id") = "",
             py::arg("input") = py::dict(),
             py::arg("max_steps") = 50,
-            py::arg("stream_mode") = StreamMode::ALL)
+            py::arg("stream_mode") = StreamMode::ALL,
+            py::arg("resume_if_exists") = false)
         .def_readwrite("thread_id",   &RunConfig::thread_id)
         .def_property("input",
             [](const RunConfig& c) { return json_to_py(c.input); },
             [](RunConfig& c, py::object v) { c.input = py_to_json(v); })
-        .def_readwrite("max_steps",   &RunConfig::max_steps)
-        .def_readwrite("stream_mode", &RunConfig::stream_mode);
+        .def_readwrite("max_steps",        &RunConfig::max_steps)
+        .def_readwrite("stream_mode",      &RunConfig::stream_mode)
+        .def_readwrite("resume_if_exists", &RunConfig::resume_if_exists,
+            "Opt-in: when True and a checkpoint store is configured, "
+            "engine.run/run_async/run_stream loads the latest checkpoint "
+            "for thread_id (if any) and applies input on top before "
+            "running. Default False preserves the historical fresh-start "
+            "semantics. For HITL resume from an interrupted run, use "
+            "engine.resume() instead.");
 
     // ── RunResult ────────────────────────────────────────────────────────
     py::class_<RunResult>(m, "RunResult",

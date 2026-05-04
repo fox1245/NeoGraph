@@ -230,6 +230,7 @@ result = engine.run(ng.RunConfig(thread_id="t1",
 | `input` | `{}` | Initial channel values — keys must match the graph's `channels` definition. |
 | `max_steps` | 25 | Super-step ceiling; ReAct loops typically need 10+. |
 | `stream_mode` | `StreamMode.OFF` | Bitmask: `EVENTS \| TOKENS \| DEBUG \| VALUES \| UPDATES \| ALL`. Only consulted by `run_stream` / `run_stream_async`. |
+| `resume_if_exists` | `False` | When `True` and a checkpoint store is configured, the run loads the latest checkpoint for `thread_id` (if any) and applies `input` on top via the channel reducers — multi-turn chat without manually threading prior state through `input`. Default keeps fresh-start semantics for back-compat; for HITL resume from an interrupted run, use `engine.resume_async()` instead. |
 
 ### Built-in reducers
 
@@ -270,6 +271,46 @@ See [`bindings/python/examples/`](bindings/python/examples/) for the
 full example index — minimal graph, ReAct, HITL, intent routing, async,
 multi-agent debate, JSON graph round-trip, and a Gradio chat with a
 deep-research subgraph (Crawl4AI + Postgres optional).
+
+### Differences from LangGraph (Python binding)
+
+The pitch is "LangGraph for C++", but a few semantics diverge from
+LangGraph Python — surfaced here so you don't hit them mid-port:
+
+- **Multi-turn `thread_id` is opt-in** — `engine.run(cfg)` with the
+  same `thread_id` does **not** auto-load the previous turn's
+  checkpoint by default; every run starts fresh from `cfg.input`.
+  Set `cfg.resume_if_exists = True` for the LangGraph-style "load
+  latest, apply input on top" behaviour. Default is `False` so
+  callers that already thread state through `input` themselves are
+  unaffected. See the `RunConfig` table above.
+- **`update_state` takes channel writes, not a `values` dict** —
+  the signature is `update_state(thread_id, channel_writes,
+  as_node='')` where `channel_writes` is a list of `ChannelWrite`,
+  not LangGraph's `values={...}` keyword form. Build the list with
+  `[ng.ChannelWrite("messages", [...]), ...]`.
+- **`get_state(thread_id)` returns a nested dict** — read a channel
+  with `state["channels"]["messages"]["value"]`. There is no flat
+  helper today; if you find yourself writing the same accessor
+  repeatedly, `state["channels"][name]["value"]` is the canonical
+  shape and stable across versions.
+- **Python `Provider` subclasses bind only `complete` (sync)** —
+  `Provider.complete_async` is not bound on Python user-defined
+  Provider subclasses, so a custom Python Provider always serves
+  through the sync entry. For async-native provider integrations
+  (HTTP/2 multiplexing, true overlap with other coroutines), stay
+  in C++ and subclass `neograph::llm::Provider` there.
+- **Streaming-only nodes need `run_stream` / `run_stream_async`** —
+  if a Python node defines only `execute_stream` /
+  `execute_full_stream`, calling `engine.run()` (non-streaming)
+  raises `NotImplementedError` from `GraphNode.execute`. The error
+  message points at the streaming entry point — pick `run_stream`
+  if you want token deltas, or also override `execute` /
+  `execute_full` if you want both modes to work.
+- **One-line token emit** — `from neograph_engine.streaming import
+  emit_token`, then `emit_token(cb, self._name, token)` inside a
+  streaming node. Replaces the 4-line `GraphEvent` construction
+  ritual.
 
 ## The agent runtime that fits in L3 cache
 

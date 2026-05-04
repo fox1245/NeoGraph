@@ -116,6 +116,11 @@ public:
     /// @brief Active run's cancel token, or nullptr if none.
     class CancelToken* run_cancel_token() const noexcept;
 
+    /// @brief Active run's cancel token as a shared_ptr (for forwarding
+    ///        into Send-spawned isolated states so cancel propagation
+    ///        survives the snapshot/restore boundary).
+    std::shared_ptr<class CancelToken> run_cancel_token_shared() const noexcept;
+
 private:
     std::map<std::string, Channel> channels_;
     uint64_t global_version_ = 0;

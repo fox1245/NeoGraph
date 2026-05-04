@@ -1,80 +1,49 @@
 # v0.3 follow-ups
 
-Remaining items from the FastAPI SSE chat-demo feedback (2026-05-04).
-v0.3.0 ships the cancel propagation work; everything below is pending.
+Originally from the FastAPI SSE chat-demo feedback (2026-05-04).
+v0.3.0 ships cancel propagation; this file tracks the remaining
+mental-model and ergonomics gaps.
 
-## 1. Auto checkpoint resume on same `thread_id` (LangGraph parity)
+## ✅ Closed in v0.3.1 (2026-05-04, session 2)
 
-Currently `engine.run_async()` with the same `thread_id` does NOT
-auto-resume from the last checkpoint — every run starts fresh from
-`config.input` and the registered reducers. Multi-turn callers thread
-prior state through the input dict themselves (see
-`examples/16_deep_research_chat.py`). This is the biggest mental-model
-mismatch for users coming from LangGraph.
+1. **Auto checkpoint resume on same `thread_id`** — opt-in
+   `RunConfig.resume_if_exists` lands. When True and a checkpoint
+   store is configured, `engine.run/run_async/run_stream` loads the
+   latest checkpoint for `thread_id`, then applies `input` on top via
+   the channel reducers (so APPEND-reduced `messages` grows with the
+   new turn). Default `False` keeps existing fresh-start behaviour.
+   Tests: `tests/test_resume_if_exists.cpp` (6) +
+   `bindings/python/tests/test_resume_if_exists.py` (6).
+2. **Better error message for streaming-only nodes** —
+   `GraphNode.execute()` (Python base) now walks the subclass MRO for
+   `execute_stream` / `execute_full_stream`, and if either is defined
+   the `NotImplementedError` includes a hint pointing at
+   `engine.run_stream() / run_stream_async()`. Tests:
+   `bindings/python/tests/test_streaming_only_error_hint.py` (4).
+3. **Token-emit helper** —
+   `from neograph_engine.streaming import emit_token` collapses the
+   4-line `GraphEvent` construction ritual to
+   `emit_token(cb, self._name, token)`. Tests:
+   `bindings/python/tests/test_emit_token_helper.py` (5).
+4. **README "Differences from LangGraph" section** — added under
+   the Python Binding section. Calls out: opt-in multi-turn resume,
+   `update_state(channel_writes)` shape, `get_state` nested dict,
+   Python `Provider.complete` only, streaming-only nodes need
+   `run_stream*`, and the new `emit_token` helper. Plus added
+   `resume_if_exists` to the `RunConfig` table.
+7. **Cancel propagation for parallel / Send branches** — verified
+   static parallel via shared parent state (already correct in
+   v0.3.0). Found and fixed the multi-Send gap: dynamic fan-out
+   workers built isolated `GraphState` from `serialize/restore`, but
+   `run_cancel_token_` lives outside the channel set and was being
+   dropped — so a cancelled run still leaked cost on Send-spawned
+   branches. Added `GraphState::run_cancel_token_shared()` and
+   `NodeExecutor::run_sends_async` now forwards it onto each
+   isolated `send_state`. Tests:
+   `tests/test_cancel_token_propagation.cpp` (3 — static parallel,
+   multi-Send, mid-fan-out abort).
 
-Options:
-- **Opt-in** — `RunConfig.resume_if_exists = True` flag. Loads latest
-  checkpoint for `thread_id` if present, applies `input` on top.
-  Backwards-compatible default.
-- **Opt-out** — flip the default and add `RunConfig.fresh_start = True`
-  for callers that want today's behaviour. More LangGraph-like but a
-  silent semantics change.
-
-Lean towards opt-in for v0.3.x; opt-out behind a major bump (v0.4).
-
-## 2. Better error message for streaming-only nodes hitting `run_async`
-
-When a node defines only `execute_full_stream` and is run via
-`run_async` (non-stream), the engine raises:
-
-```
-NotImplementedError: GraphNode subclasses must override execute() ... OR execute_full() ...
-```
-
-without mentioning the streaming variants. Add hint:
-`"(this node defines execute_full_stream — call run_stream_async() or run_stream() instead)"`.
-
-Catch in `GraphNode::execute_full` (the default-throw path) by
-checking `has_user_method("execute_full_stream")`.
-
-## 3. Token-emit helper
-
-Replace this 4-line ritual:
-
-```python
-ev = ng.GraphEvent()
-ev.type = ng.GraphEvent.Type.LLM_TOKEN
-ev.node_name = self._name
-ev.data = token
-cb(ev)
-```
-
-with:
-
-```python
-cb.emit_token(self._name, token)
-```
-
-Either bind a wrapper in pybind that decorates the user's `cb`, or
-add `GraphStreamCallback.emit_token(node_name, data)` C++-side and
-expose it as a method on the cb param. Cleaner path: a Python-side
-helper module `neograph_engine.streaming` (already exists) gains
-`emit_token(cb, node, data)` free function.
-
-## 4. README "Differences from LangGraph" section
-
-The "LangGraph for C++" pitch primes users to expect identical
-semantics. Document the deltas up front:
-
-- Same `thread_id` re-run does NOT auto-resume (until item 1 lands).
-- `update_state(thread_id, channel_writes, as_node='')` — channel_writes
-  is a list of `ChannelWrite`, not a `values=` dict.
-- `Provider.complete_async` is not bound on Python user-defined
-  Provider subclasses — only `complete` (sync). For async-native
-  provider integrations stay in C++.
-- `get_state(thread_id)` returns nested dict
-  (`state["channels"]["messages"]["value"]`); a flat helper would
-  improve ergonomics.
+## Still pending
 
 ## 5. `update_state` signature drift
 
@@ -90,22 +59,6 @@ read. Add either:
 - Pydantic model — `StateView` with `.messages`, `.channels.foo`
 - Plain helper — `state.channel("messages")` returning the value
 
-## 7. Cancel propagation for parallel branches (v0.3.0 gap)
-
-v0.3.0 wires cancel_token through `GraphState` → `PyGraphNode::execute_full_async`.
-For `run_one_async` (single-node path) this works end-to-end.
-
-For `run_parallel_async` fan-out branches that dispatch to
-`fan_out_pool_` worker threads: each branch's `execute_full_async`
-DOES still install the `CurrentCancelTokenScope` (because we read
-from GraphState, which is shared across branches), so this should
-work — but it hasn't been verified with a parallel-branch live LLM
-test. Add one before declaring full coverage.
-
-For `run_sends_async` (Send-driven dynamic fan-out): same — the
-multi-send path uses isolated state copies; verify they carry
-`run_cancel_token_` from the parent state.
-
 ## 8. Self-evolving JSON agent v2 (PoC improvements)
 
 `examples/22_self_evolving_graph.py` proves the loop closes (graph
@@ -120,3 +73,15 @@ research direction, not a user blocker.
 `bindings/python/examples/` has no RAG node — common use case.
 Add an example using pgvector via the existing Postgres connection
 infrastructure.
+
+## 10. `execute_stream`-only nodes don't dispatch through `run_stream`
+
+(Adjacent to item #2.) When a Python node overrides only
+`execute_stream(state, cb)` (not `execute_full_stream`),
+`PyGraphNode::execute_full_stream` falls back to `execute_full(state)`
+which then calls the unimplemented `execute()`, raising. The
+streaming-only error message correctly hints at `run_stream`, but
+even with `run_stream` the `execute_stream` override is bypassed.
+Fix: `execute_full_stream` fallback should try `execute_stream`
+before `execute_full` so the natural shape works. Workaround today
+is to override `execute_full_stream` instead.

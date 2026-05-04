@@ -119,4 +119,8 @@ CancelToken* GraphState::run_cancel_token() const noexcept {
     return run_cancel_token_.get();
 }
 
+std::shared_ptr<CancelToken> GraphState::run_cancel_token_shared() const noexcept {
+    return run_cancel_token_;
+}
+
 } // namespace neograph::graph

@@ -438,6 +438,22 @@ GraphEngine::execute_graph_async(const RunConfig& config,
             }
         }
     } else {
+        // v0.3.1: opt-in auto-resume. When the caller asks to continue
+        // a thread (multi-turn chat), seed the state from the latest
+        // checkpoint *before* applying input — so APPEND-reduced
+        // channels (messages) grow by the new turn instead of being
+        // overwritten. start_step continues monotonically from the
+        // checkpoint's recorded step so per-thread step numbering
+        // stays meaningful in the trace.
+        if (config.resume_if_exists && checkpoint_store_) {
+            auto cp_opt =
+                co_await checkpoint_store_->load_latest_async(config.thread_id);
+            if (cp_opt) {
+                state.restore(cp_opt->channel_values);
+                last_checkpoint_id = cp_opt->id;
+                start_step         = cp_opt->step + 1;
+            }
+        }
         apply_input(state, config.input);
     }
 

@@ -1,8 +1,14 @@
 """Streaming helpers for engine.run_stream().
 
-Currently provides ``message_stream`` — wraps a callback so LLM_TOKEN
-events are also delivered in LangChain's ``stream_mode="messages"``
-shape (a dict per token chunk with role / content / per-node provenance).
+Provides:
+
+- ``emit_token(cb, node, data)`` — one-line replacement for the
+  4-line ``GraphEvent`` construction ritual a streaming-aware node
+  has to perform every time it wants to push an LLM token through
+  the graph callback.
+- ``message_stream`` — wraps a callback so LLM_TOKEN events are also
+  delivered in LangChain's ``stream_mode="messages"`` shape (a dict
+  per token chunk with role / content / per-node provenance).
 """
 
 from __future__ import annotations
@@ -10,6 +16,44 @@ from __future__ import annotations
 from typing import Any, Callable, Optional
 
 from . import GraphEvent  # type: ignore[attr-defined]
+
+
+def emit_token(cb: Callable[[Any], None], node: str, data: Any) -> None:
+    """Emit a single LLM_TOKEN event through a graph stream callback.
+
+    Replaces the 4-line construction ritual::
+
+        ev = ng.GraphEvent()
+        ev.type = ng.GraphEvent.Type.LLM_TOKEN
+        ev.node_name = self._name
+        ev.data = token
+        cb(ev)
+
+    with::
+
+        from neograph_engine.streaming import emit_token
+        emit_token(cb, self._name, token)
+
+    No-ops if ``cb`` is None — the engine passes None when streaming is
+    disabled, and node implementations frequently want to forward the
+    cb they received without checking.
+
+    Args:
+        cb:   the stream callback received by ``execute_stream`` /
+              ``execute_full_stream``. Pass through whatever the engine
+              handed you. May be ``None``.
+        node: the emitting node's name. Conventionally ``self.get_name()``.
+        data: the token payload — typically the delta string, but any
+              JSON-serializable value works (the engine will round-trip
+              it through the C++ ``GraphEvent.data`` field).
+    """
+    if cb is None:
+        return
+    ev = GraphEvent()
+    ev.type      = GraphEvent.Type.LLM_TOKEN
+    ev.node_name = node
+    ev.data      = data
+    cb(ev)
 
 
 def message_stream(
@@ -85,4 +129,4 @@ def message_stream(
     return _cb
 
 
-__all__ = ["message_stream"]
+__all__ = ["emit_token", "message_stream"]
