@@ -45,29 +45,38 @@ mental-model and ergonomics gaps.
 
 ## Still pending
 
-## 6. `get_state` dict shape — Pydantic / accessor helper
-
-`state["channels"]["messages"]["value"]` is too deep for the common
-read. Add either:
-- Pydantic model — `StateView` with `.messages`, `.channels.foo`
-- Plain helper — `state.channel("messages")` returning the value
-
-## 8. Self-evolving JSON agent v2 (PoC improvements)
-
-`examples/22_self_evolving_graph.py` proves the loop closes (graph
-JSON self-edit + recompile works) but the LLM is bad at reasoning
-about channel data flow. v2 should expose channel topology
-explicitly to the modifier prompt (`"node X reads {a,b}, writes
-{c}"`) and let the modifier propose per-stage channels. Optional —
-research direction, not a user blocker.
-
 ## 9. pgvector RAG example
 
 `bindings/python/examples/` has no RAG node — common use case.
 Add an example using pgvector via the existing Postgres connection
-infrastructure.
+infrastructure. (Confirmed not present: examples 16/17 are web
+research, not vector retrieval.)
 
 ## ✅ Closed in v0.3.2
+
+6. **Flat `StateView` helper for `get_state` dict shape** —
+   `engine.get_state_view(thread_id)` returns a Pydantic v2
+   ``StateView`` with channels as top-level attributes
+   (``view.messages`` instead of
+   ``state["channels"]["messages"]["value"]``). The base class
+   allows arbitrary channel names via ``extra="allow"`` — works on
+   any graph without a user-declared model. Subclass ``StateView``
+   with declared fields for typed access; mismatches raise pydantic
+   ``ValidationError`` instead of silent type coercion.
+   ``view.raw`` preserves the unflattened dict for callers needing
+   version / metadata.
+
+   Pydantic v2 added as a hard dep (it's table-stakes in modern
+   LLM Python — FastAPI, LangChain, datamodel libs all use it).
+
+   Tests: ``bindings/python/tests/test_state_view.py`` (12).
+
+8. **Self-evolving graph v2 → research track in `ROADMAP_v1.md`** —
+   the topology-aware modifier prompt direction is recorded as
+   research candidate #4 there. Engine-side changes are likely
+   small once an LLM eval shows what introspection actually moves
+   the needle; deferred from v0.3.x because it's not a user
+   blocker for the shipped engine.
 
 5. **`update_state` accepts both dict and `list[ChannelWrite]`** —
    the v0.3.1 README description ("channel_writes is a list of

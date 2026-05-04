@@ -297,11 +297,16 @@ LangGraph Python — surfaced here so you don't hit them mid-port:
   messages in one call), bundle the values into the value list:
   `{"messages": [m1, m2]}`. Other types raise `TypeError` instead
   of silently no-op'ing (a pre-v0.3.2 trap closed by item #5).
-- **`get_state(thread_id)` returns a nested dict** — read a channel
-  with `state["channels"]["messages"]["value"]`. There is no flat
-  helper today; if you find yourself writing the same accessor
-  repeatedly, `state["channels"][name]["value"]` is the canonical
-  shape and stable across versions.
+- **`get_state(thread_id)` returns a nested dict — `get_state_view`
+  is the flat helper** — `state["channels"]["messages"]["value"]`
+  is the canonical raw shape (stable across versions). For
+  ergonomic dot-access, use
+  `view = engine.get_state_view(thread_id)` and read `view.messages`,
+  `view.scratch`, etc. directly. `view.raw` exposes the unflattened
+  dict for callers needing version / metadata. Subclass `StateView`
+  with declared fields (Pydantic v2) for typed access:
+  `class ChatState(ng.StateView): messages: list[dict] = []` then
+  `engine.get_state_view(thread_id, model=ChatState)`.
 - **Python `Provider` subclasses bind only `complete` (sync)** —
   `Provider.complete_async` is not bound on Python user-defined
   Provider subclasses, so a custom Python Provider always serves
