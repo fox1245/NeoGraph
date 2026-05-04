@@ -36,10 +36,14 @@
 #include <asio/cancellation_signal.hpp>
 #include <asio/post.hpp>
 
+#include <algorithm>
 #include <atomic>
+#include <cstdint>
+#include <functional>
 #include <mutex>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace neograph::graph {
 
@@ -109,6 +113,25 @@ public:
                 sig_.emit(asio::cancellation_type::all);
             });
         }
+
+        // v0.3.1+: fire all registered cancel-hooks. Each nested
+        // run_sync registers one — this is how concurrent run_syncs
+        // (e.g. multi-Send fan-out workers each calling
+        // provider.complete()) all get their HTTP sockets aborted.
+        // The single cancellation_signal above only reaches the
+        // outermost co_spawn; without per-consumer hooks, sibling
+        // workers' run_syncs would silently overwrite each other's
+        // bound executor and only one HTTP would be torn down.
+        //
+        // Invoke under the lock so a concurrent ``Hook`` destructor
+        // either runs to completion before us (we won't see the
+        // hook) or blocks until we finish (the hook always observes
+        // a live capture).
+        std::lock_guard<std::mutex> lk(hooks_mu_);
+        for (auto& [id, cb] : hooks_) {
+            (void)id;
+            if (cb) cb();
+        }
     }
 
     /// @brief Polling read of the cancel flag. Cheap, lock-free.
@@ -165,11 +188,111 @@ public:
         }
     }
 
+    /**
+     * @brief RAII handle returned by ``add_cancel_hook``. Destroying
+     *        the handle unregisters the hook.
+     *
+     * Move-only. The destructor blocks on the parent token's
+     * hooks_mu_ to serialize against an in-flight ``cancel()`` —
+     * once the destructor returns, no further callbacks will fire
+     * for this hook, so it is safe to destroy any state the
+     * callback captured.
+     */
+    class Hook {
+    public:
+        Hook() noexcept = default;
+        Hook(Hook&& o) noexcept : token_(o.token_), id_(o.id_) {
+            o.token_ = nullptr;
+            o.id_    = 0;
+        }
+        Hook& operator=(Hook&& o) noexcept {
+            if (this != &o) {
+                reset();
+                token_ = o.token_;
+                id_    = o.id_;
+                o.token_ = nullptr;
+                o.id_    = 0;
+            }
+            return *this;
+        }
+        Hook(const Hook&) = delete;
+        Hook& operator=(const Hook&) = delete;
+        ~Hook() noexcept { reset(); }
+
+    private:
+        friend class CancelToken;
+        Hook(CancelToken* t, std::uint64_t id) noexcept
+            : token_(t), id_(id) {}
+
+        void reset() noexcept {
+            if (token_ && id_ != 0) {
+                token_->remove_hook_(id_);
+            }
+            token_ = nullptr;
+            id_    = 0;
+        }
+
+        CancelToken*  token_ = nullptr;
+        std::uint64_t id_    = 0;
+    };
+
+    /**
+     * @brief Register a cancellation callback.
+     *
+     * Each nested ``run_sync`` (e.g. inside ``Provider::complete``)
+     * creates its own private ``cancellation_signal`` and registers
+     * a hook here that emits that signal on the inner io_context's
+     * executor. ``cancel()`` then fans out to every registered
+     * hook in addition to the single outer ``sig_`` emit, so
+     * concurrent nested run_syncs (multi-Send fan-out workers) each
+     * see their HTTP sockets aborted instead of silently sharing
+     * one slot.
+     *
+     * If the token is already cancelled when this is called, the
+     * callback fires synchronously and an empty handle is returned.
+     */
+    [[nodiscard]] Hook add_cancel_hook(std::function<void()> cb) {
+        if (cancelled_.load(std::memory_order_acquire)) {
+            // Already cancelled — fire and don't register.
+            cb();
+            return Hook{};
+        }
+        std::uint64_t id;
+        {
+            std::lock_guard<std::mutex> lk(hooks_mu_);
+            // Re-check under lock to close the cancel-vs-register race.
+            if (cancelled_.load(std::memory_order_acquire)) {
+                // cancel() was called between the unlocked check and
+                // here, but it has already iterated hooks_ — so it
+                // won't see us. Fire ourselves.
+                cb();
+                return Hook{};
+            }
+            id = ++next_hook_id_;
+            hooks_.emplace_back(id, std::move(cb));
+        }
+        return Hook{this, id};
+    }
+
 private:
+    void remove_hook_(std::uint64_t id) noexcept {
+        std::lock_guard<std::mutex> lk(hooks_mu_);
+        auto it = std::find_if(hooks_.begin(), hooks_.end(),
+            [id](const auto& p) { return p.first == id; });
+        if (it != hooks_.end()) hooks_.erase(it);
+    }
+
     std::atomic<bool>        cancelled_{false};
     mutable std::mutex       mu_;        // guards ex_ vs cancel() race
     asio::any_io_executor    ex_;        // bound by engine before HTTP I/O
     asio::cancellation_signal sig_;      // for asio operation cancel
+
+    // Per-consumer hooks (nested run_sync). Guarded by its own
+    // mutex so cancel() can iterate without contending with
+    // bind_executor on mu_.
+    mutable std::mutex hooks_mu_;
+    std::uint64_t next_hook_id_ = 0;
+    std::vector<std::pair<std::uint64_t, std::function<void()>>> hooks_;
 };
 
 /**

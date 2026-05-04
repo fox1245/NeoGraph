@@ -72,15 +72,40 @@ T run_sync(asio::awaitable<T> aw,
     };
 
     if (cancel) {
-        cancel->bind_executor(io.get_executor());
+        // v0.3.1+: each run_sync owns its OWN cancellation_signal and
+        // registers a hook on the parent token. The parent's
+        // cancel() iterates all registered hooks, so concurrent
+        // nested run_syncs (e.g. multi-Send fan-out workers) each
+        // get their HTTP sockets torn down. The pre-v0.3.1 design
+        // bound the parent's single signal to io.get_executor() —
+        // last writer won, so only one of N concurrent workers
+        // received cancel and the rest streamed to completion.
+        //
+        // Lifetime: the signal is shared so a late-firing hook
+        // (cancel racing with body completion) doesn't UAF a stack
+        // local. The Hook's destructor blocks against in-flight
+        // cancel() invocations, so by the time run_sync returns
+        // every hook callback has completed.
+        auto local_sig =
+            std::make_shared<asio::cancellation_signal>();
+        auto ex = io.get_executor();
+        auto hook = cancel->add_cancel_hook(
+            [sig = local_sig, ex]() mutable {
+                asio::post(ex, [sig]() {
+                    sig->emit(asio::cancellation_type::all);
+                });
+            });
         asio::co_spawn(io, body(),
-            asio::bind_cancellation_slot(cancel->slot(),
+            asio::bind_cancellation_slot(local_sig->slot(),
                                           asio::detached));
+        io.run();
+        // hook destroyed here — unregisters and serializes against
+        // any in-flight cancel() invocation before local_sig dies.
+        (void)hook;
     } else {
         asio::co_spawn(io, body(), asio::detached);
+        io.run();
     }
-
-    io.run();
 
     if (err) std::rethrow_exception(err);
     return std::move(*result);
@@ -101,10 +126,22 @@ inline void run_sync(asio::awaitable<void> aw,
     };
 
     if (cancel) {
-        cancel->bind_executor(io.get_executor());
+        auto local_sig =
+            std::make_shared<asio::cancellation_signal>();
+        auto ex = io.get_executor();
+        auto hook = cancel->add_cancel_hook(
+            [sig = local_sig, ex]() mutable {
+                asio::post(ex, [sig]() {
+                    sig->emit(asio::cancellation_type::all);
+                });
+            });
         asio::co_spawn(io, body(),
-            asio::bind_cancellation_slot(cancel->slot(),
+            asio::bind_cancellation_slot(local_sig->slot(),
                                           asio::detached));
+        io.run();
+        (void)hook;
+        if (err) std::rethrow_exception(err);
+        return;
     } else {
         asio::co_spawn(io, body(), asio::detached);
     }
