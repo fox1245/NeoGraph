@@ -17,6 +17,8 @@
 #include <stdexcept>
 #include <string>
 
+namespace neograph::graph { class CancelToken; }
+
 namespace neograph {
 
 /**
@@ -58,6 +60,21 @@ struct CompletionParams {
     std::vector<ChatTool> tools;        ///< Available tools the LLM may call.
     float temperature = 0.7f;           ///< Sampling temperature (0.0 = deterministic, 1.0 = creative).
     int max_tokens = -1;                ///< Maximum output tokens. -1 means provider default.
+
+    /**
+     * @brief Optional cancel handle (v0.3+).
+     *
+     * When set, async-native providers (OpenAIProvider, SchemaProvider)
+     * bind ``cancel_token->slot()`` to their ``ConnPool::async_post``
+     * co_await, so a caller's ``cancel()`` aborts the in-flight HTTPS
+     * socket and stops billable LLM work mid-stream.
+     *
+     * The engine populates this from ``RunConfig::cancel_token`` when
+     * a node calls ``ctx.provider->complete(params)``; user code that
+     * constructs CompletionParams directly may set it to share an
+     * abort across multiple completions.
+     */
+    std::shared_ptr<graph::CancelToken> cancel_token;
 };
 
 /**

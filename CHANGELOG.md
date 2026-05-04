@@ -7,6 +7,80 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.0] — 2026-05-04 — Cooperative cancel propagation
+
+Closes the production cost-leak gap reported during the FastAPI SSE
+chat-demo evaluation: a frontend `AbortController` cancelling the
+asyncio task no longer leaves the upstream OpenAI request running to
+completion. Cancel propagates through every layer of the run.
+
+### Added
+
+- `neograph::graph::CancelToken` (atomic flag + asio
+  `cancellation_signal`) and `CancelledException` —
+  `include/neograph/graph/cancel.h`. Cooperative cancel primitive.
+  Pass via `RunConfig::cancel_token` (optional `shared_ptr`); the
+  engine super-step loop polls `is_cancelled()` between steps and
+  bails with `CancelledException`. The token's `cancellation_slot()`
+  binds to the run's `co_spawn` so an in-flight LLM HTTP socket op is
+  aborted on the wire (asio `operation_aborted`).
+- `CompletionParams::cancel_token` — explicit pin for users threading
+  abort across multiple `provider.complete()` calls. `Provider::complete`
+  reads it (or falls back to the thread-local
+  `current_cancel_token()` set by `PyGraphNode::execute_full_async`)
+  and binds the slot to its inner `run_sync` io_context, so even sync
+  Python nodes hit by a cancel stop billing.
+- `GraphState::run_cancel_token()` — per-run, non-serialized handle
+  used by the pybind `PyGraphNode` to install a
+  `CurrentCancelTokenScope` around the synchronous Python `execute()`
+  call. This is what gives sync Python users transparent cancel
+  propagation without changing their node code.
+- pybind `engine.run_async` / `run_stream_async`: asyncio
+  `Future.cancel()` now wires through `add_done_callback` to
+  `CancelToken::cancel()`, and the `co_spawn` binds the token's
+  cancel slot.
+- pybind safe-resolve helpers `_safe_set_future_result` /
+  `_safe_set_future_exception` — guard `future.set_result` /
+  `set_exception` calls posted via `call_soon_threadsafe` against
+  cancelled-future `InvalidStateError` storms.
+- `bindings/python/tests/test_async_cancel_live_llm.py` — live
+  OpenAI E2E asserting OpenAI HTTP completes within < 3 s of
+  `Future.cancel()` (in practice immediate; pre-fix was ~7–8 s of
+  uncancelled streaming). Skipped unless `NEOGRAPH_LIVE_LLM=1`.
+- `examples/22_self_evolving_graph.py` — self-evolving graph PoC:
+  `prompted_llm` node reads its own prompts from JSON config so an
+  LLM rewriter can mutate the graph definition between runs and
+  recompile. Demonstrates `0.0 → 0.4` score improvement; documents
+  the channel-flow reasoning gap in the rewriter.
+
+### Changed
+
+- `Provider::complete(params)` now binds an inner cancellation slot
+  to its `run_sync` when `params.cancel_token` is set OR when a
+  thread-local `current_cancel_token()` is active. Previous default
+  behaviour (no cancellation) is preserved for callers that don't
+  opt in.
+- `neograph::async::run_sync` gained an optional
+  `graph::CancelToken*` parameter; when non-null the bound spawn
+  binds the token's slot.
+- pybind `resolve_future_async` routes through the safe-resolve
+  helpers instead of calling `future.set_result` directly via
+  `call_soon_threadsafe`.
+
+### Roadmap (deferred to v0.3.x — see `TODO_v0.3.md`)
+
+- LangGraph-style auto checkpoint resume on same `thread_id`.
+- Streaming-only-node hint in `run_async` error message.
+- `cb.emit_token(node, data)` ergonomic helper.
+- README "Differences from LangGraph" section.
+- `update_state` signature alignment with docs.
+- `get_state` flat helper / Pydantic accessor.
+- Live verification of cancel propagation in `run_parallel_async`
+  and `run_sends_async` branch fan-outs.
+- pgvector RAG example.
+
+---
+
 ## [Unreleased] — Stage 4
 
 Stage 4 closes the last `run_sync` hop on the async path. `run_async`

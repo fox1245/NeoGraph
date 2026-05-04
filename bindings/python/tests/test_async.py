@@ -6,10 +6,13 @@ Covers:
   - `asyncio.gather` of N concurrent run_async calls (overlap check)
   - run_stream_async with an async-friendly callback
   - resume_async after a run that interrupted on a Python node
+  - cancel-during-run: future cancel must not raise InvalidStateError
+    when the worker completes after cancellation (cost-leak guard)
 """
 
 import asyncio
 import threading
+import time
 
 import pytest
 
@@ -183,6 +186,150 @@ def test_run_stream_async_events_on_loop_thread():
     # thread — the binding's threadsafe hop is doing its job.
     assert all(t == loop_thread for t in threads), \
         f"events fired off the loop thread: {threads} vs loop {loop_thread}"
+
+
+def test_run_async_cancel_does_not_double_resolve_future():
+    """Cancelling an in-flight run_async future must not raise
+    InvalidStateError when the C++ worker finishes after the cancel.
+
+    The textbook trigger: a FastAPI SSE handler driven by a frontend
+    AbortController that fires every keystroke (300 ms debounce). The
+    asyncio task gets cancelled, but the engine's worker thread keeps
+    running; when the worker's completion lambda tries to
+    `loop.call_soon_threadsafe(fut.set_result, …)`, the now-cancelled
+    future raises InvalidStateError on the loop thread, where no C++
+    try/except can catch it. asyncio's default handler logs it, and
+    under a typing UI the log fills with the same trace many times a
+    minute.
+
+    The bridge wraps set_result/set_exception in `_safe_set_future_*`
+    helpers that `if not fut.done():` guard before calling. This test
+    captures asyncio loop exceptions and asserts none of them are
+    InvalidStateError after a cancel-during-run.
+    """
+    type_name = _next_type("async_sleepy")
+
+    class SleepyNode(neograph.GraphNode):
+        # time.sleep (not asyncio.sleep) — execute() is synchronous,
+        # runs on the engine's worker thread, releases GIL while
+        # sleeping. The duration must outlive the test's cancel-point
+        # so the worker is still running when we cancel the future.
+        def __init__(self, name):
+            super().__init__()
+            self._name = name
+        def get_name(self): return self._name
+        def execute(self, state):
+            time.sleep(0.4)
+            return [neograph.ChannelWrite("done", True)]
+
+    neograph.NodeFactory.register_type(
+        type_name, lambda name, c, ctx: SleepyNode(name))
+
+    definition = {
+        "name": "sleepy",
+        "channels": {"done": {"reducer": "overwrite"}},
+        "nodes": {"s": {"type": type_name}},
+        "edges": [
+            {"from": neograph.START_NODE, "to": "s"},
+            {"from": "s", "to": neograph.END_NODE},
+        ],
+    }
+    engine = neograph.GraphEngine.compile(definition, neograph.NodeContext())
+
+    async def go():
+        loop = asyncio.get_running_loop()
+        captured: list[dict] = []
+        loop.set_exception_handler(lambda lp, ctx: captured.append(ctx))
+
+        cfg = neograph.RunConfig(thread_id="cancel-1", input={})
+        fut = engine.run_async(cfg)
+
+        # Let the worker start the SleepyNode's time.sleep.
+        await asyncio.sleep(0.05)
+
+        # Cancel before the worker finishes. The worker keeps running
+        # — that's the bug shape we're guarding against.
+        fut.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await fut
+
+        # Wait long enough for the worker to finish its sleep and
+        # invoke the completion lambda. Pre-fix, this is when
+        # InvalidStateError would surface on the loop.
+        await asyncio.sleep(0.6)
+
+        return captured
+
+    captured = asyncio.run(go())
+    invalid_state = [
+        c for c in captured
+        if "InvalidStateError" in repr(c.get("exception"))
+        or "invalid state" in str(c.get("message", "")).lower()
+    ]
+    assert not invalid_state, (
+        f"future double-resolve raised InvalidStateError after "
+        f"cancel — _safe_set_future_* guard not in effect: "
+        f"{invalid_state}")
+
+
+def test_run_stream_async_cancel_does_not_double_resolve_future():
+    """Same cancel-during-run guard for the streaming surface.
+
+    run_stream_async has its own completion lambda (separate from
+    run_async); the safe-resolve helpers must cover it too.
+    """
+    type_name = _next_type("async_stream_sleepy")
+
+    class StreamingSleepyNode(neograph.GraphNode):
+        def __init__(self, name):
+            super().__init__()
+            self._name = name
+        def get_name(self): return self._name
+        def execute(self, state):
+            time.sleep(0.4)
+            return [neograph.ChannelWrite("done", True)]
+
+    neograph.NodeFactory.register_type(
+        type_name, lambda name, c, ctx: StreamingSleepyNode(name))
+
+    definition = {
+        "name": "stream_sleepy",
+        "channels": {"done": {"reducer": "overwrite"}},
+        "nodes": {"s": {"type": type_name}},
+        "edges": [
+            {"from": neograph.START_NODE, "to": "s"},
+            {"from": "s", "to": neograph.END_NODE},
+        ],
+    }
+    engine = neograph.GraphEngine.compile(definition, neograph.NodeContext())
+
+    async def go():
+        loop = asyncio.get_running_loop()
+        captured: list[dict] = []
+        loop.set_exception_handler(lambda lp, ctx: captured.append(ctx))
+
+        def cb(ev):
+            pass
+
+        cfg = neograph.RunConfig(thread_id="cancel-stream-1", input={})
+        fut = engine.run_stream_async(cfg, cb)
+
+        await asyncio.sleep(0.05)
+        fut.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await fut
+        await asyncio.sleep(0.6)
+        return captured
+
+    captured = asyncio.run(go())
+    invalid_state = [
+        c for c in captured
+        if "InvalidStateError" in repr(c.get("exception"))
+        or "invalid state" in str(c.get("message", "")).lower()
+    ]
+    assert not invalid_state, (
+        f"future double-resolve raised InvalidStateError after "
+        f"cancel on streaming path: {invalid_state}")
 
 
 def test_run_async_propagates_python_node_exception():

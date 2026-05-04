@@ -311,6 +311,7 @@ add_custom_target(generate_schemas DEPENDS ${GENERATED_DIR}/builtin_schemas.h)
 # ===========================================================================
 add_library(neograph_core
     src/core/json.cpp
+    src/core/cancel.cpp
     src/core/provider.cpp
     src/core/tool.cpp
     src/core/graph_engine.cpp

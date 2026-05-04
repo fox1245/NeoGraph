@@ -41,6 +41,7 @@
 
 #include "json_bridge.h"
 
+#include <neograph/graph/cancel.h>
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/engine.h>
 #include <neograph/graph/loader.h>
@@ -51,6 +52,8 @@
 #include <neograph/graph/postgres_checkpoint.h>
 #endif
 
+#include <asio/bind_cancellation_slot.hpp>
+#include <asio/cancellation_signal.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
@@ -132,10 +135,25 @@ std::shared_ptr<py::object> hold_py(py::object obj) {
 // hops back to the asyncio loop thread via call_soon_threadsafe so
 // `Future.set_result` runs where asyncio expects.
 //
-// If the asyncio loop has been closed (rare — happens if the user
-// cancels everything and tears down the loop while a run is mid-
-// flight), silently drop the result; trying to schedule on a closed
-// loop raises RuntimeError.
+// Two failure modes guarded:
+//   1. Loop closed — is_closed() short-circuits before scheduling.
+//      call_soon_threadsafe on a closed loop raises RuntimeError on
+//      the worker thread; we'd lose the GIL guarantee, so eat early.
+//   2. Future cancelled (or already resolved) — set_result/set_exception
+//      raise InvalidStateError, but the raise happens later on the
+//      asyncio loop thread (call_soon_threadsafe just schedules), so
+//      no C++ try/catch can catch it. The asyncio default handler
+//      logs the unhandled exception to stderr — visible as a flood of
+//      "Exception in callback ... InvalidStateError: invalid state"
+//      under any UI that cancels long streams (FastAPI SSE + frontend
+//      AbortController is the textbook case).
+//
+//      Fix: route through `_safe_set_future_result` /
+//      `_safe_set_future_exception` Python helpers (defined via
+//      m.def in init_graph below), which `if not fut.done():` guard
+//      before calling set_result/set_exception. The helpers run on
+//      the loop thread under its GIL, exactly where the original
+//      raise would have happened.
 template <typename T>
 void resolve_future_async(std::shared_ptr<py::object> future,
                           std::shared_ptr<py::object> loop,
@@ -143,10 +161,10 @@ void resolve_future_async(std::shared_ptr<py::object> future,
                           T&& result) {
     py::gil_scoped_acquire g;
     try {
-        // is_closed() short-circuit is the only safe way to detect a
-        // dead loop without raising — call_soon_threadsafe on a
-        // closed loop throws RuntimeError.
         if (loop->attr("is_closed")().template cast<bool>()) return;
+
+        py::module_ mod =
+            py::module_::import("neograph_engine._neograph");
 
         if (eptr) {
             std::string msg;
@@ -160,11 +178,12 @@ void resolve_future_async(std::shared_ptr<py::object> future,
             py::object exc =
                 py::module_::import("builtins").attr("RuntimeError")(msg);
             loop->attr("call_soon_threadsafe")(
-                future->attr("set_exception"), exc);
+                mod.attr("_safe_set_future_exception"),
+                *future, exc);
         } else {
             loop->attr("call_soon_threadsafe")(
-                future->attr("set_result"),
-                py::cast(std::forward<T>(result)));
+                mod.attr("_safe_set_future_result"),
+                *future, py::cast(std::forward<T>(result)));
         }
     } catch (const py::error_already_set&) {
         // Loop probably racing into closure — nothing we can do
@@ -177,6 +196,44 @@ void resolve_future_async(std::shared_ptr<py::object> future,
 
 void init_graph(py::module_& m) {
     using namespace neograph::graph;
+
+    // ── Async-bridge safe-resolve helpers ────────────────────────────────
+    //
+    // Hand these to `loop.call_soon_threadsafe` instead of raw
+    // `future.set_result` / `future.set_exception`. They guard against
+    // resolving a future that the user already cancelled — the textbook
+    // case is a frontend AbortController firing every keystroke (300 ms
+    // debounce) under FastAPI SSE: `request.is_disconnected()` cancels
+    // the asyncio task, the C++ engine worker still finishes the run,
+    // and the completion lambda races to set_result on a now-cancelled
+    // future, raising InvalidStateError on the loop thread.
+    //
+    // Bound here (rather than in a `_async_bridge.py` module) so the
+    // resolve path stays inside the `_neograph` extension — one fewer
+    // import to keep in sync, and the helpers are available before any
+    // user code can call run_async.
+    m.def("_safe_set_future_result",
+        [](py::object fut, py::object value) {
+            if (!fut.attr("done")().cast<bool>()) {
+                fut.attr("set_result")(value);
+            }
+        },
+        py::arg("future"),
+        py::arg("value"),
+        "Internal: cancel-safe peer of Future.set_result. No-op when "
+        "the future is already done/cancelled (raised "
+        "InvalidStateError pre-fix).");
+
+    m.def("_safe_set_future_exception",
+        [](py::object fut, py::object exc) {
+            if (!fut.attr("done")().cast<bool>()) {
+                fut.attr("set_exception")(exc);
+            }
+        },
+        py::arg("future"),
+        py::arg("exception"),
+        "Internal: cancel-safe peer of Future.set_exception. No-op "
+        "when the future is already done/cancelled.");
 
     // ── RunConfig ────────────────────────────────────────────────────────
     py::class_<RunConfig>(m, "RunConfig",
@@ -492,16 +549,55 @@ void init_graph(py::module_& m) {
 
                 auto fut_h  = hold_py(future);
                 auto loop_h = hold_py(loop);
+
+                // v0.3: ensure a cancel_token is always present on the
+                // RunConfig the engine sees. If the user supplied one
+                // we honour it; else allocate a fresh one so the asio
+                // co_spawn slot wiring below has something to bind.
+                if (!cfg.cancel_token) {
+                    cfg.cancel_token = std::make_shared<CancelToken>();
+                }
+                auto cancel_tok = cfg.cancel_token;
                 auto cfg_h  = std::make_shared<RunConfig>(std::move(cfg));
+
+                // Wire asyncio.Future.cancel() → CancelToken.cancel().
+                // add_done_callback fires once when the future
+                // transitions to done, including the CANCELLED state.
+                // The token then sets its atomic flag (engine super-
+                // step polls it) AND emits its asio cancellation_signal
+                // (propagates down through co_await chain to the
+                // ConnPool::async_post socket op, killing the in-
+                // flight LLM HTTP request — the v0.2.3 cost-leak fix).
+                py::cpp_function on_done(
+                    [cancel_tok](py::object fut) {
+                        try {
+                            if (fut.attr("cancelled")().cast<bool>()) {
+                                cancel_tok->cancel();
+                            }
+                        } catch (const py::error_already_set&) {
+                            PyErr_Clear();
+                        }
+                    });
+                future.attr("add_done_callback")(on_done);
+
+                // Bind the cancel slot at co_spawn so asio's per-
+                // operation cancellation propagates through every
+                // co_await down to socket I/O. Token's executor is
+                // bound on first use inside the engine; the spawn
+                // executor is the same AsyncRuntime singleton.
+                cancel_tok->bind_executor(
+                    AsyncRuntime::instance().executor());
 
                 asio::co_spawn(
                     AsyncRuntime::instance().executor(),
                     self->run_async(*cfg_h),
-                    [self, cfg_h, fut_h, loop_h]
-                    (std::exception_ptr e, RunResult result) {
-                        resolve_future_async(fut_h, loop_h, e,
-                                             std::move(result));
-                    });
+                    asio::bind_cancellation_slot(
+                        cancel_tok->slot(),
+                        [self, cfg_h, fut_h, loop_h, cancel_tok]
+                        (std::exception_ptr e, RunResult result) {
+                            resolve_future_async(fut_h, loop_h, e,
+                                                 std::move(result));
+                        }));
 
                 return future;
             },
@@ -514,7 +610,13 @@ void init_graph(py::module_& m) {
             "\n"
             "Multiple concurrent run_async() calls overlap on the "
             "binding's internal asio worker; combine with "
-            "asyncio.gather to fan out across thread_ids.")
+            "asyncio.gather to fan out across thread_ids.\n\n"
+            "v0.3+: cancelling the returned Future "
+            "(`fut.cancel()`, asyncio task cancel, FastAPI "
+            "request_disconnected) propagates through the engine "
+            "super-step loop and into in-flight LLM HTTP requests "
+            "via asio cancellation, so a cancelled run no longer "
+            "burns LLM tokens until the upstream call finishes.")
 
         .def("run_stream_async",
             [](std::shared_ptr<GraphEngine> self,
@@ -526,7 +628,28 @@ void init_graph(py::module_& m) {
 
                 auto fut_h  = hold_py(future);
                 auto loop_h = hold_py(loop);
+
+                // v0.3 cancel propagation: same shape as run_async.
+                if (!cfg.cancel_token) {
+                    cfg.cancel_token = std::make_shared<CancelToken>();
+                }
+                auto cancel_tok = cfg.cancel_token;
                 auto cfg_h  = std::make_shared<RunConfig>(std::move(cfg));
+
+                py::cpp_function on_done(
+                    [cancel_tok](py::object fut) {
+                        try {
+                            if (fut.attr("cancelled")().cast<bool>()) {
+                                cancel_tok->cancel();
+                            }
+                        } catch (const py::error_already_set&) {
+                            PyErr_Clear();
+                        }
+                    });
+                future.attr("add_done_callback")(on_done);
+
+                cancel_tok->bind_executor(
+                    AsyncRuntime::instance().executor());
 
                 // The user's py::function lives in a shared_ptr with
                 // a GIL-acquiring deleter so std::function copies on
@@ -582,11 +705,13 @@ void init_graph(py::module_& m) {
                 asio::co_spawn(
                     AsyncRuntime::instance().executor(),
                     self->run_stream_async(*cfg_h, *engine_cb_h),
-                    [self, cfg_h, engine_cb_h, fut_h, loop_h]
-                    (std::exception_ptr e, RunResult result) {
-                        resolve_future_async(fut_h, loop_h, e,
-                                             std::move(result));
-                    });
+                    asio::bind_cancellation_slot(
+                        cancel_tok->slot(),
+                        [self, cfg_h, engine_cb_h, fut_h, loop_h, cancel_tok]
+                        (std::exception_ptr e, RunResult result) {
+                            resolve_future_async(fut_h, loop_h, e,
+                                                 std::move(result));
+                        }));
 
                 return future;
             },
@@ -595,7 +720,10 @@ void init_graph(py::module_& m) {
             "Awaitable peer of run_stream(). The callback is invoked "
             "for each GraphEvent — events are hopped onto the asyncio "
             "loop, so the callback runs on the user's Python thread, "
-            "not on the engine worker.")
+            "not on the engine worker.\n\n"
+            "v0.3+: cancelling the returned Future propagates into "
+            "in-flight LLM HTTP requests via asio cancellation, so "
+            "a cancelled stream stops billable token generation.")
 
         .def("resume_async",
             [](std::shared_ptr<GraphEngine> self,

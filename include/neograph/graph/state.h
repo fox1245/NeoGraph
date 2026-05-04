@@ -98,10 +98,29 @@ public:
      */
     std::vector<std::string> channel_names() const;
 
+    // ── Per-run metadata (v0.3+) ─────────────────────────────────────
+    //
+    // Not serialized; lives only on the in-memory state of an active
+    // run. The engine populates ``cancel_token`` from
+    // ``RunConfig::cancel_token`` once before the super-step loop, so
+    // every node's ``execute_full_async`` can inspect it
+    // (``state.run_cancel_token()``) and pass it into a synchronous
+    // ``provider.complete()`` call — which is the only way cancel
+    // propagation reaches an in-flight LLM HTTP request when the
+    // node's body is sync Python (no asio co_await chain to ride).
+
+    /// @brief Set the active run's cancel token. Engine internal —
+    ///        called once at the top of execute_graph_async.
+    void set_run_cancel_token(std::shared_ptr<class CancelToken> tok);
+
+    /// @brief Active run's cancel token, or nullptr if none.
+    class CancelToken* run_cancel_token() const noexcept;
+
 private:
     std::map<std::string, Channel> channels_;
     uint64_t global_version_ = 0;
     mutable std::shared_mutex mutex_;
+    std::shared_ptr<class CancelToken> run_cancel_token_;
 };
 
 } // namespace neograph::graph

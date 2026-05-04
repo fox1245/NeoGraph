@@ -9,6 +9,7 @@
 #pragma once
 
 #include <neograph/api.h>
+#include <neograph/graph/cancel.h>
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/compiler.h>
 #include <neograph/graph/coordinator.h>
@@ -38,6 +39,20 @@ struct RunConfig {
     json        input;                              ///< Initial channel writes (e.g., {"messages": [...]}).
     int         max_steps  = 50;                    ///< Safety limit for maximum super-steps per run.
     StreamMode  stream_mode = StreamMode::ALL;      ///< Which event types to emit during streaming.
+
+    /**
+     * @brief Optional cooperative cancel handle (v0.3+).
+     *
+     * When set, the engine super-step loop polls
+     * ``cancel_token->is_cancelled()`` between steps and bails with
+     * ``CancelledException``. The pybind binding additionally binds
+     * the token's ``cancellation_slot`` to the run's ``co_spawn`` so
+     * an in-flight LLM HTTP request gets aborted at the socket layer.
+     *
+     * Default ``nullptr`` → no cancellation; existing behaviour
+     * unchanged for callers that haven't opted in.
+     */
+    std::shared_ptr<CancelToken> cancel_token;
 };
 
 /**

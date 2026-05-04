@@ -1,4 +1,5 @@
 #include <neograph/graph/state.h>
+#include <neograph/graph/cancel.h>
 #include <stdexcept>
 
 namespace neograph::graph {
@@ -105,6 +106,17 @@ std::vector<std::string> GraphState::channel_names() const {
         names.push_back(name);
     }
     return names;
+}
+
+void GraphState::set_run_cancel_token(std::shared_ptr<CancelToken> tok) {
+    // No mutex needed — set once at the top of execute_graph_async,
+    // before any node dispatch. Read-only thereafter for the run's
+    // duration. The shared_ptr is the lifetime guard.
+    run_cancel_token_ = std::move(tok);
+}
+
+CancelToken* GraphState::run_cancel_token() const noexcept {
+    return run_cancel_token_.get();
 }
 
 } // namespace neograph::graph
