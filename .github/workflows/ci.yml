@@ -492,17 +492,36 @@ jobs:
           # not being intercepted) — deselect them by name.
           export LD_PRELOAD=$(gcc -print-file-name=libasan.so)
           export PYTHONPATH=build-asan:bindings/python
-          # cancel propagation tests (v0.3.x) throw CancelledException
-          # across the engine→Python boundary, hitting the same
-          # ``real___cxa_throw == nullptr`` ASan-interceptor CHECK that
-          # propagate / undocumented_reducer / noopentelemetry already
-          # trip. Add them to the deselect list — the propagation
-          # itself is exercised by ctest under TSan and the live LLM
-          # cancel tests in non-sanitizer builds.
+          # The ASan ``__cxa_throw`` interceptor in
+          # asan_interceptors.cpp:458 trips a CHECK
+          # (``real___cxa_throw == nullptr``) on every C++ exception
+          # that crosses the engine→Python boundary. It's a known
+          # sanitizer/dlopen-init order interaction with libstdc++
+          # (the interceptor's dlsym to ``real___cxa_throw`` happens
+          # before _neograph.so is loaded). Tests that exercise that
+          # pattern have to be deselected here; coverage is preserved
+          # by ctest under TSan and the live LLM tests in non-
+          # sanitizer builds.
+          #
+          # Categories:
+          #   - propagate / undocumented_reducer / noopentelemetry —
+          #     pre-v0.3.x tests, original deselect.
+          #   - cancel_does_not_double_resolve_future — v0.3.x
+          #     CancelledException throw across pybind boundary.
+          #   - raises_under_run / raises_with_hint /
+          #     no_hint_when_no_streaming_override — v0.3.2 #10
+          #     streaming-only NotImplementedError throws.
+          #   - raises_type_error / non_channelwrite_item_raises —
+          #     v0.3.2 #5 update_state pybind type_error throws.
           python -m pytest bindings/python/tests/ -q \
             -k "not propagate and not undocumented_reducer and not noopentelemetry \
                and not run_async_cancel_does_not_double_resolve_future \
-               and not run_stream_async_cancel_does_not_double_resolve_future"
+               and not run_stream_async_cancel_does_not_double_resolve_future \
+               and not still_raises_under_run \
+               and not run_raises_with_hint \
+               and not no_hint_when_no_streaming_override \
+               and not raises_type_error_not_silent_noop \
+               and not non_channelwrite_item_raises"
 
   # ThreadSanitizer race-detection gate. Catches data races that ASan
   # can't see — concurrent reads/writes without happens-before. Caught
