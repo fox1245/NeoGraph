@@ -13,6 +13,7 @@ add_executable(neograph_tests
     test_resume_if_exists.cpp
     test_cancel_token_propagation.cpp
     test_execute_stream_only_dispatch.cpp
+    test_live_llm_cancel_fanout_cpp.cpp
     test_scheduler.cpp
     test_node_execution.cpp
     test_compiler.cpp
@@ -94,6 +95,7 @@ target_link_libraries(neograph_tests PRIVATE
     neograph::llm
     neograph::async
     httplib OpenSSL::SSL OpenSSL::Crypto
+    cppdotenv
     GTest::gtest_main
 )
 

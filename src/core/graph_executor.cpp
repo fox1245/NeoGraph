@@ -1,6 +1,7 @@
 #include <neograph/graph/executor.h>
 #include <neograph/graph/state.h>
 #include <neograph/graph/loader.h>
+#include <neograph/graph/cancel.h>
 
 #include <asio/co_spawn.hpp>
 #include <asio/deferred.hpp>
@@ -163,6 +164,15 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
             // NodeInterrupt is a control-flow signal, not a retryable
             // error. Bubble out of the coroutine so the caller can save
             // a NodeInterrupt checkpoint, matching the sync path.
+            throw;
+        } catch (const CancelledException&) {
+            // v0.3.2: cancel is also a control-flow signal — never
+            // retry. Without this short-circuit a fan-out worker
+            // whose Provider::complete throws CancelledException on
+            // socket abort would re-enter the retry loop, fresh
+            // run_sync would race emit-vs-bind on the already-set
+            // cancel flag, the second HTTP call would slip through,
+            // and the cost leak would persist for max_retries × ~3 s.
             throw;
         } catch (const std::bad_alloc&) {
             // OOM is not retryable. Sleeping then re-running won't
