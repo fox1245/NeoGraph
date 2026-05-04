@@ -478,7 +478,12 @@ jobs:
           UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=0"
           LSAN_OPTIONS: "suppressions=${{ github.workspace }}/tests/lsan_suppressions.txt"
         run: |
-          python -m pip install --quiet pytest
+          # The PYTHONPATH=build-asan:bindings/python flow below imports
+          # the package without going through `pip install -e .`, so
+          # the runtime deps from pyproject.toml are NOT auto-installed.
+          # Mirror them here. Keep this in sync with pyproject.toml's
+          # ``dependencies = [...]`` list.
+          python -m pip install --quiet pytest pydantic certifi
           # libasan must be in LD_PRELOAD so its __cxa_throw interceptor
           # is registered before _neograph.so is dlopen'd by Python.
           # Two tests propagate Python exceptions across the pybind

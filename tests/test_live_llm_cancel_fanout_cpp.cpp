@@ -26,6 +26,8 @@
 
 #include <cppdotenv/dotenv.hpp>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
