@@ -43,16 +43,23 @@ mental-model and ergonomics gaps.
    `tests/test_cancel_token_propagation.cpp` (3 — static parallel,
    multi-Send, mid-fan-out abort).
 
-## Still pending
+## Status: v0.3.x feedback closed
 
-## 9. pgvector RAG example
-
-`bindings/python/examples/` has no RAG node — common use case.
-Add an example using pgvector via the existing Postgres connection
-infrastructure. (Confirmed not present: examples 16/17 are web
-research, not vector retrieval.)
+All engine-affecting items from the v0.3.x feedback batch (FastAPI
+SSE chat-demo + ergonomics rounds) are landed. Remaining item #9
+(pgvector RAG example) is purely a worked example — no engine
+gap — and lives on a future cookbook track recorded as Candidate
+5 in `ROADMAP_v1.md`. v0.3.x as a series is closed; further engine
+work targets v0.4 / v1.0.
 
 ## ✅ Closed in v0.3.2
+
+9. **pgvector RAG example → ROADMAP cookbook track** — confirmed
+   no engine gap (existing `PostgresCheckpointStore` infrastructure
+   is sufficient; RAG nodes are pure user code). Recorded as
+   Candidate 5 in `ROADMAP_v1.md` under the same Research/Cookbook
+   section as #8. Belongs to a future cookbook drumbeat rather
+   than the engine v-bump series.
 
 6. **Flat `StateView` helper for `get_state` dict shape** —
    `engine.get_state_view(thread_id)` returns a Pydantic v2
