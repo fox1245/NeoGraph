@@ -283,6 +283,27 @@ public:
                 py_cb);
             return coerce_to_node_result(res);
         }
+        // v0.3.2 (TODO_v0.3.md item #10): a Python node that only
+        // overrides ``execute_stream`` (no ``execute_full_stream``,
+        // no ``execute`` / ``execute_full``) used to silently fall
+        // through to the line below, hit the NotImplementedError in
+        // GraphNode.execute, and never get its streaming variant
+        // dispatched. The v0.3.1 hint message correctly pointed at
+        // ``run_stream``, but ``run_stream`` itself still didn't
+        // wire up. Now it does: prefer the user's ``execute_stream``
+        // when no fuller override is present, wrap its writes into
+        // a NodeResult, and the cb propagates so LLM_TOKEN events
+        // flow through.
+        if (has_user_method("execute_stream")) {
+            py::cpp_function py_cb([cb](const neograph::graph::GraphEvent& ev) {
+                cb(ev);
+            });
+            py::object res = py_obj_.attr("execute_stream")(
+                py::cast(&state, py::return_value_policy::reference),
+                py_cb);
+            if (res.is_none()) return NodeResult{};
+            return NodeResult{res.cast<std::vector<ChannelWrite>>()};
+        }
         // No streaming override → execute_full() with cb dropped.
         // Same observable behaviour as the default GraphNode chain
         // but routes through the Python user's execute_full /

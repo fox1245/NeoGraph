@@ -74,14 +74,15 @@ research direction, not a user blocker.
 Add an example using pgvector via the existing Postgres connection
 infrastructure.
 
-## 10. `execute_stream`-only nodes don't dispatch through `run_stream`
+## ✅ Closed in v0.3.2
 
-(Adjacent to item #2.) When a Python node overrides only
-`execute_stream(state, cb)` (not `execute_full_stream`),
-`PyGraphNode::execute_full_stream` falls back to `execute_full(state)`
-which then calls the unimplemented `execute()`, raising. The
-streaming-only error message correctly hints at `run_stream`, but
-even with `run_stream` the `execute_stream` override is bypassed.
-Fix: `execute_full_stream` fallback should try `execute_stream`
-before `execute_full` so the natural shape works. Workaround today
-is to override `execute_full_stream` instead.
+10. **`execute_stream`-only nodes dispatch through `run_stream`** —
+    `PyGraphNode::execute_full_stream` now consults
+    `execute_stream` before falling back to `execute_full`, so a
+    node that only overrides `execute_stream(state, cb)` works
+    correctly under `engine.run_stream()` / `run_stream_async()`.
+    The v0.3.1 hint message in `GraphNode.execute()` no longer
+    misdirects — calling `run_stream` like the hint suggests now
+    actually dispatches. `execute_full_stream` retains priority
+    when both are defined. Tests:
+    `bindings/python/tests/test_execute_stream_dispatch.py` (5).
