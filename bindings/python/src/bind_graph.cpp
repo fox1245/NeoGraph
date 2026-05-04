@@ -464,14 +464,73 @@ void init_graph(py::module_& m) {
                const std::string& thread_id,
                py::object channel_writes,
                const std::string& as_node) {
-                self.update_state(thread_id, py_to_json(channel_writes), as_node);
+                // v0.3.2 (TODO_v0.3.md item #5): accept BOTH a
+                // ``dict`` (channel_name → value) and a
+                // ``list[ChannelWrite]`` form. Pre-fix only dict
+                // worked — passing a list silently no-op'd because
+                // the C++ engine's update_state checks
+                // ``channel_writes.is_object()`` and skips otherwise.
+                // The list form is symmetric with how every node
+                // body builds writes, so it's the natural shape a
+                // caller from a Python REPL or UI would try.
+                json payload;
+                if (py::isinstance<py::dict>(channel_writes)) {
+                    payload = py_to_json(channel_writes);
+                } else if (py::isinstance<py::list>(channel_writes) ||
+                           py::isinstance<py::tuple>(channel_writes)) {
+                    // Reduce list[ChannelWrite] → dict {channel: value}.
+                    // If the same channel appears more than once, the
+                    // last value wins — matches dict-literal semantics
+                    // and keeps the engine's single-write-per-channel
+                    // invariant intact. For multi-write per channel
+                    // (e.g. appending two messages at once on an
+                    // APPEND-reduced channel), bundle the values into
+                    // a list yourself: {"messages": [m1, m2]}.
+                    payload = json::object();
+                    for (auto item : channel_writes) {
+                        // Accept either an actual ChannelWrite instance
+                        // or a duck-typed object exposing .channel /
+                        // .value (so a SimpleNamespace works in tests).
+                        if (!py::hasattr(item, "channel") ||
+                            !py::hasattr(item, "value")) {
+                            throw py::type_error(
+                                "update_state: list items must be "
+                                "ChannelWrite (or expose .channel / "
+                                ".value attributes); got "
+                                + py::str(item.attr("__class__")
+                                              .attr("__name__"))
+                                      .cast<std::string>());
+                        }
+                        std::string ch =
+                            item.attr("channel").cast<std::string>();
+                        payload[ch] = py_to_json(item.attr("value"));
+                    }
+                } else {
+                    throw py::type_error(
+                        "update_state: channel_writes must be a dict "
+                        "{channel_name: value} or a list of ChannelWrite; "
+                        "got " +
+                        py::str(channel_writes.attr("__class__")
+                                    .attr("__name__"))
+                            .cast<std::string>());
+                }
+                self.update_state(thread_id, payload, as_node);
             },
             py::arg("thread_id"),
             py::arg("channel_writes"),
             py::arg("as_node") = "",
             "Apply channel writes to the latest checkpoint for "
-            "thread_id and save a new checkpoint. Useful for "
-            "injecting external state from a UI.")
+            "thread_id and save a new checkpoint. Useful for injecting "
+            "external state from a UI / REPL.\n\n"
+            "``channel_writes`` accepts two equivalent shapes:\n"
+            "  - ``dict``: ``{channel_name: value}`` — direct keyed form.\n"
+            "  - ``list[ChannelWrite]``: ``[ChannelWrite('messages', [...])]``\n"
+            "    — symmetric with the shape every node body emits.\n"
+            "Duplicate channels in the list form are last-write-wins; "
+            "for multi-write per channel (e.g. APPEND-reduced messages), "
+            "bundle the values: ``{'messages': [m1, m2]}``. Other types "
+            "raise TypeError so a silent no-op (the pre-v0.3.2 trap) "
+            "can't reoccur.")
 
         .def("fork", &GraphEngine::fork,
             py::arg("source_thread_id"),

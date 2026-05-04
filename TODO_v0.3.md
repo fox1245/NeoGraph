@@ -45,13 +45,6 @@ mental-model and ergonomics gaps.
 
 ## Still pending
 
-## 5. `update_state` signature drift
-
-The docstring/example forms suggest `values={...}` keyword usage but
-the actual signature is `(thread_id, channel_writes, as_node='')`
-where `channel_writes` is a list of `ChannelWrite`. Either accept a
-dict overload or rewrite the docs.
-
 ## 6. `get_state` dict shape — Pydantic / accessor helper
 
 `state["channels"]["messages"]["value"]` is too deep for the common
@@ -75,6 +68,22 @@ Add an example using pgvector via the existing Postgres connection
 infrastructure.
 
 ## ✅ Closed in v0.3.2
+
+5. **`update_state` accepts both dict and `list[ChannelWrite]`** —
+   the v0.3.1 README description ("channel_writes is a list of
+   ChannelWrite") was actually wrong: the engine took a JSON
+   object only, so passing a list **silently no-op'd** (the C++
+   `is_object()` check rejected it). Pybind binding now dispatches
+   on input shape:
+   - `dict` `{channel: value}` → existing path (LangGraph's
+     `values={...}` shape, kwarg name differs).
+   - `list[ChannelWrite]` → reduce to dict (last-write-wins per
+     channel); duck-typed `.channel`/`.value` objects also accepted.
+   - Other types raise `TypeError` so the silent-no-op trap can't
+     come back.
+
+   README `Differences from LangGraph` section corrected.
+   Tests: `bindings/python/tests/test_update_state_shapes.py` (11).
 
 10. **`execute_stream`-only nodes dispatch through `run_stream`** —
     fixed both at the Python binding AND the C++ engine level.

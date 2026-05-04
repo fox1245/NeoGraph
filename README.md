@@ -284,11 +284,19 @@ LangGraph Python — surfaced here so you don't hit them mid-port:
   latest, apply input on top" behaviour. Default is `False` so
   callers that already thread state through `input` themselves are
   unaffected. See the `RunConfig` table above.
-- **`update_state` takes channel writes, not a `values` dict** —
-  the signature is `update_state(thread_id, channel_writes,
-  as_node='')` where `channel_writes` is a list of `ChannelWrite`,
-  not LangGraph's `values={...}` keyword form. Build the list with
-  `[ng.ChannelWrite("messages", [...]), ...]`.
+- **`update_state` accepts dict OR list of `ChannelWrite`** —
+  `update_state(thread_id, channel_writes, as_node='')` takes
+  either of two shapes for `channel_writes`:
+  - dict: `{"messages": [...]}` — the directly-keyed form, closest
+    to LangGraph's `values={...}` (kwarg name differs).
+  - list: `[ChannelWrite("messages", [...]), ...]` — symmetric with
+    what every node body emits.
+
+  Duplicate channels in the list form are last-write-wins; for
+  multi-write-per-channel on an APPEND reducer (e.g. appending two
+  messages in one call), bundle the values into the value list:
+  `{"messages": [m1, m2]}`. Other types raise `TypeError` instead
+  of silently no-op'ing (a pre-v0.3.2 trap closed by item #5).
 - **`get_state(thread_id)` returns a nested dict** — read a channel
   with `state["channels"]["messages"]["value"]`. There is no flat
   helper today; if you find yourself writing the same accessor
