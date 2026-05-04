@@ -272,6 +272,7 @@ exposes a new architectural seam, or when a candidate lands
 | 2 | Explicit `RunContext` arg | Proposed | v0.3.1 multi-Send, v0.3.2 C++ scope |
 | 3 | Hierarchical CancelToken | Proposed | v0.3.2 hooks, v0.3.2 emit-vs-bind |
 | 4 | Self-evolving graph runtime hooks | Research | TODO_v0.3.md #8 |
+| 5 | pgvector RAG example | Cookbook | TODO_v0.3.md #9 |
 
 ---
 
@@ -325,3 +326,43 @@ forms to investigate:
 
 TODO_v0.3.md item #8 — deferred from v0.3.x as research, not a
 user blocker.
+
+## Candidate 5 — Cookbook track: pgvector RAG example
+
+### Context
+
+`bindings/python/examples/` (23 examples) covers ReAct, HITL,
+intent routing, multi-agent debate, deep-research (web crawl /
+web search), self-evolving graph, etc. — but **no vector
+retrieval / RAG** example. Confirmed not folded into 16/17:
+those are web research, not embedding-based retrieval.
+
+RAG is one of the most common LLM patterns; absence is a real
+discoverability gap for users evaluating NeoGraph.
+
+### Why it's a cookbook entry, not an engine concern
+
+The engine surface is sufficient as-is — `PostgresCheckpointStore`
+already brings a connection pool / config story that an embedding
++ pgvector node can re-use. No engine API additions needed; the
+work is purely a worked example (~150-200 lines):
+
+  - `EmbeddingNode` — calls OpenAI embeddings or local model.
+  - `RetrieveNode` — pgvector similarity query against a
+    pre-populated table.
+  - `RAGCallNode` — LLM call with retrieved context concatenated.
+  - One-time index setup script (separate from the example body
+    so the example doesn't reindex on every run).
+
+### Why deferred from v0.3.x
+
+The v0.3.x series was scoped around engine bugs / ergonomics
+exposed by the FastAPI SSE chat-demo feedback. RAG isn't an
+engine bug; it's "common pattern needs a worked example."
+Belongs to a separate cookbook drumbeat where each entry is a
+real-world recipe rather than a v-bump.
+
+### Triggering round
+
+TODO_v0.3.md item #9 — confirmed cookbook material (no engine
+gap), deferred to a future "examples track" sweep.
