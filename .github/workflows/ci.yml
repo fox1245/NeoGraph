@@ -492,8 +492,17 @@ jobs:
           # not being intercepted) — deselect them by name.
           export LD_PRELOAD=$(gcc -print-file-name=libasan.so)
           export PYTHONPATH=build-asan:bindings/python
+          # cancel propagation tests (v0.3.x) throw CancelledException
+          # across the engine→Python boundary, hitting the same
+          # ``real___cxa_throw == nullptr`` ASan-interceptor CHECK that
+          # propagate / undocumented_reducer / noopentelemetry already
+          # trip. Add them to the deselect list — the propagation
+          # itself is exercised by ctest under TSan and the live LLM
+          # cancel tests in non-sanitizer builds.
           python -m pytest bindings/python/tests/ -q \
-            -k "not propagate and not undocumented_reducer and not noopentelemetry"
+            -k "not propagate and not undocumented_reducer and not noopentelemetry \
+               and not run_async_cancel_does_not_double_resolve_future \
+               and not run_stream_async_cancel_does_not_double_resolve_future"
 
   # ThreadSanitizer race-detection gate. Catches data races that ASan
   # can't see — concurrent reads/writes without happens-before. Caught

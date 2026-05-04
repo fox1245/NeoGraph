@@ -477,17 +477,31 @@ NodeExecutor::run_parallel_async(
     // Find first exception + classify. NodeInterrupt gets a dedicated
     // cp-save with next_nodes={offender} so resume re-enters on just
     // that node (siblings' pending writes are already recorded).
+    //
+    // TSan-safe NodeInterrupt path: extract the reason as a plain
+    // ``std::string`` while we still hold the exception_ptr, then
+    // throw a *fresh* NodeInterrupt on the main thread. The original
+    // worker-allocated eptr (and its libstdc++-internal atomic
+    // refcount) never crosses the ``co_await save_super_step_async``
+    // suspend boundary — that's where TSan was flagging a benign
+    // libstdc++ ``__exception_ptr::_M_release`` race against the
+    // worker thread's eptr destructor (see
+    // ``feedback_parallel_group_eptr_race.md``). Non-interrupt
+    // exceptions still rethrow the original eptr on the same thread
+    // they were classified, no co_await between, so no race window.
     std::exception_ptr first_exception;
     std::string        first_exception_node;
     bool               is_node_interrupt = false;
+    std::string        ni_reason;
     for (std::size_t i = 0; i < ready.size(); ++i) {
         if (excs[i] && !first_exception) {
             first_exception      = excs[i];
             first_exception_node = ready[i];
             try {
                 std::rethrow_exception(first_exception);
-            } catch (const NodeInterrupt&) {
+            } catch (const NodeInterrupt& ni) {
                 is_node_interrupt = true;
+                ni_reason = ni.reason();
             } catch (...) {
                 // non-interrupt; leave is_node_interrupt = false
             }
@@ -504,6 +518,11 @@ NodeExecutor::run_parallel_async(
                 first_exception_node, next_nodes,
                 CheckpointPhase::NodeInterrupt, step, parent_cp_id,
                 barrier_state);
+            // Drop the worker eptr and throw a fresh NodeInterrupt —
+            // see comment above the loop. The fresh exception is
+            // wholly owned by the current (main) thread.
+            first_exception = nullptr;
+            throw NodeInterrupt(ni_reason);
         }
         std::rethrow_exception(first_exception);
     }
