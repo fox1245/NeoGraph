@@ -58,6 +58,20 @@ namespace neograph::async {
 template <typename T>
 T run_sync(asio::awaitable<T> aw,
            neograph::graph::CancelToken* cancel = nullptr) {
+    // v0.3.2: short-circuit if the parent token is already cancelled.
+    // Without this, the retry loop in NodeExecutor would re-call
+    // Provider::complete after a first cancel, fresh run_sync would
+    // bind its slot AFTER add_cancel_hook fired its post-emit (the
+    // emit-before-bind race), the cancel signal would be lost, and
+    // the new HTTP request would run to completion — burning billable
+    // tokens on every retry attempt. Throwing CancelledException
+    // eagerly closes that loop: the executor's retry loop catches it
+    // (alongside NodeInterrupt) and skips retries, so a second
+    // cancelled call never hits the wire.
+    if (cancel && cancel->is_cancelled()) {
+        throw neograph::graph::CancelledException("run_sync entry");
+    }
+
     asio::io_context io;
     std::optional<T> result;
     std::exception_ptr err;
@@ -102,6 +116,14 @@ T run_sync(asio::awaitable<T> aw,
         // hook destroyed here — unregisters and serializes against
         // any in-flight cancel() invocation before local_sig dies.
         (void)hook;
+        // v0.3.2: if the inner co_spawn completed because of a cancel
+        // (asio::system_error operation_aborted from a torn-down HTTP
+        // socket), surface it as the typed CancelledException so the
+        // executor's retry loop can short-circuit instead of treating
+        // it as a transient runtime_error.
+        if (err && cancel->is_cancelled()) {
+            throw neograph::graph::CancelledException("run_sync inner abort");
+        }
     } else {
         asio::co_spawn(io, body(), asio::detached);
         io.run();
@@ -114,6 +136,12 @@ T run_sync(asio::awaitable<T> aw,
 /// Void specialization — same semantics, no return value.
 inline void run_sync(asio::awaitable<void> aw,
                      neograph::graph::CancelToken* cancel = nullptr) {
+    // v0.3.2: same eager short-circuit as the templated peer above.
+    // See that overload's comment for the retry/cost-leak rationale.
+    if (cancel && cancel->is_cancelled()) {
+        throw neograph::graph::CancelledException("run_sync entry");
+    }
+
     asio::io_context io;
     std::exception_ptr err;
 
@@ -140,6 +168,9 @@ inline void run_sync(asio::awaitable<void> aw,
                                           asio::detached));
         io.run();
         (void)hook;
+        if (err && cancel->is_cancelled()) {
+            throw neograph::graph::CancelledException("run_sync inner abort");
+        }
         if (err) std::rethrow_exception(err);
         return;
     } else {

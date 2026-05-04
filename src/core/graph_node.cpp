@@ -116,6 +116,14 @@ GraphNode::execute_stream_async(const GraphState& state,
 
 // --- GraphNode default execute_full: wraps execute() ---
 NodeResult GraphNode::execute_full(const GraphState& state) {
+    // v0.3.2: install cancel-token thread-local for the duration of
+    // the sync execute() call. Mirrors execute_full_async's scope so
+    // either entry point lights up provider.complete()'s cancel
+    // pickup. Engine sync run() goes through execute() → here →
+    // user execute() → provider.complete; without the scope the
+    // sync path saw a null current_cancel_token() and the multi-Send
+    // worker's HTTP request couldn't be aborted.
+    CurrentCancelTokenScope scope(state.run_cancel_token());
     return NodeResult{execute(state)};
 }
 
@@ -140,6 +148,20 @@ GraphNode::execute_full_async(const GraphState& state) {
     // Async-native Send/Command emitters should override THIS method
     // directly with their own awaitable body — the default never has
     // to fabricate one.
+    //
+    // v0.3.2: install the run's cancel token as the thread-local
+    // ``current_cancel_token()`` for the duration of the synchronous
+    // ``execute_full(state)`` call. This is what lets a sync C++
+    // node's ``provider.complete(params)`` pick up cancel propagation
+    // — Provider::complete reads the same thread-local and binds it
+    // to its inner run_sync's cancellation hooks. PyGraphNode does
+    // this in its own override; native C++ subclasses route through
+    // here. Without this, multi-Send fan-out workers each call
+    // run_sync with a null token and only the engine's super-step
+    // boundary polling notices the cancel — too late: the
+    // parallel_group has already let every HTTP call run to
+    // completion, leaking ~6-7 s of OpenAI billing per branch.
+    CurrentCancelTokenScope scope(state.run_cancel_token());
     co_return execute_full(state);
 }
 
@@ -164,6 +186,10 @@ GraphNode::execute_full_async(const GraphState& state) {
 // the fall-through, so we don't silently swallow errors.
 NodeResult GraphNode::execute_full_stream(
     const GraphState& state, const GraphStreamCallback& cb) {
+    // v0.3.2: install cancel-token scope. Note execute_full() below
+    // also installs one — RAII nesting is fine, the inner scope just
+    // restores the token on exit (same pointer either way).
+    CurrentCancelTokenScope scope(state.run_cancel_token());
     NodeResult result;
     try {
         result = execute_full(state);
@@ -185,6 +211,13 @@ GraphNode::execute_full_stream_async(const GraphState& state,
     // coroutine path (no run_sync detour) so executor overlap with
     // sibling coroutines is preserved.
     //
+    // v0.3.2: install the run's cancel token as the thread-local
+    // ``current_cancel_token()`` — same rationale as the non-stream
+    // peer above. Streaming-specific note: also covers the
+    // ``execute_stream``-only fallback path below — provider.complete
+    // inside that sync hop sees the cancel token too.
+    CurrentCancelTokenScope scope(state.run_cancel_token());
+
     // GCC-13 workaround: ``catch (const GraphNodeMissingOverride&)``
     // sitting directly around a ``co_await`` does not match the
     // exception (the same family of codegen bugs the rest of this
