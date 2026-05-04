@@ -53,6 +53,36 @@ struct RunConfig {
      * unchanged for callers that haven't opted in.
      */
     std::shared_ptr<CancelToken> cancel_token;
+
+    /**
+     * @brief Auto-resume from latest checkpoint for ``thread_id`` (v0.3.1+).
+     *
+     * Default ``false`` keeps the historical behaviour: every run
+     * starts from a fresh ``GraphState`` initialized by reducers and
+     * overwritten by ``input``. Multi-turn callers carrying prior
+     * conversation state through the input dict themselves see no
+     * change.
+     *
+     * When ``true``:
+     *
+     * 1. The engine loads the latest checkpoint for ``thread_id`` (if
+     *    one exists). The checkpoint's channel values seed
+     *    ``GraphState`` instead of the per-channel initial values.
+     * 2. ``input`` is then applied on top via the same reducer pipeline
+     *    as a fresh run — so e.g. an APPEND ``messages`` channel grows
+     *    by the new turn instead of being clobbered.
+     * 3. The super-step loop starts at the entry node (``plan_start_step``)
+     *    — this flag is for the multi-turn-chat use case where the
+     *    previous run completed at ``__end__`` and the caller wants to
+     *    add a new user message and re-run. For HITL resume from an
+     *    interrupted run, use ``resume()`` / ``resume_async()`` instead.
+     * 4. If no checkpoint exists for ``thread_id``, behaves as if the
+     *    flag were unset (fresh run from ``input``). No error.
+     *
+     * Requires a configured ``CheckpointStore`` — without one the flag
+     * is a no-op.
+     */
+    bool resume_if_exists = false;
 };
 
 /**

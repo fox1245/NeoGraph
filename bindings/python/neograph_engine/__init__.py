@@ -262,10 +262,26 @@ class GraphNode:
             "the unique node name within the graph.")
 
     def execute(self, state):
+        # If the subclass only defines a streaming variant, the user
+        # almost certainly meant to drive the graph via run_stream() /
+        # run_stream_async() instead. Detect that and surface the hint
+        # so the error message points at the actual fix rather than at
+        # the missing override (TODO_v0.3.md item #2).
+        hint = ""
+        cls = type(self)
+        for stream_method in ("execute_full_stream", "execute_stream"):
+            base_attr = getattr(GraphNode, stream_method, None)
+            sub_attr  = getattr(cls,        stream_method, None)
+            if sub_attr is not None and sub_attr is not base_attr:
+                hint = (f" (this node defines {stream_method}() — call "
+                        f"engine.run_stream() / run_stream_async() instead "
+                        f"of run() / run_async() so the streaming variant "
+                        f"is dispatched.)")
+                break
         raise NotImplementedError(
             "GraphNode subclasses must override execute() to return a "
             "list of ChannelWrite, OR override execute_full() to return "
-            "a NodeResult with Command/Send.")
+            "a NodeResult with Command/Send." + hint)
 
 
 def node(type_name=None):
