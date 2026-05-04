@@ -225,12 +225,23 @@ public:
     // execute_async → execute, dropping any Command/Send the user's
     // sync execute_full might emit. Override here to bridge straight
     // to execute_full (which dispatches to the Python user code).
+    //
+    // v0.3: install the run's CancelToken (carried on the GraphState)
+    // as the thread-local ``current_cancel_token()`` so a sync Python
+    // ``execute()`` calling ``ctx.provider.complete(params)`` picks
+    // it up — Provider::complete reads the same thread-local and
+    // binds it to its inner run_sync io_context, propagating cancel
+    // into the LLM HTTP socket. The scope is set/reset around the
+    // synchronous execute_full call only (no co_await spans), so
+    // thread-local semantics stay safe across asio coroutine yields.
     asio::awaitable<NodeResult>
     execute_full_async(const GraphState& state) override {
         // Run the Python call directly in the coroutine — Python
         // execution is GIL-serialized regardless of executor, so
         // there's nothing to gain from co_awaiting on a different
         // executor here.
+        neograph::graph::CurrentCancelTokenScope scope(
+            state.run_cancel_token());
         co_return execute_full(state);
     }
 
@@ -283,6 +294,11 @@ public:
     execute_full_stream_async(
         const GraphState& state,
         const GraphStreamCallback& cb) override {
+        // Same v0.3 cancel propagation as execute_full_async — the
+        // streaming variant gets it too, otherwise long token streams
+        // would leak cost when cancelled.
+        neograph::graph::CurrentCancelTokenScope scope(
+            state.run_cancel_token());
         co_return execute_full_stream(state, cb);
     }
 

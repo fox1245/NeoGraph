@@ -24,7 +24,10 @@
  */
 #pragma once
 
+#include <neograph/graph/cancel.h>
+
 #include <asio/awaitable.hpp>
+#include <asio/bind_cancellation_slot.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
@@ -44,23 +47,38 @@ namespace neograph::async {
 /// The awaitable should use `co_await asio::this_coro::executor` to
 /// obtain an executor for nested operations; that executor will be
 /// the temporary io_context created here.
+///
+/// v0.3+: when @p cancel is non-null, the inner ``co_spawn`` binds
+/// ``cancel->slot()`` so a concurrent ``cancel->cancel()`` aborts
+/// the coroutine — including any in-flight ``co_await`` on a socket
+/// op. Used by ``Provider::complete()`` to propagate
+/// ``CompletionParams::cancel_token`` (or the thread-local current
+/// token set by the engine before each node dispatch) into the LLM
+/// HTTP request, so a cancelled run stops billable work mid-call.
 template <typename T>
-T run_sync(asio::awaitable<T> aw) {
+T run_sync(asio::awaitable<T> aw,
+           neograph::graph::CancelToken* cancel = nullptr) {
     asio::io_context io;
     std::optional<T> result;
     std::exception_ptr err;
 
-    asio::co_spawn(
-        io,
-        [&]() -> asio::awaitable<void> {
-            try {
-                result.emplace(co_await std::move(aw));
-            } catch (...) {
-                err = std::current_exception();
-            }
-            co_return;
-        },
-        asio::detached);
+    auto body = [&]() -> asio::awaitable<void> {
+        try {
+            result.emplace(co_await std::move(aw));
+        } catch (...) {
+            err = std::current_exception();
+        }
+        co_return;
+    };
+
+    if (cancel) {
+        cancel->bind_executor(io.get_executor());
+        asio::co_spawn(io, body(),
+            asio::bind_cancellation_slot(cancel->slot(),
+                                          asio::detached));
+    } else {
+        asio::co_spawn(io, body(), asio::detached);
+    }
 
     io.run();
 
@@ -69,20 +87,27 @@ T run_sync(asio::awaitable<T> aw) {
 }
 
 /// Void specialization — same semantics, no return value.
-inline void run_sync(asio::awaitable<void> aw) {
+inline void run_sync(asio::awaitable<void> aw,
+                     neograph::graph::CancelToken* cancel = nullptr) {
     asio::io_context io;
     std::exception_ptr err;
 
-    asio::co_spawn(
-        io,
-        [&]() -> asio::awaitable<void> {
-            try {
-                co_await std::move(aw);
-            } catch (...) {
-                err = std::current_exception();
-            }
-        },
-        asio::detached);
+    auto body = [&]() -> asio::awaitable<void> {
+        try {
+            co_await std::move(aw);
+        } catch (...) {
+            err = std::current_exception();
+        }
+    };
+
+    if (cancel) {
+        cancel->bind_executor(io.get_executor());
+        asio::co_spawn(io, body(),
+            asio::bind_cancellation_slot(cancel->slot(),
+                                          asio::detached));
+    } else {
+        asio::co_spawn(io, body(), asio::detached);
+    }
 
     io.run();
 

@@ -397,6 +397,15 @@ GraphEngine::execute_graph_async(const RunConfig& config,
     GraphState state;
     init_state(state);
 
+    // v0.3: thread the run's cancel_token through GraphState so
+    // PyGraphNode::execute_full_async can install it as the
+    // ``current_cancel_token()`` thread-local around the synchronous
+    // Python ``execute()`` call. This is what lets a Python node's
+    // ``provider.complete(params)`` (sync, goes through run_sync with
+    // a fresh io_context) pick up cancel propagation despite living
+    // outside the engine's asio coroutine chain.
+    state.set_run_cancel_token(config.cancel_token);
+
     StreamMode stream_mode = config.stream_mode;
     CheckpointCoordinator coord(checkpoint_store_, config.thread_id);
 
@@ -441,6 +450,17 @@ GraphEngine::execute_graph_async(const RunConfig& config,
     std::vector<Send> pending_sends;
 
     for (int step = start_step; step < config.max_steps + start_step; ++step) {
+        // v0.3: cooperative cancel checkpoint. Polled at the super-step
+        // boundary so any future node work is suppressed; in-flight
+        // HTTP work inside the just-finished step is aborted via the
+        // asio cancellation_signal bound at co_spawn time (see pybind
+        // bind_graph.cpp::run_async wiring) — both layers needed to
+        // close the cost-leak gap reported in v0.2.3.
+        if (config.cancel_token) {
+            config.cancel_token->throw_if_cancelled(
+                "step " + std::to_string(step));
+        }
+
         // hit_end is informational only — a Send target with no outgoing
         // edges resolves to __end__ in the scheduler and flips hit_end,
         // but that shouldn't kill the loop when other ready paths still

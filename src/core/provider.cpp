@@ -9,11 +9,20 @@
  */
 #include <neograph/provider.h>
 #include <neograph/async/run_sync.h>
+#include <neograph/graph/cancel.h>
 
 namespace neograph {
 
 ChatCompletion Provider::complete(const CompletionParams& params) {
-    return neograph::async::run_sync(complete_async(params));
+    // v0.3: thread cancel propagation through the sync path. The
+    // engine sets a thread-local CancelToken before invoking each
+    // node, so a node calling provider.complete() picks it up
+    // automatically. Caller can still pin params.cancel_token
+    // explicitly to override (e.g. share an abort across threads).
+    auto* tok = params.cancel_token
+                    ? params.cancel_token.get()
+                    : neograph::graph::current_cancel_token();
+    return neograph::async::run_sync(complete_async(params), tok);
 }
 
 asio::awaitable<ChatCompletion>
