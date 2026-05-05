@@ -40,6 +40,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <utility>
@@ -127,10 +128,39 @@ public:
         // either runs to completion before us (we won't see the
         // hook) or blocks until we finish (the hook always observes
         // a live capture).
-        std::lock_guard<std::mutex> lk(hooks_mu_);
-        for (auto& [id, cb] : hooks_) {
-            (void)id;
-            if (cb) cb();
+        //
+        // v0.4 PR 3: ``add_cancel_hook`` is deprecated in favour of
+        // ``fork()``. This branch keeps working for the deprecation
+        // window; new internal call sites (``run_sync``) cascade via
+        // ``fork()`` instead.
+        {
+            std::lock_guard<std::mutex> lk(hooks_mu_);
+            for (auto& [id, cb] : hooks_) {
+                (void)id;
+                if (cb) cb();
+            }
+        }
+
+        // v0.4 PR 3: cascade to live children produced by ``fork()``.
+        // Snapshot live shared_ptrs under the lock, then call
+        // ``cancel()`` on each outside the lock — the recursive call
+        // would otherwise re-enter ``children_mu_`` if a grandchild
+        // exists, and lock_guard isn't reentrant.
+        std::vector<std::shared_ptr<CancelToken>> live_children;
+        {
+            std::lock_guard<std::mutex> lk(children_mu_);
+            live_children.reserve(children_.size());
+            for (auto& w : children_) {
+                if (auto sp = w.lock()) {
+                    live_children.push_back(std::move(sp));
+                }
+            }
+            // Don't bother pruning expired entries here — fork() does
+            // it on the next call, and after this cancel() the parent
+            // is "done" anyway.
+        }
+        for (auto& child : live_children) {
+            child->cancel();
         }
     }
 
@@ -237,7 +267,78 @@ public:
     };
 
     /**
-     * @brief Register a cancellation callback.
+     * @brief Create a child token that cascades from this one (v0.4+).
+     *
+     * Each child has its **own** ``cancellation_signal``, so concurrent
+     * consumers (multi-Send fan-out workers each calling
+     * ``Provider::complete`` → ``run_sync`` with its own io_context)
+     * never overwrite each other's cancellation slot. Calling
+     * ``cancel()`` on the parent walks the live children list and
+     * cascades — every child's signal fires on its own bound executor.
+     *
+     * Replaces ``add_cancel_hook`` as the canonical primitive for
+     * nested cancel scopes. ``add_cancel_hook`` keeps working through
+     * the v0.4.x deprecation window; new code should ``fork()``.
+     *
+     * **Lifetime / ownership**: returns a ``shared_ptr<CancelToken>``;
+     * the parent stores a ``weak_ptr`` so a forked child that goes
+     * out of scope is automatically pruned from the cascade list on
+     * the next ``cancel()`` / ``fork()``. The parent itself can outlive
+     * its children freely.
+     *
+     * **Eager-cancel safety**: if the parent is already cancelled at
+     * the time of ``fork()``, the new child is constructed with its
+     * polling flag pre-set (``is_cancelled() == true``). When the
+     * caller subsequently ``bind_executor`` s the child, the eager-
+     * emit branch in ``bind_executor`` fires the child's signal on
+     * its first co_await checkpoint. This closes the v0.3.2
+     * "emit-vs-bind race" without an explicit short-circuit at
+     * every consumer site.
+     *
+     * Pass-by-value into a coroutine frame is fine — ``shared_ptr``
+     * copy is cheap and the parent reference inside the child stays
+     * valid via shared ownership of the parent. (PR 2 trap shape
+     * does NOT apply.)
+     *
+     * @see ROADMAP_v1.md "Execution plan" → PR 3
+     */
+    [[nodiscard]] std::shared_ptr<CancelToken> fork() {
+        // Construct child outside any lock — its ctor takes no lock.
+        // shared_ptr ctor allocates the control block; cheap relative
+        // to a real cancel scope (one io_context spin-up downstream).
+        auto child = std::shared_ptr<CancelToken>(new CancelToken());
+
+        {
+            std::lock_guard<std::mutex> lk(children_mu_);
+            // Opportunistic prune: every fork() is a natural place to
+            // drop expired weak_ptrs from previous children that have
+            // already been released by their owners. Bounds the
+            // children_ vector at the live-fan-out width even on
+            // long-lived parents (e.g. an engine with 1000 LLM calls
+            // per run, each forking once).
+            children_.erase(
+                std::remove_if(
+                    children_.begin(), children_.end(),
+                    [](const std::weak_ptr<CancelToken>& w) {
+                        return w.expired();
+                    }),
+                children_.end());
+            children_.push_back(child);
+        }
+
+        // Eager propagation: parent already cancelled → child sees
+        // the polling flag immediately. ``bind_executor`` on the
+        // child will then fire its signal at the next co_await.
+        if (cancelled_.load(std::memory_order_acquire)) {
+            child->cancel();
+        }
+        return child;
+    }
+
+    /**
+     * @brief Register a cancellation callback. **Deprecated in v0.4 —
+     *        prefer ``fork()`` for new code.** Kept working for one
+     *        deprecation window so v0.3.x consumers compile unchanged.
      *
      * Each nested ``run_sync`` (e.g. inside ``Provider::complete``)
      * creates its own private ``cancellation_signal`` and registers
@@ -289,10 +390,19 @@ private:
 
     // Per-consumer hooks (nested run_sync). Guarded by its own
     // mutex so cancel() can iterate without contending with
-    // bind_executor on mu_.
+    // bind_executor on mu_. Deprecated in v0.4; kept working for
+    // back-compat (see ``add_cancel_hook`` doc).
     mutable std::mutex hooks_mu_;
     std::uint64_t next_hook_id_ = 0;
     std::vector<std::pair<std::uint64_t, std::function<void()>>> hooks_;
+
+    // v0.4: hierarchical cascade list. Each entry is a child token
+    // produced by ``fork()``. ``cancel()`` walks live children and
+    // cascades. Stored as ``weak_ptr`` so a child that goes out of
+    // scope (its run_sync returned, run completed) is automatically
+    // pruned on the next ``cancel()`` / ``fork()`` traversal.
+    mutable std::mutex children_mu_;
+    std::vector<std::weak_ptr<CancelToken>> children_;
 };
 
 /**
