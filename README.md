@@ -422,6 +422,27 @@ LangGraph Python — surfaced here so you don't hit them mid-port:
   `execute_full_stream`, `execute_full_stream_async`) is
   `[[deprecated]]` in v0.4.x and **removed in v1.0.0** — migrate now
   to silence the warnings.
+- **Two Python deps, full stop** — `pip install neograph-engine`
+  pulls `certifi` and `pydantic>=2.0` and that's the entire runtime
+  dependency tree. The graph engine, schedulers, checkpoint stores,
+  HTTP/WebSocket clients, MCP/A2A/ACP transports, OpenAI-compatible
+  provider, and Postgres/SQLite checkpoint backends are all native
+  C++ baked into the wheel.
+  Compare LangGraph's transitive runtime: `langgraph` →
+  `langchain-core` → `langchain` → `langchain-community` (each a
+  fast-moving package), plus per-integration packages (`langchain-openai`,
+  `langchain-anthropic`, `langchain-postgres`, `langchain-chroma`, …).
+  This is why a working LangGraph script breaks 6 months later —
+  Pydantic v1→v2 broke the world in 2024, and import paths drift across
+  every minor release (`from langchain.chat_models import ChatOpenAI`
+  → `from langchain_openai import ChatOpenAI` →
+  `from langchain_community.chat_models import ChatOpenAI`, depending
+  on which year you read the docs).
+  NeoGraph's Python surface is a thin pybind11 layer over a frozen
+  C++ ABI under semantic-versioning. **Code you write today against
+  v0.4.0 will compile against v1.x** — the deprecation window is the
+  *only* mechanism for breaking changes, and you get a `[[deprecated]]`
+  warning at compile time before anything moves under you.
 
 ## The agent runtime that fits in L3 cache
 
