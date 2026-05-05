@@ -19,14 +19,14 @@ the key is missing.
 |---|------|---------|---------|
 | 01 | [`01_minimal.py`](01_minimal.py) | offline | `GraphNode` subclass + `engine.run()`. The smallest useful graph. |
 | 02 | [`02_tool_dispatch.py`](02_tool_dispatch.py) | offline | `Tool` subclass + built-in `tool_dispatch`. Hand-crafted tool_call (no real LLM). |
-| 03 | [`03_send_fanout.py`](03_send_fanout.py) | offline | `execute_full` → `Send` list + `set_worker_count(4)`. Map-reduce. |
+| 03 | [`03_send_fanout.py`](03_send_fanout.py) | offline | `run(input)` returning `NodeResult` with `Send` list + `set_worker_count(4)`. Map-reduce. |
 | 04 | [`04_async_concurrent.py`](04_async_concurrent.py) | offline | `engine.run_async` + `asyncio.gather` of 8 concurrent runs + `run_stream_async`. |
 | 05 | [`05_openai_provider.py`](05_openai_provider.py) | **OpenAI** | `OpenAIProvider` + built-in `llm_call` node. One-shot completion. |
 | 06 | [`06_react_agent.py`](06_react_agent.py) | **OpenAI** | ReAct loop: `llm_call` ↔ `tool_dispatch` with `has_tool_calls` conditional. |
 | 07 | [`07_checkpoint_hitl.py`](07_checkpoint_hitl.py) | offline | Two-stage propose/approve workflow with mock LLM emitter. |
 | 08 | [`08_intent_routing.py`](08_intent_routing.py) | **OpenAI** | Classifier node + conditional edge → math / translate / general expert. |
 | 09 | [`09_state_management.py`](09_state_management.py) | offline | `set_checkpoint_store(InMemoryCheckpointStore())` + `get_state` + `fork`. |
-| 10 | [`10_command_routing.py`](10_command_routing.py) | offline | `execute_full` returning `Command(goto_node=…, updates=[…])`. |
+| 10 | [`10_command_routing.py`](10_command_routing.py) | offline | `run(input)` returning `Command(goto_node=…, updates=[…])`. |
 | 11 | [`11_reflexion.py`](11_reflexion.py) | **OpenAI** | Actor + critic loop with reflection prompt (Shinn et al. 2023). |
 | 12 | [`12_self_ask.py`](12_self_ask.py) | **OpenAI** | Self-Ask follow-up question decomposition (Press et al. 2022). |
 | 13 | [`13_multi_agent_debate.py`](13_multi_agent_debate.py) | **OpenAI** | Two-debater + judge. Debaters fan out via `Send`. |

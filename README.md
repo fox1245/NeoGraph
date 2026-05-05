@@ -412,15 +412,16 @@ LangGraph Python — surfaced here so you don't hit them mid-port:
   emit_token`, then `emit_token(cb, self._name, token)` inside a
   streaming node. Replaces the 4-line `GraphEvent` construction
   ritual.
-- **One node method** — Python nodes override `def run(self, input)`
-  (v0.4+, see PR 7 of `ROADMAP_v1.md`). Read state from
-  `input.state`, the live cancel handle from
-  `input.ctx.cancel_token`, the streaming sink (or None) from
-  `input.stream_cb`. Return a list of `ChannelWrite` /
-  `Send` / `Command` or a `NodeResult`. The legacy
-  `execute(self, state)` / `execute_full` / `execute_stream` chain
-  still works through the deprecation window; pick `run` for new
-  code.
+- **One node method** — `def run(self, input)` is the canonical
+  override as of **v0.4.0**. Read state from `input.state`, the live
+  cancel handle from `input.ctx.cancel_token`, the streaming sink
+  (or `None`) from `input.stream_cb`. Return a `list[ChannelWrite]`,
+  `list[Send]`, a `Command`, or a `NodeResult`. The legacy 8-virtual
+  chain (`execute`, `execute_async`, `execute_full`,
+  `execute_full_async`, `execute_stream`, `execute_stream_async`,
+  `execute_full_stream`, `execute_full_stream_async`) is
+  `[[deprecated]]` in v0.4.x and **removed in v1.0.0** — migrate now
+  to silence the warnings.
 
 ## The agent runtime that fits in L3 cache
 

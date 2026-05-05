@@ -901,9 +901,10 @@ public:
 | `name` | Node name |
 | `ctx` | Node context providing the LLM provider, tools, model, and instructions |
 
-(LLMCallNode currently still wires through the legacy `execute_async` /
-`execute_stream_async` overrides for back-compat with v0.3 subclasses;
-v1.0 collapses to a single `run` override.)
+(LLMCallNode overrides `run(NodeInput)` directly as of v0.4.0
+(PR 9a / commit `d1070dc`) — legacy 8-virtual chain is no longer
+on its hot path. The same applies to `ToolDispatchNode`,
+`IntentClassifierNode`, and `SubgraphNode`.)
 
 ### ToolDispatchNode
 
