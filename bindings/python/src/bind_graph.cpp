@@ -457,7 +457,16 @@ void init_graph(py::module_& m) {
             },
             py::arg("thread_id"),
             "Latest serialized state for thread_id, or None if no "
-            "checkpoint has been written.")
+            "checkpoint has been written.\n\n"
+            "**v0.4 soft-deprecated**: prefer "
+            "``engine.get_state_view(thread_id)`` (PR 5 of "
+            "ROADMAP_v1.md). The view exposes channels as flat "
+            "attributes (``view.messages``) and supports typed "
+            "Pydantic subclasses; this raw-dict accessor stays as the "
+            "escape hatch for callers that need the nested "
+            "``{'channels': {name: {value, version}}}`` shape "
+            "verbatim. Slated for removal in v1.0 only if the "
+            "deprecation is loud enough; otherwise stays available.")
 
         .def("update_state",
             [](GraphEngine& self,
