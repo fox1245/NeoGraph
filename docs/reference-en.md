@@ -793,73 +793,106 @@ public:
 **Header:** `<neograph/graph/node.h>`
 **Namespace:** `neograph::graph`
 
-Nodes are the computational units of a graph. The library provides an abstract base
-class and four built-in node types.
-
-> **Writing a custom GraphNode subclass?** There are four `execute*`
-> virtuals and their four async peers (8 total). Picking the wrong
-> one silently drops `Command` / `Send`, freezes the event loop, or
-> infinite-recurses. See
-> [`ASYNC_GUIDE.md` §9.2](ASYNC_GUIDE.md#92-graphnode--the-four-quadrant-matrix)
-> for the full decision matrix and the known pitfalls.
+Nodes are the computational units of a graph. The library provides an
+abstract base class and four built-in node types.
 
 ### GraphNode (abstract)
 
-Base class for all graph nodes.
+A subclass overrides ONE method: `run(NodeInput) -> awaitable<NodeOutput>`.
+Read state, decide what to do, return writes (and optionally `Command` /
+`Send`).
 
 ```cpp
 class GraphNode {
 public:
     virtual ~GraphNode() = default;
 
-    // Basic execution: read state, return channel writes
-    virtual std::vector<ChannelWrite> execute(const GraphState& state) = 0;
-
-    // Streaming variant (default: delegates to execute)
-    virtual std::vector<ChannelWrite> execute_stream(
-        const GraphState& state, const GraphStreamCallback& cb);
-
-    // Extended execute: returns NodeResult with optional Command/Send
-    // Default: wraps execute() result into NodeResult.writes
-    virtual NodeResult execute_full(const GraphState& state);
-
-    // Extended streaming variant
-    virtual NodeResult execute_full_stream(
-        const GraphState& state, const GraphStreamCallback& cb);
+    // v0.4 unified dispatch entry. Override this in new code.
+    virtual asio::awaitable<NodeOutput> run(NodeInput in);
 
     virtual std::string get_name() const = 0;
 };
+
+struct NodeInput {
+    const GraphState&          state;       // channels visible to this node
+    const RunContext&          ctx;         // cancel_token, step, thread_id, ...
+    const GraphStreamCallback* stream_cb;   // null when not streaming
+};
+
+using NodeOutput = NodeResult;  // writes + optional Command + optional Sends
 ```
 
-| Method | Description |
+| Member | Description |
 |--------|-------------|
-| `execute(state)` | Core execution. Read from state, perform computation, return channel writes |
-| `execute_stream(state, cb)` | Streaming variant. Emits `GraphEvent`s via `cb` during execution. Default implementation delegates to `execute()` |
-| `execute_full(state)` | Extended execution returning `NodeResult`. Override this to use `Command` or `Send`. Default wraps `execute()` output |
-| `execute_full_stream(state, cb)` | Streaming extended execution. Default delegates to `execute_stream()` and wraps result |
+| `in.state` | Read-only `GraphState`. Use `in.state.get(channel)` for reads |
+| `in.ctx.cancel_token` | Pass to `provider.complete(params)` so an LLM HTTP socket aborts on cancel, or poll `ctx.cancel_token->is_cancelled()` for your own loops |
+| `in.ctx.step` | Current super-step index |
+| `in.ctx.thread_id` | Mirrors `RunConfig::thread_id` |
+| `in.stream_cb` | Streaming sink; if non-null, emit `LLM_TOKEN` events through it. Null on non-streaming runs |
+| Return: `NodeOutput.writes` | Channel writes the engine merges via reducers |
+| Return: `NodeOutput.command` | Optional routing override (`goto_node` + state updates) |
+| Return: `NodeOutput.sends` | Optional dynamic fan-out — engine spawns one branch per `Send` |
 | `get_name()` | Returns the node's unique name within the graph |
 
-To support `Send` or `Command`, override `execute_full()` (or `execute_full_stream()`
-for streaming). The engine always calls the `execute_full*` variants internally.
+Minimal example:
+
+```cpp
+class CounterNode : public neograph::graph::GraphNode {
+public:
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto current = in.state.get("count");
+        int n = current.is_number() ? current.get<int>() : 0;
+        NodeOutput out;
+        out.writes.push_back({"count", n + 1});
+        co_return out;
+    }
+    std::string get_name() const override { return "counter"; }
+};
+```
+
+Async-native LLM call:
+
+```cpp
+class ChatNode : public neograph::graph::GraphNode {
+    std::shared_ptr<Provider> provider_;
+public:
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        CompletionParams params;
+        params.messages    = in.state.get_messages();
+        params.cancel_token = in.ctx.cancel_token;  // cancel propagates
+        auto reply = co_await provider_->complete_async(params);
+        NodeOutput out;
+        json msg;
+        to_json(msg, reply.message);
+        out.writes.push_back({"messages", json::array({msg})});
+        co_return out;
+    }
+    std::string get_name() const override { return "chat"; }
+};
+```
+
+> **Legacy chain (deprecated since v0.4, removed in v1.0).** Pre-v0.4
+> code overrode one of `execute` / `execute_async` / `execute_full` /
+> `execute_full_async` / `execute_stream` / `execute_stream_async` /
+> `execute_full_stream` / `execute_full_stream_async`. Picking the
+> wrong one silently dropped `Command` / `Send`, froze the event loop,
+> or infinite-recursed — that's the seam `run()` collapses. The 8
+> legacy virtuals are marked `[[deprecated]]`; existing subclasses
+> still compile and forward through the default chain. Migrate to
+> `run(NodeInput)` at your leisure.
 
 ### LLMCallNode
 
-Calls the LLM with the current conversation state. Reads from the `"messages"` channel,
-sends a completion request to the provider, and writes the assistant's response back
-to the `"messages"` channel.
+Calls the LLM with the current conversation state. Reads from the
+`"messages"` channel, sends a completion request to the provider, and
+writes the assistant's response back. Streams `LLM_TOKEN` events when
+the run was started via `run_stream` / `run_stream_async`.
 
 ```cpp
 class LLMCallNode : public GraphNode {
 public:
     LLMCallNode(const std::string& name, const NodeContext& ctx);
-
-    std::vector<ChannelWrite> execute(const GraphState& state) override;
-    std::vector<ChannelWrite> execute_stream(
-        const GraphState& state, const GraphStreamCallback& cb) override;
     std::string get_name() const override;
-
-private:
-    CompletionParams build_params(const GraphState& state) const;
 };
 ```
 
@@ -868,7 +901,9 @@ private:
 | `name` | Node name |
 | `ctx` | Node context providing the LLM provider, tools, model, and instructions |
 
-The `execute_stream` override emits `LLM_TOKEN` events for each streamed token.
+(LLMCallNode currently still wires through the legacy `execute_async` /
+`execute_stream_async` overrides for back-compat with v0.3 subclasses;
+v1.0 collapses to a single `run` override.)
 
 ### ToolDispatchNode
 
@@ -961,10 +996,12 @@ Configuration for a single graph execution run.
 
 ```cpp
 struct RunConfig {
-    std::string thread_id;                          // Checkpoint association key
-    json        input;                              // Initial channel writes
-    int         max_steps    = 50;                  // Safety limit for loops
-    StreamMode  stream_mode  = StreamMode::ALL;     // Which events to emit
+    std::string                 thread_id;
+    json                        input;
+    int                         max_steps    = 50;
+    StreamMode                  stream_mode  = StreamMode::ALL;
+    std::shared_ptr<CancelToken> cancel_token;          // v0.3+
+    bool                        resume_if_exists = false; // v0.3.1+
 };
 ```
 
@@ -974,6 +1011,96 @@ struct RunConfig {
 | `input` | `json` | `{}` | Initial values written to channels before execution starts. Typically `{"messages": [...]}` |
 | `max_steps` | `int` | `50` | Maximum number of super-steps before forced termination (prevents infinite loops) |
 | `stream_mode` | `StreamMode` | `ALL` | Bitfield controlling which event types are emitted during streaming |
+| `cancel_token` | `std::shared_ptr<CancelToken>` | `nullptr` | Cooperative cancel handle. Engine wraps this into a `RunContext` and threads it to every node's `run(NodeInput)` call as `in.ctx.cancel_token` |
+| `resume_if_exists` | `bool` | `false` | If `true` and a checkpoint exists for `thread_id`, seed from it before applying `input` (multi-turn chat shape) |
+
+### RunContext (v0.4 PR 1, exposed to nodes via `NodeInput.ctx`)
+
+Per-run dispatch metadata threaded by the engine. Constructed from
+`RunConfig`; consumed inside a node's `run(NodeInput) -> NodeOutput`
+override via `in.ctx`.
+
+```cpp
+struct RunContext {
+    std::shared_ptr<CancelToken>  cancel_token;
+    std::optional<Deadline>       deadline;     // reserved
+    std::string                   trace_id;     // reserved
+    std::string                   thread_id;
+    int                           step;
+    StreamMode                    stream_mode;
+};
+```
+
+| Field | Description |
+|-------|-------------|
+| `cancel_token` | The active token. Pass to `provider.complete(params)` so an LLM HTTP socket aborts on cancel, or poll `is_cancelled()` for your own loops |
+| `deadline` | Reserved (no `RunConfig.deadline` field yet) |
+| `trace_id` | Reserved for OTel integration |
+| `thread_id` | Mirror of `RunConfig.thread_id` |
+| `step` | Current super-step index, updated each iteration |
+| `stream_mode` | Mirror of `RunConfig.stream_mode` |
+
+### CancelToken
+
+Cooperative cancel primitive shared between caller and engine. Construct
+via `std::make_shared<CancelToken>()`, hand to `RunConfig.cancel_token`,
+and call `cancel()` from any thread to abort the in-flight run —
+including the LLM HTTP socket if a node is mid-`provider.complete_async`.
+
+```cpp
+class CancelToken {
+public:
+    void cancel() noexcept;                            // request cancellation
+    bool is_cancelled() const noexcept;                // polling read
+
+    std::shared_ptr<CancelToken> fork();                // v0.4: child token
+    void bind_executor(asio::any_io_executor ex);
+    asio::cancellation_slot slot() noexcept;
+};
+```
+
+#### Hierarchical cancel (v0.4 `fork()`)
+
+Each child token has its own `cancellation_signal`; the parent's
+`cancel()` cascades to every live child. This is the structural
+replacement for the v0.3.x `add_cancel_hook` list (deprecated, removed
+in v1.0). Concurrent nested scopes — a multi-Send fan-out where every
+worker calls `provider.complete(params)` simultaneously — each
+`fork()` once and never overwrite each other's slot.
+
+```cpp
+// Caller side: one parent token, fan it out across N concurrent runs.
+auto parent = std::make_shared<neograph::graph::CancelToken>();
+
+RunConfig cfg_a; cfg_a.thread_id = "user-1"; cfg_a.cancel_token = parent;
+RunConfig cfg_b; cfg_b.thread_id = "user-2"; cfg_b.cancel_token = parent;
+
+auto fut_a = std::async(std::launch::async, [&] { return engine->run(cfg_a); });
+auto fut_b = std::async(std::launch::async, [&] { return engine->run(cfg_b); });
+
+// User hits stop in the UI:
+parent->cancel();   // cascades to every fork() child, every run aborts
+
+// Inside a node — pass the child to provider.complete so the HTTP
+// socket aborts on parent cancel without you doing any wiring:
+asio::awaitable<NodeOutput> run(NodeInput in) override {
+    CompletionParams params;
+    params.messages    = in.state.get_messages();
+    params.cancel_token = in.ctx.cancel_token;   // engine forks for you
+    auto reply = co_await provider_->complete_async(params);
+    NodeOutput out;
+    /* ... */
+    co_return out;
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `cancel()` | Idempotent, thread-safe. Sets the polling flag and emits the asio cancellation_signal on the bound executor; cascades to all live children via `fork()` |
+| `is_cancelled()` | Lock-free polling read |
+| `fork()` | **v0.4 PR 3.** Returns a child shared_ptr. Parent.cancel() cascades; if the parent is already cancelled at fork() time the child is constructed pre-cancelled (no emit-vs-bind race) |
+| `bind_executor(ex)` | Engine-internal; binds the executor that handles signal emits |
+| `slot()` | asio `cancellation_slot` for `bind_cancellation_slot` at `co_spawn` time |
 
 ### RunResult
 

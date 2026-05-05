@@ -313,17 +313,19 @@ LangGraph Python — surfaced here so you don't hit them mid-port:
   through the sync entry. For async-native provider integrations
   (HTTP/2 multiplexing, true overlap with other coroutines), stay
   in C++ and subclass `neograph::llm::Provider` there.
-- **Streaming-only nodes need `run_stream` / `run_stream_async`** —
-  if a Python node defines only `execute_stream` /
-  `execute_full_stream`, calling `engine.run()` (non-streaming)
-  raises `NotImplementedError` from `GraphNode.execute`. The error
-  message points at the streaming entry point — pick `run_stream`
-  if you want token deltas, or also override `execute` /
-  `execute_full` if you want both modes to work.
 - **One-line token emit** — `from neograph_engine.streaming import
   emit_token`, then `emit_token(cb, self._name, token)` inside a
   streaming node. Replaces the 4-line `GraphEvent` construction
   ritual.
+- **One node method** — Python nodes override `def run(self, input)`
+  (v0.4+, see PR 7 of `ROADMAP_v1.md`). Read state from
+  `input.state`, the live cancel handle from
+  `input.ctx.cancel_token`, the streaming sink (or None) from
+  `input.stream_cb`. Return a list of `ChannelWrite` /
+  `Send` / `Command` or a `NodeResult`. The legacy
+  `execute(self, state)` / `execute_full` / `execute_stream` chain
+  still works through the deprecation window; pick `run` for new
+  code.
 
 ## The agent runtime that fits in L3 cache
 
