@@ -364,7 +364,134 @@ independently shippable to PyPI as v0.4.0+i, v0.4.0+(i+1), etc.).
 | 6 ✓ | **Examples migrate** — landed `a2a24ef` (PR 6a, C++) + `0a76e3a` (PR 6b, Python) | 7 C++ + 19 Python examples (44 GraphNode subclasses total) switched to the unified ``run(NodeInput)`` API. PR 6a hand-migrated; PR 6b used an AST-scoped helper to safely batch-rewrite. Smoke runs match v0.3.2 outputs bit-for-bit. ctest 452/452 + pytest 96/96 green. | v0.4.x (split into 6a + 6b) |
 | 7 ✓ | **Pybind binding migrates** — landed `4e186a5` | ``PyGraphNodeOwner`` now overrides ``GraphNode::run(NodeInput)`` and dispatches to Python user's ``run`` method via ``has_user_method`` MRO walk; falls through to the legacy chain when not present. Bound ``RunContext`` / ``NodeInput`` / ``CancelToken`` to Python (re-exported from the package). Smuggling ``CurrentCancelTokenScope`` STAYS — the legacy chain still installs it for un-migrated user code. PR 9 deletes it along with the legacy 8 virtuals. ctest 452/452 + pytest 96/96 + 5 live LLM/WS green; new ``run(input)`` API exercised end-to-end. | v0.4.x |
 | 8 ✓ | **Docs rewrite** — landed `519a00b` | `docs/reference-en.md` §6 GraphNode collapsed to a single `run()` virtual; new RunContext + CancelToken (with `fork()` example) subsections under §7. README "Differences from LangGraph" picked up a "One node method" entry pointing at `run(input)`. The `@ng.node` decorator's internal `_DecoratorNode` now uses `run()` so the Five-second demo runs through the new path. concepts.md / troubleshooting.md sweeps deferred to PR 9 (where they become obviously stale once the legacy chain is deleted). | v0.5.0 |
-| 9 partial | **Old API removal** — PR 9a `d1070dc` (built-in nodes migrated to run()); 9b–d (delete legacy 8 virtuals + add_cancel_hook + smuggling thread_local) **deferred to v1.0.0 release moment** — ROADMAP itself says "Drop the old API only when the deprecation warnings have been quiet for a release", so removal waits for v0.4.0 ship + deprecation feedback period. | v1.0.0 |
+| 9 partial | **Old API removal** — PR 9a `d1070dc` (built-in nodes migrated to run()); 9b–e (legacy 8 virtuals + add_cancel_hook + smuggling thread_local + PyGraphNodeOwner legacy overrides) **deferred to v1.0.0 release moment** — ROADMAP itself says "Drop the old API only when the deprecation warnings have been quiet for a release", so removal waits for v0.4.0 ship + deprecation feedback period. See "Post-v0.4.0 plan" section below for the 4-way sub-PR split. | v1.0.0 |
+
+## Post-v0.4.0 plan (deprecation window → v1.0)
+
+v0.4.0 shipped 2026-05-05 (`4cae42c`, tag `v0.4.0`). PR 1~9a + newcomer
+sweep (`ee11ed6`) all landed. The remaining work is split into two
+phases that run sequentially: a passive observation window, then the
+destructive removal release.
+
+### Phase A — Deprecation window (observe, don't code)
+
+Duration: weeks ~ one minor cycle. No engine code changes; this phase
+exists so deprecation warnings have time to surface real downstream
+breakage before v1.0 deletes the underlying code.
+
+Watch for:
+
+  1. **Deprecation visibility** — are users actually seeing the
+     `[[deprecated]]` warnings on the 8 legacy virtuals + `add_cancel_hook`?
+     PR 4 (`35a4517`) put internal call sites under
+     `NEOGRAPH_PUSH/POP_IGNORE_DEPRECATED` so warnings should ONLY come
+     from user override sites. Issue tracker / discussion / direct
+     feedback channels for "what's this warning?" mentions.
+  2. **Legacy chain regressions** — any newly discovered case where the
+     legacy 8-virtual default chain breaks (silent no-op, forgotten
+     scope, etc.). v0.3.x had 5 rounds of these; one more is plausible.
+  3. **Downstream consumer breakage** — third-party C++ subclasses of
+     `GraphNode`. Known consumers in this repo's orbit:
+     - `neoclaw` — `src/neoclaw_nodes.cpp:94` still has
+       `std::vector<ChannelWrite> execute(const GraphState&) override`.
+       Must self-migrate to `run(NodeInput)` before v1.0 ships or
+       neoclaw breaks on the v1.0 wheel.
+     - `NeoProtocol` Executor runtime — uses NeoGraph WASM build;
+       v0.4.0 binding test recommended.
+     - WASM spike — engine-zero-diff path was the v0.3.x baseline; v0.4
+       run() addition is additive so likely fine, but verify.
+  4. **Newcomer-mode trap surface** — the `ee11ed6` newcomer sweep
+     closed 5 traps from the chatbot demo session. Streaming / MCP /
+     async fan-out / HITL resume are paths that demo didn't touch;
+     similar trap density possible. Surface via fresh `cibuildwheel`
+     + first-time-user simulation, or via a separate session priming.
+  5. **Optional patch releases** — if Phase A surfaces a real bug,
+     ship v0.4.x patch. If a new feature is genuinely needed before
+     v1.0, ship v0.5.0 minor (still in deprecation window).
+
+Exit criterion: Phase A ends when deprecation warnings have been
+"quiet for a release" — concretely, one full minor cycle (e.g. v0.5.0
+shipped) with zero user-visible breakage tied to legacy paths.
+
+### Phase B — v1.0 destructive removal (4 sub-PRs, sequential)
+
+Each sub-PR is independently mergeable on master. Land in this order;
+each must keep ctest 452/452 + pytest 96/96 green at every step.
+**Do NOT bundle into one commit** — review and revert cost compounds.
+
+| Sub-PR | Scope | Risk | Files touched |
+|---|---|---|---|
+| **9b** | Delete `graph_node.cpp` legacy default chain (the 8-virtual cross-routing logic with `ExecuteDefaultGuard` recursion-detection); delete the 8 virtual declarations from `node.h`; migrate internal nodes in `src/core/deep_research_graph.cpp` (5+ subclasses) and `src/core/plan_execute_graph.cpp` (3+ subclasses) from `execute()` / `execute_full()` overrides to `run(NodeInput)`. | **High** — every internal GraphNode subclass must migrate in one PR. Built-in nodes already migrated in PR 9a (`d1070dc`); these two graph factories were the holdouts because their nodes are file-local, not in `nodes/`. | `node.h`, `graph_node.cpp`, `deep_research_graph.cpp`, `plan_execute_graph.cpp` |
+| **9c** | Delete `add_cancel_hook` + `Hook` RAII class + `hooks_` member + `hooks_mu_` + `cancel()`'s hook iteration loop. `cancel.h` shrinks to just `fork()` + `cancel()` + `is_cancelled()` + `slot()` + `bind_executor()`. | **Medium** — `fork()` is the canonical replacement, exercised by 7 CancelTokenFork ctest. Failure mode is link-error in any user code still calling `add_cancel_hook` (caught at compile, not silent). | `cancel.h` only (impl is header-only) |
+| **9d** | Delete `CurrentCancelTokenScope` (header + impl) + `current_cancel_token()` thread_local accessor + the `state.run_cancel_token_` member + `set_run_cancel_token` / `run_cancel_token` / `run_cancel_token_shared` accessors. `cancel.cpp` becomes empty (file removable). `RunContext::cancel_token` is now the only path. | **Medium** — every internal smuggling site must already read `ctx.cancel_token` (PR 7 binding done; provider-side reads need audit). Failure mode: provider that still reads `current_cancel_token()` returns null → cancel doesn't propagate to LLM HTTP. | `cancel.h`, `cancel.cpp` (delete), `state.h`, `graph_state.cpp`, plus audit sweep over `provider/*` |
+| **9e** | Delete `PyGraphNodeOwner`'s 6 legacy GraphNode overrides (`execute(GraphState&)`, `execute_full`, `execute_full_async`, `execute_stream`, `execute_full_stream`, `execute_full_stream_async`) — keep only `run(NodeInput)` + `get_name()` + dtor. Delete `tests/test_node_default_dispatch.cpp` + `tests/test_node_async_default.cpp` + their CMakeLists entries. | **Low** — pure subtraction, no logic to break. Failure mode: any user Python class still defining only `execute()` (no `run()`) hits NotImplementedError on dispatch. Phase A should have surfaced these. | `bindings/python/src/bind_node.cpp`, `tests/CMakeLists.txt`, two test files |
+
+After 9b–e land:
+
+  - **SOVERSION introduce** (not "bump" — currently no
+    `set_target_properties(... VERSION ... SOVERSION ...)` exists
+    on any neograph_* lib). v1.0.0 is the natural moment to introduce
+    SOVERSION 1 across `libneograph_core` / `_llm` / `_postgres` /
+    `_sqlite` / `_mcp` / `_a2a` / `_acp`. Verify cibuildwheel matrix
+    (manylinux soname suffix, macOS install_name, Windows DLL — each
+    handles SOVERSION differently; treat as a bench-style verify
+    rather than assuming "CMake property = it works").
+  - **Docs sweep** — `docs/concepts.md` "8 dispatch entry points"
+    paragraph collapses to one; `docs/troubleshooting.md` deletes
+    legacy-chain entries; README "Differences from LangGraph"
+    becomes "How NeoGraph thinks" (most LG-delta entries no longer
+    apply because the gap closed).
+  - **v1.0.0 tag → PyPI publish** — last step. Rollback cost is high
+    (yanking PyPI release + reverting tag), so verify the full ctest
+    + pytest + 5 live LLM + cibuildwheel 20-wheel matrix green
+    BEFORE pushing the tag.
+
+### Post-v0.4.0 minor corrections to this roadmap
+
+Two small inaccuracies in earlier drafts that the audit caught:
+
+  - **PyGraphNodeOwner legacy override count is 6, not 7.** Earlier
+    notes said "7 overrides remove, run() only remains." Actual
+    GraphNode-derived overrides in `bind_node.cpp:183`'s
+    `PyGraphNodeOwner` are 6 (the 8 GraphNode virtuals minus
+    `execute_async` and `execute_stream_async` which were never
+    overridden — default chain handles them). After 9e: `run()` +
+    `get_name()` + dtor remain, not just `run()`.
+  - **SOVERSION is "introduce" not "bump."** The `CMakeLists.txt:5`
+    comment mentions SOVERSION but no actual
+    `set_target_properties(... SOVERSION ...)` call exists. v1.0
+    is the first version to set it. Implication: cibuildwheel
+    matrix runs need to verify wheel layout doesn't regress when
+    SOVERSION suffix appears on Linux .so / macOS dylib install_name.
+
+### "What if we never remove?" cost analysis
+
+If Phase B never lands (legacy stays in v1.0+), the system **does
+not break** — every current scenario keeps working, all 452 ctest
+pass, deprecation warnings fire on user override sites only. The
+cost is structural rather than acute:
+
+  - **Bug-class breeding ground stays open.** v0.3.x's 5-round cancel
+    propagation patch series happened because the same pattern had
+    to be threaded through 8 dispatch entry points × 2 languages.
+    Leaving the legacy chain keeps M-of-N omission bugs available
+    for the next cross-cutting concern (deadline / trace_id / metric
+    handle / observability tracing).
+  - **`state.run_cancel_token_` non-channel-set member** drops on
+    every multi-Send fan-out unless explicitly forwarded. Any new
+    per-run field added here repeats the v0.3.1 pointer-drop bug.
+  - **Two API surfaces in docs** — newcomer can't tell `execute` vs
+    `run` apart without reading source; `ee11ed6` newcomer sweep's 5
+    traps were exactly this docs-gap shape.
+  - **SOVERSION never introduced cleanly.** Distro packagers
+    (Debian, Homebrew, conda-forge) treat libraries without
+    SOVERSION as upstream-mismanaged.
+  - **Warning fatigue.** Permanent deprecation warnings train users
+    to ignore them, so the next real deprecation gets buried.
+
+None of these break v0.4.0 today. They make every future evolution
+slower and bug-prone. The v1.0 promise of "single canonical way" is
+the answer to all five at once.
 
 ## Per-PR contract
 
