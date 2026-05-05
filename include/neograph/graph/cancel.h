@@ -352,7 +352,14 @@ public:
      * If the token is already cancelled when this is called, the
      * callback fires synchronously and an empty handle is returned.
      */
-    [[nodiscard]] Hook add_cancel_hook(std::function<void()> cb) {
+    [[nodiscard]]
+    [[deprecated(
+        "v0.4: use fork() instead — it produces a child token with "
+        "its own cancellation_signal so concurrent nested cancel "
+        "scopes never overwrite each other's slot. add_cancel_hook "
+        "is preserved for back-compat through v0.5 and removed in "
+        "v1.0. See ROADMAP_v1.md PR 9.")]]
+    Hook add_cancel_hook(std::function<void()> cb) {
         if (cancelled_.load(std::memory_order_acquire)) {
             // Already cancelled — fire and don't register.
             cb();

@@ -70,6 +70,17 @@ struct NodeInput {
 /// at the call site; the underlying structure is unchanged.
 using NodeOutput = NodeResult;
 
+/// PR 4 (v0.4.0): deprecation marker for the legacy 8-virtual chain.
+/// Centralised so the message stays consistent across every override
+/// point. v0.4.x emits ``-Wdeprecated-declarations`` warnings; v1.0
+/// removes the marked methods entirely. See ROADMAP_v1.md PR 9.
+#define NEOGRAPH_DEPRECATED_VIRTUAL                              \
+    [[deprecated(                                                \
+        "v0.4: override run(NodeInput) -> awaitable<NodeOutput> " \
+        "instead. The legacy 8-virtual chain is preserved for "   \
+        "back-compat through v0.5 and removed in v1.0. See "      \
+        "ROADMAP_v1.md.")]]
+
 /**
  * @brief Thrown by the GraphNode default-execute chain when none of
  *        ``execute`` / ``execute_async`` / ``execute_full`` /
@@ -174,6 +185,7 @@ public:
      * @param state The current graph state (read-only access).
      * @return Vector of channel writes to apply to the state.
      */
+    NEOGRAPH_DEPRECATED_VIRTUAL
     virtual std::vector<ChannelWrite> execute(const GraphState& state);
 
     /**
@@ -187,6 +199,7 @@ public:
      * @param state The current graph state.
      * @return Awaitable yielding the channel writes.
      */
+    NEOGRAPH_DEPRECATED_VIRTUAL
     virtual asio::awaitable<std::vector<ChannelWrite>>
     execute_async(const GraphState& state);
 
@@ -200,6 +213,7 @@ public:
      * @param cb Callback for emitting streaming events.
      * @return Vector of channel writes.
      */
+    NEOGRAPH_DEPRECATED_VIRTUAL
     virtual std::vector<ChannelWrite> execute_stream(
         const GraphState& state, const GraphStreamCallback& cb);
 
@@ -210,6 +224,7 @@ public:
      * shape as execute / execute_async. Override at least one of the
      * sync/async pair when adding a streaming-aware async node.
      */
+    NEOGRAPH_DEPRECATED_VIRTUAL
     virtual asio::awaitable<std::vector<ChannelWrite>> execute_stream_async(
         const GraphState& state, const GraphStreamCallback& cb);
 
@@ -222,6 +237,7 @@ public:
      * @param state The current graph state.
      * @return NodeResult with writes, optional Command, and optional Sends.
      */
+    NEOGRAPH_DEPRECATED_VIRTUAL
     virtual NodeResult execute_full(const GraphState& state);
 
     /**
@@ -244,6 +260,7 @@ public:
      * here for sync Send/Command emitters; that contract is no longer
      * needed but is harmless if you have it.
      */
+    NEOGRAPH_DEPRECATED_VIRTUAL
     virtual asio::awaitable<NodeResult> execute_full_async(
         const GraphState& state);
 
@@ -253,12 +270,14 @@ public:
      * @param cb Callback for emitting streaming events.
      * @return NodeResult with writes, optional Command, and optional Sends.
      */
+    NEOGRAPH_DEPRECATED_VIRTUAL
     virtual NodeResult execute_full_stream(
         const GraphState& state, const GraphStreamCallback& cb);
 
     /**
      * @brief Async peer of execute_full_stream — Sem 3.4b.
      */
+    NEOGRAPH_DEPRECATED_VIRTUAL
     virtual asio::awaitable<NodeResult> execute_full_stream_async(
         const GraphState& state, const GraphStreamCallback& cb);
 

@@ -8,6 +8,12 @@
 // This test pins the new behaviour with a scripted provider that
 // delivers three tokens to the StreamCallback; the test asserts
 // every token surfaced as an LLM_TOKEN event on the GraphStreamCallback.
+//
+// PR 4: this test calls the legacy execute() by name to compare
+// streaming vs non-streaming output. Suppress the deprecation
+// warning at file scope.
+#include <neograph/api.h>  // NEOGRAPH_PUSH_IGNORE_DEPRECATED
+NEOGRAPH_PUSH_IGNORE_DEPRECATED
 
 #include <gtest/gtest.h>
 #include <neograph/neograph.h>
@@ -133,3 +139,5 @@ TEST(IntentClassifierStreaming, StreamingMatchesNonStreamingRouting) {
     EXPECT_EQ(sync_writes[0].value.get<std::string>(),
               stream_writes[0].value.get<std::string>());
 }
+
+NEOGRAPH_POP_IGNORE_DEPRECATED

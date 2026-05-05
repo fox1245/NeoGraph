@@ -49,3 +49,33 @@
 #else
     #define NEOGRAPH_API
 #endif
+
+// PR 4 (v0.4.0): cross-compiler deprecation-warning suppression.
+// Used inside the engine where the legacy 8-virtual default chain
+// and add_cancel_hook fallback paths legitimately call deprecated
+// symbols on behalf of consumers who haven't migrated yet. User
+// code calling the same symbols still sees the warning.
+//
+//   GCC / clang  → -Wdeprecated-declarations
+//   MSVC         → C4996
+//
+// Block-style usage:
+//   NEOGRAPH_PUSH_IGNORE_DEPRECATED
+//   // ... legacy default chain body ...
+//   NEOGRAPH_POP_IGNORE_DEPRECATED
+#if defined(__GNUC__) || defined(__clang__)
+    #define NEOGRAPH_PUSH_IGNORE_DEPRECATED                            \
+        _Pragma("GCC diagnostic push")                                  \
+        _Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+    #define NEOGRAPH_POP_IGNORE_DEPRECATED                              \
+        _Pragma("GCC diagnostic pop")
+#elif defined(_MSC_VER)
+    #define NEOGRAPH_PUSH_IGNORE_DEPRECATED                             \
+        __pragma(warning(push))                                          \
+        __pragma(warning(disable : 4996))
+    #define NEOGRAPH_POP_IGNORE_DEPRECATED                              \
+        __pragma(warning(pop))
+#else
+    #define NEOGRAPH_PUSH_IGNORE_DEPRECATED
+    #define NEOGRAPH_POP_IGNORE_DEPRECATED
+#endif

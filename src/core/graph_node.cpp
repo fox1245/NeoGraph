@@ -17,6 +17,13 @@ namespace neograph::graph {
 // The engine (NodeExecutor::execute_node_with_retry_async) dispatches
 // via run() as of PR 2; PR 4 marks the 8 legacy virtuals
 // ``[[deprecated]]``; v1.0 deletes them. See ROADMAP_v1.md.
+//
+// PR 4: ``execute_full_(stream_)async`` are themselves
+// ``[[deprecated]]``; this default forwarder legitimately calls them
+// on behalf of legacy subclasses that haven't migrated yet. User
+// deprecation warning fires on the user's override site, not on this
+// internal forwarding call.
+NEOGRAPH_PUSH_IGNORE_DEPRECATED
 asio::awaitable<NodeOutput> GraphNode::run(NodeInput in) {
     // ``in`` is by value — the coroutine frame owns its own copy. The
     // state/ctx references inside are still ``const T&`` pointing at
@@ -37,10 +44,20 @@ asio::awaitable<NodeOutput> GraphNode::run(NodeInput in) {
     }
     co_return co_await execute_full_async(in.state);
 }
+NEOGRAPH_POP_IGNORE_DEPRECATED
 
 // --- GraphNode sync ↔ async crossover defaults (Sem 3.4) ---
 // Same shape as Provider::complete / complete_async. Override one,
 // the other comes free.
+//
+// PR 4 (v0.4.0): every method below is marked ``[[deprecated]]`` in
+// node.h, AND the default chain inter-routes through other deprecated
+// methods. The whole region is bracketed by
+// NEOGRAPH_PUSH/POP_IGNORE_DEPRECATED so the engine's own implementation
+// of the legacy fallback chain doesn't drown the build in warnings.
+// User code overriding these still sees the deprecation diagnostic on
+// their override site; only this file's internal default-routing is
+// suppressed.
 //
 // Recursion-guard rationale: the two defaults below call each other.
 // Override ONE of {execute, execute_async, execute_full,
@@ -86,6 +103,7 @@ struct ExecuteDefaultGuard {
 };
 } // anonymous namespace
 
+NEOGRAPH_PUSH_IGNORE_DEPRECATED  // legacy default chain — see block comment above
 std::vector<ChannelWrite> GraphNode::execute(const GraphState& state) {
     ExecuteDefaultGuard guard(this);
     return neograph::async::run_sync(execute_async(state));
@@ -283,6 +301,7 @@ GraphNode::execute_full_stream_async(const GraphState& state,
     }
     co_return result;
 }
+NEOGRAPH_POP_IGNORE_DEPRECATED  // end of legacy default chain
 
 // =========================================================================
 // LLMCallNode
