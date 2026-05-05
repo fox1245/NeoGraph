@@ -57,7 +57,7 @@ class FakeLLMNode(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute(self, state):
+    def run(self, input):
         return [ng.ChannelWrite("messages", [{
             "role": "assistant",
             "content": "",

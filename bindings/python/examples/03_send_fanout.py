@@ -28,8 +28,8 @@ class FanOutNode(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute_full(self, state):
-        # execute_full() returns a list mixing ChannelWrite/Send/Command.
+    def run(self, input):
+        # run() returns a list mixing ChannelWrite/Send/Command.
         # Bare list of Send: each entry triggers one parallel branch.
         return [ng.Send("worker", {"item": i}) for i in range(8)]
 
@@ -44,8 +44,8 @@ class WorkerNode(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute(self, state):
-        n = state.get("item")
+    def run(self, input):
+        n = input.state.get("item")
         # Append-reducer on `results` accumulates each branch's write.
         return [ng.ChannelWrite("results", [n * n])]
 

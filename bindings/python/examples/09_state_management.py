@@ -35,8 +35,8 @@ class IncrementNode(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute(self, state):
-        n = state.get("count") or 0
+    def run(self, input):
+        n = input.state.get("count") or 0
         return [ng.ChannelWrite("count", n + 1)]
 
 

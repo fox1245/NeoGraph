@@ -35,9 +35,9 @@ class ExpensiveNode(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute(self, state):
+    def run(self, input):
         self.calls += 1
-        topic = state.get("topic") or ""
+        topic = input.state.get("topic") or ""
         c = PROVIDER.complete(ng.CompletionParams(
             messages=[ng.ChatMessage(
                 role="user",

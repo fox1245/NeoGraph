@@ -51,9 +51,9 @@ class DecomposeNode(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute(self, state):
-        question = state.get("question")
-        scratchpad = state.get("scratchpad") or ""
+    def run(self, input):
+        question = input.state.get("question")
+        scratchpad = input.state.get("scratchpad") or ""
 
         prompt = f"Question: {question}\n{scratchpad}"
         completion = self._provider.complete(ng.CompletionParams(
@@ -96,8 +96,8 @@ class AnswerIntermediateNode(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute(self, state):
-        follow_up = state.get("follow_up")
+    def run(self, input):
+        follow_up = input.state.get("follow_up")
         completion = self._provider.complete(ng.CompletionParams(
             messages=[
                 ng.ChatMessage(role="system", content=INTERMEDIATE_SYSTEM),
@@ -107,7 +107,7 @@ class AnswerIntermediateNode(ng.GraphNode):
         ))
         answer = completion.message.content.strip()
 
-        scratchpad = state.get("scratchpad") or ""
+        scratchpad = input.state.get("scratchpad") or ""
         scratchpad += f"\nFollow up: {follow_up}\nIntermediate answer: {answer}"
         return [
             # `scratchpad` carries the conversation; overwrite with the

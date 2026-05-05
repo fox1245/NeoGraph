@@ -41,10 +41,10 @@ class ActorNode(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute(self, state):
-        task = state.get("task")
-        prior_attempt = state.get("attempt") or ""
-        prior_reflection = state.get("reflection") or ""
+    def run(self, input):
+        task = input.state.get("task")
+        prior_attempt = input.state.get("attempt") or ""
+        prior_reflection = input.state.get("reflection") or ""
 
         prompt = f"Task:\n{task}\n"
         if prior_attempt:
@@ -71,10 +71,10 @@ class CriticNode(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute(self, state):
-        task = state.get("task")
-        attempt = state.get("attempt") or ""
-        n = (state.get("iteration") or 0) + 1
+    def run(self, input):
+        task = input.state.get("task")
+        attempt = input.state.get("attempt") or ""
+        n = (input.state.get("iteration") or 0) + 1
 
         completion = self._provider.complete(ng.CompletionParams(
             messages=[

@@ -32,8 +32,8 @@ def make_persona_node(name, system_prompt):
         def get_name(self):
             return self._name
 
-        def execute(self, state):
-            topic = state.get("topic")
+        def run(self, input):
+            topic = input.state.get("topic")
             completion = PROVIDER.complete(ng.CompletionParams(
                 messages=[
                     ng.ChatMessage(role="system", content=system_prompt),
@@ -59,7 +59,7 @@ class FanOutDebatersNode(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute_full(self, state):
+    def run(self, input):
         # Same input goes to each branch; the debaters' system prompts
         # carry the persona difference.
         return [
@@ -78,9 +78,9 @@ class JudgeNode(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute(self, state):
-        topic = state.get("topic")
-        args = state.get("arguments") or []
+    def run(self, input):
+        topic = input.state.get("topic")
+        args = input.state.get("arguments") or []
         if not args:
             return [ng.ChannelWrite("verdict", "(no arguments to judge)")]
 
