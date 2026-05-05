@@ -20,6 +20,56 @@
 
 namespace neograph::graph {
 
+/// Per-run dispatch metadata. Defined in
+/// ``neograph/graph/engine.h``; forward-declared here because
+/// ``node.h`` is below ``engine.h`` in the include order (a full
+/// ``#include`` would loop). The translation unit
+/// (``graph_node.cpp``) pulls in ``engine.h`` to see the layout.
+struct RunContext;
+
+/**
+ * @brief Per-call input bundle for the v0.4 unified ``run()`` virtual.
+ *
+ * Replaces the ``(state[, cb])`` parameter pair that the legacy 8-
+ * virtual cross-product passed around. New nodes override
+ * ``GraphNode::run(NodeInput) -> awaitable<NodeOutput>`` and read
+ * everything they need (state, per-run metadata, optional streaming
+ * sink) from this struct. Trivially constructed at the dispatch site;
+ * cheap to pass by const reference.
+ *
+ * **PR 2 (v0.4.0)**: ``run()`` is additive — the default body
+ * forwards to the legacy 8-virtual chain, so existing C++ subclasses
+ * continue to compile and work unchanged. PR 4 marks the legacy
+ * virtuals ``[[deprecated]]``; v1.0 deletes them.
+ *
+ * @see ROADMAP_v1.md "Execution plan" → PR 2
+ */
+struct NodeInput {
+    /// Snapshot of the channel state visible to this node.
+    const GraphState&  state;
+
+    /// Per-run metadata threaded by the engine — cancel token,
+    /// deadline, trace_id, thread_id, current super-step, stream
+    /// mode. PR 1 plumbed this through every dispatch hop; PR 2 is
+    /// the first place a user-overridable virtual receives it.
+    const RunContext&  ctx;
+
+    /// Streaming sink. ``nullptr`` for non-streaming runs (the engine
+    /// passes a pointer to its callback only when the caller used
+    /// ``run_stream`` / ``run_stream_async`` and ``StreamMode``
+    /// requests events). New nodes that emit ``LLM_TOKEN`` events
+    /// dereference this when non-null and ignore it otherwise.
+    const GraphStreamCallback* stream_cb = nullptr;
+};
+
+/// Output of the v0.4 unified ``run()`` virtual. Same shape as the
+/// legacy ``NodeResult`` (writes + optional Command + Sends), aliased
+/// here so user code can use either name interchangeably during the
+/// deprecation window. The ROADMAP names it ``NodeOutput`` because the
+/// "input → output" pairing reads more naturally than "input → result"
+/// at the call site; the underlying structure is unchanged.
+using NodeOutput = NodeResult;
+
 /**
  * @brief Thrown by the GraphNode default-execute chain when none of
  *        ``execute`` / ``execute_async`` / ``execute_full`` /
@@ -61,6 +111,56 @@ public:
 class NEOGRAPH_API GraphNode {
 public:
     virtual ~GraphNode() = default;
+
+    /**
+     * @brief v0.4 unified dispatch entry — replaces the 8-virtual cross
+     *        product over (sync/async) × (writes/full) × (stream/non-stream).
+     *
+     * **New nodes override THIS method.** Read ``in.state`` for channel
+     * inputs, read ``in.ctx`` for per-run metadata (cancel token,
+     * deadline, current step, …), check ``in.stream_cb`` for an
+     * optional ``LLM_TOKEN`` sink, and return a ``NodeOutput`` (alias
+     * for ``NodeResult``) populated with channel writes plus optional
+     * ``Command`` / ``Send`` directives.
+     *
+     * **Legacy nodes that override one of the 8 virtuals** keep
+     * working unchanged: the default body of ``run()`` below forwards
+     * to ``execute_full_async`` / ``execute_full_stream_async``, which
+     * preserves the existing default-fallback chain (and its
+     * ``ExecuteDefaultGuard`` recursion guard).
+     *
+     * The engine (``NodeExecutor::execute_node_with_retry_async``)
+     * dispatches via this method as of PR 2. Sync-vs-async is no
+     * longer a user concern — return whatever your body needs to
+     * ``co_return`` (sync work: ``co_return execute(...)``; async work:
+     * ``co_return co_await provider->complete_async(...)``).
+     *
+     * @code
+     * class MyNode : public GraphNode {
+     *     asio::awaitable<NodeOutput> run(const NodeInput& in) override {
+     *         auto messages = in.state.get_messages();
+     *         auto reply = co_await provider_->complete_async({...});
+     *         NodeOutput out;
+     *         out.writes.push_back({"messages", json::array({reply})});
+     *         co_return out;
+     *     }
+     *     std::string get_name() const override { return "my_node"; }
+     * };
+     * @endcode
+     *
+     * @see ROADMAP_v1.md "Execution plan" → PR 2; ``NodeInput`` and
+     * ``NodeOutput`` above.
+     *
+     * **Lifetime note**: ``in`` is taken **by value** so the coroutine
+     * frame owns its own copy of the struct. The ``state`` / ``ctx``
+     * references inside still point to objects on the engine's
+     * suspended-frame stack (which outlive the run by construction),
+     * but the struct itself is no longer a reference parameter.
+     * Coroutine-reference-parameter UAF (per
+     * ``feedback_async_bridge_required.md`` / the v0.2.0 RunConfig
+     * crash) does not apply.
+     */
+    virtual asio::awaitable<NodeOutput> run(NodeInput in);
 
     /**
      * @brief Execute the node: read state, return channel writes.

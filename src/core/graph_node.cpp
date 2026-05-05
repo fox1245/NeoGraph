@@ -1,10 +1,42 @@
 #include <neograph/graph/node.h>
-#include <neograph/graph/engine.h>
+#include <neograph/graph/engine.h>   // RunContext (forward-declared in node.h)
 #include <neograph/async/run_sync.h>
 #include <algorithm>
 #include <stdexcept>
 
 namespace neograph::graph {
+
+// =========================================================================
+// v0.4 unified run() — additive virtual that future-proofs the dispatch
+// surface. New nodes override this directly; legacy subclasses (LLMCall
+// Node, Tool DispatchNode, every example/test/binding written before
+// v0.4) keep working unchanged because the default body below forwards
+// to execute_full_(stream_)async — preserving the legacy 8-virtual
+// fallback chain (and its ExecuteDefaultGuard recursion guard).
+//
+// The engine (NodeExecutor::execute_node_with_retry_async) dispatches
+// via run() as of PR 2; PR 4 marks the 8 legacy virtuals
+// ``[[deprecated]]``; v1.0 deletes them. See ROADMAP_v1.md.
+asio::awaitable<NodeOutput> GraphNode::run(NodeInput in) {
+    // ``in`` is by value — the coroutine frame owns its own copy. The
+    // state/ctx references inside are still ``const T&`` pointing at
+    // the engine's super-step locals, which are alive by construction
+    // (parent coroutines are suspended waiting for this co_await).
+    // Coroutine-reference-parameter UAF (the v0.2.0 RunConfig crash
+    // shape) is sidestepped because the struct itself is not a
+    // reference parameter — only its inner refs are, and those have
+    // the same lifetime guarantee as every other engine-internal ref.
+    //
+    // ctx.cancel_token / ctx.deadline / ctx.step are intentionally not
+    // consumed inside the default — the legacy chain still installs
+    // its CurrentCancelTokenScope from state.run_cancel_token() and
+    // polls cancel at super-step boundaries. Subsequent PRs migrate
+    // those reads from state's smuggled token to in.ctx.cancel_token.
+    if (in.stream_cb) {
+        co_return co_await execute_full_stream_async(in.state, *in.stream_cb);
+    }
+    co_return co_await execute_full_async(in.state);
+}
 
 // --- GraphNode sync ↔ async crossover defaults (Sem 3.4) ---
 // Same shape as Provider::complete / complete_async. Override one,

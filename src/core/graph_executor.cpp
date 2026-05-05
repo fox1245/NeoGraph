@@ -116,12 +116,13 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
     StreamMode stream_mode,
     const RunContext& ctx) {
 
-    // PR 1 (v0.4.0): ctx is plumbed through every dispatch hop but
-    // not yet read — the smuggling channels (state's run_cancel_token,
-    // the current_cancel_token() thread-local) remain authoritative
-    // until subsequent PRs flip the consumers. Marked unused locally
-    // so a -Wunused-parameter sweep doesn't flag the stub.
-    (void)ctx;
+    // PR 2 (v0.4.0): dispatch via the unified ``run(NodeInput)`` virtual.
+    // ``ctx`` reaches the user-overridable surface for the first time
+    // — new nodes read it directly, legacy nodes that don't override
+    // ``run()`` get the default body forwarding to the existing 8-
+    // virtual chain (priority order preserved). PR 1 plumbed ``ctx``
+    // through every dispatch hop; this is where it lands at the
+    // boundary the user actually sees.
 
     auto node_it = nodes_.find(node_name);
     if (node_it == nodes_.end()) {
@@ -162,13 +163,15 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
         std::exception_ptr  retryable_err;
 
         try {
-            if (cb) {
-                ok_result.emplace(co_await node_it->second
-                    ->execute_full_stream_async(state, cb));
-            } else {
-                ok_result.emplace(co_await node_it->second
-                    ->execute_full_async(state));
-            }
+            // PR 2: single dispatch point. NodeInput bundles the legacy
+            // (state[, cb]) tuple plus the per-run RunContext. The
+            // ``stream_cb`` field is null on the non-stream path so the
+            // default ``run()`` routes through ``execute_full_async``;
+            // non-null on the stream path so it routes through
+            // ``execute_full_stream_async``. Both branches preserve
+            // the legacy default-fallback chain bit-for-bit.
+            NodeInput in{state, ctx, cb ? &cb : nullptr};
+            ok_result.emplace(co_await node_it->second->run(in));
         } catch (const NodeInterrupt&) {
             // NodeInterrupt is a control-flow signal, not a retryable
             // error. Bubble out of the coroutine so the caller can save
