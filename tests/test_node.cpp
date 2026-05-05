@@ -1,17 +1,31 @@
-// PR 4: this file calls the legacy 8-virtual chain (execute,
-// execute_full) by name to verify the default bridge during the
-// v0.4 deprecation window. Suppress at file scope; when the legacy
-// API is removed in v1.0 these specific test cases will need to be
-// rewritten or deleted.
+// PR 9a: these tests now drive the v0.4 unified ``run(NodeInput)``
+// virtual on built-in nodes (LLMCallNode, ToolDispatchNode). The few
+// remaining legacy-default-chain tests in this file (e.g.
+// ``DefaultExecuteFullWrapsExecute`` exercising a ``SimpleNode``
+// subclass that overrides only ``execute``) are still covered by
+// ``test_node_default_dispatch.cpp`` / ``test_node_async_default.cpp``;
+// when the legacy chain is deleted in PR 9 those test files go too.
 #include <neograph/api.h>  // NEOGRAPH_PUSH_IGNORE_DEPRECATED
 NEOGRAPH_PUSH_IGNORE_DEPRECATED
 
 #include <gtest/gtest.h>
 #include <neograph/neograph.h>
 #include <neograph/graph/loader.h>
+#include <neograph/async/run_sync.h>
 
 using namespace neograph;
 using namespace neograph::graph;
+
+namespace {
+// Drive a built-in node's awaitable ``run`` to completion on a
+// fresh single-threaded io_context — the right shape for unit
+// tests that exercise just one node out of an engine context.
+NodeOutput drive_run(GraphNode& node, const GraphState& state) {
+    RunContext ctx;
+    return neograph::async::run_sync(
+        node.run(NodeInput{state, ctx, nullptr}));
+}
+}  // namespace
 
 static ReducerFn overwrite_fn() { return ReducerRegistry::instance().get("overwrite"); }
 static ReducerFn append_fn()    { return ReducerRegistry::instance().get("append"); }
@@ -65,12 +79,12 @@ TEST(NodeTest, LLMCallNodeExecute) {
     to_json(user_msg, ChatMessage{"user", "Hi"});
     state.write("messages", json::array({user_msg}));
 
-    auto writes = node.execute(state);
-    ASSERT_EQ(writes.size(), 1);
-    EXPECT_EQ(writes[0].channel, "messages");
+    auto out = drive_run(node, state);
+    ASSERT_EQ(out.writes.size(), 1);
+    EXPECT_EQ(out.writes[0].channel, "messages");
 
     // The written value should contain the assistant response
-    auto msgs = writes[0].value;
+    auto msgs = out.writes[0].value;
     ASSERT_TRUE(msgs.is_array());
     ASSERT_EQ(msgs.size(), 1);
     EXPECT_EQ(msgs[0]["role"], "assistant");
@@ -107,10 +121,10 @@ TEST(NodeTest, ToolDispatchExecutes) {
     to_json(msg_json, assistant_msg);
     state.write("messages", json::array({msg_json}));
 
-    auto writes = node.execute(state);
-    ASSERT_EQ(writes.size(), 1);
+    auto out = drive_run(node, state);
+    ASSERT_EQ(out.writes.size(), 1);
 
-    auto tool_msgs = writes[0].value;
+    auto tool_msgs = out.writes[0].value;
     ASSERT_TRUE(tool_msgs.is_array());
     ASSERT_EQ(tool_msgs.size(), 1);
     EXPECT_EQ(tool_msgs[0]["role"], "tool");
@@ -129,8 +143,8 @@ TEST(NodeTest, ToolDispatchNoToolCalls) {
     to_json(user_msg, ChatMessage{"user", "Hi"});
     state.write("messages", json::array({user_msg}));
 
-    auto writes = node.execute(state);
-    EXPECT_TRUE(writes.empty());
+    auto out = drive_run(node, state);
+    EXPECT_TRUE(out.writes.empty());
 }
 
 TEST(NodeTest, ToolDispatchToolNotFound) {
@@ -149,10 +163,10 @@ TEST(NodeTest, ToolDispatchToolNotFound) {
     to_json(msg_json, assistant_msg);
     state.write("messages", json::array({msg_json}));
 
-    auto writes = node.execute(state);
-    ASSERT_EQ(writes.size(), 1);
+    auto out = drive_run(node, state);
+    ASSERT_EQ(out.writes.size(), 1);
     // Should contain error message
-    auto content = writes[0].value[0]["content"].get<std::string>();
+    auto content = out.writes[0].value[0]["content"].get<std::string>();
     EXPECT_TRUE(content.find("error") != std::string::npos ||
                 content.find("not found") != std::string::npos ||
                 content.find("Tool not found") != std::string::npos);

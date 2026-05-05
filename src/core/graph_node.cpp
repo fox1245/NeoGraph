@@ -345,63 +345,36 @@ CompletionParams LLMCallNode::build_params(const GraphState& state) const {
     return params;
 }
 
-asio::awaitable<std::vector<ChannelWrite>>
-LLMCallNode::execute_async(const GraphState& state) {
-    auto params = build_params(state);
-    auto completion = co_await provider_->complete_async(params);
+asio::awaitable<NodeOutput> LLMCallNode::run(NodeInput in) {
+    auto params = build_params(in.state);
+    // v0.4 PR 9a: explicit cancel propagation — no thread-local
+    // smuggling. The provider binds this token's slot to its inner
+    // ConnPool::async_post co_await, so a caller's cancel() aborts
+    // the in-flight HTTPS socket.
+    params.cancel_token = in.ctx.cancel_token;
 
     json msg_json;
-    to_json(msg_json, completion.message);
+    if (in.stream_cb) {
+        // Bridge per-token events to GraphEvent::LLM_TOKEN on the
+        // engine's stream callback.
+        const GraphStreamCallback& cb = *in.stream_cb;
+        std::string node_name = name_;
+        auto on_token = [&cb, &node_name](const std::string& token) {
+            cb(GraphEvent{GraphEvent::Type::LLM_TOKEN,
+                          node_name, json(token)});
+        };
+        auto completion = co_await provider_->complete_stream_async(
+            params, on_token);
+        to_json(msg_json, completion.message);
+    } else {
+        auto completion = co_await provider_->complete_async(params);
+        to_json(msg_json, completion.message);
+    }
 
-    co_return std::vector<ChannelWrite>{
-        ChannelWrite{"messages", json::array({msg_json})}};
-}
-
-std::vector<ChannelWrite> LLMCallNode::execute_stream(
-    const GraphState& state, const GraphStreamCallback& cb) {
-
-    auto params = build_params(state);
-
-    // Bridge Provider::StreamCallback -> GraphStreamCallback
-    auto on_token = [&cb, this](const std::string& token) {
-        if (cb) {
-            cb(GraphEvent{GraphEvent::Type::LLM_TOKEN, name_, json(token)});
-        }
-    };
-
-    auto completion = provider_->complete_stream(params, on_token);
-
-    json msg_json;
-    to_json(msg_json, completion.message);
-
-    return {ChannelWrite{"messages", json::array({msg_json})}};
-}
-
-asio::awaitable<std::vector<ChannelWrite>>
-LLMCallNode::execute_stream_async(const GraphState& state,
-                                   const GraphStreamCallback& cb) {
-    auto params = build_params(state);
-
-    // Bridge Provider::StreamCallback -> GraphStreamCallback. Same
-    // shape as the sync execute_stream but uses the async-native
-    // provider entry so the engine's coroutine never blocks on a
-    // synchronous call inside a worker. Subclasses with real async
-    // streaming transport (WebSocket Responses, SSE) deliver tokens
-    // directly onto the awaiter's executor.
-    auto on_token = [&cb, this](const std::string& token) {
-        if (cb) {
-            cb(GraphEvent{GraphEvent::Type::LLM_TOKEN, name_, json(token)});
-        }
-    };
-
-    auto completion = co_await provider_->complete_stream_async(
-        params, on_token);
-
-    json msg_json;
-    to_json(msg_json, completion.message);
-
-    co_return std::vector<ChannelWrite>{
-        ChannelWrite{"messages", json::array({msg_json})}};
+    NodeOutput out;
+    out.writes.push_back(
+        ChannelWrite{"messages", json::array({msg_json})});
+    co_return out;
 }
 
 // =========================================================================
@@ -413,9 +386,9 @@ ToolDispatchNode::ToolDispatchNode(const std::string& name, const NodeContext& c
     , tools_(ctx.tools)
 {}
 
-std::vector<ChannelWrite> ToolDispatchNode::execute(const GraphState& state) {
-    auto messages = state.get_messages();
-    if (messages.empty()) return {};
+asio::awaitable<NodeOutput> ToolDispatchNode::run(NodeInput in) {
+    auto messages = in.state.get_messages();
+    if (messages.empty()) co_return NodeOutput{};
 
     // Find the last assistant message with tool_calls
     const ChatMessage* assistant_msg = nullptr;
@@ -425,7 +398,7 @@ std::vector<ChannelWrite> ToolDispatchNode::execute(const GraphState& state) {
             break;
         }
     }
-    if (!assistant_msg) return {};
+    if (!assistant_msg) co_return NodeOutput{};
 
     // Execute each tool call (mirrors agent.cpp:80-104)
     json results = json::array();
@@ -455,7 +428,9 @@ std::vector<ChannelWrite> ToolDispatchNode::execute(const GraphState& state) {
         results.push_back(msg_json);
     }
 
-    return {ChannelWrite{"messages", results}};
+    NodeOutput out;
+    out.writes.push_back(ChannelWrite{"messages", results});
+    co_return out;
 }
 
 // =========================================================================
@@ -524,25 +499,28 @@ std::vector<ChannelWrite> IntentClassifierNode::route_from(const std::string& in
     return {ChannelWrite{"__route__", json(best_route)}};
 }
 
-asio::awaitable<std::vector<ChannelWrite>>
-IntentClassifierNode::execute_async(const GraphState& state) {
-    auto params = build_params(state);
-    auto completion = co_await provider_->complete_async(params);
-    co_return route_from(completion.message.content);
-}
+asio::awaitable<NodeOutput> IntentClassifierNode::run(NodeInput in) {
+    auto params = build_params(in.state);
+    params.cancel_token = in.ctx.cancel_token;
 
-std::vector<ChannelWrite> IntentClassifierNode::execute_stream(
-    const GraphState& state, const GraphStreamCallback& cb) {
+    ChatMessage reply;
+    if (in.stream_cb) {
+        const GraphStreamCallback& cb = *in.stream_cb;
+        std::string node_name = name_;
+        auto on_token = [&cb, &node_name](const std::string& token) {
+            cb(GraphEvent{GraphEvent::Type::LLM_TOKEN, node_name, json(token)});
+        };
+        auto completion = co_await provider_->complete_stream_async(
+            params, on_token);
+        reply = std::move(completion.message);
+    } else {
+        auto completion = co_await provider_->complete_async(params);
+        reply = std::move(completion.message);
+    }
 
-    auto params = build_params(state);
-
-    auto on_token = [&cb, this](const std::string& token) {
-        if (cb) {
-            cb(GraphEvent{GraphEvent::Type::LLM_TOKEN, name_, json(token)});
-        }
-    };
-    auto completion = provider_->complete_stream(params, on_token);
-    return route_from(completion.message.content);
+    NodeOutput out;
+    out.writes = route_from(reply.content);
+    co_return out;
 }
 
 // =========================================================================
@@ -602,23 +580,26 @@ std::vector<ChannelWrite> SubgraphNode::extract_output(
     return writes;
 }
 
-asio::awaitable<std::vector<ChannelWrite>>
-SubgraphNode::execute_async(const GraphState& state) {
+asio::awaitable<NodeOutput> SubgraphNode::run(NodeInput in) {
     RunConfig config;
-    config.input = build_subgraph_input(state);
+    config.input        = build_subgraph_input(in.state);
+    config.cancel_token = in.ctx.cancel_token;
 
-    auto result = co_await subgraph_->run_async(config);
-    co_return extract_output(result.output);
-}
+    json subgraph_output;
+    if (in.stream_cb) {
+        // Forward the parent's stream sink so subgraph events (LLM
+        // tokens, node enter/exit, etc.) surface at the parent
+        // graph's caller without buffering.
+        auto result = co_await subgraph_->run_stream_async(config, *in.stream_cb);
+        subgraph_output = std::move(result.output);
+    } else {
+        auto result = co_await subgraph_->run_async(config);
+        subgraph_output = std::move(result.output);
+    }
 
-std::vector<ChannelWrite> SubgraphNode::execute_stream(
-    const GraphState& state, const GraphStreamCallback& cb) {
-
-    RunConfig config;
-    config.input = build_subgraph_input(state);
-
-    auto result = subgraph_->run_stream(config, cb);
-    return extract_output(result.output);
+    NodeOutput out;
+    out.writes = extract_output(subgraph_output);
+    co_return out;
 }
 
 } // namespace neograph::graph

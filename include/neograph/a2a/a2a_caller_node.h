@@ -39,8 +39,12 @@ class NEOGRAPH_API A2ACallerNode : public neograph::graph::GraphNode {
                   std::string input_key  = "prompt",
                   std::string output_key = "response");
 
-    asio::awaitable<std::vector<neograph::graph::ChannelWrite>>
-    execute_async(const neograph::graph::GraphState& state) override;
+    /// v0.4 PR 9a: unified ``run`` — reads ``input_key`` from state,
+    /// forwards to the remote A2A agent, writes the response (and
+    /// task_id / context_id continuation handles) back. Cancel
+    /// propagates through the underlying A2AClient transport.
+    asio::awaitable<neograph::graph::NodeOutput>
+    run(neograph::graph::NodeInput in) override;
 
     std::string get_name() const override { return name_; }
 

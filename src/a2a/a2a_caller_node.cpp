@@ -8,6 +8,8 @@ namespace neograph::a2a {
 
 using neograph::graph::ChannelWrite;
 using neograph::graph::GraphState;
+using neograph::graph::NodeInput;
+using neograph::graph::NodeOutput;
 
 A2ACallerNode::A2ACallerNode(std::string name,
                              std::shared_ptr<A2AClient> client,
@@ -23,9 +25,8 @@ A2ACallerNode::A2ACallerNode(std::string name,
     }
 }
 
-asio::awaitable<std::vector<ChannelWrite>>
-A2ACallerNode::execute_async(const GraphState& state) {
-    auto raw = state.get(input_key_);
+asio::awaitable<NodeOutput> A2ACallerNode::run(NodeInput in) {
+    auto raw = in.state.get(input_key_);
     std::string prompt;
     if (raw.is_string()) {
         prompt = raw.get<std::string>();
@@ -33,8 +34,8 @@ A2ACallerNode::execute_async(const GraphState& state) {
         prompt = raw.dump();
     }
 
-    auto task_id_val    = state.get(output_key_ + "_task_id");
-    auto context_id_val = state.get(output_key_ + "_context_id");
+    auto task_id_val    = in.state.get(output_key_ + "_task_id");
+    auto context_id_val = in.state.get(output_key_ + "_context_id");
 
     MessageSendParams params;
     params.message.message_id = name_ + "-" + std::to_string(
@@ -64,13 +65,13 @@ A2ACallerNode::execute_async(const GraphState& state) {
         }
     }
 
-    std::vector<ChannelWrite> writes;
-    writes.push_back({output_key_, response_text});
+    NodeOutput out;
+    out.writes.push_back({output_key_, response_text});
     if (!task.id.empty())
-        writes.push_back({output_key_ + "_task_id", task.id});
+        out.writes.push_back({output_key_ + "_task_id", task.id});
     if (!task.context_id.empty())
-        writes.push_back({output_key_ + "_context_id", task.context_id});
-    co_return writes;
+        out.writes.push_back({output_key_ + "_context_id", task.context_id});
+    co_return out;
 }
 
 }  // namespace neograph::a2a
