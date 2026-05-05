@@ -43,7 +43,7 @@ build-backend = "scikit_build_core.build"
 # explicit — this package IS the C++ runtime, not a Python wrapper around
 # someone else's runtime. Python import name is ``neograph_engine``.
 name = "neograph-engine"
-version = "0.3.2"
+version = "0.4.0"
 description = "C++ graph agent engine — Python bindings (LangGraph-equivalent semantics, microsecond engine overhead)"
 readme = "README.md"
 requires-python = ">=3.9"
