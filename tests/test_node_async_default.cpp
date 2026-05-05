@@ -11,6 +11,15 @@
 // execute() — they pick up the async surface for free through the
 // default bridge. These cases pin both directions of the bridge end-
 // to-end with minimal stubs.
+//
+// PR 4 (v0.4.0): the entire legacy 8-virtual chain is marked
+// ``[[deprecated]]``. This test file's whole reason for existing is
+// to verify that the legacy chain still functions during the
+// deprecation window, so we suppress the warnings at file scope.
+// When the legacy API is removed in v1.0 (PR 9), this test file is
+// removed too.
+#include <neograph/api.h>  // NEOGRAPH_PUSH_IGNORE_DEPRECATED
+NEOGRAPH_PUSH_IGNORE_DEPRECATED
 
 #include <gtest/gtest.h>
 #include <neograph/graph/node.h>
@@ -97,3 +106,5 @@ TEST(NodeAsyncDefault, AsyncDirectlyCoSpawnable) {
     EXPECT_EQ(out[0].channel, "out");
     EXPECT_EQ(n.async_calls.load(), 1);
 }
+
+NEOGRAPH_POP_IGNORE_DEPRECATED

@@ -1,3 +1,11 @@
+// PR 4: this file calls the legacy 8-virtual chain (execute,
+// execute_full) by name to verify the default bridge during the
+// v0.4 deprecation window. Suppress at file scope; when the legacy
+// API is removed in v1.0 these specific test cases will need to be
+// rewritten or deleted.
+#include <neograph/api.h>  // NEOGRAPH_PUSH_IGNORE_DEPRECATED
+NEOGRAPH_PUSH_IGNORE_DEPRECATED
+
 #include <gtest/gtest.h>
 #include <neograph/neograph.h>
 #include <neograph/graph/loader.h>
@@ -205,3 +213,5 @@ TEST(NodeTest, DefaultExecuteFullWrapsExecute) {
     EXPECT_FALSE(result.command.has_value());
     EXPECT_TRUE(result.sends.empty());
 }
+
+NEOGRAPH_POP_IGNORE_DEPRECATED
