@@ -60,6 +60,13 @@ namespace neograph::graph {
 
 class GraphState;
 
+/// Per-run metadata carried alongside ``GraphState`` through every
+/// dispatch path. Defined in ``neograph/graph/engine.h``; forward-
+/// declared here because ``executor.h`` is included by ``engine.h``
+/// (a full ``#include`` would loop). The translation unit
+/// (``graph_executor.cpp``) pulls in ``engine.h`` to see the layout.
+struct RunContext;
+
 /**
  * @brief Stateless-per-call node invocation dispatcher.
  *
@@ -120,7 +127,8 @@ public:
         const BarrierState& barrier_state,
         std::vector<std::string>& trace,
         const GraphStreamCallback& cb,
-        StreamMode stream_mode);
+        StreamMode stream_mode,
+        const RunContext& ctx);
 
     /// Inner retry loop with exponential backoff + NodeInterrupt
     /// short-circuit. Drives node->execute_full_(stream_)async via
@@ -136,7 +144,8 @@ public:
         const std::string& node_name,
         GraphState& state,
         const GraphStreamCallback& cb,
-        StreamMode stream_mode);
+        StreamMode stream_mode,
+        const RunContext& ctx);
 
     /**
      * @brief Execute all `ready` nodes concurrently via
@@ -166,7 +175,8 @@ public:
         const BarrierState& barrier_state,
         std::vector<std::string>& trace,
         const GraphStreamCallback& cb,
-        StreamMode stream_mode);
+        StreamMode stream_mode,
+        const RunContext& ctx);
 
     /**
      * @brief Execute a list of Send requests accumulated this step.
@@ -194,7 +204,8 @@ public:
         const std::string& parent_cp_id,
         std::vector<std::string>& trace,
         const GraphStreamCallback& cb,
-        StreamMode stream_mode);
+        StreamMode stream_mode,
+        const RunContext& ctx);
 
 private:
     /// Initialize a clean GraphState using the engine's channel defs.

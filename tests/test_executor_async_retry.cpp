@@ -6,6 +6,7 @@
 // covered by tests/test_node_execution.cpp's 12 cases.
 
 #include <gtest/gtest.h>
+#include <neograph/graph/engine.h>   // RunContext
 #include <neograph/graph/executor.h>
 #include <neograph/graph/node.h>
 
@@ -125,7 +126,7 @@ TEST(ExecutorAsyncRetry, SucceedsFirstTryReturnsResult) {
         [&]() -> asio::awaitable<void> {
             GraphState state; init_state(state, h.channel_defs);
             got = co_await h.executor.execute_node_with_retry_async(
-                "worker", state, nullptr, StreamMode::ALL);
+                "worker", state, nullptr, StreamMode::ALL, RunContext{});
         },
         asio::detached);
     io.run();
@@ -153,7 +154,7 @@ TEST(ExecutorAsyncRetry, RetriesUntilSuccess) {
         [&]() -> asio::awaitable<void> {
             GraphState state; init_state(state, h.channel_defs);
             got = co_await h.executor.execute_node_with_retry_async(
-                "flaky", state, nullptr, StreamMode::ALL);
+                "flaky", state, nullptr, StreamMode::ALL, RunContext{});
         },
         asio::detached);
     io.run();
@@ -180,7 +181,7 @@ TEST(ExecutorAsyncRetry, ExhaustedRetriesPropagateException) {
             try {
                 GraphState state; init_state(state, h.channel_defs);
                 co_await h.executor.execute_node_with_retry_async(
-                    "doomed", state, nullptr, StreamMode::ALL);
+                    "doomed", state, nullptr, StreamMode::ALL, RunContext{});
             } catch (...) {
                 err = std::current_exception();
             }
@@ -204,7 +205,7 @@ TEST(ExecutorAsyncRetry, NodeInterruptShortCircuits) {
             try {
                 GraphState state; init_state(state, h.channel_defs);
                 co_await h.executor.execute_node_with_retry_async(
-                    "hitl", state, nullptr, StreamMode::ALL);
+                    "hitl", state, nullptr, StreamMode::ALL, RunContext{});
             } catch (...) {
                 err = std::current_exception();
             }
@@ -241,7 +242,7 @@ TEST(ExecutorAsyncRunOne, ReplayShortCircuitsExecute) {
             GraphState state; init_state(state, h.channel_defs);
             got = co_await h.executor.run_one_async(
                 "worker", 0, state, replay, coord, "", barrier,
-                trace, nullptr, StreamMode::ALL);
+                trace, nullptr, StreamMode::ALL, RunContext{});
         },
         asio::detached);
     io.run();
@@ -271,7 +272,7 @@ TEST(ExecutorAsyncRunOne, NodeInterruptSavesDedicatedCheckpoint) {
                 GraphState state; init_state(state, h.channel_defs);
                 co_await h.executor.run_one_async(
                     "hitl", 0, state, replay, coord, "", barrier,
-                    trace, nullptr, StreamMode::ALL);
+                    trace, nullptr, StreamMode::ALL, RunContext{});
             } catch (...) {
                 err = std::current_exception();
             }
@@ -318,7 +319,7 @@ TEST(ExecutorAsyncRetry, BackoffDoesNotBlockIoContext) {
         [&]() -> asio::awaitable<void> {
             GraphState state; init_state(state, h.channel_defs);
             got = co_await h.executor.execute_node_with_retry_async(
-                "slow", state, nullptr, StreamMode::ALL);
+                "slow", state, nullptr, StreamMode::ALL, RunContext{});
         },
         asio::detached);
 
