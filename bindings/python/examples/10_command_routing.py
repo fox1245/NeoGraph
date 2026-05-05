@@ -26,8 +26,8 @@ class GuardNode(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute_full(self, state):
-        value = state.get("value") or 0
+    def run(self, input):
+        value = input.state.get("value") or 0
         if value >= 100:
             return ng.Command(
                 goto_node="accept",
@@ -54,7 +54,7 @@ class StubNode(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute(self, state):
+    def run(self, input):
         return [ng.ChannelWrite("audit_log", [self._name])]
 
 

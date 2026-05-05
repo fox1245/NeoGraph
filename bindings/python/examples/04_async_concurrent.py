@@ -23,8 +23,8 @@ class DoublerNode(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute(self, state):
-        seed = state.get("seed") or 0
+    def run(self, input):
+        seed = input.state.get("seed") or 0
         return [ng.ChannelWrite("doubled", seed * 2)]
 
 

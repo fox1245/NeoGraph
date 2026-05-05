@@ -39,8 +39,8 @@ class ClassifierNode(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute(self, state):
-        msgs = state.get_messages()
+    def run(self, input):
+        msgs = input.state.get_messages()
         params = ng.CompletionParams(
             messages=[
                 ng.ChatMessage(role="system", content=CLASSIFIER_PROMPT),
@@ -67,8 +67,8 @@ class ExpertNode(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute(self, state):
-        msgs = state.get_messages()
+    def run(self, input):
+        msgs = input.state.get_messages()
         params = ng.CompletionParams(
             messages=[
                 ng.ChatMessage(role="system", content=self._system),

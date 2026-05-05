@@ -104,8 +104,8 @@ class PromptedLLMNode(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute(self, state):
-        seed = state.get("seed") or ""
+    def run(self, input):
+        seed = input.state.get("seed") or ""
         params = ng.CompletionParams()
         params.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         params.temperature = 0.4

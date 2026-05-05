@@ -36,21 +36,21 @@ tracer = provider.get_tracer("neograph-example")
 class StepA(ng.GraphNode):
     def __init__(self, name): super().__init__(); self._n = name
     def get_name(self): return self._n
-    def execute(self, state):
+    def run(self, input):
         return [ng.ChannelWrite("trail", ["A"])]
 
 
 class StepB(ng.GraphNode):
     def __init__(self, name): super().__init__(); self._n = name
     def get_name(self): return self._n
-    def execute(self, state):
+    def run(self, input):
         return [ng.ChannelWrite("trail", ["B"])]
 
 
 class StepC(ng.GraphNode):
     def __init__(self, name): super().__init__(); self._n = name
     def get_name(self): return self._n
-    def execute(self, state):
+    def run(self, input):
         return [ng.ChannelWrite("trail", ["C"])]
 
 
