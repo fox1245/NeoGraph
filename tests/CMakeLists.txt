@@ -50,6 +50,7 @@ add_executable(neograph_tests
     test_node_cache.cpp
     test_node_default_dispatch.cpp
     test_node_run_dispatch.cpp
+    test_cancel_token_fork.cpp
     test_concurrent_stress.cpp
 )
 

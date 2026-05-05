@@ -86,36 +86,42 @@ T run_sync(asio::awaitable<T> aw,
     };
 
     if (cancel) {
-        // v0.3.1+: each run_sync owns its OWN cancellation_signal and
-        // registers a hook on the parent token. The parent's
-        // cancel() iterates all registered hooks, so concurrent
-        // nested run_syncs (e.g. multi-Send fan-out workers) each
-        // get their HTTP sockets torn down. The pre-v0.3.1 design
-        // bound the parent's single signal to io.get_executor() —
-        // last writer won, so only one of N concurrent workers
-        // received cancel and the rest streamed to completion.
+        // v0.4 PR 3: fork a child token for this nested run_sync.
+        // The child has its own ``cancellation_signal``, bound to
+        // this io_context's executor; ``parent.cancel()`` cascades
+        // to every live child, so concurrent nested run_syncs
+        // (multi-Send fan-out workers each calling
+        // ``provider.complete()``) all get their HTTP sockets torn
+        // down. The pre-v0.3.1 design bound the parent's single
+        // signal to io.get_executor() — last writer won, so only
+        // one of N concurrent workers received cancel and the rest
+        // streamed to completion. v0.3.1's ``add_cancel_hook`` list
+        // was a workaround on top of that single-signal model;
+        // ``fork()`` replaces it with a structural primitive.
         //
-        // Lifetime: the signal is shared so a late-firing hook
-        // (cancel racing with body completion) doesn't UAF a stack
-        // local. The Hook's destructor blocks against in-flight
-        // cancel() invocations, so by the time run_sync returns
-        // every hook callback has completed.
-        auto local_sig =
-            std::make_shared<asio::cancellation_signal>();
-        auto ex = io.get_executor();
-        auto hook = cancel->add_cancel_hook(
-            [sig = local_sig, ex]() mutable {
-                asio::post(ex, [sig]() {
-                    sig->emit(asio::cancellation_type::all);
-                });
-            });
+        // Lifetime: ``child`` is a ``shared_ptr`` so a late-firing
+        // cascade (parent racing with body completion) doesn't UAF.
+        // The parent stores a ``weak_ptr`` to the child, so once
+        // ``child`` goes out of scope at the end of this function
+        // the parent's children_ list naturally drops it.
+        //
+        // Eager-cancel race: if the parent was already cancelled
+        // before ``fork()``, the child's polling flag is pre-set;
+        // ``bind_executor`` then fires the child's signal at the
+        // first co_await checkpoint of body(). No "emit-vs-bind"
+        // window like the pre-v0.3.2 hook design, so the eager
+        // ``is_cancelled()`` short-circuit at function entry stays
+        // strictly as a tiny optimization (skip io_context
+        // construction altogether).
+        auto child = cancel->fork();
+        child->bind_executor(io.get_executor());
         asio::co_spawn(io, body(),
-            asio::bind_cancellation_slot(local_sig->slot(),
+            asio::bind_cancellation_slot(child->slot(),
                                           asio::detached));
         io.run();
-        // hook destroyed here — unregisters and serializes against
-        // any in-flight cancel() invocation before local_sig dies.
-        (void)hook;
+        // ``child`` goes out of scope at end of block → parent's
+        // weak_ptr expires → next parent.cancel()/fork() prunes it.
+
         // v0.3.2: if the inner co_spawn completed because of a cancel
         // (asio::system_error operation_aborted from a torn-down HTTP
         // socket), surface it as the typed CancelledException so the
@@ -154,20 +160,15 @@ inline void run_sync(asio::awaitable<void> aw,
     };
 
     if (cancel) {
-        auto local_sig =
-            std::make_shared<asio::cancellation_signal>();
-        auto ex = io.get_executor();
-        auto hook = cancel->add_cancel_hook(
-            [sig = local_sig, ex]() mutable {
-                asio::post(ex, [sig]() {
-                    sig->emit(asio::cancellation_type::all);
-                });
-            });
+        // v0.4 PR 3: fork a child token. See the templated peer
+        // above for the full rationale; this is the bit-for-bit
+        // void specialization.
+        auto child = cancel->fork();
+        child->bind_executor(io.get_executor());
         asio::co_spawn(io, body(),
-            asio::bind_cancellation_slot(local_sig->slot(),
+            asio::bind_cancellation_slot(child->slot(),
                                           asio::detached));
         io.run();
-        (void)hook;
         if (err && cancel->is_cancelled()) {
             throw neograph::graph::CancelledException("run_sync inner abort");
         }
