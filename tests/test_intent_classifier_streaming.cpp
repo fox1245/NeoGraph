@@ -9,14 +9,14 @@
 // delivers three tokens to the StreamCallback; the test asserts
 // every token surfaced as an LLM_TOKEN event on the GraphStreamCallback.
 //
-// PR 4: this test calls the legacy execute() by name to compare
-// streaming vs non-streaming output. Suppress the deprecation
-// warning at file scope.
+// PR 9a: this test now drives ``IntentClassifierNode::run`` with
+// and without a streaming sink to compare both code paths.
 #include <neograph/api.h>  // NEOGRAPH_PUSH_IGNORE_DEPRECATED
 NEOGRAPH_PUSH_IGNORE_DEPRECATED
 
 #include <gtest/gtest.h>
 #include <neograph/neograph.h>
+#include <neograph/async/run_sync.h>
 
 #include <atomic>
 #include <string>
@@ -89,7 +89,10 @@ TEST(IntentClassifierStreaming, EmitsLLMTokenEventsDuringClassification) {
                                         : e.data.dump());
     };
 
-    auto writes = node.execute_stream(state, cb);
+    GraphStreamCallback gscb = cb;
+    RunContext run_ctx;
+    auto out = neograph::async::run_sync(
+        node.run(NodeInput{state, run_ctx, &gscb}));
 
     // Three tokens → three LLM_TOKEN events tagged "router".
     int token_events = 0;
@@ -105,9 +108,9 @@ TEST(IntentClassifierStreaming, EmitsLLMTokenEventsDuringClassification) {
     EXPECT_EQ("shopping", reconstructed);
 
     // Routing still lands on the full classification result.
-    ASSERT_EQ(1u, writes.size());
-    EXPECT_EQ("__route__", writes[0].channel);
-    EXPECT_EQ("shopping", writes[0].value.get<std::string>());
+    ASSERT_EQ(1u, out.writes.size());
+    EXPECT_EQ("__route__", out.writes[0].channel);
+    EXPECT_EQ("shopping", out.writes[0].value.get<std::string>());
 }
 
 TEST(IntentClassifierStreaming, StreamingMatchesNonStreamingRouting) {
@@ -130,14 +133,18 @@ TEST(IntentClassifierStreaming, StreamingMatchesNonStreamingRouting) {
         json{{"role", "user"}, {"content", "my order is missing"}}
     }));
 
-    auto sync_writes = node.execute(state);
-    auto stream_writes = node.execute_stream(state, {});
+    RunContext run_ctx;
+    auto sync_out = neograph::async::run_sync(
+        node.run(NodeInput{state, run_ctx, nullptr}));
+    GraphStreamCallback empty_cb = [](const GraphEvent&) {};
+    auto stream_out = neograph::async::run_sync(
+        node.run(NodeInput{state, run_ctx, &empty_cb}));
 
-    ASSERT_EQ(sync_writes.size(), stream_writes.size());
-    ASSERT_EQ(1u, sync_writes.size());
-    EXPECT_EQ(sync_writes[0].channel, stream_writes[0].channel);
-    EXPECT_EQ(sync_writes[0].value.get<std::string>(),
-              stream_writes[0].value.get<std::string>());
+    ASSERT_EQ(sync_out.writes.size(), stream_out.writes.size());
+    ASSERT_EQ(1u, sync_out.writes.size());
+    EXPECT_EQ(sync_out.writes[0].channel, stream_out.writes[0].channel);
+    EXPECT_EQ(sync_out.writes[0].value.get<std::string>(),
+              stream_out.writes[0].value.get<std::string>());
 }
 
 NEOGRAPH_POP_IGNORE_DEPRECATED

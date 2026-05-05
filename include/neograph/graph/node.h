@@ -304,24 +304,14 @@ public:
      */
     LLMCallNode(const std::string& name, const NodeContext& ctx);
 
-    /// Async-native execute — co_awaits provider_->complete_async so a
-    /// run on a shared io_context doesn't block during the LLM call.
-    /// The sync execute() is inherited from GraphNode and routes
-    /// through this via run_sync.
-    asio::awaitable<std::vector<ChannelWrite>>
-    execute_async(const GraphState& state) override;
-
-    std::vector<ChannelWrite> execute_stream(
-        const GraphState& state, const GraphStreamCallback& cb) override;
-
-    /// Async streaming peer of execute_stream. Bridges Provider::
-    /// complete_stream_async to GraphStreamCallback. Without this
-    /// override the base GraphNode::execute_stream_async drops `cb`,
-    /// so under the engine's default async coroutine path NO
-    /// LLM_TOKEN events fire — even for callers using run_stream().
-    asio::awaitable<std::vector<ChannelWrite>>
-    execute_stream_async(const GraphState& state,
-                          const GraphStreamCallback& cb) override;
+    /// v0.4 PR 9a: unified ``run`` override. Builds completion params,
+    /// calls ``provider_->complete_async`` (or ``complete_stream_async``
+    /// when ``in.stream_cb`` is non-null and bridges per-token events
+    /// to GraphEvent), writes the assistant message to the
+    /// ``messages`` channel. Passes ``in.ctx.cancel_token`` directly
+    /// into ``params.cancel_token`` so cancellation reaches the LLM
+    /// HTTP socket without the legacy thread-local smuggling.
+    asio::awaitable<NodeOutput> run(NodeInput in) override;
 
     std::string get_name() const override { return name_; }
 
@@ -357,7 +347,11 @@ public:
      */
     ToolDispatchNode(const std::string& name, const NodeContext& ctx);
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override;
+    /// v0.4 PR 9a: unified ``run`` — finds the latest assistant
+    /// message with tool_calls, dispatches each call to the matching
+    /// Tool, writes tool result messages back to the ``messages``
+    /// channel.
+    asio::awaitable<NodeOutput> run(NodeInput in) override;
     std::string get_name() const override { return name_; }
 
 private:
@@ -388,12 +382,11 @@ public:
                          const std::string& prompt,
                          std::vector<std::string> valid_routes);
 
-    /// Async-native classify — same rationale as LLMCallNode.
-    asio::awaitable<std::vector<ChannelWrite>>
-    execute_async(const GraphState& state) override;
-
-    std::vector<ChannelWrite> execute_stream(
-        const GraphState& state, const GraphStreamCallback& cb) override;
+    /// v0.4 PR 9a: unified ``run`` — calls the LLM with the
+    /// classification prompt, parses the result against
+    /// ``valid_routes``, writes the chosen route to ``__route__``.
+    /// Streams per-token events when ``in.stream_cb`` is non-null.
+    asio::awaitable<NodeOutput> run(NodeInput in) override;
     std::string get_name() const override { return name_; }
 
 private:
@@ -436,16 +429,13 @@ public:
                  std::map<std::string, std::string> input_map = {},
                  std::map<std::string, std::string> output_map = {});
 
-    /// Async-native execute — co_awaits subgraph_->run_async so the
-    /// parent run shares its io_context with the child run instead
-    /// of stacking sync calls. Wires correctly through the engine
-    /// thin wrapper (Sem 3.6 API surface); when the engine internals
-    /// go coroutine-native, nested subgraphs benefit transparently.
-    asio::awaitable<std::vector<ChannelWrite>>
-    execute_async(const GraphState& state) override;
-
-    std::vector<ChannelWrite> execute_stream(
-        const GraphState& state, const GraphStreamCallback& cb) override;
+    /// v0.4 PR 9a: unified ``run`` — drives the child engine via
+    /// ``run_async`` (or ``run_stream_async`` when ``in.stream_cb``
+    /// is non-null), maps channels through ``input_map`` /
+    /// ``output_map``. ``in.ctx.cancel_token`` flows through into
+    /// the child run's ``RunConfig`` so a parent cancel cascades to
+    /// the subgraph.
+    asio::awaitable<NodeOutput> run(NodeInput in) override;
     std::string get_name() const override { return name_; }
 
 private:
