@@ -463,6 +463,60 @@ LangGraph Python — surfaced here so you don't hit them mid-port:
     the only constraint that could ever drift, and you'd see it at
     install time, not 3 AM in production.
 
+## Production economics
+
+The four points above (single-dep tree, no Docker required, frozen
+ABI, single-wheel deploy) compound into a measurably different cost
+structure when you actually scale on AWS / GCP / Azure. Two
+mechanisms — **fleet-safety on auto-scaling** and **workers per
+instance** — drive the numbers.
+
+### Auto-scaling without Heisenbugs
+
+LangChain on AWS effectively requires `docker image hash` pinning
+all the way through the stack — ECR-immutable images, ASG launch
+templates pinned to image hash, multi-region replication of that
+hash. Without it, every fleet-changing event is a timing bomb:
+
+| Event | LangChain risk | NeoGraph behavior |
+|---|---|---|
+| ASG launches new EC2 | `pip install` may pull newer transitive minor → fleet behavior drift | wheel is hash-immutable on PyPI; new instance = byte-identical binary |
+| Lambda cold start | 5–15 s (`langchain-community` import graph) | ms-class — no transitive imports |
+| Spot interruption + Karpenter rebuild | OS package + transitive Python dep drift | static-linked C++; only `libc.so.6` matters |
+| Blue/green deploy | image rebuilt at deploy-time = different runtime than yesterday | `pip install neograph-engine==X.Y.Z` is reproducible by version string alone |
+| Multi-region rollout | PyPI mirror lag + ECR replication timing → regions diverge | wheel hash equality across regions, period |
+| "Code 0 lines changed, prod broke" | regular occurrence (Pydantic v1→v2 / 2024) | structurally impossible — no transitive surface to drift |
+
+→ NeoGraph removes the SOP that LangChain prod *requires*. Bare-metal
+`pip install neograph-engine==0.4.0` on an EC2 user-data script is
+itself prod-grade.
+
+### Workers per instance — the RAM-side delta
+
+| | LangGraph | NeoGraph |
+|---|---|---|
+| Just-imported (zero workers) | **80 MB** | **5.5 MB** |
+| 1024 idle workers | (typically OOM-class) | **31 MB** |
+| Per-worker overhead (idle, no user state) | ~200–500 MB realistic prod | ~30 KB measured |
+| t3.medium (4 GB) — workers/instance | 7–17 | **700–3,500** |
+| Instances needed for 1 K concurrent requests | 60–140 | **1–3** |
+| us-east-1 spend (24/7, on-demand t3.medium) | **~$1,800–4,300/mo** | **~$30–90/mo** |
+
+That's a **50–150× infrastructure cost ratio** for the same
+concurrent-user count. The mechanism behind the per-worker number is
+the L3-cache fit story below: NeoGraph's hot working set is 277 KB
+regardless of N, so vertical scale ceiling is set by physical RAM
+itself, not by cache pressure.
+
+### One-line pitch
+
+> *"LangChain runtime cost: ~$4 K/mo for 1 K concurrent users.
+> NeoGraph: ~$50/mo. Same code shape, same LLM, frozen ABI."*
+
+This is the angle SREs / Platform teams care about when they
+veto LangChain in prod. It's not "Python is slow" — it's
+"the cost curve makes the SLA impossible."
+
 ## The agent runtime that fits in L3 cache
 
 NeoGraph's hot code path is small enough that N concurrent agents share
