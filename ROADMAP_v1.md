@@ -276,6 +276,176 @@ exposes a new architectural seam, or when a candidate lands
 
 ---
 
+# Execution plan
+
+## The user-facing motivation
+
+Forget the bug-class framing for a moment. From a **new user opening
+the README** today, the surface looks fragmented:
+
+  - "How do I write a node?" — 8 virtuals (`execute` / `execute_async`
+    / `execute_full` / `execute_full_async` / `execute_stream` /
+    `execute_stream_async` / `execute_full_stream` /
+    `execute_full_stream_async`). Which one to pick? Answer is "it
+    depends on Send/Command, sync/async, streaming/non-streaming"
+    — three orthogonal axes the user has to reason about up front.
+  - "How do I cancel?" — `RunConfig::cancel_token` exists, but for
+    cancel to reach the LLM you also need: (a) the engine to install
+    a thread_local scope, (b) Provider::complete to read it,
+    (c) run_sync to register a hook, (d) the worker not to retry.
+    None of that is in one place to read.
+  - "How do I update state?" — at v0.3.2 it's `dict | list[ChannelWrite]`.
+    Before that the README documented one shape and the binding
+    silently no-op'd on the other. New users hit "why didn't my
+    write apply?" and have to debug.
+  - "How do I read state?" — nested `state["channels"][name]["value"]`
+    OR flat `engine.get_state_view(thread_id).<channel>` OR a typed
+    Pydantic subclass. Three valid answers; no single canonical one.
+  - "How do I run a graph?" — `run` (sync) vs `run_async` vs
+    `run_stream` vs `run_stream_async` vs `resume` vs `resume_async`.
+    Six entry points, multi-axis matrix again.
+
+**Each individual addition was justified** (resume_if_exists is a
+real chat semantics, StateView is a real ergonomics win, etc.). But
+**the cumulative effect is a surface where doing one thing has 2-4
+ways scattered across docs, examples, and binding code.** v0.3.x
+patches kept piling on; the v0.3.x cancel rounds (5 of them) made
+visible that this fragmentation is also where bugs hide — when the
+"right way" is in M places of N, the omission in place N+1 is the
+silent-no-op / forgotten-pattern bug.
+
+The architectural sharpenings (Candidates 1-3) collapse this to:
+
+  - **One way to write a node** (`run(NodeInput) -> NodeOutput` + tags).
+  - **One way to thread per-run metadata** (`RunContext` arg).
+  - **One way to cancel** (`token->fork()` for nested ops, parent
+    cancels all).
+  - **One way to read state** (StateView is canonical; raw dict
+    is the escape hatch).
+  - **One way to run** (collapse run / run_async etc. into one
+    method that takes a stream callback or returns an iterator).
+
+This is the v1.0 contract — the docs page reads short again.
+
+## Versioning strategy
+
+| Version | Scope | Public API |
+|---|---|---|
+| **v0.4.x** | RunContext lands as a *new* parameter, old methods deprecated but still work. CancelToken gains `fork()` additive. New `run(NodeInput)` lands additive. | Both APIs callable. Deprecation warnings. |
+| **v0.5.x** | Examples and pybind binding migrate to new API. Old API stays deprecated. | Both APIs callable. Heavier deprecation warnings + docs steer to new. |
+| **v1.0.0** | Remove old API (8 virtuals, thread_local scope, single-handler CancelToken signal-on-self). | Single canonical API. |
+
+Rationale: **no v0.4 → v1.0 leap.** A two-release deprecation
+window lets downstream consumers (neoclaw, NeoProtocol Executor,
+the WASM spike, anything outside this repo) migrate one component
+at a time. cibuildwheel matrix stays intact across the window —
+20 wheels per release path unchanged, just the dependency-on-old-
+methods slowly reduces.
+
+If the migration takes longer than expected (e.g. third-party C++
+GraphNode subclasses are common), v0.5 becomes v0.5.x with
+extended deprecation, v0.6 stretches the window. Drop the old API
+only when the deprecation warnings have been quiet for a release.
+
+## PR sequencing
+
+Each row is one mergeable PR. They land in order, all on master
+(no long-lived feature branch — the project's commit history is
+straight-line and the deprecation strategy means each PR is
+independently shippable to PyPI as v0.4.0+i, v0.4.0+(i+1), etc.).
+
+| # | PR | Scope | Lands in |
+|---|---|---|---|
+| 1 | **`RunContext` plumbing (internal)** | Add `struct RunContext` to `engine.h`. Engine's `execute_graph_async` constructs and threads it through. NodeExecutor passes it to `execute_full_async`. Pybind wraps it. **No public-facing change** — old methods still take only `state`; the new `ctx` lives alongside in the dispatch path. | v0.4.0 |
+| 2 | **`GraphNode::run(NodeInput) -> NodeOutput`** | New virtual on GraphNode. Default implementation delegates to the old 8 virtuals (priority order preserved). Registers as the engine's preferred dispatch entry. Existing C++ subclasses still compile + work via the default fallback. | v0.4.0 |
+| 3 | **CancelToken `fork()` additive** | Add `std::shared_ptr<CancelToken> CancelToken::fork()`. Parent `cancel()` cascades to children. `add_cancel_hook` keeps working (deprecated). `run_sync(aw, cancel)` switches to `cancel->fork()`. The single-signal `slot()` API stays for the engine's outer co_spawn. | v0.4.0 |
+| 4 | **Deprecation annotations** | Add `[[deprecated]]` on the 8 old virtuals + `add_cancel_hook` + the trampoline scopes. Build with `-Werror=deprecated-declarations` only on internal code; user code gets warnings. Doxygen surfaces deprecation in the rendered docs. | v0.4.0 |
+| 5 | **StateView canonical, raw dict deprecated** | Mark `engine.get_state(thread_id) -> dict` as soft-deprecated in the docstring. New canonical = `get_state_view(thread_id) -> StateView`. Raw dict still returns the same shape — no behavioural break. | v0.4.0 |
+| 6 | **Examples migrate** | All 30 C++ + 22 Python examples switch to the new API. Each example is a self-contained PR section, easy to review. Removes the "8 virtuals visible across examples" surface load. | v0.4.x (multiple PRs) |
+| 7 | **Pybind binding migrates** | `PyGraphNode` overrides `run()` instead of the 8. Drop `CurrentCancelTokenScope` thread_local — RunContext carries the token now. | v0.4.x |
+| 8 | **Docs rewrite** | `docs/reference-en.md` (1622 lines) gets a major edit: GraphNode section collapses, RunConfig grows a RunContext column, CancelToken gains a fork() example. README "Differences from LangGraph" updates the entries. | v0.5.0 |
+| 9 | **Old API removal** | Delete the 8 virtuals from GraphNode. Delete `add_cancel_hook` + thread_local scope. Delete the deprecated soft-aliases. SOVERSION bumps. | v1.0.0 |
+
+## Per-PR contract
+
+Each PR must:
+
+  - **Not break ctest 442/442 + pytest 96/96** at the time it merges
+    (deprecation warnings allowed in the build, errors not).
+  - **Not regress the bench** (median µs/iter on `bench_neograph` seq
+    path, measured per `feedback_wsl2_bench_isolation.md` — fresh
+    worktree, taskset+chrt).
+  - **Touch at most one of**: header surface OR engine internals OR
+    binding OR examples. Mixed PRs make review hard and revert
+    expensive.
+  - **Add a row to this table when it merges** — strike-through the
+    proposed line, link the merge commit, note any scope drift.
+
+## Memory of v0.3.x traps to avoid during refactor
+
+The build/release pipeline has accumulated landmines from v0.1.x →
+v0.3.x. Each of these has a memory entry — this table is the
+checklist when you touch the relevant area:
+
+| Trap | Where it bites | Memory entry |
+|---|---|---|
+| `NEOGRAPH_API` macro on every public class + free function | New engine sub-libraries (postgres / sqlite / mcp / a2a / acp). Windows DLL boundary. | `feedback_neograph_api_discipline.md` |
+| Cross-branch stale .so contamination | `BUILD_SHARED_LIBS=ON` build/ used across branches → ABI mismatch SEGV in compile() | `feedback_cross_branch_stale_so_trap.md` |
+| Build dir contamination on bench measurements | Long-lived build/ dirs produce slower binaries than fresh worktree builds (+0.4 µs/iter false signal) | `feedback_bench_build_dir_contamination.md` |
+| WSL2 measurement jitter | Plain "many reps + median" doesn't converge — needs taskset + chrt FIFO 99 | `feedback_wsl2_bench_isolation.md` |
+| Doxygen `/*` wildcard in comments | `fs/*` / `terminal/*` inside `/**` opens nested comment, suppresses subsequent diagnostics. Use `&#42;` HTML entity. | `feedback_doxygen_slash_star_trap.md` |
+| ASan `__cxa_throw` interceptor CHECK | C++ exceptions crossing pybind boundary trip the interceptor under `LD_PRELOAD libasan.so`. Deselect by keyword in CI; cancel/throw correctness is exercised by TSan + live LLM tests. | (this session — add note in feedback) |
+| TSan eptr lifetime race | NodeInterrupt's exception_ptr crossing co_await boundary trips libstdc++ `__exception_ptr::_M_release`. Fix: extract reason as `std::string`, throw fresh on main thread. | `feedback_parallel_group_eptr_race.md` |
+| MSVC needs explicit `<array>` / `<algorithm>` | libstdc++ pulls them transitively; MSVC v143 doesn't. Test files using `std::array` etc. break Windows CI silently. | (this session — add note in feedback) |
+| scikit-build-core 0.12.2 Windows single_config | `-G` flag detected, env-var ignored — Windows wheel loses SQLite=OFF override. Use `[[tool.scikit-build.overrides]]` + `cmake.define`. | `feedback_libcurl_unconditional_dep.md` |
+| Wheel OpenSSL CA path | manylinux libssl uses AlmaLinux paths absent on Ubuntu. `__init__.py` auto-set `SSL_CERT_FILE` from certifi. | `feedback_wheel_openssl_ca.md` |
+| pyproject.toml runtime deps not auto-installed in CI's PYTHONPATH flow | `pip install --quiet pytest` line must mirror pyproject.toml's `dependencies = [...]`. v0.3.2 lost this for pydantic. | (this session — add note in feedback) |
+
+If a refactor PR adds a new sub-library, new public class, new
+runtime dep, new test pattern that throws across pybind, new wheel
+platform — open this table first. Half of the v0.3.x patch series
+was rediscovering items already on this list.
+
+## Documentation impact map
+
+When the refactor lands, these pages need edits:
+
+  - **`README.md`** — "Python Binding" section's RunConfig table,
+    "Differences from LangGraph" deltas (most entries become
+    obsolete and should be deleted, not edited), "What's covered
+    by the binding" surface list.
+  - **`docs/reference-en.md`** (1622 lines) — GraphNode / Node /
+    Provider / CancelToken / RunConfig sections. Roughly 30-40%
+    rewrite. The narrative-tour structure stays; the API surface
+    shrinks.
+  - **`docs/concepts.md`** — 531-line conceptual narrative. The
+    "8 dispatch entry points" paragraph collapses to one. Cancel
+    propagation paragraph cleans up.
+  - **`docs/troubleshooting.md`** — most v0.3.x entries become
+    obsolete. The "silent no-op" / "forgot to override" /
+    "thread_local missing" entries can be deleted.
+  - **`bindings/python/examples/`** — every example (22 Python +
+    30 C++) updated.
+  - **`Doxyfile`** — no changes; PROJECT_NUMBER reads from
+    pyproject.toml so v1.0.0 propagates automatically.
+  - **`ROADMAP_v1.md`** (this file) — cross out landed candidates,
+    add post-mortem on what was harder/easier than expected.
+
+## Definition of done for v1.0
+
+  1. Single canonical way to do each of: write a node, cancel a run,
+     read state, update state, run a graph.
+  2. README's "Python Binding" section reads in under 5 minutes for
+     a new user.
+  3. `docs/reference-en.md` GraphNode section is one method, not
+     eight.
+  4. v0.3.x deprecation warnings have been silent for at least one
+     release before final removal.
+  5. ctest / pytest / live LLM / Valgrind / Doxygen all green at
+     the v1.0 tag.
+
+---
+
 # Research track (less load-bearing than the v1.0 sharpenings above)
 
 ## Candidate 4 — Self-evolving JSON agent v2 (research)
