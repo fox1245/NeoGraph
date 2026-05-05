@@ -138,6 +138,101 @@ cookbook](examples/cookbook/ai-assembly/) for a 600-line demo built
 this way (4 personas, A2A multi-process, OpenAI-backed) — including
 a friction journal of what a fresh user trips over.
 
+### A minimal LLM-only chatbot (no tools, no streaming)
+
+The shortest C++ that runs a real OpenAI multi-turn chatbot —
+useful as a template since the wider examples lean on `create_react_graph`
++ tools and obscure how the bare wiring looks:
+
+```cpp
+#include <neograph/neograph.h>
+#include <neograph/llm/openai_provider.h>
+
+using namespace neograph::graph;        // GraphEngine, NodeContext, RunConfig,
+                                         // InMemoryCheckpointStore live here.
+                                         // (RunConfig stays under graph::; the
+                                         //  README quickstack uses it directly.)
+
+int main() {
+    // OpenAIProvider exposes two factories:
+    //   * `create(Config)`        → unique_ptr<OpenAIProvider> (transferable)
+    //   * `create_shared(Config)` → shared_ptr<Provider>       (copyable, the
+    //                               natural fit for NodeContext::provider
+    //                               and for sharing across multiple nodes
+    //                               or A2A servers)
+    // For a chatbot the shared-ptr peer is what you want — drop straight
+    // into NodeContext, no std::move dance.
+    neograph::llm::OpenAIProvider::Config cfg;
+    cfg.api_key       = std::getenv("OPENAI_API_KEY");
+    cfg.default_model = "gpt-4o-mini";
+    auto provider = neograph::llm::OpenAIProvider::create_shared(cfg);
+
+    NodeContext ctx;
+    ctx.provider     = provider;
+    ctx.model        = "gpt-4o-mini";
+    ctx.instructions = "Reply in one short sentence.";
+
+    neograph::json definition = {
+        {"name", "chatbot"},
+        {"channels", {{"messages", {{"reducer", "append"}}}}},
+        {"nodes",    {{"llm",       {{"type", "llm_call"}}}}},
+        {"edges", neograph::json::array({
+            {{"from", "__start__"}, {"to", "llm"}},
+            {{"from", "llm"},       {"to", "__end__"}}
+        })}
+    };
+
+    // C++ compile() takes (definition, ctx, store) directly — Python's
+    // GraphEngine.compile takes the same trailing arg as a keyword
+    // (or use engine.set_checkpoint_store afterwards; both equivalent).
+    auto store  = std::make_shared<InMemoryCheckpointStore>();
+    auto engine = GraphEngine::compile(definition, ctx, store);
+
+    for (std::string line; std::getline(std::cin, line); ) {
+        RunConfig cfg;
+        cfg.thread_id        = "session-1";
+        cfg.input            = {{"messages", neograph::json::array({
+            {{"role", "user"}, {"content", line}}
+        })}};
+        cfg.resume_if_exists = true;     // multi-turn memory: load prior
+                                          // checkpoint, append new turn
+
+        auto r   = engine->run(cfg);
+        auto msgs = r.output["channels"]["messages"]["value"];
+        std::cout << "Bot: " << msgs.back()["content"].get<std::string>() << "\n";
+    }
+}
+```
+
+Four small things that are easy to miss:
+
+  - **`neograph::graph::` sub-namespace** — `GraphEngine`, `RunConfig`,
+    `NodeContext`, `InMemoryCheckpointStore`, `GraphState` all live
+    under `neograph::graph::`. `using namespace neograph::graph` (or a
+    handful of `using` declarations) keeps the call sites flat.
+    `neograph::llm::` and `neograph::a2a::` stay separate on purpose
+    so consumers can pick which sub-libraries they link against.
+  - **Two factories on `OpenAIProvider`** —
+    `create(Config)` → `unique_ptr<OpenAIProvider>` (transferable
+    ownership), `create_shared(Config)` → `shared_ptr<Provider>`
+    (copyable; drops straight into `NodeContext::provider`). For a
+    chatbot or any multi-node graph the `shared_ptr` peer is the
+    intended path; the unique flavour is for callers that want
+    short-lived ownership before transferring elsewhere via
+    `std::move`.
+  - **`neograph::json` is a yyjson-backed nlohmann subset** —
+    `json::array(...)`, `j["k"]`, `j.value(k, default)`, `j.contains(k)`
+    work like nlohmann; element-wise iterators and `.front()` / `.back()`
+    on objects do **not**. The full surface map is in
+    [include/neograph/json.h](include/neograph/json.h)'s top docstring.
+  - **`<cppdotenv/dotenv.hpp>` for `OPENAI_API_KEY` loading** is bundled
+    at `deps/cppdotenv/dotenv.hpp`. The in-tree examples reach it via
+    `target_include_directories(... PRIVATE ${CMAKE_SOURCE_DIR}/deps)`;
+    consumers using `FetchContent` can add
+    `target_include_directories(my_agent PRIVATE
+    ${neograph_SOURCE_DIR}/deps)` and `#include <cppdotenv/dotenv.hpp>`.
+    It's a header-only single file; not part of the public install.
+
 ## Python Binding
 
 NeoGraph also ships as a `pip`-installable Python package, so the same

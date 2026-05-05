@@ -359,7 +359,9 @@ void init_graph(py::module_& m) {
         "then call run() or run_stream(). Single instance is safe to "
         "share across threads with distinct thread_ids.")
         .def_static("compile",
-            [](py::object definition, py::object ctx_obj) {
+            [](py::object definition,
+               py::object ctx_obj,
+               std::shared_ptr<CheckpointStore> store) {
                 // Take the Python wrapper as py::object (rather than
                 // const NodeContext&) so we can read the `_pytools`
                 // dynamic attr carrying user-defined Python Tool
@@ -385,7 +387,7 @@ void init_graph(py::module_& m) {
 
                 auto j = py_to_json(definition);
                 // GIL held: compile is fast (just walks the JSON).
-                auto unique = GraphEngine::compile(j, ctx, nullptr);
+                auto unique = GraphEngine::compile(j, ctx, std::move(store));
                 if (!owned_tools.empty()) {
                     unique->own_tools(std::move(owned_tools));
                 }
@@ -393,10 +395,20 @@ void init_graph(py::module_& m) {
             },
             py::arg("definition"),
             py::arg("ctx"),
-            "Compile a graph from a JSON-shaped Python dict. The "
-            "context provides the LLM provider, tools, model, and "
-            "system instructions used by built-in node types. Raises "
-            "RuntimeError on bad shape.")
+            py::arg("store") = std::shared_ptr<CheckpointStore>{},
+            "Compile a graph from a JSON-shaped Python dict.\n\n"
+            "Args:\n"
+            "    definition: JSON graph definition (nodes, edges, "
+            "channels).\n"
+            "    ctx: NodeContext providing the LLM provider, tools, "
+            "model, system instructions.\n"
+            "    store: Optional CheckpointStore for HITL / resume / "
+            "multi-turn. Same trailing arg as the C++ ``compile(def, "
+            "ctx, store)`` 3-param overload — call as "
+            "``GraphEngine.compile(definition, ctx, store)`` or "
+            "leave default and use ``engine.set_checkpoint_store(...)`` "
+            "afterwards (both shapes equivalent).\n\n"
+            "Raises ``RuntimeError`` on bad shape.")
 
         .def("run",
             [](GraphEngine& self, const RunConfig& cfg) {
