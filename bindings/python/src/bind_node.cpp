@@ -32,6 +32,7 @@
 
 #include "json_bridge.h"
 
+#include <neograph/api.h>  // NEOGRAPH_PUSH/POP_IGNORE_DEPRECATED
 #include <neograph/graph/engine.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
@@ -53,14 +54,18 @@ namespace py = pybind11;
 
 namespace neograph::pybind {
 
+using neograph::graph::CancelToken;
 using neograph::graph::ChannelWrite;
 using neograph::graph::Command;
+using neograph::graph::GraphEvent;
 using neograph::graph::GraphNode;
 using neograph::graph::GraphState;
 using neograph::graph::GraphStreamCallback;
 using neograph::graph::NodeContext;
 using neograph::graph::NodeFactory;
+using neograph::graph::NodeInput;
 using neograph::graph::NodeResult;
+using neograph::graph::RunContext;
 using neograph::graph::Send;
 
 namespace {
@@ -217,6 +222,61 @@ public:
         py::object res = py_obj_.attr("execute")(
             py::cast(&state, py::return_value_policy::reference));
         return coerce_to_node_result(res);
+    }
+
+    // ── v0.4 PR 7: unified run() entry, with Python-override priority
+    //
+    // The engine calls ``node->run(in)`` first (PR 2). PyGraphNodeOwner
+    // overrides ``run`` so that:
+    //
+    //   1. If the Python user's class has a ``run`` method (defined
+    //      strictly on a subclass of ``neograph_engine.GraphNode``),
+    //      call it with a Python-side ``NodeInput`` object exposing
+    //      ``state`` / ``ctx`` / ``stream_cb``. The user's body
+    //      receives ``input.ctx.cancel_token`` directly — no need to
+    //      rely on the smuggling thread-local. Coerce the return value
+    //      via ``coerce_to_node_result``.
+    //
+    //   2. Otherwise, fall through to the legacy chain by forwarding
+    //      to our own ``execute_full_async`` / ``execute_full_stream_async``
+    //      override. Legacy Python users (those still overriding
+    //      ``execute`` / ``execute_full`` etc.) keep working unchanged
+    //      through the deprecation window — their ``provider.complete``
+    //      sync calls still pick up the cancel token via
+    //      ``current_cancel_token()`` thread-local installed in those
+    //      legacy override bodies.
+    //
+    // PR 9 (v1.0) deletes the legacy chain entirely and run() becomes
+    // the only path.
+    asio::awaitable<NodeResult> run(NodeInput in) override {
+        bool has_run = false;
+        {
+            py::gil_scoped_acquire g;
+            has_run = has_user_method("run");
+        }
+        if (has_run) {
+            py::gil_scoped_acquire g;
+            // Cast NodeInput by value so the Python wrapper survives
+            // even if the C++ frame moves on (NodeInput holds refs
+            // into the engine's super-step locals which stay valid
+            // through this co_await — but the wrapper itself can be
+            // freed after the call returns).
+            py::object py_input = py::cast(&in,
+                py::return_value_policy::reference);
+            py::object res = py_obj_.attr("run")(py_input);
+            co_return coerce_to_node_result(res);
+        }
+        // Legacy fallback. NEOGRAPH_PUSH_IGNORE_DEPRECATED so the
+        // legacy override calls don't trip our own deprecation
+        // warnings — the user's deprecation visibility comes from
+        // their override site, not from this internal forwarder.
+        NEOGRAPH_PUSH_IGNORE_DEPRECATED
+        if (in.stream_cb) {
+            co_return co_await execute_full_stream_async(
+                in.state, *in.stream_cb);
+        }
+        co_return co_await execute_full_async(in.state);
+        NEOGRAPH_POP_IGNORE_DEPRECATED
     }
 
     // ── execute_full_async: the real engine entry point ──────────────
@@ -463,6 +523,88 @@ void init_node(py::module_& m) {
                 }
             })
         .def_readwrite("sends", &NodeResult::sends);
+
+    // ── CancelToken (v0.4 PR 7: exposed so Python users can read /
+    // cancel through ``input.ctx.cancel_token``) ────────────────────────
+    //
+    // Construction from Python is intentionally not exposed — the engine
+    // owns lifecycle. ``RunConfig.cancel_token`` already accepts a
+    // shared_ptr<CancelToken> via the existing wiring; this just makes
+    // the *read* side usable from a node body.
+    py::class_<CancelToken, std::shared_ptr<CancelToken>>(m, "CancelToken",
+        "Cooperative cancel handle for an in-flight run. Engine "
+        "constructs these; nodes read ``input.ctx.cancel_token`` and "
+        "either pass it to ``provider.complete(params)`` (so an LLM "
+        "HTTP socket aborts on cancel) or poll ``is_cancelled()`` for "
+        "their own loops.")
+        .def("is_cancelled", &CancelToken::is_cancelled,
+            "Lock-free polling read of the cancel flag.")
+        .def("cancel", &CancelToken::cancel,
+            "Request cancellation. Thread-safe, idempotent.");
+
+    // ── RunContext (per-run dispatch metadata, v0.4 PR 7) ───────────────
+    //
+    // Exposed read-only — the engine constructs and owns the RunContext;
+    // Python users read it from ``NodeInput.ctx`` inside their ``run()``
+    // override. Currently exposes the four fields a user is most likely
+    // to consume: cancel_token (so they can pass it explicitly to
+    // provider.complete instead of relying on the smuggling thread-local),
+    // step (super-step counter), thread_id (RunConfig.thread_id), and
+    // stream_mode. ``deadline`` and ``trace_id`` are reserved for
+    // future RunConfig fields and stay default-constructed for now.
+    py::class_<RunContext>(m, "RunContext",
+        "Per-run dispatch metadata threaded by the engine. New nodes "
+        "read this from ``input.ctx`` inside their ``run(input)`` "
+        "override. Read-only — the engine constructs and owns it.")
+        .def_property_readonly("cancel_token",
+            [](const RunContext& c) -> py::object {
+                if (c.cancel_token) return py::cast(c.cancel_token);
+                return py::none();
+            },
+            "The active CancelToken for this run, or None when the "
+            "caller didn't opt in. Pass to provider.complete via "
+            "``CompletionParams(cancel_token=input.ctx.cancel_token)``.")
+        .def_readonly("step", &RunContext::step,
+            "Current super-step index, updated by the engine at the "
+            "top of each super-step iteration.")
+        .def_readonly("thread_id", &RunContext::thread_id,
+            "Mirrors ``RunConfig.thread_id``.")
+        .def_property_readonly("stream_mode",
+            [](const RunContext& c) {
+                return static_cast<uint8_t>(c.stream_mode);
+            },
+            "Mirrors ``RunConfig.stream_mode`` as the underlying flag bits.");
+
+    // ── NodeInput (per-call bundle, v0.4 PR 7) ──────────────────────────
+    py::class_<NodeInput>(m, "NodeInput",
+        "Per-call input bundle for the v0.4 unified ``run()`` "
+        "override. New Python nodes override "
+        "``def run(self, input)`` and read ``input.state`` / "
+        "``input.ctx`` / ``input.stream_cb``.")
+        .def_property_readonly("state",
+            [](const NodeInput& in) {
+                return py::cast(&in.state, py::return_value_policy::reference);
+            },
+            "Read-only ``GraphState`` for this dispatch.")
+        .def_property_readonly("ctx",
+            [](const NodeInput& in) {
+                return py::cast(&in.ctx, py::return_value_policy::reference);
+            },
+            "``RunContext`` carrying cancel_token, step, thread_id, etc.")
+        .def_property_readonly("stream_cb",
+            [](const NodeInput& in) -> py::object {
+                if (in.stream_cb) {
+                    // Wrap the C++ callback as a Python callable so the
+                    // node body can invoke it directly.
+                    return py::cpp_function(
+                        [cb = *in.stream_cb](const GraphEvent& ev) { cb(ev); });
+                }
+                return py::none();
+            },
+            "Streaming sink — a callable that takes a GraphEvent, or "
+            "None when the caller used a non-streaming ``run`` / "
+            "``run_async`` entry. Emit ``LLM_TOKEN`` events through "
+            "this when non-null.");
 
     // ── NodeFactory (custom-node-type registry) ─────────────────────────
     //

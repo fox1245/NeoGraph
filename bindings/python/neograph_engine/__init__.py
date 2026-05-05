@@ -77,6 +77,11 @@ from ._neograph import (
     Command,
     NodeResult,
 
+    # v0.4 unified-dispatch surface (PR 7) — new node API
+    NodeInput,
+    RunContext,
+    CancelToken,
+
     # Custom-node surface
     GraphState,
     NodeFactory,
@@ -346,6 +351,9 @@ __all__ = [
     "Send",
     "Command",
     "NodeResult",
+    "NodeInput",
+    "RunContext",
+    "CancelToken",
     "GraphState",
     "GraphNode",
     "NodeFactory",
