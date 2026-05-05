@@ -443,6 +443,25 @@ LangGraph Python — surfaced here so you don't hit them mid-port:
   v0.4.0 will compile against v1.x** — the deprecation window is the
   *only* mechanism for breaking changes, and you get a `[[deprecated]]`
   warning at compile time before anything moves under you.
+- **No Docker required for deployment** — a direct consequence of
+  the single-dep tree above. Production LangChain deployments
+  effectively *require* Docker + a fully-pinned `requirements.txt`
+  (or `poetry.lock` / `uv.lock`); without it, a transitive package's
+  silent minor bump on the next deploy can take the server down at
+  runtime. NeoGraph's wheel ships its full native runtime baked in,
+  so:
+
+  - `pip install neograph-engine==0.4.0` on bare metal / VPS / a
+    serverless function works — the host's other Python packages
+    can't reach into NeoGraph's C++ engine.
+  - Container images can be **alpine + musl + ~20 MB** (engine .so +
+    Python interpreter + 2 deps), or static-linked C++ binary at
+    **~1.2 MB** with `libc.so.6` as the only dynamic dep.
+  - Cold start on serverless (Lambda, Cloud Run) is ms-class, not
+    seconds — there's no LangChain import graph to walk.
+  - Lock-file maintenance burden is near-zero. `pydantic>=2.0` is
+    the only constraint that could ever drift, and you'd see it at
+    install time, not 3 AM in production.
 
 ## The agent runtime that fits in L3 cache
 
