@@ -32,11 +32,10 @@ using namespace neograph::graph;
 // =========================================================================
 class PlannerNode : public GraphNode {
 public:
-    NodeResult execute_full(const GraphState&) override {
-        NodeResult nr;
-
-        // Each Send's `input` is injected as channel writes on the spawned
-        // branch, so the mcp_caller can read tool_name / tool_args.
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        // Each Send's `input` is injected as channel writes on the
+        // spawned branch, so the mcp_caller can read tool_name /
+        // tool_args.
         struct Task { std::string tool; json args; };
         std::vector<Task> tasks = {
             {"get_current_time", json{{"timezone", "UTC"}}},
@@ -44,27 +43,16 @@ public:
             {"calculate",        json{{"expression", "2 ** 16 + 1"}}},
         };
 
-        nr.writes.push_back(ChannelWrite{"plan", json(tasks.size())});
-
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"plan", json(tasks.size())});
         for (const auto& t : tasks) {
-            nr.sends.push_back(Send{"mcp_caller", json{
+            out.sends.push_back(Send{"mcp_caller", json{
                 {"tool_name", t.tool},
                 {"tool_args", t.args}
             }});
         }
-        return nr;
+        co_return out;
     }
-
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        return execute_full(state).writes;
-    }
-
-    // Stage-4 bridge: keep the Sends on the async path.
-    asio::awaitable<NodeResult>
-    execute_full_async(const GraphState& state) override {
-        co_return execute_full(state);
-    }
-
     std::string get_name() const override { return "planner"; }
 };
 
@@ -79,9 +67,9 @@ public:
     explicit MCPCallerNode(std::shared_ptr<neograph::mcp::MCPClient> c)
       : client_(std::move(c)) {}
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        std::string tool = state.get("tool_name").get<std::string>();
-        json        args = state.get("tool_args");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        std::string tool = in.state.get("tool_name").get<std::string>();
+        json        args = in.state.get("tool_args");
 
         auto t0 = std::chrono::steady_clock::now();
         std::string content;
@@ -103,14 +91,15 @@ public:
         auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - t0).count();
 
-        return {ChannelWrite{"findings", json::array({json{
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"findings", json::array({json{
             {"tool", tool},
             {"args", args},
             {"result", content},
             {"elapsed_ms", elapsed_ms}
-        }})}};
+        }})});
+        co_return out;
     }
-
     std::string get_name() const override { return "mcp_caller"; }
 };
 
@@ -119,17 +108,19 @@ public:
 // =========================================================================
 class SummarizerNode : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        auto findings = state.get("findings");
-        std::string out = "=== MCP fan-out summary ===\n";
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto findings = in.state.get("findings");
+        std::string summary = "=== MCP fan-out summary ===\n";
         if (findings.is_array()) {
             for (const auto& f : findings) {
-                out += "  [" + f.value("tool", "?") + "] "
-                    +  f.value("result", "")
-                    +  "   (" + std::to_string(f.value("elapsed_ms", 0)) + " ms)\n";
+                summary += "  [" + f.value("tool", "?") + "] "
+                        +  f.value("result", "")
+                        +  "   (" + std::to_string(f.value("elapsed_ms", 0)) + " ms)\n";
             }
         }
-        return {ChannelWrite{"summary", json(out)}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"summary", json(summary)});
+        co_return out;
     }
     std::string get_name() const override { return "summarizer"; }
 };

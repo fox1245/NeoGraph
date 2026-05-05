@@ -29,47 +29,30 @@ using namespace neograph::graph;
 class PlannerNode : public GraphNode {
     static int round_;
 public:
-    // Override execute_full to return Sends
-    NodeResult execute_full(const GraphState& state) override {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
         round_++;
-        auto query = state.get("query");
+        auto query = in.state.get("query");
         std::string q = query.is_string() ? query.get<std::string>() : "general research";
 
         // Round 1: 3 topics, Round 2: 2 additional topics
-        std::vector<std::string> topics;
-        if (round_ == 1) {
-            topics = {"market_size", "key_players", "technology_trends"};
-        } else {
-            topics = {"risk_factors", "future_outlook"};
-        }
+        std::vector<std::string> topics = (round_ == 1)
+            ? std::vector<std::string>{"market_size", "key_players", "technology_trends"}
+            : std::vector<std::string>{"risk_factors", "future_outlook"};
 
-        NodeResult nr;
-        nr.writes.push_back(ChannelWrite{"plan", json({
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"plan", json({
             {"round", round_},
             {"query", q},
             {"topics", topics}
         })});
 
-        // Send: dynamically execute researcher node once per topic
-        // Send.input is a channel-name→value mapping (applied to state via apply_input)
+        // Send: dynamically execute researcher node once per topic.
+        // Send.input is a channel-name→value mapping applied to the
+        // worker's isolated state.
         for (const auto& topic : topics) {
-            nr.sends.push_back(Send{"researcher", json({
-                {"topic", topic}   // Inject topic string into "topic" channel
-            })});
+            out.sends.push_back(Send{"researcher", json({{"topic", topic}})});
         }
-
-        return nr;
-    }
-
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        return execute_full(state).writes;
-    }
-
-    // Stage-4 bridge: the async-first default would drop Sends, so
-    // forward to the sync path that owns them.
-    asio::awaitable<NodeResult>
-    execute_full_async(const GraphState& state) override {
-        co_return execute_full(state);
+        co_return out;
     }
 
     std::string get_name() const override { return "planner"; }
@@ -81,11 +64,12 @@ int PlannerNode::round_ = 0;
 // =========================================================================
 class ResearcherNode : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        auto topic_json = state.get("topic");
-        std::string topic = topic_json.is_string() ? topic_json.get<std::string>() : "unknown";
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto topic_json = in.state.get("topic");
+        std::string topic = topic_json.is_string()
+            ? topic_json.get<std::string>() : "unknown";
 
-        // Simulation: research takes 50-100ms
+        // Simulation: research takes 50-100ms.
         int delay = 50 + (std::hash<std::string>{}(topic) % 50);
         std::this_thread::sleep_for(std::chrono::milliseconds(delay));
 
@@ -96,7 +80,9 @@ public:
             {"elapsed_ms", delay}
         };
 
-        return {ChannelWrite{"findings", json::array({finding})}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"findings", json::array({finding})});
+        co_return out;
     }
 
     std::string get_name() const override { return "researcher"; }
@@ -108,37 +94,24 @@ public:
 class EvaluatorNode : public GraphNode {
     static int eval_count_;
 public:
-    NodeResult execute_full(const GraphState& state) override {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
         eval_count_++;
-        auto findings = state.get("findings");
+        auto findings = in.state.get("findings");
         int count = findings.is_array() ? (int)findings.size() : 0;
 
-        NodeResult nr;
-
+        NodeOutput out;
         if (count >= 5 || eval_count_ >= 2) {
-            // Sufficient data → go to summarizer
-            nr.command = Command{
-                "summarizer",
-                {ChannelWrite{"eval_status", json("sufficient: " + std::to_string(count) + " findings")}}
-            };
+            // Sufficient data → go to summarizer.
+            out.command = Command{"summarizer",
+                {ChannelWrite{"eval_status", json("sufficient: "
+                    + std::to_string(count) + " findings")}}};
         } else {
-            // Insufficient → go back to planner for more research
-            nr.command = Command{
-                "planner",
-                {ChannelWrite{"eval_status", json("insufficient: need more research (have " + std::to_string(count) + ")")}}
-            };
+            // Insufficient → go back to planner for more research.
+            out.command = Command{"planner",
+                {ChannelWrite{"eval_status", json("insufficient: need more research (have "
+                    + std::to_string(count) + ")")}}};
         }
-
-        return nr;
-    }
-
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        return execute_full(state).writes;
-    }
-
-    asio::awaitable<NodeResult>
-    execute_full_async(const GraphState& state) override {
-        co_return execute_full(state);
+        co_return out;
     }
 
     std::string get_name() const override { return "evaluator"; }
@@ -150,9 +123,9 @@ int EvaluatorNode::eval_count_ = 0;
 // =========================================================================
 class SummarizerNode : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        auto findings = state.get("findings");
-        auto eval = state.get("eval_status");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto findings = in.state.get("findings");
+        auto eval = in.state.get("eval_status");
 
         std::string summary = "=== Research Summary ===\n";
         summary += "Status: " + (eval.is_string() ? eval.get<std::string>() : "n/a") + "\n\n";
@@ -166,7 +139,9 @@ public:
             summary += "\nTotal findings: " + std::to_string(findings.size());
         }
 
-        return {ChannelWrite{"summary", json(summary)}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"summary", json(summary)});
+        co_return out;
     }
 
     std::string get_name() const override { return "summarizer"; }

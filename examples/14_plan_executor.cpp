@@ -39,11 +39,13 @@ static std::atomic<int> g_fail_on_idx{-1};   // -1 = no failure
 // =========================================================================
 class SetupNode : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        json q = state.get("query");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        json q = in.state.get("query");
         std::string query = q.is_string() ? q.get<std::string>() : "LLM market analysis";
         std::cout << "[setup]    query='" << query << "' — initialised\n";
-        return {ChannelWrite{"query", json(query)}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"query", json(query)});
+        co_return out;
     }
     std::string get_name() const override { return "setup"; }
 };
@@ -53,9 +55,7 @@ public:
 // =========================================================================
 class PlannerNode : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState&) override { return {}; }
-
-    NodeResult execute_full(const GraphState& state) override {
+    asio::awaitable<NodeOutput> run(NodeInput) override {
         std::vector<std::string> sub_topics = {
             "market_size", "competitor_map", "regulatory_landscape",
             "tech_stack_survey", "customer_interviews"
@@ -67,25 +67,14 @@ public:
             std::cout << "           #" << i << " " << sub_topics[i] << "\n";
         }
 
-        NodeResult nr;
+        NodeOutput out;
         for (size_t i = 0; i < sub_topics.size(); ++i) {
-            Send s;
-            s.target_node = "executor";
-            s.input = {
-                {"task_idx", static_cast<int>(i)},
-                {"topic",    sub_topics[i]}
-            };
-            nr.sends.push_back(std::move(s));
+            out.sends.push_back(Send{"executor",
+                json{{"task_idx", static_cast<int>(i)},
+                     {"topic",    sub_topics[i]}}});
         }
-        return nr;
+        co_return out;
     }
-
-    // Stage-4 bridge: async-first default would drop these Sends.
-    asio::awaitable<NodeResult>
-    execute_full_async(const GraphState& state) override {
-        co_return execute_full(state);
-    }
-
     std::string get_name() const override { return "planner"; }
 };
 
@@ -95,9 +84,9 @@ public:
 // =========================================================================
 class ExecutorNode : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        int idx = state.get("task_idx").get<int>();
-        std::string topic = state.get("topic").get<std::string>();
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        int idx = in.state.get("task_idx").get<int>();
+        std::string topic = in.state.get("topic").get<std::string>();
 
         // Simulate a slow LLM call so parallel fan-out is observable.
         std::this_thread::sleep_for(std::chrono::milliseconds(120));
@@ -114,13 +103,14 @@ public:
         std::cout << "[executor] #" << idx << " " << topic
                   << "  ✓ done (exec#" << n << ")\n";
 
-        // Append a structured finding to the shared "findings" channel.
         json finding = {
             {"idx",     idx},
             {"topic",   topic},
             {"summary", "key insight for " + topic}
         };
-        return {ChannelWrite{"findings", finding}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"findings", finding});
+        co_return out;
     }
     std::string get_name() const override { return "executor"; }
 };

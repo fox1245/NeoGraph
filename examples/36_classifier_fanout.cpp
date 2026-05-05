@@ -89,12 +89,12 @@ class ClassifierNode : public GraphNode {
 public:
     std::string get_name() const override { return "classifier"; }
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
         auto start = std::chrono::steady_clock::now();
 
-        std::string head = state.get("head").get<std::string>();
-        std::string text = state.get("text").get<std::string>();
-        auto labels      = state.get("labels");
+        std::string head = in.state.get("head").get<std::string>();
+        std::string text = in.state.get("text").get<std::string>();
+        auto labels      = in.state.get("labels");
 
         // Pick a label deterministically from the text's hash. Real
         // inference goes here; see [ONNX SWAP-IN] above.
@@ -112,7 +112,9 @@ public:
         verdict["label"]    = label;
         verdict["us"]       = elapsed_us;
 
-        return {ChannelWrite{"verdicts", json::array({verdict})}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"verdicts", json::array({verdict})});
+        co_return out;
     }
 };
 
@@ -123,8 +125,8 @@ class PlannerNode : public GraphNode {
 public:
     std::string get_name() const override { return "planner"; }
 
-    NodeResult execute_full(const GraphState& state) override {
-        std::string text = state.get("text").get<std::string>();
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        std::string text = in.state.get("text").get<std::string>();
 
         struct Head { const char* name; std::vector<std::string> labels; };
         std::vector<Head> heads = {
@@ -135,17 +137,16 @@ public:
             {"intent",    {"inform", "ask", "complain", "praise", "request"}},
         };
 
-        NodeResult r;
+        NodeOutput out;
         for (const auto& h : heads) {
             json pl;
             pl["text"]   = text;
             pl["head"]   = h.name;
             pl["labels"] = h.labels;
-            r.sends.emplace_back(Send{"classifier", pl});
+            out.sends.emplace_back(Send{"classifier", pl});
         }
-        return r;
+        co_return out;
     }
-
 };
 
 class SummarizerNode : public GraphNode {
@@ -156,11 +157,11 @@ public:
 
     std::string get_name() const override { return "summarizer"; }
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
         auto wall_us = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - t_start_).count();
 
-        auto verdicts = state.get("verdicts");
+        auto verdicts = in.state.get("verdicts");
 
         std::cout << "\n  ── Classifier verdicts ──\n";
         long total_inference_us = 0;
@@ -188,7 +189,7 @@ public:
                   << (double(total_inference_us) / std::max(1L, wall_us))
                   << "×\n";
 
-        return {};
+        co_return NodeOutput{};
     }
 };
 
