@@ -322,8 +322,11 @@ def node(type_name=None):
             def get_name(self):
                 return self._name
 
-            def execute(self, state):
-                return fn(state) or []
+            # v0.4: use the unified run() override. The decorated user
+            # function still takes ``state`` directly (the simplest sugar
+            # signature); we adapt by passing input.state to it.
+            def run(self, input):
+                return fn(input.state) or []
 
         NodeFactory.register_type(
             registered_type,
