@@ -28,6 +28,8 @@ using neograph::graph::GraphNode;
 using neograph::graph::GraphState;
 using neograph::graph::NodeContext;
 using neograph::graph::NodeFactory;
+using neograph::graph::NodeInput;
+using neograph::graph::NodeOutput;
 using namespace neograph::a2a;
 
 namespace {
@@ -36,12 +38,15 @@ namespace {
 class UppercaseNode : public GraphNode {
   public:
     explicit UppercaseNode(std::string n) : name_(std::move(n)) {}
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        auto raw = state.get("prompt");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto raw = in.state.get("prompt");
         std::string p = raw.is_string() ? raw.get<std::string>() : raw.dump();
-        std::string out = "[neo-agent] ";
-        for (char c : p) out.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
-        return {{"response", std::move(out)}};
+        std::string upper = "[neo-agent] ";
+        for (char c : p)
+            upper.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+        NodeOutput out;
+        out.writes.push_back({"response", std::move(upper)});
+        co_return out;
     }
     std::string get_name() const override { return name_; }
   private:

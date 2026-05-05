@@ -29,17 +29,21 @@ using namespace neograph::graph;
 // =========================================================================
 class PaymentNode : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        auto amount_json = state.get("amount");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto amount_json = in.state.get("amount");
         int amount = amount_json.is_number() ? amount_json.get<int>() : 0;
 
         // Dynamic breakpoint if amount >= 1,000,000
         if (amount >= 1000000) {
             throw NodeInterrupt(
-                "High-value payment detected: " + std::to_string(amount) + " KRW. Admin approval required.");
+                "High-value payment detected: " + std::to_string(amount)
+                + " KRW. Admin approval required.");
         }
 
-        return {ChannelWrite{"result", json("Payment complete: " + std::to_string(amount) + " KRW")}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"result",
+            json("Payment complete: " + std::to_string(amount) + " KRW")});
+        co_return out;
     }
     std::string get_name() const override { return "payment"; }
 };
@@ -50,13 +54,17 @@ public:
 class UnstableAPINode : public GraphNode {
     static std::atomic<int> call_count_;
 public:
-    std::vector<ChannelWrite> execute(const GraphState&) override {
+    asio::awaitable<NodeOutput> run(NodeInput) override {
         int count = ++call_count_;
         if (count < 3) {
             throw std::runtime_error(
                 "API temporary failure (attempt " + std::to_string(count) + ")");
         }
-        return {ChannelWrite{"api_result", json("External API response success (attempt " + std::to_string(count) + ")")}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"api_result",
+            json("External API response success (attempt "
+                + std::to_string(count) + ")")});
+        co_return out;
     }
     std::string get_name() const override { return "unstable_api"; }
 };
@@ -69,11 +77,10 @@ std::atomic<int> UnstableAPINode::call_count_{0};
 //  Command's updates are applied directly, and goto is expressed via the __route__ channel.)
 class ScoreRouterNode : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        auto score = state.get("score");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto score = in.state.get("score");
         int s = score.is_number() ? score.get<int>() : 0;
 
-        // Command pattern: routing decision + state modification at once
         Command cmd;
         if (s >= 90) {
             cmd.goto_node = "premium";
@@ -86,12 +93,10 @@ public:
             cmd.updates = {ChannelWrite{"tier", json("BASIC")}};
         }
 
-        // Routing goes via __route__ channel, state is written directly
-        std::vector<ChannelWrite> writes;
-        writes.push_back(ChannelWrite{"__route__", json(cmd.goto_node)});
-        for (auto& u : cmd.updates) writes.push_back(std::move(u));
-
-        return writes;
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"__route__", json(cmd.goto_node)});
+        for (auto& u : cmd.updates) out.writes.push_back(std::move(u));
+        co_return out;
     }
     std::string get_name() const override { return "score_router"; }
 };
@@ -102,9 +107,12 @@ class TierNode : public GraphNode {
     std::string message_;
 public:
     TierNode(const std::string& n, const std::string& msg) : name_(n), message_(msg) {}
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        auto tier = state.get("tier");
-        return {ChannelWrite{"result", json(message_ + " (tier: " + tier.get<std::string>() + ")")}};
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto tier = in.state.get("tier");
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"result",
+            json(message_ + " (tier: " + tier.get<std::string>() + ")")});
+        co_return out;
     }
     std::string get_name() const override { return name_; }
 };
