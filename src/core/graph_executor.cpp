@@ -1,4 +1,5 @@
 #include <neograph/graph/executor.h>
+#include <neograph/graph/engine.h>   // RunContext (forward-declared in executor.h)
 #include <neograph/graph/state.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/cancel.h>
@@ -112,7 +113,15 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
     const std::string& node_name,
     GraphState& state,
     const GraphStreamCallback& cb,
-    StreamMode stream_mode) {
+    StreamMode stream_mode,
+    const RunContext& ctx) {
+
+    // PR 1 (v0.4.0): ctx is plumbed through every dispatch hop but
+    // not yet read — the smuggling channels (state's run_cancel_token,
+    // the current_cancel_token() thread-local) remain authoritative
+    // until subsequent PRs flip the consumers. Marked unused locally
+    // so a -Wunused-parameter sweep doesn't flag the stub.
+    (void)ctx;
 
     auto node_it = nodes_.find(node_name);
     if (node_it == nodes_.end()) {
@@ -286,7 +295,8 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
     const BarrierState& barrier_state,
     std::vector<std::string>& trace,
     const GraphStreamCallback& cb,
-    StreamMode stream_mode) {
+    StreamMode stream_mode,
+    const RunContext& ctx) {
 
     const std::string task_id = make_static_task_id(step, node_name);
 
@@ -304,7 +314,7 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
             ok_result.emplace(replay_it->second);
         } else {
             ok_result.emplace(co_await execute_node_with_retry_async(
-                node_name, state, cb, stream_mode));
+                node_name, state, cb, stream_mode, ctx));
 
             // Record BEFORE apply_writes so a crash between the two
             // still leaves a durable log for resume to replay.
@@ -367,7 +377,8 @@ NodeExecutor::run_parallel_async(
     const BarrierState& barrier_state,
     std::vector<std::string>& trace,
     const GraphStreamCallback& cb,
-    StreamMode stream_mode) {
+    StreamMode stream_mode,
+    const RunContext& ctx) {
 
     // Single-ready bypass: skip the parallel_group machinery entirely.
     // When the super-step has only one ready node, building deferred
@@ -390,7 +401,7 @@ NodeExecutor::run_parallel_async(
             // here, save + rethrow outside the try/catch.
             try {
                 nr = co_await execute_node_with_retry_async(
-                    node_name, state, cb, stream_mode);
+                    node_name, state, cb, stream_mode, ctx);
             } catch (const NodeInterrupt&) {
                 interrupt_exc = std::current_exception();
             }
@@ -447,7 +458,7 @@ NodeExecutor::run_parallel_async(
             co_return replay_it->second;
         }
         auto nr = co_await execute_node_with_retry_async(
-            node_name, state, cb, stream_mode);
+            node_name, state, cb, stream_mode, ctx);
         co_await coord.record_pending_write_async(
             parent_cp_id, task_id, task_id, node_name, nr, step);
         co_return nr;
@@ -564,7 +575,8 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
     const std::string& parent_cp_id,
     std::vector<std::string>& trace,
     const GraphStreamCallback& cb,
-    StreamMode stream_mode) {
+    StreamMode stream_mode,
+    const RunContext& ctx) {
 
     std::vector<StepRouting> routings;
     if (sends.empty()) co_return routings;
@@ -598,7 +610,7 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
         } else {
             apply_input(state, s.input);
             nr = co_await execute_node_with_retry_async(
-                s.target_node, state, cb, stream_mode);
+                s.target_node, state, cb, stream_mode, ctx);
             co_await coord.record_pending_write_async(parent_cp_id,
                 task_id, task_id, s.target_node, nr, step);
         }
@@ -668,7 +680,7 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
         send_state.set_run_cancel_token(state.run_cancel_token_shared());
 
         auto nr = co_await execute_node_with_retry_async(
-            s.target_node, send_state, cb, stream_mode);
+            s.target_node, send_state, cb, stream_mode, ctx);
         co_await coord.record_pending_write_async(parent_cp_id,
             task_id, task_id, s.target_node, nr, step);
         co_return nr;

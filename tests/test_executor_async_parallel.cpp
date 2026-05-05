@@ -14,6 +14,7 @@
 // multi-channel state).
 
 #include <gtest/gtest.h>
+#include <neograph/graph/engine.h>   // RunContext
 #include <neograph/graph/executor.h>
 #include <neograph/graph/node.h>
 
@@ -144,7 +145,7 @@ TEST(ExecutorAsyncParallel, AllBranchesCompleteInReadyOrder) {
             GraphState state; init_parallel_state(state, h.channel_defs);
             got = co_await h.executor.run_parallel_async(
                 ready, 0, state, replay, coord, "", barrier,
-                trace, nullptr, StreamMode::ALL);
+                trace, nullptr, StreamMode::ALL, RunContext{});
         },
         asio::detached);
     io.run();
@@ -182,7 +183,7 @@ TEST(ExecutorAsyncParallel, BranchesRunConcurrentlyOnSharedIoContext) {
             GraphState state; init_parallel_state(state, h.channel_defs);
             got = co_await h.executor.run_parallel_async(
                 ready, 0, state, replay, coord, "", barrier,
-                trace, nullptr, StreamMode::ALL);
+                trace, nullptr, StreamMode::ALL, RunContext{});
         },
         asio::detached);
 
@@ -224,7 +225,7 @@ TEST(ExecutorAsyncParallel, NodeInterruptSavesDedicatedCheckpoint) {
                 GraphState state; init_parallel_state(state, h.channel_defs);
                 co_await h.executor.run_parallel_async(
                     ready, 0, state, replay, coord, "", barrier,
-                    trace, nullptr, StreamMode::ALL);
+                    trace, nullptr, StreamMode::ALL, RunContext{});
             } catch (...) {
                 err = std::current_exception();
             }
@@ -280,7 +281,7 @@ TEST(ExecutorAsyncParallel, SiblingsRecordPendingWritesBeforeThrow) {
                 GraphState state; init_parallel_state(state, h.channel_defs);
                 co_await h.executor.run_parallel_async(
                     ready, 0, state, replay, coord, parent_cp_id, barrier,
-                    trace, nullptr, StreamMode::ALL);
+                    trace, nullptr, StreamMode::ALL, RunContext{});
             } catch (...) {
                 // expected
             }

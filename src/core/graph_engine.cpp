@@ -409,6 +409,21 @@ GraphEngine::execute_graph_async(const RunConfig& config,
     StreamMode stream_mode = config.stream_mode;
     CheckpointCoordinator coord(checkpoint_store_, config.thread_id);
 
+    // PR 1 (v0.4.0): build the per-run RunContext from RunConfig and
+    // carry it by reference through every NodeExecutor hop. Plumbing-
+    // only — consumers (the new ``GraphNode::run(NodeInput)`` virtual,
+    // the deprecation of ``state.run_cancel_token`` smuggling, etc.)
+    // land in subsequent PRs. ``ctx.step`` is updated at the top of
+    // each super-step iteration below so per-step consumers see a
+    // consistent value without the engine threading ``int step``
+    // separately. See ROADMAP_v1.md "Execution plan" → PR 1.
+    RunContext ctx;
+    ctx.cancel_token = config.cancel_token;
+    ctx.thread_id    = config.thread_id;
+    ctx.stream_mode  = stream_mode;
+    // ctx.deadline / ctx.trace_id stay default-constructed for now —
+    // RunConfig has no source field for either. Future PRs add them.
+
     std::string last_checkpoint_id;
     int start_step = 0;
 
@@ -466,6 +481,7 @@ GraphEngine::execute_graph_async(const RunConfig& config,
     std::vector<Send> pending_sends;
 
     for (int step = start_step; step < config.max_steps + start_step; ++step) {
+        ctx.step = step;
         // v0.3: cooperative cancel checkpoint. Polled at the super-step
         // boundary so any future node work is suppressed; in-flight
         // HTTP work inside the just-finished step is aborted via the
@@ -533,7 +549,7 @@ GraphEngine::execute_graph_async(const RunConfig& config,
                 step_results.push_back(co_await executor_->run_one_async(
                     ready[0], step, state, replay_results,
                     coord, last_checkpoint_id, barrier_state,
-                    trace, cb, stream_mode));
+                    trace, cb, stream_mode, ctx));
             } else {
                 // Sem 3.7: full async fan-out via
                 // asio::experimental::make_parallel_group. The
@@ -542,7 +558,7 @@ GraphEngine::execute_graph_async(const RunConfig& config,
                 step_results = co_await executor_->run_parallel_async(
                     ready, step, state, replay_results,
                     coord, last_checkpoint_id, barrier_state,
-                    trace, cb, stream_mode);
+                    trace, cb, stream_mode, ctx);
             }
         } catch (const NodeInterrupt& ni) {
             interrupted = true;
@@ -581,7 +597,7 @@ GraphEngine::execute_graph_async(const RunConfig& config,
         //      next super-step routing decision (LangGraph parity).
         auto send_routings = co_await executor_->run_sends_async(
             pending_sends, step, state, replay_results,
-            coord, last_checkpoint_id, trace, cb, stream_mode);
+            coord, last_checkpoint_id, trace, cb, stream_mode, ctx);
 
         if (cb && has_mode(stream_mode, StreamMode::VALUES)) {
             cb(GraphEvent{GraphEvent::Type::CHANNEL_WRITE, "__state__",
