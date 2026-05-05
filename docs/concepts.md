@@ -165,8 +165,8 @@ subclass `GraphNode`.
 
 ### 3.3 The full `GraphNode` subclass
 
-Override `execute_full(state)` for full control. This is what every
-non-trivial example uses:
+Override `run(input)` for full control. As of v0.4.0 this is the
+canonical entry point — one method, one signature:
 
 ```python
 class Researcher(ng.GraphNode):
@@ -177,9 +177,12 @@ class Researcher(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute_full(self, state):
-        topic = state.get("topic")
-        result = await_llm(topic)            # whatever your I/O is
+    def run(self, input):
+        # input.state    — read channels via input.state.get(...)
+        # input.ctx      — RunContext (cancel_token, deadline, trace_id, ...)
+        # input.stream_cb — non-None when running in streaming mode
+        topic = input.state.get("topic")
+        result = await_llm(topic, cancel_token=input.ctx.cancel_token)
         return ng.NodeResult(
             writes=[ng.ChannelWrite("findings", [result])],
             command=ng.Command(goto_node="evaluator"),  # optional
@@ -187,8 +190,18 @@ class Researcher(ng.GraphNode):
         )
 ```
 
-`execute(state)` (returning `list[ChannelWrite]`) is a convenience
-override when you don't need `Send` or `Command`.
+You can also return a bare `list[ChannelWrite]` when you don't need
+`Send` or `Command` — the binding lifts it into a `NodeResult`
+automatically.
+
+> **Migrating from v0.3.x:** the 8-virtual chain (`execute`,
+> `execute_async`, `execute_full`, `execute_full_async`,
+> `execute_stream`, `execute_stream_async`, `execute_full_stream`,
+> `execute_full_stream_async`) still compiles in v0.4.x but is
+> `[[deprecated]]` and removed in v1.0.0. Replace with a single
+> `run(input)` override; read state from `input.state`, emit tokens
+> via `input.stream_cb` when non-None, read the cancel token from
+> `input.ctx.cancel_token`.
 
 Register the type so the JSON loader can instantiate it:
 
