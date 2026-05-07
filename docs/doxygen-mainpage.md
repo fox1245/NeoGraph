@@ -15,8 +15,8 @@ what you're looking for.
 | What NeoGraph is, why, benchmarks | [README](https://github.com/fox1245/NeoGraph#readme) |
 | Mental model — channels, nodes, edges, Send, Command | [Core Concepts](https://github.com/fox1245/NeoGraph/blob/master/docs/concepts.md) |
 | Symptom-first fixes for common issues | [Troubleshooting](https://github.com/fox1245/NeoGraph/blob/master/docs/troubleshooting.md) |
-| 36 runnable C++ programs | [examples/](https://github.com/fox1245/NeoGraph/tree/master/examples) |
-| 21 runnable Python programs | [bindings/python/examples/](https://github.com/fox1245/NeoGraph/tree/master/bindings/python/examples) |
+| 39 runnable C++ programs | [examples/](https://github.com/fox1245/NeoGraph/tree/master/examples) |
+| 23 runnable Python programs | [bindings/python/examples/](https://github.com/fox1245/NeoGraph/tree/master/bindings/python/examples) |
 | Async / coroutine internals | [ASYNC_GUIDE](https://github.com/fox1245/NeoGraph/blob/master/docs/ASYNC_GUIDE.md) |
 
 ## Top-level header

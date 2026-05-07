@@ -20,6 +20,11 @@ generated reference).
 
 ## Table of contents
 
+(Section 8.5 added in v0.6.0 — `Tracing — OpenTelemetry + Phoenix / Langfuse`.
+The numbered headings stay 1-9 to keep external docs links stable;
+8.5 sits between Streaming and Common pitfalls.)
+
+
 1. [The big picture](#1-the-big-picture)
 2. [Channels & reducers](#2-channels--reducers)
 3. [Nodes](#3-nodes)
@@ -500,6 +505,60 @@ engine.run_stream(
                  stream_mode=ng.StreamMode.TOKENS),
     message_stream(lambda chunk: print(chunk["content"], end="", flush=True)))
 ```
+
+---
+
+## 8.5. Tracing — OpenTelemetry + Phoenix / Langfuse
+
+Same callback shape as streaming, different consumer. Pass an OTel
+tracer-emitting callback into `engine.run_stream(cfg, cb)` and every
+`NODE_START` / `NODE_END` / `ERROR` / `INTERRUPT` event becomes a
+span.
+
+Two layers ship in-tree:
+
+  - `neograph_engine.tracing.otel_tracer` — vendor-neutral OTel
+    spans. Spans flow to any OTel backend (Jaeger, Tempo, Honeycomb,
+    Datadog).
+  - `neograph_engine.openinference` — LLM-shape attribute layer
+    that turns the same spans into a *LangSmith-style chat-bubble
+    trace* in Phoenix / Arize / Langfuse:
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from neograph_engine.openinference import OpenInferenceProvider, openinference_tracer
+
+trace.set_tracer_provider(TracerProvider())
+trace.get_tracer_provider().add_span_processor(
+    BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4317", insecure=True)))
+tracer = trace.get_tracer("my-app")
+
+# Wrap the provider — every Provider.complete() now emits an LLM-kind span.
+wrapped = OpenInferenceProvider(real_provider, tracer)
+ctx = ng.NodeContext(provider=wrapped)
+engine = ng.GraphEngine.compile(graph_def, ctx)
+
+with openinference_tracer(tracer) as cb:
+    engine.run_stream(ng.RunConfig(input={"messages": [...]}), cb)
+```
+
+Spin up Phoenix once: `docker run -d -p 6006:6006 -p 4317:4317
+arizephoenix/phoenix`. Open http://localhost:6006 — the trace
+renders as a chain (`graph.run` → `node.X` → `llm.complete`) with
+prompt / response / token counts visible in the LLM detail pane.
+Same code, swap the OTLP endpoint URL for Langfuse self-host and
+the trace shows up there with the same shape.
+
+This is the answer to *"NeoGraph doesn't have LangSmith"* — you
+get the LangSmith UX (chat bubbles, DAG hierarchy, token cost) by
+running Phoenix or Langfuse locally with one Docker command. No
+SaaS contract, no per-trace pricing.
+
+See `docs/reference-en.md` §10.5 for the attribute-key schema and
+the trade-off note between `otel_tracer` and `openinference_tracer`.
 
 ---
 

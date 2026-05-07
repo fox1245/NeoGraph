@@ -391,6 +391,80 @@ child node's `start_span`. Upgrade past `9073671`.
 If you're rolling your own OTel integration, do the same: don't rely
 on contextvars across the binding boundary.
 
+### My LLM spans show up under different trace IDs than my node spans
+
+**Affected:** `neograph_engine.openinference` before v0.6.0 final
+(commit `fa8ed50`).
+
+**Root cause:** the `openinference_tracer` set `parent_ctx` (a
+snapshot) but never *attached* the node span as the OTel current
+context. So when the node body called `provider.complete()` and
+`OpenInferenceProvider` opened an `llm.complete` span via
+`tracer.start_as_current_span(...)`, the new span fell back to the
+global root and the trace fragmented into separate trace IDs per
+LLM call.
+
+**Fix:** `openinference_tracer` now does
+`otel_context.attach(set_span_in_context(span))` on `NODE_START`
+and stashes the resulting token alongside the span; `NODE_END` /
+`ERROR` / `INTERRUPT` detach the token before ending the span,
+restoring the prior current span. Verified in v0.6.0 against
+Phoenix — single trace tree with `graph.run > node.X > llm.complete`
+hierarchy.
+
+If you're on v0.6.0+ and *still* see split traces, your provider
+isn't being wrapped — make sure `ctx.provider = OpenInferenceProvider(inner, tracer)`
+runs **before** `engine.compile(...)`, otherwise the engine binds
+to the un-wrapped provider.
+
+### `pip install opentelemetry-api` raises ImportError when I import `openinference`
+
+`neograph_engine.openinference` lazy-imports `opentelemetry`. The
+ImportError fires on first use only, with a one-line install hint::
+
+    pip install opentelemetry-api opentelemetry-sdk
+
+Add `opentelemetry-exporter-otlp` if you want to push spans to
+Phoenix / Langfuse / Tempo via OTLP.
+
+---
+
+## Python type identity (v0.5.0+)
+
+### `isinstance(params.messages, list)` returns False
+
+**Affected:** v0.5.0 and later, on the five vector-property surfaces:
+`CompletionParams.messages`, `.tools`, `ChatMessage.tool_calls`,
+`NodeResult.writes`, `.sends`.
+
+**Why:** v0.5.0 fixed a silent no-op on `params.messages.append(...)`
+by binding these vectors as opaque types
+(`PYBIND11_MAKE_OPAQUE` + `py::bind_vector`) so `.append` mutates
+the live C++ vector. The trade-off: the property's type is now
+e.g. `ChatMessageList` (a pybind class), not a plain Python `list`.
+
+**What still works:**
+- `params.messages = [m1, m2]` — `py::implicitly_convertible<py::list, …>`
+  auto-converts a Python list on assignment.
+- `for m in params.messages` — iteration protocol.
+- `len(params.messages)`, `params.messages[i]`, `params.messages[i] = m`,
+  slicing.
+- `params.messages.append(...)`, `.extend(...)`, `.insert(...)`,
+  `.pop(...)`, `.clear()` — all push through to the C++ vector live.
+
+**What broke (rare):**
+- `isinstance(x, list) → False`. If you really need a plain Python
+  list, materialise: `list(params.messages)`.
+- `json.dumps(params.messages)` — the bound class isn't directly
+  JSON-serialisable. Convert: `json.dumps([{"role": m.role,
+  "content": m.content} for m in params.messages])`.
+
+`ChatMessage.image_urls` (`std::vector<std::string>`) was *not*
+migrated — `vector<string>` is used too widely in the binding for a
+global OPAQUE without callsite sweeping. The `.append()` no-op
+remains there as a documented limitation; v0.6+ candidate via an
+`add_image_url()` convenience method.
+
 ---
 
 ## Build from source

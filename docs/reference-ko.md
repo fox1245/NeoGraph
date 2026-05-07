@@ -1915,6 +1915,92 @@ factory.register_type("my_node",
 
 ---
 
+## 10.5. 관측성 — OpenTelemetry + OpenInference
+
+**모듈:** `neograph_engine.tracing` (OTel 기본) +
+`neograph_engine.openinference` (LLM 형태 attribute 레이어)
+**도입 버전:** OTel 레이어는 v0.3.x, OpenInference 레이어는 **v0.6.0**.
+
+NeoGraph 의 `GraphEvent` 스트림을 OTel span 으로 매핑하는 헬퍼 두 개:
+
+  - **`otel_tracer(tracer)`** — 벤더 중립 OpenTelemetry. 한 run 당
+    root span + 노드별 child span + status / error / interrupt 매핑.
+    Jaeger / Tempo / Honeycomb / Datadog 등 OTel 백엔드 어디든 그대로 흐름.
+  - **`openinference_tracer(tracer)` + `OpenInferenceProvider`** —
+    그 위에 LLM 전용 attribute 레이어. 같은 OTel 메커니즘이지만
+    각 span 에 `openinference.span.kind` (`"CHAIN"` / `"LLM"`) +
+    LLM 키 (`llm.model_name`, `llm.input_messages.{i}.…`,
+    `llm.token_count.{prompt,completion,total}` 등) 를 박음.
+    Phoenix / Arize / Langfuse 가 trace 를 *대화 버블 + DAG +
+    per-call 토큰 비용* UI ("LangSmith UX") 로 렌더링.
+
+### `OpenInferenceProvider` 사용
+
+기존 `Provider` 를 감싸서 매 `complete()` 호출마다 LLM-kind child
+span 을 엽니다. 노드 body 가 이 wrapped provider 를 쓰면 LLM span
+이 *node span 의 child* 로 nest 됨 (v0.6.0 contextvar attach/detach
+fix 덕분).
+
+LLM span 마다 박히는 attribute:
+
+| Attribute | 출처 |
+|---|---|
+| `openinference.span.kind` | 상수 `"LLM"` |
+| `llm.model_name` | `params.model` |
+| `llm.invocation_parameters` | `temperature` / `max_tokens` 등 JSON |
+| `llm.input_messages.{i}.message.role` / `.content` | `params.messages[i]` |
+| `llm.output_messages.0.message.role` / `.content` | `result.message` |
+| `llm.token_count.{prompt,completion,total}` | `result.usage.*` |
+| `input.value` / `output.value` | Langfuse 호환 JSON blob |
+
+### Phoenix end-to-end
+
+```bash
+docker run -d -p 6006:6006 -p 4317:4317 arizephoenix/phoenix:latest
+pip install neograph-engine opentelemetry-exporter-otlp
+```
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from neograph_engine.openinference import OpenInferenceProvider, openinference_tracer
+from neograph_engine.llm import OpenAIProvider
+import neograph_engine as ng
+
+provider = TracerProvider()
+provider.add_span_processor(
+    BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4317", insecure=True)))
+trace.set_tracer_provider(provider)
+tracer = trace.get_tracer("my-app")
+
+wrapped = OpenInferenceProvider(OpenAIProvider(api_key="sk-..."), tracer)
+ctx = ng.NodeContext(provider=wrapped)
+engine = ng.GraphEngine.compile(graph_def, ctx)
+
+with openinference_tracer(tracer) as cb:
+    engine.run_stream(ng.RunConfig(input={"messages": [...]}), cb)
+```
+
+http://localhost:6006 열면 trace 가 chain 으로 렌더링.
+OTLP endpoint URL 만 Langfuse self-host 로 바꾸면 같은 trace 가
+거기에도 떨어짐.
+
+### 비고
+
+- **Opt-in 의존성**: `opentelemetry-api` 는 base wheel 이 안 끌고
+  옴. import 시 첫 사용 시점에만 ImportError 발생.
+- **pybind 경계의 contextvar**: 두 tracer 모두 명시적
+  `otel_context.attach` + `detach` 토큰 쌍으로 current-span 활성화를
+  결정론적으로 제어 (`use_span(...).__enter__()` 패턴은 leak + 전파
+  안 되어 부적합).
+- **`otel_tracer` vs `openinference_tracer`**: APM (Jaeger, Datadog)
+  면 전자, Phoenix / Langfuse 의 LLM-trace 렌더링이 필요하면 후자.
+  한 run 에 둘 다 쓸 수는 없음.
+
+---
+
 ## 11. ReAct 그래프
 
 **헤더:** `neograph/graph/react_graph.h`
