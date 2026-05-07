@@ -19,10 +19,16 @@ jobs:
   # this job catches the things that only show up after sustained
   # arrivals: RSS drift / leaks, latency walk-up, pool exhaustion.
   #
-  # Floors are intentionally loose vs. the 2026-05-01 Linux baseline
-  # (commit 9759b61: 290M runs @ 969K ops/s, drift +3.2% over 5 min)
-  # to absorb GitHub runner noise. Tighten once a few weeks of nightly
-  # runs establish steady-state numbers.
+  # Floors are deliberately *correctness-only* (err==0 + leak==false).
+  # The 2026-05-01 Linux baseline (commit 9759b61: 290M runs @ 969K ops/s
+  # on local hw) is irreproducible on shared GitHub runners — measured
+  # 4-day GHA capacity is 233~273K ops/s, ~3-4× below local. Throughput
+  # regression detection therefore lives in the PR-time bench-regression
+  # job (stable hardware, single-shot dispatch overhead in µs); this
+  # nightly soak's value is *sustained-arrivals correctness* — pool
+  # exhaustion, RSS drift, leak suspect, latency walk-up. Adding an
+  # ops/s gate here would be a false-positive farm given GHA noise +
+  # shared-runner variance.
   sustained-burst:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -59,7 +65,7 @@ jobs:
             --rss-tolerance-pct 25 \
             | tee soak.jsonl
 
-      - name: Gate — ops/s floor (>= 600K), 0 errors, no leak suspect
+      - name: Gate — 0 errors, no leak suspect (correctness-only)
         run: |
           # bench prints one summary JSON line at end with `summary:true`.
           summary=$(grep '"summary":true' soak.jsonl)
@@ -71,12 +77,13 @@ jobs:
           leak=$(echo "$summary" | sed -n 's/.*"leak_suspect":\(true\|false\).*/\1/p')
           drift=$(echo "$summary"| sed -n 's/.*"rss_drift_pct":\(-*[0-9.]*\).*/\1/p')
 
+          # ops/s is informational only — see header comment for why.
           ops=$(awk -v o="$ok" -v d="$dur" 'BEGIN{ if (d+0>0) printf "%.0f", o/d; else print "0" }')
-          echo "computed: ops/s=$ops  err=$err  drift=$drift%  leak=$leak"
+          echo "informational: ops/s=$ops  err=$err  drift=$drift%  leak=$leak"
 
           [ "$err" = "0" ]      || { echo "FAIL: err_total=$err (expected 0)"; exit 1; }
           [ "$leak" = "false" ] || { echo "FAIL: leak_suspect=true (drift=$drift%)"; exit 1; }
-          awk -v v="$ops" 'BEGIN{ if (v+0 < 600000) { print "FAIL ops/s: " v " < 600000"; exit 1 } print "ok ops/s: " v }'
+          echo "ok: 0 errors, no leak suspect across 5-min soak @ 1000 concur (ops/s=$ops, GHA-bound)"
 
       - name: Upload soak samples on failure
         if: failure()
