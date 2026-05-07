@@ -2049,6 +2049,190 @@ The library pre-registers the following components:
 
 ---
 
+## 10.5. Observability — OpenTelemetry + OpenInference
+
+**Module:** `neograph_engine.tracing` (OTel-shape) +
+`neograph_engine.openinference` (LLM-shape)
+**Since:** OTel layer in v0.3.x; OpenInference layer in **v0.6.0**.
+
+NeoGraph emits its `GraphEvent` stream through the same callback the
+streaming API uses. Two helpers ride on top:
+
+  - **`otel_tracer(tracer)`** — vendor-neutral OpenTelemetry spans.
+    Root span per run + child span per node + status / error / interrupt
+    mapping. Spans flow to any OTel backend (Jaeger, Tempo, Honeycomb,
+    Datadog, …). Useful when you already run an APM that just needs
+    spans-shaped data.
+  - **`openinference_tracer(tracer)` + `OpenInferenceProvider`** —
+    LLM-shape attribute layer on top. Same OTel mechanics, but each
+    span carries `openinference.span.kind` (`"CHAIN"` / `"LLM"`) plus
+    LLM-specific keys (`llm.model_name`, `llm.input_messages.{i}.…`,
+    `llm.token_count.{prompt,completion,total}`, etc.) so a backend
+    that recognises the OpenInference convention — Phoenix, Arize,
+    Langfuse — renders the trace as a chat-bubble + DAG hierarchy +
+    per-call token cost UI (the "LangSmith UX").
+
+### `otel_tracer` — OTel-shape spans
+
+```python
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator, Optional
+
+@contextmanager
+def otel_tracer(
+    tracer: Any,
+    *,
+    root_name: str = "graph.run",
+    node_span_prefix: str = "node.",
+    attribute_prefix: str = "neograph",
+    on_event: Optional[Callable[[Any], None]] = None,
+) -> Iterator[Callable[[Any], None]]:
+    ...
+```
+
+| Knob | Default | Purpose |
+|---|---|---|
+| `root_name` | `"graph.run"` | Span name for the per-run root span |
+| `node_span_prefix` | `"node."` | Prefix concatenated with each node name |
+| `attribute_prefix` | `"neograph"` | Prefix for engine-specific attributes (`neograph.node`, `neograph.next_nodes`, etc.) |
+| `on_event` | `None` | Optional secondary callback receiving every raw `GraphEvent` — useful for chaining with logging / metrics |
+
+Events handled: `NODE_START` opens a child span, `NODE_END` closes
+it (with `Status.OK`), `ERROR` records the exception and ends the
+span with `Status.ERROR`, `INTERRUPT` tags
+`{attribute_prefix}.interrupted = true` and ends.
+
+Concurrent fan-out (multi-Send): each node-name keeps a stack of
+open spans; `NODE_END` pops the most recent. Always-end-on-exit:
+the context-manager's `finally` block force-closes any spans still
+open if the run raises.
+
+```python
+from opentelemetry import trace
+from neograph_engine.tracing import otel_tracer
+
+tracer = trace.get_tracer("my-service")
+with otel_tracer(tracer) as cb:
+    engine.run_stream(cfg, cb)
+```
+
+### `openinference_tracer` — adds LLM-shape attributes
+
+Same shape, plus each span tagged
+`openinference.span.kind = "CHAIN"` and node payload encoded as
+`input.value` / `output.value` JSON blobs. Phoenix / Arize / Langfuse
+treat the trace as an LLM chain in their UI.
+
+```python
+@contextmanager
+def openinference_tracer(
+    tracer: Any,
+    *,
+    root_name: str = "graph.run",
+    node_span_prefix: str = "node.",
+    on_event: Optional[Callable[[Any], None]] = None,
+) -> Iterator[Callable[[Any], None]]:
+    ...
+```
+
+The tracer also attaches each node span as the OTel *current
+context* (via `otel_context.attach`) so a `Provider.complete()`
+call inside the node body opens its `llm.complete` span as a child
+of that node — the trace is a single connected tree, not 3+ orphan
+trace-IDs (the v0.6.0 contextvar-propagation fix).
+
+### `OpenInferenceProvider` — wraps any `Provider`
+
+```python
+class OpenInferenceProvider(Provider):
+    def __init__(self, inner: Provider, tracer: Any,
+                 *, span_name: str = "llm.complete"):
+        ...
+```
+
+On every `complete(params)` call it opens an LLM-kind child span
+under the current OTel context (so it nests under whichever node
+span is active), captures the OpenInference attributes, delegates
+to `inner.complete()`, then closes the span. Tracing failures are
+swallowed — observability never breaks the LLM call. Inner-provider
+exceptions are re-raised after the span is marked ERROR.
+
+Captured attributes per LLM span:
+
+| Attribute | Source |
+|---|---|
+| `openinference.span.kind` | constant `"LLM"` |
+| `llm.model_name` | `params.model` |
+| `llm.invocation_parameters` | JSON blob of `temperature`, `max_tokens`, `top_p`, `frequency_penalty`, `presence_penalty` (when set) |
+| `llm.input_messages.{i}.message.role` | `params.messages[i].role` |
+| `llm.input_messages.{i}.message.content` | `params.messages[i].content` |
+| `input.value` / `input.mime_type` | `params.messages` JSON / `application/json` (Langfuse-compatible blob) |
+| `llm.output_messages.0.message.role` | `result.message.role` |
+| `llm.output_messages.0.message.content` | `result.message.content` |
+| `output.value` / `output.mime_type` | `result.message.content` / `text/plain` |
+| `llm.token_count.prompt` | `result.usage.prompt_tokens` |
+| `llm.token_count.completion` | `result.usage.completion_tokens` |
+| `llm.token_count.total` | `result.usage.total_tokens` |
+
+### End-to-end: NeoGraph + Phoenix in one block
+
+```bash
+docker run -d -p 6006:6006 -p 4317:4317 arizephoenix/phoenix:latest
+pip install neograph-engine opentelemetry-exporter-otlp
+```
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from neograph_engine.openinference import OpenInferenceProvider, openinference_tracer
+from neograph_engine.llm import OpenAIProvider
+import neograph_engine as ng
+
+provider = TracerProvider()
+provider.add_span_processor(
+    BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4317", insecure=True)))
+trace.set_tracer_provider(provider)
+tracer = trace.get_tracer("my-app")
+
+inner = OpenAIProvider(api_key="sk-...")
+wrapped = OpenInferenceProvider(inner, tracer)
+ctx = ng.NodeContext(provider=wrapped)
+engine = ng.GraphEngine.compile(graph_def, ctx)
+
+with openinference_tracer(tracer) as cb:
+    engine.run_stream(ng.RunConfig(input={"messages": [...]}), cb)
+
+# Open http://localhost:6006 — the trace renders as a chain with
+# each LLM call expanded into prompt / response / token counts.
+```
+
+Endpoint URL is the only thing you change to point this at Langfuse
+self-host instead of Phoenix — both honour OpenInference and OTLP.
+
+### Notes
+
+- **Opt-in dependency.** `opentelemetry-api` is not pulled by the
+  base wheel. Importing `neograph_engine.tracing` /
+  `.openinference` raises `ImportError` on first use only when the
+  package is missing — install with
+  `pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp`.
+- **OTel contextvars across pybind.** The `otel_tracer` in v0.3.x
+  documented that `trace.use_span(...).__enter__()` without
+  `__exit__()` leaks the contextvar AND doesn't reliably propagate
+  through the C++ → Python callback boundary. Both tracers now use
+  explicit `otel_context.attach` + `detach` token pairs to control
+  current-span activation deterministically.
+- **`otel_tracer` vs `openinference_tracer`.** Use the OTel one
+  when your backend is APM-shape (Jaeger, Datadog) and you want
+  generic spans. Use the OpenInference one when your backend is
+  Phoenix / Langfuse / Arize and you want LLM-shape rendering. The
+  two can't be combined on the same run — they're alternative
+  callbacks for the engine's event stream.
+
+---
+
 ## 11. React Graph
 
 **Header:** `<neograph/graph/react_graph.h>`
