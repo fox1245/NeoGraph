@@ -31,6 +31,7 @@
 //     in commit 1) so concurrent compile()s don't race the deleter.
 
 #include "json_bridge.h"
+#include "opaque_types.h"
 
 #include <neograph/api.h>  // NEOGRAPH_PUSH/POP_IGNORE_DEPRECATED
 #include <neograph/graph/engine.h>

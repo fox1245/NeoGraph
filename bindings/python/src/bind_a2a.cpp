@@ -18,6 +18,8 @@
 //     Wants either a Python callback that fires from the asio thread
 //     (GIL juggling) or an async-iterator bridge — also follow-up.
 
+#include "opaque_types.h"
+
 #include <neograph/a2a/client.h>
 #include <neograph/a2a/types.h>
 

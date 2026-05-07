@@ -40,6 +40,7 @@
 // Python ops, including freeing the captured Future / loop refs.
 
 #include "json_bridge.h"
+#include "opaque_types.h"
 
 #include <neograph/graph/cancel.h>
 #include <neograph/graph/checkpoint.h>
