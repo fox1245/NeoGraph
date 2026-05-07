@@ -7,6 +7,290 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.0] — 2026-05-07 — OpenInference observability layer
+
+Closes the LangSmith UX gap. NeoGraph already emitted OTel-shape
+spans (so traces flowed to any OTel backend); this release adds the
+LLM-specific attribute layer that Phoenix / Arize / Langfuse use to
+render the trace as a chat-bubble + token-counts UI instead of a
+flat generic-application span list. Verified end-to-end against a
+local Phoenix container — writer→critic graph produces a 6-span
+hierarchy (CHAIN root → node spans → LLM spans) with model name,
+prompt/response, and token counts visible in the Phoenix UI.
+
+### Added
+
+- `neograph_engine.openinference` module:
+  - `openinference_tracer(tracer)` — context manager that mirrors
+    `otel_tracer` but tags root + node spans with
+    `openinference.span.kind = "CHAIN"` and stuffs node payload
+    into `input.value` / `output.value` JSON blobs.
+  - `OpenInferenceProvider(inner, tracer)` — wraps any `Provider`.
+    On every `complete()` opens an `llm.complete` child span tagged
+    `span.kind = "LLM"`, capturing `llm.model_name`,
+    `llm.invocation_parameters`, `llm.input_messages.{i}.message.{role,content}`,
+    `llm.output_messages.0.message.{role,content}`,
+    `llm.token_count.{prompt,completion,total}`, and the Langfuse-
+    compatible `input.value` / `output.value` blobs.
+- 4 tests in `bindings/python/tests/test_openinference.py` —
+  InMemorySpanExporter assertions on attribute presence, span
+  hierarchy, exception path, and node-input/output JSON blobs.
+
+### Fixed
+
+- `openinference_tracer` now attaches each node span as the OTel
+  *current* context (via `otel_context.attach`) so child LLM spans
+  opened inside the node body nest under their node span. Without
+  this, contextvar propagation across the C++→Python pybind callback
+  boundary produced 3+ unrelated trace_ids per run instead of the
+  expected single trace tree. The token is detached on NODE_END /
+  ERROR / INTERRUPT to restore the prior current span. Same pattern
+  the existing `otel_tracer` documents — explicit attach/detach
+  rather than `trace.use_span(...).__enter__()` which is unsafe to
+  use without a matching `__exit__`.
+
+### Notes
+
+- OpenTelemetry remains an opt-in dependency. Importing
+  `neograph_engine.openinference` raises a clear ImportError on
+  first use only if `opentelemetry-api` isn't installed; not at
+  import time.
+- For a Phoenix end-to-end run::
+
+      docker run -d -p 6006:6006 -p 4317:4317 arizephoenix/phoenix
+      pip install opentelemetry-exporter-otlp
+
+  Configure the OTLP gRPC exporter to `http://localhost:4317` and
+  open `http://localhost:6006` to view traces. The module docstring
+  has the full snippet.
+
+---
+
+## [0.5.0] — 2026-05-07 — Binding ergonomics: live-mutation list properties
+
+Closes a silent-no-op trap on the most-natural Python idiom for
+mutating message / writes / sends lists exposed via the binding.
+Previously `params.messages.append(msg)` mutated a copy and the
+underlying C++ vector never saw the new item — graceful failure (no
+crash, no warning) that produced degraded LLM replies. Now `.append()`
+pushes through to the live std::vector.
+
+### Added
+
+- `bindings/python/src/opaque_types.h` — `PYBIND11_MAKE_OPAQUE` for
+  five vector types: `std::vector<ChatMessage>`, `<ChatTool>`,
+  `<ToolCall>`, `<graph::ChannelWrite>`, `<graph::Send>`.
+- `module.cpp` `init_opaque_vectors` — `py::bind_vector` registers
+  each as a Python class (`ChatMessageList`, `ChatToolList`,
+  `ToolCallList`, `ChannelWriteList`, `SendList`) supporting the
+  full mutable-sequence protocol against the live C++ vector.
+- `py::implicitly_convertible<py::list, …>` for each — the legacy
+  build-then-assign pattern (`params.messages = [m1, m2]`) keeps
+  working unchanged; assignment auto-converts a Python list into
+  the bound class.
+- `bindings/python/examples/23_evolving_chat_agent.py` — per-thread
+  evolving chat agent (live LLM): the agent's JSON definition is
+  rewritten between turns based on accumulated conversation history.
+  Demonstrates checkpoint-resume across evolution (prior messages
+  survive), the `__graph_meta__` audit channel pattern, and a
+  validator boundary (whitelist node types, required channels).
+
+### Changed
+
+- `params.messages` / `.tools` / `chat_message.tool_calls` /
+  `node_result.writes` / `.sends` now return their bound class
+  instead of a plain `list`. `len()`, iteration, `__getitem__`,
+  `__setitem__`, `.append()`, `.extend()`, slicing — all behave
+  like a Python list. Only `isinstance(x, list)` returns False.
+  Repo + downstream grep confirms zero such isinstance call sites.
+- `.github/workflows/nightly.yml` — drop the `ops/s ≥ 600K` gate.
+  After 4 consecutive failures with `err=0` and `leak=false`, the
+  threshold (calibrated against local hardware at 969K ops/s) was
+  unreachable on shared GitHub-hosted runners (measured 233~273K
+  ops/s, 3-4× below local). Throughput regression detection lives
+  in the PR-time `bench-regression` job (stable hardware, single-
+  shot dispatch in µs). The nightly soak's actual value is
+  `err==0` + `leak_suspect==false` over 5 minutes — both kept as
+  hard gates.
+
+### Notes
+
+- `ChatMessage.image_urls` (`std::vector<std::string>`) intentionally
+  not migrated — `vector<string>` is used too widely across the
+  binding for a global OPAQUE without sweeping every callsite.
+  Documented as a remaining limitation; v0.6+ candidate.
+
+---
+
+## [0.4.0] — 2026-05-05 — v1.0 prep: unified `run(NodeInput)` dispatch
+
+The opening release of the v1.0 sharpening track (ROADMAP_v1.md).
+The 8-virtual `GraphNode` cross-product (`execute` / `execute_async` /
+`execute_full` / … / `execute_full_stream_async`) collapses to a
+single canonical method: `run(NodeInput) -> awaitable<NodeOutput>`.
+Per-run metadata (cancel token, deadline, trace_id) moves from a
+non-channel-set `GraphState` member + a thread-local smuggling
+channel into an explicit `RunContext` argument. `CancelToken` gains
+hierarchical `fork()` so multi-Send fan-out workers each own a
+private signal that the parent's `cancel()` cascades to.
+
+### Added
+
+- `RunContext` (`include/neograph/graph/engine.h`) — explicit
+  per-run metadata: `cancel_token`, `deadline`, `trace_id`,
+  `thread_id`, `step`, `stream_mode`. Engine threads through every
+  `NodeExecutor::run` call. **PR 1, commit `a473f0e`.**
+- `GraphNode::run(NodeInput) -> awaitable<NodeOutput>` — single
+  canonical dispatch entry point. `NodeInput { state, ctx,
+  stream_cb }`; `NodeOutput { writes, command, sends }`. Default
+  body forwards to the legacy 8 virtuals so existing subclasses
+  keep compiling. **PR 2, commit `607ce66`.**
+- `CancelToken::fork() -> shared_ptr<CancelToken>` — child token
+  with its own `cancellation_signal`. Parent `cancel()` cascades
+  to all live children (and to grandchildren recursively).
+  `run_sync(aw, parent_token)` switches to `parent_token->fork()`
+  so each nested op binds its own slot — closes the v0.3.x emit-
+  vs-bind race and the multi-Send single-handler overwrite. The
+  v0.3.x `add_cancel_hook` list keeps working through deprecation.
+  **PR 3, commit `897645c`.**
+- `[[deprecated]]` on the 8 legacy `GraphNode` virtuals + `add_cancel_hook`.
+  Internal call sites (graph_node.cpp default chain, default
+  `run()` forwarder) bracketed by new
+  `NEOGRAPH_PUSH/POP_IGNORE_DEPRECATED` macros (`api.h` — GCC /
+  clang / MSVC portable). User code overriding deprecated virtuals
+  sees migration warnings; engine internals stay clean.
+  **PR 4, commit `35a4517`.**
+- `engine.get_state_view(thread_id) -> StateView` is now the
+  canonical state read; raw-dict `engine.get_state(...)` soft-
+  deprecated in the docstring (no warning emitted — raw dict
+  remains a valid escape hatch). **PR 5, commit `f31aa53`.**
+- 7 C++ + 19 Python examples migrated to `run(NodeInput)`. Smoke
+  runs match v0.3.2 outputs bit-for-bit. **PR 6a/6b, commits
+  `a2a24ef` / `0a76e3a`.**
+- Pybind `PyGraphNodeOwner` overrides `run(NodeInput)` and
+  dispatches to a Python user's `run` method (when defined),
+  falling through to the legacy chain otherwise. `RunContext` /
+  `NodeInput` / `CancelToken` exposed to Python; `cancel_token`
+  reachable as `input.ctx.cancel_token` without the thread-local
+  smuggle. **PR 7, commit `4e186a5`.**
+- `docs/reference-en.md` §6 GraphNode collapsed to a single `run()`.
+  RunContext + `fork()` example subsections added under §7.
+  README "Differences from LangGraph" picked up a "One node method"
+  entry. **PR 8, commit `519a00b`.**
+- Built-in C++ nodes (`LLMCallNode`, `ToolDispatchNode`,
+  `RouteToNode`) migrated to `run(NodeInput)` overrides.
+  **PR 9a, commit `d1070dc`.**
+- Newcomer-mode trap fixes: README CMake snippet documents
+  `graph::` sub-namespace, cppdotenv path, `OpenAIProvider::create()`
+  vs `create_shared()`, `neograph::json` as nlohmann subset,
+  3-arg vs 2-arg `compile()`. Python `compile(def, ctx, store=None)`
+  keyword-arg added (additive, non-breaking). **commit `ee11ed6`.**
+
+### Changed
+
+- README: "10K-worker measured stress test" section — RTX 4070 Ti +
+  Gemma 4 E2B Q4 on neoclaw, N=10000 done @ 0 err / 424s / 2572 MB
+  peak / ~1 KB marginal worker cost / p99 648 ms (`7840b81`).
+- README: "Production economics" section — fleet safety + RAM delta
+  framing (`b82b15a`).
+- README: "No Docker required" + "Dependency-drift immunity"
+  bullets in the LangGraph delta list (`333b482`, `a6061d7`).
+
+### Deprecated
+
+- `GraphNode::execute / execute_async / execute_full /
+  execute_full_async / execute_stream / execute_stream_async /
+  execute_full_stream / execute_full_stream_async` — kept working
+  with `[[deprecated]]` annotation through v0.5.x, removed in v1.0.
+- `CancelToken::add_cancel_hook` — replaced by `fork()`. Same
+  deprecation window.
+
+### Notes
+
+- Validation: 442 → 452 ctest (3 NodeRunDispatch + 7 CancelTokenFork
+  added) + 96 pytest + 5 live LLM/WS green at the v0.4.0 tag.
+- A sub-PR (`run(const NodeInput&)` reference param) tripped the
+  v0.2.0 RunConfig coroutine-reference UAF crash shape under the
+  pybind async path. Fix landed before merge: `NodeInput in` by
+  value. Documented in `node.h`.
+
+---
+
+## [0.3.2] — 2026-05-05 — Cancel propagation hardening (5 rounds)
+
+Five-round patch series closing the gaps the v0.3.0 single-shot
+cancel uncovered: Send fan-out propagation, in-process polling,
+hooks for Python, C++ scope, exception typing. Also lands the
+TODO_v0.3.md feedback batch from the FastAPI SSE chat-demo
+evaluation — `resume_if_exists`, dict-or-list `update_state`,
+StateView for typed state reads.
+
+### Added
+
+- `RunConfig::resume_if_exists` — opt-in resume of a prior
+  thread's checkpoint without explicit `resume()` call. Standard
+  multi-turn chat semantics: `engine.run(cfg)` continues the
+  conversation if `thread_id` exists.
+- `engine.update_state(thread_id, dict | list[ChannelWrite],
+  as_node="")` — accepts both shapes. Pre-fix only `dict` worked;
+  passing a list silently no-op'd. List form is symmetric with
+  every node body's emit shape.
+- `StateView` (`bindings/python/neograph_engine/state_view.py`) —
+  Pydantic-typed state read. `engine.get_state_view(thread_id) ->
+  StateView` returns flat dot-access (`view.messages` /
+  `view.foo`) plus `view.raw` for the dict escape hatch.
+  Subclass for typed channel definitions:
+  `class ChatState(ng.StateView): messages: list[dict] = []`.
+- `bindings/python/tests/test_async_cancel_live_llm_fanout.py` —
+  asserts mid-flight cancel really aborts every Send-spawned
+  sibling at the socket layer (was the v0.3.1 root-cause patch).
+- `examples/22_self_evolving_graph.py` — moved to v0.3.2 with the
+  TODO_v0.3.md #9 cookbook fold.
+- ROADMAP_v1.md — design-sharpening candidates derived from the
+  cancel-rounds post-mortem (single dispatch, RunContext, hierarchical
+  CancelToken — all delivered in v0.4.0).
+- Doxygen `/* */` wildcard fix — `acp/types.h` had `/**` blocks
+  containing path wildcards (`fs/*`, `terminal/*`) that opened a
+  nested comment + suppressed all subsequent diagnostics. Replaced
+  with `&#42;` HTML entity.
+
+### Fixed
+
+- Cancel propagation, 5 cumulative rounds:
+  1. v0.3.0 single-node — `cancel_token` reaches `Provider::complete`.
+  2. v0.3.1 multi-Send pointer drop — fan-out workers now share
+     `run_cancel_token_shared()` (was lost when `init_state +
+     restore` rebuilt per-worker state outside the channel set).
+  3. v0.3.1+ in-process polling — engine super-step loop polls
+     between steps, not just at LLM I/O.
+  4. v0.3.2 hooks for Python — `add_cancel_hook` registers a
+     callback on the per-run token, fires on `cancel()`. Lets sync
+     Python `execute()` install ad-hoc cancel handlers without
+     the thread-local scope.
+  5. v0.3.2 C++ scope + retry + exception typing — fresh-throw
+     `NodeInterrupt` on the main thread (avoids libstdc++
+     `__exception_ptr::_M_release` race), retry budget honours
+     cancel, runtime-vs-logic exception split.
+- `execute_stream`-only Python nodes silently fell through to the
+  default `execute` path (NotImplementedError). Now `run_stream`
+  wires `execute_stream` directly when the user only overrode the
+  streaming variant.
+- `update_state` accepting list[ChannelWrite] — closes the silent
+  no-op (TODO_v0.3.md #5).
+
+### Notes
+
+- 442 ctest + 96 pytest + 2 live LLM (single + fanout cancel)
+  green at v0.3.2 tag (`915e90e`).
+- 27/30 C++ examples + 20/22 Python examples pass under
+  `examples/run_all.py`. Skipped tests need external services
+  (Postgres / Crawl4AI / live OpenAI).
+- Valgrind 6 examples 0 errors, 815 allocs / 815 frees clean.
+- Bench median 5.185 µs/iter on the seq path (v0.3.0 baseline) —
+  zero perf regression across the round.
+
+---
+
 ## [0.3.0] — 2026-05-04 — Cooperative cancel propagation
 
 Closes the production cost-leak gap reported during the FastAPI SSE
