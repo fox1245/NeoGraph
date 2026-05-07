@@ -412,6 +412,44 @@ LangGraph Python — surfaced here so you don't hit them mid-port:
   emit_token`, then `emit_token(cb, self._name, token)` inside a
   streaming node. Replaces the 4-line `GraphEvent` construction
   ritual.
+- **Observability ships in-tree, not as a separate SaaS** — pair
+  `neograph_engine.tracing.otel_tracer` (vendor-neutral OTel spans)
+  with `neograph_engine.openinference.OpenInferenceProvider` +
+  `openinference_tracer` (LLM-shape attribute keys), point an
+  OTLP exporter at any OpenInference-aware backend (Phoenix, Arize,
+  Langfuse — all OSS, all self-hostable), and you get the LangSmith
+  UX (chat-bubble per turn, DAG hierarchy, prompt/response capture,
+  per-call token counts and cost) without a vendor SaaS contract.
+
+  ```bash
+  docker run -d -p 6006:6006 -p 4317:4317 arizephoenix/phoenix
+  pip install neograph-engine opentelemetry-exporter-otlp
+  ```
+  ```python
+  from opentelemetry import trace
+  from opentelemetry.sdk.trace import TracerProvider
+  from opentelemetry.sdk.trace.export import BatchSpanProcessor
+  from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+  from neograph_engine.openinference import OpenInferenceProvider, openinference_tracer
+
+  trace.set_tracer_provider(TracerProvider())
+  trace.get_tracer_provider().add_span_processor(
+      BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4317", insecure=True)))
+  tracer = trace.get_tracer("my-app")
+
+  wrapped = OpenInferenceProvider(OpenAIProvider(api_key=...), tracer)
+  ctx = ng.NodeContext(provider=wrapped)
+  engine = ng.GraphEngine.compile(graph, ctx)
+  with openinference_tracer(tracer) as cb:
+      engine.run_stream(cfg, cb)
+  # → http://localhost:6006 renders the trace as a LangSmith-style chain.
+  ```
+
+  LangGraph's hosted LangSmith is the typical observability path
+  in that ecosystem; LangFuse / Phoenix are the OSS substitutes
+  but require integration glue. NeoGraph's `OpenInferenceProvider`
+  *is* the integration glue — drop in, every `Provider.complete()`
+  becomes an LLM span automatically.
 - **One node method** — `def run(self, input)` is the canonical
   override as of **v0.4.0**. Read state from `input.state`, the live
   cancel handle from `input.ctx.cancel_token`, the streaming sink
@@ -451,7 +489,7 @@ LangGraph Python — surfaced here so you don't hit them mid-port:
   runtime. NeoGraph's wheel ships its full native runtime baked in,
   so:
 
-  - `pip install neograph-engine==0.4.0` on bare metal / VPS / a
+  - `pip install neograph-engine==0.5.0` on bare metal / VPS / a
     serverless function works — the host's other Python packages
     can't reach into NeoGraph's C++ engine.
   - Container images can be **alpine + musl + ~20 MB** (engine .so +
@@ -488,7 +526,7 @@ hash. Without it, every fleet-changing event is a timing bomb:
 | "Code 0 lines changed, prod broke" | regular occurrence (Pydantic v1→v2 / 2024) | structurally impossible — no transitive surface to drift |
 
 → NeoGraph removes the SOP that LangChain prod *requires*. Bare-metal
-`pip install neograph-engine==0.4.0` on an EC2 user-data script is
+`pip install neograph-engine==0.5.0` on an EC2 user-data script is
 itself prod-grade.
 
 ### Workers per instance — the RAM-side delta
@@ -901,21 +939,28 @@ where N = 10,000 finishes in 52 ms. Within a single run, the
 `make_parallel_group` fan-out overlaps too: three parallel-fanout
 researchers collapse from 370 ms sequential to 150 ms.
 
-Custom nodes join the async path by overriding `execute_async`
-instead of `execute`:
+Custom nodes join the async path by returning an `asio::awaitable`
+from the unified `run(NodeInput)` entry point (the one canonical
+override as of v0.4.0):
 
 ```cpp
 class FetchNode : public GraphNode {
   public:
-    asio::awaitable<std::vector<ChannelWrite>>
-    execute_async(const GraphState& state) override {
+    asio::awaitable<NodeOutput>
+    run(NodeInput in) override {
         auto ex = co_await asio::this_coro::executor;
         auto res = co_await neograph::async::async_post(ex, /*...*/);
-        co_return std::vector<ChannelWrite>{/*...*/};
+        // in.ctx.cancel_token, in.state, in.stream_cb available.
+        co_return NodeOutput{ {ChannelWrite{"out", res}} };
     }
     std::string get_name() const override { return "fetch"; }
 };
 ```
+
+The legacy 8-virtual chain (`execute_async`, `execute_full_async`,
+`execute_stream_async`, `execute_full_stream_async`, plus the four
+sync peers) is `[[deprecated]]` and removed in v1.0.0 — see
+[ROADMAP_v1.md](ROADMAP_v1.md) for the migration window.
 
 Async-shaped tools derive from `AsyncTool`:
 
