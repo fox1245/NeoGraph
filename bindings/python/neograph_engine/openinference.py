@@ -129,17 +129,33 @@ def openinference_tracer(
         A callable suitable for ``engine.run_stream(cfg, cb)``.
     """
     _require_otel()
+    from opentelemetry import context as otel_context
     from opentelemetry.trace import Status, StatusCode, set_span_in_context
 
+    # Each node-span entry is (span, contextvar_token) so the NODE_END
+    # path can detach the span from the OTel current-context that
+    # NODE_START attached, restoring the prior current span (root or
+    # an outer node, in nested-fanout cases).
     pending: dict[str, list] = {}
     root_span = tracer.start_span(root_name)
     root_span.set_attribute(_OI_SPAN_KIND, "CHAIN")
     parent_ctx = set_span_in_context(root_span)
+    # Attach the root span as the OTel current span so any LLM-span
+    # opens under it BEFORE the first node fires (e.g. graph engine
+    # internals or pre-node hooks). NODE_START will replace this with
+    # its own attach; NODE_END restores it.
+    root_token = otel_context.attach(parent_ctx)
 
     def _close_all():
         for stack in pending.values():
             while stack:
-                span = stack.pop()
+                entry = stack.pop()
+                span, token = entry if isinstance(entry, tuple) else (entry, None)
+                try:
+                    if token is not None:
+                        otel_context.detach(token)
+                except Exception:
+                    pass
                 try:
                     span.end()
                 except Exception:
@@ -173,11 +189,16 @@ def openinference_tracer(
                         span.set_attribute(f"neograph.{k}", str(v))
                 span.set_attribute(_OI_INPUT_VALUE, _node_input_blob(ev))
                 span.set_attribute(_OI_INPUT_MIME, "application/json")
-                pending.setdefault(node, []).append(span)
+                # Attach as OTel current span so LLM/Tool spans created
+                # inside the node body nest as children. Token kept on
+                # the stack entry for NODE_END to detach.
+                token = otel_context.attach(set_span_in_context(span))
+                pending.setdefault(node, []).append((span, token))
             elif t == GraphEvent.Type.NODE_END:
                 stack = pending.get(node, [])
                 if stack:
-                    span = stack.pop()
+                    entry = stack.pop()
+                    span, token = entry if isinstance(entry, tuple) else (entry, None)
                     if hasattr(ev.data, "items"):
                         for k, v in ev.data.items():
                             span.set_attribute(f"neograph.{k}", str(v))
@@ -192,20 +213,37 @@ def openinference_tracer(
                     except Exception:
                         pass
                     span.set_status(Status(StatusCode.OK))
+                    if token is not None:
+                        try:
+                            otel_context.detach(token)
+                        except Exception:
+                            pass
                     span.end()
             elif t == GraphEvent.Type.ERROR:
                 stack = pending.get(node, [])
                 if stack:
-                    span = stack.pop()
+                    entry = stack.pop()
+                    span, token = entry if isinstance(entry, tuple) else (entry, None)
                     msg = str(ev.data)
                     span.set_attribute("neograph.error", msg)
                     span.set_status(Status(StatusCode.ERROR, msg))
+                    if token is not None:
+                        try:
+                            otel_context.detach(token)
+                        except Exception:
+                            pass
                     span.end()
             elif t == GraphEvent.Type.INTERRUPT:
                 stack = pending.get(node, [])
                 if stack:
-                    span = stack.pop()
+                    entry = stack.pop()
+                    span, token = entry if isinstance(entry, tuple) else (entry, None)
                     span.set_attribute("neograph.interrupted", True)
+                    if token is not None:
+                        try:
+                            otel_context.detach(token)
+                        except Exception:
+                            pass
                     span.end()
         except Exception:
             # Tracing must never break the graph run.
@@ -215,6 +253,10 @@ def openinference_tracer(
         yield cb
     finally:
         _close_all()
+        try:
+            otel_context.detach(root_token)
+        except Exception:
+            pass
         try:
             root_span.end()
         except Exception:
