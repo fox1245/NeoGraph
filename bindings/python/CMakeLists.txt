@@ -161,11 +161,12 @@ endif()
 # (For the wheel build path: scikit-build-core copies these via the
 # `wheel.packages = ["bindings/python/neograph"]` directive in
 # pyproject.toml — no install rule needed here for them.)
-configure_file(neograph_engine/__init__.py   "${_NEOGRAPH_PY_PKG_DIR}/__init__.py"   COPYONLY)
-configure_file(neograph_engine/llm.py        "${_NEOGRAPH_PY_PKG_DIR}/llm.py"        COPYONLY)
-configure_file(neograph_engine/streaming.py  "${_NEOGRAPH_PY_PKG_DIR}/streaming.py"  COPYONLY)
-configure_file(neograph_engine/tracing.py    "${_NEOGRAPH_PY_PKG_DIR}/tracing.py"    COPYONLY)
-configure_file(neograph_engine/state_view.py "${_NEOGRAPH_PY_PKG_DIR}/state_view.py" COPYONLY)
+configure_file(neograph_engine/__init__.py      "${_NEOGRAPH_PY_PKG_DIR}/__init__.py"      COPYONLY)
+configure_file(neograph_engine/llm.py           "${_NEOGRAPH_PY_PKG_DIR}/llm.py"           COPYONLY)
+configure_file(neograph_engine/streaming.py     "${_NEOGRAPH_PY_PKG_DIR}/streaming.py"     COPYONLY)
+configure_file(neograph_engine/tracing.py       "${_NEOGRAPH_PY_PKG_DIR}/tracing.py"       COPYONLY)
+configure_file(neograph_engine/state_view.py    "${_NEOGRAPH_PY_PKG_DIR}/state_view.py"    COPYONLY)
+configure_file(neograph_engine/openinference.py "${_NEOGRAPH_PY_PKG_DIR}/openinference.py" COPYONLY)
 
 # Install rule for the wheel build. Tagged with the same component as
 # the engine .so files in the root CMakeLists, so a single
@@ -188,6 +189,7 @@ install(FILES
     neograph_engine/streaming.py
     neograph_engine/tracing.py
     neograph_engine/state_view.py
+    neograph_engine/openinference.py
     DESTINATION neograph_engine)
 
 # Make smoke tests runnable straight from the build tree:
