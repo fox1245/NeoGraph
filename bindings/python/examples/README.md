@@ -1,6 +1,6 @@
 # Python API examples
 
-Twenty-one scripts covering the binding surface end-to-end.
+Twenty-three scripts covering the binding surface end-to-end.
 
 ## Setup
 
@@ -38,6 +38,8 @@ the key is missing.
 | 19 | [`19_streaming_messages.py`](19_streaming_messages.py) | offline | `from neograph_engine import message_stream` — wraps a callback so `LLM_TOKEN` events arrive as LangChain-shape message dicts (`{role, content, content_so_far, node, metadata}`). |
 | 20 | [`20_otel_tracing.py`](20_otel_tracing.py) | offline | `from neograph_engine.tracing import otel_tracer` — bridge engine events to OpenTelemetry spans. Ships ConsoleSpanExporter; swap for OTLP to send to Jaeger / Tempo / Honeycomb / Datadog. |
 | 21 | [`21_http2_transport.py`](21_http2_transport.py) | **OpenAI** | `SchemaProvider(..., prefer_libcurl=True)` — opt-in HTTP/2 (libcurl) transport vs default ConnPool (HTTP/1.1 keep-alive). A/Bs both on a 5-way parallel burst and prints which is faster on YOUR endpoint. Default ConnPool is faster on api.openai.com; flip when you need CF-WAF compatibility, lower TCP fan-out through corporate proxies, or HTTP/3. |
+| 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | **OpenAI** | Goal-driven self-evolution: the agent runs, scores its output against a JSON-shape goal, and asks an LLM to propose a revised graph definition. Loop closes when score ≥ 1.0 or max_iters hit. Demonstrates JSON-as-program where the modifier's only output is a new graph spec. |
+| 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | offline (mock) / **OpenAI** | Per-thread evolving chat agent: persistent multi-turn conversation; between turns the agent's JSON definition is rewritten based on accumulated history. Demonstrates checkpoint-resume across evolution (prior messages survive), the `__graph_meta__` audit channel pattern, and a validator boundary (whitelist node types, required channels, edge connectivity). Runs end-to-end with no API key via a deterministic mock provider + heuristic mock evolver. |
 
 Run any one with:
 
