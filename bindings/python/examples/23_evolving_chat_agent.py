@@ -12,10 +12,12 @@ Pattern shape (from ProjectDatePop's per-customer evolving agent):
 
   1. Each thread has its own agent definition (JSON).
   2. Conversation runs through the current definition.
-  3. ``evolve_agent()`` inspects the thread's conversation and proposes
-     a revised JSON.
+  3. ``evolve_agent()`` asks an LLM to inspect the conversation and
+     propose a revised JSON.
   4. ``validate_agent()`` rejects unsafe proposals (whitelist node
      types, required channels, edge connectivity, node count cap).
+     This is the safety boundary between LLM-proposed JSON and the
+     running engine.
   5. New definition compiles into a fresh engine that *shares* the
      checkpoint store with the old one. With ``resume_if_exists=True``
      prior messages survive because their channel + reducer is
@@ -29,11 +31,12 @@ engine has no special handling. It is a regular append-reduced channel
 that the application updates via ``engine.update_state(thread_id,
 {"__graph_meta__": [meta]})`` on each evolution.
 
-Runs end-to-end with no API key — a deterministic mock chat node + a
-heuristic mock evolver demonstrate the loop. Set ``OPENAI_API_KEY`` to
-swap in a live OpenAI provider for the chat node (the evolver stays
-mock for reproducibility; the live evolver shape is shown in
-ProjectDatePop's main_neograph.py).
+Run::
+
+    OPENAI_API_KEY=sk-... python 23_evolving_chat_agent.py
+
+Both the chat node and the evolver call OpenAI, so this is a real
+end-to-end demo. Cost is small (~5 short completions per run).
 """
 
 from __future__ import annotations
@@ -49,56 +52,13 @@ from typing import Any
 import neograph_engine as ng
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-
-# ── A deterministic in-process Provider (no network needed) ─────────
-#
-# Lets the example demonstrate the evolution loop without an API key.
-# Reads system_prompt + last user message and returns a reply whose
-# *length* and *style* tracks the system_prompt — so when the evolver
-# shrinks max_tokens or appends a "be technical" instruction, the
-# user can see the change in the next turn's reply.
-
-class MockProvider(ng.Provider):
-    def get_name(self):
-        return "mock"
-
-    def complete(self, params):
-        sys_prompt = ""
-        last_user = ""
-        for m in params.messages:
-            if m.role == "system":
-                sys_prompt = m.content or ""
-            elif m.role == "user":
-                last_user = m.content or ""
-
-        brevity = "2 sentences" in sys_prompt or "shorter" in sys_prompt.lower()
-        technical = "technical" in sys_prompt.lower()
-
-        body = f"Re: {last_user[:60]}"
-        if technical:
-            body += " (analytical breakdown follows: factor A correlates with metric M at coefficient 0.42; factor B contributes residually)"
-        else:
-            body += " — here's a friendly take with some context and a suggestion you might enjoy thinking about"
-        if brevity:
-            body = body.split(" — ")[0].split(" (")[0]
-            body += "."
-
-        cap = max(20, params.max_tokens or 200)
-        if len(body) > cap:
-            body = body[: cap - 3].rstrip() + "..."
-
-        msg = ng.ChatMessage(role="assistant", content=body)
-        completion = ng.ChatCompletion()
-        completion.message = msg
-        return completion
+from _common import openai_provider  # noqa: E402
 
 
 # ── Generic config-driven chat node ─────────────────────────────────
 #
 # All persona / token-cap knobs live in node.config so the evolver
-# can tweak them via plain JSON. This is the same shape as
-# ProjectDatePop's PromptedChatNode.
+# can tweak them via plain JSON.
 
 class PromptedChatNode(ng.GraphNode):
     def __init__(self, name: str, node_def: dict, ctx):
@@ -118,16 +78,12 @@ class PromptedChatNode(ng.GraphNode):
         params.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         params.temperature = 0.4
         params.max_tokens = self._max_tokens
-        # Build the list locally then assign — params.messages is bound
-        # to a C++ std::vector, so .append() on the property's view is a
-        # silent no-op. Build then assign is the safe pattern.
-        all_messages = [ng.ChatMessage(role="system", content=self._system_prompt)]
+        params.messages = [ng.ChatMessage(role="system", content=self._system_prompt)]
         for m in msgs:
             role = m.get("role", "")
             content = m.get("content", "")
             if role in ("user", "assistant", "system") and content:
-                all_messages.append(ng.ChatMessage(role=role, content=content))
-        params.messages = all_messages
+                params.messages.append(ng.ChatMessage(role=role, content=content))
 
         result = self._ctx.provider.complete(params)
         text = result.message.content if result.message else ""
@@ -158,7 +114,7 @@ INITIAL_AGENT: dict[str, Any] = {
         "chat": {
             "type": "prompted_chat",
             "config": {
-                "system_prompt": "You are a friendly assistant. Reply with helpful context.",
+                "system_prompt": "You are a friendly assistant. Reply with helpful context and one practical suggestion.",
                 "max_output_tokens": 400,
             },
         },
@@ -171,11 +127,6 @@ INITIAL_AGENT: dict[str, Any] = {
 
 
 # ── Validator: reject unsafe proposals before compile ───────────────
-#
-# This is the safety boundary between an LLM-proposed JSON and the
-# running engine. Anything the validator passes must compile and run;
-# anything that doesn't compile is the validator's bug, not the
-# evolver's privilege.
 
 ALLOWED_NODE_TYPES = {"prompted_chat"}
 
@@ -219,40 +170,75 @@ def validate_agent(defn: dict) -> tuple[bool, str]:
     return True, "ok"
 
 
-# ── Mock evolver: heuristic mutation from conversation signals ──────
+# ── LLM-driven evolver ──────────────────────────────────────────────
 #
-# A live evolver would replace this with an LLM call (see
-# ProjectDatePop main_neograph.py::evolve_customer_agent for the
-# prompt shape). Heuristics here let the example run reproducibly
-# without a key.
+# A separate LLM call whose only job is to emit a revised graph JSON
+# based on the current agent + the conversation. The validator above
+# is the safety boundary — anything LLM proposes that fails validation
+# is rejected before compile.
 
-def propose_new_agent(current: dict, conversation: list[dict]) -> tuple[dict, str]:
-    new = json.loads(json.dumps(current))
-    new["_version"] = current.get("_version", 1) + 1
-    cfg = new["nodes"]["chat"]["config"]
+def propose_new_agent(current: dict, conversation: list[dict], provider) -> tuple[dict, str]:
+    convo = "\n".join(
+        f"[{m.get('role','?')}] {m.get('content','')[:200]}"
+        for m in conversation[-20:]
+    ) or "(no conversation yet)"
 
-    user_text = " ".join(
-        m.get("content", "") for m in conversation if m.get("role") == "user"
-    ).lower()
+    instructions = f"""You are an agent-evolver. Given a NeoGraph agent
+definition (JSON) and the recent conversation that ran through it,
+propose a REVISED graph JSON that better fits the user's communication
+style.
 
-    if "shorter" in user_text or "brief" in user_text or "concise" in user_text:
-        cfg["max_output_tokens"] = max(60, cfg.get("max_output_tokens", 400) // 3)
-        cfg["system_prompt"] = cfg.get("system_prompt", "") + " Reply in 2 sentences max."
-        return new, "user requested brevity — shrink max_tokens + add brevity instruction"
+Hard rules — violating any rejects your output:
+  - Output ONLY a JSON object — no prose, no markdown fences.
+  - Only "prompted_chat" node type is registered.
+  - Keep the "messages" channel with reducer "append".
+  - Keep the "__graph_meta__" channel with reducer "append".
+  - Edges must connect "__start__" → ... → "__end__".
+  - Max 6 nodes.
+  - Make ONE specific, minimal change — focused improvement, not rewrite.
+  - Bump "_version" by 1.
 
-    if "technical" in user_text or "details" in user_text or "depth" in user_text:
-        cfg["system_prompt"] = cfg.get("system_prompt", "") + " Use technical terminology and quantitative detail."
-        return new, "user prefers technical depth — relax persona toward analytical tone"
+Soft guidance:
+  - User asks for shorter answers → lower max_output_tokens + add brevity instruction in system_prompt.
+  - User wants more technical depth → adjust system_prompt to allow technical detail.
+  - User's tone is casual → relax persona; formal → match formal register.
 
-    return new, "no clear signal — keep current persona"
+Recent conversation:
+{convo}
+
+Current graph:
+{json.dumps(current, indent=2, ensure_ascii=False)}
+
+Return the revised graph JSON."""
+
+    params = ng.CompletionParams()
+    params.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    params.temperature = 0.2
+    params.max_tokens = 1500
+    params.messages = [
+        ng.ChatMessage(role="system",
+                       content="You output strict JSON only — no prose, no fences."),
+        ng.ChatMessage(role="user", content=instructions),
+    ]
+    result = provider.complete(params)
+    raw = (result.message.content if result.message else "").strip()
+
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        raw = raw.strip()
+
+    try:
+        proposed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"evolver returned non-JSON: {e}; raw[:300]: {raw[:300]!r}")
+
+    reason = proposed.pop("_reason", None) or "evolved from conversation"
+    return proposed, reason
 
 
 # ── Audit logger: record evolution event in __graph_meta__ channel ──
-#
-# Application-level convention (not an engine feature). Every
-# evolution writes one entry; on replay you can scan __graph_meta__
-# in global_version order to reconstruct which graph version
-# produced each message turn.
 
 def log_evolution(engine, thread_id: str, new_def: dict, reason: str) -> dict:
     state = engine.get_state(thread_id) or {}
@@ -284,17 +270,8 @@ def _last_assistant(state) -> str:
     return ""
 
 
-def _make_provider():
-    if os.getenv("OPENAI_API_KEY"):
-        from _common import openai_provider
-        print("(using live OpenAIProvider — set by OPENAI_API_KEY)")
-        return openai_provider()
-    print("(using deterministic MockProvider — set OPENAI_API_KEY to use live OpenAI)")
-    return MockProvider()
-
-
 def main():
-    provider = _make_provider()
+    provider = openai_provider()
     ctx = ng.NodeContext(provider=provider)
     store = ng.InMemoryCheckpointStore()
     TID = "customer_alice"
@@ -303,9 +280,9 @@ def main():
     engine = ng.GraphEngine.compile(agent, ctx, store)
 
     pre_evolve_turns = [
-        "Hi! What should I think about when planning a winter trip?",
-        "That's a lot — can you make it shorter please?",
-        "Also more technical — give me concrete temperature and gear specs.",
+        "Hi! I'm planning a winter weekend trip to the mountains. What should I think about?",
+        "Way too much, can you keep it shorter? Just the essentials.",
+        "Also I'd prefer concrete numbers — temperatures, gear weights, that kind of detail.",
     ]
     for i, user_msg in enumerate(pre_evolve_turns, 1):
         print(f"\n=== turn {i} (graph v{agent['_version']}) ===")
@@ -316,12 +293,13 @@ def main():
             resume_if_exists=True,
         ))
         state = engine.get_state(TID)
-        print(f"  assistant: {_last_assistant(state)[:140]}")
+        reply = _last_assistant(state)
+        print(f"  assistant: {reply[:200]}{'...' if len(reply) > 200 else ''}")
 
     print("\n=== evolving agent ===")
     state = engine.get_state(TID)
     conv = (state.get("channels", {}).get("messages") or {}).get("value") or []
-    proposed, reason = propose_new_agent(agent, conv)
+    proposed, reason = propose_new_agent(agent, conv, provider)
 
     ok, why = validate_agent(proposed)
     if not ok:
@@ -334,15 +312,18 @@ def main():
         return
     print(f"  accepted: {reason}")
     print(f"  v{agent['_version']} → v{proposed['_version']}")
+    cfg_diff = _summarise_change(agent, proposed)
+    if cfg_diff:
+        print(f"  changes: {cfg_diff}")
 
     meta = log_evolution(engine, TID, proposed, reason)
-    print(f"  __graph_meta__ entry: hash={meta['hash']} applied_after_gv={meta['applied_after_global_version']}")
+    print(f"  __graph_meta__: hash={meta['hash']} applied_after_gv={meta['applied_after_global_version']}")
 
     agent = proposed
     engine = ng.GraphEngine.compile(agent, ctx, store)
 
     post_evolve_turns = [
-        "OK now what about wind exposure on ridges?",
+        "OK now what about wind exposure on exposed ridges?",
     ]
     for user_msg in post_evolve_turns:
         print(f"\n=== post-evolve turn (graph v{agent['_version']}) ===")
@@ -353,7 +334,8 @@ def main():
             resume_if_exists=True,
         ))
         state = engine.get_state(TID)
-        print(f"  assistant: {_last_assistant(state)[:140]}")
+        reply = _last_assistant(state)
+        print(f"  assistant: {reply[:200]}{'...' if len(reply) > 200 else ''}")
 
     print("\n=== audit chain ===")
     state = engine.get_state(TID)
@@ -365,13 +347,29 @@ def main():
         print(f"    v{m['version']} hash={m['hash']} applied_after_gv={m['applied_after_global_version']} — {m['reason']}")
     print(f"  final global_version: {state.get('global_version')}")
 
-    print("\n=== full message timeline ===")
-    for i, m in enumerate(msgs):
-        prefix = f"  [{i}] {m.get('role','?'):9s}"
-        node = m.get("node", "")
-        node_str = f" ({node})" if node else ""
-        content = m.get("content", "")[:80]
-        print(f"{prefix}{node_str} {content}")
+
+def _summarise_change(old: dict, new: dict) -> str:
+    """Best-effort diff summary for the console output."""
+    parts = []
+    old_nodes = set((old.get("nodes") or {}).keys())
+    new_nodes = set((new.get("nodes") or {}).keys())
+    if old_nodes != new_nodes:
+        added = new_nodes - old_nodes
+        removed = old_nodes - new_nodes
+        if added: parts.append(f"+nodes={sorted(added)}")
+        if removed: parts.append(f"-nodes={sorted(removed)}")
+    for nname in old_nodes & new_nodes:
+        old_cfg = (old["nodes"][nname] or {}).get("config") or {}
+        new_cfg = (new["nodes"][nname] or {}).get("config") or {}
+        old_max = old_cfg.get("max_output_tokens")
+        new_max = new_cfg.get("max_output_tokens")
+        if old_max != new_max:
+            parts.append(f"{nname}.max_tokens {old_max}→{new_max}")
+        old_sp = old_cfg.get("system_prompt", "")
+        new_sp = new_cfg.get("system_prompt", "")
+        if old_sp != new_sp:
+            parts.append(f"{nname}.system_prompt changed ({len(old_sp)}→{len(new_sp)} chars)")
+    return ", ".join(parts)
 
 
 if __name__ == "__main__":

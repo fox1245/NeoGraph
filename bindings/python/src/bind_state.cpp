@@ -2,6 +2,7 @@
 // StreamMode, GraphEvent. Plus the START_NODE / END_NODE constants.
 
 #include "json_bridge.h"
+#include "opaque_types.h"
 
 #include <neograph/graph/types.h>
 

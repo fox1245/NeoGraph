@@ -16,6 +16,7 @@
 // would require an asio<->asyncio bridge; deferred to a later commit.
 
 #include "json_bridge.h"
+#include "opaque_types.h"
 
 #include <neograph/provider.h>
 #include <neograph/tool.h>
