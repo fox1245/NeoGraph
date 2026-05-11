@@ -89,7 +89,14 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 
-    friend OpenInferenceTracerSession openinference_tracer(
+    // NEOGRAPH_API on the friend declaration MUST match the linkage
+    // of the free function declared below — without it MSVC reports
+    // C2375 ("redefinition; different linkage") because the friend
+    // is taken as having default (no-export) linkage while the real
+    // declaration is __declspec(dllexport). See
+    // feedback_neograph_api_discipline (memory) for the same trap on
+    // engine sub-libraries.
+    friend NEOGRAPH_API OpenInferenceTracerSession openinference_tracer(
         Tracer&, std::string, std::string);
 };
 
