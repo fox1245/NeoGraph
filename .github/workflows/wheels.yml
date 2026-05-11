@@ -89,7 +89,14 @@ jobs:
       # OpenSSL headers) are installed by `before-all` in pyproject.toml
       # — no extra system setup needed at the runner level.
       - name: Build wheels (cibuildwheel)
-        uses: pypa/cibuildwheel@v2.21
+        # cibuildwheel v2.21 probes all python versions in the manylinux
+        # image (including cp38) to populate env. The newer
+        # manylinux_2_34 (AlmaLinux 9) image dropped cp38 (3.8 EOL
+        # 2024-10), so the probe step failed with `env: cp38-cp38: No
+        # such file or directory`. v2.23 onwards skips python versions
+        # that aren't on the build selector, which fixes this without
+        # downgrading the manylinux image.
+        uses: pypa/cibuildwheel@v2.23
         env:
           CIBW_ARCHS: ${{ matrix.arch }}
 
