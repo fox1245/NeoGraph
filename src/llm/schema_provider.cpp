@@ -1509,6 +1509,28 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
 }
 
 // ============================================================================
+// Async streaming bridge — native override (issue #4)
+// ============================================================================
+
+asio::awaitable<ChatCompletion>
+SchemaProvider::complete_stream_async(const CompletionParams& params,
+                                      const StreamCallback& on_chunk)
+{
+    // Native fast path for the WebSocket Responses transport: it's
+    // already an async-native co_await, so we drop the bridge thread
+    // + nested run_sync entirely. Fixes issue #4 for the WS branch.
+    if (user_config_.use_websocket && provider_name_ == "openai-responses") {
+        co_return co_await complete_stream_ws_responses(params, on_chunk);
+    }
+
+    // HTTP/SSE branch: defer to Provider::complete_stream_async, which
+    // post-#4 spawns a dedicated worker thread for the synchronous
+    // httplib path and dispatches tokens back onto the awaiter's
+    // executor. No reentrancy on the engine's io_context worker.
+    co_return co_await Provider::complete_stream_async(params, on_chunk);
+}
+
+// ============================================================================
 // WebSocket: complete_stream_ws_responses()
 // ============================================================================
 //
