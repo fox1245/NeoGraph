@@ -9,6 +9,39 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- C++ peer of `neograph_engine.openinference` (issue #9). New
+  `neograph::observability` module covers two pieces:
+  - `Tracer` / `Span` — small dep-free abstract interface so NeoGraph
+    itself doesn't pull in opentelemetry-cpp. Downstream provides an
+    adapter wrapping its own backend (OTel SDK, in-memory test fake,
+    logging recorder, etc.). 4 attribute setters (string, int64,
+    double, bool — bool deliberately renamed `set_attribute_bool`
+    so a `const char*` literal can't accidentally resolve to it),
+    plus `add_event` for streamed-token diagnostics, status, and
+    `end()`.
+  - `openinference_tracer(tracer)` — opens a CHAIN-kind root span,
+    returns an `OpenInferenceTracerSession` whose `cb` field plugs
+    into `engine.run_stream()` and opens a CHAIN-kind child span per
+    node, with `NODE_START`/`END` payloads stuffed into
+    `input.value` / `output.value` JSON blobs and `LLM_TOKEN` events
+    recorded as discrete span events.
+  - `OpenInferenceProvider(inner, tracer)` — wraps any `Provider`,
+    attaches the OpenInference LLM-kind attribute set
+    (`llm.model_name`, `llm.invocation_parameters`,
+    `llm.input_messages.{i}.message.{role,content}`,
+    `llm.output_messages.0.message.{role,content}`,
+    `llm.token_count.{prompt,completion,total}`) on every
+    `complete*` call. The streaming overloads also append
+    `llm.token` events and a final assembled `output.value`.
+  - 7 parity tests in `tests/test_openinference_cpp.cpp` driving an
+    `InMemoryTracer` reference adapter — assert root + per-node CHAIN
+    span hierarchy, ERROR / INTERRUPT status surfacing, LLM_TOKEN
+    span-event recording, straggler-span cleanup on session close,
+    LLM provider attribute set, streaming token events, and
+    exception status propagation.
+
 ### Fixed
 
 - `Provider::complete_stream_async` default bridge no longer blocks
