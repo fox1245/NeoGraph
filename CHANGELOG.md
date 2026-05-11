@@ -9,6 +9,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-05-11 — C++ openinference + async streaming bridge
+
+Closes the four issues filed against v0.6.0 in one minor bump.
+Headline: the `Provider::complete_stream_async` default no longer
+segfaults when awaited from inside an outer engine coroutine
+(issue #4) — the most common shape for SSE / streaming HTTP backends
+sitting in front of NeoGraph. Companion: a C++ peer of the v0.6.0
+Python OpenInference layer so Phoenix / Arize / Langfuse render
+C++-driven traces the same way they render Python ones (issue #9).
+Plus: cosmetic Python OTel detach noise silenced (issue #2) and
+the same-`thread_id` concurrent-run + `schema_mutex_` × on_chunk
+locking invariants are now pinned in the docstrings (issue #6).
+
 ### Added
 
 - C++ peer of `neograph_engine.openinference` (issue #9). New
