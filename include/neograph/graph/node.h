@@ -7,6 +7,31 @@
  * - ToolDispatchNode: executes pending tool calls
  * - IntentClassifierNode: LLM-based intent routing
  * - SubgraphNode: hierarchical graph composition
+ *
+ * # v0.4.x migration navigator (external authors)
+ *
+ * Writing a custom node subclass in v0.4.x? **Keep using the legacy
+ * 8-virtual surface** (`execute` / `execute_async` / `execute_full` /
+ * `execute_stream` and their `_async` pairs) — those still work and
+ * the engine drives them on every dispatch path. The new unified
+ * `run(NodeInput) -> awaitable<NodeOutput>` virtual is additive in
+ * v0.4.0 (PR 2 in `ROADMAP_v1.md`): it forwards to the legacy chain
+ * by default, so existing subclasses compile unchanged. PR 4 of the
+ * same plan will mark the legacy virtuals `[[deprecated]]`; v1.0
+ * deletes them.
+ *
+ * The `RunContext` field plumbed through `NodeInput::ctx` is
+ * engine-internal for now — PR 1 (v0.4.0) only carries it through
+ * the dispatch hops. User-overridable virtuals receive it once PR 2
+ * lands. Until then, cancel token / deadline / trace_id propagate
+ * via the legacy paths.
+ *
+ * Example overrides that match the v0.4.x surface:
+ *   - `examples/01_react_agent.cpp` — basic ReAct agent
+ *   - `examples/02_custom_graph.cpp` — custom node subclass
+ *   - `examples/05_parallel_fanout.cpp` — Send / Command pattern
+ *
+ * @see ROADMAP_v1.md for the v0.4 → v1.0 PR sequence
  */
 #pragma once
 
