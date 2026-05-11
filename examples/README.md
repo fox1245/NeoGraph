@@ -109,6 +109,7 @@ demonstrate, not by file number.
 | # | File | Setup | What it shows |
 |---|------|-------|---------------|
 | 27 | [`27_async_concurrent_runs.cpp`](27_async_concurrent_runs.cpp) | offline | Three agent runs interleave on one `io_context` thread via `engine->run_async()` — wall ≈ 50 ms instead of 3×50 ms. Stage-4 async-end-to-end. |
+| 40 | [`40_react_async_streaming.cpp`](40_react_async_streaming.cpp) | OpenAI | Outer `asio::io_context` + `co_spawn` + `co_await engine->run_stream_async(...)` driving a ReAct loop, with the LLM node's tokens streaming to stdout via `co_await provider->complete_stream_async(...)` against `SchemaProvider("openai_responses")`. **Exact shape that segfaulted pre-PR-#10** — runs cleanly post-fix; tool round-trip + final answer in ~4s. |
 
 ### Deep research / RAG variants
 
