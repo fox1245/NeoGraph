@@ -7,6 +7,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- `openinference_tracer`: silence the `Failed to detach context`
+  stderr traceback that OTel's SDK emitted on every shutdown when
+  the tracer was used with `engine.run_stream_async` +
+  `StreamMode.ALL`. The OTel contextvars token created at NODE_START
+  was being detached from a different `asyncio.Task` (NODE_END
+  callback fires from the engine's continuation, not the caller's
+  task), so `Context.reset(token)` raised `ValueError`; the SDK
+  swallowed the raise but still routed the full traceback through
+  `logger.exception`, polluting production logs without affecting
+  semantics. Fix records the (thread, task) at attach and skips
+  detach on mismatch, plus installs a narrow `logging.Filter` on
+  `opentelemetry.context` that drops the message only while our
+  `_safe_detach` is on the stack. Sync callers and same-task async
+  callers still get proper LLM-span nesting under the node span.
+  (Issue #2)
+
+---
+
 ## [0.6.0] — 2026-05-07 — OpenInference observability layer
 
 Closes the LangSmith UX gap. NeoGraph already emitted OTel-shape
