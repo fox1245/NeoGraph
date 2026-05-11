@@ -52,6 +52,7 @@ add_executable(neograph_tests
     test_node_run_dispatch.cpp
     test_cancel_token_fork.cpp
     test_concurrent_stress.cpp
+    test_openinference_cpp.cpp
 )
 
 if(NEOGRAPH_BUILD_MCP)

@@ -328,6 +328,7 @@ add_library(neograph_core
     src/core/plan_execute_graph.cpp
     src/core/deep_research_graph.cpp
     src/core/store.cpp
+    src/observability/openinference.cpp
 )
 # postgres_checkpoint.cpp is built into a separate target below
 # (neograph_postgres) so projects without libpq can still link
