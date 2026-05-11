@@ -624,6 +624,12 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_react_agent examples/01_react_agent.cpp)
         target_link_libraries(example_react_agent PRIVATE neograph::core neograph::llm cppdotenv)
 
+        # Issue #4 / PR #10 showcase — outer asio + co_spawn + co_await
+        # engine->run_stream_async with SchemaProvider("openai_responses")
+        # streaming. The exact shape that segfaulted pre-PR-#10.
+        add_executable(example_react_async_streaming examples/40_react_async_streaming.cpp)
+        target_link_libraries(example_react_async_streaming PRIVATE neograph::core neograph::llm cppdotenv)
+
         add_executable(example_custom_graph examples/02_custom_graph.cpp)
         target_link_libraries(example_custom_graph PRIVATE neograph::core neograph::llm)
 
