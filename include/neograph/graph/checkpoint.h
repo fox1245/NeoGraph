@@ -167,6 +167,26 @@ struct PendingWrite {
  * returns (flushed to whatever backend the store wraps), because the
  * engine calls `state.apply_writes` only *after* `put_writes` succeeds.
  *
+ * ## Thread safety
+ *
+ * **Individual ops are atomic; cross-op sequencing is the caller's
+ * responsibility.** Every backend in-tree (`InMemoryCheckpointStore`
+ * mutex-guards each call; `PostgresCheckpointStore` /
+ * `SqliteCheckpointStore` use per-call transactions) guarantees that
+ * a single `save_checkpoint` / `load_latest` / `put_writes` /
+ * `delete_thread` call observes a consistent snapshot — no torn
+ * reads, no half-applied writes. They do NOT serialize *sequences*
+ * of calls for the same `thread_id`. Concurrent runs against the same
+ * `thread_id` therefore exhibit last-writer-wins on `save_checkpoint`
+ * and last-saver visibility on subsequent `load_latest` — see
+ * `GraphEngine`'s class-level Thread safety section for the engine-
+ * side contract. Backend authors implementing this interface MUST
+ * preserve the per-call-atomic invariant; callers needing
+ * cross-op atomicity (e.g. compare-and-set on the latest checkpoint)
+ * must wrap the relevant call sequence behind their own external
+ * mutex, or use the engine's `cancel_token` to drain in-flight runs
+ * before issuing an admin op.
+ *
  * @see InMemoryCheckpointStore for a reference implementation.
  */
 /// @note Backend authors: this is a "fat" interface (5 sync core +
