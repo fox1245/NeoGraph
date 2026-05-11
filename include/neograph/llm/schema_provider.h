@@ -109,6 +109,24 @@ class NEOGRAPH_API SchemaProvider : public Provider {
     ChatCompletion complete_stream(const CompletionParams& params,
                                    const StreamCallback& on_chunk) override;
 
+    /// Async streaming completion — native override (issue #4).
+    ///
+    /// For the WebSocket Responses path (use_websocket=true,
+    /// openai-responses schema) this co_awaits the existing
+    /// `complete_stream_ws_responses` directly — no bridge thread,
+    /// no nested `run_sync`, no shared-state race against the
+    /// awaiter's io_context.
+    ///
+    /// For the HTTP/SSE path (httplib synchronous) it defers to
+    /// `Provider::complete_stream_async`'s base implementation, which
+    /// post-#4 spawns a dedicated worker thread for `complete_stream`
+    /// and dispatches tokens back onto the awaiter's executor — so
+    /// the engine's io_context worker stays responsive and the user
+    /// `on_chunk` runs single-threaded with the awaiting coroutine.
+    asio::awaitable<ChatCompletion>
+    complete_stream_async(const CompletionParams& params,
+                          const StreamCallback& on_chunk) override;
+
     /// @brief Get the provider name (from the schema's "name" field).
     /// @return Provider identifier string (e.g., "openai", "claude", "gemini").
     std::string get_name() const override;
