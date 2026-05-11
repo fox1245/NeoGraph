@@ -663,3 +663,81 @@ real-world recipe rather than a v-bump.
 
 TODO_v0.3.md item #9 — confirmed cookbook material (no engine
 gap), deferred to a future "examples track" sweep.
+
+---
+
+## Candidate 6 — Provider single dispatch
+
+### Symptom
+
+`Provider` exposes four virtual methods (one dimension smaller than
+GraphNode's eight):
+
+```
+complete           complete_async
+complete_stream    complete_stream_async
+```
+
+`(sync/async) × (stream/non-stream)` — same shape as Candidate 1,
+same "override at least one of N" contract, same trap. The
+non-streaming pair is safe (one bridge step deep). The streaming
+pair was unsafe pre-#10: `complete_stream` is sync httplib, the
+default `complete_stream_async` bridge wrapped it inline (and the
+WebSocket Responses path nested `run_sync` on top of the engine's
+io_context worker), producing an intermittent segfault when called
+from inside `GraphEngine::run_stream_async` (issue #4, fixed by
+PR #10's worker-thread bridge + `SchemaProvider` native override).
+
+### Why this is a cleanup, not a blocker
+
+The concrete crash (#4) is closed — PR #10 spawns a dedicated
+worker thread for the sync `complete_stream` and dispatches tokens
+back onto the awaiter's executor; `SchemaProvider` overrides the
+WS path to skip even the worker thread. Both `OpenAIProvider` and
+`SchemaProvider` HTTP/SSE paths inherit the safe default, so the
+4-virtual cross-product is no longer crash-prone. What remains is
+the architectural wart: the override surface is wider than
+necessary, and the safety of the bridge depends on which corner of
+the cross-product you override (an invariant nothing pins at
+compile time).
+
+### Suggested direction (v1.0)
+
+Async-first single dispatch:
+
+```cpp
+class Provider {
+public:
+    // Only thing native subclasses override.
+    virtual asio::awaitable<CompletionStream>
+    invoke(CompletionRequest req) = 0;
+};
+```
+
+`CompletionStream` is a sender / awaitable / channel — the caller
+picks how to drain it (collect-to-end for sync, await-final for
+non-streaming async, iterate for streaming). Sync + non-streaming
+variants become thin base-class adapters that apply `run_sync`
+exactly once at the outermost boundary, never composed with each
+other. Native subclasses only ship the async-streaming path
+because it's a strict superset of the rest.
+
+Pair with Candidate 1 (GraphNode 8-virtual flattening) — same
+shape, same fix, should land in the same v1.0 cycle so the
+"override one virtual" contract is consistent across the public
+surface.
+
+### Adjacent — `schema_provider.cpp` split
+
+`schema_provider.cpp` is ~1,800 LoC concentrating multi-vendor
+schema mapping + HTTP/SSE wire + body-build + response-parse. The
+single-dispatch rewrite is a natural moment to split into
+`SchemaParser` / `SchemaWireBuilder` / `SchemaProviderImpl`.
+Mentioning here so it doesn't need a separate ROADMAP entry; can
+split if the work happens in different PRs.
+
+### Triggering round
+
+Issue #5 — surfaced while debugging #4. Concrete crash closed by
+PR #10; architectural cleanup deferred to v1.0 alongside
+Candidate 1.
