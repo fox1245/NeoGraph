@@ -106,6 +106,23 @@ class NEOGRAPH_API SchemaProvider : public Provider {
     /// Sync completion is inherited from `Provider::complete()`, which
     /// drives `complete_async` via `neograph::async::run_sync`.
 
+    /// Streaming completion (HTTP/SSE httplib path; WS path dispatched
+    /// to `complete_stream_ws_responses` when `use_websocket=true` and
+    /// the schema is `openai-responses`).
+    ///
+    /// **Locking contract for `on_chunk`**: the callback is invoked
+    /// from inside httplib's content callback (HTTP/SSE) or the
+    /// WebSocket recv loop (WS), in BOTH cases with `schema_mutex_`
+    /// NOT held — the lock is taken only during the per-call body-
+    /// build + per-call response-parse phases at the start of the
+    /// request, then released before the network roundtrip begins.
+    /// Parse state passed through `on_chunk` (accumulated `full_content`,
+    /// tool-call map, etc.) is stack-local to this call and not shared
+    /// with the `schema_mutex_`-protected schema templates. Callers
+    /// can therefore (a) safely call other provider methods from
+    /// inside `on_chunk` without deadlocking, and (b) assume tokens
+    /// emitted by concurrent `complete_stream` calls on the same
+    /// provider do not interleave their parse state.
     ChatCompletion complete_stream(const CompletionParams& params,
                                    const StreamCallback& on_chunk) override;
 

@@ -185,8 +185,20 @@ struct RunResult {
  *   `set_checkpoint_store`, `set_store`, `own_tools`) must be called
  *   before any concurrent `run()` — they are configuration, not runtime.
  * - Concurrent `run()` calls sharing the **same** `thread_id` do not
- *   crash but produce unspecified checkpoint interleaving; serialize
- *   per-thread access yourself if you need deterministic semantics.
+ *   crash but produce unspecified checkpoint interleaving (last-
+ *   writer-wins on `save_checkpoint`, last-saver visible to subsequent
+ *   `load_latest`); serialize per-thread access yourself if you need
+ *   deterministic semantics. Same caveat applies across **multiple
+ *   engines** sharing one `CheckpointStore` for the same `thread_id`
+ *   — e.g. evolving-agent patterns that tear an engine down and
+ *   recompile while a straggler `run_async` is still in flight: the
+ *   store guarantees each individual checkpoint op is atomic, not that
+ *   they sequence in any particular order. Likewise, `update_state` /
+ *   `get_state` / `fork` overlapping a live `run_async` on the same
+ *   `thread_id` race against the engine's own writes; if you need
+ *   "no straggler may overwrite my admin op", cancel the straggler
+ *   via `RunConfig::cancel_token` first and `co_await` its completion
+ *   before issuing the admin call.
  * - Custom `GraphNode` subclasses must be stateless or self-synchronized.
  *   Node instances are owned by the engine and shared across all runs.
  * - User-provided `CheckpointStore` / `Store` / `Provider` / `Tool`
