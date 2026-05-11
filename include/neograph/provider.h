@@ -150,6 +150,22 @@ class NEOGRAPH_API Provider {
      * SHOULD override this to drop the bridging thread and stream
      * tokens straight onto the coroutine's executor.
      *
+     * @warning **This default bridge nests two io_contexts when the
+     * native `complete_stream` is itself implemented via
+     * `neograph::async::run_sync`** — which is the pattern both
+     * `SchemaProvider` and `OpenAIProvider` follow today. Called from
+     * inside an outer engine coroutine (e.g. a node awaiting this
+     * method while the engine is driven by `GraphEngine::run_stream_async`
+     * on the caller's `io_context`), the bridge thread's inner
+     * `run_sync` races against the outer `io_context` on shared
+     * provider state (`ConnPool`, `schema_mutex_`) and can crash.
+     * Native subclasses whose sync streaming path uses `run_sync`
+     * internally MUST override this method directly — do not rely on
+     * the default bridge. The non-streaming `complete` / `complete_async`
+     * pair does not have this problem because that bridge composes
+     * only one layer of `run_sync`, not two. Tracked in #4 (concrete
+     * crash) and #5 (structural Provider single-dispatch direction).
+     *
      * @param params   Completion parameters.
      * @param on_chunk Callback invoked per received token (runs on the
      *                 awaiting coroutine's executor when the default
