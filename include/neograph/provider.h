@@ -142,34 +142,31 @@ class NEOGRAPH_API Provider {
     /**
      * @brief Async streaming completion. Awaitable peer of @ref complete_stream.
      *
-     * Default implementation bridges synchronously: it spawns a thread
-     * that runs `complete_stream`, posting tokens onto the awaiter's
-     * executor via `dispatch`, and resumes the coroutine when the
-     * streaming finishes. Subclasses with a native async-streaming
-     * transport (WebSocket Responses, server-sent events, etc.)
-     * SHOULD override this to drop the bridging thread and stream
+     * Default implementation (post-#4): spawns a dedicated worker
+     * thread that runs the synchronous `complete_stream`, dispatches
+     * each token onto the awaiting coroutine's executor (so the
+     * user's `on_chunk` runs single-threaded with the awaiter — no
+     * reentrancy), and resumes the coroutine via a one-shot
+     * `steady_timer.cancel()` posted on the awaiter's executor when
+     * streaming finishes. Subclasses with a fully async streaming
+     * transport (WebSocket Responses, native SSE coroutine, etc.)
+     * SHOULD override this to drop the worker thread and stream
      * tokens straight onto the coroutine's executor.
      *
-     * @warning **This default bridge nests two io_contexts when the
-     * native `complete_stream` is itself implemented via
-     * `neograph::async::run_sync`** — which is the pattern both
-     * `SchemaProvider` and `OpenAIProvider` follow today. Called from
-     * inside an outer engine coroutine (e.g. a node awaiting this
-     * method while the engine is driven by `GraphEngine::run_stream_async`
-     * on the caller's `io_context`), the bridge thread's inner
-     * `run_sync` races against the outer `io_context` on shared
-     * provider state (`ConnPool`, `schema_mutex_`) and can crash.
-     * Native subclasses whose sync streaming path uses `run_sync`
-     * internally MUST override this method directly — do not rely on
-     * the default bridge. The non-streaming `complete` / `complete_async`
-     * pair does not have this problem because that bridge composes
-     * only one layer of `run_sync`, not two. Tracked in #4 (concrete
-     * crash) and #5 (structural Provider single-dispatch direction).
+     * @note Pre-#4 the default was `co_return complete_stream(...)`
+     * inline, which blocked the awaiting executor for the whole
+     * stream and — when `complete_stream` itself called `run_sync()`
+     * — nested two io_contexts on the same thread, racing on shared
+     * provider state. The current default avoids both: the executor
+     * stays responsive, and `complete_stream` runs on its own thread
+     * with no implicit io_context reentry. `SchemaProvider` overrides
+     * the WebSocket Responses branch to skip even the worker thread
+     * (it's already async-native).
      *
      * @param params   Completion parameters.
      * @param on_chunk Callback invoked per received token (runs on the
-     *                 awaiting coroutine's executor when the default
-     *                 bridge is used).
+     *                 awaiting coroutine's executor — never on the
+     *                 internal worker thread).
      * @return Awaitable resolving to the full completion response.
      */
     virtual asio::awaitable<ChatCompletion>

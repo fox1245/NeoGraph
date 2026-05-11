@@ -11,6 +11,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `Provider::complete_stream_async` default bridge no longer blocks
+  the awaiting coroutine's executor for the duration of the stream.
+  Pre-fix the default was `co_return complete_stream(...)` inline,
+  which (a) suspended the engine's `io_context` worker thread for
+  the whole HTTP/SSE recv loop — so other node coroutines on the
+  same executor stalled — and (b) for `SchemaProvider`'s WebSocket
+  Responses branch, additionally nested a fresh `run_sync` io_context
+  on top of the engine worker via `run_sync(complete_stream_ws_responses(...))`,
+  racing on shared provider state and producing intermittent segfaults
+  when called from inside an outer `GraphEngine::run_stream_async`.
+  New default spawns a dedicated worker thread for the synchronous
+  `complete_stream`, dispatches each token back onto the awaiter's
+  executor (so the user's `on_chunk` runs single-threaded with the
+  awaiting coroutine — no reentrancy), and resumes the coroutine via
+  a one-shot `steady_timer.cancel()`. Worker-thread exceptions
+  re-raise on the awaiter. `SchemaProvider` adds a native
+  `complete_stream_async` override that skips even the worker thread
+  for the WebSocket path by directly `co_await`ing
+  `complete_stream_ws_responses`. `OpenAIProvider` benefits from the
+  new base default transparently (no WS path, no special case).
+  Two new tests in `tests/test_provider_async_default.cpp`:
+  `StreamAsyncBridgeDoesNotBlockExecutor` (a concurrent ticker
+  coroutine advances during the stream + chunks deliver on the
+  awaiter's thread, not the worker's) and
+  `StreamAsyncBridgeRethrowsWorkerException`. (Issue #4)
+
 - `openinference_tracer`: silence the `Failed to detach context`
   stderr traceback that OTel's SDK emitted on every shutdown when
   the tracer was used with `engine.run_stream_async` +
