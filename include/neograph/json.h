@@ -137,6 +137,13 @@ public:
     json at(size_t idx) const;
     json at(int idx) const { return at(static_cast<size_t>(idx)); }
 
+    // ----- Array endpoints (nlohmann-compat shorthand for arr[0] / arr[size-1]) -----
+    // Throws std::out_of_range if !is_array() or empty(); matches at()'s contract.
+    json front();
+    json back();
+    json front() const;
+    json back() const;
+
     // ----- Membership -----
     bool contains(const char* key) const;
     bool contains(const std::string& key) const;

@@ -132,12 +132,19 @@ class NEOGRAPH_API Provider {
      * Calls @p on_chunk for each token as it arrives, then returns the
      * full assembled completion when done.
      *
+     * Default implementation calls @ref complete and forwards the full
+     * assembled message content as a single chunk — sufficient for
+     * mocks, unit-test fixtures, and non-streaming-native providers
+     * that just want to satisfy the streaming surface. Streaming-native
+     * subclasses (OpenAI, schema-driven, etc.) override this to emit
+     * tokens incrementally.
+     *
      * @param params Completion parameters.
      * @param on_chunk Callback invoked per received token.
      * @return The full completion response after streaming is complete.
      */
     virtual ChatCompletion complete_stream(const CompletionParams& params,
-                                           const StreamCallback& on_chunk) = 0;
+                                           const StreamCallback& on_chunk);
 
     /**
      * @brief Async streaming completion. Awaitable peer of @ref complete_stream.
