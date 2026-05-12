@@ -138,6 +138,35 @@ cookbook](examples/cookbook/ai-assembly/) for a 600-line demo built
 this way (4 personas, A2A multi-process, OpenAI-backed) — including
 a friction journal of what a fresh user trips over.
 
+### 흔한 함정 5선 — 신참이 첫 30분에 부딪치는 것들
+
+NeoGraph 처음 쓰는 사람이 가장 자주 막히는 5 가지. 미리 한 번 훑어두면 디버깅 30분 절약됩니다.
+
+1. **결과는 `result.channel<T>("name")` 으로 꺼내세요** ([example 51](examples/51_minimal.cpp))
+   `result.output["counter"]` 식 직접 접근은 `react_graph` 같은 일부 빌더에서만 통합니다. raw `GraphEngine::compile` 그래프는 `output["channels"]["counter"]["value"]` 한 겹 더 들어간 모양이라 직접 접근하면 깨집니다. 도우미 함수 `result.channel<T>("counter")` 는 두 모양 모두 처리.
+
+2. **노드 안에서 `Store` 는 `in.ctx.store` 로** ([example 43](examples/43_store_personalization.cpp))
+   `engine->set_store(...)` 로 `Store` 박으면 v0.7+ 부터는 노드 본문에서 `in.ctx.store->get(ns, key)` 한 줄로 닿습니다. 옛 패턴 (`NodeFactory` 람다에서 `shared_ptr<Store>` 캡처) 도 계속 동작하지만 새 코드는 `in.ctx.store` 가 깔끔.
+
+3. **`neograph::graph::` 서브네임스페이스** — `GraphEngine`, `GraphNode`, `RunConfig`, `RunResult` 는 모두 `neograph::graph::` 안에 있습니다. 매번 풀 경로로 쓰기 싫으면 파일 위에 `using namespace neograph::graph;` 한 줄. `Provider`, `Tool`, `json` 같은 것들은 `neograph::` 바로 아래.
+
+4. **`<httplib.h>` 직접 쓰는 TU 는 `CPPHTTPLIB_OPENSSL_SUPPORT` 정의 필수** ([issue #16](https://github.com/fox1245/NeoGraph/issues/16))
+   여러분 코드에서 `httplib::Server` 같은 걸 직접 쓴다면, `<httplib.h>` 를 include 하기 전에 반드시 매크로를 정의하세요. 안 하면 NeoGraph 의 cpp-httplib 와 ABI 가 안 맞아서 (One Definition Rule 위반) 런타임에 `getaddrinfo` 안에서 SEGV. v0.8+ 부터는 컴파일 타임에 자동 검출됩니다 (`<neograph/api.h>` 의 `#error` 가드).
+
+   ```cpp
+   #define CPPHTTPLIB_OPENSSL_SUPPORT   // ← 반드시 먼저
+   #include <httplib.h>
+   ```
+
+   또는 CMake 측에서:
+   ```cmake
+   target_compile_definitions(your_target PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+   ```
+
+5. **GCC 13 코루틴 ICE** — Ubuntu 24.04 기본 GCC 13.3 에서 `co_await x.foo_async(...)` 형태가 `internal compiler error: in build_special_member_call, at cp/call.cc:11096` 으로 죽습니다. 컴파일러 버그라 코드는 멀쩡. 회피: GCC 14 업그레이드, 또는 `co_spawn` 대신 `neograph::async::run_sync(awaitable)` 로 sync-bridge. 자세한 안내는 [troubleshooting.md "Build errors"](docs/troubleshooting.md).
+
+각 항목의 더 깊은 내용은 [troubleshooting.md](docs/troubleshooting.md) 와 링크된 예제 / 이슈에 있습니다.
+
 ### A minimal LLM-only chatbot (no tools, no streaming)
 
 The shortest C++ that runs a real OpenAI multi-turn chatbot —
