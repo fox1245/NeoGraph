@@ -849,6 +849,51 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_classifier_fanout examples/36_classifier_fanout.cpp)
         target_link_libraries(example_classifier_fanout PRIVATE neograph::core)
 
+        # ─── API-coverage batch (examples 41-50) ───────────────────────
+        # Targeted at API surface that the existing example set did not
+        # exercise. All offline (mock providers / pure orchestration /
+        # in-memory checkpoint backends), exit 0 on success, suitable
+        # for CI smoke-runs and for first-time readers as concrete
+        # docs.
+
+        # Example 41: multi-turn chatbot via RunConfig::resume_if_exists.
+        add_executable(example_resume_if_exists_chat examples/41_resume_if_exists_chat.cpp)
+        target_link_libraries(example_resume_if_exists_chat PRIVATE neograph::core)
+
+        # Example 42: custom reducer + condition via Registry.
+        add_executable(example_custom_reducer_condition examples/42_custom_reducer_condition.cpp)
+        target_link_libraries(example_custom_reducer_condition PRIVATE neograph::core)
+
+        # Example 43: cross-thread Store driving per-user node behaviour.
+        add_executable(example_store_personalization examples/43_store_personalization.cpp)
+        target_link_libraries(example_store_personalization PRIVATE neograph::core)
+
+        # Example 44: RequestQueue backpressure / rejection path.
+        add_executable(example_request_queue_backpressure examples/44_request_queue_backpressure.cpp)
+        target_link_libraries(example_request_queue_backpressure PRIVATE neograph::core neograph::util)
+
+        # Example 46: CancelToken — cooperative cancellation from another thread.
+        add_executable(example_cancel_token examples/46_cancel_token.cpp)
+        target_link_libraries(example_cancel_token PRIVATE neograph::core)
+
+        # Example 47: NodeCache — opt-in result memoization for pure nodes.
+        add_executable(example_node_cache examples/47_node_cache.cpp)
+        target_link_libraries(example_node_cache PRIVATE neograph::core)
+
+        # Example 48: SqliteCheckpointStore — single-file durable runs.
+        if(NEOGRAPH_BUILD_SQLITE)
+            add_executable(example_sqlite_checkpoint examples/48_sqlite_checkpoint.cpp)
+            target_link_libraries(example_sqlite_checkpoint PRIVATE neograph::core neograph::sqlite)
+        endif()
+
+        # Example 49: OpenInference observability — Tracer adapter pattern.
+        add_executable(example_openinference examples/49_openinference.cpp)
+        target_link_libraries(example_openinference PRIVATE neograph::core)
+
+        # Example 50: AsyncTool — coroutine-shaped tool execution.
+        add_executable(example_async_tool examples/50_async_tool.cpp)
+        target_link_libraries(example_async_tool PRIVATE neograph::core)
+
         # Clay + Raylib chatbot (optional — requires Raylib)
         option(NEOGRAPH_BUILD_CLAY_EXAMPLE "Build Clay chatbot example (fetches Raylib)" OFF)
         if(NEOGRAPH_BUILD_CLAY_EXAMPLE)
