@@ -376,6 +376,13 @@ int main() {
 
     // ================================================================
     // Demo 6: Store (cross-thread shared memory)
+    //
+    // NOTE: this block exercises the Store API in isolation in `main()`
+    // (put / get / search) and connects an InMemoryStore to a graph via
+    // `engine->set_store(...)`, but does NOT show a node reading from
+    // Store *during a run*. For the live-node pattern — capturing
+    // `shared_ptr<Store>` in a factory closure and reading inside
+    // `run()` — see `examples/43_store_personalization.cpp`.
     // ================================================================
     section("6. Store — cross-thread shared memory");
     {

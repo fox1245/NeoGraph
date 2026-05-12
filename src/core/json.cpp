@@ -479,6 +479,30 @@ json json::at(size_t idx) const {
 }
 
 // ===========================================================================
+// Array endpoints — nlohmann-compat shorthand for arr[0] / arr[size-1].
+// Issue #26: the natural `msgs.back()["content"]` pattern is the first
+// thing nlohmann users reach for, so we mirror it. Routes through at()
+// so the not-array and empty-array preconditions are checked uniformly.
+// ===========================================================================
+
+json json::front() { return at(static_cast<size_t>(0)); }
+json json::back() {
+    if (!val_ || !yyjson_mut_is_arr(val_))
+        throw type_error("json::back: not an array");
+    size_t n = yyjson_mut_arr_size(val_);
+    if (n == 0) throw out_of_range("json::back: empty array");
+    return at(n - 1);
+}
+json json::front() const { return at(static_cast<size_t>(0)); }
+json json::back() const {
+    if (!val_ || !yyjson_mut_is_arr(val_))
+        throw type_error("json::back: not an array");
+    size_t n = yyjson_mut_arr_size(val_);
+    if (n == 0) throw out_of_range("json::back: empty array");
+    return at(n - 1);
+}
+
+// ===========================================================================
 // Membership
 // ===========================================================================
 

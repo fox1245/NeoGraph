@@ -43,6 +43,19 @@ Provider::complete_async(const CompletionParams& params) {
     co_return complete(params);
 }
 
+ChatCompletion Provider::complete_stream(const CompletionParams& params,
+                                         const StreamCallback& on_chunk) {
+    // Issue #22: default body so mocks / test fixtures / non-streaming
+    // demos don't have to stub out a four-line override that does
+    // exactly this. Streaming-native subclasses (OpenAI / schema-driven
+    // / OpenInference) override this to emit incremental tokens.
+    auto result = complete(params);
+    if (on_chunk && !result.message.content.empty()) {
+        on_chunk(result.message.content);
+    }
+    return result;
+}
+
 asio::awaitable<ChatCompletion>
 Provider::complete_stream_async(const CompletionParams& params,
                                 const StreamCallback& on_chunk) {

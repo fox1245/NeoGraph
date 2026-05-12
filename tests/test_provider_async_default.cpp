@@ -101,7 +101,40 @@ class ThrowingAsyncProvider : public Provider {
     std::string get_name() const override { return "throwing-async"; }
 };
 
+// Issue #22 regression: a mock provider that overrides ONLY complete()
+// must build (no stub for complete_stream needed) and the inherited
+// default complete_stream must forward the assembled content as a
+// single chunk.
+class MockNoStreamOverrideProvider : public Provider {
+  public:
+    ChatCompletion complete(const CompletionParams& /*params*/) override {
+        return make_completion("mock-out");
+    }
+    std::string get_name() const override { return "mock"; }
+};
+
 } // namespace
+
+TEST(ProviderAsyncDefault, DefaultCompleteStreamForwardsAsSingleChunk) {
+    MockNoStreamOverrideProvider p;
+    CompletionParams params;
+
+    std::vector<std::string> chunks;
+    auto result = p.complete_stream(
+        params,
+        [&](const std::string& c) { chunks.push_back(c); });
+
+    EXPECT_EQ(result.message.content, "mock-out");
+    ASSERT_EQ(chunks.size(), 1u);
+    EXPECT_EQ(chunks.front(), "mock-out");
+}
+
+TEST(ProviderAsyncDefault, DefaultCompleteStreamHandlesNullCallback) {
+    MockNoStreamOverrideProvider p;
+    CompletionParams params;
+    auto result = p.complete_stream(params, StreamCallback{});
+    EXPECT_EQ(result.message.content, "mock-out");
+}
 
 TEST(ProviderAsyncDefault, SyncOverrideBridgesToAsync) {
     SyncOnlyProvider p;
