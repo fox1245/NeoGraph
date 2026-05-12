@@ -533,6 +533,99 @@ you to manually `release()` and rewrap.
 
 ---
 
+## C++ consumers — `httplib.h` macro consistency (load-bearing, issue #16)
+
+If you build a C++ application that **links against NeoGraph** AND
+also `#include <httplib.h>` in your own translation units (e.g. to
+run your own `httplib::Server` SSE endpoint), every TU that includes
+`<httplib.h>` MUST `#define CPPHTTPLIB_OPENSSL_SUPPORT` **before**
+the include. Missing the macro in even one TU silently produces a
+SEGV inside `getaddrinfo` the first time
+`SchemaProvider::complete_stream` hits the LLM endpoint.
+
+### Why this happens
+
+`cpp-httplib` is header-only. The class `httplib::ClientImpl` is
+**conditionally larger** when `CPPHTTPLIB_OPENSSL_SUPPORT` is defined
+(it gains SSL-related members; layout shifts by ~8 bytes). Because
+the library's functions are all `inline`, the linker keeps one
+instantiation per inline function and discards duplicates. If two
+TUs in your binary compile against different `ClientImpl` layouts
+(because one defined the macro, the other didn't), the linker picks
+one definition; the *other* TU's compile-side accesses members at
+the wrong offsets — classic ODR violation. The corruption lands on
+adjacent fields (e.g. `proxy_host_` ends up reading from offset
+that's actually `path_`'s tail), and `httplib::ClientImpl::create_client_socket`
+branches into the "use proxy" path with a wild `proxy_host_.c_str()`
+→ `getaddrinfo` → `internal_strlen` → SEGV.
+
+### Symptom
+
+Under ASan:
+
+```
+==NNNN==ERROR: AddressSanitizer: SEGV on unknown address
+    #0 internal_strlen (...)
+    #1 getaddrinfo
+    #2 httplib::detail::create_socket
+    #3 httplib::detail::create_client_socket
+    #4 httplib::ClientImpl::create_client_socket
+    #5 httplib::SSLClient::create_and_connect_socket
+    ...
+    #N neograph::llm::SchemaProvider::complete_stream
+```
+
+Without ASan: same stack via gdb, with a wild pointer value that
+*can* look like text (it's whatever bytes were in the wrong-offset
+slot — under ASan it's typically `0xBE` quarantine poison; without
+ASan it can be uninitialized stack content that happens to decode as
+JSON / UTF-8 fragments and *looks* like memory corruption from a
+real culprit — that's the misleading symptom).
+
+### Fix
+
+In every TU that includes `<httplib.h>`:
+
+```cpp
+// your main.cpp / sse_handler.cpp / wherever
+#define CPPHTTPLIB_OPENSSL_SUPPORT
+#include <httplib.h>
+```
+
+Or globally in CMake (preferred — guarantees consistency across the
+whole target):
+
+```cmake
+target_compile_definitions(your_target PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+```
+
+The macro is harmless even if your own httplib use only needs
+`Server` (not `SSLClient`) — it only **adds** members; nothing
+requires you to actually do SSL on your side.
+
+### How to audit without ASan
+
+```bash
+grep -rn 'include.*httplib\.h\|CPPHTTPLIB_OPENSSL_SUPPORT' src/
+```
+
+If any include site of `<httplib.h>` is **not** preceded by a
+`#define CPPHTTPLIB_OPENSSL_SUPPORT` (in the same TU, or via a
+compile-flag definition), that's almost certainly the bug.
+
+### Why NeoGraph can't fix this for you
+
+NeoGraph's own .cpp files all define the macro consistently. The
+violation only happens when a downstream TU also pulls in httplib.h
+*without* the macro. Detecting that at compile time would require
+either (a) NeoGraph exposing `httplib::ClientImpl` in public headers
+(we deliberately don't — httplib stays inside `SchemaProvider.cpp`),
+or (b) link-time `static_assert` of struct size across translation
+units, which C++ doesn't support. Documenting the trap is the best
+we can do; this section is the documentation. Issue #16 closed.
+
+---
+
 ## Reporting a bug
 
 If your symptom isn't above:
