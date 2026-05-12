@@ -8,6 +8,20 @@
  *
  * This allows supporting new LLM providers without writing C++ code --
  * just add a new JSON schema file.
+ *
+ * @warning **Downstream `httplib.h` macro consistency** (issue #16). The
+ * SchemaProvider implementation TU defines `CPPHTTPLIB_OPENSSL_SUPPORT`
+ * before including `<httplib.h>`. If your application **also** includes
+ * `<httplib.h>` in any of its own TUs (e.g. to run an `httplib::Server`
+ * SSE endpoint), every such include site MUST `#define CPPHTTPLIB_OPENSSL_SUPPORT`
+ * before the include, OR you must set
+ * `target_compile_definitions(your_target PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)`
+ * globally. cpp-httplib is header-only and `ClientImpl`'s layout differs
+ * between the two macro states; mismatched TUs produce a silent ODR
+ * violation that SEGVs inside `getaddrinfo` on the first LLM call. The
+ * audit recipe and a worked example live in
+ * docs/troubleshooting.md under "C++ consumers — `httplib.h` macro
+ * consistency".
  */
 #pragma once
 

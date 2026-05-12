@@ -232,6 +232,18 @@ Four small things that are easy to miss:
     `target_include_directories(my_agent PRIVATE
     ${neograph_SOURCE_DIR}/deps)` and `#include <cppdotenv/dotenv.hpp>`.
     It's a header-only single file; not part of the public install.
+  - **If you also `#include <httplib.h>` in your own code** (e.g. for
+    your own `httplib::Server` SSE endpoint), every TU that does so
+    MUST `#define CPPHTTPLIB_OPENSSL_SUPPORT` **before** the include —
+    or set it via `target_compile_definitions(your_target PRIVATE
+    CPPHTTPLIB_OPENSSL_SUPPORT)` globally. NeoGraph's SchemaProvider
+    .cpp defines it; if your TUs don't match, the linker silently
+    picks one `httplib::ClientImpl` layout and the mismatched TU
+    reads members at wrong offsets → SEGV inside `getaddrinfo` on the
+    first LLM call. Issue #16 documented the trap end-to-end; see
+    [docs/troubleshooting.md → "C++ consumers — `httplib.h` macro
+    consistency"](docs/troubleshooting.md#c-consumers--httplibh-macro-consistency-load-bearing-issue-16)
+    for the audit recipe and the one-line fix.
 
 ## Python Binding
 
