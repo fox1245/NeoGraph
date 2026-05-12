@@ -303,6 +303,26 @@ class NEOGRAPH_API SchemaProvider : public Provider {
     std::optional<asio::executor_work_guard<asio::io_context::executor_type>> http_work_;
     std::thread http_thread_;
     std::unique_ptr<async::ConnPool>    conn_pool_;
+
+    // --- Long-lived "sync-bridge" thread for streaming (issue #16) ---
+    //
+    // The streaming HTTP/SSE path is implemented as a synchronous
+    // httplib::Client::Post call inside `complete_stream`. The previous
+    // `complete_stream_async` default ran that on a *fresh* `std::thread`
+    // per call, which exposed cold thread-local resolver / NSS init in
+    // glibc. The wild ptr in `internal_strlen` reported in #16 had this
+    // shape: outer io.run() driven from an HTTP server worker thread →
+    // fresh-spawn NeoGraph worker → first getaddrinfo on cold TLS.
+    //
+    // Fix: own one long-lived bridge thread (mirror of `http_thread_`
+    // for ConnPool). `complete_stream_async` HTTP/SSE branch dispatches
+    // each call onto this thread instead of spawning fresh. After the
+    // first call warms the thread-local resolver state, every
+    // subsequent call reuses the warm state — same robustness profile
+    // as the working `complete_async` path.
+    std::unique_ptr<asio::io_context> bridge_io_;
+    std::optional<asio::executor_work_guard<asio::io_context::executor_type>> bridge_work_;
+    std::thread bridge_thread_;
     // libcurl-backed HTTP/2 pool with multiplexing. Default transport
     // for SchemaProvider — passes Cloudflare/anti-bot WAFs (it IS curl)
     // and gives us native HTTP/2 stream multiplexing for parallel

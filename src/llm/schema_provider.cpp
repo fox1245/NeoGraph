@@ -8,7 +8,11 @@
 #include <builtin_schemas.h>
 
 #include <asio/co_spawn.hpp>
+#include <asio/dispatch.hpp>
 #include <asio/io_context.hpp>
+#include <asio/redirect_error.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/use_awaitable.hpp>
 #include <asio/use_future.hpp>
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
@@ -49,15 +53,25 @@ SchemaProvider::SchemaProvider(Config config, json schema)
     if (user_config_.prefer_libcurl) {
         curl_pool_ = std::make_unique<async::CurlH2Pool>();
     }
+
+    // Long-lived sync-bridge thread for streaming HTTP/SSE (issue #16).
+    // See header comment on `bridge_io_` for the rationale.
+    bridge_io_ = std::make_unique<asio::io_context>();
+    bridge_work_.emplace(asio::make_work_guard(*bridge_io_));
+    bridge_thread_ = std::thread([io = bridge_io_.get()]{ io->run(); });
 }
 
 SchemaProvider::~SchemaProvider()
 {
-    // Order: drop the work guard so io_context.run() can return, stop
-    // the io_context (cancels in-flight ops), then join the worker.
+    // Order: drop the work guards so each io_context.run() can return,
+    // stop the io_contexts (cancels in-flight ops), then join the
+    // worker threads.
     if (http_work_) http_work_.reset();
+    if (bridge_work_) bridge_work_.reset();
     if (http_io_) http_io_->stop();
+    if (bridge_io_) bridge_io_->stop();
     if (http_thread_.joinable()) http_thread_.join();
+    if (bridge_thread_.joinable()) bridge_thread_.join();
 }
 
 std::unique_ptr<SchemaProvider>
@@ -1523,11 +1537,58 @@ SchemaProvider::complete_stream_async(const CompletionParams& params,
         co_return co_await complete_stream_ws_responses(params, on_chunk);
     }
 
-    // HTTP/SSE branch: defer to Provider::complete_stream_async, which
-    // post-#4 spawns a dedicated worker thread for the synchronous
-    // httplib path and dispatches tokens back onto the awaiter's
-    // executor. No reentrancy on the engine's io_context worker.
-    co_return co_await Provider::complete_stream_async(params, on_chunk);
+    // HTTP/SSE branch (issue #16): dispatch the synchronous
+    // `complete_stream` work onto our long-lived `bridge_thread_`
+    // instead of letting Provider::complete_stream_async's base
+    // default spawn a fresh `std::thread` per call.
+    //
+    // Why: a fresh thread starts with cold thread-local state in
+    // glibc's resolver / NSS plugins / OpenSSL. The first
+    // `getaddrinfo` on that thread can SEGV on `internal_strlen` when
+    // the cold-init path races with the spawn pattern (observed on
+    // some downstream Linux + glibc combinations under nested HTTP
+    // server contexts; see #16). Routing through `bridge_thread_`
+    // matches the working `complete_async` shape (which lives on
+    // `http_thread_`): the thread is warm after the first call, all
+    // subsequent calls reuse the warmed state.
+    //
+    // Tokens are still dispatched onto the awaiter's executor (so the
+    // user's `on_chunk` runs single-threaded with the awaiting
+    // coroutine — same invariant the post-PR-#10 base default
+    // provides).
+    auto exec = co_await asio::this_coro::executor;
+    auto bridge_exec = bridge_io_->get_executor();
+
+    struct Shared {
+        std::optional<ChatCompletion> result;
+        std::exception_ptr err;
+    };
+    auto shared = std::make_shared<Shared>();
+
+    auto done = std::make_shared<asio::steady_timer>(exec);
+    done->expires_at(std::chrono::steady_clock::time_point::max());
+
+    StreamCallback wrapped = [exec, on_chunk](const std::string& chunk) {
+        asio::dispatch(exec, [on_chunk, chunk]() { on_chunk(chunk); });
+    };
+
+    // params copied by value so the bridge thread's work item doesn't
+    // outlive the caller's stack-allocated CompletionParams.
+    asio::dispatch(bridge_exec,
+        [this, params, wrapped, shared, done, exec]() mutable {
+            try {
+                shared->result = this->complete_stream(params, wrapped);
+            } catch (...) {
+                shared->err = std::current_exception();
+            }
+            asio::dispatch(exec, [done]() { done->cancel(); });
+        });
+
+    asio::error_code ec;
+    co_await done->async_wait(asio::redirect_error(asio::use_awaitable, ec));
+
+    if (shared->err) std::rethrow_exception(shared->err);
+    co_return std::move(*shared->result);
 }
 
 // ============================================================================
