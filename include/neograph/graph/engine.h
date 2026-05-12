@@ -183,14 +183,91 @@ struct RunContext {
 
 /**
  * @brief Result of a graph execution run.
+ *
+ * ## ``output`` shape (issue #25)
+ *
+ * The canonical shape of ``output`` is **channels-wrapped**: each
+ * channel value lives at ``output["channels"][<name>]["value"]``,
+ * with sibling metadata such as ``["version"]`` recording how many
+ * times the channel was written. ``output["global_version"]`` carries
+ * the super-step counter.
+ *
+ * Some compiled flows project additional **flat top-level keys** for
+ * ergonomic access — e.g. ``react_graph`` exposes a synthetic
+ * ``output["final_response"]`` so the README quickstart can read the
+ * model's last reply with one bracket. These projections coexist with
+ * the channels wrapper; the wrapper is always present and is the
+ * source of truth.
+ *
+ * Use the ``channel<T>(name)`` accessor below to read a channel value
+ * without committing to either shape — it checks the channels wrapper
+ * first, then falls back to a flat top-level key with the same name.
+ * That way the same call site works against ``GraphEngine::compile``-
+ * built graphs (channels-wrapped only) and ``react_graph``-built
+ * graphs (channels-wrapped + flat-key projections) alike.
  */
 struct RunResult {
-    json        output;                             ///< Final serialized graph state.
+    json        output;                             ///< Final serialized graph state. See struct docstring for shape details.
     bool        interrupted       = false;          ///< True if execution was interrupted (HITL).
     std::string interrupt_node;                     ///< Name of the node that triggered the interrupt.
     json        interrupt_value;                    ///< Value associated with the interrupt.
     std::string checkpoint_id;                      ///< ID of the last checkpoint saved.
     std::vector<std::string> execution_trace;       ///< Ordered list of executed node names.
+
+    /// @brief Read a channel value as type ``T`` (issue #25).
+    ///
+    /// Looks up the value in ``output``. Tries the canonical
+    /// channels-wrapped path first
+    /// (``output["channels"][name]["value"]``); falls back to a flat
+    /// top-level key (``output[name]``) for graphs that project flat
+    /// keys such as ``react_graph``'s ``final_response``.
+    ///
+    /// @throws json::out_of_range if no channel with that name exists
+    /// in either shape.
+    /// @throws json::type_error if the channel exists but its value
+    /// cannot be converted to ``T`` (delegated to ``json::get<T>``).
+    ///
+    /// @tparam T One of the types ``json::get<T>`` is specialised for
+    ///         — ``int``, ``long``, ``double``, ``std::string``,
+    ///         ``bool``, ``json``, etc. See ``json.h``.
+    template <typename T>
+    T channel(const std::string& name) const {
+        return channel_raw(name).get<T>();
+    }
+
+    /// @brief Read a channel value as a raw ``json`` node (issue #25).
+    ///
+    /// Same lookup rules as ``channel<T>`` — channels-wrapped first,
+    /// flat top-level key as fallback. Returns the underlying json so
+    /// the caller can walk arrays / objects without committing to a
+    /// scalar conversion.
+    ///
+    /// @throws json::out_of_range if no channel with that name exists
+    /// in either shape.
+    json channel_raw(const std::string& name) const {
+        if (output.contains("channels") && output["channels"].contains(name)) {
+            const auto wrapped = output["channels"][name];
+            if (wrapped.contains("value")) return wrapped["value"];
+        }
+        if (output.contains(name)) return output[name];
+        throw json::out_of_range(
+            "RunResult::channel: no such channel '" + name + "' in output "
+            "(checked output[\"channels\"][\"" + name + "\"][\"value\"] and output[\"" + name + "\"])");
+    }
+
+    /// @brief Test whether a channel value exists in either shape.
+    ///
+    /// True if either the channels-wrapped path or a flat top-level
+    /// key with the same name resolves. Useful as a guard before
+    /// ``channel<T>`` when the graph may or may not have written the
+    /// channel (e.g. early HITL interrupt before a node ran).
+    bool has_channel(const std::string& name) const noexcept {
+        if (output.contains("channels") && output["channels"].contains(name)
+            && output["channels"][name].contains("value")) {
+            return true;
+        }
+        return output.contains(name);
+    }
 };
 
 /**
