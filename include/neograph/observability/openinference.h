@@ -79,6 +79,24 @@ public:
     OpenInferenceTracerSession& operator=(OpenInferenceTracerSession&&) noexcept;
 
     /// End the root span + any pending node spans. Idempotent.
+    ///
+    /// @warning **Adapter authors:** `close()` resets the internal
+    /// `unique_ptr<Span>` over the root span (and the corresponding
+    /// pending-node-span stacks). If your `Tracer` adapter handed
+    /// out raw pointers into caller-owned span storage and stored
+    /// them for post-close inspection, those pointers become
+    /// dangling — any walk of \"all spans I've recorded\" after
+    /// `close()` reads freed memory and may crash, hang, or print
+    /// garbage (issue #24).
+    ///
+    /// The adapter must own the span DATA itself (not just the
+    /// wrapper). Pattern: split a `RecordedSpan` (owned by the
+    /// adapter in `unique_ptr`s) from the `Span` wrapper handed
+    /// back to the OpenInference layer. The wrapper's destruction
+    /// is then harmless — the recorded data lives in the adapter
+    /// and survives `close()`. See `tests/test_openinference_cpp.cpp`
+    /// (`InMemoryTracer`) and `examples/49_openinference.cpp`
+    /// (`PrintTracer`) for the canonical shape.
     void close();
 
     /// Internal — exposed so `OpenInferenceProvider` can open LLM
