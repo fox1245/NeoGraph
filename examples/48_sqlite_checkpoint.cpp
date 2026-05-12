@@ -61,20 +61,10 @@ int main() {
     NodeContext ctx;
     auto engine = GraphEngine::compile(def, ctx, store);
 
-    // RunResult::output is the full serialized GraphState. Channel
-    // values live under output["channels"][<name>]["value"] in the
-    // canonical raw shape. Some examples (e.g. example_custom_graph)
-    // see flat top-level keys because their graph compiler stages
-    // (e.g. react_graph) project a synthetic "final_response" channel
-    // out — but the underlying RunResult shape is the channels-wrapper.
-    auto channel_int = [](const json& out, const std::string& ch) -> int {
-        if (out.contains("channels") && out["channels"].contains(ch)
-            && out["channels"][ch].contains("value")
-            && out["channels"][ch]["value"].is_number()) {
-            return out["channels"][ch]["value"].get<int>();
-        }
-        return -1;
-    };
+    // RunResult::channel<T>(name) handles both shapes — channels-wrapper
+    // (canonical) and flat-key projections (e.g. react_graph's
+    // final_response). See engine.h's RunResult docstring for the full
+    // shape contract. Issue #25.
 
     // First run on thread "alice".
     RunConfig cfg;
@@ -124,7 +114,7 @@ int main() {
         ok = false;
     }
     // resume_if_exists should not have re-counted from 0.
-    int r2_counter = channel_int(r2.output, "counter");
+    int r2_counter = r2.has_channel("counter") ? r2.channel<int>("counter") : -1;
     if (r2_counter < 2) {
         std::cerr << "FAIL: resume_if_exists did not pick up prior state (counter="
                   << r2_counter << ")\n";
