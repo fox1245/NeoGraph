@@ -142,6 +142,43 @@ struct RunContext {
 
     /// Mirrors ``RunConfig::stream_mode``.
     StreamMode stream_mode = StreamMode::ALL;
+
+    /**
+     * @brief Cross-thread shared memory (issue #27).
+     *
+     * Mirrors ``GraphEngine::get_store()``. Populated by the engine
+     * at the top of every run so node bodies can read / write
+     * Store-backed state through ``in.ctx.store`` without a
+     * separate plumbing channel.
+     *
+     * Default ``nullptr``. The engine sets this to whatever the
+     * caller previously passed to ``GraphEngine::set_store(...)``;
+     * if no Store is configured, ``in.ctx.store`` stays ``nullptr``
+     * and node bodies should guard accordingly.
+     *
+     * Before this field existed, the only way for a node body to
+     * reach the Store was to capture a ``shared_ptr<Store>`` in the
+     * ``NodeFactory`` registration closure. That pattern still
+     * works and is left undisturbed during the deprecation window —
+     * use whichever shape fits your code best:
+     *
+     * @code
+     * // New shape (post-#27):
+     * asio::awaitable<NodeOutput> run(NodeInput in) override {
+     *     if (in.ctx.store) {
+     *         auto v = in.ctx.store->get(ns, "user.fact");
+     *     }
+     *     ...
+     * }
+     *
+     * // Legacy factory-closure shape — still supported:
+     * NodeFactory::instance().register_type("my_node",
+     *     [store](const std::string& name, const json&, const NodeContext&) {
+     *         return std::make_unique<MyNode>(name, store);  // ← capture
+     *     });
+     * @endcode
+     */
+    std::shared_ptr<Store> store;
 };
 
 /**
