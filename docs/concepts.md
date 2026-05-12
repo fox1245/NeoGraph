@@ -506,6 +506,59 @@ engine.run_stream(
     message_stream(lambda chunk: print(chunk["content"], end="", flush=True)))
 ```
 
+### `asio::io_context.run()` placement (C++)
+
+When driving `engine.run_stream_async()` from C++, the outer
+`asio::io_context.run()` should be called from your application's main
+thread (or any long-lived thread that has been initialized through
+the normal process startup path). Tested-good shapes:
+
+```cpp
+// Main-thread driver — what examples/40 and the SchemaProvider tests use.
+asio::io_context io;
+asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+    result = co_await engine->run_stream_async(cfg, cb);
+}, asio::detached);
+io.run();
+```
+
+```cpp
+// Dedicated worker thread driver — also fine.
+std::thread t([&]() {
+    asio::io_context io;
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        result = co_await engine->run_stream_async(cfg, cb);
+    }, asio::detached);
+    io.run();
+});
+t.join();
+```
+
+> **Known limitation — nested `io.run()` inside an HTTP server worker
+> callback** (issue #16): nesting an `asio::io_context.run()` inside an
+> `httplib::Server::set_chunked_content_provider` (or equivalent
+> per-request worker callback that itself spawns child threads via
+> `Provider::complete_stream_async`'s default bridge) has been observed
+> to SEGV in `getaddrinfo` on some glibc / OpenSSL combinations. The
+> in-tree tests
+> ([`tests/test_schema_provider_stream_async_nested_thread.cpp`](../tests/test_schema_provider_stream_async_nested_thread.cpp))
+> cover the structural shape and pass cleanly, but the downstream
+> environment (real `api.openai.com` over HTTPS, a glibc resolver
+> under TSan / ASan, concurrent request load) is not exhaustively
+> reproducible from the test suite. **Workarounds:**
+>
+> 1. **Use `co_await provider->complete_async(...)` instead of
+>    `complete_stream_async` from inside the HTTP server callback**, and
+>    emit the assembled reply as one `LLM_TOKEN` event from a
+>    helper. Token-typing UX is lost; engine + node + tool-loop work
+>    end-to-end. This is what ProjectDatePop's downstream `cpp_backend`
+>    uses today.
+> 2. **Move `io.run()` out of the per-request callback**: run one
+>    long-lived `asio::io_context` on a dedicated worker thread for
+>    the engine, queue per-request work onto it, post results back
+>    into the HTTP server's response sink. Avoids the per-request
+>    nested `std::thread` spawn that the SEGV correlates with.
+
 ---
 
 ## 8.5. Tracing — OpenTelemetry + Phoenix / Langfuse

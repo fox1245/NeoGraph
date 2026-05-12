@@ -163,6 +163,31 @@ class NEOGRAPH_API Provider {
      * the WebSocket Responses branch to skip even the worker thread
      * (it's already async-native).
      *
+     * @note **Subclass override contract for the streaming pair**
+     * (mirrors the non-streaming `complete` / `complete_async` pair
+     * above): subclasses MUST override at least one of
+     * `complete_stream` / `complete_stream_async`. Subclasses whose
+     * native sync `complete_stream` itself drives a `run_sync()` on
+     * an internal `io_context` (the WebSocket Responses path in
+     * `SchemaProvider` is the canonical example) MUST override
+     * `complete_stream_async` directly to expose the async-native
+     * peer — relying on the default bridge is functional but spawns
+     * an extra worker thread per call. Subclasses whose
+     * `complete_stream` is purely synchronous (e.g. blocking httplib)
+     * can leave the default bridge in place — it routes the sync work
+     * onto a worker thread and dispatches tokens back onto the
+     * awaiter's executor.
+     *
+     * @note **`asio::io_context.run()` placement for the awaiter**
+     * (issue #16): drive the outer `asio::io_context.run()` from
+     * your application's main thread or a long-lived worker thread.
+     * Nesting `io.run()` inside an HTTP server per-request callback
+     * (e.g. httplib's `set_chunked_content_provider` lambda) has been
+     * observed to SEGV in `getaddrinfo` under the per-request
+     * worker-thread spawn this default bridge issues, on some
+     * glibc/OpenSSL combinations. See `docs/concepts.md` §8 for
+     * tested-good shapes and the two recommended workarounds.
+     *
      * @param params   Completion parameters.
      * @param on_chunk Callback invoked per received token (runs on the
      *                 awaiting coroutine's executor — never on the
