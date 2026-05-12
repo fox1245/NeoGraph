@@ -9,6 +9,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `SchemaProvider::complete_stream_async` HTTP/SSE branch now
+  dispatches the synchronous `complete_stream` work onto a long-lived
+  dedicated `bridge_thread_` instead of letting
+  `Provider::complete_stream_async`'s base default spawn a fresh
+  `std::thread` per call. Mirrors the working `complete_async` shape
+  (which already lives on `http_thread_`). Closes issue #16's segfault
+  — root-caused via Ghidra static analysis to
+  `Provider::complete_stream_async`'s `_M_runEv` (the std::thread
+  start function) dispatching directly into the SchemaProvider vtable
+  with zero pre-call setup, so the fresh thread's first `getaddrinfo`
+  hit cold thread-local resolver / NSS state in glibc and SEGV'd in
+  `internal_strlen` on some downstream Linux + glibc combinations
+  under nested HTTP-server contexts (4 in-tree test variants + ASan +
+  16-concurrent-driver stress all green in our env, but the cold-init
+  path is timing-sensitive enough that downstream reproduced
+  reliably). After the first call warms the bridge thread's resolver
+  state, every subsequent call reuses it — same robustness profile as
+  `complete_async`. WS branch unchanged (already native co_await;
+  never hit the cold-resolver path). Token dispatch onto the
+  awaiter's executor is preserved (PR #10 invariant). (Issue #16)
+
 ## [0.7.0] — 2026-05-11 — C++ openinference + async streaming bridge
 
 Closes the four issues filed against v0.6.0 in one minor bump.
