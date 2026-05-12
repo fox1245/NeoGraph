@@ -39,6 +39,7 @@ add_executable(neograph_tests
     test_async_http_stream.cpp
     test_async_http_options.cpp
     test_provider_async_default.cpp
+    test_run_context_store.cpp
     test_openai_provider_async.cpp
     test_checkpoint_async_default.cpp
     test_node_async_default.cpp

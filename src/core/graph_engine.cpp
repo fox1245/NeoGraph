@@ -421,6 +421,7 @@ GraphEngine::execute_graph_async(const RunConfig& config,
     ctx.cancel_token = config.cancel_token;
     ctx.thread_id    = config.thread_id;
     ctx.stream_mode  = stream_mode;
+    ctx.store        = store_;   // issue #27 — node bodies reach Store via in.ctx.store
     // ctx.deadline / ctx.trace_id stay default-constructed for now —
     // RunConfig has no source field for either. Future PRs add them.
 
