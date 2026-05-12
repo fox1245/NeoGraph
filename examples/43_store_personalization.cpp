@@ -7,13 +7,23 @@
 // current user, and another node that WRITES learned facts back so they
 // survive across sessions and threads.
 //
-// API gap surfaced: there's no `NodeContext::store` field today, so
-// nodes can't access the engine's Store via the standard plumbing.
-// The working pattern is to capture a `shared_ptr<Store>` in the
-// node-factory closure — which is what this example demonstrates.
-// Suggested follow-up: README/concepts.md should call this out
-// explicitly, or `NodeContext` should carry the store the same way
-// it carries the provider.
+// ## Two ways to reach the Store from a node
+//
+// 1. **`in.ctx.store`** (recommended, available since issue #27).
+//    `RunContext::store` mirrors `GraphEngine::get_store()` so any
+//    node body can read/write through `in.ctx.store->get(...)` /
+//    `->put(...)` directly. No factory-closure plumbing needed.
+//
+// 2. **Capture `shared_ptr<Store>` in the `NodeFactory` closure**
+//    (what this example shows). Pre-#27 this was the only working
+//    shape; it still works and is left in place during the
+//    deprecation window so older examples / downstream code keeps
+//    compiling unchanged.
+//
+// New code should prefer (1) — fewer captures, less boilerplate, and
+// the engine guarantees `in.ctx.store` is the same Store instance
+// `set_store(...)` was called with. This example sticks with (2) so
+// the contrast with example 09 (Store-in-main-only) stays direct.
 //
 // No API key required.
 //
