@@ -427,7 +427,120 @@ ImportError fires on first use only, with a one-line install hint::
 Add `opentelemetry-exporter-otlp` if you want to push spans to
 Phoenix / Langfuse / Tempo via OTLP.
 
+### My custom `Tracer` adapter hangs / crashes / prints garbage after `session.close()` (issue #24)
+
+You wrote a `neograph::observability::Tracer` adapter (C++) that
+records spans into an in-memory list, then walked the list **after**
+calling `OpenInferenceTracerSession::close()`. The walk reads
+freed memory.
+
+`close()` resets the internal `unique_ptr<Span>` over the root
+span (and the per-node-span stacks). If your adapter handed out
+**raw pointers** into the wrapper objects it returned from
+`start_span`, those pointers are dangling the moment `close()`
+returns — the wrappers were owned by the caller, and the caller
+just released them.
+
+**Fix:** the adapter must own the recorded span data itself, not
+just track raw pointers into caller-owned wrappers. The shape:
+
+```cpp
+// Owned by the tracer (lives until tracer drops):
+struct RecordedSpan {
+    std::string name;
+    RecordedSpan* parent = nullptr;
+    std::map<std::string, std::string> attrs;
+    // ...status, events, ended flag...
+};
+
+// Owned by the OpenInference layer (may be reset on close):
+class WrapperSpan : public obs::Span {
+    RecordedSpan* rec_;        // pointer into the tracer-owned data
+public:
+    void set_attribute(...) override { rec_->attrs[...] = ...; }
+    // ...
+};
+
+class MyTracer : public obs::Tracer {
+    std::vector<std::unique_ptr<RecordedSpan>> records_;  // ← owns data
+    // start_span builds a fresh RecordedSpan, returns a Wrapper
+    // pointing at it. Walk records_ for inspection — never the
+    // wrappers.
+};
+```
+
+References: `tests/test_openinference_cpp.cpp::InMemoryTracer`
+(canonical test fixture) and `examples/49_openinference.cpp::PrintTracer`
+(stderr-printing demo) both use this exact pattern. The same
+warning is in the `@warning` blocks on `Tracer` and
+`OpenInferenceTracerSession::close()` in the headers.
+
+**How the bug shows up:** observable failure modes include a clean
+crash inside the inspection loop (best case), a hang in the middle
+of printing a span name (the freed buffer happened to contain
+something that loops a string formatter), or just incorrect
+attribute values. All three are the same root cause.
+
 ---
+
+## Build errors
+
+### GCC 13 internal compiler error: `build_special_member_call`, `cp/call.cc:11096` (issue #23)
+
+You're on Ubuntu 24.04's stock GCC 13 (or any GCC 13.x). The build
+dies with:
+
+```
+internal compiler error: in build_special_member_call, at cp/call.cc:11096
+```
+
+…on a line that does `co_await x.foo_async(...)` inside a coroutine
+(typically a lambda body passed to `asio::co_spawn` from `main()`).
+This is a GCC 13 front-end bug, not your code. GCC 14+, Clang 18+,
+and MSVC 19.40+ all compile the same source unchanged.
+
+**Three escapes**, in order of preference:
+
+1. **Upgrade the compiler** — `sudo apt install gcc-14 g++-14` on
+   Ubuntu 24.04 (24.10 ships GCC 14 by default), then
+   `cmake -DCMAKE_CXX_COMPILER=g++-14 ...`. Cleanest fix; lets
+   you write the code the natural way.
+
+2. **Drive the coroutine via `neograph::async::run_sync`** instead of
+   `asio::co_spawn` from `main()`. Same observable behaviour, no
+   front-end ICE:
+
+   ```cpp
+   // Instead of:
+   asio::co_spawn(io,
+       [&]() -> asio::awaitable<void> {
+           result = co_await tool.execute_async(args);   // ← GCC 13 ICEs here
+       },
+       asio::detached);
+   io.run();
+
+   // Do:
+   #include <neograph/async/run_sync.h>
+   result = neograph::async::run_sync(tool.execute_async(args));
+   ```
+
+   `run_sync` builds its own private `io_context` and drives the
+   awaitable to completion — internally identical to what
+   `co_spawn + io.run()` does, but the call site is sync from the
+   compiler's point of view, so the ICE never fires.
+
+3. **Restructure the coroutine** so the `co_await` happens inside a
+   member function of a regular class, not a free function or lambda
+   body. This works in some cases but the diagnostic doesn't always
+   point at the right shape change — option 1 or 2 is more reliable.
+
+**Where this bites in this repo:** the CMakeLists has a per-example
+toolchain gate around `example_03` (the original ICE site), and
+`examples/50_async_tool.cpp` works around the issue by using
+`run_sync` instead of `co_spawn` from `main()`. New coroutine
+examples / tests that follow the natural `co_spawn`-from-main shape
+will hit the same ICE on the same toolchain — just apply option 1
+or 2.
 
 ## Python type identity (v0.5.0+)
 

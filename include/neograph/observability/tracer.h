@@ -94,6 +94,22 @@ public:
  * the OpenInference helpers DO supply the parent explicitly so a
  * dep-free adapter can link spans without relying on contextvars-
  * style implicit context.
+ *
+ * @warning **Span lifetime contract.** The OpenInference layer owns
+ * the `unique_ptr<Span>` your `start_span` returns and may release
+ * it (e.g. inside `OpenInferenceTracerSession::close()`). If your
+ * adapter stores **raw pointers into the wrapper objects** to allow
+ * post-close inspection (printing, test asserts, attribute audit),
+ * those pointers become dangling at close time — see issue #24.
+ *
+ * The supported pattern is: own the recorded span DATA in your
+ * adapter (a `RecordedSpan`-style struct held in
+ * `unique_ptr<RecordedSpan>` inside the tracer), and have the
+ * `Span` wrapper your `start_span` returns merely point at that
+ * recorded struct. The wrapper's destruction is then harmless. See
+ * `tests/test_openinference_cpp.cpp::InMemoryTracer` and
+ * `examples/49_openinference.cpp::PrintTracer` for the reference
+ * shape.
  */
 class NEOGRAPH_API Tracer {
 public:
