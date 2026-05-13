@@ -40,7 +40,8 @@ class _MockToolEmittingNode(neograph.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute(self, state):
+    def run(self, input):
+        state = input.state
         msg = neograph.ChatMessage(
             role="assistant",
             content="",

@@ -21,13 +21,16 @@ class _TokenEmitter(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute_full_stream(self, state, cb):
+    def run(self, input):
+        state = input.state
+        cb = input.stream_cb
         for t in self._tokens:
-            ev = ng.GraphEvent()
-            ev.type = ng.GraphEvent.Type.LLM_TOKEN
-            ev.node_name = self._name
-            ev.data = t
-            cb(ev)
+            if cb:
+                ev = ng.GraphEvent()
+                ev.type = ng.GraphEvent.Type.LLM_TOKEN
+                ev.node_name = self._name
+                ev.data = t
+                cb(ev)
         return ng.NodeResult(writes=[ng.ChannelWrite("done", [1])])
 
 

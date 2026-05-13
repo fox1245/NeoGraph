@@ -62,7 +62,8 @@ def test_run_async_with_python_node():
             super().__init__()
             self._name = name
         def get_name(self): return self._name
-        def execute(self, state):
+        def run(self, input):
+            state = input.state
             x = state.get("x") or 0
             return [neograph.ChannelWrite("x", x * 2)]
 
@@ -103,7 +104,8 @@ def test_run_async_concurrent_gather():
             super().__init__()
             self._name = name
         def get_name(self): return self._name
-        def execute(self, state):
+        def run(self, input):
+            state = input.state
             seed = state.get("seed") or 0
             return [neograph.ChannelWrite("doubled", seed * 2)]
 
@@ -152,7 +154,8 @@ def test_run_stream_async_events_on_loop_thread():
             super().__init__()
             self._name = name
         def get_name(self): return self._name
-        def execute(self, state):
+        def run(self, input):
+            state = input.state
             return [neograph.ChannelWrite("done", True)]
 
     neograph.NodeFactory.register_type(
@@ -218,7 +221,8 @@ def test_run_async_cancel_does_not_double_resolve_future():
             super().__init__()
             self._name = name
         def get_name(self): return self._name
-        def execute(self, state):
+        def run(self, input):
+            state = input.state
             time.sleep(0.4)
             return [neograph.ChannelWrite("done", True)]
 
@@ -285,7 +289,8 @@ def test_run_stream_async_cancel_does_not_double_resolve_future():
             super().__init__()
             self._name = name
         def get_name(self): return self._name
-        def execute(self, state):
+        def run(self, input):
+            state = input.state
             time.sleep(0.4)
             return [neograph.ChannelWrite("done", True)]
 
@@ -341,7 +346,8 @@ def test_run_async_propagates_python_node_exception():
             super().__init__()
             self._name = name
         def get_name(self): return self._name
-        def execute(self, state):
+        def run(self, input):
+            state = input.state
             raise RuntimeError("kaboom from python node")
 
     neograph.NodeFactory.register_type(

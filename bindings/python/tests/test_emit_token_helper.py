@@ -48,9 +48,12 @@ def test_emit_token_runs_inside_execute_full_stream():
         def get_name(self):
             return self._n
 
-        def execute_full_stream(self, state, cb):
+        def run(self, input):
+            state = input.state
+            cb = input.stream_cb
             for chunk in ("hel", "lo"):
-                emit_token(cb, self._n, chunk)
+                if cb:
+                    emit_token(cb, self._n, chunk)
             return neograph.NodeResult(writes=[
                 neograph.ChannelWrite("messages", [{"role": "assistant", "content": "hello"}])
             ])

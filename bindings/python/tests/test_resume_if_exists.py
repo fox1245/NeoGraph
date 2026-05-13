@@ -31,7 +31,8 @@ def _build_chat_engine(node_type):
         def get_name(self):
             return self._n
 
-        def execute(self, state):
+        def run(self, input):
+            state = input.state
             msgs = state.get("messages") or []
             last_user = ""
             for m in msgs:

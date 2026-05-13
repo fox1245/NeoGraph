@@ -17,7 +17,8 @@ class _CountingNode(ng.GraphNode):
     def get_name(self):
         return self._name
 
-    def execute(self, state):
+    def run(self, input):
+        state = input.state
         self.calls += 1
         return [ng.ChannelWrite("out", "ran")]
 

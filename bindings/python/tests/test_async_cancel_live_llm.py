@@ -67,7 +67,8 @@ def _build_engine():
         def get_name(self):
             return self._name
 
-        def execute(self, state):
+        def run(self, input):
+            state = input.state
             marker["started_at"] = time.time()
             params = ng.CompletionParams()
             params.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
