@@ -21,12 +21,14 @@ using namespace neograph::graph;
 class StampNode : public GraphNode {
 public:
     explicit StampNode(std::string n) : n_(std::move(n)) {}
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
         int cur = 0;
-        auto v = state.get("counter");
+        auto v = in.state.get("counter");
         if (v.is_number()) cur = v.get<int>();
-        return {ChannelWrite{"counter", json(cur + 1)},
-                ChannelWrite{"last", json(n_)}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"counter", json(cur + 1)});
+        out.writes.push_back(ChannelWrite{"last", json(n_)});
+        co_return out;
     }
     std::string get_name() const override { return n_; }
 private:

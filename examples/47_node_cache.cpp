@@ -23,13 +23,15 @@ std::atomic<int> g_exec_count{0};
 
 class ExpensiveNode : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
         g_exec_count.fetch_add(1, std::memory_order_relaxed);
         int x = 0;
-        auto v = state.get("x");
+        auto v = in.state.get("x");
         if (v.is_number()) x = v.get<int>();
         // Pretend this is an expensive LLM/embedding/etc.
-        return {ChannelWrite{"y", json(x * x)}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"y", json(x * x)});
+        co_return out;
     }
     std::string get_name() const override { return "expensive"; }
 };

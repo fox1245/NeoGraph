@@ -27,7 +27,7 @@ public:
     explicit SlowIncNode(std::string n, std::shared_ptr<CancelToken> tok)
         : n_(std::move(n)), tok_(std::move(tok)) {}
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
         for (int i = 0; i < 20; ++i) {
             if (tok_ && tok_->is_cancelled()) {
                 throw CancelledException("aborted inside " + n_);
@@ -35,9 +35,11 @@ public:
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
         int cur = 0;
-        auto v = state.get("counter");
+        auto v = in.state.get("counter");
         if (v.is_number()) cur = v.get<int>();
-        return {ChannelWrite{"counter", json(cur + 1)}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"counter", json(cur + 1)});
+        co_return out;
     }
     std::string get_name() const override { return n_; }
 
