@@ -65,11 +65,33 @@ std::unique_ptr<GraphEngine> GraphEngine::compile(
     // NodeExecutor owns retry + fan-out + Send invocation. Bind the
     // retry-policy lookup to this engine's per-node override map so
     // set_node_retry_policy continues to work after compile() returns.
-    // The default pool is sized to hardware_concurrency() so a
-    // FANOUT > 1 workload parallelizes out of the box; users who need
-    // serial semantics (e.g. nodes with non-thread-safe state) can
-    // call set_worker_count(1).
-    engine->set_worker_count(default_worker_count());
+    //
+    // v1.0: default is `set_worker_count(1)` — no engine-owned
+    // thread_pool, fan-out branches dispatch inline on the coroutine's
+    // own executor. The pre-b59444f default. Two reasons:
+    //
+    //   1. **Sequential / single-Send workloads pay nothing.** A
+    //      tight engine-only loop (the par micro-bench, every
+    //      production graph whose fan-out is dwarfed by LLM latency)
+    //      avoided the ~6-7 µs cross-thread submit per fan-out task
+    //      when the pool was off. The hardware_concurrency default
+    //      introduced in b59444f (v0.1.4) lost that — par 11.6 µs →
+    //      44 µs — for no real-world win, since fan-out tasks at the
+    //      shape NeoGraph cares about (LLM call ≫ µs) absorb the
+    //      submit cost in the wash. The default flip was driven by
+    //      one specific bench (dr_compare) where FANOUT = 5 against
+    //      LangGraph hid the submit cost behind LLM latency.
+    //
+    //   2. **Cross-thread submit + non-thread-safe node state is the
+    //      footgun**, not the safe path. b59444f silently exposed
+    //      every default-configured user's nodes to concurrent
+    //      execution on the engine's pool.
+    //
+    // Users who need true parallel fan-out (CPU-bound work in node
+    // bodies, large fan-out, etc.) call `set_worker_count_auto()` or
+    // `set_worker_count(N)` explicitly. The opt-in surface is
+    // documented in `docs/migration-v0.4-to-v1.0.md`.
+    engine->set_worker_count(1);
 
     engine->checkpoint_store_ = std::move(store);
     return engine;

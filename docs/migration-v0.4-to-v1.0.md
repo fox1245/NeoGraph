@@ -431,3 +431,65 @@ Provider subclass 의 4 virtual override → invoke() 통합은 로직이 섞여
   컴파일 에러 / 런타임 차이 정리
 - [Issue #5](https://github.com/fox1245/NeoGraph/issues/5) — 같은 패턴
   을 `Provider` 에도 적용하는 v1.0 Candidate 6 추적용
+
+---
+
+# Migration 3: `compile()` 의 worker pool default 가 1 로 (v0.1.4 회귀 복귀)
+
+## 무엇이 바뀌었나
+
+`GraphEngine::compile(def, ctx)` 의 default worker count 가 v0.1.4
+(`b59444f`) 부터 `std::thread::hardware_concurrency()` 였음. v1.0
+에서 다시 **`1` (= no engine-owned thread_pool)** 로 복귀.
+
+## 왜
+
+`hardware_concurrency` default 가 모든 fan-out 노드에 cross-thread
+submit 비용 (~6-7 µs/task) 부담시킴 — bench 의 par 측정 (5 워커
++ summarizer) 이 11.6 µs → 44 µs 로 4× 회귀. 회귀를 우리 측정
+환경에서 git bisect 로 v0.1.4 의 `b59444f` 까지 좁힘.
+
+진짜 production workload (LLM call ms~s 단위) 는 submit overhead
+무시 가능, 그러나:
+- **단순 그래프 (no fan-out)** 도 pool overhead 부담 — 의미 없음
+- **non-thread-safe 노드 상태** 가 default 로 멀티 워커 노출 — 진짜
+  footgun
+
+그래서 default 를 안전한 1 로 두고, 사용자가 진짜 fan-out 병렬화
+필요할 때 명시 opt-in.
+
+## 마이그레이션
+
+fan-out 병렬화가 필요한 그래프 (예: `Send` 다수 발사, `parallel_group`,
+deep_research 의 5-researcher fan-out) 는 `compile()` 후 명시 호출:
+
+```cpp
+auto engine = GraphEngine::compile(def, ctx);
+engine->set_worker_count_auto();  // hardware_concurrency()
+// 또는
+engine->set_worker_count(4);  // 정확한 N 지정
+```
+
+```python
+engine = ng.GraphEngine.compile(def, ctx)
+engine.set_worker_count_auto()
+```
+
+단순 그래프 (no fan-out) 또는 fan-out 이 가벼운 그래프 (LLM call
+dominant) 는 default 그대로 — pool overhead 0.
+
+## 마이그레이션 안 하면
+
+- 사용자 그래프가 fan-out 시 단일 thread 로 직렬 실행 (정합 보장)
+- 진짜 wallclock 회복은 못 받음 — `set_worker_count_auto()` 명시
+  필요
+
+## 영향 받는 NeoGraph 내부 예제
+
+- `examples/05_parallel_fanout.cpp` — fan-out 의도 ⇒ 본 변경 이후
+  `engine->set_worker_count_auto()` 추가 필요 (별도 PR)
+- `bindings/python/examples/22_self_evolving_graph.py` — 동적 그래프
+  안에 fan-out 있으면 동일
+- 다른 deep_research / plan_executor 패턴 그래프 — 마찬가지
+
+자세한 측정 결과는 ROADMAP_v1.md 의 perf section 참조 (별도 추가).
