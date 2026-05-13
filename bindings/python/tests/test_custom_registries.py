@@ -223,7 +223,8 @@ def test_python_reducer_thread_safe_under_fanout():
 
     class FanoutPlanner(ng.GraphNode):
         def get_name(self): return "planner"
-        def execute_full(self, state):
+        def run(self, input):
+            state = input.state
             return ng.NodeResult(
                 writes=[],
                 sends=[ng.Send("worker", {"i": i}) for i in range(8)],
@@ -234,7 +235,8 @@ def test_python_reducer_thread_safe_under_fanout():
             super().__init__()
             self._name = name
         def get_name(self): return self._name
-        def execute(self, state):
+        def run(self, input):
+            state = input.state
             return [ng.ChannelWrite("results", [state.get("i")])]
 
     ng.NodeFactory.register_type("fanout_planner",

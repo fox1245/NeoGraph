@@ -37,7 +37,8 @@ def test_simple_counter_node_runs_in_sequence():
         def get_name(self):
             return self._name
 
-        def execute(self, state):
+        def run(self, input):
+            state = input.state
             calls.append(self._name)
             current = state.get("count") or 0
             return [neograph.ChannelWrite("count", current + 1)]
@@ -84,7 +85,8 @@ def test_graph_state_methods_visible_to_python():
         def get_name(self):
             return self._name
 
-        def execute(self, state):
+        def run(self, input):
+            state = input.state
             seen["channels"] = sorted(state.channel_names())
             seen["greeting"] = state.get("greeting")
             seen["missing"] = state.get("nonexistent_channel")
@@ -127,7 +129,8 @@ def test_command_routing_override():
         def get_name(self):
             return self._name
 
-        def execute_full(self, state):
+        def run(self, input):
+            state = input.state
             visits.append(self._name)
             # Override default routing to land on the taken node
             # instead of whatever the JSON edges would dispatch to.
@@ -144,7 +147,8 @@ def test_command_routing_override():
         def get_name(self):
             return self._name
 
-        def execute(self, state):
+        def run(self, input):
+            state = input.state
             visits.append(self._name)
             return []
 
@@ -198,7 +202,8 @@ def test_send_fan_out():
         def get_name(self):
             return self._name
 
-        def execute_full(self, state):
+        def run(self, input):
+            state = input.state
             # Three siblings, each handed a different item.
             return [
                 neograph.Send("worker", {"item": "a"}),
@@ -214,7 +219,8 @@ def test_send_fan_out():
         def get_name(self):
             return self._name
 
-        def execute(self, state):
+        def run(self, input):
+            state = input.state
             item = state.get("item")
             # Append to results channel.
             return [neograph.ChannelWrite("results", [item])]
@@ -288,7 +294,8 @@ def test_send_fan_out_with_worker_pool():
             self._name = name
         def get_name(self):
             return self._name
-        def execute_full(self, state):
+        def run(self, input):
+            state = input.state
             return [neograph.Send("worker", {"item": i}) for i in range(8)]
 
     class WorkerNode(neograph.GraphNode):
@@ -297,7 +304,8 @@ def test_send_fan_out_with_worker_pool():
             self._name = name
         def get_name(self):
             return self._name
-        def execute(self, state):
+        def run(self, input):
+            state = input.state
             n = state.get("item")
             return [neograph.ChannelWrite("results", [n * n])]
 
@@ -347,7 +355,8 @@ def test_concurrent_runs_with_python_node():
         def get_name(self):
             return self._name
 
-        def execute(self, state):
+        def run(self, input):
+            state = input.state
             seed = state.get("seed") or 0
             return [neograph.ChannelWrite("doubled", seed * 2)]
 

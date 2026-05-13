@@ -44,7 +44,8 @@ def exporter_and_tracer():
 class _OkNode(ng.GraphNode):
     def __init__(self, name): super().__init__(); self._n = name
     def get_name(self): return self._n
-    def execute(self, state):
+    def run(self, input):
+        state = input.state
         return [ng.ChannelWrite("done", [1])]
 
 

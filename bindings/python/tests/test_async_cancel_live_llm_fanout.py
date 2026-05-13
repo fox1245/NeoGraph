@@ -61,7 +61,8 @@ def _build_engine():
         def get_name(self):
             return self._name
 
-        def execute(self, state):
+        def run(self, input):
+            state = input.state
             i = state.get("i")
             if not isinstance(i, int):
                 i = 0
@@ -97,7 +98,8 @@ def _build_engine():
         def get_name(self):
             return self._name
 
-        def execute_full(self, state):
+        def run(self, input):
+            state = input.state
             sends = [ng.Send("worker", {"i": i}) for i in range(WIDTH)]
             return ng.NodeResult(sends=sends)
 

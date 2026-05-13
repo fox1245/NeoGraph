@@ -29,7 +29,8 @@ class _PassthroughNode(neograph.GraphNode):
         self._n = name
     def get_name(self):
         return self._n
-    def execute(self, state):
+    def run(self, input):
+        state = input.state
         return []
 
 
