@@ -41,7 +41,7 @@ public:
         // NOTE: this still reads the legacy state.run_cancel_token() smuggling
         // channel — 9d will switch it to in.ctx.cancel_token.get() (or this
         // whole test gets superseded by the in.ctx.cancel_token coverage).
-        if (in.state.run_cancel_token() == expected_ && expected_ != nullptr) {
+        if (in.ctx.cancel_token.get() == expected_ && expected_ != nullptr) {
             count_->fetch_add(1, std::memory_order_relaxed);
         }
         // Emit a small write so the engine has something to commit.
@@ -228,7 +228,7 @@ TEST(CancelTokenPropagation, CancelMidFanOutHaltsLoop) {
             } else {
                 // Cooperative: if cancel is set, throw the same way
                 // the engine does at super-step boundaries.
-                if (auto* t = in.state.run_cancel_token()) {
+                if (auto* t = in.ctx.cancel_token.get()) {
                     t->throw_if_cancelled("worker " + n_);
                 }
             }
@@ -356,7 +356,7 @@ TEST(CancelTokenPropagation, MidFlightCancelAbortsSendSiblings) {
             // null on the isolated send_state and the loop polls
             // forever (until the deadline) → completed_ bumps as if
             // nothing happened.
-            auto* t = in.state.run_cancel_token();
+            auto* t = in.ctx.cancel_token.get();
             const auto deadline =
                 std::chrono::steady_clock::now() +
                 std::chrono::milliseconds(200);

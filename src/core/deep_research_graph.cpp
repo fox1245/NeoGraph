@@ -217,6 +217,7 @@ public:
         params.temperature = 0.3f;
         params.max_tokens = 2048;
 
+        params.cancel_token = in.ctx.cancel_token;
         auto completion = co_await provider_->invoke(params, nullptr);
 
         json asst;
@@ -518,6 +519,7 @@ public:
             params.temperature = 0.3f;
             params.max_tokens = 2048;
 
+            params.cancel_token = in.ctx.cancel_token;
             auto completion = co_await provider_->invoke(params, nullptr);
             auto& msg = completion.message;
             convo.push_back(msg);
@@ -941,6 +943,7 @@ Bias toward PROCEED — only ASK when the question would clearly fork the resear
             params.max_tokens = 200;
 
             try {
+                params.cancel_token = in.ctx.cancel_token;
                 auto completion = co_await provider_->invoke(params, nullptr);
                 verdict = completion.message.content;
             } catch (...) {

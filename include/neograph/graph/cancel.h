@@ -278,37 +278,9 @@ private:
     std::vector<std::weak_ptr<CancelToken>> children_;
 };
 
-/**
- * @brief Thread-local "current run" cancel token.
- *
- * The engine installs the active ``RunConfig::cancel_token`` here
- * before invoking each node's ``execute_full_async`` and removes it
- * after. ``Provider::complete()`` (sync path → fresh ``run_sync``
- * io_context that the engine's asio cancel slot cannot reach) reads
- * this so a node that synchronously calls ``provider.complete()``
- * still gets cancel propagation into the LLM HTTP request.
- *
- * Returns nullptr when no run is active on this thread, or when the
- * active run was started without a cancel_token.
- *
- * Set/clear via ``CurrentCancelTokenScope`` (RAII).
- */
-NEOGRAPH_API CancelToken* current_cancel_token() noexcept;
-
-/**
- * @brief RAII scope that sets ``current_cancel_token()`` for the
- *        enclosing block.
- */
-class NEOGRAPH_API CurrentCancelTokenScope {
-public:
-    explicit CurrentCancelTokenScope(CancelToken* tok) noexcept;
-    ~CurrentCancelTokenScope() noexcept;
-
-    CurrentCancelTokenScope(const CurrentCancelTokenScope&) = delete;
-    CurrentCancelTokenScope& operator=(const CurrentCancelTokenScope&) = delete;
-
-private:
-    CancelToken* prev_;
-};
+// v1.0 (9d): the `current_cancel_token()` thread_local +
+// `CurrentCancelTokenScope` RAII smuggling channel is gone.
+// `RunContext::cancel_token` (on `NodeInput::ctx`) is the only cancel
+// channel. Engine threads it through every dispatch.
 
 }  // namespace neograph::graph

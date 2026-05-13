@@ -137,19 +137,7 @@ std::vector<std::string> GraphState::channel_names() const {
     return names;
 }
 
-void GraphState::set_run_cancel_token(std::shared_ptr<CancelToken> tok) {
-    // No mutex needed — set once at the top of execute_graph_async,
-    // before any node dispatch. Read-only thereafter for the run's
-    // duration. The shared_ptr is the lifetime guard.
-    run_cancel_token_ = std::move(tok);
-}
-
-CancelToken* GraphState::run_cancel_token() const noexcept {
-    return run_cancel_token_.get();
-}
-
-std::shared_ptr<CancelToken> GraphState::run_cancel_token_shared() const noexcept {
-    return run_cancel_token_;
-}
+// v1.0 (9d): run_cancel_token smuggling channel is gone; cancel flows
+// through RunContext::cancel_token instead.
 
 } // namespace neograph::graph
