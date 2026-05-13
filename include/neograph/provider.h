@@ -138,7 +138,16 @@ class NEOGRAPH_API Provider {
      *
      * @param params Completion parameters including model, messages, and tools.
      * @return The full completion response with message and usage statistics.
+     *
+     * @deprecated v1.0 collapses the 4-virtual cross-product into the
+     * single async-streaming-superset `invoke(params, on_chunk)`. New
+     * code: `co_await provider->invoke(params, nullptr)` (async) or
+     * `neograph::async::run_sync(provider->invoke(params, nullptr))`
+     * (sync). The legacy `complete()` keeps working through the
+     * deprecation window and is removed in v1.0.0. See ROADMAP_v1.md
+     * Candidate 6.
      */
+    [[deprecated("v1.0 single-dispatch: use invoke(params, nullptr) — see ROADMAP_v1.md Candidate 6")]]
     virtual ChatCompletion complete(const CompletionParams& params);
 
     /**
@@ -160,7 +169,10 @@ class NEOGRAPH_API Provider {
      *
      * @param params Completion parameters.
      * @return An awaitable yielding the full completion response.
+     *
+     * @deprecated Use `invoke(params, nullptr)`. v1.0 removes this.
      */
+    [[deprecated("v1.0 single-dispatch: use invoke(params, nullptr) — see ROADMAP_v1.md Candidate 6")]]
     virtual asio::awaitable<ChatCompletion>
     complete_async(const CompletionParams& params);
 
@@ -180,7 +192,12 @@ class NEOGRAPH_API Provider {
      * @param params Completion parameters.
      * @param on_chunk Callback invoked per received token.
      * @return The full completion response after streaming is complete.
+     *
+     * @deprecated Use `invoke(params, on_chunk)` (or
+     * `neograph::async::run_sync(invoke(params, on_chunk))` for a
+     * sync caller). v1.0 removes this.
      */
+    [[deprecated("v1.0 single-dispatch: use invoke(params, on_chunk) — see ROADMAP_v1.md Candidate 6")]]
     virtual ChatCompletion complete_stream(const CompletionParams& params,
                                            const StreamCallback& on_chunk);
 
@@ -238,7 +255,10 @@ class NEOGRAPH_API Provider {
      *                 awaiting coroutine's executor — never on the
      *                 internal worker thread).
      * @return Awaitable resolving to the full completion response.
+     *
+     * @deprecated Use `invoke(params, on_chunk)`. v1.0 removes this.
      */
+    [[deprecated("v1.0 single-dispatch: use invoke(params, on_chunk) — see ROADMAP_v1.md Candidate 6")]]
     virtual asio::awaitable<ChatCompletion>
     complete_stream_async(const CompletionParams& params,
                           const StreamCallback& on_chunk);

@@ -394,6 +394,16 @@ void record_output(Span* span, const ChatCompletion& result) {
 
 } // namespace
 
+// Candidate 6 PR4: inner Provider's 4 legacy virtuals are now
+// [[deprecated]]. OpenInferenceProvider is a tracing decorator that
+// MUST keep wrapping all 4 surfaces through the deprecation window so
+// downstream code calling any legacy method on a wrapped provider
+// still gets a span. The 4 overrides below legitimately forward to
+// `impl_->inner->complete*()` — bracket the region so the build
+// doesn't drown in self-warnings. v1.0 collapses these to a single
+// `invoke()` override.
+NEOGRAPH_PUSH_IGNORE_DEPRECATED
+
 ChatCompletion OpenInferenceProvider::complete(const CompletionParams& params) {
     Span* parent = impl_->parent_lookup ? impl_->parent_lookup() : nullptr;
     auto span = impl_->tracer->start_span(impl_->span_name, parent);
@@ -510,5 +520,7 @@ OpenInferenceProvider::complete_stream_async(
         throw;
     }
 }
+
+NEOGRAPH_POP_IGNORE_DEPRECATED
 
 } // namespace neograph::observability
