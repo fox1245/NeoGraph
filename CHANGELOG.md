@@ -7,13 +7,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased] — Candidate 6: Provider 단일 dispatch (v1.0 prep)
+## [Unreleased] — v1.0 prep (Candidate 1 Phase B + Candidate 6)
 
-ROADMAP_v1.md 의 **Candidate 6** (Provider 4-virtual cross-product →
-1-virtual `invoke()`) 5 PR landing. v0.4.0 의 `GraphNode::run(NodeInput)`
-에 이은 두 번째 v1.0 single-dispatch surface 통합. 모든 변화는 추가
-+ deprecation 단계 — 기존 사용자 코드 그대로 동작, deprecation
-window 동안 마이그레이션 안내만 visible.
+ROADMAP_v1.md 의 두 v1.0 단일 dispatch 통합이 한 사이클에 모임:
+
+  - **Candidate 1 Phase B (`9b`–`9f`)** — `GraphNode` 의 legacy 8
+    virtual (`execute` / `execute_full` / `execute_async` /
+    `execute_stream` / `execute_full_async` / `execute_full_stream` /
+    `execute_full_stream_async` / `execute_full_async` 변종) +
+    `add_cancel_hook` + `CurrentCancelTokenScope` + `state.
+    run_cancel_token_` + `PyGraphNodeOwner` 의 6 legacy override 까지
+    전부 삭제. **destructive** — deprecation window 가 닫힘. 사용자
+    GraphNode subclass / 사용자 Python 노드는 `run(NodeInput)`/
+    `def run(self, input)` 단일 메서드로 마이그레이션 필수.
+  - **Candidate 6** — `Provider` 4-virtual cross-product → 1-virtual
+    `invoke()`. 이쪽은 아직 추가 + deprecation 단계 — legacy 4 virtual
+    무변경 동작, deprecation warning 만 visible. v1.0.0 ship 직전에
+    그쪽 Phase B (`Provider` legacy 삭제) 도 닫음.
+
+같은 사이클의 b59444f 잠재 par regression revert (`e5ecb08`) + fan-out
+예제 명시 호출 추가 + CI 환경 3 fix (httplib macro guard /
+Windows MSVC unistd.h / pybind pytest 마이그레이션) 도 본 [Unreleased]
+의 일부.
 
 ### Added
 
@@ -42,6 +57,14 @@ window 동안 마이그레이션 안내만 visible.
 - **C++ examples 마이그레이션 (2 file)** — `31_local_transformer.cpp`,
   `cookbook/ai-assembly/member_server.cpp` 가 새 `invoke()` 사용.
   사용자 빌드에서 deprecation warning 안 뜸. (PR #45)
+- **`GraphEngine::compile()` 기본 워커 수 1 로 복귀** (`e5ecb08`).
+  `b59444f` 가 18일 (2026-04-26 → 2026-05-13) 잠재한 par micro-bench
+  11.8 → 283 µs (24×) 회귀의 원인이었음 — 분신술 bisect (11 worktree
+  병렬) 로 commit 핀포인트. v1.0 부터 기본=1 (CPU-tiny 시퀀셜/병렬
+  dispatch 최적), fan-out 의도면 `engine->set_worker_count_auto()` 한
+  줄로 hardware_concurrency 열어줌. 영향 받는 fan-out 예제 5곳 (10/
+  14/21/36 + deep_research_graph builder) 명시 호출 추가. 자세한 내용
+  은 ROADMAP_v1.md 의 "Perf retrospective" 섹션.
 
 ### Deprecated
 
@@ -52,7 +75,53 @@ window 동안 마이그레이션 안내만 visible.
   에서 삭제. internal forwarder 는 `NEOGRAPH_PUSH/POP_IGNORE_DEPRECATED`
   로 감싸서 user-facing override / 호출 사이트에만 warning. (PR #44)
 
+### Removed (Candidate 1 Phase B — destructive)
+
+- **`GraphNode` legacy 8 virtual** — `execute(GraphState&)` /
+  `execute_full(...)` / 6 변종 + `ExecuteDefaultGuard` recursion guard
+  + 300+ 줄 default chain. 모두 삭제. `run(NodeInput)` 만 pure virtual.
+  (commit `19819d8`)
+- **`add_cancel_hook` + `Hook` RAII + `hooks_*` member + `cancel()`
+  의 hook iteration** — `cancel.h` 가 `fork()` + `cancel()` +
+  `is_cancelled()` + `slot()` 만 남음. (commit `1d786a5`)
+- **`CurrentCancelTokenScope` + `current_cancel_token()` thread_local
+  + `GraphState::run_cancel_token_` + 3 accessor** — `RunContext::
+  cancel_token` 이 유일한 cancel 채널. `src/core/cancel.cpp` 가 stub
+  까지 비워짐 (파일 자체는 향후 삭제 가능 상태). (commit `9e8e956`)
+- **`PyGraphNodeOwner` 의 6 legacy override** — pybind trampoline 이
+  `run(self, input)` 만 호출. Python 사용자 코드도 v1.0 단일 메서드
+  필수. (commit `9e8e956`)
+- **2 obsolete pytest 파일** — `test_execute_stream_dispatch.py` (v0.3.2
+  의 stream-only fallback dispatch 검증) + `test_streaming_only_error_
+  hint.py` (execute_full_stream takes priority — v1.0 에서 의미 없음).
+  (commit `4392fbb`)
+
+### Fixed
+
+- **fan-out 예제 5곳 명시 호출 추가** — `e5ecb08` 의 default 워커 수
+  복귀로 묻혔던 진짜 병렬성 의도를 살림: `examples/10_send_command.
+  cpp`, `examples/14_plan_executor.cpp`, `examples/21_mcp_fanout.cpp`,
+  `examples/36_classifier_fanout.cpp`, `src/core/deep_research_graph.
+  cpp` 의 `create_deep_research_graph()` builder 가 `set_worker_count_
+  auto()` 호출. 검증: `classifier_fanout` 4.22× speedup (25.2 ms 순차
+  → 6.0 ms 병렬). (commit `99c470b`)
+- **`bench_async_http` httplib macro guard** — `bench_async_http.cpp`
+  가 `<neograph/async/conn_pool.h>` 통해 `<httplib.h>` 를 끌어쓰는데
+  `CPPHTTPLIB_OPENSSL_SUPPORT` 미정의로 ODR 가드가 reject. CMake 의
+  target 에 `target_compile_definitions(... PRIVATE ...)` 박음.
+  (commit `d4be42a`)
+- **Windows MSVC `unistd.h` 누락** — `test_schema_provider_extra_
+  fields_temperature.cpp` 가 POSIX-only `mkstemps` + `close` 사용으로
+  Windows 빌드 자체 실패. 파일 전체를 `#ifndef _WIN32` 가드 (커버리지
+  는 Linux/macOS 가 보장). (commit `3c49f12`)
+- **Python 테스트 16개 마이그레이션** — wheel CI 의 pytest 가 legacy
+  `def execute(self, state)` 패턴 28 노드 클래스에서 `AttributeError`
+  로 떨어짐. `def run(self, input)` 으로 일괄 마이그레이션,
+  streaming 노드는 `input.stream_cb` None-가드 추가. (commit `4392fbb`)
+
 ### Migration (사용자 코드)
+
+**Provider 호출 (Candidate 6 — deprecation 단계)**
 
 새 코드:
 ```cpp
@@ -70,7 +139,58 @@ auto completion = neograph::async::run_sync(provider->invoke(params, nullptr));
 `-Wdeprecated-declarations` warning 이 user override 사이트에 visible.
 v1.0.0 직전에 제거되니 deprecation window 안에 마이그레이션 권장.
 
-`docs/migration-v0.4-to-v1.0.md` 의 Provider 섹션 (다음 docs sweep
+**`GraphNode` subclass (Candidate 1 Phase B — destructive)**
+
+C++ 코드:
+```cpp
+// 옛 (v0.x 까지)
+class MyNode : public GraphNode {
+    NodeResult execute_full(GraphState& state) override {
+        auto x = state.get("x");
+        return {.writes = {ChannelWrite{"y", json(/*...*/)}}};
+    }
+};
+
+// v1.0 새 코드 (한 메서드, 코루틴 entry)
+class MyNode : public GraphNode {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto x = in.state.get("x");
+        // in.ctx.cancel_token / in.ctx.step / in.stream_cb 도 접근 가능
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"y", json(/*...*/)});
+        co_return out;
+    }
+};
+```
+
+Python 코드:
+```python
+# 옛 (v0.x 까지)
+class MyNode(neograph_engine.GraphNode):
+    def execute(self, state):
+        x = state.get("x") or 0
+        return [neograph_engine.ChannelWrite("y", x * 2)]
+
+# v1.0 새 코드
+class MyNode(neograph_engine.GraphNode):
+    def run(self, input):
+        state = input.state  # input.ctx.cancel_token / input.stream_cb 등도 접근 가능
+        x = state.get("x") or 0
+        return [neograph_engine.ChannelWrite("y", x * 2)]
+```
+
+**fan-out 의도 (워커 수 기본값 변경)**
+
+```cpp
+// 옛 (v0.x 4월 후): 기본=hardware_concurrency 였지만 micro-bench 부담
+// v1.0: 기본=1. fan-out 의도면 한 줄 추가.
+auto engine = GraphEngine::compile(def, ctx);
+engine->set_worker_count_auto();  // ← 본 줄 추가 (hardware_concurrency)
+// 또는 engine->set_worker_count(N);  // 명시 N
+```
+
+`docs/migration-v0.4-to-v1.0.md` 의 Migration 1/2/3 섹션 (run() /
+ctx.cancel_token / 워커 수 기본) + Provider 섹션 (다음 docs sweep
 에서 추가 예정) 가 케이스별 before/after 안내.
 
 ## [0.8.0] — 2026-05-13 — DX 폴리시 + downstream-driven API gaps 정리
