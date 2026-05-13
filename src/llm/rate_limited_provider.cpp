@@ -11,6 +11,14 @@
 
 namespace neograph::llm {
 
+// Candidate 6 PR4: inner Provider's 4 legacy virtuals are now
+// [[deprecated]]. RateLimitedProvider is a delegating decorator that
+// wraps the legacy surface for retry/backoff; it MUST keep forwarding
+// to the inner's legacy methods through the deprecation window.
+// Bracket the whole TU so internal forwarders don't drown in self-
+// warnings; v1.0 collapses these to a single invoke() override.
+NEOGRAPH_PUSH_IGNORE_DEPRECATED
+
 RateLimitedProvider::RateLimitedProvider(std::shared_ptr<Provider> inner,
                                          Config cfg)
     : inner_(std::move(inner)), cfg_(cfg) {
@@ -115,5 +123,7 @@ RateLimitedProvider::complete_stream(const CompletionParams& params,
         }
     }
 }
+
+NEOGRAPH_POP_IGNORE_DEPRECATED
 
 } // namespace neograph::llm

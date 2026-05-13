@@ -4,6 +4,7 @@
 #include <neograph/graph/node.h>
 #include <neograph/graph/state.h>
 #include <neograph/graph/types.h>
+#include <neograph/async/run_sync.h>
 
 #include <algorithm>
 #include <cctype>
@@ -119,7 +120,7 @@ public:
         params.model = model_;
         params.messages = std::move(prompt_msgs);
 
-        auto completion = provider_->complete(params);
+        auto completion = neograph::async::run_sync(provider_->invoke(params, nullptr));
         auto plan_items = extract_plan(completion.message.content);
 
         json plan_json = json::array();
@@ -187,7 +188,7 @@ public:
             params.messages = convo;
             params.tools = tool_defs;
 
-            auto completion = provider_->complete(params);
+            auto completion = neograph::async::run_sync(provider_->invoke(params, nullptr));
             auto& msg = completion.message;
             convo.push_back(msg);
 
@@ -292,7 +293,7 @@ public:
         params.model = model_;
         params.messages = std::move(convo);
 
-        auto completion = provider_->complete(params);
+        auto completion = neograph::async::run_sync(provider_->invoke(params, nullptr));
 
         json asst_json;
         to_json(asst_json, completion.message);
