@@ -236,3 +236,109 @@ TEST(SchemaTemperatureOptOut, NestedTemperaturePathStillWorks) {
     ASSERT_TRUE(body["sampling"].contains("temperature")) << body.dump();
     EXPECT_NEAR(body["sampling"]["temperature"].get<double>(), 0.5, 1e-5);
 }
+
+// ─── #33: per-call extra_fields binding via schema's per_call_fields ───
+
+TEST(SchemaPerCallFields, BoundPathLandsInBody) {
+    auto schema = base_schema();
+    // Schema declares: only reasoning.effort is bindable per-call.
+    schema["request"]["per_call_fields"] = json::array({"reasoning.effort"});
+    auto sp = make_provider_from(schema);
+    ASSERT_NE(sp, nullptr);
+
+    CompletionParams p = basic_params();
+    p.extra_fields = json{{"reasoning.effort", "high"}};
+
+    json body = SchemaProviderTestAccess::build_body(*sp, p);
+    ASSERT_TRUE(body.contains("reasoning")) << body.dump();
+    ASSERT_TRUE(body["reasoning"].contains("effort")) << body.dump();
+    EXPECT_EQ(body["reasoning"]["effort"].get<std::string>(), "high");
+}
+
+TEST(SchemaPerCallFields, UnknownPathSilentlyDropped) {
+    // Caller passes a path the schema didn't declare — should be a no-op,
+    // not an error. Schema owns the contract; typo silently drops rather
+    // than stamping a malformed key.
+    auto schema = base_schema();
+    schema["request"]["per_call_fields"] = json::array({"reasoning.effort"});
+    auto sp = make_provider_from(schema);
+    ASSERT_NE(sp, nullptr);
+
+    CompletionParams p = basic_params();
+    p.extra_fields = json{
+        {"reasoning.effort", "low"},        // declared
+        {"reasonin.effort",  "typo"},       // typo — not in allowlist
+        {"random.knob",      "ignore me"},  // never declared
+    };
+
+    json body = SchemaProviderTestAccess::build_body(*sp, p);
+    EXPECT_EQ(body["reasoning"]["effort"].get<std::string>(), "low");
+    EXPECT_FALSE(body.contains("reasonin"));
+    EXPECT_FALSE(body.contains("random"));
+}
+
+TEST(SchemaPerCallFields, PerCallOverridesSchemaStatic) {
+    // Both schema-static (request.extra_fields) and per-call bind the
+    // same path. Per-call wins — caller is overriding the default for
+    // THIS call.
+    auto schema = base_schema();
+    schema["request"]["extra_fields"] = json{
+        {"reasoning", {{"effort", "medium"}}},   // static default
+    };
+    schema["request"]["per_call_fields"] = json::array({"reasoning.effort"});
+    auto sp = make_provider_from(schema);
+    ASSERT_NE(sp, nullptr);
+
+    CompletionParams p = basic_params();
+    p.extra_fields = json{{"reasoning.effort", "high"}};
+
+    json body = SchemaProviderTestAccess::build_body(*sp, p);
+    EXPECT_EQ(body["reasoning"]["effort"].get<std::string>(), "high");
+}
+
+TEST(SchemaPerCallFields, OmittedPerCallFieldsNoOp) {
+    // Caller passes extra_fields but schema didn't declare any per_call_fields
+    // → all caller keys silently dropped (back-compat for schemas that
+    // predate the feature).
+    auto schema = base_schema();
+    // No per_call_fields key in schema.
+    auto sp = make_provider_from(schema);
+    ASSERT_NE(sp, nullptr);
+
+    CompletionParams p = basic_params();
+    p.extra_fields = json{{"reasoning.effort", "high"}};
+
+    json body = SchemaProviderTestAccess::build_body(*sp, p);
+    EXPECT_FALSE(body.contains("reasoning"));
+}
+
+TEST(SchemaPerCallFields, EmptyExtraFieldsNoOpEvenWithDeclaration) {
+    // Schema declares per_call_fields but caller doesn't bind anything
+    // → no body change.
+    auto schema = base_schema();
+    schema["request"]["per_call_fields"] = json::array({"reasoning.effort"});
+    auto sp = make_provider_from(schema);
+    ASSERT_NE(sp, nullptr);
+
+    CompletionParams p = basic_params();
+    // p.extra_fields stays default-constructed (empty json).
+
+    json body = SchemaProviderTestAccess::build_body(*sp, p);
+    EXPECT_FALSE(body.contains("reasoning"));
+}
+
+TEST(SchemaPerCallFields, NestedPathBindsCorrectly) {
+    // Sanity — per-call binding uses the same json_path::set_path
+    // machinery, so deep paths (4+ segments) just work.
+    auto schema = base_schema();
+    schema["request"]["per_call_fields"] = json::array({"a.b.c.d"});
+    auto sp = make_provider_from(schema);
+    ASSERT_NE(sp, nullptr);
+
+    CompletionParams p = basic_params();
+    p.extra_fields = json{{"a.b.c.d", "deep"}};
+
+    json body = SchemaProviderTestAccess::build_body(*sp, p);
+    ASSERT_TRUE(body.contains("a")) << body.dump();
+    EXPECT_EQ(body["a"]["b"]["c"]["d"].get<std::string>(), "deep");
+}
