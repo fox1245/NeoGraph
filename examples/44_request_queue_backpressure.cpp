@@ -47,15 +47,14 @@ class WorkNode : public GraphNode {
     int delay_ms_;
 public:
     explicit WorkNode(int d) : delay_ms_(d) {}
-    asio::awaitable<std::vector<ChannelWrite>>
-    execute_async(const GraphState&) override {
+    asio::awaitable<NodeOutput> run(NodeInput) override {
         auto ex = co_await asio::this_coro::executor;
         asio::steady_timer t(ex);
         t.expires_after(std::chrono::milliseconds(delay_ms_));
         co_await t.async_wait(asio::use_awaitable);
-        co_return std::vector<ChannelWrite>{
-            ChannelWrite{"result", json("ok")}
-        };
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"result", json("ok")});
+        co_return out;
     }
     std::string get_name() const override { return "work"; }
 };

@@ -47,8 +47,8 @@ public:
     ResearcherNode(const std::string& name, const std::string& topic, int delay_ms)
         : name_(name), topic_(topic), delay_ms_(delay_ms) {}
 
-    asio::awaitable<std::vector<neograph::graph::ChannelWrite>>
-    execute_async(const neograph::graph::GraphState& /*state*/) override {
+    asio::awaitable<neograph::graph::NodeOutput>
+    run(neograph::graph::NodeInput /*in*/) override {
         auto start = std::chrono::steady_clock::now();
 
         auto ex = co_await asio::this_coro::executor;
@@ -68,26 +68,18 @@ public:
             + ". (" + std::to_string(elapsed) + "ms)";
         result["elapsed_ms"] = elapsed;
 
-        co_return std::vector<neograph::graph::ChannelWrite>{
-            neograph::graph::ChannelWrite{
-                "findings", neograph::json::array({result})}};
+        neograph::graph::NodeOutput out;
+        out.writes.push_back(neograph::graph::ChannelWrite{
+            "findings", neograph::json::array({result})});
+        co_return out;
     }
 
-    // Override the full_stream peer so the engine doesn't invoke our
-    // (already finished) work twice per super-step. The default
-    // GraphNode::execute_full_stream_async wraps execute_full_async
-    // *and then* replaces the writes with execute_stream_async's
-    // output if no Command/Send was emitted — that works for real
-    // streaming LLM nodes (where the token stream is what produces
-    // the writes) but for a node whose execute_async already did all
-    // the work it's a redundant second run. Short-circuit to a single
-    // execute_async call.
-    asio::awaitable<neograph::graph::NodeResult>
-    execute_full_stream_async(const neograph::graph::GraphState& state,
-                              const neograph::graph::GraphStreamCallback& /*cb*/) override {
-        auto writes = co_await execute_async(state);
-        co_return neograph::graph::NodeResult{std::move(writes)};
-    }
+    // Note: v0.4 unified `run()` replaces the old 8-virtual cross-product.
+    // The previous version of this node overrode `execute_full_stream_async`
+    // to avoid double-running its already-async body; with `run(NodeInput)`
+    // that's no longer needed — engine dispatches `run()` exactly once per
+    // super-step regardless of stream mode (the stream_cb just lives in
+    // `in.stream_cb`, which we don't use here).
 
     std::string get_name() const override { return name_; }
 };
@@ -95,10 +87,10 @@ public:
 // Custom node: Summarizer
 class SummarizerNode : public neograph::graph::GraphNode {
 public:
-    std::vector<neograph::graph::ChannelWrite> execute(
-        const neograph::graph::GraphState& state) override {
+    asio::awaitable<neograph::graph::NodeOutput>
+    run(neograph::graph::NodeInput in) override {
 
-        auto findings = state.get("findings");
+        auto findings = in.state.get("findings");
         std::string summary = "=== Research Summary ===\n";
 
         if (findings.is_array()) {
@@ -109,7 +101,10 @@ public:
             summary += "\nTotal " + std::to_string(findings.size()) + " research findings collected.";
         }
 
-        return {neograph::graph::ChannelWrite{"summary", neograph::json(summary)}};
+        neograph::graph::NodeOutput out;
+        out.writes.push_back(
+            neograph::graph::ChannelWrite{"summary", neograph::json(summary)});
+        co_return out;
     }
 
     std::string get_name() const override { return "summarizer"; }

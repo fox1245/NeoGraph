@@ -69,8 +69,8 @@ class PersonaNode : public GraphNode {
           party_(std::move(party)),
           system_prompt_(std::move(system_prompt)) {}
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        auto raw = state.get("prompt");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto raw = in.state.get("prompt");
         std::string user_text = raw.is_string() ? raw.get<std::string>() : raw.dump();
 
         CompletionParams p;
@@ -79,12 +79,14 @@ class PersonaNode : public GraphNode {
         p.messages.push_back({"system", system_prompt_});
         p.messages.push_back({"user", user_text});
 
-        auto reply = neograph::async::run_sync(provider_->invoke(p, nullptr));
+        auto reply = co_await provider_->invoke(p, nullptr);
         std::string text = reply.message.content;
 
         // Tag with party + name so the Speaker's transcript is readable.
         std::string framed = "[" + party_ + " " + persona_name_ + "]\n" + text;
-        return {{"response", framed}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"response", json(framed)});
+        co_return out;
     }
 
     std::string get_name() const override { return name_; }
