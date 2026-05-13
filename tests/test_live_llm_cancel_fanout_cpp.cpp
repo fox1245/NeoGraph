@@ -61,8 +61,8 @@ public:
                    LiveTimings* t)
         : name_(std::move(name)), provider_(std::move(provider)), t_(t) {}
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        auto i_v = state.get("i");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto i_v = in.state.get("i");
         int i = i_v.is_number_integer() ? i_v.get<int>() : 0;
         if (i < 0 || i >= WIDTH) i = 0;
 
@@ -85,12 +85,11 @@ public:
         params.messages = {msg};
 
         // This is the call that should abort at the socket layer when
-        // the parent cancel_token fires. v0.3.2 wires the parent's
-        // cancel into provider.complete() via add_cancel_hook + a
-        // local cancellation_signal — concurrent siblings each get
-        // their own slot, no last-writer-wins.
+        // the parent cancel_token fires. v1.0 invoke() picks up
+        // in.ctx.cancel_token (or the engine's thread-local cancel scope)
+        // and stamps it into the underlying HTTP call.
         try {
-            auto result = provider_->complete(params);
+            auto result = co_await provider_->invoke(params, nullptr);
             (void)result;
         } catch (...) {
             // CancelledException / asio operation_aborted unwind here.
@@ -103,7 +102,7 @@ public:
             std::lock_guard<std::mutex> lk(t_->mu);
             t_->finished[i] = now_seconds();
         }
-        return {};
+        co_return NodeOutput{};
     }
 
     std::string get_name() const override { return name_; }
@@ -118,14 +117,14 @@ class DispatcherNode : public GraphNode {
 public:
     explicit DispatcherNode(std::string name) : name_(std::move(name)) {}
 
-    NodeResult execute_full(const GraphState&) override {
-        NodeResult r;
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
         for (int i = 0; i < WIDTH; ++i) {
             json input;
             input["i"] = i;
-            r.sends.push_back(Send{"worker", input});
+            out.sends.push_back(Send{"worker", input});
         }
-        return r;
+        co_return out;
     }
 
     std::string get_name() const override { return name_; }

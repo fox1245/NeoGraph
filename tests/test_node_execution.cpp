@@ -34,12 +34,14 @@ public:
     FlakyNode(std::string n, std::atomic<int>* attempts, std::atomic<int>* fail_remaining)
         : name_(std::move(n)), attempts_(attempts), fail_remaining_(fail_remaining) {}
 
-    std::vector<ChannelWrite> execute(const GraphState&) override {
+    asio::awaitable<NodeOutput> run(NodeInput) override {
         attempts_->fetch_add(1, std::memory_order_relaxed);
         if (fail_remaining_->fetch_sub(1, std::memory_order_relaxed) > 0) {
             throw std::runtime_error("flaky: injected failure in " + name_);
         }
-        return {ChannelWrite{name_ + "_done", json(true)}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{name_ + "_done", json(true)});
+        co_return out;
     }
     std::string get_name() const override { return name_; }
 
@@ -56,12 +58,14 @@ public:
     InterruptOnceNode(std::string n, std::atomic<int>* attempts, std::atomic<bool>* should_interrupt)
         : name_(std::move(n)), attempts_(attempts), should_interrupt_(should_interrupt) {}
 
-    std::vector<ChannelWrite> execute(const GraphState&) override {
+    asio::awaitable<NodeOutput> run(NodeInput) override {
         attempts_->fetch_add(1, std::memory_order_relaxed);
         if (should_interrupt_->load(std::memory_order_relaxed)) {
             throw NodeInterrupt("needs approval");
         }
-        return {ChannelWrite{name_ + "_done", json(true)}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{name_ + "_done", json(true)});
+        co_return out;
     }
     std::string get_name() const override { return name_; }
 
@@ -110,8 +114,10 @@ json make_single_flaky_graph(int global_max_retries = 0, int initial_delay_ms = 
 // fan-out failures downstream have somewhere to attach pending writes.
 class SetupNode : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState&) override {
-        return {ChannelWrite{"setup_done", json(true)}};
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"setup_done", json(true)});
+        co_return out;
     }
     std::string get_name() const override { return "setup"; }
 };

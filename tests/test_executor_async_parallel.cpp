@@ -46,27 +46,22 @@ public:
     AsyncWorkerNode(std::string name, int delay_ms)
         : name_(std::move(name)), delay_ms_(delay_ms) {}
 
-    asio::awaitable<std::vector<ChannelWrite>>
-    execute_async(const GraphState&) override {
+    asio::awaitable<NodeOutput> run(NodeInput) override {
         auto ex = co_await asio::this_coro::executor;
         asio::steady_timer t(ex);
         t.expires_after(std::chrono::milliseconds(delay_ms_));
         co_await t.async_wait(asio::use_awaitable);
         json append = json::array();
         append.push_back("done-by-" + name_);
-        co_return std::vector<ChannelWrite>{ChannelWrite{"findings", append}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"findings", append});
+        co_return out;
     }
 
-    // 3.0: execute_full_async default bridges to sync execute_full
-    // (for Command/Send preservation), which would serialize this
-    // node's async timer under a fresh io_context per call. Override
-    // here to keep the non-blocking timer on the caller's executor —
-    // the contract documented on GraphNode::execute_full_async.
-    asio::awaitable<NodeResult>
-    execute_full_async(const GraphState& state) override {
-        auto writes = co_await execute_async(state);
-        co_return NodeResult{std::move(writes)};
-    }
+    // Note: under unified run() the old execute_full_async override
+    // (which used to short-circuit the legacy bridge to avoid double-
+    // dispatch through sync execute_full) is unnecessary — run() is
+    // dispatched exactly once per super-step.
 
     std::string get_name() const override { return name_; }
 };
@@ -75,8 +70,9 @@ class InterruptingNode : public GraphNode {
     std::string name_;
 public:
     explicit InterruptingNode(std::string name) : name_(std::move(name)) {}
-    std::vector<ChannelWrite> execute(const GraphState&) override {
+    asio::awaitable<NodeOutput> run(NodeInput) override {
         throw NodeInterrupt("human input required: " + name_);
+        co_return NodeOutput{};  // unreachable
     }
     std::string get_name() const override { return name_; }
 };

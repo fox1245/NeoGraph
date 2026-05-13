@@ -53,8 +53,10 @@ class WriteNode : public GraphNode {
 public:
     WriteNode(const std::string& name, std::string value)
         : name_(name), value_(std::move(value)) {}
-    std::vector<ChannelWrite> execute(const GraphState&) override {
-        return {ChannelWrite{"result", json(value_)}};
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"result", json(value_)});
+        co_return out;
     }
     std::string get_name() const override { return name_; }
 private:
@@ -65,8 +67,9 @@ private:
 class ThrowingNode : public GraphNode {
 public:
     explicit ThrowingNode(const std::string& name) : name_(name) {}
-    std::vector<ChannelWrite> execute(const GraphState&) override {
+    asio::awaitable<NodeOutput> run(NodeInput) override {
         throw std::runtime_error("intentional failure");
+        co_return NodeOutput{};  // unreachable
     }
     std::string get_name() const override { return name_; }
 private:
