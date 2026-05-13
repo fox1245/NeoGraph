@@ -37,6 +37,8 @@ using neograph::graph::GraphNode;
 using neograph::graph::GraphState;
 using neograph::graph::NodeContext;
 using neograph::graph::NodeFactory;
+using neograph::graph::NodeInput;
+using neograph::graph::NodeOutput;
 
 namespace {
 
