@@ -200,6 +200,12 @@ int main() {
     NodeContext ctx;
     auto engine = GraphEngine::compile(definition, ctx);
 
+    // ResearcherNode 가 sync `std::this_thread::sleep_for` 를 사용하기 때문에
+    // 코루틴이 yield 하지 않는다. 워커 풀이 없으면 (v1.0 기본값 = 1) 모든
+    // 호출이 io_context 스레드 한 개를 차지해 사실상 순차 실행된다. fan-out
+    // 의도를 살리려면 hardware_concurrency 만큼 워커를 풀어줘야 한다.
+    engine->set_worker_count_auto();
+
     // Execute
     std::cout << "=== Send & Command Integration Demo ===\n\n";
 

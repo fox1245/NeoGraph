@@ -1248,6 +1248,14 @@ std::unique_ptr<GraphEngine> create_deep_research_graph(
     auto engine = GraphEngine::compile(definition, ctx);
     engine->own_tools(std::move(tools));
 
+    // Fan-out 의도: supervisor 가 동시에 여러 researcher 를 띄움
+    // (cfg.max_concurrent_researchers). v1.0 부터 GraphEngine 기본 워커 수가
+    // 1 로 되돌아갔기 때문에 (compile() 주석 참고 — b59444f 회귀 revert),
+    // 빌더에서 명시적으로 hardware_concurrency 만큼 풀어줘야 실제 병렬
+    // 실행이 살아난다. 그렇지 않으면 max_concurrent_researchers=2 여도
+    // 두 가지가 사실상 순차로 깎임.
+    engine->set_worker_count_auto();
+
     // Resilience against transient Anthropic 5xx and rate-limit (HTTP 429)
     // errors. Anthropic's minute-window rate limits usually clear within 60s;
     // two retries at up to 45s apart cover that. Applied to every LLM-calling
