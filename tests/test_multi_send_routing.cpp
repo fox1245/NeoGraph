@@ -34,20 +34,15 @@ namespace {
 class RoutingPlannerNode : public GraphNode {
 public:
     explicit RoutingPlannerNode(int fanout) : fanout_(fanout) {}
-    std::vector<ChannelWrite> execute(const GraphState&) override { return {}; }
-    NodeResult execute_full(const GraphState&) override {
-        NodeResult nr;
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
         for (int i = 0; i < fanout_; ++i) {
             Send s;
             s.target_node = "worker";
             s.input = {{"task_idx", i}};
-            nr.sends.push_back(std::move(s));
+            out.sends.push_back(std::move(s));
         }
-        return nr;
-    }
-    asio::awaitable<NodeResult>
-    execute_full_async(const GraphState& state) override {
-        co_return execute_full(state);
+        co_return out;
     }
     std::string get_name() const override { return "planner"; }
 private:
@@ -60,20 +55,15 @@ class RoutingWorkerWithGoto : public GraphNode {
 public:
     explicit RoutingWorkerWithGoto(std::string goto_target)
         : goto_target_(std::move(goto_target)) {}
-    std::vector<ChannelWrite> execute(const GraphState&) override { return {}; }
-    NodeResult execute_full(const GraphState& state) override {
-        NodeResult nr;
-        json v = state.get("task_idx");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        NodeOutput out;
+        json v = in.state.get("task_idx");
         int idx = v.is_number_integer() ? v.get<int>() : -1;
-        nr.writes.push_back(ChannelWrite{"results", json::array({idx})});
+        out.writes.push_back(ChannelWrite{"results", json::array({idx})});
         Command cmd;
         cmd.goto_node = goto_target_;
-        nr.command = std::move(cmd);
-        return nr;
-    }
-    asio::awaitable<NodeResult>
-    execute_full_async(const GraphState& state) override {
-        co_return execute_full(state);
+        out.command = std::move(cmd);
+        co_return out;
     }
     std::string get_name() const override { return "worker"; }
 private:
@@ -84,10 +74,12 @@ private:
 // "worker" is what should drive the post-fan-in routing.
 class RoutingWorkerNoCommand : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        json v = state.get("task_idx");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        json v = in.state.get("task_idx");
         int idx = v.is_number_integer() ? v.get<int>() : -1;
-        return {ChannelWrite{"results", json::array({idx})}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"results", json::array({idx})});
+        co_return out;
     }
     std::string get_name() const override { return "worker"; }
 };
@@ -96,8 +88,10 @@ public:
 // so the test can verify the engine actually transitioned here.
 class FinalizeMarkerNode : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState&) override {
-        return {ChannelWrite{"finalized", true}};
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"finalized", json(true)});
+        co_return out;
     }
     std::string get_name() const override { return "finalize"; }
 };
@@ -107,8 +101,10 @@ public:
 // graph in the default-edge test.
 class BridgeNode : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState&) override {
-        return {ChannelWrite{"bridged", true}};
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"bridged", json(true)});
+        co_return out;
     }
     std::string get_name() const override { return "bridge"; }
 };
