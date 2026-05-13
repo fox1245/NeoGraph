@@ -98,34 +98,17 @@ public:
      */
     std::vector<std::string> channel_names() const;
 
-    // ── Per-run metadata (v0.3+) ─────────────────────────────────────
-    //
-    // Not serialized; lives only on the in-memory state of an active
-    // run. The engine populates ``cancel_token`` from
-    // ``RunConfig::cancel_token`` once before the super-step loop, so
-    // every node's ``execute_full_async`` can inspect it
-    // (``state.run_cancel_token()``) and pass it into a synchronous
-    // ``provider.complete()`` call — which is the only way cancel
-    // propagation reaches an in-flight LLM HTTP request when the
-    // node's body is sync Python (no asio co_await chain to ride).
-
-    /// @brief Set the active run's cancel token. Engine internal —
-    ///        called once at the top of execute_graph_async.
-    void set_run_cancel_token(std::shared_ptr<class CancelToken> tok);
-
-    /// @brief Active run's cancel token, or nullptr if none.
-    class CancelToken* run_cancel_token() const noexcept;
-
-    /// @brief Active run's cancel token as a shared_ptr (for forwarding
-    ///        into Send-spawned isolated states so cancel propagation
-    ///        survives the snapshot/restore boundary).
-    std::shared_ptr<class CancelToken> run_cancel_token_shared() const noexcept;
+    // v1.0 (9d): the v0.3 `run_cancel_token_` smuggling channel is gone.
+    // Cancel propagation now flows exclusively through
+    // `RunContext::cancel_token` on `NodeInput::ctx` (engine threads it
+    // through every dispatch; multi-Send fan-out copies the context by
+    // value, so the cancel token survives the isolated-state boundary
+    // without a serialize/restore hop).
 
 private:
     std::map<std::string, Channel> channels_;
     uint64_t global_version_ = 0;
     mutable std::shared_mutex mutex_;
-    std::shared_ptr<class CancelToken> run_cancel_token_;
 };
 
 } // namespace neograph::graph

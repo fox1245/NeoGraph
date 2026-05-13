@@ -397,14 +397,9 @@ GraphEngine::execute_graph_async(const RunConfig& config,
     GraphState state;
     init_state(state);
 
-    // v0.3: thread the run's cancel_token through GraphState so
-    // PyGraphNode::execute_full_async can install it as the
-    // ``current_cancel_token()`` thread-local around the synchronous
-    // Python ``execute()`` call. This is what lets a Python node's
-    // ``provider.complete(params)`` (sync, goes through run_sync with
-    // a fresh io_context) pick up cancel propagation despite living
-    // outside the engine's asio coroutine chain.
-    state.set_run_cancel_token(config.cancel_token);
+    // v1.0 (9d): the `state.set_run_cancel_token` smuggling channel is
+    // gone — cancel flows through `RunContext::cancel_token` (set just
+    // below) on every NodeInput.
 
     StreamMode stream_mode = config.stream_mode;
     CheckpointCoordinator coord(checkpoint_store_, config.thread_id);

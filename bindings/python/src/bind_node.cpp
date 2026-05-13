@@ -200,188 +200,25 @@ public:
         return py_obj_.attr("get_name")().cast<std::string>();
     }
 
-    // ── Sync execute (legacy entrypoint, wrapped by execute_full) ────
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        py::gil_scoped_acquire g;
-        py::object res = py_obj_.attr("execute")(
-            py::cast(&state, py::return_value_policy::reference));
-        if (res.is_none()) return {};
-        return res.cast<std::vector<ChannelWrite>>();
-    }
-
-    // ── execute_full: where Command/Send live ────────────────────────
-    NodeResult execute_full(const GraphState& state) override {
-        py::gil_scoped_acquire g;
-        // Prefer execute_full when the user defines it (so they can
-        // emit Command/Send). Otherwise fall back to wrapping
-        // execute()'s writes.
-        if (has_user_method("execute_full")) {
-            py::object res = py_obj_.attr("execute_full")(
-                py::cast(&state, py::return_value_policy::reference));
-            return coerce_to_node_result(res);
-        }
-        py::object res = py_obj_.attr("execute")(
-            py::cast(&state, py::return_value_policy::reference));
-        return coerce_to_node_result(res);
-    }
-
-    // ── v0.4 PR 7: unified run() entry, with Python-override priority
+    // ── v1.0 unified run() entry (single dispatch surface) ───────────
     //
-    // The engine calls ``node->run(in)`` first (PR 2). PyGraphNodeOwner
-    // overrides ``run`` so that:
+    // The Python user's class MUST define `run(self, input)` returning
+    // a list of ChannelWrite (or NodeResult / NodeOutput with optional
+    // Command / Send fields). The legacy 8-virtual chain
+    // (`execute` / `execute_full` / `execute_stream` / ...) was
+    // deprecated in v0.4 and removed in v1.0 (9b–9e). Python code
+    // still defining one of the legacy methods will hit AttributeError
+    // here — see docs/migration-v0.4-to-v1.0.md for the rewrite.
     //
-    //   1. If the Python user's class has a ``run`` method (defined
-    //      strictly on a subclass of ``neograph_engine.GraphNode``),
-    //      call it with a Python-side ``NodeInput`` object exposing
-    //      ``state`` / ``ctx`` / ``stream_cb``. The user's body
-    //      receives ``input.ctx.cancel_token`` directly — no need to
-    //      rely on the smuggling thread-local. Coerce the return value
-    //      via ``coerce_to_node_result``.
-    //
-    //   2. Otherwise, fall through to the legacy chain by forwarding
-    //      to our own ``execute_full_async`` / ``execute_full_stream_async``
-    //      override. Legacy Python users (those still overriding
-    //      ``execute`` / ``execute_full`` etc.) keep working unchanged
-    //      through the deprecation window — their ``provider.complete``
-    //      sync calls still pick up the cancel token via
-    //      ``current_cancel_token()`` thread-local installed in those
-    //      legacy override bodies.
-    //
-    // PR 9 (v1.0) deletes the legacy chain entirely and run() becomes
-    // the only path.
+    // Cancel propagation is now first-class: the user's run() body
+    // receives `input.ctx.cancel_token` directly and pins it onto its
+    // own provider calls. No thread_local smuggling.
     asio::awaitable<NodeResult> run(NodeInput in) override {
-        bool has_run = false;
-        {
-            py::gil_scoped_acquire g;
-            has_run = has_user_method("run");
-        }
-        if (has_run) {
-            py::gil_scoped_acquire g;
-            // Cast NodeInput by value so the Python wrapper survives
-            // even if the C++ frame moves on (NodeInput holds refs
-            // into the engine's super-step locals which stay valid
-            // through this co_await — but the wrapper itself can be
-            // freed after the call returns).
-            py::object py_input = py::cast(&in,
-                py::return_value_policy::reference);
-            py::object res = py_obj_.attr("run")(py_input);
-            co_return coerce_to_node_result(res);
-        }
-        // Legacy fallback. NEOGRAPH_PUSH_IGNORE_DEPRECATED so the
-        // legacy override calls don't trip our own deprecation
-        // warnings — the user's deprecation visibility comes from
-        // their override site, not from this internal forwarder.
-        NEOGRAPH_PUSH_IGNORE_DEPRECATED
-        if (in.stream_cb) {
-            co_return co_await execute_full_stream_async(
-                in.state, *in.stream_cb);
-        }
-        co_return co_await execute_full_async(in.state);
-        NEOGRAPH_POP_IGNORE_DEPRECATED
-    }
-
-    // ── execute_full_async: the real engine entry point ──────────────
-    //
-    // The default GraphNode::execute_full_async chains through
-    // execute_async → execute, dropping any Command/Send the user's
-    // sync execute_full might emit. Override here to bridge straight
-    // to execute_full (which dispatches to the Python user code).
-    //
-    // v0.3: install the run's CancelToken (carried on the GraphState)
-    // as the thread-local ``current_cancel_token()`` so a sync Python
-    // ``execute()`` calling ``ctx.provider.complete(params)`` picks
-    // it up — Provider::complete reads the same thread-local and
-    // binds it to its inner run_sync io_context, propagating cancel
-    // into the LLM HTTP socket. The scope is set/reset around the
-    // synchronous execute_full call only (no co_await spans), so
-    // thread-local semantics stay safe across asio coroutine yields.
-    asio::awaitable<NodeResult>
-    execute_full_async(const GraphState& state) override {
-        // Run the Python call directly in the coroutine — Python
-        // execution is GIL-serialized regardless of executor, so
-        // there's nothing to gain from co_awaiting on a different
-        // executor here.
-        neograph::graph::CurrentCancelTokenScope scope(
-            state.run_cancel_token());
-        co_return execute_full(state);
-    }
-
-    // ── Streaming variants (LLM_TOKEN events) ────────────────────────
-    std::vector<ChannelWrite> execute_stream(
-        const GraphState& state,
-        const GraphStreamCallback& cb) override {
         py::gil_scoped_acquire g;
-        if (has_user_method("execute_stream")) {
-            // Wrap the C++ callback as a Python callable so the user
-            // can opt into streaming.
-            py::cpp_function py_cb([cb](const neograph::graph::GraphEvent& ev) {
-                cb(ev);
-            });
-            py::object res = py_obj_.attr("execute_stream")(
-                py::cast(&state, py::return_value_policy::reference),
-                py_cb);
-            if (res.is_none()) return {};
-            return res.cast<std::vector<ChannelWrite>>();
-        }
-        // No streaming override → fall back to plain execute, ignore
-        // the callback. Matches the C++ default.
-        py::object res = py_obj_.attr("execute")(
-            py::cast(&state, py::return_value_policy::reference));
-        if (res.is_none()) return {};
-        return res.cast<std::vector<ChannelWrite>>();
-    }
-
-    NodeResult execute_full_stream(
-        const GraphState& state,
-        const GraphStreamCallback& cb) override {
-        py::gil_scoped_acquire g;
-        if (has_user_method("execute_full_stream")) {
-            py::cpp_function py_cb([cb](const neograph::graph::GraphEvent& ev) {
-                cb(ev);
-            });
-            py::object res = py_obj_.attr("execute_full_stream")(
-                py::cast(&state, py::return_value_policy::reference),
-                py_cb);
-            return coerce_to_node_result(res);
-        }
-        // v0.3.2 (TODO_v0.3.md item #10): a Python node that only
-        // overrides ``execute_stream`` (no ``execute_full_stream``,
-        // no ``execute`` / ``execute_full``) used to silently fall
-        // through to the line below, hit the NotImplementedError in
-        // GraphNode.execute, and never get its streaming variant
-        // dispatched. The v0.3.1 hint message correctly pointed at
-        // ``run_stream``, but ``run_stream`` itself still didn't
-        // wire up. Now it does: prefer the user's ``execute_stream``
-        // when no fuller override is present, wrap its writes into
-        // a NodeResult, and the cb propagates so LLM_TOKEN events
-        // flow through.
-        if (has_user_method("execute_stream")) {
-            py::cpp_function py_cb([cb](const neograph::graph::GraphEvent& ev) {
-                cb(ev);
-            });
-            py::object res = py_obj_.attr("execute_stream")(
-                py::cast(&state, py::return_value_policy::reference),
-                py_cb);
-            if (res.is_none()) return NodeResult{};
-            return NodeResult{res.cast<std::vector<ChannelWrite>>()};
-        }
-        // No streaming override → execute_full() with cb dropped.
-        // Same observable behaviour as the default GraphNode chain
-        // but routes through the Python user's execute_full /
-        // execute (so Command/Send still propagate).
-        return execute_full(state);
-    }
-
-    asio::awaitable<NodeResult>
-    execute_full_stream_async(
-        const GraphState& state,
-        const GraphStreamCallback& cb) override {
-        // Same v0.3 cancel propagation as execute_full_async — the
-        // streaming variant gets it too, otherwise long token streams
-        // would leak cost when cancelled.
-        neograph::graph::CurrentCancelTokenScope scope(
-            state.run_cancel_token());
-        co_return execute_full_stream(state, cb);
+        py::object py_input = py::cast(&in,
+            py::return_value_policy::reference);
+        py::object res = py_obj_.attr("run")(py_input);
+        co_return coerce_to_node_result(res);
     }
 
 private:

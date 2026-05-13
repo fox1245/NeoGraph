@@ -671,16 +671,10 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
         init_state(send_state);
         send_state.restore(state_snapshot);
         apply_input(send_state, s.input);
-        // v0.3.1: serialize/restore drops the per-run cancel token (it
-        // lives outside the channel set), so forward the parent's token
-        // explicitly. Without this, a Python node inside a multi-Send
-        // worker would see a null `state.run_cancel_token()` and the
-        // node-installed CurrentCancelTokenScope would propagate
-        // nothing — a cancelled run would still leak LLM cost on the
-        // dynamic fan-out branches. Single-Send / static-parallel
-        // paths read the parent state directly, so they were already
-        // covered.
-        send_state.set_run_cancel_token(state.run_cancel_token_shared());
+        // v1.0 (9d): the old `run_cancel_token` smuggling channel is
+        // gone. Cancel flows through `ctx.cancel_token` instead, which
+        // is captured by value into this worker lambda — no
+        // serialize/restore hop, no manual forward.
 
         auto nr = co_await execute_node_with_retry_async(
             s.target_node, send_state, cb, stream_mode, ctx);
