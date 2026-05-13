@@ -31,9 +31,11 @@ class HitCounter : public GraphNode {
 public:
     HitCounter(std::string n, std::atomic<int>* counter)
         : name_(std::move(n)), counter_(counter) {}
-    std::vector<ChannelWrite> execute(const GraphState&) override {
+    asio::awaitable<NodeOutput> run(NodeInput) override {
         counter_->fetch_add(1, std::memory_order_relaxed);
-        return {ChannelWrite{name_ + "_done", json(true)}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{name_ + "_done", json(true)});
+        co_return out;
     }
     std::string get_name() const override { return name_; }
 private:

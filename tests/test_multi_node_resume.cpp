@@ -18,11 +18,13 @@ namespace {
 class HitCounter : public GraphNode {
 public:
     explicit HitCounter(std::string n) : n_(std::move(n)) {}
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
         int cur = 0;
-        auto v = state.get(n_ + "_hits");
+        auto v = in.state.get(n_ + "_hits");
         if (v.is_number()) cur = static_cast<int>(v.get<double>());
-        return {ChannelWrite{n_ + "_hits", json(cur + 1)}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{n_ + "_hits", json(cur + 1)});
+        co_return out;
     }
     std::string get_name() const override { return n_; }
 private:
