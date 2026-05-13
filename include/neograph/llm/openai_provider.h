@@ -90,6 +90,17 @@ class NEOGRAPH_API OpenAIProvider : public Provider {
 
     ChatCompletion complete_stream(const CompletionParams& params,
                                    const StreamCallback& on_chunk) override;
+
+    /// v1.0 single-dispatch override (Candidate 6 PR6). Native invoke()
+    /// that directly drives the ConnPool — no extra hop through
+    /// `complete_stream_async`'s default worker-thread bridge for
+    /// streaming, no extra hop through `complete_async` for non-
+    /// streaming. The 4 legacy overrides above stay as thin adapters
+    /// over invoke() through the v0.9 deprecation window; v1.0 deletes
+    /// them along with the base-class virtuals.
+    asio::awaitable<ChatCompletion>
+    invoke(const CompletionParams& params, StreamCallback on_chunk) override;
+
     std::string get_name() const override { return "openai"; }
 
   private:
