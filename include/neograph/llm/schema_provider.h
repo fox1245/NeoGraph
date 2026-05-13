@@ -34,6 +34,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <map>
@@ -201,6 +202,16 @@ class NEOGRAPH_API SchemaProvider : public Provider {
         int max_tokens_default = -1;
         std::string stream_field;
         json extra_fields;
+
+        /// Issue #33: which body paths a schema declares as bindable
+        /// per-call via `CompletionParams::extra_fields`. Schema:
+        ///   "request.per_call_fields": ["reasoning.effort", "thinking.budget"]
+        /// build_body iterates the caller's `params.extra_fields` map
+        /// and only stamps keys present in this set — unknown keys
+        /// are dropped (schema owns the contract). Empty set = no
+        /// per-call bindings honoured (legacy default; back-compat
+        /// for schemas that don't declare the key).
+        std::set<std::string> per_call_fields;
     };
 
     struct SystemPromptConfig {
