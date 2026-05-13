@@ -33,16 +33,21 @@ public:
                                 CancelToken* expected)
         : n_(std::move(n)), count_(observed_count), expected_(expected) {}
 
-    NodeResult execute_full(const GraphState& state) override {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
         // Read the token pointer; record only if it matches the parent
         // run's token. A null or mismatched pointer is the actual bug
         // — if the test sees that, count_ stays unchanged and the
         // assertion below fails.
-        if (state.run_cancel_token() == expected_ && expected_ != nullptr) {
+        // NOTE: this still reads the legacy state.run_cancel_token() smuggling
+        // channel — 9d will switch it to in.ctx.cancel_token.get() (or this
+        // whole test gets superseded by the in.ctx.cancel_token coverage).
+        if (in.state.run_cancel_token() == expected_ && expected_ != nullptr) {
             count_->fetch_add(1, std::memory_order_relaxed);
         }
         // Emit a small write so the engine has something to commit.
-        return NodeResult{{ChannelWrite{"saw_token", json::array({n_})}}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"saw_token", json::array({n_})});
+        co_return out;
     }
 
     std::string get_name() const override { return n_; }
@@ -59,14 +64,14 @@ public:
     explicit SendFanOutNode(std::string n, std::string target, int width)
         : n_(std::move(n)), target_(std::move(target)), width_(width) {}
 
-    NodeResult execute_full(const GraphState&) override {
-        NodeResult res;
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
         for (int i = 0; i < width_; ++i) {
             json input;
             input["i"] = i;
-            res.sends.push_back(Send{target_, input});
+            out.sends.push_back(Send{target_, input});
         }
-        return res;
+        co_return out;
     }
 
     std::string get_name() const override { return n_; }
@@ -213,7 +218,7 @@ TEST(CancelTokenPropagation, CancelMidFanOutHaltsLoop) {
         SlowObserver(std::string n, std::atomic<int>* started,
                      std::shared_ptr<CancelToken> tok)
             : n_(std::move(n)), started_(started), tok_(std::move(tok)) {}
-        NodeResult execute_full(const GraphState& state) override {
+        asio::awaitable<NodeOutput> run(NodeInput in) override {
             started_->fetch_add(1, std::memory_order_relaxed);
             // First node: trip the cancel before returning, so the
             // engine's super-step boundary observes it before the
@@ -223,11 +228,13 @@ TEST(CancelTokenPropagation, CancelMidFanOutHaltsLoop) {
             } else {
                 // Cooperative: if cancel is set, throw the same way
                 // the engine does at super-step boundaries.
-                if (auto* t = state.run_cancel_token()) {
+                if (auto* t = in.state.run_cancel_token()) {
                     t->throw_if_cancelled("worker " + n_);
                 }
             }
-            return NodeResult{{ChannelWrite{"saw_token", json::array({n_})}}};
+            NodeOutput out;
+            out.writes.push_back(ChannelWrite{"saw_token", json::array({n_})});
+            co_return out;
         }
         std::string get_name() const override { return n_; }
     private:
@@ -321,7 +328,7 @@ TEST(CancelTokenPropagation, MidFlightCancelAbortsSendSiblings) {
               entered_(entered), completed_(completed),
               first_done_(first_done) {}
 
-        NodeResult execute_full(const GraphState& state) override {
+        asio::awaitable<NodeOutput> run(NodeInput in) override {
             entered_->fetch_add(1, std::memory_order_relaxed);
 
             // The first worker to win the race trips cancel. Use a CAS
@@ -336,7 +343,9 @@ TEST(CancelTokenPropagation, MidFlightCancelAbortsSendSiblings) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 tok_->cancel();
                 completed_->fetch_add(1, std::memory_order_relaxed);
-                return NodeResult{{ChannelWrite{"saw_token", json::array({n_})}}};
+                NodeOutput out;
+                out.writes.push_back(ChannelWrite{"saw_token", json::array({n_})});
+                co_return out;
             }
 
             // Siblings: simulate "in-flight long work" by polling cancel
@@ -347,7 +356,7 @@ TEST(CancelTokenPropagation, MidFlightCancelAbortsSendSiblings) {
             // null on the isolated send_state and the loop polls
             // forever (until the deadline) → completed_ bumps as if
             // nothing happened.
-            auto* t = state.run_cancel_token();
+            auto* t = in.state.run_cancel_token();
             const auto deadline =
                 std::chrono::steady_clock::now() +
                 std::chrono::milliseconds(200);
@@ -361,7 +370,9 @@ TEST(CancelTokenPropagation, MidFlightCancelAbortsSendSiblings) {
             // Reaching here means we never observed the cancel within
             // the 200 ms window — the propagation is broken.
             completed_->fetch_add(1, std::memory_order_relaxed);
-            return NodeResult{{ChannelWrite{"saw_token", json::array({n_})}}};
+            NodeOutput out;
+            out.writes.push_back(ChannelWrite{"saw_token", json::array({n_})});
+            co_return out;
         }
         std::string get_name() const override { return n_; }
     private:

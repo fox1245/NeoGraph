@@ -33,16 +33,20 @@ using neograph::graph::GraphNode;
 using neograph::graph::GraphState;
 using neograph::graph::NodeContext;
 using neograph::graph::NodeFactory;
+using neograph::graph::NodeInput;
+using neograph::graph::NodeOutput;
 
 namespace {
 
 class EchoNode : public GraphNode {
   public:
     EchoNode(std::string n) : name_(std::move(n)) {}
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        auto raw = state.get("prompt");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto raw = in.state.get("prompt");
         std::string p = raw.is_string() ? raw.get<std::string>() : raw.dump();
-        return {{"response", "echo:" + p}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"response", neograph::json("echo:" + p)});
+        co_return out;
     }
     std::string get_name() const override { return name_; }
   private:
@@ -327,11 +331,13 @@ class ReadFileNode : public GraphNode {
   public:
     ReadFileNode(std::string n, std::shared_ptr<ACPClient> client, std::string path)
         : name_(std::move(n)), client_(std::move(client)), path_(std::move(path)) {}
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        auto sid_v = state.get("_acp_session_id");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto sid_v = in.state.get("_acp_session_id");
         std::string sid = sid_v.is_string() ? sid_v.get<std::string>() : "";
         auto contents = client_->read_text_file(sid, path_);
-        return {{"response", "got:" + contents}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"response", neograph::json("got:" + contents)});
+        co_return out;
     }
     std::string get_name() const override { return name_; }
   private:
@@ -446,8 +452,8 @@ class GatedNode : public GraphNode {
   public:
     GatedNode(std::string n, std::shared_ptr<ACPClient> client)
         : name_(std::move(n)), client_(std::move(client)) {}
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        auto sid_v = state.get("_acp_session_id");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto sid_v = in.state.get("_acp_session_id");
         std::string sid = sid_v.is_string() ? sid_v.get<std::string>() : "";
 
         acp::ToolCallUpdate tc;
@@ -465,7 +471,9 @@ class GatedNode : public GraphNode {
         std::string answer = (outcome.kind == PermissionOutcomeKind::Selected)
                              ? outcome.option_id
                              : "(cancelled)";
-        return {{"response", answer}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"response", neograph::json(answer)});
+        co_return out;
     }
     std::string get_name() const override { return name_; }
   private:
@@ -616,11 +624,13 @@ class WriteFileNode : public GraphNode {
                   std::string path, std::string body)
         : name_(std::move(n)), client_(std::move(client)),
           path_(std::move(path)), body_(std::move(body)) {}
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        auto sid_v = state.get("_acp_session_id");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto sid_v = in.state.get("_acp_session_id");
         std::string sid = sid_v.is_string() ? sid_v.get<std::string>() : "";
         client_->write_text_file(sid, path_, body_);
-        return {{"response", "wrote:" + path_}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"response", neograph::json("wrote:" + path_)});
+        co_return out;
     }
     std::string get_name() const override { return name_; }
   private:
@@ -758,11 +768,13 @@ TEST(ACPServer, RejectsSecondPromptOnSameSession) {
       public:
         StallNode(std::string n, std::shared_ptr<std::atomic<bool>> stall)
             : name_(std::move(n)), stall_(std::move(stall)) {}
-        std::vector<ChannelWrite> execute(const GraphState&) override {
+        asio::awaitable<NodeOutput> run(NodeInput) override {
             while (stall_->load(std::memory_order_acquire)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
-            return {{"response", "done"}};
+            NodeOutput out;
+            out.writes.push_back(ChannelWrite{"response", neograph::json("done")});
+            co_return out;
         }
         std::string get_name() const override { return name_; }
       private:
