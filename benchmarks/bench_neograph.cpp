@@ -22,11 +22,13 @@ using namespace neograph::graph;
 class IncNode : public GraphNode {
 public:
     explicit IncNode(std::string n) : n_(std::move(n)) {}
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
         int cur = 0;
-        auto v = state.get("counter");
+        auto v = in.state.get("counter");
         if (v.is_number()) cur = v.get<int>();
-        return {ChannelWrite{"counter", json(cur + 1)}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"counter", json(cur + 1)});
+        co_return out;
     }
     std::string get_name() const override { return n_; }
 private:
@@ -38,8 +40,10 @@ private:
 class WorkerNode : public GraphNode {
 public:
     WorkerNode(std::string n, int idx) : n_(std::move(n)), idx_(idx) {}
-    std::vector<ChannelWrite> execute(const GraphState&) override {
-        return {ChannelWrite{"results", json::array({idx_})}};
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"results", json::array({idx_})});
+        co_return out;
     }
     std::string get_name() const override { return n_; }
 private:
@@ -49,10 +53,12 @@ private:
 
 class SumNode : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        auto r = state.get("results");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto r = in.state.get("results");
         int n = r.is_array() ? static_cast<int>(r.size()) : 0;
-        return {ChannelWrite{"count", json(n)}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"count", json(n)});
+        co_return out;
     }
     std::string get_name() const override { return "summarizer"; }
 };
