@@ -23,11 +23,13 @@ public:
     ScriptedRouter(std::string name, std::vector<std::string> script)
         : name_(std::move(name)), script_(std::move(script)) {}
 
-    std::vector<ChannelWrite> execute(const GraphState&) override {
+    asio::awaitable<NodeOutput> run(NodeInput) override {
         std::string r = idx_ < script_.size() ? script_[idx_] : "end";
         ++idx_;
-        return {ChannelWrite{"__route__", json(r)},
-                ChannelWrite{name_ + "_count", json(static_cast<int>(idx_))}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"__route__", json(r)});
+        out.writes.push_back(ChannelWrite{name_ + "_count", json(static_cast<int>(idx_))});
+        co_return out;
     }
     std::string get_name() const override { return name_; }
 
@@ -40,8 +42,10 @@ private:
 class Collector : public GraphNode {
 public:
     explicit Collector(std::string name) : name_(std::move(name)) {}
-    std::vector<ChannelWrite> execute(const GraphState&) override {
-        return {ChannelWrite{"hits", json::array({name_})}};
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"hits", json::array({name_})});
+        co_return out;
     }
     std::string get_name() const override { return name_; }
 private:
@@ -180,19 +184,12 @@ TEST(SignalDispatch, CommandGotoOverridesEdgeRouting) {
     class GotoNode : public GraphNode {
     public:
         explicit GotoNode(std::string target) : target_(std::move(target)) {}
-        std::vector<ChannelWrite> execute(const GraphState&) override {
-            return {};
-        }
-        NodeResult execute_full(const GraphState&) override {
-            NodeResult nr;
+        asio::awaitable<NodeOutput> run(NodeInput) override {
+            NodeOutput out;
             Command c;
             c.goto_node = target_;
-            nr.command = c;
-            return nr;
-        }
-        asio::awaitable<NodeResult>
-        execute_full_async(const GraphState& state) override {
-            co_return execute_full(state);
+            out.command = c;
+            co_return out;
         }
         std::string get_name() const override { return "a"; }
     private:
@@ -202,8 +199,10 @@ TEST(SignalDispatch, CommandGotoOverridesEdgeRouting) {
     class SinkNode : public GraphNode {
     public:
         explicit SinkNode(std::string n) : n_(std::move(n)) {}
-        std::vector<ChannelWrite> execute(const GraphState&) override {
-            return {ChannelWrite{"hit_" + n_, json(true)}};
+        asio::awaitable<NodeOutput> run(NodeInput) override {
+            NodeOutput out;
+            out.writes.push_back(ChannelWrite{"hit_" + n_, json(true)});
+            co_return out;
         }
         std::string get_name() const override { return n_; }
     private:
@@ -272,8 +271,10 @@ TEST(SignalDispatch, ParallelFanInRunsOnce) {
     class LeafNode : public GraphNode {
     public:
         explicit LeafNode(std::string n) : n_(std::move(n)) {}
-        std::vector<ChannelWrite> execute(const GraphState&) override {
-            return {ChannelWrite{"leaf_" + n_, json(true)}};
+        asio::awaitable<NodeOutput> run(NodeInput) override {
+            NodeOutput out;
+            out.writes.push_back(ChannelWrite{"leaf_" + n_, json(true)});
+            co_return out;
         }
         std::string get_name() const override { return n_; }
     private:
@@ -281,9 +282,11 @@ TEST(SignalDispatch, ParallelFanInRunsOnce) {
     };
     class JoinNode : public GraphNode {
     public:
-        std::vector<ChannelWrite> execute(const GraphState&) override {
+        asio::awaitable<NodeOutput> run(NodeInput) override {
             join_hits.fetch_add(1, std::memory_order_relaxed);
-            return {ChannelWrite{"joined", json(true)}};
+            NodeOutput out;
+            out.writes.push_back(ChannelWrite{"joined", json(true)});
+            co_return out;
         }
         std::string get_name() const override { return "join"; }
     };
@@ -362,8 +365,10 @@ TEST(SignalDispatch, AsymmetricSerialFanInFiresJoinPerPath) {
     class PassThrough : public GraphNode {
     public:
         explicit PassThrough(std::string n) : n_(std::move(n)) {}
-        std::vector<ChannelWrite> execute(const GraphState&) override {
-            return {ChannelWrite{n_ + "_ran", json(true)}};
+        asio::awaitable<NodeOutput> run(NodeInput) override {
+            NodeOutput out;
+            out.writes.push_back(ChannelWrite{n_ + "_ran", json(true)});
+            co_return out;
         }
         std::string get_name() const override { return n_; }
     private:
@@ -371,17 +376,21 @@ TEST(SignalDispatch, AsymmetricSerialFanInFiresJoinPerPath) {
     };
     class JoinCounter : public GraphNode {
     public:
-        std::vector<ChannelWrite> execute(const GraphState&) override {
+        asio::awaitable<NodeOutput> run(NodeInput) override {
             join_hits.fetch_add(1, std::memory_order_relaxed);
-            return {ChannelWrite{"join_ran", json(true)}};
+            NodeOutput out;
+            out.writes.push_back(ChannelWrite{"join_ran", json(true)});
+            co_return out;
         }
         std::string get_name() const override { return "join"; }
     };
     class FinishCounter : public GraphNode {
     public:
-        std::vector<ChannelWrite> execute(const GraphState&) override {
+        asio::awaitable<NodeOutput> run(NodeInput) override {
             finish_hits.fetch_add(1, std::memory_order_relaxed);
-            return {ChannelWrite{"finish_ran", json(true)}};
+            NodeOutput out;
+            out.writes.push_back(ChannelWrite{"finish_ran", json(true)});
+            co_return out;
         }
         std::string get_name() const override { return "finish"; }
     };
@@ -460,8 +469,10 @@ TEST(SignalDispatch, DeclaredBarrierCoalescesAsymmetricFanIn) {
     class PassThrough : public GraphNode {
     public:
         explicit PassThrough(std::string n) : n_(std::move(n)) {}
-        std::vector<ChannelWrite> execute(const GraphState&) override {
-            return {ChannelWrite{n_ + "_ran", json(true)}};
+        asio::awaitable<NodeOutput> run(NodeInput) override {
+            NodeOutput out;
+            out.writes.push_back(ChannelWrite{n_ + "_ran", json(true)});
+            co_return out;
         }
         std::string get_name() const override { return n_; }
     private:
@@ -469,9 +480,11 @@ TEST(SignalDispatch, DeclaredBarrierCoalescesAsymmetricFanIn) {
     };
     class BarrierJoinCounter : public GraphNode {
     public:
-        std::vector<ChannelWrite> execute(const GraphState&) override {
+        asio::awaitable<NodeOutput> run(NodeInput) override {
             b_join_hits.fetch_add(1, std::memory_order_relaxed);
-            return {ChannelWrite{"bjoin_ran", json(true)}};
+            NodeOutput out;
+            out.writes.push_back(ChannelWrite{"bjoin_ran", json(true)});
+            co_return out;
         }
         std::string get_name() const override { return "join"; }
     };
