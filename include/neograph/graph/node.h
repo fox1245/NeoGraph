@@ -99,12 +99,15 @@ using NodeOutput = NodeResult;
 /// Centralised so the message stays consistent across every override
 /// point. v0.4.x emits ``-Wdeprecated-declarations`` warnings; v1.0
 /// removes the marked methods entirely. See ROADMAP_v1.md PR 9.
-#define NEOGRAPH_DEPRECATED_VIRTUAL                              \
-    [[deprecated(                                                \
-        "v0.4: override run(NodeInput) -> awaitable<NodeOutput> " \
-        "instead. The legacy 8-virtual chain is preserved for "   \
-        "back-compat through v0.5 and removed in v1.0. See "      \
-        "ROADMAP_v1.md.")]]
+///
+/// Migration recipe with case-by-case before/after examples:
+/// docs/migration-v0.4-to-v1.0.md
+#define NEOGRAPH_DEPRECATED_VIRTUAL                                  \
+    [[deprecated(                                                    \
+        "v0.4: override run(NodeInput) -> awaitable<NodeOutput> "    \
+        "instead. The legacy 8-virtual chain is preserved for "      \
+        "back-compat through v0.5 and removed in v1.0. "             \
+        "Migration recipe: docs/migration-v0.4-to-v1.0.md")]]
 
 /**
  * @brief Thrown by the GraphNode default-execute chain when none of

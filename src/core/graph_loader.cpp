@@ -2,8 +2,10 @@
 #include <neograph/graph/node.h>
 #include <neograph/graph/engine.h>
 #include <neograph/graph/state.h>
+#include <algorithm>
 #include <stdexcept>
 #include <fstream>
+#include <vector>
 
 namespace neograph::graph {
 
@@ -43,10 +45,34 @@ void ReducerRegistry::register_reducer(const std::string& name, ReducerFn fn) {
     registry_[name] = std::move(fn);
 }
 
+// DX helper: comma-separated sorted names from a registry map. Used by the
+// "Unknown <thing>: foo" error messages so users see what IS available
+// without having to grep the source. Defined as a template so the same
+// shape works for ReducerRegistry / ConditionRegistry / NodeFactory's
+// different value types.
+template <typename Map>
+static std::string registry_name_list(const Map& m) {
+    std::vector<std::string> names;
+    names.reserve(m.size());
+    for (const auto& kv : m) names.push_back(kv.first);
+    std::sort(names.begin(), names.end());
+    std::string out;
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (i) out += ", ";
+        out += names[i];
+    }
+    return out;
+}
+
 ReducerFn ReducerRegistry::get(const std::string& name) const {
     auto it = registry_.find(name);
     if (it == registry_.end()) {
-        throw std::runtime_error("Unknown reducer: " + name);
+        throw std::runtime_error(
+            "Unknown reducer: '" + name + "'. "
+            "Available: " + registry_name_list(registry_) + ". "
+            "Register a custom reducer before compile via "
+            "ReducerRegistry::instance().register_reducer(name, fn). "
+            "See docs/troubleshooting.md \"Unknown reducer\".");
     }
     return it->second;
 }
@@ -91,7 +117,12 @@ void ConditionRegistry::register_condition(const std::string& name, ConditionFn 
 ConditionFn ConditionRegistry::get(const std::string& name) const {
     auto it = registry_.find(name);
     if (it == registry_.end()) {
-        throw std::runtime_error("Unknown condition: " + name);
+        throw std::runtime_error(
+            "Unknown condition: '" + name + "'. "
+            "Available: " + registry_name_list(registry_) + ". "
+            "Register a custom condition before compile via "
+            "ConditionRegistry::instance().register_condition(name, fn). "
+            "See docs/troubleshooting.md \"Unknown condition\".");
     }
     return it->second;
 }
@@ -195,7 +226,12 @@ std::unique_ptr<GraphNode> NodeFactory::create(
 
     auto it = registry_.find(type);
     if (it == registry_.end()) {
-        throw std::runtime_error("Unknown node type: " + type);
+        throw std::runtime_error(
+            "Unknown node type: '" + type + "' (referenced by node '" + name + "'). "
+            "Available: " + registry_name_list(registry_) + ". "
+            "Register a custom type before compile via "
+            "NodeFactory::instance().register_type(type, factory). "
+            "See docs/troubleshooting.md \"Unknown node type\".");
     }
     return it->second(name, config, ctx);
 }

@@ -894,6 +894,12 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_async_tool examples/50_async_tool.cpp)
         target_link_libraries(example_async_tool PRIVATE neograph::core)
 
+        # Example 51: 가장 작은 동작하는 NeoGraph 프로그램. LLM·tool·mock
+        # provider 다 없는, 노드 1개짜리 5분 입문용. README 의 "first program"
+        # 자리에 인용되는 코드.
+        add_executable(example_minimal examples/51_minimal.cpp)
+        target_link_libraries(example_minimal PRIVATE neograph::core)
+
         # Clay + Raylib chatbot (optional — requires Raylib)
         option(NEOGRAPH_BUILD_CLAY_EXAMPLE "Build Clay chatbot example (fetches Raylib)" OFF)
         if(NEOGRAPH_BUILD_CLAY_EXAMPLE)

@@ -1,8 +1,27 @@
 #include <neograph/graph/state.h>
 #include <neograph/graph/cancel.h>
+#include <algorithm>
 #include <stdexcept>
+#include <vector>
 
 namespace neograph::graph {
+
+// DX helper: comma-separated sorted list of declared channel names. Used by
+// the "Write to unknown channel" error so the user immediately sees what
+// IS declared, instead of having to compare against the JSON definition.
+// Caller already holds the mutex.
+static std::string declared_channel_list(
+    const std::map<std::string, Channel>& channels) {
+    if (channels.empty()) return "(none — no channels declared in the graph definition)";
+    std::string out;
+    bool first = true;
+    for (const auto& kv : channels) {  // std::map iterates sorted by key
+        if (!first) out += ", ";
+        first = false;
+        out += kv.first;
+    }
+    return out;
+}
 
 void GraphState::init_channel(const std::string& name,
                                ReducerType type,
@@ -41,7 +60,12 @@ void GraphState::write(const std::string& channel, const json& value) {
     std::unique_lock lock(mutex_);
     auto it = channels_.find(channel);
     if (it == channels_.end()) {
-        throw std::runtime_error("Write to unknown channel: " + channel);
+        throw std::runtime_error(
+            "Write to unknown channel: '" + channel + "'. "
+            "Declared channels: " + declared_channel_list(channels_) + ". "
+            "Channel names are case-sensitive; add it to the graph "
+            "definition's \"channels\" block before writing. "
+            "See docs/troubleshooting.md \"Write to unknown channel\".");
     }
     auto& ch  = it->second;
     ch.value   = ch.reducer(ch.value, value);
@@ -53,7 +77,12 @@ void GraphState::apply_writes(const std::vector<ChannelWrite>& writes) {
     for (const auto& w : writes) {
         auto it = channels_.find(w.channel);
         if (it == channels_.end()) {
-            throw std::runtime_error("Write to unknown channel: " + w.channel);
+            throw std::runtime_error(
+                "Write to unknown channel: '" + w.channel + "'. "
+                "Declared channels: " + declared_channel_list(channels_) + ". "
+                "Channel names are case-sensitive; add it to the graph "
+                "definition's \"channels\" block before writing. "
+                "See docs/troubleshooting.md \"Write to unknown channel\".");
         }
         auto& ch  = it->second;
         ch.value   = ch.reducer(ch.value, w.value);
