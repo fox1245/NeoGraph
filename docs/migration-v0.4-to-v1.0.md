@@ -278,6 +278,149 @@ grep -lE 'execute\(const GraphState' src/**/*.cpp
 복잡한 노드 (`execute_full`, `execute_stream_async` 등) 는 무조건
 손편집. 쇼트컷 없습니다.
 
+---
+
+# Migration 2: 옛 4 `Provider` virtual → 새 `Provider::invoke()` (v0.9 → v1.0)
+
+GraphNode 8 virtual → `run(NodeInput)` 와 같은 모양의 두 번째 통합.
+ROADMAP_v1.md **Candidate 6** 에 해당. v0.9.0 에서 새 `invoke()` 가
+landing + 옛 4 virtual 이 `[[deprecated]]` 마킹됨. v1.0.0 에서 옛
+4 virtual 삭제.
+
+## 시그니처 매핑
+
+| 옛 virtual | 새 모양 |
+|---|---|
+| `complete(params)` | `co_await invoke(params, nullptr)` (코루틴) 또는 `neograph::async::run_sync(invoke(params, nullptr))` (sync) |
+| `complete_async(params)` | `co_await invoke(params, nullptr)` |
+| `complete_stream(params, on_chunk)` | `neograph::async::run_sync(invoke(params, on_chunk))` |
+| `complete_stream_async(params, on_chunk)` | `co_await invoke(params, on_chunk)` |
+
+**핵심 규칙**: `on_chunk == nullptr` 이면 비스트리밍, `on_chunk` 가 있으면
+스트리밍. 한 메서드가 두 케이스 다 처리.
+
+## 케이스별 변환
+
+### Provider 호출하는 사용자 코드
+
+```cpp
+// 옛 — async 컨텍스트에서
+auto completion = co_await provider->complete_async(params);
+
+// 새 — 같은 의미
+auto completion = co_await provider->invoke(params, nullptr);
+```
+
+```cpp
+// 옛 — sync 함수 안에서
+auto completion = provider->complete(params);
+
+// 새 — async 어웨이트할 io_context 가 없으면 run_sync 로 brige
+auto completion = neograph::async::run_sync(provider->invoke(params, nullptr));
+```
+
+```cpp
+// 옛 — 스트리밍
+auto completion = co_await provider->complete_stream_async(params, on_chunk);
+
+// 새 — invoke 가 같은 분기를 자기 안에서 함
+auto completion = co_await provider->invoke(params, on_chunk);
+```
+
+### 사용자 정의 Provider subclass
+
+옛: 4 virtual 중 하나 이상 override. 새: `invoke()` 하나만 override
+하면 됨.
+
+```cpp
+// 옛 모양 — async-native provider
+class MyProvider : public neograph::Provider {
+public:
+    asio::awaitable<ChatCompletion>
+    complete_async(const CompletionParams& params) override {
+        // ... HTTP call ...
+        co_return result;
+    }
+
+    ChatCompletion complete_stream(const CompletionParams& params,
+                                   const StreamCallback& on_chunk) override {
+        // ... SSE call ...
+        return result;
+    }
+
+    std::string get_name() const override { return "my"; }
+};
+```
+
+```cpp
+// 새 모양 — 한 메서드가 두 케이스 다 처리
+class MyProvider : public neograph::Provider {
+public:
+    asio::awaitable<ChatCompletion>
+    invoke(const CompletionParams& params, StreamCallback on_chunk) override {
+        if (on_chunk) {
+            // ... SSE call, 토큰마다 on_chunk(token) ...
+        } else {
+            // ... HTTP call ...
+        }
+        co_return result;
+    }
+
+    std::string get_name() const override { return "my"; }
+};
+```
+
+v0.9 deprecation window 동안: 옛 4 virtual override 가 그대로 동작.
+새 invoke() 안 만들면 base default 가 4 virtual chain 으로 forward —
+즉 두 모양 공존 가능.
+
+## cancel 자동 propagation
+
+옛 sync `complete()` 가 `current_cancel_token()` 을 thread-local 에서
+읽어서 자동 cancel propagation 함. **새 `invoke()` 도 같은 동작 유지**:
+caller 가 `params.cancel_token` 을 set 안 했으면 thread-local 에서
+자동 stamp. 명시적 `params.cancel_token` 가 항상 우선.
+
+```cpp
+// engine 안 노드 본문 — 둘 다 동일하게 cancel 됨
+co_await provider->invoke(params, nullptr);                    // OK
+neograph::async::run_sync(provider->invoke(params, nullptr));  // OK
+```
+
+graph 밖에서 직접 호출하는 케이스 (`Agent` user code 등) 도 동일 —
+explicit cancel_token 안 주면 그냥 cancel 못 받음 (예전과 동일).
+
+## 마이그레이션 안 하면
+
+v0.9 ~ v0.x:
+- 옛 4 virtual override 그대로 동작
+- `-Wdeprecated-declarations` warning 이 user override / 호출 사이트에 visible
+- engine 내부 forwarder 는 `NEOGRAPH_PUSH_IGNORE_DEPRECATED` 가드 됨 — internal warning 0
+
+v1.0:
+- 옛 4 virtual 삭제
+- override 한 모든 user code 가 컴파일 fail (`'complete_async' marked
+  override but doesn't override anything in the base class`)
+- 호출하는 user code 도 compile fail (메서드 자체가 없음)
+
+선제 마이그레이션 추천 — Provider subclass 가 적어도 invoke() 하나만
+override 하면 v1.0 호환. 사용자 정의 Provider 가 많으면 일찍 옮기는
+게 부담 적음.
+
+## 자동 변환 가능?
+
+호출 사이트는 패턴 단순:
+
+```bash
+# dry-run 으로 검토
+grep -rnE '->complete(_async|_stream|_stream_async)?\(' your/code
+
+# 그 다음 케이스별로 손편집 (위 매핑표 참고).
+```
+
+Provider subclass 의 4 virtual override → invoke() 통합은 로직이 섞여
+있어서 손편집 필수.
+
 ## 관련 문서 / 이슈
 
 - [`include/neograph/graph/node.h`](../include/neograph/graph/node.h) —
