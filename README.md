@@ -82,24 +82,30 @@ section below for the reproduction command.
 
 Per-invocation overhead on identically-shaped graphs, no I/O / no LLM —
 just node dispatch + state writes + reducer calls. Lower is better.
-Reproduced 2026-04-29 against NeoGraph v0.2.3 (g++ 13 Release `-O3
--DNDEBUG`); Python framework rows from the 2026-04-22 reference run,
-re-validated within ±10 % at the same date.
+NeoGraph row 는 2026-05-13 master HEAD 에서 재측정 (g++ 13 Release
+`-O3 -DNDEBUG`, WSL2 + taskset -c 3 chrt -f 99 isolation). Python
+framework rows 는 2026-04-22 reference run 그대로 — 2026-04-29 ±10%
+재검증.
 
-| Framework | `seq` (3-node chain) | `par` (fan-out 5 + join, worker=1 fast path)¹ | Slowdown vs. NeoGraph |
-|-----------|---------------------:|---------------------------------------------:|-------------------:|
-| **NeoGraph v0.2.3** (this repo) | **5.0 µs**  | **14.4 µs** | 1× |
-| Haystack 2.28 | 140 µs   | 278 µs   | **28× / 19×** |
-| pydantic-graph 1.87 | 227 µs | 280 µs²  | **45× / 19×**² |
-| LangGraph 1.1.10 | 643 µs  | 2,262 µs | **128× / 157×** |
-| LlamaIndex Workflow 0.14 | 1,565 µs | 4,374 µs | **313× / 304×** |
-| AutoGen GraphFlow 0.7.5 | 3,127 µs | 7,281 µs | **625× / 505×** |
+| Framework | `seq` (3-node chain) | `par` (fan-out 5 + join, v1.0 default)¹ | Slowdown vs. NeoGraph |
+|-----------|---------------------:|----------------------------------------:|-------------------:|
+| **NeoGraph master** (this repo) | **5.0 µs**  | **11.6 µs** | 1× |
+| Haystack 2.28 | 140 µs   | 278 µs   | **28× / 24×** |
+| pydantic-graph 1.87 | 227 µs | 280 µs²  | **45× / 24×**² |
+| LangGraph 1.1.10 | 643 µs  | 2,262 µs | **128× / 195×** |
+| LlamaIndex Workflow 0.14 | 1,565 µs | 4,374 µs | **313× / 377×** |
+| AutoGen GraphFlow 0.7.5 | 3,127 µs | 7,281 µs | **625× / 627×** |
 
-¹ NeoGraph's `par` row uses `engine->set_worker_count(1)` to compare
-the scheduling cost, not the thread-pool spin-up cost. With the default
-(hw\_concurrency) the engine pays \~280 µs of pool coordination — same
-total as Haystack but parallelizes any actual node work, which is the
-real LLM-workload payoff.
+¹ NeoGraph 의 `par` 행은 v1.0 기본 워커 수 (= 1) 에서 측정. 시퀀셜
++ CPU-tiny fan-out 의 dispatch 비용만 잰다. 진짜 병렬 wallclock 이
+필요한 그래프 (sleep-바운드 시뮬, sync HTTP 등) 는 `engine->
+set_worker_count_auto()` 한 줄로 hardware_concurrency 만큼 워커를
+풀어준다 — `examples/36_classifier_fanout.cpp` 의 5 분류기 fan-out
+은 그 한 줄로 wall time 25.2 ms 순차 → 6.0 ms 병렬 (4.22× speedup).
+NeoGraph row 는 master HEAD 에서 재측정 (WSL2 taskset+chrt
+isolation); 다른 framework 행은 2026-04-29 reference run (당시
+NeoGraph v0.2.3 = 5.0 / 14.4 µs, 두 번째 숫자만 v1.0 cycle 의
+fan-out 회귀 fix `e5ecb08` 로 14.4 → 11.6 µs 개선).
 ² pydantic-graph cannot fan out; emulated as a 6-node chain.
 
 This is the cost of **one engine round-trip**. Real LLM graphs spend
