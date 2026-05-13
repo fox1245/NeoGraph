@@ -60,15 +60,15 @@ long read_rss_kb() {
 class Worker : public GraphNode {
 public:
     std::string get_name() const override { return "worker"; }
-    asio::awaitable<std::vector<ChannelWrite>>
-    execute_async(const GraphState& state) override {
-        int i = state.get("i").get<int>();
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        int i = in.state.get("i").get<int>();
         auto ex = co_await asio::this_coro::executor;
         asio::steady_timer t(ex);
         t.expires_after(std::chrono::milliseconds(1));
         co_await t.async_wait(asio::use_awaitable);
-        co_return std::vector<ChannelWrite>{
-            ChannelWrite{"results", json::array({i * i})}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"results", json::array({i * i})});
+        co_return out;
     }
 };
 
@@ -78,12 +78,12 @@ public:
 class Planner : public GraphNode {
 public:
     std::string get_name() const override { return "planner"; }
-    NodeResult execute_full(const GraphState&) override {
-        NodeResult r;
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
         for (int i = 0; i < 3; ++i) {
-            r.sends.emplace_back(Send{"worker", json{{"i", i}}});
+            out.sends.emplace_back(Send{"worker", json{{"i", i}}});
         }
-        return r;
+        co_return out;
     }
 };
 
