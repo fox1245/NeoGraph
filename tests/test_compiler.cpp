@@ -21,7 +21,7 @@ namespace {
 class NoopNode : public GraphNode {
 public:
     explicit NoopNode(std::string n) : name_(std::move(n)) {}
-    std::vector<ChannelWrite> execute(const GraphState&) override { return {}; }
+    asio::awaitable<NodeOutput> run(NodeInput) override { co_return NodeOutput{}; }
     std::string get_name() const override { return name_; }
 private:
     std::string name_;

@@ -23,9 +23,11 @@ public:
 
     std::string get_name() const override { return name_; }
 
-    std::vector<ChannelWrite> execute(const GraphState& /*state*/) override {
+    asio::awaitable<NodeOutput> run(NodeInput /*in*/) override {
         counter_->fetch_add(1, std::memory_order_relaxed);
-        return {ChannelWrite{"out", json("hit")}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"out", json("hit")});
+        co_return out;
     }
 
 private:

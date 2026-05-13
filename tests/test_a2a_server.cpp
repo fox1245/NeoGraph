@@ -30,16 +30,20 @@ using neograph::graph::GraphNode;
 using neograph::graph::GraphState;
 using neograph::graph::NodeContext;
 using neograph::graph::NodeFactory;
+using neograph::graph::NodeInput;
+using neograph::graph::NodeOutput;
 
 namespace {
 
 class EchoNode : public GraphNode {
   public:
     EchoNode(std::string name) : name_(std::move(name)) {}
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        auto raw = state.get("prompt");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto raw = in.state.get("prompt");
         std::string prompt = raw.is_string() ? raw.get<std::string>() : raw.dump();
-        return {{"response", "echo:" + prompt}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"response", json("echo:" + prompt)});
+        co_return out;
     }
     std::string get_name() const override { return name_; }
   private:
