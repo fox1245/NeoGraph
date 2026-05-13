@@ -7,6 +7,10 @@
 // Both fixes live in src/llm/schema_provider.cpp::build_body. Tests
 // drive build_body directly via the test_access friend helper.
 
+// 본 테스트는 mkstemps + /tmp 같은 POSIX-only 경로를 쓴다. Windows
+// 빌드에서는 통째로 skip — coverage 는 Linux/macOS CI 가 보장.
+#ifndef _WIN32
+
 #include <gtest/gtest.h>
 
 #include <neograph/llm/schema_provider.h>
@@ -342,3 +346,5 @@ TEST(SchemaPerCallFields, NestedPathBindsCorrectly) {
     ASSERT_TRUE(body.contains("a")) << body.dump();
     EXPECT_EQ(body["a"]["b"]["c"]["d"].get<std::string>(), "deep");
 }
+
+#endif // !_WIN32
