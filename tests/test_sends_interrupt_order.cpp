@@ -32,15 +32,10 @@ namespace {
 // No retries, no state writes — just dispatches fan-out.
 class SinglePlanner : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState&) override { return {}; }
-    NodeResult execute_full(const GraphState&) override {
-        NodeResult nr;
-        nr.sends.push_back(Send{"worker", json{{"payload", 7}}});
-        return nr;
-    }
-    asio::awaitable<NodeResult>
-    execute_full_async(const GraphState& state) override {
-        co_return execute_full(state);
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
+        out.sends.push_back(Send{"worker", json{{"payload", 7}}});
+        co_return out;
     }
     std::string get_name() const override { return "planner"; }
 };
@@ -50,11 +45,13 @@ public:
 class Worker : public GraphNode {
 public:
     explicit Worker(std::atomic<int>* counter) : counter_(counter) {}
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
         counter_->fetch_add(1, std::memory_order_relaxed);
-        json p = state.get("payload");
+        json p = in.state.get("payload");
         int v = p.is_number_integer() ? p.get<int>() : -1;
-        return {ChannelWrite{"results", json(v)}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"results", json(v)});
+        co_return out;
     }
     std::string get_name() const override { return "worker"; }
 private:
