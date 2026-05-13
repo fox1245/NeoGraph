@@ -172,6 +172,16 @@ public:
     complete_stream_async(const CompletionParams& params,
                           const StreamCallback& on_chunk) override;
 
+    /// v1.0 single-dispatch override (Candidate 6 PR6). Anchors
+    /// invoke() so engine `provider->invoke(...)` calls land here
+    /// directly and emit one span, instead of the base default
+    /// re-forwarding to the 4-virtual chain (which would still emit
+    /// a span via the 4-virtual override but go through one extra
+    /// vtable hop). v1.0 collapses the 4 overrides' span-recording
+    /// bodies into invoke().
+    asio::awaitable<ChatCompletion>
+    invoke(const CompletionParams& params, StreamCallback on_chunk) override;
+
     std::string get_name() const override;
 
 private:

@@ -124,6 +124,20 @@ RateLimitedProvider::complete_stream(const CompletionParams& params,
     }
 }
 
+// Candidate 6 PR6: v1.0 single-dispatch native override. Routes
+// through existing 4-virtual overrides (each wraps inner with
+// retry/backoff). v1.0 will fold the retry loop into invoke()
+// and delete the legacy methods. Already inside the file-wide
+// PUSH_IGNORE block so legacy calls below don't re-warn.
+asio::awaitable<ChatCompletion>
+RateLimitedProvider::invoke(const CompletionParams& params, StreamCallback on_chunk) {
+    if (on_chunk) {
+        // Sync streaming retry — bridge to async via the base default.
+        co_return co_await Provider::complete_stream_async(params, on_chunk);
+    }
+    co_return co_await complete_async(params);
+}
+
 NEOGRAPH_POP_IGNORE_DEPRECATED
 
 } // namespace neograph::llm
