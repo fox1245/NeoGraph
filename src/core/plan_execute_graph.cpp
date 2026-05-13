@@ -99,8 +99,8 @@ public:
 
     std::string get_name() const override { return name_; }
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        auto msgs = state.get_messages();
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto msgs = in.state.get_messages();
         std::string objective;
         for (auto it = msgs.rbegin(); it != msgs.rend(); ++it) {
             if (it->role == "user") { objective = it->content; break; }
@@ -120,16 +120,16 @@ public:
         params.model = model_;
         params.messages = std::move(prompt_msgs);
 
-        auto completion = neograph::async::run_sync(provider_->invoke(params, nullptr));
+        auto completion = co_await provider_->invoke(params, nullptr);
         auto plan_items = extract_plan(completion.message.content);
 
         json plan_json = json::array();
         for (auto& s : plan_items) plan_json.push_back(json(s));
 
-        return {
-            ChannelWrite{"objective", json(objective)},
-            ChannelWrite{"plan", plan_json}
-        };
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"objective", json(objective)});
+        out.writes.push_back(ChannelWrite{"plan", plan_json});
+        co_return out;
     }
 
 private:
@@ -157,9 +157,9 @@ public:
 
     std::string get_name() const override { return name_; }
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        auto plan = state.get("plan");
-        if (!plan.is_array() || plan.size() == 0) return {};
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto plan = in.state.get("plan");
+        if (!plan.is_array() || plan.size() == 0) co_return NodeOutput{};
 
         std::string step;
         {
@@ -188,7 +188,7 @@ public:
             params.messages = convo;
             params.tools = tool_defs;
 
-            auto completion = neograph::async::run_sync(provider_->invoke(params, nullptr));
+            auto completion = co_await provider_->invoke(params, nullptr);
             auto& msg = completion.message;
             convo.push_back(msg);
 
@@ -225,10 +225,10 @@ public:
         step_record["step"] = step;
         step_record["result"] = result_text;
 
-        return {
-            ChannelWrite{"plan", new_plan},
-            ChannelWrite{"past_steps", json::array({step_record})}
-        };
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"plan", new_plan});
+        out.writes.push_back(ChannelWrite{"past_steps", json::array({step_record})});
+        co_return out;
     }
 
 private:
@@ -254,13 +254,13 @@ public:
 
     std::string get_name() const override { return name_; }
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
         std::string objective;
-        auto obj = state.get("objective");
+        auto obj = in.state.get("objective");
         if (obj.is_string()) objective = obj.get<std::string>();
 
         std::ostringstream steps_text;
-        auto past = state.get("past_steps");
+        auto past = in.state.get("past_steps");
         if (past.is_array()) {
             for (auto it = past.begin(); it != past.end(); ++it) {
                 auto rec = *it;
@@ -293,15 +293,15 @@ public:
         params.model = model_;
         params.messages = std::move(convo);
 
-        auto completion = neograph::async::run_sync(provider_->invoke(params, nullptr));
+        auto completion = co_await provider_->invoke(params, nullptr);
 
         json asst_json;
         to_json(asst_json, completion.message);
 
-        std::vector<ChannelWrite> writes;
-        writes.push_back({"final_response", json(completion.message.content)});
-        writes.push_back({"messages", json::array({asst_json})});
-        return writes;
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"final_response", json(completion.message.content)});
+        out.writes.push_back(ChannelWrite{"messages", json::array({asst_json})});
+        co_return out;
     }
 
 private:

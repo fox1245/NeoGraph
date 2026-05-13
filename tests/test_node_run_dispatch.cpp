@@ -1,14 +1,15 @@
-// PR 2 (v0.4.0) — GraphNode::run(NodeInput) -> awaitable<NodeOutput>
-// regression. Three concerns:
+// GraphNode::run(NodeInput) -> awaitable<NodeOutput> regression.
+// Two concerns (v1.0):
 //
-//   1. A node that overrides ``run()`` directly fires through
-//      NodeExecutor's dispatch path and observes the ``ctx``
-//      threaded by the engine (thread_id, stream_mode, step).
-//   2. A legacy node that overrides only ``execute()`` (no ``run``)
-//      keeps working — default ``run()`` forwards to
-//      ``execute_full_async`` → ``execute_full`` → ``execute``.
-//   3. On the streaming path, ``in.stream_cb`` is non-null and the
+//   1. A node that overrides ``run()`` fires through NodeExecutor's
+//      dispatch path and observes the ``ctx`` threaded by the engine
+//      (thread_id, stream_mode, step).
+//   2. On the streaming path, ``in.stream_cb`` is non-null and the
 //      override can emit ``LLM_TOKEN`` events through it.
+//
+// v0.4 had a third concern — legacy ``execute()`` override routes
+// through the default ``run()`` chain — but v1.0 removed the 8 legacy
+// virtuals + the default chain, so that case no longer exists.
 
 #include <gtest/gtest.h>
 #include <neograph/graph/engine.h>
@@ -57,27 +58,6 @@ public:
             json::array({json{{"role", "assistant"},
                               {"content", "ran via override"}}})});
         co_return out;
-    }
-
-    std::string get_name() const override { return name_; }
-
-private:
-    std::string             name_;
-    std::shared_ptr<RunObs> obs_;
-};
-
-// Legacy node: only overrides execute(). Default run() must forward
-// down through execute_full_async → execute_full → execute.
-class LegacyExecuteOnlyNode : public GraphNode {
-public:
-    LegacyExecuteOnlyNode(std::string name, std::shared_ptr<RunObs> obs)
-        : name_(std::move(name)), obs_(std::move(obs)) {}
-
-    std::vector<ChannelWrite> execute(const GraphState&) override {
-        obs_->invocations.fetch_add(1, std::memory_order_acq_rel);
-        return {ChannelWrite{"messages",
-            json::array({json{{"role", "assistant"},
-                              {"content", "ran via legacy execute()"}}})}};
     }
 
     std::string get_name() const override { return name_; }
@@ -165,29 +145,6 @@ TEST(NodeRunDispatch, OverrideRunSeesStreamCbOnStreamingPath) {
     EXPECT_EQ(tokens[0], "from-run-override");
 }
 
-TEST(NodeRunDispatch, LegacyExecuteOnlyNodeStillWorksViaDefaultRun) {
-    // A node that does NOT override run() — default run() must
-    // forward through execute_full_async → execute_full → execute.
-    auto obs = std::make_shared<RunObs>();
-    NodeFactory::instance().register_type(
-        "test_run_dispatch:legacy_execute_only",
-        [obs](const std::string& name, const json&, const NodeContext&) {
-            return std::make_unique<LegacyExecuteOnlyNode>(name, obs);
-        });
-
-    auto engine = make_one_node_engine(
-        "legacy", "test_run_dispatch:legacy_execute_only");
-
-    RunConfig cfg;
-    cfg.thread_id = "tid-legacy";
-    auto result = engine->run(cfg);
-
-    EXPECT_EQ(obs->invocations.load(), 1)
-        << "default GraphNode::run() must forward to legacy 8-virtual chain";
-
-    ASSERT_TRUE(result.output.contains("channels"));
-    const auto& msgs = result.output["channels"]["messages"]["value"];
-    ASSERT_TRUE(msgs.is_array());
-    ASSERT_EQ(msgs.size(), 1u);
-    EXPECT_EQ(msgs[0]["content"], "ran via legacy execute()");
-}
+// v1.0 removed `LegacyExecuteOnlyNodeStillWorksViaDefaultRun` — there
+// is no legacy 8-virtual chain for default run() to forward to. The
+// other two NodeRunDispatch tests above still cover the live surface.

@@ -5,8 +5,6 @@
 // subclass that overrides only ``execute``) are still covered by
 // ``test_node_default_dispatch.cpp`` / ``test_node_async_default.cpp``;
 // when the legacy chain is deleted in PR 9 those test files go too.
-#include <neograph/api.h>  // NEOGRAPH_PUSH_IGNORE_DEPRECATED
-NEOGRAPH_PUSH_IGNORE_DEPRECATED
 
 #include <gtest/gtest.h>
 #include <neograph/neograph.h>
@@ -208,24 +206,8 @@ TEST(NodeTest, NodeInterruptThrows) {
     }
 }
 
-// ── GraphNode default execute_full wraps execute ──
-
-class SimpleNode : public GraphNode {
-public:
-    std::vector<ChannelWrite> execute(const GraphState& /*state*/) override {
-        return {ChannelWrite{"result", json("simple")}};
-    }
-    std::string get_name() const override { return "simple"; }
-};
-
-TEST(NodeTest, DefaultExecuteFullWrapsExecute) {
-    SimpleNode node;
-    GraphState state;
-    auto result = node.execute_full(state);
-    ASSERT_EQ(result.writes.size(), 1);
-    EXPECT_EQ(result.writes[0].value, "simple");
-    EXPECT_FALSE(result.command.has_value());
-    EXPECT_TRUE(result.sends.empty());
-}
-
-NEOGRAPH_POP_IGNORE_DEPRECATED
+// v1.0 removal (9b): the `DefaultExecuteFullWrapsExecute` test verified
+// the legacy 8-virtual default chain (execute_full default wrapping
+// execute output into NodeResult::writes). The chain is gone — run() is
+// the only dispatch surface and NodeResult/NodeOutput is the only
+// return shape — so the test has nothing left to assert.
