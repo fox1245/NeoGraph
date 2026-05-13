@@ -486,10 +486,28 @@ dominant) 는 default 그대로 — pool overhead 0.
 
 ## 영향 받는 NeoGraph 내부 예제
 
-- `examples/05_parallel_fanout.cpp` — fan-out 의도 ⇒ 본 변경 이후
-  `engine->set_worker_count_auto()` 추가 필요 (별도 PR)
-- `bindings/python/examples/22_self_evolving_graph.py` — 동적 그래프
-  안에 fan-out 있으면 동일
-- 다른 deep_research / plan_executor 패턴 그래프 — 마찬가지
+본 변경 직후 함께 들어간 fan-out 가시화 패치 — 의도 보존을 위해
+명시 호출 추가. 사용자 코드도 같은 패턴이면 따라 적용:
+
+- `examples/10_send_command.cpp` — sync `sleep_for` ResearcherNode 가
+  Send 로 fan-out, `engine->set_worker_count_auto()` 추가
+- `examples/14_plan_executor.cpp` — 5 sub-topic Send fan-out (sync
+  sleep_for), 동일하게 추가
+- `examples/21_mcp_fanout.cpp` — MCP tool call 3개 동시 발사, 동일
+- `examples/36_classifier_fanout.cpp` — 이미 `set_worker_count(5)` 명시
+  돼 있었음. 주석에서 거짓말 (지금 기본=hardware_concurrency) 만 수정
+- `src/core/deep_research_graph.cpp` 의 `create_deep_research_graph()`
+  builder — `compile()` 직후 `set_worker_count_auto()` 호출. supervisor
+  가 띄우는 N researcher 가 진짜로 동시 실행되도록
+
+`examples/05_parallel_fanout.cpp` 는 `io_context` 위 코루틴 timer
+overlap 방식 (sync sleep 없음) 이라 워커 풀 영향 없음 — 그대로 둠.
+
+같은 패턴이 사용자 코드에 있다면:
+
+```cpp
+auto engine = GraphEngine::compile(def, ctx);
+engine->set_worker_count_auto();   // ← 본 줄 추가
+```
 
 자세한 측정 결과는 ROADMAP_v1.md 의 perf section 참조 (별도 추가).

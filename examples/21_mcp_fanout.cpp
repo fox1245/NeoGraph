@@ -175,6 +175,12 @@ int main(int argc, char** argv) {
     NodeContext ctx;
     auto engine = GraphEngine::compile(definition, ctx);
 
+    // 3 MCP 호출을 같은 super-step 에서 동시에 보내려면 워커 수를 늘려야 함.
+    // v1.0 부터 기본 워커 수가 1 이라 (compile() 주석 참조), 명시 안 하면
+    // 세 호출이 순차로 깎여서 wall-time 이 합산된다. set_worker_count_auto()
+    // 는 hardware_concurrency() 만큼 풀어준다.
+    engine->set_worker_count_auto();
+
     std::cout << "[*] Fanning out 3 MCP tool calls in parallel...\n\n";
 
     auto t0 = std::chrono::steady_clock::now();
