@@ -31,20 +31,15 @@ namespace {
 class FanoutPlannerNode : public GraphNode {
 public:
     explicit FanoutPlannerNode(int fanout) : fanout_(fanout) {}
-    std::vector<ChannelWrite> execute(const GraphState&) override { return {}; }
-    NodeResult execute_full(const GraphState&) override {
-        NodeResult nr;
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
         for (int i = 0; i < fanout_; ++i) {
             Send s;
             s.target_node = "worker";
             s.input = {{"task_idx", i}};
-            nr.sends.push_back(std::move(s));
+            out.sends.push_back(std::move(s));
         }
-        return nr;
-    }
-    asio::awaitable<NodeResult>
-    execute_full_async(const GraphState& state) override {
-        co_return execute_full(state);
+        co_return out;
     }
     std::string get_name() const override { return "planner"; }
 private:
@@ -54,10 +49,12 @@ private:
 // Worker node: writes result. Stateless, thread-safe.
 class WorkerNode : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        json v = state.get("task_idx");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        json v = in.state.get("task_idx");
         int idx = v.is_number_integer() ? v.get<int>() : -1;
-        return {ChannelWrite{"results", json::array({idx})}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"results", json::array({idx})});
+        co_return out;
     }
     std::string get_name() const override { return "worker"; }
 };
@@ -189,15 +186,17 @@ class FlakyWorkerNode : public GraphNode {
 public:
     FlakyWorkerNode(std::atomic<int>* attempts, int fail_until)
         : attempts_(attempts), fail_until_(fail_until) {}
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
         int n = attempts_->fetch_add(1, std::memory_order_relaxed) + 1;
         if (n <= fail_until_) {
             throw std::runtime_error(
                 "simulated transient failure #" + std::to_string(n));
         }
-        json v = state.get("task_idx");
+        json v = in.state.get("task_idx");
         int idx = v.is_number_integer() ? v.get<int>() : -1;
-        return {ChannelWrite{"results", json::array({idx})}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"results", json::array({idx})});
+        co_return out;
     }
     std::string get_name() const override { return "worker"; }
 private:
@@ -217,25 +216,20 @@ private:
 // updates make it into the merged state.
 class CommandUpdateSendTarget : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState&) override { return {}; }
-    NodeResult execute_full(const GraphState& state) override {
-        NodeResult nr;
-        json v = state.get("task_idx");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        NodeOutput out;
+        json v = in.state.get("task_idx");
         int idx = v.is_number_integer() ? v.get<int>() : -1;
         // A normal write (baseline) and a Command.updates entry. If the
         // engine drops command->updates, `side_effects` will stay empty
         // even though `results` accumulates normally.
-        nr.writes.push_back(ChannelWrite{"results", json::array({idx})});
+        out.writes.push_back(ChannelWrite{"results", json::array({idx})});
         Command cmd;
         cmd.goto_node = "__end__";
         cmd.updates.push_back(
             ChannelWrite{"side_effects", json::array({idx * 100})});
-        nr.command = std::move(cmd);
-        return nr;
-    }
-    asio::awaitable<NodeResult>
-    execute_full_async(const GraphState& state) override {
-        co_return execute_full(state);
+        out.command = std::move(cmd);
+        co_return out;
     }
     std::string get_name() const override { return "worker"; }
 };
