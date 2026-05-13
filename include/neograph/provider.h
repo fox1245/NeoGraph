@@ -244,6 +244,53 @@ class NEOGRAPH_API Provider {
                           const StreamCallback& on_chunk);
 
     /**
+     * @brief Single-dispatch async-streaming completion (v1.0 canonical).
+     *
+     * The unified entry point that future v1.0+ Provider subclasses
+     * override. Replaces the current `(sync/async) × (stream/non-stream)`
+     * 4-virtual cross-product (`complete` / `complete_async` /
+     * `complete_stream` / `complete_stream_async`) with one async-
+     * streaming-superset method. ROADMAP_v1.md Candidate 6.
+     *
+     * Semantics:
+     *   - `on_chunk == nullptr` → caller wants the full assembled
+     *     completion only; provider may skip streaming framing.
+     *   - `on_chunk != nullptr` → caller wants tokens incrementally;
+     *     provider invokes `on_chunk` on each chunk AND returns the
+     *     full assembled completion when the stream ends.
+     *
+     * The returned awaitable resolves on the caller's executor; the
+     * `on_chunk` callback runs there too (single-threaded with the
+     * awaiter, same invariant `complete_stream_async` already provides).
+     *
+     * **Deprecation strategy** (Candidate 6 PR sequence):
+     *   - This PR (additive): `invoke()` lands as a new virtual; default
+     *     forwards to the legacy 4-virtual chain (`complete_stream_async`
+     *     when `on_chunk` is set, `complete_async` otherwise) so every
+     *     existing Provider subclass keeps working unchanged.
+     *   - Subsequent PR: native subclasses (`OpenAIProvider`,
+     *     `SchemaProvider`, `RateLimitedProvider`) override `invoke()`
+     *     directly; their old 4 overrides become thin adapters.
+     *   - Subsequent PR: 4 legacy virtuals get `[[deprecated]]` markers.
+     *   - v1.0.0: 4 legacy virtuals removed; `invoke()` becomes the
+     *     only Provider virtual besides `get_name()`.
+     *
+     * **Override contract**: subclasses overriding `invoke()` MUST NOT
+     * call any of the 4 legacy `complete_*` methods on themselves —
+     * those default to forwarding to `invoke()` (in a future PR), which
+     * would recurse infinitely. New code: override `invoke()` and only
+     * `invoke()`. Old code: keep overriding the 4 legacy methods; the
+     * default `invoke()` here delegates to them.
+     *
+     * @param params   Completion parameters (model, messages, tools, ...).
+     * @param on_chunk Optional per-chunk callback. `nullptr` for non-
+     *                 streaming use.
+     * @return Awaitable yielding the full assembled completion.
+     */
+    virtual asio::awaitable<ChatCompletion>
+    invoke(const CompletionParams& params, StreamCallback on_chunk = nullptr);
+
+    /**
      * @brief Get the provider name (e.g., "openai", "claude").
      *
      * **Opaque debug identifier**, not a typed dispatch key. Different

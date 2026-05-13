@@ -128,4 +128,31 @@ Provider::complete_stream_async(const CompletionParams& params,
     co_return std::move(*shared->result);
 }
 
+// v1.0 unified invoke() — additive virtual that future-proofs the
+// Provider dispatch surface. New providers override THIS one method;
+// legacy providers (OpenAIProvider's complete_async + complete_stream_async
+// overrides, SchemaProvider's same pair, RateLimitedProvider's 4-method
+// delegation, every user-written Provider subclass) keep working
+// unchanged because the default body below forwards to the legacy
+// 4-virtual chain — preserving the current cross-product fallback.
+//
+// Subsequent Candidate 6 PRs migrate native subclasses to override
+// invoke() directly; the 4 legacy virtuals then gain [[deprecated]]
+// markers; v1.0 deletes them. See ROADMAP_v1.md Candidate 6.
+//
+// No recursion guard needed in this PR: the 4 legacy virtuals' defaults
+// don't yet route back through invoke(), so the chain terminates at
+// either complete_async (which co_returns complete()) or
+// complete_stream_async (which spawns a worker thread). When a future
+// PR flips the legacy defaults to forward INTO invoke() — closing the
+// loop — a guard analogous to ExecuteDefaultGuard (graph_node.cpp) will
+// be added then, not now.
+asio::awaitable<ChatCompletion>
+Provider::invoke(const CompletionParams& params, StreamCallback on_chunk) {
+    if (on_chunk) {
+        co_return co_await complete_stream_async(params, on_chunk);
+    }
+    co_return co_await complete_async(params);
+}
+
 } // namespace neograph
