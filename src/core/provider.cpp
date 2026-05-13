@@ -140,6 +140,18 @@ Provider::complete_stream_async(const CompletionParams& params,
 // invoke() directly; the 4 legacy virtuals then gain [[deprecated]]
 // markers; v1.0 deletes them. See ROADMAP_v1.md Candidate 6.
 //
+// **Cancel propagation parity with sync complete()** (Candidate 6 PR3):
+// the legacy sync `Provider::complete()` reads
+// `neograph::graph::current_cancel_token()` from the engine's thread-
+// local scope so a node body calling `provider->complete(params)`
+// without explicitly pinning `params.cancel_token` still gets cancel
+// propagation. As internal call sites migrate from
+// `provider->complete(params)` to `co_await provider->invoke(params, ...)`,
+// invoke() must mirror that fallback or the cancel signal is silently
+// lost. We pull the same thread_local at invoke entry and stamp the
+// effective params; explicit `params.cancel_token` (set by the caller)
+// always wins.
+//
 // No recursion guard needed in this PR: the 4 legacy virtuals' defaults
 // don't yet route back through invoke(), so the chain terminates at
 // either complete_async (which co_returns complete()) or
@@ -149,10 +161,34 @@ Provider::complete_stream_async(const CompletionParams& params,
 // be added then, not now.
 asio::awaitable<ChatCompletion>
 Provider::invoke(const CompletionParams& params, StreamCallback on_chunk) {
-    if (on_chunk) {
-        co_return co_await complete_stream_async(params, on_chunk);
+    // Fast path: caller already pinned cancel_token (or there's no
+    // engine scope on this thread). Forward const& to avoid the
+    // CompletionParams copy.
+    if (params.cancel_token) {
+        if (on_chunk) {
+            co_return co_await complete_stream_async(params, on_chunk);
+        }
+        co_return co_await complete_async(params);
     }
-    co_return co_await complete_async(params);
+    auto* tok = neograph::graph::current_cancel_token();
+    if (!tok) {
+        if (on_chunk) {
+            co_return co_await complete_stream_async(params, on_chunk);
+        }
+        co_return co_await complete_async(params);
+    }
+    // Stamp engine's thread_local token onto a copy of params. The
+    // token is owned by the engine's CurrentCancelTokenScope (lifetime
+    // strictly outlives this awaitable), so a non-owning shared_ptr
+    // alias suffices — no extra ref-count contention with the engine's
+    // own shared_ptr.
+    CompletionParams effective = params;
+    effective.cancel_token = std::shared_ptr<neograph::graph::CancelToken>(
+        tok, [](neograph::graph::CancelToken*){});
+    if (on_chunk) {
+        co_return co_await complete_stream_async(effective, on_chunk);
+    }
+    co_return co_await complete_async(effective);
 }
 
 } // namespace neograph

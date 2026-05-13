@@ -4,6 +4,7 @@
 #include <neograph/graph/node.h>
 #include <neograph/graph/state.h>
 #include <neograph/graph/types.h>
+#include <neograph/async/run_sync.h>
 
 #include <algorithm>
 #include <memory>
@@ -216,7 +217,7 @@ public:
         params.temperature = 0.3f;
         params.max_tokens = 2048;
 
-        auto completion = provider_->complete(params);
+        auto completion = neograph::async::run_sync(provider_->invoke(params, nullptr));
 
         json asst;
         to_json(asst, completion.message);
@@ -529,7 +530,7 @@ public:
             params.temperature = 0.3f;
             params.max_tokens = 2048;
 
-            auto completion = provider_->complete(params);
+            auto completion = neograph::async::run_sync(provider_->invoke(params, nullptr));
             auto& msg = completion.message;
             convo.push_back(msg);
 
@@ -609,7 +610,7 @@ private:
         cp.max_tokens = 2048;
 
         try {
-            auto completion = provider_->complete(cp);
+            auto completion = neograph::async::run_sync(provider_->invoke(cp, nullptr));
             std::string out = completion.message.content;
             // Hard cap regardless of what the model produced. Protects the
             // supervisor's accumulated context from unbounded growth across
@@ -732,7 +733,7 @@ public:
             params.max_tokens = 4096;
 
             try {
-                auto completion = provider_->complete(params);
+                auto completion = neograph::async::run_sync(provider_->invoke(params, nullptr));
                 return {
                     ChannelWrite{"final_report", json(completion.message.content)}
                 };
@@ -827,7 +828,7 @@ Output ONLY the brief, in plain markdown. No preamble. Keep it under 200 words.)
             params.temperature = 0.2f;
             params.max_tokens = 800;
 
-            auto completion = provider_->complete(params);
+            auto completion = neograph::async::run_sync(provider_->invoke(params, nullptr));
             std::string brief = completion.message.content;
             if (brief.empty()) brief = user_query;  // pass-through guard
             return {ChannelWrite{"research_brief", json(std::move(brief))}};
@@ -928,7 +929,7 @@ Bias toward PROCEED — only ASK when the question would clearly fork the resear
             params.temperature = 0.0f;
             params.max_tokens = 200;
 
-            verdict = provider_->complete(params).message.content;
+            verdict = neograph::async::run_sync(provider_->invoke(params, nullptr)).message.content;
         } catch (const std::exception&) {
             // Provider failure — degrade to PROCEED so the run isn't sunk.
             return NodeResult{};
