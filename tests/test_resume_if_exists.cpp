@@ -18,8 +18,8 @@ namespace {
 // channel. One run = one assistant turn appended.
 class EchoNode : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        auto msgs = state.get("messages");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto msgs = in.state.get("messages");
         std::string last_user = "";
         if (msgs.is_array()) {
             for (const auto& m : msgs) {
@@ -30,7 +30,9 @@ public:
         }
         json reply = {{"role", "assistant"},
                       {"content", "echo: " + last_user}};
-        return {ChannelWrite{"messages", json::array({reply})}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"messages", json::array({reply})});
+        co_return out;
     }
     std::string get_name() const override { return "echo"; }
 };

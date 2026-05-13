@@ -21,7 +21,7 @@ namespace {
 // step loop, so the graph structure just has to compile.
 class Noop : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState&) override { return {}; }
+    asio::awaitable<NodeOutput> run(NodeInput) override { co_return NodeOutput{}; }
     std::string get_name() const override { return "noop"; }
 };
 
