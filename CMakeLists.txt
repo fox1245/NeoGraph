@@ -955,6 +955,11 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
     target_link_libraries(bench_async_http PRIVATE
         neograph::async httplib OpenSSL::SSL OpenSSL::Crypto)
     target_compile_features(bench_async_http PRIVATE cxx_std_20)
+    # bench_async_http 가 conn_pool.h → httplib.h 를 끌어들이는데, neograph
+    # 의 번들 cpp-httplib 는 TLS=ON 으로 빌드되므로 매크로 일관성
+    # (issue #16) 가드가 같은 정의를 요구한다. PRIVATE 으로 추가.
+    target_compile_definitions(bench_async_http PRIVATE
+        CPPHTTPLIB_OPENSSL_SUPPORT)
 
     # Sustained-burst stress harness — Phase 3 operational-readiness
     # gate. Holds N runs in flight for M wall-clock seconds, samples
