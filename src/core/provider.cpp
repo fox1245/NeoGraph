@@ -26,6 +26,17 @@
 
 namespace neograph {
 
+// Candidate 6 PR4: the 4 legacy virtuals (complete / complete_async /
+// complete_stream / complete_stream_async) are now [[deprecated]]; this
+// TU is the canonical default-chain implementation that legitimately
+// calls them on behalf of legacy subclasses + the new invoke() default
+// (which forwards into the 4-virtual chain through the deprecation
+// window). Bracket the whole namespace body so internal forwarders
+// don't drown the build in self-warnings; user code overriding the
+// 4 virtuals or calling them externally still sees the marker on its
+// own override / call site.
+NEOGRAPH_PUSH_IGNORE_DEPRECATED
+
 ChatCompletion Provider::complete(const CompletionParams& params) {
     // v0.3: thread cancel propagation through the sync path. The
     // engine sets a thread-local CancelToken before invoking each
@@ -190,5 +201,7 @@ Provider::invoke(const CompletionParams& params, StreamCallback on_chunk) {
     }
     co_return co_await complete_async(effective);
 }
+
+NEOGRAPH_POP_IGNORE_DEPRECATED
 
 } // namespace neograph
