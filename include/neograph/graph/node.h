@@ -110,24 +110,6 @@ using NodeOutput = NodeResult;
         "Migration recipe: docs/migration-v0.4-to-v1.0.md")]]
 
 /**
- * @brief Thrown by the GraphNode default-execute chain when none of
- *        ``execute`` / ``execute_async`` / ``execute_full`` /
- *        ``execute_full_async`` is overridden in a subclass.
- *
- * Inherits from ``std::runtime_error`` for back-compat — existing
- * test code catching ``runtime_error`` continues to work. The
- * dedicated type lets the engine (and the streaming default below)
- * distinguish "user forgot to override" from "user override threw
- * for legitimate reasons", so we can fall through to
- * ``execute_stream`` for streaming-only nodes without silently
- * swallowing real errors. (TODO_v0.3.md item #10 / v0.3.2.)
- */
-class NEOGRAPH_API GraphNodeMissingOverride : public std::runtime_error {
-public:
-    using std::runtime_error::runtime_error;
-};
-
-/**
  * @brief Abstract base class for all graph nodes.
  *
  * Nodes are the building blocks of the graph. Each node reads from
@@ -199,115 +181,7 @@ public:
      * ``feedback_async_bridge_required.md`` / the v0.2.0 RunConfig
      * crash) does not apply.
      */
-    virtual asio::awaitable<NodeOutput> run(NodeInput in);
-
-    /**
-     * @brief Execute the node: read state, return channel writes.
-     *
-     * Stage 3 / Sem 3.4: defaults to bridging through `execute_async`
-     * via `neograph::async::run_sync`. Subclasses written against the
-     * sync path keep overriding this directly; async-native nodes (Sem
-     * 3.5+) override `execute_async` and inherit this. Override at
-     * least one — overriding neither yields infinite mutual recursion.
-     *
-     * @param state The current graph state (read-only access).
-     * @return Vector of channel writes to apply to the state.
-     */
-    NEOGRAPH_DEPRECATED_VIRTUAL
-    virtual std::vector<ChannelWrite> execute(const GraphState& state);
-
-    /**
-     * @brief Async peer for execute().
-     *
-     * Default body co_returns `execute(state)` — runs on whatever
-     * thread resumes the coroutine, blocking it for the duration.
-     * Override to issue non-blocking operations (typically
-     * `co_await provider->complete_async(...)` for LLM nodes).
-     *
-     * @param state The current graph state.
-     * @return Awaitable yielding the channel writes.
-     */
-    NEOGRAPH_DEPRECATED_VIRTUAL
-    virtual asio::awaitable<std::vector<ChannelWrite>>
-    execute_async(const GraphState& state);
-
-    /**
-     * @brief Streaming execution variant.
-     *
-     * Default implementation delegates to execute(). Override to emit
-     * LLM_TOKEN events during execution.
-     *
-     * @param state The current graph state.
-     * @param cb Callback for emitting streaming events.
-     * @return Vector of channel writes.
-     */
-    NEOGRAPH_DEPRECATED_VIRTUAL
-    virtual std::vector<ChannelWrite> execute_stream(
-        const GraphState& state, const GraphStreamCallback& cb);
-
-    /**
-     * @brief Async peer of execute_stream — Sem 3.4b.
-     *
-     * Default body co_returns execute_stream(state, cb). Same crossover
-     * shape as execute / execute_async. Override at least one of the
-     * sync/async pair when adding a streaming-aware async node.
-     */
-    NEOGRAPH_DEPRECATED_VIRTUAL
-    virtual asio::awaitable<std::vector<ChannelWrite>> execute_stream_async(
-        const GraphState& state, const GraphStreamCallback& cb);
-
-    /**
-     * @brief Extended execute returning a full NodeResult.
-     *
-     * Default implementation wraps execute() output into NodeResult::writes.
-     * Override this to return Command (routing override) or Send (dynamic fan-out).
-     *
-     * @param state The current graph state.
-     * @return NodeResult with writes, optional Command, and optional Sends.
-     */
-    NEOGRAPH_DEPRECATED_VIRTUAL
-    virtual NodeResult execute_full(const GraphState& state);
-
-    /**
-     * @brief Async peer of execute_full — Sem 3.4b / Stage 4.
-     *
-     * Default routes through `execute_full(state)` directly so that:
-     *   - Sync overrides of `execute_full` that emit Command/Send
-     *     work correctly on the async path (no silent dropping).
-     *   - Async-native overrides of `execute_async` flow through
-     *     `execute_full → execute → run_sync(execute_async)` for a
-     *     single sync→async hop.
-     *
-     * **Recommended override pattern**:
-     *   - Async-native Send/Command emitters: override THIS method
-     *     directly, build the NodeResult inside the awaitable.
-     *   - Sync-only emitters: don't need to override this — the
-     *     default already calls your sync `execute_full`.
-     *
-     * The pre-6bd9632 contract required a one-line bridge override
-     * here for sync Send/Command emitters; that contract is no longer
-     * needed but is harmless if you have it.
-     */
-    NEOGRAPH_DEPRECATED_VIRTUAL
-    virtual asio::awaitable<NodeResult> execute_full_async(
-        const GraphState& state);
-
-    /**
-     * @brief Extended streaming execution returning a full NodeResult.
-     * @param state The current graph state.
-     * @param cb Callback for emitting streaming events.
-     * @return NodeResult with writes, optional Command, and optional Sends.
-     */
-    NEOGRAPH_DEPRECATED_VIRTUAL
-    virtual NodeResult execute_full_stream(
-        const GraphState& state, const GraphStreamCallback& cb);
-
-    /**
-     * @brief Async peer of execute_full_stream — Sem 3.4b.
-     */
-    NEOGRAPH_DEPRECATED_VIRTUAL
-    virtual asio::awaitable<NodeResult> execute_full_stream_async(
-        const GraphState& state, const GraphStreamCallback& cb);
+    virtual asio::awaitable<NodeOutput> run(NodeInput in) = 0;
 
     /**
      * @brief Get the node's unique name within the graph.

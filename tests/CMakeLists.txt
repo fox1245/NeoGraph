@@ -12,7 +12,6 @@ add_executable(neograph_tests
     test_multi_node_resume.cpp
     test_resume_if_exists.cpp
     test_cancel_token_propagation.cpp
-    test_execute_stream_only_dispatch.cpp
     test_live_llm_cancel_fanout_cpp.cpp
     test_scheduler.cpp
     test_node_execution.cpp
@@ -47,14 +46,12 @@ add_executable(neograph_tests
     test_schema_provider_extra_fields_temperature.cpp
     test_openai_provider_async.cpp
     test_checkpoint_async_default.cpp
-    test_node_async_default.cpp
     test_graph_engine_async_api.cpp
     test_async_tool.cpp
     test_executor_async_retry.cpp
     test_executor_async_parallel.cpp
     test_async_run_sync_pool.cpp
     test_node_cache.cpp
-    test_node_default_dispatch.cpp
     test_node_run_dispatch.cpp
     test_cancel_token_fork.cpp
     test_concurrent_stress.cpp

@@ -176,7 +176,7 @@ public:
 
     std::string get_name() const override { return name_; }
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
         std::vector<ChatMessage> convo;
 
         // System prompt first.
@@ -188,7 +188,7 @@ public:
         }
 
         // Then the supervisor's running conversation.
-        auto sv = state.get("supervisor_messages");
+        auto sv = in.state.get("supervisor_messages");
         if (sv.is_array()) {
             for (auto it = sv.begin(); it != sv.end(); ++it) {
                 ChatMessage m;
@@ -202,7 +202,7 @@ public:
         bool has_user = false;
         for (const auto& m : convo) if (m.role == "user") { has_user = true; break; }
         if (!has_user) {
-            auto brief = state.get("research_brief");
+            auto brief = in.state.get("research_brief");
             ChatMessage u;
             u.role = "user";
             u.content = brief.is_string() ? brief.get<std::string>()
@@ -217,7 +217,7 @@ public:
         params.temperature = 0.3f;
         params.max_tokens = 2048;
 
-        auto completion = neograph::async::run_sync(provider_->invoke(params, nullptr));
+        auto completion = co_await provider_->invoke(params, nullptr);
 
         json asst;
         to_json(asst, completion.message);
@@ -225,13 +225,13 @@ public:
         // Track how many supervisor rounds have run — dispatcher uses this
         // as a safety cap.
         int iter = 0;
-        auto cur = state.get("supervisor_iterations");
+        auto cur = in.state.get("supervisor_iterations");
         if (cur.is_number_integer()) iter = cur.get<int>();
 
-        return {
-            ChannelWrite{"supervisor_messages", json::array({asst})},
-            ChannelWrite{"supervisor_iterations", json(iter + 1)}
-        };
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"supervisor_messages", json::array({asst})});
+        out.writes.push_back(ChannelWrite{"supervisor_iterations", json(iter + 1)});
+        co_return out;
     }
 
 private:
@@ -259,28 +259,16 @@ public:
 
     std::string get_name() const override { return name_; }
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        return execute_full(state).writes;
-    }
-
-    // Stage-4 async bridge: forwards to sync execute_full so Command/Send
-    // still propagate on the run_async path. Without this, the Stage-4
-    // async-first default would drop the Command we emit here.
-    asio::awaitable<NodeResult>
-    execute_full_async(const GraphState& state) override {
-        co_return execute_full(state);
-    }
-
-    NodeResult execute_full(const GraphState& state) override {
-        NodeResult nr;
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        NodeOutput nr;
 
         int iter = 0;
-        auto cur = state.get("supervisor_iterations");
+        auto cur = in.state.get("supervisor_iterations");
         if (cur.is_number_integer()) iter = cur.get<int>();
 
         // Parse supervisor_messages and find the tail assistant tool-calls.
         std::vector<ChatMessage> sv_msgs;
-        auto sv = state.get("supervisor_messages");
+        auto sv = in.state.get("supervisor_messages");
         if (sv.is_array()) {
             for (auto it = sv.begin(); it != sv.end(); ++it) {
                 ChatMessage m;
@@ -295,7 +283,7 @@ public:
             // Route to final report; whatever prose it produced will be
             // ignored (final report reads `notes`).
             nr.command = Command{"final_report", {}};
-            return nr;
+            co_return nr;
         }
 
         // =====================================================================
@@ -401,7 +389,7 @@ public:
             nr.writes.push_back(
                 ChannelWrite{"supervisor_messages", sv_updates});
             nr.command = Command{"final_report", {}};
-            return nr;
+            co_return nr;
         }
 
         // Iteration cap: force finish. Pair every tool_use so the saved
@@ -415,7 +403,7 @@ public:
             nr.writes.push_back(
                 ChannelWrite{"supervisor_messages", sv_updates});
             nr.command = Command{"final_report", {}};
-            return nr;
+            co_return nr;
         }
 
         // If the supervisor ONLY called think_tool / unknown / skipped
@@ -426,7 +414,7 @@ public:
                     ChannelWrite{"supervisor_messages", sv_updates});
             }
             nr.command = Command{"supervisor", {}};
-            return nr;
+            co_return nr;
         }
 
         // Emit Sends for each dispatchable conduct_research. Researcher
@@ -457,7 +445,7 @@ public:
         }
 
         // After Sends finish and fan-in, edge routes back to supervisor.
-        return nr;
+        co_return nr;
     }
 
 private:
@@ -488,23 +476,23 @@ public:
 
     std::string get_name() const override { return name_; }
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
         std::string topic;
         {
-            auto t = state.get("current_topic");
+            auto t = in.state.get("current_topic");
             if (t.is_string()) topic = t.get<std::string>();
         }
         std::string call_id;
         {
-            auto c = state.get("current_call_id");
+            auto c = in.state.get("current_call_id");
             if (c.is_string()) call_id = c.get<std::string>();
         }
 
         if (topic.empty()) {
             // Supervisor emitted a malformed conduct_research; record a
             // terse failure note so the supervisor sees something.
-            return fanin_writes(call_id, topic,
-                "(researcher received empty topic; skipped)");
+            co_return NodeOutput{fanin_writes(call_id, topic,
+                "(researcher received empty topic; skipped)")};
         }
 
         std::vector<ChatTool> tool_defs;
@@ -530,7 +518,7 @@ public:
             params.temperature = 0.3f;
             params.max_tokens = 2048;
 
-            auto completion = neograph::async::run_sync(provider_->invoke(params, nullptr));
+            auto completion = co_await provider_->invoke(params, nullptr);
             auto& msg = completion.message;
             convo.push_back(msg);
 
@@ -575,7 +563,7 @@ public:
         // model; could be swapped for a cheaper one later.
         std::string compressed = compress(convo, topic);
 
-        return fanin_writes(call_id, topic, compressed);
+        co_return NodeOutput{fanin_writes(call_id, topic, compressed)};
     }
 
 private:
@@ -675,15 +663,15 @@ public:
 
     std::string get_name() const override { return name_; }
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
         std::string brief;
         {
-            auto b = state.get("research_brief");
+            auto b = in.state.get("research_brief");
             if (b.is_string()) brief = b.get<std::string>();
         }
 
         std::ostringstream findings;
-        auto notes = state.get("raw_notes");
+        auto notes = in.state.get("raw_notes");
         if (notes.is_array()) {
             int idx = 1;
             for (auto it = notes.begin(); it != notes.end(); ++it, ++idx) {
@@ -699,13 +687,13 @@ public:
 
         std::string findings_text = findings.str();
         if (findings_text.empty()) {
-            return {
-                ChannelWrite{"final_report", json(std::string(
-                    "# Research Report\n\n"
-                    "No researcher findings were collected. "
-                    "The supervisor terminated without dispatching any "
-                    "`conduct_research` calls."))}
-            };
+            NodeOutput out;
+            out.writes.push_back(ChannelWrite{"final_report", json(std::string(
+                "# Research Report\n\n"
+                "No researcher findings were collected. "
+                "The supervisor terminated without dispatching any "
+                "`conduct_research` calls."))});
+            co_return out;
         }
 
         // Retry loop on token-limit / context-length errors. Each retry
@@ -732,41 +720,54 @@ public:
             params.temperature = 0.4f;
             params.max_tokens = 4096;
 
+            // GCC-13 coroutine codegen: catch around co_await can miss the
+            // exception type. Capture via exception_ptr and rethrow in a
+            // non-coroutine try/catch (same pattern used elsewhere).
+            ChatCompletion completion;
+            std::exception_ptr eptr;
             try {
-                auto completion = neograph::async::run_sync(provider_->invoke(params, nullptr));
-                return {
-                    ChannelWrite{"final_report", json(completion.message.content)}
-                };
+                completion = co_await provider_->invoke(params, nullptr);
+            } catch (...) {
+                eptr = std::current_exception();
+            }
+            if (!eptr) {
+                NodeOutput out;
+                out.writes.push_back(ChannelWrite{"final_report",
+                    json(completion.message.content)});
+                co_return out;
+            }
+            try {
+                std::rethrow_exception(eptr);
             } catch (const std::exception& e) {
                 last_error = e.what();
-                std::string lc = last_error;
-                std::transform(lc.begin(), lc.end(), lc.begin(),
-                               [](unsigned char c){ return std::tolower(c); });
-                bool is_context_overflow =
-                    lc.find("context") != std::string::npos
-                    || lc.find("token") != std::string::npos
-                    || lc.find("length") != std::string::npos
-                    || lc.find("too long") != std::string::npos
-                    || lc.find("max_tokens") != std::string::npos;
-                if (!is_context_overflow || attempt == MAX_RETRIES - 1) {
-                    throw;  // not a token-limit issue, or out of retries
-                }
-                // Truncate findings by 25% and retry. Keep at least 1 KB.
-                size_t new_size = std::max<size_t>(
-                    1024, findings_text.size() * 3 / 4);
-                if (new_size >= findings_text.size()) {
-                    throw;  // can't truncate further
-                }
-                findings_text.resize(new_size);
-                findings_text += "\n\n[... truncated to fit context window]\n";
             }
+            std::string lc = last_error;
+            std::transform(lc.begin(), lc.end(), lc.begin(),
+                           [](unsigned char c){ return std::tolower(c); });
+            bool is_context_overflow =
+                lc.find("context") != std::string::npos
+                || lc.find("token") != std::string::npos
+                || lc.find("length") != std::string::npos
+                || lc.find("too long") != std::string::npos
+                || lc.find("max_tokens") != std::string::npos;
+            if (!is_context_overflow || attempt == MAX_RETRIES - 1) {
+                std::rethrow_exception(eptr);  // not a token-limit issue, or out of retries
+            }
+            // Truncate findings by 25% and retry. Keep at least 1 KB.
+            size_t new_size = std::max<size_t>(
+                1024, findings_text.size() * 3 / 4);
+            if (new_size >= findings_text.size()) {
+                std::rethrow_exception(eptr);  // can't truncate further
+            }
+            findings_text.resize(new_size);
+            findings_text += "\n\n[... truncated to fit context window]\n";
         }
         // Unreachable, but the compiler can't prove it.
-        return {
-            ChannelWrite{"final_report", json(
-                std::string("# Research Report\n\nFinal-report synthesis "
-                            "failed after retries: ") + last_error)}
-        };
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"final_report", json(
+            std::string("# Research Report\n\nFinal-report synthesis "
+                        "failed after retries: ") + last_error)});
+        co_return out;
     }
 
 private:
@@ -796,12 +797,14 @@ public:
 
     std::string get_name() const override { return name_; }
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        auto q = state.get("user_query");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto q = in.state.get("user_query");
         std::string user_query = q.is_string() ? q.get<std::string>() : "";
 
         if (user_query.empty()) {
-            return {ChannelWrite{"research_brief", json(std::string{})}};
+            NodeOutput out;
+            out.writes.push_back(ChannelWrite{"research_brief", json(std::string{})});
+            co_return out;
         }
 
         const char* BRIEF_SYSTEM = R"(You convert a user's research question into a focused research brief.
@@ -814,7 +817,11 @@ The brief must:
 
 Output ONLY the brief, in plain markdown. No preamble. Keep it under 200 words.)";
 
-        try {
+        // GCC-13 coroutine codegen: catch around co_await must dispatch
+        // via exception_ptr — same pattern as FinalReportNode above.
+        ChatCompletion completion;
+        std::exception_ptr eptr;
+        {
             std::vector<ChatMessage> convo;
             ChatMessage s; s.role = "system"; s.content = BRIEF_SYSTEM;
             convo.push_back(std::move(s));
@@ -828,15 +835,24 @@ Output ONLY the brief, in plain markdown. No preamble. Keep it under 200 words.)
             params.temperature = 0.2f;
             params.max_tokens = 800;
 
-            auto completion = neograph::async::run_sync(provider_->invoke(params, nullptr));
-            std::string brief = completion.message.content;
-            if (brief.empty()) brief = user_query;  // pass-through guard
-            return {ChannelWrite{"research_brief", json(std::move(brief))}};
-        } catch (const std::exception&) {
+            try {
+                completion = co_await provider_->invoke(params, nullptr);
+            } catch (...) {
+                eptr = std::current_exception();
+            }
+        }
+        if (eptr) {
             // Provider failure → degrade gracefully to pass-through so
             // the rest of the graph still gets a (degraded) brief.
-            return {ChannelWrite{"research_brief", json(user_query)}};
+            NodeOutput out;
+            out.writes.push_back(ChannelWrite{"research_brief", json(user_query)});
+            co_return out;
         }
+        std::string brief = completion.message.content;
+        if (brief.empty()) brief = user_query;  // pass-through guard
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"research_brief", json(std::move(brief))});
+        co_return out;
     }
 private:
     std::string               name_;
@@ -867,24 +883,17 @@ public:
 
     std::string get_name() const override { return name_; }
 
-    std::vector<ChannelWrite> execute(const GraphState&) override { return {}; }
-
-    asio::awaitable<NodeResult>
-    execute_full_async(const GraphState& state) override {
-        co_return execute_full(state);
-    }
-
-    NodeResult execute_full(const GraphState& state) override {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
         std::string query;
         {
-            auto q = state.get("user_query");
+            auto q = in.state.get("user_query");
             if (q.is_string()) query = q.get<std::string>();
         }
 
         // Phase 2: messages channel populated by engine.resume() with
         // the user's clarification reply. Append it to user_query and
         // continue.
-        auto msgs = state.get("messages");
+        auto msgs = in.state.get("messages");
         if (msgs.is_array() && msgs.size() > 0) {
             auto latest = msgs[msgs.size() - 1];
             std::string answer;
@@ -896,11 +905,11 @@ public:
             if (!answer.empty()) {
                 augmented += "\n\n[user clarification]\n" + answer;
             }
-            NodeResult r;
+            NodeOutput r;
             r.writes.push_back(ChannelWrite{"user_query", json(augmented)});
             // Clear the messages channel so a future interrupt starts fresh.
             r.writes.push_back(ChannelWrite{"messages", json::array()});
-            return r;
+            co_return r;
         }
 
         // Phase 1: ask the LLM whether the query needs clarification.
@@ -915,8 +924,10 @@ If a critical detail is missing (scope, time period, comparison target, definiti
 
 Bias toward PROCEED — only ASK when the question would clearly fork the research direction. Do not ask cosmetic preference questions.)";
 
+        // GCC-13 coroutine codegen workaround — same exception_ptr dance.
         std::string verdict;
-        try {
+        std::exception_ptr eptr;
+        {
             std::vector<ChatMessage> convo;
             ChatMessage s; s.role = "system"; s.content = CLARIFY_SYSTEM;
             convo.push_back(std::move(s));
@@ -929,10 +940,16 @@ Bias toward PROCEED — only ASK when the question would clearly fork the resear
             params.temperature = 0.0f;
             params.max_tokens = 200;
 
-            verdict = neograph::async::run_sync(provider_->invoke(params, nullptr)).message.content;
-        } catch (const std::exception&) {
+            try {
+                auto completion = co_await provider_->invoke(params, nullptr);
+                verdict = completion.message.content;
+            } catch (...) {
+                eptr = std::current_exception();
+            }
+        }
+        if (eptr) {
             // Provider failure — degrade to PROCEED so the run isn't sunk.
-            return NodeResult{};
+            co_return NodeOutput{};
         }
 
         // Parse the decision. Tolerant — accept "DECISION: PROCEED" anywhere
@@ -942,7 +959,7 @@ Bias toward PROCEED — only ASK when the question would clearly fork the resear
                        [](unsigned char c){ return std::tolower(c); });
         if (lc.find("proceed") != std::string::npos
             && lc.find("ask") == std::string::npos) {
-            return NodeResult{};
+            co_return NodeOutput{};
         }
 
         // Extract the clarifying question (line starting with "QUESTION:").
@@ -1009,29 +1026,14 @@ public:
     explicit HumanReviewNode(std::string name) : name_(std::move(name)) {}
     std::string get_name() const override { return name_; }
 
-    std::vector<ChannelWrite> execute(const GraphState&) override {
-        // Should never be called — execute_full handles both phases and
-        // emits a Command. Throwing here would mask a real issue, so
-        // return empty writes; the engine will then route via the
-        // (unused) `human_review → __end__` edge declared in the graph
-        // definition. The Command path in execute_full is the intended
-        // route.
-        return {};
-    }
-
-    asio::awaitable<NodeResult>
-    execute_full_async(const GraphState& state) override {
-        co_return execute_full(state);
-    }
-
-    NodeResult execute_full(const GraphState& state) override {
-        auto msgs = state.get("messages");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto msgs = in.state.get("messages");
         bool have_user_reply = msgs.is_array() && msgs.size() > 0;
 
         if (!have_user_reply) {
             // First execution. Pause for the human.
             std::string report;
-            auto fr = state.get("final_report");
+            auto fr = in.state.get("final_report");
             if (fr.is_string()) report = fr.get<std::string>();
             throw NodeInterrupt(
                 "Awaiting human review of the report. Resume with "
@@ -1057,7 +1059,7 @@ public:
         std::transform(lower.begin(), lower.end(), lower.begin(),
             [](unsigned char c) { return std::tolower(c); });
 
-        NodeResult r;
+        NodeOutput r;
         Command cmd;
         if (trimmed.empty() || lower == "approve" || lower == "ok" ||
             lower == "yes" || lower == "y") {
@@ -1085,7 +1087,7 @@ public:
             cmd.updates.push_back({"messages", json::array()});
         }
         r.command = cmd;
-        return r;
+        co_return r;
     }
 
 private:
