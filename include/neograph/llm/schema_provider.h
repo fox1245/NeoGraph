@@ -42,6 +42,8 @@ namespace neograph::async { class ConnPool; class CurlH2Pool; }
 
 namespace neograph::llm {
 
+namespace test_access { class SchemaProviderTestAccess; }  // fwd-decl for friend
+
 /**
  * @brief LLM provider that adapts to any API via a JSON schema.
  *
@@ -383,6 +385,29 @@ class NEOGRAPH_API SchemaProvider : public Provider {
     static std::pair<std::string, std::string> parse_data_url(const std::string& url);
     static json substitute(const json& tmpl, const std::map<std::string, json>& vars);
     static std::string generate_tool_call_id();
+
+    // Test-only access to private internals. The helper class lives in a
+    // separate `test_access` namespace to discourage accidental use; tests
+    // that need to inspect build_body / serialize_messages output for
+    // contract verification (e.g. issue #34, #35 regression coverage)
+    // pull it in explicitly. NOT a public API surface — may change without
+    // notice between versions.
+    friend class neograph::llm::test_access::SchemaProviderTestAccess;
 };
+
+namespace test_access {
+
+/// Test-only friend of `SchemaProvider`. See the `friend class` line
+/// inside `SchemaProvider` for the rationale. Static methods only —
+/// stateless wrapper.
+class SchemaProviderTestAccess {
+  public:
+    static json build_body(const SchemaProvider& sp,
+                           const CompletionParams& params) {
+        return sp.build_body(params);
+    }
+};
+
+}  // namespace test_access
 
 } // namespace neograph::llm

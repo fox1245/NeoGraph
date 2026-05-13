@@ -136,7 +136,29 @@ void SchemaProvider::parse_schema()
     req_.model_field = r.value("model_field", "model");
     req_.messages_field = r.value("messages_field", "messages");
     req_.tools_field = r.value("tools_field", "tools");
-    req_.temperature_path = r.value("temperature_path", "temperature");
+    // temperature_path: schema-side opt-out via JSON null (issue #35).
+    //
+    // Reasoning models (OpenAI gpt-5.x, o-series) treat `temperature`
+    // and `reasoning.effort` as mutually exclusive; sending both is
+    // undefined behaviour. A schema for those models needs to declare
+    // "this provider doesn't accept temperature" so build_body skips
+    // the field entirely.
+    //
+    // Convention:
+    //   - `"temperature_path": "temperature"`  → write at body.temperature
+    //   - `"temperature_path": "some.nested.path"` → json_path::set_path
+    //   - `"temperature_path": null`           → opt out (don't write at all)
+    //   - field omitted entirely               → defaults to "temperature"
+    //                                            (back-compat for existing
+    //                                             schemas)
+    //
+    // Internally an empty string is the opt-out sentinel; build_body
+    // checks `!req_.temperature_path.empty()` before writing.
+    if (r.contains("temperature_path") && r["temperature_path"].is_null()) {
+        req_.temperature_path.clear();   // opt-out
+    } else {
+        req_.temperature_path = r.value("temperature_path", "temperature");
+    }
     req_.max_tokens_path = r.value("max_tokens_path", "max_tokens");
     req_.max_tokens_required = r.value("max_tokens_required", false);
     req_.max_tokens_default = r.value("max_tokens_default", -1);
@@ -883,18 +905,45 @@ json SchemaProvider::build_body(const CompletionParams& params) const {
         }
     }
 
-    // Tools
+    // Tools — only stamp the tools field when the caller actually passed
+    // tools. Empty tools means "this call doesn't expose any to the
+    // model"; sending an empty array silently changes some providers'
+    // behaviour (especially OpenAI Responses), so omit it.
     if (!params.tools.empty()) {
         body[req_.tools_field] = serialize_tools(params.tools);
-
-        // Add tool-related extra fields (like tool_choice) only when tools present
-        for (const auto& [k, v] : req_.extra_fields.items()) {
-            body[k] = v;
-        }
     }
 
-    // Temperature
-    if (params.temperature >= 0.0f) {
+    // Schema-declared static body fields (issue #34).
+    //
+    // These are vendor-specific fields a schema author wants stamped
+    // into every request body — not just when tools are present. The
+    // pre-#34 code accidentally gated this on `params.tools.empty()`
+    // because the original use case was `tool_choice` (tool-specific).
+    // But schemas declare reasoning-grade fields here too:
+    // `reasoning: {effort: "medium"}`, `response_format`, vendor knobs.
+    // Gating on tools silently dropped all of them whenever the caller
+    // didn't pass tools — observable only by inspecting the outgoing
+    // HTTP body. Now applied unconditionally.
+    //
+    // Tool-specific keys (`tool_choice`) ARE harmless to send without
+    // tools — most providers ignore them when there's nothing to
+    // choose from. Schema authors who want a key gated on tool
+    // presence can move it to a per-call binding once that surface
+    // exists (issue #33).
+    for (const auto& [k, v] : req_.extra_fields.items()) {
+        body[k] = v;
+    }
+
+    // Temperature.
+    //
+    // Two opt-out paths combined:
+    //   - Per-call: caller passes `params.temperature < 0` (sentinel).
+    //   - Per-schema: schema declares `"temperature_path": null`, which
+    //     leaves `req_.temperature_path` empty (issue #35).
+    // Either disables the write. Reasoning-model schemas typically use
+    // the per-schema path so node code doesn't have to negate
+    // `params.temperature` at every call site.
+    if (params.temperature >= 0.0f && !req_.temperature_path.empty()) {
         json_path::set_path(body, req_.temperature_path, params.temperature);
     }
 

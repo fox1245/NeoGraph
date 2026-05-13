@@ -42,6 +42,7 @@ add_executable(neograph_tests
     test_run_context_store.cpp
     test_run_result_channel.cpp
     test_error_messages_friendly.cpp
+    test_schema_provider_extra_fields_temperature.cpp
     test_openai_provider_async.cpp
     test_checkpoint_async_default.cpp
     test_node_async_default.cpp
