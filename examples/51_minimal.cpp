@@ -22,10 +22,12 @@ using namespace neograph::graph;
 // 노드 한 개. 채널 "text" 를 읽어서 대문자로 바꿔 다시 같은 채널에 씀.
 class UpperNode : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        std::string s = state.get("text").get<std::string>();
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        std::string s = in.state.get("text").get<std::string>();
         for (auto& c : s) c = static_cast<char>(std::toupper(c));
-        return {ChannelWrite{"text", json(s)}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"text", json(s)});
+        co_return out;
     }
     std::string get_name() const override { return "upper"; }
 };

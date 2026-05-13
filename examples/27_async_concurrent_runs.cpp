@@ -46,14 +46,15 @@ public:
     WorkNode(std::string name, int delay_ms)
         : name_(std::move(name)), delay_ms_(delay_ms) {}
 
-    asio::awaitable<std::vector<ng::ChannelWrite>>
-    execute_async(const ng::GraphState&) override {
+    asio::awaitable<ng::NodeOutput> run(ng::NodeInput) override {
         auto ex = co_await asio::this_coro::executor;
         asio::steady_timer t(ex);
         t.expires_after(std::chrono::milliseconds(delay_ms_));
         co_await t.async_wait(asio::use_awaitable);
-        co_return std::vector<ng::ChannelWrite>{
-            ng::ChannelWrite{"result", neograph::json("done by " + name_)}};
+        ng::NodeOutput out;
+        out.writes.push_back(
+            ng::ChannelWrite{"result", neograph::json("done by " + name_)});
+        co_return out;
     }
     std::string get_name() const override { return name_; }
 };

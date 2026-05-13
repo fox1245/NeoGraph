@@ -152,12 +152,14 @@ public:
 class TalkNode : public GraphNode {
 public:
     explicit TalkNode(std::shared_ptr<Provider> p) : prov_(std::move(p)) {}
-    std::vector<ChannelWrite> execute(const GraphState&) override {
+    asio::awaitable<NodeOutput> run(NodeInput) override {
         CompletionParams params;
         params.messages = {{"user", "say hi"}};
         params.model = "gpt-mock";
-        auto c = prov_->complete(params);
-        return {ChannelWrite{"reply", json(c.message.content)}};
+        auto c = co_await prov_->invoke(params, nullptr);
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"reply", json(c.message.content)});
+        co_return out;
     }
     std::string get_name() const override { return "talk"; }
 private:
