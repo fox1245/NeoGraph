@@ -165,6 +165,17 @@ void SchemaProvider::parse_schema()
     req_.stream_field = r.value("stream_field", "stream");
     req_.extra_fields = r.value("extra_fields", json::object());
 
+    // Per-call body field allowlist (issue #33). Schema declares which
+    // body paths a caller can override per-call via
+    // CompletionParams::extra_fields. Built once at parse time so
+    // build_body's per-call check is an O(log n) set lookup, not a
+    // re-parse.
+    if (r.contains("per_call_fields") && r["per_call_fields"].is_array()) {
+        for (const auto& path : r["per_call_fields"]) {
+            if (path.is_string()) req_.per_call_fields.insert(path.get<std::string>());
+        }
+    }
+
     // --- System Prompt ---
     auto s = schema_["system_prompt"];
     std::string sys_strategy = s.value("strategy", "in_messages");
@@ -932,6 +943,34 @@ json SchemaProvider::build_body(const CompletionParams& params) const {
     // exists (issue #33).
     for (const auto& [k, v] : req_.extra_fields.items()) {
         body[k] = v;
+    }
+
+    // Per-call body field bindings (issue #33).
+    //
+    // The schema declares which paths a caller can override per-call
+    // via `"request.per_call_fields": [path1, path2, ...]`. Caller
+    // passes the values in `params.extra_fields` as a `path -> value`
+    // map. Build_body applies them AFTER the schema-static
+    // extra_fields above, so a per-call value wins when both bind the
+    // same key — which is what the caller wants ("I'm overriding the
+    // default for THIS call").
+    //
+    // Path is a json_path expression (dot-separated, like
+    // `temperature_path` / `max_tokens_path`), so caller can target
+    // nested structure (`reasoning.effort`, `thinking.budget_tokens`).
+    //
+    // Unknown paths (not in `req_.per_call_fields`) are silently
+    // dropped. The schema, not the caller, owns the contract — same
+    // discipline as `temperature_path` and `max_tokens_path`. This
+    // also means a typo in caller code (`reasonin.effort`) silently
+    // does nothing instead of stamping a malformed key, which is
+    // safer for production.
+    if (params.extra_fields.is_object()) {
+        for (const auto& [path, value] : params.extra_fields.items()) {
+            if (req_.per_call_fields.count(path)) {
+                json_path::set_path(body, path, value);
+            }
+        }
     }
 
     // Temperature.

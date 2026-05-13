@@ -75,6 +75,44 @@ struct CompletionParams {
      * abort across multiple completions.
      */
     std::shared_ptr<graph::CancelToken> cancel_token;
+
+    /**
+     * @brief Per-call body field bindings (issue #33, v0.8+).
+     *
+     * Map of `path → value` overrides that the provider stamps into
+     * the outgoing request body for THIS call only. Companion to
+     * the schema-static `request.extra_fields` block that ships
+     * with every body — `extra_fields` here is the dynamic per-call
+     * side of the same hook.
+     *
+     * For ``SchemaProvider``: the schema author declares which paths
+     * are bindable per-call via `"request.per_call_fields": [...]`.
+     * Only listed paths are honoured; unknown paths are silently
+     * dropped (the schema, not the caller, owns the contract). This
+     * keeps the per-call surface declarative and matches how
+     * `temperature_path` / `max_tokens_path` already address specific
+     * paths.
+     *
+     * Native ``Provider`` subclasses (e.g. ``OpenAIProvider``) may
+     * choose to honour or ignore individual keys per their own
+     * documented surface — the field is generic, the contract is
+     * provider-defined.
+     *
+     * @code
+     * // Reasoning model — high effort for hard call, low for cheap call.
+     * CompletionParams hard;
+     * hard.extra_fields = {{"reasoning.effort", "high"}};
+     * auto deep = co_await provider->complete_async(hard);
+     *
+     * CompletionParams cheap;
+     * cheap.extra_fields = {{"reasoning.effort", "low"}};
+     * auto fast = co_await provider->complete_async(cheap);
+     * @endcode
+     *
+     * Default: empty json. Same lifecycle shape as the existing
+     * schema-static `request.extra_fields` block.
+     */
+    json extra_fields;
 };
 
 /**
