@@ -609,6 +609,79 @@ Each PR must:
   - **Add a row to this table when it merges** — strike-through the
     proposed line, link the merge commit, note any scope drift.
 
+## Perf retrospective — `b59444f` 18일 잠재 par 회귀
+
+v1.0 cycle 막바지에 README 의 "engine overhead" 자랑 (par 11.8 µs)
+이 깨졌다는 게 드러났다. 측정 + 분신술 bisect 결과 단일 commit
+`b59444f` 가 18일 (2026-04-26 → 2026-05-13) 잠재해 있던 회귀였다.
+
+### 무슨 일이 있었나
+
+- `b59444f` 가 `GraphEngine::compile()` 의 기본 워커 수를
+  `1` 에서 `std::thread::hardware_concurrency()` 로 바꿈. 의도:
+  fan-out 노드가 명시 설정 없이도 진짜 병렬 실행 받게.
+- 부작용: 1-node 시퀀셜 + 5-노드 fan-out micro-bench 가 **per-iter
+  cross-thread submit 비용 ~75 µs/iter** 추가로 부담. 11.8 µs →
+  283 µs (24×).
+- 4월 27일 perf audit (`project_perf_audit_2026-04-27.md`) 에서
+  `fd60aab` 가 "fix" 했다고 기록돼있는데, 그건 별개 회귀 (시간 측정
+  pattern) 였고 워커 수 기본값은 그대로 두었다. par micro-bench
+  자체는 "기본=hardware_concurrency" 모드에서 측정되고 있어서
+  numerically 정상으로 보였지만, 실제 README 의 11.8 µs 클레임은
+  pre-b59444f 시점의 값.
+- v1.0 cycle 의 Per-PR contract 가 "Not regress the bench" 요구함에도
+  당시 bench 가 같은 (회귀된) baseline 에서 측정되니 ±5% band 안에
+  들어와 무사통과. 18일 동안 잠재.
+- 2026-05-13 매 commit 별로 분신술 bisect (`git worktree add` 11개
+  병렬, taskset+chrt 측정) — `b59444f` 가 par 11.8 µs → 283 µs 점프
+  단일 commit 으로 확인. revert (`e5ecb08`) 로 11.8 → 12.2 µs 복귀.
+
+### Trade-off — 왜 기본=1 이 옳은가
+
+`asio::thread_pool` cross-thread submit 은 task 당 약 75 µs. 노드
+하나의 실행 시간이 ms 단위 (LLM 호출, HTTP 등) 면 그 비용은 묻히지만
+NeoGraph 가 자랑하는 "engine overhead 시리얼/병렬 µs 단위" 패스에서는
+같은 차원 비용이라 직접 보임.
+
+- **CPU-tiny / 시퀀셜 노드 (micro-bench, validator chain 등)** — 기본=1
+  이 압도적. 워커 풀 없이 io_context 한 스레드 위에서 sequential.
+- **진짜 fan-out 의도 (sleep-바운드 시뮬, 별도 process 호출, sync
+  HTTP)** — 사용자가 `engine->set_worker_count_auto()` 또는
+  `set_worker_count(N)` 명시 호출해야 함. 한 줄.
+
+이 트레이드오프를 명문화하려고 `e5ecb08` 의 commit message + 직후
+fan-out 예제 5곳 (10/14/21/36 + deep_research_graph builder) 에
+`set_worker_count_auto()` 명시 호출 추가 + migration doc 의 Migration
+3 섹션 보강.
+
+### Per-PR contract 보강 (다음 회귀 방지)
+
+`bench_neograph par` micro-bench 가 baseline 대비 ±5% 안에 있을지만
+검사하는 게 부족했음 — baseline 자체가 회귀된 상태에서 함께 미끄러질
+수 있음. 다음 패치에서:
+
+  - bench-regression CI 가 **README 에 명시된 절대 값** (`seq ≈ 5.0
+    µs`, `par ≈ 12 µs` 같은 wall-time anchor) 을 두 번째 게이트로
+    사용. baseline 자체 회귀 캐치.
+  - 또는 GitHub Actions 측 cron 으로 master → master 7일 회귀 측정
+    cron 추가 (nightly-soak 같은 패턴).
+  - per-PR diff 가 `GraphEngine::compile()` 또는 `set_worker_count` 를
+    건드리면 PR 본문에 "별도 micro-bench 측정 결과" 필수 (CODEOWNERS
+    훅으로 자동화).
+
+세 가지 다 후속 작업. v1.0 release 전 한 가지는 들어가야 함.
+
+### 무엇을 배웠나
+
+1. **"기본값 변경"은 functional 한 의미가 없어 보여도 perf-critical 한
+   contract 일 수 있다.** README 가 자랑하는 숫자가 "기본값" 패스에서
+   나온 값이라면, 기본값 변경 = README 변경.
+2. **회귀 측정의 baseline 도 회귀할 수 있다.** ±band 비교만 하지 말고
+   절대값 anchor 도 두자.
+3. **분신술 bisect (병렬 worktree 11개 + 결과 취합) 가 18일 잠재 회귀
+   pinpoint 하는데 30분이면 충분.** Linear bisect 보다 훨씬 빠름 —
+   master 가 길어졌을 때 default 도구.
+
 ## Memory of v0.3.x traps to avoid during refactor
 
 The build/release pipeline has accumulated landmines from v0.1.x →
@@ -628,6 +701,7 @@ checklist when you touch the relevant area:
 | scikit-build-core 0.12.2 Windows single_config | `-G` flag detected, env-var ignored — Windows wheel loses SQLite=OFF override. Use `[[tool.scikit-build.overrides]]` + `cmake.define`. | `feedback_libcurl_unconditional_dep.md` |
 | Wheel OpenSSL CA path | manylinux libssl uses AlmaLinux paths absent on Ubuntu. `__init__.py` auto-set `SSL_CERT_FILE` from certifi. | `feedback_wheel_openssl_ca.md` |
 | pyproject.toml runtime deps not auto-installed in CI's PYTHONPATH flow | `pip install --quiet pytest` line must mirror pyproject.toml's `dependencies = [...]`. v0.3.2 lost this for pydantic. | (this session — add note in feedback) |
+| `compile()` default worker count regression | `b59444f` 가 기본을 `1 → hardware_concurrency` 로 바꿔 par micro-bench 11.8 → 283 µs (24×) 잠재. baseline 자체 회귀 패턴. fix `e5ecb08` 로 복귀. | "Perf retrospective" 섹션 (위) |
 
 If a refactor PR adds a new sub-library, new public class, new
 runtime dep, new test pattern that throws across pybind, new wheel
