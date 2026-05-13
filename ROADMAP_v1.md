@@ -373,7 +373,7 @@ the class. Candidate 1 + 6 do.
 | 3 | Hierarchical CancelToken | **Landed in v0.4** (`CancelToken::fork()` + cascade) | v0.3.2 hooks, v0.3.2 emit-vs-bind |
 | 4 | Self-evolving graph runtime hooks | Research | TODO_v0.3.md #8 |
 | 5 | pgvector RAG example | Cookbook | TODO_v0.3.md #9 |
-| 6 | Provider single dispatch | Proposed (concrete crash #4 closed by PR #10; architectural cleanup deferred) | #4 (closed v0.7), #5 (open as v1.0 tracking item), pattern reinforced by #36 |
+| 6 | Provider single dispatch | **Landed (additive + deprecation)** v0.9.0 candidate — PR #40 / #41+#42 / #43 / #44 / #45. Phase B (legacy 4 virtual 제거) v1.0.0 대기. | #4 (closed v0.7), #5 (open as v1.0 tracking item), pattern reinforced by #36 |
 
 ---
 
@@ -842,3 +842,32 @@ split if the work happens in different PRs.
 Issue #5 — surfaced while debugging #4. Concrete crash closed by
 PR #10; architectural cleanup deferred to v1.0 alongside
 Candidate 1.
+
+### Landing log (v0.9.0 candidate cycle)
+
+5 PR landed sequentially on master, mid-2026-05-13:
+
+| PR | Scope | Lands in |
+|---|---|---|
+| **#40 (PR1)** | `Provider::invoke(params, on_chunk = nullptr)` 새 virtual 추가. default impl 이 4 legacy virtual chain 으로 forward (모든 기존 Provider subclass 무변경 동작). 6 신규 ctest. | v0.9.0 |
+| **#41+#42 (PR2)** | engine 의 built-in LLM 노드 (`LLMCallNode`, `IntentClassifierNode`) 가 `provider->invoke(params, on_chunk)` 통해 dispatch. PR #41 가 stacked base 에만 머지되어 PR #42 로 master 재적용. | v0.9.0 |
+| **#43 (PR3)** | engine-내부 sync LLM 호출 사이트 모두 마이그레이션 — `agent.cpp` (5 사이트), `deep_research_graph.cpp` (6 사이트). `Provider::invoke()` default 에 thread-local cancel propagation parity 추가 (legacy `complete()` 의 `current_cancel_token()` 동작 재현). 3 신규 ctest. | v0.9.0 |
+| **#44 (PR4)** | 4 legacy virtual 모두 `[[deprecated]]` 마커. `plan_execute_graph.cpp` 3 사이트 invoke() 마이그레이션. `OpenInferenceProvider` 와 `RateLimitedProvider` (decorator 들) 의 4 virtual override 블록을 `NEOGRAPH_PUSH/POP_IGNORE_DEPRECATED` 로 감쌈 — internal forwarder warning 차단, user-facing override / 호출 사이트만 warning. | v0.9.0 |
+| **#45 (PR5)** | C++ examples 마이그레이션 (`31_local_transformer.cpp`, `cookbook/ai-assembly/member_server.cpp`). | v0.9.0 |
+
+### v1.0 destructive removal (deferred)
+
+`SchemaProvider` / `OpenAIProvider` / `RateLimitedProvider` /
+`OpenInferenceProvider` 는 4 legacy virtual override 와 새 invoke()
+의 default forward 를 함께 갖고 있는 상태. v1.0.0 sub-PR 시퀀스 (Candidate 1
+의 9b–9e mirror):
+
+  - **6b**: native subclass 가 invoke() native override (4 virtual
+    override 의 코드를 invoke 안으로 통합). 기존 4 override 는 thin
+    adapter 또는 제거.
+  - **6c**: 4 legacy virtual 자체 삭제 from `Provider`. internal
+    forwarder PUSH_IGNORE 가드 제거. v1.0.0 에서 `Provider` 가 단일
+    pure-virtual `invoke()` + `get_name()` 만.
+  - **adjacent**: `schema_provider.cpp` (1800 LoC) 의 `SchemaParser` /
+    `SchemaWireBuilder` / `SchemaProviderImpl` 분할 (위 6b 와 같은
+    PR 또는 별도 — 구현 시 결정).

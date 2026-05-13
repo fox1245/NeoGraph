@@ -7,7 +7,71 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased]
+## [Unreleased] — Candidate 6: Provider 단일 dispatch (v1.0 prep)
+
+ROADMAP_v1.md 의 **Candidate 6** (Provider 4-virtual cross-product →
+1-virtual `invoke()`) 5 PR landing. v0.4.0 의 `GraphNode::run(NodeInput)`
+에 이은 두 번째 v1.0 single-dispatch surface 통합. 모든 변화는 추가
++ deprecation 단계 — 기존 사용자 코드 그대로 동작, deprecation
+window 동안 마이그레이션 안내만 visible.
+
+### Added
+
+- **`Provider::invoke(params, on_chunk = nullptr)`** — v1.0 의
+  표준 단일 dispatch 진입점. 비스트리밍 (`on_chunk == nullptr`) 과
+  스트리밍 (`on_chunk` 전달) 을 한 메서드가 처리. 기존 4 virtual
+  cross-product (`complete` / `complete_async` / `complete_stream` /
+  `complete_stream_async`) 를 한 async-streaming-superset 으로 모음.
+  default impl 은 4 legacy virtual 로 forward 하므로 기존 Provider
+  subclass 무변경 동작. 6 신규 ctest (`ProviderInvokeDefault`).
+  (PR #40)
+- **`invoke()` cancel propagation parity** — `params.cancel_token` 미설정
+  + engine thread-local scope 활성 → `current_cancel_token()` 자동 stamp.
+  legacy sync `complete()` 의 동작과 동등 (engine 안의 노드 본문이
+  `provider->invoke(params, ...)` 부르면 running graph 의 cancel signal
+  자동 받음). 3 신규 ctest (`InvokeCancelPropagation`). (PR #43)
+
+### Changed
+
+- **engine 내부 모든 LLM 호출이 `invoke()` 통과** — `LLMCallNode`,
+  `IntentClassifierNode` (PR #41/#42), `Agent::complete` /
+  `Agent::run_stream` (PR #43), `SupervisorLLMNode` /
+  `ResearcherLLMNode` / `CompressNotesNode` / `FinalReportNode`
+  (PR #43), `PlannerNode` / `ExecutorNode` (PR #44). NeoGraph
+  내부의 LLM dispatch 가 한 표면으로 통일.
+- **C++ examples 마이그레이션 (2 file)** — `31_local_transformer.cpp`,
+  `cookbook/ai-assembly/member_server.cpp` 가 새 `invoke()` 사용.
+  사용자 빌드에서 deprecation warning 안 뜸. (PR #45)
+
+### Deprecated
+
+- **`Provider::complete` / `complete_async` / `complete_stream` /
+  `complete_stream_async`** — 4 legacy virtual 모두
+  `[[deprecated("v1.0 single-dispatch: use invoke(...)")]]` 마커.
+  legacy method 는 deprecation window 동안 그대로 동작. v1.0.0
+  에서 삭제. internal forwarder 는 `NEOGRAPH_PUSH/POP_IGNORE_DEPRECATED`
+  로 감싸서 user-facing override / 호출 사이트에만 warning. (PR #44)
+
+### Migration (사용자 코드)
+
+새 코드:
+```cpp
+// 비스트리밍
+auto completion = co_await provider->invoke(params, nullptr);
+
+// 스트리밍
+auto completion = co_await provider->invoke(params, on_chunk);
+
+// sync 사이트 (옛 complete() 자리)
+auto completion = neograph::async::run_sync(provider->invoke(params, nullptr));
+```
+
+기존 4 virtual override 는 deprecation window 동안 그대로 동작하지만,
+`-Wdeprecated-declarations` warning 이 user override 사이트에 visible.
+v1.0.0 직전에 제거되니 deprecation window 안에 마이그레이션 권장.
+
+`docs/migration-v0.4-to-v1.0.md` 의 Provider 섹션 (다음 docs sweep
+에서 추가 예정) 가 케이스별 before/after 안내.
 
 ## [0.8.0] — 2026-05-13 — DX 폴리시 + downstream-driven API gaps 정리
 
