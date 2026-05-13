@@ -9,28 +9,102 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-05-13 — DX 폴리시 + downstream-driven API gaps 정리
+
+ProjectDatePop downstream 의 실사용 피드백 + 우리 자체 coverage diff 가
+드러낸 8 이슈 (#22, #25, #26, #27, #28, #34, #35 + #16 follow-up) 를
+한 minor bump 에 묶음. 새 public 도우미 두 개 (`RunResult::channel<T>`,
+`RunContext::store`), 11 새 offline 예제, `docs/migration-v0.4-to-v1.0.md`
+마이그레이션 가이드, 그리고 신참이 첫 30 분에 부딪치는 마찰면을
+줄이는 5-항목 DX 배치.
+
+### Added
+
+- **`RunResult::channel<T>(name)` / `channel_raw(name)` / `has_channel(name)`** —
+  결과에서 채널 값을 한 줄로 꺼내는 도우미. `output` 의 두 모양 (한 겹
+  들어간 `output["channels"][name]["value"]` 표준 + `react_graph` 같은
+  빌더가 추가하는 평탄 키) 모두 자동 처리. 9 신규 ctest. (Issue #25)
+- **`RunContext::store`** — 노드 본문이 `in.ctx.store->get(ns, key)` 한 줄로
+  Store 에 닿음. 옛 패턴 (`NodeFactory` 람다에서 `shared_ptr<Store>`
+  캡처) 도 그대로 동작 — 새 코드만 새 모양 쓰면 됨. 3 신규 ctest. (Issue #27)
+- **`Provider::complete_stream` non-pure default body** — minimal mock /
+  test fixture 가 `complete()` 만 override 해도 됨. 기존 streaming-native
+  override 는 그대로. 2 신규 ctest. (Issue #22)
+- **`neograph::json` arrays 의 `.front()` / `.back()`** — nlohmann muscle
+  memory 패턴 (`msgs.back()["content"]`) 이 컴파일됨. 4 신규 ctest. (Issue #26)
+- **11 new offline 예제 (41-51)** — `resume_if_exists_chat`,
+  `custom_reducer_condition`, `store_personalization`,
+  `request_queue_backpressure`, `cancel_token`, `node_cache`,
+  `sqlite_checkpoint`, `openinference`, `async_tool`, `minimal`. 모두
+  rc=0, API key / 외부 서비스 의존 없음. 27/53 `NEOGRAPH_API` 클래스 중
+  zero-reference 였던 갭들을 채움.
+- **`examples/51_minimal.cpp`** — LLM·tool·mock provider 다 없는, 노드 1 개
+  짜리 30 줄 입문 예제. 5 분 안에 NeoGraph 가 어떤 모양으로 도는지
+  파악할 수 있게.
+- **`docs/migration-v0.4-to-v1.0.md`** — `[[deprecated]]` 마킹된 옛 8-virtual
+  chain (`execute` / `execute_async` / 등) → 새 `run(NodeInput) ->
+  awaitable<NodeOutput>` 으로 옮기는 케이스별 before/after 4 예제 + 자주
+  하는 실수. `NEOGRAPH_DEPRECATED_VIRTUAL` 매크로 메시지에서도 이 문서
+  링크.
+- **README "흔한 함정 5선" 섹션** — 신참이 첫 30 분에 부딪치는 5 가지
+  (`channel<T>` 사용, `in.ctx.store`, `neograph::graph::` 서브네임스페이스,
+  `<httplib.h>` 매크로, GCC 13 코루틴 ICE) 한 자리에. 각 항목에 fix +
+  관련 예제·이슈 링크.
+- **compile-time `#error` 가드 (`include/neograph/api.h`)** — 사용자 TU 가
+  `<httplib.h>` 를 NeoGraph 헤더보다 먼저 include 하면서
+  `CPPHTTPLIB_OPENSSL_SUPPORT` 빠뜨리면 명확한 메시지 + opt-out 매크로
+  (`NEOGRAPH_SKIP_HTTPLIB_MACRO_GUARD`) 와 함께 컴파일 fail. 옛 #16 의
+  런타임 SEGV 가 컴파일 타임 fail 로 격상.
+- **`example_minimal` 5 신규 친절 에러 메시지 ctest** — `Unknown reducer` /
+  `Unknown condition` / `Unknown node type` / `Write to unknown channel`
+  의 메시지가 사용 가능한 이름 + 등록 방법 + troubleshooting 링크를
+  본문에 박는 contract 잠금.
+- **`docs/troubleshooting.md` 새 항목 4개** — Tracer adapter `close()`
+  후 hang/crash (#24), GCC 13 코루틴 ICE (#23), 친절 에러 메시지 안내
+  (#22), `RunResult::output` 모양 (#25).
+- **`Tracer` + `OpenInferenceTracerSession::close()` 의 `@warning` 블록** —
+  어댑터 작성자에게 raw-pointer 함정 명시. `RecordedSpan` + 래퍼 분리
+  패턴이 정답이라고 안내. 기존 `tests/test_openinference_cpp.cpp::InMemoryTracer`
+  + 새 `examples/49_openinference.cpp::PrintTracer` 인용. (Issue #24)
+
 ### Fixed
 
-- `SchemaProvider::complete_stream_async` HTTP/SSE branch now
-  dispatches the synchronous `complete_stream` work onto a long-lived
-  dedicated `bridge_thread_` instead of letting
-  `Provider::complete_stream_async`'s base default spawn a fresh
-  `std::thread` per call. Mirrors the working `complete_async` shape
-  (which already lives on `http_thread_`). Closes issue #16's segfault
-  — root-caused via Ghidra static analysis to
-  `Provider::complete_stream_async`'s `_M_runEv` (the std::thread
-  start function) dispatching directly into the SchemaProvider vtable
-  with zero pre-call setup, so the fresh thread's first `getaddrinfo`
-  hit cold thread-local resolver / NSS state in glibc and SEGV'd in
-  `internal_strlen` on some downstream Linux + glibc combinations
-  under nested HTTP-server contexts (4 in-tree test variants + ASan +
-  16-concurrent-driver stress all green in our env, but the cold-init
-  path is timing-sensitive enough that downstream reproduced
-  reliably). After the first call warms the bridge thread's resolver
-  state, every subsequent call reuses it — same robustness profile as
-  `complete_async`. WS branch unchanged (already native co_await;
-  never hit the cold-resolver path). Token dispatch onto the
-  awaiter's executor is preserved (PR #10 invariant). (Issue #16)
+- **`SchemaProvider::build_body` 의 `extra_fields` 가 `params.tools` 비어
+  있을 때 silent drop**. 옛 코드는 `extra_fields` 적용을 `if
+  (!params.tools.empty())` 안에 가둬서 schema 의 `reasoning`,
+  `response_format` 같은 핵심 필드가 tool 없는 호출에서 통째로 사라졌음.
+  Fix: tools 분기 밖으로 빼서 항상 적용. 3 신규 ctest. (Issue #34)
+- **`temperature_path` schema-side opt-out**. Reasoning model
+  (gpt-5.x, o-series) 은 `temperature` 와 `reasoning.effort` 가 배타인데,
+  schema 가 "이 provider 는 temperature 안 받음" 을 선언할 표면이 없어서
+  매 호출 `params.temperature = -1.0f` sentinel 로 우회해야 했음. Fix:
+  schema 에 `"temperature_path": null` 명시하면 build_body 가 아예 안
+  씀. 4 신규 ctest. (Issue #35)
+- **친절한 RuntimeError 메시지** — `ReducerRegistry::get` /
+  `ConditionRegistry::get` / `NodeFactory::create` 의 "Unknown <thing>:
+  foo" 와 `GraphState::write` / `apply_writes` 의 "Write to unknown
+  channel" 가 이제 사용 가능한 이름 목록 + 등록 방법 + troubleshooting
+  링크를 본문에 박음. 신참이 메시지만 보고 다음 행동 알 수 있음.
+- **`SchemaProvider::complete_stream_async` HTTP/SSE branch** 가 이제
+  long-lived dedicated `bridge_thread_` 에 dispatch (옛: `Provider`
+  base default 가 매 호출 fresh `std::thread` spawn). 옛 동작은
+  cold thread-local resolver / NSS state 가 glibc 의 `internal_strlen`
+  에서 SEGV 트리거. WS branch 는 이미 native co_await 라 영향 없음.
+  Token dispatch on awaiter's executor 보존 (PR #10 invariant). (Issue #16)
+- **`example/09_all_features.cpp`** Store demo 가 노드 본문 read 패턴은
+  `examples/43_store_personalization.cpp` 를 보라고 docstring pointer
+  추가. 옵션 2 — 옵션 3 (in-line live node) 은 #27 의 `RunContext::store`
+  가 land 한 후 두 예제 같이 정리. (Issue #28)
+
+### Docs
+
+- `RunResult::output` 의 정식 모양 (channels-wrapped) 과 `react_graph`
+  같은 빌더가 추가하는 평탄 키 projection 의 관계를 헤더 docstring 에
+  명시. 새 도우미 (`channel<T>` / `channel_raw` / `has_channel`) 사용
+  추천. (Issue #25)
+- `RunContext::store` field 의 `@brief` 블록 — 두 plumbing 패턴
+  (`in.ctx.store` 권장 / 옛 factory-closure 캡처 호환) 코드 예제 나란히. (Issue #27)
+- `examples/43_store_personalization.cpp` 파일 머리 주석에 두 길 명시.
 
 ## [0.7.0] — 2026-05-11 — C++ openinference + async streaming bridge
 
