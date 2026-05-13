@@ -1962,4 +1962,22 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
     co_return completion;
 }
 
+// Candidate 6 PR6: v1.0 single-dispatch native override. Routes
+// through the existing 4-virtual native overrides for v0.9 (no
+// behavioural change). Streaming branch goes to
+// `complete_stream_async` not the sync `complete_stream` so the
+// WebSocket Responses native-async path + the HTTP/SSE worker-thread
+// bridge stay in effect (issue #4 protection). v1.0 collapses
+// complete_async + complete_stream_async bodies into invoke() and
+// deletes the legacy methods.
+NEOGRAPH_PUSH_IGNORE_DEPRECATED
+asio::awaitable<ChatCompletion>
+SchemaProvider::invoke(const CompletionParams& params, StreamCallback on_chunk) {
+    if (on_chunk) {
+        co_return co_await complete_stream_async(params, on_chunk);
+    }
+    co_return co_await complete_async(params);
+}
+NEOGRAPH_POP_IGNORE_DEPRECATED
+
 } // namespace neograph::llm

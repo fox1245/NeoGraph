@@ -521,6 +521,19 @@ OpenInferenceProvider::complete_stream_async(
     }
 }
 
+// Candidate 6 PR6: v1.0 single-dispatch native override. Routes
+// through the existing 4-virtual native overrides so each call still
+// emits exactly one span (already inside the file-wide PUSH_IGNORE
+// block). v1.0 will fold the span-recording into a single invoke()
+// body and delete the legacy methods.
+asio::awaitable<ChatCompletion>
+OpenInferenceProvider::invoke(const CompletionParams& params, StreamCallback on_chunk) {
+    if (on_chunk) {
+        co_return co_await complete_stream_async(params, on_chunk);
+    }
+    co_return co_await complete_async(params);
+}
+
 NEOGRAPH_POP_IGNORE_DEPRECATED
 
 } // namespace neograph::observability

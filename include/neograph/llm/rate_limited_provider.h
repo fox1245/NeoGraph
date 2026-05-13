@@ -89,6 +89,15 @@ public:
     ChatCompletion complete_stream(const CompletionParams& params,
                                    const StreamCallback& on_chunk) override;
 
+    /// v1.0 single-dispatch override (Candidate 6 PR6). Anchors invoke()
+    /// on this decorator so engine `provider->invoke(...)` calls hit
+    /// retry/backoff directly. v0.9 body routes through the existing
+    /// 4-virtual overrides (which already wrap the inner provider with
+    /// retry); v1.0 folds the retry loop into invoke() and deletes the
+    /// legacy methods.
+    asio::awaitable<ChatCompletion>
+    invoke(const CompletionParams& params, StreamCallback on_chunk) override;
+
     std::string get_name() const override;
 
 private:
