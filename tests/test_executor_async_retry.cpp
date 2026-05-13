@@ -31,12 +31,14 @@ public:
     FlakyNode(std::string name, int fail_remaining)
         : name_(std::move(name)), fail_remaining_(fail_remaining) {}
 
-    std::vector<ChannelWrite> execute(const GraphState&) override {
+    asio::awaitable<NodeOutput> run(NodeInput) override {
         int remaining = fail_remaining_.fetch_sub(1, std::memory_order_acq_rel);
         if (remaining > 0) {
             throw std::runtime_error("flaky: injected failure in " + name_);
         }
-        return {ChannelWrite{"result", json("ok from " + name_)}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"result", json("ok from " + name_)});
+        co_return out;
     }
     std::string get_name() const override { return name_; }
 private:
@@ -47,8 +49,10 @@ private:
 class AlwaysSuccessNode : public GraphNode {
 public:
     explicit AlwaysSuccessNode(std::string name) : name_(std::move(name)) {}
-    std::vector<ChannelWrite> execute(const GraphState&) override {
-        return {ChannelWrite{"result", json("ok")}};
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"result", json("ok")});
+        co_return out;
     }
     std::string get_name() const override { return name_; }
 private:
@@ -58,8 +62,9 @@ private:
 class AlwaysInterruptNode : public GraphNode {
 public:
     explicit AlwaysInterruptNode(std::string name) : name_(std::move(name)) {}
-    std::vector<ChannelWrite> execute(const GraphState&) override {
+    asio::awaitable<NodeOutput> run(NodeInput) override {
         throw NodeInterrupt("needs human");
+        co_return NodeOutput{};  // unreachable, keeps it a coroutine
     }
     std::string get_name() const override { return name_; }
 private:

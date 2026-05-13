@@ -56,8 +56,10 @@ public:
     EchoNode(const std::string& name, const std::string& value)
         : name_(name), value_(value) {}
 
-    std::vector<ChannelWrite> execute(const GraphState& /*state*/) override {
-        return {ChannelWrite{"result", json(value_)}};
+    asio::awaitable<NodeOutput> run(NodeInput /*in*/) override {
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"result", json(value_)});
+        co_return out;
     }
     std::string get_name() const override { return name_; }
 private:
@@ -72,8 +74,10 @@ public:
     RouterNode(const std::string& name, const std::string& route)
         : name_(name), route_(route) {}
 
-    std::vector<ChannelWrite> execute(const GraphState& /*state*/) override {
-        return {ChannelWrite{"__route__", json(route_)}};
+    asio::awaitable<NodeOutput> run(NodeInput /*in*/) override {
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"__route__", json(route_)});
+        co_return out;
     }
     std::string get_name() const override { return name_; }
 private:
@@ -238,12 +242,14 @@ public:
     DoublerNode(const std::string& name, std::atomic<int>* counter)
         : name_(name), counter_(counter) {}
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        json v = state.get("input_val");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        json v = in.state.get("input_val");
         int input = v.is_number_integer() ? v.get<int>() : 0;
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
         if (counter_) counter_->fetch_add(1, std::memory_order_relaxed);
-        return {ChannelWrite{"result", json(input * 2)}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"result", json(input * 2)});
+        co_return out;
     }
     std::string get_name() const override { return name_; }
 private:
