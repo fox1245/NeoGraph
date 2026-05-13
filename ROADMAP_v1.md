@@ -264,15 +264,116 @@ Tracking: this file is updated when a v0.3.x patch round
 exposes a new architectural seam, or when a candidate lands
 (strike-through and link to the merge commit).
 
+---
+
+## Pattern retrospective — 9 downstream findings (issue #36)
+
+ProjectDatePop's `cpp_backend` stress-test over the v0.5 → v0.8
+window landed 9 NeoGraph findings. **At least 7 of those 9 trace
+to the same structural pattern** that Candidates 1 + 6 close — not
+incrementally, but by *eliminating the surface where the pattern
+can recur*.
+
+### The unifying pattern
+
+> **"X is safe only when Y" — but the Y precondition is not stated
+> in the docstring, not enforced at compile-time, and not even
+> surfaced at runtime when violated. The default path silently does
+> the wrong thing, often only on a specific corner of an inputs
+> cross-product.**
+
+| # | The hidden conditional invariant |
+|---|---|
+| #4 | `Provider::complete_stream_async` default bridge is safe **only when** the native sync `complete_stream` doesn't itself use `run_sync` — silently violated by `SchemaProvider` WS path |
+| #5 | `Provider`'s 4-virtual cross-product is safe **only when** the override surface picked happens to avoid the bridge nesting — invariant invisible from `provider.h` |
+| #6 | `schema_mutex_` × on_chunk locking is safe **only when** the user's callback doesn't re-enter SchemaProvider — undocumented pre-fix |
+| #9 | C++ openinference parity required because the Python wrapper had a hidden assumption about callback-thread identity that didn't translate |
+| #16 | NeoGraph's bundled cpp-httplib is correct **only when** every consumer TU defines `CPPHTTPLIB_OPENSSL_SUPPORT` — silent ODR violation otherwise |
+| #34 | `extra_fields` apply **only when** `params.tools` is non-empty — silently dropped reasoning fields for tool-less calls |
+| #35 | `temperature` is sent **only when** `params.temperature ≥ 0` — but the schema has no way to declare "this provider doesn't accept temperature at all", forcing every call site to negate the default |
+
+Two further findings (#17 docs gaps, #33 per-call binding gap) are
+gap reports rather than hidden-invariant traps; the same root
+diagnosis (the abstraction declared a static surface but didn't
+expose the dynamic equivalent) applies.
+
+### Why Candidates 1 + 6 close the *class*, not just the instances
+
+Each finding above closed via a **targeted patch** to the specific
+override site that misbehaved (PR #10, PR #11, PR #12, PR #19,
+PR #20, PR #37, PR #37). Each patch left the *surface that allowed
+the pattern* unchanged: 8 GraphNode virtuals, 4 Provider virtuals,
+schema build_body branch tree. The next downstream — or the next
+vendor schema, or the next refactor that adjusts one default — will
+discover a new corner of the same cross-product where some other
+"X is safe only when Y" lurks.
+
+Candidates 1 and 6 collapse those cross-products to **one virtual
+each**. After they land:
+
+- **Candidate 1** (GraphNode 8 → 1): there is no longer a "which of
+  the 8 virtuals you override determines whether the bridge is
+  safe" decision. The user overrides `run(NodeInput)`. Sync vs
+  async, stream vs non-stream, writes vs full-result are all body
+  shape choices — no hidden invariants tied to virtual identity.
+- **Candidate 6** (Provider 4 → 1): same collapse for `Provider`.
+  The "X is safe only when Y" trap of #4/#5 cannot recur because
+  there is no Y to violate — there's only one entry point and
+  one canonical drain pattern.
+
+The remaining 2 findings (#9 thread identity, #16 ODR macro) are
+*not* fixed by Candidates 1 + 6 — they're separate issue classes
+(observability layer parity, build-system convention). #9 is
+already resolved (PR #12 + parity tests). #16 is now compile-time
+guarded (v0.8.0 `api.h`).
+
+### What stays load-bearing about this retrospective
+
+The 9 findings would have surfaced **regardless of project age**.
+None of them required a long-running production deployment or an
+exotic vendor — they came from a single downstream consumer
+(ProjectDatePop) writing realistic agent flows over ~3 weeks.
+Without Candidates 1 + 6, the next downstream of comparable depth
+will land another 5-10 findings of the same shape. With them, the
+class is closed.
+
+This is the structural argument for **prioritising Candidates 1 +
+6 in the v1.0 cycle** over more cosmetic v0.x cleanups. Each new
+"X is safe only when Y" finding paid for itself in patch effort,
+but the cumulative effort across 7 findings already exceeds what
+Candidates 1 + 6 are estimated to cost.
+
+### Mitigation in the v0.x deprecation window
+
+Until Candidates 1 + 6 land, pin the invariants where they exist
+today:
+
+- `[[deprecated]]` on the legacy 8 virtuals + `docs/migration-v0.4-to-v1.0.md`
+  — landed v0.4 / v0.8.
+- `@warning` blocks on every override point that has a "safe only
+  when Y" precondition (e.g. `Tracer::start_span`,
+  `OpenInferenceTracerSession::close`).
+- compile-time `#error` guards on cross-TU invariants that the
+  language can express (e.g. `CPPHTTPLIB_OPENSSL_SUPPORT` macro
+  consistency — landed v0.8).
+- friendly runtime errors that name the invariant when violated
+  (e.g. `Unknown reducer: 'foo'. Available: ...` — landed v0.8).
+
+These narrow the window where the pattern bites, but don't close
+the class. Candidate 1 + 6 do.
+
+---
+
 ## Status
 
-| # | Candidate | Status | Triggering rounds |
+| # | Candidate | Status | Triggering rounds / issues |
 |---|---|---|---|
-| 1 | Single `run()` dispatch + tags | Proposed | v0.3.1 #2, v0.3.2 #10 (×2 langs) |
-| 2 | Explicit `RunContext` arg | Proposed | v0.3.1 multi-Send, v0.3.2 C++ scope |
-| 3 | Hierarchical CancelToken | Proposed | v0.3.2 hooks, v0.3.2 emit-vs-bind |
+| 1 | Single `run()` dispatch + tags | Proposed (v0.4 PR 2 plumbed `run(NodeInput)` additively; legacy 8 still live) | v0.3.1 #2, v0.3.2 #10 (×2 langs); pattern reinforced by #36 (9 downstream findings) |
+| 2 | Explicit `RunContext` arg | **Landed in v0.4–v0.8** (`RunContext::store` field added v0.8 #27) | v0.3.1 multi-Send, v0.3.2 C++ scope |
+| 3 | Hierarchical CancelToken | **Landed in v0.4** (`CancelToken::fork()` + cascade) | v0.3.2 hooks, v0.3.2 emit-vs-bind |
 | 4 | Self-evolving graph runtime hooks | Research | TODO_v0.3.md #8 |
 | 5 | pgvector RAG example | Cookbook | TODO_v0.3.md #9 |
+| 6 | Provider single dispatch | Proposed (concrete crash #4 closed by PR #10; architectural cleanup deferred) | #4 (closed v0.7), #5 (open as v1.0 tracking item), pattern reinforced by #36 |
 
 ---
 
