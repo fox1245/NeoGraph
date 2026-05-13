@@ -1,4 +1,5 @@
 #include <neograph/llm/agent.h>
+#include <neograph/async/run_sync.h>
 #include <algorithm>
 #include <iostream>
 #include <stdexcept>
@@ -60,7 +61,10 @@ Agent::complete(const std::vector<ChatMessage>& messages)
     CompletionParams params;
     params.model = model_;
     params.messages = messages;
-    return provider_->complete(params);
+    // Candidate 6 PR3: dispatch via invoke() so the v1.0 single-
+    // dispatch surface is end-to-end. run_sync drives the awaitable
+    // synchronously (Agent::complete is the public sync API).
+    return neograph::async::run_sync(provider_->invoke(params, nullptr));
 }
 
 std::string
@@ -75,7 +79,7 @@ Agent::run(std::vector<ChatMessage>& messages, int max_iterations)
         params.messages = messages;
         params.tools = tool_defs;
 
-        auto completion = provider_->complete(params);
+        auto completion = neograph::async::run_sync(provider_->invoke(params, nullptr));
         auto& msg = completion.message;
 
         // Append assistant message to history
@@ -131,7 +135,8 @@ Agent::run_stream(std::vector<ChatMessage>& messages,
 
         // After tool execution, use streaming for the final response
         if (has_done_tool_calls) {
-            auto completion = provider_->complete_stream(params, on_chunk);
+            auto completion = neograph::async::run_sync(
+                provider_->invoke(params, on_chunk));
             messages.push_back(completion.message);
 
             if (completion.message.tool_calls.empty()) {
@@ -140,14 +145,16 @@ Agent::run_stream(std::vector<ChatMessage>& messages,
             // Rare: another tool call after streaming — fall through to execute
         } else {
             // Non-streaming: reliable tool call detection
-            auto completion = provider_->complete(params);
+            auto completion = neograph::async::run_sync(
+                provider_->invoke(params, nullptr));
             messages.push_back(completion.message);
 
             if (completion.message.tool_calls.empty()) {
                 // No tools needed at all — stream the response
                 // Remove the non-streamed message, re-do with streaming
                 messages.pop_back();
-                auto streamed = provider_->complete_stream(params, on_chunk);
+                auto streamed = neograph::async::run_sync(
+                    provider_->invoke(params, on_chunk));
                 messages.push_back(streamed.message);
                 return streamed.message.content;
             }
