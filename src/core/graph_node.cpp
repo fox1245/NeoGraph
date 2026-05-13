@@ -353,23 +353,27 @@ asio::awaitable<NodeOutput> LLMCallNode::run(NodeInput in) {
     // the in-flight HTTPS socket.
     params.cancel_token = in.ctx.cancel_token;
 
-    json msg_json;
+    // ROADMAP_v1.md Candidate 6 PR2: dispatch through Provider::invoke()
+    // — the v1.0 unified entry point. Same semantic as the previous
+    // `if (in.stream_cb) complete_stream_async else complete_async` pair,
+    // but the stream/non-stream branch lives inside the provider's own
+    // default invoke() body (or its native override), not at every call
+    // site. Native providers that override invoke() get one dispatch
+    // path; legacy 4-virtual subclasses get the chain via the additive
+    // default. See PR #40.
+    StreamCallback on_token;
     if (in.stream_cb) {
-        // Bridge per-token events to GraphEvent::LLM_TOKEN on the
-        // engine's stream callback.
         const GraphStreamCallback& cb = *in.stream_cb;
         std::string node_name = name_;
-        auto on_token = [&cb, &node_name](const std::string& token) {
+        on_token = [&cb, node_name](const std::string& token) {
             cb(GraphEvent{GraphEvent::Type::LLM_TOKEN,
                           node_name, json(token)});
         };
-        auto completion = co_await provider_->complete_stream_async(
-            params, on_token);
-        to_json(msg_json, completion.message);
-    } else {
-        auto completion = co_await provider_->complete_async(params);
-        to_json(msg_json, completion.message);
     }
+    auto completion = co_await provider_->invoke(params, on_token);
+
+    json msg_json;
+    to_json(msg_json, completion.message);
 
     NodeOutput out;
     out.writes.push_back(
@@ -503,20 +507,17 @@ asio::awaitable<NodeOutput> IntentClassifierNode::run(NodeInput in) {
     auto params = build_params(in.state);
     params.cancel_token = in.ctx.cancel_token;
 
-    ChatMessage reply;
+    // Candidate 6 PR2: same invoke() unification as LLMCallNode above.
+    StreamCallback on_token;
     if (in.stream_cb) {
         const GraphStreamCallback& cb = *in.stream_cb;
         std::string node_name = name_;
-        auto on_token = [&cb, &node_name](const std::string& token) {
+        on_token = [&cb, node_name](const std::string& token) {
             cb(GraphEvent{GraphEvent::Type::LLM_TOKEN, node_name, json(token)});
         };
-        auto completion = co_await provider_->complete_stream_async(
-            params, on_token);
-        reply = std::move(completion.message);
-    } else {
-        auto completion = co_await provider_->complete_async(params);
-        reply = std::move(completion.message);
     }
+    auto completion = co_await provider_->invoke(params, on_token);
+    ChatMessage reply = std::move(completion.message);
 
     NodeOutput out;
     out.writes = route_from(reply.content);
