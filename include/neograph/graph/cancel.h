@@ -115,33 +115,12 @@ public:
             });
         }
 
-        // v0.3.1+: fire all registered cancel-hooks. Each nested
-        // run_sync registers one — this is how concurrent run_syncs
-        // (e.g. multi-Send fan-out workers each calling
-        // provider.complete()) all get their HTTP sockets aborted.
-        // The single cancellation_signal above only reaches the
-        // outermost co_spawn; without per-consumer hooks, sibling
-        // workers' run_syncs would silently overwrite each other's
-        // bound executor and only one HTTP would be torn down.
-        //
-        // Invoke under the lock so a concurrent ``Hook`` destructor
-        // either runs to completion before us (we won't see the
-        // hook) or blocks until we finish (the hook always observes
-        // a live capture).
-        //
-        // v0.4 PR 3: ``add_cancel_hook`` is deprecated in favour of
-        // ``fork()``. This branch keeps working for the deprecation
-        // window; new internal call sites (``run_sync``) cascade via
-        // ``fork()`` instead.
-        {
-            std::lock_guard<std::mutex> lk(hooks_mu_);
-            for (auto& [id, cb] : hooks_) {
-                (void)id;
-                if (cb) cb();
-            }
-        }
+        // v1.0 (9c): the legacy ``add_cancel_hook`` / hooks_ iteration
+        // is gone — ``fork()`` is the canonical primitive for nested
+        // cancel scopes, and every internal ``run_sync`` cascades via
+        // a forked child.
 
-        // v0.4 PR 3: cascade to live children produced by ``fork()``.
+        // Cascade to live children produced by ``fork()``.
         // Snapshot live shared_ptrs under the lock, then call
         // ``cancel()`` on each outside the lock — the recursive call
         // would otherwise re-enter ``children_mu_`` if a grandchild
@@ -219,55 +198,7 @@ public:
     }
 
     /**
-     * @brief RAII handle returned by ``add_cancel_hook``. Destroying
-     *        the handle unregisters the hook.
-     *
-     * Move-only. The destructor blocks on the parent token's
-     * hooks_mu_ to serialize against an in-flight ``cancel()`` —
-     * once the destructor returns, no further callbacks will fire
-     * for this hook, so it is safe to destroy any state the
-     * callback captured.
-     */
-    class Hook {
-    public:
-        Hook() noexcept = default;
-        Hook(Hook&& o) noexcept : token_(o.token_), id_(o.id_) {
-            o.token_ = nullptr;
-            o.id_    = 0;
-        }
-        Hook& operator=(Hook&& o) noexcept {
-            if (this != &o) {
-                reset();
-                token_ = o.token_;
-                id_    = o.id_;
-                o.token_ = nullptr;
-                o.id_    = 0;
-            }
-            return *this;
-        }
-        Hook(const Hook&) = delete;
-        Hook& operator=(const Hook&) = delete;
-        ~Hook() noexcept { reset(); }
-
-    private:
-        friend class CancelToken;
-        Hook(CancelToken* t, std::uint64_t id) noexcept
-            : token_(t), id_(id) {}
-
-        void reset() noexcept {
-            if (token_ && id_ != 0) {
-                token_->remove_hook_(id_);
-            }
-            token_ = nullptr;
-            id_    = 0;
-        }
-
-        CancelToken*  token_ = nullptr;
-        std::uint64_t id_    = 0;
-    };
-
-    /**
-     * @brief Create a child token that cascades from this one (v0.4+).
+     * @brief Create a child token that cascades from this one.
      *
      * Each child has its **own** ``cancellation_signal``, so concurrent
      * consumers (multi-Send fan-out workers each calling
@@ -276,9 +207,6 @@ public:
      * ``cancel()`` on the parent walks the live children list and
      * cascades — every child's signal fires on its own bound executor.
      *
-     * Replaces ``add_cancel_hook`` as the canonical primitive for
-     * nested cancel scopes. ``add_cancel_hook`` keeps working through
-     * the v0.4.x deprecation window; new code should ``fork()``.
      *
      * **Lifetime / ownership**: returns a ``shared_ptr<CancelToken>``;
      * the parent stores a ``weak_ptr`` so a forked child that goes
@@ -335,75 +263,13 @@ public:
         return child;
     }
 
-    /**
-     * @brief Register a cancellation callback. **Deprecated in v0.4 —
-     *        prefer ``fork()`` for new code.** Kept working for one
-     *        deprecation window so v0.3.x consumers compile unchanged.
-     *
-     * Each nested ``run_sync`` (e.g. inside ``Provider::complete``)
-     * creates its own private ``cancellation_signal`` and registers
-     * a hook here that emits that signal on the inner io_context's
-     * executor. ``cancel()`` then fans out to every registered
-     * hook in addition to the single outer ``sig_`` emit, so
-     * concurrent nested run_syncs (multi-Send fan-out workers) each
-     * see their HTTP sockets aborted instead of silently sharing
-     * one slot.
-     *
-     * If the token is already cancelled when this is called, the
-     * callback fires synchronously and an empty handle is returned.
-     */
-    [[nodiscard]]
-    [[deprecated(
-        "v0.4: use fork() instead — it produces a child token with "
-        "its own cancellation_signal so concurrent nested cancel "
-        "scopes never overwrite each other's slot. add_cancel_hook "
-        "is preserved for back-compat through v0.5 and removed in "
-        "v1.0. See ROADMAP_v1.md PR 9.")]]
-    Hook add_cancel_hook(std::function<void()> cb) {
-        if (cancelled_.load(std::memory_order_acquire)) {
-            // Already cancelled — fire and don't register.
-            cb();
-            return Hook{};
-        }
-        std::uint64_t id;
-        {
-            std::lock_guard<std::mutex> lk(hooks_mu_);
-            // Re-check under lock to close the cancel-vs-register race.
-            if (cancelled_.load(std::memory_order_acquire)) {
-                // cancel() was called between the unlocked check and
-                // here, but it has already iterated hooks_ — so it
-                // won't see us. Fire ourselves.
-                cb();
-                return Hook{};
-            }
-            id = ++next_hook_id_;
-            hooks_.emplace_back(id, std::move(cb));
-        }
-        return Hook{this, id};
-    }
-
 private:
-    void remove_hook_(std::uint64_t id) noexcept {
-        std::lock_guard<std::mutex> lk(hooks_mu_);
-        auto it = std::find_if(hooks_.begin(), hooks_.end(),
-            [id](const auto& p) { return p.first == id; });
-        if (it != hooks_.end()) hooks_.erase(it);
-    }
-
     std::atomic<bool>        cancelled_{false};
     mutable std::mutex       mu_;        // guards ex_ vs cancel() race
     asio::any_io_executor    ex_;        // bound by engine before HTTP I/O
     asio::cancellation_signal sig_;      // for asio operation cancel
 
-    // Per-consumer hooks (nested run_sync). Guarded by its own
-    // mutex so cancel() can iterate without contending with
-    // bind_executor on mu_. Deprecated in v0.4; kept working for
-    // back-compat (see ``add_cancel_hook`` doc).
-    mutable std::mutex hooks_mu_;
-    std::uint64_t next_hook_id_ = 0;
-    std::vector<std::pair<std::uint64_t, std::function<void()>>> hooks_;
-
-    // v0.4: hierarchical cascade list. Each entry is a child token
+    // Hierarchical cascade list. Each entry is a child token
     // produced by ``fork()``. ``cancel()`` walks live children and
     // cascades. Stored as ``weak_ptr`` so a child that goes out of
     // scope (its run_sync returned, run completed) is automatically
