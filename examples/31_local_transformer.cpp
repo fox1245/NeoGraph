@@ -31,6 +31,7 @@
 // up a real agent graph.
 
 #include <neograph/llm/openai_provider.h>
+#include <neograph/async/run_sync.h>
 
 #include <algorithm>
 #include <chrono>
@@ -77,7 +78,7 @@ int main(int argc, char** argv) {
         p.max_tokens = 4;
         neograph::ChatMessage m; m.role = "user"; m.content = "hi";
         p.messages = {m};
-        try { (void)provider->complete(p); }
+        try { (void)neograph::async::run_sync(provider->invoke(p, nullptr)); }
         catch (const std::exception& e) {
             std::cerr << "[bench] warmup failed: " << e.what()
                       << "\n[bench] is the server up on " << base_url << " ?\n";
@@ -111,7 +112,7 @@ int main(int argc, char** argv) {
         };
 
         try {
-            (void)provider->complete_stream(p, on_tok);
+            (void)neograph::async::run_sync(provider->invoke(p, on_tok));
         } catch (const std::exception& e) {
             std::cerr << "[bench] iter " << i << " failed: " << e.what() << "\n";
             return 2;

@@ -17,6 +17,7 @@
 #include <neograph/neograph.h>
 #include <neograph/a2a/server.h>
 #include <neograph/llm/openai_provider.h>
+#include <neograph/async/run_sync.h>
 #include <neograph/graph/node.h>
 #include <neograph/graph/loader.h>
 
@@ -78,7 +79,7 @@ class PersonaNode : public GraphNode {
         p.messages.push_back({"system", system_prompt_});
         p.messages.push_back({"user", user_text});
 
-        auto reply = provider_->complete(p);
+        auto reply = neograph::async::run_sync(provider_->invoke(p, nullptr));
         std::string text = reply.message.content;
 
         // Tag with party + name so the Speaker's transcript is readable.
