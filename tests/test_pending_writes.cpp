@@ -29,21 +29,15 @@ class PlannerNode : public GraphNode {
 public:
     explicit PlannerNode(int fanout) : fanout_(fanout) {}
 
-    std::vector<ChannelWrite> execute(const GraphState&) override { return {}; }
-
-    NodeResult execute_full(const GraphState&) override {
-        NodeResult nr;
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
         for (int i = 0; i < fanout_; ++i) {
             Send s;
             s.target_node = "executor";
             s.input = {{"task_idx", i}};
-            nr.sends.push_back(std::move(s));
+            out.sends.push_back(std::move(s));
         }
-        return nr;
-    }
-    asio::awaitable<NodeResult>
-    execute_full_async(const GraphState& state) override {
-        co_return execute_full(state);
+        co_return out;
     }
     std::string get_name() const override { return "planner"; }
 private:
@@ -56,8 +50,8 @@ public:
     CrashyExecutorNode(std::atomic<int>* counter, std::atomic<int>* fail_on)
         : counter_(counter), fail_on_(fail_on) {}
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        json v = state.get("task_idx");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        json v = in.state.get("task_idx");
         int idx = v.is_number_integer() ? v.get<int>() : -999;
         counter_->fetch_add(1, std::memory_order_relaxed);
 
@@ -67,7 +61,9 @@ public:
         }
         // Write a result entry. The main-state "results" channel is
         // append-reduced, so all successful sends accumulate.
-        return {ChannelWrite{"results", json(idx * 10)}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"results", json(idx * 10)});
+        co_return out;
     }
     std::string get_name() const override { return "executor"; }
 
@@ -81,8 +77,10 @@ private:
 // to; without this, crash recovery on the first super-step has no anchor.
 class SetupNode : public GraphNode {
 public:
-    std::vector<ChannelWrite> execute(const GraphState&) override {
-        return {ChannelWrite{"setup_done", json(true)}};
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"setup_done", json(true)});
+        co_return out;
     }
     std::string get_name() const override { return "setup"; }
 };
