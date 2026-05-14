@@ -848,6 +848,23 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             endif()
         endif()
 
+        # Multi-tenant chatbot cookbook — JSON graph-as-data + compile
+        # cache → 한 process 가 N customer 의 N 다른 topology 를 동시
+        # 서빙하는 시나리오. 두 변형: (a) Mock provider 로 NG capacity
+        # 만 측정 (외부 의존성 0), (b) 진짜 OpenAI gpt-4o-mini 로
+        # production-like.
+        add_executable(cookbook_multi_tenant_mock
+            examples/cookbook/multi_tenant_chatbot/server.cpp)
+        target_link_libraries(cookbook_multi_tenant_mock PRIVATE
+            neograph::core)
+
+        if(NEOGRAPH_BUILD_LLM)
+            add_executable(cookbook_multi_tenant_live
+                examples/cookbook/multi_tenant_chatbot/server_live_llm.cpp)
+            target_link_libraries(cookbook_multi_tenant_live PRIVATE
+                neograph::core neograph::llm cppdotenv)
+        endif()
+
         if(NEOGRAPH_BUILD_MCP)
             add_executable(example_mcp_agent examples/03_mcp_agent.cpp)
             target_link_libraries(example_mcp_agent PRIVATE neograph::core neograph::llm neograph::mcp cppdotenv)
