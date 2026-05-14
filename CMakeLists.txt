@@ -863,6 +863,14 @@ if(NEOGRAPH_BUILD_EXAMPLES)
                 examples/cookbook/multi_tenant_chatbot/server_live_llm.cpp)
             target_link_libraries(cookbook_multi_tenant_live PRIVATE
                 neograph::core neograph::llm cppdotenv)
+
+            # Self-evolving chatbot — multi-tenant + LLM judge → graph_def
+            # 가 사용자 행동 보고 in-place 진화. NG 만 가능한 카테고리
+            # (LangGraph 의 StateGraph 는 Python 객체라 runtime reshape 불가).
+            add_executable(cookbook_self_evolving_chatbot
+                examples/cookbook/self_evolving_chatbot/server.cpp)
+            target_link_libraries(cookbook_self_evolving_chatbot PRIVATE
+                neograph::core neograph::llm cppdotenv)
         endif()
 
         if(NEOGRAPH_BUILD_MCP)
