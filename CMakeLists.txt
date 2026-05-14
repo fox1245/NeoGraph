@@ -102,6 +102,14 @@ endif()
 # ===========================================================================
 # Options
 # ===========================================================================
+# neograph::async — asio::ssl-based HTTP/HTTPS/WS client. Required (as a
+# link dep) by neograph::{llm,mcp,a2a} and by the Python binding. Gated
+# behind an option so a *minimal-core* build (Dockerfile.neograph in the
+# concurrent-bench matrix, or any "I just need GraphEngine" downstream)
+# can flip every component OFF including async — that path then needs
+# **no OpenSSL** on the build host. With ASYNC=OFF the OpenSSL / libcurl
+# find_package() calls are skipped entirely (see line ~258).
+option(NEOGRAPH_BUILD_ASYNC    "Build neograph::async (asio::ssl HTTP/HTTPS/WS client)" ON)
 option(NEOGRAPH_BUILD_LLM      "Build neograph::llm (LLM providers)"     ON)
 option(NEOGRAPH_BUILD_MCP      "Build neograph::mcp (MCP client)"        ON)
 option(NEOGRAPH_BUILD_A2A      "Build neograph::a2a (Agent-to-Agent client)" ON)
@@ -252,8 +260,27 @@ find_package(Threads REQUIRED)
 target_link_libraries(asio INTERFACE Threads::Threads)
 
 # OpenSSL — required by httplib for HTTPS, and by neograph::async
-# (asio::ssl in the async HTTP client).
-find_package(OpenSSL REQUIRED)
+# (asio::ssl in the async HTTP client). Conditional so a minimal-core
+# build (ASYNC/LLM/MCP/A2A all OFF) doesn't need libssl-dev on the host.
+# Previously unconditional — that broke
+# `benchmarks/concurrent/Dockerfile.neograph` twice when option defaults
+# drifted OFF → ON. See [feedback_libcurl_unconditional_dep.md] for the
+# sister sin one release earlier; same shape, same fix.
+#
+# Guard: if any component that *needs* OpenSSL is ON but ASYNC is OFF,
+# fail loud — neograph_async is their link target and skipping it would
+# yield a confusing "undefined reference to OpenSSL::SSL" link error
+# many minutes into the build.
+if(NOT NEOGRAPH_BUILD_ASYNC AND (NEOGRAPH_BUILD_LLM OR NEOGRAPH_BUILD_MCP OR NEOGRAPH_BUILD_A2A OR NEOGRAPH_BUILD_PYBIND))
+    message(FATAL_ERROR
+        "NEOGRAPH_BUILD_ASYNC=OFF is incompatible with "
+        "NEOGRAPH_BUILD_LLM/MCP/A2A/PYBIND=ON — those targets link "
+        "against neograph_async. Either flip ASYNC back ON, or turn "
+        "the dependent components OFF in the same configure call.")
+endif()
+if(NEOGRAPH_BUILD_ASYNC OR NEOGRAPH_BUILD_LLM OR NEOGRAPH_BUILD_MCP OR NEOGRAPH_BUILD_A2A)
+    find_package(OpenSSL REQUIRED)
+endif()
 
 # SQLite3 — required by neograph::sqlite (SqliteCheckpointStore).
 # Available as a system package on every Linux distro; on macOS comes
@@ -366,6 +393,7 @@ add_library(neograph::core ALIAS neograph_core)
 # benchmarks/bench_async_fanout for the scaling measurement that
 # justifies (or kills) the bigger refactor.
 # ===========================================================================
+if(NEOGRAPH_BUILD_ASYNC)
 add_library(neograph_async
     src/async/async_smoke.cpp
     src/async/http_client.cpp
@@ -430,6 +458,7 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         target_link_libraries(neograph_h2_curl_multiplex PRIVATE CURL::libcurl)
     endif()
 endif()
+endif()  # NEOGRAPH_BUILD_ASYNC
 
 # ===========================================================================
 # neograph::postgres — PostgresCheckpointStore (libpq)
