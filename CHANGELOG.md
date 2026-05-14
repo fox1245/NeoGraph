@@ -9,7 +9,78 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-(아직 없음 — 다음 변경 사항을 여기에 누적)
+### Fixed
+
+- **v0.9.0 ship 시 누락된 신 API 마이그레이션 3건 보완.** v1.0 prep PR
+  `9b` (`19819d8`) 로 `GraphNode` legacy 8-virtual 체인이 destructive
+  삭제됐는데, 같은 사이클의 PR `#48` (`6e654ad`, "C++ examples migrate
+  to `GraphNode::run()`") 은 `examples/` 만 마이그레이션했고 다음 3개
+  파일은 빠져서 v0.9.0 release 가 빌드 불가 상태로 ship 됐음:
+    - `benchmarks/stress/bench_sustained_concurrent.cpp` (Phase 3
+      sustained-burst 검증 핵심 벤치)
+    - `benchmarks/concurrent/bench_concurrent_neograph.cpp` (LangGraph
+      등 타 엔진과의 메모리·동시성 비교 매트릭스 본체)
+    - `wasm/smoke.cpp` (Phase 1 WASM feasibility 스모크)
+
+  CI 가 이 타겟들을 add_executable 로 잡지 않거나 (Docker 빌드 의존)
+  별도 환경에 격리돼 있어서 master 머지 + tag 까지 통과한 흔적.
+
+  **수정**: 셋 다 `std::vector<ChannelWrite> execute(const GraphState&)
+  override` → `asio::awaitable<NodeOutput> run(NodeInput in) override`
+  + `co_return out` 패턴으로 옮김. 노드 로직은 무변경.
+
+  **v1.0 핵심 셀링 포인트 native 재현 확인**
+  (`benchmarks/concurrent/results_v0.9.0_native_recheck.jsonl`):
+    - 동시성 10K · wall 10–23 ms · p99 17–21 µs · peak RSS **5.6 MB**
+      (v0.3.0 / v0.5.0 측정값과 일치 — destructive 9b 후에도 메모리
+      셀링 포인트 회귀 없음)
+    - 0 errors at 10K
+  **Docker 매트릭스 (LangGraph / Haystack / pydantic-graph / LlamaIndex
+  / AutoGen 6-way 비교) 도 같은 세션 안에서 재측정 완료**
+  (`results_v0.9.0_docker_recheck.jsonl`).
+
+  매트릭스 재실행 과정에서 신 API 누락과 **별개의 회귀 1건 추가 발견** —
+  `benchmarks/concurrent/Dockerfile.neograph` 가 master 의 CMake 옵션
+  default 변경을 따라잡지 못해 빌드 자체가 안 되는 상태였음
+  (v0.9.0 ship 시점에도 같음). 시간이 지나면서 다음 옵션 default 가
+  OFF → ON 으로 바뀐 흔적:
+    - `NEOGRAPH_BUILD_POSTGRES` / `NEOGRAPH_BUILD_SQLITE`
+      (각각 `libpq-dev` / `libsqlite3-dev` 필요)
+    - `NEOGRAPH_BUILD_A2A` / `NEOGRAPH_BUILD_ACP`
+    - `NEOGRAPH_USE_LIBCURL` (`feedback_libcurl_unconditional_dep.md`
+      에서 한 번 닫힌 사고 — option toggle 만 추가되고 default 는
+      그대로 ON 이라 빈 컨테이너 빌드 경로 또 깨짐)
+    - `find_package(OpenSSL REQUIRED)` 는 옵션 토글 없이 unconditional
+      (CMakeLists.txt:256) — 별개 v1.0 cleanup 후보
+
+  **Dockerfile fix**: `libssl-dev` apt 추가 + 모든 비핵심 옵션을 명시적
+  `-DNEOGRAPH_BUILD_*=OFF` / `-DNEOGRAPH_USE_LIBCURL=OFF` 로 박음.
+  주석에 "drift 두 번 났던 이력이라 명시 freeze" 적어둠. CMakeLists.txt
+  의 `find_package(OpenSSL REQUIRED)` conditional 화는 별도 작업으로
+  남김 — 다른 빌드 path (PyPI wheel, ARM64 등) 영향 검증 필요.
+
+  **6-way 매트릭스 핵심 결과** (concurrency=10000, 2 cpus / 1 GiB):
+
+  | engine          | mode          | wall_ms | p99_us      | peak_MB | ok/err |
+  |---|---|---|---|---|---|
+  | **neograph**    | threadpool    | **16**  | **18**      | **5.1** | 10000/0 |
+  | pydantic-graph  | asyncio       | 895     | 160         | 42.8    | 10000/0 |
+  | haystack        | mp-pool-8     | 1472    | 2972        | 68.3    | 10000/0 |
+  | langgraph       | mp-pool-8     | 3802    | 74415       | 60.6    | 10000/0 |
+  | autogen         | mp-pool-8     | 22428   | 82361       | 49.1    | 10000/0 |
+  | llamaindex      | asyncio       | 26303   | 25912204    | 582.7   | 10000/0 |
+
+  NG vs LangGraph (마케팅 비교축): wall **237× 빠름**, p99 **4134×
+  빠름**, peak RSS **12× 적음**.
+
+  **가혹한 시나리오** (concurrency=10000, 1 cpu / 512 MiB):
+    - NG: 8 ms / 5.2 MB / 0 err / **ok**
+    - LangGraph mp-pool-8: 7821 ms / 60.9 MB / 0 err / ok
+    - **LlamaIndex asyncio: OOM killed** (512 MB cap 초과)
+    - **AutoGen asyncio: OOM killed**
+
+  v0.3.0 / v0.5.0 측정값 그대로 — **destructive 9b 후에도 NeoGraph
+  의 "10K 동시 worker, peak RSS 5 MB, OOM 안 됨" 셀링 포인트 회귀 0.**
 
 ## [0.9.0] — 2026-05-14 — v1.0 prep (Candidate 1 Phase B + Candidate 6)
 

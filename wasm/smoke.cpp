@@ -20,10 +20,12 @@ class DoubleNode : public GraphNode {
 public:
     explicit DoubleNode(std::string name) : name_(std::move(name)) {}
     std::string get_name() const override { return name_; }
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        auto seed = state.get("seed");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto seed = in.state.get("seed");
         int v = seed.is_number() ? seed.get<int>() : 0;
-        return { ChannelWrite{"doubled", json(v * 2)} };
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"doubled", json(v * 2)});
+        co_return out;
     }
 private:
     std::string name_;

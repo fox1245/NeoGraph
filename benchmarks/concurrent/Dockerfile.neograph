@@ -12,19 +12,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
         python3 \
     && rm -rf /var/lib/apt/lists/*
+# No libssl-dev / libsqlite3-dev / libpq-dev / libcurl4-openssl-dev —
+# this image flips every optional component (LLM / MCP / A2A / ACP /
+# UTIL / POSTGRES / SQLITE / USE_LIBCURL / **and ASYNC**) OFF, so the
+# core-only build needs *nothing* beyond a C++20 toolchain + CMake.
+# CMakeLists.txt:258 was made conditional in the same commit that
+# introduced NEOGRAPH_BUILD_ASYNC — `find_package(OpenSSL REQUIRED)`
+# now only runs when ASYNC / LLM / MCP / A2A is ON.
 
 WORKDIR /src
 COPY . .
 
-# Core-only build — skip llm / mcp / util / examples to keep CI fast.
+# Core-only build — skip every optional component so the image stays
+# minimal and reproducible. Defaults of NEOGRAPH_BUILD_* / USE_LIBCURL
+# changed to ON over time and silently broke this Dockerfile twice
+# (master ↔ Docker drift). Listing them all explicitly here freezes the
+# matrix's NeoGraph cell to "neograph_core + bench shim, nothing else."
 RUN cmake -S . -B build \
         -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
+        -DNEOGRAPH_BUILD_ASYNC=OFF \
         -DNEOGRAPH_BUILD_LLM=OFF \
         -DNEOGRAPH_BUILD_MCP=OFF \
+        -DNEOGRAPH_BUILD_A2A=OFF \
+        -DNEOGRAPH_BUILD_ACP=OFF \
         -DNEOGRAPH_BUILD_UTIL=OFF \
+        -DNEOGRAPH_BUILD_POSTGRES=OFF \
+        -DNEOGRAPH_BUILD_SQLITE=OFF \
         -DNEOGRAPH_BUILD_EXAMPLES=OFF \
         -DNEOGRAPH_BUILD_TESTS=OFF \
+        -DNEOGRAPH_USE_LIBCURL=OFF \
     && cmake --build build --target neograph_core -j
 
 RUN g++ -std=c++20 -O2 -DNDEBUG \

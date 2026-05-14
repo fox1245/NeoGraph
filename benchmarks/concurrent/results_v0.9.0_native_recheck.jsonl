@@ -1,0 +1,4 @@
+{"engine":"neograph","mode":"threadpool","concurrency":10,"total_wall_ms":0,"p50_us":23,"p95_us":23,"p99_us":23,"ok":10,"err":0,"peak_rss_kb":4608}
+{"engine":"neograph","mode":"threadpool","concurrency":100,"total_wall_ms":2,"p50_us":17,"p95_us":23,"p99_us":55,"ok":100,"err":0,"peak_rss_kb":4736}
+{"engine":"neograph","mode":"threadpool","concurrency":1000,"total_wall_ms":8,"p50_us":6,"p95_us":21,"p99_us":30,"ok":1000,"err":0,"peak_rss_kb":4736}
+{"engine":"neograph","mode":"threadpool","concurrency":10000,"total_wall_ms":10,"p50_us":6,"p95_us":10,"p99_us":17,"ok":10000,"err":0,"peak_rss_kb":5760}
