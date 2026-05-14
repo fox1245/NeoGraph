@@ -7,7 +7,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased] — v1.0 prep (Candidate 1 Phase B + Candidate 6)
+## [Unreleased]
+
+(아직 없음 — 다음 변경 사항을 여기에 누적)
+
+## [0.9.0] — 2026-05-14 — v1.0 prep (Candidate 1 Phase B + Candidate 6)
 
 ROADMAP_v1.md 의 두 v1.0 단일 dispatch 통합이 한 사이클에 모임:
 
