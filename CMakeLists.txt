@@ -871,6 +871,13 @@ if(NEOGRAPH_BUILD_EXAMPLES)
                 examples/cookbook/self_evolving_chatbot/server.cpp)
             target_link_libraries(cookbook_self_evolving_chatbot PRIVATE
                 neograph::core neograph::llm cppdotenv)
+
+            # Same cookbook, multi-customer 확장 — 5 명이 각자 별도
+            # evolution timeline 거치고 emergent cluster 형성 시연.
+            add_executable(cookbook_self_evolving_chatbot_multi
+                examples/cookbook/self_evolving_chatbot/server_multi.cpp)
+            target_link_libraries(cookbook_self_evolving_chatbot_multi PRIVATE
+                neograph::core neograph::llm cppdotenv)
         endif()
 
         if(NEOGRAPH_BUILD_MCP)
