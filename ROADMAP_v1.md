@@ -1164,6 +1164,37 @@ JSON-RPC p50 43 ms (payload 무관 고정). 43 ms = TCP delayed-ACK
   (충격적 transport 벤치 숫자 = TCP_NODELAY/Nagle/delayed-ACK 부터
   의심; `perf-regression-bench-bisect` 사촌). 사용자 승인 후 추가.
 
+### 왜 NeoGraph JSON-RPC 가 gRPC 와 동률인가 — yyjson (PROVEN)
+
+사용자 통찰: "JSON-RPC 도 yyjson 으로 파싱하니 빠른 거고, 구조적으로
+gRPC 가 유리할 수밖에 없다." example 55 에 transport 뺀 순수 codec
+마이크로벤치 추가로 검증:
+
+| 12 KB payload, codec only, 5000 iters | µs |
+|---|---|
+| yyjson parse+dump | **38.9** |
+| protobuf ser+parse | **1.75** |
+| → yyjson / protobuf | **22.3× 느림** |
+
+**사용자 말이 정확.** protobuf 는 구조적으로 22× 빠른 codec. 그런데
+round-trip 에서는 12 KB 기준 1.5× 로 희석 — 직렬화 차이 ~37 µs 가
+전체 round-trip 692–1096 µs 에서 작은 비중 (나머지는 socket I/O /
+syscall / HTTP framing). **즉 tool-call hot path 는 codec 이 아니라
+socket I/O dominant 라는 정량 증거.**
+
+핵심 함의 — **NeoGraph 의 JSON-RPC 가 gRPC 와 동률인 건 yyjson 덕,
+JSON-RPC 프로토콜이 빨라서가 아니다.** 일반 스택 (Python `json` 은
+yyjson 대비 ~50×, 12 KB 에 ~2 ms) 이면 codec 이 round-trip 을
+dominate → 그쪽에서는 gRPC 가 구조적으로 압도. NeoGraph 만 yyjson
+이라 그 함정을 피함.
+
+→ 이건 숨은 셀링 포인트이자 Candidate 7 보류의 *최종* 근거:
+"다른 프레임워크는 JSON 파싱 병목이라 gRPC transport 가 절실하지만,
+NeoGraph 의 MCP/JSON-RPC 는 yyjson 이라 그렇지 않다." MCP-over-gRPC
+는 NeoGraph 한정으로는 ROI 가 더더욱 작다 (codec 우위가 이미
+yyjson 으로 상쇄됨). gRPC 는 polyglot/원격 경계 + 대용량 payload
+~1.5× 용도로만 — 확정.
+
 ### Remaining (still open)
 
   - CI 에 `grpc-build` job 추가 (apt deps + ON 빌드 +
