@@ -47,6 +47,51 @@ private:
 
 }  // namespace
 
+// ── Client side: GrpcRemoteTool ──────────────────────────────────────
+
+struct GrpcRemoteTool::Impl {
+    std::string name;
+    std::string description;
+    neograph::json parameters;
+    std::unique_ptr<pb::ToolService::Stub> stub;
+};
+
+GrpcRemoteTool::GrpcRemoteTool(const std::string& target,
+                               std::string name,
+                               std::string description,
+                               neograph::json parameters)
+    : impl_(std::make_unique<Impl>()) {
+    impl_->name = std::move(name);
+    impl_->description = std::move(description);
+    impl_->parameters = std::move(parameters);
+    impl_->stub = pb::ToolService::NewStub(::grpc::CreateChannel(
+        target, ::grpc::InsecureChannelCredentials()));
+}
+
+GrpcRemoteTool::~GrpcRemoteTool() = default;
+
+ChatTool GrpcRemoteTool::get_definition() const {
+    return ChatTool{impl_->name, impl_->description, impl_->parameters};
+}
+
+std::string GrpcRemoteTool::get_name() const { return impl_->name; }
+
+std::string GrpcRemoteTool::execute(const neograph::json& arguments) {
+    pb::ToolCallRequest req;
+    req.set_name(impl_->name);
+    req.set_arguments_json(arguments.dump());
+
+    pb::ToolCallResponse resp;
+    ::grpc::ClientContext ctx;
+    ::grpc::Status st = impl_->stub->CallTool(&ctx, req, &resp);
+    if (!st.ok())
+        throw std::runtime_error("gRPC CallTool transport error: " +
+                                 st.error_message());
+    if (!resp.error().empty())
+        throw std::runtime_error(resp.error());  // tool threw remotely
+    return resp.result_json();
+}
+
 void run_tool_server(const std::string& address,
                      std::unordered_map<std::string, ToolFn> tools) {
     ToolServiceImpl svc(std::move(tools));

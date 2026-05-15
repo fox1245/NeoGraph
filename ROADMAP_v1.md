@@ -1195,6 +1195,45 @@ NeoGraph 의 MCP/JSON-RPC 는 yyjson 이라 그렇지 않다." MCP-over-gRPC
 yyjson 으로 상쇄됨). gRPC 는 polyglot/원격 경계 + 대용량 payload
 ~1.5× 용도로만 — 확정.
 
+### NexaGraph 2차 수확 — history 압축 + GrpcRemoteTool (2026-05-16)
+
+NexaGraph 전수조사 후, 이미 가져온 `GrpcCheckpointStore` 외 *범용·
+비중복·NeoGraph 미보유* 인 것 3개를 추가 이식. (RAG 앱 전용 — proto/
+rag_mcp_server/backend 의 stdio·HTTP MCP — 은 NeoGraph 가 이미 보유
+하거나 그 앱 한정이라 제외. `DOCS/graph-engine-design.md` 는 사실
+NeoGraph 의 설계 원형이라 "이식" 대상 아님.)
+
+1. **`neograph::history` (신규 core 유틸, additive)** — NexaGraph 의
+   CAF `compress_history` 액터에서 액터 껍데기 제거, 코어만 이식:
+   - `compact_history(messages, Provider&, model, max_tokens=12000,
+     recent_keep=6) -> awaitable<CompactedHistory>` — 토큰 추정이
+     예산 초과면 (system 1개 + 마지막 N개) 제외 구간을 LLM 1회 호출로
+     요약, system-요약 메시지로 치환. `co_await provider.invoke()`
+     (deprecated `complete()` 안 씀, async-lib 의존 0 — core 내부도
+     coroutine 이미 사용).
+   - `sanitize_tool_calls(messages&)` — NeoGraph 에 **전무했던** 방어:
+     truncation 이 깨뜨린 OpenAI tool-pair (응답 없는 assistant
+     tool_call / 호출 없는 tool 메시지) 2-pass 제거, idempotent.
+     `compact_history` 가 출력에 내부 적용 → 압축 결과가 절대 400 안 남.
+   - `estimate_tokens` — ~3 chars/tok 보수 추정 (KO/EN 혼합).
+   - example 56 `history_compaction` (offline MockProvider, key 불필요)
+     — sanitize 3→1, compact 29 msgs/975 tok → 6 msgs/208 tok,
+     원본 불변 검증 PASS. `src/core/history.cpp` 가 모든 config 의
+     `neograph_core` 에 빌드됨 — 496/497 ctest PASS (1 실패 =
+     pre-existing `pybind_smoke` openinference 모듈 누락, 무관).
+
+2. **`neograph::grpc::GrpcRemoteTool`** — example 55 가 tool 을 gRPC 로
+   *내보내는* (`run_tool_server`) 쪽이라면, 그 거울 — 원격
+   `ToolService.CallTool` 을 평범한 `neograph::Tool` 로 *끌어오는*
+   쪽. NexaGraph `GrpcTool` 어댑터 이식. pimpl (공개 헤더 grpc++-free,
+   `GrpcCheckpointStore` 와 동일 posture). 단순 proto 에 list-tools
+   RPC 없으니 definition 은 ctor 주입. server error → `runtime_error`
+   재throw (tool 에러, transport 에러 아님 — 로컬 Tool 과 동일 계약).
+   example 57 `grpc_remote_tool` — server thread + `Tool&` 다형 호출 +
+   에러 경로 PASS. **gRPC 의 ROI #1 (polyglot 원격 typed RPC) 의
+   소비자 측 구체화** — Agent 입장에서 프로세스 경계 tool 이 로컬
+   tool 과 호출부에서 구분 불가.
+
 ### Remaining (still open)
 
   - CI 에 `grpc-build` job 추가 (apt deps + ON 빌드 +

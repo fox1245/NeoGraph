@@ -384,6 +384,7 @@ add_library(neograph_core
     src/core/plan_execute_graph.cpp
     src/core/deep_research_graph.cpp
     src/core/store.cpp
+    src/core/history.cpp
     src/observability/openinference.cpp
 )
 # postgres_checkpoint.cpp is built into a separate target below
@@ -824,6 +825,13 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_async_concurrent_runs examples/27_async_concurrent_runs.cpp)
         target_link_libraries(example_async_concurrent_runs PRIVATE neograph::core)
 
+        # Example 56: conversation history compaction (neograph::history).
+        # Offline — MockProvider returns a canned summary, no API key.
+        # neograph::async only for the run_sync bridge in the demo.
+        add_executable(example_history_compaction examples/56_history_compaction.cpp)
+        target_link_libraries(example_history_compaction PRIVATE
+            neograph::core neograph::async)
+
         # Example 28: Corrective RAG (arXiv:2401.15884) over /v1/responses.
         # Links neograph::async explicitly: 28/29/30 directly call
         # neograph::async::async_post(). Worked transitively under STATIC
@@ -937,6 +945,13 @@ if(NEOGRAPH_BUILD_EXAMPLES)
                 examples/55_grpc_vs_jsonrpc_toolcall.cpp)
             target_link_libraries(example_grpc_vs_jsonrpc PRIVATE
                 neograph::core neograph::grpc httplib)
+
+            # Example 57: consume a remote gRPC tool as a neograph::Tool
+            # (mirror of 55's serve side). Ported from NexaGraph GrpcTool.
+            add_executable(example_grpc_remote_tool
+                examples/57_grpc_remote_tool.cpp)
+            target_link_libraries(example_grpc_remote_tool PRIVATE
+                neograph::core neograph::grpc)
         endif()
 
         # Reopen the A2A guarded block for the cookbook executables that
