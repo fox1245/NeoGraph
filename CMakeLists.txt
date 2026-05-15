@@ -696,6 +696,7 @@ if(NEOGRAPH_BUILD_GRPC)
         "${_ng_grpc_gen}/neograph.pb.cc"
         "${_ng_grpc_gen}/neograph.grpc.pb.cc"
         src/grpc/graph_service.cpp
+        src/grpc/grpc_checkpoint.cpp
     )
     target_include_directories(neograph_grpc
         PUBLIC
@@ -923,6 +924,11 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             add_executable(example_grpc_client examples/53_grpc_client.cpp)
             target_link_libraries(example_grpc_client PRIVATE
                 neograph::grpc)
+
+            # Remote CheckpointStore over gRPC + honest overhead bench.
+            add_executable(example_grpc_checkpoint examples/54_grpc_checkpoint.cpp)
+            target_link_libraries(example_grpc_checkpoint PRIVATE
+                neograph::core neograph::grpc)
         endif()
 
         # Reopen the A2A guarded block for the cookbook executables that
