@@ -1,0 +1,104 @@
+// NeoGraph gRPC service — expose a compiled GraphEngine over gRPC.
+//
+// Design note: payloads are JSON strings, not strongly-typed protobuf
+// messages. A NeoGraph graph_def is already JSON, channel values are
+// arbitrary JSON, and modeling every channel shape as a proto message
+// would force a .proto regen on every user graph change. Keeping the
+// wire payload as a JSON string trades a little type-safety for the
+// same "graph-as-data, no recompile" property the engine is built on.
+// The gRPC win here is transport: HTTP/2 multiplexing + binary framing
+// + native bidi streaming, not schema rigidity.
+//
+// This is a NeoGraph-native API and is intentionally independent of
+// the (still-unratified) MCP-over-gRPC transport discussion
+// (modelcontextprotocol issue #966). When that standard lands, an
+// MCP-shaped service can be added alongside this one without touching
+// it.
+
+syntax = "proto3";
+
+package neograph.v1;
+
+option cc_enable_arenas = true;
+
+// One compiled graph, invoked over gRPC.
+service GraphService {
+  // Unary: run a graph to completion, return the final RunResult.
+  rpc RunGraph(RunGraphRequest) returns (RunGraphResponse);
+
+  // Server-streaming: run a graph, stream GraphEvents (tokens, node
+  // start/end, debug) as they happen; the final message carries the
+  // terminal RunResult. Mirrors engine->run_stream's StreamMode.
+  rpc RunGraphStream(RunGraphRequest) returns (stream GraphEvent);
+
+  // Liveness / build-info probe (no graph execution).
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message RunGraphRequest {
+  // Full JSON graph definition (same shape as GraphEngine::compile's
+  // first arg). Empty → server uses its preloaded default graph.
+  string graph_def_json = 1;
+
+  // Conversation / session id. Maps to RunConfig::thread_id —
+  // checkpoint streams stay isolated per thread_id.
+  string thread_id = 2;
+
+  // Initial channel values, as a JSON object string. Maps to
+  // RunConfig::input.
+  string input_json = 3;
+
+  // Super-step ceiling. 0 → engine default (25).
+  uint32 max_steps = 4;
+
+  // Stream mode bitmask for RunGraphStream (EVENTS=1, TOKENS=2,
+  // VALUES=4, UPDATES=8, DEBUG=16). Ignored by unary RunGraph.
+  uint32 stream_mode = 5;
+
+  // When true and a checkpoint store is configured, load the latest
+  // checkpoint for thread_id and apply input on top (RunConfig::
+  // resume_if_exists).
+  bool resume_if_exists = 6;
+}
+
+message RunGraphResponse {
+  // Final state as a JSON string:
+  // {"channels": {...}, "global_version": N}.
+  string output_json = 1;
+
+  bool   interrupted     = 2;
+  string interrupt_node  = 3;
+  string interrupt_value_json = 4;   // {"reason": ...} / {"message": ...}
+  string checkpoint_id   = 5;
+
+  // Node names in execution order (debug aid for routing).
+  repeated string execution_trace = 6;
+
+  // Set on engine-side failure instead of a transport error, so the
+  // caller distinguishes "graph threw" from "gRPC broke".
+  string error = 7;
+}
+
+message GraphEvent {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    TOKEN            = 1;   // streaming LLM token
+    NODE_START       = 2;
+    NODE_END         = 3;
+    VALUES           = 4;   // channel snapshot
+    UPDATES          = 5;   // channel delta
+    DEBUG            = 6;
+    FINAL            = 7;   // terminal — payload_json carries RunGraphResponse
+  }
+  Kind   kind        = 1;
+  string node        = 2;   // node name (NODE_*/TOKEN), empty otherwise
+  string payload_json = 3;  // token text / channel JSON / final RunResult
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool   ok            = 1;
+  string version       = 2;   // NeoGraph version string
+  bool   has_default_graph = 3;
+}
