@@ -102,3 +102,63 @@ message HealthResponse {
   string version       = 2;   // NeoGraph version string
   bool   has_default_graph = 3;
 }
+
+// ── CheckpointService ────────────────────────────────────────────────
+//
+// Remote checkpoint persistence over gRPC. Ported from the predecessor
+// NexaGraph (proto/rag_service.proto, src/nexagraph/grpc_checkpoint.*),
+// which already inherited neograph::graph::CheckpointStore. Mirrors the
+// 5 sync core virtuals of CheckpointStore exactly:
+//   save / load_latest / load_by_id / list / delete_thread
+//
+// Wire shape: a single `checkpoint_json` string, NOT a field-per-member
+// message. NeoGraph's Checkpoint has next_nodes (repeated), an enum
+// interrupt_phase, a nested barrier_state map, and a schema_version —
+// modeling each as a proto field would couple the wire to the struct
+// and break on every checkpoint-format bump. The JSON-string approach
+// keeps the graph-as-data property (same reasoning as GraphService's
+// payloads) and is the exact pattern NexaGraph used (channel_values_
+// json etc.), generalized to the whole record. The gRPC win is the
+// HTTP/2 binary transport + multiplexing, measured against JSON-RPC
+// envelope overhead — not proto schema rigidity.
+
+service CheckpointService {
+  rpc SaveCheckpoint(SaveCheckpointRequest) returns (StatusResponse);
+  rpc LoadLatestCheckpoint(LoadLatestRequest) returns (CheckpointResponse);
+  rpc LoadCheckpointById(LoadByIdRequest) returns (CheckpointResponse);
+  rpc ListCheckpoints(ListCheckpointsRequest) returns (ListCheckpointsResponse);
+  rpc DeleteThreadCheckpoints(DeleteThreadRequest) returns (StatusResponse);
+}
+
+message CheckpointBlob {
+  // Indexed columns the server can key/order on without parsing the
+  // blob. Must equal the same fields inside checkpoint_json.
+  string id        = 1;
+  string thread_id  = 2;
+  // Full neograph::graph::Checkpoint serialized as a JSON object:
+  // {id, thread_id, channel_values, channel_versions, parent_id,
+  //  current_node, next_nodes[], interrupt_phase, barrier_state{},
+  //  metadata, step, timestamp, schema_version}.
+  string checkpoint_json = 3;
+}
+
+message StatusResponse {
+  bool   ok    = 1;
+  string error = 2;   // engine-side failure surfaces here, not as gRPC status
+}
+
+message SaveCheckpointRequest  { CheckpointBlob checkpoint = 1; }
+message LoadLatestRequest      { string thread_id = 1; }
+message LoadByIdRequest        { string id = 1; }
+message CheckpointResponse {
+  bool           found      = 1;
+  CheckpointBlob checkpoint = 2;
+}
+message ListCheckpointsRequest {
+  string thread_id = 1;
+  int32  limit     = 2;   // 0 → server default (100)
+}
+message ListCheckpointsResponse {
+  repeated CheckpointBlob checkpoints = 1;
+}
+message DeleteThreadRequest    { string thread_id = 1; }

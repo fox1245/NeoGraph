@@ -1064,16 +1064,60 @@ gRPC-MCP 를 구현·동작시켰음. 조사 결과 (Explore, 2026-05-16):
    dominant 라 이득 작음 + MCP-over-gRPC 표준 미확정(#966). 표준
    확정 후, 그때도 RAG/embedding 같은 대용량 tool 에 한해.
 
-다음 액션 (deferred, 우선순위순):
-  - `neograph::grpc` 에 `GrpcCheckpointStore` 추가 — NexaGraph
-    `grpc_checkpoint.{h,cpp}` + `rag_service.proto` 의 checkpoint 5
-    RPC 를 베이스로. cookbook: "checkpoint persistence over gRPC,
-    Postgres 백엔드는 별 프로세스". *측정 동반 필수* — NexaGraph 가
-    못 한 "JSON-RPC vs gRPC checkpoint save/load 실측" 을 NeoGraph
-    bench 로 닫아서 "PLAUSIBLE BUT UNPROVEN" 을 PROVEN 으로.
-  - 그 측정이 2-3x 보이면 → MCP-over-gRPC transport 도 표준 확정
-    시 추가 검토. 안 보이면 → gRPC 는 polyglot sidecar (GraphService)
-    용도로만, checkpoint 는 Postgres 직결 유지.
+### GrpcCheckpointStore — landed + measured (2026-05-16)
+
+`neograph::grpc` 에 `GrpcCheckpointStore`(client, `CheckpointStore`
+상속 — NexaGraph 와 동일) + `CheckpointServiceImpl`+`run_checkpoint_
+server`(server, 임의 `CheckpointStore` backend wrap) + `checkpoint_to
+/from_json` 헬퍼 추가. proto 에 `CheckpointService` 5 RPC. NexaGraph
+flat-mapping 이 못 한 NeoGraph rich fields (next_nodes vector /
+CheckpointPhase enum / barrier_state nested map / schema_version) 까지
+round-trip 보존 — example 54 correctness PASS.
+
+**측정 결과 (example_grpc_checkpoint, 1536-d embedding + 12-turn,
+200 iters, localhost loopback) — "PLAUSIBLE BUT UNPROVEN" 닫음. 단
+정직하게, 절반은 기각:**
+
+| 항목 | 값 |
+|---|---|
+| JSON (checkpoint_json) | 29 080 B |
+| Protobuf wire (CheckpointBlob) | 29 131 B |
+| Notional JSON-RPC envelope | 29 155 B |
+| protobuf / JSON-RPC payload | **99.9%** |
+| InMemory in-process | save 27 µs / load 36 µs |
+| gRPC round-trip | save 720 µs / load 755 µs |
+| gRPC 네트워크 오버헤드 | **+693 µs save / +719 µs load** |
+
+**정직한 결론 — NexaGraph 의 "직렬화 15KB→6KB binary 압축" 주장은
+NeoGraph 의 JSON-in-proto 설계에서 미달성 (payload 99.9% 동일).**
+이유: graph-as-data robustness 위해 checkpoint 전체를 proto string
+한 필드로 담음 → protobuf field-level 압축 안 걸림. NexaGraph 는
+field-per-member proto 라 압축됐지만 checkpoint format drift 마다
+proto regen (next_nodes/barrier_state/schema_version 추가 시마다). 즉
+**압축 vs schema-안정성 trade-off 에서 후자를 의도 선택했고, 그래서
+payload 이득은 0 이 맞다 (PROVEN: not beneficial by design).**
+
+gRPC 의 *실재* 이득은 transport 뿐 — HTTP/2 connection reuse (JSON-
+RPC/HTTP1.1 의 per-call connect 제거). 단일 loopback round-trip
++700 µs 측정으론 안 드러남 (부하·원격 RTT 에서만 delta). 즉
+**transport 이득은 still load-test-dependent — 단발 측정으로 PROVEN
+못 함.**
+
+→ 우선순위 재확정:
+  - **GrpcCheckpointStore 의 진짜 가치 = "원격 checkpoint 를 typed
+    RPC + HTTP/2 connection-reuse 로" + "polyglot: 어느 언어 서버든
+    CheckpointService 구현 가능"**. NexaGraph 가 광고한 payload
+    압축이 아님. cookbook 으로 ship 하되 셀링 포인트를
+    "압축" 아니라 "typed remote checkpoint, DB driver 0 in agent
+    process" 로 정직하게.
+  - **MCP-over-gRPC transport (일반 tool call) = 보류 유지**. payload
+    압축이 JSON-in-proto 에서 안 걸리는 게 checkpoint 에서 측정으로
+    확인됐으니, tool call 도 같은 설계면 압축 이득 0 + LLM dominant.
+    표준 #966 확정 + field-per-member 가 정당화되는 대용량 binary
+    tool (raw embedding 등) 한정으로만 재검토.
+  - 남은 검증: 부하 상황 (N 동시 checkpoint save) 에서 HTTP/2
+    multiplexing 이 per-call-connect 대비 실제 delta 내는지 —
+    bench job 후보 (단발 아닌 sustained).
 
 ### Remaining (still open)
 
