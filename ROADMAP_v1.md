@@ -1119,6 +1119,51 @@ RPC/HTTP1.1 의 per-call connect 제거). 단일 loopback round-trip
     multiplexing 이 per-call-connect 대비 실제 delta 내는지 —
     bench job 후보 (단발 아닌 sustained).
 
+### ToolCalling: JSON-RPC vs gRPC head-to-head (2026-05-16)
+
+사용자 요청 — checkpoint 가 아니라 *tool call* 자체를 두 transport
+실서버로 head-to-head. `proto` 에 `ToolService.CallTool`, example 55
+가 **같은 compute fn 을 (a) httplib JSON-RPC 2.0 `tools/call` (MCP
+shape, HTTP/1.1 keep-alive) (b) gRPC ToolService (HTTP/2)** 양쪽에
+띄우고 동일 측정.
+
+**정직성 사건 — "gRPC 70x faster" 는 측정 아티팩트였다.** 첫 실행:
+JSON-RPC p50 43 ms (payload 무관 고정). 43 ms = TCP delayed-ACK
+타이머의 교과서적 시그니처. 원인: `CPPHTTPLIB_TCP_NODELAY` 기본
+**false** → Nagle on, gRPC 는 TCP_NODELAY 기본 on → 불공정. 그대로
+"gRPC 70x" commit 했으면 거짓. `Server/Client::set_tcp_nodelay(true)`
+양쪽 적용 후 재측정.
+
+**공정 조건 결과 (loopback, 양쪽 keep-alive+NODELAY, N=300 p50,
+2회 재현):**
+
+| payload | gRPC p50 | JSON-RPC p50 | 비율 |
+|---|---|---|---|
+| tiny args (~30 B) | 433 / 448 µs | 436 / 410 µs | **0.99–1.09× (동률)** |
+| 1536-float (~12 KB) | 655 / 680 µs | 1079 / 1016 µs | **0.61–0.67× (gRPC ~1.5×)** |
+| args wire (tiny) | 42 B | 118 B | envelope overhead |
+| args wire (12 KB) | 12025 B | 12100 B | **99% (압축 0)** |
+
+**진실:**
+- **작은 tool call (실제 tool call 의 대다수): JSON-RPC ≈ gRPC 동률.**
+  transport 교체 ROI ≈ 0.
+- **대용량 payload tool call (~12 KB+, embedding/RAG chunk 반환):
+  gRPC ~1.5×.** NexaGraph 가 말한 영역이지만 70× 아니라 1.5×.
+- payload 압축은 여전히 0 (JSON-in-proto, checkpoint 측정과 일관).
+- loopback 상한 — 실제 네트워크면 RTT 가 양쪽에 공통으로 더해져
+  비율은 더 1 에 수렴. 1.5× 는 best case.
+
+**Candidate 7 최종 판정:**
+- gRPC 의 ROI 는 (1) **polyglot sidecar / 원격 typed RPC** (언어
+  경계), (2) **대용량 payload tool/checkpoint 에서 ~1.5×**. 일반
+  tool call 대량 전환은 무가치 (동률 + 표준 #966 미확정).
+- MCP-over-gRPC transport: **보류 확정**. "일반 MCP tool call 빨라짐"
+  은 측정으로 반증됨 (동률). embedding-heavy tool 한정 + 표준
+  확정 후로만.
+- Nagle 사건 → EDDSkills SKILL 후보 `bench-shock-number-nagle-first`
+  (충격적 transport 벤치 숫자 = TCP_NODELAY/Nagle/delayed-ACK 부터
+  의심; `perf-regression-bench-bisect` 사촌). 사용자 승인 후 추가.
+
 ### Remaining (still open)
 
   - CI 에 `grpc-build` job 추가 (apt deps + ON 빌드 +
