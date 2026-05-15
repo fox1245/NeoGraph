@@ -683,11 +683,11 @@ if(NEOGRAPH_BUILD_GRPC)
             "${_ng_grpc_gen}/neograph.grpc.pb.cc"
             "${_ng_grpc_gen}/neograph.grpc.pb.h"
         COMMAND protobuf::protoc
-        ARGS --proto_path="${_ng_proto_dir}"
-             --cpp_out="${_ng_grpc_gen}"
-             --grpc_out="${_ng_grpc_gen}"
-             --plugin=protoc-gen-grpc="${_grpc_plugin}"
-             "${_ng_proto}"
+        ARGS --proto_path=${_ng_proto_dir}
+             --cpp_out=${_ng_grpc_gen}
+             --grpc_out=${_ng_grpc_gen}
+             --plugin=protoc-gen-grpc=${_grpc_plugin}
+             ${_ng_proto}
         DEPENDS "${_ng_proto}"
         COMMENT "protoc: neograph.proto → C++ + gRPC stubs"
         VERBATIM)
@@ -917,6 +917,12 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             add_executable(example_grpc_server examples/52_grpc_server.cpp)
             target_link_libraries(example_grpc_server PRIVATE
                 neograph::core neograph::grpc)
+
+            # Pure gRPC client — links neograph::grpc only for the
+            # generated stubs + grpc++; never touches the engine.
+            add_executable(example_grpc_client examples/53_grpc_client.cpp)
+            target_link_libraries(example_grpc_client PRIVATE
+                neograph::grpc)
         endif()
 
         # Reopen the A2A guarded block for the cookbook executables that
