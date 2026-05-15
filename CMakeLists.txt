@@ -697,6 +697,7 @@ if(NEOGRAPH_BUILD_GRPC)
         "${_ng_grpc_gen}/neograph.grpc.pb.cc"
         src/grpc/graph_service.cpp
         src/grpc/grpc_checkpoint.cpp
+        src/grpc/tool_service.cpp
     )
     target_include_directories(neograph_grpc
         PUBLIC
@@ -929,6 +930,13 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             add_executable(example_grpc_checkpoint examples/54_grpc_checkpoint.cpp)
             target_link_libraries(example_grpc_checkpoint PRIVATE
                 neograph::core neograph::grpc)
+
+            # Head-to-head: tool calling in JSON-RPC vs gRPC. Links
+            # httplib for the JSON-RPC (MCP-shaped) server half.
+            add_executable(example_grpc_vs_jsonrpc
+                examples/55_grpc_vs_jsonrpc_toolcall.cpp)
+            target_link_libraries(example_grpc_vs_jsonrpc PRIVATE
+                neograph::core neograph::grpc httplib)
         endif()
 
         # Reopen the A2A guarded block for the cookbook executables that

@@ -103,6 +103,30 @@ message HealthResponse {
   bool   has_default_graph = 3;
 }
 
+// ── ToolService ──────────────────────────────────────────────────────
+//
+// A single tool call over gRPC, shaped to be the fair counterpart of
+// MCP's JSON-RPC 2.0 `tools/call`. Same payload model as the rest of
+// this proto (args/result are JSON strings — graph-as-data), so the
+// only thing that differs vs the JSON-RPC path in the head-to-head
+// bench is the *transport* (HTTP/2 binary framing + connection reuse
+// vs HTTP/1.1 + JSON-RPC envelope). This is the apples-to-apples
+// "ToolCalling in JSON-RPC vs ToolCalling in gRPC" measurement.
+
+service ToolService {
+  rpc CallTool(ToolCallRequest) returns (ToolCallResponse);
+}
+
+message ToolCallRequest {
+  string name           = 1;   // tool name
+  string arguments_json = 2;   // JSON object string (== MCP params.arguments)
+}
+
+message ToolCallResponse {
+  string result_json = 1;      // JSON result (== MCP result.content)
+  string error       = 2;      // non-empty → tool threw (not a transport error)
+}
+
 // ── CheckpointService ────────────────────────────────────────────────
 //
 // Remote checkpoint persistence over gRPC. Ported from the predecessor
