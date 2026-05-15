@@ -945,3 +945,60 @@ Candidate 1.
   - **adjacent**: `schema_provider.cpp` (1800 LoC) 의 `SchemaParser` /
     `SchemaWireBuilder` / `SchemaProviderImpl` 분할 (위 6b 와 같은
     PR 또는 별도 — 구현 시 결정).
+
+---
+
+## Candidate 7 — gRPC transport (opt-in component)
+
+### Context
+
+HasMCP cold-email (2026-05-15) 이 trigger 한 게 아니라, 그 메일이
+"gRPC 가 다음 transport 방향" 이라는 업계 신호를 공짜로 줬다. MCP
+커뮤니티가 [gRPC를 표준 transport로 추가](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/966)
+논의 중이고 Google 이 gRPC-as-native-MCP-transport 작업 중. gRPC 는
+NeoGraph 4축 narrative 와 거의 모든 축에서 정합 — protobuf 바이너리
+직렬화(성능/경량), HTTP/2 multiplexing(multi-tenant connection 비용),
+네이티브 bidi streaming(token/event), 스키마 강제+작은 wire(임베디드).
+
+### 결정 (2026-05-15)
+
+- **자체 구현 X.** 통신 프로토콜은 reinvent-the-wheel 리스크가 큼 —
+  표준 `grpc++` + `protoc` 사용.
+- **opt-in only.** `NEOGRAPH_BUILD_GRPC` 옵션, **default OFF**.
+  grpc++ 가 protobuf + abseil + c-ares + re2 + zlib (수십 MB
+  transitive) 를 끌어와 "2 deps / libc.so.6 only / 1.2 MB binary"
+  경량 축을 깬다. default OFF 가 그걸 막는 유일한 방법 +
+  `cmake-option-default-flip-trap` (EDDSkills, 같은 세션 신설) 규율
+  적용: `find_package(Protobuf/gRPC)` 를 옵션 gate 안에만, default
+  flip 금지.
+- **NeoGraph-native API, MCP 표준과 독립.** `proto/neograph.proto` =
+  `GraphService { RunGraph(unary) / RunGraphStream(server-stream) /
+  Health }`. payload 는 JSON string (graph-as-data 속성 보존 — proto
+  강타입 메시지로 모델링하면 user graph 변경마다 .proto regen).
+  MCP-over-gRPC 표준이 확정되면 그때 MCP-shaped service 를 이것 옆에
+  추가 (이 service 무변경).
+
+### Landed (v0.9.x cycle, scaffold)
+
+- `NEOGRAPH_BUILD_GRPC=OFF` 옵션 + conditional `find_package` + fatal
+  guard.
+- `proto/neograph.proto`, `src/grpc/graph_service.cpp` (hash-keyed
+  compile cache — multi_tenant_chatbot cookbook 패턴 재사용),
+  `include/neograph/grpc/graph_service.h` (`NEOGRAPH_HAVE_GRPC` 가드),
+  `examples/52_grpc_server.cpp`.
+
+### Open — first grpc++-equipped build
+
+Reference CI 환경에 grpc++/protoc 없음 → **OFF-default 빌드만 검증됨
+(회귀 0)**. ON 빌드의 protoc codegen 경로 (`add_custom_command` →
+`neograph.pb.* / neograph.grpc.pb.*`, `protobuf_generate` 대신 raw
+protoc 호출 사용 — CMake protobuf module 유무 비의존) 는 grpc++ 깔린
+첫 빌드에서 확인 필요. 확인 후:
+  - CI 에 `grpc-build` job 추가 (apt `libgrpc++-dev
+    protobuf-compiler-grpc`, ON 빌드 + `example_grpc_server` 스모크)
+  - `RunGraphStream` 의 `ServerWriter::Write` 가 streaming node
+    callback 안에서 호출됨 — engine 의 GraphStreamCallback 이 어느
+    thread 에서 불리는지 확인 후 필요 시 동기화 (현재 단일 super-step
+    loop thread 가정).
+  - TLS / auth 는 `run_server` 의 insecure 기본 대신 사용자 wiring
+    문서화.

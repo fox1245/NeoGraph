@@ -119,6 +119,18 @@ option(NEOGRAPH_BUILD_POSTGRES "Build PostgresCheckpointStore (libpq)" ON)
 option(NEOGRAPH_BUILD_SQLITE   "Build SqliteCheckpointStore (libsqlite3)" ON)
 option(NEOGRAPH_BUILD_EXAMPLES "Build example programs"                  ON)
 option(NEOGRAPH_BUILD_PYBIND   "Build Python bindings (pybind11)"        OFF)
+# neograph::grpc — expose a compiled GraphEngine as a gRPC service
+# (RunGraph unary + RunGraphStream server-streaming). **default OFF**
+# on purpose: grpc++ drags in protobuf + abseil + c-ares + re2 + zlib
+# (tens of MB transitive), which would break the "2 deps / libc.so.6
+# only / 1.2 MB binary" lightweight axis for the 99% who don't need
+# gRPC. Opt-in only. find_package(Protobuf/gRPC) is gated inside this
+# option (see ~line 262) — a default build never probes for them, so
+# a host without grpc++ still configures cleanly. Keeping default OFF
+# is also the explicit guard against the cmake-option-default-flip
+# trap (a previously-OFF dep silently flipping ON and breaking every
+# minimal downstream).
+option(NEOGRAPH_BUILD_GRPC     "Build neograph::grpc (gRPC GraphEngine service — needs grpc++/protoc)" OFF)
 # libcurl drives the opt-in HTTP/2 transport (CurlH2Pool, used when
 # SchemaProvider::Config::prefer_libcurl=true). Default ON because the
 # library is on every Linux/macOS distro by default; turn OFF when
@@ -296,6 +308,23 @@ endif()
 # PostgreSQL::PostgreSQL target comes from CMake's bundled FindPostgreSQL.
 if(NEOGRAPH_BUILD_POSTGRES)
     find_package(PostgreSQL REQUIRED)
+endif()
+
+# Protobuf + gRPC — only probed when NEOGRAPH_BUILD_GRPC=ON. A default
+# build (option OFF) never calls these, so a host without grpc++ /
+# protoc still configures and builds the whole engine. This is the
+# cmake-option-default-flip-trap discipline applied up front: the dep
+# discovery lives strictly inside the option gate, default OFF.
+if(NEOGRAPH_BUILD_GRPC)
+    find_package(Protobuf REQUIRED)
+    find_package(gRPC REQUIRED)
+    if(NOT TARGET gRPC::grpc++ OR NOT TARGET protobuf::libprotobuf)
+        message(FATAL_ERROR
+            "NEOGRAPH_BUILD_GRPC=ON but gRPC::grpc++ / protobuf::libprotobuf "
+            "targets not found. Install grpc++ + protobuf-compiler (apt: "
+            "libgrpc++-dev protobuf-compiler-grpc) or set "
+            "-DNEOGRAPH_BUILD_GRPC=OFF (default).")
+    endif()
 endif()
 
 # ===========================================================================
@@ -627,6 +656,64 @@ if(NEOGRAPH_BUILD_ACP)
 endif()
 
 # ===========================================================================
+# neograph::grpc — expose a compiled GraphEngine over gRPC.
+#
+# Opt-in only (NEOGRAPH_BUILD_GRPC, default OFF). When ON, protoc +
+# the grpc_cpp_plugin generate neograph.pb.* / neograph.grpc.pb.* into
+# the build tree, and graph_service.cpp implements the service against
+# neograph_core. Independent of MCP — this is NeoGraph's own gRPC API.
+#
+# NOTE: this path is not exercised in the reference CI environment
+# (no grpc++/protoc there). The OFF-default build is fully verified;
+# the ON build's protoc codegen wiring should be confirmed on the
+# first grpc++-equipped build. See ROADMAP_v1.md.
+# ===========================================================================
+if(NEOGRAPH_BUILD_GRPC)
+    set(_ng_proto "${PROJECT_SOURCE_DIR}/proto/neograph.proto")
+    set(_ng_proto_dir "${PROJECT_SOURCE_DIR}/proto")
+    set(_ng_grpc_gen "${CMAKE_CURRENT_BINARY_DIR}/grpc_gen")
+    file(MAKE_DIRECTORY "${_ng_grpc_gen}")
+
+    get_target_property(_grpc_plugin gRPC::grpc_cpp_plugin LOCATION)
+
+    add_custom_command(
+        OUTPUT
+            "${_ng_grpc_gen}/neograph.pb.cc"
+            "${_ng_grpc_gen}/neograph.pb.h"
+            "${_ng_grpc_gen}/neograph.grpc.pb.cc"
+            "${_ng_grpc_gen}/neograph.grpc.pb.h"
+        COMMAND protobuf::protoc
+        ARGS --proto_path="${_ng_proto_dir}"
+             --cpp_out="${_ng_grpc_gen}"
+             --grpc_out="${_ng_grpc_gen}"
+             --plugin=protoc-gen-grpc="${_grpc_plugin}"
+             "${_ng_proto}"
+        DEPENDS "${_ng_proto}"
+        COMMENT "protoc: neograph.proto → C++ + gRPC stubs"
+        VERBATIM)
+
+    add_library(neograph_grpc
+        "${_ng_grpc_gen}/neograph.pb.cc"
+        "${_ng_grpc_gen}/neograph.grpc.pb.cc"
+        src/grpc/graph_service.cpp
+    )
+    target_include_directories(neograph_grpc
+        PUBLIC
+            $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+            $<BUILD_INTERFACE:${_ng_grpc_gen}>
+            $<INSTALL_INTERFACE:include>
+    )
+    target_compile_definitions(neograph_grpc
+        PRIVATE NEOGRAPH_BUILDING_LIBRARY
+        PUBLIC  NEOGRAPH_HAVE_GRPC)
+    target_link_libraries(neograph_grpc
+        PUBLIC  neograph_core protobuf::libprotobuf gRPC::grpc++
+    )
+    target_compile_features(neograph_grpc PUBLIC cxx_std_20)
+    add_library(neograph::grpc ALIAS neograph_grpc)
+endif()
+
+# ===========================================================================
 # neograph::util — Utilities (RequestQueue, header-only)
 # ===========================================================================
 if(NEOGRAPH_BUILD_UTIL)
@@ -824,6 +911,12 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             add_executable(example_acp_server examples/39_acp_server.cpp)
             target_link_libraries(example_acp_server PRIVATE
                 neograph::core neograph::acp)
+        endif()
+
+        if(NEOGRAPH_BUILD_GRPC)
+            add_executable(example_grpc_server examples/52_grpc_server.cpp)
+            target_link_libraries(example_grpc_server PRIVATE
+                neograph::core neograph::grpc)
         endif()
 
         # Reopen the A2A guarded block for the cookbook executables that
