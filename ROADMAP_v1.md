@@ -1025,8 +1025,55 @@ apt `libgrpc++-dev protobuf-compiler-grpc` (1.51.1) + protoc 3.21.12
      x86_64-linux-gnu/libz.so` 명시.
 
   → 둘 다 `cmake-option-default-flip-trap` 의 사촌 (환경 누출이
-  find_package 를 엉뚱한 prefix 로 끌고 감). EDDSkills SKILL 후보
-  ("wsl-windows-path-cmake-find-leak") — 사용자 승인 후 추가.
+  find_package 를 엉뚱한 prefix 로 끌고 감). EDDSkills SKILL
+  `wsl-windows-path-cmake-find-leak` 추가 완료 (2026-05-16).
+
+### NexaGraph 전신 분석 — gRPC-MCP 의 진짜 ROI 는 checkpoint
+
+NeoGraph 의 전신 NexaGraph (`/root/Coding/NexaGraph`) 가 초기에 이미
+gRPC-MCP 를 구현·동작시켰음. 조사 결과 (Explore, 2026-05-16):
+
+- **구현 실체**: `proto/rag_service.proto` (RAGService, 11 unary RPC —
+  vector_search / graph_search / ingest / chat history / image task /
+  **graph checkpoint** 5 RPC), `src/nexagraph/grpc_client.cpp` 완전
+  구현, api_server.cpp 에서 `GRPC_TARGET` env 로 production 통합.
+  서버는 dual-transport (HTTP JSON-RPC + gRPC 50051). streaming 없음
+  (전부 unary).
+- **오버헤드 감소 주장** (`DOCS/grpc-client-plan.md`): 직렬화
+  1ms→0.01ms, 임베딩 1536d 15KB→6KB, 요청마다 새 연결→HTTP/2
+  multiplexing. **측정치 없음 — 설계 rationale 만.**
+- **정직한 평가**: 일반 MCP tool call 은 LLM inference (수백 ms) 가
+  dominant 라 직렬화 1ms 절감은 noise. gRPC 이득이 *실재하는* 영역은
+  **대용량 구조화 payload** — embedding 벡터, RAG ingest, 그리고
+  특히 **graph checkpoint** (channel_values_json + channel_versions_
+  json 이 step 마다 큼). 작은 tool metadata/string query 는 <1%
+  (인지 복잡도 안 맞음). 즉 "MCP 전반 빠르게" 가 아니라 "대용량
+  payload MCP" 한정.
+
+**핵심 발견 — NeoGraph 도입 시 우선순위 재정렬:**
+
+1. **gRPC CheckpointStore = 진짜 ROI (1순위 후보)**. NexaGraph 의
+   `grpc_checkpoint.cpp` 가 이미 **`neograph::graph::CheckpointStore`
+   를 상속** — NeoGraph 의 checkpoint 추상을 그때부터 썼다. 즉
+   NeoGraph 의 `Postgres/Sqlite CheckpointStore` 옆에 `GrpcCheckpoint
+   Store` 를 추가하는 형태로 거의 그대로 포팅 가능 (~150 LoC). 큰
+   payload + 표준(MCP #966) 무관 + 방금 만든 `neograph::grpc`
+   컴포넌트 안에 자연스럽게 들어감. checkpoint 는 step 마다 큰 JSON
+   blob 이라 gRPC binary 이득이 측정 가능한 유일한 hot path.
+2. **MCP-over-gRPC transport (일반 tool call) = 후순위**. LLM
+   dominant 라 이득 작음 + MCP-over-gRPC 표준 미확정(#966). 표준
+   확정 후, 그때도 RAG/embedding 같은 대용량 tool 에 한해.
+
+다음 액션 (deferred, 우선순위순):
+  - `neograph::grpc` 에 `GrpcCheckpointStore` 추가 — NexaGraph
+    `grpc_checkpoint.{h,cpp}` + `rag_service.proto` 의 checkpoint 5
+    RPC 를 베이스로. cookbook: "checkpoint persistence over gRPC,
+    Postgres 백엔드는 별 프로세스". *측정 동반 필수* — NexaGraph 가
+    못 한 "JSON-RPC vs gRPC checkpoint save/load 실측" 을 NeoGraph
+    bench 로 닫아서 "PLAUSIBLE BUT UNPROVEN" 을 PROVEN 으로.
+  - 그 측정이 2-3x 보이면 → MCP-over-gRPC transport 도 표준 확정
+    시 추가 검토. 안 보이면 → gRPC 는 polyglot sidecar (GraphService)
+    용도로만, checkpoint 는 Postgres 직결 유지.
 
 ### Remaining (still open)
 
