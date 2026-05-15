@@ -47,9 +47,9 @@
 
 |   | Axis | Measured value | Reproduce |
 |---|---|---|---|
-| ⚡ | **Performance** | 5 µs engine overhead · 10 K concurrent in 5.5 MB · p99 17 µs flat | [Engine overhead](#engine-overhead-vs-leading-frameworks) · [L3 cache fit](#the-agent-runtime-that-fits-in-l3-cache) |
+| ⚡ | **Performance** | 5 µs engine overhead · 10 K concurrent in 5.5 MB · p99 17 µs flat | [Engine overhead](#engine-overhead-vs-leading-frameworks) · [L3 cache fit](docs/performance-deep-dive.md#the-agent-runtime-that-fits-in-l3-cache) |
 | 🧬 | **Self-evolution** | LLM judge → graph_def hot-swap · 5 customer → 3 emergent topology cluster | [self_evolving_chatbot cookbook](examples/cookbook/self_evolving_chatbot/) |
-| 🔌 | **Embedded-ready** | 1.2 MB stripped binary · `libc.so.6` only · runs on RPi Zero 2W · MCU-class possible | [Embedded / robotics](#what-the-numbers-mean-for-embedded--robotics) |
+| 🔌 | **Embedded-ready** | 1.2 MB stripped binary · `libc.so.6` only · runs on RPi Zero 2W · MCU-class possible | [Embedded / robotics](docs/performance-deep-dive.md#what-the-numbers-mean-for-embedded--robotics) |
 | 🪶 | **Lightweight** | 2 wheel deps (`certifi` + `pydantic`) · multi-tenant 1 K customer → 29 MB · t2.micro 1 K concurrent OK | [multi_tenant_chatbot cookbook](examples/cookbook/multi_tenant_chatbot/) |
 
 Each row is a single command away — no setup, no API key needed except
@@ -346,18 +346,12 @@ Four small things that are easy to miss:
 
 ## Python Binding
 
-NeoGraph also ships as a `pip`-installable Python package, so the same
-C++ engine can drive a LangGraph-style workflow from a Jupyter
-notebook, a Gradio app, or a FastAPI service:
+NeoGraph ships as a `pip`-installable package — the same C++ engine,
+driven from a Jupyter notebook, Gradio app, or FastAPI service:
 
 ```bash
 pip install neograph-engine
 ```
-
-### Five-second demo (no API key)
-
-The shortest thing that proves the install worked — one decorator-defined
-node, run it, read the output:
 
 ```python
 import neograph_engine as ng
@@ -369,434 +363,22 @@ def greet(state):
 
 definition = {
     "name": "demo",
-    "channels": {"name":     {"reducer": "overwrite"},
+    "channels": {"name": {"reducer": "overwrite"},
                  "messages": {"reducer": "append"}},
     "nodes":    {"greet": {"type": "greet"}},
     "edges":    [{"from": ng.START_NODE, "to": "greet"},
-                 {"from": "greet",       "to": ng.END_NODE}],
+                 {"from": "greet", "to": ng.END_NODE}],
 }
-
 engine = ng.GraphEngine.compile(definition, ng.NodeContext())
 result = engine.run(ng.RunConfig(thread_id="t1", input={"name": "NeoGraph"}))
-
 print(result.output["channels"]["messages"]["value"])
 # [{'role': 'assistant', 'content': 'Hello, NeoGraph!'}]
 ```
 
-### ReAct agent with a real LLM
-
-```python
-import neograph_engine as ng
-from neograph_engine.llm import OpenAIProvider
-
-class CalcTool(ng.Tool):
-    def get_name(self):       return "calc"
-    def get_definition(self): return ng.ChatTool(name="calc", description="multiply by 2",
-        parameters={"type":"object","properties":{"x":{"type":"number"}}})
-    def execute(self, args):  return str(args["x"] * 2)
-
-ctx = ng.NodeContext(
-    provider=OpenAIProvider(api_key="sk-..."),
-    tools=[CalcTool()],
-    instructions="Use `calc` for arithmetic.",
-)
-
-definition = {
-    "name": "react",
-    "channels": {"messages": {"reducer": "append"}},
-    "nodes":    {"llm": {"type": "llm_call"}, "dispatch": {"type": "tool_dispatch"}},
-    "edges":    [{"from": ng.START_NODE, "to": "llm"}, {"from": "dispatch", "to": "llm"}],
-    "conditional_edges": [{"from": "llm", "condition": "has_tool_calls",
-                           "routes": {"true": "dispatch", "false": ng.END_NODE}}],
-}
-engine = ng.GraphEngine.compile(definition, ctx)
-result = engine.run(ng.RunConfig(thread_id="t1",
-    input={"messages": [{"role": "user", "content": "What is 21 * 2?"}]},
-    max_steps=10))
-```
-
-### Reading the output
-
-`engine.run(...)` returns a `RunResult` with these fields:
-
-| Field | Type | Meaning |
-|---|---|---|
-| `output` | `dict` | Final state — `{"channels": {...}, "global_version": int}`. Use `output["channels"][name]["value"]` to read a channel. |
-| `interrupted` | `bool` | `True` if the run paused at an `interrupt_before` / `interrupt_after` / `NodeInterrupt`. |
-| `interrupt_node` | `str` | Name of the node that triggered the interrupt (when `interrupted`). |
-| `interrupt_value` | `dict` | Diagnostic payload — `{"reason": ...}` or `{"message": ...}`. |
-| `checkpoint_id` | `str` | ID of the latest checkpoint saved during the run. Pass to `engine.resume_async(checkpoint_id=...)` to continue. |
-| `execution_trace` | `list[str]` | Node names in the order they executed — useful for debugging routing. |
-
-`RunConfig` mirrors the LangGraph `RunnableConfig` idea:
-
-| Field | Default | Meaning |
-|---|---|---|
-| `thread_id` | required | Conversation / session identifier — keeps checkpoint streams separate. |
-| `input` | `{}` | Initial channel values — keys must match the graph's `channels` definition. |
-| `max_steps` | 25 | Super-step ceiling; ReAct loops typically need 10+. |
-| `stream_mode` | `StreamMode.OFF` | Bitmask: `EVENTS \| TOKENS \| DEBUG \| VALUES \| UPDATES \| ALL`. Only consulted by `run_stream` / `run_stream_async`. |
-| `resume_if_exists` | `False` | When `True` and a checkpoint store is configured, the run loads the latest checkpoint for `thread_id` (if any) and applies `input` on top via the channel reducers — multi-turn chat without manually threading prior state through `input`. Default keeps fresh-start semantics for back-compat; for HITL resume from an interrupted run, use `engine.resume_async()` instead. |
-
-### Built-in reducers
-
-Channels need a reducer — how new writes combine with existing values.
-Two built-ins ship today:
-
-| Reducer | Behavior | Typical use |
-|---|---|---|
-| `"overwrite"` | New value replaces old. | Single-value channels: `name`, `current_question`, intermediate scratch. |
-| `"append"` | New list concatenated to existing list. | Conversation history, intermediate results, anything you want to accumulate across nodes. |
-
-Custom reducers register from Python (since v0.1.9):
-
-```python
-ng.ReducerRegistry.register_reducer("sum",
-    lambda current, incoming: (current or 0) + incoming)
-
-# Now `"reducer": "sum"` works in your channel definitions.
-```
-
-Same pattern for conditional routing — `ng.ConditionRegistry.register_condition("name", fn)`
-where `fn(state) -> str` returns one of the route keys.
-
-### What's covered by the binding
-
-- **Engine surface** — `GraphEngine.compile / run / run_stream / run_async / run_stream_async / resume_async / get_state / update_state / fork`, `RunConfig`, `RunResult`, `set_worker_count`, `set_checkpoint_store`, `set_node_cache_enabled`.
-- **Custom Python nodes** — subclass `neograph_engine.GraphNode`, register via `NodeFactory.register_type` or the `@neograph_engine.node` decorator. Engine dispatches under proper GIL handling, including from fan-out worker threads.
-- **Custom Python tools** — subclass `neograph_engine.Tool`, pass into `NodeContext(tools=[...])`. Engine takes ownership at compile time.
-- **Async** — every `*_async` binding returns an `asyncio.Future` bound to the calling thread's running loop. Stream callbacks are hopped to the loop thread via `loop.call_soon_threadsafe` so callbacks run where asyncio expects.
-- **Checkpoints** — `InMemoryCheckpointStore` always; `PostgresCheckpointStore` when the binding is built from source with `-DNEOGRAPH_BUILD_POSTGRES=ON` (libpq bundling for the PyPI wheel is pending).
-- **OpenAI Responses over WebSocket** — `SchemaProvider(schema="openai_responses", use_websocket=True)`.
-
-Wheels: Linux x86_64 (manylinux_2_34), Linux aarch64 (manylinux_2_34),
-macOS arm64 (14+), Windows x64 (MSVC), for Python 3.9 → 3.13. **20 wheels
-+ sdist per release** via cibuildwheel.
-
-See [`bindings/python/examples/`](bindings/python/examples/) for the
-full example index — minimal graph, ReAct, HITL, intent routing, async,
-multi-agent debate, JSON graph round-trip, and a Gradio chat with a
-deep-research subgraph (Crawl4AI + Postgres optional).
-
-### Differences from LangGraph (Python binding)
-
-The pitch is "LangGraph for C++", but a few semantics diverge from
-LangGraph Python — surfaced here so you don't hit them mid-port:
-
-- **Multi-turn `thread_id` is opt-in** — `engine.run(cfg)` with the
-  same `thread_id` does **not** auto-load the previous turn's
-  checkpoint by default; every run starts fresh from `cfg.input`.
-  Set `cfg.resume_if_exists = True` for the LangGraph-style "load
-  latest, apply input on top" behaviour. Default is `False` so
-  callers that already thread state through `input` themselves are
-  unaffected. See the `RunConfig` table above.
-- **`update_state` accepts dict OR list of `ChannelWrite`** —
-  `update_state(thread_id, channel_writes, as_node='')` takes
-  either of two shapes for `channel_writes`:
-  - dict: `{"messages": [...]}` — the directly-keyed form, closest
-    to LangGraph's `values={...}` (kwarg name differs).
-  - list: `[ChannelWrite("messages", [...]), ...]` — symmetric with
-    what every node body emits.
-
-  Duplicate channels in the list form are last-write-wins; for
-  multi-write-per-channel on an APPEND reducer (e.g. appending two
-  messages in one call), bundle the values into the value list:
-  `{"messages": [m1, m2]}`. Other types raise `TypeError` instead
-  of silently no-op'ing (a pre-v0.3.2 trap closed by item #5).
-- **`get_state(thread_id)` returns a nested dict — `get_state_view`
-  is the flat helper** — `state["channels"]["messages"]["value"]`
-  is the canonical raw shape (stable across versions). For
-  ergonomic dot-access, use
-  `view = engine.get_state_view(thread_id)` and read `view.messages`,
-  `view.scratch`, etc. directly. `view.raw` exposes the unflattened
-  dict for callers needing version / metadata. Subclass `StateView`
-  with declared fields (Pydantic v2) for typed access:
-  `class ChatState(ng.StateView): messages: list[dict] = []` then
-  `engine.get_state_view(thread_id, model=ChatState)`.
-- **Python `Provider` subclasses bind only `complete` (sync)** —
-  `Provider.complete_async` is not bound on Python user-defined
-  Provider subclasses, so a custom Python Provider always serves
-  through the sync entry. For async-native provider integrations
-  (HTTP/2 multiplexing, true overlap with other coroutines), stay
-  in C++ and subclass `neograph::llm::Provider` there.
-- **One-line token emit** — `from neograph_engine.streaming import
-  emit_token`, then `emit_token(cb, self._name, token)` inside a
-  streaming node. Replaces the 4-line `GraphEvent` construction
-  ritual.
-- **Observability ships in-tree, not as a separate SaaS** — pair
-  `neograph_engine.tracing.otel_tracer` (vendor-neutral OTel spans)
-  with `neograph_engine.openinference.OpenInferenceProvider` +
-  `openinference_tracer` (LLM-shape attribute keys), point an
-  OTLP exporter at any OpenInference-aware backend (Phoenix, Arize,
-  Langfuse — all OSS, all self-hostable), and you get the LangSmith
-  UX (chat-bubble per turn, DAG hierarchy, prompt/response capture,
-  per-call token counts and cost) without a vendor SaaS contract.
-
-  ```bash
-  docker run -d -p 6006:6006 -p 4317:4317 arizephoenix/phoenix
-  pip install neograph-engine opentelemetry-exporter-otlp
-  ```
-  ```python
-  from opentelemetry import trace
-  from opentelemetry.sdk.trace import TracerProvider
-  from opentelemetry.sdk.trace.export import BatchSpanProcessor
-  from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-  from neograph_engine.openinference import OpenInferenceProvider, openinference_tracer
-
-  trace.set_tracer_provider(TracerProvider())
-  trace.get_tracer_provider().add_span_processor(
-      BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4317", insecure=True)))
-  tracer = trace.get_tracer("my-app")
-
-  wrapped = OpenInferenceProvider(OpenAIProvider(api_key=...), tracer)
-  ctx = ng.NodeContext(provider=wrapped)
-  engine = ng.GraphEngine.compile(graph, ctx)
-  with openinference_tracer(tracer) as cb:
-      engine.run_stream(cfg, cb)
-  # → http://localhost:6006 renders the trace as a LangSmith-style chain.
-  ```
-
-  LangGraph's hosted LangSmith is the typical observability path
-  in that ecosystem; LangFuse / Phoenix are the OSS substitutes
-  but require integration glue. NeoGraph's `OpenInferenceProvider`
-  *is* the integration glue — drop in, every `Provider.complete()`
-  becomes an LLM span automatically.
-- **One node method** — `def run(self, input)` is the canonical
-  override as of **v0.4.0**. Read state from `input.state`, the live
-  cancel handle from `input.ctx.cancel_token`, the streaming sink
-  (or `None`) from `input.stream_cb`. Return a `list[ChannelWrite]`,
-  `list[Send]`, a `Command`, or a `NodeResult`. The legacy 8-virtual
-  chain (`execute`, `execute_async`, `execute_full`,
-  `execute_full_async`, `execute_stream`, `execute_stream_async`,
-  `execute_full_stream`, `execute_full_stream_async`) is
-  `[[deprecated]]` in v0.4.x and **removed in v1.0.0** — migrate now
-  to silence the warnings.
-- **Two Python deps, full stop** — `pip install neograph-engine`
-  pulls `certifi` and `pydantic>=2.0` and that's the entire runtime
-  dependency tree. The graph engine, schedulers, checkpoint stores,
-  HTTP/WebSocket clients, MCP/A2A/ACP transports, OpenAI-compatible
-  provider, and Postgres/SQLite checkpoint backends are all native
-  C++ baked into the wheel.
-  Compare LangGraph's transitive runtime: `langgraph` →
-  `langchain-core` → `langchain` → `langchain-community` (each a
-  fast-moving package), plus per-integration packages (`langchain-openai`,
-  `langchain-anthropic`, `langchain-postgres`, `langchain-chroma`, …).
-  This is why a working LangGraph script breaks 6 months later —
-  Pydantic v1→v2 broke the world in 2024, and import paths drift across
-  every minor release (`from langchain.chat_models import ChatOpenAI`
-  → `from langchain_openai import ChatOpenAI` →
-  `from langchain_community.chat_models import ChatOpenAI`, depending
-  on which year you read the docs).
-  NeoGraph's Python surface is a thin pybind11 layer over a frozen
-  C++ ABI under semantic-versioning. **Code you write today against
-  v0.4.0 will compile against v1.x** — the deprecation window is the
-  *only* mechanism for breaking changes, and you get a `[[deprecated]]`
-  warning at compile time before anything moves under you.
-- **No Docker required for deployment** — a direct consequence of
-  the single-dep tree above. Production LangChain deployments
-  effectively *require* Docker + a fully-pinned `requirements.txt`
-  (or `poetry.lock` / `uv.lock`); without it, a transitive package's
-  silent minor bump on the next deploy can take the server down at
-  runtime. NeoGraph's wheel ships its full native runtime baked in,
-  so:
-
-  - `pip install neograph-engine` on bare metal / VPS / a
-    serverless function works — the host's other Python packages
-    can't reach into NeoGraph's C++ engine.
-  - Container images can be **alpine + musl + ~20 MB** (engine .so +
-    Python interpreter + 2 deps), or static-linked C++ binary at
-    **~1.2 MB** with `libc.so.6` as the only dynamic dep.
-  - Cold start on serverless (Lambda, Cloud Run) is ms-class, not
-    seconds — there's no LangChain import graph to walk.
-  - Lock-file maintenance burden is near-zero. `pydantic>=2.0` is
-    the only constraint that could ever drift, and you'd see it at
-    install time, not 3 AM in production.
-
-## Production economics
-
-The four points above (single-dep tree, no Docker required, frozen
-ABI, single-wheel deploy) compound into a measurably different cost
-structure when you actually scale on AWS / GCP / Azure. Two
-mechanisms — **fleet-safety on auto-scaling** and **workers per
-instance** — drive the numbers.
-
-### Auto-scaling without Heisenbugs
-
-LangChain on AWS effectively requires `docker image hash` pinning
-all the way through the stack — ECR-immutable images, ASG launch
-templates pinned to image hash, multi-region replication of that
-hash. Without it, every fleet-changing event is a timing bomb:
-
-| Event | LangChain risk | NeoGraph behavior |
-|---|---|---|
-| ASG launches new EC2 | `pip install` may pull newer transitive minor → fleet behavior drift | wheel is hash-immutable on PyPI; new instance = byte-identical binary |
-| Lambda cold start | 5–15 s (`langchain-community` import graph) | ms-class — no transitive imports |
-| Spot interruption + Karpenter rebuild | OS package + transitive Python dep drift | static-linked C++; only `libc.so.6` matters |
-| Blue/green deploy | image rebuilt at deploy-time = different runtime than yesterday | `pip install neograph-engine==X.Y.Z` is reproducible by version string alone |
-| Multi-region rollout | PyPI mirror lag + ECR replication timing → regions diverge | wheel hash equality across regions, period |
-| "Code 0 lines changed, prod broke" | regular occurrence (Pydantic v1→v2 / 2024) | structurally impossible — no transitive surface to drift |
-
-→ NeoGraph removes the SOP that LangChain prod *requires*. Bare-metal
-`pip install neograph-engine` on an EC2 user-data script is
-itself prod-grade.
-
-### Workers per instance — the RAM-side delta
-
-| | LangGraph | NeoGraph |
-|---|---|---|
-| Just-imported (zero workers) | **80 MB** | **5.5 MB** |
-| 1024 idle workers | (typically OOM-class) | **31 MB** |
-| Per-worker overhead (idle, no user state) | ~200–500 MB realistic prod | ~30 KB measured |
-| t3.medium (4 GB) — workers/instance | 7–17 | **700–3,500** |
-| Instances needed for 1 K concurrent requests | 60–140 | **1–3** |
-| us-east-1 spend (24/7, on-demand t3.medium) | **~$1,800–4,300/mo** | **~$30–90/mo** |
-
-That's a **50–150× infrastructure cost ratio** for the same
-concurrent-user count. The mechanism behind the per-worker number is
-the L3-cache fit story below: NeoGraph's hot working set is 277 KB
-regardless of N, so vertical scale ceiling is set by physical RAM
-itself, not by cache pressure.
-
-### One-line pitch
-
-> *"LangChain runtime cost: ~$4 K/mo for 1 K concurrent users.
-> NeoGraph: ~$50/mo. Same code shape, same LLM, frozen ABI."*
-
-This is the angle SREs / Platform teams care about when they
-veto LangChain in prod. It's not "Python is slow" — it's
-"the cost curve makes the SLA impossible."
-
-### Measured: 10,000 concurrent workers, one process, one GPU
-
-The table above is conservative. A direct stress test pinned the
-real number — *measured*, not extrapolated. Setup:
-
-- One process, one RTX 4070 Ti, one Gemma 4 E2B Q4 GGUF (≈ 1.5 GB
-  model weights via llama.cpp).
-- A single shared `LocalProvider` serializing inference at the
-  GPU boundary (representing the typical "your LLM endpoint is
-  the bottleneck" production shape).
-- N concurrent NeoGraph workers, each running a 1-node graph
-  (`llm_call` → `__end__`) with `engine.run_async()`, all
-  contending for the same provider.
-- Real generation: input `"Hi"`, output e.g.
-  `"Hello! How can I help you today?\n"`.
-
-| N workers | wall (s) | throughput (rps) | p50 (ms) | p99 (ms) | peak RSS (MB) | engine overhead (MB) | per-worker incremental |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| **1** | 0.64 | 1.6 | 642 | 642 | 2 464 | +294¹ | — |
-| **10** | 0.94 | 10.6 | 184 | 686 | 2 529 | +359 | 7.2 MB/worker |
-| **100** | 4.81 | 20.8 | 343 | 855 | 2 549 | +379 | 222 KB/worker |
-| **1 000** | 44.1 | 22.7 | 347 | 673 | 2 564 | +394 | **6 KB/worker** |
-| **5 000** | 213.7 | 23.4 | 338 | 657 | 2 570 | +400 | **1.2 KB/worker** |
-| **10 000** | **424** | **23.6** | **337** | **648** | **2 572** | **+403** | **≈ 1 KB/worker** |
-
-¹ One-time KV cache + llama.cpp activation buffers. Amortized across
-all N once allocated.
-
-**What the numbers say:**
-
-- **10,000 workers cost 9 MB more RAM than 1,000 workers**
-  (2 564 → 2 572 MB). The marginal cost of an additional worker
-  *converges to about 1 KB* — the size of a `RunConfig` plus a
-  `thread_id` string.
-- **Throughput is GPU-bound at 23 rps**, identical for N = 100 and
-  N = 10 000. The engine schedules 10 000 idle workers on a queue
-  for 7 minutes and contributes nothing to wall time.
-- **p99 latency is flat** (648 ms at N = 10 000 vs 686 ms at N = 10).
-  Queue depth does not accumulate latency — the scheduler releases
-  workers fairly as the GPU drains.
-- **Workers/instance ceiling is set by physical RAM, not by the
-  engine.** On a 32 GB host, N can grow to ≈ 30 million workers
-  before RAM saturates.
-
-For the 1 K-worker LangGraph cost projection earlier in this section,
-the implicit per-worker assumption was 200–500 MB. **The NeoGraph
-measurement is 6 KB.** The ratio isn't 100× — it's ≈ 30 000–80 000×.
-The earlier table was an order-of-magnitude *underclaim*.
-
-The benchmark source lives in the sister project
-[`neoclaw`](https://github.com/fox1245/neoclaw):
-[`benchmarks/bench_concurrent_workers_local_llm.cpp`](https://github.com/fox1245/neoclaw/blob/main/benchmarks/bench_concurrent_workers_local_llm.cpp).
-Reproduce with `-DNEOCLAW_BUILD_BENCHMARKS=ON -DNEOCLAW_BUILD_CUDA=ON`.
-
-## The agent runtime that fits in L3 cache
-
-NeoGraph's hot code path is small enough that N concurrent agents share
-one L3-resident working set. We measured this with Valgrind cachegrind
-on a Ryzen 7 5800X (Zen 3: 32 KB L1i/d 8-way, **32 MB L3 16-way**),
-sweeping N = 1 → 10,000 concurrent requests through
-`benchmarks/concurrent/bench_concurrent_neograph`:
-
-| N | I refs | **L3 instruction misses** | L3i miss rate | Native p50 |
-|---:|---:|---:|---:|---:|
-| 1 | 5.3 M | **4,313** | 0.08% | 17 µs |
-| 10 | 5.9 M | **4,304** | 0.07% | 16 µs |
-| 100 | 11.8 M | **4,320** | 0.04% | 6 µs |
-| 1,000 | 69.7 M | **4,327** | 0.01% | 6 µs |
-| 10,000 | **648 M** | **4,329** | **0.00%** | **5 µs** |
-
-**L3 instruction misses stay flat at ~4,320** across four orders of
-magnitude of N. The unique hot code working set is roughly
-`4,330 × 64 B = 277 KB` — **0.85 % of the 32 MB L3**. At N = 10,000
-we processed **648 million instructions** and only **4,329 of them
-reached DRAM** (≈ 1 miss per 150,000 instructions).
-
-Native per-request latency drops from 17 µs (cold) to 5 µs (warm) as N
-grows — the 3.4× improvement is pure I-cache warming. Throughput at
-N = 10,000 is ~1.1 M req/s on the single thread pool, with 5.2 MB
-peak RSS (≈ 100 B / agent marginal cost).
-
-**Why this matters:** DRAM access on Zen 3 is ~250 cycles vs ~46 for
-an L3 hit — roughly 5.5× slower per access. If NeoGraph's working set
-had overflowed L3 (as Python interpreters + dict-heavy state typically
-do), the same N = 10,000 sweep would have paid **+420 to +840 ms in
-memory stalls** instead of the measured **9 ms total wall time** —
-47–94× slower depending on how much of the miss chain reaches DRAM.
-The whole L3 stays available for *your* workload (conversation history,
-embeddings, tool responses): the engine itself is a rounding error.
-
-_Reproduce:_
-```bash
-g++ -std=c++20 -O2 -DNDEBUG -Iinclude -Ideps -Ideps/yyjson -Ideps/asio/include \
-    -DASIO_STANDALONE benchmarks/concurrent/bench_concurrent_neograph.cpp \
-    build-release/libneograph_core.a build-release/libyyjson.a -pthread -o bench_ng
-
-valgrind --tool=cachegrind --cache-sim=yes \
-    --I1=32768,8,64 --D1=32768,8,64 --LL=33554432,16,64 ./bench_ng 10000
-```
-
-### Holds end-to-end with a real LLM in the loop
-
-The L3 story survives full-stack production: we point NeoGraph at a
-locally-hosted Gemma-4 E2B (Q4_K_M, 4.65 B params, 2.9 GB GGUF) served
-by [TransformerCPP](https://github.com/fox1245/TransformerCPP)'s
-OpenAI-compatible HTTP endpoint — zero NeoGraph code changes, just
-`OpenAIProvider::Config::base_url = "http://localhost:8090"`. See
-[`examples/31_local_transformer.cpp`](examples/31_local_transformer.cpp).
-
-| | Pure NeoGraph | **NeoGraph + local Gemma (HTTP)** |
-|---|---:|---:|
-| L3 instruction misses | 4,320 | **7,262** |
-| Hot code working set | 277 KB | **465 KB** (1.42% of L3) |
-| Per-request TTFT | — | **25–27 ms** (curl baseline 9–10 ms → ~15 ms NeoGraph overhead) |
-| Per-request total | — | 146–213 ms @ 19–27 tokens (~130 tok/s) |
-| **NeoGraph agent RSS** | 5.2 MB | **7.6 MB** (+2.4 MB for httplib + JSON streaming) |
-| Gemma server RSS | n/a | 2.45 GB (mmap GGUF) |
-| VRAM (RTX 4070 Ti) | n/a | 3.06 GB |
-
-The inference process lives in a **separate address space**, so its
-2.5 GB of model weights never touch NeoGraph's L3 cache lines. The
-agent's 465 KB working set stays L3-resident regardless of how large
-the model is. That's the architectural payoff of the two-process
-split: you can swap in a 70 B model without inflating the agent.
-
-Burst-tested with 5 concurrent NeoGraph agents against the same server:
-aggregate wall 1.58 s / 5 requests (2.65× speedup from coroutine
-overlap). Per-agent throughput drops under queue pressure because the
-Gemma server doesn't implement continuous batching — that's a
-TransformerCPP concern, not an agent one. NeoGraph dispatched all 5
-cleanly with no resource pressure and the RSS stayed flat at ~7 MB.
+20 wheels + sdist per release (Linux x86_64 / aarch64, macOS arm64,
+Windows x64 · Python 3.9–3.13). **Full guide — ReAct with a real LLM,
+async, custom reducers, the LangGraph-divergence list, in-tree
+observability, Docker-free deployment: [`docs/python-binding.md`](docs/python-binding.md).**
 
 ## Quick Start
 
@@ -999,234 +581,16 @@ coroutine primitives (see [Features](#core-engine-neographcore)).
 
 ## Concurrency & Async
 
-NeoGraph supports two concurrency models out of the box — pick the
-one that fits your hosting pattern:
+Two models out of the box: **thread-per-agent (sync)** — share one
+compiled engine across threads with distinct `thread_id`s — and
+**coroutine async** — one `asio::io_context` hosts thousands of
+agents without a thread per run. Plus a bundled lock-free
+`RequestQueue` for fixed-pool backpressure and
+`PostgresCheckpointStore` for restart-surviving state.
 
-* **Thread-per-agent (sync)** — `run()` / `run_stream()` / `resume()`
-  dispatched onto any executor you already use. Safe up to roughly a
-  thousand concurrent agents; ~5 µs engine overhead per call on a
-  Release `-O3 -DNDEBUG` build (the super-step loop routes through
-  `run_sync(execute_graph_async)` so both entry points share one
-  coroutine path). Detailed below.
-* **Coroutine-based async** — `run_async()` / `run_stream_async()` /
-  `resume_async()` returning `asio::awaitable<RunResult>`. One
-  `asio::io_context` hosts thousands of concurrent agents without a
-  thread per run; all Provider / MCP / checkpoint I/O points are
-  non-blocking `co_await` under the hood. Short intro below; full
-  migration guide in [`docs/ASYNC_GUIDE.md`](docs/ASYNC_GUIDE.md).
-
-### Async (Stage 3)
-
-```cpp
-#include <asio/co_spawn.hpp>
-#include <asio/detached.hpp>
-#include <asio/io_context.hpp>
-
-asio::io_context io;
-for (const auto& user : users) {
-    asio::co_spawn(
-        io,
-        [&, user]() -> asio::awaitable<void> {
-            RunConfig cfg;
-            cfg.thread_id = user.session_id;
-            cfg.input     = {{"messages", user.history}};
-            auto result = co_await engine->run_async(cfg);
-            handle(result);
-        },
-        asio::detached);
-}
-io.run();  // drives all agents on this thread
-```
-
-Stage 4 reality: `engine->run_async()` stays on the caller's
-executor end-to-end — every super-step suspension point (node
-dispatch, checkpoint I/O, parallel fan-out, retry backoff) is a real
-`co_await`. The three 50 ms steps above therefore overlap on one
-io_context thread and the wall time lands at ~50 ms, not 3 × 50 ms.
-One thread, N concurrent agents. For CPU-bound fan-out across cores,
-switch the driver to a shared `asio::thread_pool` — that's the
-pattern in [`benchmarks/concurrent/CONCURRENT.md`](benchmarks/concurrent/CONCURRENT.md)
-where N = 10,000 finishes in 52 ms. Within a single run, the
-`make_parallel_group` fan-out overlaps too: three parallel-fanout
-researchers collapse from 370 ms sequential to 150 ms.
-
-Custom nodes join the async path by returning an `asio::awaitable`
-from the unified `run(NodeInput)` entry point (the one canonical
-override as of v0.4.0):
-
-```cpp
-class FetchNode : public GraphNode {
-  public:
-    asio::awaitable<NodeOutput>
-    run(NodeInput in) override {
-        auto ex = co_await asio::this_coro::executor;
-        auto res = co_await neograph::async::async_post(ex, /*...*/);
-        // in.ctx.cancel_token, in.state, in.stream_cb available.
-        co_return NodeOutput{ {ChannelWrite{"out", res}} };
-    }
-    std::string get_name() const override { return "fetch"; }
-};
-```
-
-The legacy 8-virtual chain (`execute_async`, `execute_full_async`,
-`execute_stream_async`, `execute_full_stream_async`, plus the four
-sync peers) is `[[deprecated]]` and removed in v1.0.0 — see
-[ROADMAP_v1.md](ROADMAP_v1.md) for the migration window.
-
-Async-shaped tools derive from `AsyncTool`:
-
-```cpp
-class FetchTool : public neograph::AsyncTool {
-  public:
-    asio::awaitable<std::string>
-    execute_async(const json& args) override { /* co_await HTTP */ }
-    // sync execute() is final, routes through run_sync automatically.
-};
-```
-
-See `examples/27_async_concurrent_runs.cpp` for the multi-agent
-pattern and `examples/05_parallel_fanout.cpp` for fan-out within
-one run.
-
-### Sync (thread-per-agent)
-
-NeoGraph does not ship its own async runtime — it exposes synchronous
-`run()` / `run_stream()` / `resume()` and lets you pick the executor.
-A single compiled `GraphEngine` is safe to share across threads that
-invoke `run()` concurrently with **distinct `thread_id`s**, so hosting
-multi-tenant agent workloads is a matter of dispatching onto whatever
-executor you already use.
-
-```cpp
-// One engine, many concurrent sessions — no external runtime required.
-auto engine = GraphEngine::compile(def, ctx, std::make_shared<InMemoryCheckpointStore>());
-
-std::vector<std::future<RunResult>> sessions;
-for (const auto& user : users) {
-    sessions.push_back(std::async(std::launch::async, [&engine, user]() {
-        RunConfig cfg;
-        cfg.thread_id = user.session_id;
-        cfg.input = {{"messages", user.history}};
-        return engine->run(cfg);
-    }));
-}
-for (auto& f : sessions) handle(f.get());
-```
-
-Works the same way with an `asio::thread_pool`, a `std::async`-backed
-task system, or your web framework's worker pool — NeoGraph stays out
-of the executor decision. If you need CPU-parallel fan-out *inside*
-a single sync `run()` call (rather than N sync `run()`s on N threads),
-call `engine->set_worker_count(N)` once after `compile()` to install
-an engine-owned `asio::thread_pool` that `run_parallel_async` and the
-multi-Send branch dispatch onto.
-
-### Using the bundled `RequestQueue`
-
-For multi-tenant servers that want a fixed worker pool with
-backpressure (rejecting new sessions when the queue is saturated
-instead of unbounded memory growth), link `neograph::util` and use
-the built-in lock-free queue — no external executor needed:
-
-```cpp
-#include <neograph/util/request_queue.h>
-using namespace neograph::util;
-
-RequestQueue pool(16, 1000);           // 16 workers, max 1000 pending sessions
-auto engine = GraphEngine::compile(def, ctx,
-                                   std::make_shared<InMemoryCheckpointStore>());
-
-std::vector<RunResult>          results(users.size());
-std::vector<std::future<void>>  futs;
-
-for (size_t i = 0; i < users.size(); ++i) {
-    auto [accepted, fut] = pool.submit([&, i]() {
-        RunConfig cfg;
-        cfg.thread_id = users[i].session_id;
-        cfg.input     = {{"messages", users[i].history}};
-        results[i]    = engine->run(cfg);
-    });
-    if (!accepted) {
-        // Backpressure: queue is full — shed load, return 503, retry later, …
-        reject(users[i]);
-        continue;
-    }
-    futs.push_back(std::move(fut));
-}
-
-for (auto& f : futs) f.get();           // propagates exceptions from run()
-
-auto s = pool.stats();
-log("pending={} active={} completed={} rejected={}",
-    s.pending, s.active, s.completed, s.rejected);
-```
-
-`submit()` returns `{accepted, std::future<void>}`: capture the
-`RunResult` via a shared output slot (as above) or a per-task
-`std::promise<RunResult>`. The queue is backed by
-`moodycamel::ConcurrentQueue` (lock-free) and workers park on a
-condvar when idle — no busy-spin.
-
-**Rules for safe concurrent use:**
-
-- Configuration mutators (`set_retry_policy`, `set_checkpoint_store`,
-  `set_store`, `own_tools`, …) must be called **before** any concurrent
-  `run()`. Treat the engine as frozen after the first dispatch.
-- Concurrent `run()` calls sharing the **same** `thread_id` do not crash
-  but produce unspecified checkpoint interleaving. Serialize per-session
-  access yourself if you need deterministic history.
-- Custom `GraphNode` subclasses must be **stateless or self-synchronized**.
-  Node instances are owned by the engine and reused across every run on
-  every thread — per-run scratch data belongs in graph channels, not in
-  node member variables.
-- User-supplied `CheckpointStore`, `Store`, `Provider`, and `Tool`
-  implementations must be thread-safe. The bundled `InMemoryCheckpointStore`
-  and `InMemoryStore` already are.
-
-### Persistent checkpointing with PostgreSQL
-
-For multi-process deployments or when checkpoints must survive a restart,
-link `neograph::postgres` and swap `InMemoryCheckpointStore` for
-`PostgresCheckpointStore`:
-
-```cpp
-#include <neograph/graph/postgres_checkpoint.h>
-
-auto store = std::make_shared<PostgresCheckpointStore>(
-    "postgresql://user:pass@host:5432/dbname");
-auto engine = GraphEngine::compile(def, ctx, store);
-```
-
-The schema mirrors LangGraph's `PostgresSaver` (three tables prefixed
-`neograph_*` to coexist with LangGraph state in the same database) and
-deduplicates channel values by `(thread_id, channel, version)`. A
-1000-step session that touches one channel per super-step costs roughly
-`O(steps + channels)` blob rows instead of `O(steps × channels)`.
-
-**Build flag**: `-DNEOGRAPH_BUILD_POSTGRES=ON` (default). Requires
-`libpqxx-dev` (apt) / `libpqxx-devel` (rpm). Set the flag `OFF` to skip
-the dependency entirely.
-
-**Running the integration tests**: spin up a throwaway local PG and
-point the test binary at it:
-
-```bash
-docker run -d --rm --name neograph-pg-test \
-    -e POSTGRES_PASSWORD=test -e POSTGRES_DB=neograph_test \
-    -p 55432:5432 postgres:16-alpine
-
-NEOGRAPH_TEST_POSTGRES_URL='postgresql://postgres:test@localhost:55432/neograph_test' \
-    ctest --test-dir build -R PostgresCheckpoint --output-on-failure
-```
-
-Without the env var the 19 PG tests are `GTEST_SKIP`'d so the rest of
-the suite stays green on machines without a Postgres handy.
-
-Coverage: `tests/test_graph_engine.cpp` contains
-`ConcurrentRunDifferentThreadIds` (16 threads × 25 runs = 400 parallel
-executions, validates per-session output + checkpoint isolation) and
-`ConcurrentRunSameThreadIdNoCrash` (8 threads × 50 runs on one shared
-`thread_id`, validates crash-free behavior).
+**Full patterns, safe-concurrency rules, and the Postgres setup:
+[`docs/concurrency.md`](docs/concurrency.md)** · async migration
+guide: [`docs/ASYNC_GUIDE.md`](docs/ASYNC_GUIDE.md).
 
 ## JSON Graph Definition
 
@@ -1405,169 +769,35 @@ leak signal). DLL load tests under continuous production traffic
 still pending — file an issue if you hit LNK2019 on a public
 symbol with the unresolved name.
 
+## Performance & production economics
+
+Headline numbers are in [The four axes](#the-four-axes--measurable-each-independently-verifiable)
+and [Why NeoGraph?](#why-neograph) above. The full evidence —
+AWS/GCP cost modeling, the 10 K-worker one-GPU stress test, the
+L3-cache-fit cachegrind sweep, and the local-LLM end-to-end hold —
+lives in **[`docs/performance-deep-dive.md`](docs/performance-deep-dive.md)**.
+
+> *"LangChain runtime cost: ~$4 K/mo for 1 K concurrent users.
+> NeoGraph: ~$50/mo. Same code shape, same LLM, frozen ABI."*
+
 ## Benchmarks
 
-### Engine overhead vs. Python graph/pipeline frameworks
+Matched-topology, zero-I/O engine overhead (µs/iter, lower better):
 
-Matched-topology, zero-I/O workloads: graph compiled once, invoked in a
-hot loop. Measures what the engine itself costs (dispatch, state
-writes, reducer calls) — no LLM, no sleep, no network.
-
-![NeoGraph vs Python frameworks — per-iteration latency and peak RSS](docs/images/bench-engine-overhead.png)
-
-Per-iteration engine overhead (µs, lower is better). All rows
-measured 2026-04-22 on the same x86_64 Linux host. NeoGraph built
-with Release `-O3 -DNDEBUG` (10-run median); Python rows are 3-run
-median through CPython 3.12.3.
-
-| Framework | `seq` (3-node chain) | `par` (fan-out 5 + join) | `seq` vs. NeoGraph |
-|-----------|---------------------:|-------------------------:|-------------------:|
+| Framework | `seq` (3-node) | `par` (fan-out 5) | vs. NeoGraph |
+|---|--:|--:|--:|
 | **NeoGraph master** | **5.0 µs** | **11.8 µs** | 1× |
-| Haystack 2.28.0 | 144.1 µs | 290.0 µs | 28.8× |
-| pydantic-graph 1.85.1 | 235.9 µs | 286.1 µs¹ | 47.2× |
-| LangGraph 1.1.9 | 656.7 µs | 2,348.7 µs | 131.3× |
-| LlamaIndex Workflow 0.14.21 | 1,780.3 µs | 4,683.5 µs | 356.1× |
-| AutoGen GraphFlow 0.7.5 | 3,209.2 µs | 7,292.7 µs | 641.8× |
+| Haystack 2.28 | 144 µs | 290 µs | 29× |
+| pydantic-graph 1.85 | 236 µs | 286 µs | 47× |
+| LangGraph 1.1.9 | 657 µs | 2,349 µs | 131× |
+| LlamaIndex 0.14 | 1,780 µs | 4,684 µs | 356× |
+| AutoGen 0.7.5 | 3,209 µs | 7,293 µs | 642× |
 
-¹ pydantic-graph is a single-next-node state machine and cannot fan
-out; `par` is a serial 6-node emulation.
-
-Whole-process metrics (warm-up + both workloads, 10k seq + 5k par iters):
-
-| | NeoGraph | best Python (Haystack) | worst (AutoGen) |
-|---|----------|------------------------|-----------------|
-| **Total elapsed** | **~0.16 s** | 2.91 s | 68.29 s |
-| **Peak RSS** | **4.8 MB** | 80.3 MB | 52.4 MB² |
-| **Parallel fan-out executor** | `asio::experimental::make_parallel_group` | single-thread asyncio (GIL) | single-thread asyncio (GIL) |
-
-² AutoGen has a smaller RSS than LlamaIndex but its per-iter cost
-is 64× higher — different tradeoff axes. Full matrix in
-[`benchmarks/README.md`](benchmarks/README.md).
-
-**Engine overhead disappears under LLM latency.** A 500 ms OpenAI round
-trip swamps every engine; the per-iter gap only shows up in non-LLM
-nodes (data transforms, routing decisions, pure-compute tool calls) and
-in dense agent orchestration. Where it does show up, it shows up big:
-on a Raspberry Pi 4 / Jetson Nano / any SBC-class target, a 10–20×
-RAM delta is the difference between "fits" and "swap thrash."
-
-Reproduction and methodology: [`benchmarks/README.md`](benchmarks/README.md).
-
-### Burst concurrency (1 CPU / 512 MB sandbox)
-
-What happens under thousands of simultaneous requests? Burst test: N
-requests submitted at t=0 to each engine, all-in / all-wait, inside a
-Docker cgroup limited to **1 CPU and 512 MB RAM** — roughly a
-Raspberry Pi 4 process budget.
-
-![Tail latency — P99 per request](docs/images/bench-concurrent-latency.png)
-
-![Throughput under concurrent load](docs/images/bench-concurrent-throughput.png)
-
-![Peak resident memory](docs/images/bench-concurrent-rss.png)
-
-At **N=10,000 concurrent requests** in asyncio mode (the default
-deployment shape for every Python framework):
-
-| Engine | Wall | P99 latency | Peak RSS | Status |
-|--------|-----:|------------:|---------:|:-------|
-| **NeoGraph master** | **52 ms** | **7 µs** | **5.5 MB** | ✅ 10000 / 0 |
-| pydantic-graph | 886 ms | **158 µs** | 42.6 MB | ✅ 10000 / 0 |
-| Haystack | 3.1 s | 2.9 s | 130.7 MB | ✅ 10000 / 0 |
-| LangGraph | 23.4 s | 23.0 s | 416.2 MB | ✅ 10000 / 0 |
-| LlamaIndex | — | — | — | ❌ **OOM killed** |
-| AutoGen | — | — | — | ❌ **OOM killed** |
-
-**Two frameworks don't complete** — LlamaIndex Workflow and AutoGen
-GraphFlow exhaust the 512 MB cgroup and get OOM-killed before 10k
-concurrent coroutines can drain. The remaining Python frameworks
-degrade rather than die, but their P99 latency grows linearly with N
-because the CPython GIL serializes every coroutine's CPU work. **This
-is not a LangGraph-specific pathology** — it shows up in every Python
-asyncio runtime.
-
-NeoGraph beats every Python asyncio runtime on throughput,
-tail latency, and RSS: 7 µs P99 at N=10k, ~76× lower RSS than
-LangGraph at the same load, and 3 orders of magnitude ahead of the
-GIL-serialized Python curves. Even pydantic-graph — the leanest
-Python state-machine — sits at 158 µs P99 and ~8× NeoGraph's RSS.
-
-`multiprocessing.Pool` mode bypasses the GIL across worker processes
-but saturates at pool size and pays fork + pickle overhead; full
-numbers and the mp-mode story are in
-[`benchmarks/concurrent/CONCURRENT.md`](benchmarks/concurrent/CONCURRENT.md).
-
-### Size & cold-start footprint (Plan & Executor demo)
-
-All numbers below were measured on x86_64 Linux (GCC 13) using
-`example_plan_executor` — a self-contained Plan & Executor demo that
-runs a 5-way Send fan-out, crashes sub-topic #2 on the first run, and
-resumes with the failure cleared. No LLM calls, no API keys, no network.
-
-### Binary size (MinSizeRel + static libstdc++ + strip)
-
-| Build configuration | Size |
-|---|---|
-| **MinSizeRel `-Os`, static libstdc++, `--gc-sections`, stripped** | **1,203 KB (1.2 MB)** |
-
-The MinSizeRel binary's only dynamic dependency is `libc.so.6` —
-`libstdc++` and `libgcc_s` are linked in statically. Drop it onto any
-Linux host with a matching libc and it runs. 3.0 is ~80 KB larger
-than 2.0 because asio's coroutine machinery (steady_timer,
-make_parallel_group, use_future) is pulled into the engine path;
-Taskflow was header-only and `--gc-sections` stripped most of it
-anyway, so its removal doesn't offset the coroutine growth.
-
-### Runtime footprint
-
-| Metric | Value |
-|---|---|
-| Peak RSS (full Plan & Executor run, crash + resume included) | **2.9 MB** |
-| Wall-clock (cold start → both phases complete) | **~720 ms** |
-| Dynamic dependencies | `libc.so.6` only |
-
-`example_plan_executor` sleeps 120 ms per Send target to simulate an
-LLM call; the 5-way fan-out runs serially on the default
-single-threaded super-step loop (5 × 120 ms × 2 phases ≈ wall
-time). Call `engine->set_worker_count(N)` after `compile()` to get
-the 2.x-style multi-threaded fan-out (cuts this demo's wall time
-roughly in half on a 2-core host). Steady-state footprint (RSS) is
-unchanged between 2.0 and 3.0.
-
-### Reproduction
-
-```bash
-git clone https://github.com/fox1245/NeoGraph.git
-cd NeoGraph
-
-cmake -B build-minsize -S . \
-    -DCMAKE_BUILD_TYPE=MinSizeRel \
-    -DNEOGRAPH_BUILD_MCP=OFF \
-    -DNEOGRAPH_BUILD_TESTS=OFF \
-    -DCMAKE_CXX_FLAGS="-ffunction-sections -fdata-sections" \
-    -DCMAKE_EXE_LINKER_FLAGS="-Wl,--gc-sections -static-libstdc++ -static-libgcc"
-
-cmake --build build-minsize --target example_plan_executor -j$(nproc)
-
-strip --strip-all build-minsize/example_plan_executor
-ls -la    build-minsize/example_plan_executor        # binary size
-ldd       build-minsize/example_plan_executor        # dynamic deps (libc only)
-/usr/bin/time -v build-minsize/example_plan_executor  # peak RSS + wall time
-```
-
-### What the numbers mean for embedded / robotics
-
-- **1.1 MB static binary** fits a Docker `scratch` image at ~1 MB, fits
-  on-board flash of a Pixhawk companion computer, fits comfortably in
-  a Jetson Orin boot partition. Python + LangGraph does not.
-- **2.9 MB RSS** means you can host **100+ concurrent agent sessions**
-  on an RPi Zero 2W (512 MB RAM) by sharing one compiled engine across
-  threads — the [Concurrency & Async](#concurrency--async) section covers
-  the pattern.
-- **< 250 ms cold start** fits inside a drone watchdog reset window;
-  a Python LangGraph process still hasn't finished `import` by then.
-- **`libc.so.6` only** makes cross-compilation trivial: pick `glibc` or
-  `musl` and link — no transitive dependency hell.
+At N=10,000 concurrent (1 CPU / 512 MB sandbox): NeoGraph 52 ms /
+7 µs p99 / 5.5 MB · LangGraph 23.4 s / 416 MB · LlamaIndex & AutoGen
+OOM-killed. **Full matrix, burst-concurrency curves, size/cold-start,
+methodology: [`docs/performance-deep-dive.md`](docs/performance-deep-dive.md)**
+and [`benchmarks/README.md`](benchmarks/README.md).
 
 ## Acknowledgments
 
