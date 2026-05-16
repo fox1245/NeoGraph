@@ -53,6 +53,10 @@
 #include <neograph/graph/postgres_checkpoint.h>
 #endif
 
+#ifdef NEOGRAPH_PYBIND_HAS_SQLITE
+#include <neograph/graph/sqlite_checkpoint.h>
+#endif
+
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/cancellation_signal.hpp>
 #include <asio/co_spawn.hpp>
@@ -348,6 +352,41 @@ void init_graph(py::module_& m) {
             "Cumulative number of pool slots replaced after a broken-"
             "connection detection (PG restart, pgbouncer idle timeout, "
             "network blip). Useful as a Prometheus gauge.");
+#endif
+
+#ifdef NEOGRAPH_PYBIND_HAS_SQLITE
+    // ── SqliteCheckpointStore (NEOGRAPH_BUILD_SQLITE=ON, default) ──────
+    //
+    // Single-file, libsqlite3-backed durable store. Same schema and
+    // dedup semantics as PostgresCheckpointStore (neograph_* table
+    // prefix, INSERT ... ON CONFLICT DO NOTHING) — swapping backends is
+    // a one-line change at the call site. State survives across
+    // separate processes that open the same DB path, so a CLI tool can
+    // resume a thread_id after exiting (the use case Postgres serves
+    // without provisioning a DB server). libsqlite3 is a tiny, ubiquitous
+    // system library, so unlike the Postgres binding this is wired into
+    // the default build (NEOGRAPH_BUILD_SQLITE=ON).
+    py::class_<SqliteCheckpointStore, CheckpointStore,
+               std::shared_ptr<SqliteCheckpointStore>>(m,
+        "SqliteCheckpointStore",
+        "Durable, single-file checkpoint store backed by SQLite "
+        "(libsqlite3). State survives across separate processes that "
+        "open the same DB path — a CLI tool can resume a thread_id on "
+        "the next invocation. Same schema/dedup as "
+        "PostgresCheckpointStore under a `neograph_` prefix; no DB "
+        "server to provision. The constructor opens the file (created "
+        "if missing) and materialises the schema, raising RuntimeError "
+        "on open or DDL failure rather than at first save().")
+        .def(py::init<const std::string&>(),
+             py::arg("db_path"),
+             "db_path is a filesystem path (created if missing) or "
+             "':memory:' for an ephemeral per-process store (tests). "
+             "Anything sqlite3_open accepts.")
+        .def_property_readonly("blob_count",
+            &SqliteCheckpointStore::blob_count,
+            "Number of distinct channel-value blobs currently held. "
+            "Mirrors InMemory/Postgres blob_count() so dedup tests can "
+            "be written uniformly against the abstract interface.");
 #endif
 
     // ── GraphEngine ──────────────────────────────────────────────────────

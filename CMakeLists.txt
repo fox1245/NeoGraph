@@ -1268,6 +1268,15 @@ if(NEOGRAPH_BUILD_PYBIND)
     if(TARGET neograph_postgres)
         list(APPEND NEOGRAPH_PYBIND_LIBS neograph_postgres)
     endif()
+    # neograph_sqlite ships when SQLite is built (default ON). The
+    # binding's SqliteCheckpointStore class hard-links against it
+    # (bindings/python/CMakeLists.txt), so the wheel must carry
+    # libneograph_sqlite.{so,dylib,dll} as a sibling alongside the
+    # binding — otherwise auditwheel/delocate fail with "required
+    # library libneograph_sqlite.* could not be located" during repair.
+    if(TARGET neograph_sqlite)
+        list(APPEND NEOGRAPH_PYBIND_LIBS neograph_sqlite)
+    endif()
     # neograph_a2a ships when A2A is built. Same reasoning as above:
     # bindings/python/src/bind_a2a.cpp links against it (added in
     # v0.2.1), so the wheel must carry libneograph_a2a.{so,dylib,dll}
