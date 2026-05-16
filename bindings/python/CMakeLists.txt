@@ -100,6 +100,16 @@ if(TARGET neograph::postgres)
     target_compile_definitions(_neograph PRIVATE NEOGRAPH_PYBIND_HAS_POSTGRES)
 endif()
 
+# SQLite checkpoint store. Unlike Postgres this is wired into the
+# default build (NEOGRAPH_BUILD_SQLITE=ON) — libsqlite3 is a tiny,
+# ubiquitous system library, so the source build and wheel both get
+# `neograph_engine.SqliteCheckpointStore` as a durable, cross-process
+# CheckpointStore subclass with no DB server to provision.
+if(TARGET neograph::sqlite)
+    target_link_libraries(_neograph PRIVATE neograph::sqlite)
+    target_compile_definitions(_neograph PRIVATE NEOGRAPH_PYBIND_HAS_SQLITE)
+endif()
+
 # ── Version sync: pyproject.toml → C extension's __version__ ────────
 #
 # Read the [project].version line out of the repo-root pyproject.toml

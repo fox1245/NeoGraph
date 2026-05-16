@@ -118,6 +118,17 @@ try:
 except ImportError:
     _HAVE_POSTGRES = False
 
+# SqliteCheckpointStore is present when the binding was built with
+# -DNEOGRAPH_BUILD_SQLITE=ON (default ON; libsqlite3 is a tiny,
+# ubiquitous system library). Durable, single-file, cross-process
+# checkpoint store — survives between separate process invocations
+# sharing the same DB path, with no DB server to provision.
+try:
+    from ._neograph import SqliteCheckpointStore  # noqa: F401
+    _HAVE_SQLITE = True
+except ImportError:
+    _HAVE_SQLITE = False
+
 # A2A (Agent-to-Agent protocol) — present when the binding was built
 # with neograph::a2a (the default for v0.2.1+). The submodule wraps
 # A2AClient + AgentCard + Task/Message/Part/TaskState/Role and is
@@ -368,7 +379,7 @@ __all__ = [
     "RunResult",
     "CheckpointStore",
     "InMemoryCheckpointStore",
-    # PostgresCheckpointStore appended dynamically below when present.
+    # Postgres/SqliteCheckpointStore appended dynamically below when present.
     "StreamMode",
     "GraphEvent",
     "START_NODE",
@@ -377,6 +388,9 @@ __all__ = [
 
 if _HAVE_POSTGRES:
     __all__.append("PostgresCheckpointStore")
+
+if _HAVE_SQLITE:
+    __all__.append("SqliteCheckpointStore")
 
 # Streaming helpers — pure-Python, no C++ side. Re-exported here so a
 # `from neograph_engine import message_stream` import works alongside
