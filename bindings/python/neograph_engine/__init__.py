@@ -88,6 +88,11 @@ from ._neograph import (
     ReducerRegistry,
     ConditionRegistry,
 
+    # Topology schema export (issue #56) — drift-proof palette source
+    # for external tooling (the visual block editor). Reflects whatever
+    # is registered in NodeFactory at call time.
+    export_schema,
+
     # Engine
     GraphEngine,
     RunConfig,
@@ -373,6 +378,7 @@ __all__ = [
     "NodeFactory",
     "ReducerRegistry",
     "ConditionRegistry",
+    "export_schema",
     "node",
     "GraphEngine",
     "RunConfig",

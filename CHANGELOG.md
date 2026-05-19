@@ -9,6 +9,34 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **토폴로지 JSON Schema export — `NodeFactory::export_schema()`
+  (issue #56, 코드 없는 비주얼 블록 에디터의 선결 과제).** 엔진이
+  먹는 토폴로지 JSON 형식을 기계가독 스키마(JSON Schema Draft
+  2020-12) 한 덩어리로 내보낸다: `{ neograph_version, $schema,
+  topology(고정 봉투), node_types, reducers, conditions }`. 별도
+  리포의 블록 에디터가 이 스키마로 팔레트를 자동 생성 → 에디터와
+  엔진이 버전 간 표류(drift)하지 않음. 전부 additive:
+    - `NodeFactory::register_type(type, fn, json config_schema)`
+      3-인자 변형 추가. 기존 2-인자는 permissive 기본 스키마로
+      위임 — 기존 사용자 노드/호출 안 깨짐.
+    - `ReducerRegistry::names()` / `ConditionRegistry::names()` /
+      `NodeFactory::registered_types()` 조회 접근자 신설.
+    - 내장 4타입(`llm_call`/`tool_dispatch`/`intent_classifier`/
+      `subgraph`)에 설정 스키마 선언. `NEOGRAPH_VERSION` 을
+      컴파일 정의로 노출(pyproject.toml 단일 진실) → 스키마 버전
+      도장.
+    - `examples/52_export_schema.cpp` (`example_export_schema`):
+      `./example_export_schema > schema.json` — 에디터 리포 CI 가
+      고정 NeoGraph 버전으로 산출물을 뽑는 표준 경로.
+    - 파이썬: `neograph_engine.export_schema()` → dict (에디터 리포
+      CI 가 `pip install neograph-engine` 후 덤프).
+    - `tests/test_schema_export.cpp` 8건 + `test_export_schema.py`
+      4건. 핵심: top-level `conditional_edges` 가 loader→compile
+      왕복에서 살아남는지 회귀 가드(v0.1.0~0.1.7 silent-drop
+      재발 방지).
+
 ### Fixed
 
 - **v0.9.0 ship 시 누락된 신 API 마이그레이션 3건 보완.** v1.0 prep PR

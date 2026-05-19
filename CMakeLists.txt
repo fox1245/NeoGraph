@@ -1095,6 +1095,14 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_minimal examples/51_minimal.cpp)
         target_link_libraries(example_minimal PRIVATE neograph::core)
 
+        # Schema dump tool — prints NodeFactory::export_schema() as JSON.
+        # The drift-proof artifact source for external tooling (the
+        # visual block editor, issue #56): `./example_export_schema >
+        # schema.json` in CI keeps an editor's palette pinned to the
+        # exact engine version it was built against.
+        add_executable(example_export_schema examples/52_export_schema.cpp)
+        target_link_libraries(example_export_schema PRIVATE neograph::core)
+
         # Clay + Raylib chatbot (optional — requires Raylib)
         option(NEOGRAPH_BUILD_CLAY_EXAMPLE "Build Clay chatbot example (fetches Raylib)" OFF)
         if(NEOGRAPH_BUILD_CLAY_EXAMPLE)
