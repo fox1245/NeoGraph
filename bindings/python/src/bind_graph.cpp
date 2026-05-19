@@ -202,6 +202,24 @@ void resolve_future_async(std::shared_ptr<py::object> future,
 void init_graph(py::module_& m) {
     using namespace neograph::graph;
 
+    // ── Topology schema export (issue #56) ───────────────────────────────
+    //
+    // Lets a Python-side tool build (the visual block editor's CI
+    // typically does: `pip install neograph-engine` then dump this to
+    // schema.json) a palette pinned to the exact engine version. The
+    // returned dict is the same document as the C++
+    // NodeFactory::export_schema() / `example_export_schema`:
+    // {neograph_version, $schema, topology, node_types, reducers,
+    // conditions}. Reflects whatever is registered in NodeFactory at
+    // call time, so register custom node types/reducers/conditions
+    // first if you want them in the palette.
+    m.def("export_schema",
+        []() {
+            return json_to_py(NodeFactory::instance().export_schema());
+        },
+        "Return the engine's topology JSON Schema (Draft 2020-12) as a "
+        "dict. Drift-proof palette source for external tooling.");
+
     // ── Async-bridge safe-resolve helpers ────────────────────────────────
     //
     // Hand these to `loop.call_soon_threadsafe` instead of raw

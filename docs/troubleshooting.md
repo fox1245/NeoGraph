@@ -739,6 +739,42 @@ we can do; this section is the documentation. Issue #16 closed.
 
 ---
 
+## A tool/editor that builds topology JSON drifts from the engine
+
+### Symptom
+
+You wrote (or use) a generator, GUI, or visual block editor that emits
+NeoGraph topology JSON. It offered a node type, reducer, or condition
+that the engine then rejects at `compile()` with `Unknown node type:`
+/ `Unknown reducer:` / `Unknown condition:` — or a branch you drew
+silently never fires.
+
+### Why this happens
+
+The tool's palette was hand-maintained and fell behind the NeoGraph
+version actually linked. The branch case is the classic top-level
+`conditional_edges` regression (silently dropped in v0.1.0–v0.1.7,
+fixed v0.1.8) — a tool that emits that block must verify it survives a
+loader→compile round-trip.
+
+### Fix
+
+Don't hand-maintain the palette. The engine emits a machine-readable
+schema of exactly what it accepts — pin the tool to it:
+
+- C++: `neograph::graph::NodeFactory::instance().export_schema()`.
+- CLI: `./example_export_schema > schema.json`
+  (`examples/52_export_schema.cpp`).
+- Python: `neograph_engine.export_schema()` → dict.
+
+The document carries `neograph_version`; have the tool compare it to
+its cached schema and warn on mismatch. `node_types` reflects whatever
+is registered in `NodeFactory` at call time, so register your custom
+node types/reducers/conditions *before* exporting, exactly as you do
+before `compile()`. (Background: issue #56.)
+
+---
+
 ## Reporting a bug
 
 If your symptom isn't above:
