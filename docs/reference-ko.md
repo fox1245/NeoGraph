@@ -1794,6 +1794,7 @@ public:
 
     void register_reducer(const std::string& name, ReducerFn fn);
     ReducerFn get(const std::string& name) const;
+    std::vector<std::string> names() const;   // 등록된 이름 목록(정렬)
 };
 ```
 
@@ -1826,6 +1827,7 @@ public:
 
     void register_condition(const std::string& name, ConditionFn fn);
     ConditionFn get(const std::string& name) const;
+    std::vector<std::string> names() const;   // 등록된 이름 목록(정렬)
 };
 ```
 
@@ -1875,12 +1877,22 @@ public:
     static NodeFactory& instance();
 
     void register_type(const std::string& type, NodeFactoryFn fn);
+    void register_type(const std::string& type, NodeFactoryFn fn,
+                       json config_schema);     // 설정 스키마 동반(추가형)
     std::unique_ptr<GraphNode> create(const std::string& type,
                                        const std::string& name,
                                        const json& config,
                                        const NodeContext& ctx) const;
+    std::vector<std::string> registered_types() const;  // 타입 이름 목록
+    json export_schema() const;                 // 아래 10.4 참고
 };
 ```
+
+> `register_type` 의 3-인자 변형은 그 노드 타입의 `config` 가 받는
+> 필드를 JSON Schema(Draft 2020-12)로 같이 선언한다. 기존 2-인자는
+> 그대로 동작(기존 코드 안 깨짐) — 미지정 시 `{"type":"object"}`
+> (아무 객체나 허용). 이 스키마는 `export_schema()` 용이고 엔진이
+> compile 시 검증에 쓰지는 않는다.
 
 **내장 노드 타입:**
 
@@ -1911,6 +1923,64 @@ factory.register_type("my_node",
     "processor": { "type": "my_node", "config": { "threshold": 0.5 } }
   }
 }
+```
+
+---
+
+### 10.4 토폴로지 스키마 export (issue #56)
+
+NeoGraph 는 그래프를 **JSON 으로 기술**한다 — JSON 만 갈아끼우면 같은
+엔진이 다른 하네스가 된다. `NodeFactory::export_schema()` 는 *이 엔진
+버전이 받는 토폴로지 JSON 형식*을 기계가 읽을 수 있는 한 덩어리로
+내보낸다. 덕분에 외부 도구 — 특히 코드 없는 비주얼 블록 에디터
+([NeoGraph Studio](https://github.com/fox1245/NeoGraph-Studio),
+issue #56) — 가 팔레트를 엔진에서 자동 생성해 **버전 간 표류(drift)가
+구조적으로 불가능**하다.
+
+**같은 문서, 가져오는 경로 3가지:**
+
+| 경로 | 방법 |
+|------|------|
+| C++ | `neograph::graph::NodeFactory::instance().export_schema()` → `json` |
+| CLI | `./example_export_schema > schema.json` (`examples/52_export_schema.cpp`) |
+| 파이썬 | `neograph_engine.export_schema()` → `dict` |
+
+**문서 모양:**
+
+```jsonc
+{
+  "neograph_version": "0.9.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "topology":   { /* 최상위 봉투의 JSON Schema: name, channels,
+                     nodes(type+config+barrier), edges,
+                     conditional_edges, interrupt_before,
+                     interrupt_after, retry_policy */ },
+  "node_types": { "<타입>": { /* config JSON Schema */ }, ... },
+  "reducers":   ["append", "overwrite", ...],
+  "conditions": ["has_tool_calls", "route_channel", ...]
+}
+```
+
+- **`neograph_version`** 은 컴파일 시 `pyproject.toml`(버전 단일
+  진실)에서 박힌다. 도구는 캐시한 스키마와 이 값을 비교해 자기
+  팔레트가 엔진보다 구버전이면 경고할 수 있다.
+- **`node_types`** 는 호출 시점에 `NodeFactory` 에 등록돼 있는 것을
+  그대로 반영한다. 임베더가 만든 커스텀 노드 타입도 나오니, 팔레트에
+  넣고 싶으면 `compile()` 전과 똑같이 export 전에 먼저 등록하라.
+  3-인자 `register_type` 으로 등록한 타입은 선언한 설정 스키마를,
+  2-인자는 `{"type":"object"}`(아무 객체나 허용)를 갖는다.
+- **왕복 계약.** 토폴로지 JSON 을 뽑는 도구는 그걸 loader 에 다시
+  넣어 구조가 보존되는지 확인해야 한다. 특히 최상위
+  `conditional_edges` 블록은 v0.1.0~v0.1.7 에서 컴파일러가 조용히
+  버린 회귀가 있었다(v0.1.8 수정). 엔진 테스트
+  (`tests/test_schema_export.cpp`)가 이 회귀를 막고, 도구도 막아야
+  한다.
+
+```cpp
+#include <neograph/graph/loader.h>
+// 팔레트에 넣을 커스텀 노드 타입이 있으면 먼저 등록 …
+auto schema = neograph::graph::NodeFactory::instance().export_schema();
+std::cout << schema.dump(2) << "\n";
 ```
 
 ---
