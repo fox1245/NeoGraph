@@ -6,6 +6,14 @@
 #include <stdexcept>
 #include <fstream>
 #include <vector>
+#include <string>
+
+// Stamped into export_schema() so external tooling can detect when its
+// cached schema is older than the engine. Defined by CMake
+// (target_compile_definitions); the fallback keeps a stray TU compiling.
+#ifndef NEOGRAPH_VERSION_STR
+#define NEOGRAPH_VERSION_STR "unknown"
+#endif
 
 namespace neograph::graph {
 
@@ -45,21 +53,28 @@ void ReducerRegistry::register_reducer(const std::string& name, ReducerFn fn) {
     registry_[name] = std::move(fn);
 }
 
-// DX helper: comma-separated sorted names from a registry map. Used by the
-// "Unknown <thing>: foo" error messages so users see what IS available
-// without having to grep the source. Defined as a template so the same
-// shape works for ReducerRegistry / ConditionRegistry / NodeFactory's
-// different value types.
+// Sorted key list from any registry map. Backs both the "Unknown
+// <thing>: foo" error messages (joined to a comma string) and the
+// public names()/registered_types() introspection accessors used by
+// external tooling. One source of truth for "what IS registered".
 template <typename Map>
-static std::string registry_name_list(const Map& m) {
+static std::vector<std::string> registry_names(const Map& m) {
     std::vector<std::string> names;
     names.reserve(m.size());
     for (const auto& kv : m) names.push_back(kv.first);
     std::sort(names.begin(), names.end());
+    return names;
+}
+
+// DX helper: comma-separated sorted names. Used by the "Unknown
+// <thing>: foo" error messages so users see what IS available without
+// having to grep the source.
+template <typename Map>
+static std::string registry_name_list(const Map& m) {
     std::string out;
-    for (size_t i = 0; i < names.size(); ++i) {
-        if (i) out += ", ";
-        out += names[i];
+    for (const auto& n : registry_names(m)) {
+        if (!out.empty()) out += ", ";
+        out += n;
     }
     return out;
 }
@@ -75,6 +90,10 @@ ReducerFn ReducerRegistry::get(const std::string& name) const {
             "See docs/troubleshooting.md \"Unknown reducer\".");
     }
     return it->second;
+}
+
+std::vector<std::string> ReducerRegistry::names() const {
+    return registry_names(registry_);
 }
 
 // =========================================================================
@@ -127,6 +146,10 @@ ConditionFn ConditionRegistry::get(const std::string& name) const {
     return it->second;
 }
 
+std::vector<std::string> ConditionRegistry::names() const {
+    return registry_names(registry_);
+}
+
 // =========================================================================
 // NodeFactory
 // =========================================================================
@@ -141,13 +164,23 @@ NodeFactory::NodeFactory() {
         [](const std::string& name, const json& /*config*/,
            const NodeContext& ctx) -> std::unique_ptr<GraphNode> {
             return std::make_unique<LLMCallNode>(name, ctx);
-        });
+        },
+        json::parse(R"JSON({
+            "type": "object",
+            "properties": {},
+            "description": "LLM call node. Uses the NodeContext provider/model; no type-specific config fields."
+        })JSON"));
 
     register_type("tool_dispatch",
         [](const std::string& name, const json& /*config*/,
            const NodeContext& ctx) -> std::unique_ptr<GraphNode> {
             return std::make_unique<ToolDispatchNode>(name, ctx);
-        });
+        },
+        json::parse(R"JSON({
+            "type": "object",
+            "properties": {},
+            "description": "Executes tool calls from the last assistant message using NodeContext tools; no type-specific config fields."
+        })JSON"));
 
     // intent_classifier: LLM-based intent routing
     register_type("intent_classifier",
@@ -162,7 +195,22 @@ NodeFactory::NodeFactory() {
             }
             return std::make_unique<IntentClassifierNode>(
                 name, ctx, prompt, std::move(routes));
-        });
+        },
+        json::parse(R"JSON({
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Classification prompt shown to the LLM."
+                },
+                "routes": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Allowed route keys the classifier may emit. Written to the __route__ channel; pair with the route_channel condition on an outgoing conditional edge."
+                }
+            },
+            "required": ["routes"]
+        })JSON"));
 
     // subgraph: recursively compile an inner graph definition as a single node
     // Supports both inline JSON and external file path:
@@ -211,11 +259,148 @@ NodeFactory::NodeFactory() {
                 std::shared_ptr<GraphEngine>(inner.release()),
                 std::move(input_map),
                 std::move(output_map));
-        });
+        },
+        json::parse(R"JSON({
+            "type": "object",
+            "properties": {
+                "definition": {
+                    "description": "Inner graph: an inline topology object, or a string path to a .json topology file.",
+                    "oneOf": [ { "type": "object" }, { "type": "string" } ]
+                },
+                "input_map": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" },
+                    "description": "Map outer channel name -> inner channel name for inputs."
+                },
+                "output_map": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" },
+                    "description": "Map inner channel name -> outer channel name for outputs."
+                }
+            },
+            "required": ["definition"]
+        })JSON"));
 }
 
 void NodeFactory::register_type(const std::string& type, NodeFactoryFn fn) {
+    // Permissive default: any config object accepted. Tooling that
+    // consumes export_schema() will render a free-form config for a
+    // type registered without a declared schema.
+    register_type(type, std::move(fn),
+                  json::parse(R"JSON({
+                      "type": "object",
+                      "description": "No declared config schema; any object accepted."
+                  })JSON"));
+}
+
+void NodeFactory::register_type(const std::string& type, NodeFactoryFn fn,
+                                json config_schema) {
     registry_[type] = std::move(fn);
+    schemas_[type]  = std::move(config_schema);
+}
+
+std::vector<std::string> NodeFactory::registered_types() const {
+    return registry_names(registry_);
+}
+
+json NodeFactory::export_schema() const {
+    // Fixed top-level envelope. This mirrors exactly what
+    // GraphCompiler::compile reads (src/core/graph_compiler.cpp);
+    // keep the two in sync when the loader grows new top-level keys.
+    static const char* kTopologySchema = R"JSON({
+        "type": "object",
+        "description": "NeoGraph topology definition consumed by GraphEngine::compile / the JSON loader.",
+        "properties": {
+            "name": { "type": "string", "description": "Optional graph name." },
+            "channels": {
+                "type": "object",
+                "description": "State channels. Key = channel name.",
+                "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                        "reducer": { "type": "string", "default": "overwrite", "description": "Reducer name (see top-level 'reducers')." },
+                        "initial": { "description": "Initial value (any JSON)." }
+                    }
+                }
+            },
+            "nodes": {
+                "type": "object",
+                "description": "Graph nodes. Key = unique node name. 'type' selects a node type from 'node_types'; remaining fields are that type's config.",
+                "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                        "type": { "type": "string", "description": "Node type name (key in 'node_types')." },
+                        "barrier": {
+                            "type": "object",
+                            "description": "Opt into AND-join: fire only after every listed upstream node has signaled.",
+                            "properties": {
+                                "wait_for": { "type": "array", "items": { "type": "string" } }
+                            }
+                        }
+                    },
+                    "required": ["type"]
+                }
+            },
+            "edges": {
+                "type": "array",
+                "description": "Edges. '__start__' and '__end__' are sentinel endpoints. An edge carrying a 'condition' (or type:'conditional') is a conditional edge (legacy inline form).",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "from": { "type": "string" },
+                        "to": { "type": "string" },
+                        "type": { "type": "string", "enum": ["conditional"] },
+                        "condition": { "type": "string", "description": "Condition name (see 'conditions'); makes this a branch." },
+                        "routes": { "type": "object", "additionalProperties": { "type": "string" }, "description": "route key -> target node name." }
+                    },
+                    "required": ["from"]
+                }
+            },
+            "conditional_edges": {
+                "type": "array",
+                "description": "Top-level conditional (branch) edges; LangGraph add_conditional_edges parity. NOTE: a compiler regression silently dropped this block in v0.1.0-v0.1.7 (fixed v0.1.8) — tooling round-trip tests MUST assert these survive loader->compile.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "from": { "type": "string" },
+                        "condition": { "type": "string", "description": "Condition name (see 'conditions')." },
+                        "routes": { "type": "object", "additionalProperties": { "type": "string" }, "description": "route key -> target node name." }
+                    },
+                    "required": ["from", "condition"]
+                }
+            },
+            "interrupt_before": {
+                "type": "array", "items": { "type": "string" },
+                "description": "Node names to pause before (human-in-the-loop / checkpoint resume point)."
+            },
+            "interrupt_after": {
+                "type": "array", "items": { "type": "string" },
+                "description": "Node names to pause after (human-in-the-loop / checkpoint resume point)."
+            },
+            "retry_policy": {
+                "type": "object",
+                "description": "Optional engine retry-policy override."
+            }
+        },
+        "required": ["nodes"]
+    })JSON";
+
+    json node_types = json::object();
+    for (const auto& kv : registry_) {
+        auto sit = schemas_.find(kv.first);
+        node_types[kv.first] = (sit != schemas_.end())
+            ? sit->second
+            : json::parse(R"JSON({"type":"object","description":"No declared config schema; any object accepted."})JSON");
+    }
+
+    json doc;
+    doc["neograph_version"] = NEOGRAPH_VERSION_STR;
+    doc["$schema"]          = "https://json-schema.org/draft/2020-12/schema";
+    doc["topology"]         = json::parse(kTopologySchema);
+    doc["node_types"]       = std::move(node_types);
+    doc["reducers"]         = ReducerRegistry::instance().names();
+    doc["conditions"]       = ConditionRegistry::instance().names();
+    return doc;
 }
 
 std::unique_ptr<GraphNode> NodeFactory::create(

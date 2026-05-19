@@ -15,6 +15,8 @@
 #include <neograph/graph/types.h>
 #include <unordered_map>
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace neograph::graph {
 
@@ -71,6 +73,16 @@ public:
      */
     ReducerFn get(const std::string& name) const;
 
+    /**
+     * @brief List all registered reducer names, sorted.
+     *
+     * Introspection accessor for external tooling (e.g. a visual
+     * topology editor) that needs to enumerate the available reducer
+     * palette without grepping engine source.
+     * @return Sorted vector of reducer names.
+     */
+    std::vector<std::string> names() const;
+
 private:
     ReducerRegistry();
     std::unordered_map<std::string, ReducerFn> registry_;
@@ -108,6 +120,16 @@ public:
      * @return The ConditionFn, or throws if not found.
      */
     ConditionFn get(const std::string& name) const;
+
+    /**
+     * @brief List all registered condition names, sorted.
+     *
+     * Introspection accessor for external tooling (e.g. a visual
+     * topology editor) that needs to enumerate the available
+     * conditional-routing palette.
+     * @return Sorted vector of condition names.
+     */
+    std::vector<std::string> names() const;
 
 private:
     ConditionRegistry();
@@ -150,8 +172,29 @@ public:
      * @brief Register a custom node type.
      * @param type Node type name (referenced in JSON node definitions).
      * @param fn Factory function that creates the node.
+     *
+     * The node's config schema defaults to a permissive
+     * `{"type":"object"}` (any config object accepted). Existing
+     * callers keep working unchanged; external tooling that consumes
+     * export_schema() will simply render a free-form config for such
+     * a type. To declare a concrete config schema, use the 3-arg
+     * overload below.
      */
     void register_type(const std::string& type, NodeFactoryFn fn);
+
+    /**
+     * @brief Register a custom node type with a declared config schema.
+     * @param type Node type name (referenced in JSON node definitions).
+     * @param fn Factory function that creates the node.
+     * @param config_schema JSON Schema (Draft 2020-12) fragment
+     *        describing this node type's accepted `config` fields.
+     *        Used only by export_schema() for external tooling; the
+     *        engine does not validate config against it at compile
+     *        time. Additive: callers using the 2-arg overload are
+     *        unaffected.
+     */
+    void register_type(const std::string& type, NodeFactoryFn fn,
+                       json config_schema);
 
     /**
      * @brief Create a node by type name.
@@ -166,9 +209,46 @@ public:
                                        const json& config,
                                        const NodeContext& ctx) const;
 
+    /**
+     * @brief List all registered node type names, sorted.
+     * @return Sorted vector of node type names.
+     */
+    std::vector<std::string> registered_types() const;
+
+    /**
+     * @brief Export a machine-readable description of the topology
+     *        JSON format this engine accepts.
+     *
+     * Intended for external tooling — notably a visual block-coding
+     * topology editor — so the editor's node palette and the engine
+     * cannot drift apart across NeoGraph versions. The returned
+     * document is JSON, shaped as:
+     *
+     * @code
+     * {
+     *   "neograph_version": "0.6.0",
+     *   "$schema": "https://json-schema.org/draft/2020-12/schema",
+     *   "topology": { ...JSON Schema for the top-level envelope... },
+     *   "node_types": { "<type>": { ...config JSON Schema... }, ... },
+     *   "reducers":   ["append", "overwrite", ...],
+     *   "conditions": ["has_tool_calls", "route_channel", ...]
+     * }
+     * @endcode
+     *
+     * `neograph_version` lets a tool detect when its cached schema
+     * is older than the engine and warn the user. The `topology`
+     * fragment is fixed (defined by the graph compiler); per-type
+     * config schemas come from register_type's 3-arg overload, or
+     * default to a permissive object for types registered without one.
+     *
+     * @return The schema document as json.
+     */
+    json export_schema() const;
+
 private:
     NodeFactory();
     std::unordered_map<std::string, NodeFactoryFn> registry_;
+    std::unordered_map<std::string, json> schemas_;
 };
 
 } // namespace neograph::graph

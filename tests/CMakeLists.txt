@@ -5,6 +5,7 @@ add_executable(neograph_tests
     test_store.cpp
     test_node.cpp
     test_loader.cpp
+    test_schema_export.cpp
     test_json_path.cpp
     test_pending_writes.cpp
     test_plan_execute_graph.cpp

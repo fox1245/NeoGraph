@@ -403,6 +403,12 @@ target_include_directories(neograph_core
 # libraries) must see dllimport — which is what they get when this
 # define is absent from their compile line.
 target_compile_definitions(neograph_core PRIVATE NEOGRAPH_BUILDING_LIBRARY)
+# Stamp the version (single source of truth: pyproject.toml, parsed near
+# the top of this file into NEOGRAPH_VERSION) into the binary so
+# NodeFactory::export_schema() can emit it for drift detection by
+# external tooling (e.g. the visual topology editor, issue #56).
+target_compile_definitions(neograph_core PRIVATE
+    NEOGRAPH_VERSION_STR="${NEOGRAPH_VERSION}")
 
 target_link_libraries(neograph_core
     PUBLIC  yyjson Threads::Threads asio
