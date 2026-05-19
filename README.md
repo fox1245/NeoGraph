@@ -37,10 +37,10 @@
 </p>
 
 <p align="center">
-  <a href="docs/videos/neograph-promo-v2.mp4">
-    <img src="docs/images/neograph-promo-v2.gif" alt="NeoGraph 15-second promo v2 — graph engine in motion, 10-line Python, every LangGraph capability built in" width="900">
+  <a href="docs/videos/neograph-promo-v2r.mp4">
+    <img src="docs/images/neograph-promo-v2r.gif" alt="NeoGraph 15-second promo v2 — graph engine in motion, 10-line Python, every LangGraph capability built in" width="900">
   </a>
-  <br><sub><i>15s · what you actually ship · click for the 1080p MP4 (740 KB)</i></sub>
+  <br><sub><i>15s · what you actually ship · click for the 1080p MP4 (644 KB)</i></sub>
 </p>
 
 ## The four axes — measurable, each independently verifiable

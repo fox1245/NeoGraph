@@ -1,5 +1,8 @@
 build/
 build-*/
+build_pybind/
+tmp/
+projects/
 docs/api/
 .env
 .claude/
