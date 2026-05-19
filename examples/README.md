@@ -1,6 +1,6 @@
 # C++ API examples
 
-Thirty-six runnable C++ programs covering the NeoGraph engine surface.
+Fifty-six runnable C++ programs covering the NeoGraph engine surface.
 Each is a single file in this directory (with one Docker-Compose
 exception, [`26_postgres_react_hitl/`](26_postgres_react_hitl/)) — copy
 one into your own project, link against `neograph::core` +
@@ -40,6 +40,7 @@ If this is your first time:
 
 | First | What you learn |
 |---|---|
+| [`51_minimal.cpp`](51_minimal.cpp) | The smallest working program — compile, run, read `result.channel<T>("name")`. No API key. |
 | [`02_custom_graph.cpp`](02_custom_graph.cpp) | Compile a JSON graph definition, run it. No API key. |
 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | Async fan-out with `make_parallel_group`. No API key. |
 | [`10_send_command.cpp`](10_send_command.cpp) | `Send` (dynamic fan-out) + `Command` (routing override). No API key. |
@@ -62,6 +63,11 @@ demonstrate, not by file number.
 | 08 | [`08_state_management.cpp`](08_state_management.cpp) | offline | `get_state` / `update_state` / `fork` — LangGraph's Checkpointer API mapped to C++. |
 | 09 | [`09_all_features.cpp`](09_all_features.cpp) | offline | Six features in one demo — `NodeInterrupt`, `RetryPolicy`, `StreamMode`, `Send`, `Command`, `Store`. |
 | 10 | [`10_send_command.cpp`](10_send_command.cpp) | offline | Planner→Send→researcher→Command(loop|finish) — the canonical Send+Command pattern. |
+| 42 | [`42_custom_reducer_condition.cpp`](42_custom_reducer_condition.cpp) | offline | Register custom channel reducers and edge conditions from C++ — extend the JSON vocabulary without touching the engine. |
+| 43 | [`43_store_personalization.cpp`](43_store_personalization.cpp) | offline | Cross-thread `Store` reached from inside a node via `in.ctx.store` — per-user node behaviour from shared namespaced memory. |
+| 51 | [`51_minimal.cpp`](51_minimal.cpp) | offline | The shortest working program — compile, run, `result.channel<T>("name")`. The fresh-user template. |
+| 52 | [`52_export_schema.cpp`](52_export_schema.cpp) | offline | `NodeFactory::export_schema()` → topology JSON Schema dump. The version-locked source of truth a codeless visual editor builds its palette from. |
+| 56 | [`56_history_compaction.cpp`](56_history_compaction.cpp) | offline (optional OpenAI) | Bounded message window — when history exceeds the budget the dropped prefix is replaced by an LLM-written summary. Mock provider by default. |
 
 ### Real LLM — providers, tools, ReAct
 
@@ -92,6 +98,8 @@ demonstrate, not by file number.
 | 04 | [`04_checkpoint_hitl.cpp`](04_checkpoint_hitl.cpp) | offline | `interrupt_before` a payment node, persist checkpoint, resume after operator approval. Mock provider. |
 | 14 | [`14_plan_executor.cpp`](14_plan_executor.cpp) | offline | Plan-and-Executor with simulated mid-fan-out failure — checkpoint replay only re-runs the failed sibling. Pending-writes machinery in action. |
 | 26 | [`26_postgres_react_hitl/`](26_postgres_react_hitl/) | OpenAI WS + Postgres + Crawl4AI | Process-discontinuous deep-research HITL — PG-backed checkpoints survive `exit` between report and resume. Docker-Compose driven. |
+| 41 | [`41_resume_if_exists_chat.cpp`](41_resume_if_exists_chat.cpp) | offline | LangGraph-style multi-turn chat — `resume_if_exists` reloads the prior checkpoint and appends the new turn. Mock provider. |
+| 48 | [`48_sqlite_checkpoint.cpp`](48_sqlite_checkpoint.cpp) | offline | `SqliteCheckpointStore` — single-file durable runs, no server. Same `CheckpointStore` interface as InMemory/Postgres. |
 
 ### MCP (Model Context Protocol)
 
@@ -110,6 +118,36 @@ demonstrate, not by file number.
 |---|------|-------|---------------|
 | 27 | [`27_async_concurrent_runs.cpp`](27_async_concurrent_runs.cpp) | offline | Three agent runs interleave on one `io_context` thread via `engine->run_async()` — wall ≈ 50 ms instead of 3×50 ms. Stage-4 async-end-to-end. |
 | 40 | [`40_react_async_streaming.cpp`](40_react_async_streaming.cpp) | OpenAI | Outer `asio::io_context` + `co_spawn` + `co_await engine->run_stream_async(...)` driving a ReAct loop, with the LLM node's tokens streaming to stdout via `co_await provider->complete_stream_async(...)` against `SchemaProvider("openai_responses")`. **Exact shape that segfaulted pre-PR-#10** — runs cleanly post-fix; tool round-trip + final answer in ~4s. |
+| 44 | [`44_request_queue_backpressure.cpp`](44_request_queue_backpressure.cpp) | offline | Fixed-worker pool with backpressure (`neograph::util::RequestQueue`) — bounded in-flight work, no unbounded growth under load. |
+| 46 | [`46_cancel_token.cpp`](46_cancel_token.cpp) | offline | Cooperative cancellation — `CancelToken::fork()` per child, parent `cancel()` cascades to all in-flight children. |
+| 47 | [`47_node_cache.cpp`](47_node_cache.cpp) | offline | Per-node result cache keyed on node + input — skip recompute on identical inputs across runs. |
+| 50 | [`50_async_tool.cpp`](50_async_tool.cpp) | offline | `AsyncTool` — coroutine-shaped tool execution adapter, so a tool can `co_await` without blocking the io_context. |
+
+### Agent interop — A2A & ACP
+
+| # | File | Setup | What it shows |
+|---|------|-------|---------------|
+| 38 | [`38_a2a_server.cpp`](38_a2a_server.cpp) | offline | Expose a compiled NeoGraph as an Agent-to-Agent endpoint (HTTP, streaming SSE). Run this first. |
+| 37 | [`37_a2a_client.cpp`](37_a2a_client.cpp) | offline (needs example 38 running) | Drive a *remote* A2A agent — `A2ACallerNode` makes a remote agent look like a local node. |
+| 39 | [`39_acp_server.cpp`](39_acp_server.cpp) | offline | Expose a NeoGraph over the Agent Client Protocol — bidirectional JSON-RPC over stdio, the shape an editor (Zed-style) drives. |
+
+### Distributed — gRPC service & remote checkpoint/tool
+
+Built only with `-DNEOGRAPH_BUILD_GRPC=ON` (needs `grpc++` / `protoc`).
+
+| # | File | Setup | What it shows |
+|---|------|-------|---------------|
+| 52 | [`52_grpc_server.cpp`](52_grpc_server.cpp) | offline (grpc++) | Expose a `GraphEngine` over gRPC — per-distinct-graph engines compiled lazily and cached. |
+| 53 | [`53_grpc_client.cpp`](53_grpc_client.cpp) | offline (grpc++) | Call a NeoGraph gRPC `GraphService` from a C++ client. |
+| 54 | [`54_grpc_checkpoint.cpp`](54_grpc_checkpoint.cpp) | offline (grpc++) | `GrpcCheckpointStore` — a remote `CheckpointStore` across a network boundary, with an honest latency measurement. |
+| 55 | [`55_grpc_vs_jsonrpc_toolcall.cpp`](55_grpc_vs_jsonrpc_toolcall.cpp) | offline (grpc++) | Head-to-head: tool-calling over JSON-RPC vs gRPC — the microbench behind "70× was a Nagle artifact". |
+| 57 | [`57_grpc_remote_tool.cpp`](57_grpc_remote_tool.cpp) | offline (grpc++) | A tool living in another process exposed as a local `neograph::Tool`. |
+
+### Observability
+
+| # | File | Setup | What it shows |
+|---|------|-------|---------------|
+| 49 | [`49_openinference.cpp`](49_openinference.cpp) | offline | OpenInference tracer adapter — `graph.run > node.* > llm.complete` lands as one trace tree (12 attributes). Phoenix-verified. Mock provider. |
 
 ### Deep research / RAG variants
 
@@ -157,15 +195,18 @@ show how the same definition round-trips through `json.dumps` and back.
 
 | Provider | Examples |
 |---|---|
-| `OPENAI_API_KEY` | 01, 03, 12, 13, 20, 22, 23, 24, 28, 29, 30, 33, 34, 35 |
+| `OPENAI_API_KEY` | 01, 03, 12, 13, 20, 22, 23, 24, 28, 29, 30, 33, 34, 35, 40 |
 | `ANTHROPIC_API_KEY` | 15, 16, 17, 18, 19, 25 |
 | local server (no key) | 31, 32 |
-| **none** | 02, 04, 05, 06, 07, 08, 09, 10, 14, 21, 27, 36 |
+| **none** | 02, 04, 05, 06, 07, 08, 09, 10, 14, 21, 27, 36, 37, 38, 39, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57 |
 
-Twelve examples run with no API key — that is the "kick the tyres"
+Thirty-one examples run with no API key — that is the "kick the tyres"
 floor. Examples 21 (MCP fanout, deterministic planner) and 27 (async
 concurrency, `steady_timer` stand-in for LLM latency) in particular
-demonstrate engine plumbing without spending a token.
+demonstrate engine plumbing without spending a token. The gRPC suite
+(52–55, 57) is also key-free but needs `-DNEOGRAPH_BUILD_GRPC=ON`
+(`grpc++` / `protoc`); 56 (`history_compaction`) defaults to a mock
+provider and only touches OpenAI if a key is present.
 
 ## Re-running after CMake config
 

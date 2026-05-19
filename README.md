@@ -469,6 +469,11 @@ target_link_libraries(my_app PRIVATE neograph::core neograph::llm)
 - **Intent routing** — LLM-based classification + dynamic routing
 - **Cross-thread Store** — Namespace-based shared memory across threads
 - **Custom nodes** — Register via `NodeFactory` with zero framework changes
+- **Async-native engine** — `run_async()` / `run_stream_async()` host thousands of agents on one `asio::io_context`, no thread per run
+- **Cooperative cancellation** — hierarchical `CancelToken` with `fork()`; `cancel()` cascades to in-flight children and aborts open sockets
+- **Conversation history compaction** — bounded message history with LLM summarisation of the dropped prefix ([example 56](examples/56_history_compaction.cpp))
+- **Per-node result cache** — `NodeCache` keyed on node + input, skips recompute ([example 47](examples/47_node_cache.cpp))
+- **Topology schema export** — `NodeFactory::export_schema()` emits the engine's JSON Schema (Draft 2020-12), machine-readable so a codeless visual editor stays version-locked to the engine ([example 52](examples/52_export_schema.cpp), issue #56)
 
 ### LLM Providers (`neograph::llm`)
 
@@ -487,9 +492,39 @@ target_link_libraries(my_app PRIVATE neograph::core neograph::llm)
 - **Tool discovery** — `get_tools()` auto-discovers tools from either
   transport; returned `MCPTool`s plug straight into `Agent` / `GraphEngine`
 
+### Async HTTP/WS (`neograph::async`)
+
+- **asio::ssl client** — HTTP / HTTPS / WebSocket on the engine's coroutine runtime; connection pooling, SSE streaming, timeout, redirect, typed error classification. This is the layer every provider and MCP transport sits on.
+
+### Agent-to-Agent (`neograph::a2a`)
+
+- **A2A server** — expose any compiled NeoGraph as an Agent-to-Agent endpoint (HTTP, dual v0.3 / v1 method dispatch, streaming SSE)
+- **A2A client + caller node** — drive a *remote* agent as if it were a local node; `A2ACallerNode` drops straight into a graph ([examples 37–38](examples/37_a2a_client.cpp))
+
+### Agent Client Protocol (`neograph::acp`)
+
+- **ACP server** — bidirectional JSON-RPC over stdio so editors (Zed-style) drive a NeoGraph agent: `session/{new,prompt,cancel}` client→agent, `fs/{read,write}_text_file` + `session/request_permission` agent→client, official Zed `StopReason` schema ([example 39](examples/39_acp_server.cpp))
+
+### gRPC service (`neograph::grpc`, opt-in)
+
+- **GraphService** — run a graph over gRPC; per-distinct-graph engines compiled lazily and cached (same multi-tenant pattern as the cookbook)
+- **GrpcCheckpointStore** — a remote `CheckpointStore` reachable over gRPC (restart-surviving state across a network boundary)
+- **Remote tool adapter** — a tool living in another process exposed as a local `neograph::Tool` ([examples 52–57](examples/57_grpc_remote_tool.cpp); off by default — needs `grpc++`/`protoc`)
+
+### Observability (built into `neograph::core`)
+
+- **OpenInference tracer** — `openinference_tracer` wraps a run so `graph.run > node.* > llm.complete` lands as a single trace tree (12 OpenInference attributes); verified end-to-end in Phoenix ([example 49](examples/49_openinference.cpp))
+
+### Durable checkpoint stores
+
+- **`neograph::postgres`** — `PostgresCheckpointStore`, survives process restart, async libpq path
+- **`neograph::sqlite`** — `SqliteCheckpointStore`, single-file durable runs, no server ([example 48](examples/48_sqlite_checkpoint.cpp))
+- Both Python-bound; both behind the same `CheckpointStore` interface as `InMemoryCheckpointStore`
+
 ### Utilities (`neograph::util`)
 
 - **RequestQueue** — Lock-free worker pool with backpressure (moodycamel::ConcurrentQueue)
+- **AsyncTool** — coroutine-shaped tool execution adapter ([example 50](examples/50_async_tool.cpp))
 
 ## Examples
 
@@ -525,6 +560,37 @@ target_link_libraries(my_app PRIVATE neograph::core neograph::llm)
 | 28 | `corrective_rag` | Corrective RAG (arXiv:2401.15884) — retrieve → evaluator routes to refine / web / both → generate, all over `/v1/responses` | Required (OpenAI) |
 | 29 | `responses_envelope` | Wire-level dump of `/v1/responses`'s `output[]` envelope — debug/pedagogy aid for understanding tool-calling shape before SchemaProvider flattens it | Required (OpenAI) |
 | 30 | `reasoning_effort` | Same prompt at `reasoning.effort` ∈ {none, low, medium, high} on a reasoning model — compares wall, hidden-CoT tokens, and answer | Required (OpenAI, reasoning model) |
+| 31 | `local_transformer` | Point `OpenAIProvider` at a local OpenAI-compatible server (TransformerCPP / llama.cpp / vLLM) — model weights stay out of the agent's address space | Local server |
+| 32 | `inproc_gemma` | Fully-local: TransformerCPP linked into the process, inline `Provider` adapter (~60 lines), no HTTP | GGUF file |
+| 33 | `openai_responses_ws` | OpenAI Responses API over WebSocket — ~40% lower latency on multi-tool loops | Required (OpenAI) |
+| 34 | `openai_responses_ws_tools` | Tour of every Responses-API built-in tool (web_search, image_generation, file_search, …) at wire level | Required (OpenAI) |
+| 35 | `re_agent` | Reverse-engineering agent — recovers function names from a stripped binary via Ghidra MCP | Required (OpenAI + Ghidra) |
+| 36 | `classifier_fanout` | Five small classifiers fan out via Send and run in parallel — the small-model edge story (inline ONNX swap-in guide) | No |
+| 37 | `a2a_client` | Drive a *remote* Agent-to-Agent agent (run example 38 first) | No |
+| 38 | `a2a_server` | Expose a NeoGraph as an Agent-to-Agent endpoint | No |
+| 39 | `acp_server` | Expose a NeoGraph over the Agent Client Protocol (editor-driven, JSON-RPC over stdio) | No |
+| 40 | `react_async_streaming` | Outer `io_context` + `co_await run_stream_async()` driving a ReAct loop with token streaming | Required (OpenAI) |
+| 41 | `resume_if_exists_chat` | LangGraph-style multi-turn chat via `resume_if_exists` checkpoint reload | No |
+| 42 | `custom_reducer_condition` | Register custom reducers and conditions from C++ | No |
+| 43 | `store_personalization` | Cross-thread `Store` driving per-user node behaviour (`in.ctx.store`) | No |
+| 44 | `request_queue_backpressure` | Fixed-worker pool with backpressure (`RequestQueue`) | No |
+| 46 | `cancel_token` | Cooperative cancellation — `CancelToken::fork()`, cascade to in-flight children | No |
+| 47 | `node_cache` | Per-node result cache keyed on node + input | No |
+| 48 | `sqlite_checkpoint` | `SqliteCheckpointStore` — single-file durable runs, no server | No |
+| 49 | `openinference` | OpenInference observability — Tracer adapter pattern, Phoenix-verified (mock provider) | No |
+| 50 | `async_tool` | `AsyncTool` — coroutine-shaped tool execution adapter | No |
+| 51 | `minimal` | Smallest working program — `result.channel<T>("name")` accessor | No |
+| 52 | `export_schema` | `NodeFactory::export_schema()` → topology JSON Schema dump (codeless-editor source of truth) | No |
+| 52†| `grpc_server` | Expose a `GraphEngine` over gRPC (build with `-DNEOGRAPH_BUILD_GRPC=ON`) | No |
+| 53 | `grpc_client` | Call a NeoGraph gRPC `GraphService` from C++ | No |
+| 54 | `grpc_checkpoint` | Remote `CheckpointStore` over gRPC (state across a network boundary) | No |
+| 55 | `grpc_vs_jsonrpc_toolcall` | Head-to-head: tool-calling over JSON-RPC vs gRPC (honest microbench) | No |
+| 56 | `history_compaction` | Conversation history compaction — bounded window + LLM summary of dropped prefix | No (Optional OpenAI) |
+| 57 | `grpc_remote_tool` | A remote gRPC tool exposed as a local `neograph::Tool` | No |
+
+† Two examples share the upstream number `52` (`52_export_schema.cpp`
+and `52_grpc_server.cpp`); the table lists them by filename to avoid
+ambiguity.
 
 Every API-using example above auto-loads `.env` from the cwd or any
 parent directory via the bundled `cppdotenv`, so the recipe is just
@@ -676,12 +742,21 @@ NeoGraph/
 │   │   └── json_path.h         # JSON dot-path utilities
 │   ├── mcp/
 │   │   └── client.h            # MCP client + tool wrapper
+│   ├── a2a/                    # Agent-to-Agent client + server + caller node
+│   ├── acp/                    # Agent Client Protocol server (types + server)
+│   ├── async/                  # asio::ssl HTTP/HTTPS/WS client + SSE
+│   ├── grpc/                   # GraphService + GrpcCheckpointStore + tool service
+│   ├── observability/          # OpenInference tracer (compiled into core)
 │   └── util/
-│       └── request_queue.h     # Lock-free worker pool
+│       └── request_queue.h     # Lock-free worker pool + AsyncTool
 ├── src/
-│   ├── core/                   # 13 source files (engine + compiler/scheduler/executor/coordinator split)
-│   ├── llm/                    # 3 source files
-│   └── mcp/                    # 1 source file
+│   ├── core/                   # 21 source files (engine + compiler/scheduler/executor/coordinator split, history, observability)
+│   ├── llm/                    # 4 source files
+│   ├── mcp/                    # 1 source file
+│   ├── a2a/                    # 4 source files
+│   ├── acp/                    # 2 source files
+│   ├── async/                  # 10 source files
+│   └── grpc/                   # 3 source files (opt-in)
 ├── schemas/                    # Built-in LLM provider schemas
 │   ├── openai.json
 │   ├── claude.json
@@ -695,7 +770,7 @@ NeoGraph/
 │   ├── clay.h                  # Clay UI layout
 │   └── clay_renderer_raylib.c  # Clay + raylib renderer glue (example 11)
 ├── benchmarks/                 # NeoGraph vs LangGraph engine-overhead bench
-├── examples/                   # 30+ runnable C++ examples + cookbooks (multi-file scenarios)
+├── examples/                   # 55+ runnable C++ examples + 5 cookbooks (multi-file scenarios)
 └── scripts/
     └── embed_schemas.py        # Build-time schema embedding
 ```
@@ -709,17 +784,25 @@ NeoGraph/
 | `neograph::llm` | LLM providers + Agent | core + OpenSSL (httplib PRIVATE) |
 | `neograph::mcp` | MCP client | core + OpenSSL (httplib PRIVATE) |
 | `neograph::a2a` | Agent-to-Agent client + server + caller node | core + async + OpenSSL (httplib PRIVATE) |
+| `neograph::acp` | Agent Client Protocol server (editor-driven, JSON-RPC over stdio) | core (httplib PRIVATE) |
+| `neograph::grpc` | gRPC GraphService + GrpcCheckpointStore + remote tool (opt-in) | core + grpc++ / protoc |
 | `neograph::postgres` | PostgresCheckpointStore | core + libpq |
 | `neograph::sqlite` | SqliteCheckpointStore | core + libsqlite3 |
-| `neograph::util` | RequestQueue | core + concurrentqueue |
+| `neograph::util` | RequestQueue + AsyncTool | core + concurrentqueue |
+
+OpenInference observability (`openinference_tracer`) is compiled into
+`neograph::core` — no separate link target.
 
 ## Build Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `NEOGRAPH_BUILD_LLM` | ON | Build LLM provider module |
+| `NEOGRAPH_BUILD_ASYNC` | ON | Build async HTTP/HTTPS/WS client (`neograph::async`) |
 | `NEOGRAPH_BUILD_MCP` | ON | Build MCP client module |
 | `NEOGRAPH_BUILD_A2A` | ON | Build Agent-to-Agent module (client + server + caller node) |
+| `NEOGRAPH_BUILD_ACP` | ON | Build Agent Client Protocol server (`neograph::acp`) |
+| `NEOGRAPH_BUILD_GRPC` | OFF | Build gRPC GraphService / checkpoint / remote tool (needs grpc++/protoc) |
 | `NEOGRAPH_BUILD_UTIL` | ON | Build utility module |
 | `NEOGRAPH_BUILD_POSTGRES` | ON | Build PostgresCheckpointStore (libpq) |
 | `NEOGRAPH_BUILD_SQLITE` | ON | Build SqliteCheckpointStore (libsqlite3) |
