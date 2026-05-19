@@ -1963,6 +1963,7 @@ public:
 
     void register_reducer(const std::string& name, ReducerFn fn);
     ReducerFn get(const std::string& name) const;
+    std::vector<std::string> names() const;
 };
 ```
 
@@ -1971,6 +1972,7 @@ public:
 | `instance()` | Returns the singleton instance |
 | `register_reducer(name, fn)` | Registers a custom reducer function |
 | `get(name)` | Looks up a reducer by name. Throws if not found |
+| `names()` | Sorted list of all registered reducer names (introspection for external tooling) |
 
 ### ConditionRegistry
 
@@ -1983,6 +1985,7 @@ public:
 
     void register_condition(const std::string& name, ConditionFn fn);
     ConditionFn get(const std::string& name) const;
+    std::vector<std::string> names() const;
 };
 ```
 
@@ -1991,6 +1994,7 @@ public:
 | `instance()` | Returns the singleton instance |
 | `register_condition(name, fn)` | Registers a custom condition function |
 | `get(name)` | Looks up a condition by name. Throws if not found |
+| `names()` | Sorted list of all registered condition names (introspection for external tooling) |
 
 ### NodeFactory
 
@@ -2007,18 +2011,25 @@ public:
     static NodeFactory& instance();
 
     void register_type(const std::string& type, NodeFactoryFn fn);
+    void register_type(const std::string& type, NodeFactoryFn fn,
+                       json config_schema);
     std::unique_ptr<GraphNode> create(const std::string& type,
                                        const std::string& name,
                                        const json& config,
                                        const NodeContext& ctx) const;
+    std::vector<std::string> registered_types() const;
+    json export_schema() const;
 };
 ```
 
 | Method | Description |
 |--------|-------------|
 | `instance()` | Returns the singleton instance |
-| `register_type(type, fn)` | Registers a node factory function for the given type string |
+| `register_type(type, fn)` | Registers a node factory. Config schema defaults to a permissive `{"type":"object"}` |
+| `register_type(type, fn, config_schema)` | As above, with a declared JSON Schema (Draft 2020-12) for the node's `config`. Additive — the 2-arg overload still works unchanged. Used only by `export_schema()`; the engine does not validate config against it |
 | `create(type, name, config, ctx)` | Creates a node of the given type. Throws if the type is not registered |
+| `registered_types()` | Sorted list of all registered node type names |
+| `export_schema()` | Machine-readable description of the topology JSON this engine accepts (see [Topology Schema Export](#topology-schema-export-issue-56)) |
 
 ### Built-in Registrations
 
@@ -2046,6 +2057,63 @@ The library pre-registers the following components:
 | `"tool_dispatch"` | `ToolDispatchNode` | Dispatches tool calls from the latest assistant message |
 | `"intent_classifier"` | `IntentClassifierNode` | LLM-based intent classification. Reads `prompt` and `valid_routes` from `config` |
 | `"subgraph"` | `SubgraphNode` | Runs a compiled subgraph. Reads `input_map` and `output_map` from `config` |
+
+### Topology Schema Export (issue #56)
+
+NeoGraph runs a graph that is *described in JSON*; swap the JSON and the
+same engine becomes a different harness. `NodeFactory::export_schema()`
+emits a machine-readable description of exactly what topology JSON this
+engine version accepts, so external tooling — notably a code-free
+visual block editor ([NeoGraph Studio](https://github.com/fox1245/NeoGraph-Studio),
+issue #56) — can generate its palette from the engine and never drift
+out of sync.
+
+**Three access paths, one document:**
+
+| From | How |
+|------|-----|
+| C++ | `neograph::graph::NodeFactory::instance().export_schema()` → `json` |
+| CLI | `./example_export_schema > schema.json` (`examples/52_export_schema.cpp`) |
+| Python | `neograph_engine.export_schema()` → `dict` |
+
+**Document shape:**
+
+```jsonc
+{
+  "neograph_version": "0.9.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "topology":   { /* JSON Schema for the top-level envelope:
+                     name, channels, nodes (type + config + barrier),
+                     edges, conditional_edges, interrupt_before,
+                     interrupt_after, retry_policy */ },
+  "node_types": { "<type>": { /* config JSON Schema */ }, ... },
+  "reducers":   ["append", "overwrite", ...],
+  "conditions": ["has_tool_calls", "route_channel", ...]
+}
+```
+
+- **`neograph_version`** is stamped at compile time from
+  `pyproject.toml` (single source of truth). A tool compares it to its
+  cached schema and warns when its palette is older than the engine.
+- **`node_types`** reflects whatever is registered in `NodeFactory` at
+  call time, so an embedder's custom node types appear too — register
+  them (and any custom reducers/conditions) *before* exporting, exactly
+  as you would before `compile()`. A type registered via the 3-arg
+  `register_type` carries its declared config schema; the 2-arg form
+  yields a permissive `{"type":"object"}`.
+- **Round-trip contract.** A tool that emits topology JSON should
+  round-trip it through the loader and assert structure is preserved.
+  In particular the top-level `conditional_edges` block was silently
+  dropped by the compiler in v0.1.0–v0.1.7 (fixed v0.1.8); the engine
+  test suite (`tests/test_schema_export.cpp`) guards this regression,
+  and tooling should too.
+
+```cpp
+#include <neograph/graph/loader.h>
+// register custom node types first if you want them in the palette …
+auto schema = neograph::graph::NodeFactory::instance().export_schema();
+std::cout << schema.dump(2) << "\n";
+```
 
 ---
 
