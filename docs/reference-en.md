@@ -1190,13 +1190,16 @@ public:
 
     // Fan-out worker pool. n==1 keeps the engine on the caller's
     // executor (no engine-owned thread_pool); n>=2 installs an
-    // owned `asio::thread_pool` of size n. Throws `std::logic_error`
-    // if called while a run is in flight (Round 3 guard —
-    // `active_runs_` counter prevents tasks queued on the old pool
-    // from being silently dropped on swap).
+    // owned `asio::thread_pool` of size n. compile() defaults to
+    // n==1 — call this (or set_worker_count_auto()) to opt into
+    // real parallel fan-out. Throws `std::logic_error` if called
+    // while a run is in flight (Round 3 guard — `active_runs_`
+    // counter prevents tasks queued on the old pool from being
+    // silently dropped on swap).
     void set_worker_count(std::size_t n);
 
-    // Convenience: set_worker_count(hardware_concurrency()).
+    // Convenience: set_worker_count(hardware_concurrency()). compile()
+    // does NOT call this — its default is set_worker_count(1).
     void set_worker_count_auto();
 
     // Per-node result caching. Disabled by default; opt in per node.

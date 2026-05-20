@@ -12,6 +12,10 @@
 #include <asio/use_awaitable.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
 #include <random>
 #include <chrono>
 #include <cstdio>
@@ -84,6 +88,44 @@ void NodeExecutor::init_state(GraphState& state) const {
         }
         state.init_channel(cd.name, cd.type, reducer, initial);
     }
+}
+
+void NodeExecutor::maybe_warn_serial_fanout(std::size_t width) const {
+    // Only relevant when the engine has no owned pool — that's the
+    // compile() default (set_worker_count(1)) and the case where a
+    // fan-out of width >= 2 silently runs sequentially. With a pool
+    // installed, real parallelism is in effect and nothing to warn
+    // about.
+    if (fan_out_pool_ != nullptr || width < 2) return;
+    // One-shot: first call that finds the flag clear wins the CAS,
+    // every subsequent fan-out on this executor is silent. The flag
+    // resets along with the executor on the next set_worker_count(N).
+    bool expected = false;
+    if (!warned_serial_fanout_.compare_exchange_strong(
+            expected, true, std::memory_order_relaxed)) {
+        return;
+    }
+    // Opt-out for users who knowingly drive serial fan-out (the
+    // worker=1 fast path) or for CI scenarios where stderr is
+    // assertion-checked. Accepts "1" / "true" / "yes" as on, anything
+    // else (or unset) as off.
+    if (const char* env = std::getenv("NEOGRAPH_SUPPRESS_FANOUT_WARNING")) {
+        if (std::strcmp(env, "1") == 0 ||
+            std::strcmp(env, "true") == 0 ||
+            std::strcmp(env, "yes") == 0) {
+            return;
+        }
+    }
+    std::cerr
+        << "[neograph] warning: fan-out of width " << width
+        << " is executing serially on a single thread because no "
+        << "engine-owned worker pool is installed (compile() default "
+        << "is set_worker_count(1)).\n"
+        << "    Call engine->set_worker_count_auto() or "
+        << "engine->set_worker_count(N) once after compile() and "
+        << "before run() to enable real parallel fan-out.\n"
+        << "    Suppress this warning with the environment variable "
+        << "NEOGRAPH_SUPPRESS_FANOUT_WARNING=1.\n";
 }
 
 void NodeExecutor::apply_input(GraphState& state, const json& input) const {
@@ -428,6 +470,7 @@ NodeExecutor::run_parallel_async(
         co_return result;
     }
 
+    maybe_warn_serial_fanout(ready.size());
     auto outer_ex = co_await asio::this_coro::executor;
     // Branches dispatch to the engine's owned pool when available so
     // CPU-bound fan-out actually parallelizes even if the outer
@@ -636,6 +679,7 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
     // serialize/restore round-trip, applies the Send's input, then
     // drives execute_node_with_retry_async. Isolated state can't be
     // shared across concurrent Sends — each gets its own copy.
+    maybe_warn_serial_fanout(sends.size());
     //
     // PERF: serialize the source state once and have every worker
     // restore from the same snapshot. Pre-fix every worker called
