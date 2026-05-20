@@ -8,7 +8,28 @@ Without a louder hint the user discovers this only via timing-sensitive
 integration tests; the engine now emits a one-shot stderr warning the
 first time a fan-out of width >= 2 dispatches against a worker=1
 default, with an env-var opt-out for benchmarks and CI assertions.
+
+NOTE: Windows is skipped at module level. pytest's `capfd` redirects
+fd 2 via `dup2`, but the MSVC CRT inside the loaded wheel binary
+caches the original `fd 2 -> HANDLE` mapping inside its `FILE*
+stderr`, so writes via `std::cerr` / `fputs(..., stderr)` / `fflush`
+land on the pre-redirect HANDLE that `capfd` never observes. The
+warning itself still reaches a Windows user's real console — only
+pytest's fd-capture machinery is the limitation. The Linux + macOS
+jobs in this PR's CI exercise the same code path and cover the
+behavior.
 """
+
+import sys
+
+import pytest
+
+if sys.platform == "win32":
+    pytest.skip(
+        "capfd does not observe wheel-binary stderr on Windows MSVC; "
+        "Linux + macOS CI cover the warning behavior.",
+        allow_module_level=True,
+    )
 
 import neograph_engine as neograph
 
