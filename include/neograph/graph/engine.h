@@ -519,19 +519,26 @@ public:
     void set_node_retry_policy(const std::string& node_name, const RetryPolicy& policy);
 
     /**
-     * @brief Resize the dedicated worker pool for parallel fan-out.
+     * @brief Resize (or install) the engine-owned worker pool for
+     *        parallel fan-out.
      *
-     * `compile()` already wires up a pool sized to
-     * `std::thread::hardware_concurrency()` (with a fallback of 4 if
-     * the platform fails to detect), so multi-Send fan-out
-     * parallelizes by default. Call this only to override that
-     * default — for example, `set_worker_count(1)` for nodes that
-     * hold non-thread-safe state, or a larger value if the workload's
-     * fan-out width exceeds the core count.
+     * **`compile()` default is `set_worker_count(1)`** — no
+     * engine-owned thread pool, fan-out branches dispatch inline on
+     * the coroutine's own executor. That keeps sequential and
+     * single-`Send` workloads off the ~6-7 µs cross-thread submit
+     * path, and avoids silently exposing nodes that hold
+     * non-thread-safe state to concurrent execution. See
+     * `docs/migration-v0.4-to-v1.0.md` (Migration 3) for the full
+     * rationale.
+     *
+     * Call this with `n >= 2` to opt into a real engine-owned
+     * `asio::thread_pool` for multi-`Send` fan-out or multi-outgoing
+     * edges (e.g. `set_worker_count(4)` for a 4-way `Send`). For
+     * `hardware_concurrency()` sizing, see `set_worker_count_auto()`.
      *
      * Must be called before any concurrent `run()`; resizing rebuilds
-     * both the pool and the internal executor and is not safe against
-     * in-flight runs. Values < 1 are clamped to 1.
+     * both the pool and the internal executor and is a hard error
+     * against in-flight runs. Values < 1 are clamped to 1.
      *
      * @param n Number of worker threads in the fan-out pool.
      * @see set_worker_count_auto()
@@ -539,13 +546,15 @@ public:
     void set_worker_count(std::size_t n);
 
     /**
-     * @brief Resize the worker pool to `hardware_concurrency()`.
+     * @brief Opt into a `hardware_concurrency()`-sized worker pool.
      *
      * Equivalent to
-     * `set_worker_count(std::thread::hardware_concurrency())`, with
-     * the same fallback (4) if the runtime cannot detect. `compile()`
-     * already calls this; use it only to revert after an explicit
-     * `set_worker_count(N)` overrode the default.
+     * `set_worker_count(std::thread::hardware_concurrency())`, with a
+     * fallback of 4 if the runtime cannot detect. **`compile()` does
+     * NOT call this — its default is `set_worker_count(1)`.** Use
+     * this once after `compile()` (and before any `run()`) to enable
+     * real parallel fan-out for multi-`Send` / multi-outgoing-edge
+     * workloads.
      */
     void set_worker_count_auto();
 

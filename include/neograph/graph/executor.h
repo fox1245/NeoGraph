@@ -49,6 +49,7 @@
 
 #include <asio/thread_pool.hpp>
 
+#include <atomic>
 #include <functional>
 #include <map>
 #include <memory>
@@ -216,11 +217,23 @@ private:
     /// state. Silently skips unknown channel names.
     void apply_input(GraphState& state, const json& input) const;
 
+    /// Emit a one-shot stderr warning the first time a fan-out of
+    /// width >= 2 is dispatched while no engine-owned worker pool is
+    /// installed. `compile()` defaults to `set_worker_count(1)` for
+    /// safety + sequential-path performance (see engine.h docs), so
+    /// users who built a multi-Send / multi-edge graph and forgot to
+    /// opt into a pool would silently see serial execution. The flag
+    /// is per-NodeExecutor — `set_worker_count(N>=2)` rebuilds the
+    /// executor and resets the flag along with it. Suppress via env
+    /// `NEOGRAPH_SUPPRESS_FANOUT_WARNING=1`.
+    void maybe_warn_serial_fanout(std::size_t width) const;
+
     const std::map<std::string, std::unique_ptr<GraphNode>>& nodes_;
     const std::vector<ChannelDef>& channel_defs_;
     RetryPolicyLookup retry_policy_for_;
     asio::thread_pool* fan_out_pool_ = nullptr;
     NodeCache*         node_cache_   = nullptr;
+    mutable std::atomic<bool> warned_serial_fanout_{false};
 };
 
 } // namespace neograph::graph
