@@ -9,7 +9,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-05-20
+
 ### Added
+
+- **직렬 fan-out 일회성 stderr 경고 (issue #62, PR #63).** `compile()`
+  의 기본값은 `set_worker_count(1)` — 엔진 소유 스레드 풀 없이 fan-out
+  가지가 호출자 executor 에서 직렬 실행된다. 이 의도된 동작이 docs 만
+  믿고 multi-Send 그래프를 짠 사용자에게는 silent serial 로 보이는
+  함정이라, `NodeExecutor` 가 multi-Send (또는 multi-outgoing-edge)
+  fan-out 을 풀 없이 dispatch 하는 순간 stderr 에 처음 한 번만 안내
+  메시지를 출력하도록 추가. `std::atomic` + compare-exchange 로
+  동시 fan-out 에서도 정확히 1회 보장. `set_worker_count(N>=2)` 호출
+  시 `NodeExecutor` 자체가 재구축되므로 플래그도 자연 reset. 환경변수
+  `NEOGRAPH_SUPPRESS_FANOUT_WARNING=1` (또는 `true` / `yes`) 로 끌 수
+  있음 — 의도된 worker=1 직렬 실행, 벤치, CI stderr assertion 케이스용.
+  Linux + macOS 단위 테스트 5건 (`test_fanout_worker_warning.py`) 으로
+  발사 / 1회성 / pool 옵트인 silence / env-var silence / 단일 Send
+  무경고 cover. Windows 는 pytest capfd 가 wheel binary 의 MSVC CRT
+  fd 캐싱과 호환 안 돼 모듈 단위 skip — wheel binary 자체의 stderr
+  출력은 정상.
 
 - **토폴로지 JSON Schema export — `NodeFactory::export_schema()`
   (issue #56, 코드 없는 비주얼 블록 에디터의 선결 과제).** 엔진이
@@ -38,6 +57,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       재발 방지).
 
 ### Fixed
+
+- **`set_worker_count` / `set_worker_count_auto` docstring 정정
+  (issue #62, PR #63).** v1.0 prep 사이클에 `compile()` 의 worker pool
+  기본값을 `set_worker_count(hardware_concurrency())` 에서
+  `set_worker_count(1)` 로 의도적으로 되돌렸는데 (사유는
+  `src/core/graph_engine.cpp:69-93` 주석 참조) 사용자 향한 docstring
+  4군데가 옛 클레임을 유지 → 사용자가 docs 그대로 믿고 짠 multi-Send
+  fan-out 이 영문 모르고 단일 스레드에서 직렬 실행되는 함정. 단위 테스트
+  (fake spawn, instant body) 로는 안 보이고 진짜 wall-time 들어가는
+  e2e 에서만 들킴.
+  - `bindings/python/src/bind_graph.cpp` 의 `set_worker_count` /
+    `set_worker_count_auto` Python docstring 두 개를 실제 동작에 맞게
+    다시 작성. `compile()` 기본은 1 이고 `set_worker_count_auto()` /
+    `set_worker_count(N>=2)` 가 명시적 opt-in 이라고 명문화.
+  - `include/neograph/graph/engine.h` 의 동일 두 함수 Doxygen 주석도
+    같이 정정. Doxygen Pages 가 master push 트리거로 자동 재빌드.
+  - `docs/concepts.md` / `docs/troubleshooting.md` / `docs/reference-en.md`
+    의 같은 stale 클레임 (default = hardware_concurrency) 정정.
 
 - **v0.9.0 ship 시 누락된 신 API 마이그레이션 3건 보완.** v1.0 prep PR
   `9b` (`19819d8`) 로 `GraphNode` legacy 8-virtual 체인이 destructive
