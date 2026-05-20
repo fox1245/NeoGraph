@@ -221,39 +221,37 @@ escape. Add a conditional edge that can route to `__end__`.
 
 Two common causes:
 
-1. **`worker_count` mismatch.** Default is `hardware_concurrency()`.
-   For Send fan-out of width N, `engine.set_worker_count(N)` (or more)
-   is required for true parallelism. Smaller worker counts serialize
-   the fan-out branches.
+1. **No engine-owned worker pool.** `compile()` defaults to
+   `set_worker_count(1)` — no pool, fan-out branches dispatch inline
+   on the caller's executor and run serially. Opt into a pool once
+   after `compile()` (and before `run()`):
+
+   ```python
+   engine.set_worker_count(N)        # exact fan-out width
+   engine.set_worker_count_auto()    # hardware_concurrency()
+   ```
+
+   NeoGraph also prints a one-shot stderr warning the first time a
+   multi-Send (or multi-outgoing-edge) fan-out runs without a pool,
+   so the silent-serial case is visible. Suppress with
+   `NEOGRAPH_SUPPRESS_FANOUT_WARNING=1` if the worker=1 fast path is
+   intentional.
 2. **Python custom nodes hold the GIL** during their body. If your
    `@ng.node` function does CPU-bound Python work, fan-out won't speed
    up. ONNX / PyTorch / numpy / `requests.get` release the GIL during
    native calls, so they DO parallelize. For pure Python scoring loops,
    it doesn't matter how many workers you set.
 
-### `set_worker_count(1)` made things slower than before
-
-**Affected:** wheels v0.1.4 – fixed in `fd60aab` (post-v0.1.4 master).
-
-**Root cause:** `set_worker_count(1)` allocated a 1-worker thread pool
-that paid ~75 µs/iter for cross-thread submission. The pool was a
-no-op at N=1 but not actually a no-op.
-
-**Fix:** v0.1.5+ — `set_worker_count(1)` now uses a `nullptr` pool
-(direct sync execution, no submission cost).
-
 ### `bench_neograph par` reports 200+ µs
 
-**Default behaviour since v0.1.4.** The default `worker_count` flipped
-to `hardware_concurrency()` to better match real LLM workloads (where
-fan-out width is usually > 1). The pre-flip 11.8 µs `par` is reachable
-in one line:
-
-```python
-engine.set_worker_count(1)
-```
-
-This isn't a regression — it's a tuning knob you can flip.
+**Pre-v1.0 wheel.** v0.1.4–v0.x kept the worker pool default at
+`hardware_concurrency()`, which paid the cross-thread submit cost on
+every fan-out tick. v1.0 reverted the default to `set_worker_count(1)`
+(no pool, no submit cost) — `par` is back at the pre-flip ballpark on
+fresh `compile()`. Opt into a pool with
+`engine.set_worker_count(N)` / `engine.set_worker_count_auto()` when
+your workload's fan-out branches actually benefit from a real thread
+pool (CPU-bound bodies, large fan-out widths).
 
 ### My streaming callback fires twice per node
 

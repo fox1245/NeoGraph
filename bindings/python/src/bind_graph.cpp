@@ -620,18 +620,26 @@ void init_graph(py::module_& m) {
 
         .def("set_worker_count", &GraphEngine::set_worker_count,
             py::arg("n"),
-            "Resize the worker pool used for parallel fan-out. "
-            "compile() already sizes the pool to hardware_concurrency() "
-            "so FANOUT > 1 workloads parallelize by default; call this "
-            "only to override (e.g. set_worker_count(1) for nodes with "
-            "non-thread-safe state, or a wider pool than core count). "
-            "Must be called before any run(). Values < 1 clamp to 1.")
+            "Resize (or install) the engine-owned worker pool used for "
+            "parallel fan-out. **compile() default is set_worker_count(1)** "
+            "— no engine-owned pool, fan-out branches dispatch inline on "
+            "the coroutine's own executor (cheap for sequential / "
+            "single-Send workloads, safe for nodes holding non-thread-safe "
+            "state). Call this with N >= 2 to opt into real CPU "
+            "parallelism for multi-Send fan-out or multi-outgoing edges "
+            "(e.g. set_worker_count(4) for a 4-way Send). "
+            "set_worker_count_auto() picks hardware_concurrency() for you. "
+            "Must be called before any run(). Values < 1 clamp to 1. "
+            "Resizing mid-run is a hard error.")
 
         .def("set_worker_count_auto", &GraphEngine::set_worker_count_auto,
-            "Resize the worker pool back to hardware_concurrency() (the "
-            "compile-time default). Useful after an explicit "
-            "set_worker_count(N) override to return to the auto-sized "
-            "pool. Must be called before any run().")
+            "Opt into a hardware_concurrency()-sized worker pool for "
+            "parallel fan-out (fallback 4 if the platform fails to "
+            "detect). Equivalent to "
+            "set_worker_count(hardware_concurrency()). "
+            "**compile() default is set_worker_count(1)** — fan-out runs "
+            "serially on a single thread until this (or set_worker_count(N)) "
+            "is called explicitly. Must be called before any run().")
 
         .def("set_node_cache_enabled", &GraphEngine::set_node_cache_enabled,
             py::arg("node_name"), py::arg("enabled"),

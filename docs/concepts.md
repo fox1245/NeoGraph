@@ -362,16 +362,26 @@ planner ─┬─ Send("researcher", {topic: "A"})  ─┐
 
 ### Worker-count tuning
 
-For real parallelism, set the worker count to at least the fan-out
-width:
+`compile()` defaults to `set_worker_count(1)` — no engine-owned thread
+pool, fan-out branches dispatch inline on the coroutine's own
+executor. That's a no-allocate fast path that's cheap for sequential
+graphs and safe for nodes that hold non-thread-safe state.
+
+For real parallelism, opt into a pool explicitly. Pick exactly N to
+match your fan-out width, or use `set_worker_count_auto()` for
+`hardware_concurrency()` (with a fallback of 4):
 
 ```python
-engine.set_worker_count(5)   # match Send count
+engine.set_worker_count(5)           # match a 5-way Send
+# or
+engine.set_worker_count_auto()       # hardware_concurrency()
 ```
 
-The default is `hardware_concurrency()`. Setting it to 1 puts the
-engine on a no-allocate fast path (single super-step, no thread pool)
-— useful for benchmarks.
+When a multi-Send (or multi-outgoing-edge) fan-out runs without an
+opted-in pool, NeoGraph emits a one-shot stderr warning so the
+silent-serial case doesn't fly under the radar. Suppress with
+`NEOGRAPH_SUPPRESS_FANOUT_WARNING=1` if you intentionally drive
+serial fan-out (e.g. a benchmark of the worker=1 fast path).
 
 ---
 
@@ -636,9 +646,14 @@ that don't exist on Ubuntu / Debian / macOS. Upgrade to ≥ 0.1.7
 
 ### "My fan-out is slower than I expected"
 
-`set_worker_count(N)` where N matches your Send fan-out width. Default
-is `hardware_concurrency()`, but Python custom nodes see GIL contention
-on small fan-outs — bench with both 1 and N.
+`compile()` defaults to `set_worker_count(1)` (no engine-owned thread
+pool — fan-out branches run serially on the caller's executor). For
+real parallelism call `engine.set_worker_count(N)` where N matches
+your Send fan-out width, or `engine.set_worker_count_auto()` for
+`hardware_concurrency()`. NeoGraph also prints a one-shot stderr
+warning the first time a multi-Send fan-out runs without an opted-in
+pool — that's a hint, not an error. Python custom nodes see GIL
+contention on small fan-outs, so bench with both 1 and N.
 
 ### "RunResult has no .status / .final_state attribute"
 
