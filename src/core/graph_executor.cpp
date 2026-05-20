@@ -15,11 +15,11 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
-#include <iostream>
 #include <random>
 #include <chrono>
 #include <cstdio>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 
 namespace neograph::graph {
@@ -116,8 +116,16 @@ void NodeExecutor::maybe_warn_serial_fanout(std::size_t width) const {
             return;
         }
     }
-    std::cerr
-        << "[neograph] warning: fan-out of width " << width
+    // Write directly to the stderr FILE* rather than std::cerr — on
+    // Windows the MSVC CRT does not always keep std::cerr's underlying
+    // buffer in sync with the OS-level fd 2 that test harnesses (and
+    // pytest's `capfd`) redirect, so a `std::cerr << "..."` message
+    // can be swallowed entirely in Windows wheel CI even though it
+    // shows up on POSIX. `std::fputs` + `std::fflush(stderr)` hits
+    // fd 2 directly and is portable across the three platforms we
+    // ship wheels for.
+    std::ostringstream oss;
+    oss << "[neograph] warning: fan-out of width " << width
         << " is executing serially on a single thread because no "
         << "engine-owned worker pool is installed (compile() default "
         << "is set_worker_count(1)).\n"
@@ -126,6 +134,8 @@ void NodeExecutor::maybe_warn_serial_fanout(std::size_t width) const {
         << "before run() to enable real parallel fan-out.\n"
         << "    Suppress this warning with the environment variable "
         << "NEOGRAPH_SUPPRESS_FANOUT_WARNING=1.\n";
+    std::fputs(oss.str().c_str(), stderr);
+    std::fflush(stderr);
 }
 
 void NodeExecutor::apply_input(GraphState& state, const json& input) const {
