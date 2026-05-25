@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "tools": [
+    {
+      "name": "demo",
+      "transport": "http",
+      "url": "http://127.0.0.1:8888",
+      "description": "시간/날씨/계산 도구. 시간은 진짜 시스템 시계, 계산은 진짜 eval, 날씨는 데모용 시뮬레이션(random) — 매번 값이 다르면 진짜 도구 호출된 증거.",
+      "tags": ["fast", "direct-friendly"],
+      "skip_synthesis_hint": false,
+      "enabled": true
+    }
+  ],
+  "routing_hints": {
+    "direct_when": ["현재 시간, 계산, 날씨 같은 단일 도구로 답 가능한 질의"]
+  }
+}

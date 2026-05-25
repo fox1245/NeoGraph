@@ -1,0 +1,19 @@
+# 자비스 cookbook 의 무거운 산출물 / 의존성. git 에 절대 들어가지 않음.
+# bash assets/download.sh 또는 scripts/install_deps.sh 로 사용자가 직접 받음.
+
+# 외부 라이브러리 (~78MB) — ONNX Runtime, whisper.cpp, supertonic helper, miniaudio
+third_party/
+
+# 모델 가중치 (~864MB) — supertonic-3, whisper-small, silero VAD
+assets/onnx
+assets/voices
+assets/supertonic-3/
+assets/whisper-small.bin
+assets/silero_vad.onnx
+
+# 시연 결과물
+*.wav
+/tmp/
+
+# 빌드 산출물 (혹시 cookbook 안에 빌드한 경우)
+build/

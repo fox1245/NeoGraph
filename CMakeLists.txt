@@ -1014,6 +1014,20 @@ if(NEOGRAPH_BUILD_EXAMPLES)
                 neograph::core neograph::llm cppdotenv)
         endif()
 
+        # JARVIS voice meta-orchestrator cookbook — 골격(skeleton) 단계.
+        # whisper.cpp + onnxruntime + miniaudio + supertonic helper + 모델 가중치
+        # (~250MB) 가 필요. 기본 OFF — ON 으로 켜면 jarvis 의 자체 CMakeLists 가
+        # 의존성 못 찾으면 조용히 return() 해서 본체 빌드를 깨뜨리지 않음.
+        # MCP / A2A / LLM 셋 다 켜져 있어야 의미가 있음.
+        option(NEOGRAPH_BUILD_COOKBOOK_JARVIS
+            "Build JARVIS voice cookbook (needs whisper.cpp + onnxruntime + miniaudio + 250MB models)"
+            OFF)
+        if(NEOGRAPH_BUILD_COOKBOOK_JARVIS
+           AND NEOGRAPH_BUILD_LLM
+           AND NEOGRAPH_BUILD_MCP)
+            add_subdirectory(examples/cookbook/jarvis)
+        endif()
+
         if(NEOGRAPH_BUILD_MCP)
             add_executable(example_mcp_agent examples/03_mcp_agent.cpp)
             target_link_libraries(example_mcp_agent PRIVATE neograph::core neograph::llm neograph::mcp cppdotenv)

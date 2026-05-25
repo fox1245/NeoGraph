@@ -1,0 +1,57 @@
+{
+  "$schema": "../docs/agent_registry.schema.json",
+  "version": 1,
+  "comment": [
+    "자비스가 통째로 위임할 수 있는 A2A 서브에이전트 레지스트리.",
+    "시작 시 각 url 의 /.well-known/agent.json 에서 AgentCard 가져옴.",
+    "응답 안 하는 항목은 자동으로 비활성화 (로그만 남기고 계속 진행).",
+    "표준 A2A 따르는 어떤 외부 에이전트라도 url 추가만 하면 자비스의 부하가 됨."
+  ],
+  "agents": [
+    {
+      "name": "coder",
+      "url": "http://127.0.0.1:8210",
+      "expertise": "코드 작성, 리뷰, 디버깅, 리팩토링. 파이썬/C++/JS 친숙.",
+      "delegate_keywords": ["코드", "리뷰", "버그", "리팩토링", "고쳐", "구현", "code", "review", "debug"],
+      "fetch_card_on_start": true,
+      "timeout_seconds": 60,
+      "enabled": true,
+      "comment": "specialists/coder/ 의 별도 프로세스. example 38 a2a_server 패턴."
+    },
+    {
+      "name": "researcher",
+      "url": "http://127.0.0.1:8211",
+      "expertise": "웹 검색 + 요약, 학술 자료 정리, 비교 분석.",
+      "delegate_keywords": ["조사", "찾아봐", "비교", "정리", "research", "compare", "summarize"],
+      "fetch_card_on_start": true,
+      "timeout_seconds": 90,
+      "enabled": true,
+      "comment": "specialists/researcher/. web_search 도구 가진 ReAct 서브그래프."
+    },
+    {
+      "name": "remote_jarvis_office",
+      "url": "http://office.local:8200",
+      "expertise": "회사 자비스 — 회의록, 일정, 사내 문서 접근.",
+      "delegate_keywords": ["회사", "회의록", "사내", "office"],
+      "fetch_card_on_start": false,
+      "timeout_seconds": 30,
+      "enabled": false,
+      "comment": "자비스끼리 통신 시연용. 회사 자비스 인스턴스를 별도로 띄우면 활성화."
+    }
+  ],
+  "self": {
+    "comment": [
+      "자비스 자신을 외부에 노출하는 A2A 서버 설정.",
+      "다른 에이전트, 휴대폰 앱, 또 다른 자비스가 여기로 텍스트 메시지 보낼 수 있음.",
+      "텍스트 입력은 마이크/STT 단계 건너뛰고 라우터로 직행."
+    ],
+    "bind_host": "127.0.0.1",
+    "bind_port": 8200,
+    "agent_card": {
+      "name": "jarvis",
+      "description": "Tony's personal meta-orchestrator. Voice-first, on-device, multilingual.",
+      "skills": ["intent_routing", "tool_dispatch", "agent_delegation", "multilingual_voice"]
+    },
+    "enabled": true
+  }
+}

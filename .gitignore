@@ -45,3 +45,4 @@ wasm/*.wasm
 wasm/*.js
 wasm/*.html
 wasm/*.data
+.omc/
