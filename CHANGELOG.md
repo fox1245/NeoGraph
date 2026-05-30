@@ -9,6 +9,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed (docs)
+
+- **샌드박스 실측으로 드러난 README 요약 배지의 조건 누락·내부 모순 정정.**
+  "The four axes" 요약 표의 배지들이 본문/deep-dive 에 있는 측정 조건을
+  떼어내 과장처럼 읽히던 것을 본문 수치에 맞춰 정정 (측정 데이터 표 자체는
+  불변):
+  - **`p99 17 µs flat` → `p99 7 µs @ 10 K (1 CPU sandbox)`** — 배지의
+    17 µs 는 본문(`At N=10,000 concurrent ... 7 µs p99`)과 모순이었고
+    `flat` 은 µs 측정이 아니라 GPU-bound 부하 테스트의 run-latency
+    (648 ms) 에 해당하는 표현이었다. 배지를 본문의 측정 숫자·조건에 정렬.
+  - **`1.2 MB stripped binary` → `... (MinSizeRel static)`** — `libc.so.6`
+    only 와 1.2 MB 는 MinSizeRel + 정적 libstdc++ 빌드에서만 성립
+    (기본 Release 는 libstdc++/libgcc_s/libm/libc 동적 링크). deep-dive
+    §size 에 이미 명시돼 있던 조건을 배지에도 복원.
+  - **`2 wheel deps` → `2 direct wheel deps (... ; 7 with transitive)`**
+    — 직접 의존은 `certifi` + `pydantic` 둘이 맞으나 실제 설치 트리는
+    pydantic 의 transitive (pydantic-core, typing-extensions,
+    annotated-types, typing-inspection) 포함 7 패키지.
+- **deep-dive MinSizeRel 재현 명령에 `-DNEOGRAPH_BUILD_POSTGRES=OFF` 추가.**
+  POSTGRES 기본 ON 이라 libpq 없는 호스트에서 그대로 실행 시 configure
+  실패하던 것을 수정.
+
 ## [0.10.0] — 2026-05-20
 
 ### Added

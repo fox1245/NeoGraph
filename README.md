@@ -47,10 +47,10 @@
 
 |   | Axis | Measured value | Reproduce |
 |---|---|---|---|
-| ⚡ | **Performance** | 5 µs engine overhead · 10 K concurrent in 5.5 MB · p99 17 µs flat | [Engine overhead](#engine-overhead-vs-leading-frameworks) · [L3 cache fit](docs/performance-deep-dive.md#the-agent-runtime-that-fits-in-l3-cache) |
+| ⚡ | **Performance** | 5 µs engine overhead · 10 K concurrent in-flight in 5.5 MB · p99 7 µs @ 10 K (1 CPU sandbox) | [Engine overhead](#engine-overhead-vs-leading-frameworks) · [L3 cache fit](docs/performance-deep-dive.md#the-agent-runtime-that-fits-in-l3-cache) |
 | 🧬 | **Self-evolution** | LLM judge → graph_def hot-swap · 5 customer → 3 emergent topology cluster | [self_evolving_chatbot cookbook](examples/cookbook/self_evolving_chatbot/) |
-| 🔌 | **Embedded-ready** | 1.2 MB stripped binary · `libc.so.6` only · runs on RPi Zero 2W · MCU-class possible | [Embedded / robotics](docs/performance-deep-dive.md#what-the-numbers-mean-for-embedded--robotics) |
-| 🪶 | **Lightweight** | 2 wheel deps (`certifi` + `pydantic`) · multi-tenant 1 K customer → 29 MB · t2.micro 1 K concurrent OK | [multi_tenant_chatbot cookbook](examples/cookbook/multi_tenant_chatbot/) |
+| 🔌 | **Embedded-ready** | 1.2 MB stripped binary (MinSizeRel static) · `libc.so.6` only · runs on RPi Zero 2W · MCU-class possible | [Embedded / robotics](docs/performance-deep-dive.md#what-the-numbers-mean-for-embedded--robotics) |
+| 🪶 | **Lightweight** | 2 direct wheel deps (`certifi` + `pydantic`; 7 with transitive) · multi-tenant 1 K customer → 29 MB · t2.micro 1 K concurrent OK | [multi_tenant_chatbot cookbook](examples/cookbook/multi_tenant_chatbot/) |
 
 Each row is a single command away — no setup, no API key needed except
 the live-LLM cookbook variants.
