@@ -1041,6 +1041,13 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             add_executable(example_mcp_stdio examples/22_mcp_stdio.cpp)
             target_link_libraries(example_mcp_stdio PRIVATE neograph::core neograph::llm neograph::mcp cppdotenv)
 
+            # minimal-mcp cookbook — MCP client round-trip with NO LLM and
+            # NO fastmcp: a ~60-line stdlib stdio server (min_stdio_server.py)
+            # paired with this harness. Demonstrates that NeoGraph's MCP
+            # client only needs a process that speaks the wire protocol.
+            add_executable(cookbook_minimal_mcp examples/cookbook/minimal-mcp/client_harness.cpp)
+            target_link_libraries(cookbook_minimal_mcp PRIVATE neograph::core neograph::mcp)
+
             add_executable(example_mcp_multi examples/23_mcp_multi.cpp)
             target_link_libraries(example_mcp_multi PRIVATE neograph::core neograph::llm neograph::mcp cppdotenv)
 
