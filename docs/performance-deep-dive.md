@@ -314,7 +314,7 @@ time roughly in half on a 2-core host). Steady-state RSS is unaffected.
 ```bash
 cmake -B build-minsize -S . \
     -DCMAKE_BUILD_TYPE=MinSizeRel \
-    -DNEOGRAPH_BUILD_MCP=OFF -DNEOGRAPH_BUILD_TESTS=OFF \
+    -DNEOGRAPH_BUILD_MCP=OFF -DNEOGRAPH_BUILD_TESTS=OFF -DNEOGRAPH_BUILD_POSTGRES=OFF \
     -DCMAKE_CXX_FLAGS="-ffunction-sections -fdata-sections" \
     -DCMAKE_EXE_LINKER_FLAGS="-Wl,--gc-sections -static-libstdc++ -static-libgcc"
 cmake --build build-minsize --target example_plan_executor -j$(nproc)
