@@ -9,17 +9,32 @@
 // calls into A2AServer; the agent is reachable from any A2A client
 // (a2a-js, a2a-python, our own A2AClient, etc.) at the bound URL.
 //
+// Two modes:
+//   * Default (no "serve" arg) — self-verifies by round-tripping with
+//     its own client, then stops the server and exits 0. Good for CI.
+//   * Serve mode ("serve" / "--serve" arg) — runs the self-verification,
+//     then KEEPS listening until a signal (Ctrl-C / SIGTERM) arrives, so
+//     a separate process (e.g. example_a2a_client) can connect across
+//     process boundaries. On signal it stops the server cleanly and exits.
+//
 // Usage:
-//   ./build-pybind/example_a2a_server [port]    (default 8087, 0=auto)
+//   ./build-pybind/example_a2a_server [port]          (default 8087, 0=auto)
+//   ./build-pybind/example_a2a_server [port] serve    (stay up until Ctrl-C)
 
 #include <neograph/neograph.h>
 #include <neograph/a2a/server.h>
 #include <neograph/a2a/client.h>
 
 #include <chrono>
+#include <csignal>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
+
+#if !defined(_WIN32)
+#include <signal.h>
+#endif
 
 using namespace neograph;
 using neograph::graph::ChannelWrite;
@@ -77,10 +92,50 @@ std::shared_ptr<GraphEngine> build_demo_engine() {
     return std::shared_ptr<GraphEngine>(std::move(engine));
 }
 
+// Set by SIGINT/SIGTERM so the serve loop can wake up and shut down.
+// volatile sig_atomic_t is the only type the C++ standard guarantees is
+// safe to touch from an async signal handler.
+volatile std::sig_atomic_t g_stop_requested = 0;
+
+extern "C" void handle_signal(int) { g_stop_requested = 1; }
+
+// Install a portable, persistent handler for SIGINT/SIGTERM. Uses
+// sigaction where available (handler stays installed, no SA_RESETHAND)
+// so the signal reliably reaches our flag instead of the default
+// terminate action — even with asio worker threads in the process.
+void install_signal_handlers() {
+#if defined(_WIN32)
+    std::signal(SIGINT, handle_signal);
+    std::signal(SIGTERM, handle_signal);
+#else
+    struct sigaction sa{};
+    sa.sa_handler = handle_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;  // no SA_RESTART, no SA_RESETHAND
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+#endif
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    int port = (argc > 1) ? std::atoi(argv[1]) : 8087;
+    // Parse args: an optional numeric port, plus an optional "serve" /
+    // "--serve" flag (in any order after the program name).
+    int port = 8087;
+    bool serve = false;
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "serve" || a == "--serve") {
+            serve = true;
+        } else {
+            port = std::atoi(a.c_str());
+        }
+    }
+
+    // In serve mode, claim SIGINT/SIGTERM up front — before any asio
+    // worker threads exist — so the signal reliably reaches our flag.
+    if (serve) install_signal_handlers();
 
     auto engine = build_demo_engine();
 
@@ -137,9 +192,25 @@ int main(int argc, char** argv) {
     std::cout << "    streamed task state: "
               << task_state_to_string(streamed.status.state) << "\n";
 
-    // Server keeps running until we tear it down — for an actual
-    // deployment, replace this with a wait-for-signal loop.
+    if (serve) {
+        // Long-running deployment mode: stay up until a signal arrives so
+        // a separate process can connect across the process boundary.
+        // Re-assert the handlers here: the engine's asio worker threads
+        // (spun up during start_async + self-verification) can reset the
+        // SIGINT/SIGTERM disposition, so installing once at startup isn't
+        // enough — without this, the signal hits the default terminate
+        // action instead of our flag.
+        install_signal_handlers();
+        std::cout << "\n[*] serve mode — staying up at " << url
+                  << " (Ctrl-C or SIGTERM to stop)\n";
+        std::cout.flush();
+        while (g_stop_requested == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        std::cout << "\n[*] signal received — stopping server\n";
+    }
+
     server.stop();
-    std::cout << "\n[*] server stopped, exiting cleanly\n";
+    std::cout << "[*] server stopped, exiting cleanly\n";
     return 0;
 }
