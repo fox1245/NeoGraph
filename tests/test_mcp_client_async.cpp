@@ -168,6 +168,79 @@ TEST(MCPClientAsync, NonOkHttpStatusSurfacesAsRuntimeError) {
     EXPECT_THROW(client.call_tool("x", json::object()), std::runtime_error);
 }
 
+TEST(MCPClientAsync, NotFoundDoesNotTerminateAndThrowsRuntimeError) {
+    // Regression for issue #65: a 404 from the MCP HTTP path used to escape
+    // the sync call as an exception that callers could (and an example
+    // didn't) catch. Here we assert the library surfaces a *catchable*
+    // std::runtime_error rather than aborting the process — and that the
+    // message carries the request URL so a misconfigured path is obvious
+    // (issue #66 friendly-error half).
+    httplib::Server svr;
+    // Register nothing on the MCP path → httplib answers 404 for any POST.
+    int port = svr.bind_to_any_port("127.0.0.1");
+    std::thread t([&] { svr.listen_after_bind(); });
+    for (int i = 0; i < 200 && !svr.is_running(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_TRUE(svr.is_running());
+
+    mcp::MCPClient client("http://127.0.0.1:" + std::to_string(port));
+
+    bool threw_runtime_error = false;
+    try {
+        client.call_tool("x", json::object());
+    } catch (const std::runtime_error& e) {
+        threw_runtime_error = true;
+        std::string what = e.what();
+        // HTTP status and the request URL must both appear.
+        EXPECT_NE(what.find("404"), std::string::npos);
+        EXPECT_NE(what.find("127.0.0.1"), std::string::npos);
+    }
+    EXPECT_TRUE(threw_runtime_error);
+
+    svr.stop();
+    if (t.joinable()) t.join();
+}
+
+TEST(MCPClientAsync, UrlWithMcpSuffixIsNotDoubled) {
+    // Regression for issue #66: a user-supplied URL that already ends in
+    // `/mcp` must resolve to `/mcp`, not `/mcp/mcp`. We register a handler
+    // ONLY at `/mcp`; if the client doubled the suffix it would request
+    // `/mcp/mcp` and httplib would 404 (which call_tool turns into a throw).
+    std::atomic<int> hits_mcp{0};
+    httplib::Server svr;
+    svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+        hits_mcp.fetch_add(1, std::memory_order_relaxed);
+        int id = 0;
+        try {
+            auto parsed = json::parse(req.body);
+            if (parsed.is_object()) id = parsed.value("id", 0);
+        } catch (...) { }
+        res.set_content(
+            R"({"jsonrpc":"2.0","id":)" + std::to_string(id) +
+                R"(,"result":{"ok":true}})",
+            "application/json");
+    });
+    int port = svr.bind_to_any_port("127.0.0.1");
+    std::thread t([&] { svr.listen_after_bind(); });
+    for (int i = 0; i < 200 && !svr.is_running(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_TRUE(svr.is_running());
+
+    // URL already carries the `/mcp` path the spec endpoint uses.
+    mcp::MCPClient client(
+        "http://127.0.0.1:" + std::to_string(port) + "/mcp");
+    auto result = client.call_tool("ping", json::object());
+
+    EXPECT_TRUE(result.is_object());
+    EXPECT_EQ(result.value("ok", false), true);
+    EXPECT_EQ(hits_mcp.load(), 1);  // reached /mcp exactly once, no /mcp/mcp
+
+    svr.stop();
+    if (t.joinable()) t.join();
+}
+
 TEST(MCPClientAsync, SessionIdHeaderRoundTrips) {
     // Regression for the Mcp-Session-Id tracking that was lost in the
     // Sem 2.6 httplib → async_post migration and restored in the
