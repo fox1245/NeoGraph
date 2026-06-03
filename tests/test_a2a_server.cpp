@@ -179,6 +179,27 @@ TEST(A2AServer, SendsStatusUpdatesOverSSE) {
     EXPECT_EQ(states.back(),  TaskState::Completed);
 }
 
+// Serve-mode contract: a server is expected to stay up and accept many
+// independent client connections over its lifetime, not stop after the
+// first round-trip. This mirrors example_a2a_server's "serve" mode where
+// a separate process connects across the process boundary. Here we use
+// fresh A2AClient objects (independent connections) against one server.
+TEST(A2AServer, StaysUpAcrossIndependentClients) {
+    LiveServer srv;
+    for (int i = 0; i < 5; ++i) {
+        A2AClient client(srv.url());  // fresh connection each iteration
+        auto task = client.send_message_sync("ping " + std::to_string(i));
+        ASSERT_EQ(task.status.state, TaskState::Completed);
+        ASSERT_FALSE(task.history.empty());
+        EXPECT_EQ(task.history.back().parts[0].text,
+                  "echo:ping " + std::to_string(i));
+        EXPECT_TRUE(srv.server->is_running());
+    }
+    // Server still healthy after all those round-trips — only an explicit
+    // stop() (or a signal in the example) tears it down.
+    EXPECT_TRUE(srv.server->is_running());
+}
+
 TEST(A2AServer, MethodNotFoundReturnsCorrectCode) {
     LiveServer srv;
     A2AClient client(srv.url());
