@@ -906,6 +906,25 @@ MCPClient::rpc_call_async(const std::string& method, const json& params) {
 
     auto endpoint = async::split_async_endpoint(server_url_);
 
+    // Build the request path idempotently. `split_async_endpoint` puts the
+    // URL's path into `prefix`, so a user who configures the full MCP
+    // endpoint (`http://host:8000/mcp`) already has prefix == "/mcp". If we
+    // blindly appended "/mcp" we'd request "/mcp/mcp" and get a 404 even
+    // though the user gave a correct URL (issue #66). Only append the
+    // suffix when it isn't already there.
+    std::string path;
+    auto ends_with_mcp = [](const std::string& s) {
+        return s == "/mcp" ||
+               (s.size() > 4 && s.compare(s.size() - 4, 4, "/mcp") == 0);
+    };
+    if (endpoint.prefix.empty() || endpoint.prefix == "/") {
+        path = "/mcp";
+    } else if (ends_with_mcp(endpoint.prefix)) {
+        path = endpoint.prefix;
+    } else {
+        path = endpoint.prefix + "/mcp";
+    }
+
     async::RequestOptions opts;
     opts.timeout = std::chrono::seconds(30);
 
@@ -916,7 +935,7 @@ MCPClient::rpc_call_async(const std::string& method, const json& params) {
             ex,
             endpoint.host,
             endpoint.port,
-            endpoint.prefix + "/mcp",
+            path,
             body_str,
             std::move(headers),
             endpoint.tls,
@@ -935,8 +954,19 @@ MCPClient::rpc_call_async(const std::string& method, const json& params) {
     }
 
     if (res.status != 200) {
+        std::string scheme = endpoint.tls ? "https://" : "http://";
+        std::string full_url =
+            scheme + endpoint.host + ":" + endpoint.port + path;
+        std::string hint;
+        if (res.status == 404) {
+            hint = " — the server has no MCP endpoint at this path. Check the "
+                   "configured URL (a trailing '/mcp' is added automatically, "
+                   "so pass the server base like 'http://host:8000' or the "
+                   "full 'http://host:8000/mcp').";
+        }
         throw std::runtime_error(
-            "MCP error (HTTP " + std::to_string(res.status) + "): " + res.body);
+            "MCP error (HTTP " + std::to_string(res.status) + ") for " +
+            full_url + ": " + res.body + hint);
     }
 
     // Parse response — may be plain JSON or SSE. Streamable HTTP can

@@ -128,9 +128,16 @@ public:
 int main(int argc, char** argv) {
     const std::string mcp_url = (argc >= 2) ? argv[1] : "http://localhost:8000";
 
+    try {
     // One shared MCPClient — all fan-out branches reuse it. HTTP client is
     // session-per-rpc under the hood; for stdio the shared session would be
     // reused across tasks too (see example 22).
+    //
+    // initialize() makes a live HTTP round-trip and throws (e.g. on a 404
+    // from a wrong URL or a server that's down). It used to sit outside any
+    // try/catch, so a one-character URL typo escaped main and aborted the
+    // process with std::terminate (issue #65). Wrapping the whole body keeps
+    // that a friendly error + non-zero exit instead.
     auto client = std::make_shared<neograph::mcp::MCPClient>(mcp_url);
     client->initialize();
 
@@ -203,4 +210,10 @@ int main(int argc, char** argv) {
     std::cout << summary_v << "\n";
     std::cout << "Wall clock: " << wall << " ms (all 3 MCP calls concurrent)\n";
     return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "\nError: " << e.what() << "\n";
+        std::cerr << "Is the MCP server running at " << mcp_url
+                  << "? Start it with: python examples/demo_mcp_server.py\n";
+        return 1;
+    }
 }
