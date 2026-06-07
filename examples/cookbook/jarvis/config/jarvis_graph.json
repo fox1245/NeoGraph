@@ -68,7 +68,7 @@
       "model": "gpt-4o-mini",
       "routes": ["direct", "delegate", "parallel"],
       "output_channel": "route_decision",
-      "prompt_file": "/root/Coding/NeoGraph/examples/cookbook/jarvis/config/persona.txt",
+      "prompt_file": "config/persona.txt",
       "prompt_section": "router"
     },
 
@@ -103,7 +103,7 @@
         "route_decision.skip_synthesis=true 면 이 노드는 우회 (조건부 엣지로)."
       ],
       "model": "gpt-4o",
-      "prompt_file": "/root/Coding/NeoGraph/examples/cookbook/jarvis/config/persona.txt",
+      "prompt_file": "config/persona.txt",
       "prompt_section": "synth",
       "output_channel": "final_text"
     },

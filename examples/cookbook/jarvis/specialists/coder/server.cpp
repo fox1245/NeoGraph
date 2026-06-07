@@ -209,10 +209,28 @@ int main(int argc, char** argv) {
 
     std::string system_prompt = extract_persona_section(persona_file, "specialist_coder");
     if (system_prompt.empty()) {
-        // 빌드 트리 위치와 다를 수 있으므로 소스 기준 경로도 시도
+        // 빌드 트리 위치와 다를 수 있으므로 소스 기준 경로도 시도.
+        // 환경변수 JARVIS_CONFIG_DIR 가 있으면 우선, 없으면 __FILE__ 기준으로
+        // 두 단계 위 config/ 를 찾는다 (researcher/server.cpp 와 동일 규약).
+        std::string config_dir;
+        if (const char* env_dir = std::getenv("JARVIS_CONFIG_DIR")) {
+            config_dir = env_dir;
+        } else {
+            // __FILE__ = .../specialists/coder/server.cpp
+            std::string src_path = __FILE__;
+            auto slash = src_path.rfind('/');
+            slash = (slash != std::string::npos)
+                        ? src_path.rfind('/', slash - 1)
+                        : std::string::npos;
+            slash = (slash != std::string::npos)
+                        ? src_path.rfind('/', slash - 1)
+                        : std::string::npos;
+            config_dir = (slash != std::string::npos)
+                             ? src_path.substr(0, slash + 1) + "config"
+                             : "config";
+        }
         system_prompt = extract_persona_section(
-            "/root/Coding/NeoGraph/examples/cookbook/jarvis/config/persona.txt",
-            "specialist_coder");
+            config_dir + "/persona.txt", "specialist_coder");
     }
     if (system_prompt.empty()) {
         // 끝까지 못 읽으면 최소 fallback
