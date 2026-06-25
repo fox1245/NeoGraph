@@ -9,6 +9,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-25
+
+### Added
+
+- **동시 tool 디스패치 — `Tool::execute_async` 정식 비동기 경로.**
+  `ToolDispatchNode` 가 한 어시스턴트 턴의 여러 `tool_call` 을 엔진의
+  `make_parallel_group` 으로 **동시에** 실행한다. 기존에는 동기
+  `execute()` 로 순차 실행돼, 특히 MCP 도구는 호출마다 `run_sync` 로
+  자체 `io_context` 를 띄워 막혀 병렬 MCP 호출이 겹치지 못했다
+  (외부 C++ 포크가 병렬 MCP 호출에서 발견). 수정:
+  - `Tool` 에 가상 `execute_async()` 추가 — 기본 구현이 동기
+    `execute()` 로 브리지하므로 기존 도구는 그대로 동작.
+  - `MCPTool` 을 `AsyncTool` 로 전환, `execute_async` 를 네이티브
+    구현 (stdio 는 `rpc_call_async`, HTTP 는 신규
+    `MCPClient::initialize_async`/`call_tool_async` 로 비동기 핸드셰이크
+    — `run_sync` 제거).
+  - `ToolDispatchNode::run` 은 노드 fan-out 과 동일한
+    `make_parallel_group` 관용구로 호출들을 동시 디스패치(단일 호출은
+    인라인), 결과는 호출 순서대로 적용. 동기 `execute()` 파사드 유지로
+    하위 호환.
+  - 검증: 478/478 ctest, Valgrind 누수 0, TSAN race 0.
+
 ### Fixed (docs)
 
 - **샌드박스 실측으로 드러난 README 요약 배지의 조건 누락·내부 모순 정정.**
