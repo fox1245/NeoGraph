@@ -217,7 +217,13 @@ jobs:
           if-no-files-found: ignore
 
   build-windows:
-    runs-on: windows-latest
+    # Pinned to windows-2022: the windows-latest image rolled to
+    # windows-2025, where CMake's "Visual Studio 17 2022" generator can
+    # no longer locate a VS instance ("could not find any instance of
+    # Visual Studio") at the project() configure step. windows-2022
+    # still ships VS 2022. Revisit when the workflow moves to a
+    # Ninja + msvc-dev-cmd setup that is image-agnostic.
+    runs-on: windows-2022
     # Windows tier is **alpha** for 2.0.0 — CI gates the Windows-
     # specific code paths (MCP stdio named-pipe + PG async socket
     # wrap) compile-wise, not full integration. Scope is deliberately
