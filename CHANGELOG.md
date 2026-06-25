@@ -9,6 +9,37 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-06-25
+
+### Changed
+
+- **stdio MCP 동시 호출 — 상관 ID 디멀티플렉서로 I/O 겹침.**
+  `0.11.0` 의 동시 tool 디스패치는 HTTP MCP 만 실제로 겹쳤다. stdio MCP
+  는 `StdioSession::rpc_call_async` 가 용량-1 채널 락을 **요청→응답 왕복
+  전체** 동안 잡아, 한 턴의 여러 호출이 한 세션의 단일 파이프에서
+  차례로 직렬화됐다 (벽시계 ≈ 지연의 합). 파이프가 하나인 게 원인이
+  아니라 — JSON-RPC `id` 가 바로 한 연결을 파이프라이닝하라고 있는
+  장치다. 그 락을 상관 ID 디멀티플렉서로 교체했다:
+  - 용량-1 채널을 **쓰기 전용 락**으로 용도 변경 — 프레임 쓰기 순간만
+    잡으므로 두 호출의 바이트가 섞이지 않으면서 읽기는 더는 직렬화되지
+    않는다.
+  - 리더 코루틴 하나(`run_reader`)가 읽기 측을 독점해 응답 줄마다
+    JSON-RPC `id` 로 해당 호출의 sink 에 배달한다. N 개 동시 호출이
+    읽기를 겹쳐 벽시계 ≈ max(지연) — 단, **상대 MCP 서버가 동시
+    처리할 때만** 실익이 난다 (단일 스레드 순차 서버는 암달 바닥).
+  - 리더는 in-flight 호출이 있을 때만 lazy 하게 돌고 대기자가 비면
+    종료하므로 사설 `run_sync` io_context 가 정상 반환한다. 대기자는
+    호출자가 await 하는 동안만 존재하고 그 호출자가 `MCPTool` 의
+    `shared_ptr` 로 세션을 살려두므로 리더가 소멸된 세션을 건드릴 일이
+    없다 (소멸자 join 불필요). 파이프 EOF/오류 시 리더가 모든 sink 를
+    닫아, await 중인 호출자가 영원히 매달리는 대신 예외를 받는다.
+  - **API/문법 변화 없음** — 공개 헤더 불변, 기존 코드 재컴파일 불필요.
+    엔진 오버헤드 회귀 0 (`bench_neograph` interleaved A/B, seq/par Δ 0%).
+  - 테스트: 스레드 기반 지연 fixture `tests/fixtures/mcp_stdio_slow.py`
+    + `ConcurrentStdioCallsOverlapIO` (5×100 ms 호출이 ~130 ms 완료,
+    직렬 바닥 500 ms; 각 응답이 `id` 로 자기 호출자에 라우팅되는지 검증).
+    ASan+UBSan ×3 clean.
+
 ## [0.11.0] - 2026-06-25
 
 ### Added
