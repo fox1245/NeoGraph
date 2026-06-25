@@ -20,9 +20,13 @@
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
@@ -195,4 +199,99 @@ TEST(MCPStdioAsync, SyncFacadeStillWorksAlongsideAsync) {
     auto out = client.call_tool("echo", json{{"msg", "hello"}});
     EXPECT_TRUE(out.is_object());
     ASSERT_TRUE(out.contains("content"));
+}
+
+TEST(MCPStdioAsync, ConcurrentStdioCallsOverlapIO) {
+    // Demux-multiplexer proof: N tool calls on ONE stdio session, each
+    // an I/O-bound 100 ms server-side wait, fanned out concurrently.
+    // With the correlation-id demux the writes are pipelined and the
+    // reads overlap, so wall ≈ one delay; the pre-demux round-trip lock
+    // would serialise to ≈ N delays. The slow fixture handles each call
+    // on its own thread so the server itself is NOT the bottleneck.
+    if (!python3_available()) {
+        GTEST_SKIP() << "python3 not available";
+    }
+    std::filesystem::path here(__FILE__);
+    auto fixture = here.parent_path() / "fixtures" / "mcp_stdio_slow.py";
+    ASSERT_TRUE(std::filesystem::exists(fixture))
+        << "fixture missing: " << fixture;
+
+    constexpr int kN = 5;
+    constexpr int kDelayMs = 100;
+
+    asio::io_context io;
+    mcp::MCPClient client({python_cmd(), fixture.string()});
+
+    json init_params;
+    init_params["protocolVersion"] = "2025-03-26";
+    init_params["capabilities"] = json::object();
+    init_params["clientInfo"] = json::object();
+    init_params["clientInfo"]["name"] = "test";
+    init_params["clientInfo"]["version"] = "0";
+
+    // Pre-build each call's params OUTSIDE the coroutine (GCC 13 nested
+    // brace-init-in-coroutine ICE). Each carries a distinct marker so we
+    // can prove the demux routed each response to the RIGHT caller.
+    std::array<json, kN> call_params;
+    for (int i = 0; i < kN; ++i) {
+        json args;
+        args["delay_ms"] = kDelayMs;
+        args["marker"] = i;
+        json p;
+        p["name"] = "echo";
+        p["arguments"] = args;
+        call_params[i] = p;
+    }
+
+    std::array<json, kN> results;
+    std::atomic<int> done{0};
+    long wall_ms = 0;
+
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            co_await client.rpc_call_async("initialize", init_params);
+            auto t0 = std::chrono::steady_clock::now();
+            for (int i = 0; i < kN; ++i) {
+                asio::co_spawn(
+                    io,
+                    [&, i]() -> asio::awaitable<void> {
+                        results[i] = co_await client.rpc_call_async(
+                            "tools/call", call_params[i]);
+                        done.fetch_add(1, std::memory_order_relaxed);
+                    },
+                    asio::detached);
+            }
+            // Spin the same io_context cooperatively until all siblings
+            // report in, then stamp the wall time.
+            while (done.load(std::memory_order_relaxed) < kN) {
+                asio::steady_timer t(co_await asio::this_coro::executor);
+                t.expires_after(std::chrono::milliseconds(1));
+                co_await t.async_wait(asio::use_awaitable);
+            }
+            wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0).count();
+        },
+        asio::detached);
+    io.run();
+
+    ASSERT_EQ(done.load(), kN);
+
+    // Correctness: every response was routed to its own caller by id.
+    for (int i = 0; i < kN; ++i) {
+        ASSERT_TRUE(results[i].is_object()) << "call " << i << " no result";
+        ASSERT_TRUE(results[i].contains("content"));
+        const auto& content = results[i]["content"];
+        ASSERT_TRUE(content.is_array() && !content.empty());
+        auto text = content[0].value("text", std::string{});
+        auto echoed = json::parse(text);
+        EXPECT_EQ(echoed["args"].value("marker", -1), i)
+            << "demux mis-routed: call " << i << " got " << text;
+    }
+
+    // Overlap: serial would be ≈ kN*kDelayMs (500 ms); demux ≈ kDelayMs
+    // (100 ms). Assert well under the serial floor with generous slack.
+    EXPECT_LT(wall_ms, kN * kDelayMs * 3 / 5)
+        << "calls did not overlap: wall=" << wall_ms
+        << "ms, serial floor=" << (kN * kDelayMs) << "ms";
 }
