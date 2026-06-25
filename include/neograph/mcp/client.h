@@ -39,7 +39,7 @@ class StdioSession;
  * through the owning transport (HTTP or stdio). Created automatically
  * by MCPClient::get_tools().
  */
-class NEOGRAPH_API MCPTool : public Tool {
+class NEOGRAPH_API MCPTool : public AsyncTool {
   public:
     /// HTTP-mode constructor. Each execute() opens an ephemeral
     /// MCPClient against @p server_url.
@@ -63,7 +63,11 @@ class NEOGRAPH_API MCPTool : public Tool {
      * @param arguments JSON object containing the tool's input parameters.
      * @return Result string (text content joined by newlines) or JSON dump.
      */
-    std::string execute(const json& arguments) override;
+    /// Native async execution — overlaps with sibling tool calls when a
+    /// node dispatches several at once. stdio rides the session's
+    /// awaitable lock; HTTP runs an ephemeral handshake+call coroutine
+    /// (no run_sync, so no per-call io_context blocks a worker thread).
+    asio::awaitable<std::string> execute_async(const json& arguments) override;
 
     std::string get_name() const override { return name_; }
 
@@ -120,6 +124,11 @@ class NEOGRAPH_API MCPClient {
      */
     bool initialize(const std::string& client_name = "neograph");
 
+    /// Async variant of initialize() — runs the handshake + initialized
+    /// notification through rpc_call_async, so a coroutine can set up an
+    /// HTTP client without blocking a worker thread in run_sync.
+    asio::awaitable<bool> initialize_async(const std::string& client_name = "neograph");
+
     /**
      * @brief Discover tools from the MCP server.
      * @return Vector of Tool unique_ptrs (MCPTool instances).
@@ -133,6 +142,11 @@ class NEOGRAPH_API MCPClient {
      * @return JSON response from the server.
      */
     json call_tool(const std::string& name, const json& arguments);
+
+    /// Async variant of call_tool() — awaits the tools/call RPC without
+    /// blocking. Used by MCPTool::execute_async for concurrent dispatch.
+    asio::awaitable<json> call_tool_async(const std::string& name,
+                                          const json& arguments);
 
     /**
      * @brief Async variant of rpc_call for the HTTP transport.

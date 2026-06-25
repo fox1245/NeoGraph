@@ -52,6 +52,19 @@ class NEOGRAPH_API Tool {
      * @return Tool name string (must match the name in get_definition()).
      */
     virtual std::string get_name() const = 0;
+
+    /**
+     * @brief Canonical async entry point for tool execution.
+     *
+     * The default bridges to the sync execute() so every existing Tool
+     * keeps working unchanged. I/O-bound tools (HTTP fetch, MCP RPC)
+     * override this with a real coroutine so that a node dispatching
+     * several tool calls at once can overlap their in-flight I/O
+     * instead of running them one-by-one through the blocking
+     * execute() facade. ToolDispatchNode awaits all calls of one
+     * assistant turn through a parallel group on this method.
+     */
+    virtual asio::awaitable<std::string> execute_async(const json& arguments);
 };
 
 /**
@@ -87,12 +100,11 @@ class NEOGRAPH_API Tool {
  */
 class NEOGRAPH_API AsyncTool : public Tool {
   public:
-    /// Async work — override this. Default would infinitely recurse
-    /// against execute(), so an override is mandatory; left non-pure
-    /// only because Tool's contract requires execute() to be present
-    /// and providing both pure-virtual would force every Tool subclass
-    /// to acknowledge AsyncTool, which we don't want.
-    virtual asio::awaitable<std::string> execute_async(const json& arguments) = 0;
+    /// Async work — override this. Kept pure so AsyncTool subclasses
+    /// must supply a real coroutine: relying on Tool's default (which
+    /// bridges to execute()) would recurse here, since AsyncTool's
+    /// execute() drives execute_async() in turn.
+    asio::awaitable<std::string> execute_async(const json& arguments) override = 0;
 
     /// Sync facade — drives execute_async on a private io_context.
     /// Implemented out-of-line in src/core/tool.cpp so the run_sync

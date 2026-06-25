@@ -10,6 +10,14 @@
 
 namespace neograph {
 
+// Default async entry: bridge to the sync execute(). Tools whose work
+// is naturally blocking get a valid awaitable for free; the call runs
+// to completion before the first suspension, so `arguments` stays
+// valid. I/O-bound tools override execute_async() for real overlap.
+asio::awaitable<std::string> Tool::execute_async(const json& arguments) {
+    co_return execute(arguments);
+}
+
 std::string AsyncTool::execute(const json& arguments) {
     return neograph::async::run_sync(execute_async(arguments));
 }
