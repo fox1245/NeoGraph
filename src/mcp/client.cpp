@@ -810,18 +810,30 @@ ChatTool MCPTool::get_definition() const {
     return { name_, description_, input_schema_ };
 }
 
-std::string MCPTool::execute(const json& arguments) {
+asio::awaitable<std::string> MCPTool::execute_async(const json& arguments) {
     if (stdio_session_) {
-        json result = stdio_session_->rpc_call(
-            "tools/call",
-            json{{"name", name_}, {"arguments", arguments}});
-        return format_tool_result(result);
+        json params{{"name", name_}, {"arguments", arguments}};
+        json result = co_await stdio_session_->rpc_call_async("tools/call", params);
+        std::string text = format_tool_result(result);
+        co_return text;
     }
 
-    // HTTP path (legacy) — one ephemeral client per call.
-    MCPClient client(server_url_);
-    client.initialize();
-    return format_tool_result(client.call_tool(name_, arguments));
+    // HTTP — one ephemeral client per call, driven fully async. Unlike
+    // the old sync path (which spun a private io_context via run_sync
+    // per call and parked a worker thread), this awaits on the caller's
+    // executor, so several sibling tool calls dispatched from one node
+    // keep their HTTP round-trips in flight at the same time.
+    //
+    // Heap-allocate the client: MCPClient holds a std::mutex (non-move,
+    // non-copy), and keeping such an object directly in the coroutine
+    // frame across a co_await trips a GCC 13 codegen ICE
+    // (build_special_member_call). A unique_ptr in the frame sidesteps
+    // it — the object lives on the heap, the frame only owns a pointer.
+    auto client = std::make_unique<MCPClient>(server_url_);
+    co_await client->initialize_async();
+    json result = co_await client->call_tool_async(name_, arguments);
+    std::string text = format_tool_result(result);
+    co_return text;
 }
 
 // ===========================================================================
@@ -1127,6 +1139,68 @@ bool MCPClient::initialize(const std::string& client_name) {
     return true;
 }
 
+asio::awaitable<bool> MCPClient::initialize_async(const std::string& client_name) {
+    json params;
+    params["protocolVersion"] = "2025-11-25";
+    params["capabilities"]    = json::object();
+    params["clientInfo"]      = {{"name", client_name}, {"version", "0.1.0"}};
+
+    auto init_result = co_await rpc_call_async("initialize", params);
+    {
+        std::lock_guard lk(http_state_mu_);
+        if (init_result.contains("protocolVersion")
+            && init_result["protocolVersion"].is_string()) {
+            negotiated_protocol_version_ =
+                init_result["protocolVersion"].get<std::string>();
+        } else {
+            negotiated_protocol_version_ = "2025-11-25";
+        }
+    }
+
+    if (stdio_session_) {
+        stdio_session_->notify("notifications/initialized", json::object());
+        co_return true;
+    }
+
+    // HTTP initialized notification — same envelope/headers as the sync
+    // initialize(), but awaited directly instead of through run_sync.
+    json notify;
+    notify["jsonrpc"] = "2.0";
+    notify["method"]  = "notifications/initialized";
+    notify["params"]  = json::object();
+
+    auto endpoint = async::split_async_endpoint(server_url_);
+    std::vector<std::pair<std::string, std::string>> headers;
+    {
+        std::lock_guard lk(http_state_mu_);
+        headers = {
+            {"Content-Type", "application/json"},
+            {"Accept",       "application/json, text/event-stream"},
+            {"Host",         "localhost"},
+        };
+        if (!session_id_.empty()) {
+            headers.emplace_back("Mcp-Session-Id", session_id_);
+        }
+        if (!negotiated_protocol_version_.empty()) {
+            headers.emplace_back("MCP-Protocol-Version",
+                                 negotiated_protocol_version_);
+        }
+    }
+
+    auto notify_body = notify.dump();
+    auto ex  = co_await asio::this_coro::executor;
+    auto res = co_await async::async_post(
+        ex, endpoint.host, endpoint.port, endpoint.prefix + "/mcp",
+        notify_body, headers, endpoint.tls);
+
+    if (res.status != 200 && res.status != 202 && res.status != 204) {
+        throw std::runtime_error(
+            "MCP initialize notification returned HTTP "
+            + std::to_string(res.status) + ": " + res.body);
+    }
+    co_return true;
+}
+
 std::vector<std::unique_ptr<Tool>> MCPClient::get_tools() {
     initialize();
 
@@ -1157,6 +1231,14 @@ json MCPClient::call_tool(const std::string& name, const json& arguments) {
     params["name"]      = name;
     params["arguments"] = arguments;
     return rpc_call("tools/call", params);
+}
+
+asio::awaitable<json>
+MCPClient::call_tool_async(const std::string& name, const json& arguments) {
+    json params;
+    params["name"]      = name;
+    params["arguments"] = arguments;
+    co_return co_await rpc_call_async("tools/call", params);
 }
 
 } // namespace neograph::mcp

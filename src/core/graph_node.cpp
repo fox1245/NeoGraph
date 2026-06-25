@@ -1,8 +1,14 @@
 #include <neograph/graph/node.h>
 #include <neograph/graph/engine.h>   // RunContext (forward-declared in node.h)
 #include <neograph/async/run_sync.h>
+#include <asio/co_spawn.hpp>
+#include <asio/deferred.hpp>
+#include <asio/experimental/parallel_group.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
 #include <algorithm>
 #include <stdexcept>
+#include <vector>
 
 namespace neograph::graph {
 
@@ -118,32 +124,87 @@ asio::awaitable<NodeOutput> ToolDispatchNode::run(NodeInput in) {
     }
     if (!assistant_msg) co_return NodeOutput{};
 
-    // Execute each tool call (mirrors agent.cpp:80-104)
-    json results = json::array();
+    const auto& calls = assistant_msg->tool_calls;
 
-    for (const auto& tc : assistant_msg->tool_calls) {
-        auto it = std::find_if(tools_.begin(), tools_.end(),
-            [&](Tool* t) { return t->get_name() == tc.name; });
-
+    // One worker coroutine per tool call. Each resolves the matching
+    // tool and awaits its execute_async; errors (tool-not-found, parse
+    // failure, tool exception) are captured into the result message so
+    // a worker never throws. The workers are launched together so their
+    // I/O-bound work overlaps — e.g. several MCP round-trips stay in
+    // flight at once instead of running one-by-one through the blocking
+    // execute() facade. Results are applied in call order, independent
+    // of which worker finished first.
+    auto worker = [this](ToolCall tc) -> asio::awaitable<ChatMessage> {
         ChatMessage tool_msg;
         tool_msg.role         = "tool";
         tool_msg.tool_call_id = tc.id;
         tool_msg.tool_name    = tc.name;
 
+        auto it = std::find_if(tools_.begin(), tools_.end(),
+            [&](Tool* t) { return t->get_name() == tc.name; });
         if (it == tools_.end()) {
             tool_msg.content = R"({"error": "Tool not found: )" + tc.name + "\"}";
-        } else {
-            try {
-                auto args = json::parse(tc.arguments);
-                tool_msg.content = (*it)->execute(args);
-            } catch (const std::exception& e) {
-                tool_msg.content = std::string(R"({"error": ")") + e.what() + "\"}";
-            }
+            co_return tool_msg;
         }
+        try {
+            auto args = json::parse(tc.arguments);
+            tool_msg.content = co_await (*it)->execute_async(args);
+        } catch (const std::exception& e) {
+            tool_msg.content = std::string(R"({"error": ")") + e.what() + "\"}";
+        }
+        co_return tool_msg;
+    };
 
-        json msg_json;
-        to_json(msg_json, tool_msg);
-        results.push_back(msg_json);
+    json results = json::array();
+
+    // Single call: run inline, skip the parallel-group machinery.
+    if (calls.size() == 1) {
+        ChatMessage m = co_await worker(calls.front());
+        json mj;
+        to_json(mj, m);
+        results.push_back(mj);
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"messages", results});
+        co_return out;
+    }
+
+    // Multiple calls: fan them out via the same parallel-group idiom the
+    // engine uses for independent nodes within a super-step.
+    auto ex = co_await asio::this_coro::executor;
+    using DeferredOp = decltype(asio::co_spawn(
+        ex, worker(std::declval<ToolCall>()), asio::deferred));
+    std::vector<DeferredOp> ops;
+    ops.reserve(calls.size());
+    for (const auto& tc : calls) {
+        ops.push_back(asio::co_spawn(ex, worker(tc), asio::deferred));
+    }
+
+    auto [order, excs, values] = co_await asio::experimental::make_parallel_group(
+        std::move(ops))
+        .async_wait(asio::experimental::wait_for_all(), asio::use_awaitable);
+    (void)order;  // results are applied in call order, not completion order
+
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        ChatMessage m;
+        if (excs[i]) {
+            // Workers catch their own exceptions, so this is a defensive
+            // fallback (e.g. bad_alloc) keyed to the originating call.
+            m.role         = "tool";
+            m.tool_call_id = calls[i].id;
+            m.tool_name    = calls[i].name;
+            try {
+                std::rethrow_exception(excs[i]);
+            } catch (const std::exception& e) {
+                m.content = std::string(R"({"error": ")") + e.what() + "\"}";
+            } catch (...) {
+                m.content = R"({"error": "unknown tool failure"})";
+            }
+        } else {
+            m = std::move(values[i]);
+        }
+        json mj;
+        to_json(mj, m);
+        results.push_back(mj);
     }
 
     NodeOutput out;
