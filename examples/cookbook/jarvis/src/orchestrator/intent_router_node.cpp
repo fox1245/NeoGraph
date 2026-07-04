@@ -148,14 +148,19 @@ std::string IntentRouterNode::compose_system_prompt() const
 
 neograph::json IntentRouterNode::safe_parse_or_fallback(const std::string& raw) const
 {
-    // 안전 폴백 JSON — 그래프가 직접 실행으로 흘러서 빈 합성 단계로 이어짐
+    // 안전 폴백 JSON — 그래프가 직접 실행으로 흘러서 빈 합성 단계로 이어짐.
+    // _parser_fallback 은 내부 마커: salvage/anti-parrot 분기가 이 필드로
+    // 파서 폴백을 판별한다. (예전엔 reasoning_short 에 "fallback" 문자열이
+    // 있는지로 판별했는데, LLM 이 자기 reasoning 에 "fallback to direct"
+    // 같은 말을 쓰면 오발동하는 구멍이 있었음.)
     auto fallback = []() -> neograph::json {
         return {
             {"mode",             "direct"},
             {"tool_calls",       neograph::json::array()},
             {"delegate_to",      nullptr},
             {"skip_synthesis",   true},
-            {"reasoning_short",  "router parse failed, fallback"}
+            {"reasoning_short",  "router parse failed, fallback"},
+            {"_parser_fallback", true}
         };
     };
 
@@ -347,7 +352,7 @@ IntentRouterNode::run(neograph::graph::NodeInput in)
     if (decision.value("skip_synthesis", false) &&
         decision.value("mode", "") == "direct" &&
         (!decision.contains("tool_calls") || decision["tool_calls"].empty()) &&
-        decision.value("reasoning_short", "").find("fallback") == std::string::npos) {
+        !decision.value("_parser_fallback", false)) {
         decision["skip_synthesis"] = false;
         std::cerr << "[router] skip_synthesis 강제 해제 — 도구 0개 direct 는 "
                      "합성 경로 필수\n";
@@ -362,9 +367,7 @@ IntentRouterNode::run(neograph::graph::NodeInput in)
     //   (mode 필드 없음 → 안전 폴백) raw 응답에서 의미 있는 텍스트를 뽑아
     //   tool_results 채널에 직접 push. synth_skip(passthrough) 가 그 텍스트를
     //   final_text 로 가져가서 TTS 가 정상적으로 읽도록.
-    if (decision.contains("reasoning_short") &&
-        decision["reasoning_short"].is_string() &&
-        decision["reasoning_short"].get<std::string>().find("fallback") != std::string::npos)
+    if (decision.value("_parser_fallback", false))
     {
         std::string salvage;
         try {
