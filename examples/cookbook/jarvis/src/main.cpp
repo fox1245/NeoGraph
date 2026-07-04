@@ -23,6 +23,7 @@
 #include "orchestrator/agent_dispatcher.h"
 #include "orchestrator/intent_router_node.h"
 #include "memory/conversation_store.h"
+#include "memory/json_file_store.h"
 
 #include <asio/co_spawn.hpp>
 #include <asio/deferred.hpp>
@@ -729,13 +730,19 @@ int main(int argc, char** argv) {
         auto engine =
             std::shared_ptr<neograph::graph::GraphEngine>(engine_uptr.release());
 
-        // ── 5.5) In-memory Store 생성 + 엔진에 주입 ─────────────────────────
+        // ── 5.5) 파일 영속 Store 생성 + 엔진에 주입 ─────────────────────────
         // MemoryLookupNode / MemoryCommitNode 가 ctx.store 를 통해 대화 기록을
-        // 읽고 쓸 수 있게 된다. mock 시연이라 영구 저장 불필요 — 프로세스 내
-        // 메모리만 사용 (InMemoryStore).
-        auto jarvis_store = std::make_shared<neograph::graph::InMemoryStore>();
+        // 읽고 쓴다. JsonFileStore 라 프로세스를 재시작해도 기억이 유지됨
+        // ("아까 뭐 물어봤지?" 가 재시작 후에도 동작). 경로는 cwd 상대 —
+        // run_jarvis.sh 가 cookbook 디렉토리로 이동 후 실행하므로 그 안에 생김.
+        const char* mem_path_env = std::getenv("JARVIS_MEMORY_FILE");
+        const std::string mem_path =
+            (mem_path_env && mem_path_env[0]) ? mem_path_env
+                                              : "jarvis_memory.json";
+        auto jarvis_store =
+            std::make_shared<jarvis::memory::JsonFileStore>(mem_path);
         engine->set_store(jarvis_store);
-        std::cerr << "[jarvis] In-memory Store 주입 완료\n";
+        std::cerr << "[jarvis] 파일 영속 Store 주입 완료 (" << mem_path << ")\n";
 
         // ── 6) 자비스 A2A self-server 기동 ──────────────────────────────────
         auto self_server = dispatcher.start_self_server(engine);

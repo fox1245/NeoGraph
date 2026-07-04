@@ -17,3 +17,7 @@ assets/silero_vad.onnx
 
 # 빌드 산출물 (혹시 cookbook 안에 빌드한 경우)
 build/
+
+# 자비스 대화 기억 (파일 영속 Store)
+jarvis_memory.json
+jarvis_memory.json.tmp
