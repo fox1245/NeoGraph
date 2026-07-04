@@ -17,6 +17,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <thread>
 
@@ -76,6 +77,8 @@ bool play_pcm_blocking(const std::vector<float>& pcm, int sample_rate) {
         std::cerr << "[jarvis:audio] 재생 디바이스 초기화 실패 — 파일 저장만 유지\n";
         return false;
     }
+
+    const auto start = std::chrono::steady_clock::now();
     if (ma_device_start(&dev) != MA_SUCCESS) {
         std::cerr << "[jarvis:audio] 재생 시작 실패 — 파일 저장만 유지\n";
         ma_device_uninit(&dev);
@@ -85,8 +88,18 @@ bool play_pcm_blocking(const std::vector<float>& pcm, int sample_rate) {
     while (!st.done.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
-    // 마지막 콜백이 채운 디바이스 내부 버퍼가 실제 스피커까지 나가도록 drain
-    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+
+    // done 은 마지막 프레임이 '콜백 버퍼에 복사'된 시점일 뿐 스피커 출력
+    // 완료가 아니다. 짧은 발화는 전체가 첫 콜백들에 다 들어가서 done 이
+    // 즉시 서므로, 여기서 바로 uninit 하면 디바이스/서버(PulseAudio) 내부
+    // 버퍼에 남은 소리가 잘린다. 전체 재생 시간 + 마진까지 벽시계로 대기.
+    const auto expected = std::chrono::milliseconds(
+        static_cast<std::int64_t>(1000.0 * static_cast<double>(pcm.size())
+                                  / sample_rate) + 350);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    if (elapsed < expected) {
+        std::this_thread::sleep_for(expected - elapsed);
+    }
 
     ma_device_uninit(&dev);
     return true;

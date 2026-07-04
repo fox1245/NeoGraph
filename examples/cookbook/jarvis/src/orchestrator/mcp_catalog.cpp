@@ -248,6 +248,20 @@ neograph::Tool* McpCatalog::find_tool(const std::string& fully_qualified_name) c
 }
 
 // ---------------------------------------------------------------------------
+// allows_skip_synthesis() — 도구가 속한 엔트리의 skip_synthesis_hint 조회
+// ---------------------------------------------------------------------------
+bool McpCatalog::allows_skip_synthesis(const std::string& fully_qualified_name) const {
+    const auto dot_pos = fully_qualified_name.find('.');
+    if (dot_pos == std::string::npos) return true;  // 형식 불명 — LLM 결정 존중
+
+    const std::string catalog_name = fully_qualified_name.substr(0, dot_pos);
+    for (const auto& entry : entries_) {
+        if (entry.name == catalog_name) return entry.skip_synthesis_hint;
+    }
+    return true;  // 미등록 엔트리 — LLM 결정 존중
+}
+
+// ---------------------------------------------------------------------------
 // routing_hints_text() — 저장된 routing hints 문자열 그대로 반환
 // ---------------------------------------------------------------------------
 std::string McpCatalog::routing_hints_text() const {

@@ -242,9 +242,40 @@ IntentRouterNode::run(neograph::graph::NodeInput in)
         return fallback;
     };
 
-    const std::string user_text      = json_to_str(state.get("user_text"),      "");
-    const std::string user_lang      = json_to_str(state.get("user_lang"),      "en");
-    const std::string memory_context = json_to_str(state.get("memory_context"), "");
+    const std::string user_text = json_to_str(state.get("user_text"), "");
+    const std::string user_lang = json_to_str(state.get("user_lang"), "en");
+
+    // memory_context 는 MemoryLookupNode 가 객체({recent_turns, prefs,
+    // last_topic})로 쓴다 — 문자열만 받으면 항상 "" 가 되어 라우터가
+    // 이전 대화를 전혀 못 보는 버그가 있었음. 객체면 dump 로 직렬화.
+    std::string memory_context;
+    {
+        const auto& mc = state.get("memory_context");
+        if (mc.is_string())     memory_context = mc.get<std::string>();
+        else if (!mc.is_null()) memory_context = mc.dump();
+    }
+
+    // ①.5 빈 턴 가드 — EOF 직전 셧다운 사이클이나 빈 입력은 LLM 호출 없이
+    //     no-op 라우팅으로 종료. 이게 없으면 종료할 때마다 유령 턴이
+    //     라우터+합성+TTS 한 바퀴를 돌며 "your message was empty" 를 말한다.
+    //     (tool_dispatch 가 빈 user_text 를 echo → final_text "" → TTS 는
+    //      빈 텍스트를 건너뛰므로 이 경로는 완전히 무음이다.)
+    {
+        const auto& sd = state.get("__shutdown__");
+        const bool shutting_down = sd.is_boolean() && sd.get<bool>();
+        if (shutting_down || user_text.empty()) {
+            neograph::json noop = {
+                {"mode",            "direct"},
+                {"tool_calls",      neograph::json::array()},
+                {"delegate_to",     nullptr},
+                {"skip_synthesis",  true},
+                {"reasoning_short", "empty turn — no-op"}
+            };
+            neograph::graph::NodeOutput out;
+            out.writes.push_back({output_channel_, noop});
+            co_return out;
+        }
+    }
 
     // ② 시스템 프롬프트 합성 (파일 I/O + 도구 목록 렌더링)
     // 헤더에 캐시 멤버가 없으므로 매 호출마다 생성.
@@ -290,6 +321,37 @@ IntentRouterNode::run(neograph::graph::NodeInput in)
     std::cerr << "[router][debug] raw="
               << raw_content.substr(0, 240) << "\n";
     neograph::json decision = safe_parse_or_fallback(raw_content);
+
+    // skip_synthesis 강제 규칙 — 카탈로그가 skip_synthesis_hint=false 로
+    // 선언한 도구는 LLM 결정과 무관하게 합성을 거친다. raw 도구 출력
+    // (ISO 날짜/숫자 나열)이 그대로 TTS 로 가면 비발화 문자열이 읽히는
+    // 문제 방지. 힌트는 프롬프트에도 들어가지만 LLM 이 무시할 수 있어
+    // 여기서 결정론적으로 덮어쓴다.
+    if (decision.value("skip_synthesis", false) &&
+        decision.contains("tool_calls") && decision["tool_calls"].is_array()) {
+        for (const auto& call : decision["tool_calls"]) {
+            const std::string t = call.value("tool", "");
+            if (!t.empty() && !catalog_.allows_skip_synthesis(t)) {
+                decision["skip_synthesis"] = false;
+                std::cerr << "[router] skip_synthesis 강제 해제 — '" << t
+                          << "' 은 카탈로그 hint=false\n";
+                break;
+            }
+        }
+    }
+
+    // 앵무새 방지 — mode=direct 인데 도구 0개면 합성만이 답을 만들 수 있다.
+    // 이때 skip_synthesis=true 로 두면 tool_dispatch 의 user_text echo 폴백이
+    // 발화되어 자비스가 사용자 말을 그대로 따라 하게 된다. 파서 fallback 은
+    // 예외 — salvage 가 채운 텍스트를 그대로 읽는 것이 의도된 동작.
+    if (decision.value("skip_synthesis", false) &&
+        decision.value("mode", "") == "direct" &&
+        (!decision.contains("tool_calls") || decision["tool_calls"].empty()) &&
+        decision.value("reasoning_short", "").find("fallback") == std::string::npos) {
+        decision["skip_synthesis"] = false;
+        std::cerr << "[router] skip_synthesis 강제 해제 — 도구 0개 direct 는 "
+                     "합성 경로 필수\n";
+    }
     std::cerr << "[router][debug] parsed=" << decision.dump() << "\n";
 
     // ⑦ NodeOutput 에 결과 쓰기

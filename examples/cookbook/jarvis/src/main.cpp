@@ -548,14 +548,32 @@ void register_custom_node_types(
                     auto tr = in.state.get("tool_results");
                     if (tr.is_array() && !tr.empty()) tool_summary = tr.dump();
 
+                    // 이전 대화 기억 — memory_lookup 이 객체로 채운
+                    // memory_context.recent_turns 를 프롬프트에 포함.
+                    // 이게 없으면 "아까 내가 뭐 물어봤지?" 에 답할 수 없다.
+                    std::string memory_ctx;
+                    auto mc = in.state.get("memory_context");
+                    if (mc.is_object() && mc.contains("recent_turns") &&
+                        mc["recent_turns"].is_array() &&
+                        !mc["recent_turns"].empty()) {
+                        memory_ctx = mc["recent_turns"].dump();
+                    }
+
                     std::string sys =
                         "You are JARVIS — Tony Stark's terse, witty AI butler. "
                         "Reply in the user's language code (" + user_lang + "). "
-                        "One or two sentences max. No markdown, no JSON, plain speech. "
-                        "If a tool result is provided, lead with the key fact from it.";
+                        "One or two sentences max. No markdown, no JSON, plain speech "
+                        "suitable for text-to-speech: spell numbers, dates and times "
+                        "naturally in the user's language. "
+                        "If a tool result is provided, lead with the key fact from it. "
+                        "Use the recent conversation turns to resolve references "
+                        "like 'that' or 'earlier'.";
                     std::string usr = "User said: " + user_text + "\n";
                     if (!tool_summary.empty()) usr += "Tool result (JSON): " + tool_summary + "\n";
                     if (!delegated.empty())    usr += "Specialist replied: " + delegated + "\n";
+                    if (!memory_ctx.empty())
+                        usr += "Recent conversation turns (JSON, oldest first): "
+                               + memory_ctx + "\n";
 
                     neograph::CompletionParams p;
                     p.model       = cfg_.value("model", std::string("gpt-4o"));
