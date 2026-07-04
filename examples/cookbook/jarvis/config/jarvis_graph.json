@@ -123,11 +123,12 @@
 
     "tts": {
       "type": "supertonic_tts",
-      "_comment": "final_text + user_lang → 44.1kHz wav → 스피커.",
+      "_comment": "final_text + user_lang → 44.1kHz wav 저장 + 기본 재생 디바이스 출력. play_audio=false 또는 env JARVIS_NO_PLAYBACK=1 로 재생만 끌 수 있음.",
       "onnx_dir": "assets/onnx",
       "voice_style": "assets/voices/M1.json",
       "total_steps": 8,
-      "speed": 1.05
+      "speed": 1.05,
+      "play_audio": true
     }
   },
 

@@ -127,6 +127,8 @@ set(_jarvis_sources
     src/main.cpp
     src/audio/mic_input.cpp
     src/audio/tts_output.cpp
+    src/audio/audio_playback.cpp
+    src/audio/miniaudio_impl.cpp
     src/stt/whisper_node.cpp
     src/orchestrator/mcp_catalog.cpp
     src/orchestrator/agent_dispatcher.cpp

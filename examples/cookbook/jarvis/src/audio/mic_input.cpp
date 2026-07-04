@@ -23,9 +23,8 @@
 #ifdef JARVIS_HAVE_MINIAUDIO
 #  include <vector>
 #  include <stdexcept>
-// miniaudio — 장치 입출력 비활성화, 디코더(파일 읽기)만 사용
-#  define MINIAUDIO_IMPLEMENTATION
-#  define MA_NO_DEVICE_IO
+// miniaudio 구현은 miniaudio_impl.cpp 단일 TU 에 있음 (디바이스 I/O 포함
+// — TTS 재생이 사용). 여기서는 디코더 API 선언만 필요.
 #  include "miniaudio.h"
 #endif
 
