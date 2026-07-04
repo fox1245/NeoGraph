@@ -24,13 +24,22 @@
 #include "orchestrator/intent_router_node.h"
 #include "memory/conversation_store.h"
 
+#include <asio/co_spawn.hpp>
+#include <asio/deferred.hpp>
+#include <asio/experimental/parallel_group.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
+
+#include <algorithm>
 #include <atomic>
 #include <csignal>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <vector>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 전역 종료 플래그 — SIGINT / SIGTERM 핸들러가 세팅
@@ -227,7 +236,8 @@ void register_custom_node_types(
 
                     neograph::json result;
                     try {
-                        result = tool->execute(args);
+                        std::string raw = co_await tool->execute_async(args);
+                        result = raw;
                     } catch (const std::exception& e) {
                         result = neograph::json{{"error", std::string(e.what())}};
                     }
@@ -251,7 +261,8 @@ void register_custom_node_types(
         });
 
     // ── 8) MCP 도구 병렬 팬아웃 (parallel 경로) ─────────────────────────────
-    // mock 구현은 순차 실행으로도 충분 — 실제 구현에서 make_parallel_group 사용
+    // execute_async + make_parallel_group — 코어 ToolDispatchNode 와 같은 관용구.
+    // N개 호출의 I/O 가 겹쳐서 wall ≈ max(latency). max_concurrent 윈도우 단위.
     factory.register_type("parallel_tool_fanout",
         [&catalog](const std::string& name, const neograph::json& cfg, const NodeContext&)
         {
@@ -273,27 +284,91 @@ void register_custom_node_types(
                         co_return out;
                     }
 
-                    neograph::json results = neograph::json::array();
+                    // 호출 목록 스냅샷 — 워커 코루틴이 state 참조와 무관하게 소유
+                    // (neograph::json iterator 는 std iterator traits 미충족 —
+                    //  range 생성자 대신 인덱스 복사)
+                    std::vector<neograph::json> calls;
+                    calls.reserve(rd["tool_calls"].size());
+                    for (const auto& c : rd["tool_calls"]) calls.push_back(c);
 
-                    // TODO(실제 구현): asio::make_parallel_group 으로 동시 실행
-                    for (const auto& call : rd["tool_calls"]) {
+                    // 워커: 도구 해석 + execute_async 한 건. 예외는 결과 JSON 으로
+                    // 흡수 — 워커는 절대 던지지 않는다.
+                    auto worker = [this](neograph::json call)
+                        -> asio::awaitable<neograph::json> {
                         std::string tool_name = call.value("tool", "");
                         neograph::json args   = call.value("args", neograph::json::object());
 
-                        neograph::Tool* tool = catalog_.find_tool(tool_name);
                         neograph::json result;
+                        neograph::Tool* tool = catalog_.find_tool(tool_name);
                         if (!tool) {
                             result = neograph::json{{"error", "tool not found: " + tool_name}};
                         } else {
                             try {
-                                result = tool->execute(args);
+                                std::string raw = co_await tool->execute_async(args);
+                                result = raw;
                             } catch (const std::exception& e) {
                                 result = neograph::json{{"error", std::string(e.what())}};
                             }
                         }
-                        results.push_back(neograph::json{
+                        // GCC13 코루틴 ICE 회피 — co_return 값은 named local 로
+                        neograph::json entry = neograph::json{
                             {"tool",   tool_name},
-                            {"result", result}});
+                            {"result", result}};
+                        co_return entry;
+                    };
+
+                    neograph::json results = neograph::json::array();
+
+                    if (calls.size() == 1) {
+                        // 단건은 병렬 기계 없이 인라인
+                        neograph::json one = co_await worker(calls[0]);
+                        results.push_back(std::move(one));
+                    } else if (!calls.empty()) {
+                        const std::size_t max_conc = static_cast<std::size_t>(
+                            std::max(1, cfg_.value("max_concurrent", 4)));
+                        auto ex = co_await asio::this_coro::executor;
+
+                        for (std::size_t base = 0; base < calls.size(); base += max_conc) {
+                            const std::size_t end =
+                                std::min(base + max_conc, calls.size());
+
+                            using DeferredOp = decltype(asio::co_spawn(
+                                ex, worker(std::declval<neograph::json>()),
+                                asio::deferred));
+                            std::vector<DeferredOp> ops;
+                            ops.reserve(end - base);
+                            for (std::size_t i = base; i < end; ++i) {
+                                ops.push_back(asio::co_spawn(
+                                    ex, worker(calls[i]), asio::deferred));
+                            }
+
+                            auto [order, excs, values] =
+                                co_await asio::experimental::make_parallel_group(
+                                    std::move(ops))
+                                    .async_wait(asio::experimental::wait_for_all(),
+                                                asio::use_awaitable);
+                            (void)order;  // 결과는 완료 순서가 아닌 호출 순서로 적용
+
+                            for (std::size_t i = 0; i < values.size(); ++i) {
+                                if (excs[i]) {
+                                    // 워커가 자체 예외를 흡수하므로 방어적 폴백
+                                    // (bad_alloc 등) — 원 호출에 키잉해 오류 기록
+                                    std::string err;
+                                    try {
+                                        std::rethrow_exception(excs[i]);
+                                    } catch (const std::exception& e) {
+                                        err = e.what();
+                                    } catch (...) {
+                                        err = "unknown tool failure";
+                                    }
+                                    results.push_back(neograph::json{
+                                        {"tool", calls[base + i].value("tool", "")},
+                                        {"result", neograph::json{{"error", err}}}});
+                                } else {
+                                    results.push_back(std::move(values[i]));
+                                }
+                            }
+                        }
                     }
 
                     out.writes.push_back({"tool_results", results});
@@ -349,9 +424,18 @@ void register_custom_node_types(
 
                     std::string reply;
                     try {
-                        // TODO(실제 구현): co_await 비동기 A2A 호출로 교체
-                        neograph::a2a::Task task =
-                            entry->client->send_message_sync(user_text);
+                        // 비동기 A2A 호출 — 이벤트 루프를 막지 않아 백그라운드
+                        // 트리거/self-server 요청이 위임 대기 중에도 처리된다.
+                        neograph::a2a::MessageSendParams params;
+                        static std::atomic<std::uint64_t> msg_seq{0};
+                        params.message.message_id =
+                            "jarvis-delegate-" + std::to_string(++msg_seq);
+                        params.message.role = neograph::a2a::Role::User;
+                        params.message.parts.push_back(
+                            neograph::a2a::Part::text_part(user_text));
+
+                        neograph::a2a::Task task = co_await
+                            entry->client->send_message_async(params);
 
                         // Task 에서 텍스트 응답 꺼내기
                         // 우선순위: status.message.parts[0].text
