@@ -573,7 +573,10 @@ void register_custom_node_types(
                     if (!tool_summary.empty()) usr += "Tool result (JSON): " + tool_summary + "\n";
                     if (!delegated.empty())    usr += "Specialist replied: " + delegated + "\n";
                     if (!memory_ctx.empty())
-                        usr += "Recent conversation turns (JSON, oldest first): "
+                        usr += "Recent conversation turns (JSON, oldest first; "
+                               "'user_text' = what the user said, "
+                               "'final_text' = what YOU (JARVIS) replied — "
+                               "attribute each side correctly): "
                                + memory_ctx + "\n";
 
                     neograph::CompletionParams p;
