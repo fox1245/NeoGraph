@@ -19,6 +19,7 @@
 #include "audio/mic_input.h"
 #include "audio/tts_output.h"
 #include "stt/whisper_node.h"
+#include "stt/moonshine_node.h"
 #include "orchestrator/mcp_catalog.h"
 #include "orchestrator/agent_dispatcher.h"
 #include "orchestrator/intent_router_node.h"
@@ -196,6 +197,12 @@ void register_custom_node_types(
         });
 
     // ── 2) STT (mock: mock_text 패스스루 + 언어 감지) ────────────────────────
+    // Moonshine STT (ONNX, 엣지/저지연 — whisper_stt 대체 옵션)
+    factory.register_type("moonshine_stt",
+        [](const std::string& name, const neograph::json& cfg, const NodeContext&) {
+            return std::make_unique<jarvis::stt::MoonshineSttNode>(name, cfg);
+        });
+
     factory.register_type("whisper_stt",
         [](const std::string& name, const neograph::json& cfg, const NodeContext&) {
             return std::make_unique<jarvis::stt::WhisperSttNode>(name, cfg);

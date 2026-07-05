@@ -130,6 +130,7 @@ set(_jarvis_sources
     src/audio/audio_playback.cpp
     src/audio/miniaudio_impl.cpp
     src/stt/whisper_node.cpp
+    src/stt/moonshine_node.cpp
     src/orchestrator/mcp_catalog.cpp
     src/orchestrator/agent_dispatcher.cpp
     src/orchestrator/intent_router_node.cpp

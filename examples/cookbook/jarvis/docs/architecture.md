@@ -32,11 +32,19 @@ T0→T8 가 자비스의 체감 응답 속도. 목표 분포:
 - `vad_threshold` 넘는 청크가 들어오면 녹음 시작, 200ms 연속 미만이면 종료
 - 최대 `max_utterance_seconds` 초 넘으면 강제 종료 (라우터가 너무 긴 입력으로 비대해지는 거 방지)
 
-### stt (`whisper_stt`)
+### stt (`whisper_stt` 또는 `moonshine_stt`)
 - whisper.cpp 모델 1개를 노드 수명 동안 재사용 (재로딩 비용 ×)
 - `language="auto"` 면 첫 30초 (또는 발화 전체) 로 자동 감지
 - 결과: `user_text` (한 문자열), `user_lang` (ISO 코드)
 - 인식 신뢰도가 너무 낮으면 빈 문자열 — 라우터 단계에서 턴 스킵
+
+**대체 옵션 `moonshine_stt`** (Moonshine-tiny ONNX): 27M 초경량, raw 16kHz
+파형 입력(mel 아님), seq2seq(encoder + 2-모델 분리 decoder + KV캐시). supertonic
+TTS 와 같은 ONNX Runtime 재사용. 언어별 flavor 모델이라 `user_lang` 은 config
+고정(tiny-ko = "ko"). 토크나이저는 SentencePiece BPE 를 tokenizer.json 에서 직접
+디코드(▁→space + ByteFallback + Fuse). config 의 stt.type 을 바꾸면 스왑되고,
+파이썬 optimum 레퍼런스와 55토큰 글자단위 패리티 검증됨. int8(~28MB)은 풀 ORT
+빌드 필요(번들 축소빌드는 ConvInteger 미포함) → 기본 fp32(~183MB).
 
 ### text_or_voice (`channel_merge`)
 - voice_in 경로(STT 통과)와 text_in 경로(외부 A2A) 중 살아있는 쪽 선택

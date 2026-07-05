@@ -10,6 +10,7 @@ assets/voices
 assets/supertonic-3/
 assets/whisper-small.bin
 assets/silero_vad.onnx
+assets/moonshine-tiny-ko/
 
 # 시연 결과물
 *.wav

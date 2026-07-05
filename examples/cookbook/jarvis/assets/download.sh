@@ -69,6 +69,30 @@ else
     echo "[jarvis] silero VAD already present — skipping."
 fi
 
+# ---------- 4. Moonshine-tiny-ko STT (ONNX, whisper 대체 옵션) ----------
+# 엣지/저지연 STT. fp32 를 받는다 — jarvis 번들 ONNX Runtime(축소 빌드)이
+# int8 의 ConvInteger/MatMulInteger 커널을 미포함하므로. 풀 ORT 빌드면
+# onnx/*_int8.onnx (~28MB) 로 교체 가능(config 의 encoder/decoder 키).
+MOONSHINE_DIR="moonshine-tiny-ko"
+if [[ ! -f "${MOONSHINE_DIR}/onnx/encoder_model.onnx" ]]; then
+    echo "[jarvis] downloading Moonshine-tiny-ko STT (~183MB fp32)..."
+    if command -v hf >/dev/null 2>&1; then
+        hf download onnx-community/moonshine-tiny-ko-ONNX \
+            --include "onnx/encoder_model.onnx" "onnx/decoder_model.onnx" \
+                      "onnx/decoder_with_past_model.onnx" "tokenizer.json" "config.json" \
+            --local-dir "${MOONSHINE_DIR}"
+    else
+        MS_BASE="https://huggingface.co/onnx-community/moonshine-tiny-ko-ONNX/resolve/main"
+        mkdir -p "${MOONSHINE_DIR}/onnx"
+        for f in onnx/encoder_model.onnx onnx/decoder_model.onnx \
+                 onnx/decoder_with_past_model.onnx tokenizer.json config.json; do
+            curl -L -o "${MOONSHINE_DIR}/${f}" "${MS_BASE}/${f}"
+        done
+    fi
+else
+    echo "[jarvis] Moonshine-tiny-ko already present — skipping."
+fi
+
 echo
 echo "[jarvis] assets ready:"
 ls -lh onnx voices ${WHISPER_MODEL} ${SILERO_MODEL} 2>/dev/null || true
