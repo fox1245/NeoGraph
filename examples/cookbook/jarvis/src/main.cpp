@@ -33,6 +33,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <fstream>
@@ -112,6 +113,39 @@ public:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// load_prompt_section() — persona.txt 의 ===<section>=== 섹션 추출.
+// IntentRouterNode::compose_system_prompt 와 동일 규칙. 파일이 없으면 빈 문자열.
+// ─────────────────────────────────────────────────────────────────────────────
+
+std::string load_prompt_section(const std::string& path,
+                                const std::string& section)
+{
+    std::ifstream file(path);
+    if (!file.is_open()) return "";
+
+    const std::string target_header = "===" + section + "===";
+    std::string line;
+    bool in_section = false;
+    std::ostringstream buf;
+
+    while (std::getline(file, line)) {
+        bool is_section_header = (line.size() >= 6 &&
+                                  line.front() == '=' &&
+                                  line.back()  == '=');
+        if (is_section_header) {
+            if (in_section) break;
+            if (line == target_header) in_section = true;
+            continue;
+        }
+        if (in_section) buf << line << '\n';
+    }
+
+    std::string text = buf.str();
+    while (!text.empty() && text.back() == '\n') text.pop_back();
+    return text;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // register_custom_node_types() — 자비스 전용 노드 타입을 NodeFactory 에 등록.
 //
 // NeoGraph 내장 타입("llm_call", "intent_classifier" 등) 은 이미 등록되어 있음.
@@ -122,7 +156,8 @@ public:
 void register_custom_node_types(
     const jarvis::orchestrator::McpCatalog&       catalog,
     const jarvis::orchestrator::AgentDispatcher&  dispatcher,
-    std::shared_ptr<neograph::Provider>           router_provider)
+    std::shared_ptr<neograph::Provider>           router_provider,
+    std::shared_ptr<neograph::Provider>           synth_provider)
 {
     using namespace neograph::graph;
     auto& factory = NodeFactory::instance();
@@ -136,9 +171,15 @@ void register_custom_node_types(
     cond_reg.register_condition("route_by_mode",
         [](const GraphState& state) -> std::string {
             auto rd = state.get("route_decision");
-            if (rd.is_object() && rd.contains("mode") && rd["mode"].is_string())
-                return rd["mode"].get<std::string>();
-            return "direct";  // 안전 폴백
+            if (rd.is_object() && rd.contains("mode") && rd["mode"].is_string()) {
+                const std::string m = rd["mode"].get<std::string>();
+                if (m == "chat" || m == "direct" || m == "delegate" ||
+                    m == "parallel") {
+                    return m;
+                }
+            }
+            // 안전 폴백 — 합성기가 직접 답하는 chat 이 가장 무해한 경로
+            return "chat";
         });
     cond_reg.register_condition("route_by_skip_synth",
         [](const GraphState& state) -> std::string {
@@ -522,10 +563,13 @@ void register_custom_node_types(
 
     // ── 10.5) llm_call — NeoGraph 내장 덮어쓰기. 자비스 특화 합성기.
     //         내장 llm_call 은 messages 채널을 기대하는데 자비스 그래프에선
-    //         아무도 안 채움 → empty messages 400. 직접 user_text + tool_results +
-    //         delegated_reply 를 모아 system+user 메시지를 구성한다.
+    //         아무도 안 채움. 대신 여기서 대화 이력을 **messages 배열**
+    //         (user/assistant 역할 구조)로 조립한다 — 이력을 user 메시지 안에
+    //         JSON 덤프로 인라인하면 모델이 "따라 쓸 본문"으로 취급해 과거
+    //         답변을 verbatim 복창하는 사고가 났다(기억 앵무새). 역할 구조로
+    //         주면 "이어갈 대화"가 되어 발병 지점이 사라진다.
     factory.register_type("llm_call",
-        [router_provider](const std::string& name, const neograph::json& cfg, const NodeContext&)
+        [synth_provider](const std::string& name, const neograph::json& cfg, const NodeContext&)
         {
             class JarvisSynthNode : public neograph::graph::GraphNode {
             public:
@@ -549,47 +593,113 @@ void register_custom_node_types(
                     auto tr = in.state.get("tool_results");
                     if (tr.is_array() && !tr.empty()) tool_summary = tr.dump();
 
-                    // 이전 대화 기억 — memory_lookup 이 객체로 채운
-                    // memory_context.recent_turns 를 프롬프트에 포함.
-                    // 이게 없으면 "아까 내가 뭐 물어봤지?" 에 답할 수 없다.
-                    std::string memory_ctx;
+                    // ── 시스템 프롬프트 — persona.txt [synth] 섹션 실배선.
+                    //    (기존엔 하드코딩 프롬프트가 쓰이고 persona [synth] 는
+                    //     사문이었다. 파일이 없을 때만 최소 폴백 사용.)
+                    std::string sys = load_prompt_section(
+                        cfg_.value("prompt_file",    std::string("config/persona.txt")),
+                        cfg_.value("prompt_section", std::string("synth")));
+                    if (sys.empty()) {
+                        sys = "You are JARVIS — Tony Stark's terse, witty AI butler. "
+                              "One or two sentences max. No markdown, no JSON, "
+                              "plain speech suitable for text-to-speech.";
+                    }
+                    sys += "\n\nReply in the user's language code (" + user_lang + "). "
+                           "Spell numbers, dates and times naturally in that language.";
+
+                    // ── 대화 이력 수집 (memory_lookup 이 채운 recent_turns) ──
+                    struct PastTurn { std::string user; std::string assistant; };
+                    std::vector<PastTurn> history;
+                    std::int64_t last_ts = 0;
                     auto mc = in.state.get("memory_context");
                     if (mc.is_object() && mc.contains("recent_turns") &&
-                        mc["recent_turns"].is_array() &&
-                        !mc["recent_turns"].empty()) {
-                        memory_ctx = mc["recent_turns"].dump();
+                        mc["recent_turns"].is_array()) {
+                        for (const auto& t : mc["recent_turns"]) {
+                            if (!t.is_object()) continue;
+                            history.push_back({t.value("user_text",  std::string("")),
+                                               t.value("final_text", std::string(""))});
+                            if (t.contains("ts") && t["ts"].is_number_integer()) {
+                                last_ts = t["ts"].get<std::int64_t>();
+                            }
+                        }
                     }
 
-                    std::string sys =
-                        "You are JARVIS — Tony Stark's terse, witty AI butler. "
-                        "Reply in the user's language code (" + user_lang + "). "
-                        "One or two sentences max. No markdown, no JSON, plain speech "
-                        "suitable for text-to-speech: spell numbers, dates and times "
-                        "naturally in the user's language. "
-                        "If a tool result is provided, lead with the key fact from it. "
-                        "Use the recent conversation turns to resolve references "
-                        "like 'that' or 'earlier'.";
-                    std::string usr = "User said: " + user_text + "\n";
-                    if (!tool_summary.empty()) usr += "Tool result (JSON): " + tool_summary + "\n";
-                    if (!delegated.empty())    usr += "Specialist replied: " + delegated + "\n";
-                    if (!memory_ctx.empty())
-                        usr += "Recent conversation turns (JSON, oldest first; "
-                               "'user_text' = what the user said, "
-                               "'final_text' = what YOU (JARVIS) replied — "
-                               "attribute each side correctly): "
-                               + memory_ctx + "\n";
+                    // 세션 경계 주석 — 마지막 기억 턴이 오래됐으면 명시해서
+                    // "방금/아까" 같은 지시어를 구세션 턴으로 오해소하지 않게 한다.
+                    if (last_ts > 0) {
+                        using namespace std::chrono;
+                        const std::int64_t now_s = duration_cast<seconds>(
+                            system_clock::now().time_since_epoch()).count();
+                        const std::int64_t gap_min = (now_s - last_ts) / 60;
+                        if (gap_min >= 15) {
+                            sys += "\n(Note: the conversation history above your "
+                                   "current turn ended about "
+                                   + std::to_string(gap_min) +
+                                   " minutes ago — treat it as an earlier session, "
+                                   "not something the user said just now.)";
+                        }
+                    }
 
+                    // ── messages 배열 조립: system → 이력(user/assistant 교대) → 현재 턴 ──
                     neograph::CompletionParams p;
                     p.model       = cfg_.value("model", std::string("gpt-4o"));
                     p.temperature = 0.4f;
                     p.max_tokens  = 220;
                     p.messages.push_back({"system", sys});
-                    p.messages.push_back({"user",   usr});
+                    for (const auto& turn : history) {
+                        if (!turn.user.empty())
+                            p.messages.push_back({"user", turn.user});
+                        if (!turn.assistant.empty())
+                            p.messages.push_back({"assistant", turn.assistant});
+                    }
+
+                    std::string usr = user_text;
+                    if (!tool_summary.empty())
+                        usr += "\n\n[Tool result JSON — use the key fact]: " + tool_summary;
+                    if (!delegated.empty())
+                        usr += "\n\n[Specialist reply — speak it as your own]: " + delegated;
+                    p.messages.push_back({"user", usr});
 
                     auto reply = co_await provider_->invoke(p, nullptr);
+                    std::string final_text = reply.message.content;
+
+                    // ── 복창 가드 — 과거 답변과 trim 후 verbatim 일치하면 1회 재생성.
+                    //    커밋 전 마지막 방어선: 복창이 Store 에 들어가면 다음 턴의
+                    //    앵커가 배가되는 자기강화 루프의 입구를 막는다.
+                    auto trim = [](const std::string& s) -> std::string {
+                        const char* ws = " \t\r\n";
+                        auto b = s.find_first_not_of(ws);
+                        if (b == std::string::npos) return "";
+                        auto e = s.find_last_not_of(ws);
+                        return s.substr(b, e - b + 1);
+                    };
+                    const std::string trimmed = trim(final_text);
+                    bool verbatim = false;
+                    if (!trimmed.empty()) {
+                        for (const auto& turn : history) {
+                            if (!turn.assistant.empty() &&
+                                trim(turn.assistant) == trimmed) {
+                                verbatim = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (verbatim) {
+                        std::cerr << "[synth] 복창 감지 — 과거 답변과 verbatim 일치, "
+                                     "1회 재생성\n";
+                        p.messages.push_back({"system",
+                            "Your draft repeated one of your earlier replies "
+                            "word-for-word. Compose a fresh answer to the user's "
+                            "CURRENT message, in their language."});
+                        auto retry = co_await provider_->invoke(p, nullptr);
+                        if (!trim(retry.message.content).empty()) {
+                            final_text = retry.message.content;
+                        }
+                    }
+
                     std::string out_ch = cfg_.value("output_channel",
                                                     std::string("final_text"));
-                    out.writes.push_back({out_ch, reply.message.content});
+                    out.writes.push_back({out_ch, final_text});
                     co_return out;
                 }
 
@@ -599,7 +709,7 @@ void register_custom_node_types(
                 neograph::json cfg_;
                 std::shared_ptr<neograph::Provider> provider_;
             };
-            return std::make_unique<JarvisSynthNode>(name, cfg, router_provider);
+            return std::make_unique<JarvisSynthNode>(name, cfg, synth_provider);
         });
 
     // ── 11) passthrough — cfg.from 채널 값을 cfg.to 채널로 복사 ─────────────
@@ -717,7 +827,8 @@ int main(int argc, char** argv) {
 
         // ── 4) 커스텀 노드 타입 등록 ────────────────────────────────────────
         std::cerr << "[jarvis] 노드 타입 등록 중...\n";
-        register_custom_node_types(catalog, dispatcher, router_provider);
+        register_custom_node_types(catalog, dispatcher,
+                                   router_provider, synth_provider);
 
         // ── 5) jarvis_graph.json 컴파일 ──────────────────────────────────────
         std::cerr << "[jarvis] 그래프 컴파일 중: "
