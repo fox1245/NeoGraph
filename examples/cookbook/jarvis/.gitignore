@@ -22,3 +22,4 @@ build/
 # 자비스 대화 기억 (파일 영속 Store)
 jarvis_memory.json
 jarvis_memory.json.tmp
+assets/whisper-large-v3-turbo.bin

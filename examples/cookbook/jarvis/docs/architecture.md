@@ -26,11 +26,16 @@ T0→T8 가 자비스의 체감 응답 속도. 목표 분포:
 
 ## 각 노드 상세
 
-### mic_capture (`voice_in`)
-- `miniaudio` 로 16kHz mono PCM 캡처
-- `Silero VAD` 가 청크 단위 (32ms 권장) 로 발화 확률 평가
-- `vad_threshold` 넘는 청크가 들어오면 녹음 시작, 200ms 연속 미만이면 종료
-- 최대 `max_utterance_seconds` 초 넘으면 강제 종료 (라우터가 너무 긴 입력으로 비대해지는 거 방지)
+### mic_capture (`voice_in`) — 라이브 마이크 구현됨
+- 기본은 stdin 모드(텍스트 / `wav:/경로`). **`use_microphone:true` 또는 env
+  `JARVIS_MIC=1`** 이면 라이브 마이크 캡처 활성화.
+- `miniaudio` 캡처 디바이스가 16kHz mono f32 를 콜백으로 흘림 → mutex 버퍼
+- VAD 워커 스레드가 512샘플(32ms) 윈도우로 `Silero VAD`(ONNX) 추론 → speech prob
+- `vad_threshold`(0.5) 넘으면 녹음 시작(200ms 프리롤로 어두 안 잘림),
+  500ms 연속 무음이면 발화 종료 → PCM 을 발화 큐에 push → run() 이 voice_in 으로
+- 250ms 미만 잡음은 무시, `max_utterance_seconds` 초 넘으면 강제 종료
+- **디바이스 초기화 실패(WSL2 오디오 브리지 없음 등)면 자동 stdin 폴백** —
+  크래시 없음. WSLg/PulseAudio 소스가 있으면 WSL2 에서도 실동작.
 
 ### stt (`whisper_stt` 또는 `moonshine_stt`)
 - whisper.cpp 모델 1개를 노드 수명 동안 재사용 (재로딩 비용 ×)

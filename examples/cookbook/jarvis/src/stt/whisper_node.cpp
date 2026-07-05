@@ -178,10 +178,14 @@ WhisperSttNode::run(neograph::graph::NodeInput in)
         whisper_full_params wparams =
             whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
 
-        // 언어 설정: "auto" 면 자동 감지, 아니면 ISO 코드 고정
+        // 언어 설정: "auto" 면 자동 감지, 아니면 ISO 코드 고정.
+        // ⚠️ detect_language=true 는 whisper.cpp 에서 "언어만 감지하고 전사
+        //    없이 종료" 모드 — 이걸 켜면 user_lang 은 나오는데 user_text 가
+        //    항상 빈 문자열이 된다(실측: jfk.wav 도 ''). auto 감지 + 전사를
+        //    둘 다 하려면 language="auto" + detect_language=false.
         if (language_ == "auto") {
             wparams.language        = "auto";
-            wparams.detect_language = true;
+            wparams.detect_language = false;
         } else {
             wparams.language        = language_.c_str();
             wparams.detect_language = false;
