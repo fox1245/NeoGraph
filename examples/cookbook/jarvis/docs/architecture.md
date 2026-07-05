@@ -43,6 +43,13 @@ T0→T8 가 자비스의 체감 응답 속도. 목표 분포:
 - 결과: `user_text` (한 문자열), `user_lang` (ISO 코드)
 - 인식 신뢰도가 너무 낮으면 빈 문자열 — 라우터 단계에서 턴 스킵
 
+**GPU 가속 (whisper.cpp ROCm/HIP)**: 번들 whisper.cpp 는 CPU 전용이라
+whisper-large-v3-turbo 가 CPU 에서 ~32초(jfk 11초)로 라이브에 부적합. AMD GPU
+(gfx1201=R9700 등, ROCm≥7.2)면 `bash scripts/build_whisper_hip.sh` 로
+GGML_HIP 빌드 → whisper_install 교체 → **~7초(4.5×)**. run_jarvis.sh 가 ROCm
+런타임·WSL dxg 브리지(HSA_ENABLE_DXG_DETECTION)를 자동 로드. GPU 있으면
+config 를 large 로 둬도 실시간, 없으면 whisper-small(CPU ~8초)로 교체.
+
 **대체 옵션 `moonshine_stt`** (Moonshine-tiny ONNX): 27M 초경량, raw 16kHz
 파형 입력(mel 아님), seq2seq(encoder + 2-모델 분리 decoder + KV캐시). supertonic
 TTS 와 같은 ONNX Runtime 재사용. 언어별 flavor 모델이라 `user_lang` 은 config
