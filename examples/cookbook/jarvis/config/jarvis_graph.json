@@ -66,7 +66,7 @@
         "도구 카탈로그와 에이전트 레지스트리는 main.cpp 에서 시스템 프롬프트에 주입."
       ],
       "model": "gpt-4o-mini",
-      "routes": ["direct", "delegate", "parallel"],
+      "routes": ["chat", "direct", "delegate", "parallel"],
       "output_channel": "route_decision",
       "prompt_file": "config/persona.txt",
       "prompt_section": "router"
@@ -141,9 +141,10 @@
 
     {
       "from": "router",
-      "_comment": "라우터 출력의 mode 필드로 조건 분기 — route_by_mode 는 main.cpp 에서 등록.",
+      "_comment": "라우터 출력의 mode 필드로 조건 분기 — route_by_mode 는 main.cpp 에서 등록. chat 은 도구/위임 없이 합성기 직행 (인사·자기소개·대화 회상).",
       "condition": "route_by_mode",
       "routes": {
+        "chat":     "response_synth",
         "direct":   "direct_branch",
         "parallel": "parallel_branch",
         "delegate": "delegate_branch"

@@ -11,7 +11,7 @@ T1  발화 끝 (VAD 가 200ms 무음 감지)
 T2  STT 완료 — 텍스트 + 감지된 언어 코드
 T3  메모리 조회 완료 — 최근 6턴 + 선호 + 마지막 주제
 T4  라우터 결정 완료 — {mode, tool_calls, delegate_to, skip_synthesis}
-T5  3-way 분기 — 도구 직접 / 위임 / 병렬 중 하나 완료
+T5  4-way 분기 — 자가응답(chat) / 도구 직접 / 위임 / 병렬 중 하나 완료
 T6  응답 합성 완료 (또는 skip 분기로 우회)
 T7  메모리 커밋 완료
 T8  TTS 첫 청크 재생 시작 ← 토니가 답을 "듣기 시작" 하는 지점
@@ -51,8 +51,10 @@ T0→T8 가 자비스의 체감 응답 속도. 목표 분포:
 ### router (`intent_classifier`)
 - 작은 LLM (gpt-4o-mini, ~200-400ms)
 - 시스템 프롬프트 = persona.txt [router] + MCP 카탈로그 텍스트 + 에이전트 레지스트리 텍스트
-- 출력 JSON 검증 (도구명/에이전트명이 카탈로그에 있는지). 실패 시 fallback (mode=direct, 빈 tool_calls).
-- 검증 실패는 로그 + 자비스 응답 "잘 못 알아들었습니다" 한 줄
+- 출력 JSON 검증: 파싱 실패 → fallback (mode=chat). 도구명/에이전트명은 카탈로그·
+  레지스트리와 대조해 실재하지 않으면 chat 으로 강등 (LLM 이 발명한
+  `delegate_to:"null"` 같은 결정이 하류로 흐르지 않게).
+- chat 모드는 도구/위임 없이 response_synth 로 직행 — 인사·자기소개·대화 회상용
 
 ### direct_branch (`tool_dispatch`)
 - `route_decision.tool_calls[0]` 한 번 dispatch
@@ -71,8 +73,12 @@ T0→T8 가 자비스의 체감 응답 속도. 목표 분포:
 
 ### response_synth (`llm_call`)
 - 큰 LLM (gpt-4o, ~800-1500ms)
-- 시스템 프롬프트 = persona.txt [synth]
-- 사용자 메시지 = user_text + memory_context + tool_results / delegated_reply 조립
+- 시스템 프롬프트 = persona.txt [synth] (+ 언어 지시 + 구세션 경계 주석)
+- 대화 이력(memory_context.recent_turns)은 **messages 배열의 user/assistant
+  역할 턴으로 전달** — user 메시지에 JSON 덤프로 인라인하면 모델이 과거 답변을
+  본문으로 취급해 verbatim 복창하는 사고가 났었음 (기억 앵무새)
+- 현재 턴 user 메시지 = user_text + tool_results / delegated_reply 첨부
+- 복창 가드: 출력이 과거 답변과 trim 후 완전 일치하면 1회 재생성
 - 출력 = `final_text` (TTS 가 읽을 문자열)
 - skip_synthesis=true 경로에서는 우회됨 (synth_skip 이 그 자리)
 
