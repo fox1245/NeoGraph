@@ -6,6 +6,7 @@
 
 #include "mcp_catalog.h"
 
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -197,12 +198,39 @@ std::string McpCatalog::render_for_router_prompt() const {
             oss << entry.description << "\n";
         }
 
-        // 개별 도구 목록 — 이름은 "catalog_name.tool_name" 완전 수식 형식
+        // 개별 도구 목록 — 이름은 "catalog_name.tool_name" 완전 수식 형식.
+        // ⚠️ 파라미터 스키마(def.parameters)를 반드시 렌더링한다 — 이게 없으면
+        //    LLM 이 args 를 어떻게 채워야 할지 몰라 빈 args({})로 호출하고
+        //    서버가 "missing required argument" 로 거부한다.
         for (const auto& tool : entry.tools) {
             const auto def = tool->get_definition();
             oss << "  - " << entry.name << "." << def.name;
             if (!def.description.empty()) {
                 oss << ": " << def.description;
+            }
+            // JSON Schema properties → "args: {city: string [required], ...}"
+            const auto& p = def.parameters;
+            if (p.is_object() && p.contains("properties") &&
+                p["properties"].is_object() && !p["properties"].empty()) {
+                std::vector<std::string> req;
+                if (p.contains("required") && p["required"].is_array())
+                    for (const auto& r : p["required"])
+                        if (r.is_string()) req.push_back(r.get<std::string>());
+                // OpenAPI 수준: 이름·타입·required·설명 전부 노출해 LLM 이
+                // args 를 정확히 채우도록.
+                for (auto it = p["properties"].begin();
+                     it != p["properties"].end(); ++it) {
+                    oss << "\n      · " << it.key();
+                    const auto& pv = it.value();
+                    if (pv.is_object() && pv.contains("type") &&
+                        pv["type"].is_string())
+                        oss << " (" << pv["type"].get<std::string>() << ")";
+                    if (std::find(req.begin(), req.end(), it.key()) != req.end())
+                        oss << " [required]";
+                    if (pv.is_object() && pv.contains("description") &&
+                        pv["description"].is_string())
+                        oss << " — " << pv["description"].get<std::string>();
+                }
             }
             oss << "\n";
         }

@@ -241,6 +241,22 @@ MemoryCommitNode::run(neograph::graph::NodeInput in) {
     std::string final_text = final_text_v.is_string()
                              ? final_text_v.get<std::string>() : "";
 
+    // 빈 턴 커밋 가드 — user_text 나 final_text 가 비었으면 저장 안 함.
+    // (마이크 노이즈·STT 실패·도구 오류로 빈 응답이 나온 턴이 기억을 오염시켜
+    //  "이전 대화를 기억 못함" 처럼 보이는 것을 막는다. append 리스트가 빈
+    //  턴으로 차서 진짜 대화가 24개 상한 밖으로 밀려나던 문제.)
+    {
+        auto trim = [](const std::string& s) {
+            auto b = s.find_first_not_of(" \t\r\n");
+            return b == std::string::npos ? std::string() : s.substr(b);
+        };
+        if (trim(user_text).empty() || trim(final_text).empty()) {
+            std::cerr << "[MemoryCommitNode] 빈 턴 — 저장 건너뜀 "
+                         "(user_text 또는 final_text 비어있음)\n";
+            co_return out;
+        }
+    }
+
     // 사용된 도구 이름 목록 추출
     auto tool_names = extract_tool_names(tool_res_v);
     neograph::json tools_json = neograph::json::array();

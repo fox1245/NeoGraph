@@ -251,6 +251,45 @@ WhisperSttNode::run(neograph::graph::NodeInput in)
     lang = detect_language_heuristic(text);
 #endif
 
+    // ── 언어 관성(hysteresis) — 추정 네이티브 언어를 고수 ──────────────────
+    // whisper 는 매 발화 언어를 새로 감지하는데, 짧거나 잡음 섞인 발화가
+    // 외국어로 오인식되면 응답·TTS 언어가 홱 바뀐다. store.prefs 에 native_lang
+    // 과 연속 streak 을 유지해: 감지언어==네이티브면 streak↑(고수), 다르면
+    // streak↓ 하고 0 이 될 때만 전환. 한두 번의 오인식은 무시하고 진짜로
+    // 언어를 바꾸면(연속 감지) 따라간다. 빈 텍스트 턴은 관성에 영향 X.
+    auto trim = [](const std::string& s) {
+        auto b = s.find_first_not_of(" \t\r\n");
+        return b == std::string::npos ? std::string() : s.substr(b);
+    };
+    if (in.ctx.store && !trim(text).empty()) {
+        constexpr int kStreakCap = 4;   // 전환 관성 강도
+        neograph::graph::Namespace ns{"jarvis", "tony"};
+        auto& store = *in.ctx.store;
+        auto item = store.get(ns, "prefs");
+        neograph::json prefs = (item && item->value.is_object())
+                               ? item->value : neograph::json::object();
+        std::string native = prefs.value("native_lang", std::string(""));
+        int streak = prefs.value("lang_streak", 0);
+        std::string effective;
+        if (native.empty()) {
+            native = lang; streak = 1; effective = lang;
+        } else if (lang == native) {
+            streak = std::min(streak + 1, kStreakCap); effective = native;
+        } else {
+            if (--streak <= 0) { native = lang; streak = 1; effective = lang; }
+            else               { effective = native; }  // 오인식 무시, 고수
+        }
+        if (effective != lang) {
+            std::cerr << "[whisper] 언어 관성 — 감지='" << lang
+                      << "' 이지만 네이티브='" << native << "' 고수 (streak "
+                      << streak << ")\n";
+        }
+        prefs["native_lang"] = native;
+        prefs["lang_streak"] = streak;
+        store.put(ns, "prefs", prefs);
+        lang = effective;
+    }
+
     // ── user_text + user_lang 채널에 쓰기 ─────────────────────────────────
     out.writes.push_back({"user_text", text});
     out.writes.push_back({"user_lang", lang});
