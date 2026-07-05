@@ -36,6 +36,7 @@
 #  include <onnxruntime_cxx_api.h>
 #  include <array>
 #  include <atomic>
+#  include <cmath>
 #  include <condition_variable>
 #  include <deque>
 #  include <mutex>
@@ -60,7 +61,13 @@ class MicCapture {
     MicCapture(std::string vad_path, float threshold, int max_seconds)
         : vad_path_(std::move(vad_path))
         , threshold_(threshold)
-        , max_samples_(max_seconds * 16000) {}
+        , max_samples_(max_seconds * 16000) {
+        // env 오버라이드: JARVIS_VAD_THRESHOLD(민감도 튜닝), JARVIS_MIC_DEBUG(관찰)
+        if (const char* t = std::getenv("JARVIS_VAD_THRESHOLD"); t && t[0])
+            threshold_ = std::atof(t);
+        if (const char* d = std::getenv("JARVIS_MIC_DEBUG"); d && d[0] && d[0] != '0')
+            debug_ = true;
+    }
 
     ~MicCapture() { stop(); }
 
@@ -182,6 +189,20 @@ class MicCapture {
             }
 
             float prob = run_vad(win.data());
+
+            // 진단 로깅 — 오디오가 흐르는지 + VAD 가 반응하는지 관찰.
+            // JARVIS_MIC_DEBUG=1 이면 ~0.5초마다 RMS(신호 세기)+prob 출력.
+            if (debug_) {
+                double sum = 0.0;
+                for (int i = 0; i < WIN; ++i) sum += win[i] * win[i];
+                const float rms = static_cast<float>(std::sqrt(sum / WIN));
+                if (++dbg_ctr_ % 15 == 0) {
+                    std::cerr << "[mic][debug] rms=" << rms << " vad_prob=" << prob
+                              << " thr=" << threshold_
+                              << (triggered ? " [녹음중]" : "") << "\n";
+                }
+            }
+
             if (prob >= threshold_) {
                 if (!triggered) {
                     triggered = true;
@@ -221,6 +242,8 @@ class MicCapture {
     std::string vad_path_;
     float       threshold_;
     int         max_samples_;
+    bool        debug_ = false;
+    long        dbg_ctr_ = 0;
 
     std::unique_ptr<Ort::Env>        env_;
     std::unique_ptr<Ort::MemoryInfo> mem_;
