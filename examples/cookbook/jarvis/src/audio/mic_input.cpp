@@ -120,12 +120,24 @@ class MicCapture {
     }
 
     // 발화 하나를 기다림 — 완성된 PCM 반환, 종료 신호면 nullopt.
+    //
+    // 백프레셔: 호출 시점에 이전 턴 처리(STT/LLM/TTS) 동안 쌓인 오디오·발화를
+    // 전부 폐기하고 "새로" 듣기 시작한다. 이렇게 하면 (1) 시작 중 로딩 노이즈,
+    // (2) 스테일 발화(자비스가 뒤처지며 옛 음성 처리), (3) TTS 재생음이 마이크로
+    // 되먹임되는 에코 — 셋 다 막힌다. 발화 하나를 얻으면 listening_ 을 내려
+    // 처리 구간 동안 워커가 아무것도 큐잉하지 않게 한다(다음 호출에서 재개).
     std::optional<std::vector<float>> next_utterance() {
+        { std::lock_guard<std::mutex> bl(buf_mtx_); buf_.clear(); }
+        { std::lock_guard<std::mutex> ql(q_mtx_);
+          std::queue<std::vector<float>> empty; utt_q_.swap(empty); }
+        listening_.store(true);
+
         std::unique_lock<std::mutex> lk(q_mtx_);
         cv_.wait(lk, [this] { return !utt_q_.empty() || !running_.load(); });
-        if (!utt_available()) return std::nullopt;
+        if (utt_q_.empty()) { listening_.store(false); return std::nullopt; }
         auto u = std::move(utt_q_.front());
         utt_q_.pop();
+        listening_.store(false);   // 처리 시작 — 이후 캡처는 폐기
         return u;
     }
 
@@ -194,6 +206,15 @@ class MicCapture {
             }
             if (!have) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
+
+            // 처리 중(listening_==false)이면 이 창을 버린다 — 발화 누적/큐잉 X.
+            // TTS 재생음 되먹임(에코)·스테일 발화 방지. 로컬 상태도 리셋해
+            // 다음 듣기 시작이 깨끗하게. (VAD state 는 다음 몇 창에 재-warm.)
+            if (!listening_.load()) {
+                if (triggered) { triggered = false; utt.clear(); silence = 0; }
+                preroll.clear();
                 continue;
             }
 
@@ -272,6 +293,7 @@ class MicCapture {
     std::condition_variable           cv_;
     std::queue<std::vector<float>>    utt_q_;
     std::atomic<bool>                 running_{false};
+    std::atomic<bool>                 listening_{false};  // 듣는 중에만 발화 큐잉
     std::thread                       worker_;
 };
 #endif  // JARVIS_LIVE_MIC
