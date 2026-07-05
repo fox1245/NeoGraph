@@ -87,8 +87,13 @@ def main() -> None:
     # ── 턴 루프 ──
     records = []
     max_rss = rss_ready
+    # 절대시각은 모노토닉 앵커로 파생 — WSL2/NTP 벽시계 스텝에 면역
+    # (nginx $msec 는 벽시계라 스텝 시 어긋날 수 있음 → 분석기는 순서 기반
+    #  매칭을 우선하고 시간창은 폴백으로만 사용)
+    wall_anchor = time.time() - time.monotonic()
     for i, text in enumerate(turns):
         t0 = time.monotonic()
+        t0_epoch = wall_anchor + t0     # 프록시 로그($msec)와 대조용 절대시각
         assert proc.stdin is not None
         proc.stdin.write(text + "\n")
         proc.stdin.flush()
@@ -99,6 +104,8 @@ def main() -> None:
             records.append({"i": i, "ms": None, "reply": None})
             break
         records.append({"i": i, "ms": round(ms, 3),
+                        "t0": round(t0_epoch, 3),
+                        "t1": round(wall_anchor + time.monotonic(), 3),
                         "reply": line.rstrip("\n")[:120]})
         max_rss = max(max_rss, read_rss_kb(proc.pid))
         if args.delay:
