@@ -135,6 +135,107 @@ else:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# MCP 클라이언트 (E2E 벤치) — env MCP_URL 설정 시 공식 mcp SDK 로 영구 세션.
+# C++ McpCatalog 과 동일: 시작 시 도구 목록 수집 → 라우터 프롬프트에 주입,
+# direct/parallel 분기가 실호출. 카탈로그 메타(이름/설명/태그/힌트)는
+# JARVIS_MCP_CATALOG(json) 에서 — C++ 이 읽는 것과 같은 파일.
+# ─────────────────────────────────────────────────────────────────────────────
+
+MCP_URL = os.environ.get("MCP_URL", "")
+MCP_TOOLS: dict = {}      # "demo.get_weather" -> description
+MCP_ENTRY: dict = {}      # 카탈로그 entry (name/description/tags/hints)
+_mcp_loop = None
+_mcp_session = None
+
+if MCP_URL:
+    import asyncio
+    import threading as _threading
+
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    _mcp_loop = asyncio.new_event_loop()
+    _mcp_ready = _threading.Event()
+    _mcp_tools_resp = None
+
+    async def _mcp_holder():
+        global _mcp_session, _mcp_tools_resp
+        async with streamablehttp_client(
+                MCP_URL.rstrip("/") + "/mcp") as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                _mcp_tools_resp = await session.list_tools()
+                _mcp_session = session
+                _mcp_ready.set()
+                await asyncio.Event().wait()      # 프로세스 수명 동안 유지
+
+    def _mcp_thread():
+        asyncio.set_event_loop(_mcp_loop)
+        _mcp_loop.run_until_complete(_mcp_holder())
+
+    _threading.Thread(target=_mcp_thread, daemon=True).start()
+    if not _mcp_ready.wait(timeout=30):
+        sys.exit(f"[twin] MCP 연결 실패: {MCP_URL}")
+
+    entry_name = "demo"
+    cat_path = os.environ.get("JARVIS_MCP_CATALOG", "")
+    if cat_path:
+        with open(cat_path, encoding="utf-8") as f:
+            cat = json.load(f)
+        if cat.get("tools"):
+            MCP_ENTRY = dict(cat["tools"][0])
+            entry_name = MCP_ENTRY.get("name", "demo")
+        MCP_ENTRY["_hints"] = cat.get("routing_hints", {})
+    for t in _mcp_tools_resp.tools:
+        MCP_TOOLS[f"{entry_name}.{t.name}"] = t.description or ""
+    print(f"[twin] MCP 도구 {len(MCP_TOOLS)}개 수집: "
+          + ", ".join(MCP_TOOLS), file=sys.stderr)
+
+
+def mcp_call_async(tool_fq: str, args: dict):
+    """도구 호출을 이벤트루프에 제출하고 Future 반환 (parallel 은 동시 제출)."""
+    import asyncio
+    name = tool_fq.split(".", 1)[1] if "." in tool_fq else tool_fq
+    return asyncio.run_coroutine_threadsafe(
+        _mcp_session.call_tool(name, args or {}), _mcp_loop)
+
+
+def mcp_result_text(fut) -> str:
+    res = fut.result(timeout=60)
+    for c in res.content:
+        text = getattr(c, "text", None)
+        if text is not None:
+            return text
+    return ""
+
+
+def render_tool_block() -> tuple:
+    """C++ McpCatalog::render_for_router_prompt / routing_hints_text 미러."""
+    if not MCP_TOOLS:
+        return "## Available MCP tools\n", ""
+    s = "## Available MCP tools\n\n### " + MCP_ENTRY.get("name", "demo")
+    tags = MCP_ENTRY.get("tags") or []
+    if tags:
+        s += "  [" + ", ".join(tags) + "]"
+    if MCP_ENTRY.get("skip_synthesis_hint"):
+        s += " (skip_synthesis ok)"
+    s += "\n"
+    if MCP_ENTRY.get("description"):
+        s += MCP_ENTRY["description"] + "\n"
+    for fq, desc in MCP_TOOLS.items():
+        s += f"  - {fq}" + (f": {desc}" if desc else "") + "\n"
+    hints = ""
+    h = MCP_ENTRY.get("_hints") or {}
+    for key in ("direct_when", "parallel_when", "delegate_when"):
+        arr = h.get(key)
+        if isinstance(arr, list) and arr:
+            hints += key + ":\n" + "".join(f"  - {x}\n" for x in arr)
+    if hints:
+        s += "\n## Routing hints\n\n" + hints
+    return s, hints
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 그래프 상태 — jarvis_graph.json 의 채널 미러 (tool_results 만 append)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -202,12 +303,14 @@ def router(state: State) -> dict:
                                    "reasoning_short": "empty turn — no-op"}}
 
     section = load_prompt_section(PERSONA_FILE, "router")
-    tool_block = "## Available MCP tools\n"          # 벤치: 빈 카탈로그
+    tool_block, hints = render_tool_block()
     agent_block = ("## Available specialist agents (A2A delegation)\n\n"
                    "(등록된 전문가 에이전트 없음)\n")
     system = (section + "\n\n=== Available Tools (MCP) ===\n" + tool_block
               + "\n\n=== Specialist Agents (A2A) ===\n" + agent_block
-              + "\n\nIMPORTANT: respond with a single JSON object only. "
+              + "\n\n"
+              + (f"=== Routing Hints ===\n{hints}\n\n" if hints else "")
+              + "IMPORTANT: respond with a single JSON object only. "
                 "No markdown, no prose, no code fence.")
     user = (f"User said: {user_text}\nLanguage: {state.get('user_lang', 'en')}"
             f"\nMemory: {json.dumps(state.get('memory_context', {}), ensure_ascii=False, sort_keys=True, separators=(',', ':'))}")
@@ -242,7 +345,12 @@ def router(state: State) -> dict:
     if mode == "delegate":
         decision["mode"] = "chat"                     # 벤치: 레지스트리 비어있음
     elif mode in ("direct", "parallel"):
-        valid = []                                    # 벤치: 카탈로그 비어있음
+        valid = []
+        for c in decision.get("tool_calls") or []:
+            if isinstance(c, dict) and c.get("tool") in MCP_TOOLS:
+                valid.append(c)
+                if mode == "direct":
+                    break                             # direct 는 정확히 1개
         decision["tool_calls"] = valid
         if not valid:
             decision["mode"] = "chat"
@@ -250,6 +358,13 @@ def router(state: State) -> dict:
         decision["tool_calls"] = []
         decision["delegate_to"] = None
         decision["skip_synthesis"] = False
+    # skip_synthesis 강제 규칙 — 카탈로그 hint=false 도구는 합성 필수 (C++ 동일)
+    if decision.get("skip_synthesis") and decision.get("tool_calls") \
+            and not MCP_ENTRY.get("skip_synthesis_hint", False):
+        decision["skip_synthesis"] = False
+    if os.environ.get("JARVIS_DEBUG"):
+        print("[twin][debug] parsed=" + json.dumps(decision, ensure_ascii=False),
+              file=sys.stderr)
     return {"route_decision": decision}
 
 
@@ -260,12 +375,33 @@ def direct_branch(state: State) -> dict:
         if state.get("tool_results"):
             return {}
         return {"tool_results": [{"text": state.get("user_text", "")}]}
-    return {"tool_results": [{"tool": calls[0].get("tool", ""),
-                              "result": "unavailable in bench"}]}
+    call = calls[0]
+    try:
+        result = mcp_result_text(
+            mcp_call_async(call.get("tool", ""), call.get("args") or {}))
+    except Exception as ex:                          # noqa: BLE001
+        result = {"error": str(ex)}
+    return {"tool_results": [{"tool": call.get("tool", ""),
+                              "result": result}]}
 
 
 def parallel_branch(state: State) -> dict:
-    return {"tool_results": []}
+    rd = state.get("route_decision", {})
+    calls = rd.get("tool_calls") or []
+    if not calls:
+        return {"tool_results": []}
+    # 동시 제출 후 순서대로 수확 — C++ make_parallel_group 동일 의미
+    futs = [(c, mcp_call_async(c.get("tool", ""), c.get("args") or {}))
+            for c in calls]
+    results = []
+    for c, fut in futs:
+        try:
+            results.append({"tool": c.get("tool", ""),
+                            "result": mcp_result_text(fut)})
+        except Exception as ex:                      # noqa: BLE001
+            results.append({"tool": c.get("tool", ""),
+                            "result": {"error": str(ex)}})
+    return {"tool_results": results}
 
 
 def delegate_branch(state: State) -> dict:

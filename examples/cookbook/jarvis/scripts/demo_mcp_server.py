@@ -49,5 +49,6 @@ def get_weather(city: str) -> str:
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) >= 2 else 8888
+    host = sys.argv[2] if len(sys.argv) >= 3 else "127.0.0.1"  # 컨테이너에선 0.0.0.0
     print(f"[demo_mcp_server] starting on port {port}", file=sys.stderr)
-    mcp.run(transport="streamable-http", port=port)
+    mcp.run(transport="streamable-http", host=host, port=port)

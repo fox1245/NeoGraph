@@ -1,0 +1,168 @@
+{
+  "name": "jarvis",
+  "_comment": [
+    "자비스 메인 그래프. 음성 입력 한 턴이 들어와서 음성 출력 한 턴이 나가는 단위.",
+    "voice_in / whisper_stt / supertonic_tts / mcp_dispatch / a2a_delegate 는 main.cpp 에서",
+    "NodeFactory::register_type() 으로 등록되는 커스텀 노드 타입.",
+    "",
+    "백그라운드 트리거(타이머/외부 A2A)는 이 그래프 바깥의 별도 비동기 그래프에서 돌고,",
+    "voice_in 채널에 직접 메시지를 주입하는 방식으로 끼어듦.",
+    "",
+    "외부 A2A 호출은 STT 단계 건너뛰고 'text_in' 채널로 들어옴 — text_or_voice 노드가",
+    "두 입력 중 비어있지 않은 쪽을 골라서 라우터로 흘려보냄."
+  ],
+
+  "channels": {
+    "voice_in":        { "reducer": "overwrite" },
+    "text_in":         { "reducer": "overwrite" },
+    "user_text":       { "reducer": "overwrite" },
+    "user_lang":       { "reducer": "overwrite" },
+    "memory_context":  { "reducer": "overwrite" },
+    "route_decision":  { "reducer": "overwrite" },
+    "tool_results":    { "reducer": "append" },
+    "delegated_reply": { "reducer": "overwrite" },
+    "final_text":      { "reducer": "overwrite" },
+    "tts_audio":       { "reducer": "overwrite" },
+    "messages":        { "reducer": "append" },
+    "__shutdown__":    { "reducer": "overwrite" }
+  },
+
+  "nodes": {
+    "mic_capture": {
+      "type": "voice_in",
+      "_comment": "miniaudio + Silero VAD. 발화 끝 감지 시 PCM 청크를 voice_in 채널에 push.",
+      "sample_rate": 16000,
+      "vad_threshold": 0.5,
+      "max_utterance_seconds": 30
+    },
+
+    "stt": {
+      "type": "whisper_stt",
+      "_comment": "voice_in PCM → (text, lang). lang='auto' 면 whisper 가 자동 감지.",
+      "model_path": "assets/whisper-small.bin",
+      "language": "auto",
+      "translate_to_en": false
+    },
+
+    "text_or_voice": {
+      "type": "channel_merge",
+      "_comment": "voice_in 경로(STT 통과)와 text_in 경로(외부 A2A) 중 살아있는 쪽 선택.",
+      "inputs": ["user_text", "text_in"],
+      "output": "user_text"
+    },
+
+    "memory_lookup": {
+      "type": "memory_lookup",
+      "_comment": "Store 에서 최근 N턴 + 사용자 선호 끌어와 memory_context 에 저장.",
+      "store_namespace": "jarvis.tony",
+      "recent_turns": 6
+    },
+
+    "router": {
+      "type": "intent_classifier",
+      "_comment": [
+        "작은/빠른 LLM 으로 JSON 결정 출력.",
+        "출력: {mode, tool_calls, delegate_to, skip_synthesis}",
+        "도구 카탈로그와 에이전트 레지스트리는 main.cpp 에서 시스템 프롬프트에 주입."
+      ],
+      "model": "gpt-4o-mini",
+      "routes": ["chat", "direct", "delegate", "parallel"],
+      "output_channel": "route_decision",
+      "prompt_file": "config/persona.txt",
+      "prompt_section": "router"
+    },
+
+    "direct_branch": {
+      "type": "tool_dispatch",
+      "_comment": "MCP 도구 1회 호출. route_decision.tool_calls[0] 사용.",
+      "catalog_channel": "mcp_catalog",
+      "output_channel": "tool_results"
+    },
+
+    "parallel_branch": {
+      "type": "parallel_tool_fanout",
+      "_comment": "route_decision.tool_calls 의 모든 항목 동시 호출. make_parallel_group 사용.",
+      "catalog_channel": "mcp_catalog",
+      "output_channel": "tool_results",
+      "max_concurrent": 4
+    },
+
+    "delegate_branch": {
+      "type": "a2a_delegate",
+      "_comment": "route_decision.delegate_to 의 A2A 엔드포인트로 user_text 통째 위임.",
+      "registry_channel": "agent_registry",
+      "output_channel": "delegated_reply",
+      "timeout_seconds": 90
+    },
+
+    "response_synth": {
+      "type": "llm_call",
+      "_comment": [
+        "큰 LLM 으로 자연 응답 합성. tool_results / delegated_reply / memory_context 를",
+        "사용자 언어(user_lang)에 맞춰 한 문장-두 문장으로 답함.",
+        "route_decision.skip_synthesis=true 면 이 노드는 우회 (조건부 엣지로)."
+      ],
+      "model": "gpt-4o",
+      "prompt_file": "config/persona.txt",
+      "prompt_section": "synth",
+      "output_channel": "final_text"
+    },
+
+    "synth_skip": {
+      "type": "passthrough",
+      "_comment": "tool_results 의 마지막 결과를 그대로 final_text 로 — skip_synthesis=true 경로용.",
+      "from": "tool_results",
+      "to": "final_text"
+    },
+
+    "memory_commit": {
+      "type": "memory_commit",
+      "_comment": "사용자 발화 + 자비스 응답 + 사용 도구를 Store 에 push.",
+      "store_namespace": "jarvis.tony"
+    },
+
+    "tts": {
+      "type": "supertonic_tts",
+      "_comment": "final_text + user_lang → 44.1kHz wav 저장 + 기본 재생 디바이스 출력. play_audio=false 또는 env JARVIS_NO_PLAYBACK=1 로 재생만 끌 수 있음.",
+      "onnx_dir": "assets/onnx",
+      "voice_style": "assets/voices/M1.json",
+      "total_steps": 8,
+      "speed": 1.05,
+      "play_audio": true
+    }
+  },
+
+  "edges": [
+    { "from": "__start__",       "to": "mic_capture" },
+    { "from": "mic_capture",     "to": "stt" },
+    { "from": "stt",             "to": "text_or_voice" },
+    { "from": "text_or_voice",   "to": "memory_lookup" },
+    { "from": "memory_lookup",   "to": "router" },
+
+    {
+      "from": "router",
+      "_comment": "라우터 출력의 mode 필드로 조건 분기 — route_by_mode 는 main.cpp 에서 등록. chat 은 도구/위임 없이 합성기 직행 (인사·자기소개·대화 회상).",
+      "condition": "route_by_mode",
+      "routes": {
+        "chat":     "response_synth",
+        "direct":   "direct_branch",
+        "parallel": "parallel_branch",
+        "delegate": "delegate_branch"
+      }
+    },
+
+    {
+      "from": "direct_branch",
+      "_comment": "skip_synthesis 가 true 면 합성 우회 — route_by_skip_synth 등록 필요.",
+      "condition": "route_by_skip_synth",
+      "routes": { "true": "synth_skip", "false": "response_synth" }
+    },
+    { "from": "parallel_branch", "to": "response_synth" },
+    { "from": "delegate_branch", "to": "response_synth" },
+
+    { "from": "synth_skip",      "to": "memory_commit" },
+    { "from": "response_synth",  "to": "memory_commit" },
+    { "from": "memory_commit",   "to": "tts" },
+    { "from": "tts",             "to": "__end__" }
+  ]
+}
