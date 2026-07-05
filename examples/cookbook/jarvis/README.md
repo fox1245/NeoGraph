@@ -156,7 +156,10 @@ URL 만 추가하면 자비스의 부하가 됩니다.
 사용자 선호 (`tony.prefers.language=ko`, `tony.last_topic=...`) 끌어옴.
 
 매 턴 종료 시 자비스 응답 + 토니 발화 + 사용된 도구를 Store 에 push.
-다음 턴 라우터가 "아까 그거" 같은 지칭 해소 가능.
+다음 턴 라우터가 "아까 그거" 같은 지칭 해소 가능. `JsonFileStore` 로
+파일 영속 — 재시작해도 기억 유지. 빈 턴(STT 실패·노이즈)은 커밋에서
+제외해 기억 오염 방지. `prefs.native_lang` 에 추정 네이티브 언어를 유지
+(언어 관성).
 
 ## A2A 양방향 — 자비스가 부르고 자비스가 불린다
 
@@ -187,69 +190,108 @@ NeoGraph 의 `27_async_concurrent_runs.cpp` 패턴 그대로 사용.
 ```
 jarvis/
 ├── README.md                      ← 지금 이 문서
-├── CMakeLists.txt                 모든 외부 의존(whisper/onnxruntime/miniaudio) gated
-├── config/
-│   ├── mcp_catalog.json           도구 카탈로그
-│   ├── agent_registry.json        A2A 서브에이전트 레지스트리
-│   ├── jarvis_graph.json          자비스 메인 그래프 정의 (NeoGraph JSON)
-│   └── persona.txt                시스템 프롬프트 (라우터 + 합성기 공유)
+├── CMakeLists.txt                 외부 의존(whisper/onnxruntime/miniaudio) gated
+├── config/                        기본 config (그래프·카탈로그·레지스트리·persona)
+├── config-demo/                   실행용 프리셋 (real-tools / mock)
+├── config-bench*/                 벤치용 config
 ├── src/
-│   ├── main.cpp                   진입점
-│   ├── audio/                     miniaudio 마이크 입력 + 스피커 출력
-│   ├── stt/                       whisper.cpp 래퍼 (auto 언어 감지)
+│   ├── main.cpp                   진입점 (노드 등록·그래프 컴파일·메인 루프)
+│   ├── audio/                     miniaudio 캡처(+Silero VAD)·재생, supertonic TTS
+│   ├── stt/                       whisper_node(다국어·언어관성) + moonshine_node(엣지)
 │   ├── orchestrator/              라우터, MCP 카탈로그 로더, A2A 디스패처
-│   └── memory/                    Store 기반 대화 메모리
-├── specialists/
-│   ├── coder/                     별도 A2A 서버 (NeoGraph 서브그래프)
-│   └── researcher/                별도 A2A 서버
-├── assets/
-│   ├── download.sh                whisper + supertonic 모델 다운로드
-│   └── voices/                    supertonic voice style JSON
+│   └── memory/                    Store 기반 대화 메모리(JsonFileStore 영속)
+├── specialists/                   coder / researcher (별도 A2A 서버)
+├── bench/                         NeoGraph vs LangGraph 벤치 (쌍둥이·드라이버·Docker)
+├── assets/download.sh             whisper/supertonic/moonshine/silero 모델 다운로드
 ├── scripts/
-│   └── run_session.sh             전체 시연 실행 (specialists 다 띄우고 자비스 띄움)
-└── docs/
-    └── architecture.md            그래프 노드별 상세 설명
+│   ├── run_jarvis.sh              실행 wrapper (LD_LIBRARY_PATH·ROCm·dxg 자동)
+│   ├── jarvis_repl.py             한글 readline REPL (텍스트/wav 입력)
+│   ├── build_whisper_hip.sh       whisper.cpp ROCm/HIP GPU 빌드
+│   └── demo_mcp_server.py         데모 MCP 서버 (시간/날씨/계산)
+└── docs/architecture.md          그래프 노드별 상세 설명
 ```
 
-## 빌드 / 실행 (예정)
+## 빌드 / 실행
 
 ```bash
-# 1. 모델 다운로드 (~250MB: whisper-small + supertonic)
+# 1. 모델 다운로드 (whisper-large-v3-turbo ~1.6GB + supertonic + silero VAD)
+#    경량: JARVIS_WHISPER=small bash assets/download.sh  (라즈베리파이/CPU)
 bash examples/cookbook/jarvis/assets/download.sh
 
-# 2. 빌드 — onnxruntime, whisper.cpp, miniaudio 시스템에서 찾아짐
-cmake -B build -DNEOGRAPH_BUILD_COOKBOOK_JARVIS=ON
-cmake --build build --target cookbook_jarvis -j
+# 2. 빌드 — onnxruntime, whisper.cpp, miniaudio 시스템에서 찾아짐(없으면 mock)
+cmake -B build-jarvis -DNEOGRAPH_BUILD_COOKBOOK_JARVIS=ON
+cmake --build build-jarvis --target cookbook_jarvis -j
 
-# 3. 시연 — 백그라운드로 전문가들 띄우고, 자비스 띄움
-bash examples/cookbook/jarvis/scripts/run_session.sh
+# 3a. 실행 — 텍스트/wav 입력 (한글 라인편집 REPL 권장)
+cd examples/cookbook/jarvis
+python3 scripts/jarvis_repl.py                 # .env 의 OPENAI_API_KEY 자동 로드
+#   토니 ▸ 안녕?                                # 텍스트
+#   토니 ▸ wav:/경로/음성.wav                    # 오디오 파일 → STT
+
+# 3b. 실행 — 라이브 마이크 (miniaudio 캡처 + Silero VAD)
+JARVIS_MIC=1 bash scripts/run_jarvis.sh config-demo/real-tools
+#   "온라인" 뜬 뒤 말하면 → 발화 끝 감지 → STT → 응답 → TTS
+
+# (도구 데모용 MCP 서버 — 별도 터미널)
+python3 scripts/demo_mcp_server.py 8888        # 시간/날씨/계산
 ```
 
-## 현재 상태
+LLM 프로바이더는 `.env` 의 `OPENAI_API_KEY`(OpenAI 직결) 또는
+`OPENAI_BASE_URL`+`JARVIS_ROUTER_MODEL`/`JARVIS_SYNTH_MODEL`(Groq/Cerebras 등
+OpenAI 호환) 으로 선택. 없으면 MockProvider 로 오프라인 동작(에코).
 
-이 디렉토리는 **골격(skeleton)** 입니다. 컴파일 안 됩니다.
-다음 단계에서 채워질 것:
+## 음성 스택 세부
 
-- [ ] supertonic 통합 (`src/audio/tts_node.{h,cpp}`)
-- [ ] whisper.cpp + VAD 통합 (`src/audio/mic_input.cpp`, `src/stt/whisper_node.cpp`)
-- [ ] MCP 카탈로그 로더 (`src/orchestrator/mcp_catalog.cpp`)
-- [ ] A2A 디스패처 (`src/orchestrator/agent_dispatcher.cpp`)
-- [ ] intent_router 노드 (`src/orchestrator/intent_router.cpp`)
-- [ ] response_synth 노드
-- [ ] specialists 두 개 (coder, researcher) — `examples/cookbook/ai-assembly/member_server.cpp` 패턴 재사용
-- [ ] CMake 게이팅 + 모델 다운로드 스크립트
-- [ ] 시연 영상
+### 라이브 마이크 (miniaudio + Silero VAD)
+`JARVIS_MIC=1` 또는 config `use_microphone:true`. 캡처 워커 스레드가 512샘플
+윈도우로 Silero VAD 를 돌려 발화 시작/끝을 감지(200ms 프리롤, 500ms 무음 종료).
+**백프레셔**: 추론 중 캡처를 폐기해 TTS 에코·스테일 발화·시작 노이즈를 차단.
+디바이스 실패(WSL2 마이크 미연결 등) 시 stdin 자동 폴백. 튜닝:
+`JARVIS_VAD_THRESHOLD`(기본 0.5), 관측: `JARVIS_MIC_DEBUG=1`.
 
-설계 리뷰가 끝나면 `/team` 또는 `/autopilot` 으로 위 체크리스트를 한 번에 채울 예정.
+### STT — 두 가지 옵션 (config 의 `stt.type` 으로 스왑)
+- **`whisper_stt`** (기본): whisper.cpp. `language:"auto"` 로 99개 언어 자동
+  감지 → **화자 언어 그대로 응답·TTS**. **언어 관성**: store.prefs 에
+  네이티브 언어를 유지해, 짧은 발화가 외국어로 오인식돼도 홱 바뀌지 않고
+  고수(연속 오인식이어야 전환).
+- **`moonshine_stt`**: Moonshine-tiny ONNX(27M, supertonic 과 ORT 공유).
+  엣지·저지연·한국어 flavor. 언어별 모델이라 lang 고정.
+
+### GPU 가속 (whisper.cpp ROCm/HIP)
+번들 whisper.cpp 는 CPU 전용 — large 가 CPU 로 ~32초(11초 클립). AMD GPU
+(gfx1201=R9700, ROCm≥7.2)면 `bash scripts/build_whisper_hip.sh` 로 GGML_HIP
+빌드 → **~7초(4.5×)**. run_jarvis.sh 가 ROCm 런타임·WSL dxg 를 자동 로드.
+
+## 벤치 — NeoGraph vs LangGraph (`bench/`)
+
+동일 토폴로지를 LangGraph 로 미러링해 프레임워크 오버헤드를 실측
+(`bench/README.md`). 동일 제약 컨테이너, 4층위(mock/E2E/nginx 경계계측/
+스트리밍 TTFT/파이썬-pybind). 요지: 그래프 오버헤드 0.38 vs 3.07ms/턴,
+기동 40ms vs ~3s, RSS 36 vs 561MB — 단 클라우드 LLM 턴 레이턴시는 공급자
+분산이 지배(경계계측으로 분리). `GROQ_API_KEY=... bash bench/run_bench.sh`.
+
+## 구현 상태
+
+**실기동 완료** — 실기기에서 라이브 음성 한 턴이 도는 것을 검증(실LLM Groq).
+mic→VAD→STT→라우터→4-way→합성→TTS 전 구간 + 메모리 영속 + A2A self-server.
+
+알려진 한계 / 다음 버전:
+- **barge-in 미지원** — TTS 재생 중 발화는 백프레셔로 폐기(v2 에서 cancel
+  token 도입).
+- **스트리밍 STT 미적용** — 발화 완성 후 배치 전사. Moonshine v2 ergodic
+  encoder 로 청크 단위 스트리밍이 다음 후보.
+- **다중 화자·장기 메모리 압축** — 단일 화자 가정, turns 24개 상한.
+- **백그라운드 트리거(proactive)** — 설계만 있고 미구현.
 
 ## 라이선스 / 외부 의존성
 
 | 라이브러리 | 라이선스 | 역할 |
 |---|---|---|
-| [supertonic](https://github.com/supertone-inc/supertonic) | MIT | TTS (99M params, ONNX, CPU) |
-| [whisper.cpp](https://github.com/ggerganov/whisper.cpp) | MIT | STT (자동 언어 감지) |
-| [miniaudio](https://github.com/mackron/miniaudio) | MIT-0 / public domain | 마이크 입력 + 스피커 출력 |
-| [Silero VAD](https://github.com/snakers4/silero-vad) | MIT | 발화 끝 감지 (ONNX) |
-| ONNX Runtime | MIT | supertonic + VAD 추론 |
+| [supertonic](https://github.com/supertone-inc/supertonic) | MIT | TTS (99M, ONNX, 31개 언어) |
+| [whisper.cpp](https://github.com/ggerganov/whisper.cpp) | MIT | STT (99개 언어 자동감지, CPU/ROCm) |
+| [Moonshine](https://github.com/moonshine-ai/moonshine) | MIT | 엣지 STT 옵션 (27M ONNX) |
+| [miniaudio](https://github.com/mackron/miniaudio) | MIT-0 / public domain | 마이크 캡처 + 스피커 재생 |
+| [Silero VAD](https://github.com/snakers4/silero-vad) | MIT | 발화 시작/끝 감지 (ONNX) |
+| ONNX Runtime | MIT | supertonic·moonshine·VAD 추론 |
 
 전부 MIT 계열 — NeoGraph 의 `THIRD_PARTY_LICENSES.md` 에 추가 예정.
