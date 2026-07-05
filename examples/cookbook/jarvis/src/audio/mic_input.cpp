@@ -86,6 +86,7 @@ class MicCapture {
             return false;
         }
         state_.assign(2 * 1 * 128, 0.0f);
+        context_.assign(64, 0.0f);
 
         // 캡처 디바이스 (16kHz mono f32)
         ma_device_config cfg = ma_device_config_init(ma_device_type_capture);
@@ -139,13 +140,19 @@ class MicCapture {
     }
 
     float run_vad(const float* chunk /*512*/) {
-        std::array<int64_t, 2> in_shape{1, 512};
+        // Silero v5 계약: 입력 = context(64) ++ chunk(512) = 576 샘플.
+        // context 는 직전 입력의 마지막 64 (첫 호출은 0). 이걸 안 붙이고 512 만
+        // 넣으면 모델이 무의미한 ~0.0006 을 뱉는다(실측 — 이게 원래 버그였음).
+        constexpr int CTX = 64;
+        std::array<int64_t, 2> in_shape{1, CTX + 512};
         std::array<int64_t, 3> st_shape{2, 1, 128};
         int64_t sr = 16000;
         std::array<int64_t, 1> sr_shape{};  // scalar
-        std::vector<float> in_buf(chunk, chunk + 512);
+        std::vector<float> in_buf(CTX + 512);
+        std::copy(context_.begin(), context_.end(), in_buf.begin());
+        std::copy(chunk, chunk + 512, in_buf.begin() + CTX);
         std::array<Ort::Value, 3> ins{
-            Ort::Value::CreateTensor<float>(*mem_, in_buf.data(), 512,
+            Ort::Value::CreateTensor<float>(*mem_, in_buf.data(), in_buf.size(),
                                             in_shape.data(), in_shape.size()),
             Ort::Value::CreateTensor<float>(*mem_, state_.data(), state_.size(),
                                             st_shape.data(), st_shape.size()),
@@ -158,6 +165,8 @@ class MicCapture {
         float prob = outs[0].GetTensorData<float>()[0];
         const float* ns = outs[1].GetTensorData<float>();
         std::copy(ns, ns + state_.size(), state_.begin());
+        // context = 이번 입력의 마지막 64 (다음 호출에 선행)
+        std::copy(in_buf.end() - CTX, in_buf.end(), context_.begin());
         return prob;
     }
 
@@ -221,6 +230,7 @@ class MicCapture {
                     }
                     utt.clear(); triggered = false; silence = 0;
                     std::fill(state_.begin(), state_.end(), 0.0f);
+                    std::fill(context_.begin(), context_.end(), 0.0f);
                 }
             } else {
                 // 유휴 — 프리롤 롤링 유지
@@ -235,6 +245,7 @@ class MicCapture {
                 cv_.notify_one();
                 utt.clear(); triggered = false; silence = 0;
                 std::fill(state_.begin(), state_.end(), 0.0f);
+                    std::fill(context_.begin(), context_.end(), 0.0f);
             }
         }
     }
@@ -249,6 +260,7 @@ class MicCapture {
     std::unique_ptr<Ort::MemoryInfo> mem_;
     std::unique_ptr<Ort::Session>    vad_;
     std::vector<float>               state_;
+    std::vector<float>               context_;  // Silero 64샘플 선행 컨텍스트
 
     ma_device device_{};
     bool      device_ok_ = false;
