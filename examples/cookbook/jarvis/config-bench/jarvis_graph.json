@@ -39,7 +39,7 @@
     "stt": {
       "type": "whisper_stt",
       "_comment": "voice_in PCM → (text, lang). lang='auto' 면 whisper 가 자동 감지.",
-      "model_path": "assets/whisper-large-v3-turbo.bin",
+      "model_path": "assets/whisper-small.bin",
       "language": "auto",
       "translate_to_en": false
     },

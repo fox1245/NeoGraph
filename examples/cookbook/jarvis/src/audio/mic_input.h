@@ -27,7 +27,14 @@
 
 #include <neograph/neograph.h>
 
+#include <memory>
+
 namespace jarvis::audio {
+
+// 라이브 마이크 캡처 + Silero VAD (pimpl). miniaudio 캡처 디바이스가
+// 16kHz mono 를 콜백으로 흘리고, VAD 워커 스레드가 발화 시작/끝을 감지해
+// 완성된 발화 PCM 을 큐에 넣는다. 정의는 mic_input.cpp (miniaudio+ORT 가드 안).
+class MicCapture;
 
 class MicInputNode : public neograph::graph::GraphNode {
   public:
@@ -44,7 +51,11 @@ class MicInputNode : public neograph::graph::GraphNode {
     int sample_rate_;
     float vad_threshold_;
     int max_utterance_seconds_;
-    // TODO: miniaudio device handle, Silero VAD session
+
+    // 라이브 마이크 모드 — cfg "use_microphone":true 또는 env JARVIS_MIC=1.
+    // 디바이스 초기화 실패(WSL2 마이크 없음 등)면 자동으로 stdin 폴백.
+    bool use_mic_ = false;
+    std::unique_ptr<MicCapture> capture_;
 };
 
 }  // namespace jarvis::audio

@@ -167,6 +167,13 @@ AgentEntry* AgentDispatcher::find(const std::string& name) {
     return nullptr;
 }
 
+const AgentEntry* AgentDispatcher::find(const std::string& name) const {
+    for (const auto& entry : entries_) {
+        if (entry.name == name) return &entry;
+    }
+    return nullptr;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // start_self_server  — 자비스 자신을 A2A 서버로 노출
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,22 @@
+# NeoGraph 자비스 벤치 이미지 — mock 빌드 (오디오 의존성 없음 → STT 패스스루/TTS 콘솔)
+# 빌드 컨텍스트: NeoGraph 레포 루트 (.dockerignore 가 jarvis third_party/assets 제외
+# → CMake 가 whisper/onnx/miniaudio 를 못 찾아 자동으로 mock 게이트)
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        g++ cmake make libssl-dev libcurl4-openssl-dev ca-certificates python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+# sqlite/postgres 체크포인트는 자비스가 안 쓰므로 OFF — 컨테이너 dev 패키지 불필요
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release \
+        -DNEOGRAPH_BUILD_COOKBOOK_JARVIS=ON \
+        -DNEOGRAPH_BUILD_SQLITE=OFF \
+        -DNEOGRAPH_BUILD_POSTGRES=OFF \
+    && cmake --build build --target cookbook_jarvis -j"$(nproc)" \
+    && rm -rf build/CMakeFiles
+
+ENV NEOGRAPH_BUILD_DIR=/src/build
+WORKDIR /src/examples/cookbook/jarvis

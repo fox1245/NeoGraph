@@ -39,6 +39,12 @@ class McpCatalog {
     // direct_branch / parallel_branch 가 도구 이름으로 조회.
     neograph::Tool* find_tool(const std::string& fully_qualified_name) const;
 
+    // 해당 도구의 카탈로그 엔트리가 skip_synthesis 를 허용하는가.
+    // 라우터가 LLM 결정 위에 덮어쓰는 강제 규칙용 — hint=false 인 도구의
+    // raw 출력(ISO 날짜 등 비발화 문자열)이 TTS 로 직행하는 것을 막는다.
+    // 알 수 없는 도구는 true (LLM 결정 존중).
+    bool allows_skip_synthesis(const std::string& fully_qualified_name) const;
+
     // routing_hints 섹션 (있으면) 도 라우터 프롬프트에 주입.
     std::string routing_hints_text() const;
 

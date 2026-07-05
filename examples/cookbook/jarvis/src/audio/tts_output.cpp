@@ -11,8 +11,10 @@
 // JARVIS_HAVE_SUPERTONIC 가 없으면 기존 mock 으로 폴백.
 
 #include "tts_output.h"
+#include "audio_playback.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 
@@ -35,7 +37,13 @@ SupertonicTtsNode::SupertonicTtsNode(std::string name, const neograph::json& cfg
     , voice_style_path_(cfg.value("voice_style", std::string("assets/voices/M1.json")))
     , total_steps_(cfg.value("total_steps", 8))
     , speed_(cfg.value("speed",             1.05f))
+    , play_audio_(cfg.value("play_audio",   true))
 {
+    // env 로 강제 비활성 — 헤드리스 CI / 스크립트 구동에서 유용
+    if (const char* no_play = std::getenv("JARVIS_NO_PLAYBACK");
+        no_play && no_play[0] == '1') {
+        play_audio_ = false;
+    }
 #ifdef JARVIS_HAVE_SUPERTONIC
     try {
         // ONNX 환경 + MemoryInfo 초기화 — 수명 동안 재사용
@@ -127,6 +135,15 @@ SupertonicTtsNode::run(neograph::graph::NodeInput in)
                       << "(생성: " << path_turn << ", "
                       << std::fixed << std::setprecision(1) << duration_sec << "초)\n";
             std::cout.flush();
+
+            // 기본 재생 디바이스로 출력 — 실패해도 wav 는 이미 저장됨
+            if (play_audio_) {
+                if (play_pcm_blocking(result.wav, tts_->getSampleRate())) {
+                    std::cerr << "[jarvis:tts] 재생 완료 ("
+                              << std::fixed << std::setprecision(1)
+                              << duration_sec << "초)\n";
+                }
+            }
 
             // 재생 완료 타임스탬프
             using namespace std::chrono;

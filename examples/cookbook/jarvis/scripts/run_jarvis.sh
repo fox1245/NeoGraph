@@ -40,7 +40,18 @@ if [[ ! -d "$CFG" ]]; then
     exit 1
 fi
 
-export LD_LIBRARY_PATH="$TP/onnxruntime/lib:$TP/whisper_install/lib:${LD_LIBRARY_PATH:-}"
+# whisper.cpp 가 GGML_HIP(ROCm) 로 빌드됐으면 ROCm 런타임(libamdhip64/rocblas/
+# hipblas)과 WSL dxg 브리지가 있어야 GPU 를 쓴다. ROCM_PATH 존재 시 자동 추가.
+ROCM_LIB=""
+for r in /opt/rocm-7.2.1/lib /opt/rocm/lib; do
+    [ -f "$r/libamdhip64.so" ] && { ROCM_LIB="$r"; break; }
+done
+if [[ -n "$ROCM_LIB" ]]; then
+    export LD_LIBRARY_PATH="$TP/whisper_install/lib:$ROCM_LIB:/usr/lib/wsl/lib:$TP/onnxruntime/lib:${LD_LIBRARY_PATH:-}"
+    export HSA_ENABLE_DXG_DETECTION=1     # WSL2 /dev/dxg 로 GPU 감지
+else
+    export LD_LIBRARY_PATH="$TP/onnxruntime/lib:$TP/whisper_install/lib:${LD_LIBRARY_PATH:-}"
+fi
 # 모델 path 가 cwd 상대 (assets/...) 이므로 cookbook 디렉토리로 이동 후 실행.
 cd "$ROOT"
 exec "$BIN" "$CFG"

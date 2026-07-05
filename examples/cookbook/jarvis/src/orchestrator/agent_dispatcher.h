@@ -42,6 +42,7 @@ class AgentDispatcher {
     std::string render_for_router_prompt() const;
 
     AgentEntry* find(const std::string& name);
+    const AgentEntry* find(const std::string& name) const;
 
     // 자비스 자신을 외부에 노출 (self 섹션). engine 은 jarvis_graph 컴파일 결과.
     std::unique_ptr<neograph::a2a::A2AServer>

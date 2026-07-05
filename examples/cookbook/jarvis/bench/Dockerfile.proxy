@@ -1,0 +1,5 @@
+# Groq 경계 계측 프록시 — nginx 가 TLS 종단 + 콜별 상류 타이밍 로깅
+FROM nginx:alpine
+COPY examples/cookbook/jarvis/bench/nginx-groq.conf /etc/nginx/nginx.conf
+RUN mkdir -p /logs
+EXPOSE 8080

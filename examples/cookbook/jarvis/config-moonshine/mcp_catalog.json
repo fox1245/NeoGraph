@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "comment": ["벤치용 빈 카탈로그 — 라우터가 chat 경로만 타게 해서 순수 오케스트레이션 코어를 측정"],
+  "tools": [],
+  "routing_hints": {}
+}

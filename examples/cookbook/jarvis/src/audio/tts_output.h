@@ -15,7 +15,8 @@
 //   { "type": "supertonic_tts",
 //     "onnx_dir": "assets/onnx",
 //     "voice_style": "assets/voices/M1.json",
-//     "total_steps": 8, "speed": 1.05 }
+//     "total_steps": 8, "speed": 1.05,
+//     "play_audio": true }        // 스피커 재생 (기본 true; env JARVIS_NO_PLAYBACK=1 로 강제 off)
 //
 // 입력 채널: final_text (string), user_lang (string?, optional)
 // 출력 채널: tts_audio (재생 완료 timestamp 또는 빈 값 — 부수 효과로 스피커 출력)
@@ -52,6 +53,7 @@ class SupertonicTtsNode : public neograph::graph::GraphNode {
     std::string voice_style_path_;
     int total_steps_;
     float speed_;
+    bool play_audio_ = true;  // 합성 후 기본 재생 디바이스로 출력
     int turn_counter_ = 0;  // wav 파일 순번 카운터
 
 #ifdef JARVIS_HAVE_SUPERTONIC

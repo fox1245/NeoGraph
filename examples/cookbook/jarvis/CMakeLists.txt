@@ -127,11 +127,15 @@ set(_jarvis_sources
     src/main.cpp
     src/audio/mic_input.cpp
     src/audio/tts_output.cpp
+    src/audio/audio_playback.cpp
+    src/audio/miniaudio_impl.cpp
     src/stt/whisper_node.cpp
+    src/stt/moonshine_node.cpp
     src/orchestrator/mcp_catalog.cpp
     src/orchestrator/agent_dispatcher.cpp
     src/orchestrator/intent_router_node.cpp
     src/memory/conversation_store.cpp
+    src/memory/json_file_store.cpp
 )
 if(JARVIS_HAVE_SUPERTONIC AND JARVIS_HAVE_ONNXRUNTIME)
     # supertonic helper.cpp 가 ONNX Runtime 헤더 의존. 둘 다 있을 때만 빌드.

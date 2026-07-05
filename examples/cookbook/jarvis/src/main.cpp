@@ -19,18 +19,30 @@
 #include "audio/mic_input.h"
 #include "audio/tts_output.h"
 #include "stt/whisper_node.h"
+#include "stt/moonshine_node.h"
 #include "orchestrator/mcp_catalog.h"
 #include "orchestrator/agent_dispatcher.h"
 #include "orchestrator/intent_router_node.h"
 #include "memory/conversation_store.h"
+#include "memory/json_file_store.h"
 
+#include <asio/co_spawn.hpp>
+#include <asio/deferred.hpp>
+#include <asio/experimental/parallel_group.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
+
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <vector>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 전역 종료 플래그 — SIGINT / SIGTERM 핸들러가 세팅
@@ -102,6 +114,39 @@ public:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// load_prompt_section() — persona.txt 의 ===<section>=== 섹션 추출.
+// IntentRouterNode::compose_system_prompt 와 동일 규칙. 파일이 없으면 빈 문자열.
+// ─────────────────────────────────────────────────────────────────────────────
+
+std::string load_prompt_section(const std::string& path,
+                                const std::string& section)
+{
+    std::ifstream file(path);
+    if (!file.is_open()) return "";
+
+    const std::string target_header = "===" + section + "===";
+    std::string line;
+    bool in_section = false;
+    std::ostringstream buf;
+
+    while (std::getline(file, line)) {
+        bool is_section_header = (line.size() >= 6 &&
+                                  line.front() == '=' &&
+                                  line.back()  == '=');
+        if (is_section_header) {
+            if (in_section) break;
+            if (line == target_header) in_section = true;
+            continue;
+        }
+        if (in_section) buf << line << '\n';
+    }
+
+    std::string text = buf.str();
+    while (!text.empty() && text.back() == '\n') text.pop_back();
+    return text;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // register_custom_node_types() — 자비스 전용 노드 타입을 NodeFactory 에 등록.
 //
 // NeoGraph 내장 타입("llm_call", "intent_classifier" 등) 은 이미 등록되어 있음.
@@ -112,7 +157,8 @@ public:
 void register_custom_node_types(
     const jarvis::orchestrator::McpCatalog&       catalog,
     const jarvis::orchestrator::AgentDispatcher&  dispatcher,
-    std::shared_ptr<neograph::Provider>           router_provider)
+    std::shared_ptr<neograph::Provider>           router_provider,
+    std::shared_ptr<neograph::Provider>           synth_provider)
 {
     using namespace neograph::graph;
     auto& factory = NodeFactory::instance();
@@ -126,9 +172,15 @@ void register_custom_node_types(
     cond_reg.register_condition("route_by_mode",
         [](const GraphState& state) -> std::string {
             auto rd = state.get("route_decision");
-            if (rd.is_object() && rd.contains("mode") && rd["mode"].is_string())
-                return rd["mode"].get<std::string>();
-            return "direct";  // 안전 폴백
+            if (rd.is_object() && rd.contains("mode") && rd["mode"].is_string()) {
+                const std::string m = rd["mode"].get<std::string>();
+                if (m == "chat" || m == "direct" || m == "delegate" ||
+                    m == "parallel") {
+                    return m;
+                }
+            }
+            // 안전 폴백 — 합성기가 직접 답하는 chat 이 가장 무해한 경로
+            return "chat";
         });
     cond_reg.register_condition("route_by_skip_synth",
         [](const GraphState& state) -> std::string {
@@ -145,6 +197,12 @@ void register_custom_node_types(
         });
 
     // ── 2) STT (mock: mock_text 패스스루 + 언어 감지) ────────────────────────
+    // Moonshine STT (ONNX, 엣지/저지연 — whisper_stt 대체 옵션)
+    factory.register_type("moonshine_stt",
+        [](const std::string& name, const neograph::json& cfg, const NodeContext&) {
+            return std::make_unique<jarvis::stt::MoonshineSttNode>(name, cfg);
+        });
+
     factory.register_type("whisper_stt",
         [](const std::string& name, const neograph::json& cfg, const NodeContext&) {
             return std::make_unique<jarvis::stt::WhisperSttNode>(name, cfg);
@@ -227,7 +285,8 @@ void register_custom_node_types(
 
                     neograph::json result;
                     try {
-                        result = tool->execute(args);
+                        std::string raw = co_await tool->execute_async(args);
+                        result = raw;
                     } catch (const std::exception& e) {
                         result = neograph::json{{"error", std::string(e.what())}};
                     }
@@ -251,7 +310,8 @@ void register_custom_node_types(
         });
 
     // ── 8) MCP 도구 병렬 팬아웃 (parallel 경로) ─────────────────────────────
-    // mock 구현은 순차 실행으로도 충분 — 실제 구현에서 make_parallel_group 사용
+    // execute_async + make_parallel_group — 코어 ToolDispatchNode 와 같은 관용구.
+    // N개 호출의 I/O 가 겹쳐서 wall ≈ max(latency). max_concurrent 윈도우 단위.
     factory.register_type("parallel_tool_fanout",
         [&catalog](const std::string& name, const neograph::json& cfg, const NodeContext&)
         {
@@ -273,27 +333,91 @@ void register_custom_node_types(
                         co_return out;
                     }
 
-                    neograph::json results = neograph::json::array();
+                    // 호출 목록 스냅샷 — 워커 코루틴이 state 참조와 무관하게 소유
+                    // (neograph::json iterator 는 std iterator traits 미충족 —
+                    //  range 생성자 대신 인덱스 복사)
+                    std::vector<neograph::json> calls;
+                    calls.reserve(rd["tool_calls"].size());
+                    for (const auto& c : rd["tool_calls"]) calls.push_back(c);
 
-                    // TODO(실제 구현): asio::make_parallel_group 으로 동시 실행
-                    for (const auto& call : rd["tool_calls"]) {
+                    // 워커: 도구 해석 + execute_async 한 건. 예외는 결과 JSON 으로
+                    // 흡수 — 워커는 절대 던지지 않는다.
+                    auto worker = [this](neograph::json call)
+                        -> asio::awaitable<neograph::json> {
                         std::string tool_name = call.value("tool", "");
                         neograph::json args   = call.value("args", neograph::json::object());
 
-                        neograph::Tool* tool = catalog_.find_tool(tool_name);
                         neograph::json result;
+                        neograph::Tool* tool = catalog_.find_tool(tool_name);
                         if (!tool) {
                             result = neograph::json{{"error", "tool not found: " + tool_name}};
                         } else {
                             try {
-                                result = tool->execute(args);
+                                std::string raw = co_await tool->execute_async(args);
+                                result = raw;
                             } catch (const std::exception& e) {
                                 result = neograph::json{{"error", std::string(e.what())}};
                             }
                         }
-                        results.push_back(neograph::json{
+                        // GCC13 코루틴 ICE 회피 — co_return 값은 named local 로
+                        neograph::json entry = neograph::json{
                             {"tool",   tool_name},
-                            {"result", result}});
+                            {"result", result}};
+                        co_return entry;
+                    };
+
+                    neograph::json results = neograph::json::array();
+
+                    if (calls.size() == 1) {
+                        // 단건은 병렬 기계 없이 인라인
+                        neograph::json one = co_await worker(calls[0]);
+                        results.push_back(std::move(one));
+                    } else if (!calls.empty()) {
+                        const std::size_t max_conc = static_cast<std::size_t>(
+                            std::max(1, cfg_.value("max_concurrent", 4)));
+                        auto ex = co_await asio::this_coro::executor;
+
+                        for (std::size_t base = 0; base < calls.size(); base += max_conc) {
+                            const std::size_t end =
+                                std::min(base + max_conc, calls.size());
+
+                            using DeferredOp = decltype(asio::co_spawn(
+                                ex, worker(std::declval<neograph::json>()),
+                                asio::deferred));
+                            std::vector<DeferredOp> ops;
+                            ops.reserve(end - base);
+                            for (std::size_t i = base; i < end; ++i) {
+                                ops.push_back(asio::co_spawn(
+                                    ex, worker(calls[i]), asio::deferred));
+                            }
+
+                            auto [order, excs, values] =
+                                co_await asio::experimental::make_parallel_group(
+                                    std::move(ops))
+                                    .async_wait(asio::experimental::wait_for_all(),
+                                                asio::use_awaitable);
+                            (void)order;  // 결과는 완료 순서가 아닌 호출 순서로 적용
+
+                            for (std::size_t i = 0; i < values.size(); ++i) {
+                                if (excs[i]) {
+                                    // 워커가 자체 예외를 흡수하므로 방어적 폴백
+                                    // (bad_alloc 등) — 원 호출에 키잉해 오류 기록
+                                    std::string err;
+                                    try {
+                                        std::rethrow_exception(excs[i]);
+                                    } catch (const std::exception& e) {
+                                        err = e.what();
+                                    } catch (...) {
+                                        err = "unknown tool failure";
+                                    }
+                                    results.push_back(neograph::json{
+                                        {"tool", calls[base + i].value("tool", "")},
+                                        {"result", neograph::json{{"error", err}}}});
+                                } else {
+                                    results.push_back(std::move(values[i]));
+                                }
+                            }
+                        }
                     }
 
                     out.writes.push_back({"tool_results", results});
@@ -349,9 +473,18 @@ void register_custom_node_types(
 
                     std::string reply;
                     try {
-                        // TODO(실제 구현): co_await 비동기 A2A 호출로 교체
-                        neograph::a2a::Task task =
-                            entry->client->send_message_sync(user_text);
+                        // 비동기 A2A 호출 — 이벤트 루프를 막지 않아 백그라운드
+                        // 트리거/self-server 요청이 위임 대기 중에도 처리된다.
+                        neograph::a2a::MessageSendParams params;
+                        static std::atomic<std::uint64_t> msg_seq{0};
+                        params.message.message_id =
+                            "jarvis-delegate-" + std::to_string(++msg_seq);
+                        params.message.role = neograph::a2a::Role::User;
+                        params.message.parts.push_back(
+                            neograph::a2a::Part::text_part(user_text));
+
+                        neograph::a2a::Task task = co_await
+                            entry->client->send_message_async(params);
 
                         // Task 에서 텍스트 응답 꺼내기
                         // 우선순위: status.message.parts[0].text
@@ -437,10 +570,13 @@ void register_custom_node_types(
 
     // ── 10.5) llm_call — NeoGraph 내장 덮어쓰기. 자비스 특화 합성기.
     //         내장 llm_call 은 messages 채널을 기대하는데 자비스 그래프에선
-    //         아무도 안 채움 → empty messages 400. 직접 user_text + tool_results +
-    //         delegated_reply 를 모아 system+user 메시지를 구성한다.
+    //         아무도 안 채움. 대신 여기서 대화 이력을 **messages 배열**
+    //         (user/assistant 역할 구조)로 조립한다 — 이력을 user 메시지 안에
+    //         JSON 덤프로 인라인하면 모델이 "따라 쓸 본문"으로 취급해 과거
+    //         답변을 verbatim 복창하는 사고가 났다(기억 앵무새). 역할 구조로
+    //         주면 "이어갈 대화"가 되어 발병 지점이 사라진다.
     factory.register_type("llm_call",
-        [router_provider](const std::string& name, const neograph::json& cfg, const NodeContext&)
+        [synth_provider](const std::string& name, const neograph::json& cfg, const NodeContext&)
         {
             class JarvisSynthNode : public neograph::graph::GraphNode {
             public:
@@ -464,26 +600,132 @@ void register_custom_node_types(
                     auto tr = in.state.get("tool_results");
                     if (tr.is_array() && !tr.empty()) tool_summary = tr.dump();
 
-                    std::string sys =
-                        "You are JARVIS — Tony Stark's terse, witty AI butler. "
-                        "Reply in the user's language code (" + user_lang + "). "
-                        "One or two sentences max. No markdown, no JSON, plain speech. "
-                        "If a tool result is provided, lead with the key fact from it.";
-                    std::string usr = "User said: " + user_text + "\n";
-                    if (!tool_summary.empty()) usr += "Tool result (JSON): " + tool_summary + "\n";
-                    if (!delegated.empty())    usr += "Specialist replied: " + delegated + "\n";
+                    // ── 시스템 프롬프트 — persona.txt [synth] 섹션 실배선.
+                    //    (기존엔 하드코딩 프롬프트가 쓰이고 persona [synth] 는
+                    //     사문이었다. 파일이 없을 때만 최소 폴백 사용.)
+                    std::string sys = load_prompt_section(
+                        cfg_.value("prompt_file",    std::string("config/persona.txt")),
+                        cfg_.value("prompt_section", std::string("synth")));
+                    if (sys.empty()) {
+                        sys = "You are JARVIS — Tony Stark's terse, witty AI butler. "
+                              "One or two sentences max. No markdown, no JSON, "
+                              "plain speech suitable for text-to-speech.";
+                    }
+                    sys += "\n\nReply in the user's language code (" + user_lang + "). "
+                           "Spell numbers, dates and times naturally in that language.";
 
+                    // ── 대화 이력 수집 (memory_lookup 이 채운 recent_turns) ──
+                    struct PastTurn { std::string user; std::string assistant; };
+                    std::vector<PastTurn> history;
+                    std::int64_t last_ts = 0;
+                    auto mc = in.state.get("memory_context");
+                    if (mc.is_object() && mc.contains("recent_turns") &&
+                        mc["recent_turns"].is_array()) {
+                        for (const auto& t : mc["recent_turns"]) {
+                            if (!t.is_object()) continue;
+                            history.push_back({t.value("user_text",  std::string("")),
+                                               t.value("final_text", std::string(""))});
+                            if (t.contains("ts") && t["ts"].is_number_integer()) {
+                                last_ts = t["ts"].get<std::int64_t>();
+                            }
+                        }
+                    }
+
+                    // 세션 경계 주석 — 마지막 기억 턴이 오래됐으면 명시해서
+                    // "방금/아까" 같은 지시어를 구세션 턴으로 오해소하지 않게 한다.
+                    if (last_ts > 0) {
+                        using namespace std::chrono;
+                        const std::int64_t now_s = duration_cast<seconds>(
+                            system_clock::now().time_since_epoch()).count();
+                        const std::int64_t gap_min = (now_s - last_ts) / 60;
+                        if (gap_min >= 15) {
+                            sys += "\n(Note: the conversation history above your "
+                                   "current turn ended about "
+                                   + std::to_string(gap_min) +
+                                   " minutes ago — treat it as an earlier session, "
+                                   "not something the user said just now.)";
+                        }
+                    }
+
+                    // ── messages 배열 조립: system → 이력(user/assistant 교대) → 현재 턴 ──
+                    // JARVIS_SYNTH_MODEL — 그래프 JSON 재작성 없이 합성 모델 교체
+                    // (Groq/Cerebras 등 OpenAI 호환 엔드포인트 벤치·운영용)
+                    static const std::string model_env = [] {
+                        const char* v = std::getenv("JARVIS_SYNTH_MODEL");
+                        return std::string(v ? v : "");
+                    }();
                     neograph::CompletionParams p;
-                    p.model       = cfg_.value("model", std::string("gpt-4o"));
+                    p.model       = !model_env.empty()
+                                    ? model_env
+                                    : cfg_.value("model", std::string("gpt-4o"));
                     p.temperature = 0.4f;
                     p.max_tokens  = 220;
                     p.messages.push_back({"system", sys});
-                    p.messages.push_back({"user",   usr});
+                    for (const auto& turn : history) {
+                        if (!turn.user.empty())
+                            p.messages.push_back({"user", turn.user});
+                        if (!turn.assistant.empty())
+                            p.messages.push_back({"assistant", turn.assistant});
+                    }
 
-                    auto reply = co_await provider_->invoke(p, nullptr);
+                    std::string usr = user_text;
+                    if (!tool_summary.empty())
+                        usr += "\n\n[Tool result JSON — use the key fact]: " + tool_summary;
+                    if (!delegated.empty())
+                        usr += "\n\n[Specialist reply — speak it as your own]: " + delegated;
+                    p.messages.push_back({"user", usr});
+
+                    // ── 스트리밍 합성 — 첫 토큰 도착 시 [jarvis:ttft] 마커를
+                    //    stdout 에 한 번 찍는다. 드라이버가 이 시각으로 TTFT
+                    //    (사용자가 답을 "듣기 시작"하는 지점)를 잰다. 요즘 LLM
+                    //    서비스는 전부 스트리밍이라 벤치도 여기 맞춘다.
+                    bool ttft_emitted = false;
+                    auto on_tok = [&ttft_emitted](const std::string& chunk) {
+                        if (!ttft_emitted && !chunk.empty()) {
+                            ttft_emitted = true;
+                            std::cout << "[jarvis:ttft]" << std::endl;
+                        }
+                    };
+                    auto reply = co_await provider_->invoke(p, on_tok);
+                    std::string final_text = reply.message.content;
+
+                    // ── 복창 가드 — 과거 답변과 trim 후 verbatim 일치하면 1회 재생성.
+                    //    커밋 전 마지막 방어선: 복창이 Store 에 들어가면 다음 턴의
+                    //    앵커가 배가되는 자기강화 루프의 입구를 막는다.
+                    auto trim = [](const std::string& s) -> std::string {
+                        const char* ws = " \t\r\n";
+                        auto b = s.find_first_not_of(ws);
+                        if (b == std::string::npos) return "";
+                        auto e = s.find_last_not_of(ws);
+                        return s.substr(b, e - b + 1);
+                    };
+                    const std::string trimmed = trim(final_text);
+                    bool verbatim = false;
+                    if (!trimmed.empty()) {
+                        for (const auto& turn : history) {
+                            if (!turn.assistant.empty() &&
+                                trim(turn.assistant) == trimmed) {
+                                verbatim = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (verbatim) {
+                        std::cerr << "[synth] 복창 감지 — 과거 답변과 verbatim 일치, "
+                                     "1회 재생성\n";
+                        p.messages.push_back({"system",
+                            "Your draft repeated one of your earlier replies "
+                            "word-for-word. Compose a fresh answer to the user's "
+                            "CURRENT message, in their language."});
+                        auto retry = co_await provider_->invoke(p, nullptr);
+                        if (!trim(retry.message.content).empty()) {
+                            final_text = retry.message.content;
+                        }
+                    }
+
                     std::string out_ch = cfg_.value("output_channel",
                                                     std::string("final_text"));
-                    out.writes.push_back({out_ch, reply.message.content});
+                    out.writes.push_back({out_ch, final_text});
                     co_return out;
                 }
 
@@ -493,7 +735,7 @@ void register_custom_node_types(
                 neograph::json cfg_;
                 std::shared_ptr<neograph::Provider> provider_;
             };
-            return std::make_unique<JarvisSynthNode>(name, cfg, router_provider);
+            return std::make_unique<JarvisSynthNode>(name, cfg, synth_provider);
         });
 
     // ── 11) passthrough — cfg.from 채널 값을 cfg.to 채널로 복사 ─────────────
@@ -593,15 +835,21 @@ int main(int argc, char** argv) {
         const char* api_key_env = std::getenv("OPENAI_API_KEY");
         if (api_key_env && std::string(api_key_env).size() > 0) {
             std::cerr << "[jarvis] OpenAI Provider 사용 (OPENAI_API_KEY 감지됨)\n";
+            // OPENAI_BASE_URL — OpenAI 호환 엔드포인트 교체 (Groq/Cerebras 등).
+            // 예: https://api.groq.com/openai → <base>/v1/chat/completions
+            const char* base_url_env = std::getenv("OPENAI_BASE_URL");
+
             neograph::llm::OpenAIProvider::Config pcfg;
             pcfg.api_key      = api_key_env;
             pcfg.default_model = "gpt-4o-mini";
+            if (base_url_env && base_url_env[0]) pcfg.base_url = base_url_env;
             router_provider = neograph::llm::OpenAIProvider::create_shared(pcfg);
 
             // 합성기용 — 더 큰 모델 사용
             neograph::llm::OpenAIProvider::Config synth_cfg;
             synth_cfg.api_key      = api_key_env;
             synth_cfg.default_model = "gpt-4o";
+            if (base_url_env && base_url_env[0]) synth_cfg.base_url = base_url_env;
             synth_provider = neograph::llm::OpenAIProvider::create_shared(synth_cfg);
         } else {
             std::cerr << "[jarvis] Mock Provider 사용 (OPENAI_API_KEY 없음)\n";
@@ -611,7 +859,8 @@ int main(int argc, char** argv) {
 
         // ── 4) 커스텀 노드 타입 등록 ────────────────────────────────────────
         std::cerr << "[jarvis] 노드 타입 등록 중...\n";
-        register_custom_node_types(catalog, dispatcher, router_provider);
+        register_custom_node_types(catalog, dispatcher,
+                                   router_provider, synth_provider);
 
         // ── 5) jarvis_graph.json 컴파일 ──────────────────────────────────────
         std::cerr << "[jarvis] 그래프 컴파일 중: "
@@ -627,13 +876,19 @@ int main(int argc, char** argv) {
         auto engine =
             std::shared_ptr<neograph::graph::GraphEngine>(engine_uptr.release());
 
-        // ── 5.5) In-memory Store 생성 + 엔진에 주입 ─────────────────────────
+        // ── 5.5) 파일 영속 Store 생성 + 엔진에 주입 ─────────────────────────
         // MemoryLookupNode / MemoryCommitNode 가 ctx.store 를 통해 대화 기록을
-        // 읽고 쓸 수 있게 된다. mock 시연이라 영구 저장 불필요 — 프로세스 내
-        // 메모리만 사용 (InMemoryStore).
-        auto jarvis_store = std::make_shared<neograph::graph::InMemoryStore>();
+        // 읽고 쓴다. JsonFileStore 라 프로세스를 재시작해도 기억이 유지됨
+        // ("아까 뭐 물어봤지?" 가 재시작 후에도 동작). 경로는 cwd 상대 —
+        // run_jarvis.sh 가 cookbook 디렉토리로 이동 후 실행하므로 그 안에 생김.
+        const char* mem_path_env = std::getenv("JARVIS_MEMORY_FILE");
+        const std::string mem_path =
+            (mem_path_env && mem_path_env[0]) ? mem_path_env
+                                              : "jarvis_memory.json";
+        auto jarvis_store =
+            std::make_shared<jarvis::memory::JsonFileStore>(mem_path);
         engine->set_store(jarvis_store);
-        std::cerr << "[jarvis] In-memory Store 주입 완료\n";
+        std::cerr << "[jarvis] 파일 영속 Store 주입 완료 (" << mem_path << ")\n";
 
         // ── 6) 자비스 A2A self-server 기동 ──────────────────────────────────
         auto self_server = dispatcher.start_self_server(engine);
