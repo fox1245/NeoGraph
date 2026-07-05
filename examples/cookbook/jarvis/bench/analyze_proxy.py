@@ -34,38 +34,14 @@ def parse_log(path):
     return calls
 
 
-def split_rounds(calls, n_rounds):
-    """콜 스트림을 라운드 수만큼 분할 — 가장 큰 (n-1)개 시간 공백을 경계로.
-
-    라운드 간 공백(컨테이너 교체 수 초)이 턴 간 공백(delay+라우터)보다 항상
-    크다는 성질만 사용 — 절대 임계값 불요, 벽시계 스텝에도 안전."""
-    calls = sorted(calls)
-    if n_rounds == 1:
-        return [calls]
-    gaps = sorted(range(len(calls) - 1),
-                  key=lambda i: calls[i + 1][0] - calls[i][0],
-                  reverse=True)[: n_rounds - 1]
-    clusters, prev = [], 0
-    for b in sorted(gaps):
-        clusters.append(calls[prev: b + 1])
-        prev = b + 1
-    clusters.append(calls[prev:])
-    return clusters
-
-
 def main():
-    log_path = sys.argv[1]
-    calls = parse_log(log_path)
-    print(f"프록시 로그 콜 수: {len(calls)}\n")
-
-    # 순서 기반 매칭 — 턴은 순차 실행이고 콜은 턴 안에서 완료되므로
-    # 로그 순서 = 턴 순서. 벽시계 스텝(WSL2/NTP)에 면역.
-    # 각 라운드 콜 수가 정확히 2×턴수일 때만 사용, 아니면 시간창 폴백.
-    specs = [s.split(":", 1) for s in sys.argv[2:]]
-    clusters = split_rounds(calls, len(specs))
+    # 라운드마다 독립 로그(label:jsonl:log) — 라운드 분할·크로스컨테이너
+    # 시간창 매칭 불요. 콜이 정확히 2×턴수면 순서 기반, 아니면 residual 생략.
+    specs = [s.split(":") for s in sys.argv[1:]]
 
     rows = []
-    for (label, jsonl), cluster in zip(specs, clusters):
+    for label, jsonl, log in specs:
+        cluster = sorted(parse_log(log))
         turns = []
         for line in open(jsonl, encoding="utf-8"):
             o = json.loads(line)
@@ -75,7 +51,6 @@ def main():
 
         residuals, upstream_sums, call_counts, unmatched = [], [], [], 0
         if len(cluster) == 2 * len(turns):
-            print(f"[{label}] 순서 기반 매칭 (콜 {len(cluster)} = 2×{len(turns)}턴)")
             for k, t in enumerate(turns):
                 mine = cluster[2 * k: 2 * k + 2]
                 up_ms = sum(up for _, up, _ in mine) * 1000.0
@@ -83,17 +58,10 @@ def main():
                 upstream_sums.append(up_ms)
                 call_counts.append(len(mine))
         else:
-            print(f"[{label}] 콜 수 불일치({len(cluster)} vs 2×{len(turns)}) "
-                  "— 시간창 매칭 폴백 (벽시계 스텝 시 부정확)")
-            for t in turns:
-                mine = [(ts, up) for ts, up, status in cluster
-                        if t["t0"] - 0.05 <= ts <= t["t1"] + 0.05]
-                up_ms = sum(up for _, up in mine) * 1000.0
-                residuals.append(t["ms"] - up_ms)
-                upstream_sums.append(up_ms)
-                call_counts.append(len(mine))
-                if not mine:
-                    unmatched += 1
+            print(f"[{label}] 콜 {len(cluster)} ≠ 2×{len(turns)}턴 "
+                  "— residual 생략")
+            residuals = [0.0]
+            upstream_sums = [0.0]
 
         def pct(v, p):
             s = sorted(v)

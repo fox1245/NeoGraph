@@ -117,16 +117,25 @@ if BENCH_MODE == "api":
         return ROUTER_LLM.invoke([("system", system), ("human", user)]).content
 
     def call_synth(messages: list) -> str:
+        # 스트리밍 — 첫 청크 도착 시 [jarvis:ttft] 마커. C++ 합성 노드와 동일.
         role_map = {"system": "system", "user": "human", "assistant": "ai"}
-        return SYNTH_LLM.invoke(
-            [(role_map[r], c) for r, c in messages]).content
+        lc = [(role_map[r], c) for r, c in messages]
+        parts, emitted = [], False
+        for chunk in SYNTH_LLM.stream(lc):
+            txt = chunk.content or ""
+            if txt and not emitted:
+                emitted = True
+                print("[jarvis:ttft]", flush=True)
+            parts.append(txt)
+        return "".join(parts)
 else:
     def call_router(system: str, user: str) -> str:  # noqa: ARG001
         # C++ MockProvider: 라우터 호출이면 mock 라우팅 JSON
         return MOCK_ROUTER_JSON
 
     def call_synth(messages: list) -> str:
-        # C++ MockProvider: 마지막 user 메시지 echo
+        # C++ MockProvider: 마지막 user 메시지 echo. 스트리밍 흉내 — 즉시 마커.
+        print("[jarvis:ttft]", flush=True)
         user_text = ""
         for role, content in messages:
             if role == "user":

@@ -668,7 +668,18 @@ void register_custom_node_types(
                         usr += "\n\n[Specialist reply — speak it as your own]: " + delegated;
                     p.messages.push_back({"user", usr});
 
-                    auto reply = co_await provider_->invoke(p, nullptr);
+                    // ── 스트리밍 합성 — 첫 토큰 도착 시 [jarvis:ttft] 마커를
+                    //    stdout 에 한 번 찍는다. 드라이버가 이 시각으로 TTFT
+                    //    (사용자가 답을 "듣기 시작"하는 지점)를 잰다. 요즘 LLM
+                    //    서비스는 전부 스트리밍이라 벤치도 여기 맞춘다.
+                    bool ttft_emitted = false;
+                    auto on_tok = [&ttft_emitted](const std::string& chunk) {
+                        if (!ttft_emitted && !chunk.empty()) {
+                            ttft_emitted = true;
+                            std::cout << "[jarvis:ttft]" << std::endl;
+                        }
+                    };
+                    auto reply = co_await provider_->invoke(p, on_tok);
                     std::string final_text = reply.message.content;
 
                     // ── 복창 가드 — 과거 답변과 trim 후 verbatim 일치하면 1회 재생성.

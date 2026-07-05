@@ -97,13 +97,24 @@ def main() -> None:
         assert proc.stdin is not None
         proc.stdin.write(text + "\n")
         proc.stdin.flush()
-        line = wait_for(lambda l: l.startswith("[jarvis:tts]"), args.turn_timeout)
+        # [jarvis:ttft](첫 합성 토큰) → [jarvis:tts](턴 완료) 순으로 온다.
+        # 둘을 한 번에 훑어 ttft_ms 와 total ms 를 각각 잡는다.
+        ttft_ms = None
+
+        def _seen(l):
+            nonlocal ttft_ms
+            if ttft_ms is None and l.startswith("[jarvis:ttft]"):
+                ttft_ms = (time.monotonic() - t0) * 1000.0
+            return l.startswith("[jarvis:tts]")
+
+        line = wait_for(_seen, args.turn_timeout)
         ms = (time.monotonic() - t0) * 1000.0
         if line is None:
             print(f"[driver] turn {i} timeout", file=sys.stderr)
             records.append({"i": i, "ms": None, "reply": None})
             break
         records.append({"i": i, "ms": round(ms, 3),
+                        "ttft_ms": round(ttft_ms, 3) if ttft_ms is not None else None,
                         "t0": round(t0_epoch, 3),
                         "t1": round(wall_anchor + time.monotonic(), 3),
                         "reply": line.rstrip("\n")[:120]})
@@ -128,6 +139,13 @@ def main() -> None:
         k = min(len(ok) - 1, max(0, int(round(p / 100.0 * (len(ok) - 1)))))
         return ok[k]
 
+    tt = sorted(r["ttft_ms"] for r in records if r.get("ttft_ms") is not None)
+
+    def pct_of(v, p):
+        if not v:
+            return 0.0
+        return v[min(len(v) - 1, max(0, int(round(p / 100.0 * (len(v) - 1)))))]
+
     summary = {
         "label": args.label, "turns_ok": len(ok), "turns_total": len(turns),
         "startup_ms": round(startup_ms, 1),
@@ -137,6 +155,10 @@ def main() -> None:
         "p99_ms": round(pct(99), 3),
         "min_ms": round(ok[0], 3) if ok else 0.0,
         "max_ms": round(ok[-1], 3) if ok else 0.0,
+        "ttft_n": len(tt),
+        "ttft_mean_ms": round(sum(tt) / len(tt), 3) if tt else None,
+        "ttft_p50_ms": round(pct_of(tt, 50), 3) if tt else None,
+        "ttft_p90_ms": round(pct_of(tt, 90), 3) if tt else None,
     }
     with open(args.out, "w", encoding="utf-8") as f:
         for r in records:

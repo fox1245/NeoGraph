@@ -43,6 +43,16 @@ GROQ_ENV=(-e OPENAI_API_KEY="$GROQ_API_KEY"
           -e JARVIS_DEBUG=1
           -e JARVIS_MEMORY_FILE=/tmp/mem.json)
 
+# 라운드마다 프록시 로그를 분리 — 라운드 분할 추측(스모크 오염·스로틀 갭에
+# 취약)을 제거. mv + nginx reopen 으로 프레임워크별 독립 로그.
+rotate_log() {  # $1 = 대상 파일명
+    docker exec jarvis-groq-proxy sh -c \
+        "mv /logs/groq.log /logs/$1 2>/dev/null; nginx -s reopen" || true
+    sleep 1
+}
+# 시작 전 잔여 로그 비우기 (이전 스모크/런 오염 차단)
+docker exec jarvis-groq-proxy sh -c ': > /logs/groq.log; nginx -s reopen' || true
+
 echo "[proxy-bench] NeoGraph 라운드..."
 docker run --rm "${LIMITS[@]}" --network "$NET" -v "$OUT":/out "${GROQ_ENV[@]}" \
     -v "$JARVIS/bench":/src/examples/cookbook/jarvis/bench:ro \
@@ -51,6 +61,7 @@ docker run --rm "${LIMITS[@]}" --network "$NET" -v "$OUT":/out "${GROQ_ENV[@]}" 
     --cmd "exec bash scripts/run_jarvis.sh config-bench-e2e" \
     --turns bench/turns_e2e.txt --out /out/neograph_proxy.jsonl \
     --label neograph-proxy --delay 2
+rotate_log groq_neograph.log
 
 echo "[proxy-bench] LangGraph 라운드..."
 docker run --rm "${LIMITS[@]}" --network "$NET" -v "$OUT":/out "${GROQ_ENV[@]}" \
@@ -62,8 +73,15 @@ docker run --rm "${LIMITS[@]}" --network "$NET" -v "$OUT":/out "${GROQ_ENV[@]}" 
     --cmd "exec python3 bench/langgraph_twin.py" \
     --turns bench/turns_e2e.txt --out /out/langgraph_proxy.jsonl \
     --label langgraph-proxy --delay 2
+rotate_log groq_langgraph.log
 
 echo
-python3 "$JARVIS/bench/analyze_proxy.py" "$OUT/proxylogs/groq.log" \
-    "neograph-proxy:$OUT/neograph_proxy.jsonl" \
-    "langgraph-proxy:$OUT/langgraph_proxy.jsonl"
+echo "=== 완료시간(total) 잔차 ==="
+python3 "$JARVIS/bench/analyze_proxy.py" \
+    "neograph-proxy:$OUT/neograph_proxy.jsonl:$OUT/proxylogs/groq_neograph.log" \
+    "langgraph-proxy:$OUT/langgraph_proxy.jsonl:$OUT/proxylogs/groq_langgraph.log"
+echo
+echo "=== TTFT (스트리밍 첫 토큰) ==="
+python3 "$JARVIS/bench/analyze_ttft.py" \
+    "neograph-proxy:$OUT/neograph_proxy.jsonl:$OUT/proxylogs/groq_neograph.log" \
+    "langgraph-proxy:$OUT/langgraph_proxy.jsonl:$OUT/proxylogs/groq_langgraph.log"
