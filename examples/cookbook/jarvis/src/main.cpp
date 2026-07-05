@@ -641,8 +641,16 @@ void register_custom_node_types(
                     }
 
                     // ── messages 배열 조립: system → 이력(user/assistant 교대) → 현재 턴 ──
+                    // JARVIS_SYNTH_MODEL — 그래프 JSON 재작성 없이 합성 모델 교체
+                    // (Groq/Cerebras 등 OpenAI 호환 엔드포인트 벤치·운영용)
+                    static const std::string model_env = [] {
+                        const char* v = std::getenv("JARVIS_SYNTH_MODEL");
+                        return std::string(v ? v : "");
+                    }();
                     neograph::CompletionParams p;
-                    p.model       = cfg_.value("model", std::string("gpt-4o"));
+                    p.model       = !model_env.empty()
+                                    ? model_env
+                                    : cfg_.value("model", std::string("gpt-4o"));
                     p.temperature = 0.4f;
                     p.max_tokens  = 220;
                     p.messages.push_back({"system", sys});
@@ -809,15 +817,21 @@ int main(int argc, char** argv) {
         const char* api_key_env = std::getenv("OPENAI_API_KEY");
         if (api_key_env && std::string(api_key_env).size() > 0) {
             std::cerr << "[jarvis] OpenAI Provider 사용 (OPENAI_API_KEY 감지됨)\n";
+            // OPENAI_BASE_URL — OpenAI 호환 엔드포인트 교체 (Groq/Cerebras 등).
+            // 예: https://api.groq.com/openai → <base>/v1/chat/completions
+            const char* base_url_env = std::getenv("OPENAI_BASE_URL");
+
             neograph::llm::OpenAIProvider::Config pcfg;
             pcfg.api_key      = api_key_env;
             pcfg.default_model = "gpt-4o-mini";
+            if (base_url_env && base_url_env[0]) pcfg.base_url = base_url_env;
             router_provider = neograph::llm::OpenAIProvider::create_shared(pcfg);
 
             // 합성기용 — 더 큰 모델 사용
             neograph::llm::OpenAIProvider::Config synth_cfg;
             synth_cfg.api_key      = api_key_env;
             synth_cfg.default_model = "gpt-4o";
+            if (base_url_env && base_url_env[0]) synth_cfg.base_url = base_url_env;
             synth_provider = neograph::llm::OpenAIProvider::create_shared(synth_cfg);
         } else {
             std::cerr << "[jarvis] Mock Provider 사용 (OPENAI_API_KEY 없음)\n";

@@ -1,0 +1,9 @@
+# LangGraph 쌍둥이 벤치 이미지 — 동일 토폴로지, python:3.12 + langgraph 스택
+# 빌드 컨텍스트: NeoGraph 레포 루트 (Dockerfile.neograph 와 동일 컨텍스트)
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir langgraph langchain-openai
+
+WORKDIR /app
+COPY examples/cookbook/jarvis/bench   /app/bench
+COPY examples/cookbook/jarvis/config  /app/config
