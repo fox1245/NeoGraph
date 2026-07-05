@@ -11,7 +11,7 @@ T1  발화 끝 (VAD 가 200ms 무음 감지)
 T2  STT 완료 — 텍스트 + 감지된 언어 코드
 T3  메모리 조회 완료 — 최근 6턴 + 선호 + 마지막 주제
 T4  라우터 결정 완료 — {mode, tool_calls, delegate_to, skip_synthesis}
-T5  3-way 분기 — 도구 직접 / 위임 / 병렬 중 하나 완료
+T5  4-way 분기 — 자가응답(chat) / 도구 직접 / 위임 / 병렬 중 하나 완료
 T6  응답 합성 완료 (또는 skip 분기로 우회)
 T7  메모리 커밋 완료
 T8  TTS 첫 청크 재생 시작 ← 토니가 답을 "듣기 시작" 하는 지점
@@ -26,17 +26,37 @@ T0→T8 가 자비스의 체감 응답 속도. 목표 분포:
 
 ## 각 노드 상세
 
-### mic_capture (`voice_in`)
-- `miniaudio` 로 16kHz mono PCM 캡처
-- `Silero VAD` 가 청크 단위 (32ms 권장) 로 발화 확률 평가
-- `vad_threshold` 넘는 청크가 들어오면 녹음 시작, 200ms 연속 미만이면 종료
-- 최대 `max_utterance_seconds` 초 넘으면 강제 종료 (라우터가 너무 긴 입력으로 비대해지는 거 방지)
+### mic_capture (`voice_in`) — 라이브 마이크 구현됨
+- 기본은 stdin 모드(텍스트 / `wav:/경로`). **`use_microphone:true` 또는 env
+  `JARVIS_MIC=1`** 이면 라이브 마이크 캡처 활성화.
+- `miniaudio` 캡처 디바이스가 16kHz mono f32 를 콜백으로 흘림 → mutex 버퍼
+- VAD 워커 스레드가 512샘플(32ms) 윈도우로 `Silero VAD`(ONNX) 추론 → speech prob
+- `vad_threshold`(0.5) 넘으면 녹음 시작(200ms 프리롤로 어두 안 잘림),
+  500ms 연속 무음이면 발화 종료 → PCM 을 발화 큐에 push → run() 이 voice_in 으로
+- 250ms 미만 잡음은 무시, `max_utterance_seconds` 초 넘으면 강제 종료
+- **디바이스 초기화 실패(WSL2 오디오 브리지 없음 등)면 자동 stdin 폴백** —
+  크래시 없음. WSLg/PulseAudio 소스가 있으면 WSL2 에서도 실동작.
 
-### stt (`whisper_stt`)
+### stt (`whisper_stt` 또는 `moonshine_stt`)
 - whisper.cpp 모델 1개를 노드 수명 동안 재사용 (재로딩 비용 ×)
 - `language="auto"` 면 첫 30초 (또는 발화 전체) 로 자동 감지
 - 결과: `user_text` (한 문자열), `user_lang` (ISO 코드)
 - 인식 신뢰도가 너무 낮으면 빈 문자열 — 라우터 단계에서 턴 스킵
+
+**GPU 가속 (whisper.cpp ROCm/HIP)**: 번들 whisper.cpp 는 CPU 전용이라
+whisper-large-v3-turbo 가 CPU 에서 ~32초(jfk 11초)로 라이브에 부적합. AMD GPU
+(gfx1201=R9700 등, ROCm≥7.2)면 `bash scripts/build_whisper_hip.sh` 로
+GGML_HIP 빌드 → whisper_install 교체 → **~7초(4.5×)**. run_jarvis.sh 가 ROCm
+런타임·WSL dxg 브리지(HSA_ENABLE_DXG_DETECTION)를 자동 로드. GPU 있으면
+config 를 large 로 둬도 실시간, 없으면 whisper-small(CPU ~8초)로 교체.
+
+**대체 옵션 `moonshine_stt`** (Moonshine-tiny ONNX): 27M 초경량, raw 16kHz
+파형 입력(mel 아님), seq2seq(encoder + 2-모델 분리 decoder + KV캐시). supertonic
+TTS 와 같은 ONNX Runtime 재사용. 언어별 flavor 모델이라 `user_lang` 은 config
+고정(tiny-ko = "ko"). 토크나이저는 SentencePiece BPE 를 tokenizer.json 에서 직접
+디코드(▁→space + ByteFallback + Fuse). config 의 stt.type 을 바꾸면 스왑되고,
+파이썬 optimum 레퍼런스와 55토큰 글자단위 패리티 검증됨. int8(~28MB)은 풀 ORT
+빌드 필요(번들 축소빌드는 ConvInteger 미포함) → 기본 fp32(~183MB).
 
 ### text_or_voice (`channel_merge`)
 - voice_in 경로(STT 통과)와 text_in 경로(외부 A2A) 중 살아있는 쪽 선택
@@ -51,8 +71,10 @@ T0→T8 가 자비스의 체감 응답 속도. 목표 분포:
 ### router (`intent_classifier`)
 - 작은 LLM (gpt-4o-mini, ~200-400ms)
 - 시스템 프롬프트 = persona.txt [router] + MCP 카탈로그 텍스트 + 에이전트 레지스트리 텍스트
-- 출력 JSON 검증 (도구명/에이전트명이 카탈로그에 있는지). 실패 시 fallback (mode=direct, 빈 tool_calls).
-- 검증 실패는 로그 + 자비스 응답 "잘 못 알아들었습니다" 한 줄
+- 출력 JSON 검증: 파싱 실패 → fallback (mode=chat). 도구명/에이전트명은 카탈로그·
+  레지스트리와 대조해 실재하지 않으면 chat 으로 강등 (LLM 이 발명한
+  `delegate_to:"null"` 같은 결정이 하류로 흐르지 않게).
+- chat 모드는 도구/위임 없이 response_synth 로 직행 — 인사·자기소개·대화 회상용
 
 ### direct_branch (`tool_dispatch`)
 - `route_decision.tool_calls[0]` 한 번 dispatch
@@ -71,8 +93,12 @@ T0→T8 가 자비스의 체감 응답 속도. 목표 분포:
 
 ### response_synth (`llm_call`)
 - 큰 LLM (gpt-4o, ~800-1500ms)
-- 시스템 프롬프트 = persona.txt [synth]
-- 사용자 메시지 = user_text + memory_context + tool_results / delegated_reply 조립
+- 시스템 프롬프트 = persona.txt [synth] (+ 언어 지시 + 구세션 경계 주석)
+- 대화 이력(memory_context.recent_turns)은 **messages 배열의 user/assistant
+  역할 턴으로 전달** — user 메시지에 JSON 덤프로 인라인하면 모델이 과거 답변을
+  본문으로 취급해 verbatim 복창하는 사고가 났었음 (기억 앵무새)
+- 현재 턴 user 메시지 = user_text + tool_results / delegated_reply 첨부
+- 복창 가드: 출력이 과거 답변과 trim 후 완전 일치하면 1회 재생성
 - 출력 = `final_text` (TTS 가 읽을 문자열)
 - skip_synthesis=true 경로에서는 우회됨 (synth_skip 이 그 자리)
 

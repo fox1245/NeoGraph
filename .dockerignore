@@ -9,3 +9,7 @@ docs/api/
 NEXT_SESSION.md
 benchmarks/concurrent/results*.jsonl
 tests/NeoGraph.code-workspace
+build_pybind/
+examples/cookbook/jarvis/third_party/
+examples/cookbook/jarvis/assets/
+examples/cookbook/jarvis/jarvis_memory.json

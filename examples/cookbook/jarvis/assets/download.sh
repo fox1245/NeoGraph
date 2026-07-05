@@ -48,12 +48,15 @@ else
     echo "[jarvis] supertonic-3 already present — skipping."
 fi
 
-# ---------- 2. whisper.cpp small.bin (STT) ----------
-WHISPER_MODEL="whisper-small.bin"
-WHISPER_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+# ---------- 2. whisper.cpp STT 모델 ----------
+# 기본: large-v3-turbo (~1.6GB) — 99개 언어 자동감지 + 전사, 화자 언어로 응답.
+# 경량 대안: JARVIS_WHISPER=small(~470MB) 또는 base/tiny (라즈베리파이).
+# config 의 stt.model_path 가 여기서 받는 파일명과 일치해야 함.
+WHISPER_VARIANT="${JARVIS_WHISPER:-large-v3-turbo}"
+WHISPER_MODEL="whisper-${WHISPER_VARIANT}.bin"
+WHISPER_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${WHISPER_VARIANT}.bin"
 if [[ ! -f "${WHISPER_MODEL}" ]]; then
-    echo "[jarvis] downloading whisper small.bin (~470MB)... TODO: 다국어용. en-only 가 더 가벼움 — 옵션화 예정."
-    # 실제 사용 시: 사용자가 라즈베리파이 타깃이면 tiny/base 가 적절. small 은 노트북급.
+    echo "[jarvis] downloading whisper ${WHISPER_VARIANT}..."
     curl -L -o "${WHISPER_MODEL}" "${WHISPER_URL}"
 else
     echo "[jarvis] whisper model already present — skipping."
@@ -67,6 +70,30 @@ if [[ ! -f "${SILERO_MODEL}" ]]; then
     curl -L -o "${SILERO_MODEL}" "${SILERO_URL}"
 else
     echo "[jarvis] silero VAD already present — skipping."
+fi
+
+# ---------- 4. Moonshine-tiny-ko STT (ONNX, whisper 대체 옵션) ----------
+# 엣지/저지연 STT. fp32 를 받는다 — jarvis 번들 ONNX Runtime(축소 빌드)이
+# int8 의 ConvInteger/MatMulInteger 커널을 미포함하므로. 풀 ORT 빌드면
+# onnx/*_int8.onnx (~28MB) 로 교체 가능(config 의 encoder/decoder 키).
+MOONSHINE_DIR="moonshine-tiny-ko"
+if [[ ! -f "${MOONSHINE_DIR}/onnx/encoder_model.onnx" ]]; then
+    echo "[jarvis] downloading Moonshine-tiny-ko STT (~183MB fp32)..."
+    if command -v hf >/dev/null 2>&1; then
+        hf download onnx-community/moonshine-tiny-ko-ONNX \
+            --include "onnx/encoder_model.onnx" "onnx/decoder_model.onnx" \
+                      "onnx/decoder_with_past_model.onnx" "tokenizer.json" "config.json" \
+            --local-dir "${MOONSHINE_DIR}"
+    else
+        MS_BASE="https://huggingface.co/onnx-community/moonshine-tiny-ko-ONNX/resolve/main"
+        mkdir -p "${MOONSHINE_DIR}/onnx"
+        for f in onnx/encoder_model.onnx onnx/decoder_model.onnx \
+                 onnx/decoder_with_past_model.onnx tokenizer.json config.json; do
+            curl -L -o "${MOONSHINE_DIR}/${f}" "${MS_BASE}/${f}"
+        done
+    fi
+else
+    echo "[jarvis] Moonshine-tiny-ko already present — skipping."
 fi
 
 echo

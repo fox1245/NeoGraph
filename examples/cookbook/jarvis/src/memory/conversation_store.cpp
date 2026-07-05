@@ -48,6 +48,15 @@ int64_t now_epoch_seconds() {
     return duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
 }
 
+/// 앞뒤 공백 제거 — 복창(verbatim) 비교용.
+std::string trim_ws(const std::string& s) {
+    const char* ws = " \t\r\n";
+    auto b = s.find_first_not_of(ws);
+    if (b == std::string::npos) return "";
+    auto e = s.find_last_not_of(ws);
+    return s.substr(b, e - b + 1);
+}
+
 /// tool_results 채널 값에서 도구 이름 목록을 추출한다.
 /// tool_results 는 array([{"tool":"x",...},...]) 또는 object({"tool":"x",...}) 형태
 /// 둘 다 처리한다.
@@ -138,10 +147,18 @@ MemoryLookupNode::run(neograph::graph::NodeInput in) {
         auto item      = store.get(turns_ns, "turns");   // key = "turns"
         if (item && item->value.is_array()) {
             const auto& all = item->value;
-            int total = static_cast<int>(all.size());
-            int start = std::max(0, total - recent_turns_);
-            for (int i = start; i < total; ++i) {
-                recent_turns.push_back(all[i]);
+            // 뒤에서부터 N개 수집 — repeat_flag(복창 의심) 턴은 컨텍스트에서
+            // 제외한다. 복창이 기억에 재주입되면 다음 턴의 앵커가 배가되는
+            // 자기강화 루프가 생기므로, 오염 턴은 저장은 하되 회상은 막는다.
+            std::vector<neograph::json> picked;
+            for (int i = static_cast<int>(all.size()) - 1;
+                 i >= 0 && static_cast<int>(picked.size()) < recent_turns_; --i) {
+                const auto& t = all[i];
+                if (t.is_object() && t.value("repeat_flag", false)) continue;
+                picked.push_back(t);
+            }
+            for (auto it = picked.rbegin(); it != picked.rend(); ++it) {
+                recent_turns.push_back(*it);   // 다시 오래된 순으로
             }
         }
     }
@@ -224,6 +241,22 @@ MemoryCommitNode::run(neograph::graph::NodeInput in) {
     std::string final_text = final_text_v.is_string()
                              ? final_text_v.get<std::string>() : "";
 
+    // 빈 턴 커밋 가드 — user_text 나 final_text 가 비었으면 저장 안 함.
+    // (마이크 노이즈·STT 실패·도구 오류로 빈 응답이 나온 턴이 기억을 오염시켜
+    //  "이전 대화를 기억 못함" 처럼 보이는 것을 막는다. append 리스트가 빈
+    //  턴으로 차서 진짜 대화가 24개 상한 밖으로 밀려나던 문제.)
+    {
+        auto trim = [](const std::string& s) {
+            auto b = s.find_first_not_of(" \t\r\n");
+            return b == std::string::npos ? std::string() : s.substr(b);
+        };
+        if (trim(user_text).empty() || trim(final_text).empty()) {
+            std::cerr << "[MemoryCommitNode] 빈 턴 — 저장 건너뜀 "
+                         "(user_text 또는 final_text 비어있음)\n";
+            co_return out;
+        }
+    }
+
     // 사용된 도구 이름 목록 추출
     auto tool_names = extract_tool_names(tool_res_v);
     neograph::json tools_json = neograph::json::array();
@@ -247,6 +280,27 @@ MemoryCommitNode::run(neograph::graph::NodeInput in) {
         auto existing = store.get(base_ns, "turns");
         if (existing && existing->value.is_array()) {
             all_turns = existing->value;
+        }
+
+        // 복창 의심 표기 — 다른 질문(user_text 상이)에 과거와 verbatim 동일한
+        // 답이 커밋되면 repeat_flag=true. 저장은 하되 MemoryLookupNode 가
+        // 회상에서 제외해 앵무새의 자기강화를 끊는다. (같은 질문에 같은 답은
+        // 정당한 반복이므로 flag 하지 않는다.)
+        {
+            const std::string ft = trim_ws(final_text);
+            if (!ft.empty()) {
+                for (const auto& t : all_turns) {
+                    if (!t.is_object()) continue;
+                    if (trim_ws(t.value("final_text", std::string(""))) == ft &&
+                        trim_ws(t.value("user_text",  std::string(""))) !=
+                            trim_ws(user_text)) {
+                        new_turn["repeat_flag"] = true;
+                        std::cerr << "[MemoryCommitNode] 복창 의심 턴 — "
+                                     "repeat_flag=true (회상 제외 대상)\n";
+                        break;
+                    }
+                }
+            }
         }
 
         all_turns.push_back(new_turn);

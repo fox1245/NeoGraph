@@ -1,0 +1,6 @@
+# E2E 벤치용 데모 MCP 서버 (시간/계산/날씨) — 벤치 네트워크에서 양쪽이 공유
+FROM python:3.12-slim
+RUN pip install --no-cache-dir fastmcp
+COPY examples/cookbook/jarvis/scripts/demo_mcp_server.py /srv/demo_mcp_server.py
+EXPOSE 8888
+CMD ["python3", "/srv/demo_mcp_server.py", "8888", "0.0.0.0"]
