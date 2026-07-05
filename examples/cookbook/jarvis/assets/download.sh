@@ -48,12 +48,15 @@ else
     echo "[jarvis] supertonic-3 already present — skipping."
 fi
 
-# ---------- 2. whisper.cpp small.bin (STT) ----------
-WHISPER_MODEL="whisper-small.bin"
-WHISPER_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+# ---------- 2. whisper.cpp STT 모델 ----------
+# 기본: large-v3-turbo (~1.6GB) — 99개 언어 자동감지 + 전사, 화자 언어로 응답.
+# 경량 대안: JARVIS_WHISPER=small(~470MB) 또는 base/tiny (라즈베리파이).
+# config 의 stt.model_path 가 여기서 받는 파일명과 일치해야 함.
+WHISPER_VARIANT="${JARVIS_WHISPER:-large-v3-turbo}"
+WHISPER_MODEL="whisper-${WHISPER_VARIANT}.bin"
+WHISPER_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${WHISPER_VARIANT}.bin"
 if [[ ! -f "${WHISPER_MODEL}" ]]; then
-    echo "[jarvis] downloading whisper small.bin (~470MB)... TODO: 다국어용. en-only 가 더 가벼움 — 옵션화 예정."
-    # 실제 사용 시: 사용자가 라즈베리파이 타깃이면 tiny/base 가 적절. small 은 노트북급.
+    echo "[jarvis] downloading whisper ${WHISPER_VARIANT}..."
     curl -L -o "${WHISPER_MODEL}" "${WHISPER_URL}"
 else
     echo "[jarvis] whisper model already present — skipping."
