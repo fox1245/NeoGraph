@@ -773,6 +773,45 @@ before `compile()`. (Background: issue #56.)
 
 ---
 
+## Strict topology validation
+
+### Symptom
+
+`compile()` throws `strict topology validation failed (schema_version 1)`
+listing keys like `$: unknown or unconsumed key 'conditionnal_edges'`,
+`nodes.X.barrier: 'wait_for' is missing or empty`, or
+`translation validation failed: compiled graph does not round-trip`.
+
+### Why this happens
+
+Your topology declares `"schema_version": 1`, which opts it into strict
+compilation: every key of every object the compiler owns must be
+*consumed* by the parser. A key nobody consumed is almost always a typo
+(`conditionnal_edges`, `max_retry`, `promt`) or a construct the engine
+would otherwise **silently drop** — the failure mode behind the
+v0.1.0–v0.1.7 `conditional_edges` regression. The round-trip
+(translation-validation) error means the compiled graph re-emitted as
+JSON no longer matches your input: the compiler lost or rewired
+something, and the message lists exactly what.
+
+### Fix
+
+- Fix the listed keys — each error carries its JSON path.
+- Comments and editor metadata belong in the annotation namespace:
+  keys starting with `_` or `x-` (e.g. `_comment`, `x-studio-pos`) are
+  always allowed and never validated.
+- A barrier needs a non-empty `wait_for` array; an inline conditional
+  edge routes through `routes`, so a `to` on it is dead — move the
+  target into `routes` or drop it.
+- Custom node types registered *with* a declared config schema
+  (3-arg `register_type`) are checked closed-world; add
+  `"additionalProperties": true` to the schema to opt a type out.
+- To fall back to the historical lenient parsing, remove
+  `schema_version` — unknown keys are then ignored again and round-trip
+  mismatches only warn on stderr. New documents should stay strict.
+
+---
+
 ## Reporting a bug
 
 If your symptom isn't above:
