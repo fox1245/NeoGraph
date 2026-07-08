@@ -184,6 +184,29 @@ public:
     static json canon(const json& definition);
 
     /**
+     * @brief Upgrade a legacy (schema_version 0 / absent) topology
+     *        document to the current schema version.
+     *
+     * v0 → v1 is purely mechanical and **lossless**: it stamps
+     * `schema_version: 1`, removes barrier blocks whose wait_for is
+     * missing/empty (making the legacy silent drop explicit), and
+     * renames every key strict mode would refuse to
+     * `x-upgraded-<key>` — the annotation namespace — so no user data
+     * is deleted, it is just moved out of the engine's way exactly as
+     * the lenient parser ignored it.
+     *
+     * Guarantee (tested over the corpus): compiling the legacy
+     * document leniently and compiling the upgraded document strictly
+     * yield IR-equivalent graphs
+     * (canon(to_json()) equal modulo the schema_version stamp).
+     *
+     * Like compile(), node-config upgrading consults NodeFactory —
+     * register custom node types before calling. Documents already at
+     * the current version are returned unchanged.
+     */
+    static json upgrade_to_latest(const json& definition);
+
+    /**
      * @brief Translation validation: assert compile() lost nothing.
      *
      * Compares canon(definition) against canon(cg.to_json()). On
