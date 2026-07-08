@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "name": "valid_minimal",
+  "channels": {
+    "messages": {
+      "reducer": "append"
+    }
+  },
+  "nodes": {
+    "a": {
+      "type": "llm_call"
+    }
+  },
+  "edges": [
+    {
+      "from": "__start__",
+      "to": "a"
+    },
+    {
+      "from": "a",
+      "to": "__end__"
+    }
+  ]
+}

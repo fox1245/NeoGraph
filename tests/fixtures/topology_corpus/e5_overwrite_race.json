@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "name": "e5_overwrite_race",
+  "channels": {
+    "messages": {
+      "reducer": "append"
+    },
+    "__route__": {
+      "reducer": "overwrite"
+    }
+  },
+  "nodes": {
+    "src": {
+      "type": "llm_call"
+    },
+    "ic1": {
+      "type": "intent_classifier",
+      "prompt": "p",
+      "routes": [
+        "x"
+      ]
+    },
+    "ic2": {
+      "type": "intent_classifier",
+      "prompt": "p",
+      "routes": [
+        "x"
+      ]
+    }
+  },
+  "edges": [
+    {
+      "from": "__start__",
+      "to": "src"
+    },
+    {
+      "from": "src",
+      "to": "ic1"
+    },
+    {
+      "from": "src",
+      "to": "ic2"
+    }
+  ]
+}

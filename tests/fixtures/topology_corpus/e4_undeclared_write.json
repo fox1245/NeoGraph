@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "name": "e4_undeclared_write",
+  "channels": {
+    "messages": {
+      "reducer": "append",
+      "initial": []
+    }
+  },
+  "nodes": {
+    "ic": {
+      "type": "intent_classifier",
+      "prompt": "p",
+      "routes": [
+        "x"
+      ]
+    }
+  },
+  "edges": [
+    {
+      "from": "__start__",
+      "to": "ic"
+    }
+  ]
+}

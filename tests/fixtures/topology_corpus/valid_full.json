@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "name": "valid_full",
+  "channels": {
+    "messages": {
+      "reducer": "append"
+    },
+    "__route__": {
+      "reducer": "overwrite"
+    }
+  },
+  "nodes": {
+    "ic": {
+      "type": "intent_classifier",
+      "prompt": "route it",
+      "routes": [
+        "x",
+        "y"
+      ]
+    },
+    "a": {
+      "type": "llm_call"
+    },
+    "b": {
+      "type": "llm_call"
+    },
+    "j": {
+      "type": "tool_dispatch",
+      "barrier": {
+        "wait_for": [
+          "a",
+          "b"
+        ]
+      }
+    }
+  },
+  "edges": [
+    {
+      "from": "__start__",
+      "to": "ic"
+    },
+    {
+      "from": "a",
+      "to": "j"
+    },
+    {
+      "from": "b",
+      "to": "j"
+    },
+    {
+      "from": "j",
+      "to": "__end__"
+    }
+  ],
+  "conditional_edges": [
+    {
+      "from": "ic",
+      "condition": "route_channel",
+      "routes": {
+        "x": "a",
+        "y": "b",
+        "default": "__end__"
+      }
+    }
+  ],
+  "interrupt_before": [
+    "j"
+  ]
+}

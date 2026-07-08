@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "name": "e10_open_no_default",
+  "channels": {
+    "messages": {
+      "reducer": "append"
+    },
+    "__route__": {
+      "reducer": "overwrite"
+    }
+  },
+  "nodes": {
+    "ic": {
+      "type": "intent_classifier",
+      "prompt": "p",
+      "routes": [
+        "x"
+      ]
+    },
+    "a": {
+      "type": "llm_call"
+    }
+  },
+  "edges": [
+    {
+      "from": "__start__",
+      "to": "ic"
+    },
+    {
+      "from": "a",
+      "to": "__end__"
+    }
+  ],
+  "conditional_edges": [
+    {
+      "from": "ic",
+      "condition": "route_channel",
+      "routes": {
+        "x": "a"
+      }
+    }
+  ]
+}
