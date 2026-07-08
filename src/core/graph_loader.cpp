@@ -303,6 +303,12 @@ std::vector<std::string> NodeFactory::registered_types() const {
     return registry_names(registry_);
 }
 
+json NodeFactory::config_schema(const std::string& type) const {
+    auto it = schemas_.find(type);
+    if (it != schemas_.end()) return it->second;
+    return json::parse(R"JSON({"type":"object","description":"No declared config schema; any object accepted."})JSON");
+}
+
 json NodeFactory::export_schema() const {
     // Fixed top-level envelope. This mirrors exactly what
     // GraphCompiler::compile reads (src/core/graph_compiler.cpp);
@@ -311,6 +317,7 @@ json NodeFactory::export_schema() const {
         "type": "object",
         "description": "NeoGraph topology definition consumed by GraphEngine::compile / the JSON loader.",
         "properties": {
+            "schema_version": { "type": "integer", "description": "Topology schema version. 1 opts this document into strict compilation: every key must be consumed by the parser (unknown keys, typos, and silently-droppable constructs are hard errors), and translation validation failures throw instead of warning. Absent or 0 = legacy lenient parsing. Keys prefixed '_' or 'x-' are annotations and always allowed." },
             "name": { "type": "string", "description": "Optional graph name." },
             "channels": {
                 "type": "object",

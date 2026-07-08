@@ -216,6 +216,18 @@ public:
     std::vector<std::string> registered_types() const;
 
     /**
+     * @brief Declared config schema for a node type.
+     *
+     * Returns the schema passed to the 3-arg register_type overload,
+     * or the permissive `{"type":"object"}` default for types
+     * registered without one (never throws on unknown types — returns
+     * the permissive default; create() is where unknown types fail).
+     * Backs strict-mode consumed-key accounting in GraphCompiler and
+     * per-type introspection for external tooling.
+     */
+    json config_schema(const std::string& type) const;
+
+    /**
      * @brief Export a machine-readable description of the topology
      *        JSON format this engine accepts.
      *

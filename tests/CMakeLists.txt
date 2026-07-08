@@ -17,6 +17,7 @@ add_executable(neograph_tests
     test_scheduler.cpp
     test_node_execution.cpp
     test_compiler.cpp
+    test_compiler_strict.cpp
     test_barrier_persistence.cpp
     test_coordinator.cpp
     test_sends_interrupt_order.cpp

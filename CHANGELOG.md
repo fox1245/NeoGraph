@@ -9,6 +9,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **토폴로지 컴파일 정합성 게이트 — 소비 회계 + translation validation** (#75 M1).
+  "조용한 의미 소실" 클래스(v0.1.0–v0.1.7 `conditional_edges` 무언 드롭과
+  동형의 사고)를 구조적으로 봉쇄하는 2중 장치:
+  - **소비 회계(consumed-key accounting)**: `"schema_version": 1` 을 선언한
+    문서는 strict 컴파일로 전환 — 파서가 소비하지 않은 키(오타
+    `conditionnal_edges`, 미지원 필드, 빈 `wait_for` 로 무언 드롭될
+    barrier, inline conditional 의 무시되는 `to`)가 전부 컴파일 에러로
+    모아서 보고된다. 마킹은 파싱 블록 **안**에서 이뤄지므로 파싱 단계를
+    지우면 마크도 함께 사라져, 해당 기능을 쓰는 strict 문서가 즉시
+    실패한다 — 드롭 회귀가 조용할 수 없는 구조. `_`/`x-` 접두 키
+    (`_comment`, `x-studio-*`)는 주석 네임스페이스로 항상 허용.
+    `schema_version` 없는 기존 문서는 관용 동작 그대로 (바이트 단위 보존).
+  - **translation validation**: `CompiledGraph::to_json()` 역방출 +
+    `GraphCompiler::canon()` 정규형으로 매 컴파일마다
+    `canon(입력) == canon(재방출)` 을 검사한다. 불일치(= 컴파일러가
+    뭔가를 떨어뜨렸거나 오배선)는 strict 문서에서 throw, 관용 문서에서
+    stderr 경고. 등가 판정은 구조 비교 — 라우트 키 뒤바뀜 같은 오배선도
+    잡는다 (존재-여부 비교가 놓치는 클래스).
+  - `NodeFactory::config_schema(type)` 조회 추가, `export_schema()` 에
+    `schema_version` 필드 문서화. 신규 테스트 27개
+    (`tests/test_compiler_strict.cpp`) — v0.1.x 드롭 mutant 시뮬레이션
+    (conditional_edges/barrier/interrupt 드롭 + 라우트 오배선) 포함.
+
 ## [0.11.1] - 2026-06-25
 
 ### Changed

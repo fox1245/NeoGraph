@@ -40,6 +40,12 @@ std::unique_ptr<GraphEngine> GraphEngine::compile(
 
     auto cg = GraphCompiler::compile(definition, default_context);
 
+    // Translation validation: assert nothing was silently dropped or
+    // rewired between the JSON definition and the compiled graph.
+    // Strict documents (schema_version >= 1) fail hard; legacy
+    // documents get a stderr warning. Must run before the moves below.
+    GraphCompiler::verify_roundtrip(definition, cg);
+
     auto engine = std::unique_ptr<GraphEngine>(new GraphEngine());
     engine->name_              = std::move(cg.name);
     engine->channel_defs_      = std::move(cg.channel_defs);
