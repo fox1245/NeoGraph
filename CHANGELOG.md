@@ -11,6 +11,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **DSL 표면 (elaboration 계층) + 스키마 진화 게이트** (#75 M4).
+  - **Elaborator**: `vars`(`{"$var":...}`·`${...}` 보간, 비순환 강제) /
+    `templates`+`use`(파라미터 정확 일치 강제, 노드 prefix 리네임 —
+    로컬 참조·barrier·routes까지, 채널은 공유 상태라 전역 병합) /
+    `when` 조건부 포함. **non-Turing-complete·total**: 모든 DSL 문서는
+    유한 시간에 유일한 코어로 정규화되고, 코어 문서에 대해선 항등
+    (멱등). 모든 에러가 DSL 소스 좌표(`use[2].args`, `vars.model`)로
+    보고되고, 소스맵(출력 위치→생성 구문)이 동봉된다. 락파일 워크플로:
+    `./example_elaborate harness.dsl.json > harness.json` (example 53).
+  - **`GraphCompiler::upgrade_to_latest()`**: v0→v1 무손실 기계 변환 —
+    strict 가 거부할 키를 전부 `x-upgraded-<키>` 주석 네임스페이스로
+    격리(데이터 삭제 0), 빈 barrier 는 명시적으로 제거. 코퍼스 전체에
+    대해 "legacy 관용 컴파일 IR == 업그레이드 후 strict 컴파일 IR"
+    (canon 동치, 버전 스탬프 제외)을 테스트로 보증.
+  - **스키마 진화 게이트**: `tests/fixtures/schema_snapshot.json`
+    베이스라인 대비 add-only 부분집합 판정(JSON Subschema 계열의
+    결정가능 서브셋) — 노드타입/프로퍼티/reducer/condition 제거,
+    required 증가, closed 조건 라벨 변경, effect 계약 변경이 전부
+    테스트 실패 = CI 머지 차단. 비호환 변경은 버전 범프 + 업그레이더 +
+    스냅샷 재생성을 같은 리뷰 커밋에서 강제.
+
 - **PBT/차분 검증 하네스** (#75 M3). 300-시드 결정론적 topology 생성기
   (스키마 봉투에서 유효 strict 문서 생성, 기능 커버리지 자가 계측 —
   conditional_edges/barrier/interrupt 등장률 30% 미달 시 테스트 실패:
