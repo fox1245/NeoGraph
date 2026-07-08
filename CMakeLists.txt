@@ -387,6 +387,7 @@ add_library(neograph_core
     src/core/deep_research_graph.cpp
     src/core/store.cpp
     src/core/history.cpp
+    src/core/evolution.cpp
     src/observability/openinference.cpp
 )
 # postgres_checkpoint.cpp is built into a separate target below
@@ -1130,6 +1131,12 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         # workflow: `./example_elaborate harness.dsl.json > harness.json`.
         add_executable(example_elaborate examples/53_elaborate.cpp)
         target_link_libraries(example_elaborate PRIVATE neograph::core)
+
+        # Harness evolution loop (issue #80). Example 54: reproduce the
+        # README evolution benchmark from a DSL seed + task fixture.
+        #   ./example_evolution seed.json task.json > lineage.json
+        add_executable(example_evolution examples/54_evolution.cpp)
+        target_link_libraries(example_evolution PRIVATE neograph::core)
 
         # Clay + Raylib chatbot (optional — requires Raylib)
         option(NEOGRAPH_BUILD_CLAY_EXAMPLE "Build Clay chatbot example (fetches Raylib)" OFF)
