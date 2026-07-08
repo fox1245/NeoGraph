@@ -609,6 +609,113 @@ json GraphCompiler::canon(const json& definition) {
     return sort_keys(out);
 }
 
+json GraphCompiler::upgrade_to_latest(const json& definition) {
+    if (definition.contains("schema_version")
+        && definition["schema_version"].is_number_integer()
+        && definition["schema_version"].get<int>() >= kSupportedSchemaVersion) {
+        return definition;   // already current
+    }
+
+    // Rebuild an object keeping `consumed` keys, renaming everything
+    // else (except annotations) into the x- namespace — data preserved,
+    // strict mode satisfied, semantics identical to the lenient parser
+    // that ignored those keys.
+    auto quarantine = [](const json& obj, const std::set<std::string>& consumed) {
+        json out = json::object();
+        for (const auto& [k, v] : obj.items()) {
+            if (consumed.count(k) || is_annotation_key(k)) out[k] = v;
+            else out["x-upgraded-" + k] = v;
+        }
+        return out;
+    };
+
+    json up = json::object();
+    up["schema_version"] = kSupportedSchemaVersion;
+
+    static const std::set<std::string> top_keys = {
+        "name", "channels", "nodes", "edges", "conditional_edges",
+        "interrupt_before", "interrupt_after", "retry_policy",
+    };
+    for (const auto& [k, v] : definition.items()) {
+        if (k == "schema_version") continue;   // re-stamped above
+        if (!top_keys.count(k) && !is_annotation_key(k)) {
+            up["x-upgraded-" + k] = v;
+            continue;
+        }
+        if (k == "channels" && v.is_object()) {
+            json channels = json::object();
+            for (const auto& [cn, cd] : v.items()) {
+                channels[cn] = cd.is_object()
+                    ? quarantine(cd, {"reducer", "initial"}) : cd;
+            }
+            up["channels"] = std::move(channels);
+        } else if (k == "nodes" && v.is_object()) {
+            json nodes = json::object();
+            for (const auto& [nn, nd] : v.items()) {
+                if (!nd.is_object()) { nodes[nn] = nd; continue; }
+                // Node config keys are checked against the declared
+                // schema only when it is closed-world (mirrors strict
+                // compile) — permissive types keep their config as-is.
+                const std::string type = nd.value("type", "");
+                const json schema = NodeFactory::instance().config_schema(type);
+                bool open = !schema.contains("properties");
+                if (schema.contains("additionalProperties")) {
+                    const auto& ap = schema["additionalProperties"];
+                    if (!ap.is_boolean() || ap.get<bool>()) open = true;
+                }
+                std::set<std::string> consumed = {"type", "barrier"};
+                if (!open) {
+                    for (const auto& [pk, pv] : schema["properties"].items()) {
+                        (void)pv;
+                        consumed.insert(pk);
+                    }
+                }
+                json node = open ? nd : quarantine(nd, consumed);
+                // Legacy: an empty/missing wait_for silently dropped
+                // the barrier — make that explicit.
+                if (node.contains("barrier")) {
+                    const auto& b = node["barrier"];
+                    const bool empty = !b.is_object() || !b.contains("wait_for")
+                        || !b["wait_for"].is_array() || b["wait_for"].empty();
+                    if (empty) {
+                        json cleaned = json::object();
+                        for (const auto& [nk, nv] : node.items()) {
+                            if (nk != "barrier") cleaned[nk] = nv;
+                        }
+                        node = std::move(cleaned);
+                    }
+                }
+                nodes[nn] = std::move(node);
+            }
+            up["nodes"] = std::move(nodes);
+        } else if (k == "edges" && v.is_array()) {
+            json edges = json::array();
+            for (const auto& e : v) {
+                if (!e.is_object()) { edges.push_back(e); continue; }
+                const bool cond = e.contains("condition")
+                               || e.value("type", "") == "conditional";
+                edges.push_back(cond
+                    ? quarantine(e, {"from", "condition", "routes", "type"})
+                    : quarantine(e, {"from", "to"}));
+            }
+            up["edges"] = std::move(edges);
+        } else if (k == "conditional_edges" && v.is_array()) {
+            json ces = json::array();
+            for (const auto& e : v) {
+                ces.push_back(e.is_object()
+                    ? quarantine(e, {"from", "condition", "routes"}) : e);
+            }
+            up["conditional_edges"] = std::move(ces);
+        } else if (k == "retry_policy" && v.is_object()) {
+            up["retry_policy"] = quarantine(v, {"max_retries", "initial_delay_ms",
+                                                "backoff_multiplier", "max_delay_ms"});
+        } else {
+            up[k] = v;
+        }
+    }
+    return up;
+}
+
 void GraphCompiler::verify_roundtrip(const json& definition,
                                      const CompiledGraph& cg) {
     const json a = canon(definition);

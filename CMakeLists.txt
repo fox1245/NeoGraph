@@ -373,6 +373,7 @@ add_library(neograph_core
     src/core/graph_engine.cpp
     src/core/graph_compiler.cpp
     src/core/graph_validator.cpp
+    src/core/elaborator.cpp
     src/core/graph_coordinator.cpp
     src/core/graph_executor.cpp
     src/core/node_cache.cpp
@@ -1124,6 +1125,11 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         # exact engine version it was built against.
         add_executable(example_export_schema examples/52_export_schema.cpp)
         target_link_libraries(example_export_schema PRIVATE neograph::core)
+
+        # DSL -> core topology expander (issue #75 M4). The lockfile
+        # workflow: `./example_elaborate harness.dsl.json > harness.json`.
+        add_executable(example_elaborate examples/53_elaborate.cpp)
+        target_link_libraries(example_elaborate PRIVATE neograph::core)
 
         # Clay + Raylib chatbot (optional — requires Raylib)
         option(NEOGRAPH_BUILD_CLAY_EXAMPLE "Build Clay chatbot example (fetches Raylib)" OFF)
