@@ -106,7 +106,7 @@ ConditionRegistry& ConditionRegistry::instance() {
 }
 
 ConditionRegistry::ConditionRegistry() {
-    // Built-in: has_tool_calls
+    // Built-in: has_tool_calls — closed contract: exactly true/false.
     register_condition("has_tool_calls",
         [](const GraphState& state) -> std::string {
             auto messages = state.get_messages();
@@ -116,21 +116,40 @@ ConditionRegistry::ConditionRegistry() {
                 }
             }
             return "false";
-        });
+        },
+        ConditionSpec{{"false", "true"}, /*open=*/false});
 
     // Built-in: route_channel
     // Reads the "__route__" channel and returns its string value.
     // Used with IntentClassifierNode for dynamic intent-based routing.
+    // Open contract: returns arbitrary channel content — but "default"
+    // is a KNOWN label (returned whenever __route__ is missing or not
+    // a string), so the validator can warn when it is unrouted.
     register_condition("route_channel",
         [](const GraphState& state) -> std::string {
             auto route = state.get("__route__");
             if (route.is_string()) return route.get<std::string>();
             return "default";
-        });
+        },
+        ConditionSpec{{"default"}, /*open=*/true});
 }
 
 void ConditionRegistry::register_condition(const std::string& name, ConditionFn fn) {
     registry_[name] = std::move(fn);
+    specs_.erase(name);   // re-registration without a spec clears the old one
+}
+
+void ConditionRegistry::register_condition(const std::string& name, ConditionFn fn,
+                                           ConditionSpec spec) {
+    registry_[name] = std::move(fn);
+    specs_[name]    = std::move(spec);
+}
+
+std::optional<ConditionSpec> ConditionRegistry::condition_spec(
+    const std::string& name) const {
+    auto it = specs_.find(name);
+    if (it == specs_.end()) return std::nullopt;
+    return it->second;
 }
 
 ConditionFn ConditionRegistry::get(const std::string& name) const {
@@ -169,7 +188,8 @@ NodeFactory::NodeFactory() {
             "type": "object",
             "properties": {},
             "description": "LLM call node. Uses the NodeContext provider/model; no type-specific config fields."
-        })JSON"));
+        })JSON"),
+        json::parse(R"JSON({"reads":["messages"],"writes":["messages"]})JSON"));
 
     register_type("tool_dispatch",
         [](const std::string& name, const json& /*config*/,
@@ -180,7 +200,8 @@ NodeFactory::NodeFactory() {
             "type": "object",
             "properties": {},
             "description": "Executes tool calls from the last assistant message using NodeContext tools; no type-specific config fields."
-        })JSON"));
+        })JSON"),
+        json::parse(R"JSON({"reads":["messages"],"writes":["messages"]})JSON"));
 
     // intent_classifier: LLM-based intent routing
     register_type("intent_classifier",
@@ -210,7 +231,8 @@ NodeFactory::NodeFactory() {
                 }
             },
             "required": ["routes"]
-        })JSON"));
+        })JSON"),
+        json::parse(R"JSON({"reads":["messages"],"writes":["__route__"]})JSON"));
 
     // subgraph: recursively compile an inner graph definition as a single node
     // Supports both inline JSON and external file path:
@@ -297,6 +319,20 @@ void NodeFactory::register_type(const std::string& type, NodeFactoryFn fn,
                                 json config_schema) {
     registry_[type] = std::move(fn);
     schemas_[type]  = std::move(config_schema);
+    effects_.erase(type);   // re-registration without effects clears them
+}
+
+void NodeFactory::register_type(const std::string& type, NodeFactoryFn fn,
+                                json config_schema, json effects) {
+    registry_[type] = std::move(fn);
+    schemas_[type]  = std::move(config_schema);
+    effects_[type]  = std::move(effects);
+}
+
+json NodeFactory::node_effects(const std::string& type) const {
+    auto it = effects_.find(type);
+    if (it != effects_.end()) return it->second;
+    return json();   // null: no declared effect contract
 }
 
 std::vector<std::string> NodeFactory::registered_types() const {
@@ -400,13 +436,36 @@ json NodeFactory::export_schema() const {
             : json::parse(R"JSON({"type":"object","description":"No declared config schema; any object accepted."})JSON");
     }
 
+    // Per-type channel-effect contracts (only types that declared one).
+    json node_effects = json::object();
+    for (const auto& kv : registry_) {
+        auto eit = effects_.find(kv.first);
+        if (eit != effects_.end()) node_effects[kv.first] = eit->second;
+    }
+
+    // Per-condition output-label contracts (only conditions that
+    // declared one). `conditions` stays a plain name array for
+    // backward compatibility with existing tooling.
+    json condition_specs = json::object();
+    auto& creg = ConditionRegistry::instance();
+    for (const auto& cname : creg.names()) {
+        if (auto spec = creg.condition_spec(cname)) {
+            json labels = json::array();
+            for (const auto& l : spec->labels) labels.push_back(l);
+            condition_specs[cname] = json{{"labels", std::move(labels)},
+                                          {"open", spec->open}};
+        }
+    }
+
     json doc;
     doc["neograph_version"] = NEOGRAPH_VERSION_STR;
     doc["$schema"]          = "https://json-schema.org/draft/2020-12/schema";
     doc["topology"]         = json::parse(kTopologySchema);
     doc["node_types"]       = std::move(node_types);
+    doc["node_effects"]     = std::move(node_effects);
     doc["reducers"]         = ReducerRegistry::instance().names();
-    doc["conditions"]       = ConditionRegistry::instance().names();
+    doc["conditions"]       = creg.names();
+    doc["condition_specs"]  = std::move(condition_specs);
     return doc;
 }
 

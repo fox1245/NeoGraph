@@ -1,5 +1,6 @@
 #include <neograph/graph/engine.h>
 #include <neograph/graph/loader.h>
+#include <neograph/graph/validator.h>
 #include <neograph/graph/coordinator.h>
 
 #include <neograph/async/run_sync.h>
@@ -45,6 +46,31 @@ std::unique_ptr<GraphEngine> GraphEngine::compile(
     // Strict documents (schema_version >= 1) fail hard; legacy
     // documents get a stderr warning. Must run before the moves below.
     GraphCompiler::verify_roundtrip(definition, cg);
+
+    // Static semantic analysis (issue #75 M2). Strict documents:
+    // errors throw, warnings go to stderr. Legacy documents: only
+    // errors are surfaced (as stderr warnings — they were silent
+    // breakage before, e.g. a dangling edge or an empty route map),
+    // heuristic lint is suppressed to keep existing graphs quiet.
+    {
+        auto report = GraphValidator::validate(cg);
+        if (cg.schema_version >= 1) {
+            if (report.has_errors()) {
+                std::string msg = "graph validation failed (schema_version "
+                    + std::to_string(cg.schema_version) + "):\n" + report.summary();
+                throw std::runtime_error(msg);
+            }
+            for (const auto* w : report.warnings()) {
+                std::fprintf(stderr, "[neograph] lint [%s] %s: %s\n",
+                             w->code.c_str(), w->path.c_str(), w->message.c_str());
+            }
+        } else {
+            for (const auto* e : report.errors()) {
+                std::fprintf(stderr, "[neograph] warning: [%s] %s: %s\n",
+                             e->code.c_str(), e->path.c_str(), e->message.c_str());
+            }
+        }
+    }
 
     auto engine = std::unique_ptr<GraphEngine>(new GraphEngine());
     engine->name_              = std::move(cg.name);
