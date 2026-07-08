@@ -11,6 +11,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **GraphValidator — 토폴로지 정적 의미 검사 (E3~E11 + effect)** (#75 M2).
+  파싱(M1)과 실행 사이의 패스 계층. strict 문서(schema_version>=1)에서
+  에러는 컴파일 실패, 경고는 stderr lint; 관용 문서는 에러급만 stderr
+  경고로 표면화(기존 그래프 무소음). 판정 철학 = 체커 건전성 우선:
+  엔진 의미론상 절대 옳을 수 없는 것만 에러(dangling 참조 E3, 신호
+  경로 없는 barrier E8 — goto 는 barrier 회계를 우회하므로 구제 불가,
+  빈 routes E10 — 디스패치가 rend() 역참조 UB, 미선언 채널 write E4 —
+  런타임 확정 throw), Command.goto/Send 가 정당화할 수 있는 것은 경고
+  (도달성 E7, 탈출 없는 사이클 E11, barrier 없는 plain fan-in E9,
+  overwrite 경쟁 E5, dead channel E6). 모든 진단은 기계가 읽을 수 있는
+  witness(반례) JSON 동반 — Studio 캔버스 하이라이트용(M3).
+  - **route 완전성(E10)**: `ConditionSpec` 라벨 계약 도입.
+    `register_condition` 3-인자 오버로드로 조건의 출력 라벨 집합을
+    선언하면, closed 조건의 라우트는 라벨과 정확히 일치해야 한다 —
+    미커버 라벨은 스케줄러의 "사전순 마지막 라우트" 폴백(순서 의존
+    임의 타깃)으로 떨어지므로 에러. 빌트인 `has_tool_calls` =
+    closed {false,true}, `route_channel` = open + known {default}.
+  - **채널 effect 계약**: `register_type` 4-인자 오버로드로 노드
+    타입의 reads/writes 채널을 선언. 그래프의 **모든** 노드 타입이
+    선언한 경우에만 E4/E5/E6 분석 가동(미지 타입 하나면 전체 스킵 —
+    커버리지보다 건전성). 빌트인 3종(llm_call/tool_dispatch/
+    intent_classifier) 선언 완료.
+  - `export_schema()` 에 `node_effects`·`condition_specs` 추가
+    (기존 `conditions` 배열은 하위호환 유지). 신규 테스트 22개.
+
 - **토폴로지 컴파일 정합성 게이트 — 소비 회계 + translation validation** (#75 M1).
   "조용한 의미 소실" 클래스(v0.1.0–v0.1.7 `conditional_edges` 무언 드롭과
   동형의 사고)를 구조적으로 봉쇄하는 2중 장치:

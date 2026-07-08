@@ -372,6 +372,7 @@ add_library(neograph_core
     src/core/tool.cpp
     src/core/graph_engine.cpp
     src/core/graph_compiler.cpp
+    src/core/graph_validator.cpp
     src/core/graph_coordinator.cpp
     src/core/graph_executor.cpp
     src/core/node_cache.cpp

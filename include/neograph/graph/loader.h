@@ -15,6 +15,7 @@
 #include <neograph/graph/types.h>
 #include <unordered_map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -101,6 +102,26 @@ private:
  *     });
  * @endcode
  */
+/**
+ * @brief Declared output-label contract of a condition function.
+ *
+ * Backs static route-completeness checking (GraphValidator E10): a
+ * conditional edge over a *closed* condition must map exactly the
+ * declared labels — an unmapped label would fall into the scheduler's
+ * lexicographically-last-route fallback (an arbitrary target), and a
+ * route key outside the label set is dead. Conditions registered
+ * without a spec are skipped by the validator.
+ */
+struct ConditionSpec {
+    /// Labels the condition is known to return ("known" for open specs,
+    /// "exactly these" for closed specs).
+    std::vector<std::string> labels;
+    /// True when the condition can return values outside `labels`
+    /// (e.g. route_channel returns arbitrary channel content) — the
+    /// validator then only warns about uncovered *known* labels.
+    bool open = false;
+};
+
 class NEOGRAPH_API ConditionRegistry {
 public:
     /// @brief Get the singleton instance.
@@ -115,11 +136,26 @@ public:
     void register_condition(const std::string& name, ConditionFn fn);
 
     /**
+     * @brief Register a named condition function with a declared
+     *        output-label contract (enables E10 route-completeness
+     *        checking on conditional edges using this condition).
+     */
+    void register_condition(const std::string& name, ConditionFn fn,
+                            ConditionSpec spec);
+
+    /**
      * @brief Look up a condition by name.
      * @param name Condition name.
      * @return The ConditionFn, or throws if not found.
      */
     ConditionFn get(const std::string& name) const;
+
+    /**
+     * @brief Declared label contract for a condition, if any.
+     * @return The ConditionSpec, or std::nullopt for conditions
+     *         registered without one (validator skips those).
+     */
+    std::optional<ConditionSpec> condition_spec(const std::string& name) const;
 
     /**
      * @brief List all registered condition names, sorted.
@@ -134,6 +170,7 @@ public:
 private:
     ConditionRegistry();
     std::unordered_map<std::string, ConditionFn> registry_;
+    std::unordered_map<std::string, ConditionSpec> specs_;
 };
 
 /**
@@ -195,6 +232,27 @@ public:
      */
     void register_type(const std::string& type, NodeFactoryFn fn,
                        json config_schema);
+
+    /**
+     * @brief Register a custom node type with a declared config schema
+     *        AND a declared channel-effect contract.
+     * @param effects `{"reads": ["ch", ...], "writes": ["ch", ...]}` —
+     *        the channels instances of this type touch at runtime.
+     *        Enables static effect checking (GraphValidator E4/E5/E6:
+     *        writes to undeclared channels, overwrite races, dead
+     *        channels). Effect analysis only runs on graphs where
+     *        EVERY node's type declared effects — one unknown type
+     *        disables it (soundness of the checker over coverage).
+     */
+    void register_type(const std::string& type, NodeFactoryFn fn,
+                       json config_schema, json effects);
+
+    /**
+     * @brief Declared channel effects for a node type.
+     * @return `{"reads":[...],"writes":[...]}`, or null json for types
+     *         registered without an effect contract.
+     */
+    json node_effects(const std::string& type) const;
 
     /**
      * @brief Create a node by type name.
@@ -261,6 +319,7 @@ private:
     NodeFactory();
     std::unordered_map<std::string, NodeFactoryFn> registry_;
     std::unordered_map<std::string, json> schemas_;
+    std::unordered_map<std::string, json> effects_;
 };
 
 } // namespace neograph::graph
