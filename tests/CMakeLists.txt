@@ -22,6 +22,7 @@ add_executable(neograph_tests
     test_pbt_roundtrip.cpp
     test_corpus.cpp
     test_elaborator.cpp
+    test_evolution.cpp
     test_schema_evolution.cpp
     test_barrier_persistence.cpp
     test_coordinator.cpp
