@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "name": "e3_interrupt_unknown",
+  "channels": {
+    "messages": {
+      "reducer": "append"
+    }
+  },
+  "nodes": {
+    "a": {
+      "type": "llm_call"
+    }
+  },
+  "edges": [
+    {
+      "from": "__start__",
+      "to": "a"
+    },
+    {
+      "from": "a",
+      "to": "__end__"
+    }
+  ],
+  "interrupt_before": [
+    "phantom"
+  ]
+}

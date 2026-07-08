@@ -1,0 +1,44 @@
+{
+  "_comment": "Shared engine<->Studio differential corpus. Keep tests/fixtures/topology_corpus (NeoGraph) and tests/corpus (NeoGraph-Studio) byte-identical. Expected = sorted code:severity multiset from GraphValidator / lint.js.",
+  "expected": {
+    "valid_minimal.json": [],
+    "valid_full.json": [],
+    "valid_intent_router.json": [],
+    "e3_dangling_edge.json": [
+      "E3:error"
+    ],
+    "e3_interrupt_unknown.json": [
+      "E3:error"
+    ],
+    "e8_barrier_unsignaled.json": [
+      "E8:error"
+    ],
+    "e9_fanin_no_barrier.json": [
+      "E9:warning"
+    ],
+    "e10_empty_routes.json": [
+      "E10:error"
+    ],
+    "e10_closed_uncovered.json": [
+      "E10:error"
+    ],
+    "e10_open_no_default.json": [
+      "E10:warning"
+    ],
+    "e7_unreachable.json": [
+      "E7:warning"
+    ],
+    "e11_trapped_cycle.json": [
+      "E11:warning"
+    ],
+    "e4_undeclared_write.json": [
+      "E4:error"
+    ],
+    "e6_dead_channel.json": [
+      "E6:warning"
+    ],
+    "e5_overwrite_race.json": [
+      "E5:warning"
+    ]
+  }
+}

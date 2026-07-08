@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "name": "e11_trapped_cycle",
+  "channels": {
+    "messages": {
+      "reducer": "append"
+    }
+  },
+  "nodes": {
+    "a": {
+      "type": "llm_call"
+    },
+    "b": {
+      "type": "llm_call"
+    }
+  },
+  "edges": [
+    {
+      "from": "__start__",
+      "to": "a"
+    },
+    {
+      "from": "a",
+      "to": "b"
+    },
+    {
+      "from": "b",
+      "to": "a"
+    }
+  ]
+}

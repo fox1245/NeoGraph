@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "name": "e9_fanin_no_barrier",
+  "channels": {
+    "messages": {
+      "reducer": "append"
+    }
+  },
+  "nodes": {
+    "a": {
+      "type": "llm_call"
+    },
+    "b": {
+      "type": "llm_call"
+    },
+    "j": {
+      "type": "llm_call"
+    }
+  },
+  "edges": [
+    {
+      "from": "__start__",
+      "to": "a"
+    },
+    {
+      "from": "__start__",
+      "to": "b"
+    },
+    {
+      "from": "a",
+      "to": "j"
+    },
+    {
+      "from": "b",
+      "to": "j"
+    },
+    {
+      "from": "j",
+      "to": "__end__"
+    }
+  ]
+}

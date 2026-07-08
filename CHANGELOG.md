@@ -11,6 +11,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **PBT/차분 검증 하네스** (#75 M3). 300-시드 결정론적 topology 생성기
+  (스키마 봉투에서 유효 strict 문서 생성, 기능 커버리지 자가 계측 —
+  conditional_edges/barrier/interrupt 등장률 30% 미달 시 테스트 실패:
+  "생성기가 안 건드린 기능"이 소리 없는 구멍이 아니라 실패가 되게).
+  - **mutation 검출**: 드롭 5종(conditional_edges/edge/barrier/
+    interrupt/channel) + 오배선 3종(route 붕괴/edge 재타깃/노드 개명 =
+    드롭+날조 상쇄) 전부에 대해 translation validation 이 매 적용마다
+    검출됨을 300-시드 코퍼스에서 확증. 적용률 하한(시드의 10%)도 단언.
+  - **레퍼런스 인터프리터 차분**: 문서화된 super-step 의미론(goto
+    선점·barrier 누적·사전순 폴백·암묵 __end__)을 코드 비공유로 재구현한
+    독립 모델과 Scheduler 를 12-step × 300-graph 대조 (DESIL 교훈:
+    verifier 만으론 wrong-execution 을 못 잡는다).
+  - **엔진↔Studio 공유 코퍼스**: `tests/fixtures/topology_corpus/` 15종
+    (유효 3 + E3~E11 위반 12)이 NeoGraph-Studio `tests/corpus/` 와
+    byte-동일, 양측이 같은 verdict(code:severity multiset)를 단언 —
+    두 구현이 조용히 갈라질 수 없음.
+
 - **GraphValidator — 토폴로지 정적 의미 검사 (E3~E11 + effect)** (#75 M2).
   파싱(M1)과 실행 사이의 패스 계층. strict 문서(schema_version>=1)에서
   에러는 컴파일 실패, 경고는 stderr lint; 관용 문서는 에러급만 stderr

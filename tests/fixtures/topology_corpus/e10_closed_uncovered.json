@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "name": "e10_closed_uncovered",
+  "channels": {
+    "messages": {
+      "reducer": "append"
+    }
+  },
+  "nodes": {
+    "a": {
+      "type": "llm_call"
+    },
+    "t": {
+      "type": "tool_dispatch"
+    }
+  },
+  "edges": [
+    {
+      "from": "__start__",
+      "to": "a"
+    },
+    {
+      "from": "t",
+      "to": "__end__"
+    }
+  ],
+  "conditional_edges": [
+    {
+      "from": "a",
+      "condition": "has_tool_calls",
+      "routes": {
+        "true": "t"
+      }
+    }
+  ]
+}

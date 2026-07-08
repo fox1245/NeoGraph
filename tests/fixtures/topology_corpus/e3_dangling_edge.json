@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "name": "e3_dangling_edge",
+  "channels": {
+    "messages": {
+      "reducer": "append"
+    }
+  },
+  "nodes": {
+    "a": {
+      "type": "llm_call"
+    }
+  },
+  "edges": [
+    {
+      "from": "__start__",
+      "to": "a"
+    },
+    {
+      "from": "a",
+      "to": "__end__"
+    },
+    {
+      "from": "a",
+      "to": "ghost"
+    }
+  ]
+}
