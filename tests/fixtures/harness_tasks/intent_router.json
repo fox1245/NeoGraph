@@ -1,0 +1,19 @@
+{
+    "name": "intent_router_with_tools",
+    "description": "인텐트 3분기 라우터 + 도구 루프 + HITL 승인 지점, 병렬 팬아웃 후 AND-join",
+    "natural_spec": "Build a graph that: (1) classifies user intent into one of three categories using an LLM call, (2) routes to the appropriate tool handler node, (3) each handler calls a tool then feeds back to a summarizer, (4) a human-in-the-loop approval point exists before the final response, (5) uses parallel fan-out for the three handlers followed by an AND-join barrier.",
+    "expected_properties": {
+        "min_nodes": 5,
+        "max_nodes": 12,
+        "has_conditional_edges": true,
+        "has_barrier": true,
+        "has_interrupt": true,
+        "has_tool_calls": true,
+        "schema_version": 1
+    },
+    "evaluation_criteria": {
+        "compile_passes": true,
+        "validate_passes": true,
+        "conditional_routes_realized": 3
+    }
+}

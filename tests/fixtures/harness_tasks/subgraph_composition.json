@@ -1,0 +1,18 @@
+{
+    "name": "subgraph_composition",
+    "description": "서브그래프 템플릿 2종 → 3중 병합 → 조건부 라우팅 → 복합 에이전트",
+    "natural_spec": "Build a graph using DSL templates (M4): (1) define a 'worker' template that has an LLM call node and a tool dispatch node, (2) define a 'reviewer' template that has an LLM grading node, (3) instantiate 3 workers with different system prompts via 'use', (4) add a router that decides based on worker outputs whether to invoke a reviewer or directly return, (5) use a barrier to synchronize the 3 workers before the router.",
+    "expected_properties": {
+        "min_nodes": 8,
+        "max_nodes": 20,
+        "has_conditional_edges": true,
+        "has_barrier": true,
+        "has_template_vars": true,
+        "schema_version": 1
+    },
+    "evaluation_criteria": {
+        "compile_passes": true,
+        "validate_passes": true,
+        "dsl_elaborates": true
+    }
+}
