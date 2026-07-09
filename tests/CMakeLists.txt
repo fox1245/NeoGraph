@@ -23,6 +23,7 @@ add_executable(neograph_tests
     test_corpus.cpp
     test_elaborator.cpp
     test_evolution.cpp
+    test_harness_bench.cpp
     test_schema_evolution.cpp
     test_barrier_persistence.cpp
     test_coordinator.cpp

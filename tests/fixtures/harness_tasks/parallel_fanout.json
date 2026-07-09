@@ -1,0 +1,15 @@
+{
+    "name": "parallel_fanout_join",
+    "description": "병렬 분류기 5개 + ALL-join + 집계 — 순수 오케스트레이션, 툴·LLM 없음",
+    "natural_spec": "Build a graph that: (1) fans out to 5 parallel classifier nodes, (2) each classifier writes its result to a shared channel with append reducer, (3) an ALL-join barrier waits for all 5 to complete before proceeding, (4) a summarizer node reads the aggregated results and produces a final output, (5) no LLM or tool calls—pure orchestration with pnoop stubs.",
+    "expected_properties": {
+        "min_nodes": 6,
+        "max_nodes": 10,
+        "has_barrier": true,
+        "schema_version": 1
+    },
+    "evaluation_criteria": {
+        "compile_passes": true,
+        "validate_passes": true
+    }
+}

@@ -388,6 +388,7 @@ add_library(neograph_core
     src/core/store.cpp
     src/core/history.cpp
     src/core/evolution.cpp
+    src/core/harness_bench.cpp
     src/observability/openinference.cpp
 )
 # postgres_checkpoint.cpp is built into a separate target below
@@ -1137,6 +1138,11 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         #   ./example_evolution seed.json task.json > lineage.json
         add_executable(example_evolution examples/54_evolution.cpp)
         target_link_libraries(example_evolution PRIVATE neograph::core)
+
+        # Harness convergence benchmark (issue #81). Example 58:
+        #   ./example_harness_bench --smoke
+        add_executable(example_harness_bench examples/58_harness_bench.cpp)
+        target_link_libraries(example_harness_bench PRIVATE neograph::core)
 
         # Clay + Raylib chatbot (optional — requires Raylib)
         option(NEOGRAPH_BUILD_CLAY_EXAMPLE "Build Clay chatbot example (fetches Raylib)" OFF)

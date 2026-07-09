@@ -1,0 +1,17 @@
+{
+    "name": "corrective_rag",
+    "description": "Corrective RAG (arXiv:2401.15884): retrieve → grade → (relevant: generate | irrelevant: rewrite query → retry) → max 3 retries → fallback",
+    "natural_spec": "Build a graph that: (1) takes a user query, (2) retrieves documents from a vector store, (3) grades retrieved docs for relevance using an LLM, (4) if relevant, generates an answer, (5) if irrelevant, rewrites the query and retries retrieval, (6) maximum 3 retry attempts, (7) after max retries falls back to a 'cannot answer' response.",
+    "expected_properties": {
+        "min_nodes": 4,
+        "max_nodes": 10,
+        "has_conditional_edges": true,
+        "has_tool_calls": true,
+        "schema_version": 1
+    },
+    "evaluation_criteria": {
+        "compile_passes": true,
+        "validate_passes": true,
+        "conditional_routes_realized": 2
+    }
+}
