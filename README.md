@@ -191,7 +191,7 @@ include(FetchContent)
 FetchContent_Declare(
     NeoGraph
     GIT_REPOSITORY https://github.com/fox1245/NeoGraph.git
-    GIT_TAG        main
+    GIT_TAG        master
 )
 # Optional: turn off heavy components you don't need.
 set(NEOGRAPH_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -438,7 +438,7 @@ make -j$(nproc)
 include(FetchContent)
 FetchContent_Declare(neograph
   GIT_REPOSITORY https://github.com/fox1245/NeoGraph.git
-  GIT_TAG main)
+  GIT_TAG master)
 FetchContent_MakeAvailable(neograph)
 
 target_link_libraries(my_app PRIVATE neograph::core neograph::llm)
