@@ -266,6 +266,33 @@ specifically adversarial multimodal functions — so constructing such a landsca
 over harness topologies (write-back's committed genes must actively foreclose the
 global for a *majority* while a diverse minority escapes) is the honest next
 step, alongside wiring the LLM refiner in as the learning operator (making the
-Baldwin/Lamarck toggle literally "does the LLM's fix become heritable?"). The
-three roadmap slices (a)/(b)/(c) are now all landed in their verifiable-core
-form; each names its own deeper follow-up.
+Baldwin/Lamarck toggle literally "does the LLM's fix become heritable?").
+
+**Status: (b) deepened — adversarial landscape built, reversal robustly
+disconfirmed.** [`the_beast_baldwin_adv.cpp`](the_beast_baldwin_adv.cpp) upgrades
+learning to real multi-restart **hill-climbing** (a genuine local-search
+operator, not random guessing) and the landscape to a genuinely **adversarial**
+one — a broad decoy hill whose gradient points *away* from a small, steep global
+ball, so blind committed-space search is actively *deceived* (not merely at the
+chance floor). Results (24 seeds, deterministic, stable across seed bases):
+
+- *Memetic ≫ blind (CI-gated, stronger than the plateau):* blind Darwin is
+  deceived onto the decoy (~5% global / ~92% decoy) while learning solves
+  (Baldwin ~78%, Lamarck ~98%). The blind baseline is *misled*, not just blind.
+- *The Whitley reversal is robustly disconfirmed here.* A three-sweep, 30+-config
+  parameter search across the whole reachable/unreachable boundary found **no**
+  regime where non-inheritance robustly beats write-back: reachable → write-back
+  speed dominates (Lamarck ahead by 9-60 pt); unreachable → both fail, Baldwin
+  keeps only a marginal ~3-4 pt diversity edge; and at the boundary the sign is
+  seed-dependent noise. This is a *documented negative* — Whitley's reversal was
+  established on continuous multimodal functions with real-valued local search,
+  and the discrete topology-GA does not exhibit it. Reported with the mechanism,
+  not massaged.
+
+Remaining follow-up for (b): the LLM refiner as the literal learning operator on
+a task the model can reason about (arithmetic-pipeline assembly), so the
+Baldwin/Lamarck toggle becomes "does the LLM's acquired fix get written back into
+the heritable genome?" — a demonstration rather than a statistical claim, given
+per-call cost. The three roadmap slices (a)/(b)/(c) are all landed in
+verifiable-core form; (b) now carries both a positive (memetic ≫ blind) and a
+robust negative (no Whitley reversal over discrete topologies).

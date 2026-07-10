@@ -1082,6 +1082,15 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             target_link_libraries(cookbook_the_beast_baldwin PRIVATE
                 neograph::core)
 
+            # Adversarial deceptive-gradient landscape + real hill-climb learning
+            # (stronger "memetic beats blind": blind is DECEIVED, not just at the
+            # chance floor). Reports the Baldwin-vs-Lamarck comparison honestly —
+            # the Whitley reversal does not reproduce here. Offline/deterministic.
+            add_executable(cookbook_the_beast_baldwin_adv
+                examples/cookbook/the-beast/the_beast_baldwin_adv.cpp)
+            target_link_libraries(cookbook_the_beast_baldwin_adv PRIVATE
+                neograph::core)
+
             # Optional: run the model-written python under Google Sandbox2
             # (own user/pid/mount/net namespaces + read-only FS view + CPU/
             # wall/file rlimits). Default OFF — ON pulls sandboxed-api via

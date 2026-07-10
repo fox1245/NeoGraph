@@ -500,6 +500,41 @@ This is the honest shape of the result the reviewers asked for: the robust claim
 CI-enforced; the delicate claim (non-inheritance beats inheritance) is measured
 and reported as-is, with the negative outcome named rather than hidden.
 
+## Baldwin-adv — adversarial landscape + real hill-climb learning
+
+[`the_beast_baldwin_adv.cpp`](the_beast_baldwin_adv.cpp) sharpens both sides of
+the previous experiment. Learning is now **real local search** (multi-restart
+hill-climbing over the plastic genes to a local optimum — the discrete analogue
+of a refiner, and the slot the LLM plugs into), and the landscape is genuinely
+**adversarial**: a broad decoy hill whose gradient points *away* from a small,
+steep global ball. Blind committed-space search is not at the chance floor — it
+is actively **deceived** down the decoy gradient.
+
+```console
+$ ./build/cookbook_the_beast_baldwin_adv        # offline, deterministic, no key
+  Darwinian  | committed → global   5%   decoy  92%
+  Baldwinian | committed → global  76%   decoy  19%
+  Lamarckian | committed → global  98%   decoy   1%
+CI gate (blind deceived onto decoy >50%, both learners solve >60%, faithful): PASS
+```
+
+- **Memetic ≫ blind (robust, CI-gated).** Darwin is deceived onto the decoy
+  (~5% global / ~92% decoy); learning finds the global ball a single genome
+  cannot (76-98%). This is a *stronger* separation than the plateau — the blind
+  baseline is misled, not merely blind. Stable across seed bases (Darwin 2-5%,
+  learners 76-98%).
+- **Baldwin vs Lamarck: the reversal does NOT reproduce.** Lamarckian
+  write-back wins by a stable margin (98% vs 76%). A parameter sweep across the
+  whole reachable/unreachable boundary (30+ configs, three sweeps) found **no
+  regime** where non-inheritance robustly beats write-back: when the global is
+  reachable, write-back's speed dominates; when it is not, both fail with only a
+  marginal (~3-4 pt) Baldwin diversity edge. This is the honest empirical answer
+  to "does Whitley's Baldwin > Lamarck reversal reproduce over harness
+  topologies?" — **no**, in this discrete regime, and the program says so with
+  the mechanism named. (Whitley's reversal was established on *continuous*
+  multimodal functions with real-valued local search; the discrete topology-GA
+  here does not exhibit it.)
+
 ## Friction surfaced
 
 - **E6 "written but never read" on `trail`** is emitted as lint — and it
