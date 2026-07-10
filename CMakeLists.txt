@@ -1091,6 +1091,15 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             target_link_libraries(cookbook_the_beast_baldwin_adv PRIVATE
                 neograph::core)
 
+            # The LLM as the literal learning operator: the Baldwin/Lamarck
+            # toggle = "does the model's fix become heritable?" Offline uses a
+            # deterministic oracle learner; OPENROUTER_API_KEY makes the model
+            # the learner. Prints the per-generation trace, not a gated claim.
+            add_executable(cookbook_the_beast_baldwin_llm
+                examples/cookbook/the-beast/the_beast_baldwin_llm.cpp)
+            target_link_libraries(cookbook_the_beast_baldwin_llm PRIVATE
+                neograph::core neograph::llm cppdotenv)
+
             # Optional: run the model-written python under Google Sandbox2
             # (own user/pid/mount/net namespaces + read-only FS view + CPU/
             # wall/file rlimits). Default OFF — ON pulls sandboxed-api via

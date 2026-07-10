@@ -535,6 +535,42 @@ CI gate (blind deceived onto decoy >50%, both learners solve >60%, faithful): PA
   multimodal functions with real-valued local search; the discrete topology-GA
   here does not exhibit it.)
 
+## Baldwin-llm — the model IS the learning operator
+
+The mechanical learners above (random guess, hill-climb) were always the *slot*
+an LLM refiner plugs into. [`the_beast_baldwin_llm.cpp`](the_beast_baldwin_llm.cpp)
+plugs it in, on a task the model can actually reason about: fill the `?` stages
+of an arithmetic pipeline so `acc` reaches a target. The **learning operator is
+the model** (it chooses ops for the `?` stages); fitness is the assembled
+harness *run*. The Baldwin/Lamarck toggle becomes literal:
+
+- **Baldwinian** scores the model's fill but keeps the gene `?` — the model must
+  be consulted **again** next generation. Learning is not inherited.
+- **Lamarckian** writes the fill into the genome — the `?` becomes committed.
+  The acquired trait is **heritable**; the model need not be consulted again.
+
+```console
+$ ./build/cookbook_the_beast_baldwin_llm       # oracle learner (default, offline)
+  Baldwinian (learner = oracle):
+    gen 0: … committed genes 16/24 | learner calls 5
+    gen 3: … committed genes 10/24 | learner calls 6      # re-learns every gen
+  Lamarckian (learner = oracle):
+    gen 0: … committed genes 24/24 | learner calls 5
+    gen 3: … committed genes 24/24 | learner calls 0      # banked; no re-learning
+total learner invocations: Baldwin 23 vs Lamarck 5  (Lamarck banked its way to fewer)
+```
+
+The observable difference is not fitness (both reach the target) but a **genome
+economy**: Lamarck banks the learner's work into heredity (genes commit, calls
+fall to zero); Baldwin re-learns every generation (genes stay plastic, calls
+stay high). Run offline with a deterministic **oracle** learner (default), or
+`--llm` with `OPENROUTER_API_KEY` to make **the model** the learner — in which
+case those invocations are real API calls, and heredity is literally the
+difference between paying the model once and paying it every generation. This is
+the concrete meaning of "does the model's fix become heritable?" — shown as a
+trace, not asserted. (The `--llm` path needs network; it falls back to the
+oracle and logs on any call/parse failure, so the demo always completes.)
+
 ## Friction surfaced
 
 - **E6 "written but never read" on `trail`** is emitted as lint — and it
