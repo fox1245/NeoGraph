@@ -1016,6 +1016,26 @@ if(NEOGRAPH_BUILD_EXAMPLES)
                 examples/cookbook/self_evolving_chatbot/server_multi.cpp)
             target_link_libraries(cookbook_self_evolving_chatbot_multi PRIVATE
                 neograph::core neograph::llm cppdotenv)
+
+            # "The Beast" — a self-evolving agent that WRITES its own
+            # harness in the DSL surface, gates it through the three
+            # coherence gates (elaborate → strict compile + TV →
+            # validate), and spawns the survivor as a disposable
+            # sub-agent. The category only NeoGraph makes safe: the
+            # authored topology is data, and the DSL compiler proves it
+            # coherent before a single node runs. Offline (Mock provider).
+            add_executable(cookbook_the_beast
+                examples/cookbook/the-beast/the_beast.cpp)
+            target_link_libraries(cookbook_the_beast PRIVATE
+                neograph::core neograph::llm)
+
+            # Live variant: a real LLM (DeepSeek v4 pro via OpenRouter)
+            # authors the harness; the three gates validate it with a
+            # self-repair loop. Needs OPENROUTER_API_KEY in .env.
+            add_executable(cookbook_the_beast_live
+                examples/cookbook/the-beast/the_beast_live.cpp)
+            target_link_libraries(cookbook_the_beast_live PRIVATE
+                neograph::core neograph::llm cppdotenv)
         endif()
 
         # JARVIS voice meta-orchestrator cookbook — 골격(skeleton) 단계.
