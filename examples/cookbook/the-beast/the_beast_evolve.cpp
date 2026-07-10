@@ -187,7 +187,10 @@ int main(int argc, char** argv) {
                 Fit f = fitness(*mr.core, ctx);
                 if (f.valid) next.push_back({*mr.core, f.score, f.acc, "mut"});
             }
-        std::sort(next.begin(), next.end(), [](const Ind& a, const Ind& b) { return a.score > b.score; });
+        std::sort(next.begin(), next.end(), [](const Ind& a, const Ind& b) {
+                      if (a.score != b.score) return a.score > b.score;
+                      return (a.origin == "LLM") && (b.origin != "LLM");  // honest tie-break: credit Lamarckian
+                  });
         std::vector<Ind> keep;
         for (const auto& ind : next) {
             bool dup = false;
@@ -210,7 +213,10 @@ int main(int argc, char** argv) {
                 std::cout << "   [Lamarckian] LLM refinement acc=" << f.acc << "  fitness " << f.score;
                 if (f.valid && f.score > best.score) {
                     pop.push_back({*imp, f.score, f.acc, "LLM"});
-                    std::sort(pop.begin(), pop.end(), [](const Ind& a, const Ind& b) { return a.score > b.score; });
+                    std::sort(pop.begin(), pop.end(), [](const Ind& a, const Ind& b) {
+                      if (a.score != b.score) return a.score > b.score;
+                      return (a.origin == "LLM") && (b.origin != "LLM");  // honest tie-break: credit Lamarckian
+                  });
                     std::cout << "  → injected (heritable)\n";
                 } else std::cout << "  → not better, discarded\n";
                 if (pop.front().score == 0.0) { std::cout << "\nSolved via Lamarckian injection.\n"; break; }
