@@ -246,7 +246,7 @@ int main(int argc, char** argv) {
         if (!key || !*key) { std::cerr << "OPENROUTER_API_KEY not set (or use --selftest)\n"; return 2; }
         provider = neograph::llm::OpenAIProvider::create_shared(
             {.api_key = key, .base_url = "https://openrouter.ai/api",
-             .default_model = "deepseek/deepseek-v4-pro"});
+             .default_model = "deepseek/deepseek-v4-flash"});
         ctx.provider = provider;
     }
 
@@ -271,7 +271,7 @@ int main(int argc, char** argv) {
     for (int attempt = 1; attempt <= 3 && core.is_null(); ++attempt) {
         std::cout << "── Attempt #" << attempt << ": model writes node logic ──\n";
         neograph::CompletionParams p;
-        p.model = "deepseek/deepseek-v4-pro"; p.messages = convo;
+        p.model = "deepseek/deepseek-v4-flash"; p.messages = convo;
         p.temperature = 0.2f; p.max_tokens = 4000;
         neograph::ChatCompletion resp;
         try { resp = provider->complete(p); }

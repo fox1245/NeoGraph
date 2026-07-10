@@ -2,7 +2,7 @@
 // =================================================================
 // the_beast.cpp proves the generated harness is *coherent*. But its
 // nodes are inert stubs — it never acts. THIS is the monster: a live
-// LLM (DeepSeek v4 pro) is handed the engine's node schema AND a TOOL
+// LLM (DeepSeek v4 flash) is handed the engine's node schema AND a TOOL
 // CATALOG, and asked to author a ReAct agent harness — `llm_call` ⇄
 // `tool_dispatch` looping on `has_tool_calls`. The harness it writes is
 // gated for coherence (3 gates + self-repair), then SPAWNED WITH THE
@@ -14,7 +14,7 @@
 // the agent it builds. Generation is creative; tool-use is autonomous;
 // coherence is proven.
 //
-// Setup:  OPENROUTER_API_KEY=sk-or-... in .env  (model deepseek/deepseek-v4-pro)
+// Setup:  OPENROUTER_API_KEY=sk-or-... in .env  (model deepseek/deepseek-v4-flash)
 // Build:  cmake --build build --target cookbook_the_beast_apex
 // Run:    ./build/cookbook_the_beast_apex ["your task"]
 
@@ -112,7 +112,7 @@ int main(int argc, char** argv) {
 
     auto provider = neograph::llm::OpenAIProvider::create_shared(
         {.api_key = key, .base_url = "https://openrouter.ai/api",
-         .default_model = "deepseek/deepseek-v4-pro"});
+         .default_model = "deepseek/deepseek-v4-flash"});
 
     // Build the tool catalog to feed the architect, and a live copy to
     // bind into the spawned harness.
@@ -165,7 +165,7 @@ int main(int argc, char** argv) {
     for (int attempt = 1; attempt <= 3 && core.is_null(); ++attempt) {
         std::cout << "── Attempt #" << attempt << ": model authors a tool-calling agent ──\n";
         neograph::CompletionParams p;
-        p.model = "deepseek/deepseek-v4-pro";
+        p.model = "deepseek/deepseek-v4-flash";
         p.messages = convo;
         p.temperature = 0.2f;
         p.max_tokens = 4000;

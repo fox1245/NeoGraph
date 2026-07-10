@@ -14,7 +14,7 @@
 //
 // Real, not theatre: two live MCP stdio subprocesses (one stock, one the
 // Beast wrote this run), a real tools/list round-trip on each, and a real
-// ReAct loop. Only the authoring model is remote (deepseek/deepseek-v4-pro).
+// ReAct loop. Only the authoring model is remote (deepseek/deepseek-v4-flash).
 //
 // Setup:  OPENROUTER_API_KEY in .env ; python3 on PATH.
 // Build:  cmake --build build --target cookbook_the_beast_forge
@@ -58,7 +58,7 @@ Verdict forge_gate(const json& dsl, const ng::NodeContext& ctx) {
 static std::string ask(std::shared_ptr<neograph::Provider> prov,
                        std::vector<neograph::ChatMessage>& convo, int max_tokens = 4000) {
     neograph::CompletionParams p;
-    p.model = "deepseek/deepseek-v4-pro";
+    p.model = "deepseek/deepseek-v4-flash";
     p.messages = convo;
     p.temperature = 0.2f;
     p.max_tokens = max_tokens;
@@ -94,7 +94,7 @@ int main(int argc, char** argv) {
     if (!key || !*key) { std::cerr << "OPENROUTER_API_KEY not set\n"; return 2; }
     auto provider = neograph::llm::OpenAIProvider::create_shared(
         {.api_key = key, .base_url = "https://openrouter.ai/api",
-         .default_model = "deepseek/deepseek-v4-pro"});
+         .default_model = "deepseek/deepseek-v4-flash"});
 
     // Task deliberately needs a capability the stock server lacks (string
     // reversal), forcing the Beast to FORGE it.

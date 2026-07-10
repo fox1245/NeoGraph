@@ -1,7 +1,7 @@
 // NeoGraph Cookbook — "The Beast", LIVE
 // =================================================================
 // The offline the_beast.cpp mocks the author. THIS one is live: a real
-// LLM (DeepSeek v4 pro via OpenRouter) is handed the engine's exported
+// LLM (DeepSeek v4 flash via OpenRouter) is handed the engine's exported
 // schema and asked to WRITE a harness in the DSL surface. Whatever it
 // produces is forced through the three coherence gates; on rejection the
 // gate's diagnostics are fed straight back into the conversation and the
@@ -14,7 +14,7 @@
 // creative; coherence is proven.
 //
 // Setup:  put OPENROUTER_API_KEY=sk-or-... in .env beside the binary
-//         (or export it). Uses model deepseek/deepseek-v4-pro.
+//         (or export it). Uses model deepseek/deepseek-v4-flash.
 // Build:  cmake --build build --target cookbook_the_beast_live
 // Run:    ./build/cookbook_the_beast_live
 
@@ -106,13 +106,13 @@ int main(int argc, char** argv) {
     auto provider = neograph::llm::OpenAIProvider::create_shared(
         {.api_key = key,
          .base_url = "https://openrouter.ai/api",
-         .default_model = "deepseek/deepseek-v4-pro"});
+         .default_model = "deepseek/deepseek-v4-flash"});
 
     ng::NodeContext ctx;
     ctx.provider = provider;
 
     std::cout << "============ THE BEAST (live) ============\n"
-                 "Author: deepseek/deepseek-v4-pro via OpenRouter.\n"
+                 "Author: deepseek/deepseek-v4-flash via OpenRouter.\n"
                  "The model writes the harness; the compiler proves it coherent.\n\n";
 
     // Hand the model the engine's real schema — the exact palette this
@@ -157,7 +157,7 @@ int main(int argc, char** argv) {
     for (int attempt = 1; attempt <= 3; ++attempt) {
         std::cout << "── Attempt #" << attempt << ": asking the model to write a harness ──\n";
         neograph::CompletionParams p;
-        p.model = "deepseek/deepseek-v4-pro";
+        p.model = "deepseek/deepseek-v4-flash";
         p.messages = convo;
         p.temperature = 0.2f;
         p.max_tokens = 4000;  // reasoning model: leave room for thinking + JSON

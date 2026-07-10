@@ -113,7 +113,7 @@ are fed straight back into the conversation and the model rewrites — a
 genuine self-repair loop.
 
 ```console
-$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek v4 pro via OpenRouter
+$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek v4 flash via OpenRouter
 $ cmake --build build --target cookbook_the_beast_live
 $ ./build/cookbook_the_beast_live                  # optional: pass a task string as argv[1]
 ```
@@ -132,7 +132,7 @@ $ ./build/cookbook_the_beast_live                  # optional: pass a task strin
 The model wrote it. The compiler proved it. The Beast ran it.
 ```
 
-**What the live runs showed** (DeepSeek v4 pro): it authored *coherent*
+**What the live runs showed** (DeepSeek v4 flash): it authored *coherent*
 harnesses on the first try across a linear pipeline, a diamond fan-out /
 barrier fan-in, and a conditional router — the self-repair loop is armed
 but a capable model rarely trips it. The gates still earned their keep as
