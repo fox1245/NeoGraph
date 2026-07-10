@@ -475,6 +475,14 @@ suspiciously-perfect confusion matrix: **the static gate is sound relative to
 honest contracts, with a runtime backstop for dishonest ones** — Layer 1 and
 Layer 2 each CI-enforced.
 
+The formal companion, [`SOUNDNESS.md`](SOUNDNESS.md), *proves* this: a small-step
+semantics of super-step execution, the effect lattice `(𝒫(Chan), ⊆)`, the gate as
+a well-formedness judgment `⊢ G ok`, and a Progress theorem (a gate-passing graph
+under honest contracts never faults) with the honesty hypothesis proved necessary
+and the runtime write-guard as its fail-stop backstop. Every premise is checked
+against the engine source; `gate_eval`/`gate_fuzz` are the model's fidelity
+checks. The two harnesses here are Cor 6.4 and Prop 6.5 of that document, run.
+
 ## Baldwin — does memetic beat blind, and does inheritance matter?
 
 The `evolve` variant showed Darwinian mutation + a Lamarckian LLM injection.

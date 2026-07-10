@@ -246,9 +246,25 @@ discovery); **Layer 2** — the gate trusts effect contracts, so a node that
 the static gate 500/500 and the runtime `GraphState` guard backstops it 500/500.
 The deliverable is a *precise* statement of the guarantee — **sound relative to
 honest contracts, with a runtime backstop for dishonest ones** — each layer
-CI-enforced. What remains genuinely open for (a) is the *formal* small-step
-semantics + a written soundness proof over the effect lattice (theory/writing,
-not a runnable artifact).
+CI-enforced.
+
+**Status: (a) complete — the formal proof landed.** [`SOUNDNESS.md`](SOUNDNESS.md)
+supplies the last piece: a small-step operational semantics of harness execution
+(super-steps over a declared-channel state, with the write-guard as the sole
+fault rule), the effect lattice `(𝒫(Chan), ⊆)` the gate reasons over, and the
+gate read as a well-formedness judgment `⊢ G ok` whose premises are exactly the
+error families E3/E4-write/E8/E10. Over that model it proves **Progress /
+non-fault** (Thm 6.3): a gate-passing graph, under contract coverage and an
+explicit *honesty hypothesis* `(H)`, never faults — no undeclared-channel throw,
+no dangling-route or empty-route UB. The honesty hypothesis is proved *necessary*
+(Prop 6.5, the `gate_fuzz` lying node) and the runtime write-guard is shown to be
+the fail-stop **backstop** that keeps the composite system UB-free even when `(H)`
+fails. Every premise was checked against the actual code (`graph_state.cpp`,
+`graph_validator.cpp`, `graph_engine.cpp`); the proof is over a *faithful
+abstraction*, and `gate_eval`/`gate_fuzz` are its standing fidelity checks (they
+measure exactly what Cor 6.4 and Prop 6.5 predict). Theory + measured model, the
+methodology this project holds itself to. All three roadmap slices (a)/(b)/(c)
+are now landed end-to-end — empirical harness *and* formal companion for (a).
 
 **Status: (b) landed — the Baldwinian control, with an honest negative on the
 reversal.** [`the_beast_baldwin.cpp`](the_beast_baldwin.cpp) is the benchmark
