@@ -218,3 +218,16 @@ same sandbox, differing only by the declared cap): `caps=[]` →
 and academic weakness 7 with a contract-derived (not hand-written) seccomp layer.
 Remaining sandbox depth (per-node syscall allowlist, capability-based secret
 mediation à la CapSeal, an adversarial-escape eval) stays on the roadmap.
+
+**Status: (a) first empirical installment landed.** The pure "formal semantics +
+soundness proof" is theory, but its *testable core* — the soundness/precision-
+recall of the coherence gate (weaknesses 1 and 3) — is now a runnable harness,
+[`the_beast_gate_eval.cpp`](the_beast_gate_eval.cpp): a labeled topology corpus
+run through the validator (predicted) and the engine (ground truth), cross-
+checked, `exit 0` iff every verdict matched execution (currently 4/4 — E4/E3
+errors ⇒ genuine runtime faults; a coherent graph and an E7-warning graph both
+run clean). It measures the theorem `validator-error ⟹ runtime-fault` instead of
+asserting it, and is CI-gatable. The *formal* semantics + a written soundness
+proof over the effect lattice, and a larger statistically-powered corpus, remain
+the deeper follow-up. (b) — a real agentic benchmark + Baldwinian control — is
+next.

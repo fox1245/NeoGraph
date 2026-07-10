@@ -401,6 +401,43 @@ logs `[Lamarckian] LLM returned no parseable harness` and Darwinian
 carries the round; the final line reports the champion's *actual* origin,
 never a Lamarckian win that didn't happen.
 
+## Gate-eval — is the coherence gate actually sound?
+
+The Beast's whole safety argument is that the static validator is a *sound*
+coherence oracle: an ERROR means the harness would genuinely fault at
+runtime; no error means it runs. That was **asserted, not measured** — the
+first thing every reviewer asked about.
+
+[`the_beast_gate_eval.cpp`](the_beast_gate_eval.cpp) measures it. It runs a
+labeled corpus of topologies through the validator (predicted verdict) AND
+through the engine (ground truth) and cross-checks. Offline, deterministic,
+no key — `exit 0` iff every verdict matched execution, so **CI can gate on
+soundness**.
+
+```console
+$ ./build/cookbook_the_beast_gate_eval
+case                     | validator      | runtime | sound?
+coherent                 | ok             | CLEAN   | yes
+E4-undeclared-write      | ERROR:E4       | FAULT   | yes   # reject ⇒ genuine runtime throw
+E3-dangling-edge         | ERROR:E3       | FAULT   | yes
+E7-unreachable(warn)     | ok             | CLEAN   | yes   # a warning does NOT reject a correct graph
+E10-empty-routes         | ERROR:E10      | not run | yes   # dispatch is UB by design — the gate stops it
+runtime cross-check: 4/4 cases where the validator's verdict matched execution.
+```
+
+The property under test:
+
+> validator reports an ERROR ⟹ the graph faults when executed;
+> validator reports no error ⟹ the graph executes cleanly.
+
+The first line is *soundness* (an error-flagged graph that ran clean would be
+a soundness hole); a warning-flagged graph that runs clean shows the gate
+does not *over*-reject. E10/E8-class errors are verdict-only — running an
+empty route map dereferences `rend()` (UB), which is exactly the fault the
+gate exists to prevent, so it is checked but not executed. This is a
+demonstration corpus, not exhaustive coverage of every diagnostic — but it
+turns "the gate is sound" from a slogan into a measured, CI-enforced 4/4.
+
 ## Friction surfaced
 
 - **E6 "written but never read" on `trail`** is emitted as lint — and it

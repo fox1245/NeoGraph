@@ -1064,6 +1064,14 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             target_link_libraries(cookbook_the_beast_evolve PRIVATE
                 neograph::core neograph::llm cppdotenv)
 
+            # Empirical soundness eval of the coherence gate: labeled topology
+            # corpus, validator verdict vs actual execution, cross-checked.
+            # Offline/deterministic — CI-gatable (answers "is the gate sound?").
+            add_executable(cookbook_the_beast_gate_eval
+                examples/cookbook/the-beast/the_beast_gate_eval.cpp)
+            target_link_libraries(cookbook_the_beast_gate_eval PRIVATE
+                neograph::core)
+
             # Optional: run the model-written python under Google Sandbox2
             # (own user/pid/mount/net namespaces + read-only FS view + CPU/
             # wall/file rlimits). Default OFF — ON pulls sandboxed-api via
