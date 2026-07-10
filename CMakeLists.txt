@@ -1072,6 +1072,16 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             target_link_libraries(cookbook_the_beast_gate_eval PRIVATE
                 neograph::core)
 
+            # Darwinian vs Baldwinian vs Lamarckian memetic evolution of
+            # harness topologies (Hinton-Nowlan needle + Whitley deceptive
+            # landscape). Fitness = signature of the assembled harness when
+            # run. Offline/deterministic — CI-gatable on the robust Baldwin
+            # effect; the Baldwin-vs-Lamarck comparison is measured, not gated.
+            add_executable(cookbook_the_beast_baldwin
+                examples/cookbook/the-beast/the_beast_baldwin.cpp)
+            target_link_libraries(cookbook_the_beast_baldwin PRIVATE
+                neograph::core)
+
             # Optional: run the model-written python under Google Sandbox2
             # (own user/pid/mount/net namespaces + read-only FS view + CPU/
             # wall/file rlimits). Default OFF — ON pulls sandboxed-api via

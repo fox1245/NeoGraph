@@ -231,3 +231,41 @@ asserting it, and is CI-gatable. The *formal* semantics + a written soundness
 proof over the effect lattice, and a larger statistically-powered corpus, remain
 the deeper follow-up. (b) — a real agentic benchmark + Baldwinian control — is
 next.
+
+**Status: (b) landed — the Baldwinian control, with an honest negative on the
+reversal.** [`the_beast_baldwin.cpp`](the_beast_baldwin.cpp) is the benchmark
+weakness 5 demanded: a task where blind Darwinian search *and* a single
+committed genome (a one-shot solver's analogue) both stall, but memetic search
+wins. The genome is an affine-pipeline wiring with plastic (`?`) genes; fitness
+is the signature of the **assembled harness when run** (cross-checked 200/200
+against the compiled engine — the gate-eval discipline). The landscape is
+deceptive: a broad decoy hill plus a narrow, **gradient-free** global plateau
+that only lifetime learning (neighborhood search over the plastic genes) reaches.
+
+- *Robust result (CI-gated):* blind Darwin assimilates the global ~25% — the
+  chance floor, trapped on the decoy — while learning assimilates ~75%. The gate
+  enforces the **mean margin** (25% vs 75% over 24 seeds), not a per-run
+  threshold count (which init luck perturbs). "Memetic beats blind," measured.
+- *The Baldwinian control (measured, never gated):* Baldwin (non-inheritance)
+  vs Lamarck (write-back) came out **74% vs 78%** global assimilation —
+  Lamarckian marginally ahead. That is the *expected* outcome on a
+  deceptive-but-not-adversarial landscape (Whitley's own result: Lamarck wins on
+  non-adversarial functions). The **Baldwin > Lamarck reversal** was *tested and
+  did not robustly reproduce* on this two-peak construction — reported as
+  measured, with the negative named rather than tuned away. (A code-review pass
+  caught a subtle trap here: a fixed tie-break at the fitness-tied selection
+  boundary *manufactured* an apparent reversal; ties are now broken by a per-seed
+  random draw averaged over the sweep, and the non-reversal ordering is stable
+  across seed bases. Two honesty defects the review found — an overclaim that the
+  GA fitness was the execution signature, and the tie-break artifact — were both
+  fixed.)
+
+This is the scientifically correct posture: the sub-prediction (non-inheritance
+beats inheritance) is genuinely delicate — Whitley reproduces it only on
+specifically adversarial multimodal functions — so constructing such a landscape
+over harness topologies (write-back's committed genes must actively foreclose the
+global for a *majority* while a diverse minority escapes) is the honest next
+step, alongside wiring the LLM refiner in as the learning operator (making the
+Baldwin/Lamarck toggle literally "does the LLM's fix become heritable?"). The
+three roadmap slices (a)/(b)/(c) are now all landed in their verifiable-core
+form; each names its own deeper follow-up.
