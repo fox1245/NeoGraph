@@ -1023,13 +1023,14 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             # validate), and spawns the survivor as a disposable
             # sub-agent. The category only NeoGraph makes safe: the
             # authored topology is data, and the DSL compiler proves it
-            # coherent before a single node runs. Offline (Mock provider).
+            # coherent before a single node runs. Offline, no provider
+            # (deterministic stub nodes).
             add_executable(cookbook_the_beast
                 examples/cookbook/the-beast/the_beast.cpp)
             target_link_libraries(cookbook_the_beast PRIVATE
                 neograph::core neograph::llm)
 
-            # Live variant: a real LLM (DeepSeek v4 pro via OpenRouter)
+            # Live variant: a real LLM (DeepSeek v4 flash via OpenRouter)
             # authors the harness; the three gates validate it with a
             # self-repair loop. Needs OPENROUTER_API_KEY in .env.
             add_executable(cookbook_the_beast_live

@@ -32,6 +32,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <unistd.h>    // getpid
 #include <iostream>
 #include <memory>
 #include <string>
@@ -132,7 +133,9 @@ int main(int argc, char** argv) {
          "Write a server exposing ONLY the additional tool(s) needed for the task."}};
 
     namespace fs = std::filesystem;
-    const std::string forged_path = (fs::temp_directory_path() / "beast_forged_server.py").string();
+    // pid-unique so concurrent forge runs on one host don't clobber each other.
+    const std::string forged_path = (fs::temp_directory_path() /
+        ("beast_forged_server." + std::to_string(getpid()) + ".py")).string();
     std::vector<std::string> forged_names;
     std::unique_ptr<neograph::mcp::MCPClient> forged_client;
 
@@ -235,5 +238,6 @@ int main(int argc, char** argv) {
     }
     std::cout << "\n  autonomous tool calls: " << calls << "\n  final answer: " << final_answer << "\n";
     std::cout << "\nIt discovered tools, forged the missing one, and used them all.\n";
+    { std::error_code ec; fs::remove(forged_path, ec); }   // clean the forged server file
     return 0;   // MCPClients + engine tear down here (subprocesses reaped)
 }

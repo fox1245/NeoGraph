@@ -65,10 +65,15 @@ static std::string run_cmd(const std::string& cmd) {
 // Optional hardened path (build with -DNEOGRAPH_BEAST_SANDBOX=ON): run the
 // model-written python under Google Sandbox2 — its own user/pid/mount/net
 // namespaces, a read-only filesystem view limited to the interpreter + the
-// work dir, and CPU/wall/file rlimits. Verified on this platform: python's
-// stdlib imports work under the FS allowlist, stdout is captured over the
-// sandbox IPC, and there is no network. This seals script_node's one
-// unproven surface (the script's inner logic) behind real isolation.
+// two work files, and CPU/wall/file rlimits. Verified on this platform:
+// python's stdlib imports work under the FS allowlist, stdout is captured
+// over the sandbox IPC, and there is no network.
+//
+// Honest scope: this is CONTAINER-GRADE isolation (namespaces + read-only
+// FS allowlist + rlimits), NOT syscall-level confinement — the policy
+// permits all syscalls, so a kernel exploit is not contained. Tightening
+// with a seccomp allowlist (ideally derived from each node's declared
+// effect contract) is the documented next step.
 #include <sandboxed_api/sandbox2/allowlists/all_syscalls.h>
 #include <sandboxed_api/sandbox2/allowlists/map_exec.h>
 #include <sandboxed_api/sandbox2/executor.h>
@@ -98,9 +103,13 @@ static std::string run_python_sandboxed(const std::string& code_path,
     b.DefaultAction(sandbox2::AllowAllSyscalls());  // isolation via ns + FS + rlimit
     b.Allow(sandbox2::MapExec());
     b.AddLibrariesForBinary(bin);
-    for (const char* d : {"/usr/lib", "/usr/bin", "/lib", "/lib64",
-                          fs::temp_directory_path().c_str()})
-        b.AddDirectory(d);                          // read-only bind mounts
+    for (const char* d : {"/usr/lib", "/usr/bin", "/lib", "/lib64"})
+        b.AddDirectory(d);                          // interpreter + stdlib, read-only
+    // Mount ONLY the two work files, not all of temp_directory_path() — so
+    // the script cannot read other runs' inputs. (Also avoids a dangling
+    // c_str() into a temporary path.)
+    b.AddFile(code_path);
+    b.AddFile(in_path);
     sandbox2::Sandbox2 s2(std::move(executor), b.BuildOrDie());
     std::string out;
     if (s2.RunAsync()) {
@@ -142,6 +151,7 @@ public:
         for (const auto& w : cfg.value("writes", json::array())) writes_.insert(w.get<std::string>());
         for (const auto& g : cfg.value("goto_targets", json::array())) goto_targets_.insert(g.get<std::string>());
     }
+    ~ScriptNode() override { std::error_code ec; fs::remove(code_path_, ec); }
 
     asio::awaitable<ng::NodeOutput> run(ng::NodeInput in) override {
         // (a) flatten channel state → {name: value}
@@ -158,6 +168,7 @@ public:
         const std::string in_path = code_path_ + "." + std::to_string(call++) + ".in.json";
         std::ofstream(in_path) << json{{"state", flat}}.dump();
         const std::string raw = run_python(code_path_, in_path);
+        { std::error_code ec; fs::remove(in_path, ec); }   // clean the per-run input file
 
         json out;
         try { out = json::parse(raw); }
@@ -375,16 +386,25 @@ int main(int argc, char** argv) {
     rc.max_steps = 20;
     rc.input = {{"counter", 0}};
     int ticks = 0;
-    auto result = engine->run_stream(rc, [&](const ng::GraphEvent& ev) {
-        if (ev.type == ng::GraphEvent::Type::NODE_START && ev.node_name == "tick")
-            std::cout << "  [tick #" << ++ticks << " — script decides: continue or exit]\n";
-    });
-    std::cout << "  trace: ";
-    for (const auto& n : result.execution_trace) std::cout << n << " -> ";
-    std::cout << "END\n";
-    json fc = result.has_channel("counter") ? result.channel<json>("counter") : json();
-    std::cout << "  final counter = " << fc.dump()
-              << "  (the model's goto logic ran the loop, contract-enforced)\n";
+    // The runtime contract wrapper throws on an undeclared write/goto or
+    // non-JSON script output; catch it so a bad script fails loudly-but-
+    // gracefully instead of aborting the process.
+    try {
+        auto result = engine->run_stream(rc, [&](const ng::GraphEvent& ev) {
+            if (ev.type == ng::GraphEvent::Type::NODE_START && ev.node_name == "tick")
+                std::cout << "  [tick #" << ++ticks << " — script decides: continue or exit]\n";
+        });
+        std::cout << "  trace: ";
+        for (const auto& n : result.execution_trace) std::cout << n << " -> ";
+        std::cout << "END\n";
+        json fc = result.has_channel("counter") ? result.channel<json>("counter") : json();
+        std::cout << "  final counter = " << fc.dump()
+                  << "  (the model's goto logic ran the loop, contract-enforced)\n";
+    } catch (const std::exception& e) {
+        std::cout << "  RUNTIME CONTRACT VIOLATION: " << e.what()
+                  << "\n  (the script broke its declared surface — rejected at runtime)\n";
+        return 1;
+    }
     std::cout << "\nThe model wrote the node's logic AND its flow. The compiler proved the "
                  "shape; the contract proved the surface.\n";
     return 0;
