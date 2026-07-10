@@ -1109,6 +1109,17 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             target_link_libraries(cookbook_the_beast_baldwin_llm PRIVATE
                 neograph::core neograph::llm cppdotenv)
 
+            # Prompt in → a light-novel-length manuscript out as plain .txt. A
+            # graph over an explicit story state (outline/bible/summary channels)
+            # that cures "lost in the middle": each chapter is generated fresh
+            # against compact externalized state, not the whole prior text. The
+            # writer node self-loops via goto. Offline uses a deterministic stub;
+            # OPENROUTER_API_KEY makes the model write the prose.
+            add_executable(cookbook_the_beast_novelist
+                examples/cookbook/the-beast/the_beast_novelist.cpp)
+            target_link_libraries(cookbook_the_beast_novelist PRIVATE
+                neograph::core neograph::llm cppdotenv)
+
             # Optional: run the model-written python under Google Sandbox2
             # (own user/pid/mount/net namespaces + read-only FS view + CPU/
             # wall/file rlimits). Default OFF — ON pulls sandboxed-api via

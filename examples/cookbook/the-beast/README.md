@@ -616,6 +616,45 @@ the concrete meaning of "does the model's fix become heritable?" — shown as a
 trace, not asserted. (The `--llm` path needs network; it falls back to the
 oracle and logs on any call/parse failure, so the demo always completes.)
 
+## Novelist — a premise in, a light-novel-length `.txt` out
+
+The simplest genuinely-useful writing harness, and the honest form of the
+"NovelWriter" idea: give it a premise, get back a whole light-novel-sized
+manuscript as plain text. [`the_beast_novelist.cpp`](the_beast_novelist.cpp) is
+the cure for **lost-in-the-middle** made concrete — a long story is *not* written
+in one giant context. It is a small graph over an **explicit story state**:
+
+    channels:  premise · outline · bible · summary · book · idx · total
+
+so each chapter is generated **fresh against the compact externalized state**
+(the outline beat, the story bible, a running summary) instead of re-reading 60k
+characters. The model never has to *remember* who a character is across a novel —
+it reads the `bible` channel.
+
+```console
+$ ./build/cookbook_the_beast_novelist "a librarian's returned books whisper futures" 12
+harness passed the coherence gate. writing (live — this takes a few minutes)…
+  … chapter 1/12 written (4180 chars)
+  …
+done — 51k characters across 12 chapters.
+manuscript: /abs/path/novel_12ch.txt
+```
+
+The graph is `__start__ → planner → writer ⟲`: `planner` turns the premise into
+an outline + initial bible; `writer` writes chapter `idx` into `book` and
+**updates `summary` and `bible`** so the next iteration stays grounded, then
+**self-loops with a `Command` goto** until `idx+1 == total`. Effect contracts are
+declared, so the **coherence gate proves the wiring before a word is written** —
+every story-state channel is actually consumed, no dangling stage.
+
+Offline (no key) a **deterministic stub** planner/writer runs the *exact same
+graph*, so the pipeline — state threading, the goto loop, accumulation, the
+`.txt` output — is verifiable without a network; `OPENROUTER_API_KEY` swaps in
+the model for the real prose. Honest scope: the gate proves the *plumbing*
+(the story-state is wired and threaded), not the *prose* — narrative quality is
+the model's job, and continuity beyond structure would be a checker node (the
+runtime-backstop pattern), left as the obvious next node to add.
+
 ## Friction surfaced
 
 - **E6 "written but never read" on `trail`** is emitted as lint — and it
