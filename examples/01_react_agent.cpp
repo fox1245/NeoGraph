@@ -164,40 +164,25 @@ int main() {
 
         // 3. Create agent.
         //
-        // The system prompt forces ReAct's interleaved Thought/Action/
-        // Observation pattern. The one-shot exemplar shows the model
-        // exactly what to emit before each tool call — without it,
-        // strong instruction-tuned models often jump straight to a
-        // silent tool call (which is OpenAI function calling, not
-        // ReAct).
+        // The system prompt elicits ReAct's Thought line before every
+        // tool call. Deliberately NO example trajectory: any textual
+        // rendering of an action — 'Action: calculator({...})', even a
+        // '[invokes calculator ...]' placeholder — gets imitated
+        // verbatim by gpt-4o-mini, which then writes the call into
+        // content instead of the tool_calls channel; the agent loop
+        // sees no tool call and returns that text as the final answer.
+        // Measured 2026-07 against the live API: with an exemplar 0/4
+        // responses made a real tool call; without one, 3/3 did.
         const std::string react_system =
-            "You are a ReAct agent. For every step, follow this format:\n"
+            "You are a ReAct agent. Before every tool call, first write one\n"
+            "plain-text line:\n"
             "  Thought: <one sentence — what you need next and why>\n"
-            "  Action: <call a tool, OR write 'finish' to give the final answer>\n"
-            "After a tool returns, the result is the Observation. Use it to\n"
-            "form the next Thought. Stop only when you have enough to answer.\n"
-            "\n"
-            "Example trajectory:\n"
-            "  User: What is 12 * 7 plus 5?\n"
-            "  Thought: I need 12 * 7 first, then add 5. I'll compute the multiplication.\n"
-            "  Action: calculator({\"expression\": \"12 * 7\"})\n"
-            "  Observation: {\"result\": \"84\"}\n"
-            "  Thought: Now add 5 to 84.\n"
-            "  Action: calculator({\"expression\": \"84 + 5\"})\n"
-            "  Observation: {\"result\": \"89\"}\n"
-            "  Thought: I have the answer.\n"
-            "  Final answer: 89\n"
-            "\n"
-            "Always emit the Thought line in plain text before any tool call,\n"
-            "even when the next step is obvious. The reasoning trace is\n"
-            "load-bearing — do not skip it.\n"
-            "\n"
-            "IMPORTANT: The Thought line is plain text, but the Action is NOT\n"
-            "text. To act, you MUST invoke the tool through the function-calling\n"
-            "interface. Never write the tool call inside your text response — a\n"
-            "written-out call like 'calculator({...})' does nothing. In the\n"
-            "example above, each Action line represents a real tool invocation,\n"
-            "not text you should reproduce.";
+            "Then invoke the tool through the function-calling interface (never\n"
+            "write the call as text). After a tool returns, its result is your\n"
+            "Observation; use it to form the next Thought. When you have enough\n"
+            "to answer, reply with 'Final answer: <answer>' as plain text. The\n"
+            "Thought lines are load-bearing — do not skip them, even when the\n"
+            "next step is obvious.";
 
         neograph::llm::Agent agent(
             std::move(provider),
