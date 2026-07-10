@@ -1081,6 +1081,15 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             add_executable(cookbook_minimal_mcp examples/cookbook/minimal-mcp/client_harness.cpp)
             target_link_libraries(cookbook_minimal_mcp PRIVATE neograph::core neograph::mcp)
 
+            # "The Beast" forge — discovers tools over MCP, writes (forges) the
+            # ones it lacks as a Python MCP server, re-discovers them, then
+            # authors + gates + spawns a ReAct agent using them all. Needs
+            # OPENROUTER_API_KEY in .env and python3 on PATH.
+            add_executable(cookbook_the_beast_forge
+                examples/cookbook/the-beast/the_beast_forge.cpp)
+            target_link_libraries(cookbook_the_beast_forge PRIVATE
+                neograph::core neograph::llm neograph::mcp cppdotenv)
+
             add_executable(example_mcp_multi examples/23_mcp_multi.cpp)
             target_link_libraries(example_mcp_multi PRIVATE neograph::core neograph::llm neograph::mcp cppdotenv)
 

@@ -194,6 +194,73 @@ machine-authored, compiler-proven agent ran a live ReAct loop and called
 two tools autonomously. Creativity is unbounded, tool-use is autonomous,
 **coherence is non-negotiable.**
 
+## Forge — when it lacks a tool, it writes one
+
+[`the_beast_forge.cpp`](the_beast_forge.cpp) is the apex plus a tool
+supply chain. Given a task, it:
+
+1. **DISCOVER** — spawns a stock MCP stdio server and lists its tools over
+   the real MCP protocol (`MCPClient::get_tools`).
+2. **FORGE** — for the capability the task needs but the catalog lacks,
+   the architect LLM **writes a Python MCP server** implementing it; we
+   materialize it to disk, launch it, and **re-discover** the new tool
+   over MCP. (Self-repairs if the generated server fails to initialize.)
+3. **AUTHOR** — writes a ReAct agent over the *combined* catalog; three
+   gates + self-repair as always.
+4. **SPAWN** — binds every discovered *and* forged tool and runs the
+   agent, which calls them autonomously.
+
+A real run — the model wrote the missing tool and the agent used it:
+
+```
+── DISCOVER · stock MCP server ──
+  tools: get_current_time calculate get_weather
+
+── FORGE · the model writes a Python MCP server for what's missing ──
+  attempt #1: wrote 5225 bytes → /tmp/beast_forged_server.py
+  FORGED + re-discovered over MCP: reverse_string
+
+── AUTHOR · the model writes a ReAct agent over the full catalog ──
+  #1 REJECTED at 'compile': ... unknown or unconsumed key 'id' → self-repair.
+  ACCEPTED — coherent agent: agent(llm_call) tools(tool_dispatch)
+
+── SPAWN · run the agent it wrote, tools bound ──
+  [harness dispatching tools autonomously]
+    tool → retsnom                         # the forged reverse_string
+    tool → 2026-07-10 06:13:21 (UTC)       # the discovered get_current_time
+  final answer: Reversed 'monster' → retsnom; current UTC time is 2026-07-10 06:13:21.
+
+It discovered tools, forged the missing one, and used them all.
+```
+
+Two live MCP subprocesses (one stock, one the Beast wrote *this run*), a
+real `tools/list` on each, a real ReAct loop. Only the authoring model is
+remote.
+
+### Can it define custom *nodes* too?
+
+Honestly: NeoGraph node **types** are C++ classes registered through
+`NodeFactory::register_type` — you cannot JIT-compile a brand-new atomic
+C++ node type at runtime. But the intent is covered three ways that the
+Beast *can* drive from data:
+
+- **Composite nodes** — the DSL's `templates` / `use` (M4) let the model
+  define reusable node/topology units purely in data; that is exactly
+  what `the_beast.cpp`'s seed does.
+- **Recursion** — a `subgraph` node embeds a whole harness as one node,
+  so a Beast-authored harness can contain Beast-authored sub-harnesses
+  (N-level self-proliferation).
+- **Custom behavior via code** — the forge pattern above *is* runtime
+  behavior authored by the model: a tool it wrote becomes a dispatchable
+  unit. The same trick generalizes to a generic `script_node` type (a
+  pre-registered C++ node that executes model-written code), which is the
+  honest way to get a "new atomic node whose logic the LLM defined."
+
+The one thing that is genuinely off the table is emitting new *compiled
+C++ node classes* at runtime; everything the model needs to specialize
+behavior lives in the data/script/subgraph surface the compiler already
+gates.
+
 ## Friction surfaced
 
 - **E6 "written but never read" on `trail`** is emitted as lint — and it
