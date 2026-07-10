@@ -311,9 +311,23 @@ contract proves the node's *surface* (which channels/targets it may
 touch); only the script's *inner logic* is unproven — bounded by a
 `timeout` on the subprocess and `max_steps` on the run. Running
 model-written code is arbitrary code execution: fine for a local,
-user-driven cookbook, but production needs a sandbox around the
-interpreter (Sandbox2 / nsjail) — a selectable build option, not on by
-default.
+user-driven cookbook, but production wants a sandbox around the
+interpreter. That is a **build option**, off by default:
+
+```console
+$ cmake -S . -B build -DNEOGRAPH_BEAST_SANDBOX=ON   # pulls Google Sandbox2 (FetchContent)
+$ cmake --build build --target cookbook_the_beast_script
+```
+
+With it on, the python runs under Google **Sandbox2** — its own
+user/pid/mount/net namespaces, a read-only filesystem view limited to the
+interpreter + the work dir, and CPU/wall/file rlimits (no network, no
+access to the rest of the system). The `#ifdef BEAST_SANDBOX2` path swaps
+the plain subprocess for the isolated one; the stdout contract is
+identical. Needs `libcap-dev`, `libunwind-dev`, and a C++20 toolchain;
+verified on Linux/WSL2 (which supports the required namespaces +
+seccomp-bpf). This seals script_node's one unproven surface behind real
+isolation.
 
 ## Friction surfaced
 

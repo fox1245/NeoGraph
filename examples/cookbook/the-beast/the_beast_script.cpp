@@ -49,7 +49,7 @@ using neograph::json;
 namespace ng = neograph::graph;
 namespace fs = std::filesystem;
 
-// ---- run a shell command, capture stdout ----
+// ---- run a shell command, capture stdout (default, unsandboxed path) ----
 static std::string run_cmd(const std::string& cmd) {
     std::string out;
     FILE* p = popen(cmd.c_str(), "r");
@@ -59,6 +59,69 @@ static std::string run_cmd(const std::string& cmd) {
     while ((n = fread(buf, 1, sizeof(buf), p)) > 0) out.append(buf, n);
     pclose(p);
     return out;
+}
+
+#ifdef BEAST_SANDBOX2
+// Optional hardened path (build with -DNEOGRAPH_BEAST_SANDBOX=ON): run the
+// model-written python under Google Sandbox2 — its own user/pid/mount/net
+// namespaces, a read-only filesystem view limited to the interpreter + the
+// work dir, and CPU/wall/file rlimits. Verified on this platform: python's
+// stdlib imports work under the FS allowlist, stdout is captured over the
+// sandbox IPC, and there is no network. This seals script_node's one
+// unproven surface (the script's inner logic) behind real isolation.
+#include <sandboxed_api/sandbox2/allowlists/all_syscalls.h>
+#include <sandboxed_api/sandbox2/allowlists/map_exec.h>
+#include <sandboxed_api/sandbox2/executor.h>
+#include <sandboxed_api/sandbox2/ipc.h>
+#include <sandboxed_api/sandbox2/limits.h>
+#include <sandboxed_api/sandbox2/policy.h>
+#include <sandboxed_api/sandbox2/policybuilder.h>
+#include <sandboxed_api/sandbox2/result.h>
+#include <sandboxed_api/sandbox2/sandbox2.h>
+#include <absl/log/initialize.h>
+#include <absl/time/time.h>
+
+static std::string run_python_sandboxed(const std::string& code_path,
+                                        const std::string& in_path) {
+    const std::string bin = "/usr/bin/python3";
+    std::vector<std::string> argv = {bin, code_path, in_path};
+    std::vector<std::string> envp = {
+        "PATH=/usr/bin:/bin", "HOME=/tmp", "PYTHONDONTWRITEBYTECODE=1"};
+    auto executor = std::make_unique<sandbox2::Executor>(bin, argv, envp);
+    int recv = executor->ipc()->ReceiveFd(STDOUT_FILENO);
+    executor->limits()
+        ->set_rlimit_cpu(10)
+        .set_walltime_limit(absl::Seconds(10))
+        .set_rlimit_fsize(1ULL << 20)
+        .set_rlimit_nofile(1024);
+    sandbox2::PolicyBuilder b;
+    b.DefaultAction(sandbox2::AllowAllSyscalls());  // isolation via ns + FS + rlimit
+    b.Allow(sandbox2::MapExec());
+    b.AddLibrariesForBinary(bin);
+    for (const char* d : {"/usr/lib", "/usr/bin", "/lib", "/lib64",
+                          fs::temp_directory_path().c_str()})
+        b.AddDirectory(d);                          // read-only bind mounts
+    sandbox2::Sandbox2 s2(std::move(executor), b.BuildOrDie());
+    std::string out;
+    if (s2.RunAsync()) {
+        char buf[4096];
+        ssize_t n;
+        while ((n = read(recv, buf, sizeof(buf))) > 0) out.append(buf, n);
+    }
+    close(recv);
+    (void)s2.AwaitResult();
+    return out;
+}
+#endif
+
+// Run the model's python: sandboxed when built with BEAST_SANDBOX2, else a
+// plain `timeout 10 python3` subprocess. Same stdout contract either way.
+static std::string run_python(const std::string& code_path, const std::string& in_path) {
+#ifdef BEAST_SANDBOX2
+    return run_python_sandboxed(code_path, in_path);
+#else
+    return run_cmd("timeout 10 python3 '" + code_path + "' '" + in_path + "'");
+#endif
 }
 
 // =================================================================
@@ -94,7 +157,7 @@ public:
         static std::atomic<uint64_t> call{0};
         const std::string in_path = code_path_ + "." + std::to_string(call++) + ".in.json";
         std::ofstream(in_path) << json{{"state", flat}}.dump();
-        const std::string raw = run_cmd("timeout 10 python3 '" + code_path_ + "' '" + in_path + "'");
+        const std::string raw = run_python(code_path_, in_path);
 
         json out;
         try { out = json::parse(raw); }
@@ -216,6 +279,9 @@ static json canned_harness() {
 
 int main(int argc, char** argv) {
     const bool selftest = (argc > 1 && std::string(argv[1]) == "--selftest");
+#ifdef BEAST_SANDBOX2
+    absl::InitializeLog();   // sandbox2 uses absl logging
+#endif
     register_script_node();
 
     std::cout << "============ THE BEAST (script) ============\n"

@@ -1054,6 +1054,48 @@ if(NEOGRAPH_BUILD_EXAMPLES)
                 examples/cookbook/the-beast/the_beast_script.cpp)
             target_link_libraries(cookbook_the_beast_script PRIVATE
                 neograph::core neograph::llm cppdotenv)
+
+            # Optional: run the model-written python under Google Sandbox2
+            # (own user/pid/mount/net namespaces + read-only FS view + CPU/
+            # wall/file rlimits). Default OFF — ON pulls sandboxed-api via
+            # FetchContent (needs libcap-dev, libunwind-dev, clang/gcc,
+            # ninja). Verified on Linux/WSL2. The clang header-generator is
+            # skipped (SAPI_CLANG_TOOL_EXECUTABLE) — only sandbox2 is needed.
+            # Google's sandboxed-api embeds poorly via FetchContent (its
+            # bundled Abseil demands a gtest/gmock target the parent must
+            # provide, a brittle cascade). It builds cleanly STANDALONE,
+            # though, so this option links against a pre-built tree instead:
+            #
+            #   git clone https://github.com/google/sandboxed-api.git /path/sapi
+            #   cmake -S /path/sapi -B /path/sapi/build -G Ninja \
+            #     -DSAPI_CLANG_TOOL_EXECUTABLE=/bin/true
+            #   ninja -C /path/sapi/build \
+            #     sandboxed_api/sandbox2/libsandbox2_sandbox2.a
+            #   cmake -S . -B build -DNEOGRAPH_BEAST_SANDBOX=ON \
+            #     -DSANDBOX2_SRC=/path/sapi
+            #
+            # Needs libcap-dev + libunwind-dev. See the cookbook README.
+            option(NEOGRAPH_BEAST_SANDBOX
+                "Isolate the_beast_script's python under a pre-built Google Sandbox2 (set SANDBOX2_SRC)" OFF)
+            if(NEOGRAPH_BEAST_SANDBOX)
+                if(NOT SANDBOX2_SRC OR NOT EXISTS "${SANDBOX2_SRC}/build")
+                    message(FATAL_ERROR "NEOGRAPH_BEAST_SANDBOX=ON requires -DSANDBOX2_SRC=<sandboxed-api clone with a built build/ dir>. See examples/cookbook/the-beast/README.md.")
+                endif()
+                file(GLOB_RECURSE _beast_sbx_libs
+                    "${SANDBOX2_SRC}/build/sandboxed_api/*.a"
+                    "${SANDBOX2_SRC}/build/_deps/absl-build/*.a"
+                    "${SANDBOX2_SRC}/build/_deps/protobuf-build/*.a")
+                target_include_directories(cookbook_the_beast_script PRIVATE
+                    "${SANDBOX2_SRC}" "${SANDBOX2_SRC}/build"
+                    "${SANDBOX2_SRC}/build/_deps/absl-src"
+                    "${SANDBOX2_SRC}/build/_deps/protobuf-src/src"
+                    "${SANDBOX2_SRC}/build/_deps/protobuf-src/third_party/utf8_range")
+                target_link_libraries(cookbook_the_beast_script PRIVATE
+                    -Wl,--start-group ${_beast_sbx_libs} -Wl,--end-group
+                    cap unwind pthread dl rt)
+                target_compile_definitions(cookbook_the_beast_script PRIVATE
+                    BEAST_SANDBOX2)
+            endif()
         endif()
 
         # JARVIS voice meta-orchestrator cookbook — 골격(skeleton) 단계.
