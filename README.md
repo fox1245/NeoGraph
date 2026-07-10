@@ -113,8 +113,21 @@ Full matrix + methodology: [`docs/performance-deep-dive.md`](docs/performance-de
 ## Quick Start
 
 **Requirements** — C++20 compiler (GCC 13.3 core-green; GCC 14.2+ / Clang 18+ /
-MSVC 2022 for everything), CMake 3.16+, OpenSSL. libpq and SQLite3 are optional
-(Postgres / SQLite checkpoints).
+MSVC 2022 for everything), CMake 3.16+, Python 3 (build-time codegen). With
+default options the configure step also requires the OpenSSL, SQLite3, libpq,
+and libcurl **development** packages (runtime `.so`s alone won't satisfy
+`find_package`):
+
+```bash
+# Ubuntu / Debian
+sudo apt install libssl-dev libsqlite3-dev libpq-dev libcurl4-openssl-dev
+# macOS (SQLite ships with the system)
+brew install openssl libpq curl
+```
+
+Don't need Postgres / SQLite checkpoints or the HTTP/2 backend? Skip the
+packages and configure with `-DNEOGRAPH_BUILD_POSTGRES=OFF
+-DNEOGRAPH_BUILD_SQLITE=OFF -DNEOGRAPH_USE_LIBCURL=OFF` instead.
 
 **Platforms** — Linux x86_64 **GA** (reference, 429/429 ctest, sanitizer-clean);
 macOS arm64, Linux ARM64, Windows MSVC 2022 **beta**. Per-platform rationale in
