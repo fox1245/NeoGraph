@@ -647,6 +647,27 @@ an outline + initial bible; `writer` writes chapter `idx` into `book` and
 declared, so the **coherence gate proves the wiring before a word is written** —
 every story-state channel is actually consumed, no dangling stage.
 
+**Batch-generate, batch-evolve — a distinct feel per chapter.** Each chapter is
+effectively an isolated sub-agent (a fresh `writer` invocation grounded only by
+the shared story-state). To keep them from reading the same, the writer evolves a
+**style genome** per chapter — a point in a 5-D style space (POV · tense · mood ·
+lens · pacing, 480 combinations). It runs a mini-GA (the `baldwin` memetic loop,
+aimed at *variety* instead of a target): a batch of candidate genomes evolved to
+maximize **novelty** — distance from the styles already used — then the winner is
+committed and pushed onto `styles_used` so the next chapter is pressured away from
+it. Offline the style trace is deterministic and visibly varied:
+
+```console
+  … chapter 1/8  [style: epistolary/journal, present tense, melancholic, dialogue-driven, brisk]
+  … chapter 2/8  [style: omniscient third, past tense, wry and whimsical, atmospheric, slow-burn]
+  … chapter 4/8  [style: first-person, past tense, melancholic, kinetic action, staccato]
+  … chapter 6/8  [style: close third-person, present tense, cold and clinical, kinetic, slow-burn]
+```
+
+Novelty search maximizes distinctiveness (it doesn't *guarantee* every dimension
+differs) — honest, and enough to break the monotone-voice failure of one-model
+long-form.
+
 Offline (no key) a **deterministic stub** planner/writer runs the *exact same
 graph*, so the pipeline — state threading, the goto loop, accumulation, the
 `.txt` output — is verifiable without a network; `OPENROUTER_API_KEY` swaps in

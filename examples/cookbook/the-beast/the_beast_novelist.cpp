@@ -40,11 +40,16 @@
 
 #include <cppdotenv/dotenv.hpp>
 
+#include <algorithm>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <random>
+#include <sstream>
 #include <string>
+#include <vector>
 
 using neograph::json;
 namespace ng = neograph::graph;
@@ -72,6 +77,74 @@ static std::string trim(std::string x) {
     auto ns = x.find_first_not_of(" \t\r\n");
     auto ne = x.find_last_not_of(" \t\r\n");
     return ns == std::string::npos ? "" : x.substr(ns, ne - ns + 1);
+}
+
+// ---------------------------------------------- per-chapter style evolution --
+// To give each chapter a distinct FEEL, the writer evolves a small STYLE GENOME
+// per chapter: a point in a 5-dimensional style space. The fitness is NOVELTY —
+// distance from the styles already used — so a batch of candidates is evolved
+// (a mini-GA) to be maximally UNLIKE the chapters before it. Batch-generate,
+// batch-evolve, commit the winner: the memetic loop from `baldwin`, aimed at
+// variety instead of a target. Deterministic (seeded per chapter).
+static const std::vector<std::vector<const char*>> STYLE_DIMS = {
+    {"first-person", "close third-person", "omniscient third", "epistolary/journal"},
+    {"past tense", "present tense"},
+    {"tense and foreboding", "melancholic and lyrical", "wry and whimsical",
+     "warm and intimate", "cold and clinical"},
+    {"dialogue-driven", "introspective interiority", "kinetic action",
+     "atmospheric sensory detail"},
+    {"slow-burn", "brisk and propulsive", "staccato fragments"}};
+using Style = std::array<int, 5>;
+static int sdist(const Style& a, const Style& b) {
+    int d = 0; for (int i = 0; i < 5; ++i) d += (a[i] != b[i]); return d;
+}
+// Novelty = min distance to any prior style (higher = more different).
+static int novelty(const Style& g, const std::vector<Style>& prior) {
+    if (prior.empty()) return 5;
+    int m = 5; for (const auto& p : prior) m = std::min(m, sdist(g, p)); return m;
+}
+static Style rand_style(std::mt19937& rng) {
+    Style g; for (int i = 0; i < 5; ++i) g[i] = rng() % (int)STYLE_DIMS[i].size(); return g;
+}
+// Mini-GA: evolve a batch of style genomes to maximize novelty vs `prior`.
+static Style evolve_style(const std::vector<Style>& prior, uint32_t seed) {
+    std::mt19937 rng(seed);
+    const int P = 12, G = 8;
+    std::vector<Style> pop(P);
+    for (auto& g : pop) g = rand_style(rng);
+    Style best = pop[0]; int best_f = -1;
+    for (int gen = 0; gen < G; ++gen) {
+        std::sort(pop.begin(), pop.end(), [&](const Style& a, const Style& b) {
+            return novelty(a, prior) > novelty(b, prior); });
+        if (novelty(pop[0], prior) > best_f) { best_f = novelty(pop[0], prior); best = pop[0]; }
+        std::vector<Style> next(pop.begin(), pop.begin() + P / 2);   // elite half
+        while ((int)next.size() < P) {                               // mutate elites
+            Style c = next[rng() % (P / 2)];
+            int dim = rng() % 5; c[dim] = rng() % (int)STYLE_DIMS[dim].size();
+            next.push_back(c);
+        }
+        pop = std::move(next);
+    }
+    return best;
+}
+static std::string describe(const Style& g) {
+    std::string s;
+    for (int i = 0; i < 5; ++i) s += (i ? ", " : "") + std::string(STYLE_DIMS[i][g[i]]);
+    return s;
+}
+static std::string style_sig(const Style& g) {
+    std::ostringstream o; for (int i = 0; i < 5; ++i) o << (i ? "," : "") << g[i]; return o.str();
+}
+static std::vector<Style> parse_styles(const std::string& s) {
+    std::vector<Style> out;
+    std::istringstream ss(s); std::string tok;
+    while (std::getline(ss, tok, ';')) {
+        if (tok.empty()) continue;
+        Style g{}; std::istringstream ts(tok); std::string n; int i = 0;
+        while (std::getline(ts, n, ',') && i < 5) g[i++] = std::atoi(n.c_str());
+        if (i == 5) out.push_back(g);
+    }
+    return out;
 }
 
 // ------------------------------------------------------------------ planner --
@@ -126,6 +199,12 @@ struct WriterNode : ng::GraphNode {
         std::string premise = sget(in, "premise"), outline = sget(in, "outline"),
                     bible = sget(in, "bible"), summary = sget(in, "summary"), book = sget(in, "book");
 
+        // Batch-generate + batch-evolve a STYLE for this chapter, maximizing
+        // novelty vs the styles already used → each chapter gets a distinct feel.
+        std::vector<Style> prior = parse_styles(sget(in, "styles_used"));
+        Style style = evolve_style(prior, (uint32_t)(idx + 1) * 2654435761u);
+        std::string style_desc = describe(style);
+
         std::string chapter, new_summary = summary, new_bible = bible;
         if (g_prov) {
             std::string reply = ask(
@@ -142,7 +221,10 @@ struct WriterNode : ng::GraphNode {
                 "\n\nStory bible (canon):\n" + bible + "\n\nSummary so far:\n" +
                 (summary.empty() ? "(none yet — this is the opening)" : summary) +
                 "\n\nWrite CHAPTER " + std::to_string(idx + 1) + " of " + std::to_string(total) +
-                ". Follow beat " + std::to_string(idx + 1) + " of the outline.", 6000);
+                ". Follow beat " + std::to_string(idx + 1) + " of the outline."
+                "\n\nRender THIS chapter in a deliberately distinct STYLE so it FEELS different "
+                "from the other chapters — commit fully to: " + style_desc +
+                ". (Keep the STORY consistent; only the texture changes.)", 6000);
             chapter = trim(slice(reply, "###CHAPTER###", "###SUMMARY###"));
             std::string s = trim(slice(reply, "###SUMMARY###", "###BIBLE###"));
             std::string b = trim(slice(reply, "###BIBLE###", ""));
@@ -162,8 +244,11 @@ struct WriterNode : ng::GraphNode {
         o.writes.push_back({"summary", new_summary});
         o.writes.push_back({"bible", new_bible});
         o.writes.push_back({"idx", idx + 1});
-        std::cerr << "  … chapter " << (idx + 1) << "/" << total << " written ("
-                  << chapter.size() << " chars)\n";
+        std::string styles_used = sget(in, "styles_used");
+        o.writes.push_back({"styles_used",
+                            styles_used + (styles_used.empty() ? "" : ";") + style_sig(style)});
+        std::cerr << "  … chapter " << (idx + 1) << "/" << total << "  [style: " << style_desc
+                  << "]  (" << chapter.size() << " chars)\n";
         if (idx + 1 < total) o.command = ng::Command{"writer", {}};   // loop; else → __end__
         co_return o;
     }
@@ -183,8 +268,8 @@ static void register_nodes() {
             [](const std::string& n, const json&, const ng::NodeContext&) {
                 return std::unique_ptr<ng::GraphNode>(new WriterNode(n)); },
             json::object(),
-            json::parse(R"({"reads":["premise","outline","bible","summary","book","idx","total"],
-                            "writes":["book","summary","bible","idx"]})"));
+            json::parse(R"({"reads":["premise","outline","bible","summary","book","idx","total","styles_used"],
+                            "writes":["book","summary","bible","idx","styles_used"]})"));
         return true;
     }();
     (void)once;
@@ -220,7 +305,8 @@ int main(int argc, char** argv) {
         {"schema_version", 1}, {"name", "novelist"},
         {"channels", {
             {"premise", ch(premise)}, {"total", ch(total)}, {"idx", ch(0)},
-            {"outline", ch("")}, {"bible", ch("")}, {"summary", ch("")}, {"book", ch("")}}},
+            {"outline", ch("")}, {"bible", ch("")}, {"summary", ch("")}, {"book", ch("")},
+            {"styles_used", ch("")}}},
         {"nodes", {{"planner", {{"type", "planner"}}}, {"writer", {{"type", "writer"}}}}},
         {"edges", json::array({ {{"from", "__start__"}, {"to", "planner"}},
                                 {{"from", "planner"}, {"to", "writer"}} })}};
