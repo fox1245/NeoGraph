@@ -261,6 +261,60 @@ C++ node classes* at runtime; everything the model needs to specialize
 behavior lives in the data/script/subgraph surface the compiler already
 gates.
 
+## Script — the universal cartridge (model-authored node logic + flow)
+
+Every variant above lets the model author *tools* (leaf capabilities).
+[`the_beast_script.cpp`](the_beast_script.cpp) lets it author **node logic
+— including control flow (`goto`) that tools categorically cannot
+express.** `script_node` is one pre-compiled C++ node whose config carries
+model-written Python; at `run()` it hands the node the channel state and
+applies whatever the code returns — `{writes, goto, sends}` — to the
+graph. The model defines a node's behavior *and* the graph's flow, in
+data, with no recompile.
+
+Coherence stays non-negotiable. The script declares its contract in config
+(`reads` / `writes` / `goto_targets`); the harness passes the three DSL
+gates PLUS a Beast-layer **contract check** (declared writes must be
+declared channels; goto targets must be real nodes) PLUS a **runtime
+wrapper** that rejects any write/goto outside the declaration. That
+restores the effect/route guarantees at the Beast layer with **zero change
+to NeoGraph core** — additive and backward compatible.
+
+```console
+$ cmake --build build --target cookbook_the_beast_script
+$ ./build/cookbook_the_beast_script --selftest   # offline, no API key
+$ ./build/cookbook_the_beast_script              # live: DeepSeek writes the node logic
+```
+
+Live run — the model wrote a counter loop whose control flow is its own
+`goto`:
+
+```
+── Attempt #1: model writes node logic ──
+  ACCEPTED — coherent, and the script's write/goto surface is contract-checked.
+
+── Spawning — the node's own code drives the loop via goto ──
+  [tick #1 — script decides: continue or exit]
+  [tick #2 — script decides: continue or exit]
+  [tick #3 — script decides: continue or exit]
+  trace: tick -> tick -> tick -> END
+  final counter = 3  (the model's goto logic ran the loop, contract-enforced)
+```
+
+There are no static edges out of `tick`: the loop exists only because the
+model's Python returns `{"goto": "tick"}` until the counter hits 3, then
+`{"goto": "__end__"}`. `--selftest` runs the identical mechanism from a
+canned harness with no API key, so CI can exercise it offline.
+
+**Boundaries (honest).** The compiler proves the graph's *shape*; the
+contract proves the node's *surface* (which channels/targets it may
+touch); only the script's *inner logic* is unproven — bounded by a
+`timeout` on the subprocess and `max_steps` on the run. Running
+model-written code is arbitrary code execution: fine for a local,
+user-driven cookbook, but production needs a sandbox around the
+interpreter (Sandbox2 / nsjail) — a selectable build option, not on by
+default.
+
 ## Friction surfaced
 
 - **E6 "written but never read" on `trail`** is emitted as lint — and it

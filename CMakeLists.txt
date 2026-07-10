@@ -1045,6 +1045,15 @@ if(NEOGRAPH_BUILD_EXAMPLES)
                 examples/cookbook/the-beast/the_beast_apex.cpp)
             target_link_libraries(cookbook_the_beast_apex PRIVATE
                 neograph::core neograph::llm cppdotenv)
+
+            # Script variant: the "universal cartridge". A single custom
+            # node type (script_node) runs model-written code that controls
+            # its own logic AND graph flow (goto). Contract-checked + runtime
+            # -enforced, zero core change. Needs OPENROUTER_API_KEY in .env.
+            add_executable(cookbook_the_beast_script
+                examples/cookbook/the-beast/the_beast_script.cpp)
+            target_link_libraries(cookbook_the_beast_script PRIVATE
+                neograph::core neograph::llm cppdotenv)
         endif()
 
         # JARVIS voice meta-orchestrator cookbook — 골격(skeleton) 단계.
