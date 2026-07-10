@@ -25,6 +25,7 @@
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
 #include <neograph/llm/openai_provider.h>
+#include <neograph/async/run_sync.h>
 
 #include <cppdotenv/dotenv.hpp>
 
@@ -56,7 +57,11 @@ void register_beast_node() {
             [](const std::string& name, const json&, const ng::NodeContext&) {
                 return std::unique_ptr<ng::GraphNode>(new BeastNode(name));
             },
-            json::object(), json::parse(R"({"reads":["trail"],"writes":["trail"]})"));
+            // BeastNode ignores its input and only appends to trail, so the
+            // contract declares reads:[] — matching the offline the_beast.cpp.
+            // This deliberately lets E6 (written but never read) surface on
+            // `trail`, the precise-lint behaviour the README documents.
+            json::object(), json::parse(R"({"reads":[],"writes":["trail"]})"));
         return true;
     }();
     (void)once;
@@ -163,9 +168,10 @@ int main(int argc, char** argv) {
         p.max_tokens = 4000;  // reasoning model: leave room for thinking + JSON
 
         neograph::ChatCompletion resp;
-        // complete() is the synchronous entry (invoke() is the awaitable
-        // async peer); fine for a straight-line CLI driver like this.
-        try { resp = provider->complete(p); }
+        // invoke(params, nullptr) is the single-dispatch v1.0 entry; run_sync
+        // drives it to completion on a private io_context — the right sync
+        // bridge for a straight-line CLI driver like this.
+        try { resp = neograph::async::run_sync(provider->invoke(p, nullptr)); }
         catch (const std::exception& e) { std::cerr << "  LLM error: " << e.what() << "\n"; return 1; }
         const std::string reply = resp.message.content;
         std::cout << "  model returned " << reply.size() << " chars of JSON.\n";

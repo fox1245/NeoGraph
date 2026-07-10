@@ -23,6 +23,7 @@
 #include <neograph/graph/validator.h>
 #include <neograph/graph/loader.h>
 #include <neograph/llm/openai_provider.h>
+#include <neograph/async/run_sync.h>
 
 #include <cppdotenv/dotenv.hpp>
 
@@ -170,7 +171,9 @@ int main(int argc, char** argv) {
         p.temperature = 0.2f;
         p.max_tokens = 4000;
         neograph::ChatCompletion resp;
-        try { resp = provider->complete(p); }
+        // v1.0 single-dispatch: invoke(params, nullptr) driven to completion
+        // by run_sync (private io_context), replacing deprecated complete().
+        try { resp = neograph::async::run_sync(provider->invoke(p, nullptr)); }
         catch (const std::exception& e) { std::cerr << "  LLM error: " << e.what() << "\n"; return 1; }
 
         json dsl;
