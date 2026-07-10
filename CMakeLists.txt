@@ -1055,6 +1055,14 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             target_link_libraries(cookbook_the_beast_script PRIVATE
                 neograph::core neograph::llm cppdotenv)
 
+            # Memetic evolution: REAL fitness (executes the harness) + Darwinian
+            # mutation/selection + optional Lamarckian LLM injection. Supplies
+            # the fitness layer evolution.h's gate-only evaluate() lacks.
+            add_executable(cookbook_the_beast_evolve
+                examples/cookbook/the-beast/the_beast_evolve.cpp)
+            target_link_libraries(cookbook_the_beast_evolve PRIVATE
+                neograph::core neograph::llm cppdotenv)
+
             # Optional: run the model-written python under Google Sandbox2
             # (own user/pid/mount/net namespaces + read-only FS view + CPU/
             # wall/file rlimits). Default OFF — ON pulls sandboxed-api via
