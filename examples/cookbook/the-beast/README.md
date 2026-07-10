@@ -438,6 +438,43 @@ gate exists to prevent, so it is checked but not executed. This is a
 demonstration corpus, not exhaustive coverage of every diagnostic — but it
 turns "the gate is sound" from a slogan into a measured, CI-enforced 4/4.
 
+## Gate-fuzz — the guarantee and its boundary, at scale
+
+[`the_beast_gate_fuzz.cpp`](the_beast_gate_fuzz.cpp) pushes gate_eval from 5
+hand-labeled cases to thousands of fuzzed ones — but honestly. The naive move
+(fuzz N graphs, print precision 1.0) would be theatre: the **engine re-runs the
+validator on compile and throws on any error**, so "validator-error ⟹
+engine-faults" is true *by construction*. So the program measures the two things
+that are actually informative:
+
+```console
+$ ./build/cookbook_the_beast_gate_fuzz 2>/dev/null   # lint → stderr
+LAYER 1 — static gate vs engine over 2000 honest-contract mutants:
+  gate rejected 1586, gate passed 414;  agreements 2000, DISAGREEMENTS 0
+  runtime faults AFTER the gate passed (soundness holes): 0
+LAYER 2 — a node that LIES about its effect contract (500 mutants):
+  static gate PASSED (blind to the lie): 500/500
+  runtime GraphState guard FAULTED (backstop caught it): 500/500
+CI gate (Layer 1: 0 disagreements over 2000; Layer 2: runtime backstops 100%): PASS
+```
+
+- **Layer 1 — consistency at scale.** Fuzz a coherent seed with random
+  structural mutators (dangling edge → E3, undeclared write → E4, orphan writer,
+  dropped edge → E7 *warning*, extra valid edge). Over 2000 mutants the compiler
+  gate and the engine never disagree. This is not a soundness *discovery* (it's
+  partly by construction) — it is a **regression guarantee**: if a future change
+  makes the static gate and the runtime diverge, this fails.
+- **Layer 2 — the boundary.** The gate trusts each node's declared **effect
+  contract**. A node that *lies* — declares `writes:["out"]` but actually writes
+  the undeclared `phantom` channel at runtime — sails past the static gate
+  (500/500), and the **runtime `GraphState` write-guard** catches every one
+  (500/500). That is not a gate bug; it is the designed division of labour.
+
+The result is a *precise* statement of the guarantee, which is more honest than a
+suspiciously-perfect confusion matrix: **the static gate is sound relative to
+honest contracts, with a runtime backstop for dishonest ones** — Layer 1 and
+Layer 2 each CI-enforced.
+
 ## Baldwin — does memetic beat blind, and does inheritance matter?
 
 The `evolve` variant showed Darwinian mutation + a Lamarckian LLM injection.

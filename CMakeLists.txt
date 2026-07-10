@@ -1072,6 +1072,15 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             target_link_libraries(cookbook_the_beast_gate_eval PRIVATE
                 neograph::core)
 
+            # Statistically-powered soundness of the coherence gate: fuzz a
+            # coherent seed with random mutators, tally the validator-vs-engine
+            # confusion matrix (precision/recall), gate on ZERO soundness
+            # violations over N mutants. Offline/deterministic — CI-gatable.
+            add_executable(cookbook_the_beast_gate_fuzz
+                examples/cookbook/the-beast/the_beast_gate_fuzz.cpp)
+            target_link_libraries(cookbook_the_beast_gate_fuzz PRIVATE
+                neograph::core)
+
             # Darwinian vs Baldwinian vs Lamarckian memetic evolution of
             # harness topologies (Hinton-Nowlan needle + Whitley deceptive
             # landscape). Fitness = signature of the assembled harness when

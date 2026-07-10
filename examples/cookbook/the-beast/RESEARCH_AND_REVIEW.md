@@ -232,6 +232,24 @@ proof over the effect lattice, and a larger statistically-powered corpus, remain
 the deeper follow-up. (b) — a real agentic benchmark + Baldwinian control — is
 next.
 
+**Status: (a) extended — the statistically-powered corpus landed, honestly
+framed.** [`the_beast_gate_fuzz.cpp`](the_beast_gate_fuzz.cpp) scales gate_eval
+from 5 hand-labeled cases to thousands of fuzzed ones — but *without* the trap of
+printing a suspiciously-perfect precision/recall. The honest observation is that
+the engine re-runs the validator on compile and throws on any error, so
+"validator-error ⟹ engine-faults" is true by construction; a 1.0 confusion
+matrix off that is theatre. So the program measures the two informative layers
+instead: **Layer 1** — over 2000 structural mutants the compiler gate and the
+engine never disagree (a scale *regression* guarantee, not a soundness
+discovery); **Layer 2** — the gate trusts effect contracts, so a node that
+*lies* (declares `writes:["out"]` but writes an undeclared channel) sails past
+the static gate 500/500 and the runtime `GraphState` guard backstops it 500/500.
+The deliverable is a *precise* statement of the guarantee — **sound relative to
+honest contracts, with a runtime backstop for dishonest ones** — each layer
+CI-enforced. What remains genuinely open for (a) is the *formal* small-step
+semantics + a written soundness proof over the effect lattice (theory/writing,
+not a runnable artifact).
+
 **Status: (b) landed — the Baldwinian control, with an honest negative on the
 reversal.** [`the_beast_baldwin.cpp`](the_beast_baldwin.cpp) is the benchmark
 weakness 5 demanded: a task where blind Darwinian search *and* a single
