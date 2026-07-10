@@ -190,7 +190,14 @@ int main() {
             "\n"
             "Always emit the Thought line in plain text before any tool call,\n"
             "even when the next step is obvious. The reasoning trace is\n"
-            "load-bearing — do not skip it.";
+            "load-bearing — do not skip it.\n"
+            "\n"
+            "IMPORTANT: The Thought line is plain text, but the Action is NOT\n"
+            "text. To act, you MUST invoke the tool through the function-calling\n"
+            "interface. Never write the tool call inside your text response — a\n"
+            "written-out call like 'calculator({...})' does nothing. In the\n"
+            "example above, each Action line represents a real tool invocation,\n"
+            "not text you should reproduce.";
 
         neograph::llm::Agent agent(
             std::move(provider),
