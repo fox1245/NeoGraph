@@ -337,39 +337,50 @@ The offline `the_beast.cpp` runs evolution.h's `evolve()`, but that path's
 flat and nothing climbs (the best individual stays the seed).
 
 [`the_beast_evolve.cpp`](the_beast_evolve.cpp) supplies the missing layer:
-a **real fitness that executes the harness** and scores its behaviour,
+a **real fitness that executes the harness and scores its actual output**,
 then drives a memetic loop.
 
-- **Fitness** (a structural proxy — the point is the mechanism, not a hard
-  task): 5 worker nodes `s1..s5` exist, but the seed wires only two into
-  the active path, so only two execute and append to `trail`. Fitness =
-  `-(|executed - 5|)`.
-- **Darwinian**: random topology mutations (`all_operators()`) + selection
-  by measured fitness — blind, gradual.
-- **Lamarckian**: between rounds an LLM inspects the elite, writes a
-  *directed* fix (an acquired trait), and injects it back as a heritable
-  seed.
+- **The task** (a genuine one, output-scored — not a structural proxy):
+  assemble an ARITHMETIC PIPELINE that computes a target number. Five op
+  nodes exist — `add2(+2) add3(+3) mul5(*5) mul2(*2) sub1(-1)` — each reads
+  the `acc` channel (init 0), applies its op, writes it back. The harness's
+  answer is whatever `acc` holds after execution; **fitness =
+  `-(|acc - 20|)`**. The *topology* (which ops run, in what order)
+  determines the number, so evolving the wiring evolves the computation.
+- **Darwinian**: random rewiring (`all_operators()`) + selection by the
+  measured output — stumbles toward 20.
+- **Lamarckian**: an LLM does the arithmetic, wires a chain that hits 20
+  exactly, and injects that acquired solution as a heritable seed.
 
 ```console
 $ ./build/cookbook_the_beast_evolve --darwin-only   # offline, deterministic
-gen 0  seed executes 2/5  fitness -3
-gen 2  best executes 3/5  fitness -2  (mut)
-gen 4  best executes 4/5  fitness -1  (mut)
-gen 8  best executes 5/5  fitness -0  (mut)   → Solved
+gen 0  seed acc=5   fitness -15
+gen 1  best acc=10  fitness -10  (mut)
+gen 2  best acc=24  fitness -4   (mut)   # overshoot
+gen 6  best acc=19  fitness -1   (mut)
+gen 9  best acc=20  fitness -0   (mut)   → Solved
+champion: acc=20, origin 'mut'. Pure Darwinian mutation + selection.
 
-$ ./build/cookbook_the_beast_evolve             # + Lamarckian (needs OPENROUTER_API_KEY)
-gen 2  best executes 3/5  fitness -2  (mut)
-gen 3  [Lamarckian] LLM refinement executes 5/5  → injected (heritable)
+$ ./build/cookbook_the_beast_evolve                 # + Lamarckian (needs OPENROUTER_API_KEY)
+gen 2  best acc=24  fitness -4  (mut)
+gen 3  [Lamarckian] LLM refinement acc=20  fitness -0  → injected (heritable)
        Solved via Lamarckian injection.
+champion: acc=20, origin 'LLM'. The winner is a Lamarckian acquired trait ...
 ```
 
-The contrast is the whole point: **blind mutation climbs gradually**
-(2→3→4→5 by generation 8); **directed LLM refinement jumps** straight to
-5/5 when injected, and because the acquired trait becomes the heritable
-champion (`origin 'LLM'`), that is Lamarckian. The hybrid (a memetic
-algorithm) converges fastest — mutation explores, refinement exploits.
-Pure Darwinian is verified offline and deterministic; the Lamarckian layer
-is verified live.
+The contrast is the whole point: **blind mutation stumbles toward the
+target** (5→10→24→19→20 by generation 9, computing the number by trial);
+**the LLM does the arithmetic** — `(0+2)*5*2 = 20` — and jumps straight to
+the answer when injected. Because that acquired solution becomes the
+heritable champion (`origin 'LLM'`), it is Lamarckian; blind variation +
+selection is Darwinian; running both is a memetic algorithm.
+
+Honest notes: pure Darwinian is verified offline and deterministic. The
+Lamarckian LLM call (deepseek-v4-flash) is **occasionally flaky** — the
+streamed reply sometimes comes back unparseable, in which case the run
+logs `[Lamarckian] LLM returned no parseable harness` and Darwinian
+carries the round; the final line reports the champion's *actual* origin,
+never a Lamarckian win that didn't happen.
 
 ## Friction surfaced
 
