@@ -207,3 +207,14 @@ policy — this review proceeds with **(c)**, because it is the one that:
 resists crisp verification; (b) is the most empirically demanded but highest-
 risk to land cleanly. (c) is the best build-and-verify slice now; (a) and (b)
 remain the sequenced follow-ups.
+
+**Status: (c) implemented and verified.** `script_node`'s effect contract now
+carries an optional `caps` list; the Sandbox2 policy is *synthesised* from it —
+the absence of a `"net"` capability seccomp-blocks `socket`/`connect`/…, the
+absence of `"exec"` blocks `execve`. Verified by a negative test (same python,
+same sandbox, differing only by the declared cap): `caps=[]` →
+`{"socket":"SOCKET_BLOCKED:EPERM"}` (the syscall itself is denied);
+`caps=["net"]` → `{"socket":"SOCKET_CREATED"}`. This closes code-review finding 5
+and academic weakness 7 with a contract-derived (not hand-written) seccomp layer.
+Remaining sandbox depth (per-node syscall allowlist, capability-based secret
+mediation à la CapSeal, an adversarial-escape eval) stays on the roadmap.

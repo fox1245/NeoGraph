@@ -314,20 +314,39 @@ model-written code is arbitrary code execution: fine for a local,
 user-driven cookbook, but production wants a sandbox around the
 interpreter. That is a **build option**, off by default:
 
+Sandboxed-api embeds poorly via FetchContent, so link a pre-built tree
+(build recipe in the CMake comment above the option):
+
 ```console
-$ cmake -S . -B build -DNEOGRAPH_BEAST_SANDBOX=ON   # pulls Google Sandbox2 (FetchContent)
+$ cmake -S . -B build -DNEOGRAPH_BEAST_SANDBOX=ON -DSANDBOX2_SRC=/path/to/sandboxed-api
 $ cmake --build build --target cookbook_the_beast_script
 ```
 
 With it on, the python runs under Google **Sandbox2** — its own
-user/pid/mount/net namespaces, a read-only filesystem view limited to the
-interpreter + the work dir, and CPU/wall/file rlimits (no network, no
-access to the rest of the system). The `#ifdef BEAST_SANDBOX2` path swaps
-the plain subprocess for the isolated one; the stdout contract is
-identical. Needs `libcap-dev`, `libunwind-dev`, and a C++20 toolchain;
-verified on Linux/WSL2 (which supports the required namespaces +
-seccomp-bpf). This seals script_node's one unproven surface behind real
-isolation.
+user/pid/mount/net namespaces, a read-only FS view limited to the
+interpreter + the two work files, and CPU/wall/file rlimits. Needs
+`libcap-dev`, `libunwind-dev`, a C++20 toolchain; verified on Linux/WSL2.
+
+**Seccomp policy synthesised from the effect contract.** Python's syscall
+footprint is too large to allowlist safely, so the default action stays
+permissive — but the node's declared *capabilities* subtract syscalls: a
+node that declares no `"net"` capability has `socket`/`connect`/`bind`/…
+seccomp-blocked (EPERM); no `"exec"` capability blocks `execve`/`execveat`.
+The policy is *derived from the declared contract*, not hand-written. This
+was verified with a negative test — the **same** python, under the **same**
+sandbox, differing only by the declared cap:
+
+```
+caps=[]     (no net cap): {"socket": "SOCKET_BLOCKED:EPERM"}   # seccomp denies the syscall itself
+caps=[net]  (net cap):    {"socket": "SOCKET_CREATED"}         # capability grants it
+```
+
+So it is more than the network namespace: with no `net` cap, the
+`socket()` *syscall* fails (defense in depth on top of the netns). Honest
+scope: this is **container-grade + a contract-derived seccomp blocklist**,
+not a full syscall allowlist — a kernel exploit via an unblocked syscall is
+still not contained. A tighter per-node allowlist (and capability-based
+secret mediation) is the documented next step.
 
 ## Evolve — memetic (Darwinian + Lamarckian)
 

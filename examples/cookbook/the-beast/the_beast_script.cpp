@@ -69,11 +69,16 @@ static std::string run_cmd(const std::string& cmd) {
 // python's stdlib imports work under the FS allowlist, stdout is captured
 // over the sandbox IPC, and there is no network.
 //
-// Honest scope: this is CONTAINER-GRADE isolation (namespaces + read-only
-// FS allowlist + rlimits), NOT syscall-level confinement — the policy
-// permits all syscalls, so a kernel exploit is not contained. Tightening
-// with a seccomp allowlist (ideally derived from each node's declared
-// effect contract) is the documented next step.
+// Isolation: namespaces (own user/pid/mount/net) + read-only FS allowlist +
+// CPU/wall/file rlimits, PLUS a seccomp BLOCKLIST *derived from the node's
+// declared effect contract* (see below). Python's syscall footprint is too
+// large to allowlist safely (cf. Alhindi & Hallett, arXiv:2506.10234), so the
+// default action stays permissive and the contract's ABSENCE of a capability
+// removes the matching syscalls: a node that declares no "net" capability
+// cannot socket()/connect() even if the network namespace were misconfigured
+// (defense in depth); a node with no "exec" capability cannot execve() a new
+// program. Honest scope: still not a full allowlist — a kernel exploit via an
+// unblocked syscall is not contained.
 #include <sandboxed_api/sandbox2/allowlists/all_syscalls.h>
 #include <sandboxed_api/sandbox2/allowlists/map_exec.h>
 #include <sandboxed_api/sandbox2/executor.h>
@@ -85,9 +90,12 @@ static std::string run_cmd(const std::string& cmd) {
 #include <sandboxed_api/sandbox2/sandbox2.h>
 #include <absl/log/initialize.h>
 #include <absl/time/time.h>
+#include <sys/syscall.h>
+#include <cerrno>
 
 static std::string run_python_sandboxed(const std::string& code_path,
-                                        const std::string& in_path) {
+                                        const std::string& in_path,
+                                        const std::set<std::string>& caps) {
     const std::string bin = "/usr/bin/python3";
     std::vector<std::string> argv = {bin, code_path, in_path};
     std::vector<std::string> envp = {
@@ -100,8 +108,17 @@ static std::string run_python_sandboxed(const std::string& code_path,
         .set_rlimit_fsize(1ULL << 20)
         .set_rlimit_nofile(1024);
     sandbox2::PolicyBuilder b;
-    b.DefaultAction(sandbox2::AllowAllSyscalls());  // isolation via ns + FS + rlimit
+    b.DefaultAction(sandbox2::AllowAllSyscalls());
     b.Allow(sandbox2::MapExec());
+    // --- seccomp policy SYNTHESISED from the declared effect contract ---
+    // No declared capability ⇒ the corresponding syscalls return EPERM.
+    if (!caps.count("net"))
+        for (int sc : {__NR_socket, __NR_socketpair, __NR_connect, __NR_bind,
+                       __NR_listen, __NR_accept, __NR_accept4})
+            b.BlockSyscallWithErrno(sc, EPERM);
+    if (!caps.count("exec"))
+        for (int sc : {__NR_execve, __NR_execveat})
+            b.BlockSyscallWithErrno(sc, EPERM);
     b.AddLibrariesForBinary(bin);
     for (const char* d : {"/usr/lib", "/usr/bin", "/lib", "/lib64"})
         b.AddDirectory(d);                          // interpreter + stdlib, read-only
@@ -125,10 +142,13 @@ static std::string run_python_sandboxed(const std::string& code_path,
 
 // Run the model's python: sandboxed when built with BEAST_SANDBOX2, else a
 // plain `timeout 10 python3` subprocess. Same stdout contract either way.
-static std::string run_python(const std::string& code_path, const std::string& in_path) {
+// `caps` = the node's declared capabilities (drives the seccomp policy).
+static std::string run_python(const std::string& code_path, const std::string& in_path,
+                              const std::set<std::string>& caps) {
 #ifdef BEAST_SANDBOX2
-    return run_python_sandboxed(code_path, in_path);
+    return run_python_sandboxed(code_path, in_path, caps);
 #else
+    (void)caps;
     return run_cmd("timeout 10 python3 '" + code_path + "' '" + in_path + "'");
 #endif
 }
@@ -140,7 +160,7 @@ static std::string run_python(const std::string& code_path, const std::string& i
 // =================================================================
 class ScriptNode : public ng::GraphNode {
     std::string name_, code_path_;
-    std::set<std::string> writes_, goto_targets_;
+    std::set<std::string> writes_, goto_targets_, caps_;
 public:
     ScriptNode(std::string name, const json& cfg) : name_(std::move(name)) {
         static std::atomic<uint64_t> counter{0};
@@ -150,6 +170,9 @@ public:
         std::ofstream(code_path_) << cfg.value("code", "");
         for (const auto& w : cfg.value("writes", json::array())) writes_.insert(w.get<std::string>());
         for (const auto& g : cfg.value("goto_targets", json::array())) goto_targets_.insert(g.get<std::string>());
+        // Declared capabilities (e.g. "net", "exec"); their ABSENCE tightens
+        // the sandbox's seccomp policy. Default: none → most restrictive.
+        for (const auto& c : cfg.value("caps", json::array())) caps_.insert(c.get<std::string>());
     }
     ~ScriptNode() override { std::error_code ec; fs::remove(code_path_, ec); }
 
@@ -167,7 +190,7 @@ public:
         static std::atomic<uint64_t> call{0};
         const std::string in_path = code_path_ + "." + std::to_string(call++) + ".in.json";
         std::ofstream(in_path) << json{{"state", flat}}.dump();
-        const std::string raw = run_python(code_path_, in_path);
+        const std::string raw = run_python(code_path_, in_path, caps_);
         { std::error_code ec; fs::remove(in_path, ec); }   // clean the per-run input file
 
         json out;
@@ -208,7 +231,8 @@ void register_script_node() {
                 return std::unique_ptr<ng::GraphNode>(new ScriptNode(n, cfg)); },
             json::parse(R"({"type":"object","properties":{
               "code":{"type":"string"},"reads":{"type":"array"},
-              "writes":{"type":"array"},"goto_targets":{"type":"array"}},
+              "writes":{"type":"array"},"goto_targets":{"type":"array"},
+              "caps":{"type":"array"}},
               "required":["code"]})"));
         return true;
     }();
