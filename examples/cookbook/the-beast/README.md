@@ -145,6 +145,55 @@ The nodes here are deterministic `beast_node` workers so a live run costs
 one LLM call (the authoring) and executes for free; swap them for
 `llm_call` and each node becomes a live call too.
 
+## Apex — the harness devours the tools
+
+The stub-worker demos prove the generated harness is *coherent*, but the
+harness never acts. [`the_beast_apex.cpp`](the_beast_apex.cpp) is the
+monster: the model is handed a **tool catalog** and asked to author a
+ReAct agent — `llm_call` ⇄ `tool_dispatch` looping on `has_tool_calls`.
+The harness it writes is gated for coherence, then **spawned with the
+tools bound** (`ctx.tools` + `engine->own_tools`). The spawned agent then
+decides, on its own, which tools to call and when.
+
+```console
+$ cmake --build build --target cookbook_the_beast_apex
+$ ./build/cookbook_the_beast_apex "What is 23 * 19, and the weather in Seoul?"
+```
+
+A real run — the self-repair loop firing for real, then autonomous
+tool-calling:
+
+```
+Tool catalog offered: calculator get_weather
+
+── Attempt #1: model authors a tool-calling agent ──
+  REJECTED at 'compile': ... unknown or unconsumed key 'id'    (strict, schema_version 1)
+  → feeding diagnostics back for self-repair.
+── Attempt #2: model authors a tool-calling agent ──
+  REJECTED at 'compile': ... unknown or unconsumed key 'name'
+  → feeding diagnostics back for self-repair.
+── Attempt #3: model authors a tool-calling agent ──
+  ACCEPTED — coherent tool-calling agent. Nodes: agent(llm_call) tools(tool_dispatch)
+
+── Spawning the agent it wrote — live, tools bound ──
+  user task: What is 23 multiplied by 19, and what's the weather in Seoul?
+  [the harness is calling tools autonomously]
+    tool → {"result":437.0}
+    tool → {"weather":"19C, clear"}
+  tool calls executed by the harness: 2
+  final answer: 23 × 19 = 437; Weather in Seoul: 19°C, clear.
+
+The model wrote the agent. The compiler proved it. The agent ate the tools.
+```
+
+This is the whole thesis in one run: the model hallucinated a `nodes`
+schema twice (adding `id`, then `name` keys), and the strict compiler's
+**consumed-key accounting rejected both** — the diagnostics went back into
+the conversation and it repaired itself on the third try. Then the
+machine-authored, compiler-proven agent ran a live ReAct loop and called
+two tools autonomously. Creativity is unbounded, tool-use is autonomous,
+**coherence is non-negotiable.**
+
 ## Friction surfaced
 
 - **E6 "written but never read" on `trail`** is emitted as lint — and it

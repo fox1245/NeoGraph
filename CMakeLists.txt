@@ -1036,6 +1036,15 @@ if(NEOGRAPH_BUILD_EXAMPLES)
                 examples/cookbook/the-beast/the_beast_live.cpp)
             target_link_libraries(cookbook_the_beast_live PRIVATE
                 neograph::core neograph::llm cppdotenv)
+
+            # Apex variant: the model devours a tool catalog and authors a
+            # ReAct tool-calling agent (llm_call <-> tool_dispatch). Gated
+            # for coherence, then spawned WITH THE TOOLS BOUND — it calls
+            # tools autonomously. Needs OPENROUTER_API_KEY in .env.
+            add_executable(cookbook_the_beast_apex
+                examples/cookbook/the-beast/the_beast_apex.cpp)
+            target_link_libraries(cookbook_the_beast_apex PRIVATE
+                neograph::core neograph::llm cppdotenv)
         endif()
 
         # JARVIS voice meta-orchestrator cookbook — 골격(skeleton) 단계.
