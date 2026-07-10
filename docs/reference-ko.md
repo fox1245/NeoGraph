@@ -1933,7 +1933,7 @@ NeoGraph 는 그래프를 **JSON 으로 기술**한다 — JSON 만 갈아끼우
 엔진이 다른 하네스가 된다. `NodeFactory::export_schema()` 는 *이 엔진
 버전이 받는 토폴로지 JSON 형식*을 기계가 읽을 수 있는 한 덩어리로
 내보낸다. 덕분에 외부 도구 — 특히 코드 없는 비주얼 블록 에디터
-([NeoGraph Studio](https://github.com/fox1245/NeoGraph-Studio),
+(NeoGraph Studio, 비공개 컴패니언 레포,
 issue #56) — 가 팔레트를 엔진에서 자동 생성해 **버전 간 표류(drift)가
 구조적으로 불가능**하다.
 

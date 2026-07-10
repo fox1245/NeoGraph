@@ -2067,7 +2067,7 @@ NeoGraph runs a graph that is *described in JSON*; swap the JSON and the
 same engine becomes a different harness. `NodeFactory::export_schema()`
 emits a machine-readable description of exactly what topology JSON this
 engine version accepts, so external tooling — notably a code-free
-visual block editor ([NeoGraph Studio](https://github.com/fox1245/NeoGraph-Studio),
+visual block editor (NeoGraph Studio, a private companion repo,
 issue #56) — can generate its palette from the engine and never drift
 out of sync.
 
