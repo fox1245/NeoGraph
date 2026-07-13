@@ -52,7 +52,15 @@ void init_state(py::module_& m) {
             py::arg("tools") = std::vector<std::shared_ptr<neograph::Tool>>{},
             py::arg("model") = "",
             py::arg("instructions") = "",
-            py::arg("extra_config") = py::dict())
+            py::arg("extra_config") = py::dict(),
+            // #98: keep the Python provider alive for as long as this
+            // NodeContext. The C++ side holds a shared_ptr<Provider>, which
+            // keeps the *C++* trampoline object alive — but the Python instance
+            // carrying the overrides is a separate refcount, and when it dies
+            // the trampoline can no longer find `complete`, falls through to
+            // Provider::complete, which bridges to complete_async, which bridges
+            // back to complete: infinite recursion, stack overflow, SIGSEGV.
+            py::keep_alive<1, 2>())
         .def_readwrite("provider", &NodeContext::provider)
         .def_readwrite("model", &NodeContext::model)
         .def_readwrite("instructions", &NodeContext::instructions)

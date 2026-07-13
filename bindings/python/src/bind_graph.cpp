@@ -454,6 +454,13 @@ void init_graph(py::module_& m) {
             py::arg("definition"),
             py::arg("ctx"),
             py::arg("store") = std::shared_ptr<CheckpointStore>{},
+            // #98: the compiled engine keeps the NodeContext alive, and the
+            // NodeContext keeps the Python provider alive (see bind_state.cpp).
+            // Without this chain, `GraphEngine.compile(d, ng.NodeContext(
+            // provider=MyProvider()))` — every argument a temporary, which is
+            // how anyone writes it — leaves the engine holding a trampoline
+            // whose Python half has been collected.
+            py::keep_alive<0, 2>(),
             "Compile a graph from a JSON-shaped Python dict.\n\n"
             "Args:\n"
             "    definition: JSON graph definition (nodes, edges, "
