@@ -128,7 +128,10 @@ cmake.args = [
     "-DBUILD_SHARED_LIBS=ON",
     "-DNEOGRAPH_BUILD_PYBIND=ON",
     "-DNEOGRAPH_BUILD_LLM=ON",
-    "-DNEOGRAPH_BUILD_MCP=OFF",
+    # ON since #95: the Python MCP binding is useless if `pip install`
+    # ships a wheel that compiled it out. Marginal size cost is small —
+    # the client links httplib + OpenSSL, which neograph::llm already pulls in.
+    "-DNEOGRAPH_BUILD_MCP=ON",
     # NEOGRAPH_BUILD_POSTGRES default ON (CMakeLists.txt:19). Each platform's
     # before-all installs libpq dev headers; auditwheel/delocate/delvewheel
     # bundle libpq.{so,dylib,dll} + its transitive deps into the wheel so

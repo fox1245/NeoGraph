@@ -209,6 +209,36 @@ asio::thread_pool& async_tool_pool() {
     return pool;
 }
 
+// Lets a Python-owned C++ tool (an MCPTool, say) satisfy the engine's
+// `unique_ptr<Tool>` ownership while Python keeps its shared_ptr. Forwards
+// everything, and — the point — forwards `execute_async` to the real tool, so a
+// tool that genuinely suspends still does (issue #95).
+class SharedToolRef final : public neograph::Tool {
+public:
+    explicit SharedToolRef(std::shared_ptr<neograph::Tool> tool)
+        : tool_(std::move(tool)) {}
+
+    neograph::ChatTool get_definition() const override {
+        return tool_->get_definition();
+    }
+
+    std::string execute(const json& arguments) override {
+        return tool_->execute(arguments);
+    }
+
+    // Plain forwarding, NOT a coroutine: `co_await tool_->execute_async(args)`
+    // here would build a second frame for no reason, and `arguments` is a
+    // reference the caller keeps alive across the await either way.
+    asio::awaitable<std::string> execute_async(const json& arguments) override {
+        return tool_->execute_async(arguments);
+    }
+
+    std::string get_name() const override { return tool_->get_name(); }
+
+private:
+    std::shared_ptr<neograph::Tool> tool_;
+};
+
 class PyToolOwner final : public neograph::Tool {
 public:
     explicit PyToolOwner(py::object py_obj)
@@ -406,6 +436,18 @@ wrap_python_tools(py::handle tools_list) {
     std::vector<std::unique_ptr<neograph::Tool>> out;
     if (tools_list.is_none()) return out;
     for (auto t : tools_list) {
+        // A tool that is ALREADY a C++ Tool — an MCPTool from
+        // MCPClient.get_tools(), say (issue #95) — must pass through as what it
+        // is. Wrapping it in a PyToolOwner would compile, run, and pass a
+        // functional test, while quietly serializing it: a PyToolOwner only
+        // runs concurrently when it holds a Python ng.AsyncTool, and a C++ tool
+        // is not one. MCP calls are network round-trips, so that would deliver
+        // the feature without the reason anyone wants it (#96).
+        if (py::isinstance<neograph::Tool>(t)) {
+            auto shared = t.cast<std::shared_ptr<neograph::Tool>>();
+            out.push_back(std::make_unique<SharedToolRef>(std::move(shared)));
+            continue;
+        }
         out.push_back(std::make_unique<PyToolOwner>(
             py::reinterpret_borrow<py::object>(t)));
     }
