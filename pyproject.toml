@@ -141,6 +141,11 @@ cmake.args = [
     # Skip the include/ + share/ install rules so they don't end up
     # in the wheel layout.
     "-DNEOGRAPH_INSTALL_HEADERS=OFF",
+    # Same reasoning for the C++ find_package export: lib/*.{a,so} plus
+    # lib/cmake/NeoGraph/ have no business in a Python wheel. CMakeLists
+    # already defaults this OFF when NEOGRAPH_BUILD_PYBIND is on; stating it
+    # here keeps the wheel's layout independent of that default.
+    "-DNEOGRAPH_INSTALL_EXPORT=OFF",
 ]
 
 # Headers + schemas would otherwise land in the wheel under

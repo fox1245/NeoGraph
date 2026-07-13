@@ -643,3 +643,35 @@ jobs:
           ./build-fuzz/tests/fuzz/fuzz_graph_compile \
             -max_total_time=60 -timeout=10 -seed=42 \
             tests/fuzz/corpus/graph_compile/
+
+  # Can a downstream project actually consume an installed NeoGraph?
+  #
+  # No other job can answer this. Every test and example in the repo links
+  # against the build tree, where headers, vendored deps and libraries are all
+  # reachable by accident. `cmake --install` shipped headers and nothing to link
+  # against, with no package config at all, for the entire life of the project
+  # (issue #92) — and the whole suite stayed green throughout.
+  #
+  # This job installs into a throwaway prefix and builds a consumer that sees
+  # nothing but that prefix. It is the only thing standing between us and that
+  # gap reopening.
+  install-consumable:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            build-essential \
+            libpq-dev \
+            libsqlite3-dev \
+            libssl-dev \
+            libcurl4-openssl-dev \
+            pkg-config
+
+      - name: find_package(NeoGraph) from a clean install prefix
+        run: ./scripts/test_find_package.sh

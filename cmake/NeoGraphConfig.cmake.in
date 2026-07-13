@@ -1,0 +1,24 @@
+@PACKAGE_INIT@
+
+# Package config for a downstream `find_package(NeoGraph CONFIG REQUIRED)`.
+#
+# The engine's optional pieces (llm, mcp, a2a, acp, postgres, sqlite) are built
+# or not depending on which system libraries were present at engine-build time,
+# so the set of exported targets varies per install. The dependency lookups below
+# are written out at configure time to match what was actually built — see
+# NEOGRAPH_CONFIG_DEPENDENCIES in the top-level CMakeLists.
+#
+# Consumers link the same target names they would use as a subdirectory:
+#
+#   find_package(NeoGraph CONFIG REQUIRED)
+#   target_link_libraries(app PRIVATE neograph::core neograph::llm)
+
+include(CMakeFindDependencyMacro)
+
+@NEOGRAPH_CONFIG_DEPENDENCIES@
+
+include("${CMAKE_CURRENT_LIST_DIR}/NeoGraphTargets.cmake")
+
+set(NEOGRAPH_COMPONENTS_BUILT "@NEOGRAPH_COMPONENTS_BUILT@")
+
+check_required_components(NeoGraph)
