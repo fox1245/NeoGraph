@@ -96,6 +96,103 @@ TEST(NodeTest, LLMCallNodeName) {
     EXPECT_EQ(node.get_name(), "my_llm");
 }
 
+// ── System-message contract (issue #93) ──
+//
+// build_params() is private, so these assert on what the provider actually
+// received. That is the honest surface anyway: the contract we care about is
+// the shape of the outgoing request, not the shape of an internal helper.
+
+class RecordingProvider : public Provider {
+public:
+    CompletionParams last_params;
+    ChatMessage      next_response{"assistant", "ok"};
+
+    ChatCompletion complete(const CompletionParams& params) override {
+        last_params = params;
+        ChatCompletion comp;
+        comp.message = next_response;
+        return comp;
+    }
+    ChatCompletion complete_stream(const CompletionParams& params,
+                                   const StreamCallback& /*on_chunk*/) override {
+        return complete(params);
+    }
+    std::string get_name() const override { return "recording"; }
+};
+
+namespace {
+std::size_t count_system(const std::vector<ChatMessage>& msgs) {
+    return static_cast<std::size_t>(
+        std::count_if(msgs.begin(), msgs.end(),
+                      [](const ChatMessage& m) { return m.role == "system"; }));
+}
+
+// Seed a messages channel with the given messages. GraphState holds a
+// shared_mutex, so it is neither copyable nor movable — fill in place.
+void seed_messages(GraphState& state, const std::vector<ChatMessage>& msgs) {
+    state.init_channel("messages", ReducerType::APPEND, append_fn(), json::array());
+    json arr = json::array();
+    for (const auto& m : msgs) {
+        json j;
+        to_json(j, m);
+        arr.push_back(j);
+    }
+    state.write("messages", arr);
+}
+}  // namespace
+
+// Existing behavior — must stay green. A node with instructions and no system
+// message in state prepends exactly one.
+TEST(NodeTest, AddsSystemMessageWhenAbsent) {
+    auto provider = std::make_shared<RecordingProvider>();
+    NodeContext ctx;
+    ctx.provider     = provider;
+    ctx.instructions = "You are a helpful assistant.";
+
+    LLMCallNode node("llm", ctx);
+    GraphState state;
+    seed_messages(state, {{"user", "Hi"}});
+    drive_run(node, state);
+
+    ASSERT_EQ(count_system(provider->last_params.messages), 1u);
+    EXPECT_EQ(provider->last_params.messages[0].content, "You are a helpful assistant.");
+}
+
+// Existing behavior — must stay green. A system message that already matches
+// the instructions is not duplicated.
+TEST(NodeTest, DoesNotDuplicateMatchingSystemMessage) {
+    auto provider = std::make_shared<RecordingProvider>();
+    NodeContext ctx;
+    ctx.provider     = provider;
+    ctx.instructions = "You are a helpful assistant.";
+
+    LLMCallNode node("llm", ctx);
+    GraphState state;
+    seed_messages(state, {{"system", "You are a helpful assistant."}, {"user", "Hi"}});
+    drive_run(node, state);
+
+    EXPECT_EQ(count_system(provider->last_params.messages), 1u);
+}
+
+// RED (issue #93). The guard tests role AND content, so a system message whose
+// content differs from instructions_ fails the check and a SECOND system
+// message is prepended. Two system messages go out: malformed for Anthropic
+// (single system prompt), undefined for OpenAI-family.
+TEST(NodeTest, DoesNotPrependSecondSystemMessage) {
+    auto provider = std::make_shared<RecordingProvider>();
+    NodeContext ctx;
+    ctx.provider     = provider;
+    ctx.instructions = "Instructions B";
+
+    LLMCallNode node("llm", ctx);
+    GraphState state;
+    seed_messages(state, {{"system", "System prompt A"}, {"user", "Hi"}});
+    drive_run(node, state);
+
+    EXPECT_EQ(count_system(provider->last_params.messages), 1u)
+        << "a second system message was prepended in front of the existing one";
+}
+
 // ── ToolDispatchNode ──
 
 TEST(NodeTest, ToolDispatchExecutes) {

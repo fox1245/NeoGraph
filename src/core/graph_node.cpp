@@ -38,12 +38,23 @@ LLMCallNode::LLMCallNode(const std::string& name, const NodeContext& ctx)
 CompletionParams LLMCallNode::build_params(const GraphState& state) const {
     auto messages = state.get_messages();
 
-    // Ensure system message (mirrors Agent::ensure_system_message)
+    // Ensure exactly one system message, carrying `instructions_` (issue #93).
+    //
+    // The contract: when a node is configured with instructions, the model sees
+    // those instructions as its single system prompt. State that already holds a
+    // system message — seeded by the caller, or restored from a checkpoint
+    // written when instructions_ was different — is replaced, not stacked on top
+    // of. Two system messages is malformed for a single-system-prompt API such
+    // as Anthropic's, and undefined for the OpenAI family.
+    //
+    // Replacing (rather than deferring to the state's message) is also what the
+    // previous code effectively did: it inserted instructions_ at position 0,
+    // ahead of any existing system message, so instructions already won on
+    // precedence. Only the duplicate goes away.
     if (!instructions_.empty()) {
-        bool has_system = !messages.empty()
-                          && messages[0].role == "system"
-                          && messages[0].content == instructions_;
-        if (!has_system) {
+        if (!messages.empty() && messages[0].role == "system") {
+            messages[0].content = instructions_;
+        } else {
             ChatMessage sys;
             sys.role    = "system";
             sys.content = instructions_;
