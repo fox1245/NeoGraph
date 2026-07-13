@@ -468,6 +468,11 @@ GraphEngine::execute_graph_async(const RunConfig& config,
     // separately. See ROADMAP_v1.md "Execution plan" → PR 1.
     RunContext ctx;
     ctx.cancel_token = config.cancel_token;
+    // #88: the caller may hand us an accumulator (to total across several runs);
+    // otherwise this run gets a fresh one. Either way ctx.usage is non-null, so
+    // node bodies never have to check.
+    ctx.usage        = config.usage ? config.usage
+                                    : std::make_shared<UsageAccumulator>();
     ctx.thread_id    = config.thread_id;
     ctx.stream_mode  = stream_mode;
     ctx.store        = store_;   // issue #27 — node bodies reach Store via in.ctx.store
@@ -565,6 +570,7 @@ GraphEngine::execute_graph_async(const RunConfig& config,
                         barrier_state);
 
                     RunResult result;
+                    result.usage = ctx.usage->snapshot();   // #88
                     result.output          = state.serialize();
                     result.interrupted     = true;
                     result.interrupt_node  = node_name;
@@ -617,6 +623,7 @@ GraphEngine::execute_graph_async(const RunConfig& config,
 
         if (interrupted) {
             RunResult result;
+            result.usage = ctx.usage->snapshot();   // #88
             result.output          = state.serialize();
             result.interrupted     = true;
             result.interrupt_node  = interrupt_reason;
@@ -685,6 +692,7 @@ GraphEngine::execute_graph_async(const RunConfig& config,
                     last_checkpoint_id, barrier_state);
 
                 RunResult result;
+                result.usage = ctx.usage->snapshot();   // #88
                 result.output          = state.serialize();
                 result.interrupted     = true;
                 result.interrupt_node  = node_name;
@@ -771,6 +779,7 @@ GraphEngine::execute_graph_async(const RunConfig& config,
     }
 
     RunResult result;
+    result.usage = ctx.usage->snapshot();   // #88
     result.output          = state.serialize();
     result.execution_trace = std::move(trace);
     if (!last_checkpoint_id.empty()) {

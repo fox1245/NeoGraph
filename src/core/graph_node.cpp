@@ -103,6 +103,7 @@ asio::awaitable<NodeOutput> LLMCallNode::run(NodeInput in) {
         };
     }
     auto completion = co_await provider_->invoke(params, on_token);
+    record_usage(in.ctx, completion);   // #88
 
     json msg_json;
     to_json(msg_json, completion.message);
@@ -235,6 +236,7 @@ asio::awaitable<NodeOutput> IntentClassifierNode::run(NodeInput in) {
         };
     }
     auto completion = co_await provider_->invoke(params, on_token);
+    record_usage(in.ctx, completion);   // #88 — routing costs tokens too
     ChatMessage reply = std::move(completion.message);
 
     NodeOutput out;
@@ -303,6 +305,10 @@ asio::awaitable<NodeOutput> SubgraphNode::run(NodeInput in) {
     RunConfig config;
     config.input        = build_subgraph_input(in.state);
     config.cancel_token = in.ctx.cancel_token;
+    // #88: hand the parent's accumulator down. A subgraph runs on its own engine
+    // with its own RunConfig, so without this a graph that delegates its LLM work
+    // to a subgraph reports zero tokens — which reads as "this run was free".
+    config.usage        = in.ctx.usage;
 
     json subgraph_output;
     if (in.stream_cb) {

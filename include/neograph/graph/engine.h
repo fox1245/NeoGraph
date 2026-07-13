@@ -57,6 +57,12 @@ struct RunConfig {
      */
     std::shared_ptr<CancelToken> cancel_token;
 
+    /// Token accounting for this run (issue #88). Leave null and the engine
+    /// makes one; pass your own to accumulate across several runs — e.g. a
+    /// per-tenant budget that spans a whole conversation rather than one turn.
+    /// Whatever ends up here is what ``RunResult::usage`` reports.
+    std::shared_ptr<UsageAccumulator> usage;
+
     /**
      * @brief Auto-resume from latest checkpoint for ``thread_id`` (v0.3.1+).
      *
@@ -120,6 +126,12 @@ struct RunContext {
     /// Null when the caller did not opt in.
     std::shared_ptr<CancelToken> cancel_token;
 
+    /// Token accounting sink for this run (issue #88). The engine always sets
+    /// it, so a node body can record unconditionally via ``record_usage``.
+    /// A custom node that calls a Provider directly is responsible for doing
+    /// so — the engine only sees completions that pass through its own nodes.
+    std::shared_ptr<UsageAccumulator> usage;
+
     /// Optional absolute wall-clock deadline. Reserved for a future PR
     /// (RunConfig has no deadline field today); left ``std::nullopt``
     /// by the engine for now so existing behaviour is unchanged.
@@ -181,6 +193,21 @@ struct RunContext {
     std::shared_ptr<Store> store;
 };
 
+/// @brief Fold a completion's token usage into the run's running total (#88).
+///
+/// One implementation, called from every node that receives a completion. The
+/// alternative — each node incrementing its own counters — is how the two tool
+/// dispatch paths drifted apart in #87, and it would drift the same way here:
+/// a new node type gets written, nobody remembers to count, and the run's token
+/// total silently under-reports. There is nothing in a wrong-but-plausible token
+/// number that tells you it is wrong.
+///
+/// Safe to call with a context whose accumulator is null (a node driven outside
+/// an engine run, as unit tests do).
+inline void record_usage(const RunContext& ctx, const ChatCompletion& completion) {
+    if (ctx.usage) ctx.usage->add(completion.usage);
+}
+
 /**
  * @brief Result of a graph execution run.
  *
@@ -213,6 +240,22 @@ struct RunResult {
     json        interrupt_value;                    ///< Value associated with the interrupt.
     std::string checkpoint_id;                      ///< ID of the last checkpoint saved.
     std::vector<std::string> execution_trace;       ///< Ordered list of executed node names.
+
+    /// Token usage for the whole run, subgraphs included (issue #88). Zero for
+    /// a graph that made no LLM calls — not an error, just nothing to count.
+    ///
+    /// **This is what THIS call to run() spent, not the whole bill.** A previous
+    /// attempt that threw never produced a RunResult, so its tokens are not
+    /// here — even though they were really spent. Spend 15 tokens, crash, retry,
+    /// spend 15 more, and this field says 15 against a bill of 30.
+    ///
+    /// For cost accounting that survives retries, hand the engine your own
+    /// accumulator via ``RunConfig::usage``: it outlives the failed attempt
+    /// because it is yours and the engine only borrows it.
+    ///
+    /// @see UsageAccounting.ACrashedAttemptIsInvisibleToRunResult
+    /// @see UsageAccounting.ACallerSuppliedAccumulatorSeesTheCrashedAttempt
+    ChatCompletion::Usage usage;
 
     /// @brief Read a channel value as type ``T`` (issue #25).
     ///

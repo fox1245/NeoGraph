@@ -8,6 +8,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <vector>
 #include <neograph/json.h>
@@ -66,6 +67,53 @@ struct ChatCompletion {
         int completion_tokens = 0;  ///< Number of tokens in the completion.
         int total_tokens = 0;       ///< Total tokens used (prompt + completion).
     } usage;
+};
+
+/**
+ * @brief Running total of the token usage of a graph run (issue #88).
+ *
+ * One of these rides on `RunContext` for the length of a run, exactly as the
+ * cancel token does, and is surfaced as `RunResult::usage` when the run ends.
+ * It is shared — by the parent run and every subgraph beneath it, and by every
+ * branch of a fan-out — so the counters are atomic.
+ *
+ * **Where it gets fed.** At the node that *receives* a completion, never at the
+ * provider that produced it. `RateLimitedProvider` wraps another provider and
+ * delegates to it, so a provider-layer counter would count the same completion
+ * once per layer. A completion reaches a node exactly once, whatever it went
+ * through on the way.
+ */
+class NEOGRAPH_API UsageAccumulator {
+public:
+    /// Fold one completion's usage into the running total.
+    ///
+    /// Providers that report only `prompt_tokens` and `completion_tokens` and
+    /// leave `total_tokens` at zero are normalized here rather than at every
+    /// call site — otherwise the total silently under-reports for those.
+    void add(const ChatCompletion::Usage& u) {
+        const long long total = u.total_tokens != 0
+            ? u.total_tokens
+            : static_cast<long long>(u.prompt_tokens) + u.completion_tokens;
+
+        prompt_.fetch_add(u.prompt_tokens, std::memory_order_relaxed);
+        completion_.fetch_add(u.completion_tokens, std::memory_order_relaxed);
+        total_.fetch_add(total, std::memory_order_relaxed);
+    }
+
+    /// Read the running total. Not a consistent snapshot across the three
+    /// counters under concurrent writes — read it when the run is done.
+    ChatCompletion::Usage snapshot() const {
+        ChatCompletion::Usage u;
+        u.prompt_tokens     = static_cast<int>(prompt_.load(std::memory_order_relaxed));
+        u.completion_tokens = static_cast<int>(completion_.load(std::memory_order_relaxed));
+        u.total_tokens      = static_cast<int>(total_.load(std::memory_order_relaxed));
+        return u;
+    }
+
+private:
+    std::atomic<long long> prompt_{0};
+    std::atomic<long long> completion_{0};
+    std::atomic<long long> total_{0};
 };
 
 // --- ADL serialization: ChatMessage/ToolCall <-> json ---
