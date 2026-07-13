@@ -107,6 +107,10 @@ class NEOGRAPH_API Agent {
 
     void ensure_system_message(std::vector<ChatMessage>& messages);
     std::vector<ChatTool> get_tool_definitions() const;
+
+    /// Non-owning view of `tools_` for `dispatch_tool_calls`, the one place
+    /// tool execution is implemented (shared with graph::ToolDispatchNode).
+    std::vector<Tool*> tool_ptrs() const;
 };
 
 } // namespace neograph::llm

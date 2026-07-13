@@ -16,6 +16,7 @@ add_executable(neograph_tests
     test_live_llm_cancel_fanout_cpp.cpp
     test_scheduler.cpp
     test_node_execution.cpp
+    test_tool_dispatch_parity.cpp
     test_compiler.cpp
     test_compiler_strict.cpp
     test_validator.cpp
