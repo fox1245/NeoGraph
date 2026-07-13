@@ -203,3 +203,122 @@ TEST(UsageAccounting, TotalIsDerivedWhenTheProviderOmitsIt) {
                             "partial");
     EXPECT_EQ(result.usage.total_tokens, 10) << "total should fall back to prompt + completion";
 }
+
+// ── Streaming counts too ──
+//
+// Worth pinning because the usual way to lose it is upstream: OpenAI omits usage
+// from a streamed response unless `stream_options: {include_usage: true}` is
+// set. Both bundled providers do set it; this asserts the engine does not then
+// drop what they hand back.
+TEST(UsageAccounting, StreamingRunsCountToo) {
+    NodeContext ctx;
+    ctx.provider = std::make_shared<UsageProvider>(10, 5);
+    auto engine = GraphEngine::compile(llm_graph(1), ctx);
+
+    RunConfig cfg;
+    cfg.thread_id = "stream";
+    auto result = engine->run_stream(cfg, [](const GraphEvent&) {});
+
+    EXPECT_EQ(result.usage.total_tokens, 15);
+}
+
+// ── The contract around a failed run, and its sharp edge ──
+
+namespace {
+// Calls the LLM — really spending tokens — and only then decides to fail.
+class PaysThenCrashesNode : public GraphNode {
+public:
+    PaysThenCrashesNode(std::shared_ptr<Provider> p, std::atomic<bool>* fail)
+        : provider_(std::move(p)), fail_(fail) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        CompletionParams params;
+        params.messages = {{"user", "hi"}};
+        auto completion = co_await provider_->invoke(params, nullptr);
+        record_usage(in.ctx, completion);              // the tokens are spent
+
+        if (fail_->load()) throw std::runtime_error("crash after paying");
+
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"done", json(true)});
+        co_return out;
+    }
+    std::string get_name() const override { return "pays_then_crashes"; }
+
+private:
+    std::shared_ptr<Provider> provider_;
+    std::atomic<bool>*        fail_;
+};
+
+json crashy_graph(const std::string& type) {
+    return {
+        {"name", "crashy"},
+        {"channels", {{"done", {{"reducer", "overwrite"}}}}},
+        {"nodes", {{"n", {{"type", type}}}}},
+        {"edges", json::array({
+            {{"from", "__start__"}, {"to", "n"}},
+            {{"from", "n"},         {"to", "__end__"}}
+        })}
+    };
+}
+}  // namespace
+
+// RunResult::usage is what THIS call to run() spent. A previous attempt that
+// threw never produced a RunResult, so its tokens are not in this one — even
+// though they were really spent.
+//
+// This is the semantics, not a bug, but it is a trap for exactly the person #88
+// is for: run 15 tokens, crash, retry 15 tokens, and a cost tracker reading
+// RunResult::usage books 15 against a bill of 30. The next test is the way out,
+// and the reason this one is written down.
+TEST(UsageAccounting, ACrashedAttemptIsInvisibleToRunResult) {
+    static std::atomic<bool> fail{true};
+    auto provider = std::make_shared<UsageProvider>(10, 5);
+    NodeFactory::instance().register_type("pays_then_crashes",
+        [provider](const std::string&, const json&, const NodeContext&) {
+            return std::make_unique<PaysThenCrashesNode>(provider, &fail);
+        });
+
+    auto engine = GraphEngine::compile(crashy_graph("pays_then_crashes"), NodeContext{},
+                                       std::make_shared<InMemoryCheckpointStore>());
+    RunConfig cfg;
+    cfg.thread_id = "crash-default";
+
+    fail = true;
+    EXPECT_THROW(engine->run(cfg), std::exception);   // 15 tokens spent and lost
+
+    fail = false;
+    auto result = engine->run(cfg);                   // 15 more
+
+    EXPECT_EQ(result.usage.total_tokens, 15)
+        << "RunResult reports this run, not the whole bill — see the next test";
+}
+
+// Supply your own accumulator and it outlives the failed attempt, because it is
+// yours and the engine only borrows it. This is what anyone doing real cost
+// accounting wants, and RunConfig::usage exists to make it possible.
+TEST(UsageAccounting, ACallerSuppliedAccumulatorSeesTheCrashedAttempt) {
+    static std::atomic<bool> fail{true};
+    auto provider = std::make_shared<UsageProvider>(10, 5);
+    NodeFactory::instance().register_type("pays_then_crashes_2",
+        [provider](const std::string&, const json&, const NodeContext&) {
+            return std::make_unique<PaysThenCrashesNode>(provider, &fail);
+        });
+
+    auto engine = GraphEngine::compile(crashy_graph("pays_then_crashes_2"), NodeContext{},
+                                       std::make_shared<InMemoryCheckpointStore>());
+
+    auto budget = std::make_shared<UsageAccumulator>();
+    RunConfig cfg;
+    cfg.thread_id = "crash-budget";
+    cfg.usage     = budget;
+
+    fail = true;
+    EXPECT_THROW(engine->run(cfg), std::exception);
+
+    fail = false;
+    auto result = engine->run(cfg);
+
+    EXPECT_EQ(budget->snapshot().total_tokens, 30) << "the crashed attempt's tokens went missing";
+    EXPECT_EQ(result.usage.total_tokens, 30)       << "RunResult snapshots the accumulator it was given";
+}

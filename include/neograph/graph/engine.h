@@ -243,6 +243,18 @@ struct RunResult {
 
     /// Token usage for the whole run, subgraphs included (issue #88). Zero for
     /// a graph that made no LLM calls — not an error, just nothing to count.
+    ///
+    /// **This is what THIS call to run() spent, not the whole bill.** A previous
+    /// attempt that threw never produced a RunResult, so its tokens are not
+    /// here — even though they were really spent. Spend 15 tokens, crash, retry,
+    /// spend 15 more, and this field says 15 against a bill of 30.
+    ///
+    /// For cost accounting that survives retries, hand the engine your own
+    /// accumulator via ``RunConfig::usage``: it outlives the failed attempt
+    /// because it is yours and the engine only borrows it.
+    ///
+    /// @see UsageAccounting.ACrashedAttemptIsInvisibleToRunResult
+    /// @see UsageAccounting.ACallerSuppliedAccumulatorSeesTheCrashedAttempt
     ChatCompletion::Usage usage;
 
     /// @brief Read a channel value as type ``T`` (issue #25).
