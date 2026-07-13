@@ -21,8 +21,15 @@
 
 #include <gtest/gtest.h>
 #include <neograph/neograph.h>
+// The persistence backends are optional at build time (a Windows or TSan
+// build has neither). Guard both the include and the tests that use them —
+// this file also holds backend-independent tests that must keep running.
+#ifdef NEOGRAPH_TESTS_HAVE_SQLITE
 #include <neograph/graph/sqlite_checkpoint.h>
+#endif
+#ifdef NEOGRAPH_TESTS_HAVE_POSTGRES
 #include <neograph/graph/postgres_checkpoint.h>
+#endif
 #include <cstdlib>
 
 #include <atomic>
@@ -244,6 +251,7 @@ TEST_F(ChannelWriteModeTest, OverwriteSurvivesPendingWriteReplay) {
 // field, the mode would survive unit tests and die in production.
 //
 // Reading the code says it round-trips. This runs it.
+#ifdef NEOGRAPH_TESTS_HAVE_SQLITE
 TEST_F(ChannelWriteModeTest, OverwriteSurvivesReplayThroughSqlite) {
     auto store  = std::make_shared<SqliteCheckpointStore>(":memory:");
     auto engine = GraphEngine::compile(make_graph(fanout), NodeContext{}, store);
@@ -265,12 +273,15 @@ TEST_F(ChannelWriteModeTest, OverwriteSurvivesReplayThroughSqlite) {
         << "the Overwrite did not survive the SQLite round trip";
 }
 
+#endif  // NEOGRAPH_TESTS_HAVE_SQLITE
+
 // ── 4. And through Postgres, where the column is JSONB ──
 //
 // Gated on NEOGRAPH_TEST_POSTGRES_URL like the rest of the PG suite. JSONB is
 // not a string round trip: Postgres reparses the document, reorders keys and
 // drops duplicates. It preserves "mode", but that is the sort of claim that
 // deserves a test rather than a paragraph.
+#ifdef NEOGRAPH_TESTS_HAVE_POSTGRES
 TEST_F(ChannelWriteModeTest, OverwriteSurvivesReplayThroughPostgres) {
     const char* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
     if (!url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL unset";
@@ -304,3 +315,4 @@ TEST_F(ChannelWriteModeTest, OverwriteSurvivesReplayThroughPostgres) {
     EXPECT_EQ(resumed.channel_raw("banner"), json::array({"final"}))
         << "the Overwrite did not survive the JSONB round trip";
 }
+#endif  // NEOGRAPH_TESTS_HAVE_POSTGRES

@@ -101,12 +101,20 @@ target_sources(neograph_tests PRIVATE test_async_get.cpp)
 # PostgresCheckpointStore integration tests are gated on NEOGRAPH_BUILD_POSTGRES
 # at the build level (so projects without libpqxx still build the test
 # binary) and on NEOGRAPH_TEST_POSTGRES_URL at runtime (skipped if unset).
+# The repo's habit is to gate a whole test FILE on its backend. That does not
+# fit a file whose backend cases sit next to backend-independent ones (see
+# test_channel_write_mode.cpp), so those get a compile definition to guard on
+# instead. Without it the file references SqliteCheckpointStore /
+# PostgresCheckpointStore unconditionally and the link fails on any build
+# without them — which is what the Windows and TSan jobs are.
 if(NEOGRAPH_BUILD_POSTGRES)
     target_sources(neograph_tests PRIVATE test_postgres_checkpoint.cpp)
+    target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_POSTGRES)
 endif()
 
 if(NEOGRAPH_BUILD_SQLITE)
     target_sources(neograph_tests PRIVATE test_sqlite_checkpoint.cpp)
+    target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_SQLITE)
 endif()
 
 target_link_libraries(neograph_tests PRIVATE
