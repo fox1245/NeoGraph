@@ -48,6 +48,7 @@
 #include <neograph/graph/loader.h>
 #include <neograph/graph/state.h>
 #include <neograph/graph/types.h>
+#include <neograph/tool_dispatch.h>
 
 #ifdef NEOGRAPH_PYBIND_HAS_POSTGRES
 #include <neograph/graph/postgres_checkpoint.h>
@@ -316,6 +317,64 @@ void init_graph(py::module_& m) {
             "makes one per run; supply your own to total tokens across several "
             "runs on the same conversation.");
 
+    // ── ToolDecision / ToolGateContext (issue #89) ───────────────────────
+    //
+    // What a Python gate returns, and what it is told. Kept next to RunConfig
+    // because GraphEngine.set_tool_gate() is the only way to install one.
+    py::class_<neograph::ToolGateContext>(m, "ToolGateContext",
+        "What a tool gate is told about the run it is gating.")
+        .def_property_readonly("resume_value",
+            [](const neograph::ToolGateContext& c) -> py::object {
+                if (!c.resume_value) return py::none();
+                return json_to_py(*c.resume_value);
+            },
+            "The human's answer from engine.resume(). None until someone has "
+            "actually answered — which is how a gate tells \"nobody has been "
+            "asked yet\" from \"the answer was no\", and therefore how it "
+            "avoids interrupting forever.")
+        .def_readonly("thread_id", &neograph::ToolGateContext::thread_id)
+        .def_readonly("step",      &neograph::ToolGateContext::step);
+
+    py::class_<neograph::ToolDecision> tool_decision(m, "ToolDecision",
+        "A gate's verdict on one tool call: Allow (optionally with rewritten "
+        "arguments), Deny (the model is told why), or Interrupt (pause and ask "
+        "a human).");
+
+    py::enum_<neograph::ToolDecision::Kind>(tool_decision, "Kind")
+        .value("Allow",     neograph::ToolDecision::Kind::Allow)
+        .value("Deny",      neograph::ToolDecision::Kind::Deny)
+        .value("Interrupt", neograph::ToolDecision::Kind::Interrupt);
+
+    tool_decision
+        .def_readonly("kind",   &neograph::ToolDecision::kind)
+        .def_readonly("reason", &neograph::ToolDecision::reason)
+        .def_static("allow",
+            [](py::object rewritten_args) {
+                if (rewritten_args.is_none()) return neograph::ToolDecision::allow();
+                return neograph::ToolDecision::allow(py_to_json(rewritten_args));
+            },
+            py::arg("args") = py::none(),
+            "Run the tool. Pass a dict to rewrite its arguments — that is how "
+            "ambient values (tenant, thread, credentials) get injected without "
+            "every tool having to know about them.")
+        .def_static("deny", &neograph::ToolDecision::deny,
+            py::arg("reason"),
+            "Do not run the tool. The reason goes back to the model as the "
+            "tool's result, so it can react instead of asking for the same "
+            "tool again next turn.")
+        .def_static("interrupt",
+            [](std::string reason, py::object payload) {
+                if (payload.is_none())
+                    return neograph::ToolDecision::interrupt(std::move(reason));
+                return neograph::ToolDecision::interrupt(std::move(reason),
+                                                         py_to_json(payload));
+            },
+            py::arg("reason"), py::arg("payload") = py::none(),
+            "Do not run the tool, and pause the whole run for a human. The "
+            "payload surfaces at RunResult.interrupt_value[\"value\"] to "
+            "render a prompt from; answer with engine.resume(thread_id, ...), "
+            "which the gate reads back on ToolGateContext.resume_value.");
+
     // ── RunResult ────────────────────────────────────────────────────────
     py::class_<RunResult>(m, "RunResult",
         "Run completion record: serialized final state, interrupt info, "
@@ -509,6 +568,41 @@ void init_graph(py::module_& m) {
             },
             py::arg("config"),
             "Run the graph synchronously to completion (or interrupt).")
+
+        .def("set_tool_gate",
+            [](GraphEngine& self, py::object fn) {
+                if (fn.is_none()) { self.set_tool_gate({}); return; }
+                // The Python gate is an ordinary function returning a
+                // ToolDecision — no coroutines asked of the user. It is called
+                // under the GIL and wrapped in the coroutine the C++ ToolGate
+                // signature wants.
+                auto held = std::shared_ptr<py::object>(
+                    new py::object(std::move(fn)),
+                    [](py::object* p) { py::gil_scoped_acquire g; delete p; });
+                self.set_tool_gate([held](neograph::ToolCall call,
+                                          neograph::ToolGateContext gctx)
+                        -> asio::awaitable<neograph::ToolDecision> {
+                    neograph::ToolDecision decision;
+                    {
+                        py::gil_scoped_acquire g;
+                        decision = (*held)(call, gctx)
+                                       .cast<neograph::ToolDecision>();
+                    }
+                    co_return decision;
+                });
+            },
+            py::arg("gate"),
+            "Intercept every tool call before it runs (issue #89).\n\n"
+            "``gate(call, gctx) -> ToolDecision`` is consulted for every call "
+            "in a batch BEFORE any tool runs, so an Interrupt has no side "
+            "effects to undo and the resumed node cannot double-apply a "
+            "sibling's effects.\n\n"
+            "It lives on the engine rather than RunConfig on purpose: "
+            "``resume()`` builds its own RunConfig, so a per-run gate would "
+            "vanish the moment a human answered the very prompt it raised, and "
+            "the dangerous tool would run unchecked. Set it once; it holds for "
+            "every run and resume.\n\n"
+            "Pass None to remove it.")
 
         .def("resume",
             [](GraphEngine& self,

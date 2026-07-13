@@ -481,7 +481,7 @@ GraphEngine::execute_graph_async(const RunConfig& config,
     // from "the answer was no". Only engaged on an actual resume, so the
     // common path pays no json allocation.
     if (!resume_value.is_null()) ctx.resume_value = resume_value;
-    ctx.tool_gate    = config.tool_gate;   // issue #89
+    ctx.tool_gate    = tool_gate_;   // issue #89 — engine-level, so resume() keeps it
     // ctx.deadline / ctx.trace_id stay default-constructed for now —
     // RunConfig has no source field for either. Future PRs add them.
 

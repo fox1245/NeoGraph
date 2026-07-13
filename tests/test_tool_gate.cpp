@@ -321,9 +321,10 @@ TEST(ToolGate, ResumeAfterApprovalRunsEachToolExactlyOnce) {
         co_return ToolDecision::allow();
     };
 
+    engine->set_tool_gate(gate);
+
     RunConfig cfg;
     cfg.thread_id = "tg-e2e";
-    cfg.tool_gate = gate;
 
     auto paused = engine->run(cfg);
 
@@ -340,4 +341,55 @@ TEST(ToolGate, ResumeAfterApprovalRunsEachToolExactlyOnce) {
     EXPECT_EQ(g_runs_a.load(), 1)
         << "the harmless tool ran twice — the approval double-applied its effects";
     EXPECT_EQ(g_runs_b.load(), 1);
+}
+
+// ── 7. And a refusal actually refuses, across the resume ──────────────────
+//
+// This is the case that caught a defect the C++ tests above had missed. The
+// gate used to hang off RunConfig — and `resume()` builds its own RunConfig
+// internally, so the gate silently vanished the moment a human answered the
+// prompt it had raised. Every tool then ran unchecked.
+//
+// ResumeAfterApprovalRunsEachToolExactlyOnce did not notice: with no gate, both
+// tools run once, which is exactly what "exactly once" asserts. It was green for
+// the wrong reason. Only asking the human to say NO exposes it — an approval and
+// a vanished gate look identical; a refusal and a vanished gate do not.
+TEST(ToolGate, ARefusalStillRefusesAfterTheResume) {
+    g_runs_a = 0;
+    g_runs_b = 0;
+
+    NodeFactory::instance().register_type("tg_llm",
+        [](const std::string&, const json&, const NodeContext&) {
+            return std::make_unique<ToolCallingNode>();
+        });
+
+    auto read  = std::make_unique<SpyTool>("read",  &g_runs_a);
+    auto shell = std::make_unique<SpyTool>("shell", &g_runs_b);
+
+    NodeContext ctx;
+    ctx.tools = {read.get(), shell.get()};
+
+    auto store  = std::make_shared<InMemoryCheckpointStore>();
+    auto engine = GraphEngine::compile(gate_graph(), ctx, store);
+
+    engine->set_tool_gate([](ToolCall call, ToolGateContext gctx)
+            -> asio::awaitable<ToolDecision> {
+        if (call.name != "shell") co_return ToolDecision::allow();
+        if (!gctx.resume_value) co_return ToolDecision::interrupt("needs approval");
+        if (gctx.resume_value->value("approved", false))
+            co_return ToolDecision::allow();
+        co_return ToolDecision::deny("the human said no");
+    });
+
+    RunConfig cfg;
+    cfg.thread_id = "tg-refuse";
+    ASSERT_TRUE(engine->run(cfg).interrupted);
+
+    auto done = engine->resume("tg-refuse", json{{"approved", false}});
+
+    EXPECT_FALSE(done.interrupted);
+    EXPECT_EQ(g_runs_b.load(), 0)
+        << "the human refused and the tool ran anyway — the gate did not survive resume()";
+    EXPECT_EQ(g_runs_a.load(), 1)
+        << "refusing one call must not block the others";
 }
