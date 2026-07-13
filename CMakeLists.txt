@@ -405,6 +405,7 @@ add_library(neograph_core
     src/core/scheduler.cpp
     src/core/graph_state.cpp
     src/core/graph_node.cpp
+    src/core/tool_dispatch.cpp
     src/core/graph_loader.cpp
     src/core/graph_checkpoint.cpp
     src/core/react_graph.cpp
