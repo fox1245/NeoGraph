@@ -20,6 +20,7 @@
 #include <neograph/graph/state.h>
 #include <neograph/graph/store.h>
 #include <neograph/graph/types.h>
+#include <neograph/tool_dispatch.h>   // ToolGate (issue #89)
 
 #include <asio/awaitable.hpp>
 #include <asio/thread_pool.hpp>
@@ -92,6 +93,7 @@ struct RunConfig {
      * is a no-op.
      */
     bool resume_if_exists = false;
+
 };
 
 /**
@@ -217,6 +219,11 @@ struct RunContext {
      * @endcode
      */
     std::shared_ptr<Store> store;
+
+    /// The engine's tool gate (issue #89). Empty when none was set — an empty
+    /// std::function allocates nothing, so the ungated path pays a null check
+    /// and no more.
+    ToolGate tool_gate;
 };
 
 /// @brief Fold a completion's token usage into the run's running total (#88).
@@ -569,6 +576,39 @@ public:
     void set_store(std::shared_ptr<Store> store);
 
     /**
+     * @brief Intercept every tool call before it runs (issue #89).
+     *
+     * A gate returns Allow (optionally rewriting the arguments), Deny (the
+     * model is told why) or Interrupt (pause and ask a human). It is consulted
+     * for every call in a batch **before any tool runs**, so an Interrupt has
+     * no side effects to undo and the resumed node cannot double-apply a
+     * sibling's effects. Reaches both dispatch paths — graph nodes and
+     * llm::Agent — because they share one dispatcher (issue #87).
+     *
+     * **It lives on the engine, not on RunConfig, and that is deliberate.**
+     * `resume()` builds its own RunConfig internally, so a per-run gate would
+     * vanish the moment a human answered the very prompt it raised — the
+     * dangerous tool would then run unchecked, with the caller believing they
+     * had a permission system. A policy that disappears exactly when it is
+     * being exercised is worse than no policy. Set it once, here, and it holds
+     * for every run and every resume on this engine.
+     *
+     * @code
+     * engine->set_tool_gate([](ToolCall call, ToolGateContext gctx)
+     *         -> asio::awaitable<ToolDecision> {
+     *     if (call.name != "shell") co_return ToolDecision::allow();
+     *     if (!gctx.resume_value)
+     *         co_return ToolDecision::interrupt("shell needs approval",
+     *                                           json::parse(call.arguments));
+     *     if (gctx.resume_value->value("approved", false))
+     *         co_return ToolDecision::allow();
+     *     co_return ToolDecision::deny("the human said no");
+     * });
+     * @endcode
+     */
+    void set_tool_gate(ToolGate gate) { tool_gate_ = std::move(gate); }
+
+    /**
      * @brief Get the cross-thread shared memory store.
      * @return Shared pointer to the Store, or nullptr if not set.
      */
@@ -662,6 +702,10 @@ public:
 
 private:
     GraphEngine() = default;
+
+    /// #89 — set_tool_gate(). Lives on the engine rather than RunConfig so it
+    /// survives resume(), which builds its own RunConfig internally.
+    ToolGate tool_gate_;
 
     void init_state(GraphState& state) const;
     void apply_input(GraphState& state, const json& input) const;

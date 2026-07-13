@@ -61,6 +61,8 @@ _ensure_ssl_ca_bundle()
 
 
 from ._neograph import (
+    ToolDecision,
+    ToolGateContext,
     # Versioning
     __version__,
 
@@ -434,6 +436,8 @@ __all__ = [
     "GraphState",
     "GraphNode",
     "NodeInterrupt",
+    "ToolDecision",
+    "ToolGateContext",
     "NodeFactory",
     "ReducerRegistry",
     "ConditionRegistry",

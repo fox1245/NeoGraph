@@ -142,7 +142,14 @@ asio::awaitable<NodeOutput> ToolDispatchNode::run(NodeInput in) {
     // copies they drifted — this one fanned the calls out, the agent ran them
     // one at a time — and every future capability at this boundary would have
     // drifted the same way.
-    auto tool_msgs = co_await dispatch_tool_calls(assistant_msg->tool_calls, tools_);
+    // The gate (issue #89) rides along on the RunContext, so it reaches both
+    // dispatch paths through the one function they share.
+    ToolGateContext gctx;
+    gctx.resume_value = in.ctx.resume_value;
+    gctx.thread_id    = in.ctx.thread_id;
+    gctx.step         = in.ctx.step;
+    auto tool_msgs = co_await dispatch_tool_calls(
+        assistant_msg->tool_calls, tools_, in.ctx.tool_gate, std::move(gctx));
 
     json results = json::array();
     for (const auto& m : tool_msgs) {

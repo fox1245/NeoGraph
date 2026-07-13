@@ -107,7 +107,7 @@ Agent::run(std::vector<ChatMessage>& messages, int max_iterations)
         // node fanned the same calls out concurrently; three 300 ms async
         // tools took 900 ms here and 300 ms there.
         auto tool_msgs = neograph::async::run_sync(
-            dispatch_tool_calls(msg.tool_calls, tool_ptrs()));
+            dispatch_tool_calls(msg.tool_calls, tool_ptrs(), tool_gate_));
         for (auto& tm : tool_msgs) {
             messages.push_back(std::move(tm));
         }
@@ -171,7 +171,7 @@ Agent::run_stream(std::vector<ChatMessage>& messages,
         auto calls = messages.back().tool_calls;
 
         auto tool_msgs = neograph::async::run_sync(
-            dispatch_tool_calls(std::move(calls), tool_ptrs()));
+            dispatch_tool_calls(std::move(calls), tool_ptrs(), tool_gate_));
         for (auto& tm : tool_msgs) {
             messages.push_back(std::move(tm));
         }

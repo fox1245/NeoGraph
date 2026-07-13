@@ -144,6 +144,72 @@ loudly rather than looking like a question for a human.
 
 Requires a checkpoint store — there is nothing to resume from otherwise.
 
+## Gating tool calls — "the agent wants to run `rm -rf build/`. Allow?"
+
+There is one hook between *the model asked for tool X* and *tool X runs*, and it
+returns one of three verdicts:
+
+```python
+def gate(call, gctx):
+    if call.name not in DANGEROUS:
+        return ng.ToolDecision.allow()
+
+    # None until a human has actually answered — which is how the gate tells
+    # "nobody has been asked yet" from "the answer was no", and so avoids
+    # asking the same question forever.
+    if gctx.resume_value is None:
+        return ng.ToolDecision.interrupt(
+            f"{call.name} needs approval",
+            {"tool": call.name, "arguments": call.arguments})
+
+    if gctx.resume_value.get("approved"):
+        return ng.ToolDecision.allow()
+    return ng.ToolDecision.deny("the operator refused this command")
+
+engine.set_tool_gate(gate)
+```
+
+```python
+result = engine.run(cfg)
+if result.interrupted:
+    print(result.interrupt_value["reason"])   # "shell needs approval"
+    print(result.interrupt_value["value"])    # {"tool": ..., "arguments": ...}
+    result = engine.resume(cfg.thread_id, {"approved": True})
+```
+
+| Verdict | Effect |
+|---|---|
+| `ToolDecision.allow()` | Run it. |
+| `ToolDecision.allow({...})` | Run it with these arguments instead — this is where ambient values (tenant, thread, credentials) get injected, rather than every tool knowing about them. |
+| `ToolDecision.deny(reason)` | Do not run it. The reason goes back to the model as the tool's result, so it can adapt instead of asking for the same tool again next turn. |
+| `ToolDecision.interrupt(reason, payload)` | Do not run it, and pause the whole run. The payload surfaces at `RunResult.interrupt_value["value"]`. |
+
+Permission, audit, argument rewriting and the per-call interrupt are not four
+features; they are one primitive wearing four hats.
+
+**The gate sees every call before any tool runs, and that ordering is the
+design.** Suppose the model asks for `list_files` and `shell` together, and only
+`shell` needs approval. When the run pauses, `list_files` has **not** run either
+— even though the gate allowed it.
+
+That is not an oversight. `resume()` re-enters the node from the top, because a
+node that interrupted recorded no writes. Had `list_files` already run, the
+approval would run it a *second* time — swap it for `git commit` and the prompt
+for `rm -rf` has just double-committed. And if the human says **no**, anything
+already executed cannot be undone. A permission system in which "denied" does
+not mean "nothing happened" is not a permission system.
+
+Two practical notes:
+
+- **A checkpoint store is required.** An interrupt has to be resumable; without
+  a store there is nothing to resume from.
+- **The gate lives on the engine, not on `RunConfig`.** `resume()` builds its own
+  `RunConfig` internally, so a per-run gate would vanish the moment a human
+  answered the very prompt it raised — and the dangerous tool would then run
+  unchecked. Set it once on the engine and it holds for every run and resume.
+
+Runnable end to end, no API key: [`examples/24_tool_approval_gate.py`](../bindings/python/examples/24_tool_approval_gate.py).
+
 ## Built-in reducers
 
 Channels need a reducer — how new writes combine with existing values.

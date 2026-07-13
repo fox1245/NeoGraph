@@ -11,6 +11,7 @@
 #include <neograph/api.h>
 #include <neograph/provider.h>
 #include <neograph/tool.h>
+#include <neograph/tool_dispatch.h>   // ToolGate (issue #89)
 #include <functional>
 #include <memory>
 #include <string>
@@ -108,6 +109,20 @@ class NEOGRAPH_API Agent {
      */
     ChatCompletion::Usage usage() const { return usage_->snapshot(); }
 
+    /**
+     * @brief Intercept every tool call before it runs (issue #89).
+     *
+     * The same gate the graph path takes from ``RunConfig::tool_gate``. Both
+     * route through one dispatcher (issue #87), which is what stops a
+     * capability like this from landing in one path and silently missing the
+     * other — as concurrency once did.
+     *
+     * An ``Interrupt`` verdict throws ``graph::NodeInterrupt`` out of
+     * ``run()``: the Agent is standalone and has no checkpoint machinery to
+     * pause into. Callers wanting pause-and-resume want the graph path.
+     */
+    void set_tool_gate(ToolGate gate) { tool_gate_ = std::move(gate); }
+
   private:
     std::shared_ptr<Provider> provider_;
     std::vector<std::unique_ptr<Tool>> tools_;
@@ -121,6 +136,9 @@ class NEOGRAPH_API Agent {
 
     /// #88 — Agent's own token accounting; see usage().
     std::shared_ptr<UsageAccumulator> usage_ = std::make_shared<UsageAccumulator>();
+
+    /// #89 — tool interception; empty means every call runs.
+    ToolGate tool_gate_;
 
     void ensure_system_message(std::vector<ChatMessage>& messages);
     std::vector<ChatTool> get_tool_definitions() const;
