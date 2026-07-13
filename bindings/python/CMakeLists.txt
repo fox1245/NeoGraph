@@ -71,6 +71,17 @@ pybind11_add_module(_neograph
     src/bind_node.cpp
 )
 
+# MCP client (Model Context Protocol). Bound only when neograph::mcp was
+# built; surfaces as `neograph_engine.mcp.MCPClient` (issue #95). The wheel
+# build turns MCP ON — binding the classes while the wheel compiled them out
+# would give an import that works from source and fails on `pip install`,
+# which is worse than the honest absence it replaced.
+if(TARGET neograph::mcp)
+    target_sources(_neograph PRIVATE src/bind_mcp.cpp)
+    target_link_libraries(_neograph PRIVATE neograph::mcp)
+    target_compile_definitions(_neograph PRIVATE NEOGRAPH_PYBIND_HAS_MCP)
+endif()
+
 # A2A client (Agent-to-Agent protocol). Bound only when neograph::a2a
 # was built; surfaces as `neograph_engine.a2a.A2AClient` etc.
 if(TARGET neograph::a2a)
