@@ -467,7 +467,10 @@ void init_node(py::module_& m) {
             },
             "Mirrors ``RunConfig.stream_mode`` as the underlying flag bits.")
         .def_property_readonly("resume_value",
-            [](const RunContext& c) { return json_to_py(c.resume_value); },
+            [](const RunContext& c) -> py::object {
+                if (!c.resume_value) return py::none();
+                return json_to_py(*c.resume_value);
+            },
             "The value passed to ``engine.resume(thread_id, value)`` — the "
             "human's answer to a NodeInterrupt. ``None`` on a fresh run, so a "
             "node can tell \"nobody has answered yet\" from \"the answer was "

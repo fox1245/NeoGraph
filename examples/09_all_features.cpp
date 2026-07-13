@@ -36,11 +36,11 @@ public:
         // The admin's verdict, handed to engine->resume(). Null on the first
         // visit — which is how the node knows nobody has answered yet, rather
         // than that the answer was "no".
-        const json& verdict = in.ctx.resume_value;
+        const auto& verdict = in.ctx.resume_value;
 
         // Dynamic breakpoint if amount >= 1,000,000. The payload rides along
         // so the caller can render the prompt without parsing the sentence.
-        if (amount >= 1000000 && verdict.is_null()) {
+        if (amount >= 1000000 && !verdict) {
             json needs_approval;
             needs_approval["amount"]   = amount;
             needs_approval["currency"] = "KRW";
@@ -50,7 +50,7 @@ public:
                 needs_approval);
         }
 
-        if (!verdict.is_null() && !verdict.value("approved", false)) {
+        if (verdict && !verdict->value("approved", false)) {
             NodeOutput denied;
             denied.writes.push_back(ChannelWrite{"result",
                 json("Payment declined by admin")});

@@ -118,7 +118,7 @@ struct ChannelWrite {
  *                     json{{"tool", "shell"}, {"cmd", "rm -rf build/"}});
  *
  * // In (on the resumed call): what the human said.
- * if (in.ctx.resume_value.value("approved", false)) { ... }
+ * if (in.ctx.resume_value->value("approved", false)) { ... }
  * @endcode
  *
  * The caller sees the reason at @c RunResult::interrupt_value["reason"], the

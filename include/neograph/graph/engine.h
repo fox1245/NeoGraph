@@ -158,22 +158,28 @@ struct RunContext {
     /**
      * @brief The value handed to ``GraphEngine::resume()`` — the human's answer.
      *
-     * Null on a fresh run, so a node can tell "nobody has answered yet" from
+     * Empty on a fresh run, so a node can tell "nobody has answered yet" from
      * "the answer was no":
      *
      * @code
-     * if (in.ctx.resume_value.is_null())
-     *     throw NodeInterrupt("needs approval", payload);   // ask
-     * if (in.ctx.resume_value.value("approved", false))     // act on the reply
+     * if (!in.ctx.resume_value)
+     *     throw NodeInterrupt("needs approval", payload);    // ask
+     * if (in.ctx.resume_value->value("approved", false))     // act on the reply
      *     ...
      * @endcode
+     *
+     * ``std::optional<json>`` rather than a plain ``json``, because a
+     * default-constructed ``json`` allocates a yyjson document — and this
+     * struct is built on every run, including the overwhelming majority that
+     * never interrupt. An empty optional allocates nothing. (Measured: a bare
+     * ``json`` member here cost ~3% of engine overhead per run.)
      *
      * The engine also keeps writing ``resume_value`` into a ``messages``
      * channel when the graph has one, which is how chat-shaped graphs have
      * always received it. That path is unchanged; this one exists because a
      * graph without a ``messages`` channel had no way to see the answer at all.
      */
-    json resume_value;
+    std::optional<json> resume_value;
 
     /**
      * @brief Cross-thread shared memory (issue #27).

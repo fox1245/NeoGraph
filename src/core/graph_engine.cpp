@@ -476,10 +476,11 @@ GraphEngine::execute_graph_async(const RunConfig& config,
     ctx.thread_id    = config.thread_id;
     ctx.stream_mode  = stream_mode;
     ctx.store        = store_;   // issue #27 — node bodies reach Store via in.ctx.store
-    // issue #94 — the human's answer, readable by any node. Null on a fresh
-    // run (the default `resume_value`), which is how a node distinguishes
-    // "nobody has answered yet" from "the answer was no".
-    ctx.resume_value = resume_value;
+    // issue #94 — the human's answer, readable by any node. Left empty on a
+    // fresh run, which is how a node distinguishes "nobody has answered yet"
+    // from "the answer was no". Only engaged on an actual resume, so the
+    // common path pays no json allocation.
+    if (!resume_value.is_null()) ctx.resume_value = resume_value;
     // ctx.deadline / ctx.trace_id stay default-constructed for now —
     // RunConfig has no source field for either. Future PRs add them.
 
@@ -609,10 +610,11 @@ GraphEngine::execute_graph_async(const RunConfig& config,
 
         // Capture NodeInterrupt outside the catch (GCC-13-safe) so the
         // checkpoint lookup that follows can do its own work.
-        bool interrupted = false;
-        std::string interrupt_reason;
-        std::string interrupt_node;
-        json        interrupt_payload;
+        // One empty optional, not a bool + two strings + a json: this runs on
+        // every super-step of every run, and a default-constructed `json`
+        // allocates a yyjson document. An empty optional allocates nothing,
+        // and the NodeInterrupt inside it is only ever built on the cold path.
+        std::optional<NodeInterrupt> interrupt;
 
         try {
             if (ready.size() == 1) {
@@ -631,13 +633,10 @@ GraphEngine::execute_graph_async(const RunConfig& config,
                     trace, cb, stream_mode, ctx);
             }
         } catch (const NodeInterrupt& ni) {
-            interrupted       = true;
-            interrupt_reason  = ni.reason();
-            interrupt_node    = ni.node();
-            interrupt_payload = ni.value();
+            interrupt = ni;
         }
 
-        if (interrupted) {
+        if (interrupt) {
             RunResult result;
             result.usage = ctx.usage->snapshot();   // #88
             result.output          = state.serialize();
@@ -646,14 +645,15 @@ GraphEngine::execute_graph_async(const RunConfig& config,
             // stamps ni.node(); the fallback covers a NodeInterrupt that
             // reached here without passing through it, which would otherwise
             // leave the caller with an empty string.
-            result.interrupt_node  = interrupt_node.empty() ? interrupt_reason
-                                                            : interrupt_node;
+            result.interrupt_node  = interrupt->node().empty()
+                                       ? interrupt->reason()
+                                       : interrupt->node();
             json iv;
-            iv["reason"] = interrupt_reason;
+            iv["reason"] = interrupt->reason();
             iv["type"]   = "NodeInterrupt";
             // Absent — not null — when the node attached no payload, so
             // `contains("value")` answers "did the node hand me something".
-            if (!interrupt_payload.is_null()) iv["value"] = interrupt_payload;
+            if (!interrupt->value().is_null()) iv["value"] = interrupt->value();
             result.interrupt_value = iv;
             result.execution_trace = std::move(trace);
 

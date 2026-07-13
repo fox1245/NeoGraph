@@ -55,15 +55,15 @@ public:
     asio::awaitable<NodeResult> run(NodeInput in) override {
         if (visits_) visits_->fetch_add(1);
 
-        const json& answer = in.ctx.resume_value;
-        if (answer.is_null()) {
+        const auto& answer = in.ctx.resume_value;
+        if (!answer) {
             json payload;
             payload["tool"] = "shell";
             payload["cmd"]  = "rm -rf build/";
             throw NodeInterrupt(kReason, payload);
         }
 
-        const bool approved = answer.value("approved", false);
+        const bool approved = answer->value("approved", false);
         NodeResult out;
         out.writes.push_back(ChannelWrite{
             "result", json(approved ? "paid" : "refused")});
