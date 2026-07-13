@@ -19,6 +19,7 @@ Example:
     >>> result = engine.run(ng.RunConfig(thread_id="demo", input={...}))
 """
 
+import json as _json
 import os as _os
 
 
@@ -230,6 +231,62 @@ class NodeContext(_CppNodeContext):
         self._pytools = list(tools or [])
 
 
+class NodeInterrupt(Exception):
+    """Pause the graph from inside a node, resumably (issue #94).
+
+    Raise this when the node has decided — from what it is actually holding,
+    which is something no graph definition can know in advance — that a human
+    has to look before it goes on::
+
+        class ApprovalNode(neograph_engine.GraphNode):
+            def run(self, input):
+                answer = input.ctx.resume_value
+                if answer is None:
+                    raise neograph_engine.NodeInterrupt(
+                        {"tool": "shell", "cmd": "rm -rf build/"},
+                        reason="shell command needs approval")
+                if not answer.get("approved"):
+                    return [neograph_engine.ChannelWrite("result", "refused")]
+                ...
+
+    The engine catches it, checkpoints, and hands the caller a ``RunResult``
+    with ``interrupted=True``, ``interrupt_node`` naming this node, and
+    ``interrupt_value`` carrying ``{"reason": ..., "value": ...}``. The caller
+    answers with ``engine.resume(thread_id, {"approved": True})``, and the node
+    runs again — this time with the answer on ``input.ctx.resume_value``.
+
+    This is the dynamic counterpart to ``interrupt_before`` / ``interrupt_after``
+    in the graph definition, which pause at a node picked when the graph was
+    written.
+
+    A plain reason works too, and is what the C++ examples have always shown::
+
+        raise neograph_engine.NodeInterrupt("needs human approval")
+
+    Anything raised that is *not* a NodeInterrupt stays an error: a bug in a
+    node must fail the run loudly, not masquerade as a question for a human.
+    """
+
+    def __init__(self, value=None, reason=None):
+        # One positional argument covers both shapes. A string is the reason
+        # (the C++ one-argument constructor); anything else is the payload,
+        # and the reason falls back to its JSON form so logs and checkpoints
+        # still have something human-readable to show.
+        if isinstance(value, str) and reason is None:
+            self.reason = value
+            self.value = None
+        else:
+            self.value = value
+            if reason is not None:
+                self.reason = reason
+            elif value is None:
+                self.reason = ""
+            else:
+                self.reason = _json.dumps(value, ensure_ascii=False,
+                                          separators=(",", ":"))
+        super().__init__(self.reason)
+
+
 class GraphNode:
     """Base class for Python-defined graph nodes.
 
@@ -376,6 +433,7 @@ __all__ = [
     "CancelToken",
     "GraphState",
     "GraphNode",
+    "NodeInterrupt",
     "NodeFactory",
     "ReducerRegistry",
     "ConditionRegistry",

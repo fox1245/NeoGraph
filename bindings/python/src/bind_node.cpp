@@ -48,6 +48,7 @@
 #include <pybind11/stl.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -141,6 +142,46 @@ NodeResult coerce_to_node_result(py::handle obj) {
         std::string(py::str(obj.get_type()).cast<std::string>()));
 }
 
+// Translate a Python `neograph_engine.NodeInterrupt` into the C++ exception
+// the engine understands (issue #94).
+//
+// Without this, a Python node had no way to pause a run: the exception fell
+// through as a generic Python error, the engine treated it as a failure, and
+// there was no checkpoint and nothing to resume.
+//
+// The translation happens *here*, inside the trampoline, rather than by
+// registering an exception translator and letting things propagate: a C++
+// exception crossing the pybind11 boundary trips ASan's __cxa_throw
+// interceptor (see the sanitizer CI job's deselect list). Catching the Python
+// error, reading its fields under the GIL, and throwing a fresh C++ exception
+// afterwards keeps each exception on one side of the boundary.
+//
+// Narrow on purpose: only NodeInterrupt is converted. Every other exception
+// stays an error, because a bug in a node must fail the run loudly instead of
+// looking like a graceful "waiting for a human".
+std::optional<neograph::graph::NodeInterrupt>
+translate_node_interrupt(py::error_already_set& e) {
+    py::object type;
+    try {
+        type = py::module_::import("neograph_engine").attr("NodeInterrupt");
+    } catch (const py::error_already_set&) {
+        return std::nullopt;   // module half-initialised; treat as a plain error
+    }
+    if (!e.matches(type)) return std::nullopt;
+
+    py::object exc = e.value();
+    std::string reason;
+    if (py::hasattr(exc, "reason")) {
+        reason = py::str(exc.attr("reason")).cast<std::string>();
+    }
+    json value;   // stays null when the node attached no payload
+    if (py::hasattr(exc, "value")) {
+        py::object v = exc.attr("value");
+        if (!v.is_none()) value = py_to_json(v);
+    }
+    return neograph::graph::NodeInterrupt(reason, std::move(value));
+}
+
 // PyToolOwner: bridges the C++ Tool interface to a held Python user
 // object. Created at GraphEngine.compile() time from the
 // `_pytools` attribute on the Python NodeContext wrapper, then
@@ -214,11 +255,24 @@ public:
     // receives `input.ctx.cancel_token` directly and pins it onto its
     // own provider calls. No thread_local smuggling.
     asio::awaitable<NodeResult> run(NodeInput in) override {
-        py::gil_scoped_acquire g;
-        py::object py_input = py::cast(&in,
-            py::return_value_policy::reference);
-        py::object res = py_obj_.attr("run")(py_input);
-        co_return coerce_to_node_result(res);
+        NodeResult result;
+        // Captured under the GIL, thrown after releasing it — see
+        // translate_node_interrupt.
+        std::optional<neograph::graph::NodeInterrupt> interrupt;
+        {
+            py::gil_scoped_acquire g;
+            py::object py_input = py::cast(&in,
+                py::return_value_policy::reference);
+            try {
+                py::object res = py_obj_.attr("run")(py_input);
+                result = coerce_to_node_result(res);
+            } catch (py::error_already_set& e) {
+                interrupt = translate_node_interrupt(e);
+                if (!interrupt) throw;   // a real error, not a pause
+            }
+        }
+        if (interrupt) throw *interrupt;
+        co_return result;
     }
 
 private:
@@ -411,7 +465,16 @@ void init_node(py::module_& m) {
             [](const RunContext& c) {
                 return static_cast<uint8_t>(c.stream_mode);
             },
-            "Mirrors ``RunConfig.stream_mode`` as the underlying flag bits.");
+            "Mirrors ``RunConfig.stream_mode`` as the underlying flag bits.")
+        .def_property_readonly("resume_value",
+            [](const RunContext& c) -> py::object {
+                if (!c.resume_value) return py::none();
+                return json_to_py(*c.resume_value);
+            },
+            "The value passed to ``engine.resume(thread_id, value)`` — the "
+            "human's answer to a NodeInterrupt. ``None`` on a fresh run, so a "
+            "node can tell \"nobody has answered yet\" from \"the answer was "
+            "no\" (issue #94).");
 
     // ── NodeInput (per-call bundle, v0.4 PR 7) ──────────────────────────
     py::class_<NodeInput>(m, "NodeInput",

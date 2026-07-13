@@ -102,13 +102,28 @@ struct ChannelWrite {
 /**
  * @brief Exception thrown from inside a node to trigger a dynamic breakpoint.
  *
- * When a node throws NodeInterrupt, the graph engine saves a checkpoint
- * and pauses execution, allowing Human-in-the-Loop (HITL) intervention.
- * Execution can be resumed with GraphEngine::resume().
+ * When a node throws NodeInterrupt, the graph engine saves a checkpoint and
+ * pauses execution, allowing Human-in-the-Loop (HITL) intervention. Execution
+ * continues with GraphEngine::resume(), whose @c resume_value comes back to
+ * the node as RunContext::resume_value.
+ *
+ * Unlike @c interrupt_before / @c interrupt_after in the graph definition,
+ * which pause at a node chosen when the graph was written, this pauses on a
+ * decision the node makes about what it is holding — which is what an
+ * approval prompt actually needs:
  *
  * @code
- * throw NodeInterrupt("Need human approval for this action");
+ * // Out: why we stopped, and what needs approving.
+ * throw NodeInterrupt("shell command needs approval",
+ *                     json{{"tool", "shell"}, {"cmd", "rm -rf build/"}});
+ *
+ * // In (on the resumed call): what the human said.
+ * if (in.ctx.resume_value->value("approved", false)) { ... }
  * @endcode
+ *
+ * The caller sees the reason at @c RunResult::interrupt_value["reason"], the
+ * payload at @c ["value"], and the node that paused at
+ * @c RunResult::interrupt_node.
  */
 class NEOGRAPH_API NodeInterrupt : public std::runtime_error {
 public:
@@ -117,11 +132,36 @@ public:
     explicit NodeInterrupt(const std::string& reason)
         : std::runtime_error(reason), reason_(reason) {}
 
+    /// @brief Construct a NodeInterrupt carrying a structured payload.
+    /// @param reason Human-readable explanation, for logs and for humans.
+    /// @param value  Machine-readable payload the caller can branch on
+    ///               without parsing prose (which tool, which arguments, ...).
+    NodeInterrupt(const std::string& reason, json value)
+        : std::runtime_error(reason), reason_(reason),
+          value_(std::move(value)) {}
+
     /// @brief Get the interrupt reason.
     /// @return The reason string provided at construction.
     const std::string& reason() const { return reason_; }
+
+    /// @brief Get the structured payload.
+    /// @return The payload, or a null json when the node attached none.
+    const json& value() const { return value_; }
+
+    /// @brief The node that threw this interrupt.
+    ///
+    /// Stamped by the executor, which is the only layer that knows the name —
+    /// a node body does not know what the graph definition called it. Empty
+    /// on an interrupt that has not yet passed through the executor.
+    const std::string& node() const { return node_; }
+
+    /// @brief Record the throwing node's name. Called by the executor.
+    void set_node(std::string node) { node_ = std::move(node); }
+
 private:
     std::string reason_;
+    json        value_;
+    std::string node_;
 };
 
 /**

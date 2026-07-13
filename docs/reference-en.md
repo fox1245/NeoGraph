@@ -508,25 +508,63 @@ When thrown, execution pauses, a checkpoint is saved, and the interrupt can be r
 class NodeInterrupt : public std::runtime_error {
 public:
     explicit NodeInterrupt(const std::string& reason);
+    NodeInterrupt(const std::string& reason, json value);   // with a payload
     const std::string& reason() const;
+    const json&        value()  const;   // null when no payload was attached
+    const std::string& node()   const;   // stamped by the executor
 };
 ```
 
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `reason()` | `const std::string&` | The reason string passed to the constructor |
+| `value()` | `const json&` | The structured payload, or null if none was attached |
+| `node()` | `const std::string&` | The node that threw. The executor stamps this — a node body does not know what the graph definition called it |
 
-**Usage inside a node:**
+**The round trip.** An approval prompt needs information to travel in both
+directions: the node says *what* needs approving, and the human's answer has to
+come back to the node that asked.
 
 ```cpp
-std::vector<ChannelWrite> execute(const GraphState& state) override {
-    auto input = state.get("user_input");
-    if (needs_approval(input)) {
-        throw NodeInterrupt("Requires human approval");
+asio::awaitable<NodeResult> run(NodeInput in) override {
+    // The human's answer. Empty until someone has actually answered — which is
+    // how you tell "nobody has looked yet" from "the answer was no".
+    const auto& verdict = in.ctx.resume_value;
+
+    if (needs_approval(in.state) && !verdict) {
+        throw NodeInterrupt("shell command needs approval",
+                            json{{"tool", "shell"}, {"cmd", "rm -rf build/"}});
     }
-    // ... normal execution
+    if (verdict && !verdict->value("approved", false)) {
+        co_return refused();
+    }
+    co_return proceed();
 }
 ```
+
+The caller sees the pause as a normal `RunResult` — `NodeInterrupt` is not
+re-thrown at them:
+
+```cpp
+auto r = engine->run(cfg);
+if (r.interrupted) {
+    r.interrupt_node;                          // "risky"  — which node paused
+    r.interrupt_value["reason"];               // the sentence, for a human
+    r.interrupt_value["value"];                // the payload, to branch on
+                                               //   (key absent if none attached)
+    engine->resume(cfg.thread_id, json{{"approved", true}});   // the answer
+}
+```
+
+`resume_value` also arrives as a user turn on a `messages` channel when the
+graph has one, which is how chat-shaped graphs have always received it.
+`ctx.resume_value` is the general path — it works whatever the graph's channels
+are called.
+
+This is the *dynamic* form of interruption. The *static* form —
+`interrupt_before` / `interrupt_after` in the graph definition — pauses at a
+node chosen when the graph was written, which cannot express "pause only if the
+model asked for something dangerous".
 
 ### Send
 

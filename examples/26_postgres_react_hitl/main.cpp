@@ -339,7 +339,9 @@ static int cmd_run(const std::string& query) {
     // HITL branch is a flag check, not an exception catch.
     if (result.interrupted) {
         std::cout << "\n--- HUMAN REVIEW REQUESTED ---\n"
-                  << "Interrupt reason:\n" << result.interrupt_node << "\n\n"
+                  << "Paused at node: " << result.interrupt_node << "\n"
+                  << "Interrupt reason:\n"
+                  << result.interrupt_value.value("reason", "") << "\n\n"
                   << "To approve: ./example_postgres_react_hitl resume "
                   << thread_id << " approve\n"
                   << "To send feedback: ./example_postgres_react_hitl resume "
@@ -373,7 +375,9 @@ static int cmd_resume(const std::string& thread_id,
     if (result.interrupted) {
         // Supervisor produced a NEW report; human_review fires again.
         std::cout << "\n--- HUMAN REVIEW REQUESTED (round 2+) ---\n"
-                  << "Interrupt reason:\n" << result.interrupt_node << "\n\n"
+                  << "Paused at node: " << result.interrupt_node << "\n"
+                  << "Interrupt reason:\n"
+                  << result.interrupt_value.value("reason", "") << "\n\n"
                   << "To approve: ./example_postgres_react_hitl resume "
                   << thread_id << " approve\n"
                   << "To send more feedback: ./example_postgres_react_hitl resume "
