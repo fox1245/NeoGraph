@@ -58,6 +58,38 @@ cmake --build "$wt/build" --target bench_neograph -j"$(nproc)" >/dev/null 2>&1 |
 bench=$(find "$wt/build" -name bench_neograph -type f -perm -u+x | head -1)
 [[ -n "$bench" ]] || exit 125
 
+# Refuse to measure on a busy box, and note that the build above just made it
+# busy: a -j$(nproc) compile leaves the 1-minute load average elevated for a
+# while after it exits, so a gate that benches immediately is measuring its own
+# build. Observed: a bench run at load 8.5 (8 cores) reported a 25.8% regression
+# on a commit that does not touch the benchmarked path at all, with samples
+# spread 5.2-8.3 us against a quiet-box spread of 4.8-5.0.
+#
+# The false positive is the harmless direction — a human investigates and finds
+# nothing. The same defect runs the other way: baseline taken while loaded and
+# candidate taken while quiet lets a real regression through. And `git bisect
+# run` calls this script dozens of times unattended, so a stray build landing
+# mid-run pins the blame on an innocent commit.
+#
+# A missing number is better than a wrong one: if the box will not settle, skip.
+wait_for_quiet() {
+    local limit="${LOAD_LIMIT:-1.5}" waited=0
+    while (( waited < ${LOAD_WAIT_MAX:-300} )); do
+        local load
+        load=$(cut -d' ' -f1 /proc/loadavg)
+        if awk -v l="$load" -v m="$limit" 'BEGIN{exit !(l <= m)}'; then
+            [[ $waited -gt 0 ]] && echo "   load settled to ${load} after ${waited}s"
+            return 0
+        fi
+        sleep 10
+        waited=$((waited + 10))
+    done
+    echo "   load still $(cut -d' ' -f1 /proc/loadavg) after ${waited}s — refusing to measure"
+    return 1
+}
+
+wait_for_quiet || exit 125
+
 # Warm-up runs are DISCARDED, not averaged in. Measured on this box: the first
 # few runs after a build land ~10% high (median 5.3 µs) while steady state is
 # 4.8-4.9 µs. Folding those into the baseline inflates it, and an inflated
