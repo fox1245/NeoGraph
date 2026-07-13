@@ -490,44 +490,28 @@ jobs:
           # Mirror them here. Keep this in sync with pyproject.toml's
           # ``dependencies = [...]`` list.
           python -m pip install --quiet pytest pydantic certifi
-          # libasan must be in LD_PRELOAD so its __cxa_throw interceptor
-          # is registered before _neograph.so is dlopen'd by Python.
-          # Two tests propagate Python exceptions across the pybind
-          # boundary — a known sanitizer limitation
-          # (asan_interceptors.cpp:458 CHECK failure on real___cxa_throw
-          # not being intercepted) — deselect them by name.
-          export LD_PRELOAD=$(gcc -print-file-name=libasan.so)
-          export PYTHONPATH=build-asan:bindings/python
-          # The ASan ``__cxa_throw`` interceptor in
-          # asan_interceptors.cpp:458 trips a CHECK
-          # (``real___cxa_throw == nullptr``) on every C++ exception
-          # that crosses the engine→Python boundary. It's a known
-          # sanitizer/dlopen-init order interaction with libstdc++
-          # (the interceptor's dlsym to ``real___cxa_throw`` happens
-          # before _neograph.so is loaded). Tests that exercise that
-          # pattern have to be deselected here; coverage is preserved
-          # by ctest under TSan and the live LLM tests in non-
-          # sanitizer builds.
+          # libasan must be in LD_PRELOAD so its __cxa_throw interceptor is
+          # registered before _neograph.so is dlopen'd by Python.
           #
-          # Categories:
-          #   - propagate / undocumented_reducer / noopentelemetry —
-          #     pre-v0.3.x tests, original deselect.
-          #   - cancel_does_not_double_resolve_future — v0.3.x
-          #     CancelledException throw across pybind boundary.
-          #   - raises_under_run / raises_with_hint /
-          #     no_hint_when_no_streaming_override — v0.3.2 #10
-          #     streaming-only NotImplementedError throws.
-          #   - raises_type_error / non_channelwrite_item_raises —
-          #     v0.3.2 #5 update_state pybind type_error throws.
-          python -m pytest bindings/python/tests/ -q \
-            -k "not propagate and not undocumented_reducer and not noopentelemetry \
-               and not run_async_cancel_does_not_double_resolve_future \
-               and not run_stream_async_cancel_does_not_double_resolve_future \
-               and not still_raises_under_run \
-               and not run_raises_with_hint \
-               and not no_hint_when_no_streaming_override \
-               and not raises_type_error_not_silent_noop \
-               and not non_channelwrite_item_raises"
+          # libstdc++ must be preloaded WITH it, and that is the whole story
+          # behind the deselect list this step used to carry. ASan's
+          # __cxa_throw interceptor resolves the real __cxa_throw by dlsym at
+          # init; with only libasan preloaded, libstdc++ is not in the link map
+          # yet, the lookup yields null, and the first C++ throw dies on
+          #
+          #     asan_interceptors.cpp:458 CHECK failed:
+          #       ((__interception::real___cxa_throw)) != (0)
+          #
+          # pybind11 turns *every* Python exception raised inside a node into a
+          # C++ throw (error_already_set), so this hit any test where Python
+          # code raised. Nine of them were switched off by name and written up
+          # as "a known sanitizer limitation". It was not a limitation; it was
+          # a preload-order bug in this file. Preloading libstdc++ as well
+          # makes the symbol resolvable, and all nine pass — so the deselect
+          # list is gone and the whole suite runs under ASan/LSan/UBSan again.
+          export LD_PRELOAD="$(gcc -print-file-name=libasan.so):$(gcc -print-file-name=libstdc++.so)"
+          export PYTHONPATH=build-asan:bindings/python
+          python -m pytest bindings/python/tests/ -q
 
   # ThreadSanitizer race-detection gate. Catches data races that ASan
   # can't see — concurrent reads/writes without happens-before. Caught
