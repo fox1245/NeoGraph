@@ -78,7 +78,7 @@ result = engine.run(ng.RunConfig(thread_id="t1",
 | `output` | `dict` | Final state — `{"channels": {...}, "global_version": int}`. Use `output["channels"][name]["value"]` to read a channel. |
 | `interrupted` | `bool` | `True` if the run paused at an `interrupt_before` / `interrupt_after` / `NodeInterrupt`. |
 | `interrupt_node` | `str` | Name of the node that triggered the interrupt (when `interrupted`). |
-| `interrupt_value` | `dict` | Diagnostic payload — `{"reason": ...}` or `{"message": ...}`. |
+| `interrupt_value` | `dict` | `{"reason": str, "type": "NodeInterrupt", "value": ...}` for a dynamic interrupt (`"value"` present only when the node attached a payload), or `{"message": ...}` for a static `interrupt_before` / `interrupt_after`. |
 | `checkpoint_id` | `str` | ID of the latest checkpoint saved during the run. Pass to `engine.resume_async(checkpoint_id=...)` to continue. |
 | `execution_trace` | `list[str]` | Node names in the order they executed — useful for debugging routing. |
 
@@ -91,6 +91,58 @@ result = engine.run(ng.RunConfig(thread_id="t1",
 | `max_steps` | 25 | Super-step ceiling; ReAct loops typically need 10+. |
 | `stream_mode` | `StreamMode.OFF` | Bitmask: `EVENTS \| TOKENS \| DEBUG \| VALUES \| UPDATES \| ALL`. Only consulted by `run_stream` / `run_stream_async`. |
 | `resume_if_exists` | `False` | When `True` and a checkpoint store is configured, the run loads the latest checkpoint for `thread_id` (if any) and applies `input` on top via the channel reducers — multi-turn chat without manually threading prior state through `input`. Default keeps fresh-start semantics for back-compat; for HITL resume from an interrupted run, use `engine.resume_async()` instead. |
+
+## Pausing for a human, from a Python node
+
+`interrupt_before` in the graph definition pauses at a node you picked when you
+wrote the graph. That cannot express the case human-in-the-loop actually exists
+for, because whether a step is dangerous depends on what the model just asked
+for:
+
+> *"The agent wants to run `rm -rf build/`. Allow?"*
+
+For that, the node itself decides — it raises `NodeInterrupt`, attaching what
+needs approving. The engine checkpoints and hands you back a normal `RunResult`
+(nothing is raised at you), and your answer travels back to the node that asked:
+
+```python
+import neograph_engine as ng
+
+class ApprovalNode(ng.GraphNode):
+    def run(self, input):
+        # The human's answer. None until someone has actually answered — which
+        # is how you tell "nobody has looked yet" from "the answer was no".
+        verdict = input.ctx.resume_value
+
+        if verdict is None:
+            raise ng.NodeInterrupt(
+                {"tool": "shell", "cmd": "rm -rf build/"},
+                reason="shell command needs approval")
+
+        if not verdict.get("approved"):
+            return [ng.ChannelWrite("result", "refused")]
+        return [ng.ChannelWrite("result", "done")]
+
+    def get_name(self):
+        return "risky"
+```
+
+```python
+result = engine.run(cfg)
+
+if result.interrupted:
+    print(result.interrupt_node)               # "risky"      — which node paused
+    print(result.interrupt_value["reason"])    # for a human to read
+    print(result.interrupt_value["value"])     # for your code to branch on
+
+    result = engine.resume(cfg.thread_id, {"approved": True})   # the answer
+```
+
+`NodeInterrupt(reason)` with a plain string works too, and omits the `"value"`
+key. Anything else you raise stays an error: a bug in a node fails the run
+loudly rather than looking like a question for a human.
+
+Requires a checkpoint store — there is nothing to resume from otherwise.
 
 ## Built-in reducers
 
@@ -116,7 +168,7 @@ where `fn(state) -> str` returns one of the route keys.
 
 ## What's covered by the binding
 
-- **Engine surface** — `GraphEngine.compile / run / run_stream / run_async / run_stream_async / resume_async / get_state / update_state / fork`, `RunConfig`, `RunResult`, `set_worker_count`, `set_checkpoint_store`, `set_node_cache_enabled`.
+- **Engine surface** — `GraphEngine.compile / run / run_stream / run_async / run_stream_async / resume / resume_async / get_state / update_state / fork`, `RunConfig`, `RunResult`, `set_worker_count`, `set_checkpoint_store`, `set_node_cache_enabled`.
 - **Custom Python nodes** — subclass `neograph_engine.GraphNode`, register via `NodeFactory.register_type` or the `@neograph_engine.node` decorator. Engine dispatches under proper GIL handling, including from fan-out worker threads.
 - **Custom Python tools** — subclass `neograph_engine.Tool`, pass into `NodeContext(tools=[...])`. Engine takes ownership at compile time.
 - **Async** — every `*_async` binding returns an `asyncio.Future` bound to the calling thread's running loop. Stream callbacks are hopped to the loop thread via `loop.call_soon_threadsafe` so callbacks run where asyncio expects.
