@@ -156,6 +156,26 @@ struct RunContext {
     StreamMode stream_mode = StreamMode::ALL;
 
     /**
+     * @brief The value handed to ``GraphEngine::resume()`` — the human's answer.
+     *
+     * Null on a fresh run, so a node can tell "nobody has answered yet" from
+     * "the answer was no":
+     *
+     * @code
+     * if (in.ctx.resume_value.is_null())
+     *     throw NodeInterrupt("needs approval", payload);   // ask
+     * if (in.ctx.resume_value.value("approved", false))     // act on the reply
+     *     ...
+     * @endcode
+     *
+     * The engine also keeps writing ``resume_value`` into a ``messages``
+     * channel when the graph has one, which is how chat-shaped graphs have
+     * always received it. That path is unchanged; this one exists because a
+     * graph without a ``messages`` channel had no way to see the answer at all.
+     */
+    json resume_value;
+
+    /**
      * @brief Cross-thread shared memory (issue #27).
      *
      * Mirrors ``GraphEngine::get_store()``. Populated by the engine

@@ -510,6 +510,27 @@ void init_graph(py::module_& m) {
             py::arg("config"),
             "Run the graph synchronously to completion (or interrupt).")
 
+        .def("resume",
+            [](GraphEngine& self,
+               const std::string& thread_id,
+               py::object resume_value) {
+                // Convert while we still hold the GIL, then drop it for the
+                // run — same shape as the resume_async binding below.
+                json rv = resume_value.is_none() ? json()
+                                                 : py_to_json(resume_value);
+                py::gil_scoped_release release;
+                return self.resume(thread_id, rv);
+            },
+            py::arg("thread_id"),
+            py::arg("resume_value") = py::none(),
+            "Continue an interrupted run, synchronously.\n\n"
+            "``resume_value`` is the human's answer. The resumed node reads "
+            "it from ``input.ctx.resume_value``; graphs with a ``messages`` "
+            "channel also receive it as a user turn there.\n\n"
+            "Until now only ``resume_async`` was bound, so answering an "
+            "approval prompt meant standing up an asyncio loop to do it "
+            "(issue #94).")
+
         .def("run_stream",
             [](GraphEngine& self,
                const RunConfig& cfg,

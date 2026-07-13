@@ -33,11 +33,28 @@ public:
         auto amount_json = in.state.get("amount");
         int amount = amount_json.is_number() ? amount_json.get<int>() : 0;
 
-        // Dynamic breakpoint if amount >= 1,000,000
-        if (amount >= 1000000) {
+        // The admin's verdict, handed to engine->resume(). Null on the first
+        // visit — which is how the node knows nobody has answered yet, rather
+        // than that the answer was "no".
+        const json& verdict = in.ctx.resume_value;
+
+        // Dynamic breakpoint if amount >= 1,000,000. The payload rides along
+        // so the caller can render the prompt without parsing the sentence.
+        if (amount >= 1000000 && verdict.is_null()) {
+            json needs_approval;
+            needs_approval["amount"]   = amount;
+            needs_approval["currency"] = "KRW";
             throw NodeInterrupt(
                 "High-value payment detected: " + std::to_string(amount)
-                + " KRW. Admin approval required.");
+                + " KRW. Admin approval required.",
+                needs_approval);
+        }
+
+        if (!verdict.is_null() && !verdict.value("approved", false)) {
+            NodeOutput denied;
+            denied.writes.push_back(ChannelWrite{"result",
+                json("Payment declined by admin")});
+            co_return denied;
         }
 
         NodeOutput out;
@@ -208,11 +225,17 @@ int main() {
         cfg.stream_mode = StreamMode::EVENTS | StreamMode::DEBUG;
         auto r2 = engine->run_stream(cfg, stream_handler);
         std::cout << "  interrupted: " << std::boolalpha << r2.interrupted << "\n";
+        std::cout << "  Node:   " << r2.interrupt_node << "\n";
         std::cout << "  Reason: " << r2.interrupt_value.value("reason", "") << "\n";
+        std::cout << "  Payload: " << r2.interrupt_value["value"].dump() << "\n";
 
-        // Resume after approval
+        // Resume with the admin's verdict. It reaches the node as
+        // in.ctx.resume_value — pass nothing and the node has no way to know
+        // it was approved, so it would simply pause again.
         std::cout << "\n  >>> Admin approved -> resume <<<\n";
-        auto r3 = engine->resume("pay-002", json(), stream_handler);
+        json approval;
+        approval["approved"] = true;
+        auto r3 = engine->resume("pay-002", approval, stream_handler);
         std::cout << "  Result: " << r3.output["channels"]["result"]["value"] << "\n";
     }
 

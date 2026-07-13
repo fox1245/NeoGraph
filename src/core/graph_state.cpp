@@ -144,6 +144,11 @@ std::vector<std::string> GraphState::channel_names() const {
     return names;
 }
 
+bool GraphState::has_channel(const std::string& channel) const {
+    std::shared_lock lock(mutex_);
+    return channels_.find(channel) != channels_.end();
+}
+
 // v1.0 (9d): run_cancel_token smuggling channel is gone; cancel flows
 // through RunContext::cancel_token instead.
 

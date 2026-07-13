@@ -358,8 +358,8 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
     // GCC-13-safe outcome capture: collect result or NodeInterrupt
     // marker inside try, decide outside. Other exceptions propagate
     // out of the coroutine untouched.
-    std::optional<NodeResult> ok_result;
-    bool interrupted = false;
+    std::optional<NodeResult>    ok_result;
+    std::optional<NodeInterrupt> interrupt;
 
     try {
         auto replay_it = replay.find(task_id);
@@ -376,11 +376,16 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
             co_await coord.record_pending_write_async(parent_cp_id,
                 task_id, task_id, node_name, *ok_result, step);
         }
-    } catch (const NodeInterrupt&) {
-        interrupted = true;
+    } catch (const NodeInterrupt& ni) {
+        // Copy the whole interrupt, not just the fact that one happened.
+        // This used to record a bool and rethrow `NodeInterrupt(node_name)`,
+        // which silently replaced the node's reason (and, later, its payload)
+        // with the node's own name — so a caller asking "why did you stop?"
+        // got back "risky" (issue #94).
+        interrupt = ni;
     }
 
-    if (interrupted) {
+    if (interrupt) {
         // NodeInterrupt pauses this specific node — resume must
         // re-enter exactly here. Save a phase=NodeInterrupt cp with
         // next_nodes={node_name} so load_for_resume restarts the super
@@ -394,7 +399,10 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
             node_name, next_nodes,
             CheckpointPhase::NodeInterrupt, step, parent_cp_id,
             barrier_state);
-        throw NodeInterrupt(node_name);
+        // The executor is the only layer that knows the graph's name for
+        // this node — the node body does not.
+        interrupt->set_node(node_name);
+        throw *interrupt;
     }
 
     auto& nr = *ok_result;
@@ -448,7 +456,7 @@ NodeExecutor::run_parallel_async(
         const std::string task_id = make_static_task_id(step, node_name);
         auto replay_it = replay.find(task_id);
         NodeResult nr;
-        std::exception_ptr interrupt_exc;
+        std::optional<NodeInterrupt> interrupt;
         if (replay_it != replay.end()) {
             nr = replay_it->second;
         } else {
@@ -457,17 +465,18 @@ NodeExecutor::run_parallel_async(
             try {
                 nr = co_await execute_node_with_retry_async(
                     node_name, state, cb, stream_mode, ctx);
-            } catch (const NodeInterrupt&) {
-                interrupt_exc = std::current_exception();
+            } catch (const NodeInterrupt& ni) {
+                interrupt = ni;
             }
-            if (interrupt_exc) {
+            if (interrupt) {
                 std::vector<std::string> next_nodes;
                 next_nodes.push_back(node_name);
                 co_await coord.save_super_step_async(state,
                     node_name, next_nodes,
                     CheckpointPhase::NodeInterrupt, step, parent_cp_id,
                     barrier_state);
-                std::rethrow_exception(interrupt_exc);
+                interrupt->set_node(node_name);
+                throw *interrupt;
             }
             co_await coord.record_pending_write_async(
                 parent_cp_id, task_id, task_id, node_name, nr, step);
@@ -558,8 +567,11 @@ NodeExecutor::run_parallel_async(
     // they were classified, no co_await between, so no race window.
     std::exception_ptr first_exception;
     std::string        first_exception_node;
-    bool               is_node_interrupt = false;
-    std::string        ni_reason;
+    // A whole copy of the interrupt (reason + payload), not just its reason.
+    // Copying it here is what keeps the TSan property described above: the
+    // strings and json are deep-copied out while we still hold the eptr, so
+    // what we throw later is wholly owned by this thread.
+    std::optional<NodeInterrupt> interrupt;
     for (std::size_t i = 0; i < ready.size(); ++i) {
         if (excs[i] && !first_exception) {
             first_exception      = excs[i];
@@ -567,16 +579,15 @@ NodeExecutor::run_parallel_async(
             try {
                 std::rethrow_exception(first_exception);
             } catch (const NodeInterrupt& ni) {
-                is_node_interrupt = true;
-                ni_reason = ni.reason();
+                interrupt = ni;
             } catch (...) {
-                // non-interrupt; leave is_node_interrupt = false
+                // non-interrupt; leave `interrupt` empty
             }
         }
     }
 
     if (first_exception) {
-        if (is_node_interrupt) {
+        if (interrupt) {
             // GCC-13 workaround: build the next_nodes vector outside
             // the co_await arg list (nested brace-init trips the ICE).
             std::vector<std::string> next_nodes;
@@ -589,7 +600,8 @@ NodeExecutor::run_parallel_async(
             // see comment above the loop. The fresh exception is
             // wholly owned by the current (main) thread.
             first_exception = nullptr;
-            throw NodeInterrupt(ni_reason);
+            interrupt->set_node(first_exception_node);
+            throw *interrupt;
         }
         std::rethrow_exception(first_exception);
     }

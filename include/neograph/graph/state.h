@@ -98,6 +98,16 @@ public:
      */
     std::vector<std::string> channel_names() const;
 
+    /**
+     * @brief Whether the graph declared this channel.
+     *
+     * `write()` throws on an undeclared channel, so code that writes into a
+     * channel it does not own (the engine seeding a resume value into
+     * "messages", say) must ask first rather than assume the graph is
+     * shaped like a chat.
+     */
+    bool has_channel(const std::string& channel) const;
+
     // v1.0 (9d): the v0.3 `run_cancel_token_` smuggling channel is gone.
     // Cancel propagation now flows exclusively through
     // `RunContext::cancel_token` on `NodeInput::ctx` (engine threads it
