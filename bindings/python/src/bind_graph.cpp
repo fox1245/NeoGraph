@@ -259,6 +259,23 @@ void init_graph(py::module_& m) {
         "when the future is already done/cancelled.");
 
     // ── RunConfig ────────────────────────────────────────────────────────
+    // ── UsageAccumulator (issue #88) ─────────────────────────────────────
+    //
+    // Hand one to RunConfig to total tokens across several runs — a multi-turn
+    // chat is N runs on one thread_id, and the number people actually want is
+    // what the conversation cost, not what the last turn cost.
+    py::class_<UsageAccumulator, std::shared_ptr<UsageAccumulator>>(
+        m, "UsageAccumulator",
+        "Running token total. Pass to RunConfig.usage to accumulate across runs; "
+        "read RunResult.usage for a single run's cost.")
+        .def(py::init<>())
+        .def("snapshot", &UsageAccumulator::snapshot,
+             "Current totals as a ChatCompletion.Usage.")
+        .def("__repr__", [](const UsageAccumulator& a) {
+            auto u = a.snapshot();
+            return "<UsageAccumulator total=" + std::to_string(u.total_tokens) + ">";
+        });
+
     py::class_<RunConfig>(m, "RunConfig",
         "Per-run configuration: thread_id, input dict, max_steps, "
         "stream_mode for run_stream(), and resume_if_exists for "
@@ -293,7 +310,11 @@ void init_graph(py::module_& m) {
             "for thread_id (if any) and applies input on top before "
             "running. Default False preserves the historical fresh-start "
             "semantics. For HITL resume from an interrupted run, use "
-            "engine.resume() instead.");
+            "engine.resume() instead.")
+        .def_readwrite("usage", &RunConfig::usage,
+            "Optional UsageAccumulator (issue #88). Leave None and the engine "
+            "makes one per run; supply your own to total tokens across several "
+            "runs on the same conversation.");
 
     // ── RunResult ────────────────────────────────────────────────────────
     py::class_<RunResult>(m, "RunResult",
@@ -307,7 +328,10 @@ void init_graph(py::module_& m) {
         .def_property_readonly("interrupt_value",
             [](const RunResult& r) { return json_to_py(r.interrupt_value); })
         .def_readonly("checkpoint_id",   &RunResult::checkpoint_id)
-        .def_readonly("execution_trace", &RunResult::execution_trace);
+        .def_readonly("execution_trace", &RunResult::execution_trace)
+        .def_readonly("usage",           &RunResult::usage,
+            "Token usage for the whole run, subgraphs included (issue #88). "
+            "Zero when the graph made no LLM calls.");
 
     // ── CheckpointStore (abstract base) + InMemoryCheckpointStore ────────
     //

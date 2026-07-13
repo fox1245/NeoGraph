@@ -72,7 +72,9 @@ Agent::complete(const std::vector<ChatMessage>& messages)
     // Candidate 6 PR3: dispatch via invoke() so the v1.0 single-
     // dispatch surface is end-to-end. run_sync drives the awaitable
     // synchronously (Agent::complete is the public sync API).
-    return neograph::async::run_sync(provider_->invoke(params, nullptr));
+    auto completion = neograph::async::run_sync(provider_->invoke(params, nullptr));
+    usage_->add(completion.usage);   // #88
+    return completion;
 }
 
 std::string
@@ -88,6 +90,7 @@ Agent::run(std::vector<ChatMessage>& messages, int max_iterations)
         params.tools = tool_defs;
 
         auto completion = neograph::async::run_sync(provider_->invoke(params, nullptr));
+        usage_->add(completion.usage);   // #88
         auto& msg = completion.message;
 
         // Append assistant message to history
@@ -133,6 +136,7 @@ Agent::run_stream(std::vector<ChatMessage>& messages,
         if (has_done_tool_calls) {
             auto completion = neograph::async::run_sync(
                 provider_->invoke(params, on_chunk));
+            usage_->add(completion.usage);   // #88
             messages.push_back(completion.message);
 
             if (completion.message.tool_calls.empty()) {
@@ -143,6 +147,7 @@ Agent::run_stream(std::vector<ChatMessage>& messages,
             // Non-streaming: reliable tool call detection
             auto completion = neograph::async::run_sync(
                 provider_->invoke(params, nullptr));
+            usage_->add(completion.usage);   // #88
             messages.push_back(completion.message);
 
             if (completion.message.tool_calls.empty()) {
@@ -151,6 +156,7 @@ Agent::run_stream(std::vector<ChatMessage>& messages,
                 messages.pop_back();
                 auto streamed = neograph::async::run_sync(
                     provider_->invoke(params, on_chunk));
+                usage_->add(streamed.usage);   // #88
                 messages.push_back(streamed.message);
                 return streamed.message.content;
             }
