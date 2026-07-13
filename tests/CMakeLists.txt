@@ -9,6 +9,7 @@ add_executable(neograph_tests
     test_json_path.cpp
     test_pending_writes.cpp
     test_channel_write_mode.cpp
+    test_usage_accounting.cpp
     test_plan_execute_graph.cpp
     test_signal_dispatch.cpp
     test_multi_node_resume.cpp

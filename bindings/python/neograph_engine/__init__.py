@@ -97,6 +97,7 @@ from ._neograph import (
     GraphEngine,
     RunConfig,
     RunResult,
+    UsageAccumulator,
     CheckpointStore,
     InMemoryCheckpointStore,
 
@@ -382,6 +383,7 @@ __all__ = [
     "node",
     "GraphEngine",
     "RunConfig",
+    "UsageAccumulator",
     "RunResult",
     "CheckpointStore",
     "InMemoryCheckpointStore",
