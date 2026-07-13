@@ -215,8 +215,25 @@ find_package(Threads REQUIRED)
 set(DEPS_DIR ${PROJECT_SOURCE_DIR}/deps)
 
 # yyjson (C, compiled) — used by all modules for JSON parse/write
+# GNUInstallDirs early: the vendored targets below need CMAKE_INSTALL_INCLUDEDIR
+# for their INSTALL_INTERFACE include paths. Including it twice is harmless.
+include(GNUInstallDirs)
+
+# Vendored deps that leak through NeoGraph's PUBLIC headers must be consumable
+# from an install tree, not just from the build tree (issue #92). asio appears in
+# 18 public headers (provider.h returns asio::awaitable), yyjson in json.h, and
+# concurrentqueue in util/request_queue.h — so a downstream project cannot even
+# *compile* against an installed NeoGraph unless these ship with it and the
+# exported targets point at the installed copies.
+#
+# They install under include/neograph/vendor/ rather than the include root, so a
+# consumer's own asio or httplib is not shadowed by ours.
+set(NEOGRAPH_VENDOR_INSTALL_INCLUDEDIR ${CMAKE_INSTALL_INCLUDEDIR}/neograph/vendor)
+
 add_library(yyjson STATIC ${DEPS_DIR}/yyjson/yyjson.c)
-target_include_directories(yyjson PUBLIC ${DEPS_DIR}/yyjson)
+target_include_directories(yyjson PUBLIC
+    $<BUILD_INTERFACE:${DEPS_DIR}/yyjson>
+    $<INSTALL_INTERFACE:${NEOGRAPH_VENDOR_INSTALL_INCLUDEDIR}>)
 set_target_properties(yyjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(NOT MSVC)
     target_compile_options(yyjson PRIVATE -O2)
@@ -224,7 +241,9 @@ endif()
 
 # cpp-httplib (header-only) — used by llm and mcp (PRIVATE)
 add_library(httplib INTERFACE)
-target_include_directories(httplib INTERFACE ${DEPS_DIR})
+target_include_directories(httplib INTERFACE
+    $<BUILD_INTERFACE:${DEPS_DIR}>
+    $<INSTALL_INTERFACE:${NEOGRAPH_VENDOR_INSTALL_INCLUDEDIR}>)
 # Windows: httplib hard-errors unless _WIN32_WINNT >= 0x0A00 (Windows 10).
 # Set it on the INTERFACE so every TU that links httplib picks it up,
 # regardless of whether it also links asio.
@@ -246,18 +265,24 @@ endif()
 
 # moodycamel::ConcurrentQueue (header-only) — used by util (PRIVATE)
 add_library(concurrentqueue INTERFACE)
-target_include_directories(concurrentqueue INTERFACE ${DEPS_DIR})
+target_include_directories(concurrentqueue INTERFACE
+    $<BUILD_INTERFACE:${DEPS_DIR}>
+    $<INSTALL_INTERFACE:${NEOGRAPH_VENDOR_INSTALL_INCLUDEDIR}>)
 
 # cppdotenv (header-only) — used by examples that read .env for API keys
 add_library(cppdotenv INTERFACE)
-target_include_directories(cppdotenv INTERFACE ${DEPS_DIR})
+target_include_directories(cppdotenv INTERFACE
+    $<BUILD_INTERFACE:${DEPS_DIR}>
+    $<INSTALL_INTERFACE:${NEOGRAPH_VENDOR_INSTALL_INCLUDEDIR}>)
 
 # standalone asio (header-only) — used by the async runtime layer.
 # Vendored as `deps/asio/include/` so the public macro ASIO_STANDALONE
 # turns off the Boost.System coupling. Any TU linking this must also
 # link a threads lib (std::thread backend).
 add_library(asio INTERFACE)
-target_include_directories(asio INTERFACE ${DEPS_DIR}/asio/include)
+target_include_directories(asio INTERFACE
+    $<BUILD_INTERFACE:${DEPS_DIR}/asio/include>
+    $<INSTALL_INTERFACE:${NEOGRAPH_VENDOR_INSTALL_INCLUDEDIR}>)
 target_compile_definitions(asio INTERFACE ASIO_STANDALONE ASIO_NO_DEPRECATED)
 # Windows: target Windows 10+ so httplib compiles (it hard-errors on
 # _WIN32_WINNT < 0x0A00) and asio's newer overlapped/pipe paths light up.
@@ -1449,6 +1474,124 @@ if(NEOGRAPH_INSTALL_HEADERS)
 
     install(DIRECTORY schemas/
         DESTINATION ${CMAKE_INSTALL_DATADIR}/neograph/schemas)
+
+    # ── Vendored headers that leak through the public API (issue #92) ──
+    #
+    # Without these an installed NeoGraph does not compile downstream: 18 public
+    # headers include <asio/...>, json.h includes <yyjson.h>, and
+    # util/request_queue.h includes <concurrentqueue.h>. httplib and cppdotenv
+    # ship too — they appear in PRIVATE link interfaces, which still surface as
+    # $<LINK_ONLY:...> entries in the export set, so the export would be
+    # rejected without them.
+    install(DIRECTORY ${DEPS_DIR}/asio/include/asio
+        DESTINATION ${NEOGRAPH_VENDOR_INSTALL_INCLUDEDIR})
+    install(FILES
+            ${DEPS_DIR}/yyjson/yyjson.h
+            ${DEPS_DIR}/httplib.h
+            ${DEPS_DIR}/concurrentqueue.h
+        DESTINATION ${NEOGRAPH_VENDOR_INSTALL_INCLUDEDIR})
+    if(EXISTS ${DEPS_DIR}/cppdotenv)
+        install(DIRECTORY ${DEPS_DIR}/cppdotenv
+            DESTINATION ${NEOGRAPH_VENDOR_INSTALL_INCLUDEDIR})
+    endif()
+endif()
+
+# ── Export set: the libraries themselves, and find_package() support ────────
+#
+# Before this, `cmake --install` laid down headers and nothing to link against,
+# and there was no package config at all — so `find_package(NeoGraph)` failed
+# outright and the only way to consume the engine was to vendor its whole source
+# tree as a subdirectory. For a library whose pitch is "embed this in your app",
+# that was the most embarrassing gap on the list (issue #92).
+#
+# Exported target names match the in-tree ALIAS names (neograph::core, ...), so
+# the same target_link_libraries line works whether a project consumes NeoGraph
+# via add_subdirectory or via find_package.
+# Default OFF for wheel builds. scikit-build-core packages whatever
+# `cmake --install` lays down, so leaving this on would drop lib/*.a and
+# lib/cmake/NeoGraph/ into the wheel alongside the Python extension — the same
+# reason NEOGRAPH_INSTALL_HEADERS is turned off there. The wheel installs the
+# engine shared objects through its own rules further down.
+if(NEOGRAPH_BUILD_PYBIND)
+    set(_neograph_install_export_default OFF)
+else()
+    set(_neograph_install_export_default ON)
+endif()
+
+option(NEOGRAPH_INSTALL_EXPORT
+    "Install libraries + NeoGraphConfig.cmake for find_package (off for wheel builds)"
+    ${_neograph_install_export_default})
+
+if(NEOGRAPH_INSTALL_EXPORT)
+    set(NEOGRAPH_EXPORT_TARGETS neograph_core yyjson asio)
+    set(NEOGRAPH_COMPONENTS_BUILT core)
+
+    # Vendored INTERFACE targets referenced by any exported link interface must
+    # be in the export set, PRIVATE ones included.
+    foreach(_vendor httplib concurrentqueue cppdotenv)
+        if(TARGET ${_vendor})
+            list(APPEND NEOGRAPH_EXPORT_TARGETS ${_vendor})
+        endif()
+    endforeach()
+
+    foreach(_comp async llm mcp a2a acp util postgres sqlite)
+        if(TARGET neograph_${_comp})
+            list(APPEND NEOGRAPH_EXPORT_TARGETS neograph_${_comp})
+            list(APPEND NEOGRAPH_COMPONENTS_BUILT ${_comp})
+        endif()
+    endforeach()
+
+    # neograph_core -> neograph::core, asio -> neograph::asio, and so on.
+    foreach(_t ${NEOGRAPH_EXPORT_TARGETS})
+        string(REGEX REPLACE "^neograph_" "" _export_name ${_t})
+        set_target_properties(${_t} PROPERTIES EXPORT_NAME ${_export_name})
+    endforeach()
+
+    install(TARGETS ${NEOGRAPH_EXPORT_TARGETS}
+        EXPORT  NeoGraphTargets
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+    install(EXPORT NeoGraphTargets
+        FILE        NeoGraphTargets.cmake
+        NAMESPACE   neograph::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/NeoGraph)
+
+    # Re-find, in the consumer's configure, whatever the engine build actually
+    # linked. Writing these out per-build rather than hardcoding them is the
+    # point: an install that was built without libpq must not make its consumers
+    # hunt for PostgreSQL.
+    set(NEOGRAPH_CONFIG_DEPENDENCIES "find_dependency(Threads)")
+    if(TARGET neograph_async OR TARGET neograph_llm)
+        string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "\nfind_dependency(OpenSSL)")
+    endif()
+    if(TARGET neograph_postgres)
+        string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "\nfind_dependency(PostgreSQL)")
+    endif()
+    if(TARGET neograph_sqlite)
+        string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "\nfind_dependency(SQLite3)")
+    endif()
+    if(NEOGRAPH_USE_LIBCURL AND CURL_FOUND)
+        string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "\nfind_dependency(CURL)")
+    endif()
+
+    include(CMakePackageConfigHelpers)
+    configure_package_config_file(
+        ${PROJECT_SOURCE_DIR}/cmake/NeoGraphConfig.cmake.in
+        ${CMAKE_CURRENT_BINARY_DIR}/NeoGraphConfig.cmake
+        INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/NeoGraph)
+
+    write_basic_package_version_file(
+        ${CMAKE_CURRENT_BINARY_DIR}/NeoGraphConfigVersion.cmake
+        VERSION       ${PROJECT_VERSION}
+        COMPATIBILITY SameMajorVersion)
+
+    install(FILES
+            ${CMAKE_CURRENT_BINARY_DIR}/NeoGraphConfig.cmake
+            ${CMAKE_CURRENT_BINARY_DIR}/NeoGraphConfigVersion.cmake
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/NeoGraph)
 endif()
 
 # ── Pybind11 wheel install ───────────────────────────────────────────────
