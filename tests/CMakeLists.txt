@@ -166,12 +166,18 @@ if(NEOGRAPH_BUILD_POSTGRES)
     # SetUp/TearDown — running them in parallel collides on DDL. Mark
     # them with a RESOURCE_LOCK so ctest serializes only this group
     # while the other ~200 tests still run concurrently.
+    # ChannelWriteModeTest.OverwriteSurvivesReplayThroughPostgres joins the
+    # locked group: it talks to the same database, and the Postgres suite's
+    # drop_schema() will wipe its tables mid-run otherwise. Observed exactly
+    # that — green standalone, red under `ctest -j8`.
+    set(NEOGRAPH_PG_LOCKED_TESTS
+        "PostgresCheckpointTest.*:ChannelWriteModeTest.OverwriteSurvivesReplayThroughPostgres")
     gtest_discover_tests(neograph_tests
-        TEST_FILTER "PostgresCheckpointTest.*"
+        TEST_FILTER "${NEOGRAPH_PG_LOCKED_TESTS}"
         PROPERTIES RESOURCE_LOCK postgres_test_db
     )
     gtest_discover_tests(neograph_tests
-        TEST_FILTER "-PostgresCheckpointTest.*"
+        TEST_FILTER "-${NEOGRAPH_PG_LOCKED_TESTS}"
     )
 else()
     gtest_discover_tests(neograph_tests)

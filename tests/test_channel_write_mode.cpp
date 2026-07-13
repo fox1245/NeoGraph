@@ -21,6 +21,9 @@
 
 #include <gtest/gtest.h>
 #include <neograph/neograph.h>
+#include <neograph/graph/sqlite_checkpoint.h>
+#include <neograph/graph/postgres_checkpoint.h>
+#include <cstdlib>
 
 #include <atomic>
 #include <memory>
@@ -229,4 +232,75 @@ TEST_F(ChannelWriteModeTest, OverwriteSurvivesPendingWriteReplay) {
         << "the replayed write lost its Overwrite mode and reduced instead";
     EXPECT_EQ(resumed.channel_raw("log").size(), 3u)
         << "the three appending workers' writes should all have replayed";
+}
+
+// ── 3. The same replay, through a real persistence backend ──
+//
+// The test above uses InMemoryCheckpointStore, which hands the PendingWrite's
+// json straight back — so it proves the coordinator's serialize/deserialize
+// round trip, but says nothing about a store that has to marshal that json
+// through a database. SqliteCheckpointStore writes writes_json as TEXT and
+// parses it back; Postgres uses a JSONB column. If either dropped an unknown
+// field, the mode would survive unit tests and die in production.
+//
+// Reading the code says it round-trips. This runs it.
+TEST_F(ChannelWriteModeTest, OverwriteSurvivesReplayThroughSqlite) {
+    auto store  = std::make_shared<SqliteCheckpointStore>(":memory:");
+    auto engine = GraphEngine::compile(make_graph(fanout), NodeContext{}, store);
+
+    RunConfig cfg;
+    cfg.thread_id = "crashy-sqlite";
+
+    fail_on = 2;
+    EXPECT_THROW(engine->run(cfg), std::exception);
+    ASSERT_EQ(exec_counter.load(), fanout);
+
+    fail_on = -1;
+    auto resumed = engine->resume("crashy-sqlite");
+
+    ASSERT_EQ(exec_counter.load(), fanout + 1)
+        << "successful workers must not re-run, or this proves nothing";
+
+    EXPECT_EQ(resumed.channel_raw("banner"), json::array({"final"}))
+        << "the Overwrite did not survive the SQLite round trip";
+}
+
+// ── 4. And through Postgres, where the column is JSONB ──
+//
+// Gated on NEOGRAPH_TEST_POSTGRES_URL like the rest of the PG suite. JSONB is
+// not a string round trip: Postgres reparses the document, reorders keys and
+// drops duplicates. It preserves "mode", but that is the sort of claim that
+// deserves a test rather than a paragraph.
+TEST_F(ChannelWriteModeTest, OverwriteSurvivesReplayThroughPostgres) {
+    const char* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL unset";
+
+    // Start from a clean database. Without this a previous run's checkpoints for
+    // this thread_id are still there, and the "crash" run below resumes them
+    // instead of starting fresh — the test would pass or fail depending on what
+    // was left behind. The constructor runs ensure_schema(), so dropping and
+    // reconstructing gives empty tables.
+    {
+        PostgresCheckpointStore cleaner(url);
+        cleaner.drop_schema();
+    }
+    auto store = std::make_shared<PostgresCheckpointStore>(url);
+
+    auto engine = GraphEngine::compile(make_graph(fanout), NodeContext{}, store);
+
+    RunConfig cfg;
+    cfg.thread_id = "crashy-pg";
+
+    fail_on = 2;
+    EXPECT_THROW(engine->run(cfg), std::exception);
+    ASSERT_EQ(exec_counter.load(), fanout);
+
+    fail_on = -1;
+    auto resumed = engine->resume("crashy-pg");
+
+    ASSERT_EQ(exec_counter.load(), fanout + 1)
+        << "successful workers must not re-run, or this proves nothing";
+
+    EXPECT_EQ(resumed.channel_raw("banner"), json::array({"final"}))
+        << "the Overwrite did not survive the JSONB round trip";
 }
