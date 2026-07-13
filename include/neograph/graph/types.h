@@ -83,8 +83,20 @@ struct Channel {
  * @brief Output of a node: a write to a named channel.
  */
 struct ChannelWrite {
-    std::string channel;  ///< Target channel name.
-    json        value;    ///< Value to write through the channel's reducer.
+    /// What the write means for the channel's current value (issue #91).
+    enum class Mode {
+        /// Feed the value through the channel's reducer. The default, and what
+        /// every write did before this existed.
+        Reduce,
+        /// Replace the channel's value outright, ignoring the reducer. The only
+        /// way to shrink an accumulating channel — trim a conversation history,
+        /// drop a poisoned message, reset a scratchpad.
+        Overwrite,
+    };
+
+    std::string channel;              ///< Target channel name.
+    json        value;                ///< Value to write.
+    Mode        mode = Mode::Reduce;  ///< Default preserves the pre-#91 behavior.
 };
 
 /**

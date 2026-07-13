@@ -12,10 +12,22 @@ namespace {
 // NodeResult and the on-store PendingWrite record; moved here because
 // only the coordinator drives both directions now.
 
+// A write's mode has to survive this round trip, or a replayed Overwrite comes
+// back as a Reduce and the resumed run reconstructs a different state than the
+// original — silently (#91).
+//
+// The field is emitted only when it is not the default, so a graph that never
+// overwrites produces byte-identical records to the pre-#91 format, and a
+// checkpoint written before this existed reads back as Reduce. Same shape as the
+// v1 -> v2 barrier_state addition.
 inline json serialize_writes(const std::vector<ChannelWrite>& writes) {
     json arr = json::array();
     for (const auto& w : writes) {
-        arr.push_back({{"channel", w.channel}, {"value", w.value}});
+        json item{{"channel", w.channel}, {"value", w.value}};
+        if (w.mode == ChannelWrite::Mode::Overwrite) {
+            item["mode"] = "overwrite";
+        }
+        arr.push_back(std::move(item));
     }
     return arr;
 }
@@ -24,10 +36,16 @@ inline std::vector<ChannelWrite> deserialize_writes(const json& arr) {
     if (!arr.is_array()) return out;
     out.reserve(arr.size());
     for (const auto& item : arr) {
-        out.push_back(ChannelWrite{
+        ChannelWrite w{
             item.value("channel", std::string{}),
             item.contains("value") ? item["value"] : json()
-        });
+        };
+        // Absent, unknown, or "reduce" -> Reduce. An older engine reading a
+        // record it does not understand must not silently invent an Overwrite.
+        if (item.value("mode", std::string{}) == "overwrite") {
+            w.mode = ChannelWrite::Mode::Overwrite;
+        }
+        out.push_back(std::move(w));
     }
     return out;
 }

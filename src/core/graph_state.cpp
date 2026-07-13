@@ -84,8 +84,15 @@ void GraphState::apply_writes(const std::vector<ChannelWrite>& writes) {
                 "definition's \"channels\" block before writing. "
                 "See docs/troubleshooting.md \"Write to unknown channel\".");
         }
-        auto& ch  = it->second;
-        ch.value   = ch.reducer(ch.value, w.value);
+        auto& ch = it->second;
+        // The mode is the whole point of ChannelWrite::Mode (#91): Reduce keeps
+        // the reducer as the law, Overwrite is an explicit, *recorded* escape
+        // from it. Because the intent rides on the write, it lands in the write
+        // log, survives checkpointing, and replays identically — which a
+        // side-door GraphState::overwrite() could never do.
+        ch.value = (w.mode == ChannelWrite::Mode::Overwrite)
+                       ? w.value
+                       : ch.reducer(ch.value, w.value);
         ch.version = ++global_version_;
     }
 }
