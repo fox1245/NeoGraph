@@ -59,8 +59,8 @@ TEST(BarrierPersistence, FreshCheckpointHasEmptyBarrierState) {
     Checkpoint cp;
     EXPECT_TRUE(cp.barrier_state.empty());
     EXPECT_EQ(cp.schema_version, CHECKPOINT_SCHEMA_VERSION);
-    EXPECT_EQ(CHECKPOINT_SCHEMA_VERSION, 2)
-        << "barrier_state requires schema v2";
+    EXPECT_EQ(CHECKPOINT_SCHEMA_VERSION, 3)
+        << "barrier_state requires schema v2; v3 adds ChannelWrite::Mode (#91)";
 }
 
 // =========================================================================

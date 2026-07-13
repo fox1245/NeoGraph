@@ -42,7 +42,11 @@ namespace neograph::graph {
 // platform-variable `int` width is wrong for a value persisted to
 // disk and round-tripped through JSON. Old `int` left the door open
 // to a `-1` sentinel value that wasn't documented anywhere.
-constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 2;
+// v3 (#91): pending-write records may carry a "mode" field ("overwrite").
+// Absent means Reduce, so a v2 blob loads unchanged — same tolerant shape as the
+// v1 -> v2 barrier_state addition. Nothing rejects an older version on read; the
+// number records what the writer was capable of.
+constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
 
 /// Phase at which a Checkpoint was produced. Drives resume semantics —
 /// `Before` means "re-enter before the target node runs", `After` /
