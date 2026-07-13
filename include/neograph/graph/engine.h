@@ -20,6 +20,7 @@
 #include <neograph/graph/state.h>
 #include <neograph/graph/store.h>
 #include <neograph/graph/types.h>
+#include <neograph/tool_dispatch.h>   // ToolGate (issue #89)
 
 #include <asio/awaitable.hpp>
 #include <asio/thread_pool.hpp>
@@ -92,6 +93,31 @@ struct RunConfig {
      * is a no-op.
      */
     bool resume_if_exists = false;
+
+    /**
+     * @brief Interception point between "the model asked for tool X" and
+     *        "tool X runs" (issue #89).
+     *
+     * Consulted for every tool call before any tool runs, on both the graph
+     * path (`tool_dispatch` nodes) and the Agent path — they share one
+     * dispatcher (issue #87), so a gate cannot land in one and miss the other.
+     *
+     * Unset means every call runs, exactly as before this existed.
+     *
+     * @code
+     * cfg.tool_gate = [](ToolCall call, ToolGateContext gctx)
+     *         -> asio::awaitable<ToolDecision> {
+     *     if (call.name != "shell") co_return ToolDecision::allow();
+     *     if (!gctx.resume_value)
+     *         co_return ToolDecision::interrupt("shell needs approval",
+     *                                           json::parse(call.arguments));
+     *     if (gctx.resume_value->value("approved", false))
+     *         co_return ToolDecision::allow();
+     *     co_return ToolDecision::deny("the human said no");
+     * };
+     * @endcode
+     */
+    ToolGate tool_gate;
 };
 
 /**
@@ -217,6 +243,11 @@ struct RunContext {
      * @endcode
      */
     std::shared_ptr<Store> store;
+
+    /// Mirrors ``RunConfig::tool_gate`` (issue #89). Empty when the caller did
+    /// not opt in — an empty std::function allocates nothing, so the ungated
+    /// path pays a null check and no more.
+    ToolGate tool_gate;
 };
 
 /// @brief Fold a completion's token usage into the run's running total (#88).
