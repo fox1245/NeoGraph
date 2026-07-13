@@ -41,12 +41,15 @@
 #include <neograph/graph/types.h>
 
 #include <asio/awaitable.hpp>
+#include <asio/co_spawn.hpp>
+#include <asio/thread_pool.hpp>
 #include <asio/use_awaitable.hpp>
 
 #include <pybind11/pybind11.h>
 #include <pybind11/functional.h>
 #include <pybind11/stl.h>
 
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <string>
@@ -187,10 +190,41 @@ translate_node_interrupt(py::error_already_set& e) {
 // `_pytools` attribute on the Python NodeContext wrapper, then
 // transferred to the engine via own_tools(). Pattern parallels
 // PyGraphNodeOwner — same GIL handshake, same destructor caveat.
+// Worker pool for AsyncTool bodies (issue #96).
+//
+// Overlapping Python tools means running their bodies on separate threads —
+// there is no other way, since a Python function holds the GIL while it runs
+// and only lets go when it blocks on I/O. These threads therefore spend their
+// lives blocked on sockets, so the pool is sized generously rather than to the
+// core count: it bounds how many tool calls can be in flight, not how much CPU
+// is used.
+asio::thread_pool& async_tool_pool() {
+    static asio::thread_pool pool([] {
+        if (const char* env = std::getenv("NEOGRAPH_TOOL_THREADS")) {
+            long n = std::strtol(env, nullptr, 10);
+            if (n > 0 && n <= 1024) return static_cast<std::size_t>(n);
+        }
+        return static_cast<std::size_t>(32);
+    }());
+    return pool;
+}
+
 class PyToolOwner final : public neograph::Tool {
 public:
     explicit PyToolOwner(py::object py_obj)
-        : py_obj_(std::move(py_obj)) {}
+        : py_obj_(std::move(py_obj)) {
+        // Does this tool opt in to running concurrently? Decided once, here,
+        // rather than on every call — the answer cannot change, and the check
+        // needs the GIL.
+        py::gil_scoped_acquire g;
+        try {
+            py::object base =
+                py::module_::import("neograph_engine").attr("AsyncTool");
+            concurrent_ = py::isinstance(py_obj_, base);
+        } catch (const py::error_already_set&) {
+            concurrent_ = false;   // conservative: serial is always correct
+        }
+    }
 
     ~PyToolOwner() override {
         py::gil_scoped_acquire g;
@@ -205,9 +239,28 @@ public:
 
     std::string execute(const json& arguments) override {
         py::gil_scoped_acquire g;
-        py::object args_py = json_to_py(arguments);
-        return py_obj_.attr("execute")(args_py)
-            .cast<std::string>();
+        return call_python(arguments);
+    }
+
+    // The whole of issue #96 is this override.
+    //
+    // Tool::execute_async's default body is `co_return execute(arguments)` —
+    // it runs to completion before the coroutine's first suspension, so a
+    // sync tool never overlaps with its siblings even inside the dispatcher's
+    // parallel group. That is not an accident; it is the guarantee that let
+    // #87 land concurrency without racing anybody's existing stateful tool.
+    //
+    // A tool that subclassed ng.AsyncTool has said it is safe to overlap. For
+    // those, and only those, we hop onto a worker thread, which is where the
+    // GIL can actually be released while the tool waits on I/O.
+    asio::awaitable<std::string> execute_async(const json& arguments) override {
+        if (!concurrent_) {
+            co_return execute(arguments);   // unchanged: serial, as before
+        }
+        co_return co_await asio::co_spawn(
+            async_tool_pool().get_executor(),
+            offload(this, arguments),
+            asio::use_awaitable);
     }
 
     std::string get_name() const override {
@@ -216,7 +269,25 @@ public:
     }
 
 private:
+    /// GIL must be held.
+    std::string call_python(const json& arguments) {
+        py::object args_py = json_to_py(arguments);
+        return py_obj_.attr("execute")(args_py).cast<std::string>();
+    }
+
+    // `arguments` is a coroutine PARAMETER, taken by value, and not a lambda
+    // capture: a lambda's closure dies as soon as it has handed back the
+    // awaitable, so a captured argument would dangle. A parameter lives in the
+    // coroutine frame. (`self` is a raw pointer on purpose — the tool outlives
+    // the run, and copying a py::object here would touch a CPython refcount
+    // without the GIL.)
+    static asio::awaitable<std::string> offload(PyToolOwner* self, json arguments) {
+        py::gil_scoped_acquire g;
+        co_return self->call_python(arguments);
+    }
+
     py::object py_obj_;
+    bool       concurrent_ = false;
 };
 
 // PyGraphNodeOwner: bridges the C++ GraphNode interface to a held
