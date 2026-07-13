@@ -144,6 +144,53 @@ loudly rather than looking like a question for a human.
 
 Requires a checkpoint store — there is nothing to resume from otherwise.
 
+## Making tools run concurrently
+
+When the model asks for several tools in one turn, NeoGraph dispatches them
+together. Whether they actually *overlap* is the tool's choice:
+
+```python
+class Fetch(ng.AsyncTool):          # ng.Tool -> serial;  ng.AsyncTool -> overlaps
+    def execute(self, arguments):
+        return requests.get(arguments["url"]).text
+    ...
+```
+
+Measured, twenty tools that each wait 300 ms:
+
+| tool base class | wall clock |
+|---|---|
+| `ng.Tool` | 6.0 s |
+| `ng.AsyncTool` | **0.30 s** (19.9×) |
+
+**Why it is opt-in.** A sync `Tool` runs to completion before the next one
+starts — so an existing tool that keeps state cannot suddenly find itself
+racing a copy of itself. Concurrency is something you declare, not something
+that happens to you. The flip side: two calls to the same `AsyncTool` can be in
+flight at once (the model may ask for it twice in one turn), so keep per-call
+state on the stack, not on `self`.
+
+**The boundary, stated plainly.** A Python function holds the GIL while it runs.
+Your tool overlaps with its siblings only while it is *not* holding it — which
+is while it is blocked on I/O, because that is when CPython lets go. An HTTP
+call, a socket read, a database query, `time.sleep`: all release it, all overlap.
+
+A tool that burns CPU **in Python** holds the GIL for its whole body and will
+not overlap, however many threads it is handed:
+
+| 3 CPU-bound `AsyncTool`s | 3.1× the time of one |
+|---|---|
+
+Declaring such a tool `AsyncTool` buys nothing. (If the heavy work happens
+inside numpy, a C extension, or a subprocess, the GIL is released there and it
+does overlap.) This is pinned by a test, so the claim cannot quietly drift.
+
+Concurrency is bounded by an internal worker pool — 32 threads by default, or
+`NEOGRAPH_TOOL_THREADS`. They spend their time blocked on I/O, so a generous
+pool costs little.
+
+Runnable, offline: [`examples/25_async_tools.py`](../bindings/python/examples/25_async_tools.py).
+
 ## Gating tool calls — "the agent wants to run `rm -rf build/`. Allow?"
 
 There is one hook between *the model asked for tool X* and *tool X runs*, and it
