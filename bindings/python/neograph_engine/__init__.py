@@ -208,6 +208,57 @@ class Tool:
             "perform the tool's work and return a string result.")
 
 
+class AsyncTool(Tool):
+    """A tool that may run concurrently with its siblings (issue #96).
+
+    When the model asks for several tools in one turn, NeoGraph dispatches them
+    together. Whether they actually *overlap* is up to the tool:
+
+    - Subclass :class:`Tool` and yours will not. It runs to completion before
+      the next one starts, exactly as Python tools always have. An existing
+      tool that keeps state cannot suddenly find itself racing a copy of
+      itself — that guarantee is why concurrency is opt-in rather than default.
+
+    - Subclass ``AsyncTool`` and yours will. Write the same ``execute()``; the
+      binding runs it on a worker thread so it can overlap with its siblings.
+
+    ::
+
+        class Fetch(neograph_engine.AsyncTool):
+            def get_definition(self):
+                d = neograph_engine.ChatTool()
+                d.name = "fetch"
+                d.description = "Fetch a URL"
+                return d
+
+            def execute(self, arguments):
+                return requests.get(arguments["url"]).text   # releases the GIL
+
+            def get_name(self):
+                return "fetch"
+
+    **What the speedup depends on, plainly.** A Python function holds the GIL
+    while it runs. Your tool overlaps with its siblings only while it is *not*
+    holding it — that is, while it is blocked on I/O, which is when CPython
+    lets go. An HTTP call, a socket read, a database query, ``time.sleep``: all
+    release it, and all overlap.
+
+    A tool that burns CPU in Python holds the GIL for its whole body and will
+    **not** overlap, no matter how many threads it is handed. Declaring such a
+    tool ``AsyncTool`` buys nothing. (If the heavy work happens inside numpy, a
+    C extension, or a subprocess, the GIL is released there and it does
+    overlap.)
+
+    **Thread safety is now yours.** Two calls to the same AsyncTool can be in
+    flight at once — the model is free to ask for the same tool twice in one
+    turn. Keep per-call state on the stack, not on ``self``.
+
+    Concurrency is bounded by an internal worker pool (32 threads by default;
+    set ``NEOGRAPH_TOOL_THREADS`` to change it). These threads spend their time
+    blocked on I/O, so a generous pool costs little.
+    """
+
+
 class NodeContext(_CppNodeContext):
     """Engine context — provider, tools, model, instructions.
 
@@ -435,6 +486,7 @@ __all__ = [
     "CancelToken",
     "GraphState",
     "GraphNode",
+    "AsyncTool",
     "NodeInterrupt",
     "ToolDecision",
     "ToolGateContext",
