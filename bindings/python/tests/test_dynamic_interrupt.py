@@ -185,3 +185,71 @@ def test_resume_value_is_none_on_a_fresh_run(engine):
     cfg = ng.RunConfig()
     cfg.thread_id = "py-di-fresh"
     assert compiled.run(cfg).interrupted
+
+
+class _UsageProvider(ng.Provider):
+    def complete(self, params):
+        completion = ng.ChatCompletion()
+        completion.message = ng.ChatMessage("assistant", "ok")
+        completion.usage.prompt_tokens = 10
+        completion.usage.completion_tokens = 5
+        completion.usage.total_tokens = 15
+        return completion
+
+    def complete_stream(self, params, on_chunk):
+        return self.complete(params)
+
+    def get_name(self):
+        return "usage-stub"
+
+
+def test_an_interrupted_run_still_reports_what_it_spent():
+    """Where token accounting (#88) meets the dynamic interrupt (#94).
+
+    A run that calls the model and *then* pauses for a human has already spent
+    money. If the pause dropped the usage on the floor, every approval-gated
+    agent would under-report its bill by exactly the work it did before asking.
+
+    On the resume the count is zero, and that is correct rather than a second
+    bug: the LLM node's write is replayed from the checkpoint, not re-executed,
+    so no new tokens are bought. It is the same per-run contract documented on
+    RunResult.usage — for the conversation total, supply RunConfig.usage.
+    """
+    provider = _UsageProvider()
+
+    class Gate(ng.GraphNode):
+        def run(self, input):
+            if input.ctx.resume_value is None:
+                raise ng.NodeInterrupt("needs approval")
+            return [ng.ChannelWrite("done", True)]
+
+        def get_name(self):
+            return "gate"
+
+    ng.NodeFactory.register_type("py_usage_gate", lambda _n, _c, _x: Gate())
+    definition = {
+        "name": "py_interrupt_usage",
+        "channels": {"messages": {"reducer": "append"},
+                     "done": {"reducer": "overwrite"}},
+        "nodes": {"llm": {"type": "llm_call"},
+                  "gate": {"type": "py_usage_gate"}},
+        "edges": [
+            {"from": "__start__", "to": "llm"},
+            {"from": "llm", "to": "gate"},
+            {"from": "gate", "to": "__end__"},
+        ],
+    }
+    compiled = ng.GraphEngine.compile(
+        definition, ng.NodeContext(provider=provider),
+        ng.InMemoryCheckpointStore())
+
+    cfg = ng.RunConfig()
+    cfg.thread_id = "py-di-usage"
+    paused = compiled.run(cfg)
+
+    assert paused.interrupted
+    assert paused.usage.total_tokens == 15, "the call made before the pause vanished from the bill"
+
+    done = compiled.resume("py-di-usage", {"approved": True})
+    assert done.output["channels"]["done"]["value"] is True
+    assert done.usage.total_tokens == 0, "the resumed run replays; it must not re-buy the tokens"
