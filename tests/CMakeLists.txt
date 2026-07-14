@@ -73,6 +73,10 @@ add_executable(neograph_tests
 )
 
 if(NEOGRAPH_BUILD_MCP)
+    # A stdio MCP tool used from inside a graph run — the combination nothing
+    # covered, and a use-after-free until the session stopped depending on an
+    # io_context it does not own.
+    target_sources(neograph_tests PRIVATE test_mcp_stdio_in_graph.cpp)
     target_sources(neograph_tests PRIVATE
         test_mcp_client_async.cpp
         test_mcp_stdio_async.cpp

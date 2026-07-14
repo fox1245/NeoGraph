@@ -5,6 +5,9 @@
 #include <neograph/async/run_sync.h>
 
 #include <asio/co_spawn.hpp>
+#include <asio/executor_work_guard.hpp>
+#include <asio/io_context.hpp>
+#include <asio/post.hpp>
 #include <asio/detached.hpp>
 #include <asio/experimental/channel.hpp>
 #include <asio/read_until.hpp>
@@ -103,6 +106,10 @@ public:
 private:
     StdioSession() = default;
 
+    /// The actual exchange, running on THIS session's io_context. Parameters by
+    /// value: they live in the coroutine frame, not in the caller's.
+    asio::awaitable<json> do_exchange(std::string method, json params);
+
     std::string read_line_locked();       ///< caller holds mtx_
     void write_frame_locked(const json& j); ///< caller holds mtx_
 
@@ -124,6 +131,39 @@ private:
     int   stdin_fd_ = -1;   // parent → child
     int   stdout_fd_ = -1;  // child  → parent
 #endif
+
+    // ── The session's OWN io_context ────────────────────────────────
+    //
+    // Every piece of asio state below (the pipe descriptors, the write
+    // lock, the reader coroutine) is bound to an executor on first use
+    // and reused on every later call. It used to be the CALLER's
+    // executor, and the header said so:
+    //
+    //     "All callers of one session are assumed to share one
+    //      io_context (in practice the engine's)"
+    //
+    // That was never true. `GraphEngine::run` goes through `run_sync`,
+    // which stands up an io_context for ONE call and destroys it on the
+    // way out. So the second run — or simply the client's destructor —
+    // touched asio state hanging off a destroyed io_context. Without a
+    // sanitizer, in plain C++, that is a core dump.
+    //
+    // Owning the context makes its lifetime the session's, and deletes
+    // the old precondition ("callers must ensure the io_context outlives
+    // the session") rather than restating it. No engine could have
+    // honoured it.
+    //
+    // Declared FIRST so it is destroyed LAST — after the descriptors and
+    // the lock that point into it.
+    asio::io_context io_;
+    asio::executor_work_guard<asio::io_context::executor_type> io_guard_{
+        asio::make_work_guard(io_)};
+    std::thread io_thread_;
+    std::mutex  io_thread_mtx_;
+
+    /// Stop the worker and drop everything bound to io_, in that order. Called
+    /// from both platforms' destructors before the subprocess is reaped.
+    void shutdown_async_io();
 
     std::mutex   mtx_;        ///< sync path serialisation
     std::string  buffer_;     ///< sync read buffer
@@ -330,6 +370,8 @@ std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>
 }
 
 StdioSession::~StdioSession() {
+    shutdown_async_io();   // see the POSIX destructor
+
     if (stdin_h_)  { CloseHandle(stdin_h_); stdin_h_ = nullptr; }
     if (stdout_h_) { CloseHandle(stdout_h_); stdout_h_ = nullptr; }
 
@@ -442,6 +484,11 @@ std::shared_ptr<StdioSession> StdioSession::spawn(const std::vector<std::string>
 }
 
 StdioSession::~StdioSession() {
+    // First: stop the io_context and destroy everything bound to it. Doing this
+    // after closing the fds (or not at all) is what left a destroyed
+    // io_context's descriptors to be freed twice.
+    shutdown_async_io();
+
     if (stdin_fd_  >= 0) ::close(stdin_fd_);
     if (stdout_fd_ >= 0) ::close(stdout_fd_);
 
@@ -463,6 +510,31 @@ StdioSession::~StdioSession() {
 }
 
 #endif  // _WIN32
+
+// Tear down the async machinery on the thread that owns it, before anything it
+// points at can go away. Order matters: close the descriptors (which cancels the
+// reader's pending read, letting it finish), release the work guard so io_.run()
+// can return, then join.
+void StdioSession::shutdown_async_io() {
+    if (!io_thread_.joinable()) {
+        io_guard_.reset();
+        return;
+    }
+    asio::post(io_, [this] {
+        asio::error_code ec;
+        if (async_in_)  async_in_->close(ec);
+        if (async_out_) async_out_->close(ec);
+        if (async_lock_) async_lock_->close();
+        for (auto& kv : waiters_) {
+            if (kv.second) kv.second->close();
+        }
+        async_in_.reset();
+        async_out_.reset();
+        async_lock_.reset();
+    });
+    io_guard_.reset();
+    io_thread_.join();
+}
 
 void StdioSession::write_frame_locked(const json& j) {
     std::string line = j.dump();
@@ -704,8 +776,42 @@ asio::awaitable<void> StdioSession::run_reader() {
     co_return;
 }
 
+// Public entry: hop onto the session's OWN io_context and do the exchange
+// there.
+//
+// Everything asio in this session — the pipe descriptors, the write lock, the
+// reader coroutine — is bound to an executor on first use, and used again on
+// every later call. Binding that to the caller's executor was the bug: the graph
+// engine's `run_sync` stands up an io_context for one call and destroys it on
+// the way out, so the second run (or the client's destructor) touched asio state
+// hanging off a destroyed io_context. In C++, with no sanitizer, that is a core
+// dump; see MCPStdioInGraph.TheSameClientSurvivesASecondRun.
+//
+// The session owns the io_context now, so its lifetime is the session's, and the
+// old precondition — "callers must ensure the io_context outlives the session" —
+// is gone rather than merely documented. It was never a precondition an engine
+// could honour.
 asio::awaitable<json>
 StdioSession::rpc_call_async(const std::string& method, const json& params) {
+    // Lazily start the worker. A session that only ever uses the sync path (or
+    // never gets called at all) pays no thread.
+    {
+        std::lock_guard<std::mutex> g(io_thread_mtx_);
+        if (!io_thread_.joinable()) {
+            io_thread_ = std::thread([this] { io_.run(); });
+        }
+    }
+
+    co_return co_await asio::co_spawn(
+        io_.get_executor(),
+        // BY VALUE, into the coroutine frame. A reference would dangle: this
+        // function returns as soon as it has handed the awaitable to co_spawn.
+        do_exchange(method, params),
+        asio::use_awaitable);
+}
+
+asio::awaitable<json>
+StdioSession::do_exchange(std::string method, json params) {
     const int id = ++next_id_;
 
     json req = {
