@@ -19,6 +19,9 @@ void init_node(py::module_& m);
 #ifdef NEOGRAPH_PYBIND_HAS_A2A
 void init_a2a(py::module_& m);
 #endif
+#ifdef NEOGRAPH_PYBIND_HAS_MCP
+void init_mcp(py::module_& m);
+#endif
 
 // Register bind_vector classes for the OPAQUE vector types. Must run
 // BEFORE any other init_* so call sites that use these vectors can
@@ -80,5 +83,8 @@ PYBIND11_MODULE(_neograph, m) {
     neograph::pybind::init_node(m);
 #ifdef NEOGRAPH_PYBIND_HAS_A2A
     neograph::pybind::init_a2a(m);
+#endif
+#ifdef NEOGRAPH_PYBIND_HAS_MCP
+    neograph::pybind::init_mcp(m);
 #endif
 }

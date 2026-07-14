@@ -144,6 +144,39 @@ loudly rather than looking like a question for a human.
 
 Requires a checkpoint store — there is nothing to resume from otherwise.
 
+## MCP — using a remote tool server
+
+```python
+client = ng.mcp.MCPClient("http://localhost:8931")     # or ["python", "server.py"]
+client.initialize()
+
+engine = ng.GraphEngine.compile(
+    definition, ng.NodeContext(tools=client.get_tools()))
+```
+
+That is the whole integration. `get_tools()` returns the server's catalogue as
+tools the graph can dispatch, and you can mix them freely with your own Python
+tools in the same `NodeContext`.
+
+`client.call_tool(name, args)` calls one directly, outside any graph.
+
+**They overlap — over HTTP.** MCP tools are network round-trips, which is the
+case where concurrent dispatch pays, and `MCPTool` is a real C++ `AsyncTool`. But
+the two transports are not the same, and it is worth knowing which one you have:
+
+| transport | 3 calls × 0.4 s |
+|---|---|
+| HTTP | **0.41 s** — each call is its own request |
+| stdio | 1.2 s — one subprocess, one pipe; the client takes a capacity-1 lock, so calls queue |
+
+That stdio number is not a NeoGraph limitation to be optimised away; it is what
+a single pipe means. If you need MCP calls to overlap, use an HTTP server.
+
+The stdio subprocess is terminated when the last reference to the session is
+dropped — the client, or any tool it produced.
+
+Runnable, offline (it starts its own MCP server): [`examples/26_mcp_tools.py`](../bindings/python/examples/26_mcp_tools.py).
+
 ## Making tools run concurrently
 
 When the model asks for several tools in one turn, NeoGraph dispatches them

@@ -148,6 +148,16 @@ try:
 except ImportError:
     _HAVE_A2A = False
 
+# MCP (Model Context Protocol) — present when the binding was built with
+# neograph::mcp, which the wheel now does (issue #95). Reachable as
+# `neograph_engine.mcp.MCPClient(...)`. get_tools() hands back C++ tools that go
+# straight into NodeContext(tools=[...]) and keep their concurrency there.
+try:
+    from ._neograph import mcp  # noqa: F401
+    _HAVE_MCP = True
+except ImportError:
+    _HAVE_MCP = False
+
 # Re-import the C++ Tool / NodeContext bindings under private names so
 # we can shadow them with Python-side wrappers below.
 from ._neograph import Tool as _CppTool
