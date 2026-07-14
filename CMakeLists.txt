@@ -1630,6 +1630,16 @@ if(NEOGRAPH_BUILD_PYBIND)
     if(TARGET neograph_sqlite)
         list(APPEND NEOGRAPH_PYBIND_LIBS neograph_sqlite)
     endif()
+    # neograph_mcp ships when MCP is built — which, since #95, the wheel does.
+    # bindings/python/src/bind_mcp.cpp links against it, so the wheel must carry
+    # libneograph_mcp.{so,dylib,dll} next to the binding. Miss this and the
+    # wheel builds fine and then dies in repair on all four platforms with
+    # "Cannot repair wheel, because required library libneograph_mcp.so could
+    # not be located" — which is exactly what flipping NEOGRAPH_BUILD_MCP=ON in
+    # pyproject.toml without touching this list did.
+    if(TARGET neograph_mcp)
+        list(APPEND NEOGRAPH_PYBIND_LIBS neograph_mcp)
+    endif()
     # neograph_a2a ships when A2A is built. Same reasoning as above:
     # bindings/python/src/bind_a2a.cpp links against it (added in
     # v0.2.1), so the wheel must carry libneograph_a2a.{so,dylib,dll}
