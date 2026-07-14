@@ -144,6 +144,85 @@ loudly rather than looking like a question for a human.
 
 Requires a checkpoint store — there is nothing to resume from otherwise.
 
+## Remembering the user across conversations — the Store
+
+A checkpoint remembers **one conversation**. A Store remembers **the user**,
+across all of them.
+
+```python
+store = ng.InMemoryStore()
+engine.set_store(store)
+
+class Greet(ng.GraphNode):
+    def run(self, input):
+        seen = input.ctx.store.get(["users", "u1"], "visits")
+        n = (seen.value["n"] if seen else 0) + 1
+        input.ctx.store.put(["users", "u1"], "visits", {"n": n})
+        return [ng.ChannelWrite("greeting", f"visit #{n}")]
+```
+
+Namespaces are hierarchical lists, so `store.search(["users"])` finds everything
+under every user, and `store.search(["users", "u1"])` finds one user's items.
+`get()` returns `None` for a miss — absence is an answer, not an error.
+
+Subclass `ng.Store` to put it in a database instead.
+
+## Backing off on a 429 — RateLimitedProvider
+
+```python
+from neograph_engine.llm import RateLimitedProvider, OpenAIProvider
+
+provider = RateLimitedProvider(OpenAIProvider(...), max_retries=5)
+engine = ng.GraphEngine.compile(definition, ng.NodeContext(provider=provider))
+```
+
+Without it you end up wrapping `engine.run()` in your own retry loop, which
+retries **the whole graph** — re-running every node that already succeeded. This
+retries the one HTTP request that failed.
+
+It honours the upstream's `Retry-After` when there is one, falls back to
+`default_wait_seconds` when there is not, caps a single sleep at
+`max_wait_seconds`, and gives up once `max_total_wait_seconds` of sleeping has
+accumulated (`0` = no total cap).
+
+Your own provider opts in by raising the right exception:
+
+```python
+class MyProvider(ng.Provider):
+    def complete(self, params):
+        r = requests.post(...)
+        if r.status_code == 429:
+            raise ng.RateLimitError(
+                "rate limited",
+                retry_after_seconds=int(r.headers.get("Retry-After", -1)))
+```
+
+Anything else you raise stays an error.
+
+## Checking a graph before you run it — `validate`
+
+```python
+report = ng.validate(definition)
+if report.has_errors():
+    print(report.summary())
+    for d in report.errors():
+        print(d.code, d.path, d.message)
+```
+
+Dangling edges, unreachable nodes, dead barriers — a report you can read, rather
+than finding out when `compile()` throws.
+
+One edge worth knowing: `validate()` compiles the definition first, so a node
+type nobody registered surfaces as an **exception**, not a diagnostic. Register
+your node types before validating, exactly as you would before compiling.
+
+**Retries at the node level need no class.** Put `"retry_policy": {...}` in the
+graph definition and the engine honours it — that has always worked from Python:
+
+```python
+definition["retry_policy"] = {"max_retries": 5, "initial_delay_ms": 100}
+```
+
 ## MCP — using a remote tool server
 
 ```python

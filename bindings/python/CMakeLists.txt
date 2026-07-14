@@ -69,6 +69,7 @@ pybind11_add_module(_neograph
     src/bind_state.cpp
     src/bind_graph.cpp
     src/bind_node.cpp
+    src/bind_parity.cpp
 )
 
 # MCP client (Model Context Protocol). Bound only when neograph::mcp was
