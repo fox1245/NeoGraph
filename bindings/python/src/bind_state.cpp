@@ -61,7 +61,19 @@ void init_state(py::module_& m) {
             // Provider::complete, which bridges to complete_async, which bridges
             // back to complete: infinite recursion, stack overflow, SIGSEGV.
             py::keep_alive<1, 2>())
-        .def_readwrite("provider", &NodeContext::provider)
+        // A setter keep_alive policy appends every assigned provider to the
+        // context's patient list. Keep exactly the current Python override in
+        // a replaceable dynamic attribute instead, so reassignment releases
+        // the previous provider normally.
+        .def_property("provider",
+            py::cpp_function([](const NodeContext& c) { return c.provider; }),
+            py::cpp_function([](py::object self, py::object provider) {
+                auto cpp_provider = provider.is_none()
+                    ? std::shared_ptr<neograph::Provider>{}
+                    : provider.cast<std::shared_ptr<neograph::Provider>>();
+                self.attr("_pyprovider") = provider;
+                self.cast<NodeContext&>().provider = std::move(cpp_provider);
+            }))
         .def_readwrite("model", &NodeContext::model)
         .def_readwrite("instructions", &NodeContext::instructions)
         .def_property("extra_config",

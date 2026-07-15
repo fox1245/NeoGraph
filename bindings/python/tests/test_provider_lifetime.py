@@ -14,6 +14,9 @@ It went unnoticed because every existing test that subclasses Provider drives th
 graph through run_stream(), and holds the provider in a local variable.
 """
 
+import gc
+import weakref
+
 import neograph_engine as ng
 import pytest
 
@@ -51,8 +54,6 @@ def _definition():
 
 
 def test_provider_passed_as_a_temporary_survives_the_run():
-    import gc
-
     # Nothing here holds a reference to the provider or the NodeContext.
     engine = ng.GraphEngine.compile(_definition(), ng.NodeContext(provider=_Provider()))
     gc.collect()  # and make sure Python really does try to collect them
@@ -73,6 +74,78 @@ def test_provider_held_in_a_local_still_works():
     result = engine.run(cfg)
 
     assert result.output["channels"]["messages"]["value"][-1]["content"] == "held"
+
+
+@pytest.mark.parametrize("drive", ["run", "run_stream"])
+def test_provider_assigned_after_construction_survives_collection(drive):
+    """The current provider stays alive; the replaced provider does not."""
+    initial = _Provider("initial")
+    initial_ref = weakref.ref(initial)
+    ctx = ng.NodeContext(provider=initial)
+    del initial
+    gc.collect()
+
+    assert initial_ref() is not None
+
+    replacement = _Provider("reassigned")
+    replacement_ref = weakref.ref(replacement)
+    ctx.provider = replacement
+    del replacement
+    gc.collect()
+
+    assert initial_ref() is None
+    assert replacement_ref() is not None
+
+    engine = ng.GraphEngine.compile(_definition(), ctx)
+    del ctx
+    gc.collect()
+
+    assert replacement_ref() is not None
+
+    cfg = ng.RunConfig()
+    cfg.thread_id = f"reassigned-{drive}"
+    if drive == "run":
+        result = engine.run(cfg)
+    else:
+        result = engine.run_stream(cfg, lambda _event: None)
+
+    assert result.output["channels"]["messages"]["value"][-1]["content"] == "reassigned"
+
+
+def test_provider_property_none_releases_the_current_provider():
+    provider = _Provider()
+    provider_ref = weakref.ref(provider)
+    ctx = ng.NodeContext(provider=provider)
+    del provider
+    gc.collect()
+
+    assert provider_ref() is not None
+
+    ctx.provider = None
+    gc.collect()
+
+    assert provider_ref() is None
+    assert ctx.provider is None
+
+
+def test_repeated_provider_assignment_keeps_only_the_current_provider():
+    ctx = ng.NodeContext()
+    refs = []
+
+    for i in range(10):
+        provider = _Provider(f"provider-{i}")
+        refs.append(weakref.ref(provider))
+        ctx.provider = provider
+
+    del provider
+    gc.collect()
+
+    assert [ref() is not None for ref in refs] == [False] * 9 + [True]
+
+    ctx.provider = None
+    gc.collect()
+
+    assert all(ref() is None for ref in refs)
 
 
 @pytest.mark.parametrize("drive", ["run", "run_stream"])

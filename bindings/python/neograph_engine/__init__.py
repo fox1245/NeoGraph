@@ -294,12 +294,16 @@ class NodeContext(_CppNodeContext):
 
     def __init__(self, provider=None, tools=None,
                  model="", instructions="", extra_config=None):
+        # Let the property setter keep one replaceable Python reference. Passing
+        # provider to the C++ constructor would install a keep_alive edge that
+        # cannot be removed when the property is reassigned.
         super().__init__(
-            provider=provider,
+            provider=None,
             model=model,
             instructions=instructions,
             extra_config=extra_config or {},
         )
+        self.provider = provider
         # Stash the Python tool list on the wrapper. compile() reads
         # it via py::hasattr / py::object.attr("_pytools").
         self._pytools = list(tools or [])
