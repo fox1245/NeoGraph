@@ -38,6 +38,7 @@
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
 #include <neograph/graph/state.h>
+#include <neograph/graph/store.h>
 #include <neograph/graph/types.h>
 
 #include <asio/awaitable.hpp>
@@ -579,6 +580,14 @@ void init_node(py::module_& m) {
                 return static_cast<uint8_t>(c.stream_mode);
             },
             "Mirrors ``RunConfig.stream_mode`` as the underlying flag bits.")
+        .def_property_readonly("store",
+            [](const RunContext& c) -> py::object {
+                if (!c.store) return py::none();
+                return py::cast(c.store);
+            },
+            "The engine's Store, or None when none was installed. This is how "
+            "a node body remembers something across conversations (issue #97):\n\n"
+            "    seen = input.ctx.store.get([\"users\", uid], \"prefs\")")
         .def_property_readonly("resume_value",
             [](const RunContext& c) -> py::object {
                 if (!c.resume_value) return py::none();

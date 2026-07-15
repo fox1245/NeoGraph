@@ -63,6 +63,17 @@ _ensure_ssl_ca_bundle()
 from ._neograph import (
     ToolDecision,
     ToolGateContext,
+
+    # Long-term memory across conversations (#97)
+    Store,
+    InMemoryStore,
+    StoreItem,
+
+    # Pre-flight checks on a graph definition (#97)
+    validate,
+    ValidationReport,
+    Diagnostic,
+
     # Versioning
     __version__,
 
@@ -283,15 +294,49 @@ class NodeContext(_CppNodeContext):
 
     def __init__(self, provider=None, tools=None,
                  model="", instructions="", extra_config=None):
+        # Let the property setter keep one replaceable Python reference. Passing
+        # provider to the C++ constructor would install a keep_alive edge that
+        # cannot be removed when the property is reassigned.
         super().__init__(
-            provider=provider,
+            provider=None,
             model=model,
             instructions=instructions,
             extra_config=extra_config or {},
         )
+        self.provider = provider
         # Stash the Python tool list on the wrapper. compile() reads
         # it via py::hasattr / py::object.attr("_pytools").
         self._pytools = list(tools or [])
+
+
+class RateLimitError(RuntimeError):
+    """Raise this from a Provider that hit a rate limit (issue #97).
+
+    ``RateLimitedProvider`` catches it, honours ``retry_after_seconds`` if the
+    upstream told you one, and retries **the call**. Anything else you raise
+    propagates as an error, as it should.
+
+    ::
+
+        class MyProvider(neograph_engine.Provider):
+            def complete(self, params):
+                response = requests.post(...)
+                if response.status_code == 429:
+                    raise neograph_engine.RateLimitError(
+                        "rate limited",
+                        retry_after_seconds=int(response.headers.get("Retry-After", -1)))
+                ...
+
+    The binding translates this into the C++ ``RateLimitError`` at the boundary.
+    Without that translation the wrapper would sail straight past a Python
+    provider's 429 and never retry — a capability that exists and quietly does
+    nothing is worse than one that is plainly absent.
+    """
+
+    def __init__(self, message="rate limited", retry_after_seconds=-1):
+        super().__init__(message)
+        #: What the upstream asked you to wait, or -1 if it did not say.
+        self.retry_after_seconds = retry_after_seconds
 
 
 class NodeInterrupt(Exception):
@@ -498,6 +543,14 @@ __all__ = [
     "GraphNode",
     "AsyncTool",
     "NodeInterrupt",
+    "RateLimitError",
+    "Store",
+    "InMemoryStore",
+    "StoreItem",
+    "validate",
+    "ValidationReport",
+    "Diagnostic",
+    "RateLimitError",
     "ToolDecision",
     "ToolGateContext",
     "NodeFactory",

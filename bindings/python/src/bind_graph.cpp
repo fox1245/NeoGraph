@@ -47,6 +47,7 @@
 #include <neograph/graph/engine.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/state.h>
+#include <neograph/graph/store.h>
 #include <neograph/graph/types.h>
 #include <neograph/tool_dispatch.h>
 
@@ -568,6 +569,21 @@ void init_graph(py::module_& m) {
             },
             py::arg("config"),
             "Run the graph synchronously to completion (or interrupt).")
+
+        .def("set_store",
+            [](GraphEngine& self, std::shared_ptr<Store> store) {
+                self.set_store(std::move(store));
+            },
+            py::arg("store"),
+            py::keep_alive<1, 2>(),   // the engine must not outlive the store
+            "Install the long-term memory the graph's nodes will see at "
+            "``input.ctx.store``.\n\n"
+            "A checkpoint remembers one conversation; a Store remembers the "
+            "user across all of them (issue #97).")
+
+        .def("get_store",
+            [](GraphEngine& self) { return self.get_store(); },
+            "The Store installed with set_store(), or None.")
 
         .def("set_tool_gate",
             [](GraphEngine& self, py::object fn) {

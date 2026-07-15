@@ -30,6 +30,7 @@
 
 #ifdef NEOGRAPH_PYBIND_HAS_LLM
 #include <neograph/llm/openai_provider.h>
+#include <neograph/llm/rate_limited_provider.h>
 #include <neograph/llm/schema_provider.h>
 #endif
 
@@ -49,14 +50,52 @@ namespace {
 // `complete_stream`, we just call `complete()` and emit the whole
 // content as a single chunk. That lets a non-streaming Python wrapper
 // still work in graphs that requested stream mode.
+// A Python provider that hits a 429 raises `ng.RateLimitError`. That is a
+// Python exception, and RateLimitedProvider catches the C++ one — so without a
+// translation the wrapper would sail past it and never retry, silently. Same
+// shape as the NodeInterrupt translation in bind_node.cpp (issue #94), and the
+// same reason: a capability that exists in C++ and quietly does nothing in
+// Python is worse than one that is plainly absent.
+//
+// Narrow on purpose. Only RateLimitError converts; every other exception stays
+// an error.
+void rethrow_python_rate_limit_error(py::error_already_set& e) {
+    // The GIL guard inside PYBIND11_OVERRIDE is scoped to the macro's block, so
+    // by the time the error_already_set reaches the catch it may already be
+    // released. Everything below touches CPython.
+    py::gil_scoped_acquire gil;
+
+    py::object type;
+    try {
+        type = py::module_::import("neograph_engine").attr("RateLimitError");
+    } catch (const py::error_already_set&) {
+        return;   // module half-initialised; let the original error stand
+    }
+    if (!e.matches(type)) return;
+
+    py::object exc = e.value();
+    std::string message = py::str(exc).cast<std::string>();
+    int retry_after = -1;
+    if (py::hasattr(exc, "retry_after_seconds")) {
+        py::object v = exc.attr("retry_after_seconds");
+        if (!v.is_none()) retry_after = v.cast<int>();
+    }
+    throw neograph::RateLimitError(message, retry_after);
+}
+
 class PyProvider : public neograph::Provider {
   public:
     using neograph::Provider::Provider;
 
     neograph::ChatCompletion
     complete(const neograph::CompletionParams& params) override {
-        PYBIND11_OVERRIDE(neograph::ChatCompletion,
-                          neograph::Provider, complete, params);
+        try {
+            PYBIND11_OVERRIDE(neograph::ChatCompletion,
+                              neograph::Provider, complete, params);
+        } catch (py::error_already_set& e) {
+            rethrow_python_rate_limit_error(e);   // no-op unless it matches
+            throw;
+        }
     }
 
     neograph::ChatCompletion
@@ -310,6 +349,41 @@ void init_provider(py::module_& m) {
 
 #ifdef NEOGRAPH_PYBIND_HAS_LLM
     // ── OpenAIProvider ───────────────────────────────────────────────────
+    py::class_<neograph::llm::RateLimitedProvider, neograph::Provider,
+               std::shared_ptr<neograph::llm::RateLimitedProvider>>(
+        m, "RateLimitedProvider",
+        "Wrap a provider so a 429 backs off and retries THE CALL — not the "
+        "whole graph.\n\n"
+        "    provider = RateLimitedProvider(OpenAIProvider(...), max_retries=5)\n"
+        "    engine = ng.GraphEngine.compile(defn, ng.NodeContext(provider=provider))\n\n"
+        "Retrying at the graph level, which is what you are left doing without "
+        "this, re-runs every node that already succeeded. This retries the one "
+        "HTTP request that failed.\n\n"
+        "Honours the upstream's Retry-After when it sends one, falls back to "
+        "``default_wait_seconds`` when it does not, caps any single sleep at "
+        "``max_wait_seconds``, and gives up entirely once ``max_total_wait_seconds`` "
+        "of sleeping has accumulated (0 = no total cap).")
+        .def(py::init([](std::shared_ptr<neograph::Provider> inner,
+                         int max_retries, int default_wait_seconds,
+                         int max_wait_seconds, int max_total_wait_seconds) {
+                neograph::llm::RateLimitedProvider::Config cfg;
+                cfg.max_retries            = max_retries;
+                cfg.default_wait_seconds   = default_wait_seconds;
+                cfg.max_wait_seconds       = max_wait_seconds;
+                cfg.max_total_wait_seconds = max_total_wait_seconds;
+                return std::shared_ptr<neograph::llm::RateLimitedProvider>(
+                    neograph::llm::RateLimitedProvider::create(
+                        std::move(inner), cfg).release());
+            }),
+            py::arg("provider"),
+            py::arg("max_retries")            = 3,
+            py::arg("default_wait_seconds")   = 30,
+            py::arg("max_wait_seconds")       = 120,
+            py::arg("max_total_wait_seconds") = 0,
+            py::keep_alive<1, 2>(),   // the wrapper must outlive nothing, but the
+                                      // inner provider must outlive the wrapper
+            "Wrap `provider`. Defaults mirror the C++ Config.");
+
     py::class_<neograph::llm::OpenAIProvider, neograph::Provider,
                std::shared_ptr<neograph::llm::OpenAIProvider>>(m, "OpenAIProvider",
         "OpenAI-compatible HTTP provider. Works with OpenAI, Groq, "
