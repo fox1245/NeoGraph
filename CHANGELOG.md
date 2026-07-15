@@ -221,6 +221,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`max_steps` 종료 상태 노출 (#114).**
+  `RunResult::max_steps_exhausted()`와 Python의 읽기 전용
+  `RunResult.max_steps_exhausted` 속성을 추가했다. 실행할 노드가 남은 상태에서
+  `max_steps`에 도달했을 때만 참이며, 같은 상태를 gRPC 단건 응답과 스트리밍
+  마지막 JSON에서도 제공한다. C++ 구조체 크기는 바꾸지 않았다.
+
 - **`set_worker_count` / `set_worker_count_auto` docstring 정정
   (issue #62, PR #63).** v1.0 prep 사이클에 `compile()` 의 worker pool
   기본값을 `set_worker_count(hardware_concurrency())` 에서

@@ -1153,6 +1153,8 @@ struct RunResult {
     json        interrupt_value;                 // Value associated with the interrupt
     std::string checkpoint_id;                   // ID of the last checkpoint saved
     std::vector<std::string> execution_trace;    // Ordered list of executed node names
+
+    bool max_steps_exhausted() const noexcept;    // Limit stopped runnable work
 };
 ```
 
@@ -1164,6 +1166,10 @@ struct RunResult {
 | `interrupt_value` | `json` | Reason or payload from the interrupt |
 | `checkpoint_id` | `std::string` | UUID of the last saved checkpoint |
 | `execution_trace` | `std::vector<std::string>` | Ordered list of node names in execution order |
+
+`max_steps_exhausted()` returns `true` only when the step ceiling stopped the
+run while runnable work remained. A graph that reaches `__end__` exactly on its
+last permitted step returns `false`.
 
 ### GraphEngine
 
