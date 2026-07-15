@@ -176,3 +176,72 @@ TEST(OpenAIProviderAsync, NonRateLimitErrorSurfacesAsRuntimeError) {
 
     EXPECT_THROW(provider->complete(params), std::runtime_error);
 }
+
+TEST(OpenAIProviderStream, TopLevelErrorIsNotAnEmptySuccess) {
+    MockServer mock;
+    mock.body = "data: {\"error\":\"STREAM_EXPLODED\"}\n\n"
+                "data: [DONE]\n\n";
+
+    auto provider = llm::OpenAIProvider::create(make_config(mock));
+    try {
+        provider->complete_stream(make_params(), {});
+        FAIL() << "expected the stream error to propagate";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("STREAM_EXPLODED"),
+                  std::string::npos);
+    }
+}
+
+TEST(OpenAIProviderStream, MalformedDataIsNotSilentlySkipped) {
+    MockServer mock;
+    mock.body = "data: {not-json}\n\ndata: [DONE]\n\n";
+
+    auto provider = llm::OpenAIProvider::create(make_config(mock));
+    EXPECT_THROW(provider->complete_stream(make_params(), {}),
+                 std::runtime_error);
+}
+
+TEST(OpenAIProviderStream, CallbackExceptionPropagates) {
+    MockServer mock;
+    mock.body = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"
+                "data: [DONE]\n\n";
+
+    auto provider = llm::OpenAIProvider::create(make_config(mock));
+    try {
+        provider->complete_stream(make_params(), [](const std::string&) {
+            throw std::runtime_error("callback failed");
+        });
+        FAIL() << "expected the callback error to propagate";
+    } catch (const std::runtime_error& error) {
+        EXPECT_STREQ(error.what(), "callback failed");
+    }
+}
+
+TEST(OpenAIProviderStream, EmptyChoicesRemainAValidEmptyCompletion) {
+    MockServer mock;
+    mock.body = "data: {\"choices\":[]}\n\ndata: [DONE]\n\n";
+
+    auto provider = llm::OpenAIProvider::create(make_config(mock));
+    auto completion = provider->complete_stream(make_params(), {});
+    EXPECT_TRUE(completion.message.content.empty());
+    EXPECT_TRUE(completion.message.tool_calls.empty());
+}
+
+TEST(OpenAIProviderStream, HttpStatusTakesPrecedenceOverSseBody) {
+    MockServer mock;
+    mock.status = 500;
+    mock.body = "data: {\"choices\":[{\"delta\":{\"content\":\"must-not-leak\"}}]}\n\n";
+
+    auto provider = llm::OpenAIProvider::create(make_config(mock));
+    int callback_count = 0;
+    try {
+        provider->complete_stream(make_params(), [&](const std::string&) {
+            ++callback_count;
+        });
+        FAIL() << "expected the HTTP error to propagate";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("HTTP 500"),
+                  std::string::npos);
+    }
+    EXPECT_EQ(callback_count, 0);
+}
