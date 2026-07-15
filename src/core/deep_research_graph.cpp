@@ -796,8 +796,6 @@ private:
 // has to interpret colloquial user phrasing and tends to over-broaden
 // the search.
 //
-// Falls back to a verbatim pass-through if the LLM call fails so a
-// transient provider error doesn't sink the whole run.
 // =========================================================================
 class BriefNode : public GraphNode {
 public:
@@ -845,6 +843,7 @@ Output ONLY the brief, in plain markdown. No preamble. Keep it under 200 words.)
             params.messages = std::move(convo);
             params.temperature = 0.2f;
             params.max_tokens = 800;
+            params.cancel_token = in.ctx.cancel_token;
 
             try {
                 completion = co_await provider_->invoke(params, nullptr);
@@ -854,11 +853,7 @@ Output ONLY the brief, in plain markdown. No preamble. Keep it under 200 words.)
             }
         }
         if (eptr) {
-            // Provider failure → degrade gracefully to pass-through so
-            // the rest of the graph still gets a (degraded) brief.
-            NodeOutput out;
-            out.writes.push_back(ChannelWrite{"research_brief", json(user_query)});
-            co_return out;
+            std::rethrow_exception(eptr);
         }
         std::string brief = completion.message.content;
         if (brief.empty()) brief = user_query;  // pass-through guard
@@ -962,8 +957,7 @@ Bias toward PROCEED — only ASK when the question would clearly fork the resear
             }
         }
         if (eptr) {
-            // Provider failure — degrade to PROCEED so the run isn't sunk.
-            co_return NodeOutput{};
+            std::rethrow_exception(eptr);
         }
 
         // Parse the decision. Tolerant — accept "DECISION: PROCEED" anywhere

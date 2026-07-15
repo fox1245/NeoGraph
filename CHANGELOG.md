@@ -221,6 +221,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Deep Research provider 오류 전파 (#125).** `brief`와 `clarify` 노드가
+  Provider 예외를 정상 결과로 바꾸던 경로를 제거했다. 두 노드는 이제 원래
+  예외와 취소를 그대로 전달하며, `brief`도 실행의 `CancelToken`을 Provider에
+  넘긴다.
+
 - **`set_worker_count` / `set_worker_count_auto` docstring 정정
   (issue #62, PR #63).** v1.0 prep 사이클에 `compile()` 의 worker pool
   기본값을 `set_worker_count(hardware_concurrency())` 에서

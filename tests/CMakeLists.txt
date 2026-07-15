@@ -43,6 +43,7 @@ add_executable(neograph_tests
     test_intent_classifier_streaming.cpp
     test_incremental_checkpoint.cpp
     test_deep_research_human_review.cpp
+    test_deep_research_provider_failure.cpp
     test_async_conn_pool.cpp
     test_async_http_errors.cpp
     test_async_sse_parser.cpp
