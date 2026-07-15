@@ -25,6 +25,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <future>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -337,4 +339,67 @@ TEST(ProviderAsyncDefault, StreamAsyncBridgeRethrowsWorkerException) {
 
     ASSERT_TRUE(caught);
     EXPECT_THROW(std::rethrow_exception(caught), std::runtime_error);
+}
+
+class TeardownStreamingProvider : public Provider {
+  public:
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false;
+    bool released = false;
+
+    ChatCompletion complete(const CompletionParams&) override { return {}; }
+    ChatCompletion complete_stream(const CompletionParams&,
+                                   const StreamCallback& on_chunk) override {
+        std::unique_lock lock(mutex);
+        entered = true;
+        cv.notify_all();
+        cv.wait(lock, [&] { return released; });
+        lock.unlock();
+        on_chunk("late");
+        return make_completion("late");
+    }
+    std::string get_name() const override { return "teardown-stream"; }
+};
+
+TEST(ProviderAsyncDefault, ContextDestructionJoinsWorkerAndDropsLateChunk) {
+    TeardownStreamingProvider provider;
+    CompletionParams params;
+    std::atomic<int> callbacks{0};
+    auto io = std::make_unique<asio::io_context>();
+
+    asio::co_spawn(
+        *io,
+        [&]() -> asio::awaitable<void> {
+            (void)co_await provider.complete_stream_async(
+                params, [&](const std::string&) { ++callbacks; });
+        },
+        asio::detached);
+
+    std::thread runner([&] { io->run(); });
+    {
+        std::unique_lock lock(provider.mutex);
+        provider.cv.wait(lock, [&] { return provider.entered; });
+    }
+    io->stop();
+    runner.join();
+
+    std::promise<void> destroyed;
+    auto destroyed_future = destroyed.get_future();
+    std::thread destroyer([&] {
+        io.reset();
+        destroyed.set_value();
+    });
+
+    EXPECT_EQ(destroyed_future.wait_for(std::chrono::milliseconds(50)),
+              std::future_status::timeout);
+    {
+        std::lock_guard lock(provider.mutex);
+        provider.released = true;
+    }
+    provider.cv.notify_all();
+    EXPECT_EQ(destroyed_future.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    destroyer.join();
+    EXPECT_EQ(callbacks.load(), 0);
 }
