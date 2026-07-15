@@ -48,7 +48,6 @@ SchemaProvider::SchemaProvider(Config config, json schema)
     // successive calls to the same model host now amortise TCP+TLS.
     http_io_ = std::make_unique<asio::io_context>();
     http_work_.emplace(asio::make_work_guard(*http_io_));
-    http_thread_ = std::thread([io = http_io_.get()]{ io->run(); });
     conn_pool_ = std::make_unique<async::ConnPool>(http_io_->get_executor());
     if (user_config_.prefer_libcurl) {
         curl_pool_ = std::make_unique<async::CurlH2Pool>();
@@ -58,7 +57,22 @@ SchemaProvider::SchemaProvider(Config config, json schema)
     // See header comment on `bridge_io_` for the rationale.
     bridge_io_ = std::make_unique<asio::io_context>();
     bridge_work_.emplace(asio::make_work_guard(*bridge_io_));
-    bridge_thread_ = std::thread([io = bridge_io_.get()]{ io->run(); });
+
+    // Threads come last so resource setup failures unwind normally. If the
+    // second thread cannot start, explicitly stop and join the first one;
+    // destroying a joinable std::thread would otherwise call std::terminate.
+    try {
+        http_thread_ = std::thread([io = http_io_.get()]{ io->run(); });
+        bridge_thread_ = std::thread([io = bridge_io_.get()]{ io->run(); });
+    } catch (...) {
+        http_work_.reset();
+        bridge_work_.reset();
+        http_io_->stop();
+        bridge_io_->stop();
+        if (http_thread_.joinable()) http_thread_.join();
+        if (bridge_thread_.joinable()) bridge_thread_.join();
+        throw;
+    }
 }
 
 SchemaProvider::~SchemaProvider()

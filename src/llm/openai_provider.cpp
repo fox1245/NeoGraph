@@ -26,8 +26,10 @@ OpenAIProvider::OpenAIProvider(Config config)
     // throw-away io_context per call, so the pool can't live there.
     http_io_ = std::make_unique<asio::io_context>();
     http_work_.emplace(asio::make_work_guard(*http_io_));
-    http_thread_ = std::thread([io = http_io_.get()]{ io->run(); });
     conn_pool_ = std::make_unique<async::ConnPool>(http_io_->get_executor());
+    // Start the thread only after every other constructor step succeeds.
+    // A joinable std::thread aborts the process if a later step throws.
+    http_thread_ = std::thread([io = http_io_.get()]{ io->run(); });
 }
 
 OpenAIProvider::~OpenAIProvider()

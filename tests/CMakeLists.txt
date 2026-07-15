@@ -122,6 +122,10 @@ if(NEOGRAPH_BUILD_SQLITE)
     target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_SQLITE)
 endif()
 
+if(NOT NEOGRAPH_USE_LIBCURL)
+    target_sources(neograph_tests PRIVATE test_provider_constructor_exception_safety.cpp)
+endif()
+
 target_link_libraries(neograph_tests PRIVATE
     neograph::core
     neograph::llm
