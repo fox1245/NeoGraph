@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <exception>
 
 // Windows SDK (pulled in transitively via asio on Win32) defines a
 // bunch of ALL-CAPS macros — notably ERROR (wingdi.h) and DEBUG —
@@ -162,6 +163,43 @@ private:
     std::string reason_;
     json        value_;
     std::string node_;
+};
+
+/**
+ * @brief A node failure annotated by the executor with dispatch context.
+ *
+ * The original exception remains available through @c cause() and can be
+ * rethrown with @c std::rethrow_exception. Control-flow exceptions such as
+ * NodeInterrupt and CancelledException are never wrapped.
+ */
+class NEOGRAPH_API NodeExecutionError : public std::runtime_error {
+public:
+    NodeExecutionError(std::string node_name, int attempts,
+                       std::exception_ptr cause)
+        : std::runtime_error(make_message(node_name, attempts, cause)),
+          node_name_(std::move(node_name)), attempts_(attempts),
+          cause_(std::move(cause)) {}
+
+    const std::string& node_name() const noexcept { return node_name_; }
+    int attempts() const noexcept { return attempts_; }
+    const std::exception_ptr& cause() const noexcept { return cause_; }
+
+private:
+    static std::string make_message(const std::string& node_name, int attempts,
+                                    const std::exception_ptr& cause) {
+        std::string detail = "unknown exception";
+        try {
+            if (cause) std::rethrow_exception(cause);
+        } catch (const std::exception& e) {
+            detail = e.what();
+        } catch (...) {}
+        return "Node '" + node_name + "' failed after "
+            + std::to_string(attempts) + " attempt(s): " + detail;
+    }
+
+    std::string        node_name_;
+    int                attempts_;
+    std::exception_ptr cause_;
 };
 
 /**

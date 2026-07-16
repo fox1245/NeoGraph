@@ -9,6 +9,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **노드 실패 문맥 보존 (issue #123).** C++ 실행 오류를 원래
+  `exception_ptr`과 실패 노드 이름·시도 횟수를 담은 `NodeExecutionError`로
+  전달하고, terminal `ERROR` event에도 같은 문맥을 기록한다. Python에서는
+  원래 예외 객체·타입·args·사용자 속성·traceback을 그대로 유지하면서
+  `.node_name`과 `.attempts` 속성만 추가한다. `NodeInterrupt`, 취소, 메모리
+  부족 예외는 기존 제어 흐름대로 감싸지 않는다.
+
 ### Added
 
 - **DSL 표면 (elaboration 계층) + 스키마 진화 게이트** (#75 M4).

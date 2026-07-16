@@ -77,6 +77,17 @@ public:
     std::string get_name() const override { return name_; }
 };
 
+class FailingNode : public GraphNode {
+    std::string name_;
+public:
+    explicit FailingNode(std::string name) : name_(std::move(name)) {}
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        throw std::runtime_error("parallel failure");
+        co_return NodeOutput{};
+    }
+    std::string get_name() const override { return name_; }
+};
+
 struct ParallelHarness {
     std::map<std::string, std::unique_ptr<GraphNode>> nodes;
     std::vector<ChannelDef> channel_defs;
@@ -288,4 +299,44 @@ TEST(ExecutorAsyncParallel, SiblingsRecordPendingWritesBeforeThrow) {
     EXPECT_EQ(store->pending_writes_count("tid-pending", parent_cp_id), 1u)
         << "the successful sibling ('quick') must have recorded its pending "
            "write before the parallel group resolved the interrupt";
+}
+
+TEST(ExecutorAsyncParallel, FailureReportsReadyOrderNode) {
+    std::vector<std::unique_ptr<GraphNode>> nodes;
+    nodes.push_back(std::make_unique<AsyncWorkerNode>("quick", 1));
+    nodes.push_back(std::make_unique<FailingNode>("explode"));
+    ParallelHarness h(std::move(nodes));
+    auto store = std::make_shared<InMemoryCheckpointStore>();
+    CheckpointCoordinator coord(store, "tid-failure");
+
+    asio::io_context io;
+    std::exception_ptr err;
+    BarrierState barrier;
+    std::vector<std::string> trace;
+    std::unordered_map<std::string, NodeResult> replay;
+    std::vector<std::string> ready{"quick", "explode"};
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            try {
+                GraphState state; init_parallel_state(state, h.channel_defs);
+                co_await h.executor.run_parallel_async(
+                    ready, 0, state, replay, coord, "", barrier,
+                    trace, nullptr, StreamMode::ALL, RunContext{});
+            } catch (...) {
+                err = std::current_exception();
+            }
+        },
+        asio::detached);
+    io.run();
+
+    ASSERT_TRUE(err);
+    try {
+        std::rethrow_exception(err);
+        FAIL() << "expected NodeExecutionError";
+    } catch (const NodeExecutionError& e) {
+        EXPECT_EQ(e.node_name(), "explode");
+        EXPECT_EQ(e.attempts(), 1);
+        EXPECT_THROW(std::rethrow_exception(e.cause()), std::runtime_error);
+    }
 }

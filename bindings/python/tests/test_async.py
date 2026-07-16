@@ -394,6 +394,8 @@ def test_async_run_api_preserves_python_node_exception(async_method):
     assert type(sync_exc) is CustomNodeError
     assert sync_exc.args == ("kaboom from python node", 41)
     assert sync_exc.marker == 41
+    assert sync_exc.node_name == "e"
+    assert sync_exc.attempts == 1
     assert sync_frames[-2:] == ["run", "raise_custom_error"]
 
     # Raising the same instance again otherwise retains the earlier traceback.
@@ -414,6 +416,8 @@ def test_async_run_api_preserves_python_node_exception(async_method):
     assert type(async_exc) is type(sync_exc)
     assert async_exc.args == sync_exc.args
     assert async_exc.marker == sync_exc.marker
+    assert async_exc.node_name == "e"
+    assert async_exc.attempts == 1
     assert _traceback_function_names(async_exc)[-2:] == sync_frames[-2:]
 
 
@@ -469,6 +473,8 @@ def test_resume_async_preserves_python_node_exception():
     assert type(resume_exc) is CustomResumeError
     assert resume_exc.args == ("kaboom after resume", 42)
     assert resume_exc.marker == 42
+    assert resume_exc.node_name == "gate"
+    assert resume_exc.attempts == 1
     assert _traceback_function_names(resume_exc)[-2:] == [
         "run", "raise_resume_error"]
 
@@ -511,3 +517,47 @@ def test_run_async_invalid_node_return_matches_sync_type_error():
     async_exc = asyncio.run(go())
     assert type(async_exc) is type(sync_info.value)
     assert async_exc.args == sync_info.value.args
+    assert async_exc.node_name == "bad"
+    assert async_exc.attempts == 1
+
+
+def test_node_context_does_not_replace_locked_or_existing_attributes():
+    """Graph context never masks the original exception or user metadata."""
+    type_name = _next_type("locked_error")
+
+    class LockedError(Exception):
+        def __init__(self):
+            super().__init__("locked failure")
+            object.__setattr__(self, "node_name", "user-owned")
+            object.__setattr__(self, "attempts", 99)
+
+        def __setattr__(self, name, value):
+            raise AttributeError(f"{name} is locked")
+
+    error = LockedError()
+
+    class LockedNode(neograph.GraphNode):
+        def get_name(self): return "locked"
+        def run(self, input): raise error
+
+    neograph.NodeFactory.register_type(
+        type_name, lambda name, c, ctx: LockedNode())
+    definition = {
+        "name": "locked-error",
+        "channels": {},
+        "nodes": {"explode": {"type": type_name}},
+        "edges": [
+            {"from": neograph.START_NODE, "to": "explode"},
+            {"from": "explode", "to": neograph.END_NODE},
+        ],
+    }
+    engine = neograph.GraphEngine.compile(definition, neograph.NodeContext())
+
+    with pytest.raises(LockedError) as info:
+        engine.run(neograph.RunConfig(thread_id="locked-error", input={}))
+
+    assert info.value is error
+    assert info.value.node_name == "user-owned"
+    assert info.value.attempts == 99
+    assert info.value._neograph_node_name == "explode"
+    assert info.value._neograph_attempts == 1

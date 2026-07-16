@@ -200,6 +200,25 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
 
     auto ex = co_await asio::this_coro::executor;
 
+    auto throw_node_error = [&](std::exception_ptr cause, int attempts) -> void {
+        if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
+            std::string what = "unknown";
+            try { std::rethrow_exception(cause); }
+            catch (const std::exception& e) { what = e.what(); }
+            catch (...) {}
+            cb(GraphEvent{GraphEvent::Type::ERROR, node_name,
+                          json{{"error", what}, {"attempts", attempts}}});
+        }
+        try {
+            std::rethrow_exception(cause);
+        } catch (const NodeExecutionError&) {
+            // A subgraph may fail inside this node. The outer retry policy has
+            // now been honored; keep the innermost dispatch context intact.
+            throw;
+        } catch (...) {}
+        throw NodeExecutionError(node_name, attempts, std::move(cause));
+    };
+
     for (int attempt = 0; attempt <= policy.max_retries; ++attempt) {
         if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
             json data;
@@ -250,7 +269,7 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
             // violations. Retrying produces the same bug. Surface
             // immediately so the bug shows up loud rather than as
             // a slow retry-exhaustion timeout.
-            throw;
+            throw_node_error(std::current_exception(), attempt + 1);
         } catch (...) {
             // runtime_error, network/timeout errors, third-party
             // exceptions: assume transient and let the retry loop
@@ -285,15 +304,7 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
         // Retry path. retryable_err must be populated since neither the
         // result nor a NodeInterrupt path was taken.
         if (attempt >= policy.max_retries) {
-            if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
-                std::string what;
-                try { std::rethrow_exception(retryable_err); }
-                catch (const std::exception& e) { what = e.what(); }
-                catch (...) { what = "unknown"; }
-                cb(GraphEvent{GraphEvent::Type::ERROR, node_name,
-                              json{{"error", what}, {"attempts", attempt + 1}}});
-            }
-            std::rethrow_exception(retryable_err);
+            throw_node_error(retryable_err, attempt + 1);
         }
 
         if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
