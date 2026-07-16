@@ -112,6 +112,9 @@ from ._neograph import (
     RunConfig,
     RunResult,
     UsageAccumulator,
+    CheckpointPhase,
+    Checkpoint,
+    PendingWrite,
     CheckpointStore,
     InMemoryCheckpointStore,
 
@@ -562,6 +565,9 @@ __all__ = [
     "RunConfig",
     "UsageAccumulator",
     "RunResult",
+    "CheckpointPhase",
+    "Checkpoint",
+    "PendingWrite",
     "CheckpointStore",
     "InMemoryCheckpointStore",
     # Postgres/SqliteCheckpointStore appended dynamically below when present.

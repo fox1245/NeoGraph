@@ -80,6 +80,58 @@ namespace neograph::pybind {
 
 namespace {
 
+class PyCheckpointStore : public neograph::graph::CheckpointStore {
+public:
+    using CheckpointStore::CheckpointStore;
+
+    void save(const neograph::graph::Checkpoint& cp) override {
+        PYBIND11_OVERRIDE_PURE(void, CheckpointStore, save, cp);
+    }
+
+    std::optional<neograph::graph::Checkpoint>
+    load_latest(const std::string& thread_id) override {
+        PYBIND11_OVERRIDE_PURE(std::optional<neograph::graph::Checkpoint>,
+                               CheckpointStore, load_latest, thread_id);
+    }
+
+    std::optional<neograph::graph::Checkpoint>
+    load_by_id(const std::string& id) override {
+        PYBIND11_OVERRIDE_PURE(std::optional<neograph::graph::Checkpoint>,
+                               CheckpointStore, load_by_id, id);
+    }
+
+    std::vector<neograph::graph::Checkpoint>
+    list(const std::string& thread_id, int limit) override {
+        PYBIND11_OVERRIDE_PURE(std::vector<neograph::graph::Checkpoint>,
+                               CheckpointStore, list, thread_id, limit);
+    }
+
+    void delete_thread(const std::string& thread_id) override {
+        PYBIND11_OVERRIDE_PURE(void, CheckpointStore, delete_thread, thread_id);
+    }
+
+    void put_writes(const std::string& thread_id,
+                    const std::string& parent_checkpoint_id,
+                    const neograph::graph::PendingWrite& write) override {
+        PYBIND11_OVERRIDE(void, CheckpointStore, put_writes,
+                          thread_id, parent_checkpoint_id, write);
+    }
+
+    std::vector<neograph::graph::PendingWrite>
+    get_writes(const std::string& thread_id,
+               const std::string& parent_checkpoint_id) override {
+        PYBIND11_OVERRIDE(std::vector<neograph::graph::PendingWrite>,
+                          CheckpointStore, get_writes,
+                          thread_id, parent_checkpoint_id);
+    }
+
+    void clear_writes(const std::string& thread_id,
+                      const std::string& parent_checkpoint_id) override {
+        PYBIND11_OVERRIDE(void, CheckpointStore, clear_writes,
+                          thread_id, parent_checkpoint_id);
+    }
+};
+
 // Singleton asio runtime that drives all `run_async` calls. One
 // io_context, one worker thread, work-guard prevents premature exit
 // even when there are no coroutines in flight.
@@ -403,11 +455,88 @@ void init_graph(py::module_& m) {
     // mutate the checkpoint store, and refuse to run when one isn't
     // configured. The in-memory store is the simplest option; SQLite /
     // Postgres backends are NeoGraph-side targets (binding deferred).
-    py::class_<CheckpointStore, std::shared_ptr<CheckpointStore>>(m,
+    py::enum_<CheckpointPhase>(m, "CheckpointPhase")
+        .value("Before", CheckpointPhase::Before)
+        .value("After", CheckpointPhase::After)
+        .value("Completed", CheckpointPhase::Completed)
+        .value("NodeInterrupt", CheckpointPhase::NodeInterrupt)
+        .value("Updated", CheckpointPhase::Updated);
+
+    py::class_<Checkpoint>(m, "Checkpoint")
+        .def(py::init([]() { return Checkpoint{}; }))
+        .def_readwrite("id", &Checkpoint::id)
+        .def_readwrite("thread_id", &Checkpoint::thread_id)
+        .def_property("channel_values",
+            [](const Checkpoint& cp) { return json_to_py(cp.channel_values); },
+            [](Checkpoint& cp, py::object value) {
+                cp.channel_values = py_to_json(value);
+            })
+        .def_property("channel_versions",
+            [](const Checkpoint& cp) { return json_to_py(cp.channel_versions); },
+            [](Checkpoint& cp, py::object value) {
+                cp.channel_versions = py_to_json(value);
+            })
+        .def_readwrite("parent_id", &Checkpoint::parent_id)
+        .def_readwrite("current_node", &Checkpoint::current_node)
+        .def_readwrite("next_nodes", &Checkpoint::next_nodes)
+        .def_readwrite("interrupt_phase", &Checkpoint::interrupt_phase)
+        .def_readwrite("barrier_state", &Checkpoint::barrier_state)
+        .def_property("metadata",
+            [](const Checkpoint& cp) { return json_to_py(cp.metadata); },
+            [](Checkpoint& cp, py::object value) {
+                cp.metadata = py_to_json(value);
+            })
+        .def_readwrite("step", &Checkpoint::step)
+        .def_readwrite("timestamp", &Checkpoint::timestamp)
+        .def_readwrite("schema_version", &Checkpoint::schema_version)
+        .def_static("generate_id", &Checkpoint::generate_id);
+
+    py::class_<PendingWrite>(m, "PendingWrite")
+        .def(py::init([]() { return PendingWrite{}; }))
+        .def_readwrite("task_id", &PendingWrite::task_id)
+        .def_readwrite("task_path", &PendingWrite::task_path)
+        .def_readwrite("node_name", &PendingWrite::node_name)
+        .def_property("writes",
+            [](const PendingWrite& write) { return json_to_py(write.writes); },
+            [](PendingWrite& write, py::object value) {
+                write.writes = py_to_json(value);
+            })
+        .def_property("command",
+            [](const PendingWrite& write) { return json_to_py(write.command); },
+            [](PendingWrite& write, py::object value) {
+                write.command = py_to_json(value);
+            })
+        .def_property("sends",
+            [](const PendingWrite& write) { return json_to_py(write.sends); },
+            [](PendingWrite& write, py::object value) {
+                write.sends = py_to_json(value);
+            })
+        .def_readwrite("step", &PendingWrite::step)
+        .def_readwrite("timestamp", &PendingWrite::timestamp);
+
+    py::class_<CheckpointStore, PyCheckpointStore,
+               std::shared_ptr<CheckpointStore>>(m,
         "CheckpointStore",
         "Abstract checkpoint persistence interface. Construct a "
         "concrete subclass like InMemoryCheckpointStore and pass it "
-        "to engine.set_checkpoint_store().");
+        "to engine.set_checkpoint_store().")
+        .def(py::init<>())
+        .def("save", &CheckpointStore::save, py::arg("checkpoint"))
+        .def("load_latest", &CheckpointStore::load_latest,
+             py::arg("thread_id"))
+        .def("load_by_id", &CheckpointStore::load_by_id,
+             py::arg("checkpoint_id"))
+        .def("list", &CheckpointStore::list,
+             py::arg("thread_id"), py::arg("limit") = 100)
+        .def("delete_thread", &CheckpointStore::delete_thread,
+             py::arg("thread_id"))
+        .def("put_writes", &CheckpointStore::put_writes,
+             py::arg("thread_id"), py::arg("parent_checkpoint_id"),
+             py::arg("write"))
+        .def("get_writes", &CheckpointStore::get_writes,
+             py::arg("thread_id"), py::arg("parent_checkpoint_id"))
+        .def("clear_writes", &CheckpointStore::clear_writes,
+             py::arg("thread_id"), py::arg("parent_checkpoint_id"));
 
     py::class_<InMemoryCheckpointStore, CheckpointStore,
                std::shared_ptr<InMemoryCheckpointStore>>(m,
@@ -501,13 +630,14 @@ void init_graph(py::module_& m) {
     // simple. compile() returns unique_ptr; we move into shared_ptr at
     // the binding boundary.
     py::class_<GraphEngine, std::shared_ptr<GraphEngine>>(m, "GraphEngine",
+        py::dynamic_attr(),
         "Compiled graph runtime. Construct via GraphEngine.compile(), "
         "then call run() or run_stream(). Single instance is safe to "
         "share across threads with distinct thread_ids.")
         .def_static("compile",
             [](py::object definition,
                py::object ctx_obj,
-               std::shared_ptr<CheckpointStore> store) {
+               py::object store_obj) {
                 // Take the Python wrapper as py::object (rather than
                 // const NodeContext&) so we can read the `_pytools`
                 // dynamic attr carrying user-defined Python Tool
@@ -531,24 +661,24 @@ void init_graph(py::module_& m) {
                     }
                 }
 
+                auto store = store_obj.is_none()
+                    ? std::shared_ptr<CheckpointStore>{}
+                    : store_obj.cast<std::shared_ptr<CheckpointStore>>();
                 auto j = py_to_json(definition);
                 // GIL held: compile is fast (just walks the JSON).
                 auto unique = GraphEngine::compile(j, ctx, std::move(store));
                 if (!owned_tools.empty()) {
                     unique->own_tools(std::move(owned_tools));
                 }
-                return std::shared_ptr<GraphEngine>(unique.release());
+                auto engine = std::shared_ptr<GraphEngine>(unique.release());
+                py::object result = py::cast(engine);
+                result.attr("_pycontext") = ctx_obj;
+                result.attr("_pycheckpointstore") = store_obj;
+                return result;
             },
             py::arg("definition"),
             py::arg("ctx"),
-            py::arg("store") = std::shared_ptr<CheckpointStore>{},
-            // #98: the compiled engine keeps the NodeContext alive, and the
-            // NodeContext keeps the Python provider alive (see bind_state.cpp).
-            // Without this chain, `GraphEngine.compile(d, ng.NodeContext(
-            // provider=MyProvider()))` — every argument a temporary, which is
-            // how anyone writes it — leaves the engine holding a trampoline
-            // whose Python half has been collected.
-            py::keep_alive<0, 2>(),
+             py::arg("store") = py::none(),
             "Compile a graph from a JSON-shaped Python dict.\n\n"
             "Args:\n"
             "    definition: JSON graph definition (nodes, edges, "
@@ -575,11 +705,14 @@ void init_graph(py::module_& m) {
             "Run the graph synchronously to completion (or interrupt).")
 
         .def("set_store",
-            [](GraphEngine& self, std::shared_ptr<Store> store) {
-                self.set_store(std::move(store));
+            [](py::object self, py::object store_obj) {
+                auto store = store_obj.is_none()
+                    ? std::shared_ptr<Store>{}
+                    : store_obj.cast<std::shared_ptr<Store>>();
+                self.cast<GraphEngine&>().set_store(std::move(store));
+                self.attr("_pystore") = store_obj;
             },
             py::arg("store"),
-            py::keep_alive<1, 2>(),   // the engine must not outlive the store
             "Install the long-term memory the graph's nodes will see at "
             "``input.ctx.store``.\n\n"
             "A checkpoint remembers one conversation; a Store remembers the "
@@ -832,7 +965,14 @@ void init_graph(py::module_& m) {
             return d;
         }, "Return a dict with current cache size, hit count, miss count.")
 
-        .def("set_checkpoint_store", &GraphEngine::set_checkpoint_store,
+        .def("set_checkpoint_store",
+            [](py::object self, py::object store_obj) {
+                auto store = store_obj.is_none()
+                    ? std::shared_ptr<CheckpointStore>{}
+                    : store_obj.cast<std::shared_ptr<CheckpointStore>>();
+                self.cast<GraphEngine&>().set_checkpoint_store(std::move(store));
+                self.attr("_pycheckpointstore") = store_obj;
+            },
             py::arg("store"),
             "Wire a CheckpointStore instance into the engine. Required "
             "before update_state() / fork(); without it those methods "
@@ -849,11 +989,10 @@ void init_graph(py::module_& m) {
         // hopped back to the asyncio loop via
         // `loop.call_soon_threadsafe(fut.set_result, …)`.
         //
-        // Receiver type is std::shared_ptr<GraphEngine> rather than
-        // GraphEngine& so we can capture the shared_ptr by value
-        // into the asio completion lambda — keeps the engine alive
-        // for the duration of the in-flight coroutine even if the
-        // Python wrapper goes out of scope.
+        // Keep both the C++ engine and its Python wrapper alive for the
+        // in-flight coroutine. The wrapper owns dynamic attributes that pin
+        // Python-defined Store / CheckpointStore trampoline instances; the
+        // C++ shared_ptr alone is not enough to preserve those overrides.
         //
         // Lifetime contract for coroutine parameters: run_async,
         // run_stream_async, and resume_async all take parameters by
@@ -865,7 +1004,9 @@ void init_graph(py::module_& m) {
         // that the completion lambda also captures, so the storage
         // outlives the coroutine.
         .def("run_async",
-            [](std::shared_ptr<GraphEngine> self, RunConfig cfg) {
+            [](py::object self_obj, RunConfig cfg) {
+                auto self = self_obj.cast<std::shared_ptr<GraphEngine>>();
+                auto self_h = hold_py(std::move(self_obj));
                 py::object asyncio = py::module_::import("asyncio");
                 py::object loop = asyncio.attr("get_running_loop")();
                 py::object future = loop.attr("create_future")();
@@ -916,7 +1057,7 @@ void init_graph(py::module_& m) {
                     self->run_async(*cfg_h),
                     asio::bind_cancellation_slot(
                         cancel_tok->slot(),
-                        [self, cfg_h, fut_h, loop_h, cancel_tok]
+                        [self, self_h, cfg_h, fut_h, loop_h, cancel_tok]
                         (std::exception_ptr e, RunResult result) {
                             resolve_future_async(fut_h, loop_h, e,
                                                  std::move(result));
@@ -942,9 +1083,11 @@ void init_graph(py::module_& m) {
             "burns LLM tokens until the upstream call finishes.")
 
         .def("run_stream_async",
-            [](std::shared_ptr<GraphEngine> self,
+            [](py::object self_obj,
                RunConfig cfg,
                py::function py_cb) {
+                auto self = self_obj.cast<std::shared_ptr<GraphEngine>>();
+                auto self_h = hold_py(std::move(self_obj));
                 py::object asyncio = py::module_::import("asyncio");
                 py::object loop = asyncio.attr("get_running_loop")();
                 py::object future = loop.attr("create_future")();
@@ -1030,7 +1173,8 @@ void init_graph(py::module_& m) {
                     self->run_stream_async(*cfg_h, *engine_cb_h),
                     asio::bind_cancellation_slot(
                         cancel_tok->slot(),
-                        [self, cfg_h, engine_cb_h, fut_h, loop_h, cancel_tok]
+                        [self, self_h, cfg_h, engine_cb_h, fut_h, loop_h,
+                         cancel_tok]
                         (std::exception_ptr e, RunResult result) {
                             resolve_future_async(fut_h, loop_h, e,
                                                  std::move(result));
@@ -1049,9 +1193,11 @@ void init_graph(py::module_& m) {
             "a cancelled stream stops billable token generation.")
 
         .def("resume_async",
-            [](std::shared_ptr<GraphEngine> self,
+            [](py::object self_obj,
                std::string thread_id,
                py::object resume_value) {
+                auto self = self_obj.cast<std::shared_ptr<GraphEngine>>();
+                auto self_h = hold_py(std::move(self_obj));
                 py::object asyncio = py::module_::import("asyncio");
                 py::object loop = asyncio.attr("get_running_loop")();
                 py::object future = loop.attr("create_future")();
@@ -1063,11 +1209,12 @@ void init_graph(py::module_& m) {
                 // dangling-reference concern as run_async.
                 auto tid_h = std::make_shared<std::string>(std::move(thread_id));
                 auto rv_h  = std::make_shared<json>(py_to_json(resume_value));
+                auto engine_cb_h = std::make_shared<GraphStreamCallback>();
 
                 asio::co_spawn(
                     AsyncRuntime::instance().executor(),
-                    self->resume_async(*tid_h, *rv_h, nullptr),
-                    [self, tid_h, rv_h, fut_h, loop_h]
+                    self->resume_async(*tid_h, *rv_h, *engine_cb_h),
+                    [self, self_h, tid_h, rv_h, engine_cb_h, fut_h, loop_h]
                     (std::exception_ptr e, RunResult result) {
                         resolve_future_async(fut_h, loop_h, e,
                                              std::move(result));

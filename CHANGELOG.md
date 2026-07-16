@@ -18,6 +18,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Python persistence backends** (#117) — `Store` and `CheckpointStore` are
+  now constructible subclass bases with C++ virtual dispatch into Python.
+  `StoreItem`, `CheckpointPhase`, `Checkpoint`, and `PendingWrite` are exposed
+  with JSON-shaped fields; checkpoint pending-write methods remain optional.
 - **Python synchronous cancellation** (#119) — Python callers can construct a
   `CancelToken`, assign it to `RunConfig.cancel_token`, and cooperatively stop
   `engine.run()` from another thread.

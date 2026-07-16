@@ -178,6 +178,13 @@ under every user, and `store.search(["users", "u1"])` finds one user's items.
 
 Subclass `ng.Store` to put it in a database instead.
 
+Custom checkpoint persistence works the same way: subclass
+`ng.CheckpointStore` and implement `save`, `load_latest`, `load_by_id`, `list`,
+and `delete_thread`. The optional `put_writes`, `get_writes`, and
+`clear_writes` methods default to no-op/full-super-step replay behavior. Values
+inside `StoreItem`, `Checkpoint`, and `PendingWrite` are ordinary Python JSON
+shapes (`dict`, `list`, strings, numbers, booleans, and `None`).
+
 ## Backing off on a 429 — RateLimitedProvider
 
 ```python
@@ -408,7 +415,7 @@ where `fn(state) -> str` returns one of the route keys.
 - **Custom Python nodes** — subclass `neograph_engine.GraphNode`, register via `NodeFactory.register_type` or the `@neograph_engine.node` decorator. Engine dispatches under proper GIL handling, including from fan-out worker threads.
 - **Custom Python tools** — subclass `neograph_engine.Tool`, pass into `NodeContext(tools=[...])`. Engine takes ownership at compile time.
 - **Async** — every `*_async` binding returns an `asyncio.Future` bound to the calling thread's running loop. Stream callbacks are hopped to the loop thread via `loop.call_soon_threadsafe` so callbacks run where asyncio expects.
-- **Checkpoints** — `InMemoryCheckpointStore` always; `PostgresCheckpointStore` when the binding is built from source with `-DNEOGRAPH_BUILD_POSTGRES=ON` (libpq bundling for the PyPI wheel is pending).
+- **Checkpoints** — subclass `CheckpointStore` for a Python backend, use `InMemoryCheckpointStore` directly, or use `PostgresCheckpointStore` when the binding is built from source with `-DNEOGRAPH_BUILD_POSTGRES=ON` (libpq bundling for the PyPI wheel is pending).
 - **OpenAI Responses over WebSocket** — `SchemaProvider(schema="openai_responses", use_websocket=True)`.
 
 Wheels: Linux x86_64 (manylinux_2_34), Linux aarch64 (manylinux_2_34),
