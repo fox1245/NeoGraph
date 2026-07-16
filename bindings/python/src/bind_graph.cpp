@@ -837,6 +837,19 @@ void init_graph(py::module_& m) {
             "verbatim. Slated for removal in v1.0 only if the "
             "deprecation is loud enough; otherwise stays available.")
 
+        .def("get_state_history",
+            [](const GraphEngine& self, const std::string& thread_id, int limit) {
+                if (limit < 0) {
+                    throw py::value_error(
+                        "get_state_history: limit must be non-negative");
+                }
+                return self.get_state_history(thread_id, limit);
+            },
+            py::arg("thread_id"),
+            py::arg("limit") = 100,
+            "Checkpoint history for thread_id, newest first. Returns an "
+            "empty list when no checkpoint store or matching thread exists.")
+
         .def("update_state",
             [](GraphEngine& self,
                const std::string& thread_id,

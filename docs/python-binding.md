@@ -411,7 +411,7 @@ where `fn(state) -> str` returns one of the route keys.
 
 ## What's covered by the binding
 
-- **Engine surface** — `GraphEngine.compile / run / run_stream / run_async / run_stream_async / resume / resume_async / get_state / update_state / fork`, `RunConfig`, `RunResult`, `set_worker_count`, `set_checkpoint_store`, `set_node_cache_enabled`.
+- **Engine surface** — `GraphEngine.compile / run / run_stream / run_async / run_stream_async / resume / resume_async / get_state / get_state_history / update_state / fork`, `RunConfig`, `RunResult`, `set_worker_count`, `set_checkpoint_store`, `set_node_cache_enabled`.
 - **Custom Python nodes** — subclass `neograph_engine.GraphNode`, register via `NodeFactory.register_type` or the `@neograph_engine.node` decorator. Engine dispatches under proper GIL handling, including from fan-out worker threads.
 - **Custom Python tools** — subclass `neograph_engine.Tool`, pass into `NodeContext(tools=[...])`. Engine takes ownership at compile time.
 - **Async** — every `*_async` binding returns an `asyncio.Future` bound to the calling thread's running loop. Stream callbacks are hopped to the loop thread via `loop.call_soon_threadsafe` so callbacks run where asyncio expects.
