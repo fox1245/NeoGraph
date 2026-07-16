@@ -55,10 +55,154 @@ def test_protocol_host_accepts_custom_graph_shape():
         ]["text"],
     )
 
-    answer = asyncio.run(adapter.run("question", thread_id="session-1"))
+    payload = [{"type": "image", "url": "https://example.test/cat.png"}]
+    answer = asyncio.run(adapter.run_payload(payload, thread_id="session-1"))
 
     assert answer == "custom"
-    assert engine.configs[0].input == {"prompt": "question"}
+    assert engine.configs[0].input == {"prompt": payload}
+
+
+def test_protocol_stream_yields_tokens_then_final_response():
+    class StreamingEngine(RecordingEngine):
+        async def run_stream_async(self, cfg, callback):
+            self.configs.append(cfg)
+            for token in ("hello", " ", "world"):
+                event = ng.GraphEvent()
+                event.type = ng.GraphEvent.Type.LLM_TOKEN
+                event.node_name = "answer"
+                event.data = token
+                callback(event)
+            return SimpleNamespace(output=self.output)
+
+    async def collect(adapter):
+        return [
+            (event.kind, event.data)
+            async for event in adapter.stream("question", thread_id="session-1")
+        ]
+
+    engine = StreamingEngine()
+    engine.output = {
+        "channels": {
+            "messages": {
+                "value": [{"role": "assistant", "content": "hello world"}]
+            }
+        }
+    }
+    events = asyncio.run(collect(ng.ProtocolHostAdapter(
+        engine, stream_node="answer"
+    )))
+
+    assert events == [
+        ("token", "hello"),
+        ("token", " "),
+        ("token", "world"),
+        ("final", "hello world"),
+    ]
+    assert engine.configs[0].stream_mode == ng.StreamMode.TOKENS
+
+
+def test_protocol_stream_rejects_tokens_that_disagree_with_final_output():
+    class MismatchEngine(RecordingEngine):
+        async def run_stream_async(self, cfg, callback):
+            event = ng.GraphEvent()
+            event.type = ng.GraphEvent.Type.LLM_TOKEN
+            event.node_name = "answer"
+            event.data = "draft"
+            callback(event)
+            return SimpleNamespace(output=self.output)
+
+    async def consume():
+        adapter = ng.ProtocolHostAdapter(
+            MismatchEngine(), stream_node="answer"
+        )
+        return [event async for event in adapter.stream("x", thread_id="s")]
+
+    with pytest.raises(ValueError, match="does not match"):
+        asyncio.run(consume())
+
+
+def test_protocol_stream_bounds_queue_and_cancels_on_overflow():
+    class BurstEngine(RecordingEngine):
+        async def run_stream_async(self, cfg, callback):
+            for token in ("one", "two"):
+                event = ng.GraphEvent()
+                event.type = ng.GraphEvent.Type.LLM_TOKEN
+                event.node_name = "answer"
+                event.data = token
+                callback(event)
+            await asyncio.sleep(0)
+            return SimpleNamespace(output=self.output)
+
+    async def consume():
+        adapter = ng.ProtocolHostAdapter(
+            BurstEngine(), stream_queue_size=1, stream_node="answer"
+        )
+        return [event async for event in adapter.stream("x", thread_id="s")]
+
+    with pytest.raises(RuntimeError, match="queue overflowed"):
+        asyncio.run(asyncio.wait_for(consume(), timeout=1))
+
+    with pytest.raises(ValueError, match="at least 1"):
+        ng.ProtocolHostAdapter(RecordingEngine(), stream_queue_size=0)
+
+
+def test_protocol_stream_without_output_node_yields_only_final():
+    class StreamingEngine(RecordingEngine):
+        async def run_stream_async(self, cfg, callback):
+            event = ng.GraphEvent()
+            event.type = ng.GraphEvent.Type.LLM_TOKEN
+            event.node_name = "planner"
+            event.data = "private draft"
+            callback(event)
+            return SimpleNamespace(output=self.output)
+
+    async def consume():
+        adapter = ng.ProtocolHostAdapter(StreamingEngine())
+        return [event async for event in adapter.stream("x", thread_id="s")]
+
+    events = asyncio.run(consume())
+    assert [(event.kind, event.data) for event in events] == [
+        ("final", "hello")
+    ]
+
+
+def test_protocol_stream_close_cancels_engine_and_cleans_waiters():
+    class BlockingEngine(RecordingEngine):
+        def __init__(self):
+            super().__init__()
+            self.cancelled = False
+
+        async def run_stream_async(self, cfg, callback):
+            event = ng.GraphEvent()
+            event.type = ng.GraphEvent.Type.LLM_TOKEN
+            event.node_name = "answer"
+            event.data = "partial"
+            callback(event)
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+
+    async def exercise():
+        engine = BlockingEngine()
+        adapter = ng.ProtocolHostAdapter(engine, stream_node="answer")
+        stream = adapter.stream("x", thread_id="s", request_id="r")
+        first = await stream.__anext__()
+        assert first.data == "partial"
+        await stream.aclose()
+        await asyncio.sleep(0)
+        others = [
+            task
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task() and not task.done()
+        ]
+        return engine, adapter, others
+
+    engine, adapter, others = asyncio.run(exercise())
+    assert engine.cancelled is True
+    assert adapter.active_count() == 0
+    assert others == []
 
 
 def test_protocol_host_rejects_missing_output_channel():

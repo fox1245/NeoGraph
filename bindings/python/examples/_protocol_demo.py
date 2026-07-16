@@ -13,16 +13,33 @@ class EchoNode(ng.GraphNode):
 
     def run(self, input):
         messages = input.state.get("messages") or []
-        text = messages[-1].get("content", "") if messages else ""
+        content = messages[-1].get("content", "") if messages else ""
+        if isinstance(content, list):
+            text = " ".join(
+                block.get("text") or f"[{block.get('type', 'content')}]"
+                for block in content
+                if isinstance(block, dict)
+            )
+        else:
+            text = str(content)
+        turn = sum(message.get("role") == "user" for message in messages)
+        answer = f"NeoGraph received: {text} (turn {turn})"
+        if input.stream_cb:
+            for token in ("NeoGraph ", "received: ", text, f" (turn {turn})"):
+                event = ng.GraphEvent()
+                event.type = ng.GraphEvent.Type.LLM_TOKEN
+                event.node_name = self._name
+                event.data = token
+                input.stream_cb(event)
         return [
             ng.ChannelWrite(
                 "messages",
-                [{"role": "assistant", "content": f"NeoGraph received: {text}"}],
+                [{"role": "assistant", "content": answer}],
             )
         ]
 
 
-def make_adapter():
+def make_adapter(checkpoint_store=None, input_builder=None):
     type_name = "protocol_demo_echo"
     ng.NodeFactory.register_type(
         type_name, lambda name, config, ctx: EchoNode(name)
@@ -37,5 +54,9 @@ def make_adapter():
         ],
     }
     engine = ng.GraphEngine.compile(definition, ng.NodeContext())
-    engine.set_checkpoint_store(ng.InMemoryCheckpointStore())
-    return ng.ProtocolHostAdapter(engine)
+    engine.set_checkpoint_store(
+        checkpoint_store or ng.InMemoryCheckpointStore()
+    )
+    return ng.ProtocolHostAdapter(
+        engine, input_builder=input_builder, stream_node="echo"
+    )

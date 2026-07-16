@@ -8,6 +8,8 @@ http://127.0.0.1:9999/. The agent card is served from the SDK's standard
 well-known route.
 """
 
+import os
+
 import uvicorn
 
 from a2a.helpers import (
@@ -33,6 +35,13 @@ from starlette.applications import Starlette
 from _protocol_demo import make_adapter
 
 
+HOST = os.environ.get("NEOGRAPH_A2A_HOST", "127.0.0.1")
+PORT = int(os.environ.get("NEOGRAPH_A2A_PORT", "9999"))
+PUBLIC_URL = os.environ.get(
+    "NEOGRAPH_A2A_PUBLIC_URL", f"http://127.0.0.1:{PORT}/"
+)
+
+
 class NeoGraphAgentExecutor(AgentExecutor):
     def __init__(self):
         self.adapter = make_adapter()
@@ -52,13 +61,37 @@ class NeoGraphAgentExecutor(AgentExecutor):
             state=TaskState.TASK_STATE_WORKING,
             message=new_text_message("NeoGraph is running"),
         )
-        answer = await self.adapter.run(
+        pending_token = None
+        emitted = False
+        final_answer = ""
+        async for event in self.adapter.stream(
             get_message_text(context.message) or "",
             thread_id=task.context_id,
             request_id=task.id,
-        )
+        ):
+            if event.kind == "token":
+                if pending_token is not None:
+                    await updater.add_artifact(
+                        parts=[new_text_part(
+                            text=pending_token, media_type="text/plain"
+                        )],
+                        artifact_id=f"{task.id}-response",
+                        append=emitted,
+                        last_chunk=False,
+                    )
+                    emitted = True
+                pending_token = event.data
+            else:
+                final_answer = event.data
+
         await updater.add_artifact(
-            parts=[new_text_part(text=answer, media_type="text/plain")]
+            parts=[new_text_part(
+                text=pending_token if pending_token is not None else final_answer,
+                media_type="text/plain",
+            )],
+            artifact_id=f"{task.id}-response",
+            append=emitted,
+            last_chunk=True,
         )
         await updater.update_status(state=TaskState.TASK_STATE_COMPLETED)
 
@@ -86,14 +119,14 @@ card = AgentCard(
     name="NeoGraph A2A Agent",
     description="A NeoGraph engine hosted by the official A2A SDK.",
     version="1.0.0",
-    capabilities=AgentCapabilities(streaming=False),
+    capabilities=AgentCapabilities(streaming=True),
     default_input_modes=["text/plain"],
     default_output_modes=["text/plain"],
     supported_interfaces=[
         AgentInterface(
             protocol_binding="JSONRPC",
             protocol_version="1.0",
-            url="http://127.0.0.1:9999/",
+            url=PUBLIC_URL,
         )
     ],
     skills=[skill],
@@ -111,4 +144,4 @@ app = Starlette(routes=routes)
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=9999)
+    uvicorn.run(app, host=HOST, port=PORT)

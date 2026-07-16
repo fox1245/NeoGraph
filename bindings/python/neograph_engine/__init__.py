@@ -596,10 +596,16 @@ __all__.append("StateView")
 # cancellation semantics inside those SDK callbacks.
 from .protocol import (  # noqa: E402
     ProtocolHostAdapter,
+    ProtocolStreamEvent,
     last_message_text,
     message_input,
 )
-__all__.extend(["ProtocolHostAdapter", "last_message_text", "message_input"])
+__all__.extend([
+    "ProtocolHostAdapter",
+    "ProtocolStreamEvent",
+    "last_message_text",
+    "message_input",
+])
 
 
 def _engine_get_state_view(self, thread_id, model=None):

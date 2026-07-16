@@ -43,8 +43,8 @@ the key is missing.
 | 24 | [`24_tool_approval_gate.py`](24_tool_approval_gate.py) | offline | The tool gate (#89): `engine.set_tool_gate(...)` is consulted for every tool call **before any tool runs**, returning Allow / Allow-with-rewritten-args / Deny / Interrupt. Shows the canonical approval prompt — *"the agent wants to run `rm -rf build/`. Allow?"* — and, crucially, that the harmless sibling call has **not** run while the human is deciding, so a refusal really means nothing happened and an approval does not re-run it. |
 | 25 | [`25_async_tools.py`](25_async_tools.py) | offline | Concurrent tools (#96): `ng.AsyncTool` instead of `ng.Tool` and three 300 ms tools take 0.30 s instead of 0.90 s. Also measures the boundary in the same run — three *CPU-bound* tools take 3.2x the time of one, because a Python function holds the GIL while it runs and no number of threads changes that. Concurrency is opt-in so an existing stateful tool cannot suddenly race itself. |
 | 26 | [`26_mcp_tools.py`](26_mcp_tools.py) | offline | MCP (#95): `ng.mcp.MCPClient(url).get_tools()` pulls a remote tool catalogue and hands it straight to `NodeContext`. Starts its own MCP server, so it runs with no network. Measures the thing that matters — three 0.4 s MCP calls in 0.41 s over HTTP — and says out loud where it does *not* hold: stdio has one pipe, so those calls serialize. |
-| 27 | [`27_a2a_server.py`](27_a2a_server.py) | localhost | A2A hosting (#120): the official `a2a-sdk` owns JSON-RPC, task state, the agent card, and cancellation. `ProtocolHostAdapter` maps A2A context/task IDs to NeoGraph checkpoint threads and active async runs. Requires Python 3.10+ and `pip install "neograph-engine[a2a]"`. |
-| 28 | [`28_acp_agent.py`](28_acp_agent.py) | stdio | ACP hosting (#120): the official `agent-client-protocol` runtime owns stdio framing and session methods. `ProtocolHostAdapter` preserves multi-turn state while the demo process is running and turns ACP cancel notifications into real `run_async()` cancellation. Requires Python 3.10+ and `pip install "neograph-engine[acp]"`. |
+| 27 | [`27_a2a_server.py`](27_a2a_server.py) | localhost | A2A hosting (#120): the official `a2a-sdk` owns JSON-RPC, task state, the agent card, and cancellation. `ProtocolHostAdapter.stream()` maps engine token events to chunked A2A artifacts while preserving checkpoint context. Requires Python 3.10+ and `pip install "neograph-engine[a2a]"`. |
+| 28 | [`28_acp_agent.py`](28_acp_agent.py) | stdio | ACP hosting (#120): streams token updates, preserves text/image/audio/resource content blocks for the graph, and supports durable `session/load` when `NEOGRAPH_ACP_POSTGRES_URL` or `NEOGRAPH_ACP_SQLITE_PATH` is set. Requires Python 3.10+ and `pip install "neograph-engine[acp]"`. |
 
 ## Why hosting uses the official SDKs
 
@@ -59,10 +59,24 @@ that those SDKs cannot: a checkpoint-aware call into the C++ graph engine.
 |------|----------|
 | C++ feature that appears missing | `A2AServer`, `ACPServer`, and their lifecycle methods are not mirrored as Python classes. |
 | Python alternative | Official `a2a-sdk` 1.x and `agent-client-protocol` 0.11.x server runtimes. |
-| NeoGraph integration | `ProtocolHostAdapter` maps protocol conversation IDs to `RunConfig.thread_id`, enables `resume_if_exists`, calls `run_async()`, and cancels the active asyncio task. |
+| NeoGraph integration | `ProtocolHostAdapter` maps protocol conversation IDs to `RunConfig.thread_id`, enables `resume_if_exists`, streams `LLM_TOKEN` events, accepts custom JSON-safe input payloads, and cancels the active asyncio task. |
 | Dependency policy | Both SDKs are optional because they require Python 3.10+, while `neograph-engine` supports Python 3.9. Install `neograph-engine[a2a]`, `neograph-engine[acp]`, or `neograph-engine[protocols]`. |
-| Current limit | The examples return one final text artifact/message. Protocol-native streaming, rich media, ACP editor tool callbacks, and durable ACP `session/load` remain application code. The demo uses an in-memory checkpoint store. |
+| Durable ACP sessions | Set `NEOGRAPH_ACP_POSTGRES_URL` for the wheel-supported durable backend. Source builds with `NEOGRAPH_BUILD_SQLITE=ON` may set `NEOGRAPH_ACP_SQLITE_PATH`. The agent advertises `session/load` only when one is configured; a new session becomes loadable after its first completed prompt creates a checkpoint. Session IDs are server-generated capabilities and checkpoints use a private `acp:` thread namespace. Keep one active agent process per session; checkpoint stores do not serialize concurrent writers across processes. |
+| Current limit | ACP editor callbacks (`fs/read_text_file`, terminal calls, permission prompts) cannot yet be invoked safely from a shared NeoGraph Python tool: today's `AsyncTool` runs a synchronous function on a worker thread and does not carry the current protocol session ID. A fake bridge would risk calling the wrong editor session. |
 | Revisit direct bindings when | A user must embed the exact C++ server in Python, or the official SDK path cannot preserve a required NeoGraph cancellation, checkpoint, tracing, or tool-call behavior. |
+
+`ProtocolHostAdapter.run_payload()` passes any JSON-safe value through the
+configured `input_builder`. The default `message_input` keeps rich content
+blocks as the user message's `content`; graphs whose provider expects another
+shape should pass a custom builder. `ProtocolHostAdapter.stream()` yields
+`ProtocolStreamEvent(kind="token", ...)` values followed by exactly one final
+event. Live tokens are disabled unless `stream_node` names the graph node whose
+tokens exactly form the final answer. This prevents planner/tool-node output
+from leaking through a protocol response. The asyncio consumer queue is bounded
+(1,024 chunks by default); overflow cancels the engine run. Native stream events
+are first scheduled onto the asyncio loop, so this queue is backpressure for a
+slow protocol transport, not a hard process-wide memory cap against an
+unbounded native producer.
 
 Run any one with:
 
