@@ -20,11 +20,10 @@
  * same plan will mark the legacy virtuals `[[deprecated]]`; v1.0
  * deletes them.
  *
- * The `RunContext` field plumbed through `NodeInput::ctx` is
- * engine-internal for now — PR 1 (v0.4.0) only carries it through
- * the dispatch hops. User-overridable virtuals receive it once PR 2
- * lands. Until then, cancel token / deadline / trace_id propagate
- * via the legacy paths.
+ * The engine threads `RunContext` through `NodeInput::ctx`. Nodes can use
+ * cancellation, usage accounting, thread/step/stream metadata, Store access,
+ * and resume values. The deadline and trace-id fields are reserved extension
+ * slots and are not populated by current `RunConfig` APIs.
  *
  * Example overrides that match the v0.4.x surface:
  *   - `examples/01_react_agent.cpp` — basic ReAct agent
@@ -73,10 +72,9 @@ struct NodeInput {
     /// Snapshot of the channel state visible to this node.
     const GraphState&  state;
 
-    /// Per-run metadata threaded by the engine — cancel token,
-    /// deadline, trace_id, thread_id, current super-step, stream
-    /// mode. PR 1 plumbed this through every dispatch hop; PR 2 is
-    /// the first place a user-overridable virtual receives it.
+    /// Per-run metadata threaded by the engine — cancel token, usage,
+    /// thread_id, current super-step, stream mode, Store, and resume value.
+    /// Deadline and trace-id members are reserved and currently unpopulated.
     const RunContext&  ctx;
 
     /// Streaming sink. ``nullptr`` for non-streaming runs (the engine
@@ -138,8 +136,8 @@ public:
      *        product over (sync/async) × (writes/full) × (stream/non-stream).
      *
      * **New nodes override THIS method.** Read ``in.state`` for channel
-     * inputs, read ``in.ctx`` for per-run metadata (cancel token,
-     * deadline, current step, …), check ``in.stream_cb`` for an
+     * inputs, read ``in.ctx`` for available per-run metadata (cancel token,
+     * thread ID, current step, …), check ``in.stream_cb`` for an
      * optional ``LLM_TOKEN`` sink, and return a ``NodeOutput`` (alias
      * for ``NodeResult``) populated with channel writes plus optional
      * ``Command`` / ``Send`` directives.
