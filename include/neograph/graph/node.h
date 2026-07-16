@@ -158,7 +158,7 @@ public:
      *
      * @code
      * class MyNode : public GraphNode {
-     *     asio::awaitable<NodeOutput> run(const NodeInput& in) override {
+     *     asio::awaitable<NodeOutput> run(NodeInput in) override {
      *         auto messages = in.state.get_messages();
      *         auto reply = co_await provider_->complete_async({...});
      *         NodeOutput out;
