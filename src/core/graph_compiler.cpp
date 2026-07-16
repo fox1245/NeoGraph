@@ -160,6 +160,31 @@ CompiledGraph GraphCompiler::compile(const json& definition,
     }
     const bool strict = cg.schema_version >= 1;
 
+    auto require_container = [&](const char* field, bool expects_object,
+                                 bool legacy_object_allowed = false) {
+        if (!definition.contains(field)) return;
+        const auto& value = definition[field];
+        if (legacy_object_allowed && !strict && value.is_object()) return;
+        if (expects_object ? !value.is_object() : !value.is_array()) {
+            const char* expected = expects_object ? "object" : "array";
+            const char* actual = value.is_object() ? "object"
+                               : value.is_array()  ? "array"
+                               : value.is_string() ? "string"
+                               : value.is_number() ? "number"
+                               : value.is_bool()   ? "boolean"
+                                                   : "null";
+            throw std::runtime_error(
+                "topology '$." + std::string(field) + "' must be an "
+                + expected + ", got " + actual);
+        }
+    };
+    require_container("channels", true);
+    require_container("nodes", true);
+    // Legacy accepted keyed edge maps and some users rely on that shape.
+    // Strict mode follows the exported schema and requires arrays.
+    require_container("edges", false, true);
+    require_container("conditional_edges", false, true);
+
     cg.name = definition.value("name", "unnamed_graph");
     top_consumed.insert("name");
 

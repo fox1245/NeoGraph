@@ -221,6 +221,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **토폴로지 최상위 컨테이너 형식 검증 (#126).** `channels`/`nodes`는
+  객체가 아니면 모든 모드에서 거부한다. `edges`/`conditional_edges`의
+  배열 검증은 strict 모드에서 강제하며, legacy의 keyed edge map 호환성은
+  유지한다. 오류에는 전체 입력 대신 경로와 JSON 종류만 기록한다.
+
 - **`set_worker_count` / `set_worker_count_auto` docstring 정정
   (issue #62, PR #63).** v1.0 prep 사이클에 `compile()` 의 worker pool
   기본값을 `set_worker_count(hardware_concurrency())` 에서

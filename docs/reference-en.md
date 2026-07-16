@@ -1271,14 +1271,14 @@ Compiles a graph from a JSON definition and returns an engine ready for executio
 ```json
 {
   "name": "my_graph",
-  "channels": [
-    {"name": "messages", "type": "append"},
-    {"name": "status", "type": "overwrite", "initial": "idle"}
-  ],
-  "nodes": [
-    {"name": "llm", "type": "llm_call"},
-    {"name": "tools", "type": "tool_dispatch"}
-  ],
+  "channels": {
+    "messages": {"reducer": "append"},
+    "status": {"reducer": "overwrite", "initial": "idle"}
+  },
+  "nodes": {
+    "llm": {"type": "llm_call"},
+    "tools": {"type": "tool_dispatch"}
+  },
   "edges": [
     {"from": "__start__", "to": "llm"},
     {"from": "tools", "to": "llm"}
@@ -2920,14 +2920,14 @@ int main() {
 
     json definition = {
         {"name", "assistant_graph"},
-        {"channels", json::array({
-            {{"name", "messages"}, {"type", "append"}},
-            {{"name", "status"},   {"type", "overwrite"}, {"initial", "idle"}}
-        })},
-        {"nodes", json::array({
-            {{"name", "llm"},   {"type", "llm_call"}},
-            {{"name", "tools"}, {"type", "tool_dispatch"}}
-        })},
+        {"channels", {
+            {"messages", {{"reducer", "append"}}},
+            {"status",   {{"reducer", "overwrite"}, {"initial", "idle"}}}
+        }},
+        {"nodes", {
+            {"llm",   {{"type", "llm_call"}}},
+            {"tools", {{"type", "tool_dispatch"}}}
+        }},
         {"edges", json::array({
             {{"from", "__start__"}, {"to", "llm"}},
             {{"from", "tools"},     {"to", "llm"}}
