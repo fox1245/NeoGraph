@@ -267,8 +267,11 @@ void GraphEngine::update_state(const std::string& thread_id,
     // super-step saves propagate this for the same reason.
     new_cp.barrier_state   = cp.barrier_state;
     new_cp.step            = cp.step;
-    new_cp.timestamp       = std::chrono::duration_cast<std::chrono::milliseconds>(
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+    // update_state preserves the parent's step, so millisecond timestamp ties
+    // would leave durable stores unable to identify the newer checkpoint.
+    new_cp.timestamp       = std::max(now, cp.timestamp + 1);
 
     checkpoint_store_->save(new_cp);
 }
@@ -287,6 +290,11 @@ std::string GraphEngine::fork(const std::string& source_thread_id,
     }
     if (!cp_opt)
         throw std::runtime_error("No checkpoint found for fork source");
+    if (cp_opt->thread_id != source_thread_id) {
+        throw std::runtime_error(
+            "Checkpoint does not belong to fork source thread: " +
+            source_thread_id);
+    }
 
     Checkpoint forked;
     forked.id              = Checkpoint::generate_id();
