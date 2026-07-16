@@ -552,12 +552,12 @@ void init_node(py::module_& m) {
     //
     // Exposed read-only — the engine constructs and owns the RunContext;
     // Python users read it from ``NodeInput.ctx`` inside their ``run()``
-    // override. Currently exposes the four fields a user is most likely
-    // to consume: cancel_token (so they can pass it explicitly to
+    // override. Currently exposes six user-facing fields:
+    // cancel_token (so they can pass it explicitly to
     // provider.complete instead of relying on the smuggling thread-local),
     // step (super-step counter), thread_id (RunConfig.thread_id), and
-    // stream_mode. ``deadline`` and ``trace_id`` are reserved for
-    // future RunConfig fields and stay default-constructed for now.
+    // stream_mode, store, and resume_value. ``deadline`` and ``trace_id`` are
+    // reserved for future RunConfig fields and stay default-constructed for now.
     py::class_<RunContext>(m, "RunContext",
         "Per-run dispatch metadata threaded by the engine. New nodes "
         "read this from ``input.ctx`` inside their ``run(input)`` "
