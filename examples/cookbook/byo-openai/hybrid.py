@@ -94,31 +94,22 @@ def main() -> int:
                       "Each turn must fit in 1-2 sentences."),
     )
 
-    # 3-node graph: classify → respond → summarise. Each step is a
-    # built-in `llm_call` node, so each step routes through our
-    # OpenAISdkProvider.
+    # A built-in `llm_call` gets its system prompt from
+    # NodeContext.instructions and routes through our OpenAISdkProvider.
     graph_def = {
         "name": "byo-openai-demo",
+        "schema_version": 1,
         "channels": {"messages": {"reducer": "append"}},
-        "nodes": {
-            "classify": {"type": "llm_call",
-                "config": {"system": "Classify the user's intent in one word."}},
-            "respond": {"type": "llm_call",
-                "config": {"system": "Answer the user given the classification."}},
-            "summarise": {"type": "llm_call",
-                "config": {"system": "Summarise the conversation in one sentence."}},
-        },
+        "nodes": {"answer": {"type": "llm_call"}},
         "edges": [
-            {"from": ng.START_NODE, "to": "classify"},
-            {"from": "classify",     "to": "respond"},
-            {"from": "respond",      "to": "summarise"},
-            {"from": "summarise",    "to": ng.END_NODE},
+            {"from": ng.START_NODE, "to": "answer"},
+            {"from": "answer",     "to": ng.END_NODE},
         ],
     }
-    print(f"[hybrid] running 3-node graph: classify → respond → summarise")
+    print("[hybrid] running one llm_call through the OpenAI SDK provider")
 
     engine = ng.GraphEngine.compile(graph_def, ctx)
-    user_q = "How do I make my Python script run a graph through three LLM calls?"
+    user_q = "How do I make my Python script run a graph through an LLM call?"
     result = engine.run(ng.RunConfig(
         thread_id="hybrid-demo",
         input={"messages": [{"role": "user", "content": user_q}]},

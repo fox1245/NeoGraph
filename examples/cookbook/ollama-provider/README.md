@@ -78,18 +78,21 @@ python via_openai_compat.py
 python via_native_api.py
 ```
 
-Both demos build a 2-node graph (`classify → respond`) and route both
-LLM calls through the local model. No external API key needed.
+Both demos build a strict one-node graph and route its `llm_call` through the
+local model. The system prompt comes from the shared
+`NodeContext.instructions`. No external API key needed.
 
 ## Output
 
 ```
-[ollama] using qwen2.5:0.5b at http://127.0.0.1:11434
-[graph] step 1 — classify: question type
-[graph] step 2 — respond:  one-sentence answer
+[ollama] using qwen2.5:0.5b at http://127.0.0.1:11434 (OpenAI-compat path)
+[user] What's the capital of France?
+       user: What's the capital of France?
+  assistant: Paris is the capital of France.
 ```
 
-(Actual completions vary with the model.)
+(Actual completions vary with the model. The native path prints
+`(native /api/chat path)` and uses its own sample question.)
 
 ## Notes
 
