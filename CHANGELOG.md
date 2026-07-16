@@ -11,6 +11,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Python persistence backends** (#117) — `Store` and `CheckpointStore` are
+  now constructible subclass bases with C++ virtual dispatch into Python.
+  `StoreItem`, `CheckpointPhase`, `Checkpoint`, and `PendingWrite` are exposed
+  with JSON-shaped fields; checkpoint pending-write methods remain optional.
+
 - **DSL 표면 (elaboration 계층) + 스키마 진화 게이트** (#75 M4).
   - **Elaborator**: `vars`(`{"$var":...}`·`${...}` 보간, 비순환 강제) /
     `templates`+`use`(파라미터 정확 일치 강제, 노드 prefix 리네임 —
