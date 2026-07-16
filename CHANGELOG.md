@@ -15,6 +15,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `RunConfig`로 설정할 수 없고 Python에도 노출되지 않는 `deadline`과
   `trace_id`를 사용 가능한 per-run metadata처럼 안내하던 문서와 Doxygen
   주석을 수정했다.
+- **`GraphNode::run` 예제 서명 수정 (issue #129).** 공개 헤더 예제가 실제
+  by-value virtual과 달리 `const NodeInput&`를 받아 override에 실패하던 문제를
+  수정하고, 코루틴 인자 수명에 필요한 by-value 계약을 compile-time test로
+  고정했다.
 
 ### Added
 
