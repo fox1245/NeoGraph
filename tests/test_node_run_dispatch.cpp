@@ -19,11 +19,17 @@
 #include <atomic>
 #include <memory>
 #include <string>
+#include <type_traits>
 
 using namespace neograph;
 using namespace neograph::graph;
 
 namespace {
+
+using RunSignature = asio::awaitable<NodeOutput> (GraphNode::*)(NodeInput);
+static_assert(std::is_same_v<decltype(&GraphNode::run), RunSignature>,
+              "GraphNode::run must take NodeInput by value so its coroutine "
+              "frame owns the parameter");
 
 // Shared observation slot — the factory lambda captures a
 // shared_ptr<RunObs> by value, every node it produces records into the
