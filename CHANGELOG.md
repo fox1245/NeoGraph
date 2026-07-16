@@ -150,6 +150,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     하위 호환.
   - 검증: 478/478 ctest, Valgrind 누수 0, TSAN race 0.
 
+### Fixed
+
+- **Python 비동기 실행의 예외 보존 (issue #122).** `run_async`,
+  `run_stream_async`, `resume_async`가 Python 노드의 원래 예외를 문자열로
+  바꾼 새 `RuntimeError`로 덮어쓰던 문제를 수정. 이제 pybind11의 표준
+  예외 변환 경로를 거쳐 원래 Python 예외 객체·타입·사용자 속성·traceback을
+  보존하고, C++ `py::type_error`도 동기 실행과 같은 Python `TypeError`로
+  전달한다. `resume_async`의 빈 callback도 코루틴이 끝날 때까지 보관해
+  pybind11 3.x에서 드러난 dangling-reference 충돌을 함께 막았다.
+
 ### Fixed (docs)
 
 - **샌드박스 실측으로 드러난 README 요약 배지의 조건 누락·내부 모순 정정.**

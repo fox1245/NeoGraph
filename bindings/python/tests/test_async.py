@@ -38,6 +38,15 @@ def _passthrough_definition(channel="x"):
     }
 
 
+def _traceback_function_names(exc):
+    names = []
+    tb = exc.__traceback__
+    while tb is not None:
+        names.append(tb.tb_frame.f_code.co_name)
+        tb = tb.tb_next
+    return names
+
+
 def test_run_async_basic():
     """Smoke: engine.run_async returns an awaitable that yields a RunResult."""
     engine = neograph.GraphEngine.compile(
@@ -337,9 +346,20 @@ def test_run_stream_async_cancel_does_not_double_resolve_future():
         f"cancel on streaming path: {invalid_state}")
 
 
-def test_run_async_propagates_python_node_exception():
-    """Python node raises → asyncio future rejects → await raises."""
+@pytest.mark.parametrize("async_method", ["run_async", "run_stream_async"])
+def test_async_run_api_preserves_python_node_exception(async_method):
+    """Each async run API exposes the original Python exception."""
     type_name = _next_type("async_explode")
+
+    class CustomNodeError(Exception):
+        def __init__(self, message, marker):
+            super().__init__(message, marker)
+            self.marker = marker
+
+    error = CustomNodeError("kaboom from python node", 41)
+
+    def raise_custom_error():
+        raise error
 
     class ExplodeNode(neograph.GraphNode):
         def __init__(self, name):
@@ -348,7 +368,7 @@ def test_run_async_propagates_python_node_exception():
         def get_name(self): return self._name
         def run(self, input):
             state = input.state
-            raise RuntimeError("kaboom from python node")
+            raise_custom_error()
 
     neograph.NodeFactory.register_type(
         type_name, lambda name, c, ctx: ExplodeNode(name))
@@ -363,10 +383,131 @@ def test_run_async_propagates_python_node_exception():
         ],
     }
     engine = neograph.GraphEngine.compile(definition, neograph.NodeContext())
+    cfg = neograph.RunConfig(thread_id="sync-error", input={"x": 1})
+
+    with pytest.raises(CustomNodeError) as sync_info:
+        engine.run(cfg)
+
+    sync_exc = sync_info.value
+    sync_frames = _traceback_function_names(sync_exc)
+    assert sync_exc is error
+    assert type(sync_exc) is CustomNodeError
+    assert sync_exc.args == ("kaboom from python node", 41)
+    assert sync_exc.marker == 41
+    assert sync_frames[-2:] == ["run", "raise_custom_error"]
+
+    # Raising the same instance again otherwise retains the earlier traceback.
+    error.__traceback__ = None
 
     async def go():
-        cfg = neograph.RunConfig(thread_id="t1", input={"x": 1})
-        with pytest.raises(RuntimeError, match="kaboom"):
-            await engine.run_async(cfg)
+        cfg = neograph.RunConfig(
+            thread_id=f"{async_method}-error", input={"x": 1})
+        with pytest.raises(CustomNodeError) as async_info:
+            if async_method == "run_stream_async":
+                await engine.run_stream_async(cfg, lambda _event: None)
+            else:
+                await engine.run_async(cfg)
+        return async_info.value
 
-    asyncio.run(go())
+    async_exc = asyncio.run(go())
+    assert async_exc is error
+    assert type(async_exc) is type(sync_exc)
+    assert async_exc.args == sync_exc.args
+    assert async_exc.marker == sync_exc.marker
+    assert _traceback_function_names(async_exc)[-2:] == sync_frames[-2:]
+
+
+def test_resume_async_preserves_python_node_exception():
+    """An exception raised after resuming keeps its object and traceback."""
+    type_name = _next_type("async_resume_explode")
+
+    class CustomResumeError(Exception):
+        def __init__(self, message, marker):
+            super().__init__(message, marker)
+            self.marker = marker
+
+    error = CustomResumeError("kaboom after resume", 42)
+
+    def raise_resume_error():
+        raise error
+
+    class InterruptThenExplodeNode(neograph.GraphNode):
+        def __init__(self, name):
+            super().__init__()
+            self._name = name
+        def get_name(self): return self._name
+        def run(self, input):
+            if input.ctx.resume_value is None:
+                raise neograph.NodeInterrupt("continue into failure")
+            raise_resume_error()
+
+    neograph.NodeFactory.register_type(
+        type_name, lambda name, c, ctx: InterruptThenExplodeNode(name))
+
+    definition = {
+        "name": "resume_explode",
+        "channels": {},
+        "nodes": {"gate": {"type": type_name}},
+        "edges": [
+            {"from": neograph.START_NODE, "to": "gate"},
+            {"from": "gate", "to": neograph.END_NODE},
+        ],
+    }
+    engine = neograph.GraphEngine.compile(
+        definition, neograph.NodeContext(),
+        neograph.InMemoryCheckpointStore())
+    cfg = neograph.RunConfig(thread_id="resume-error", input={})
+    assert engine.run(cfg).interrupted
+
+    async def go():
+        with pytest.raises(CustomResumeError) as resume_info:
+            await engine.resume_async("resume-error", {"approved": True})
+        return resume_info.value
+
+    resume_exc = asyncio.run(go())
+    assert resume_exc is error
+    assert type(resume_exc) is CustomResumeError
+    assert resume_exc.args == ("kaboom after resume", 42)
+    assert resume_exc.marker == 42
+    assert _traceback_function_names(resume_exc)[-2:] == [
+        "run", "raise_resume_error"]
+
+
+def test_run_async_invalid_node_return_matches_sync_type_error():
+    """py::type_error from node coercion stays TypeError in async runs."""
+    type_name = _next_type("async_invalid_return")
+
+    class InvalidReturnNode(neograph.GraphNode):
+        def __init__(self, name):
+            super().__init__()
+            self._name = name
+        def get_name(self): return self._name
+        def run(self, input):
+            return object()
+
+    neograph.NodeFactory.register_type(
+        type_name, lambda name, c, ctx: InvalidReturnNode(name))
+
+    definition = {
+        "name": "invalid_return",
+        "channels": {},
+        "nodes": {"bad": {"type": type_name}},
+        "edges": [
+            {"from": neograph.START_NODE, "to": "bad"},
+            {"from": "bad", "to": neograph.END_NODE},
+        ],
+    }
+    engine = neograph.GraphEngine.compile(definition, neograph.NodeContext())
+
+    with pytest.raises(TypeError) as sync_info:
+        engine.run(neograph.RunConfig(thread_id="sync-type-error", input={}))
+
+    async def go():
+        with pytest.raises(TypeError) as async_info:
+            await engine.run_async(neograph.RunConfig(
+                thread_id="async-type-error", input={}))
+        return async_info.value
+
+    async_exc = asyncio.run(go())
+    assert type(async_exc) is type(sync_info.value)
+    assert async_exc.args == sync_info.value.args
