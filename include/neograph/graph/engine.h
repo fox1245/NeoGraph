@@ -99,8 +99,9 @@ struct RunConfig {
 /**
  * @brief Per-run dispatch metadata threaded through the engine and executor.
  *
- * Built from ``RunConfig`` at the top of ``execute_graph_async`` and
- * carried by reference through every internal dispatch hop
+ * Built from ``RunConfig`` plus engine state (usage accounting and Store) and
+ * resume input at the top of ``execute_graph_async``, then carried by reference
+ * through every internal dispatch hop
  * (``NodeExecutor::run_one_async`` / ``run_parallel_async`` /
  * ``run_sends_async`` / ``execute_node_with_retry_async``). Replaces the
  * v0.3.x-era smuggling channels — ``GraphState::run_cancel_token_`` and
@@ -108,19 +109,14 @@ struct RunConfig {
  * argument that survives every Send-fan-out / serialize-restore /
  * thread-hop.
  *
- * **PR 1 (v0.4.0) is plumbing-only**: the struct exists, the engine
- * builds it, and ``NodeExecutor`` carries it through, but nothing yet
- * consumes it. ``GraphNode::execute_full_async`` still receives only
- * ``state``. The smuggling channels remain authoritative until
- * subsequent PRs flip the consumers (PR 2: new ``run(NodeInput)``
- * virtual; PR 3: hierarchical CancelToken; PR 4: deprecate the
- * smuggling).
+ * ``GraphNode::run(NodeInput)`` consumes it through ``in.ctx``. Cancellation,
+ * usage, thread/step/stream metadata, Store, and resume values are active;
+ * deadline and trace ID remain reserved extension slots.
  *
- * Cheap to copy (one shared_ptr + a couple of strings); workers that
- * need an isolated copy take it by value, the common path takes it by
- * const reference.
+ * Workers that need an isolated context copy take it by value; the common
+ * path takes it by const reference.
  *
- * @see RunConfig (the caller-supplied source) and ROADMAP_v1.md
+ * @see RunConfig (the primary caller-supplied source) and ROADMAP_v1.md
  * (Candidate 2: "Explicit RunContext for per-run metadata").
  */
 struct RunContext {
@@ -134,7 +130,7 @@ struct RunContext {
     /// so — the engine only sees completions that pass through its own nodes.
     std::shared_ptr<UsageAccumulator> usage;
 
-    /// Optional absolute wall-clock deadline. Reserved for a future PR
+    /// Optional absolute monotonic-clock deadline. Reserved for a future PR
     /// (RunConfig has no deadline field today); left ``std::nullopt``
     /// by the engine for now so existing behaviour is unchanged.
     std::optional<std::chrono::steady_clock::time_point> deadline;
