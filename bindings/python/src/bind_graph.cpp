@@ -137,6 +137,28 @@ std::shared_ptr<py::object> hold_py(py::object obj) {
         });
 }
 
+// Convert a captured C++ exception exactly as pybind11's function dispatcher
+// would, then take ownership of the resulting Python exception object. This
+// preserves py::error_already_set values and applies built-in translators such
+// as py::type_error -> TypeError.
+//
+py::object exception_ptr_to_python(std::exception_ptr eptr) {
+    try {
+        // Calling through cpp_function uses pybind11's public dispatcher,
+        // including registered C++ translators and error_already_set restore.
+        py::cpp_function([eptr] { std::rethrow_exception(eptr); })();
+    } catch (py::error_already_set& translated) {
+        py::object exception = translated.value();
+        if (translated.trace()
+            && PyException_SetTraceback(exception.ptr(),
+                                       translated.trace().ptr()) != 0) {
+            throw py::error_already_set();
+        }
+        return exception;
+    }
+    throw std::logic_error("exception_ptr did not throw");
+}
+
 // Drain whatever the asio coroutine produced (RunResult or exception)
 // onto the captured asyncio.Future. Runs on the asio worker thread;
 // hops back to the asyncio loop thread via call_soon_threadsafe so
@@ -164,9 +186,15 @@ std::shared_ptr<py::object> hold_py(py::object obj) {
 template <typename T>
 void resolve_future_async(std::shared_ptr<py::object> future,
                           std::shared_ptr<py::object> loop,
-                          std::exception_ptr eptr,
+                          std::exception_ptr& eptr,
                           T&& result) {
     py::gil_scoped_acquire g;
+    // error_already_set owns Python references; release the completion
+    // callback's copy before gil_scoped_acquire leaves scope.
+    struct ExceptionPtrReset {
+        std::exception_ptr& ptr;
+        ~ExceptionPtrReset() { ptr = nullptr; }
+    } reset{eptr};
     try {
         if (loop->attr("is_closed")().template cast<bool>()) return;
 
@@ -174,16 +202,7 @@ void resolve_future_async(std::shared_ptr<py::object> future,
             py::module_::import("neograph_engine._neograph");
 
         if (eptr) {
-            std::string msg;
-            try {
-                std::rethrow_exception(eptr);
-            } catch (const std::exception& ex) {
-                msg = ex.what();
-            } catch (...) {
-                msg = "neograph: unknown C++ exception in async run";
-            }
-            py::object exc =
-                py::module_::import("builtins").attr("RuntimeError")(msg);
+            py::object exc = exception_ptr_to_python(eptr);
             loop->attr("call_soon_threadsafe")(
                 mod.attr("_safe_set_future_exception"),
                 *future, exc);
@@ -1059,11 +1078,12 @@ void init_graph(py::module_& m) {
                 // dangling-reference concern as run_async.
                 auto tid_h = std::make_shared<std::string>(std::move(thread_id));
                 auto rv_h  = std::make_shared<json>(py_to_json(resume_value));
+                auto cb_h  = std::make_shared<GraphStreamCallback>();
 
                 asio::co_spawn(
                     AsyncRuntime::instance().executor(),
-                    self->resume_async(*tid_h, *rv_h, nullptr),
-                    [self, tid_h, rv_h, fut_h, loop_h]
+                    self->resume_async(*tid_h, *rv_h, *cb_h),
+                    [self, tid_h, rv_h, cb_h, fut_h, loop_h]
                     (std::exception_ptr e, RunResult result) {
                         resolve_future_async(fut_h, loop_h, e,
                                              std::move(result));
