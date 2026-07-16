@@ -368,7 +368,11 @@ void init_graph(py::module_& m) {
         .def_readwrite("usage", &RunConfig::usage,
             "Optional UsageAccumulator (issue #88). Leave None and the engine "
             "makes one per run; supply your own to total tokens across several "
-            "runs on the same conversation.");
+            "runs on the same conversation.")
+        .def_readwrite("cancel_token", &RunConfig::cancel_token,
+            "Optional cooperative cancellation handle. Construct a "
+            "CancelToken, assign it here, and call token.cancel() from another "
+            "thread to stop engine.run() at the next cancellation point.");
 
     // ── ToolDecision / ToolGateContext (issue #89) ───────────────────────
     //

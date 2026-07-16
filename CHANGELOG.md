@@ -9,12 +9,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed (docs)
+
+- **`GraphNode::run` 예제 서명 수정 (issue #129).** 공개 헤더 예제가 실제
+  by-value virtual과 달리 `const NodeInput&`를 받아 override에 실패하던 문제를
+  수정하고, 코루틴 인자 수명에 필요한 by-value 계약을 compile-time test로
+  고정했다.
+
 ### Added
 
 - **Python persistence backends** (#117) — `Store` and `CheckpointStore` are
   now constructible subclass bases with C++ virtual dispatch into Python.
   `StoreItem`, `CheckpointPhase`, `Checkpoint`, and `PendingWrite` are exposed
   with JSON-shaped fields; checkpoint pending-write methods remain optional.
+- **Python synchronous cancellation** (#119) — Python callers can construct a
+  `CancelToken`, assign it to `RunConfig.cancel_token`, and cooperatively stop
+  `engine.run()` from another thread.
 
 - **DSL 표면 (elaboration 계층) + 스키마 진화 게이트** (#75 M4).
   - **Elaborator**: `vars`(`{"$var":...}`·`${...}` 보간, 비순환 강제) /
