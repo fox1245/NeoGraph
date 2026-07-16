@@ -91,6 +91,17 @@ result = engine.run(ng.RunConfig(thread_id="t1",
 | `max_steps` | 25 | Super-step ceiling; ReAct loops typically need 10+. |
 | `stream_mode` | `StreamMode.OFF` | Bitmask: `EVENTS \| TOKENS \| DEBUG \| VALUES \| UPDATES \| ALL`. Only consulted by `run_stream` / `run_stream_async`. |
 | `resume_if_exists` | `False` | When `True` and a checkpoint store is configured, the run loads the latest checkpoint for `thread_id` (if any) and applies `input` on top via the channel reducers — multi-turn chat without manually threading prior state through `input`. Default keeps fresh-start semantics for back-compat; for HITL resume from an interrupted run, use `engine.resume_async()` instead. |
+| `cancel_token` | `None` | Optional `CancelToken` for cooperative cancellation. Assign one before `engine.run()`, then call `token.cancel()` from another Python thread. The engine stops at the next super-step boundary; nodes doing long work should poll `input.ctx.cancel_token`. |
+
+```python
+token = ng.CancelToken()
+config = ng.RunConfig(thread_id="job-42", input={"query": "..."})
+config.cancel_token = token
+
+# Run engine.run(config) in a worker thread, then request cancellation from
+# the caller thread when the request disconnects or the user presses Stop.
+token.cancel()
+```
 
 ## Pausing for a human, from a Python node
 
