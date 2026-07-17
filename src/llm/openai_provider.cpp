@@ -314,6 +314,11 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
         throw std::runtime_error("HTTP request failed: " + httplib::to_string(res.error()));
     }
 
+    if (!line_buffer.empty()) {
+        throw std::runtime_error(
+            "Malformed SSE stream: unterminated line: " + line_buffer);
+    }
+
     if (res->status != 200) {
         throw std::runtime_error(
             "API error (HTTP " + std::to_string(res->status) + "): " + res->body);
