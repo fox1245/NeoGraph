@@ -122,6 +122,15 @@ TEST(GraphEngineAsyncApi, RunAsyncPropagatesNodeException) {
     RunConfig cfg;
     cfg.thread_id = "t-2";
 
+    try {
+        engine->run(cfg);
+        FAIL() << "expected NodeExecutionError";
+    } catch (const NodeExecutionError& e) {
+        EXPECT_EQ(e.node_name(), "boom");
+        EXPECT_EQ(e.attempts(), 1);
+        EXPECT_THROW(std::rethrow_exception(e.cause()), std::runtime_error);
+    }
+
     asio::io_context io;
     std::exception_ptr captured;
     asio::co_spawn(
@@ -137,7 +146,65 @@ TEST(GraphEngineAsyncApi, RunAsyncPropagatesNodeException) {
     io.run();
 
     ASSERT_TRUE(captured);
-    EXPECT_THROW(std::rethrow_exception(captured), std::runtime_error);
+    try {
+        std::rethrow_exception(captured);
+        FAIL() << "expected NodeExecutionError";
+    } catch (const NodeExecutionError& e) {
+        EXPECT_EQ(e.node_name(), "boom");
+        EXPECT_EQ(e.attempts(), 1);
+        EXPECT_THROW(std::rethrow_exception(e.cause()), std::runtime_error);
+    }
+}
+
+TEST(GraphEngineAsyncApi, SubgraphFailureStillHonorsOuterRetry) {
+    auto calls = std::make_shared<std::atomic<int>>(0);
+    NodeFactory::instance().register_type("subgraph_transient_123",
+        [calls](const std::string& name, const json&, const NodeContext&) {
+            class TransientNode final : public GraphNode {
+            public:
+                TransientNode(std::string name,
+                              std::shared_ptr<std::atomic<int>> calls)
+                    : name_(std::move(name)), calls_(std::move(calls)) {}
+                asio::awaitable<NodeOutput> run(NodeInput) override {
+                    if (calls_->fetch_add(1) < 2) {
+                        throw std::runtime_error("inner transient failure");
+                    }
+                    co_return NodeOutput{};
+                }
+                std::string get_name() const override { return name_; }
+            private:
+                std::string name_;
+                std::shared_ptr<std::atomic<int>> calls_;
+            };
+            return std::make_unique<TransientNode>(name, calls);
+        });
+
+    json inner = {
+        {"name", "inner"},
+        {"channels", json::object()},
+        {"nodes", {{"deep", {{"type", "subgraph_transient_123"}}}}},
+        {"edges", json::array({
+            {{"from", "__start__"}, {"to", "deep"}},
+            {{"from", "deep"}, {"to", "__end__"}}
+        })}
+    };
+    json outer = {
+        {"name", "outer"},
+        {"channels", json::object()},
+        {"nodes", {{"shell", {{"type", "subgraph"},
+                                {"definition", inner}}}}},
+        {"edges", json::array({
+            {{"from", "__start__"}, {"to", "shell"}},
+            {{"from", "shell"}, {"to", "__end__"}}
+        })},
+        {"retry_policy", {{"max_retries", 2}, {"initial_delay_ms", 1}}}
+    };
+
+    auto engine = GraphEngine::compile(outer, NodeContext{});
+    RunConfig cfg;
+    cfg.thread_id = "subgraph-retry";
+    EXPECT_NO_THROW(engine->run(cfg));
+    EXPECT_EQ(calls->load(), 3);
 }
 
 TEST(GraphEngineAsyncApi, ResumeAsyncMatchesSyncResume) {

@@ -61,6 +61,8 @@ TEST(TopLevelContainerTypes, RejectsMalformedContainers) {
         for (const char* field : {"edges", "conditional_edges"}) {
             if (strict) expect_error(field, json::object(), true, "array");
             expect_error(field, json("not a container"), strict, "array");
+            expect_error(field, json(7), strict, "array");
+            expect_error(field, json(true), strict, "array");
             expect_error(field, json(nullptr), strict, "array");
         }
     }
@@ -80,9 +82,25 @@ TEST(TopLevelContainerTypes, AcceptsValidAndLegacyCompatibleContainers) {
 
     json legacy = {
         {"nodes", json::object()},
-        {"edges", {{"direct", {{"from", "__start__"}, {"to", "__end__"}}}}}
+        {"edges", {
+            {"direct", {{"from", "__start__"}, {"to", "worker"}}}
+        }},
+        {"conditional_edges", {
+            {"branch", {
+                {"from", "worker"},
+                {"condition", "route"},
+                {"routes", {{"done", "__end__"}}}
+            }}
+        }}
     };
-    EXPECT_NO_THROW(GraphCompiler::compile(legacy, NodeContext{}));
+    auto compiled = GraphCompiler::compile(legacy, NodeContext{});
+    ASSERT_EQ(compiled.edges.size(), 1u);
+    EXPECT_EQ(compiled.edges[0].from, "__start__");
+    EXPECT_EQ(compiled.edges[0].to, "worker");
+    ASSERT_EQ(compiled.conditional_edges.size(), 1u);
+    EXPECT_EQ(compiled.conditional_edges[0].from, "worker");
+    EXPECT_EQ(compiled.conditional_edges[0].condition, "route");
+    EXPECT_EQ(compiled.conditional_edges[0].routes.at("done"), "__end__");
 }
 
 // =========================================================================

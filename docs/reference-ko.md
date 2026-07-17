@@ -952,8 +952,14 @@ struct RunResult {
     json        interrupt_value;                 // 인터럽트 사유/값
     std::string checkpoint_id;                   // 마지막 checkpoint ID
     std::vector<std::string> execution_trace;    // 실행된 노드 순서
+
+    bool max_steps_exhausted() const noexcept;    // 실행할 작업을 남기고 한도 도달
 };
 ```
+
+`max_steps_exhausted()`는 실행할 노드가 남아 있는데 단계 한도에 도달한
+경우에만 `true`를 반환한다. 마지막 허용 단계에서 정확히 `__end__`에 도달한
+정상 실행은 `false`다.
 
 ---
 

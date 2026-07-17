@@ -206,6 +206,7 @@ def test_runresult_documented_attributes_exist():
 
     documented_attrs = [
         "output",
+        "max_steps_exhausted",
         "interrupted",
         "interrupt_node",
         "interrupt_value",
