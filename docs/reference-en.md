@@ -1040,6 +1040,7 @@ struct RunConfig {
     int                         max_steps    = 50;
     StreamMode                  stream_mode  = StreamMode::ALL;
     std::shared_ptr<CancelToken> cancel_token;          // v0.3+
+    std::shared_ptr<UsageAccumulator> usage;             // optional accumulator
     bool                        resume_if_exists = false; // v0.3.1+
 };
 ```
@@ -1051,33 +1052,41 @@ struct RunConfig {
 | `max_steps` | `int` | `50` | Maximum number of super-steps before forced termination (prevents infinite loops) |
 | `stream_mode` | `StreamMode` | `ALL` | Bitfield controlling which event types are emitted during streaming |
 | `cancel_token` | `std::shared_ptr<CancelToken>` | `nullptr` | Cooperative cancel handle. Engine wraps this into a `RunContext` and threads it to every node's `run(NodeInput)` call as `in.ctx.cancel_token` |
+| `usage` | `std::shared_ptr<UsageAccumulator>` | `nullptr` | Optional token accumulator. The engine creates one when omitted and exposes the active accumulator as `in.ctx.usage` |
 | `resume_if_exists` | `bool` | `false` | If `true` and a checkpoint exists for `thread_id`, seed from it before applying `input` (multi-turn chat shape) |
 
 ### RunContext (v0.4 PR 1, exposed to nodes via `NodeInput.ctx`)
 
-Per-run dispatch metadata threaded by the engine. Constructed from
-`RunConfig`; consumed inside a node's `run(NodeInput) -> NodeOutput`
-override via `in.ctx`.
+Per-run dispatch metadata threaded by the engine. Constructed from `RunConfig`
+(with a new usage accumulator when none was supplied), the engine's Store,
+and an optional resume value. Nodes consume it inside a
+`run(NodeInput) -> NodeOutput` override via `in.ctx`.
 
 ```cpp
 struct RunContext {
     std::shared_ptr<CancelToken>  cancel_token;
-    std::optional<Deadline>       deadline;     // reserved
+    std::shared_ptr<UsageAccumulator> usage;
+    std::optional<std::chrono::steady_clock::time_point> deadline; // reserved
     std::string                   trace_id;     // reserved
     std::string                   thread_id;
     int                           step;
     StreamMode                    stream_mode;
+    std::optional<json>           resume_value;
+    std::shared_ptr<Store>        store;
 };
 ```
 
 | Field | Description |
 |-------|-------------|
 | `cancel_token` | The active token. Pass to `provider.complete(params)` so an LLM HTTP socket aborts on cancel, or poll `is_cancelled()` for your own loops |
+| `usage` | Shared token-accounting sink populated by the engine |
 | `deadline` | Reserved (no `RunConfig.deadline` field yet) |
 | `trace_id` | Reserved for OTel integration |
 | `thread_id` | Mirror of `RunConfig.thread_id` |
 | `step` | Current super-step index, updated each iteration |
 | `stream_mode` | Mirror of `RunConfig.stream_mode` |
+| `resume_value` | Value supplied to `GraphEngine::resume()`, or empty on a fresh run |
+| `store` | Store installed on the engine, or `nullptr` when none is configured |
 
 ### CancelToken
 
