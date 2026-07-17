@@ -71,13 +71,16 @@ python hybrid.py
 
 Output:
 ```
-[hybrid] using openai SDK 2.33.0 inside NeoGraph 0.2.3 graph
-[hybrid] running 3-node graph: classify → respond → summarise
-[provider] complete() call #1 (system + 1 user) — model=gpt-5.4-mini
-[provider] complete() call #2 (system + 2 user) — model=gpt-5.4-mini
-[provider] complete() call #3 (system + 3 user) — model=gpt-5.4-mini
-[hybrid] final summary: ...
+[hybrid] using openai SDK inside NeoGraph 0.2.3 graph
+[hybrid] running one llm_call through the OpenAI SDK provider
+[provider] complete() call #1 (2 msgs) — model=gpt-5.4-mini
+[... user and assistant messages ...]
+[hybrid] provider.complete() called 1× via openai SDK
 ```
+
+The built-in `llm_call` uses the shared `NodeContext.instructions` as its
+system prompt. Use a custom node type when different graph stages need
+different prompts.
 
 ## What you keep
 

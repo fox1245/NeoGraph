@@ -112,6 +112,9 @@ from ._neograph import (
     RunConfig,
     RunResult,
     UsageAccumulator,
+    CheckpointPhase,
+    Checkpoint,
+    PendingWrite,
     CheckpointStore,
     InMemoryCheckpointStore,
 
@@ -562,6 +565,9 @@ __all__ = [
     "RunConfig",
     "UsageAccumulator",
     "RunResult",
+    "CheckpointPhase",
+    "Checkpoint",
+    "PendingWrite",
     "CheckpointStore",
     "InMemoryCheckpointStore",
     # Postgres/SqliteCheckpointStore appended dynamically below when present.
@@ -590,6 +596,22 @@ __all__.append("message_stream")
 # item #6 / v0.3.2.)
 from .state_view import StateView  # noqa: E402
 __all__.append("StateView")
+
+# Protocol hosting bridge. A2A and ACP transports remain owned by their
+# official Python SDKs; this adapter preserves NeoGraph session resume and
+# cancellation semantics inside those SDK callbacks.
+from .protocol import (  # noqa: E402
+    ProtocolHostAdapter,
+    ProtocolStreamEvent,
+    last_message_text,
+    message_input,
+)
+__all__.extend([
+    "ProtocolHostAdapter",
+    "ProtocolStreamEvent",
+    "last_message_text",
+    "message_input",
+])
 
 
 def _engine_get_state_view(self, thread_id, model=None):
