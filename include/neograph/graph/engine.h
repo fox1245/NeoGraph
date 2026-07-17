@@ -286,6 +286,17 @@ struct RunResult {
     /// @see UsageAccounting.ACallerSuppliedAccumulatorSeesTheCrashedAttempt
     ChatCompletion::Usage usage;
 
+    /// True only when execution stopped at RunConfig::max_steps while work
+    /// remained ready. The status is stored in output rather than as a data
+    /// member so adding this query does not change RunResult's binary layout.
+    inline bool max_steps_exhausted() const noexcept {
+        if (!output.is_object()) return false;
+        auto* metadata = yyjson_mut_obj_get(output.raw_val(), "_neograph");
+        if (!yyjson_mut_is_obj(metadata)) return false;
+        auto* marker = yyjson_mut_obj_get(metadata, "max_steps_exhausted");
+        return yyjson_mut_is_bool(marker) && yyjson_mut_get_bool(marker);
+    }
+
     /// @brief Read a channel value as type ``T`` (issue #25).
     ///
     /// Looks up the value in ``output``. Tries the canonical
