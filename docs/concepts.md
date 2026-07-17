@@ -184,7 +184,7 @@ class Researcher(ng.GraphNode):
 
     def run(self, input):
         # input.state    — read channels via input.state.get(...)
-        # input.ctx      — RunContext (cancel_token, deadline, trace_id, ...)
+        # input.ctx      — RunContext (cancel_token, thread_id, step, ...)
         # input.stream_cb — non-None when running in streaming mode
         topic = input.state.get("topic")
         result = await_llm(topic, cancel_token=input.ctx.cancel_token)
@@ -194,6 +194,11 @@ class Researcher(ng.GraphNode):
             sends=[],                                    # optional
         )
 ```
+
+Python exposes `cancel_token`, `thread_id`, `step`, `stream_mode`, `store`,
+and `resume_value` on `input.ctx`. The C++ `deadline` and `trace_id` slots are
+reserved for future `RunConfig` fields; the engine does not populate them and
+Python does not expose them yet.
 
 You can also return a bare `list[ChannelWrite]` when you don't need
 `Send` or `Command` — the binding lifts it into a `NodeResult`
