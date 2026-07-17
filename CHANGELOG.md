@@ -9,6 +9,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **노드 실패 문맥 보존 (issue #123).** C++ 실행 오류를 원래
+  `exception_ptr`과 실패 노드 이름·시도 횟수를 담은 `NodeExecutionError`로
+  전달하고, terminal `ERROR` event에도 같은 문맥을 기록한다. Python에서는
+  원래 예외 객체·타입·args·사용자 속성·traceback을 그대로 유지하면서
+  `.node_name`과 `.attempts` 속성만 추가한다. `NodeInterrupt`, 취소, 메모리
+  부족 예외는 기존 제어 흐름대로 감싸지 않는다.
+
 ### Fixed (docs)
 
 - **Provider cookbook의 무시되던 노드별 prompt 제거 (issue #116).** 세 Python
@@ -177,6 +186,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     인라인), 결과는 호출 순서대로 적용. 동기 `execute()` 파사드 유지로
     하위 호환.
   - 검증: 478/478 ctest, Valgrind 누수 0, TSAN race 0.
+
+### Fixed
+
+- **Python 비동기 실행의 예외 보존 (issue #122).** `run_async`,
+  `run_stream_async`, `resume_async`가 Python 노드의 원래 예외를 문자열로
+  바꾼 새 `RuntimeError`로 덮어쓰던 문제를 수정. 이제 pybind11의 표준
+  예외 변환 경로를 거쳐 원래 Python 예외 객체·타입·사용자 속성·traceback을
+  보존하고, C++ `py::type_error`도 동기 실행과 같은 Python `TypeError`로
+  전달한다. `resume_async`의 빈 callback도 코루틴이 끝날 때까지 보관해
+  pybind11 3.x에서 드러난 dangling-reference 충돌을 함께 막았다.
 
 ### Fixed (docs)
 

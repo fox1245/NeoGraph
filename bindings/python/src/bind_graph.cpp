@@ -189,6 +189,73 @@ std::shared_ptr<py::object> hold_py(py::object obj) {
         });
 }
 
+// Convert a captured C++ exception exactly as pybind11's function dispatcher
+// would, then take ownership of the resulting Python exception object. This
+// preserves py::error_already_set values and applies built-in translators such
+// as py::type_error -> TypeError.
+//
+py::object exception_ptr_to_python(std::exception_ptr eptr) {
+    try {
+        // Calling through cpp_function uses pybind11's public dispatcher,
+        // including registered C++ translators and error_already_set restore.
+        py::cpp_function([eptr] { std::rethrow_exception(eptr); })();
+    } catch (py::error_already_set& translated) {
+        py::object exception = translated.value();
+        if (translated.trace()
+            && PyException_SetTraceback(exception.ptr(),
+                                       translated.trace().ptr()) != 0) {
+            throw py::error_already_set();
+        }
+        return exception;
+    }
+    throw std::logic_error("exception_ptr did not throw");
+}
+
+// C++ callers receive NodeExecutionError as a typed envelope. Python callers
+// retain the original exception object and traceback, with graph context added
+// as structured attributes instead of changing its type, args, or message.
+void translate_node_execution_error(std::exception_ptr eptr) {
+    try {
+        if (eptr) std::rethrow_exception(eptr);
+    } catch (const graph::NodeExecutionError& error) {
+        try {
+            py::object original = exception_ptr_to_python(error.cause());
+            auto add_context = [&](const char* preferred, const char* fallback,
+                                   py::object value) {
+                int has_preferred = PyObject_HasAttrString(original.ptr(), preferred);
+                if (has_preferred < 0) {
+                    PyErr_Clear();
+                    has_preferred = 1;
+                }
+                const char* name = has_preferred ? fallback : preferred;
+                int has_name = PyObject_HasAttrString(original.ptr(), name);
+                if (has_name < 0) {
+                    PyErr_Clear();
+                    return;
+                }
+                if (has_name) return;
+
+                py::str key(name);
+                // BaseException instances have a writable dictionary. Use the
+                // generic setter so a custom __setattr__ cannot replace the
+                // original graph failure with its own AttributeError.
+                if (PyObject_GenericSetAttr(original.ptr(), key.ptr(),
+                                            value.ptr()) != 0) {
+                    PyErr_Clear();
+                }
+            };
+            add_context("node_name", "_neograph_node_name",
+                        py::str(error.node_name()));
+            add_context("attempts", "_neograph_attempts",
+                        py::int_(error.attempts()));
+            PyErr_SetObject(reinterpret_cast<PyObject*>(Py_TYPE(original.ptr())),
+                            original.ptr());
+        } catch (py::error_already_set& translated) {
+            translated.restore();
+        }
+    }
+}
+
 // Drain whatever the asio coroutine produced (RunResult or exception)
 // onto the captured asyncio.Future. Runs on the asio worker thread;
 // hops back to the asyncio loop thread via call_soon_threadsafe so
@@ -216,9 +283,15 @@ std::shared_ptr<py::object> hold_py(py::object obj) {
 template <typename T>
 void resolve_future_async(std::shared_ptr<py::object> future,
                           std::shared_ptr<py::object> loop,
-                          std::exception_ptr eptr,
+                          std::exception_ptr& eptr,
                           T&& result) {
     py::gil_scoped_acquire g;
+    // error_already_set owns Python references; release the completion
+    // callback's copy before gil_scoped_acquire leaves scope.
+    struct ExceptionPtrReset {
+        std::exception_ptr& ptr;
+        ~ExceptionPtrReset() { ptr = nullptr; }
+    } reset{eptr};
     try {
         if (loop->attr("is_closed")().template cast<bool>()) return;
 
@@ -226,16 +299,7 @@ void resolve_future_async(std::shared_ptr<py::object> future,
             py::module_::import("neograph_engine._neograph");
 
         if (eptr) {
-            std::string msg;
-            try {
-                std::rethrow_exception(eptr);
-            } catch (const std::exception& ex) {
-                msg = ex.what();
-            } catch (...) {
-                msg = "neograph: unknown C++ exception in async run";
-            }
-            py::object exc =
-                py::module_::import("builtins").attr("RuntimeError")(msg);
+            py::object exc = exception_ptr_to_python(eptr);
             loop->attr("call_soon_threadsafe")(
                 mod.attr("_safe_set_future_exception"),
                 *future, exc);
@@ -255,6 +319,8 @@ void resolve_future_async(std::shared_ptr<py::object> future,
 
 void init_graph(py::module_& m) {
     using namespace neograph::graph;
+
+    py::register_exception_translator(&translate_node_execution_error);
 
     // ── Topology schema export (issue #56) ───────────────────────────────
     //
