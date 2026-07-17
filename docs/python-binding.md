@@ -76,6 +76,7 @@ result = engine.run(ng.RunConfig(thread_id="t1",
 | Field | Type | Meaning |
 |---|---|---|
 | `output` | `dict` | Final state — `{"channels": {...}, "global_version": int}`. Use `output["channels"][name]["value"]` to read a channel. |
+| `max_steps_exhausted` | `bool` | `True` only when the step ceiling stopped execution while runnable work remained. |
 | `interrupted` | `bool` | `True` if the run paused at an `interrupt_before` / `interrupt_after` / `NodeInterrupt`. |
 | `interrupt_node` | `str` | Name of the node that triggered the interrupt (when `interrupted`). |
 | `interrupt_value` | `dict` | `{"reason": str, "type": "NodeInterrupt", "value": ...}` for a dynamic interrupt (`"value"` present only when the node attached a payload), or `{"message": ...}` for a static `interrupt_before` / `interrupt_after`. |
@@ -88,7 +89,7 @@ result = engine.run(ng.RunConfig(thread_id="t1",
 |---|---|---|
 | `thread_id` | required | Conversation / session identifier — keeps checkpoint streams separate. |
 | `input` | `{}` | Initial channel values — keys must match the graph's `channels` definition. |
-| `max_steps` | 25 | Super-step ceiling; ReAct loops typically need 10+. |
+| `max_steps` | 50 | Super-step ceiling; ReAct loops typically need 10+. |
 | `stream_mode` | `StreamMode.OFF` | Bitmask: `EVENTS \| TOKENS \| DEBUG \| VALUES \| UPDATES \| ALL`. Only consulted by `run_stream` / `run_stream_async`. |
 | `resume_if_exists` | `False` | When `True` and a checkpoint store is configured, the run loads the latest checkpoint for `thread_id` (if any) and applies `input` on top via the channel reducers — multi-turn chat without manually threading prior state through `input`. Default keeps fresh-start semantics for back-compat; for HITL resume from an interrupted run, use `engine.resume_async()` instead. |
 | `cancel_token` | `None` | Optional `CancelToken` for cooperative cancellation. Assign one before `engine.run()`, then call `token.cancel()` from another Python thread. The engine stops at the next super-step boundary; nodes doing long work should poll `input.ctx.cancel_token`. |
