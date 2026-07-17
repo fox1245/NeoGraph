@@ -21,7 +21,6 @@
 #include <asio/this_coro.hpp>
 
 #include <charconv>
-#include <condition_variable>
 #include <iostream>
 #include <stdexcept>
 #include <sstream>
@@ -29,7 +28,6 @@
 #include <random>
 #include <chrono>
 #include <algorithm>
-#include <vector>
 
 namespace neograph::llm {
 
@@ -65,13 +63,13 @@ SchemaProvider::SchemaProvider(Config config, json schema)
 
 SchemaProvider::~SchemaProvider()
 {
-    // Stop the async HTTP loop, but let the sync bridge drain every
-    // accepted stream before its thread and this object's members die.
+    // Order: drop the work guards so each io_context.run() can return,
+    // stop the io_contexts (cancels in-flight ops), then join the
+    // worker threads.
     if (http_work_) http_work_.reset();
     if (bridge_work_) bridge_work_.reset();
     if (http_io_) http_io_->stop();
-    // Do not stop bridge_io_: reset the guard and let run() drain work that
-    // was already accepted before joining the bridge thread.
+    if (bridge_io_) bridge_io_->stop();
     if (http_thread_.joinable()) http_thread_.join();
     if (bridge_thread_.joinable()) bridge_thread_.join();
 }
@@ -1642,77 +1640,40 @@ SchemaProvider::complete_stream_async(const CompletionParams& params,
     // `http_thread_`): the thread is warm after the first call, all
     // subsequent calls reuse the warmed state.
     //
-    // The bridge thread only writes to a shared queue. The awaiting
-    // coroutine drains that queue and invokes the user's callback, so
-    // no executor copy is used after its io_context starts teardown.
+    // Tokens are still dispatched onto the awaiter's executor (so the
+    // user's `on_chunk` runs single-threaded with the awaiting
+    // coroutine — same invariant the post-PR-#10 base default
+    // provides).
     auto exec = co_await asio::this_coro::executor;
     auto bridge_exec = bridge_io_->get_executor();
 
     struct Shared {
-        std::mutex mutex;
-        std::condition_variable cv;
-        bool abandoned = false;
-        bool finished = false;
-        std::vector<std::string> chunks;
         std::optional<ChatCompletion> result;
         std::exception_ptr err;
     };
     auto shared = std::make_shared<Shared>();
 
-    StreamCallback wrapped = [shared](const std::string& chunk) {
-        std::lock_guard lock(shared->mutex);
-        if (shared->abandoned) return;
-        shared->chunks.push_back(chunk);
-    };
+    auto done = std::make_shared<asio::steady_timer>(exec);
+    done->expires_at(std::chrono::steady_clock::time_point::max());
 
-    struct OperationGuard {
-        std::shared_ptr<Shared> shared;
-        bool submitted = false;
-        ~OperationGuard() {
-            if (!submitted) return;
-            std::unique_lock lock(shared->mutex);
-            shared->abandoned = true;
-            shared->cv.wait(lock, [&] { return shared->finished; });
-        }
-    } operation_guard{shared};
+    StreamCallback wrapped = [exec, on_chunk](const std::string& chunk) {
+        asio::dispatch(exec, [on_chunk, chunk]() { on_chunk(chunk); });
+    };
 
     // params copied by value so the bridge thread's work item doesn't
     // outlive the caller's stack-allocated CompletionParams.
     asio::dispatch(bridge_exec,
-        [this, params, wrapped, shared]() mutable {
-            std::optional<ChatCompletion> result;
-            std::exception_ptr err;
+        [this, params, wrapped, shared, done, exec]() mutable {
             try {
-                result = this->complete_stream(params, wrapped);
+                shared->result = this->complete_stream(params, wrapped);
             } catch (...) {
-                err = std::current_exception();
+                shared->err = std::current_exception();
             }
-            {
-                std::lock_guard lock(shared->mutex);
-                shared->result = std::move(result);
-                shared->err = err;
-                shared->finished = true;
-                shared->cv.notify_all();
-            }
+            asio::dispatch(exec, [done]() { done->cancel(); });
         });
-    operation_guard.submitted = true;
 
-    asio::steady_timer poll(exec);
-    for (;;) {
-        std::vector<std::string> chunks;
-        bool finished;
-        {
-            std::lock_guard lock(shared->mutex);
-            chunks.swap(shared->chunks);
-            finished = shared->finished;
-        }
-        for (const auto& chunk : chunks) on_chunk(chunk);
-        if (finished) break;
-
-        poll.expires_after(std::chrono::milliseconds(1));
-        asio::error_code ec;
-        co_await poll.async_wait(asio::redirect_error(asio::use_awaitable, ec));
-    }
+    asio::error_code ec;
+    co_await done->async_wait(asio::redirect_error(asio::use_awaitable, ec));
 
     if (shared->err) std::rethrow_exception(shared->err);
     co_return std::move(*shared->result);

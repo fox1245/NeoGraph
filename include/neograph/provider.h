@@ -205,13 +205,15 @@ class NEOGRAPH_API Provider {
      * @brief Async streaming completion. Awaitable peer of @ref complete_stream.
      *
      * Default implementation (post-#4): spawns a dedicated worker
-     * thread that runs the synchronous `complete_stream` and writes
-     * tokens into a shared queue. The awaiting coroutine drains that
-     * queue and invokes `on_chunk`, so callbacks remain single-threaded
-     * with the awaiter and the worker never touches an executor whose
-     * `io_context` may be tearing down. Subclasses with a fully async
-     * streaming transport (WebSocket Responses, native SSE coroutine,
-     * etc.) SHOULD override this to drop the worker thread entirely.
+     * thread that runs the synchronous `complete_stream`, dispatches
+     * each token onto the awaiting coroutine's executor (so the
+     * user's `on_chunk` runs single-threaded with the awaiter — no
+     * reentrancy), and resumes the coroutine via a one-shot
+     * `steady_timer.cancel()` posted on the awaiter's executor when
+     * streaming finishes. Subclasses with a fully async streaming
+     * transport (WebSocket Responses, native SSE coroutine, etc.)
+     * SHOULD override this to drop the worker thread and stream
+     * tokens straight onto the coroutine's executor.
      *
      * @note Pre-#4 the default was `co_return complete_stream(...)`
      * inline, which blocked the awaiting executor for the whole
@@ -222,9 +224,6 @@ class NEOGRAPH_API Provider {
      * with no implicit io_context reentry. `SchemaProvider` overrides
      * the WebSocket Responses branch to skip even the worker thread
      * (it's already async-native).
-     *
-     * @note As with every asynchronous member function, the Provider
-     * object must outlive the returned awaitable's execution.
      *
      * @note **Subclass override contract for the streaming pair**
      * (mirrors the non-streaming `complete` / `complete_async` pair

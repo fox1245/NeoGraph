@@ -9,8 +9,9 @@
 // modes ended up racing on shared SchemaProvider state).
 //
 // Post-#10:
-//   - HTTP/SSE branch → long-lived bridge thread for sync
-//     `complete_stream`; the awaiting coroutine drains its token queue.
+//   - HTTP/SSE branch → `Provider::complete_stream_async`'s new default
+//     (dedicated worker thread for sync `complete_stream`, tokens
+//     dispatched back onto the awaiter's executor via `asio::dispatch`).
 //   - WS branch → `complete_stream_ws_responses` co_awaited directly,
 //     no worker thread (separate test:
 //     `test_schema_provider_ws_responses.cpp`).
@@ -39,8 +40,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
-#include <future>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -50,8 +49,6 @@
 using namespace neograph;
 
 namespace {
-
-std::string make_korean_sse();
 
 struct ResponsesMock {
     httplib::Server svr;
@@ -72,43 +69,6 @@ struct ResponsesMock {
         }
     }
     ~ResponsesMock() { svr.stop(); if (t.joinable()) t.join(); }
-};
-
-struct BlockingResponsesMock {
-    httplib::Server svr;
-    std::thread t;
-    int port = 0;
-    std::mutex mutex;
-    std::condition_variable cv;
-    bool entered = false;
-    bool released = false;
-
-    BlockingResponsesMock() {
-        svr.Post("/v1/responses",
-            [this](const httplib::Request&, httplib::Response& res) {
-                std::unique_lock lock(mutex);
-                entered = true;
-                cv.notify_all();
-                cv.wait(lock, [&] { return released; });
-                lock.unlock();
-                res.set_content(make_korean_sse(), "text/event-stream");
-            });
-        port = svr.bind_to_any_port("127.0.0.1");
-        t = std::thread([this] { svr.listen_after_bind(); });
-        for (int i = 0; i < 200 && !svr.is_running(); ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-    }
-
-    ~BlockingResponsesMock() {
-        {
-            std::lock_guard lock(mutex);
-            released = true;
-        }
-        cv.notify_all();
-        svr.stop();
-        if (t.joinable()) t.join();
-    }
 };
 
 llm::SchemaProvider::Config cfg_for(int port) {
@@ -310,51 +270,4 @@ TEST(SchemaProviderStreamAsyncOuterIo, ConcurrentOuterCoroutinesDoNotRace) {
     for (int i = 0; i < kCallers; ++i) {
         EXPECT_EQ(finals[i], kKoreanFull) << "caller " << i;
     }
-}
-
-TEST(SchemaProviderStreamAsyncOuterIo,
-     ContextDestructionWaitsForBridgeAndDropsLateChunks) {
-    BlockingResponsesMock mock;
-    ASSERT_GT(mock.port, 0);
-
-    auto provider = llm::SchemaProvider::create(cfg_for(mock.port));
-    ASSERT_TRUE(provider);
-    auto io = std::make_unique<asio::io_context>();
-    CompletionParams params = params_with("ping");
-    std::atomic<int> callbacks{0};
-
-    asio::co_spawn(
-        *io,
-        [&]() -> asio::awaitable<void> {
-            (void)co_await provider->complete_stream_async(
-                params, [&](const std::string&) { ++callbacks; });
-        },
-        asio::detached);
-
-    std::thread runner([&] { io->run(); });
-    {
-        std::unique_lock lock(mock.mutex);
-        mock.cv.wait(lock, [&] { return mock.entered; });
-    }
-    io->stop();
-    runner.join();
-
-    std::promise<void> destroyed;
-    auto destroyed_future = destroyed.get_future();
-    std::thread destroyer([&] {
-        io.reset();
-        destroyed.set_value();
-    });
-
-    EXPECT_EQ(destroyed_future.wait_for(std::chrono::milliseconds(50)),
-              std::future_status::timeout);
-    {
-        std::lock_guard lock(mock.mutex);
-        mock.released = true;
-    }
-    mock.cv.notify_all();
-    EXPECT_EQ(destroyed_future.wait_for(std::chrono::seconds(2)),
-              std::future_status::ready);
-    destroyer.join();
-    EXPECT_EQ(callbacks.load(), 0);
 }

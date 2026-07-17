@@ -151,13 +151,12 @@ class NEOGRAPH_API SchemaProvider : public Provider {
     /// no nested `run_sync`, no shared-state race against the
     /// awaiter's io_context.
     ///
-    /// For the HTTP/SSE path (httplib synchronous) it runs
-    /// `complete_stream` on the provider's long-lived bridge thread.
-    /// The bridge writes tokens to a per-call queue, which the awaiting
-    /// coroutine drains. The engine's io_context stays responsive,
-    /// `on_chunk` remains single-threaded with the awaiter, and the
-    /// bridge never uses an executor whose io_context may be tearing
-    /// down.
+    /// For the HTTP/SSE path (httplib synchronous) it defers to
+    /// `Provider::complete_stream_async`'s base implementation, which
+    /// post-#4 spawns a dedicated worker thread for `complete_stream`
+    /// and dispatches tokens back onto the awaiter's executor — so
+    /// the engine's io_context worker stays responsive and the user
+    /// `on_chunk` runs single-threaded with the awaiting coroutine.
     asio::awaitable<ChatCompletion>
     complete_stream_async(const CompletionParams& params,
                           const StreamCallback& on_chunk) override;
