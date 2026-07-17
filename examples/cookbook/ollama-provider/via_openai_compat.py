@@ -54,17 +54,12 @@ def main() -> int:
 
     graph_def = {
         "name": "ollama-compat",
+        "schema_version": 1,
         "channels": {"messages": {"reducer": "append"}},
-        "nodes": {
-            "classify": {"type": "llm_call",
-                "config": {"system": "Classify the user's question type in ONE word."}},
-            "respond": {"type": "llm_call",
-                "config": {"system": "Answer the user concisely (one sentence)."}},
-        },
+        "nodes": {"answer": {"type": "llm_call"}},
         "edges": [
-            {"from": ng.START_NODE, "to": "classify"},
-            {"from": "classify",     "to": "respond"},
-            {"from": "respond",      "to": ng.END_NODE},
+            {"from": ng.START_NODE, "to": "answer"},
+            {"from": "answer",     "to": ng.END_NODE},
         ],
     }
     engine = ng.GraphEngine.compile(graph_def, ctx)

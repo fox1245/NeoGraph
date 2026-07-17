@@ -65,9 +65,22 @@ def test_edge_fields_reject_scalar_values(field, value, schema_version):
         ng.GraphEngine.compile(definition, ng.NodeContext())
 
 
-def test_legacy_edges_keep_keyed_object_compatibility():
+@pytest.mark.parametrize(
+    "field,entry",
+    [
+        ("edges", {"direct": {"from": ng.START_NODE, "to": ng.END_NODE}}),
+        ("conditional_edges", {
+            "branch": {
+                "from": ng.START_NODE,
+                "condition": "route",
+                "routes": {"done": ng.END_NODE},
+            }
+        }),
+    ],
+)
+def test_legacy_edge_fields_keep_keyed_object_compatibility(field, entry):
     definition = {
         "nodes": {},
-        "edges": {"direct": {"from": ng.START_NODE, "to": ng.END_NODE}},
+        field: entry,
     }
     ng.GraphEngine.compile(definition, ng.NodeContext())
