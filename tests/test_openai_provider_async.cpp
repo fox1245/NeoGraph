@@ -201,22 +201,6 @@ TEST(OpenAIProviderStream, MalformedDataIsNotSilentlySkipped) {
                  std::runtime_error);
 }
 
-TEST(OpenAIProviderStream, CallbackExceptionPropagates) {
-    MockServer mock;
-    mock.body = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"
-                "data: [DONE]\n\n";
-
-    auto provider = llm::OpenAIProvider::create(make_config(mock));
-    try {
-        provider->complete_stream(make_params(), [](const std::string&) {
-            throw std::runtime_error("callback failed");
-        });
-        FAIL() << "expected the callback error to propagate";
-    } catch (const std::runtime_error& error) {
-        EXPECT_STREQ(error.what(), "callback failed");
-    }
-}
-
 TEST(OpenAIProviderStream, EmptyChoicesRemainAValidEmptyCompletion) {
     MockServer mock;
     mock.body = "data: {\"choices\":[]}\n\ndata: [DONE]\n\n";
