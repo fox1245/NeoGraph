@@ -10,6 +10,7 @@
 #include <asio/this_coro.hpp>
 
 #include <charconv>
+#include <exception>
 #include <iostream>
 #include <stdexcept>
 #include <sstream>
@@ -26,8 +27,10 @@ OpenAIProvider::OpenAIProvider(Config config)
     // throw-away io_context per call, so the pool can't live there.
     http_io_ = std::make_unique<asio::io_context>();
     http_work_.emplace(asio::make_work_guard(*http_io_));
-    http_thread_ = std::thread([io = http_io_.get()]{ io->run(); });
     conn_pool_ = std::make_unique<async::ConnPool>(http_io_->get_executor());
+    // Start the thread only after every other constructor step succeeds.
+    // A joinable std::thread aborts the process if a later step throws.
+    http_thread_ = std::thread([io = http_io_.get()]{ io->run(); });
 }
 
 OpenAIProvider::~OpenAIProvider()
@@ -193,27 +196,57 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
 
     // Buffer for partial SSE lines across chunk boundaries
     std::string line_buffer;
+    std::exception_ptr stream_error;
 
-    auto res = cli.Post(
-        prefix + "/v1/chat/completions", headers, body.dump(), "application/json",
-        [&](const char* data, size_t len) -> bool {
-            line_buffer.append(data, len);
+    int response_status = 0;
+    std::string error_body;
+    httplib::Request request;
+    request.method = "POST";
+    request.path = prefix + "/v1/chat/completions";
+    request.headers = headers;
+    request.body = body.dump();
+    request.set_header("Content-Type", "application/json");
+    request.response_handler = [&](const httplib::Response& response) {
+        response_status = response.status;
+        return true;
+    };
+    request.content_receiver =
+        [&](const char* data, size_t len, size_t, size_t) -> bool {
+            if (response_status != 200) {
+                error_body.append(data, len);
+                return true;
+            }
+            try {
+                line_buffer.append(data, len);
 
-            // Process complete lines only
-            size_t pos;
-            while ((pos = line_buffer.find('\n')) != std::string::npos) {
-                std::string line = line_buffer.substr(0, pos);
-                line_buffer.erase(0, pos + 1);
+                // Process complete lines only
+                size_t pos;
+                while ((pos = line_buffer.find('\n')) != std::string::npos) {
+                    std::string line = line_buffer.substr(0, pos);
+                    line_buffer.erase(0, pos + 1);
 
-                // Remove \r
-                if (!line.empty() && line.back() == '\r') line.pop_back();
+                    // Remove \r
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
 
-                if (line.rfind("data: ", 0) != 0) continue;
-                std::string payload = line.substr(6);
-                if (payload == "[DONE]") continue;
+                    if (line.rfind("data:", 0) != 0) continue;
+                    std::string payload = line.substr(5);
+                    if (!payload.empty() && payload.front() == ' ') {
+                        payload.erase(0, 1);
+                    }
+                    if (payload.empty() || payload == "[DONE]") continue;
 
-                try {
-                    auto j = json::parse(payload);
+                    json j;
+                    try {
+                        j = json::parse(payload);
+                    } catch (const json::parse_error& error) {
+                        throw std::runtime_error(
+                            "Malformed SSE data JSON: " + payload +
+                            " (" + error.what() + ")");
+                    }
+
+                    if (j.is_object() && j.contains("error")) {
+                        throw std::runtime_error("API stream error: " + payload);
+                    }
 
                     // The final chunk (after include_usage=true) has
                     // usage populated but an empty choices array. Capture
@@ -232,9 +265,7 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
                     }
 
                     if (!j.contains("choices") || !j["choices"].is_array()
-                        || j["choices"].empty()) {
-                        continue;
-                    }
+                        || j["choices"].empty()) continue;
                     auto delta = j["choices"][0]["delta"];
 
                     // Content token
@@ -259,16 +290,33 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
                             }
                         }
                     }
-                } catch (...) {
-                    // Skip malformed chunks
                 }
+            } catch (...) {
+                stream_error = std::current_exception();
+                return false;
             }
             return true; // continue receiving
-        }
-    );
+        };
+
+    auto res = cli.send(request);
+
+    if (response_status != 0 && response_status != 200) {
+        throw std::runtime_error(
+            "API error (HTTP " + std::to_string(response_status) + "): " +
+            error_body);
+    }
+
+    // Returning false from httplib's receiver becomes Error::Canceled.
+    // Preserve the actual parser, API, or user callback exception instead.
+    if (stream_error) std::rethrow_exception(stream_error);
 
     if (!res) {
         throw std::runtime_error("HTTP request failed: " + httplib::to_string(res.error()));
+    }
+
+    if (!line_buffer.empty()) {
+        throw std::runtime_error(
+            "Malformed SSE stream: unterminated line: " + line_buffer);
     }
 
     if (res->status != 200) {

@@ -48,7 +48,7 @@ message RunGraphRequest {
   // RunConfig::input.
   string input_json = 3;
 
-  // Super-step ceiling. 0 → engine default (25).
+  // Super-step ceiling. 0 → engine default (50).
   uint32 max_steps = 4;
 
   // Stream mode bitmask for RunGraphStream (EVENTS=1, TOKENS=2,
@@ -77,6 +77,10 @@ message RunGraphResponse {
   // Set on engine-side failure instead of a transport error, so the
   // caller distinguishes "graph threw" from "gRPC broke".
   string error = 7;
+
+  // True when max_steps stopped execution while runnable work remained.
+  // Added at a new field number to preserve protobuf wire compatibility.
+  bool max_steps_exhausted = 8;
 }
 
 message GraphEvent {

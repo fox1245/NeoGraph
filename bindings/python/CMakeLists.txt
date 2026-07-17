@@ -189,6 +189,7 @@ configure_file(neograph_engine/streaming.py     "${_NEOGRAPH_PY_PKG_DIR}/streami
 configure_file(neograph_engine/tracing.py       "${_NEOGRAPH_PY_PKG_DIR}/tracing.py"       COPYONLY)
 configure_file(neograph_engine/state_view.py    "${_NEOGRAPH_PY_PKG_DIR}/state_view.py"    COPYONLY)
 configure_file(neograph_engine/openinference.py "${_NEOGRAPH_PY_PKG_DIR}/openinference.py" COPYONLY)
+configure_file(neograph_engine/protocol.py      "${_NEOGRAPH_PY_PKG_DIR}/protocol.py"      COPYONLY)
 
 # Install rule for the wheel build. Tagged with the same component as
 # the engine .so files in the root CMakeLists, so a single
@@ -212,6 +213,7 @@ install(FILES
     neograph_engine/tracing.py
     neograph_engine/state_view.py
     neograph_engine/openinference.py
+    neograph_engine/protocol.py
     DESTINATION neograph_engine)
 
 # Make smoke tests runnable straight from the build tree:

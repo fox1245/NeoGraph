@@ -79,6 +79,24 @@ classifiers = [
 # already has pydantic in the env.
 dependencies = ["certifi", "pydantic>=2.0"]
 
+# Protocol servers are intentionally optional. Their official Python SDKs own
+# fast-moving wire formats and require Python 3.10+, while the NeoGraph wheel
+# itself still supports Python 3.9. The pure-Python ProtocolHostAdapter has no
+# extra dependency and remains available on every supported Python version.
+[project.optional-dependencies]
+a2a = [
+    "a2a-sdk[http-server]>=1.1,<2; python_version >= '3.10'",
+    "uvicorn>=0.35; python_version >= '3.10'",
+]
+acp = [
+    "agent-client-protocol==0.11.0; python_version >= '3.10'",
+]
+protocols = [
+    "a2a-sdk[http-server]>=1.1,<2; python_version >= '3.10'",
+    "uvicorn>=0.35; python_version >= '3.10'",
+    "agent-client-protocol==0.11.0; python_version >= '3.10'",
+]
+
 [project.urls]
 Homepage      = "https://github.com/fox1245/NeoGraph"
 Repository    = "https://github.com/fox1245/NeoGraph"

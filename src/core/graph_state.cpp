@@ -28,12 +28,8 @@ void GraphState::init_channel(const std::string& name,
                                ReducerFn reducer,
                                const json& initial_value) {
     std::unique_lock lock(mutex_);
-    Channel ch;
-    ch.name         = name;
-    ch.reducer_type = type;
-    ch.reducer      = std::move(reducer);
-    ch.value        = initial_value;
-    channels_[name] = std::move(ch);
+    channels_.insert_or_assign(
+        name, Channel{name, type, std::move(reducer), initial_value, 0});
 }
 
 json GraphState::get(const std::string& channel) const {

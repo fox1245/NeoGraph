@@ -26,6 +26,43 @@ namespace py = pybind11;
 
 namespace neograph::pybind {
 
+namespace {
+
+class PyStore : public neograph::graph::Store {
+public:
+    using Store::Store;
+
+    void put(const neograph::graph::Namespace& ns, const std::string& key,
+             const neograph::json& value) override {
+        PYBIND11_OVERRIDE_PURE(void, Store, put, ns, key, json_to_py(value));
+    }
+
+    std::optional<neograph::graph::StoreItem>
+    get(const neograph::graph::Namespace& ns, const std::string& key) const override {
+        PYBIND11_OVERRIDE_PURE(std::optional<neograph::graph::StoreItem>,
+                               Store, get, ns, key);
+    }
+
+    std::vector<neograph::graph::StoreItem>
+    search(const neograph::graph::Namespace& ns_prefix, int limit) const override {
+        PYBIND11_OVERRIDE_PURE(std::vector<neograph::graph::StoreItem>,
+                               Store, search, ns_prefix, limit);
+    }
+
+    void delete_item(const neograph::graph::Namespace& ns,
+                     const std::string& key) override {
+        PYBIND11_OVERRIDE_PURE(void, Store, delete_item, ns, key);
+    }
+
+    std::vector<neograph::graph::Namespace>
+    list_namespaces(const neograph::graph::Namespace& prefix) const override {
+        PYBIND11_OVERRIDE_PURE(std::vector<neograph::graph::Namespace>,
+                               Store, list_namespaces, prefix);
+    }
+};
+
+}  // namespace
+
 void init_parity(py::module_& m) {
     using namespace neograph::graph;
 
@@ -38,14 +75,16 @@ void init_parity(py::module_& m) {
     py::class_<StoreItem>(m, "StoreItem",
         "One item in the Store: its namespace, its key, its value, and when it "
         "was written.")
-        .def_readonly("ns",  &StoreItem::ns,
+        .def(py::init([]() { return StoreItem{}; }))
+        .def_readwrite("ns",  &StoreItem::ns,
             "Hierarchical namespace, e.g. [\"users\", \"u1\", \"prefs\"].")
-        .def_readonly("key", &StoreItem::key)
-        .def_property_readonly("value",
-            [](const StoreItem& i) { return json_to_py(i.value); })
-        .def_readonly("created_at", &StoreItem::created_at,
+        .def_readwrite("key", &StoreItem::key)
+        .def_property("value",
+            [](const StoreItem& i) { return json_to_py(i.value); },
+            [](StoreItem& i, py::object value) { i.value = py_to_json(value); })
+        .def_readwrite("created_at", &StoreItem::created_at,
             "Unix epoch milliseconds.")
-        .def_readonly("updated_at", &StoreItem::updated_at,
+        .def_readwrite("updated_at", &StoreItem::updated_at,
             "Unix epoch milliseconds.")
         .def("__repr__", [](const StoreItem& i) {
             std::string ns;
@@ -53,13 +92,25 @@ void init_parity(py::module_& m) {
             return "<StoreItem " + ns + "/" + i.key + ">";
         });
 
-    py::class_<Store, std::shared_ptr<Store>>(m, "Store",
+    py::class_<Store, PyStore, std::shared_ptr<Store>>(m, "Store",
         "Cross-thread long-term memory, namespaced key/value.\n\n"
         "Where a checkpoint remembers one conversation, a Store remembers the "
         "user across all of them. Install one with ``engine.set_store(store)``; "
         "node bodies then reach it through ``input.ctx.store``.\n\n"
         "Abstract — use InMemoryStore, or subclass this to back it with a "
-        "database.");
+        "database.")
+        .def(py::init<>())
+        .def("put",
+            [](Store& self, const Namespace& ns, const std::string& key,
+               py::object value) { self.put(ns, key, py_to_json(value)); },
+            py::arg("ns"), py::arg("key"), py::arg("value"))
+        .def("get", &Store::get, py::arg("ns"), py::arg("key"))
+        .def("search", &Store::search,
+            py::arg("ns_prefix"), py::arg("limit") = 100)
+        .def("delete_item", &Store::delete_item,
+            py::arg("ns"), py::arg("key"))
+        .def("list_namespaces", &Store::list_namespaces,
+            py::arg("prefix") = Namespace{});
 
     py::class_<InMemoryStore, Store, std::shared_ptr<InMemoryStore>>(
         m, "InMemoryStore",
