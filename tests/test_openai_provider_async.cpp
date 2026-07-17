@@ -192,6 +192,26 @@ TEST(OpenAIProviderStream, TopLevelErrorIsNotAnEmptySuccess) {
     }
 }
 
+TEST(OpenAIProviderStream, ErrorAfterContentStillFailsTheCompletion) {
+    MockServer mock;
+    mock.body = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"
+                "data: {\"error\":\"STREAM_EXPLODED\"}\n\n"
+                "data: [DONE]\n\n";
+
+    auto provider = llm::OpenAIProvider::create(make_config(mock));
+    std::string streamed_content;
+    try {
+        provider->complete_stream(make_params(), [&](const std::string& chunk) {
+            streamed_content += chunk;
+        });
+        FAIL() << "expected the stream error to propagate";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("STREAM_EXPLODED"),
+                  std::string::npos);
+    }
+    EXPECT_EQ(streamed_content, "partial");
+}
+
 TEST(OpenAIProviderStream, MalformedDataIsNotSilentlySkipped) {
     MockServer mock;
     mock.body = "data: {not-json}\n\ndata: [DONE]\n\n";
@@ -199,6 +219,36 @@ TEST(OpenAIProviderStream, MalformedDataIsNotSilentlySkipped) {
     auto provider = llm::OpenAIProvider::create(make_config(mock));
     EXPECT_THROW(provider->complete_stream(make_params(), {}),
                  std::runtime_error);
+}
+
+TEST(OpenAIProviderStream, UnterminatedDataIsNotAnEmptySuccess) {
+    MockServer mock;
+    mock.body = "data: {\"error\":\"STREAM_EXPLODED\"}";
+
+    auto provider = llm::OpenAIProvider::create(make_config(mock));
+    EXPECT_THROW(provider->complete_stream(make_params(), {}),
+                 std::runtime_error);
+}
+
+TEST(OpenAIProviderStream, SuccessfulContentAndUsageRemainIntact) {
+    MockServer mock;
+    mock.body = "data: {\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\n"
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,"
+                "\"completion_tokens\":2,\"total_tokens\":9}}\n\n"
+                "data: [DONE]\n\n";
+
+    auto provider = llm::OpenAIProvider::create(make_config(mock));
+    std::string streamed_content;
+    auto completion = provider->complete_stream(
+        make_params(), [&](const std::string& chunk) {
+            streamed_content += chunk;
+        });
+
+    EXPECT_EQ(streamed_content, "pong");
+    EXPECT_EQ(completion.message.content, "pong");
+    EXPECT_EQ(completion.usage.prompt_tokens, 7);
+    EXPECT_EQ(completion.usage.completion_tokens, 2);
+    EXPECT_EQ(completion.usage.total_tokens, 9);
 }
 
 TEST(OpenAIProviderStream, EmptyChoicesRemainAValidEmptyCompletion) {
