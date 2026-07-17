@@ -20,6 +20,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed (docs)
 
+- **Provider cookbook의 무시되던 노드별 prompt 제거 (issue #116).** 세 Python
+  예제가 built-in `llm_call`이 읽지 않는 `config.system`으로 여러 역할을
+  수행한다고 설명하던 문제를 수정했다. 각 예제를
+  `NodeContext.instructions`를 쓰는 strict 단일 호출 graph로 바꾸고 관련
+  README를 실제 동작에 맞췄다.
 - **예약된 `RunContext::deadline` 설명 정정 (issue #115).** 현재
   `RunConfig`로 설정할 수 없고 Python에도 노출되지 않는 `deadline`과
   `trace_id`를 사용 가능한 per-run metadata처럼 안내하던 문서와 Doxygen
@@ -262,6 +267,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       재발 방지).
 
 ### Fixed
+
+- **`max_steps` 종료 상태 노출 (#114).**
+  `RunResult::max_steps_exhausted()`와 Python의 읽기 전용
+  `RunResult.max_steps_exhausted` 속성을 추가했다. 실행할 노드가 남은 상태에서
+  `max_steps`에 도달했을 때만 참이며, 같은 상태를 gRPC 단건 응답과 스트리밍
+  마지막 JSON에서도 제공한다. C++ 구조체 크기는 바꾸지 않았다.
 
 - **`set_worker_count` / `set_worker_count_auto` docstring 정정
   (issue #62, PR #63).** v1.0 prep 사이클에 `compile()` 의 worker pool

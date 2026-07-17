@@ -505,6 +505,9 @@ void init_graph(py::module_& m) {
         .def(py::init<>())
         .def_property_readonly("output",
             [](const RunResult& r) { return json_to_py(r.output); })
+        .def_property_readonly("max_steps_exhausted",
+            &RunResult::max_steps_exhausted,
+            "True when max_steps stopped execution while runnable work remained.")
         .def_readonly("interrupted",     &RunResult::interrupted)
         .def_readonly("interrupt_node",  &RunResult::interrupt_node)
         .def_property_readonly("interrupt_value",

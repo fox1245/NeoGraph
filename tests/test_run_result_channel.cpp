@@ -126,3 +126,25 @@ TEST(RunResultChannel, WrappedWithoutValueKeyFallsThroughToFlatLookup) {
     };
     EXPECT_EQ(r.channel<std::string>("weird"), "from-flat");
 }
+
+TEST(RunResultStatus, MaxStepsExhaustedReadsReservedMarker) {
+    RunResult r;
+    r.output = json{{"_neograph", {{"max_steps_exhausted", true}}}};
+    EXPECT_TRUE(r.max_steps_exhausted());
+}
+
+TEST(RunResultStatus, MaxStepsExhaustedRejectsMalformedOrCollidingJson) {
+    RunResult r;
+
+    r.output = json("not an object");
+    EXPECT_FALSE(r.max_steps_exhausted());
+
+    r.output = json{{"_neograph", "user collision"}};
+    EXPECT_FALSE(r.max_steps_exhausted());
+
+    r.output = json{{"_neograph", {{"max_steps_exhausted", "true"}}}};
+    EXPECT_FALSE(r.max_steps_exhausted());
+
+    r.output = json{{"_neograph", {{"max_steps_exhausted", false}}}};
+    EXPECT_FALSE(r.max_steps_exhausted());
+}
