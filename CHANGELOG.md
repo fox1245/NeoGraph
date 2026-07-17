@@ -268,6 +268,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **토폴로지 최상위 컨테이너 형식 검증 (#126).** `channels`/`nodes`는
+  객체가 아니면 모든 모드에서 거부한다. `edges`/`conditional_edges`의
+  배열 검증은 strict 모드에서 강제하며, legacy의 keyed edge map 호환성은
+  유지한다. 오류에는 전체 입력 대신 경로와 JSON 종류만 기록한다.
 - **`max_steps` 종료 상태 노출 (#114).**
   `RunResult::max_steps_exhausted()`와 Python의 읽기 전용
   `RunResult.max_steps_exhausted` 속성을 추가했다. 실행할 노드가 남은 상태에서
