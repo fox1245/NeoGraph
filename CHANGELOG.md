@@ -18,7 +18,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `.node_name`과 `.attempts` 속성만 추가한다. `NodeInterrupt`, 취소, 메모리
   부족 예외는 기존 제어 흐름대로 감싸지 않는다.
 
+### Fixed (docs)
+
+- **예약된 `RunContext::deadline` 설명 정정 (issue #115).** 현재
+  `RunConfig`로 설정할 수 없고 Python에도 노출되지 않는 `deadline`과
+  `trace_id`를 사용 가능한 per-run metadata처럼 안내하던 문서와 Doxygen
+  주석을 수정했다.
+- **`GraphNode::run` 예제 서명 수정 (issue #129).** 공개 헤더 예제가 실제
+  by-value virtual과 달리 `const NodeInput&`를 받아 override에 실패하던 문제를
+  수정하고, 코루틴 인자 수명에 필요한 by-value 계약을 compile-time test로
+  고정했다.
+
 ### Added
+
+- **Python persistence backends** (#117) — `Store` and `CheckpointStore` are
+  now constructible subclass bases with C++ virtual dispatch into Python.
+  `StoreItem`, `CheckpointPhase`, `Checkpoint`, and `PendingWrite` are exposed
+  with JSON-shaped fields; checkpoint pending-write methods remain optional.
+- **Python synchronous cancellation** (#119) — Python callers can construct a
+  `CancelToken`, assign it to `RunConfig.cancel_token`, and cooperatively stop
+  `engine.run()` from another thread.
+
+- **Python checkpoint history** (#118) — `GraphEngine.get_state_history()`
+  exposes newest-first checkpoint records so callers can inspect parent links,
+  metadata, steps, and IDs before forking from a historical state.
 
 - **DSL 표면 (elaboration 계층) + 스키마 진화 게이트** (#75 M4).
   - **Elaborator**: `vars`(`{"$var":...}`·`${...}` 보간, 비순환 강제) /
@@ -825,17 +848,18 @@ The opening release of the v1.0 sharpening track (ROADMAP_v1.md).
 The 8-virtual `GraphNode` cross-product (`execute` / `execute_async` /
 `execute_full` / … / `execute_full_stream_async`) collapses to a
 single canonical method: `run(NodeInput) -> awaitable<NodeOutput>`.
-Per-run metadata (cancel token, deadline, trace_id) moves from a
-non-channel-set `GraphState` member + a thread-local smuggling
-channel into an explicit `RunContext` argument. `CancelToken` gains
+Per-run cancellation metadata moves from a non-channel-set `GraphState`
+member + a thread-local smuggling channel into an explicit `RunContext`
+argument. `deadline` and `trace_id` were added only as reserved extension
+slots and are not populated by `RunConfig`. `CancelToken` gains
 hierarchical `fork()` so multi-Send fan-out workers each own a
 private signal that the parent's `cancel()` cascades to.
 
 ### Added
 
-- `RunContext` (`include/neograph/graph/engine.h`) — explicit
-  per-run metadata: `cancel_token`, `deadline`, `trace_id`,
-  `thread_id`, `step`, `stream_mode`. Engine threads through every
+- `RunContext` (`include/neograph/graph/engine.h`) — explicit per-run metadata:
+  usable `cancel_token`, `thread_id`, `step`, `stream_mode`, plus reserved
+  `deadline` and `trace_id` slots. Engine threads it through every
   `NodeExecutor::run` call. **PR 1, commit `a473f0e`.**
 - `GraphNode::run(NodeInput) -> awaitable<NodeOutput>` — single
   canonical dispatch entry point. `NodeInput { state, ctx,

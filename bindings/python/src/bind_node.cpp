@@ -533,16 +533,17 @@ void init_node(py::module_& m) {
     // ── CancelToken (v0.4 PR 7: exposed so Python users can read /
     // cancel through ``input.ctx.cancel_token``) ────────────────────────
     //
-    // Construction from Python is intentionally not exposed — the engine
-    // owns lifecycle. ``RunConfig.cancel_token`` already accepts a
-    // shared_ptr<CancelToken> via the existing wiring; this just makes
-    // the *read* side usable from a node body.
+    // Python callers can construct a token and attach it to
+    // RunConfig.cancel_token to stop a synchronous run from another thread.
+    // Nodes can also read the active token through input.ctx.cancel_token.
     py::class_<CancelToken, std::shared_ptr<CancelToken>>(m, "CancelToken",
-        "Cooperative cancel handle for an in-flight run. Engine "
-        "constructs these; nodes read ``input.ctx.cancel_token`` and "
+        "Cooperative cancel handle for an in-flight run. Callers may attach "
+        "one to ``RunConfig.cancel_token``; nodes read "
+        "``input.ctx.cancel_token`` and "
         "either pass it to ``provider.complete(params)`` (so an LLM "
         "HTTP socket aborts on cancel) or poll ``is_cancelled()`` for "
         "their own loops.")
+        .def(py::init<>())
         .def("is_cancelled", &CancelToken::is_cancelled,
             "Lock-free polling read of the cancel flag.")
         .def("cancel", &CancelToken::cancel,
@@ -552,12 +553,12 @@ void init_node(py::module_& m) {
     //
     // Exposed read-only — the engine constructs and owns the RunContext;
     // Python users read it from ``NodeInput.ctx`` inside their ``run()``
-    // override. Currently exposes the four fields a user is most likely
-    // to consume: cancel_token (so they can pass it explicitly to
+    // override. Currently exposes six user-facing fields:
+    // cancel_token (so they can pass it explicitly to
     // provider.complete instead of relying on the smuggling thread-local),
     // step (super-step counter), thread_id (RunConfig.thread_id), and
-    // stream_mode. ``deadline`` and ``trace_id`` are reserved for
-    // future RunConfig fields and stay default-constructed for now.
+    // stream_mode, store, and resume_value. ``deadline`` and ``trace_id`` are
+    // reserved for future RunConfig fields and stay default-constructed for now.
     py::class_<RunContext>(m, "RunContext",
         "Per-run dispatch metadata threaded by the engine. New nodes "
         "read this from ``input.ctx`` inside their ``run(input)`` "

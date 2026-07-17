@@ -223,7 +223,8 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
         if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
             json data;
             if (attempt > 0) data["retry_attempt"] = attempt;
-            cb(GraphEvent{GraphEvent::Type::NODE_START, node_name, data});
+            cb(GraphEvent{GraphEvent::Type::NODE_START, node_name,
+                          std::move(data)});
         }
 
         // Capture the outcome of one attempt without co_await inside a
@@ -292,7 +293,8 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
                         end_data["command_goto"] = nr.command->goto_node;
                     if (!nr.sends.empty())
                         end_data["sends"] = (int)nr.sends.size();
-                    cb(GraphEvent{GraphEvent::Type::NODE_END, node_name, end_data});
+                    cb(GraphEvent{GraphEvent::Type::NODE_END, node_name,
+                                  std::move(end_data)});
                 }
             }
             if (cache_eligible) {
@@ -670,7 +672,8 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
         }
         json data;
         data["sends"] = send_info;
-        cb(GraphEvent{GraphEvent::Type::NODE_START, "__send__", data});
+        cb(GraphEvent{GraphEvent::Type::NODE_START, "__send__",
+                      std::move(data)});
     }
 
     // --- Single Send: sequential on shared state, with retry. ---
