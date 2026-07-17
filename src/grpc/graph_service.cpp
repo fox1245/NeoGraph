@@ -48,6 +48,7 @@ public:
             resp->set_interrupt_node(r.interrupt_node);
             resp->set_interrupt_value_json(r.interrupt_value.dump());
             resp->set_checkpoint_id(r.checkpoint_id);
+            resp->set_max_steps_exhausted(r.max_steps_exhausted());
             for (const auto& n : r.execution_trace)
                 resp->add_execution_trace(n);
         } catch (const std::exception& e) {
@@ -91,11 +92,12 @@ public:
             pb::GraphEvent fin;
             fin.set_kind(pb::GraphEvent::FINAL);
             neograph::json f = {
-                {"output",          r.output},
-                {"interrupted",     r.interrupted},
-                {"interrupt_node",  r.interrupt_node},
-                {"checkpoint_id",   r.checkpoint_id},
-                {"execution_trace", r.execution_trace},
+                {"output",              r.output},
+                {"interrupted",         r.interrupted},
+                {"interrupt_node",      r.interrupt_node},
+                {"checkpoint_id",       r.checkpoint_id},
+                {"execution_trace",     r.execution_trace},
+                {"max_steps_exhausted", r.max_steps_exhausted()},
             };
             fin.set_payload_json(f.dump());
             writer->Write(fin);

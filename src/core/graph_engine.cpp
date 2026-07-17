@@ -820,6 +820,11 @@ GraphEngine::execute_graph_async(const RunConfig& config,
     result.usage = ctx.usage->snapshot();   // #88
     result.output          = state.serialize();
     result.execution_trace = std::move(trace);
+    if (!ready.empty()) {
+        result.output["_neograph"] = json{
+            {"max_steps_exhausted", true}
+        };
+    }
     if (!last_checkpoint_id.empty()) {
         result.checkpoint_id = last_checkpoint_id;
     }
