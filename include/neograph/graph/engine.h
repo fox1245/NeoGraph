@@ -715,7 +715,7 @@ private:
         const RunConfig& config,
         const GraphStreamCallback& cb,
         const std::vector<std::string>& resume_from = {},
-        const json& resume_value = json());
+        const json* resume_value = nullptr);
 
     RetryPolicy get_retry_policy(const std::string& node_name) const;
 
