@@ -296,6 +296,10 @@ class MicCapture {
     std::atomic<bool>                 listening_{false};  // 듣는 중에만 발화 큐잉
     std::thread                       worker_;
 };
+#else
+// Keep the pimpl type complete when live audio dependencies are absent.
+// Mock mode never constructs it, but unique_ptr still instantiates its deleter.
+class MicCapture {};
 #endif  // JARVIS_LIVE_MIC
 
 // ─────────────────────────────────────────────────────────────────────────────

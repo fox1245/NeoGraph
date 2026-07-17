@@ -11,6 +11,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **JARVIS mock 빌드 복구 (issue #130).** 음성 의존성이 없을 때
+  `MicCapture`가 불완전한 타입으로 남아 `cookbook_jarvis` 컴파일이 실패하던
+  문제를 수정했다. `NEOGRAPH_JARVIS_FORCE_MOCK`을 추가해 ASan CI가 runner의
+  설치 패키지와 관계없이 외부 음성 의존성 없는 mock 구성을 항상 빌드한다.
 - **노드 실패 문맥 보존 (issue #123).** C++ 실행 오류를 원래
   `exception_ptr`과 실패 노드 이름·시도 횟수를 담은 `NodeExecutionError`로
   전달하고, terminal `ERROR` event에도 같은 문맥을 기록한다. Python에서는

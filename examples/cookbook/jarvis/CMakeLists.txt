@@ -43,25 +43,30 @@ endforeach()
 
 # ── 외부 의존 — 없어도 빌드 계속 (mock-first 전략) ──────────────────────────
 
+option(NEOGRAPH_JARVIS_FORCE_MOCK
+    "Build JARVIS without optional voice dependencies" OFF)
+
 # 프로젝트 로컬 third_party 경로 (시스템 의존 0 — 모두 cookbook 안)
 set(_jarvis_local_tp "${CMAKE_CURRENT_LIST_DIR}/third_party")
 
 # onnxruntime — 없으면 JARVIS_HAVE_ONNXRUNTIME=OFF, 빌드는 계속
 set(JARVIS_HAVE_ONNXRUNTIME OFF)
-find_package(onnxruntime QUIET CONFIG)
-if(onnxruntime_FOUND)
-    set(JARVIS_HAVE_ONNXRUNTIME ON)
-else()
-    # third_party/onnxruntime 우선, 없으면 시스템 경로
-    find_path(ONNXRUNTIME_INCLUDE_DIR
-        NAMES onnxruntime_cxx_api.h
-        HINTS ${_jarvis_local_tp}/onnxruntime/include
-        PATH_SUFFIXES onnxruntime)
-    find_library(ONNXRUNTIME_LIB
-        NAMES onnxruntime libonnxruntime
-        HINTS ${_jarvis_local_tp}/onnxruntime/lib)
-    if(ONNXRUNTIME_INCLUDE_DIR AND ONNXRUNTIME_LIB)
+if(NOT NEOGRAPH_JARVIS_FORCE_MOCK)
+    find_package(onnxruntime QUIET CONFIG)
+    if(onnxruntime_FOUND)
         set(JARVIS_HAVE_ONNXRUNTIME ON)
+    else()
+        # third_party/onnxruntime 우선, 없으면 시스템 경로
+        find_path(ONNXRUNTIME_INCLUDE_DIR
+            NAMES onnxruntime_cxx_api.h
+            HINTS ${_jarvis_local_tp}/onnxruntime/include
+            PATH_SUFFIXES onnxruntime)
+        find_library(ONNXRUNTIME_LIB
+            NAMES onnxruntime libonnxruntime
+            HINTS ${_jarvis_local_tp}/onnxruntime/lib)
+        if(ONNXRUNTIME_INCLUDE_DIR AND ONNXRUNTIME_LIB)
+            set(JARVIS_HAVE_ONNXRUNTIME ON)
+        endif()
     endif()
 endif()
 if(NOT JARVIS_HAVE_ONNXRUNTIME)
@@ -72,17 +77,19 @@ endif()
 
 # whisper.cpp — 없으면 JARVIS_HAVE_WHISPER=OFF, 빌드는 계속
 set(JARVIS_HAVE_WHISPER OFF)
-find_package(whisper QUIET CONFIG)
-if(whisper_FOUND)
-    set(JARVIS_HAVE_WHISPER ON)
-else()
-    # third_party/whisper_install 우선
-    find_path(WHISPER_INCLUDE_DIR NAMES whisper.h
-        HINTS ${_jarvis_local_tp}/whisper_install/include)
-    find_library(WHISPER_LIB NAMES whisper
-        HINTS ${_jarvis_local_tp}/whisper_install/lib)
-    if(WHISPER_INCLUDE_DIR AND WHISPER_LIB)
+if(NOT NEOGRAPH_JARVIS_FORCE_MOCK)
+    find_package(whisper QUIET CONFIG)
+    if(whisper_FOUND)
         set(JARVIS_HAVE_WHISPER ON)
+    else()
+        # third_party/whisper_install 우선
+        find_path(WHISPER_INCLUDE_DIR NAMES whisper.h
+            HINTS ${_jarvis_local_tp}/whisper_install/include)
+        find_library(WHISPER_LIB NAMES whisper
+            HINTS ${_jarvis_local_tp}/whisper_install/lib)
+        if(WHISPER_INCLUDE_DIR AND WHISPER_LIB)
+            set(JARVIS_HAVE_WHISPER ON)
+        endif()
     endif()
 endif()
 if(NOT JARVIS_HAVE_WHISPER)
@@ -94,17 +101,19 @@ endif()
 # supertonic helper.cpp — assets/download.sh 가 third_party/supertonic/ 에 받음
 set(_jarvis_supertonic_helper "${_jarvis_local_tp}/supertonic/helper.cpp")
 set(JARVIS_HAVE_SUPERTONIC OFF)
-if(EXISTS "${_jarvis_supertonic_helper}")
+if(NOT NEOGRAPH_JARVIS_FORCE_MOCK AND EXISTS "${_jarvis_supertonic_helper}")
     set(JARVIS_HAVE_SUPERTONIC ON)
     message(STATUS "[jarvis] supertonic helper OK — ${_jarvis_supertonic_helper}")
 endif()
 
 # miniaudio — 헤더 하나. 없으면 stub 헤더 생성 후 계속 진행.
 set(JARVIS_HAVE_MINIAUDIO OFF)
-find_path(MINIAUDIO_INCLUDE_DIR NAMES miniaudio.h
-    HINTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party
-          ${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniaudio)
-if(MINIAUDIO_INCLUDE_DIR)
+if(NOT NEOGRAPH_JARVIS_FORCE_MOCK)
+    find_path(MINIAUDIO_INCLUDE_DIR NAMES miniaudio.h
+        HINTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+              ${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniaudio)
+endif()
+if(MINIAUDIO_INCLUDE_DIR AND NOT NEOGRAPH_JARVIS_FORCE_MOCK)
     set(JARVIS_HAVE_MINIAUDIO ON)
 else()
     # stub 헤더 생성 — mic_input.cpp / tts_output.cpp 가 #ifdef 없이

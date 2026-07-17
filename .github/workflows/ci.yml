@@ -427,6 +427,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Debug \
             -DNEOGRAPH_BUILD_TESTS=ON \
             -DNEOGRAPH_BUILD_EXAMPLES=ON \
+            -DNEOGRAPH_BUILD_COOKBOOK_JARVIS=ON \
+            -DNEOGRAPH_JARVIS_FORCE_MOCK=ON \
             -DNEOGRAPH_BUILD_BENCHMARKS=OFF \
             -DNEOGRAPH_BUILD_POSTGRES=ON \
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -O1" \
