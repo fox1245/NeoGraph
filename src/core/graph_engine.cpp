@@ -420,7 +420,7 @@ GraphEngine::resume_async(const std::string& thread_id,
     config.max_steps = 50;
 
     co_return co_await execute_graph_async(
-        config, cb, cp_opt->next_nodes, resume_value);
+        config, cb, cp_opt->next_nodes, &resume_value);
 }
 
 // =========================================================================
@@ -441,7 +441,7 @@ asio::awaitable<RunResult>
 GraphEngine::execute_graph_async(const RunConfig& config,
                                  const GraphStreamCallback& cb,
                                  const std::vector<std::string>& resume_from,
-                                 const json& resume_value) {
+                                 const json* resume_value) {
     const bool is_resume = !resume_from.empty();
 
     // RAII inc/dec on the inflight-run counter — set_worker_count()
@@ -488,7 +488,7 @@ GraphEngine::execute_graph_async(const RunConfig& config,
     // fresh run, which is how a node distinguishes "nobody has answered yet"
     // from "the answer was no". Only engaged on an actual resume, so the
     // common path pays no json allocation.
-    if (!resume_value.is_null()) ctx.resume_value = resume_value;
+    if (resume_value && !resume_value->is_null()) ctx.resume_value = *resume_value;
     ctx.tool_gate    = tool_gate_;   // issue #89 — engine-level, so resume() keeps it
     // ctx.deadline / ctx.trace_id stay default-constructed for now —
     // RunConfig has no source field for either. Future PRs add them.
@@ -516,13 +516,14 @@ GraphEngine::execute_graph_async(const RunConfig& config,
             // dynamic interrupts exist for. Every node now reads the answer
             // from ``ctx.resume_value`` regardless; this write stays for the
             // graphs that were relying on it (issue #94).
-            if (!resume_value.is_null() && state.has_channel("messages")) {
+            if (resume_value && !resume_value->is_null()
+                && state.has_channel("messages")) {
                 // Build the resume message outside the brace-init that
                 // would otherwise nest inside the coroutine body. Same
                 // GCC 13 ICE shape; same workaround.
-                std::string content = resume_value.is_string()
-                    ? resume_value.get<std::string>()
-                    : resume_value.dump();
+                std::string content = resume_value->is_string()
+                    ? resume_value->get<std::string>()
+                    : resume_value->dump();
                 json resume_msg;
                 resume_msg["role"]    = "user";
                 resume_msg["content"] = content;
@@ -606,7 +607,8 @@ GraphEngine::execute_graph_async(const RunConfig& config,
                         json data;
                         data["phase"]         = "before";
                         data["checkpoint_id"] = cp_id;
-                        cb(GraphEvent{GraphEvent::Type::INTERRUPT, node_name, data});
+                        cb(GraphEvent{GraphEvent::Type::INTERRUPT, node_name,
+                                      std::move(data)});
                     }
                     co_return result;
                 }
@@ -739,7 +741,8 @@ GraphEngine::execute_graph_async(const RunConfig& config,
                     json data;
                     data["phase"]         = "after";
                     data["checkpoint_id"] = cp_id;
-                    cb(GraphEvent{GraphEvent::Type::INTERRUPT, node_name, data});
+                    cb(GraphEvent{GraphEvent::Type::INTERRUPT, node_name,
+                                  std::move(data)});
                 }
                 co_return result;
             }
@@ -774,7 +777,8 @@ GraphEngine::execute_graph_async(const RunConfig& config,
             if (plan.winning_command_goto) {
                 json data;
                 data["command_goto"] = *plan.winning_command_goto;
-                cb(GraphEvent{GraphEvent::Type::NODE_START, "__routing__", data});
+                cb(GraphEvent{GraphEvent::Type::NODE_START, "__routing__",
+                              std::move(data)});
             }
             if (!ready.empty()) {
                 json next_nodes_arr = json::array();
@@ -782,7 +786,8 @@ GraphEngine::execute_graph_async(const RunConfig& config,
                 json data;
                 data["next_nodes"] = next_nodes_arr;
                 data["step"]       = step;
-                cb(GraphEvent{GraphEvent::Type::NODE_START, "__routing__", data});
+                cb(GraphEvent{GraphEvent::Type::NODE_START, "__routing__",
+                              std::move(data)});
             }
         }
 
