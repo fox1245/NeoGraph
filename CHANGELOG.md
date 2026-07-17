@@ -11,6 +11,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed (docs)
 
+- **Provider cookbook의 무시되던 노드별 prompt 제거 (issue #116).** 세 Python
+  예제가 built-in `llm_call`이 읽지 않는 `config.system`으로 여러 역할을
+  수행한다고 설명하던 문제를 수정했다. 각 예제를
+  `NodeContext.instructions`를 쓰는 strict 단일 호출 graph로 바꾸고 관련
+  README를 실제 동작에 맞췄다.
 - **예약된 `RunContext::deadline` 설명 정정 (issue #115).** 현재
   `RunConfig`로 설정할 수 없고 Python에도 노출되지 않는 `deadline`과
   `trace_id`를 사용 가능한 per-run metadata처럼 안내하던 문서와 Doxygen
