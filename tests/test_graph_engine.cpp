@@ -182,8 +182,50 @@ TEST_F(GraphEngineTest, MaxStepsLimit) {
     config.max_steps = 5;
     auto result = engine->run(config);
 
-    // Should not run forever — capped by max_steps
-    EXPECT_LE(result.execution_trace.size(), 5u);
+    ASSERT_EQ(result.execution_trace.size(), 5u);
+    EXPECT_TRUE(result.max_steps_exhausted());
+    ASSERT_TRUE(result.output.contains("_neograph"));
+    EXPECT_EQ(result.output["_neograph"]["max_steps_exhausted"], true);
+}
+
+TEST_F(GraphEngineTest, ExactBoundaryCompletionIsNotExhausted) {
+    auto engine = GraphEngine::compile(make_linear_graph(), NodeContext{});
+    RunConfig config;
+    config.max_steps = 1;
+    auto result = engine->run(config);
+
+    ASSERT_EQ(result.execution_trace.size(), 1u);
+    EXPECT_FALSE(result.max_steps_exhausted());
+    EXPECT_FALSE(result.output.contains("_neograph"));
+}
+
+TEST_F(GraphEngineTest, ZeroMaxStepsWithPendingStartWorkIsExhausted) {
+    auto engine = GraphEngine::compile(make_linear_graph(), NodeContext{});
+    RunConfig config;
+    config.max_steps = 0;
+    auto result = engine->run(config);
+
+    EXPECT_TRUE(result.execution_trace.empty());
+    EXPECT_TRUE(result.max_steps_exhausted());
+    ASSERT_TRUE(result.output.contains("_neograph"));
+    EXPECT_EQ(result.output["_neograph"]["max_steps_exhausted"], true);
+}
+
+TEST_F(GraphEngineTest, StartToEndWithZeroMaxStepsIsNotExhausted) {
+    json empty_graph = {
+        {"name", "empty"},
+        {"channels", {{"result", {{"reducer", "overwrite"}}}}},
+        {"nodes", json::object()},
+        {"edges", {{{"from", "__start__"}, {"to", "__end__"}}}}
+    };
+    auto engine = GraphEngine::compile(empty_graph, NodeContext{});
+    RunConfig config;
+    config.max_steps = 0;
+    auto result = engine->run(config);
+
+    EXPECT_TRUE(result.execution_trace.empty());
+    EXPECT_FALSE(result.max_steps_exhausted());
+    EXPECT_FALSE(result.output.contains("_neograph"));
 }
 
 // ── Streaming callback invoked ──

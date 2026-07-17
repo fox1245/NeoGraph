@@ -39,6 +39,70 @@ void ensure_noop_registered() {
 
 } // namespace
 
+TEST(TopLevelContainerTypes, RejectsMalformedContainers) {
+    auto expect_error = [](const char* field, json value, bool strict,
+                           const char* expected) {
+        json def = json::object();
+        if (strict) def["schema_version"] = 1;
+        def[field] = std::move(value);
+        try {
+            GraphCompiler::compile(def, NodeContext{});
+            FAIL() << "expected $." << field << " to reject malformed input";
+        } catch (const std::runtime_error& e) {
+            const std::string message = e.what();
+            EXPECT_NE(message.find("$." + std::string(field)), std::string::npos);
+            EXPECT_NE(message.find(expected), std::string::npos);
+        }
+    };
+
+    for (bool strict : {false, true}) {
+        expect_error("channels", json::array(), strict, "object");
+        expect_error("nodes", json::array(), strict, "object");
+        for (const char* field : {"edges", "conditional_edges"}) {
+            if (strict) expect_error(field, json::object(), true, "array");
+            expect_error(field, json("not a container"), strict, "array");
+            expect_error(field, json(7), strict, "array");
+            expect_error(field, json(true), strict, "array");
+            expect_error(field, json(nullptr), strict, "array");
+        }
+    }
+}
+
+TEST(TopLevelContainerTypes, AcceptsValidAndLegacyCompatibleContainers) {
+    for (bool strict : {false, true}) {
+        json def = {
+            {"channels", json::object()},
+            {"nodes", json::object()},
+            {"edges", json::array()},
+            {"conditional_edges", json::array()}
+        };
+        if (strict) def["schema_version"] = 1;
+        EXPECT_NO_THROW(GraphCompiler::compile(def, NodeContext{}));
+    }
+
+    json legacy = {
+        {"nodes", json::object()},
+        {"edges", {
+            {"direct", {{"from", "__start__"}, {"to", "worker"}}}
+        }},
+        {"conditional_edges", {
+            {"branch", {
+                {"from", "worker"},
+                {"condition", "route"},
+                {"routes", {{"done", "__end__"}}}
+            }}
+        }}
+    };
+    auto compiled = GraphCompiler::compile(legacy, NodeContext{});
+    ASSERT_EQ(compiled.edges.size(), 1u);
+    EXPECT_EQ(compiled.edges[0].from, "__start__");
+    EXPECT_EQ(compiled.edges[0].to, "worker");
+    ASSERT_EQ(compiled.conditional_edges.size(), 1u);
+    EXPECT_EQ(compiled.conditional_edges[0].from, "worker");
+    EXPECT_EQ(compiled.conditional_edges[0].condition, "route");
+    EXPECT_EQ(compiled.conditional_edges[0].routes.at("done"), "__end__");
+}
+
 // =========================================================================
 // Defaults
 // =========================================================================

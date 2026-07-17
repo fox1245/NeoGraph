@@ -71,6 +71,20 @@ private:
     std::string name_;
 };
 
+class LogicFailureNode : public GraphNode {
+public:
+    explicit LogicFailureNode(std::string name) : name_(std::move(name)) {}
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        ++calls;
+        throw std::logic_error("broken invariant");
+        co_return NodeOutput{};
+    }
+    std::string get_name() const override { return name_; }
+    int calls = 0;
+private:
+    std::string name_;
+};
+
 // Helper to construct a NodeExecutor over a single node. Real engine
 // builds these inside compile(); reaching in directly keeps the test
 // scoped to the executor unit.
@@ -169,7 +183,7 @@ TEST(ExecutorAsyncRetry, RetriesUntilSuccess) {
     (void)node_ptr;
 }
 
-TEST(ExecutorAsyncRetry, ExhaustedRetriesPropagateException) {
+TEST(ExecutorAsyncRetry, ExhaustedRetriesAddNodeContext) {
     RetryPolicy p;
     p.max_retries = 1;
     p.initial_delay_ms = 1;
@@ -180,13 +194,17 @@ TEST(ExecutorAsyncRetry, ExhaustedRetriesPropagateException) {
 
     asio::io_context io;
     std::exception_ptr err;
+    std::vector<GraphEvent> events;
+    GraphStreamCallback cb = [&](const GraphEvent& event) {
+        events.push_back(event);
+    };
     asio::co_spawn(
         io,
         [&]() -> asio::awaitable<void> {
             try {
                 GraphState state; init_state(state, h.channel_defs);
                 co_await h.executor.execute_node_with_retry_async(
-                    "doomed", state, nullptr, StreamMode::ALL, RunContext{});
+                    "doomed", state, cb, StreamMode::EVENTS, RunContext{});
             } catch (...) {
                 err = std::current_exception();
             }
@@ -195,7 +213,68 @@ TEST(ExecutorAsyncRetry, ExhaustedRetriesPropagateException) {
     io.run();
 
     ASSERT_TRUE(err);
-    EXPECT_THROW(std::rethrow_exception(err), std::runtime_error);
+    try {
+        std::rethrow_exception(err);
+        FAIL() << "expected NodeExecutionError";
+    } catch (const NodeExecutionError& e) {
+        EXPECT_EQ(e.node_name(), "doomed");
+        EXPECT_EQ(e.attempts(), 2);
+        EXPECT_NE(std::string(e.what()).find("doomed"), std::string::npos);
+        EXPECT_NE(std::string(e.what()).find("flaky: injected failure"),
+                  std::string::npos);
+        try {
+            std::rethrow_exception(e.cause());
+            FAIL() << "expected original runtime_error";
+        } catch (const std::runtime_error& cause) {
+            EXPECT_NE(std::string(cause.what()).find("injected failure"),
+                      std::string::npos);
+        }
+    }
+
+    int terminal_errors = 0;
+    for (const auto& event : events) {
+        if (event.type == GraphEvent::Type::ERROR) {
+            ++terminal_errors;
+            EXPECT_EQ(event.node_name, "doomed");
+            EXPECT_EQ(event.data.at("attempts"), 2);
+        }
+    }
+    EXPECT_EQ(terminal_errors, 1);
+}
+
+TEST(ExecutorAsyncRetry, LogicErrorAddsContextWithoutRetry) {
+    auto node = std::make_unique<LogicFailureNode>("validator");
+    auto* node_ptr = node.get();
+    RetryPolicy policy;
+    policy.max_retries = 3;
+    ExecutorHarness h(std::move(node), policy);
+
+    asio::io_context io;
+    std::exception_ptr err;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            try {
+                GraphState state; init_state(state, h.channel_defs);
+                co_await h.executor.execute_node_with_retry_async(
+                    "validator", state, nullptr, StreamMode::ALL, RunContext{});
+            } catch (...) {
+                err = std::current_exception();
+            }
+        },
+        asio::detached);
+    io.run();
+
+    ASSERT_TRUE(err);
+    EXPECT_EQ(node_ptr->calls, 1);
+    try {
+        std::rethrow_exception(err);
+        FAIL() << "expected NodeExecutionError";
+    } catch (const NodeExecutionError& e) {
+        EXPECT_EQ(e.node_name(), "validator");
+        EXPECT_EQ(e.attempts(), 1);
+        EXPECT_THROW(std::rethrow_exception(e.cause()), std::logic_error);
+    }
 }
 
 TEST(ExecutorAsyncRetry, NodeInterruptShortCircuits) {
