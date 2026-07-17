@@ -213,8 +213,10 @@ asio::awaitable<NodeOutput> run(NodeInput in) override {
 }
 ```
 
-`in.ctx` 의 다른 필드: `deadline`, `trace_id`, `thread_id`, `step`,
-`stream_mode` — 노드가 자기 컨텍스트를 알고 행동을 바꿀 때 활용.
+현재 노드가 활용할 수 있는 `in.ctx` 필드는 `cancel_token`, `usage`,
+`thread_id`, `step`, `stream_mode`, `store`, `resume_value`입니다.
+`deadline`과 `trace_id`는 향후 `RunConfig` 확장을 위한 예약 슬롯으로,
+현재 엔진은 값을 채우지 않으며 Python에도 노출하지 않습니다.
 
 ### `_full` virtual 옮기는 사람 — `co_return out;` 한 줄로 끝
 
