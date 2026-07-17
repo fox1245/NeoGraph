@@ -242,6 +242,8 @@ TEST(OpenAIProviderStream, HttpStatusTakesPrecedenceOverSseBody) {
     } catch (const std::runtime_error& error) {
         EXPECT_NE(std::string(error.what()).find("HTTP 500"),
                   std::string::npos);
+        EXPECT_NE(std::string(error.what()).find("must-not-leak"),
+                  std::string::npos);
     }
     EXPECT_EQ(callback_count, 0);
 }

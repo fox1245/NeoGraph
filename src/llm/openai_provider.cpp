@@ -197,6 +197,7 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
     std::exception_ptr stream_error;
 
     int response_status = 0;
+    std::string error_body;
     httplib::Request request;
     request.method = "POST";
     request.path = prefix + "/v1/chat/completions";
@@ -205,10 +206,14 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
     request.set_header("Content-Type", "application/json");
     request.response_handler = [&](const httplib::Response& response) {
         response_status = response.status;
-        return response.status == 200;
+        return true;
     };
     request.content_receiver =
         [&](const char* data, size_t len, size_t, size_t) -> bool {
+            if (response_status != 200) {
+                error_body.append(data, len);
+                return true;
+            }
             try {
                 line_buffer.append(data, len);
 
@@ -295,7 +300,8 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
 
     if (response_status != 0 && response_status != 200) {
         throw std::runtime_error(
-            "API error (HTTP " + std::to_string(response_status) + ")");
+            "API error (HTTP " + std::to_string(response_status) + "): " +
+            error_body);
     }
 
     // Returning false from httplib's receiver becomes Error::Canceled.
