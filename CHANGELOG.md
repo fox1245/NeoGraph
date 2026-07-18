@@ -9,6 +9,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- **폐기된 TransformerCPP 연동 예제.** 더 이상 제공되지 않는 외부 저장소에
+  의존하던 `example_inproc_gemma`, `NEOGRAPH_BUILD_LOCAL_INFERENCE_EXAMPLE`,
+  `TRANSFORMERCPP_DIR`를 제거했다. 일반 OpenAI 호환 로컬 서버를 사용하는
+  `example_local_transformer`는 유지한다.
+
 ### Fixed
 
 - **JARVIS mock 빌드 복구 (issue #130).** 음성 의존성이 없을 때
