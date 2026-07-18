@@ -139,15 +139,11 @@ class NEOGRAPH_API Provider {
      * @param params Completion parameters including model, messages, and tools.
      * @return The full completion response with message and usage statistics.
      *
-     * @deprecated v1.0 collapses the 4-virtual cross-product into the
-     * single async-streaming-superset `invoke(params, on_chunk)`. New
-     * code: `co_await provider->invoke(params, nullptr)` (async) or
-     * `neograph::async::run_sync(provider->invoke(params, nullptr))`
-     * (sync). The legacy `complete()` keeps working through the
-     * deprecation window and is removed in v1.0.0. See ROADMAP_v1.md
-     * Candidate 6.
+     * @deprecated New Provider implementations should derive from
+     * `CompletionProvider` and implement its explicit request contract.
+     * This method remains supported during the compatibility window.
      */
-    [[deprecated("v1.0 single-dispatch: use invoke(params, nullptr) — see ROADMAP_v1.md Candidate 6")]]
+    [[deprecated("legacy Provider API: new implementations should use CompletionProvider")]]
     virtual ChatCompletion complete(const CompletionParams& params);
 
     /**
@@ -170,9 +166,9 @@ class NEOGRAPH_API Provider {
      * @param params Completion parameters.
      * @return An awaitable yielding the full completion response.
      *
-     * @deprecated Use `invoke(params, nullptr)`. v1.0 removes this.
+     * @deprecated New implementations should use `CompletionProvider`.
      */
-    [[deprecated("v1.0 single-dispatch: use invoke(params, nullptr) — see ROADMAP_v1.md Candidate 6")]]
+    [[deprecated("legacy Provider API: new implementations should use CompletionProvider")]]
     virtual asio::awaitable<ChatCompletion>
     complete_async(const CompletionParams& params);
 
@@ -193,11 +189,9 @@ class NEOGRAPH_API Provider {
      * @param on_chunk Callback invoked per received token.
      * @return The full completion response after streaming is complete.
      *
-     * @deprecated Use `invoke(params, on_chunk)` (or
-     * `neograph::async::run_sync(invoke(params, on_chunk))` for a
-     * sync caller). v1.0 removes this.
+     * @deprecated New implementations should use `CompletionProvider`.
      */
-    [[deprecated("v1.0 single-dispatch: use invoke(params, on_chunk) — see ROADMAP_v1.md Candidate 6")]]
+    [[deprecated("legacy Provider API: new implementations should use CompletionProvider")]]
     virtual ChatCompletion complete_stream(const CompletionParams& params,
                                            const StreamCallback& on_chunk);
 
@@ -256,21 +250,20 @@ class NEOGRAPH_API Provider {
      *                 internal worker thread).
      * @return Awaitable resolving to the full completion response.
      *
-     * @deprecated Use `invoke(params, on_chunk)`. v1.0 removes this.
+     * @deprecated New implementations should use `CompletionProvider`.
      */
-    [[deprecated("v1.0 single-dispatch: use invoke(params, on_chunk) — see ROADMAP_v1.md Candidate 6")]]
+    [[deprecated("legacy Provider API: new implementations should use CompletionProvider")]]
     virtual asio::awaitable<ChatCompletion>
     complete_stream_async(const CompletionParams& params,
                           const StreamCallback& on_chunk);
 
     /**
-     * @brief Single-dispatch async-streaming completion (v1.0 canonical).
+     * @brief Legacy callback-selected async completion entry point.
      *
-     * The unified entry point that future v1.0+ Provider subclasses
-     * override. Replaces the current `(sync/async) × (stream/non-stream)`
-     * 4-virtual cross-product (`complete` / `complete_async` /
-     * `complete_stream` / `complete_stream_async`) with one async-
-     * streaming-superset method. ROADMAP_v1.md Candidate 6.
+     * Existing Provider subclasses may override this method to combine the
+     * legacy async collect and stream paths. New implementations should derive
+     * from `CompletionProvider`, whose explicit `CompletionRequest` keeps the
+     * transport mode independent of callback presence.
      *
      * Semantics:
      *   - `on_chunk == nullptr` → caller wants the full assembled
@@ -283,24 +276,10 @@ class NEOGRAPH_API Provider {
      * `on_chunk` callback runs there too (single-threaded with the
      * awaiter, same invariant `complete_stream_async` already provides).
      *
-     * **Deprecation strategy** (Candidate 6 PR sequence):
-     *   - This PR (additive): `invoke()` lands as a new virtual; default
-     *     forwards to the legacy 4-virtual chain (`complete_stream_async`
-     *     when `on_chunk` is set, `complete_async` otherwise) so every
-     *     existing Provider subclass keeps working unchanged.
-     *   - Subsequent PR: native subclasses (`OpenAIProvider`,
-     *     `SchemaProvider`, `RateLimitedProvider`) override `invoke()`
-     *     directly; their old 4 overrides become thin adapters.
-     *   - Subsequent PR: 4 legacy virtuals get `[[deprecated]]` markers.
-     *   - v1.0.0: 4 legacy virtuals removed; `invoke()` becomes the
-     *     only Provider virtual besides `get_name()`.
-     *
-     * **Override contract**: subclasses overriding `invoke()` MUST NOT
-     * call any of the 4 legacy `complete_*` methods on themselves —
-     * those default to forwarding to `invoke()` (in a future PR), which
-     * would recurse infinitely. New code: override `invoke()` and only
-     * `invoke()`. Old code: keep overriding the 4 legacy methods; the
-     * default `invoke()` here delegates to them.
+     * The default implementation forwards to `complete_stream_async()` when
+     * `on_chunk` is set and to `complete_async()` otherwise, preserving every
+     * existing Provider subclass. The legacy methods remain available during
+     * the compatibility window; no removal version is currently scheduled.
      *
      * @param params   Completion parameters (model, messages, tools, ...).
      * @param on_chunk Optional per-chunk callback. `nullptr` for non-

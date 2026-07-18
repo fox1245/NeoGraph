@@ -17,6 +17,7 @@
 // Foundation types
 #include <neograph/types.h>
 #include <neograph/provider.h>
+#include <neograph/completion_provider.h>
 #include <neograph/tool.h>
 
 // Graph engine

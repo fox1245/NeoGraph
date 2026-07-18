@@ -394,6 +394,7 @@ add_library(neograph_core
     src/core/json.cpp
     src/core/cancel.cpp
     src/core/provider.cpp
+    src/core/completion_provider.cpp
     src/core/tool.cpp
     src/core/graph_engine.cpp
     src/core/graph_compiler.cpp

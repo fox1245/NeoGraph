@@ -40,6 +40,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **하위 호환 Provider 이전 경로.** 새 `CompletionRequest`가 streaming mode를
+  callback 유무와 분리하고, `CompletionProvider`는 새 구현이 `do_invoke()`
+  하나만 작성하게 한다. 기존 `Provider` vtable, 네 legacy virtual, callback
+  기반 `invoke()`, Python `complete()` subclass 계약은 그대로 유지한다.
+
 - **Python persistence backends** (#117) — `Store` and `CheckpointStore` are
   now constructible subclass bases with C++ virtual dispatch into Python.
   `StoreItem`, `CheckpointPhase`, `Checkpoint`, and `PendingWrite` are exposed

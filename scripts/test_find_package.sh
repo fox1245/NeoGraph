@@ -11,12 +11,20 @@
 #   exit 0 — a consumer can find_package(NeoGraph), link neograph::core, and run
 #   exit 1 — it cannot, at whichever of the four stages failed
 #
-# Usage: scripts/test_find_package.sh [--keep]
+# Usage: scripts/test_find_package.sh [--keep] [--shared]
 set -uo pipefail
 
 repo_root=$(git rev-parse --show-toplevel)
 work=$(mktemp -d -t ng-findpkg-XXXXXX)
-keep=${1:-}
+keep=
+shared=OFF
+for arg in "$@"; do
+    case "$arg" in
+        --keep) keep=--keep ;;
+        --shared) shared=ON ;;
+        *) echo "unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
 
 cleanup() { [[ "$keep" == "--keep" ]] || rm -rf "$work"; }
 trap cleanup EXIT
@@ -30,6 +38,7 @@ fail() { echo "   FAILED: $1"; exit 1; }
 step "1/4 configure engine"
 cmake -S "$repo_root" -B "$work/build" \
     -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS="$shared" \
     -DCMAKE_INSTALL_PREFIX="$prefix" \
     -DNEOGRAPH_BUILD_TESTS=OFF \
     -DNEOGRAPH_BUILD_EXAMPLES=OFF \
