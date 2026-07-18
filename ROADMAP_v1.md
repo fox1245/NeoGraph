@@ -929,19 +929,23 @@ Candidate 1.
 | **#44 (PR4)** | 4 legacy virtual 모두 `[[deprecated]]` 마커. `plan_execute_graph.cpp` 3 사이트 invoke() 마이그레이션. `OpenInferenceProvider` 와 `RateLimitedProvider` (decorator 들) 의 4 virtual override 블록을 `NEOGRAPH_PUSH/POP_IGNORE_DEPRECATED` 로 감쌈 — internal forwarder warning 차단, user-facing override / 호출 사이트만 warning. | v0.9.0 |
 | **#45 (PR5)** | C++ examples 마이그레이션 (`31_local_transformer.cpp`, `cookbook/ai-assembly/member_server.cpp`). | v0.9.0 |
 
-### v1.0 destructive removal (deferred)
+### Additive compatibility path (revised 2026-07)
 
-`SchemaProvider` / `OpenAIProvider` / `RateLimitedProvider` /
-`OpenInferenceProvider` 는 4 legacy virtual override 와 새 invoke()
-의 default forward 를 함께 갖고 있는 상태. v1.0.0 sub-PR 시퀀스 (Candidate 1
-의 9b–9e mirror):
+기존 `Provider` vtable을 유지한 채 별도 `CompletionProvider`를 추가한다.
+새 구현은 explicit `CompletionRequest`를 받고 `do_invoke()` 하나만 재정의한다.
+기존 네 virtual과 callback 기반 `invoke()`는 final adapter를 통해 새 구현에
+연결되며, 기존 Provider subclass와 Python trampoline은 그대로 유지된다.
 
-  - **6b**: native subclass 가 invoke() native override (4 virtual
-    override 의 코드를 invoke 안으로 통합). 기존 4 override 는 thin
-    adapter 또는 제거.
-  - **6c**: 4 legacy virtual 자체 삭제 from `Provider`. internal
-    forwarder PUSH_IGNORE 가드 제거. v1.0.0 에서 `Provider` 가 단일
-    pure-virtual `invoke()` + `get_name()` 만.
+legacy virtual 제거는 v1.0의 전제 조건이 아니다. 충분한 외부 이전 기간,
+Python 새 계약, `SOVERSION` 분리, downstream binary 검증이 모두 준비된 이후의
+주요 버전에서만 다시 판단한다. #127의 native async transport와 operation
+ownership은 이 additive API와 별도로 구현해야 한다.
+
+후속 작업:
+
+  - **6b**: 새 Provider는 `CompletionProvider` 기반으로 작성. 기존 built-in의
+    즉시 상속 변경은 ABI 영향 때문에 하지 않는다.
+  - **6c**: native async transport와 request-owned cancellation/lifetime 완성.
   - **adjacent**: `schema_provider.cpp` (1800 LoC) 의 `SchemaParser` /
     `SchemaWireBuilder` / `SchemaProviderImpl` 분할 (위 6b 와 같은
     PR 또는 별도 — 구현 시 결정).

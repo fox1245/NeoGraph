@@ -108,6 +108,7 @@ Provider::complete_stream_async(const CompletionParams& params,
     // awaiter's executor (not the worker thread). Restores the
     // single-threaded-with-the-awaiter invariant.
     StreamCallback wrapped = [exec, on_chunk](const std::string& chunk) {
+        if (!on_chunk) return;
         asio::dispatch(exec, [on_chunk, chunk]() { on_chunk(chunk); });
     };
 

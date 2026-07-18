@@ -4,7 +4,7 @@
 // inference — the "edge story" that motivates NeoGraph's per-iter
 // latency tradeoff over LangGraph (130× faster engine overhead, 76×
 // lower RSS). NeoGraph itself is not an inference runtime; you bring
-// your own (ONNXRuntime, libtorch, ggml, TransformerCPP). This
+// your own (ONNXRuntime, libtorch, ggml, llama.cpp). This
 // example shows the part NeoGraph DOES handle: orchestrating N small
 // classifiers concurrently with sub-µs scheduling overhead, so the
 // wall-clock cost is `max(per-classifier latency)` not `sum(...)`.

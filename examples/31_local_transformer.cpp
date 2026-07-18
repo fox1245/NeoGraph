@@ -1,9 +1,9 @@
 // NeoGraph Example 31: Local LLM backend (OpenAI-compatible server)
 //
 // Demonstrates pointing NeoGraph's OpenAIProvider at a local OpenAI-
-// compatible inference server — such as TransformerCPP's http_server_demo
-// running a Gemma/Llama GGUF, llama.cpp's server, vLLM's OpenAI-compat
-// mode, etc. Zero NeoGraph code changes — just override `base_url`.
+// compatible inference server — such as llama.cpp's server or vLLM's
+// OpenAI-compatible mode. Zero NeoGraph code changes — just override
+// `base_url`.
 //
 // The two-process topology (NeoGraph agent ←HTTP→ inference server)
 // keeps the model weights out of the agent's address space. The agent
@@ -12,10 +12,9 @@
 // virtual-address world.
 //
 // Expected setup:
-//   1. Start an OpenAI-compatible server on localhost. With TransformerCPP:
-//        ./http_server_demo path/to/model.gguf 8090
-//      With llama.cpp server, vLLM --served-model-name, etc. the same
-//      /v1/chat/completions shape works.
+//   1. Start an OpenAI-compatible server on localhost. llama.cpp server,
+//      vLLM --served-model-name, and equivalent runtimes expose the same
+//      /v1/chat/completions shape.
 //   2. Run this example. By default it hits http://localhost:8090 and
 //      expects streaming chat/completions.
 //
