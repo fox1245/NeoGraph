@@ -9,12 +9,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- **폐기된 TransformerCPP 연동 예제.** 더 이상 제공되지 않는 외부 저장소에
+  의존하던 `example_inproc_gemma`, `NEOGRAPH_BUILD_LOCAL_INFERENCE_EXAMPLE`,
+  `TRANSFORMERCPP_DIR`를 제거했다. 일반 OpenAI 호환 로컬 서버를 사용하는
+  `example_local_transformer`는 유지한다.
+
 ### Fixed
 
 - **JARVIS mock 빌드 복구 (issue #130).** 음성 의존성이 없을 때
   `MicCapture`가 불완전한 타입으로 남아 `cookbook_jarvis` 컴파일이 실패하던
   문제를 수정했다. `NEOGRAPH_JARVIS_FORCE_MOCK`을 추가해 ASan CI가 runner의
   설치 패키지와 관계없이 외부 음성 의존성 없는 mock 구성을 항상 빌드한다.
+  세션 실행기도 실제 CMake 출력 경로와 specialist 대상 이름을 사용하고,
+  존재하는 `demo_mcp_server.py`를 기동하도록 맞췄다.
 - **노드 실패 문맥 보존 (issue #123).** C++ 실행 오류를 원래
   `exception_ptr`과 실패 노드 이름·시도 횟수를 담은 `NodeExecutionError`로
   전달하고, terminal `ERROR` event에도 같은 문맥을 기록한다. Python에서는
@@ -39,6 +48,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   고정했다.
 
 ### Added
+
+- **하위 호환 Provider 이전 경로.** 새 `CompletionRequest`가 streaming mode를
+  callback 유무와 분리하고, `CompletionProvider`는 새 구현이 `do_invoke()`
+  하나만 작성하게 한다. 기존 `Provider` vtable, 네 legacy virtual, callback
+  기반 `invoke()`, Python `complete()` subclass 계약은 그대로 유지한다.
 
 - **Python persistence backends** (#117) — `Store` and `CheckpointStore` are
   now constructible subclass bases with C++ virtual dispatch into Python.

@@ -331,8 +331,9 @@ auto completion = co_await provider->invoke(params, on_chunk);
 
 ### 사용자 정의 Provider subclass
 
-옛: 4 virtual 중 하나 이상 override. 새: `invoke()` 하나만 override
-하면 됨.
+기존 `Provider` subclass는 계속 동작한다. 새 구현은 별도
+`CompletionProvider`를 상속하고 `do_invoke()` 하나만 구현하는 방식을 권장한다.
+기존 `Provider`의 vtable과 Python `complete()` 계약은 바꾸지 않는다.
 
 ```cpp
 // 옛 모양 — async-native provider
@@ -355,13 +356,14 @@ public:
 ```
 
 ```cpp
-// 새 모양 — 한 메서드가 두 케이스 다 처리
-class MyProvider : public neograph::Provider {
+// 새 모양 — transport mode가 callback 유무와 분리됨
+class MyProvider : public neograph::CompletionProvider {
 public:
     asio::awaitable<ChatCompletion>
-    invoke(const CompletionParams& params, StreamCallback on_chunk) override {
-        if (on_chunk) {
-            // ... SSE call, 토큰마다 on_chunk(token) ...
+    do_invoke(CompletionRequest request) override {
+        if (request.streaming()) {
+            // callback이 없어도 SSE/WS transport를 사용한다.
+            // callback이 있으면 토큰마다 request.on_chunk()(token).
         } else {
             // ... HTTP call ...
         }
@@ -372,16 +374,29 @@ public:
 };
 ```
 
-v0.9 deprecation window 동안: 옛 4 virtual override 가 그대로 동작.
-새 invoke() 안 만들면 base default 가 4 virtual chain 으로 forward —
-즉 두 모양 공존 가능.
+새 호출자는 mode를 명시한다.
+
+```cpp
+auto full = co_await provider.invoke_request(
+    CompletionRequest::collect(params));
+
+auto streamed = co_await provider.invoke_request(
+    CompletionRequest::stream(params, on_chunk));
+
+// token을 관찰하지 않아도 streaming transport를 명시할 수 있다.
+auto streamed_without_observer = co_await provider.invoke_request(
+    CompletionRequest::stream(params));
+```
+
+기존 네 virtual과 `invoke(params, on_chunk)`는 호환 기간 동안 그대로 동작한다.
+`CompletionProvider`의 final adapter가 모든 기존 진입점을 `do_invoke()`로 한 번만
+연결하므로 상호 재귀가 생기지 않는다.
 
 ## cancel 자동 propagation
 
-옛 sync `complete()` 가 `current_cancel_token()` 을 thread-local 에서
-읽어서 자동 cancel propagation 함. **새 `invoke()` 도 같은 동작 유지**:
-caller 가 `params.cancel_token` 을 set 안 했으면 thread-local 에서
-자동 stamp. 명시적 `params.cancel_token` 가 항상 우선.
+취소가 필요하면 `CompletionParams::cancel_token`을 명시한다. 엔진 내부 노드는
+`RunContext`의 token을 params에 넣어 Provider로 전달한다. thread-local 기반의
+암묵적 전달 경로는 더 이상 사용하지 않는다.
 
 ```cpp
 // engine 안 노드 본문 — 둘 다 동일하게 cancel 됨
@@ -394,20 +409,14 @@ explicit cancel_token 안 주면 그냥 cancel 못 받음 (예전과 동일).
 
 ## 마이그레이션 안 하면
 
-v0.9 ~ v0.x:
+현재 호환 기간:
 - 옛 4 virtual override 그대로 동작
 - `-Wdeprecated-declarations` warning 이 user override / 호출 사이트에 visible
 - engine 내부 forwarder 는 `NEOGRAPH_PUSH_IGNORE_DEPRECATED` 가드 됨 — internal warning 0
 
-v1.0:
-- 옛 4 virtual 삭제
-- override 한 모든 user code 가 컴파일 fail (`'complete_async' marked
-  override but doesn't override anything in the base class`)
-- 호출하는 user code 도 compile fail (메서드 자체가 없음)
-
-선제 마이그레이션 추천 — Provider subclass 가 적어도 invoke() 하나만
-override 하면 v1.0 호환. 사용자 정의 Provider 가 많으면 일찍 옮기는
-게 부담 적음.
+제거 버전은 정하지 않았다. 실제 외부 Provider와 Python subclass의 이전 기간,
+별도 SONAME, downstream binary 검증을 갖춘 뒤 주요 버전에서만 검토한다.
+경고는 이전을 권장하지만 즉시 삭제를 뜻하지 않는다.
 
 ## 자동 변환 가능?
 

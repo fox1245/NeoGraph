@@ -9,13 +9,42 @@
 // not enough — this has to *compile*.
 
 #include <neograph/neograph.h>
+#include <neograph/async/run_sync.h>
 
 #include <cstdlib>
 #include <iostream>
 
+namespace {
+
+class InstalledProvider final : public neograph::CompletionProvider {
+  public:
+    std::string get_name() const override { return "installed"; }
+
+  protected:
+    asio::awaitable<neograph::ChatCompletion>
+    do_invoke(neograph::CompletionRequest request) override {
+        neograph::ChatCompletion result;
+        result.message.role = "assistant";
+        result.message.content = request.params().model;
+        co_return result;
+    }
+};
+
+} // namespace
+
 int main() {
     using namespace neograph;
     using namespace neograph::graph;
+
+    InstalledProvider provider;
+    CompletionParams params;
+    params.model = "installed-provider";
+    const auto completion = neograph::async::run_sync(provider.invoke_request(
+        CompletionRequest::collect(std::move(params))));
+    if (completion.message.content != "installed-provider") {
+        std::cerr << "installed CompletionProvider dispatch failed\n";
+        return EXIT_FAILURE;
+    }
 
     GraphState state;
     state.init_channel("greeting", ReducerType::OVERWRITE,
