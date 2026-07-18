@@ -12,13 +12,25 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-$ROOT/build}"
-
-if [[ ! -x "$BUILD_DIR/cookbook_jarvis" ]]; then
-    echo "[run_session] cookbook_jarvis 가 빌드되지 않았습니다."
-    echo "  cmake -B $BUILD_DIR -DNEOGRAPH_BUILD_COOKBOOK_JARVIS=ON"
-    echo "  cmake --build $BUILD_DIR --target cookbook_jarvis cookbook_jarvis_coder cookbook_jarvis_researcher -j"
-    exit 1
+JARVIS_BIN_DIR="$BUILD_DIR/examples/cookbook/jarvis"
+if [[ -n "${JARVIS_BUILD_CONFIG:-}" ]]; then
+    JARVIS_BIN_DIR="$JARVIS_BIN_DIR/$JARVIS_BUILD_CONFIG"
 fi
+
+required_bins=(
+    cookbook_jarvis
+    cookbook_jarvis_specialist_coder
+    cookbook_jarvis_specialist_researcher
+)
+for bin in "${required_bins[@]}"; do
+    if [[ ! -x "$JARVIS_BIN_DIR/$bin" ]]; then
+        echo "[run_session] 빌드된 실행 파일 없음: $JARVIS_BIN_DIR/$bin"
+        echo "  multi-config 빌드는 JARVIS_BUILD_CONFIG=Release 같이 지정하세요."
+        echo "  cmake -B $BUILD_DIR -DNEOGRAPH_BUILD_COOKBOOK_JARVIS=ON"
+        echo "  cmake --build $BUILD_DIR --target cookbook_jarvis cookbook_jarvis_specialist_coder cookbook_jarvis_specialist_researcher -j"
+        exit 1
+    fi
+done
 
 PIDS=()
 cleanup() {
@@ -34,17 +46,17 @@ trap cleanup EXIT INT TERM
 
 # --- 1. 전문가들 ---
 echo "[run_session] coder specialist → 127.0.0.1:8210"
-"$BUILD_DIR/cookbook_jarvis_coder" 8210 &
+"$JARVIS_BIN_DIR/cookbook_jarvis_specialist_coder" 8210 &
 PIDS+=($!)
 
 echo "[run_session] researcher specialist → 127.0.0.1:8211"
-"$BUILD_DIR/cookbook_jarvis_researcher" 8211 &
+"$JARVIS_BIN_DIR/cookbook_jarvis_specialist_researcher" 8211 &
 PIDS+=($!)
 
 # --- 2. MCP 데모 서버 ---
-if [[ -f "$ROOT/examples/demo_mcp_http_server.py" ]]; then
+if [[ -f "$ROOT/examples/demo_mcp_server.py" ]]; then
     echo "[run_session] MCP HTTP demo → 127.0.0.1:8000"
-    python3 "$ROOT/examples/demo_mcp_http_server.py" --port 8000 &
+    python3 "$ROOT/examples/demo_mcp_server.py" &
     PIDS+=($!)
 fi
 
@@ -54,4 +66,4 @@ sleep 2
 # --- 3. 자비스 본체 ---
 echo "[run_session] jarvis 본체 기동"
 echo "[run_session] 말해보세요. Ctrl-C 로 종료."
-"$BUILD_DIR/cookbook_jarvis" "$ROOT/examples/cookbook/jarvis/config"
+"$JARVIS_BIN_DIR/cookbook_jarvis" "$ROOT/examples/cookbook/jarvis/config"
