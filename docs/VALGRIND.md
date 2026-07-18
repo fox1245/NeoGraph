@@ -69,8 +69,8 @@ nightly CI job (not yet wired).
   noise from libssl / libcurl that valgrind suppressions would have
   to mask. Use leak-check on the engine path with mock providers
   instead.
-- Crawl4AI / Postgres / TransformerCPP-linked examples — external
-  process or library state confounds the leak-check; coverage of those
+- Crawl4AI / Postgres examples — external process or library state
+  confounds the leak-check; coverage of those
   paths comes through ASan in CI rather than valgrind.
 - Python binding (`_neograph.so`) — Python's interpreter has many
   intentional "leaks" at exit (allocated-but-not-freed module state)

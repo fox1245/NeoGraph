@@ -160,8 +160,7 @@ Built only with `-DNEOGRAPH_BUILD_GRPC=ON` (needs `grpc++` / `protoc`).
 
 | # | File | Setup | What it shows |
 |---|------|-------|---------------|
-| 31 | [`31_local_transformer.cpp`](31_local_transformer.cpp) | local server (TransformerCPP / llama.cpp / vLLM) | Point `OpenAIProvider` at `http://localhost:8090`. Two-process split keeps model weights out of the agent's address space. |
-| 32 | [`32_inproc_gemma.cpp`](32_inproc_gemma.cpp) | TransformerCPP linked, GGUF file | Fully-local: TransformerCPP linked into the NeoGraph process, no HTTP. Inline `Provider` adapter — ~60 lines. The "any C++ inference runtime can plug in" demo. |
+| 31 | [`31_local_transformer.cpp`](31_local_transformer.cpp) | local server (llama.cpp / vLLM) | Point `OpenAIProvider` at `http://localhost:8090`. Two-process split keeps model weights out of the agent's address space. |
 
 ### Showcase
 
@@ -197,7 +196,7 @@ show how the same definition round-trips through `json.dumps` and back.
 |---|---|
 | `OPENAI_API_KEY` | 01, 03, 12, 13, 20, 22, 23, 24, 28, 29, 30, 33, 34, 35, 40 |
 | `ANTHROPIC_API_KEY` | 15, 16, 17, 18, 19, 25 |
-| local server (no key) | 31, 32 |
+| local server (no key) | 31 |
 | **none** | 02, 04, 05, 06, 07, 08, 09, 10, 14, 21, 27, 36, 37, 38, 39, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57 |
 
 Thirty-one examples run with no API key — that is the "kick the tyres"
