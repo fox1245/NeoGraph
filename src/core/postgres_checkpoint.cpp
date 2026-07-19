@@ -1163,18 +1163,10 @@ asio::awaitable<void> wait_pg_socket_until(
 #endif
 }
 
-std::chrono::milliseconds async_connect_timeout(pg_conn* c) {
-    int test_timeout = connection_timeout_ms_for_test.load(
-        std::memory_order_relaxed);
-    if (test_timeout >= 0) return std::chrono::milliseconds(test_timeout);
-
+std::chrono::milliseconds connect_timeout_from_options(
+    PQconninfoOption* options) {
     constexpr auto kProjectDefault = std::chrono::seconds(30);
-    PQconninfoOption* options = PQconninfo(c);
     if (!options) return kProjectDefault;
-    struct OptionsFree {
-        PQconninfoOption* options;
-        ~OptionsFree() { PQconninfoFree(options); }
-    } free_options{options};
 
     for (auto* option = options; option->keyword; ++option) {
         if (std::strcmp(option->keyword, "connect_timeout") != 0
@@ -1190,6 +1182,34 @@ std::chrono::milliseconds async_connect_timeout(pg_conn* c) {
         break;
     }
     return kProjectDefault;
+}
+
+std::chrono::milliseconds connect_timeout_from_conninfo(
+    const std::string& conn_str) {
+    char* error = nullptr;
+    PQconninfoOption* options = PQconninfoParse(conn_str.c_str(), &error);
+    struct ParseFree {
+        PQconninfoOption* options;
+        char* error;
+        ~ParseFree() {
+            if (options) PQconninfoFree(options);
+            if (error) PQfreemem(error);
+        }
+    } free_parse{options, error};
+    return connect_timeout_from_options(options);
+}
+
+std::chrono::milliseconds async_connect_timeout(pg_conn* c) {
+    int test_timeout = connection_timeout_ms_for_test.load(
+        std::memory_order_relaxed);
+    if (test_timeout >= 0) return std::chrono::milliseconds(test_timeout);
+
+    PQconninfoOption* options = PQconninfo(c);
+    struct OptionsFree {
+        PQconninfoOption* options;
+        ~OptionsFree() { if (options) PQconninfoFree(options); }
+    } free_options{options};
+    return connect_timeout_from_options(options);
 }
 
 asio::awaitable<void> start_connection_off_executor(
@@ -1240,8 +1260,7 @@ asio::awaitable<std::unique_ptr<PgConn>> open_conn_async(
         std::memory_order_relaxed);
     auto initial_timeout = start_timeout >= 0
         ? std::chrono::milliseconds(start_timeout)
-        : std::chrono::duration_cast<std::chrono::milliseconds>(
-              std::chrono::seconds(30));
+        : connect_timeout_from_conninfo(url);
     auto attempt = std::make_shared<ConnectionAttempt>();
     co_await start_connection_off_executor(
         attempt, url, started + initial_timeout, initial_timeout);
@@ -1446,6 +1465,11 @@ void PostgresCheckpointStore::set_async_connection_test_seams(
                                              std::memory_order_relaxed);
     connection_timeout_ms_for_test.store(timeout_ms,
                                          std::memory_order_relaxed);
+}
+
+int PostgresCheckpointStore::async_connection_timeout_ms_for_test(
+    const std::string& conn_str) {
+    return static_cast<int>(connect_timeout_from_conninfo(conn_str).count());
 }
 
 // Async peer of with_conn. Template — definition here (same TU as the

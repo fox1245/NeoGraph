@@ -296,6 +296,25 @@ them — or use the `key=value` form:
 host=localhost user=neo password=p@ss dbname=neograph
 ```
 
+### Async Postgres reconnect times out after 30 seconds
+
+Async initial/replacement connections use one production-safety deadline for
+the entire attempt. A positive libpq `connect_timeout=N` sets that global
+budget in seconds, with `connect_timeout=1` rounded up to PostgreSQL's minimum
+of two seconds. If `connect_timeout` is absent, zero, or negative, NeoGraph
+uses 30 seconds.
+
+The budget spans every host and resolved IP in a multi-host connection string;
+it is not multiplied per host. This differs intentionally from synchronous
+libpq, where `connect_timeout` applies separately to each host. Synchronous
+`PostgresCheckpointStore` construction and replacement are unchanged.
+
+For example, this gives the complete async replacement attempt 60 seconds:
+
+```
+host=pg-a,pg-b dbname=neograph connect_timeout=60
+```
+
 ### Postgres `relation "neograph_checkpoints" does not exist`
 
 The store creates its tables on first use (`CREATE TABLE IF NOT EXISTS`).

@@ -100,6 +100,11 @@ public:
             poll_delay_ms, timeout_ms);
     }
 
+    static int async_connection_timeout_ms(const std::string& conn_str) {
+        return PostgresCheckpointStore::async_connection_timeout_ms_for_test(
+            conn_str);
+    }
+
     static Layout layout(const PostgresCheckpointStore& store) {
         auto base = reinterpret_cast<uintptr_t>(&store);
         return {
@@ -506,14 +511,33 @@ TEST(PostgresCheckpointAsyncIoTest, ResolverPollDoesNotBlockIoContext) {
     EXPECT_TRUE(PoolTestAccess::slot_is_empty(*store, 0));
 }
 
-TEST(PostgresCheckpointAsyncIoTest, ConnectPollHonorsConninfoTimeout) {
+TEST(PostgresCheckpointAsyncIoTest, TimeoutPolicyParsesDefaultAndMinimum) {
+    EXPECT_EQ(PoolTestAccess::async_connection_timeout_ms(
+        "host=localhost sslmode=disable"), 30000);
+    EXPECT_EQ(PoolTestAccess::async_connection_timeout_ms(
+        "host=localhost sslmode=disable connect_timeout=0"), 30000);
+    EXPECT_EQ(PoolTestAccess::async_connection_timeout_ms(
+        "host=localhost sslmode=disable connect_timeout=-1"), 30000);
+    EXPECT_EQ(PoolTestAccess::async_connection_timeout_ms(
+        "host=localhost sslmode=disable connect_timeout=1"), 2000);
+    EXPECT_EQ(PoolTestAccess::async_connection_timeout_ms(
+        "host=localhost sslmode=disable connect_timeout=60"), 60000);
+    EXPECT_EQ(PoolTestAccess::async_connection_timeout_ms(
+        "host=one,two sslmode=disable connect_timeout=3"), 3000)
+        << "multi-host conninfo must not multiply the global budget";
+}
+
+TEST(PostgresCheckpointAsyncIoTest, ConnectPollUsesOneGlobalConninfoDeadline) {
     AsyncConnectionTestSeamReset reset;
     PoolTestAccess::set_async_connection_test_seams(
         /*poll_delay_ms=*/0, /*timeout_ms=*/-1);
-    StalledTcpServer server;
+    StalledTcpServer first_server;
+    StalledTcpServer second_server;
     auto store = PoolTestAccess::make_pool(/*pool_size=*/1);
     PoolTestAccess::set_conn_str(*store,
-        "hostaddr=127.0.0.1 port=" + std::to_string(server.port)
+        "hostaddr=127.0.0.1,127.0.0.1 port="
+        + std::to_string(first_server.port) + ","
+        + std::to_string(second_server.port)
         + " user=stall dbname=stall sslmode=disable connect_timeout=1");
 
     asio::io_context io;

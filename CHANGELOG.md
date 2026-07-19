@@ -41,6 +41,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   단, 외부 코드가 직접 만든 token에 `bind_executor()`를 호출한 경우에는
   해당 executor의 게시 작업이 끝날 때까지 token을 살려 둘 책임이 여전히
   호출자에게 있다.
+- **PostgreSQL 비동기 연결의 전역 제한 시간 정책 명문화.** 비동기 최초
+  연결·교체는 모든 host/IP를 합쳐 하나의 제한 시간을 사용한다. 양수
+  `connect_timeout`은 최소 2초로 적용하고, 미지정·0·음수이면 운영 안전
+  기본값 30초를 사용한다. libpq의 host별 동기 제한 시간과 의도적으로
+  다르며, 동기 생성·교체 동작은 바꾸지 않았다.
 - **JARVIS mock 빌드 복구 (issue #130).** 음성 의존성이 없을 때
   `MicCapture`가 불완전한 타입으로 남아 `cookbook_jarvis` 컴파일이 실패하던
   문제를 수정했다. `NEOGRAPH_JARVIS_FORCE_MOCK`을 추가해 ASan CI가 runner의

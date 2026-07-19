@@ -106,6 +106,18 @@ struct PgConn {
  * the connection eagerly and runs `ensure_schema()` so callers get
  * an immediate failure if credentials or DDL permissions are wrong,
  * rather than a delayed surprise on first save().
+ *
+ * ## Async connection deadline
+ *
+ * Async initial/replacement connection attempts use one NeoGraph-wide
+ * deadline for the complete attempt, including every host and resolved IP.
+ * A positive libpq `connect_timeout` supplies the deadline in seconds, with
+ * libpq's documented two-second minimum. If it is absent, zero, or negative,
+ * NeoGraph applies a 30-second production-safety default. This intentionally
+ * differs from libpq's synchronous per-host timeout semantics: an async
+ * multi-host attempt receives one budget rather than one budget per host.
+ * Synchronous construction and synchronous replacement retain native libpq
+ * behavior and are unchanged by this policy.
  */
 class NEOGRAPH_API PostgresCheckpointStore : public CheckpointStore {
 public:
@@ -159,9 +171,9 @@ public:
     // concurrent save_async calls across pool slots actually overlap
     // instead of serialising on the main worker thread.
     //
-    // Behaviour identical to the sync peers (same retry semantics,
-    // same broken-connection auto-replacement, same schema). Only the
-    // wire-level wait is non-blocking.
+    // Successful operations use the same storage schema and values as the
+    // sync peers. Async connection setup/replacement additionally follows
+    // the global deadline policy documented on this class.
 
     asio::awaitable<void> save_async(const Checkpoint& cp) override;
     asio::awaitable<std::optional<Checkpoint>>
@@ -225,6 +237,8 @@ private:
     static asio::awaitable<bool> wait_socket_either_for_test(int fd);
     static void set_async_connection_test_seams(int poll_delay_ms,
                                                 int timeout_ms);
+    static int async_connection_timeout_ms_for_test(
+        const std::string& conn_str);
 
     /// Original connection string, retained so individual pool slots
     /// can be rebuilt on demand after a broken-connection detection.

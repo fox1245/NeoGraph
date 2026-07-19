@@ -3243,7 +3243,10 @@ defaults. **Full reference:**
 `<neograph/graph/sqlite_checkpoint.h>`
 `PostgresCheckpointStore` — libpq-based, 3-table schema (`neograph_*`)
 with channel-blob deduplication keyed on
-`(thread_id, channel, version)`; LangGraph `PostgresSaver` parity.
+`(thread_id, channel, version)`; LangGraph `PostgresSaver` parity. Async
+initial/replacement connections use one global deadline across all hosts:
+positive `connect_timeout` (minimum 2s), otherwise a 30s safety default.
+Synchronous libpq connection timeout behavior is unchanged.
 `SqliteCheckpointStore` — same shape, single-file backend, fits the
 edge / single-host deployments.
 **Full reference:**
