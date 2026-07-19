@@ -22,11 +22,13 @@
 #include <neograph/tool.h>
 #include <neograph/types.h>
 
+#include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
 #include <memory>
 #include <string>
+#include <thread>
 
 #ifdef NEOGRAPH_PYBIND_HAS_LLM
 #include <neograph/llm/openai_provider.h>
@@ -130,6 +132,50 @@ class PyProvider : public neograph::Provider {
         PYBIND11_OVERRIDE_PURE(std::string,
                                neograph::Provider, get_name,);
     }
+};
+
+class CallbackThreadProvider : public neograph::Provider {
+  public:
+    neograph::ChatCompletion
+    complete(const neograph::CompletionParams&) override {
+        return make_completion();
+    }
+
+    neograph::ChatCompletion
+    complete_stream(const neograph::CompletionParams&,
+                    const neograph::StreamCallback& on_chunk) override {
+        std::thread worker([this, callback = on_chunk]() mutable {
+            worker_started_without_gil_ = PyGILState_Check() == 0;
+            auto retained = callback;
+            callback("one");
+            retained("-");
+            callback("two");
+            retained = {};
+            callback = {};
+            worker_finished_without_gil_ = PyGILState_Check() == 0;
+        });
+        worker.join();
+        return make_completion();
+    }
+
+    std::string get_name() const override { return "callback-thread-test"; }
+    bool worker_started_without_gil() const {
+        return worker_started_without_gil_;
+    }
+    bool worker_finished_without_gil() const {
+        return worker_finished_without_gil_;
+    }
+
+  private:
+    static neograph::ChatCompletion make_completion() {
+        neograph::ChatCompletion result;
+        result.message.role = "assistant";
+        result.message.content = "one-two";
+        return result;
+    }
+
+    bool worker_started_without_gil_ = false;
+    bool worker_finished_without_gil_ = false;
 };
 
 }  // namespace
@@ -337,23 +383,26 @@ void init_provider(py::module_& m) {
             py::arg("temperature") = 0.7,
             py::arg("max_tokens")  = -1,
             py::arg("tools")       = py::list{})
+        // pybind11 v2.13.6 functional.h wraps Python callables in func_handle,
+        // which acquires the GIL for invocation, copying, and destruction.
         .def("complete_stream", [](neograph::Provider& self,
                                     const neograph::CompletionParams& p,
-                                    py::object on_chunk) {
-            neograph::StreamCallback callback;
-            if (!on_chunk.is_none()) {
-                auto fn = on_chunk.cast<py::function>();
-                callback = [fn = std::move(fn)](const std::string& chunk) {
-                    py::gil_scoped_acquire gil;
-                    fn(chunk);
-                };
-            }
-            // Declared after callback on purpose: reverse destruction
-            // reacquires the GIL before callback releases its py::function.
+                                    neograph::StreamCallback callback) {
             py::gil_scoped_release release;
             return self.complete_stream(p, callback);
         }, py::arg("params"), py::arg("on_chunk"))
         .def("get_name", &neograph::Provider::get_name);
+
+    py::class_<CallbackThreadProvider, neograph::Provider,
+               std::shared_ptr<CallbackThreadProvider>>(
+        m, "_CallbackThreadProvider")
+        .def(py::init<>())
+        .def_property_readonly(
+            "worker_started_without_gil",
+            &CallbackThreadProvider::worker_started_without_gil)
+        .def_property_readonly(
+            "worker_finished_without_gil",
+            &CallbackThreadProvider::worker_finished_without_gil);
 
     // ── Tool base (opaque, no Python subclass yet) ───────────────────────
     py::class_<neograph::Tool, std::shared_ptr<neograph::Tool>>(m, "Tool",

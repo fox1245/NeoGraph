@@ -13,6 +13,7 @@ import json
 import pytest
 
 import neograph_engine as ng
+from neograph_engine import _neograph as _native
 
 pytest.importorskip("opentelemetry")
 
@@ -394,6 +395,19 @@ def test_provider_binding_retained_stream_callback_remains_safe():
 
     assert result.message.content == "complete"
     assert received == ["late"]
+
+
+def test_native_provider_copies_and_destroys_callback_without_gil():
+    provider = _native._CallbackThreadProvider()
+    received = []
+
+    result = provider.complete_stream(
+        ng.CompletionParams(), received.append)
+
+    assert result.message.content == "one-two"
+    assert received == ["one", "-", "two"]
+    assert provider.worker_started_without_gil
+    assert provider.worker_finished_without_gil
 
 
 class _TestSpan:
