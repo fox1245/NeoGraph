@@ -1654,43 +1654,84 @@ SchemaProvider::complete_stream_async(const CompletionParams& params,
     // `http_thread_`): the thread is warm after the first call, all
     // subsequent calls reuse the warmed state.
     //
-    // Tokens are still dispatched onto the awaiter's executor (so the
-    // user's `on_chunk` runs single-threaded with the awaiting
-    // coroutine — same invariant the post-PR-#10 base default
-    // provides).
+    // The bridge thread only writes to shared state. The awaiting
+    // coroutine drains queued tokens on its own executor, preserving
+    // the callback-thread invariant without letting late bridge work
+    // retain or use an executor whose io_context may be gone.
     auto exec = co_await asio::this_coro::executor;
     auto bridge_exec = bridge_io_->get_executor();
 
     struct Shared {
+        std::mutex mutex;
+        bool abandoned = false;
+        bool finished = false;
+        std::vector<std::string> chunks;
         std::optional<ChatCompletion> result;
         std::exception_ptr err;
     };
     auto shared = std::make_shared<Shared>();
 
-    auto done = std::make_shared<asio::steady_timer>(exec);
-    done->expires_at(std::chrono::steady_clock::time_point::max());
-
-    StreamCallback wrapped = [exec, on_chunk](const std::string& chunk) {
-        asio::dispatch(exec, [on_chunk, chunk]() { on_chunk(chunk); });
+    StreamCallback wrapped = [shared](const std::string& chunk) {
+        std::lock_guard lock(shared->mutex);
+        if (!shared->abandoned) shared->chunks.push_back(chunk);
     };
+
+    struct AbandonGuard {
+        std::shared_ptr<Shared> shared;
+        ~AbandonGuard() {
+            std::lock_guard lock(shared->mutex);
+            shared->abandoned = true;
+            shared->chunks.clear();
+        }
+    } abandon_guard{shared};
 
     // params copied by value so the bridge thread's work item doesn't
     // outlive the caller's stack-allocated CompletionParams.
     asio::dispatch(bridge_exec,
-        [this, params, wrapped, shared, done, exec]() mutable {
+        [this, params, wrapped, shared]() mutable {
+            std::optional<ChatCompletion> result;
+            std::exception_ptr err;
             try {
-                shared->result = this->complete_stream(params, wrapped);
+                result = this->complete_stream(params, wrapped);
             } catch (...) {
-                shared->err = std::current_exception();
+                err = std::current_exception();
             }
-            asio::dispatch(exec, [done]() { done->cancel(); });
+            {
+                std::lock_guard lock(shared->mutex);
+                shared->result = std::move(result);
+                shared->err = err;
+                shared->finished = true;
+            }
         });
 
-    asio::error_code ec;
-    co_await done->async_wait(asio::redirect_error(asio::use_awaitable, ec));
+    asio::steady_timer poll(exec);
+    for (;;) {
+        std::vector<std::string> chunks;
+        std::optional<ChatCompletion> result;
+        std::exception_ptr err;
+        bool finished = false;
+        {
+            std::lock_guard lock(shared->mutex);
+            chunks.swap(shared->chunks);
+            finished = shared->finished;
+            if (finished) {
+                result = std::move(shared->result);
+                err = shared->err;
+            }
+        }
 
-    if (shared->err) std::rethrow_exception(shared->err);
-    co_return std::move(*shared->result);
+        if (on_chunk) {
+            for (const auto& chunk : chunks) on_chunk(chunk);
+        }
+        if (finished) {
+            if (err) std::rethrow_exception(err);
+            co_return std::move(*result);
+        }
+
+        poll.expires_after(std::chrono::milliseconds(1));
+        asio::error_code ec;
+        co_await poll.async_wait(asio::redirect_error(asio::use_awaitable, ec));
+    }
 }
 
 // ============================================================================

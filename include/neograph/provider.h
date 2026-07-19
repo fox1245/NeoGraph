@@ -199,12 +199,13 @@ class NEOGRAPH_API Provider {
      * @brief Async streaming completion. Awaitable peer of @ref complete_stream.
      *
      * Default implementation (post-#4): spawns a dedicated worker
-     * thread that runs the synchronous `complete_stream`, dispatches
-     * each token onto the awaiting coroutine's executor (so the
-     * user's `on_chunk` runs single-threaded with the awaiter — no
-     * reentrancy), and resumes the coroutine via a one-shot
-     * `steady_timer.cancel()` posted on the awaiter's executor when
-     * streaming finishes. Subclasses with a fully async streaming
+     * thread that runs the synchronous `complete_stream` and writes
+     * tokens and completion state to a private queue. The awaiting
+     * coroutine polls that queue and invokes the user's `on_chunk` on
+     * its own executor (single-threaded with the awaiter — no
+     * reentrancy). If the coroutine is abandoned, late tokens are
+     * discarded and the worker finishes independently without using
+     * the awaiter's executor. Subclasses with a fully async streaming
      * transport (WebSocket Responses, native SSE coroutine, etc.)
      * SHOULD override this to drop the worker thread and stream
      * tokens straight onto the coroutine's executor.
@@ -231,8 +232,15 @@ class NEOGRAPH_API Provider {
      * an extra worker thread per call. Subclasses whose
      * `complete_stream` is purely synchronous (e.g. blocking httplib)
      * can leave the default bridge in place — it routes the sync work
-     * onto a worker thread and dispatches tokens back onto the
-     * awaiter's executor.
+     * onto a worker thread and lets the awaiting coroutine drain the
+     * token queue on its own executor.
+     *
+     * @warning The default bridge calls the virtual `complete_stream`
+     * through this Provider object. If the returned awaitable is
+     * abandoned, the Provider must remain alive until that synchronous
+     * transport call returns. Abandoning the awaitable or destroying
+     * its `io_context` does not wait for the worker, and therefore does
+     * not extend the Provider object's lifetime.
      *
      * @note **`asio::io_context.run()` placement for the awaiter**
      * (issue #16): drive the outer `asio::io_context.run()` from
