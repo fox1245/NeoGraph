@@ -62,7 +62,9 @@ namespace neograph::observability {
  * `close()` is also called by the destructor — explicit close is
  * recommended only when the user wants to inspect the tracer's
  * exported spans before the session goes out of scope (e.g. in
- * tests). Double-close is a no-op.
+ * tests). Double-close is a no-op. Copies of `cb` are safe to retain:
+ * they become no-ops after close/destruction, and `close()` waits for
+ * callbacks that already entered before finalizing their spans.
  */
 class NEOGRAPH_API OpenInferenceTracerSession {
 public:
@@ -72,7 +74,7 @@ public:
     OpenInferenceTracerSession();
     ~OpenInferenceTracerSession();
 
-    // Non-copyable, movable.
+    // Non-copyable, movable. Move assignment closes the target first.
     OpenInferenceTracerSession(const OpenInferenceTracerSession&) = delete;
     OpenInferenceTracerSession& operator=(const OpenInferenceTracerSession&) = delete;
     OpenInferenceTracerSession(OpenInferenceTracerSession&&) noexcept;
