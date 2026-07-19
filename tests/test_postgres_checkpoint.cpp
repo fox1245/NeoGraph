@@ -20,6 +20,7 @@
 #include <asio/cancellation_signal.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
+#include <asio/ip/tcp.hpp>
 #include <asio/steady_timer.hpp>
 
 #include <array>
@@ -66,6 +67,20 @@ public:
 
     static size_t waiter_count(PostgresCheckpointStore& store) {
         return store.waiter_count_for_test();
+    }
+
+    static void set_conn_str(PostgresCheckpointStore& store,
+                             std::string conn_str) {
+        store.conn_str_ = std::move(conn_str);
+    }
+
+    static asio::awaitable<void> rebuild_async(
+        PostgresCheckpointStore& store, size_t idx) {
+        co_await store.rebuild_slot_async(idx);
+    }
+
+    static bool slot_is_empty(PostgresCheckpointStore& store, size_t idx) {
+        return !store.pool_[idx];
     }
 
     static Layout layout(const PostgresCheckpointStore& store) {
@@ -116,6 +131,33 @@ struct TestPgConn {
 struct TestPgResult {
     PGresult* raw = nullptr;
     ~TestPgResult() { if (raw) PQclear(raw); }
+};
+
+struct StalledTcpServer {
+    asio::io_context io;
+    asio::ip::tcp::acceptor acceptor{io};
+    std::shared_ptr<asio::ip::tcp::socket> client;
+    std::thread worker;
+    unsigned short port = 0;
+
+    StalledTcpServer() {
+        acceptor.open(asio::ip::tcp::v4());
+        acceptor.set_option(asio::ip::tcp::acceptor::reuse_address(true));
+        acceptor.bind({asio::ip::tcp::v4(), 0});
+        acceptor.listen();
+        port = acceptor.local_endpoint().port();
+        auto pending = std::make_shared<asio::ip::tcp::socket>(io);
+        acceptor.async_accept(*pending, [this, pending](const asio::error_code& ec) {
+            if (!ec) client = pending;
+        });
+        worker = std::thread([this] { io.run(); });
+    }
+
+    ~StalledTcpServer() {
+        io.stop();
+        if (worker.joinable()) worker.join();
+        client.reset();
+    }
 };
 
 std::optional<int> wait_for_blocked_table_lock(PGconn* observer,
@@ -355,6 +397,52 @@ TEST(PostgresCheckpointPoolTest, MixedWaitersKeepArrivalOrder) {
     EXPECT_EQ(async_error, nullptr);
     EXPECT_EQ(order, (std::vector<std::string>{"sync", "async"}));
     EXPECT_EQ(PoolTestAccess::free_count(*pool), 1u);
+}
+
+TEST(PostgresCheckpointAsyncIoTest, ReconnectPollDoesNotBlockIoContext) {
+    StalledTcpServer server;
+    auto store = PoolTestAccess::make_pool(/*pool_size=*/1);
+    PoolTestAccess::set_conn_str(*store,
+        "hostaddr=127.0.0.1 port=" + std::to_string(server.port)
+        + " user=stall dbname=stall sslmode=disable");
+
+    asio::io_context io;
+    asio::cancellation_signal cancel;
+    std::optional<std::chrono::milliseconds> heartbeat_elapsed;
+    std::exception_ptr rebuild_error;
+    auto started = std::chrono::steady_clock::now();
+
+    asio::steady_timer heartbeat(io, std::chrono::milliseconds(20));
+    heartbeat.async_wait([&](const asio::error_code& ec) {
+        if (!ec) {
+            heartbeat_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started);
+        }
+    });
+    asio::steady_timer cancel_timer(io, std::chrono::milliseconds(100));
+    cancel_timer.async_wait([&](const asio::error_code& ec) {
+        if (!ec) cancel.emit(asio::cancellation_type::all);
+    });
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> {
+            co_await PoolTestAccess::rebuild_async(*store, 0);
+        },
+        asio::bind_cancellation_slot(cancel.slot(),
+            [&](std::exception_ptr error) { rebuild_error = error; }));
+
+    io.run();
+
+    ASSERT_TRUE(heartbeat_elapsed.has_value());
+    EXPECT_LT(*heartbeat_elapsed, std::chrono::milliseconds(60));
+    ASSERT_NE(rebuild_error, nullptr);
+    try {
+        std::rethrow_exception(rebuild_error);
+    } catch (const asio::system_error& error) {
+        EXPECT_EQ(error.code(), asio::error::operation_aborted);
+    } catch (...) {
+        FAIL() << "cancelled async reconnect returned an unexpected exception";
+    }
+    EXPECT_TRUE(PoolTestAccess::slot_is_empty(*store, 0));
 }
 
 TEST_F(PostgresCheckpointTest, SaveAndLoadLatestRoundTrip) {
@@ -716,10 +804,12 @@ TEST_F(PostgresCheckpointTest, AsyncSaveAndLoadLatestRoundTrip) {
 
     asio::io_context io;
     std::optional<Checkpoint> loaded;
+    std::optional<Checkpoint> loaded_by_id;
     asio::co_spawn(io,
         [&]() -> asio::awaitable<void> {
             co_await store->save_async(cp);
             loaded = co_await store->load_latest_async("t-async");
+            loaded_by_id = co_await store->load_by_id_async(cp.id);
         },
         asio::detached);
     io.run();
@@ -728,6 +818,73 @@ TEST_F(PostgresCheckpointTest, AsyncSaveAndLoadLatestRoundTrip) {
     EXPECT_EQ(loaded->id, cp.id);
     EXPECT_EQ(loaded->step, 3);
     EXPECT_EQ(loaded->channel_values["channels"]["x"]["value"].get<int>(), 42);
+    ASSERT_TRUE(loaded_by_id.has_value());
+    EXPECT_EQ(loaded_by_id->id, cp.id);
+    EXPECT_EQ(loaded_by_id->channel_values["channels"]["msg"]["value"], "hi");
+}
+
+TEST_F(PostgresCheckpointTest, AsyncBlobLoadDoesNotBlockIoContext) {
+    store = std::make_unique<PostgresCheckpointStore>(pg_url(), /*pool_size=*/1);
+    store->drop_schema();
+    auto cp = make_state_cp("async-blob-heartbeat", 0, {{"x", {42, 1}}});
+    store->save(cp);
+
+    TestPgConn locker{PQconnectdb(pg_url())};
+    ASSERT_EQ(PQstatus(locker.raw), CONNECTION_OK) << PQerrorMessage(locker.raw);
+    {
+        TestPgResult result{PQexec(locker.raw,
+            "BEGIN; LOCK TABLE neograph_checkpoint_blobs "
+            "IN ACCESS EXCLUSIVE MODE")};
+        ASSERT_NE(result.raw, nullptr);
+        ASSERT_EQ(PQresultStatus(result.raw), PGRES_COMMAND_OK)
+            << PQresultErrorMessage(result.raw);
+    }
+    TestPgConn observer{PQconnectdb(pg_url())};
+    ASSERT_EQ(PQstatus(observer.raw), CONNECTION_OK) << PQerrorMessage(observer.raw);
+
+    asio::io_context io;
+    std::optional<Checkpoint> loaded;
+    std::optional<std::chrono::milliseconds> heartbeat_elapsed;
+    std::exception_ptr load_error;
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> {
+            loaded = co_await store->load_latest_async("async-blob-heartbeat");
+        },
+        [&](std::exception_ptr error) { load_error = error; });
+    std::thread io_thread([&] { io.run(); });
+
+    auto blocked_pid = wait_for_blocked_table_lock(
+        observer.raw, "neograph_checkpoint_blobs");
+    if (!blocked_pid) {
+        TestPgResult result{PQexec(locker.raw, "ROLLBACK")};
+        io_thread.join();
+        FAIL() << "async blob query never reached the PostgreSQL table lock";
+    }
+
+    auto started = std::chrono::steady_clock::now();
+    asio::steady_timer heartbeat(io);
+    asio::post(io, [&] {
+        heartbeat.expires_after(std::chrono::milliseconds(20));
+        heartbeat.async_wait([&](const asio::error_code& ec) {
+            if (!ec) {
+                heartbeat_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - started);
+            }
+        });
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    {
+        TestPgResult result{PQexec(locker.raw, "COMMIT")};
+    }
+    io_thread.join();
+
+    EXPECT_EQ(load_error, nullptr);
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(loaded->channel_values["channels"]["x"]["value"], 42);
+    ASSERT_TRUE(heartbeat_elapsed.has_value());
+    EXPECT_LT(*heartbeat_elapsed, std::chrono::milliseconds(150))
+        << "async blob materialization blocked the io_context for "
+        << heartbeat_elapsed->count() << "ms";
 }
 
 TEST_F(PostgresCheckpointTest, AsyncListReturnsNewestFirst) {
@@ -910,7 +1067,8 @@ TEST_F(PostgresCheckpointTest, CancelledAsyncQueryDiscardsConnectionWithoutRetry
     } catch (...) {
         FAIL() << "cancelled async query returned an unexpected exception";
     }
-    EXPECT_EQ(store->reconnect_count(), 1u);
+    EXPECT_EQ(store->reconnect_count(), 0u)
+        << "cancelled coroutine must discard without blocking to reconnect";
 
     int attempts = -1;
     {
@@ -924,8 +1082,19 @@ TEST_F(PostgresCheckpointTest, CancelledAsyncQueryDiscardsConnectionWithoutRetry
     }
     EXPECT_EQ(attempts, 0)
         << "a cancelled write reached PostgreSQL after its connection was discarded";
-    EXPECT_FALSE(store->load_by_id(cp.id).has_value())
+    asio::io_context recovery_io;
+    std::optional<Checkpoint> recovered;
+    std::exception_ptr recovery_error;
+    asio::co_spawn(recovery_io,
+        [&]() -> asio::awaitable<void> {
+            recovered = co_await store->load_by_id_async(cp.id);
+        },
+        [&](std::exception_ptr error) { recovery_error = error; });
+    recovery_io.run();
+    EXPECT_EQ(recovery_error, nullptr);
+    EXPECT_FALSE(recovered.has_value())
         << "a cancelled write was retried on the replacement connection";
+    EXPECT_EQ(store->reconnect_count(), 1u);
 
     {
         TestPgResult result{PQexec(observer.raw,
@@ -1003,7 +1172,21 @@ TEST_F(PostgresCheckpointTest, CancelledAsyncPutWritesDiscardsTransactionWithout
     } catch (...) {
         FAIL() << "cancelled put_writes_async returned an unexpected exception";
     }
-    EXPECT_EQ(store->reconnect_count(), 1u);
-    EXPECT_TRUE(store->get_writes("cancel-writes", "cancel-parent").empty())
+    EXPECT_EQ(store->reconnect_count(), 0u)
+        << "cancelled coroutine must discard without blocking to reconnect";
+
+    asio::io_context recovery_io;
+    std::vector<PendingWrite> recovered;
+    std::exception_ptr recovery_error;
+    asio::co_spawn(recovery_io,
+        [&]() -> asio::awaitable<void> {
+            recovered = co_await store->get_writes_async(
+                "cancel-writes", "cancel-parent");
+        },
+        [&](std::exception_ptr error) { recovery_error = error; });
+    recovery_io.run();
+    EXPECT_EQ(recovery_error, nullptr);
+    EXPECT_TRUE(recovered.empty())
         << "cancelled put_writes_async retried on the replacement connection";
+    EXPECT_EQ(store->reconnect_count(), 1u);
 }

@@ -220,6 +220,7 @@ private:
     asio::awaitable<size_t> acquire_slot_async();
     void release_slot(size_t idx);
     void rebuild_slot(size_t idx);
+    asio::awaitable<void> rebuild_slot_async(size_t idx);
     size_t waiter_count_for_test();
 
     /// Original connection string, retained so individual pool slots
