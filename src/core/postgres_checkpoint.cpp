@@ -27,6 +27,8 @@
 #else
 #  include <asio/posix/stream_descriptor.hpp>
 #endif
+#include <asio/bind_cancellation_slot.hpp>
+#include <asio/cancellation_state.hpp>
 #include <asio/deferred.hpp>
 #include <asio/experimental/parallel_group.hpp>
 #include <asio/post.hpp>
@@ -598,6 +600,7 @@ void PostgresCheckpointStore::drop_schema() {
     // We can safely take pool_mutex_ here because drop_schema is
     // test-only and never called concurrently with regular ops.
     std::unique_lock lock(pool_mutex_);
+    if (!pool_[0]) rebuild_slot(0);
     exec_sql(pool_[0]->raw, kDropDDL);
     exec_sql(pool_[0]->raw, kSchemaDDL);
     // No prepared statements to re-register — the libpq rewrite sends
@@ -1026,6 +1029,30 @@ asio::awaitable<Result> run_connection_step_off_executor(
     co_return result.get();
 }
 
+bool is_operation_aborted(const std::exception_ptr& error) {
+    try {
+        std::rethrow_exception(error);
+    } catch (const asio::system_error& e) {
+        return e.code() == asio::error::operation_aborted;
+    } catch (...) {
+        return false;
+    }
+}
+
+void discard_cancelled_connection_off_executor(std::unique_ptr<PgConn> conn) {
+    if (!conn) return;
+    auto owned = std::shared_ptr<PgConn>(conn.release());
+    asio::post(connection_start_pool(), [owned] {
+        auto cancel = std::unique_ptr<PGcancel, decltype(&PQfreeCancel)>(
+            PQgetCancel(owned->raw), PQfreeCancel);
+        if (cancel) {
+            char error[256]{};
+            (void)PQcancel(cancel.get(), error, sizeof(error));
+        }
+        // `owned` closes the original connection only after PQcancel returns.
+    });
+}
+
 template <typename Socket>
 asio::awaitable<SocketReady> wait_socket_either(Socket& sock) {
     auto [order, read_error, write_error] =
@@ -1101,6 +1128,7 @@ asio::awaitable<SocketReady> wait_pg_socket_either(pg_conn* c) {
 
 asio::awaitable<void> wait_pg_socket(pg_conn* c, bool reading) {
     auto ex = co_await asio::this_coro::executor;
+    auto cancellation = co_await asio::this_coro::cancellation_state;
     int fd = PQsocket(c);
     if (fd < 0) {
         throw BrokenConnection(
@@ -1118,7 +1146,8 @@ asio::awaitable<void> wait_pg_socket(pg_conn* c, bool reading) {
     co_await sock.async_wait(
         reading ? asio::ip::tcp::socket::wait_read
                 : asio::ip::tcp::socket::wait_write,
-        asio::use_awaitable);
+        asio::bind_cancellation_slot(
+            cancellation.slot(), asio::use_awaitable));
 #else
     asio::posix::stream_descriptor sock(ex, fd);
     struct SockRelease {
@@ -1128,7 +1157,8 @@ asio::awaitable<void> wait_pg_socket(pg_conn* c, bool reading) {
     co_await sock.async_wait(
         reading ? asio::posix::stream_descriptor::wait_read
                 : asio::posix::stream_descriptor::wait_write,
-        asio::use_awaitable);
+        asio::bind_cancellation_slot(
+            cancellation.slot(), asio::use_awaitable));
 #endif
 }
 
@@ -1491,48 +1521,66 @@ auto PostgresCheckpointStore::with_conn_async(Fn fn)
 
     std::exception_ptr first_error;
     bool need_retry = false;
+    bool cancel_before_close = false;
     // First attempt under try — any co_await happens here, not in catch.
     try {
         co_return co_await fn(pool_[idx]->raw);
     } catch (const QueryNotDrained& error) {
         first_error = error.cause;
         need_retry = error.retryable;
+        cancel_before_close = !need_retry && is_operation_aborted(error.cause);
     } catch (const BrokenConnection&) {
         first_error = std::current_exception();
         need_retry = true;
     }
 
     // Once PQsendQueryParams succeeded, an interrupted exchange leaves
-    // unread protocol data on the connection. Close it before opening a
-    // replacement; a cancelled write may already have reached PostgreSQL,
-    // so cancellation is propagated without sending the operation again.
+    // unread protocol data on the connection. A cancelled write may already
+    // have reached PostgreSQL, so transfer that dirty connection to the
+    // bounded worker that sends PQcancel before closing it. Reconnection is
+    // deferred to the next operation and the write is never retried.
+    if (!need_retry) {
+        if (cancel_before_close) {
+            discard_cancelled_connection_off_executor(std::move(pool_[idx]));
+        } else {
+            pool_[idx].reset();
+        }
+        std::rethrow_exception(first_error);
+    }
     pool_[idx].reset();
     try {
         co_await rebuild_slot_async(idx);
     } catch (...) {
-        if (!need_retry) std::rethrow_exception(first_error);
         throw;
     }
-    if (!need_retry) std::rethrow_exception(first_error);
 
     // One retry is retained for a genuine broken connection. The second
     // attempt is never retried, but it still quarantines an undrained slot.
     std::exception_ptr second_error;
     bool must_discard = false;
+    bool cancel_second_before_close = false;
     try {
         co_return co_await fn(pool_[idx]->raw);
     } catch (const QueryNotDrained& error) {
         second_error = error.cause;
         must_discard = true;
+        cancel_second_before_close = is_operation_aborted(error.cause);
     } catch (const BrokenConnection&) {
         second_error = std::current_exception();
     }
 
+    if (must_discard) {
+        if (cancel_second_before_close) {
+            discard_cancelled_connection_off_executor(std::move(pool_[idx]));
+        } else {
+            pool_[idx].reset();
+        }
+        std::rethrow_exception(second_error);
+    }
     pool_[idx].reset();
     try {
         co_await rebuild_slot_async(idx);
     } catch (...) {
-        if (must_discard) std::rethrow_exception(second_error);
         throw;
     }
     std::rethrow_exception(second_error);

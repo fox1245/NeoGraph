@@ -121,6 +121,11 @@ struct PgConn {
  * multi-host attempt receives one budget rather than one budget per host.
  * Synchronous construction and synchronous replacement retain native libpq
  * behavior and are unchanged by this policy.
+ *
+ * Cancelling an in-flight async query quarantines its pool connection and
+ * sends PostgreSQL's out-of-band cancel request on NeoGraph's bounded worker
+ * pool before closing that connection. The cancelled operation is never
+ * retried; the empty slot is rebuilt lazily by the next operation.
  */
 class NEOGRAPH_API PostgresCheckpointStore : public CheckpointStore {
 public:

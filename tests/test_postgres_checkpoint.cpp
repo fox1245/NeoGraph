@@ -18,10 +18,12 @@
 #include <asio/co_spawn.hpp>
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/cancellation_signal.hpp>
+#include <asio/cancellation_state.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/steady_timer.hpp>
+#include <asio/this_coro.hpp>
 
 #include <array>
 #include <atomic>
@@ -1202,10 +1204,31 @@ TEST_F(PostgresCheckpointTest, CancelledAsyncQueryDiscardsConnectionWithoutRetry
     asio::io_context io;
     asio::cancellation_signal cancel;
     std::exception_ptr save_error;
+    std::exception_ptr followup_error;
+    std::exception_ptr coroutine_error;
+    std::atomic<bool> followup_waiting{false};
+    asio::steady_timer followup_timer(io);
     asio::co_spawn(io,
-        [&]() -> asio::awaitable<void> { co_await store->save_async(cp); },
+        [&]() -> asio::awaitable<void> {
+            co_await asio::this_coro::reset_cancellation_state(
+                asio::enable_partial_cancellation());
+            try {
+                co_await store->save_async(cp);
+            } catch (...) {
+                save_error = std::current_exception();
+            }
+            if (save_error) {
+                followup_timer.expires_after(std::chrono::seconds(30));
+                followup_waiting.store(true, std::memory_order_release);
+                try {
+                    co_await followup_timer.async_wait(asio::use_awaitable);
+                } catch (...) {
+                    followup_error = std::current_exception();
+                }
+            }
+        },
         asio::bind_cancellation_slot(cancel.slot(),
-            [&](std::exception_ptr error) { save_error = error; }));
+            [&](std::exception_ptr error) { coroutine_error = error; }));
     std::thread io_thread([&] { io.run(); });
 
     auto blocked_pid = wait_for_blocked_table_lock(
@@ -1216,17 +1239,32 @@ TEST_F(PostgresCheckpointTest, CancelledAsyncQueryDiscardsConnectionWithoutRetry
         FAIL() << "async save never reached the PostgreSQL table lock";
     }
 
-    asio::post(io, [&] { cancel.emit(asio::cancellation_type::all); });
+    asio::post(io, [&] { cancel.emit(asio::cancellation_type::partial); });
     if (!wait_for_backend_exit(observer.raw, *blocked_pid)) {
         TestPgResult result{PQexec(locker.raw, "ROLLBACK")};
+        asio::post(io, [&] { cancel.emit(asio::cancellation_type::all); });
         io_thread.join();
         FAIL() << "cancelled async save did not discard its PostgreSQL backend";
     }
+    auto followup_deadline = std::chrono::steady_clock::now()
+                           + std::chrono::seconds(2);
+    while (!followup_waiting.load(std::memory_order_acquire)
+           && std::chrono::steady_clock::now() < followup_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    if (!followup_waiting.load(std::memory_order_acquire)) {
+        TestPgResult result{PQexec(locker.raw, "ROLLBACK")};
+        asio::post(io, [&] { cancel.emit(asio::cancellation_type::all); });
+        io_thread.join();
+        FAIL() << "cancelled async save did not reach its continuation";
+    }
+    asio::post(io, [&] { cancel.emit(asio::cancellation_type::partial); });
     {
         TestPgResult result{PQexec(locker.raw, "COMMIT")};
     }
     io_thread.join();
 
+    EXPECT_EQ(coroutine_error, nullptr);
     ASSERT_NE(save_error, nullptr);
     try {
         std::rethrow_exception(save_error);
@@ -1234,6 +1272,15 @@ TEST_F(PostgresCheckpointTest, CancelledAsyncQueryDiscardsConnectionWithoutRetry
         EXPECT_EQ(error.code(), asio::error::operation_aborted);
     } catch (...) {
         FAIL() << "cancelled async query returned an unexpected exception";
+    }
+    ASSERT_NE(followup_error, nullptr)
+        << "PostgreSQL cleanup permanently disabled caller cancellation";
+    try {
+        std::rethrow_exception(followup_error);
+    } catch (const asio::system_error& error) {
+        EXPECT_EQ(error.code(), asio::error::operation_aborted);
+    } catch (...) {
+        FAIL() << "follow-up wait returned an unexpected exception";
     }
     EXPECT_EQ(store->reconnect_count(), 0u)
         << "cancelled coroutine must discard without blocking to reconnect";
