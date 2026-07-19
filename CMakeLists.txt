@@ -46,7 +46,8 @@ endif()
 option(NEOGRAPH_ENABLE_HARDENING "Hardening flags in Release builds (canaries, FORTIFY, CFI)" ON)
 if(NEOGRAPH_ENABLE_HARDENING
    AND NOT CMAKE_CXX_FLAGS MATCHES "fsanitize="
-   AND NOT MSVC)
+   AND NOT MSVC
+   AND NOT EMSCRIPTEN)
     set(_NEOGRAPH_HARDEN_FLAGS
         # libstdc++ debug assertions: catches std::vector OOB, iterator
         # invalidation, dereferencing end(), uninitialized optional, …
@@ -102,6 +103,16 @@ endif()
 # ===========================================================================
 # Options
 # ===========================================================================
+option(NEOGRAPH_BUILD_WASM     "Build the browser/Node.js WebAssembly runtime" OFF)
+
+# Browser builds consume the graph engine through JavaScript adapters. Native
+# sockets, servers, databases, subprocess protocols, and examples stay opt-in
+# instead of making a plain Emscripten configure probe host-only dependencies.
+set(_NEOGRAPH_NATIVE_DEFAULT ON)
+if(EMSCRIPTEN)
+    set(_NEOGRAPH_NATIVE_DEFAULT OFF)
+endif()
+
 # neograph::async — asio::ssl-based HTTP/HTTPS/WS client. Required (as a
 # link dep) by neograph::{llm,mcp,a2a} and by the Python binding. Gated
 # behind an option so a *minimal-core* build (Dockerfile.neograph in the
@@ -109,15 +120,15 @@ endif()
 # can flip every component OFF including async — that path then needs
 # **no OpenSSL** on the build host. With ASYNC=OFF the OpenSSL / libcurl
 # find_package() calls are skipped entirely (see line ~258).
-option(NEOGRAPH_BUILD_ASYNC    "Build neograph::async (asio::ssl HTTP/HTTPS/WS client)" ON)
-option(NEOGRAPH_BUILD_LLM      "Build neograph::llm (LLM providers)"     ON)
-option(NEOGRAPH_BUILD_MCP      "Build neograph::mcp (MCP client)"        ON)
-option(NEOGRAPH_BUILD_A2A      "Build neograph::a2a (Agent-to-Agent client)" ON)
-option(NEOGRAPH_BUILD_ACP      "Build neograph::acp (Agent Client Protocol server)" ON)
-option(NEOGRAPH_BUILD_UTIL     "Build neograph::util (utilities)"        ON)
-option(NEOGRAPH_BUILD_POSTGRES "Build PostgresCheckpointStore (libpq)" ON)
-option(NEOGRAPH_BUILD_SQLITE   "Build SqliteCheckpointStore (libsqlite3)" ON)
-option(NEOGRAPH_BUILD_EXAMPLES "Build example programs"                  ON)
+option(NEOGRAPH_BUILD_ASYNC    "Build neograph::async (asio::ssl HTTP/HTTPS/WS client)" ${_NEOGRAPH_NATIVE_DEFAULT})
+option(NEOGRAPH_BUILD_LLM      "Build neograph::llm (LLM providers)"     ${_NEOGRAPH_NATIVE_DEFAULT})
+option(NEOGRAPH_BUILD_MCP      "Build neograph::mcp (MCP client)"        ${_NEOGRAPH_NATIVE_DEFAULT})
+option(NEOGRAPH_BUILD_A2A      "Build neograph::a2a (Agent-to-Agent client)" ${_NEOGRAPH_NATIVE_DEFAULT})
+option(NEOGRAPH_BUILD_ACP      "Build neograph::acp (Agent Client Protocol server)" ${_NEOGRAPH_NATIVE_DEFAULT})
+option(NEOGRAPH_BUILD_UTIL     "Build neograph::util (utilities)"        ${_NEOGRAPH_NATIVE_DEFAULT})
+option(NEOGRAPH_BUILD_POSTGRES "Build PostgresCheckpointStore (libpq)" ${_NEOGRAPH_NATIVE_DEFAULT})
+option(NEOGRAPH_BUILD_SQLITE   "Build SqliteCheckpointStore (libsqlite3)" ${_NEOGRAPH_NATIVE_DEFAULT})
+option(NEOGRAPH_BUILD_EXAMPLES "Build example programs"                  ${_NEOGRAPH_NATIVE_DEFAULT})
 option(NEOGRAPH_BUILD_PYBIND   "Build Python bindings (pybind11)"        OFF)
 # neograph::grpc — expose a compiled GraphEngine as a gRPC service
 # (RunGraph unary + RunGraphStream server-streaming). **default OFF**
@@ -138,7 +149,14 @@ option(NEOGRAPH_BUILD_GRPC     "Build neograph::grpc (gRPC GraphEngine service �
 # still builds and the default ConnPool HTTP/1.1 path works — only the
 # `prefer_libcurl=true` opt-in becomes a runtime no-op (an error from
 # the SchemaProvider constructor if the user requests it).
-option(NEOGRAPH_USE_LIBCURL    "Build libcurl HTTP/2 backend (CurlH2Pool)" ON)
+option(NEOGRAPH_USE_LIBCURL    "Build libcurl HTTP/2 backend (CurlH2Pool)" ${_NEOGRAPH_NATIVE_DEFAULT})
+
+if(NEOGRAPH_BUILD_WASM AND NOT EMSCRIPTEN)
+    message(FATAL_ERROR
+        "NEOGRAPH_BUILD_WASM=ON requires the Emscripten toolchain. "
+        "Configure with emcmake/emconfigure rather than a native compiler.")
+endif()
+unset(_NEOGRAPH_NATIVE_DEFAULT)
 
 # ---------------------------------------------------------------------------
 # Shared-vs-static library mode
@@ -284,6 +302,13 @@ target_include_directories(asio INTERFACE
     $<BUILD_INTERFACE:${DEPS_DIR}/asio/include>
     $<INSTALL_INTERFACE:${NEOGRAPH_VENDOR_INSTALL_INCLUDEDIR}>)
 target_compile_definitions(asio INTERFACE ASIO_STANDALONE ASIO_NO_DEPRECATED)
+if(EMSCRIPTEN AND NEOGRAPH_BUILD_WASM)
+    # Asio sees Emscripten's Clang as a threaded non-POSIX platform unless told
+    # otherwise, then rejects its own TSS/signal implementation selection.
+    # The default WASM runtime is deliberately single-threaded and runs inside
+    # a Web Worker, so use Asio's supported null-thread backend.
+    target_compile_definitions(asio INTERFACE ASIO_DISABLE_THREADS)
+endif()
 # Windows: target Windows 10+ so httplib compiles (it hard-errors on
 # _WIN32_WINNT < 0x0A00) and asio's newer overlapped/pipe paths light up.
 # Also scrub min/max macros from <windows.h> that clobber std::min/max.
@@ -450,6 +475,33 @@ target_link_libraries(neograph_core
 target_compile_features(neograph_core PUBLIC cxx_std_20)
 
 add_library(neograph::core ALIAS neograph_core)
+
+# ===========================================================================
+# @neograph/wasm engine — current neograph::core behind a JSON-only ABI.
+# ===========================================================================
+if(NEOGRAPH_BUILD_WASM)
+    add_executable(neograph_wasm wasm/bindings.cpp)
+    target_link_libraries(neograph_wasm PRIVATE neograph::core)
+    target_compile_definitions(neograph_wasm PRIVATE
+        NEOGRAPH_VERSION_STR="${NEOGRAPH_VERSION}")
+    target_compile_options(neograph_core PRIVATE -fexceptions)
+    target_compile_options(neograph_wasm PRIVATE -fexceptions)
+    target_link_options(neograph_wasm PRIVATE
+        -fexceptions
+        -lembind
+        --no-entry
+        "SHELL:-sMODULARIZE=1"
+        "SHELL:-sEXPORT_ES6=1"
+        "SHELL:-sEXPORT_NAME=createNeoGraphModule"
+        "SHELL:-sENVIRONMENT=web,worker,node"
+        "SHELL:-sALLOW_MEMORY_GROWTH=1"
+        "SHELL:-sNO_EXIT_RUNTIME=1"
+        "SHELL:-sEXPORTED_RUNTIME_METHODS=getExceptionMessage,decrementExceptionRefcount"
+    )
+    set_target_properties(neograph_wasm PROPERTIES
+        OUTPUT_NAME neograph
+        SUFFIX ".js")
+endif()
 
 # ===========================================================================
 # neograph::async — asio-based async runtime (PoC stage)
@@ -1230,8 +1282,10 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         target_link_libraries(example_store_personalization PRIVATE neograph::core)
 
         # Example 44: RequestQueue backpressure / rejection path.
-        add_executable(example_request_queue_backpressure examples/44_request_queue_backpressure.cpp)
-        target_link_libraries(example_request_queue_backpressure PRIVATE neograph::core neograph::util)
+        if(NEOGRAPH_BUILD_UTIL)
+            add_executable(example_request_queue_backpressure examples/44_request_queue_backpressure.cpp)
+            target_link_libraries(example_request_queue_backpressure PRIVATE neograph::core neograph::util)
+        endif()
 
         # Example 46: CancelToken — cooperative cancellation from another thread.
         add_executable(example_cancel_token examples/46_cancel_token.cpp)
@@ -1301,6 +1355,17 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             target_link_libraries(example_clay_chatbot PRIVATE neograph::core neograph::llm raylib cppdotenv)
             target_include_directories(example_clay_chatbot PRIVATE ${DEPS_DIR})
         endif()
+    endif()
+
+    # A2A is independently buildable; it must not require the LLM examples.
+    if(NEOGRAPH_BUILD_A2A AND NOT NEOGRAPH_BUILD_LLM)
+        add_executable(example_a2a_client examples/37_a2a_client.cpp)
+        target_link_libraries(example_a2a_client PRIVATE
+            neograph::core neograph::a2a)
+
+        add_executable(example_a2a_server examples/38_a2a_server.cpp)
+        target_link_libraries(example_a2a_server PRIVATE
+            neograph::core neograph::a2a)
     endif()
 endif()
 

@@ -1,0 +1,45 @@
+name: WASM
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: wasm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Configure current core for Emscripten
+        run: >-
+          docker run --rm -v "$PWD:/src" -w /src
+          emscripten/emsdk@sha256:bb0910e6a18bb9bd7cb31ae4ed40f9073148b78cb2cdb8ea8676454e0d85425c
+          emcmake cmake -S . -B build/wasm-release
+          -DCMAKE_BUILD_TYPE=Release
+          -DNEOGRAPH_BUILD_WASM=ON
+
+      - name: Build WebAssembly runtime
+        run: >-
+          docker run --rm -v "$PWD:/src" -w /src
+          emscripten/emsdk@sha256:bb0910e6a18bb9bd7cb31ae4ed40f9073148b78cb2cdb8ea8676454e0d85425c
+          cmake --build build/wasm-release --target neograph_wasm --parallel 4
+
+      - name: Run JavaScript callback and HITL smoke tests
+        run: node wasm/smoke.mjs build/wasm-release/neograph.js
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neograph-wasm
+          path: |
+            build/wasm-release/neograph.js
+            build/wasm-release/neograph.wasm
