@@ -352,9 +352,9 @@ and so on.
 - [ ] If your custom nodes do real I/O → override `execute_async`.
 - [ ] If your tools do real I/O → derive from `AsyncTool`, override
       `execute_async`.
-- [ ] If you use the Postgres checkpoint store → still sync under
-      the hood (Sem 3.3 pending); expect a future breaking change
-      when libpq pipeline mode lands.
+- [ ] If you use the Postgres checkpoint store → use its `*_async`
+      methods on shared event loops. They use libpq's nonblocking wire
+      protocol and a coroutine-friendly connection pool.
 - [ ] Measure. The value axis is concurrency; if your workload
       isn't concurrency-bound, don't migrate.
 
@@ -362,9 +362,9 @@ and so on.
 
 ## 7. What's not covered yet
 
-* **Postgres checkpoint store** — still uses libpqxx sync; its
-  `save_async` routes through `run_sync`. A full libpq-pipeline
-  rewrite is tracked as Sem 3.3.
+* **Postgres pipeline mode** — async checkpoint methods already use
+  nonblocking libpq I/O, but they do not yet batch multiple commands
+  through libpq pipeline mode.
 * **`async::HttpResponse` headers map** — the response surface only
   exposes status / body / retry_after / location. Arbitrary header
   access (e.g. MCP session ID header tracking) is a Sem 1

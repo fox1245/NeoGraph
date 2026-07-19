@@ -38,6 +38,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   취소 때문에 생긴 asio `operation_aborted`는 재시도 가능한 노드 오류가
   아니라 `CancelledException`으로 전달한다.
   `CancelToken`의 0.11.x 객체 배치와 inline/header-only 동작은 그대로다.
+  따라서 이미 컴파일된 C++ 소비자가 갱신된 `fork()` 수명 동작까지 받으려면
+  재컴파일해야 한다. 공유 라이브러리만 교체해도 객체 배치는 호환되지만,
+  소비자 바이너리에 들어간 기존 inline 본문은 바뀌지 않는다.
   단, 외부 코드가 직접 만든 token에 `bind_executor()`를 호출한 경우에는
   해당 executor의 게시 작업이 끝날 때까지 token을 살려 둘 책임이 여전히
   호출자에게 있다.

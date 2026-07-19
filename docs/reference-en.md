@@ -1145,6 +1145,9 @@ Engine operation children retain themselves until their posted cancellation
 emit executes. If application code calls `bind_executor()` directly on a token
 it constructed itself, the application must keep that token alive until the
 executor drains; the engine cannot supply ownership for an external object.
+Because these methods are inline in the public header, existing C++ consumers
+must be recompiled to receive the updated `fork()` lifetime behavior. The
+`CancelToken` object layout remains binary-compatible with 0.11.x.
 
 ```cpp
 class CancelToken {
