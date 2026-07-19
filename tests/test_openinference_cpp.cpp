@@ -389,6 +389,58 @@ public:
         std::make_shared<BlockingDestructionState>();
 };
 
+struct BlockingTerminalState {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool end_called = false;
+    bool destructor_entered = false;
+    bool release_destructor = false;
+};
+
+class BlockingTerminalSpan : public obs::Span {
+public:
+    BlockingTerminalSpan(std::shared_ptr<BlockingTerminalState> state,
+                         bool block_destructor)
+        : state_(std::move(state)), block_destructor_(block_destructor) {}
+
+    ~BlockingTerminalSpan() override {
+        if (!block_destructor_) return;
+        std::unique_lock lock(state_->mu);
+        state_->destructor_entered = true;
+        state_->cv.notify_all();
+        state_->cv.wait(lock, [&] { return state_->release_destructor; });
+    }
+
+    void set_attribute(std::string_view, std::string_view) override {}
+    void set_attribute(std::string_view, int64_t) override {}
+    void set_attribute(std::string_view, double) override {}
+    void set_attribute_bool(std::string_view, bool) override {}
+    void add_event(std::string_view, std::string_view) override {}
+    void set_status_ok() override {}
+    void set_status_error(std::string_view) override {}
+    void end() override {
+        if (!block_destructor_) return;
+        std::lock_guard lock(state_->mu);
+        state_->end_called = true;
+    }
+
+private:
+    std::shared_ptr<BlockingTerminalState> state_;
+    bool block_destructor_;
+};
+
+class BlockingTerminalTracer : public obs::Tracer {
+public:
+    std::unique_ptr<obs::Span> start_span(std::string_view name,
+                                          obs::Span*) override {
+        return std::make_unique<BlockingTerminalSpan>(
+            state, name.starts_with("node."));
+    }
+
+    std::shared_ptr<BlockingTerminalState> state =
+        std::make_shared<BlockingTerminalState>();
+};
+
 class NonStdAsyncProvider : public Provider {
 public:
     ChatCompletion complete(const CompletionParams&) override { return {}; }
@@ -870,6 +922,39 @@ TEST(OpenInferenceCpp, CloseWaitsForFinalSpanWrapperDestruction) {
     EXPECT_EQ(closing.wait_for(2s), std::future_status::ready);
     EXPECT_EQ(completion.wait_for(2s), std::future_status::ready);
     EXPECT_EQ(completion.get().message.content, "ok");
+}
+
+TEST(OpenInferenceCpp, CloseWaitsForTerminalSpanTeardown) {
+    using namespace std::chrono_literals;
+
+    BlockingTerminalTracer tracer;
+    auto session = obs::openinference_tracer(tracer);
+    session.cb({GraphEvent::Type::NODE_START, "blocked",
+                neograph::json::object()});
+
+    auto terminal = std::async(std::launch::async, [&] {
+        session.cb({GraphEvent::Type::NODE_END, "blocked",
+                    neograph::json::object()});
+    });
+    {
+        std::unique_lock lock(tracer.state->mu);
+        ASSERT_TRUE(tracer.state->cv.wait_for(lock, 2s, [&] {
+            return tracer.state->destructor_entered;
+        }));
+        EXPECT_TRUE(tracer.state->end_called);
+    }
+
+    auto closing = std::async(std::launch::async, [&] { session.close(); });
+    EXPECT_EQ(closing.wait_for(50ms), std::future_status::timeout);
+
+    {
+        std::lock_guard lock(tracer.state->mu);
+        tracer.state->release_destructor = true;
+    }
+    tracer.state->cv.notify_all();
+
+    EXPECT_EQ(closing.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(terminal.wait_for(2s), std::future_status::ready);
 }
 
 TEST(OpenInferenceCpp, StartSpanFailureDoesNotBlockInnerCall) {

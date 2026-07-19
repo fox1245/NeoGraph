@@ -164,24 +164,30 @@ struct OpenInferenceTracerSession::Impl {
         }
 
         void release_operation() noexcept {
-            FinalizeBatch batch;
-            {
-                std::lock_guard<std::mutex> lock(mu);
-                const auto owner = std::this_thread::get_id();
-                auto it = operation_owners.find(owner);
-                if (it != operation_owners.end()) {
-                    if (--it->second == 0) operation_owners.erase(it);
-                }
-                if (in_flight > 0) --in_flight;
-                if (in_flight == 0) {
-                    if (closed && !finalizing && !finalized) {
-                        batch = collect_locked(true);
-                    } else if (!closed && !retired.empty()) {
+            while (true) {
+                FinalizeBatch batch;
+                bool keep_lease = false;
+                {
+                    std::lock_guard<std::mutex> lock(mu);
+                    if (!closed && in_flight == 1 && !retired.empty()) {
                         batch = collect_locked(false);
+                        keep_lease = true;
+                    } else {
+                        const auto owner = std::this_thread::get_id();
+                        auto it = operation_owners.find(owner);
+                        if (it != operation_owners.end()) {
+                            if (--it->second == 0) operation_owners.erase(it);
+                        }
+                        if (in_flight > 0) --in_flight;
+                        if (in_flight == 0 && closed
+                            && !finalizing && !finalized) {
+                            batch = collect_locked(true);
+                        }
                     }
                 }
+                run_batch(std::move(batch));
+                if (!keep_lease) return;
             }
-            run_batch(std::move(batch));
         }
 
         void close() {
