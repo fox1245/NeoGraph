@@ -110,10 +110,9 @@ class PyProvider : public neograph::Provider {
             py::get_override(static_cast<const neograph::Provider*>(this),
                              "complete_stream");
         if (override) {
-            // Python on_chunk: pass a callable that re-locks the GIL
-            // before forwarding to the C++ callback so the user can
-            // call `on_chunk(token)` cleanly.
-            auto py_on_chunk = py::cpp_function([&on_chunk](const std::string& tok) {
+            // Own a callback copy so a Python override may retain the
+            // callable without dangling after this virtual call returns.
+            auto py_on_chunk = py::cpp_function([on_chunk](const std::string& tok) {
                 if (on_chunk) on_chunk(tok);
             });
             auto r = override(params, py_on_chunk);
@@ -338,6 +337,22 @@ void init_provider(py::module_& m) {
             py::arg("temperature") = 0.7,
             py::arg("max_tokens")  = -1,
             py::arg("tools")       = py::list{})
+        .def("complete_stream", [](neograph::Provider& self,
+                                    const neograph::CompletionParams& p,
+                                    py::object on_chunk) {
+            neograph::StreamCallback callback;
+            if (!on_chunk.is_none()) {
+                auto fn = on_chunk.cast<py::function>();
+                callback = [fn = std::move(fn)](const std::string& chunk) {
+                    py::gil_scoped_acquire gil;
+                    fn(chunk);
+                };
+            }
+            // Declared after callback on purpose: reverse destruction
+            // reacquires the GIL before callback releases its py::function.
+            py::gil_scoped_release release;
+            return self.complete_stream(p, callback);
+        }, py::arg("params"), py::arg("on_chunk"))
         .def("get_name", &neograph::Provider::get_name);
 
     // ── Tool base (opaque, no Python subclass yet) ───────────────────────
