@@ -512,12 +512,19 @@ PostgresCheckpointStore::PostgresCheckpointStore(PoolOnlyTag,
 
 PostgresCheckpointStore::~PostgresCheckpointStore() = default;
 
-struct PostgresCheckpointStore::AsyncSlotWaiter {
-    explicit AsyncSlotWaiter(asio::any_io_executor ex)
-        : wake(std::move(ex), asio::steady_timer::time_point::max()) {}
+struct PostgresCheckpointStore::SlotWaiter {
+    enum class Kind { Sync, Async };
 
-    asio::steady_timer wake;
+    SlotWaiter() : kind(Kind::Sync) {}
+    explicit SlotWaiter(asio::any_io_executor ex)
+        : kind(Kind::Async),
+          async_wake(std::in_place, std::move(ex),
+                     asio::steady_timer::time_point::max()) {}
+
+    Kind kind;
     std::optional<size_t> slot;
+    std::condition_variable sync_wake;
+    std::optional<asio::steady_timer> async_wake;
 };
 
 void PostgresCheckpointStore::ensure_schema() {
@@ -541,43 +548,49 @@ void PostgresCheckpointStore::drop_schema() {
 
 size_t PostgresCheckpointStore::acquire_slot() {
     std::unique_lock lock(pool_mutex_);
-    pool_cv_.wait(lock, [this] { return !free_.empty(); });
-    size_t idx = free_.front();
-    free_.pop();
-    return idx;
+    if (waiters_.empty() && !free_.empty()) {
+        size_t idx = free_.front();
+        free_.pop();
+        return idx;
+    }
+
+    auto waiter = std::make_shared<SlotWaiter>();
+    waiters_.push_back(waiter);
+    waiter->sync_wake.wait(lock, [&] { return waiter->slot.has_value(); });
+    return *waiter->slot;
 }
 
 asio::awaitable<size_t> PostgresCheckpointStore::acquire_slot_async() {
     auto ex = co_await asio::this_coro::executor;
     {
         std::lock_guard lock(pool_mutex_);
-        if (!free_.empty()) {
+        if (waiters_.empty() && !free_.empty()) {
             size_t idx = free_.front();
             free_.pop();
             co_return idx;
         }
     }
 
-    auto waiter = std::make_shared<AsyncSlotWaiter>(ex);
+    auto waiter = std::make_shared<SlotWaiter>(ex);
     {
         std::lock_guard lock(pool_mutex_);
-        if (!free_.empty()) {
+        if (waiters_.empty() && !free_.empty()) {
             size_t idx = free_.front();
             free_.pop();
             co_return idx;
         }
-        async_waiters_.push_back(waiter);
+        waiters_.push_back(waiter);
     }
 
     try {
-        co_await waiter->wake.async_wait(asio::use_awaitable);
+        co_await waiter->async_wake->async_wait(asio::use_awaitable);
     } catch (...) {
         std::lock_guard lock(pool_mutex_);
         if (waiter->slot) {
             co_return *waiter->slot;
         }
-        auto it = std::find(async_waiters_.begin(), async_waiters_.end(), waiter);
-        if (it != async_waiters_.end()) async_waiters_.erase(it);
+        auto it = std::find(waiters_.begin(), waiters_.end(), waiter);
+        if (it != waiters_.end()) waiters_.erase(it);
         throw;
     }
 
@@ -585,23 +598,24 @@ asio::awaitable<size_t> PostgresCheckpointStore::acquire_slot_async() {
 }
 
 void PostgresCheckpointStore::release_slot(size_t idx) {
-    std::shared_ptr<AsyncSlotWaiter> waiter;
+    std::shared_ptr<SlotWaiter> waiter;
     {
         std::lock_guard lock(pool_mutex_);
-        if (!async_waiters_.empty()) {
-            waiter = async_waiters_.front();
-            async_waiters_.pop_front();
+        if (!waiters_.empty()) {
+            waiter = waiters_.front();
+            waiters_.pop_front();
             waiter->slot = idx;
         } else {
             free_.push(idx);
         }
     }
-    if (waiter) {
-        asio::post(waiter->wake.get_executor(), [waiter] {
-            waiter->wake.cancel();
-        });
+    if (!waiter) return;
+    if (waiter->kind == SlotWaiter::Kind::Sync) {
+        waiter->sync_wake.notify_one();
     } else {
-        pool_cv_.notify_one();
+        asio::post(waiter->async_wake->get_executor(), [waiter] {
+            waiter->async_wake->cancel();
+        });
     }
 }
 
@@ -1242,15 +1256,16 @@ asio::awaitable<void> PostgresCheckpointStore::put_writes_async(
                 insert_params);
 
             (void)co_await exec_params_async(c, "COMMIT", empty_params);
-        } catch (...) {
-            // Best-effort rollback. Can't co_await inside catch (GCC 13
-            // ICE), so use the sync exec_sql helper — fast path since
-            // connection is still nonblocking-set but PQexec works on
-            // either mode.
-            PQsetnonblocking(c, 0);
-            PGresult* r = PQexec(c, "ROLLBACK");
-            if (r) PQclear(r);
+        } catch (const QueryNotDrained&) {
             throw;
+        } catch (const BrokenConnection&) {
+            throw;
+        } catch (...) {
+            // A cancellation may land between transaction statements, and
+            // an operation exception may mean unread protocol data remains.
+            // Never issue a blocking rollback on that uncertain connection;
+            // force with_conn_async to close it and preserve the cause.
+            throw QueryNotDrained{std::current_exception(), false};
         }
         co_return;
     });

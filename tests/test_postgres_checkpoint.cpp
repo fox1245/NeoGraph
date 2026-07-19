@@ -63,7 +63,7 @@ public:
 
     static size_t waiter_count(PostgresCheckpointStore& store) {
         std::lock_guard lock(store.pool_mutex_);
-        return store.async_waiters_.size();
+        return store.waiters_.size();
     }
 };
 
@@ -83,13 +83,14 @@ struct TestPgResult {
     ~TestPgResult() { if (raw) PQclear(raw); }
 };
 
-std::optional<int> wait_for_blocked_checkpoint_lock(PGconn* observer) {
+std::optional<int> wait_for_blocked_table_lock(PGconn* observer,
+                                                const char* table) {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    std::string sql = "SELECT pid FROM pg_locks WHERE relation = '"
+                    + std::string(table)
+                    + "'::regclass AND NOT granted LIMIT 1";
     while (std::chrono::steady_clock::now() < deadline) {
-        TestPgResult result{PQexec(observer,
-            "SELECT pid FROM pg_locks "
-            "WHERE relation = 'neograph_checkpoints'::regclass "
-            "  AND NOT granted LIMIT 1")};
+        TestPgResult result{PQexec(observer, sql.c_str())};
         if (result.raw && PQresultStatus(result.raw) == PGRES_TUPLES_OK
             && PQntuples(result.raw) == 1) {
             return std::stoi(PQgetvalue(result.raw, 0, 0));
@@ -249,6 +250,63 @@ TEST(PostgresCheckpointPoolTest, CancelledWaiterIsRemoved) {
     PoolTestAccess::release(*pool, occupied);
     EXPECT_EQ(PoolTestAccess::free_count(*pool), 1u)
         << "a cancelled waiter retained or lost the released pool slot";
+}
+
+TEST(PostgresCheckpointPoolTest, MixedWaitersKeepArrivalOrder) {
+    auto pool = PoolTestAccess::make_pool(/*pool_size=*/1);
+    const size_t occupied = PoolTestAccess::acquire(*pool);
+    auto wait_for_count = [&](size_t expected) {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (PoolTestAccess::waiter_count(*pool) == expected) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        return false;
+    };
+
+    std::mutex order_mutex;
+    std::vector<std::string> order;
+    std::thread sync_waiter([&] {
+        size_t idx = PoolTestAccess::acquire(*pool);
+        {
+            std::lock_guard lock(order_mutex);
+            order.push_back("sync");
+        }
+        PoolTestAccess::release(*pool, idx);
+    });
+    if (!wait_for_count(1)) {
+        PoolTestAccess::release(*pool, occupied);
+        sync_waiter.join();
+        FAIL() << "sync waiter did not enter the mixed FIFO queue";
+    }
+
+    asio::io_context io;
+    std::exception_ptr async_error;
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> {
+            size_t idx = co_await PoolTestAccess::acquire_async(*pool);
+            {
+                std::lock_guard lock(order_mutex);
+                order.push_back("async");
+            }
+            PoolTestAccess::release(*pool, idx);
+        },
+        [&](std::exception_ptr error) { async_error = error; });
+    std::thread io_thread([&] { io.run(); });
+    if (!wait_for_count(2)) {
+        PoolTestAccess::release(*pool, occupied);
+        sync_waiter.join();
+        io_thread.join();
+        FAIL() << "async waiter did not join behind the sync waiter";
+    }
+
+    PoolTestAccess::release(*pool, occupied);
+    sync_waiter.join();
+    io_thread.join();
+
+    EXPECT_EQ(async_error, nullptr);
+    EXPECT_EQ(order, (std::vector<std::string>{"sync", "async"}));
+    EXPECT_EQ(PoolTestAccess::free_count(*pool), 1u);
 }
 
 TEST_F(PostgresCheckpointTest, SaveAndLoadLatestRoundTrip) {
@@ -777,7 +835,8 @@ TEST_F(PostgresCheckpointTest, CancelledAsyncQueryDiscardsConnectionWithoutRetry
             [&](std::exception_ptr error) { save_error = error; }));
     std::thread io_thread([&] { io.run(); });
 
-    auto blocked_pid = wait_for_blocked_checkpoint_lock(observer.raw);
+    auto blocked_pid = wait_for_blocked_table_lock(
+        observer.raw, "neograph_checkpoints");
     if (!blocked_pid) {
         TestPgResult result{PQexec(locker.raw, "ROLLBACK")};
         io_thread.join();
@@ -830,4 +889,73 @@ TEST_F(PostgresCheckpointTest, CancelledAsyncQueryDiscardsConnectionWithoutRetry
         ASSERT_EQ(PQresultStatus(result.raw), PGRES_COMMAND_OK)
             << PQresultErrorMessage(result.raw);
     }
+}
+
+TEST_F(PostgresCheckpointTest, CancelledAsyncPutWritesDiscardsTransactionWithoutRetry) {
+    store = std::make_unique<PostgresCheckpointStore>(pg_url(), /*pool_size=*/1);
+    store->drop_schema();
+
+    PendingWrite write;
+    write.task_id = "cancelled-task";
+    write.task_path = "cancelled-path";
+    write.node_name = "cancelled-node";
+    write.writes = json::array();
+    write.command = json();
+    write.sends = json::array();
+
+    TestPgConn locker{PQconnectdb(pg_url())};
+    ASSERT_EQ(PQstatus(locker.raw), CONNECTION_OK) << PQerrorMessage(locker.raw);
+    {
+        TestPgResult result{PQexec(locker.raw,
+            "BEGIN; LOCK TABLE neograph_checkpoint_writes "
+            "IN ACCESS EXCLUSIVE MODE")};
+        ASSERT_NE(result.raw, nullptr);
+        ASSERT_EQ(PQresultStatus(result.raw), PGRES_COMMAND_OK)
+            << PQresultErrorMessage(result.raw);
+    }
+    TestPgConn observer{PQconnectdb(pg_url())};
+    ASSERT_EQ(PQstatus(observer.raw), CONNECTION_OK) << PQerrorMessage(observer.raw);
+
+    asio::io_context io;
+    asio::cancellation_signal cancel;
+    std::exception_ptr write_error;
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> {
+            co_await store->put_writes_async(
+                "cancel-writes", "cancel-parent", write);
+        },
+        asio::bind_cancellation_slot(cancel.slot(),
+            [&](std::exception_ptr error) { write_error = error; }));
+    std::thread io_thread([&] { io.run(); });
+
+    auto blocked_pid = wait_for_blocked_table_lock(
+        observer.raw, "neograph_checkpoint_writes");
+    if (!blocked_pid) {
+        TestPgResult result{PQexec(locker.raw, "ROLLBACK")};
+        io_thread.join();
+        FAIL() << "put_writes_async never reached its transactional SELECT";
+    }
+
+    asio::post(io, [&] { cancel.emit(asio::cancellation_type::all); });
+    if (!wait_for_backend_exit(observer.raw, *blocked_pid)) {
+        TestPgResult result{PQexec(locker.raw, "ROLLBACK")};
+        io_thread.join();
+        FAIL() << "cancelled put_writes_async did not discard its backend";
+    }
+    {
+        TestPgResult result{PQexec(locker.raw, "COMMIT")};
+    }
+    io_thread.join();
+
+    ASSERT_NE(write_error, nullptr);
+    try {
+        std::rethrow_exception(write_error);
+    } catch (const asio::system_error& error) {
+        EXPECT_EQ(error.code(), asio::error::operation_aborted);
+    } catch (...) {
+        FAIL() << "cancelled put_writes_async returned an unexpected exception";
+    }
+    EXPECT_EQ(store->reconnect_count(), 1u);
+    EXPECT_TRUE(store->get_writes("cancel-writes", "cancel-parent").empty())
+        << "cancelled put_writes_async retried on the replacement connection";
 }

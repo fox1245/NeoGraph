@@ -231,14 +231,14 @@ private:
     std::vector<std::unique_ptr<PgConn>> pool_;
 
     /// Free slot indices, drained on acquire and refilled on release.
-    /// Guarded by `pool_mutex_`; sync callers wait on `pool_cv_` while
-    /// async callers queue in `async_waiters_` without blocking an executor.
+    /// Guarded by `pool_mutex_`; sync and async callers join `waiters_`
+    /// in one FIFO order. Sync callers block on their waiter condition;
+    /// async callers suspend without blocking an executor.
     std::queue<size_t> free_;
     std::mutex pool_mutex_;
-    std::condition_variable pool_cv_;
 
-    struct AsyncSlotWaiter;
-    std::deque<std::shared_ptr<AsyncSlotWaiter>> async_waiters_;
+    struct SlotWaiter;
+    std::deque<std::shared_ptr<SlotWaiter>> waiters_;
 
     /// Cumulative count of connection slot replacements.
     /// Atomic so monitoring threads can read without taking the pool
