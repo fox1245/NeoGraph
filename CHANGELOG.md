@@ -9,6 +9,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Provider API 영구 호환 정책 (issue #5).** `Provider::complete()`,
+  `complete_async()`, `complete_stream()`, `complete_stream_async()`와 callback 기반
+  `invoke()`의 제거 계획을 철회하고 `[[deprecated]]` 경고를 없앴다. 기존 API에는
+  호환성·보안 수정을 계속 적용한다. 새 Provider 구현과 새 직접 호출에는 각각
+  `CompletionProvider::do_invoke()`와 `invoke_request(CompletionRequest)`를 권장하며,
+  새 기능을 기존 API에 모두 역이식하는 것은 보장하지 않는다. 공개 서명, virtual
+  순서, 객체 크기와 vtable은 바뀌지 않는다.
+
 ### Removed
 
 - **폐기된 TransformerCPP 연동 예제.** 더 이상 제공되지 않는 외부 저장소에

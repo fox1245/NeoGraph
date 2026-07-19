@@ -332,14 +332,11 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
     return completion;
 }
 
-// Candidate 6 PR6: v1.0 single-dispatch native override. Anchors the
-// dispatch surface — by overriding invoke() here, the engine's
+// Compatibility callback-selected override. The engine's
 // `provider_->invoke(...)` calls land on this method directly instead
 // of bouncing through the base-class default that re-forwards to the
-// 4-virtual chain. Body still routes through the existing native
-// overrides for v0.9 (no behavioural change); v1.0 will collapse the
-// complete_async + complete_stream bodies into invoke() and delete
-// the legacy methods.
+// 4-virtual chain. The body routes through the existing native
+// overrides without changing their supported public behavior.
 //
 // Streaming branch deliberately uses `complete_stream_async` (not
 // the sync `complete_stream` directly) because OpenAI's streaming
@@ -347,7 +344,6 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
 // default spawns a worker thread and dispatches tokens onto the
 // awaiter's executor, which is the issue #4 fix. Skipping that
 // bridge would re-introduce the engine io_context blocker.
-NEOGRAPH_PUSH_IGNORE_DEPRECATED
 asio::awaitable<ChatCompletion>
 OpenAIProvider::invoke(const CompletionParams& params, StreamCallback on_chunk) {
     if (on_chunk) {
@@ -355,6 +351,5 @@ OpenAIProvider::invoke(const CompletionParams& params, StreamCallback on_chunk) 
     }
     co_return co_await complete_async(params);
 }
-NEOGRAPH_POP_IGNORE_DEPRECATED
 
 } // namespace neograph::llm

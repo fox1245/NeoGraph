@@ -11,9 +11,6 @@
 //
 // PR 9a: this test now drives ``IntentClassifierNode::run`` with
 // and without a streaming sink to compare both code paths.
-#include <neograph/api.h>  // NEOGRAPH_PUSH_IGNORE_DEPRECATED
-NEOGRAPH_PUSH_IGNORE_DEPRECATED
-
 #include <gtest/gtest.h>
 #include <neograph/neograph.h>
 #include <neograph/async/run_sync.h>
@@ -146,5 +143,3 @@ TEST(IntentClassifierStreaming, StreamingMatchesNonStreamingRouting) {
     EXPECT_EQ(sync_out.writes[0].value.get<std::string>(),
               stream_out.writes[0].value.get<std::string>());
 }
-
-NEOGRAPH_POP_IGNORE_DEPRECATED

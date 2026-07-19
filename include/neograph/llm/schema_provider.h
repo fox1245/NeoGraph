@@ -162,13 +162,9 @@ class NEOGRAPH_API SchemaProvider : public Provider {
     complete_stream_async(const CompletionParams& params,
                           const StreamCallback& on_chunk) override;
 
-    /// v1.0 single-dispatch override (Candidate 6 PR6). Anchors the
-    /// dispatch surface — engine `provider->invoke(...)` calls land
-    /// here directly instead of bouncing through the base default that
-    /// re-forwards to the 4-virtual chain. v0.9 body routes through
-    /// existing native overrides (no behavioural change); v1.0 will
-    /// fold complete_async + complete_stream_async bodies into invoke()
-    /// and delete the legacy methods.
+    /// Callback-selected compatibility override. Engine
+    /// `provider->invoke(...)` calls land here and route through the
+    /// stable native overrides above without changing their behavior.
     asio::awaitable<ChatCompletion>
     invoke(const CompletionParams& params, StreamCallback on_chunk) override;
 

@@ -27,17 +27,6 @@
 
 namespace neograph {
 
-// Candidate 6 PR4: the 4 legacy virtuals (complete / complete_async /
-// complete_stream / complete_stream_async) are now [[deprecated]]; this
-// TU is the canonical default-chain implementation that legitimately
-// calls them on behalf of legacy subclasses + the new invoke() default
-// (which forwards into the 4-virtual chain through the deprecation
-// window). Bracket the whole namespace body so internal forwarders
-// don't drown the build in self-warnings; user code overriding the
-// 4 virtuals or calling them externally still sees the marker on its
-// own override / call site.
-NEOGRAPH_PUSH_IGNORE_DEPRECATED
-
 ChatCompletion Provider::complete(const CompletionParams& params) {
     // v1.0 (9d): the legacy `current_cancel_token()` thread_local
     // fallback is gone. Callers must pin `params.cancel_token` if they
@@ -167,17 +156,10 @@ Provider::complete_stream_async(const CompletionParams& params,
     }
 }
 
-// v1.0 unified invoke() — additive virtual that future-proofs the
-// Provider dispatch surface. New providers override THIS one method;
-// legacy providers (OpenAIProvider's complete_async + complete_stream_async
-// overrides, SchemaProvider's same pair, RateLimitedProvider's 4-method
-// delegation, every user-written Provider subclass) keep working
-// unchanged because the default body below forwards to the legacy
-// 4-virtual chain — preserving the current cross-product fallback.
-//
-// Subsequent Candidate 6 PRs migrate native subclasses to override
-// invoke() directly; the 4 legacy virtuals then gain [[deprecated]]
-// markers; v1.0 deletes them. See ROADMAP_v1.md Candidate 6.
+// Compatibility callback-selected entry point. Existing providers keep
+// working because this default forwards to the stable 4-virtual chain.
+// New providers should derive from CompletionProvider, where explicit
+// CompletionRequest mode selection reaches one do_invoke() override.
 //
 // v1.0 (9d): invoke() default is now the simple single-dispatch
 // forward — `params.cancel_token` is the only cancel channel. Engine-
@@ -192,7 +174,5 @@ Provider::invoke(const CompletionParams& params, StreamCallback on_chunk) {
     }
     co_return co_await complete_async(params);
 }
-
-NEOGRAPH_POP_IGNORE_DEPRECATED
 
 } // namespace neograph

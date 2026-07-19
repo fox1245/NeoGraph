@@ -282,51 +282,39 @@ grep -lE 'execute\(const GraphState' src/**/*.cpp
 
 ---
 
-# Migration 2: 옛 4 `Provider` virtual → 새 `Provider::invoke()` (v0.9 → v1.0)
+# Migration 2: `Provider` 호환 정책과 새 명시적 요청 API (v0.9+)
 
-GraphNode 8 virtual → `run(NodeInput)` 와 같은 모양의 두 번째 통합.
-ROADMAP_v1.md **Candidate 6** 에 해당. v0.9.0 에서 새 `invoke()` 가
-landing + 옛 4 virtual 이 `[[deprecated]]` 마킹됨. v1.0.0 에서 옛
-4 virtual 삭제.
+기존 `Provider::complete*` 네 메서드와 callback 기반 `invoke()`는 안정 API로
+계속 지원하며 제거 계획이 없다. 기존 구현과 호출자는 옮기지 않아도 된다.
+다만 새 Provider 구현에는 `CompletionProvider::do_invoke()` 하나를 재정의하는
+방식을, 새 직접 호출에는 `invoke_request(CompletionRequest)`를 권장한다.
 
-## 시그니처 매핑
+## 기존 호출과 권장 새 호출
 
-| 옛 virtual | 새 모양 |
+| 안정 호환 API | `CompletionProvider`를 직접 쓸 때 권장하는 API |
 |---|---|
-| `complete(params)` | `co_await invoke(params, nullptr)` (코루틴) 또는 `neograph::async::run_sync(invoke(params, nullptr))` (sync) |
-| `complete_async(params)` | `co_await invoke(params, nullptr)` |
-| `complete_stream(params, on_chunk)` | `neograph::async::run_sync(invoke(params, on_chunk))` |
-| `complete_stream_async(params, on_chunk)` | `co_await invoke(params, on_chunk)` |
+| `complete(params)` | `run_sync(invoke_request(CompletionRequest::collect(params)))` |
+| `complete_async(params)` | `co_await invoke_request(CompletionRequest::collect(params))` |
+| `complete_stream(params, on_chunk)` | `run_sync(invoke_request(CompletionRequest::stream(params, on_chunk)))` |
+| `complete_stream_async(params, on_chunk)` | `co_await invoke_request(CompletionRequest::stream(params, on_chunk))` |
 
-**핵심 규칙**: `on_chunk == nullptr` 이면 비스트리밍, `on_chunk` 가 있으면
-스트리밍. 한 메서드가 두 케이스 다 처리.
+`CompletionRequest`는 callback 유무와 전송 방식을 분리한다. 따라서 callback이
+없어도 `CompletionRequest::stream(params)`로 streaming 전송을 명시할 수 있다.
+`Provider&`나 `Provider*`만 가진 코드는 기존 `complete*`를 그대로 쓰면 된다.
 
 ## 케이스별 변환
 
-### Provider 호출하는 사용자 코드
+### Provider를 호출하는 사용자 코드
 
 ```cpp
-// 옛 — async 컨텍스트에서
+// 안정 호환 API — 계속 지원됨
 auto completion = co_await provider->complete_async(params);
-
-// 새 — 같은 의미
-auto completion = co_await provider->invoke(params, nullptr);
 ```
 
 ```cpp
-// 옛 — sync 함수 안에서
-auto completion = provider->complete(params);
-
-// 새 — async 어웨이트할 io_context 가 없으면 run_sync 로 brige
-auto completion = neograph::async::run_sync(provider->invoke(params, nullptr));
-```
-
-```cpp
-// 옛 — 스트리밍
-auto completion = co_await provider->complete_stream_async(params, on_chunk);
-
-// 새 — invoke 가 같은 분기를 자기 안에서 함
-auto completion = co_await provider->invoke(params, on_chunk);
+// CompletionProvider를 직접 쓰는 새 코드 — mode가 명시적
+auto completion = co_await provider.invoke_request(
+    CompletionRequest::collect(params));
 ```
 
 ### 사용자 정의 Provider subclass
@@ -388,7 +376,7 @@ auto streamed_without_observer = co_await provider.invoke_request(
     CompletionRequest::stream(params));
 ```
 
-기존 네 virtual과 `invoke(params, on_chunk)`는 호환 기간 동안 그대로 동작한다.
+기존 네 virtual과 `invoke(params, on_chunk)`는 계속 지원된다.
 `CompletionProvider`의 final adapter가 모든 기존 진입점을 `do_invoke()`로 한 번만
 연결하므로 상호 재귀가 생기지 않는다.
 
@@ -409,14 +397,13 @@ explicit cancel_token 안 주면 그냥 cancel 못 받음 (예전과 동일).
 
 ## 마이그레이션 안 하면
 
-현재 호환 기간:
-- 옛 4 virtual override 그대로 동작
-- `-Wdeprecated-declarations` warning 이 user override / 호출 사이트에 visible
-- engine 내부 forwarder 는 `NEOGRAPH_PUSH_IGNORE_DEPRECATED` 가드 됨 — internal warning 0
+아무 조치도 필요 없다:
+- 기존 네 virtual 재정의와 직접 호출은 그대로 동작한다.
+- Provider 관련 `-Wdeprecated-declarations` 경고는 더 이상 발생하지 않는다.
+- 호환성·보안 수정은 기존 API에도 적용한다.
 
-제거 버전은 정하지 않았다. 실제 외부 Provider와 Python subclass의 이전 기간,
-별도 SONAME, downstream binary 검증을 갖춘 뒤 주요 버전에서만 검토한다.
-경고는 이전을 권장하지만 즉시 삭제를 뜻하지 않는다.
+기존 API 제거 계획은 없다. 다만 새 기능은 명시적 요청 계약에만 추가될 수
+있으므로, 새 구현은 `CompletionProvider`로 작성하는 편이 낫다.
 
 ## 자동 변환 가능?
 
@@ -429,8 +416,8 @@ grep -rnE '->complete(_async|_stream|_stream_async)?\(' your/code
 # 그 다음 케이스별로 손편집 (위 매핑표 참고).
 ```
 
-Provider subclass 의 4 virtual override → invoke() 통합은 로직이 섞여
-있어서 손편집 필수.
+기존 Provider subclass를 `CompletionProvider::do_invoke()` 하나로 합치는 작업은
+선택 사항이며, 로직이 섞여 있어서 손편집이 필요하다.
 
 ## 관련 문서 / 이슈
 
@@ -440,8 +427,8 @@ Provider subclass 의 4 virtual override → invoke() 통합은 로직이 섞여
   flattening) 의 상세 설계 메모
 - [troubleshooting.md](troubleshooting.md) — 실제 옮기다 부딪치는
   컴파일 에러 / 런타임 차이 정리
-- [Issue #5](https://github.com/fox1245/NeoGraph/issues/5) — 같은 패턴
-  을 `Provider` 에도 적용하는 v1.0 Candidate 6 추적용
+- [Issue #5](https://github.com/fox1245/NeoGraph/issues/5) — Provider의
+  한 메서드 구현 경로와 영구 호환 정책 결정 기록
 
 ---
 

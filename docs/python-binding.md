@@ -463,12 +463,12 @@ LangGraph Python — surfaced here so you don't hit them mid-port:
   with declared fields (Pydantic v2) for typed access:
   `class ChatState(ng.StateView): messages: list[dict] = []` then
   `engine.get_state_view(thread_id, model=ChatState)`.
-- **Python `Provider` subclasses bind only `complete` (sync)** —
-  `Provider.complete_async` is not bound on Python user-defined
-  Provider subclasses, so a custom Python Provider always serves
-  through the sync entry. For async-native provider integrations
-  (HTTP/2 multiplexing, true overlap with other coroutines), stay
-  in C++ and subclass `neograph::llm::Provider` there.
+- **Python `Provider` subclasses bind only the sync `complete` and
+  `complete_stream` methods** — async virtuals are not bound on Python
+  user-defined Provider subclasses, so custom Python providers serve through
+  sync entries. For async-native provider integrations (HTTP/2 multiplexing,
+  true overlap with other coroutines), stay in C++ and derive from
+  `neograph::CompletionProvider` there.
 - **One-line token emit** — `from neograph_engine.streaming import
   emit_token`, then `emit_token(cb, self._name, token)` inside a
   streaming node. Replaces the 4-line `GraphEvent` construction

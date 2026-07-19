@@ -17,7 +17,7 @@ Every synchronous I/O point in the engine now has an awaitable peer:
 
 | Layer | Sync (unchanged) | Async peer |
 |---|---|---|
-| Provider | `complete` / `complete_stream` | `complete_async` |
+| Provider | `complete` / `complete_stream` | `complete_async` / `complete_stream_async` |
 | CheckpointStore | `save` / `load_latest` / `load_by_id` / `list` / `delete_thread` / `put_writes` / `get_writes` / `clear_writes` | `*_async` for each |
 | GraphNode | `execute` / `execute_stream` / `execute_full` / `execute_full_stream` | `*_async` for each |
 | GraphEngine | `run` / `run_stream` / `resume` | `run_async` / `run_stream_async` / `resume_async` |
@@ -31,7 +31,7 @@ invocations without dedicating an OS thread per run — the concurrency
 model that motivated the whole refactor.
 
 Sync surfaces are preserved. Existing code that calls `engine->run(cfg)`
-or `provider->complete(params)` keeps working bit-for-bit. The 276+
+or any `provider->complete*` entry point remains supported. The 276+
 test cases that existed before Stage 3 still pass against the sync
 path.
 
@@ -116,18 +116,22 @@ calling `io.run()` — see `examples/27_async_concurrent_runs.cpp`.
 
 ### 3.2 Writing a new async provider
 
-Implement only `complete_async`. The sync `complete` comes free
-through the base-class bridge (fresh `io_context` per call), so
-users that call your provider through the sync API still work.
+Derive from `CompletionProvider` and implement only `do_invoke()`.
+Its final adapters keep every existing `Provider` entry point working,
+while `CompletionRequest` makes collect versus stream mode explicit.
 
 ```cpp
-class MyProvider : public Provider {
+class MyProvider : public CompletionProvider {
   public:
     asio::awaitable<ChatCompletion>
-    complete_async(const CompletionParams& params) override {
+    do_invoke(CompletionRequest request) override {
         auto ex = co_await asio::this_coro::executor;
+        const auto& params = request.params();
         auto res = co_await neograph::async::async_post(
             ex, host, port, path, body, headers, /*tls=*/true);
+        if (request.streaming() && request.on_chunk()) {
+            // Deliver parsed chunks through request.on_chunk().
+        }
         co_return parse_response(res);
     }
 
@@ -470,7 +474,7 @@ guide tells you which member of the contract to implement.
 | Async-I/O `GraphNode`, no `Command` / `Send` | `execute_async()` | sync `execute()` + both `_full` variants (but see §9.2.2 pitfall #2) |
 | Async-I/O `GraphNode` that emits `Command` / `Send` | `execute_full_async()` | every other peer |
 | Streaming LLM node (cb-driven token emission) | see §9.2 quadrant table | — |
-| Custom `Provider` (real HTTP/LLM backend) | `complete_async()` | sync `complete()` bridges via `run_sync` |
+| New custom LLM backend | inherit `CompletionProvider`, override `do_invoke()` | all existing `Provider` entry points are final adapters |
 | Custom `CheckpointStore`, async-capable backend | all eight `*_async` peers | sync peers bridge via `run_sync` |
 | Custom `CheckpointStore`, sync-only backend | all eight sync peers | async peers bridge via `run_sync` |
 | Custom sync `Tool` | inherit `Tool`, override `execute()` | — |
@@ -546,20 +550,23 @@ stack-overflows.
 
 ### 9.3 `Provider`
 
-Three virtuals: `complete`, `complete_async`, `complete_stream`
-(sync-only — no `complete_stream_async`).
+Existing `Provider` subclasses may keep using the four sync/async collect/stream
+virtuals. They are stable compatibility APIs with no removal planned and no
+deprecation warnings. Each pair still requires at least one override:
 
 | Override | Behaviour |
 |---|---|
 | `complete()` only | Sync works directly; async `complete_async` bridges via the base-class default `co_return complete()`. Fine for CPU-only mock providers. |
-| `complete_async()` only (**recommended** for real backends) | Async works directly; sync `complete` bridges via `run_sync(complete_async())`. One fresh `io_context` per sync call — acceptable for the admin-tool sync surface, would be wasteful for hot loops. |
-| Both | Hand-tune both paths. Only worth it if the async peer needs to avoid `run_sync` init overhead on the sync path. |
+| `complete_async()` only | Async works directly; sync `complete` bridges via `run_sync(complete_async())`. |
+| `complete_stream()` only | Sync streaming works directly; the async peer runs it on a worker thread and delivers callbacks on the awaiting executor. |
+| `complete_stream_async()` only | Native async streaming works directly; implement a sync peer too if direct sync streaming calls must avoid the default collect fallback. |
 
-`complete_stream(params, cb)` is sync-only by design — SSE delivery
-is inherently per-chunk, and the cb-based shape maps poorly to
-awaitable-returning wrappers. The default delegates to `complete()`
-and invokes `cb` once with the full result. Override when your
-backend natively streams and you want per-token emission.
+For a **new** backend, do not choose among these pairs. Derive from
+`CompletionProvider`, implement `do_invoke(CompletionRequest)`, and use
+`request.streaming()` to select the transport. New direct callers should use
+`invoke_request()` with `CompletionRequest::collect(...)` or
+`CompletionRequest::stream(...)`. Compatibility and security fixes continue on
+the old entry points, but new capabilities may be explicit-request-only.
 
 ### 9.4 `CheckpointStore`
 

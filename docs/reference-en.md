@@ -283,15 +283,15 @@ of missing fields.
 
 ## 2. Provider Interface
 
-**Header:** `<neograph/provider.h>`
+**Headers:** `<neograph/provider.h>`, `<neograph/completion_provider.h>`
 **Namespace:** `neograph`
 
 The abstract interface for LLM backends. Implement this to add support for any LLM API.
 
-> **Writing a custom Provider subclass?** See
-> [`ASYNC_GUIDE.md` §9.3](ASYNC_GUIDE.md#93-provider) for the
-> decision matrix on whether to override `complete()`,
-> `complete_async()`, or both.
+> **Writing a new Provider implementation?** Derive from
+> `CompletionProvider` and implement `do_invoke()`. Existing `Provider`
+> subclasses and `complete*` callers remain supported with no removal planned.
+> See [`ASYNC_GUIDE.md` §9.3](ASYNC_GUIDE.md#93-provider).
 
 ### StreamCallback
 
@@ -328,7 +328,9 @@ struct CompletionParams {
 
 ### Provider
 
-Abstract base class for LLM providers. All LLM backends must implement this interface.
+Stable compatibility base class for LLM providers. Existing implementations and
+callers may continue to use this interface. New implementations should prefer
+`CompletionProvider` below.
 
 ```cpp
 class Provider {
@@ -345,16 +347,20 @@ public:
     virtual asio::awaitable<ChatCompletion>
     complete_async(const CompletionParams& params);
 
-    // Streaming completion (sync). Default body bridges to async peer.
+    // Streaming completion (sync). Default emits the collected result once.
     virtual ChatCompletion complete_stream(const CompletionParams& params,
                                            const StreamCallback& on_chunk);
 
-    // Async streaming peer. Added in audit Round 4 so async-native
-    // backends can override only this side. Default body bridges to
-    // complete_stream via run_sync.
+    // Async streaming peer. The default runs complete_stream on a worker
+    // thread and delivers callbacks on the awaiting executor.
     virtual asio::awaitable<ChatCompletion>
     complete_stream_async(const CompletionParams& params,
                           const StreamCallback& on_chunk);
+
+    // Stable callback-selected compatibility entry point.
+    virtual asio::awaitable<ChatCompletion>
+    invoke(const CompletionParams& params,
+           StreamCallback on_chunk = nullptr);
 
     // Only pure virtual on this interface — every backend must name
     // itself.
@@ -368,12 +374,50 @@ public:
 | `complete_async(params)` | Coroutine peer. Default `co_return complete(params)`. |
 | `complete_stream(params, on_chunk)` | Streaming completion. Calls `on_chunk` per chunk, returns the assembled `ChatCompletion`. |
 | `complete_stream_async(params, on_chunk)` | Async streaming peer (Round 4). Same `on_chunk` semantics. |
+| `invoke(params, on_chunk)` | Callback-selected compatibility entry point used by existing engine code. |
 | `get_name()` | Human-readable provider identifier (only pure virtual). |
 
 **Override-at-least-one-side contract**: each `(sync, async)` pair
 defaults to the other; overriding neither yields infinite mutual
 recursion at call time. Same shape as `CheckpointStore`'s sync↔async
 bridge below.
+
+These methods have no planned removal and no deprecation warnings. Compatibility
+and security fixes continue to apply; new capabilities may be exposed only through
+the explicit request API.
+
+### CompletionProvider
+
+Recommended base class for new C++ provider implementations. It preserves every
+`Provider` entry point through final adapters while giving implementations one
+request-mode-aware override.
+
+```cpp
+class MyProvider : public neograph::CompletionProvider {
+public:
+    asio::awaitable<ChatCompletion>
+    do_invoke(CompletionRequest request) override {
+        if (request.streaming()) {
+            // Use the streaming transport even when no observer is attached.
+            // If present, request.on_chunk() receives incremental text.
+        } else {
+            // Use the collect transport.
+        }
+        co_return result;
+    }
+
+    std::string get_name() const override { return "my-provider"; }
+};
+```
+
+New direct calls should make transport mode explicit:
+
+```cpp
+auto full = co_await provider.invoke_request(
+    CompletionRequest::collect(params));
+auto streamed = co_await provider.invoke_request(
+    CompletionRequest::stream(params, on_chunk));
+```
 
 ---
 

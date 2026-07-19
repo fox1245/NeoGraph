@@ -366,9 +366,12 @@ The provider must support streaming. Currently:
 | `SchemaProvider("claude")` | ✓ SSE |
 | Custom Python `Provider` subclass | depends on your `complete_stream` impl |
 
-If you're using a custom provider, override `complete_stream_async` or
-the engine falls back to non-streaming `complete_async` and your
-TOKENS callback won't fire.
+For a custom Python `Provider`, override `complete_stream`; Python subclasses
+do not expose an async virtual override. For a new C++ backend, derive from
+`CompletionProvider` and handle `request.streaming()` in `do_invoke()`. Existing
+C++ `Provider` subclasses may continue to override `complete_stream()` or
+`complete_stream_async()`. Without a streaming implementation, the default emits
+the collected response as one chunk rather than incremental tokens.
 
 ---
 
