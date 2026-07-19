@@ -68,7 +68,6 @@
 #include <neograph/graph/checkpoint.h>
 #include <atomic>
 #include <condition_variable>
-#include <deque>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -221,6 +220,7 @@ private:
     asio::awaitable<size_t> acquire_slot_async();
     void release_slot(size_t idx);
     void rebuild_slot(size_t idx);
+    size_t waiter_count_for_test();
 
     /// Original connection string, retained so individual pool slots
     /// can be rebuilt on demand after a broken-connection detection.
@@ -231,14 +231,11 @@ private:
     std::vector<std::unique_ptr<PgConn>> pool_;
 
     /// Free slot indices, drained on acquire and refilled on release.
-    /// Guarded by `pool_mutex_`; sync and async callers join `waiters_`
-    /// in one FIFO order. Sync callers block on their waiter condition;
-    /// async callers suspend without blocking an executor.
+    /// Guarded by `pool_mutex_`. Fair mixed waiter state lives in an
+    /// out-of-object sidecar so this exported class keeps its original ABI.
     std::queue<size_t> free_;
     std::mutex pool_mutex_;
-
-    struct SlotWaiter;
-    std::deque<std::shared_ptr<SlotWaiter>> waiters_;
+    std::condition_variable pool_cv_;  // Retained at its original ABI offset.
 
     /// Cumulative count of connection slot replacements.
     /// Atomic so monitoring threads can read without taking the pool

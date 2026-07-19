@@ -35,12 +35,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <deque>
 #include <exception>
 #include <memory>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace neograph::graph {
@@ -481,6 +483,64 @@ std::unique_ptr<PgConn> open_conn(const std::string& url) {
     return std::make_unique<PgConn>(raw);
 }
 
+struct PoolSlotWaiter {
+    enum class Kind { Sync, Async };
+
+    PoolSlotWaiter() : kind(Kind::Sync) {}
+    explicit PoolSlotWaiter(asio::any_io_executor ex)
+        : kind(Kind::Async),
+          async_wake(std::in_place, std::move(ex),
+                     asio::steady_timer::time_point::max()) {}
+
+    Kind kind;
+    std::optional<size_t> slot;
+    std::condition_variable sync_wake;
+    std::optional<asio::steady_timer> async_wake;
+};
+
+struct PoolWaitState {
+    std::deque<std::shared_ptr<PoolSlotWaiter>> waiters;
+};
+
+struct PoolWaitRegistry {
+    std::mutex mutex;
+    std::unordered_map<const PostgresCheckpointStore*,
+                       std::shared_ptr<PoolWaitState>> states;
+};
+
+PoolWaitRegistry& pool_wait_registry() {
+    // Process-lifetime storage avoids static destruction racing a late store.
+    static auto* registry = new PoolWaitRegistry;
+    return *registry;
+}
+
+void register_pool_wait_state(const PostgresCheckpointStore* store) {
+    auto& registry = pool_wait_registry();
+    std::lock_guard lock(registry.mutex);
+    auto [it, inserted] = registry.states.emplace(
+        store, std::make_shared<PoolWaitState>());
+    if (!inserted) {
+        throw std::logic_error("PostgresCheckpointStore: duplicate pool sidecar");
+    }
+}
+
+std::shared_ptr<PoolWaitState> pool_wait_state(
+    const PostgresCheckpointStore* store) {
+    auto& registry = pool_wait_registry();
+    std::lock_guard lock(registry.mutex);
+    auto it = registry.states.find(store);
+    if (it == registry.states.end()) {
+        throw std::logic_error("PostgresCheckpointStore: missing pool sidecar");
+    }
+    return it->second;
+}
+
+void unregister_pool_wait_state(const PostgresCheckpointStore* store) {
+    auto& registry = pool_wait_registry();
+    std::lock_guard lock(registry.mutex);
+    registry.states.erase(store);
+}
+
 } // namespace
 
 // ── Construction / lifetime ───────────────────────────────────────────
@@ -498,6 +558,7 @@ PostgresCheckpointStore::PostgresCheckpointStore(const std::string& conn_str,
         free_.push(i);
     }
     ensure_schema();
+    register_pool_wait_state(this);
 }
 
 PostgresCheckpointStore::PostgresCheckpointStore(PoolOnlyTag,
@@ -508,24 +569,12 @@ PostgresCheckpointStore::PostgresCheckpointStore(PoolOnlyTag,
             "PostgresCheckpointStore: pool_size must be >= 1");
     }
     for (size_t i = 0; i < pool_size; ++i) free_.push(i);
+    register_pool_wait_state(this);
 }
 
-PostgresCheckpointStore::~PostgresCheckpointStore() = default;
-
-struct PostgresCheckpointStore::SlotWaiter {
-    enum class Kind { Sync, Async };
-
-    SlotWaiter() : kind(Kind::Sync) {}
-    explicit SlotWaiter(asio::any_io_executor ex)
-        : kind(Kind::Async),
-          async_wake(std::in_place, std::move(ex),
-                     asio::steady_timer::time_point::max()) {}
-
-    Kind kind;
-    std::optional<size_t> slot;
-    std::condition_variable sync_wake;
-    std::optional<asio::steady_timer> async_wake;
-};
+PostgresCheckpointStore::~PostgresCheckpointStore() {
+    unregister_pool_wait_state(this);
+}
 
 void PostgresCheckpointStore::ensure_schema() {
     // Direct call on slot 0 — only invoked at construction (and from
@@ -547,39 +596,41 @@ void PostgresCheckpointStore::drop_schema() {
 }
 
 size_t PostgresCheckpointStore::acquire_slot() {
+    auto state = pool_wait_state(this);
     std::unique_lock lock(pool_mutex_);
-    if (waiters_.empty() && !free_.empty()) {
+    if (state->waiters.empty() && !free_.empty()) {
         size_t idx = free_.front();
         free_.pop();
         return idx;
     }
 
-    auto waiter = std::make_shared<SlotWaiter>();
-    waiters_.push_back(waiter);
+    auto waiter = std::make_shared<PoolSlotWaiter>();
+    state->waiters.push_back(waiter);
     waiter->sync_wake.wait(lock, [&] { return waiter->slot.has_value(); });
     return *waiter->slot;
 }
 
 asio::awaitable<size_t> PostgresCheckpointStore::acquire_slot_async() {
     auto ex = co_await asio::this_coro::executor;
+    auto state = pool_wait_state(this);
     {
         std::lock_guard lock(pool_mutex_);
-        if (waiters_.empty() && !free_.empty()) {
+        if (state->waiters.empty() && !free_.empty()) {
             size_t idx = free_.front();
             free_.pop();
             co_return idx;
         }
     }
 
-    auto waiter = std::make_shared<SlotWaiter>(ex);
+    auto waiter = std::make_shared<PoolSlotWaiter>(ex);
     {
         std::lock_guard lock(pool_mutex_);
-        if (waiters_.empty() && !free_.empty()) {
+        if (state->waiters.empty() && !free_.empty()) {
             size_t idx = free_.front();
             free_.pop();
             co_return idx;
         }
-        waiters_.push_back(waiter);
+        state->waiters.push_back(waiter);
     }
 
     try {
@@ -589,8 +640,8 @@ asio::awaitable<size_t> PostgresCheckpointStore::acquire_slot_async() {
         if (waiter->slot) {
             co_return *waiter->slot;
         }
-        auto it = std::find(waiters_.begin(), waiters_.end(), waiter);
-        if (it != waiters_.end()) waiters_.erase(it);
+        auto it = std::find(state->waiters.begin(), state->waiters.end(), waiter);
+        if (it != state->waiters.end()) state->waiters.erase(it);
         throw;
     }
 
@@ -598,25 +649,32 @@ asio::awaitable<size_t> PostgresCheckpointStore::acquire_slot_async() {
 }
 
 void PostgresCheckpointStore::release_slot(size_t idx) {
-    std::shared_ptr<SlotWaiter> waiter;
+    auto state = pool_wait_state(this);
+    std::shared_ptr<PoolSlotWaiter> waiter;
     {
         std::lock_guard lock(pool_mutex_);
-        if (!waiters_.empty()) {
-            waiter = waiters_.front();
-            waiters_.pop_front();
+        if (!state->waiters.empty()) {
+            waiter = state->waiters.front();
+            state->waiters.pop_front();
             waiter->slot = idx;
         } else {
             free_.push(idx);
         }
     }
     if (!waiter) return;
-    if (waiter->kind == SlotWaiter::Kind::Sync) {
+    if (waiter->kind == PoolSlotWaiter::Kind::Sync) {
         waiter->sync_wake.notify_one();
     } else {
         asio::post(waiter->async_wake->get_executor(), [waiter] {
             waiter->async_wake->cancel();
         });
     }
+}
+
+size_t PostgresCheckpointStore::waiter_count_for_test() {
+    auto state = pool_wait_state(this);
+    std::lock_guard lock(pool_mutex_);
+    return state->waiters.size();
 }
 
 void PostgresCheckpointStore::rebuild_slot(size_t idx) {

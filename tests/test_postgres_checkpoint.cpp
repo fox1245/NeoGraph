@@ -22,6 +22,7 @@
 #include <asio/io_context.hpp>
 #include <asio/steady_timer.hpp>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -37,6 +38,8 @@ namespace neograph::graph::test_access {
 
 class PostgresCheckpointStoreTestAccess {
 public:
+    using Layout = std::array<size_t, 6>;
+
     static std::unique_ptr<PostgresCheckpointStore> make_pool(size_t pool_size) {
         return std::unique_ptr<PostgresCheckpointStore>(
             new PostgresCheckpointStore(
@@ -62,8 +65,19 @@ public:
     }
 
     static size_t waiter_count(PostgresCheckpointStore& store) {
-        std::lock_guard lock(store.pool_mutex_);
-        return store.waiters_.size();
+        return store.waiter_count_for_test();
+    }
+
+    static Layout layout(const PostgresCheckpointStore& store) {
+        auto base = reinterpret_cast<uintptr_t>(&store);
+        return {
+            reinterpret_cast<uintptr_t>(&store.conn_str_) - base,
+            reinterpret_cast<uintptr_t>(&store.pool_) - base,
+            reinterpret_cast<uintptr_t>(&store.free_) - base,
+            reinterpret_cast<uintptr_t>(&store.pool_mutex_) - base,
+            reinterpret_cast<uintptr_t>(&store.pool_cv_) - base,
+            reinterpret_cast<uintptr_t>(&store.reconnect_count_) - base,
+        };
     }
 };
 
@@ -72,6 +86,27 @@ public:
 namespace {
 
 using PoolTestAccess = test_access::PostgresCheckpointStoreTestAccess;
+
+struct OriginPostgresLayout : CheckpointStore {
+    std::string conn_str;
+    std::vector<std::unique_ptr<PgConn>> pool;
+    std::queue<size_t> free;
+    std::mutex pool_mutex;
+    std::condition_variable pool_cv;
+    std::atomic<size_t> reconnect_count{0};
+};
+
+PoolTestAccess::Layout origin_layout(const OriginPostgresLayout& store) {
+    auto base = reinterpret_cast<uintptr_t>(&store);
+    return {
+        reinterpret_cast<uintptr_t>(&store.conn_str) - base,
+        reinterpret_cast<uintptr_t>(&store.pool) - base,
+        reinterpret_cast<uintptr_t>(&store.free) - base,
+        reinterpret_cast<uintptr_t>(&store.pool_mutex) - base,
+        reinterpret_cast<uintptr_t>(&store.pool_cv) - base,
+        reinterpret_cast<uintptr_t>(&store.reconnect_count) - base,
+    };
+}
 
 struct TestPgConn {
     PGconn* raw = nullptr;
@@ -170,6 +205,19 @@ protected:
 };
 
 } // namespace
+
+TEST(PostgresCheckpointAbiTest, MatchesOriginLayout) {
+    static_assert(sizeof(PostgresCheckpointStore) == sizeof(OriginPostgresLayout));
+    static_assert(alignof(PostgresCheckpointStore) == alignof(OriginPostgresLayout));
+
+    auto store = PoolTestAccess::make_pool(/*pool_size=*/1);
+    OriginPostgresLayout origin;
+#if defined(__linux__) && INTPTR_MAX == INT64_MAX
+    EXPECT_EQ(sizeof(*store), 240u);
+#endif
+    EXPECT_EQ(alignof(PostgresCheckpointStore), alignof(OriginPostgresLayout));
+    EXPECT_EQ(PoolTestAccess::layout(*store), origin_layout(origin));
+}
 
 TEST(PostgresCheckpointPoolTest, AsyncWaitDoesNotBlockIoContext) {
     auto pool = PoolTestAccess::make_pool(/*pool_size=*/1);
