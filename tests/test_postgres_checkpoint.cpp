@@ -284,8 +284,10 @@ TEST(PostgresCheckpointAbiTest, MatchesOriginLayout) {
 
     auto store = PoolTestAccess::make_pool(/*pool_size=*/1);
     OriginPostgresLayout origin;
-#if defined(__linux__) && INTPTR_MAX == INT64_MAX
+#if defined(__linux__) && defined(__x86_64__) && INTPTR_MAX == INT64_MAX
     EXPECT_EQ(sizeof(*store), 240u);
+#elif defined(__linux__) && defined(__aarch64__) && INTPTR_MAX == INT64_MAX
+    EXPECT_EQ(sizeof(*store), 248u);
 #endif
     EXPECT_EQ(alignof(PostgresCheckpointStore), alignof(OriginPostgresLayout));
     EXPECT_EQ(PoolTestAccess::layout(*store), origin_layout(origin));
