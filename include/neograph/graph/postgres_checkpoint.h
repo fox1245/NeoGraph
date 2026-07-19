@@ -222,6 +222,9 @@ private:
     void rebuild_slot(size_t idx);
     asio::awaitable<void> rebuild_slot_async(size_t idx);
     size_t waiter_count_for_test();
+    static asio::awaitable<bool> wait_socket_either_for_test(int fd);
+    static void set_async_connection_test_seams(int poll_delay_ms,
+                                                int timeout_ms);
 
     /// Original connection string, retained so individual pool slots
     /// can be rebuilt on demand after a broken-connection detection.

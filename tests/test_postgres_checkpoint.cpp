@@ -32,6 +32,13 @@
 #include <thread>
 #include <vector>
 
+#ifndef _WIN32
+#  include <cerrno>
+#  include <fcntl.h>
+#  include <sys/socket.h>
+#  include <unistd.h>
+#endif
+
 using namespace neograph::graph;
 using json = neograph::json;
 
@@ -81,6 +88,16 @@ public:
 
     static bool slot_is_empty(PostgresCheckpointStore& store, size_t idx) {
         return !store.pool_[idx];
+    }
+
+    static asio::awaitable<bool> wait_socket_either(int fd) {
+        co_return co_await PostgresCheckpointStore::wait_socket_either_for_test(fd);
+    }
+
+    static void set_async_connection_test_seams(int poll_delay_ms,
+                                                int timeout_ms) {
+        PostgresCheckpointStore::set_async_connection_test_seams(
+            poll_delay_ms, timeout_ms);
     }
 
     static Layout layout(const PostgresCheckpointStore& store) {
@@ -157,6 +174,12 @@ struct StalledTcpServer {
         io.stop();
         if (worker.joinable()) worker.join();
         client.reset();
+    }
+};
+
+struct AsyncConnectionTestSeamReset {
+    ~AsyncConnectionTestSeamReset() {
+        PoolTestAccess::set_async_connection_test_seams(0, -1);
     }
 };
 
@@ -443,6 +466,124 @@ TEST(PostgresCheckpointAsyncIoTest, ReconnectPollDoesNotBlockIoContext) {
         FAIL() << "cancelled async reconnect returned an unexpected exception";
     }
     EXPECT_TRUE(PoolTestAccess::slot_is_empty(*store, 0));
+}
+
+TEST(PostgresCheckpointAsyncIoTest, ResolverPollDoesNotBlockIoContext) {
+    AsyncConnectionTestSeamReset reset;
+    PoolTestAccess::set_async_connection_test_seams(
+        /*poll_delay_ms=*/150, /*timeout_ms=*/80);
+    StalledTcpServer server;
+    auto store = PoolTestAccess::make_pool(/*pool_size=*/1);
+    PoolTestAccess::set_conn_str(*store,
+        "hostaddr=127.0.0.1 port=" + std::to_string(server.port)
+        + " user=stall dbname=stall sslmode=disable");
+
+    asio::io_context io;
+    std::optional<std::chrono::milliseconds> heartbeat_elapsed;
+    std::exception_ptr rebuild_error;
+    auto started = std::chrono::steady_clock::now();
+    asio::steady_timer heartbeat(io, std::chrono::milliseconds(20));
+    heartbeat.async_wait([&](const asio::error_code& ec) {
+        if (!ec) {
+            heartbeat_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started);
+        }
+    });
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> {
+            co_await PoolTestAccess::rebuild_async(*store, 0);
+        },
+        [&](std::exception_ptr error) { rebuild_error = error; });
+
+    io.run();
+
+    ASSERT_TRUE(heartbeat_elapsed.has_value());
+    EXPECT_LT(*heartbeat_elapsed, std::chrono::milliseconds(80));
+    EXPECT_NE(rebuild_error, nullptr);
+    EXPECT_TRUE(PoolTestAccess::slot_is_empty(*store, 0));
+}
+
+TEST(PostgresCheckpointAsyncIoTest, ConnectPollHonorsConninfoTimeout) {
+    AsyncConnectionTestSeamReset reset;
+    PoolTestAccess::set_async_connection_test_seams(
+        /*poll_delay_ms=*/0, /*timeout_ms=*/-1);
+    StalledTcpServer server;
+    auto store = PoolTestAccess::make_pool(/*pool_size=*/1);
+    PoolTestAccess::set_conn_str(*store,
+        "hostaddr=127.0.0.1 port=" + std::to_string(server.port)
+        + " user=stall dbname=stall sslmode=disable connect_timeout=1");
+
+    asio::io_context io;
+    std::exception_ptr rebuild_error;
+    auto started = std::chrono::steady_clock::now();
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> {
+            co_await PoolTestAccess::rebuild_async(*store, 0);
+        },
+        [&](std::exception_ptr error) { rebuild_error = error; });
+    io.run();
+    auto elapsed = std::chrono::steady_clock::now() - started;
+
+    ASSERT_NE(rebuild_error, nullptr);
+    try {
+        std::rethrow_exception(rebuild_error);
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find(
+            "connection timed out after 2000 ms while polling libpq"),
+            std::string::npos);
+    } catch (...) {
+        FAIL() << "timed async reconnect returned an unexpected exception";
+    }
+    EXPECT_GE(elapsed, std::chrono::milliseconds(1800));
+    EXPECT_LT(elapsed, std::chrono::milliseconds(3000));
+    EXPECT_TRUE(PoolTestAccess::slot_is_empty(*store, 0));
+}
+
+TEST(PostgresCheckpointAsyncIoTest, FlushReadinessCanWinAndCancelsWriteWait) {
+#ifdef _WIN32
+    GTEST_SKIP() << "socketpair readiness probe is POSIX-only";
+#else
+    int sockets[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sockets), 0);
+    struct SocketPairClose {
+        int* sockets;
+        ~SocketPairClose() {
+            if (sockets[0] >= 0) ::close(sockets[0]);
+            if (sockets[1] >= 0) ::close(sockets[1]);
+        }
+    } close_sockets{sockets};
+
+    int flags = ::fcntl(sockets[0], F_GETFL, 0);
+    ASSERT_NE(flags, -1);
+    ASSERT_NE(::fcntl(sockets[0], F_SETFL, flags | O_NONBLOCK), -1);
+    std::array<char, 4096> fill{};
+    for (;;) {
+        auto sent = ::send(sockets[0], fill.data(), fill.size(), 0);
+        if (sent >= 0) continue;
+        ASSERT_TRUE(errno == EAGAIN || errno == EWOULDBLOCK)
+            << "failed to fill socket send buffer: errno=" << errno;
+        break;
+    }
+    const char marker = 'R';
+    ASSERT_EQ(::send(sockets[1], &marker, 1, 0), 1);
+
+    asio::io_context io;
+    std::optional<bool> read_won;
+    std::exception_ptr wait_error;
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> {
+            read_won = co_await PoolTestAccess::wait_socket_either(sockets[0]);
+        },
+        [&](std::exception_ptr error) { wait_error = error; });
+    io.run();
+
+    EXPECT_EQ(wait_error, nullptr);
+    ASSERT_TRUE(read_won.has_value());
+    EXPECT_TRUE(*read_won);
+    char received = 0;
+    ASSERT_EQ(::recv(sockets[0], &received, 1, 0), 1);
+    EXPECT_EQ(received, marker);
+#endif
 }
 
 TEST_F(PostgresCheckpointTest, SaveAndLoadLatestRoundTrip) {
