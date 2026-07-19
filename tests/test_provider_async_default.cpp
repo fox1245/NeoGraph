@@ -25,6 +25,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <future>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -337,4 +341,131 @@ TEST(ProviderAsyncDefault, StreamAsyncBridgeRethrowsWorkerException) {
 
     ASSERT_TRUE(caught);
     EXPECT_THROW(std::rethrow_exception(caught), std::runtime_error);
+}
+
+struct WorkerExitState {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool exited = false;
+};
+
+struct WorkerExitToken {
+    std::shared_ptr<WorkerExitState> state;
+
+    ~WorkerExitToken() {
+        std::lock_guard lock(state->mutex);
+        state->exited = true;
+        state->cv.notify_all();
+    }
+};
+
+struct WorkerExitError {
+    std::shared_ptr<WorkerExitToken> token;
+};
+
+class AbandonedStreamingProvider : public Provider {
+  public:
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false;
+    bool released = false;
+    std::shared_ptr<WorkerExitState> exit_state =
+        std::make_shared<WorkerExitState>();
+
+    ChatCompletion complete(const CompletionParams&) override { return {}; }
+
+    ChatCompletion complete_stream(const CompletionParams&,
+                                   const StreamCallback& on_chunk) override {
+        {
+            std::unique_lock lock(mutex);
+            entered = true;
+            cv.notify_all();
+            cv.wait(lock, [&] { return released; });
+        }
+
+        on_chunk("late");
+        throw WorkerExitError{std::make_shared<WorkerExitToken>(exit_state)};
+    }
+
+    std::string get_name() const override { return "abandoned-stream"; }
+};
+
+void retain_until_worker_exit(
+    std::shared_ptr<AbandonedStreamingProvider> provider) {
+    auto state = provider->exit_state;
+    std::thread([provider = std::move(provider), state] {
+        std::unique_lock lock(state->mutex);
+        state->cv.wait(lock, [&] { return state->exited; });
+    }).detach();
+}
+
+// Issue #127: stopping and destroying the outer io_context abandons the
+// coroutine while its synchronous stream worker is still running. The worker
+// must neither retain that io_context nor make its destruction wait for the
+// blocking stream to finish.
+TEST(ProviderAsyncDefault, AbandonedStreamNeverTouchesDestroyedIoContext) {
+    auto provider = std::make_shared<AbandonedStreamingProvider>();
+    CompletionParams params;
+    std::atomic<int> callbacks{0};
+    auto io = std::make_unique<asio::io_context>();
+
+    asio::co_spawn(
+        *io,
+        [&]() -> asio::awaitable<void> {
+            (void)co_await provider->complete_stream_async(
+                params, [&](const std::string&) { ++callbacks; });
+        },
+        asio::detached);
+
+    std::thread runner([&] { io->run(); });
+    bool entered = false;
+    {
+        std::unique_lock lock(provider->mutex);
+        entered = provider->cv.wait_for(
+            lock, std::chrono::seconds(2), [&] { return provider->entered; });
+    }
+    if (!entered) {
+        {
+            std::lock_guard lock(provider->mutex);
+            provider->released = true;
+        }
+        provider->cv.notify_all();
+        io->stop();
+        runner.join();
+        retain_until_worker_exit(std::move(provider));
+        ADD_FAILURE() << "stream worker did not start";
+        return;
+    }
+
+    io->stop();
+    runner.join();
+
+    auto destroyed = std::async(std::launch::async, [&] { io.reset(); });
+    EXPECT_EQ(destroyed.wait_for(std::chrono::seconds(1)),
+              std::future_status::ready)
+        << "io_context destruction waited for a blocking stream";
+
+    {
+        std::lock_guard lock(provider->mutex);
+        provider->released = true;
+    }
+    provider->cv.notify_all();
+
+    // The thrown exception remains owned by the bridge's shared state until
+    // the detached worker releases its last reference. Its token therefore
+    // gives the test a deterministic worker-exit signal without exposing a
+    // production synchronization hook.
+    auto exit_state = provider->exit_state;
+    bool exited = false;
+    {
+        std::unique_lock lock(exit_state->mutex);
+        exited = exit_state->cv.wait_for(
+            lock, std::chrono::seconds(2), [&] { return exit_state->exited; });
+    }
+    if (!exited) {
+        retain_until_worker_exit(std::move(provider));
+        ADD_FAILURE() << "stream worker did not exit";
+        return;
+    }
+    EXPECT_EQ(callbacks.load(), 0);
 }

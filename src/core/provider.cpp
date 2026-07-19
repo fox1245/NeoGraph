@@ -12,7 +12,6 @@
 #include <neograph/async/run_sync.h>
 #include <neograph/graph/cancel.h>
 
-#include <asio/dispatch.hpp>
 #include <asio/redirect_error.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
@@ -21,8 +20,10 @@
 #include <chrono>
 #include <exception>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <thread>
+#include <vector>
 
 namespace neograph {
 
@@ -80,12 +81,11 @@ Provider::complete_stream_async(const CompletionParams& params,
     // thread.
     //
     // New default: spawn a dedicated worker thread to run the
-    // synchronous `complete_stream`, and dispatch each token onto the
-    // *awaiter's* executor so the caller's `on_chunk` runs single-
-    // threaded with the coroutine that issued the await — same
-    // invariant the engine already gives node bodies. Completion is
-    // signalled via a one-shot `steady_timer.cancel()` posted onto
-    // the awaiter's executor.
+    // synchronous `complete_stream`. The worker only writes to shared
+    // state; the awaiting coroutine polls and drains queued tokens on
+    // its own executor. This keeps `on_chunk` single-threaded with the
+    // awaiter without letting the worker retain or use that executor
+    // after its io_context begins teardown.
     //
     // Subclasses with a fully async streaming transport (e.g.
     // SchemaProvider's WebSocket Responses path) SHOULD override this
@@ -94,46 +94,77 @@ Provider::complete_stream_async(const CompletionParams& params,
     auto exec = co_await asio::this_coro::executor;
 
     struct Shared {
+        std::mutex mutex;
+        bool abandoned = false;
+        bool finished = false;
+        std::vector<std::string> chunks;
         std::optional<ChatCompletion> result;
         std::exception_ptr err;
     };
     auto shared = std::make_shared<Shared>();
 
-    // expires_at::max + cancel() == one-shot completion signal. Same
-    // pattern graph_executor.cpp uses for retry-wait timers.
-    auto done = std::make_shared<asio::steady_timer>(exec);
-    done->expires_at(std::chrono::steady_clock::time_point::max());
-
-    // Wrap the user's on_chunk so each chunk is dispatched onto the
-    // awaiter's executor (not the worker thread). Restores the
-    // single-threaded-with-the-awaiter invariant.
-    StreamCallback wrapped = [exec, on_chunk](const std::string& chunk) {
-        if (!on_chunk) return;
-        asio::dispatch(exec, [on_chunk, chunk]() { on_chunk(chunk); });
+    StreamCallback wrapped = [shared](const std::string& chunk) {
+        std::lock_guard lock(shared->mutex);
+        if (!shared->abandoned) shared->chunks.push_back(chunk);
     };
+
+    struct AbandonGuard {
+        std::shared_ptr<Shared> shared;
+        ~AbandonGuard() {
+            std::lock_guard lock(shared->mutex);
+            shared->abandoned = true;
+            shared->chunks.clear();
+        }
+    } abandon_guard{shared};
 
     // params is captured by value so the worker thread doesn't
     // outlive the caller's stack-allocated CompletionParams. The
     // CancelToken inside params (shared_ptr) keeps its target alive
     // through the worker.
-    std::thread([this, params, wrapped, shared, done, exec]() mutable {
+    std::thread([this, params, wrapped, shared]() mutable {
+        std::optional<ChatCompletion> result;
+        std::exception_ptr err;
         try {
-            shared->result = this->complete_stream(params, wrapped);
+            result = this->complete_stream(params, wrapped);
         } catch (...) {
-            shared->err = std::current_exception();
+            err = std::current_exception();
         }
-        // Wake the awaiter on its executor.
-        asio::dispatch(exec, [done]() { done->cancel(); });
+        {
+            std::lock_guard lock(shared->mutex);
+            shared->result = std::move(result);
+            shared->err = err;
+            shared->finished = true;
+        }
     }).detach();
 
-    // Suspend until the worker fires cancel(). async_wait completes
-    // with operation_aborted on cancel — we don't care about the ec
-    // value, only that we resumed.
-    asio::error_code ec;
-    co_await done->async_wait(asio::redirect_error(asio::use_awaitable, ec));
+    asio::steady_timer poll(exec);
+    for (;;) {
+        std::vector<std::string> chunks;
+        std::optional<ChatCompletion> result;
+        std::exception_ptr err;
+        bool finished = false;
+        {
+            std::lock_guard lock(shared->mutex);
+            chunks.swap(shared->chunks);
+            finished = shared->finished;
+            if (finished) {
+                result = std::move(shared->result);
+                err = shared->err;
+            }
+        }
 
-    if (shared->err) std::rethrow_exception(shared->err);
-    co_return std::move(*shared->result);
+        if (on_chunk) {
+            for (const auto& chunk : chunks) on_chunk(chunk);
+        }
+        if (finished) {
+            if (err) std::rethrow_exception(err);
+            co_return std::move(*result);
+        }
+
+        poll.expires_after(std::chrono::milliseconds(1));
+        asio::error_code ec;
+        co_await poll.async_wait(asio::redirect_error(asio::use_awaitable, ec));
+    }
 }
 
 // v1.0 unified invoke() — additive virtual that future-proofs the

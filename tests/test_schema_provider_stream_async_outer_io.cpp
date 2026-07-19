@@ -9,9 +9,8 @@
 // modes ended up racing on shared SchemaProvider state).
 //
 // Post-#10:
-//   - HTTP/SSE branch → `Provider::complete_stream_async`'s new default
-//     (dedicated worker thread for sync `complete_stream`, tokens
-//     dispatched back onto the awaiter's executor via `asio::dispatch`).
+//   - HTTP/SSE branch → SchemaProvider's long-lived bridge thread runs
+//     sync `complete_stream`; the awaiting coroutine drains queued tokens.
 //   - WS branch → `complete_stream_ws_responses` co_awaited directly,
 //     no worker thread (separate test:
 //     `test_schema_provider_ws_responses.cpp`).
@@ -40,6 +39,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <future>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -69,6 +71,52 @@ struct ResponsesMock {
         }
     }
     ~ResponsesMock() { svr.stop(); if (t.joinable()) t.join(); }
+};
+
+struct BlockingResponsesMock {
+    httplib::Server svr;
+    std::thread t;
+    int port = 0;
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false;
+    bool released = false;
+    bool finished = false;
+
+    explicit BlockingResponsesMock(std::string sse_body) {
+        svr.Post("/v1/responses",
+            [this, body = std::move(sse_body)]
+            (const httplib::Request&, httplib::Response& res) {
+                {
+                    std::unique_lock lock(mutex);
+                    entered = true;
+                    cv.notify_all();
+                    cv.wait(lock, [&] { return released; });
+                }
+                res.set_header("Content-Type", "text/event-stream");
+                res.set_content(body, "text/event-stream");
+                {
+                    std::lock_guard lock(mutex);
+                    finished = true;
+                    cv.notify_all();
+                }
+            });
+        port = svr.bind_to_any_port("127.0.0.1");
+        t = std::thread([this] { svr.listen_after_bind(); });
+        for (int i = 0; i < 200 && !svr.is_running(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+
+    ~BlockingResponsesMock() {
+        {
+            std::lock_guard lock(mutex);
+            released = true;
+        }
+        cv.notify_all();
+        svr.stop();
+        if (t.joinable()) t.join();
+    }
 };
 
 llm::SchemaProvider::Config cfg_for(int port) {
@@ -270,4 +318,78 @@ TEST(SchemaProviderStreamAsyncOuterIo, ConcurrentOuterCoroutinesDoNotRace) {
     for (int i = 0; i < kCallers; ++i) {
         EXPECT_EQ(finals[i], kKoreanFull) << "caller " << i;
     }
+}
+
+// Issue #127: destroying the outer io_context must abandon callback delivery
+// without waiting for a blocked synchronous HTTP/SSE request. SchemaProvider
+// itself remains alive until its owned bridge thread finishes.
+TEST(SchemaProviderStreamAsyncOuterIo,
+     AbandonedHttpStreamNeverTouchesDestroyedIoContext) {
+    BlockingResponsesMock mock{make_korean_sse()};
+    ASSERT_GT(mock.port, 0);
+
+    auto provider = llm::SchemaProvider::create(cfg_for(mock.port));
+    ASSERT_TRUE(provider);
+    std::atomic<int> callbacks{0};
+    auto io = std::make_unique<asio::io_context>();
+
+    asio::co_spawn(
+        *io,
+        [&]() -> asio::awaitable<void> {
+            auto p = params_with("ping");
+            (void)co_await provider->complete_stream_async(
+                p, [&](const std::string&) { ++callbacks; });
+        },
+        asio::detached);
+
+    std::thread runner([&] { io->run(); });
+    bool entered = false;
+    {
+        std::unique_lock lock(mock.mutex);
+        entered = mock.cv.wait_for(
+            lock, std::chrono::seconds(2), [&] { return mock.entered; });
+    }
+    if (!entered) {
+        {
+            std::lock_guard lock(mock.mutex);
+            mock.released = true;
+        }
+        mock.cv.notify_all();
+        io->stop();
+        runner.join();
+        provider.reset();
+        ADD_FAILURE() << "HTTP stream did not reach the mock server";
+        return;
+    }
+
+    io->stop();
+    runner.join();
+
+    auto destroyed = std::async(std::launch::async, [&] { io.reset(); });
+    EXPECT_EQ(destroyed.wait_for(std::chrono::seconds(1)),
+              std::future_status::ready)
+        << "io_context destruction waited for a blocking HTTP stream";
+
+    {
+        std::lock_guard lock(mock.mutex);
+        mock.released = true;
+    }
+    mock.cv.notify_all();
+    bool finished = false;
+    {
+        std::unique_lock lock(mock.mutex);
+        finished = mock.cv.wait_for(
+            lock, std::chrono::seconds(2), [&] { return mock.finished; });
+    }
+    if (!finished) {
+        mock.svr.stop();
+        provider.reset();
+        ADD_FAILURE() << "HTTP stream did not finish after release";
+        return;
+    }
+
+    // Joining SchemaProvider's owned bridge thread proves all late stream work
+    // has ended before checking that no abandoned callback was delivered.
+    provider.reset();
+    EXPECT_EQ(callbacks.load(), 0);
 }
