@@ -471,7 +471,7 @@ TEST(PostgresCheckpointAsyncIoTest, ReconnectPollDoesNotBlockIoContext) {
 TEST(PostgresCheckpointAsyncIoTest, ResolverPollDoesNotBlockIoContext) {
     AsyncConnectionTestSeamReset reset;
     PoolTestAccess::set_async_connection_test_seams(
-        /*poll_delay_ms=*/150, /*timeout_ms=*/80);
+        /*poll_delay_ms=*/300, /*timeout_ms=*/80);
     StalledTcpServer server;
     auto store = PoolTestAccess::make_pool(/*pool_size=*/1);
     PoolTestAccess::set_conn_str(*store,
@@ -496,9 +496,12 @@ TEST(PostgresCheckpointAsyncIoTest, ResolverPollDoesNotBlockIoContext) {
         [&](std::exception_ptr error) { rebuild_error = error; });
 
     io.run();
+    auto elapsed = std::chrono::steady_clock::now() - started;
 
     ASSERT_TRUE(heartbeat_elapsed.has_value());
     EXPECT_LT(*heartbeat_elapsed, std::chrono::milliseconds(80));
+    EXPECT_LT(elapsed, std::chrono::milliseconds(200))
+        << "deadline waited for the blocking resolver worker";
     EXPECT_NE(rebuild_error, nullptr);
     EXPECT_TRUE(PoolTestAccess::slot_is_empty(*store, 0));
 }

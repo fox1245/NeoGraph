@@ -27,7 +27,6 @@
 #else
 #  include <asio/posix/stream_descriptor.hpp>
 #endif
-#include <asio/co_spawn.hpp>
 #include <asio/deferred.hpp>
 #include <asio/experimental/parallel_group.hpp>
 #include <asio/post.hpp>
@@ -42,6 +41,7 @@
 #include <cstring>
 #include <deque>
 #include <exception>
+#include <future>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -991,6 +991,41 @@ asio::thread_pool& connection_start_pool() {
     return *pool;
 }
 
+struct ConnectionAttempt {
+    std::unique_ptr<PgConn> conn;
+};
+
+[[noreturn]] void throw_connect_timeout(std::chrono::milliseconds timeout) {
+    throw std::runtime_error(
+        "PostgresCheckpointStore: connection timed out after "
+        + std::to_string(timeout.count())
+        + " ms while polling libpq");
+}
+
+template <typename Result, typename Fn>
+asio::awaitable<Result> run_connection_step_off_executor(
+    Fn fn,
+    std::chrono::steady_clock::time_point deadline,
+    std::chrono::milliseconds timeout) {
+    auto task = std::make_shared<std::packaged_task<Result()>>(std::move(fn));
+    auto result = task->get_future();
+    // The task captures ConnectionAttempt. If timeout/cancellation releases
+    // the caller, the worker still owns the PGconn until its blocking call
+    // returns, preventing both a use-after-free and a leaked connection.
+    asio::post(connection_start_pool(), [task] { (*task)(); });
+
+    auto ex = co_await asio::this_coro::executor;
+    while (result.wait_for(std::chrono::milliseconds(0))
+           != std::future_status::ready) {
+        auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) throw_connect_timeout(timeout);
+        asio::steady_timer poll_timer(
+            ex, std::min(deadline, now + std::chrono::milliseconds(2)));
+        co_await poll_timer.async_wait(asio::use_awaitable);
+    }
+    co_return result.get();
+}
+
 template <typename Socket>
 asio::awaitable<SocketReady> wait_socket_either(Socket& sock) {
     auto [order, read_error, write_error] =
@@ -1032,10 +1067,7 @@ asio::awaitable<void> wait_socket_until(
                         asio::use_awaitable);
 
     if (order[0] == 1 && !timer_error) {
-        throw std::runtime_error(
-            "PostgresCheckpointStore: connection timed out after "
-            + std::to_string(timeout.count())
-            + " ms while polling libpq");
+        throw_connect_timeout(timeout);
     }
     if (socket_error) throw asio::system_error(socket_error);
 }
@@ -1160,21 +1192,28 @@ std::chrono::milliseconds async_connect_timeout(pg_conn* c) {
     return kProjectDefault;
 }
 
-asio::awaitable<std::unique_ptr<PgConn>> start_connection_off_executor(
-    const std::string& url) {
-    co_return co_await asio::co_spawn(
-        connection_start_pool(),
-        [url]() -> asio::awaitable<std::unique_ptr<PgConn>> {
-            co_return std::make_unique<PgConn>(PQconnectStart(url.c_str()));
+asio::awaitable<void> start_connection_off_executor(
+    const std::shared_ptr<ConnectionAttempt>& attempt,
+    const std::string& url,
+    std::chrono::steady_clock::time_point deadline,
+    std::chrono::milliseconds timeout) {
+    (void)co_await run_connection_step_off_executor<int>(
+        [attempt, url] {
+            attempt->conn = std::make_unique<PgConn>(
+                PQconnectStart(url.c_str()));
+            return 0;
         },
-        asio::use_awaitable);
+        deadline,
+        timeout);
 }
 
 asio::awaitable<PostgresPollingStatusType> poll_connection_off_executor(
-    pg_conn* c) {
-    co_return co_await asio::co_spawn(
-        connection_start_pool(),
-        [c]() -> asio::awaitable<PostgresPollingStatusType> {
+    const std::shared_ptr<ConnectionAttempt>& attempt,
+    std::chrono::steady_clock::time_point deadline,
+    std::chrono::milliseconds timeout) {
+    co_return co_await run_connection_step_off_executor<
+        PostgresPollingStatusType>(
+        [attempt] {
             // Test seam models the potentially blocking hostname lookup that
             // PostgreSQL documents inside the first PQconnectPoll call.
             int delay = connection_poll_delay_ms_for_test.load(
@@ -1182,9 +1221,10 @@ asio::awaitable<PostgresPollingStatusType> poll_connection_off_executor(
             if (delay > 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(delay));
             }
-            co_return PQconnectPoll(c);
+            return PQconnectPoll(attempt->conn->raw);
         },
-        asio::use_awaitable);
+        deadline,
+        timeout);
 }
 
 asio::awaitable<std::unique_ptr<PgConn>> open_conn_async(
@@ -1192,10 +1232,20 @@ asio::awaitable<std::unique_ptr<PgConn>> open_conn_async(
     // PostgreSQL 16 libpq contract, consulted 2026-07-19:
     // PQconnectStart/PQconnectPoll can block on DNS without hostaddr, and
     // connect_timeout is ignored by PQconnectPoll. Both calls therefore run
-    // on the bounded sidecar above, while socket waits carry our deadline.
+    // on the bounded sidecar above; worker steps and socket waits both race
+    // our deadline.
     // https://www.postgresql.org/docs/16/libpq-connect.html
-    auto conn = co_await start_connection_off_executor(url);
-    pg_conn* raw = conn->raw;
+    auto started = std::chrono::steady_clock::now();
+    auto start_timeout = connection_timeout_ms_for_test.load(
+        std::memory_order_relaxed);
+    auto initial_timeout = start_timeout >= 0
+        ? std::chrono::milliseconds(start_timeout)
+        : std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::seconds(30));
+    auto attempt = std::make_shared<ConnectionAttempt>();
+    co_await start_connection_off_executor(
+        attempt, url, started + initial_timeout, initial_timeout);
+    pg_conn* raw = attempt->conn->raw;
     if (!raw) {
         throw std::runtime_error(
             "PostgresCheckpointStore: connection failed: null PGconn");
@@ -1207,7 +1257,7 @@ asio::awaitable<std::unique_ptr<PgConn>> open_conn_async(
     }
 
     auto timeout = async_connect_timeout(raw);
-    auto deadline = std::chrono::steady_clock::now() + timeout;
+    auto deadline = started + timeout;
     auto status = PGRES_POLLING_WRITING;
     for (;;) {
         if (status == PGRES_POLLING_READING) {
@@ -1216,15 +1266,15 @@ asio::awaitable<std::unique_ptr<PgConn>> open_conn_async(
             co_await wait_pg_socket_until(raw, false, deadline, timeout);
         }
 
-        status = co_await poll_connection_off_executor(raw);
+        status = co_await poll_connection_off_executor(
+            attempt, deadline, timeout);
         if (std::chrono::steady_clock::now() >= deadline
             && status != PGRES_POLLING_OK) {
-            throw std::runtime_error(
-                "PostgresCheckpointStore: connection timed out after "
-                + std::to_string(timeout.count())
-                + " ms while polling libpq");
+            throw_connect_timeout(timeout);
         }
-        if (status == PGRES_POLLING_OK) co_return conn;
+        if (status == PGRES_POLLING_OK) {
+            co_return std::move(attempt->conn);
+        }
         if (status == PGRES_POLLING_FAILED) {
             throw std::runtime_error(
                 std::string("PostgresCheckpointStore: connection failed: ")
