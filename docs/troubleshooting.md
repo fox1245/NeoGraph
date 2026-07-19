@@ -299,10 +299,13 @@ host=localhost user=neo password=p@ss dbname=neograph
 ### Async Postgres reconnect times out after 30 seconds
 
 Async initial/replacement connections use one production-safety deadline for
-the entire attempt. A positive libpq `connect_timeout=N` sets that global
-budget in seconds, with `connect_timeout=1` rounded up to PostgreSQL's minimum
-of two seconds. If `connect_timeout` is absent, zero, or negative, NeoGraph
-uses 30 seconds.
+the entire attempt. A positive `connect_timeout=N` written directly in the
+connection string sets that global budget in seconds, with `connect_timeout=1`
+rounded up to PostgreSQL's minimum of two seconds. If the explicit value is
+absent, zero, or negative, NeoGraph uses 30 seconds. `PGCONNECT_TIMEOUT` and
+service-file timeout values are resolved too late to bound the initial async
+connection step, so they also use the 30-second default; put the value directly
+in the connection string when the async deadline must differ.
 
 The budget spans every host and resolved IP in a multi-host connection string;
 it is not multiplied per host. This differs intentionally from synchronous
