@@ -170,15 +170,13 @@ int main() {
     PrintTracer tracer;
 
     // The session opens the CHAIN root span at construction. It must
-    // outlive the run; we hold it in a shared_ptr so the
-    // OpenInferenceProvider's parent_lookup lambda can grab it.
+    // outlive the run. The provider copies a safe child-span starter from it.
     auto session = std::make_shared<obs::OpenInferenceTracerSession>(
         obs::openinference_tracer(tracer));
 
     auto inner = std::make_shared<MockProvider>();
     auto traced = std::make_shared<obs::OpenInferenceProvider>(
-        inner, tracer,
-        [session]() -> obs::Span* { return session->current_parent(); });
+        inner, tracer, *session);
 
     NodeFactory::instance().register_type("talk",
         [traced](const std::string&, const json&, const NodeContext&) {

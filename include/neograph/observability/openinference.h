@@ -40,8 +40,10 @@
 #include <neograph/observability/tracer.h>
 #include <neograph/provider.h>
 
+#include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 
 namespace neograph::observability {
 
@@ -68,6 +70,9 @@ namespace neograph::observability {
  */
 class NEOGRAPH_API OpenInferenceTracerSession {
 public:
+    using ChildSpanStarter =
+        std::function<std::unique_ptr<Span>(Tracer&, std::string_view)>;
+
     /// Engine event callback. Pass to `engine.run_stream()`.
     graph::GraphStreamCallback cb;
 
@@ -101,9 +106,14 @@ public:
     /// (`PrintTracer`) for the canonical shape.
     void close();
 
-    /// Internal — exposed so `OpenInferenceProvider` can open LLM
-    /// child spans under the currently-active node span.
+    /// Snapshot of the current span. The pointer is only valid until another
+    /// session operation or `close()`; use `child_span_starter()` when opening
+    /// a child concurrently with session teardown.
     Span* current_parent() const noexcept;
+
+    /// Return a copied operation that opens a child while leasing the current
+    /// parent through `Tracer::start_span`. Safe across close/destruction.
+    ChildSpanStarter child_span_starter() const;
 
 private:
     struct Impl;
@@ -150,15 +160,21 @@ class NEOGRAPH_API OpenInferenceProvider : public Provider {
 public:
     /// @param inner         Provider to delegate to.
     /// @param tracer        Tracer for span emission. Must outlive `*this`.
-    /// @param parent_lookup Optional callback returning the current node
-    ///                      span the LLM call should nest under (e.g.
-    ///                      bound to an `OpenInferenceTracerSession::current_parent`).
-    ///                      May be null — null parent opens the LLM
-    ///                      span as a root.
+    /// @param parent_lookup Legacy raw-parent callback. It is invoked for
+    ///                      compatibility, but its unleased pointer is not
+    ///                      attached because concurrent close could invalidate
+    ///                      it. Use the session overload for parent attachment.
     /// @param span_name     Span name for each LLM call (default "llm.complete").
     OpenInferenceProvider(std::shared_ptr<Provider> inner,
                           Tracer& tracer,
                           std::function<Span*()> parent_lookup = nullptr,
+                          std::string span_name = "llm.complete");
+
+    /// Safe parent-aware overload. The copied starter does not retain the
+    /// session object and becomes a root-span starter after session teardown.
+    OpenInferenceProvider(std::shared_ptr<Provider> inner,
+                          Tracer& tracer,
+                          const OpenInferenceTracerSession& session,
                           std::string span_name = "llm.complete");
     ~OpenInferenceProvider() override;
 
