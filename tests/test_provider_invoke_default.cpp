@@ -1,12 +1,11 @@
 // ROADMAP_v1.md Candidate 6 — `Provider::invoke()` regression coverage.
 //
-// `invoke(params, on_chunk)` is the v1.0 canonical single-dispatch
-// entry point that replaces the 4-virtual cross-product
-// (`complete` / `complete_async` / `complete_stream` /
-// `complete_stream_async`). This first additive PR adds `invoke()`
-// with a default body that forwards to the legacy chain so existing
-// Provider subclasses keep working unchanged. These tests pin the
-// forwarding semantics and the new override surface.
+// `invoke(params, on_chunk)` is the callback-selected compatibility
+// entry point used by existing engine code. Its default body forwards
+// to the stable 4-virtual chain so existing Provider subclasses keep
+// working unchanged. New implementations use CompletionProvider's
+// explicit request API; these tests pin the compatibility forwarding
+// and override semantics.
 
 #include <gtest/gtest.h>
 #include <neograph/provider.h>
@@ -37,7 +36,7 @@ ChatCompletion make_completion(const std::string& text) {
     return c;
 }
 
-// Legacy provider — overrides only complete_async() and complete_stream(),
+// Existing provider — overrides only complete_async() and complete_stream(),
 // the two pieces of the existing chain. Default invoke() must route to
 // the right one based on on_chunk presence.
 class LegacyChainProvider : public Provider {
@@ -61,10 +60,9 @@ class LegacyChainProvider : public Provider {
     std::string get_name() const override { return "legacy-chain"; }
 };
 
-// New-style provider — overrides invoke() directly. Legacy 4 virtuals
-// are NOT overridden. Engine code that already calls the legacy methods
-// gets the base-class default, which (in this PR) forwards through the
-// chain — but if the user calls invoke() directly, the override fires.
+// Compatibility override — invokes can still be overridden directly.
+// The 4 complete* virtuals are not overridden, so direct complete* calls
+// use the base defaults; a direct invoke() call reaches this override.
 class InvokeNativeProvider : public Provider {
   public:
     std::atomic<int> invoke_calls{0};
@@ -143,8 +141,8 @@ TEST(ProviderInvokeDefault, WithCallbackRoutesToCompleteStreamAsync) {
 }
 
 // ---------------------------------------------------------------------------
-// New-style: subclass overrides invoke() directly. Calling invoke() must
-// hit the override, not the legacy chain.
+// A subclass may still override invoke() directly. Calling invoke() must
+// hit that override, not the complete* compatibility chain.
 // ---------------------------------------------------------------------------
 
 TEST(ProviderInvokeDefault, OverriddenInvokeFires) {

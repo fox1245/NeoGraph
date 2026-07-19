@@ -14,15 +14,27 @@
 
 #include <neograph/observability/openinference.h>
 #include <neograph/observability/tracer.h>
+#include <neograph/async/run_sync.h>
 #include <neograph/provider.h>
 #include <neograph/graph/types.h>
 #include <neograph/json.h>
 
+#include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
+#include <asio/io_context.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
+
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -56,6 +68,7 @@ struct RecordedSpan {
     std::string status = "unset";  // "unset" | "ok" | "error"
     std::string status_message;
     bool ended = false;
+    int end_calls = 0;
 };
 
 class InMemorySpan : public obs::Span {
@@ -82,7 +95,10 @@ public:
         rec_->status = "error";
         rec_->status_message = std::string(msg);
     }
-    void end() override { rec_->ended = true; }
+    void end() override {
+        rec_->ended = true;
+        ++rec_->end_calls;
+    }
 
 private:
     RecordedSpan* rec_;
@@ -171,6 +187,298 @@ public:
     std::string get_name() const override { return "throw"; }
 };
 
+class ThrowingStartTracer : public obs::Tracer {
+public:
+    std::unique_ptr<obs::Span> start_span(std::string_view,
+                                          obs::Span*) override {
+        throw std::runtime_error("trace start failed");
+    }
+};
+
+class ThrowingSpan : public obs::Span {
+public:
+    explicit ThrowingSpan(std::atomic<int>& end_calls)
+        : end_calls_(end_calls) {}
+
+    void set_attribute(std::string_view, std::string_view) override {
+        throw std::runtime_error("trace attribute failed");
+    }
+    void set_attribute(std::string_view, int64_t) override {
+        throw std::runtime_error("trace attribute failed");
+    }
+    void set_attribute(std::string_view, double) override {
+        throw std::runtime_error("trace attribute failed");
+    }
+    void set_attribute_bool(std::string_view, bool) override {
+        throw std::runtime_error("trace attribute failed");
+    }
+    void add_event(std::string_view, std::string_view) override {
+        throw std::runtime_error("trace event failed");
+    }
+    void set_status_ok() override {
+        throw std::runtime_error("trace status failed");
+    }
+    void set_status_error(std::string_view) override {
+        throw std::runtime_error("trace status failed");
+    }
+    void end() override {
+        ++end_calls_;
+        throw std::runtime_error("trace end failed");
+    }
+
+private:
+    std::atomic<int>& end_calls_;
+};
+
+class ThrowingSpanTracer : public obs::Tracer {
+public:
+    std::unique_ptr<obs::Span> start_span(std::string_view,
+                                          obs::Span*) override {
+        return std::make_unique<ThrowingSpan>(end_calls);
+    }
+
+    std::atomic<int> end_calls{0};
+};
+
+class BlockingTracer : public InMemoryTracer {
+public:
+    std::unique_ptr<obs::Span> start_span(std::string_view name,
+                                          obs::Span* parent) override {
+        if (name.starts_with("node.")) {
+            std::unique_lock lock(mu);
+            node_start_entered = true;
+            cv.notify_all();
+            cv.wait(lock, [&] { return release_node_start; });
+        }
+        return InMemoryTracer::start_span(name, parent);
+    }
+
+    std::mutex mu;
+    std::condition_variable cv;
+    bool node_start_entered = false;
+    bool release_node_start = false;
+};
+
+struct ParentLifetimeState {
+    std::atomic<bool> alive{true};
+    std::atomic<bool> ended{false};
+};
+
+class ParentLifetimeSpan : public obs::Span {
+public:
+    explicit ParentLifetimeSpan(std::shared_ptr<ParentLifetimeState> state)
+        : state_(std::move(state)) {}
+    ~ParentLifetimeSpan() override { state_->alive.store(false); }
+
+    void set_attribute(std::string_view, std::string_view) override {}
+    void set_attribute(std::string_view, int64_t) override {}
+    void set_attribute(std::string_view, double) override {}
+    void set_attribute_bool(std::string_view, bool) override {}
+    void add_event(std::string_view, std::string_view) override {}
+    void set_status_ok() override {}
+    void set_status_error(std::string_view) override {}
+    void end() override { state_->ended.store(true); }
+
+private:
+    std::shared_ptr<ParentLifetimeState> state_;
+};
+
+class BlockingParentLifetimeTracer : public obs::Tracer {
+public:
+    std::unique_ptr<obs::Span> start_span(std::string_view name,
+                                          obs::Span* parent) override {
+        std::shared_ptr<ParentLifetimeState> parent_state;
+        {
+            std::lock_guard lock(mu);
+            if (parent) parent_state = state_by_span.at(parent);
+        }
+
+        if (name == "llm.complete") {
+            std::unique_lock lock(window_mu);
+            child_start_entered = true;
+            cv.notify_all();
+            cv.wait(lock, [&] { return release_child_start; });
+            parent_usable_during_start = parent_state
+                && parent_state->alive.load() && !parent_state->ended.load();
+        }
+
+        auto state = std::make_shared<ParentLifetimeState>();
+        auto span = std::make_unique<ParentLifetimeSpan>(state);
+        {
+            std::lock_guard lock(mu);
+            state_by_span.emplace(span.get(), std::move(state));
+        }
+        return span;
+    }
+
+    std::mutex window_mu;
+    std::condition_variable cv;
+    bool child_start_entered = false;
+    bool release_child_start = false;
+    bool parent_usable_during_start = false;
+
+private:
+    std::mutex mu;
+    std::unordered_map<obs::Span*, std::shared_ptr<ParentLifetimeState>>
+        state_by_span;
+};
+
+class ReentrantCloseTracer : public InMemoryTracer {
+public:
+    std::unique_ptr<obs::Span> start_span(std::string_view name,
+                                          obs::Span* parent) override {
+        if (name == "llm.complete" && session) session->close();
+        return InMemoryTracer::start_span(name, parent);
+    }
+
+    obs::OpenInferenceTracerSession* session = nullptr;
+};
+
+struct BlockingDestructionState {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool child_start_entered = false;
+    bool release_child_start = false;
+    bool root_destructor_entered = false;
+    bool release_root_destructor = false;
+};
+
+class BlockingDestructorSpan : public obs::Span {
+public:
+    BlockingDestructorSpan(std::shared_ptr<BlockingDestructionState> state,
+                           bool block_destructor)
+        : state_(std::move(state)), block_destructor_(block_destructor) {}
+
+    ~BlockingDestructorSpan() override {
+        if (!block_destructor_) return;
+        std::unique_lock lock(state_->mu);
+        state_->root_destructor_entered = true;
+        state_->cv.notify_all();
+        state_->cv.wait(lock, [&] { return state_->release_root_destructor; });
+    }
+
+    void set_attribute(std::string_view, std::string_view) override {}
+    void set_attribute(std::string_view, int64_t) override {}
+    void set_attribute(std::string_view, double) override {}
+    void set_attribute_bool(std::string_view, bool) override {}
+    void add_event(std::string_view, std::string_view) override {}
+    void set_status_ok() override {}
+    void set_status_error(std::string_view) override {}
+    void end() override {}
+
+private:
+    std::shared_ptr<BlockingDestructionState> state_;
+    bool block_destructor_;
+};
+
+class BlockingWrapperDestructionTracer : public obs::Tracer {
+public:
+    std::unique_ptr<obs::Span> start_span(std::string_view name,
+                                          obs::Span*) override {
+        if (name == "llm.complete") {
+            std::unique_lock lock(state->mu);
+            state->child_start_entered = true;
+            state->cv.notify_all();
+            state->cv.wait(lock, [&] { return state->release_child_start; });
+        }
+        return std::make_unique<BlockingDestructorSpan>(
+            state, name == "graph.run");
+    }
+
+    std::shared_ptr<BlockingDestructionState> state =
+        std::make_shared<BlockingDestructionState>();
+};
+
+struct BlockingTerminalState {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool end_called = false;
+    bool destructor_entered = false;
+    bool release_destructor = false;
+};
+
+class BlockingTerminalSpan : public obs::Span {
+public:
+    BlockingTerminalSpan(std::shared_ptr<BlockingTerminalState> state,
+                         bool block_destructor)
+        : state_(std::move(state)), block_destructor_(block_destructor) {}
+
+    ~BlockingTerminalSpan() override {
+        if (!block_destructor_) return;
+        std::unique_lock lock(state_->mu);
+        state_->destructor_entered = true;
+        state_->cv.notify_all();
+        state_->cv.wait(lock, [&] { return state_->release_destructor; });
+    }
+
+    void set_attribute(std::string_view, std::string_view) override {}
+    void set_attribute(std::string_view, int64_t) override {}
+    void set_attribute(std::string_view, double) override {}
+    void set_attribute_bool(std::string_view, bool) override {}
+    void add_event(std::string_view, std::string_view) override {}
+    void set_status_ok() override {}
+    void set_status_error(std::string_view) override {}
+    void end() override {
+        if (!block_destructor_) return;
+        std::lock_guard lock(state_->mu);
+        state_->end_called = true;
+    }
+
+private:
+    std::shared_ptr<BlockingTerminalState> state_;
+    bool block_destructor_;
+};
+
+class BlockingTerminalTracer : public obs::Tracer {
+public:
+    std::unique_ptr<obs::Span> start_span(std::string_view name,
+                                          obs::Span*) override {
+        return std::make_unique<BlockingTerminalSpan>(
+            state, name.starts_with("node."));
+    }
+
+    std::shared_ptr<BlockingTerminalState> state =
+        std::make_shared<BlockingTerminalState>();
+};
+
+class NonStdAsyncProvider : public Provider {
+public:
+    ChatCompletion complete(const CompletionParams&) override { return {}; }
+
+    asio::awaitable<ChatCompletion>
+    complete_async(const CompletionParams&) override {
+        throw 42;
+        co_return ChatCompletion{};
+    }
+
+    std::string get_name() const override { return "non-std-async"; }
+};
+
+class SuspendedAsyncProvider : public Provider {
+public:
+    ChatCompletion complete(const CompletionParams&) override { return {}; }
+
+    asio::awaitable<ChatCompletion>
+    complete_async(const CompletionParams&) override {
+        auto executor = co_await asio::this_coro::executor;
+        {
+            std::lock_guard lock(mu);
+            entered = true;
+        }
+        cv.notify_all();
+        asio::steady_timer timer(executor);
+        timer.expires_after(std::chrono::hours(1));
+        co_await timer.async_wait(asio::use_awaitable);
+        co_return ChatCompletion{};
+    }
+
+    std::string get_name() const override { return "suspended-async"; }
+
+    std::mutex mu;
+    std::condition_variable cv;
+    bool entered = false;
+};
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -195,6 +503,7 @@ TEST(OpenInferenceCpp, TracerOpensChainRootAndPerNodeChild) {
     EXPECT_EQ(spans[0]->name, "graph.run");
     EXPECT_EQ(spans[0]->attrs_str["openinference.span.kind"], "CHAIN");
     EXPECT_TRUE(spans[0]->ended);
+    EXPECT_EQ(spans[0]->end_calls, 1);
 
     // Node child: name "node.researcher", parent = root, CHAIN
     EXPECT_EQ(spans[1]->name, "node.researcher");
@@ -205,6 +514,7 @@ TEST(OpenInferenceCpp, TracerOpensChainRootAndPerNodeChild) {
     EXPECT_EQ(spans[1]->attrs_str["output.mime_type"], "application/json");
     EXPECT_EQ(spans[1]->status, "ok");
     EXPECT_TRUE(spans[1]->ended);
+    EXPECT_EQ(spans[1]->end_calls, 1);
 
     // input.value JSON contains node name; output.value JSON contains the data.
     auto in_json = neograph::json::parse(spans[1]->attrs_str["input.value"]);
@@ -234,11 +544,13 @@ TEST(OpenInferenceCpp, TracerSurfacesErrorAndInterrupt) {
     EXPECT_EQ(spans[1]->status_message, "kaboom");
     EXPECT_EQ(spans[1]->attrs_str["neograph.error"], "kaboom");
     EXPECT_TRUE(spans[1]->ended);
+    EXPECT_EQ(spans[1]->end_calls, 1);
 
     // b: INTERRUPT
     EXPECT_EQ(spans[2]->name, "node.b");
     EXPECT_TRUE(spans[2]->attrs_bool["neograph.interrupted"]);
     EXPECT_TRUE(spans[2]->ended);
+    EXPECT_EQ(spans[2]->end_calls, 1);
 }
 
 TEST(OpenInferenceCpp, TracerRecordsLLMTokenAsSpanEvent) {
@@ -273,6 +585,118 @@ TEST(OpenInferenceCpp, TracerCloseAlsoEndsStragglerNodeSpan) {
     ASSERT_EQ(spans.size(), 2u);
     EXPECT_TRUE(spans[0]->ended);  // root
     EXPECT_TRUE(spans[1]->ended);  // straggler node span
+}
+
+TEST(OpenInferenceCpp, TerminalEventsRestorePreviousCurrentParent) {
+    for (auto terminal : {GraphEvent::Type::NODE_END,
+                          GraphEvent::Type::ERROR,
+                          GraphEvent::Type::INTERRUPT}) {
+        InMemoryTracer tracer;
+        auto session = obs::openinference_tracer(tracer);
+        auto* root = session.current_parent();
+        ASSERT_NE(root, nullptr);
+
+        session.cb({GraphEvent::Type::NODE_START, "outer",
+                    neograph::json::object()});
+        auto* outer = session.current_parent();
+        ASSERT_NE(outer, root);
+        session.cb({GraphEvent::Type::NODE_START, "inner",
+                    neograph::json::object()});
+        ASSERT_NE(session.current_parent(), outer);
+
+        neograph::json data = terminal == GraphEvent::Type::ERROR
+            ? neograph::json("boom") : neograph::json::object();
+        session.cb({terminal, "inner", std::move(data)});
+        EXPECT_EQ(session.current_parent(), outer);
+
+        session.cb({GraphEvent::Type::NODE_END, "outer",
+                    neograph::json::object()});
+        EXPECT_EQ(session.current_parent(), root);
+    }
+}
+
+TEST(OpenInferenceCpp, CopiedCallbackIsSafeAfterSessionDestruction) {
+    InMemoryTracer tracer;
+    neograph::graph::GraphStreamCallback copied;
+    {
+        auto session = obs::openinference_tracer(tracer);
+        copied = session.cb;
+    }
+
+    EXPECT_NO_THROW(copied({GraphEvent::Type::NODE_START, "late",
+                            neograph::json::object()}));
+    auto spans = tracer.snapshot();
+    ASSERT_EQ(spans.size(), 1u);
+    EXPECT_TRUE(spans[0]->ended);
+    EXPECT_EQ(spans[0]->end_calls, 1);
+}
+
+TEST(OpenInferenceCpp, CopiedCallbackIsSafeAfterExplicitClose) {
+    InMemoryTracer tracer;
+    auto session = obs::openinference_tracer(tracer);
+    auto copied = session.cb;
+    session.close();
+
+    EXPECT_NO_THROW(copied({GraphEvent::Type::NODE_START, "late",
+                            neograph::json::object()}));
+    auto spans = tracer.snapshot();
+    ASSERT_EQ(spans.size(), 1u);
+    EXPECT_EQ(spans[0]->end_calls, 1);
+}
+
+TEST(OpenInferenceCpp, CloseWaitsForInFlightCallbackAndEndsItsSpan) {
+    using namespace std::chrono_literals;
+
+    BlockingTracer tracer;
+    auto session = obs::openinference_tracer(tracer);
+    auto copied = session.cb;
+    std::thread callback_thread([&] {
+        copied({GraphEvent::Type::NODE_START, "blocked",
+                neograph::json::object()});
+    });
+
+    {
+        std::unique_lock lock(tracer.mu);
+        ASSERT_TRUE(tracer.cv.wait_for(lock, 2s, [&] {
+            return tracer.node_start_entered;
+        }));
+    }
+
+    auto closing = std::async(std::launch::async, [&] { session.close(); });
+    EXPECT_EQ(closing.wait_for(50ms), std::future_status::timeout);
+
+    {
+        std::lock_guard lock(tracer.mu);
+        tracer.release_node_start = true;
+    }
+    tracer.cv.notify_all();
+    callback_thread.join();
+    ASSERT_EQ(closing.wait_for(2s), std::future_status::ready);
+
+    auto spans = tracer.snapshot();
+    ASSERT_EQ(spans.size(), 2u);
+    EXPECT_TRUE(spans[0]->ended);
+    EXPECT_TRUE(spans[1]->ended);
+    EXPECT_EQ(spans[0]->end_calls, 1);
+    EXPECT_EQ(spans[1]->end_calls, 1);
+}
+
+TEST(OpenInferenceCpp, MoveAssignmentClosesTargetSession) {
+    InMemoryTracer target_tracer;
+    InMemoryTracer source_tracer;
+    auto target = obs::openinference_tracer(target_tracer);
+    target.cb({GraphEvent::Type::NODE_START, "open",
+               neograph::json::object()});
+    auto source = obs::openinference_tracer(source_tracer);
+
+    target = std::move(source);
+
+    auto old_spans = target_tracer.snapshot();
+    ASSERT_EQ(old_spans.size(), 2u);
+    EXPECT_TRUE(old_spans[0]->ended);
+    EXPECT_TRUE(old_spans[1]->ended);
+    EXPECT_EQ(old_spans[0]->end_calls, 1);
+    EXPECT_EQ(old_spans[1]->end_calls, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -362,4 +786,267 @@ TEST(OpenInferenceCpp, ProviderPropagatesExceptionAndMarksSpanError) {
     EXPECT_EQ(spans[0]->status, "error");
     EXPECT_NE(spans[0]->status_message.find("boom"), std::string::npos);
     EXPECT_TRUE(spans[0]->ended);
+}
+
+TEST(OpenInferenceCpp, ProviderRejectsNullInnerProvider) {
+    InMemoryTracer tracer;
+    EXPECT_THROW(obs::OpenInferenceProvider(nullptr, tracer),
+                 std::invalid_argument);
+}
+
+TEST(OpenInferenceCpp, ParentLookupFailureDoesNotBlockInnerCall) {
+    InMemoryTracer tracer;
+    auto inner = std::make_shared<FakeProvider>();
+    obs::OpenInferenceProvider wrapped(
+        inner, tracer, []() -> obs::Span* {
+            throw std::runtime_error("parent lookup failed");
+        });
+
+    auto result = wrapped.complete({});
+    EXPECT_EQ(result.message.content, "ok");
+    EXPECT_EQ(inner->calls.load(), 1);
+
+    auto spans = tracer.snapshot();
+    ASSERT_EQ(spans.size(), 1u);
+    EXPECT_EQ(spans[0]->parent, nullptr);
+    EXPECT_TRUE(spans[0]->ended);
+    EXPECT_EQ(spans[0]->end_calls, 1);
+}
+
+TEST(OpenInferenceCpp, LegacyParentLookupPreservesCallerOwnedHierarchy) {
+    InMemoryTracer tracer;
+    auto parent = tracer.start_span("caller.parent", nullptr);
+    auto inner = std::make_shared<FakeProvider>();
+    obs::OpenInferenceProvider wrapped(
+        inner, tracer, [&]() -> obs::Span* { return parent.get(); });
+
+    auto result = wrapped.complete({});
+
+    EXPECT_EQ(result.message.content, "ok");
+    auto spans = tracer.snapshot();
+    ASSERT_EQ(spans.size(), 2u);
+    EXPECT_EQ(spans[1]->parent, parent.get());
+    EXPECT_EQ(spans[1]->end_calls, 1);
+}
+
+TEST(OpenInferenceCpp, ParentLeaseSurvivesConcurrentCloseThroughStartSpan) {
+    using namespace std::chrono_literals;
+
+    BlockingParentLifetimeTracer tracer;
+    auto session = obs::openinference_tracer(tracer);
+    auto inner = std::make_shared<FakeProvider>();
+    obs::OpenInferenceProvider wrapped(inner, tracer, session);
+
+    auto completion = std::async(std::launch::async, [&] {
+        return wrapped.complete({});
+    });
+    {
+        std::unique_lock lock(tracer.window_mu);
+        ASSERT_TRUE(tracer.cv.wait_for(lock, 2s, [&] {
+            return tracer.child_start_entered;
+        }));
+    }
+
+    auto closing = std::async(std::launch::async, [&] { session.close(); });
+    EXPECT_EQ(closing.wait_for(50ms), std::future_status::timeout);
+
+    {
+        std::lock_guard lock(tracer.window_mu);
+        tracer.release_child_start = true;
+    }
+    tracer.cv.notify_all();
+
+    EXPECT_EQ(completion.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(closing.wait_for(2s), std::future_status::ready);
+    EXPECT_TRUE(tracer.parent_usable_during_start);
+    EXPECT_EQ(completion.get().message.content, "ok");
+}
+
+TEST(OpenInferenceCpp, ReentrantCloseFromStartSpanDoesNotDeadlock) {
+    using namespace std::chrono_literals;
+
+    ReentrantCloseTracer tracer;
+    auto session = obs::openinference_tracer(tracer);
+    tracer.session = &session;
+    auto inner = std::make_shared<FakeProvider>();
+    obs::OpenInferenceProvider wrapped(inner, tracer, session);
+
+    auto completion = std::async(std::launch::async, [&] {
+        return wrapped.complete({});
+    });
+
+    ASSERT_EQ(completion.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(completion.get().message.content, "ok");
+    EXPECT_EQ(session.current_parent(), nullptr);
+}
+
+TEST(OpenInferenceCpp, CloseWaitsForFinalSpanWrapperDestruction) {
+    using namespace std::chrono_literals;
+
+    BlockingWrapperDestructionTracer tracer;
+    auto session = obs::openinference_tracer(tracer);
+    auto inner = std::make_shared<FakeProvider>();
+    obs::OpenInferenceProvider wrapped(inner, tracer, session);
+
+    auto completion = std::async(std::launch::async, [&] {
+        return wrapped.complete({});
+    });
+    {
+        std::unique_lock lock(tracer.state->mu);
+        ASSERT_TRUE(tracer.state->cv.wait_for(lock, 2s, [&] {
+            return tracer.state->child_start_entered;
+        }));
+    }
+
+    auto closing = std::async(std::launch::async, [&] { session.close(); });
+    {
+        std::lock_guard lock(tracer.state->mu);
+        tracer.state->release_child_start = true;
+    }
+    tracer.state->cv.notify_all();
+
+    {
+        std::unique_lock lock(tracer.state->mu);
+        ASSERT_TRUE(tracer.state->cv.wait_for(lock, 2s, [&] {
+            return tracer.state->root_destructor_entered;
+        }));
+    }
+    EXPECT_EQ(closing.wait_for(50ms), std::future_status::timeout);
+
+    {
+        std::lock_guard lock(tracer.state->mu);
+        tracer.state->release_root_destructor = true;
+    }
+    tracer.state->cv.notify_all();
+
+    EXPECT_EQ(closing.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(completion.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(completion.get().message.content, "ok");
+}
+
+TEST(OpenInferenceCpp, CloseWaitsForTerminalSpanTeardown) {
+    using namespace std::chrono_literals;
+
+    BlockingTerminalTracer tracer;
+    auto session = obs::openinference_tracer(tracer);
+    session.cb({GraphEvent::Type::NODE_START, "blocked",
+                neograph::json::object()});
+
+    auto terminal = std::async(std::launch::async, [&] {
+        session.cb({GraphEvent::Type::NODE_END, "blocked",
+                    neograph::json::object()});
+    });
+    {
+        std::unique_lock lock(tracer.state->mu);
+        ASSERT_TRUE(tracer.state->cv.wait_for(lock, 2s, [&] {
+            return tracer.state->destructor_entered;
+        }));
+        EXPECT_TRUE(tracer.state->end_called);
+    }
+
+    auto closing = std::async(std::launch::async, [&] { session.close(); });
+    EXPECT_EQ(closing.wait_for(50ms), std::future_status::timeout);
+
+    {
+        std::lock_guard lock(tracer.state->mu);
+        tracer.state->release_destructor = true;
+    }
+    tracer.state->cv.notify_all();
+
+    EXPECT_EQ(closing.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(terminal.wait_for(2s), std::future_status::ready);
+}
+
+TEST(OpenInferenceCpp, StartSpanFailureDoesNotBlockInnerCall) {
+    ThrowingStartTracer tracer;
+    auto inner = std::make_shared<FakeProvider>();
+    obs::OpenInferenceProvider wrapped(inner, tracer);
+
+    auto result = wrapped.complete({});
+    EXPECT_EQ(result.message.content, "ok");
+    EXPECT_EQ(inner->calls.load(), 1);
+}
+
+TEST(OpenInferenceCpp, TracingFailureDoesNotReplaceInnerException) {
+    ThrowingStartTracer tracer;
+    auto inner = std::make_shared<ThrowingProvider>();
+    obs::OpenInferenceProvider wrapped(inner, tracer);
+
+    try {
+        (void)wrapped.complete({});
+        FAIL() << "inner provider exception was not propagated";
+    } catch (const std::runtime_error& error) {
+        EXPECT_STREQ(error.what(), "boom");
+    }
+}
+
+TEST(OpenInferenceCpp, SpanMethodFailuresDoNotAffectInnerCall) {
+    ThrowingSpanTracer tracer;
+    auto inner = std::make_shared<FakeProvider>();
+    obs::OpenInferenceProvider wrapped(inner, tracer);
+
+    auto result = wrapped.complete({});
+
+    EXPECT_EQ(result.message.content, "ok");
+    EXPECT_EQ(inner->calls.load(), 1);
+    EXPECT_EQ(tracer.end_calls.load(), 1);
+}
+
+TEST(OpenInferenceCpp, SpanMethodFailuresDoNotReplaceInnerException) {
+    ThrowingSpanTracer tracer;
+    auto inner = std::make_shared<ThrowingProvider>();
+    obs::OpenInferenceProvider wrapped(inner, tracer);
+
+    try {
+        (void)wrapped.complete({});
+        FAIL() << "inner provider exception was not propagated";
+    } catch (const std::runtime_error& error) {
+        EXPECT_STREQ(error.what(), "boom");
+    }
+    EXPECT_EQ(tracer.end_calls.load(), 1);
+}
+
+TEST(OpenInferenceCpp, AsyncNonStdExceptionEndsSpanExactlyOnce) {
+    InMemoryTracer tracer;
+    auto inner = std::make_shared<NonStdAsyncProvider>();
+    obs::OpenInferenceProvider wrapped(inner, tracer);
+
+    EXPECT_THROW(
+        (void)neograph::async::run_sync(wrapped.complete_async({})), int);
+
+    auto spans = tracer.snapshot();
+    ASSERT_EQ(spans.size(), 1u);
+    EXPECT_EQ(spans[0]->status, "error");
+    EXPECT_TRUE(spans[0]->ended);
+    EXPECT_EQ(spans[0]->end_calls, 1);
+}
+
+TEST(OpenInferenceCpp, AbandonedAsyncCallEndsSpanExactlyOnce) {
+    using namespace std::chrono_literals;
+
+    InMemoryTracer tracer;
+    auto inner = std::make_shared<SuspendedAsyncProvider>();
+    auto wrapped = std::make_shared<obs::OpenInferenceProvider>(inner, tracer);
+    auto io = std::make_unique<asio::io_context>();
+    asio::co_spawn(
+        *io,
+        [wrapped]() -> asio::awaitable<void> {
+            (void)co_await wrapped->complete_async({});
+        },
+        asio::detached);
+
+    std::thread runner([&] { io->run(); });
+    {
+        std::unique_lock lock(inner->mu);
+        ASSERT_TRUE(inner->cv.wait_for(lock, 2s, [&] { return inner->entered; }));
+    }
+
+    io->stop();
+    runner.join();
+    io.reset();
+
+    auto spans = tracer.snapshot();
+    ASSERT_EQ(spans.size(), 1u);
+    EXPECT_TRUE(spans[0]->ended);
+    EXPECT_EQ(spans[0]->end_calls, 1);
 }

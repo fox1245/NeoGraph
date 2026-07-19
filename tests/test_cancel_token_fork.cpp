@@ -98,6 +98,23 @@ TEST(CancelTokenFork, ChildCancelDoesNotAffectParent) {
         << "cancel() on a child must not cascade up to the parent";
 }
 
+TEST(CancelTokenFork, ForkedOperationChildOutlivesPostedEmit) {
+    // GraphEngine always binds a forked operation child, never the caller's
+    // parent. A forked child has a weak self-entry that cancel() locks and
+    // captures in the posted emit, so the engine may release its operation
+    // owner before this executor drains without touching freed storage.
+    auto parent = std::make_shared<CancelToken>();
+    asio::io_context io;
+    auto operation = parent->fork();
+    operation->bind_executor(io.get_executor());
+    parent->cancel();
+    operation.reset();
+
+    std::size_t drained = 0;
+    EXPECT_NO_THROW(drained = io.run());
+    EXPECT_EQ(drained, 1u) << "the queued emit must actually be drained";
+}
+
 TEST(CancelTokenFork, ChildSiblingsAreIndependent) {
     // Cascade is parent→children only. A child cancelling does not
     // sweep its siblings: only the parent's own cancel() does that.

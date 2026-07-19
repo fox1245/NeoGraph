@@ -116,6 +116,11 @@ target_sources(neograph_tests PRIVATE test_async_get.cpp)
 if(NEOGRAPH_BUILD_POSTGRES)
     target_sources(neograph_tests PRIVATE test_postgres_checkpoint.cpp)
     target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_POSTGRES)
+
+    add_executable(neograph_postgres_old_header_abi
+        test_postgres_old_header_abi.cpp)
+    target_link_libraries(neograph_postgres_old_header_abi PRIVATE
+        neograph::postgres)
 endif()
 
 if(NEOGRAPH_BUILD_SQLITE)
@@ -160,6 +165,13 @@ if(NEOGRAPH_BUILD_SQLITE)
 endif()
 
 include(GoogleTest)
+
+if(NEOGRAPH_BUILD_POSTGRES)
+    add_test(NAME PostgresCheckpointAbiTest.OldHeaderNewLibrary
+        COMMAND neograph_postgres_old_header_abi)
+    set_tests_properties(PostgresCheckpointAbiTest.OldHeaderNewLibrary
+        PROPERTIES RESOURCE_LOCK postgres_test_db)
+endif()
 
 # ThreadSanitizer ASLR notice: when CMAKE_CXX_FLAGS contains
 # `-fsanitize=thread`, the test binaries can FATAL with

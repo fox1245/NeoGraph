@@ -5,7 +5,13 @@
 
 #include <neograph/async/run_sync.h>
 
+#include <asio/bind_cancellation_slot.hpp>
+#include <asio/co_spawn.hpp>
+#include <asio/error.hpp>
+#include <asio/system_error.hpp>
+#include <asio/this_coro.hpp>
 #include <asio/thread_pool.hpp>
+#include <asio/use_awaitable.hpp>
 
 #include <stdexcept>
 #include <algorithm>
@@ -267,8 +273,9 @@ void GraphEngine::update_state(const std::string& thread_id,
     // super-step saves propagate this for the same reason.
     new_cp.barrier_state   = cp.barrier_state;
     new_cp.step            = cp.step;
-    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+    const int64_t now = static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
     // update_state preserves the parent's step, so millisecond timestamp ties
     // would leave durable stores unable to identify the newer checkpoint.
     new_cp.timestamp       = std::max(now, cp.timestamp + 1);
@@ -356,7 +363,13 @@ RunResult GraphEngine::run(const RunConfig& config) {
     // thread-pool hop. Parallel fan-out inside run_parallel_async /
     // run_sends_async still uses pool_ explicitly for CPU
     // parallelism (see NodeExecutor::fan_out_pool_).
-    return neograph::async::run_sync(execute_graph_async(config, nullptr));
+    RunConfig operation_config = config;
+    if (config.cancel_token) {
+        operation_config.cancel_token = config.cancel_token->fork();
+    }
+    return neograph::async::detail::run_sync_operation(
+        execute_graph_async(operation_config, nullptr),
+        operation_config.cancel_token);
 }
 
 // Public async entry — takes RunConfig BY VALUE so the coroutine frame
@@ -370,12 +383,41 @@ RunResult GraphEngine::run(const RunConfig& config) {
 // alive on their own stack frame.
 asio::awaitable<RunResult>
 GraphEngine::run_async(RunConfig config) {
-    co_return co_await execute_graph_async(config, nullptr);
+    auto operation = config.cancel_token
+        ? config.cancel_token->fork()
+        : std::shared_ptr<CancelToken>{};
+    config.cancel_token = operation;
+    if (!operation) {
+        co_return co_await execute_graph_async(config, nullptr);
+    }
+
+    auto executor = co_await asio::this_coro::executor;
+    operation->bind_executor(executor);
+    operation->throw_if_cancelled("run_async entry");
+    try {
+        co_return co_await asio::co_spawn(
+            executor,
+            execute_graph_async(config, nullptr),
+            asio::bind_cancellation_slot(
+                operation->slot(), asio::use_awaitable));
+    } catch (const asio::system_error& error) {
+        if (operation->is_cancelled() &&
+            error.code() == asio::error::operation_aborted) {
+            throw CancelledException("run_async operation aborted");
+        }
+        throw;
+    }
 }
 
 RunResult GraphEngine::run_stream(const RunConfig& config,
                                    const GraphStreamCallback& cb) {
-    return neograph::async::run_sync(execute_graph_async(config, cb));
+    RunConfig operation_config = config;
+    if (config.cancel_token) {
+        operation_config.cancel_token = config.cancel_token->fork();
+    }
+    return neograph::async::detail::run_sync_operation(
+        execute_graph_async(operation_config, cb),
+        operation_config.cancel_token);
 }
 
 asio::awaitable<RunResult>
@@ -384,7 +426,31 @@ GraphEngine::run_stream_async(RunConfig config,
     // Same lifetime concern as run_async — both config and cb might
     // be stack-local at the callsite, captured into a co_spawn'd
     // awaitable that outlives the callsite. Take both by value.
-    co_return co_await execute_graph_async(config, cb);
+    auto operation = config.cancel_token
+        ? config.cancel_token->fork()
+        : std::shared_ptr<CancelToken>{};
+    config.cancel_token = operation;
+    if (!operation) {
+        co_return co_await execute_graph_async(config, cb);
+    }
+
+    auto executor = co_await asio::this_coro::executor;
+    operation->bind_executor(executor);
+    operation->throw_if_cancelled("run_stream_async entry");
+    try {
+        co_return co_await asio::co_spawn(
+            executor,
+            execute_graph_async(config, cb),
+            asio::bind_cancellation_slot(
+                operation->slot(), asio::use_awaitable));
+    } catch (const asio::system_error& error) {
+        if (operation->is_cancelled() &&
+            error.code() == asio::error::operation_aborted) {
+            throw CancelledException(
+                "run_stream_async operation aborted");
+        }
+        throw;
+    }
 }
 
 RunResult GraphEngine::resume(const std::string& thread_id,
@@ -563,11 +629,11 @@ GraphEngine::execute_graph_async(const RunConfig& config,
         // v0.3: cooperative cancel checkpoint. Polled at the super-step
         // boundary so any future node work is suppressed; in-flight
         // HTTP work inside the just-finished step is aborted via the
-        // asio cancellation_signal bound at co_spawn time (see pybind
-        // bind_graph.cpp::run_async wiring) — both layers needed to
-        // close the cost-leak gap reported in v0.2.3.
-        if (config.cancel_token) {
-            config.cancel_token->throw_if_cancelled(
+        // operation child's asio cancellation_signal bound by run_async /
+        // run_stream_async (or the sync bridge for blocking entry points).
+        // Both layers are needed to close the cost-leak gap from v0.2.3.
+        if (ctx.cancel_token) {
+            ctx.cancel_token->throw_if_cancelled(
                 "step " + std::to_string(step));
         }
 

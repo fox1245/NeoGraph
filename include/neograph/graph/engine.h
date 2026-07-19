@@ -49,9 +49,10 @@ struct RunConfig {
      *
      * When set, the engine super-step loop polls
      * ``cancel_token->is_cancelled()`` between steps and bails with
-     * ``CancelledException``. The pybind binding additionally binds
-     * the token's ``cancellation_slot`` to the run's ``co_spawn`` so
-     * an in-flight LLM HTTP request gets aborted at the socket layer.
+     * ``CancelledException``. Each engine entry point forks an operation
+     * child and binds only that child's ``cancellation_slot`` to its internal
+     * work, so an in-flight LLM HTTP request gets aborted at the socket layer
+     * without sharing one slot across concurrent runs.
      *
      * Default ``nullptr`` → no cancellation; existing behaviour
      * unchanged for callers that haven't opted in.
@@ -120,8 +121,8 @@ struct RunConfig {
  * (Candidate 2: "Explicit RunContext for per-run metadata").
  */
 struct RunContext {
-    /// Cooperative cancel handle. Mirrors ``RunConfig::cancel_token``.
-    /// Null when the caller did not opt in.
+    /// Cooperative cancel handle. This is the operation child forked from
+    /// ``RunConfig::cancel_token``. Null when the caller did not opt in.
     std::shared_ptr<CancelToken> cancel_token;
 
     /// Token accounting sink for this run (issue #88). The engine always sets

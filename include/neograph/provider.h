@@ -118,8 +118,10 @@ struct CompletionParams {
 /**
  * @brief Abstract base class for LLM providers.
  *
- * Subclass this to integrate any LLM backend (OpenAI, Claude, Gemini, etc.).
- * Both synchronous and streaming completion must be implemented.
+ * Existing subclasses may continue to implement any supported sync/async pair.
+ * These entry points are stable compatibility APIs with no removal planned.
+ * New backends should normally derive from `CompletionProvider` and implement
+ * its explicit request contract instead.
  *
  * @see neograph::llm::OpenAIProvider
  * @see neograph::llm::SchemaProvider
@@ -139,11 +141,7 @@ class NEOGRAPH_API Provider {
      * @param params Completion parameters including model, messages, and tools.
      * @return The full completion response with message and usage statistics.
      *
-     * @deprecated New Provider implementations should derive from
-     * `CompletionProvider` and implement its explicit request contract.
-     * This method remains supported during the compatibility window.
      */
-    [[deprecated("legacy Provider API: new implementations should use CompletionProvider")]]
     virtual ChatCompletion complete(const CompletionParams& params);
 
     /**
@@ -166,9 +164,7 @@ class NEOGRAPH_API Provider {
      * @param params Completion parameters.
      * @return An awaitable yielding the full completion response.
      *
-     * @deprecated New implementations should use `CompletionProvider`.
      */
-    [[deprecated("legacy Provider API: new implementations should use CompletionProvider")]]
     virtual asio::awaitable<ChatCompletion>
     complete_async(const CompletionParams& params);
 
@@ -189,9 +185,7 @@ class NEOGRAPH_API Provider {
      * @param on_chunk Callback invoked per received token.
      * @return The full completion response after streaming is complete.
      *
-     * @deprecated New implementations should use `CompletionProvider`.
      */
-    [[deprecated("legacy Provider API: new implementations should use CompletionProvider")]]
     virtual ChatCompletion complete_stream(const CompletionParams& params,
                                            const StreamCallback& on_chunk);
 
@@ -258,15 +252,13 @@ class NEOGRAPH_API Provider {
      *                 internal worker thread).
      * @return Awaitable resolving to the full completion response.
      *
-     * @deprecated New implementations should use `CompletionProvider`.
      */
-    [[deprecated("legacy Provider API: new implementations should use CompletionProvider")]]
     virtual asio::awaitable<ChatCompletion>
     complete_stream_async(const CompletionParams& params,
                           const StreamCallback& on_chunk);
 
     /**
-     * @brief Legacy callback-selected async completion entry point.
+     * @brief Compatibility callback-selected async completion entry point.
      *
      * Existing Provider subclasses may override this method to combine the
      * legacy async collect and stream paths. New implementations should derive
@@ -286,8 +278,10 @@ class NEOGRAPH_API Provider {
      *
      * The default implementation forwards to `complete_stream_async()` when
      * `on_chunk` is set and to `complete_async()` otherwise, preserving every
-     * existing Provider subclass. The legacy methods remain available during
-     * the compatibility window; no removal version is currently scheduled.
+     * existing Provider subclass. These compatibility methods remain supported
+     * with no removal planned. Compatibility and security fixes apply to them;
+     * new capabilities may be available only through `CompletionProvider`'s
+     * explicit request API.
      *
      * @param params   Completion parameters (model, messages, tools, ...).
      * @param on_chunk Optional per-chunk callback. `nullptr` for non-

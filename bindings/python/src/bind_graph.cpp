@@ -59,7 +59,6 @@
 #include <neograph/graph/sqlite_checkpoint.h>
 #endif
 
-#include <asio/bind_cancellation_slot.hpp>
 #include <asio/cancellation_signal.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/executor_work_guard.hpp>
@@ -1076,15 +1075,10 @@ void init_graph(py::module_& m) {
         // Python-defined Store / CheckpointStore trampoline instances; the
         // C++ shared_ptr alone is not enough to preserve those overrides.
         //
-        // Lifetime contract for coroutine parameters: run_async,
-        // run_stream_async, and resume_async all take parameters by
-        // const reference. Coroutine frames store the *reference*,
-        // not a copy of the referent — when the binding lambda
-        // returns, the local `cfg` (or `thread_id` / `rv`) is
-        // destroyed and the coroutine's reference dangles. We
-        // sidestep this by heap-copying inputs into a shared_ptr
-        // that the completion lambda also captures, so the storage
-        // outlives the coroutine.
+        // run_async and run_stream_async own their config/callback values in
+        // their coroutine frames. The shared_ptr holders here also keep the
+        // Python-facing objects and resume_async's reference parameters alive
+        // until the completion callback runs.
         .def("run_async",
             [](py::object self_obj, RunConfig cfg) {
                 auto self = self_obj.cast<std::shared_ptr<GraphEngine>>();
@@ -1098,8 +1092,8 @@ void init_graph(py::module_& m) {
 
                 // v0.3: ensure a cancel_token is always present on the
                 // RunConfig the engine sees. If the user supplied one
-                // we honour it; else allocate a fresh one so the asio
-                // co_spawn slot wiring below has something to bind.
+                // we honour it; else allocate a fresh parent for Future.cancel
+                // to trip. GraphEngine forks and binds an operation child.
                 if (!cfg.cancel_token) {
                     cfg.cancel_token = std::make_shared<CancelToken>();
                 }
@@ -1110,8 +1104,8 @@ void init_graph(py::module_& m) {
                 // add_done_callback fires once when the future
                 // transitions to done, including the CANCELLED state.
                 // The token then sets its atomic flag (engine super-
-                // step polls it) AND emits its asio cancellation_signal
-                // (propagates down through co_await chain to the
+                // step polls its child) AND cascades to the operation child's
+                // asio cancellation_signal (propagates down through co_await to
                 // ConnPool::async_post socket op, killing the in-
                 // flight LLM HTTP request — the v0.2.3 cost-leak fix).
                 py::cpp_function on_done(
@@ -1126,24 +1120,14 @@ void init_graph(py::module_& m) {
                     });
                 future.attr("add_done_callback")(on_done);
 
-                // Bind the cancel slot at co_spawn so asio's per-
-                // operation cancellation propagates through every
-                // co_await down to socket I/O. Token's executor is
-                // bound on first use inside the engine; the spawn
-                // executor is the same AsyncRuntime singleton.
-                cancel_tok->bind_executor(
-                    AsyncRuntime::instance().executor());
-
                 asio::co_spawn(
                     AsyncRuntime::instance().executor(),
                     self->run_async(*cfg_h),
-                    asio::bind_cancellation_slot(
-                        cancel_tok->slot(),
-                        [self, self_h, cfg_h, fut_h, loop_h, cancel_tok]
+                    [self, self_h, cfg_h, fut_h, loop_h, cancel_tok]
                         (std::exception_ptr e, RunResult result) {
                             resolve_future_async(fut_h, loop_h, e,
                                                  std::move(result));
-                        }));
+                        });
 
                 return future;
             },
@@ -1195,9 +1179,6 @@ void init_graph(py::module_& m) {
                         }
                     });
                 future.attr("add_done_callback")(on_done);
-
-                cancel_tok->bind_executor(
-                    AsyncRuntime::instance().executor());
 
                 // The user's py::function lives in a shared_ptr with
                 // a GIL-acquiring deleter so std::function copies on
@@ -1253,14 +1234,12 @@ void init_graph(py::module_& m) {
                 asio::co_spawn(
                     AsyncRuntime::instance().executor(),
                     self->run_stream_async(*cfg_h, *engine_cb_h),
-                    asio::bind_cancellation_slot(
-                        cancel_tok->slot(),
-                        [self, self_h, cfg_h, engine_cb_h, fut_h, loop_h,
-                         cancel_tok]
+                    [self, self_h, cfg_h, engine_cb_h, fut_h, loop_h,
+                          cancel_tok]
                         (std::exception_ptr e, RunResult result) {
                             resolve_future_async(fut_h, loop_h, e,
                                                  std::move(result));
-                        }));
+                        });
 
                 return future;
             },

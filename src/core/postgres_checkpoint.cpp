@@ -27,16 +27,30 @@
 #else
 #  include <asio/posix/stream_descriptor.hpp>
 #endif
+#include <asio/bind_cancellation_slot.hpp>
+#include <asio/cancellation_state.hpp>
+#include <asio/deferred.hpp>
+#include <asio/experimental/parallel_group.hpp>
+#include <asio/post.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/thread_pool.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 
+#include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <exception>
+#include <future>
 #include <memory>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace neograph::graph {
@@ -93,6 +107,12 @@ bool is_broken_connection(PGresult* res, pg_conn* c) {
 // Throw on non-success result. Distinguishes broken_connection from
 // other errors so the with_conn retry layer can handle them differently.
 void check_ok(PGresult* res, pg_conn* c, const char* context) {
+    if (!res) {
+        std::string msg = context ? context : "pg exec";
+        msg += ": ";
+        msg += PQerrorMessage(c);
+        throw BrokenConnection(msg);
+    }
     ExecStatusType st = PQresultStatus(res);
     if (st == PGRES_COMMAND_OK || st == PGRES_TUPLES_OK) return;
     std::string msg = context ? context : "pg exec";
@@ -122,15 +142,15 @@ PgResult exec_params(pg_conn* c,
         bool is_null = (i < nulls.size() && nulls[i]);
         vals[i] = is_null ? nullptr : params[i].c_str();
     }
-    PGresult* r = PQexecParams(c, sql,
-                               static_cast<int>(params.size()),
-                               /*paramTypes=*/nullptr,
-                               vals.data(),
-                               /*lengths=*/nullptr,
-                               /*formats=*/nullptr,
-                               /*resultFormat=*/0);
-    check_ok(r, c, "exec_params");
-    return PgResult{r};
+    PgResult result{PQexecParams(c, sql,
+                                 static_cast<int>(params.size()),
+                                 /*paramTypes=*/nullptr,
+                                 vals.data(),
+                                 /*lengths=*/nullptr,
+                                 /*formats=*/nullptr,
+                                 /*resultFormat=*/0)};
+    check_ok(result, c, "exec_params");
+    return result;
 }
 
 PgResult exec_prepared(pg_conn* c,
@@ -142,23 +162,23 @@ PgResult exec_prepared(pg_conn* c,
         bool is_null = (i < nulls.size() && nulls[i]);
         vals[i] = is_null ? nullptr : params[i].c_str();
     }
-    PGresult* r = PQexecPrepared(c, name,
-                                 static_cast<int>(params.size()),
-                                 vals.data(),
-                                 /*lengths=*/nullptr,
-                                 /*formats=*/nullptr,
-                                 /*resultFormat=*/0);
-    check_ok(r, c, "exec_prepared");
-    return PgResult{r};
+    PgResult result{PQexecPrepared(c, name,
+                                   static_cast<int>(params.size()),
+                                   vals.data(),
+                                   /*lengths=*/nullptr,
+                                   /*formats=*/nullptr,
+                                   /*resultFormat=*/0)};
+    check_ok(result, c, "exec_prepared");
+    return result;
 }
 
 // Simple query (no params) via PQexec. Used only for DDL bundles that
 // have multiple statements separated by semicolons (PQexecParams
 // rejects that shape).
 PgResult exec_sql(pg_conn* c, const char* sql) {
-    PGresult* r = PQexec(c, sql);
-    check_ok(r, c, "exec_sql");
-    return PgResult{r};
+    PgResult result{PQexec(c, sql)};
+    check_ok(result, c, "exec_sql");
+    return result;
 }
 
 // ── Result-row accessors ──────────────────────────────────────────────
@@ -471,6 +491,68 @@ std::unique_ptr<PgConn> open_conn(const std::string& url) {
     return std::make_unique<PgConn>(raw);
 }
 
+asio::awaitable<std::unique_ptr<PgConn>> open_conn_async(
+    const std::string& url);
+asio::awaitable<void> exec_sql_async(pg_conn* c, const char* sql);
+
+struct PoolSlotWaiter {
+    enum class Kind { Sync, Async };
+
+    PoolSlotWaiter() : kind(Kind::Sync) {}
+    explicit PoolSlotWaiter(asio::any_io_executor ex)
+        : kind(Kind::Async),
+          async_wake(std::in_place, std::move(ex),
+                     asio::steady_timer::time_point::max()) {}
+
+    Kind kind;
+    std::optional<size_t> slot;
+    std::condition_variable sync_wake;
+    std::optional<asio::steady_timer> async_wake;
+};
+
+struct PoolWaitState {
+    std::deque<std::shared_ptr<PoolSlotWaiter>> waiters;
+};
+
+struct PoolWaitRegistry {
+    std::mutex mutex;
+    std::unordered_map<const PostgresCheckpointStore*,
+                       std::shared_ptr<PoolWaitState>> states;
+};
+
+PoolWaitRegistry& pool_wait_registry() {
+    // Process-lifetime storage avoids static destruction racing a late store.
+    static auto* registry = new PoolWaitRegistry;
+    return *registry;
+}
+
+void register_pool_wait_state(const PostgresCheckpointStore* store) {
+    auto& registry = pool_wait_registry();
+    std::lock_guard lock(registry.mutex);
+    auto [it, inserted] = registry.states.emplace(
+        store, std::make_shared<PoolWaitState>());
+    if (!inserted) {
+        throw std::logic_error("PostgresCheckpointStore: duplicate pool sidecar");
+    }
+}
+
+std::shared_ptr<PoolWaitState> pool_wait_state(
+    const PostgresCheckpointStore* store) {
+    auto& registry = pool_wait_registry();
+    std::lock_guard lock(registry.mutex);
+    auto it = registry.states.find(store);
+    if (it == registry.states.end()) {
+        throw std::logic_error("PostgresCheckpointStore: missing pool sidecar");
+    }
+    return it->second;
+}
+
+void unregister_pool_wait_state(const PostgresCheckpointStore* store) {
+    auto& registry = pool_wait_registry();
+    std::lock_guard lock(registry.mutex);
+    registry.states.erase(store);
+}
+
 } // namespace
 
 // ── Construction / lifetime ───────────────────────────────────────────
@@ -488,9 +570,23 @@ PostgresCheckpointStore::PostgresCheckpointStore(const std::string& conn_str,
         free_.push(i);
     }
     ensure_schema();
+    register_pool_wait_state(this);
 }
 
-PostgresCheckpointStore::~PostgresCheckpointStore() = default;
+PostgresCheckpointStore::PostgresCheckpointStore(PoolOnlyTag,
+                                                   size_t pool_size)
+    : pool_(pool_size) {
+    if (pool_size == 0) {
+        throw std::invalid_argument(
+            "PostgresCheckpointStore: pool_size must be >= 1");
+    }
+    for (size_t i = 0; i < pool_size; ++i) free_.push(i);
+    register_pool_wait_state(this);
+}
+
+PostgresCheckpointStore::~PostgresCheckpointStore() {
+    unregister_pool_wait_state(this);
+}
 
 void PostgresCheckpointStore::ensure_schema() {
     // Direct call on slot 0 — only invoked at construction (and from
@@ -504,6 +600,7 @@ void PostgresCheckpointStore::drop_schema() {
     // We can safely take pool_mutex_ here because drop_schema is
     // test-only and never called concurrently with regular ops.
     std::unique_lock lock(pool_mutex_);
+    if (!pool_[0]) rebuild_slot(0);
     exec_sql(pool_[0]->raw, kDropDDL);
     exec_sql(pool_[0]->raw, kSchemaDDL);
     // No prepared statements to re-register — the libpq rewrite sends
@@ -512,19 +609,101 @@ void PostgresCheckpointStore::drop_schema() {
 }
 
 size_t PostgresCheckpointStore::acquire_slot() {
+    auto state = pool_wait_state(this);
     std::unique_lock lock(pool_mutex_);
-    pool_cv_.wait(lock, [this] { return !free_.empty(); });
-    size_t idx = free_.front();
-    free_.pop();
-    return idx;
+    if (state->waiters.empty() && !free_.empty()) {
+        size_t idx = free_.front();
+        free_.pop();
+        return idx;
+    }
+
+    auto waiter = std::make_shared<PoolSlotWaiter>();
+    state->waiters.push_back(waiter);
+    waiter->sync_wake.wait(lock, [&] { return waiter->slot.has_value(); });
+    return *waiter->slot;
+}
+
+asio::awaitable<size_t> PostgresCheckpointStore::acquire_slot_async() {
+    auto ex = co_await asio::this_coro::executor;
+    auto state = pool_wait_state(this);
+    {
+        std::lock_guard lock(pool_mutex_);
+        if (state->waiters.empty() && !free_.empty()) {
+            size_t idx = free_.front();
+            free_.pop();
+            co_return idx;
+        }
+    }
+
+    auto waiter = std::make_shared<PoolSlotWaiter>(ex);
+    {
+        std::lock_guard lock(pool_mutex_);
+        if (state->waiters.empty() && !free_.empty()) {
+            size_t idx = free_.front();
+            free_.pop();
+            co_return idx;
+        }
+        state->waiters.push_back(waiter);
+    }
+
+    try {
+        co_await waiter->async_wake->async_wait(asio::use_awaitable);
+    } catch (...) {
+        std::lock_guard lock(pool_mutex_);
+        if (waiter->slot) {
+            co_return *waiter->slot;
+        }
+        auto it = std::find(state->waiters.begin(), state->waiters.end(), waiter);
+        if (it != state->waiters.end()) state->waiters.erase(it);
+        throw;
+    }
+
+    throw std::logic_error("PostgresCheckpointStore: pool waiter expired");
 }
 
 void PostgresCheckpointStore::release_slot(size_t idx) {
+    auto state = pool_wait_state(this);
+    std::shared_ptr<PoolSlotWaiter> waiter;
     {
         std::lock_guard lock(pool_mutex_);
-        free_.push(idx);
+        if (!state->waiters.empty()) {
+            waiter = state->waiters.front();
+            state->waiters.pop_front();
+            waiter->slot = idx;
+        } else {
+            free_.push(idx);
+        }
     }
-    pool_cv_.notify_one();
+    if (!waiter) return;
+    if (waiter->kind == PoolSlotWaiter::Kind::Sync) {
+        waiter->sync_wake.notify_one();
+    } else {
+        asio::post(waiter->async_wake->get_executor(), [waiter] {
+            waiter->async_wake->cancel();
+        });
+    }
+}
+
+size_t PostgresCheckpointStore::waiter_count_for_test() {
+    auto state = pool_wait_state(this);
+    std::lock_guard lock(pool_mutex_);
+    return state->waiters.size();
+}
+
+void PostgresCheckpointStore::rebuild_slot(size_t idx) {
+    pool_[idx].reset();
+    auto fresh = open_conn(conn_str_);
+    exec_sql(fresh->raw, kSchemaDDL);
+    pool_[idx] = std::move(fresh);
+    reconnect_count_.fetch_add(1, std::memory_order_relaxed);
+}
+
+asio::awaitable<void> PostgresCheckpointStore::rebuild_slot_async(size_t idx) {
+    pool_[idx].reset();
+    auto fresh = co_await open_conn_async(conn_str_);
+    co_await exec_sql_async(fresh->raw, kSchemaDDL);
+    pool_[idx] = std::move(fresh);
+    reconnect_count_.fetch_add(1, std::memory_order_relaxed);
 }
 
 // Borrow a slot, run fn(PGconn*) on it, release the slot. On a broken-
@@ -540,6 +719,8 @@ auto PostgresCheckpointStore::with_conn(Fn&& fn) {
         size_t idx;
         ~Releaser() { self->release_slot(idx); }
     } guard{this, idx};
+
+    if (!pool_[idx]) rebuild_slot(idx);
 
     try {
         return fn(pool_[idx]->raw);
@@ -794,23 +975,367 @@ size_t PostgresCheckpointStore::blob_count() {
 
 namespace {
 
-asio::awaitable<PgResult> exec_params_async(
-    pg_conn* c,
-    const char* sql,
-    const std::vector<std::string>& params,
-    const std::vector<bool>& nulls = {}) {
+struct QueryNotDrained {
+    std::exception_ptr cause;
+    bool retryable;
+};
+
+enum class SocketReady { Read, Write };
+
+std::atomic<int> connection_poll_delay_ms_for_test{0};
+std::atomic<int> connection_timeout_ms_for_test{-1};
+
+asio::thread_pool& connection_start_pool() {
+    // PQconnectStart/PQconnectPoll can perform blocking hostname lookup.
+    // Keep that work off user executors on a bounded, process-lifetime pool.
+    // The intentional process-lifetime allocation also avoids shutdown racing
+    // a resolver call that the platform API does not let us cancel.
+    static auto* pool = new asio::thread_pool(2);
+    return *pool;
+}
+
+struct ConnectionAttempt {
+    std::unique_ptr<PgConn> conn;
+};
+
+[[noreturn]] void throw_connect_timeout(std::chrono::milliseconds timeout) {
+    throw std::runtime_error(
+        "PostgresCheckpointStore: connection timed out after "
+        + std::to_string(timeout.count())
+        + " ms while polling libpq");
+}
+
+template <typename Result, typename Fn>
+asio::awaitable<Result> run_connection_step_off_executor(
+    Fn fn,
+    std::chrono::steady_clock::time_point deadline,
+    std::chrono::milliseconds timeout) {
+    auto task = std::make_shared<std::packaged_task<Result()>>(std::move(fn));
+    auto result = task->get_future();
+    // The task captures ConnectionAttempt. If timeout/cancellation releases
+    // the caller, the worker still owns the PGconn until its blocking call
+    // returns, preventing both a use-after-free and a leaked connection.
+    asio::post(connection_start_pool(), [task] { (*task)(); });
 
     auto ex = co_await asio::this_coro::executor;
+    while (result.wait_for(std::chrono::milliseconds(0))
+           != std::future_status::ready) {
+        auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) throw_connect_timeout(timeout);
+        asio::steady_timer poll_timer(
+            ex, std::min(deadline, now + std::chrono::milliseconds(2)));
+        co_await poll_timer.async_wait(asio::use_awaitable);
+    }
+    co_return result.get();
+}
 
-    std::vector<const char*> vals(params.size(), nullptr);
-    for (size_t i = 0; i < params.size(); ++i) {
-        bool is_null = (i < nulls.size() && nulls[i]);
-        vals[i] = is_null ? nullptr : params[i].c_str();
+bool is_operation_aborted(const std::exception_ptr& error) {
+    try {
+        std::rethrow_exception(error);
+    } catch (const asio::system_error& e) {
+        return e.code() == asio::error::operation_aborted;
+    } catch (...) {
+        return false;
+    }
+}
+
+void discard_cancelled_connection_off_executor(std::unique_ptr<PgConn> conn) {
+    if (!conn) return;
+    auto owned = std::shared_ptr<PgConn>(conn.release());
+    asio::post(connection_start_pool(), [owned] {
+        auto cancel = std::unique_ptr<PGcancel, decltype(&PQfreeCancel)>(
+            PQgetCancel(owned->raw), PQfreeCancel);
+        if (cancel) {
+            char error[256]{};
+            (void)PQcancel(cancel.get(), error, sizeof(error));
+        }
+        // `owned` closes the original connection only after PQcancel returns.
+    });
+}
+
+template <typename Socket>
+asio::awaitable<SocketReady> wait_socket_either(Socket& sock) {
+    auto [order, read_error, write_error] =
+        co_await asio::experimental::make_parallel_group(
+            [&](auto token) {
+                return sock.async_wait(Socket::wait_read, std::move(token));
+            },
+            [&](auto token) {
+                return sock.async_wait(Socket::wait_write, std::move(token));
+            })
+            .async_wait(asio::experimental::wait_for_one(),
+                        asio::use_awaitable);
+
+    // If both readiness notifications completed before cancellation reached
+    // the loser, prefer read so server NOTICE traffic cannot be starved.
+    if (!read_error) co_return SocketReady::Read;
+    if (order[0] == 1 && !write_error) co_return SocketReady::Write;
+    throw asio::system_error(order[0] == 0 ? read_error : write_error);
+}
+
+template <typename Socket>
+asio::awaitable<void> wait_socket_until(
+    Socket& sock,
+    bool reading,
+    std::chrono::steady_clock::time_point deadline,
+    std::chrono::milliseconds timeout) {
+    auto ex = co_await asio::this_coro::executor;
+    asio::steady_timer timer(ex, deadline);
+    auto wait_type = reading ? Socket::wait_read : Socket::wait_write;
+    auto [order, socket_error, timer_error] =
+        co_await asio::experimental::make_parallel_group(
+            [&](auto token) {
+                return sock.async_wait(wait_type, std::move(token));
+            },
+            [&](auto token) {
+                return timer.async_wait(std::move(token));
+            })
+            .async_wait(asio::experimental::wait_for_one(),
+                        asio::use_awaitable);
+
+    if (order[0] == 1 && !timer_error) {
+        throw_connect_timeout(timeout);
+    }
+    if (socket_error) throw asio::system_error(socket_error);
+}
+
+asio::awaitable<SocketReady> wait_pg_socket_either(pg_conn* c) {
+    auto ex = co_await asio::this_coro::executor;
+    int fd = PQsocket(c);
+    if (fd < 0) {
+        throw BrokenConnection(
+            std::string("PQsocket: ") + PQerrorMessage(c));
     }
 
-    // Flip to nonblocking for this exchange; restore on every exit
-    // (exception, cancellation, normal return) so subsequent sync
-    // calls on this slot still work.
+#ifdef _WIN32
+    asio::ip::tcp::socket sock(ex);
+    using NativeSock = asio::ip::tcp::socket::native_handle_type;
+    sock.assign(asio::ip::tcp::v4(), static_cast<NativeSock>(fd));
+    struct SockRelease {
+        asio::ip::tcp::socket& s;
+        ~SockRelease() { try { (void)s.release(); } catch (...) {} }
+    } rel{sock};
+    co_return co_await wait_socket_either(sock);
+#else
+    asio::posix::stream_descriptor sock(ex, fd);
+    struct SockRelease {
+        asio::posix::stream_descriptor& s;
+        ~SockRelease() { try { s.release(); } catch (...) {} }
+    } rel{sock};
+    co_return co_await wait_socket_either(sock);
+#endif
+}
+
+asio::awaitable<void> wait_pg_socket(pg_conn* c, bool reading) {
+    auto ex = co_await asio::this_coro::executor;
+    auto cancellation = co_await asio::this_coro::cancellation_state;
+    int fd = PQsocket(c);
+    if (fd < 0) {
+        throw BrokenConnection(
+            std::string("PQsocket: ") + PQerrorMessage(c));
+    }
+
+#ifdef _WIN32
+    asio::ip::tcp::socket sock(ex);
+    using NativeSock = asio::ip::tcp::socket::native_handle_type;
+    sock.assign(asio::ip::tcp::v4(), static_cast<NativeSock>(fd));
+    struct SockRelease {
+        asio::ip::tcp::socket& s;
+        ~SockRelease() { try { (void)s.release(); } catch (...) {} }
+    } rel{sock};
+    co_await sock.async_wait(
+        reading ? asio::ip::tcp::socket::wait_read
+                : asio::ip::tcp::socket::wait_write,
+        asio::bind_cancellation_slot(
+            cancellation.slot(), asio::use_awaitable));
+#else
+    asio::posix::stream_descriptor sock(ex, fd);
+    struct SockRelease {
+        asio::posix::stream_descriptor& s;
+        ~SockRelease() { try { s.release(); } catch (...) {} }
+    } rel{sock};
+    co_await sock.async_wait(
+        reading ? asio::posix::stream_descriptor::wait_read
+                : asio::posix::stream_descriptor::wait_write,
+        asio::bind_cancellation_slot(
+            cancellation.slot(), asio::use_awaitable));
+#endif
+}
+
+asio::awaitable<void> wait_pg_socket_until(
+    pg_conn* c,
+    bool reading,
+    std::chrono::steady_clock::time_point deadline,
+    std::chrono::milliseconds timeout) {
+    auto ex = co_await asio::this_coro::executor;
+    int fd = PQsocket(c);
+    if (fd < 0) {
+        throw BrokenConnection(
+            std::string("PQsocket: ") + PQerrorMessage(c));
+    }
+
+#ifdef _WIN32
+    asio::ip::tcp::socket sock(ex);
+    using NativeSock = asio::ip::tcp::socket::native_handle_type;
+    sock.assign(asio::ip::tcp::v4(), static_cast<NativeSock>(fd));
+    struct SockRelease {
+        asio::ip::tcp::socket& s;
+        ~SockRelease() { try { (void)s.release(); } catch (...) {} }
+    } rel{sock};
+    co_await wait_socket_until(sock, reading, deadline, timeout);
+#else
+    asio::posix::stream_descriptor sock(ex, fd);
+    struct SockRelease {
+        asio::posix::stream_descriptor& s;
+        ~SockRelease() { try { s.release(); } catch (...) {} }
+    } rel{sock};
+    co_await wait_socket_until(sock, reading, deadline, timeout);
+#endif
+}
+
+std::chrono::milliseconds connect_timeout_from_options(
+    PQconninfoOption* options) {
+    constexpr auto kProjectDefault = std::chrono::seconds(30);
+    if (!options) return kProjectDefault;
+
+    for (auto* option = options; option->keyword; ++option) {
+        if (std::strcmp(option->keyword, "connect_timeout") != 0
+            || !option->val || !*option->val) {
+            continue;
+        }
+        char* end = nullptr;
+        long seconds = std::strtol(option->val, &end, 10);
+        if (end && *end == '\0' && seconds > 0) {
+            // libpq documents a two-second minimum for connect_timeout.
+            return std::chrono::seconds(std::max(2L, seconds));
+        }
+        break;
+    }
+    return kProjectDefault;
+}
+
+std::chrono::milliseconds connect_timeout_from_conninfo(
+    const std::string& conn_str) {
+    char* error = nullptr;
+    PQconninfoOption* options = PQconninfoParse(conn_str.c_str(), &error);
+    struct ParseFree {
+        PQconninfoOption* options;
+        char* error;
+        ~ParseFree() {
+            if (options) PQconninfoFree(options);
+            if (error) PQfreemem(error);
+        }
+    } free_parse{options, error};
+    return connect_timeout_from_options(options);
+}
+
+std::chrono::milliseconds async_connect_timeout(pg_conn* c) {
+    int test_timeout = connection_timeout_ms_for_test.load(
+        std::memory_order_relaxed);
+    if (test_timeout >= 0) return std::chrono::milliseconds(test_timeout);
+
+    PQconninfoOption* options = PQconninfo(c);
+    struct OptionsFree {
+        PQconninfoOption* options;
+        ~OptionsFree() { if (options) PQconninfoFree(options); }
+    } free_options{options};
+    return connect_timeout_from_options(options);
+}
+
+asio::awaitable<void> start_connection_off_executor(
+    const std::shared_ptr<ConnectionAttempt>& attempt,
+    const std::string& url,
+    std::chrono::steady_clock::time_point deadline,
+    std::chrono::milliseconds timeout) {
+    (void)co_await run_connection_step_off_executor<int>(
+        [attempt, url] {
+            attempt->conn = std::make_unique<PgConn>(
+                PQconnectStart(url.c_str()));
+            return 0;
+        },
+        deadline,
+        timeout);
+}
+
+asio::awaitable<PostgresPollingStatusType> poll_connection_off_executor(
+    const std::shared_ptr<ConnectionAttempt>& attempt,
+    std::chrono::steady_clock::time_point deadline,
+    std::chrono::milliseconds timeout) {
+    co_return co_await run_connection_step_off_executor<
+        PostgresPollingStatusType>(
+        [attempt] {
+            // Test seam models the potentially blocking hostname lookup that
+            // PostgreSQL documents inside the first PQconnectPoll call.
+            int delay = connection_poll_delay_ms_for_test.load(
+                std::memory_order_relaxed);
+            if (delay > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+            }
+            return PQconnectPoll(attempt->conn->raw);
+        },
+        deadline,
+        timeout);
+}
+
+asio::awaitable<std::unique_ptr<PgConn>> open_conn_async(
+    const std::string& url) {
+    // PostgreSQL 16 libpq contract, consulted 2026-07-19:
+    // PQconnectStart/PQconnectPoll can block on DNS without hostaddr, and
+    // connect_timeout is ignored by PQconnectPoll. Both calls therefore run
+    // on the bounded sidecar above; worker steps and socket waits both race
+    // our deadline.
+    // https://www.postgresql.org/docs/16/libpq-connect.html
+    auto started = std::chrono::steady_clock::now();
+    auto start_timeout = connection_timeout_ms_for_test.load(
+        std::memory_order_relaxed);
+    auto initial_timeout = start_timeout >= 0
+        ? std::chrono::milliseconds(start_timeout)
+        : connect_timeout_from_conninfo(url);
+    auto attempt = std::make_shared<ConnectionAttempt>();
+    co_await start_connection_off_executor(
+        attempt, url, started + initial_timeout, initial_timeout);
+    pg_conn* raw = attempt->conn->raw;
+    if (!raw) {
+        throw std::runtime_error(
+            "PostgresCheckpointStore: connection failed: null PGconn");
+    }
+    if (PQstatus(raw) == CONNECTION_BAD) {
+        throw std::runtime_error(
+            std::string("PostgresCheckpointStore: connection failed: ")
+            + PQerrorMessage(raw));
+    }
+
+    auto timeout = async_connect_timeout(raw);
+    auto deadline = started + timeout;
+    auto status = PGRES_POLLING_WRITING;
+    for (;;) {
+        if (status == PGRES_POLLING_READING) {
+            co_await wait_pg_socket_until(raw, true, deadline, timeout);
+        } else if (status == PGRES_POLLING_WRITING) {
+            co_await wait_pg_socket_until(raw, false, deadline, timeout);
+        }
+
+        status = co_await poll_connection_off_executor(
+            attempt, deadline, timeout);
+        if (std::chrono::steady_clock::now() >= deadline
+            && status != PGRES_POLLING_OK) {
+            throw_connect_timeout(timeout);
+        }
+        if (status == PGRES_POLLING_OK) {
+            co_return std::move(attempt->conn);
+        }
+        if (status == PGRES_POLLING_FAILED) {
+            throw std::runtime_error(
+                std::string("PostgresCheckpointStore: connection failed: ")
+                + PQerrorMessage(raw));
+        }
+    }
+}
+
+template <typename Send>
+asio::awaitable<std::vector<PgResult>> exec_async_results(
+    pg_conn* c, const char* context, Send send) {
+
     if (PQsetnonblocking(c, 1) != 0) {
         throw std::runtime_error(
             std::string("PQsetnonblocking(1): ") + PQerrorMessage(c));
@@ -820,82 +1345,162 @@ asio::awaitable<PgResult> exec_params_async(
         ~ModeRestore() { PQsetnonblocking(c, 0); }
     } restore{c};
 
-    int send_r = PQsendQueryParams(c, sql,
-                                    static_cast<int>(params.size()),
-                                    /*paramTypes=*/nullptr, vals.data(),
-                                    /*lengths=*/nullptr,
-                                    /*formats=*/nullptr,
-                                    /*resultFormat=*/0);
-    if (send_r != 1) {
-        std::string msg = std::string("PQsendQueryParams: ")
-                        + PQerrorMessage(c);
+    if (send() != 1) {
+        std::string msg = std::string(context) + ": " + PQerrorMessage(c);
         if (PQstatus(c) != CONNECTION_OK) throw BrokenConnection(msg);
         throw std::runtime_error(msg);
     }
 
-    // Wrap PQsocket without taking ownership — asio would close it
-    // on destruction otherwise, and the PGconn needs to keep it
-    // across calls. release() before unwind strips the ownership.
+    bool drained = false;
+    try {
+        // PostgreSQL 16 libpq contract, consulted 2026-07-19: PQflush(1)
+        // requires waiting for read OR write readiness. Read-ready must call
+        // PQconsumeInput so server NOTICE backpressure cannot deadlock writes.
+        // https://www.postgresql.org/docs/16/libpq-async.html
+        while (true) {
+            int f = PQflush(c);
+            if (f == 0) break;
+            if (f < 0) {
+                std::string msg = std::string("PQflush: ") + PQerrorMessage(c);
+                if (PQstatus(c) != CONNECTION_OK) throw BrokenConnection(msg);
+                throw std::runtime_error(msg);
+            }
+            if (co_await wait_pg_socket_either(c) == SocketReady::Read
+                && PQconsumeInput(c) != 1) {
+                std::string msg = std::string("PQconsumeInput during flush: ")
+                                + PQerrorMessage(c);
+                if (PQstatus(c) != CONNECTION_OK) throw BrokenConnection(msg);
+                throw std::runtime_error(msg);
+            }
+        }
+
+        // PQgetResult is nonblocking only after PQisBusy says the next
+        // result is ready. Repeat that readiness cycle for every result;
+        // multi-statement schema setup can produce more than one.
+        std::vector<PgResult> results;
+        for (;;) {
+            while (PQisBusy(c)) {
+                co_await wait_pg_socket(c, true);
+                if (PQconsumeInput(c) != 1) {
+                    std::string msg = std::string("PQconsumeInput: ")
+                                    + PQerrorMessage(c);
+                    if (PQstatus(c) != CONNECTION_OK) throw BrokenConnection(msg);
+                    throw std::runtime_error(msg);
+                }
+            }
+            auto* next = PQgetResult(c);
+            if (!next) break;
+            results.emplace_back(next);
+        }
+        drained = true;
+        if (results.empty()) {
+            throw std::runtime_error("PQgetResult: no result");
+        }
+        for (auto& result : results) check_ok(result, c, context);
+        co_return results;
+    } catch (...) {
+        if (!drained) {
+            auto cause = std::current_exception();
+            bool retryable = false;
+            try {
+                std::rethrow_exception(cause);
+            } catch (const BrokenConnection&) {
+                retryable = true;
+            } catch (...) {
+            }
+            throw QueryNotDrained{cause, retryable};
+        }
+        throw;
+    }
+}
+
+asio::awaitable<PgResult> exec_params_async(
+    pg_conn* c,
+    const char* sql,
+    const std::vector<std::string>& params,
+    const std::vector<bool>& nulls = {}) {
+    std::vector<const char*> vals(params.size(), nullptr);
+    for (size_t i = 0; i < params.size(); ++i) {
+        bool is_null = (i < nulls.size() && nulls[i]);
+        vals[i] = is_null ? nullptr : params[i].c_str();
+    }
+
+    auto results = co_await exec_async_results(c, "exec_params_async", [&] {
+        return PQsendQueryParams(c, sql,
+                                 static_cast<int>(params.size()),
+                                 /*paramTypes=*/nullptr, vals.data(),
+                                 /*lengths=*/nullptr,
+                                 /*formats=*/nullptr,
+                                 /*resultFormat=*/0);
+    });
+    co_return std::move(results.front());
+}
+
+asio::awaitable<void> exec_sql_async(pg_conn* c, const char* sql) {
+    (void)co_await exec_async_results(c, "exec_sql_async", [&] {
+        return PQsendQuery(c, sql);
+    });
+}
+
+asio::awaitable<Checkpoint> finish_load_async(pg_conn* c, LoadedShell ls) {
+    std::map<std::string, json> blobs;
+    if (ls.channel_versions.is_object() && !ls.channel_versions.empty()) {
+        std::vector<std::string> params{
+            ls.cp.thread_id, ls.channel_versions.dump()};
+        auto result = co_await exec_params_async(c,
+            "SELECT b.channel, b.blob_data "
+            "FROM neograph_checkpoint_blobs AS b "
+            "JOIN jsonb_each_text($2::jsonb) AS cv(channel, version) "
+            "  ON b.channel = cv.channel "
+            " AND b.version = cv.version::bigint "
+            "WHERE b.thread_id = $1",
+            params);
+        for (int row = 0; row < PQntuples(result); ++row) {
+            blobs.emplace(col_text(result, row, 0),
+                          parse_jsonb_text(col_text(result, row, 1)));
+        }
+    }
+    ls.cp.channel_values = materialize_channel_values(
+        ls.channel_versions, blobs, static_cast<uint64_t>(ls.global_version));
+    co_return std::move(ls.cp);
+}
+
+} // namespace
+
+asio::awaitable<bool>
+PostgresCheckpointStore::wait_socket_either_for_test(int fd) {
+    auto ex = co_await asio::this_coro::executor;
 #ifdef _WIN32
-    // On Windows PQsocket returns int but the underlying handle is
-    // a SOCKET (UINT_PTR). Explicit cast back to the asio native
-    // handle type silences the narrowing warning and keeps us safe
-    // on 64-bit where SOCKET values can exceed INT_MAX.
     asio::ip::tcp::socket sock(ex);
     using NativeSock = asio::ip::tcp::socket::native_handle_type;
-    sock.assign(asio::ip::tcp::v4(), static_cast<NativeSock>(PQsocket(c)));
+    sock.assign(asio::ip::tcp::v4(), static_cast<NativeSock>(fd));
     struct SockRelease {
         asio::ip::tcp::socket& s;
         ~SockRelease() { try { (void)s.release(); } catch (...) {} }
     } rel{sock};
-    constexpr auto kWaitWrite = asio::ip::tcp::socket::wait_write;
-    constexpr auto kWaitRead  = asio::ip::tcp::socket::wait_read;
+    co_return co_await wait_socket_either(sock) == SocketReady::Read;
 #else
-    asio::posix::stream_descriptor sock(ex, PQsocket(c));
+    asio::posix::stream_descriptor sock(ex, fd);
     struct SockRelease {
         asio::posix::stream_descriptor& s;
         ~SockRelease() { try { s.release(); } catch (...) {} }
     } rel{sock};
-    constexpr auto kWaitWrite = asio::posix::stream_descriptor::wait_write;
-    constexpr auto kWaitRead  = asio::posix::stream_descriptor::wait_read;
+    co_return co_await wait_socket_either(sock) == SocketReady::Read;
 #endif
-
-    // Flush loop: PQflush returns 0 (done), 1 (more to send), -1 (error).
-    while (true) {
-        int f = PQflush(c);
-        if (f == 0) break;
-        if (f < 0) {
-            std::string msg = std::string("PQflush: ") + PQerrorMessage(c);
-            if (PQstatus(c) != CONNECTION_OK) throw BrokenConnection(msg);
-            throw std::runtime_error(msg);
-        }
-        co_await sock.async_wait(kWaitWrite, asio::use_awaitable);
-    }
-
-    // Consume loop: PQisBusy returns 1 while results are still on the
-    // wire. Wait for readable, pull bytes in via PQconsumeInput, repeat.
-    while (PQisBusy(c)) {
-        co_await sock.async_wait(kWaitRead, asio::use_awaitable);
-        if (PQconsumeInput(c) != 1) {
-            std::string msg = std::string("PQconsumeInput: ")
-                            + PQerrorMessage(c);
-            if (PQstatus(c) != CONNECTION_OK) throw BrokenConnection(msg);
-            throw std::runtime_error(msg);
-        }
-    }
-
-    // Collect the single result (non-pipeline sends produce exactly
-    // one). Drain defensively in case the wire had spurious extras.
-    PGresult* res = PQgetResult(c);
-    while (auto* next = PQgetResult(c)) PQclear(next);
-    if (!res) {
-        throw std::runtime_error("PQgetResult: no result");
-    }
-    check_ok(res, c, "exec_params_async");  // throws BrokenConnection or runtime_error
-    co_return PgResult{res};
 }
 
-} // namespace
+void PostgresCheckpointStore::set_async_connection_test_seams(
+    int poll_delay_ms, int timeout_ms) {
+    connection_poll_delay_ms_for_test.store(poll_delay_ms,
+                                             std::memory_order_relaxed);
+    connection_timeout_ms_for_test.store(timeout_ms,
+                                         std::memory_order_relaxed);
+}
+
+int PostgresCheckpointStore::async_connection_timeout_ms_for_test(
+    const std::string& conn_str) {
+    return static_cast<int>(connect_timeout_from_conninfo(conn_str).count());
+}
 
 // Async peer of with_conn. Template — definition here (same TU as the
 // only instantiation points) so the Fn → awaitable<T> inference works
@@ -905,36 +1510,80 @@ asio::awaitable<PgResult> exec_params_async(
 template <typename Fn>
 auto PostgresCheckpointStore::with_conn_async(Fn fn)
     -> decltype(fn(std::declval<pg_conn*>())) {
-    size_t idx = acquire_slot();
+    size_t idx = co_await acquire_slot_async();
     struct Releaser {
         PostgresCheckpointStore* self;
         size_t idx;
         ~Releaser() { self->release_slot(idx); }
     } guard{this, idx};
 
+    if (!pool_[idx]) co_await rebuild_slot_async(idx);
+
+    std::exception_ptr first_error;
     bool need_retry = false;
+    bool cancel_before_close = false;
     // First attempt under try — any co_await happens here, not in catch.
     try {
         co_return co_await fn(pool_[idx]->raw);
+    } catch (const QueryNotDrained& error) {
+        first_error = error.cause;
+        need_retry = error.retryable;
+        cancel_before_close = !need_retry && is_operation_aborted(error.cause);
     } catch (const BrokenConnection&) {
+        first_error = std::current_exception();
         need_retry = true;
     }
 
-    // need_retry == true (otherwise co_return above already happened).
-    // Replace the slot's connection synchronously. Open the fresh
-    // connection into a local first; only swap into pool_[idx] after
-    // both open AND DDL succeed, so a recurring transient failure
-    // doesn't leave the slot holding an empty unique_ptr that the
-    // next acquirer would dereference (covered by the audit's
-    // "with_conn poisons slot if reconnection itself throws"
-    // finding). On open/DDL failure the original (broken) connection
-    // stays in the slot, the exception propagates, and the next
-    // acquirer naturally retries the recovery.
-    auto fresh = open_conn(conn_str_);
-    exec_sql(fresh->raw, kSchemaDDL);
-    pool_[idx] = std::move(fresh);
-    reconnect_count_.fetch_add(1, std::memory_order_relaxed);
-    co_return co_await fn(pool_[idx]->raw);
+    // Once PQsendQueryParams succeeded, an interrupted exchange leaves
+    // unread protocol data on the connection. A cancelled write may already
+    // have reached PostgreSQL, so transfer that dirty connection to the
+    // bounded worker that sends PQcancel before closing it. Reconnection is
+    // deferred to the next operation and the write is never retried.
+    if (!need_retry) {
+        if (cancel_before_close) {
+            discard_cancelled_connection_off_executor(std::move(pool_[idx]));
+        } else {
+            pool_[idx].reset();
+        }
+        std::rethrow_exception(first_error);
+    }
+    pool_[idx].reset();
+    try {
+        co_await rebuild_slot_async(idx);
+    } catch (...) {
+        throw;
+    }
+
+    // One retry is retained for a genuine broken connection. The second
+    // attempt is never retried, but it still quarantines an undrained slot.
+    std::exception_ptr second_error;
+    bool must_discard = false;
+    bool cancel_second_before_close = false;
+    try {
+        co_return co_await fn(pool_[idx]->raw);
+    } catch (const QueryNotDrained& error) {
+        second_error = error.cause;
+        must_discard = true;
+        cancel_second_before_close = is_operation_aborted(error.cause);
+    } catch (const BrokenConnection&) {
+        second_error = std::current_exception();
+    }
+
+    if (must_discard) {
+        if (cancel_second_before_close) {
+            discard_cancelled_connection_off_executor(std::move(pool_[idx]));
+        } else {
+            pool_[idx].reset();
+        }
+        std::rethrow_exception(second_error);
+    }
+    pool_[idx].reset();
+    try {
+        co_await rebuild_slot_async(idx);
+    } catch (...) {
+        throw;
+    }
+    std::rethrow_exception(second_error);
 }
 
 // ── Async method overrides ────────────────────────────────────────────
@@ -1005,11 +1654,7 @@ PostgresCheckpointStore::load_latest_async(const std::string& thread_id) {
         [&, sql, params](pg_conn* c) -> asio::awaitable<std::optional<Checkpoint>> {
             auto res = co_await exec_params_async(c, sql.c_str(), params);
             if (PQntuples(res) == 0) co_return std::nullopt;
-            // Blob fetch still sync on the same connection — keeps
-            // the load hot path simple. For a thread with 10+ channels
-            // a future pipeline-mode batch could reduce round-trips,
-            // but typical channel counts are 2-5 so it's not load-bearing.
-            co_return finish_load(c, row_to_loaded(res, 0));
+            co_return co_await finish_load_async(c, row_to_loaded(res, 0));
         });
 }
 
@@ -1023,7 +1668,7 @@ PostgresCheckpointStore::load_by_id_async(const std::string& id) {
         [&, sql, params](pg_conn* c) -> asio::awaitable<std::optional<Checkpoint>> {
             auto res = co_await exec_params_async(c, sql.c_str(), params);
             if (PQntuples(res) == 0) co_return std::nullopt;
-            co_return finish_load(c, row_to_loaded(res, 0));
+            co_return co_await finish_load_async(c, row_to_loaded(res, 0));
         });
 }
 
@@ -1041,7 +1686,8 @@ PostgresCheckpointStore::list_async(const std::string& thread_id, int limit) {
             int n = PQntuples(res);
             out.reserve(n);
             for (int i = 0; i < n; ++i) {
-                out.push_back(finish_load(c, row_to_loaded(res, i)));
+                out.push_back(co_await finish_load_async(
+                    c, row_to_loaded(res, i)));
             }
             co_return out;
         });
@@ -1108,15 +1754,16 @@ asio::awaitable<void> PostgresCheckpointStore::put_writes_async(
                 insert_params);
 
             (void)co_await exec_params_async(c, "COMMIT", empty_params);
-        } catch (...) {
-            // Best-effort rollback. Can't co_await inside catch (GCC 13
-            // ICE), so use the sync exec_sql helper — fast path since
-            // connection is still nonblocking-set but PQexec works on
-            // either mode.
-            PQsetnonblocking(c, 0);
-            PGresult* r = PQexec(c, "ROLLBACK");
-            if (r) PQclear(r);
+        } catch (const QueryNotDrained&) {
             throw;
+        } catch (const BrokenConnection&) {
+            throw;
+        } catch (...) {
+            // A cancellation may land between transaction statements, and
+            // an operation exception may mean unread protocol data remains.
+            // Never issue a blocking rollback on that uncertain connection;
+            // force with_conn_async to close it and preserve the cause.
+            throw QueryNotDrained{std::current_exception(), false};
         }
         co_return;
     });

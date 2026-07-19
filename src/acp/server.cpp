@@ -12,6 +12,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <unordered_map>
 
@@ -176,6 +177,29 @@ struct ACPServer::Impl {
     int                                           inflight_count = 0;
     std::set<std::string>                         inflight_sessions;
     int                                           max_inflight_prompts = 32;
+#if defined(NEOGRAPH_ACP_TESTING)
+    std::atomic<bool>                             fail_next_worker_launch{false};
+    std::atomic<bool>                             fail_next_handle_message{false};
+#endif
+
+    struct WorkerReservation {
+        Impl*       owner;
+        std::string session_id;
+        bool        active = false;
+
+        WorkerReservation(Impl* owner_in, std::string session_id_in)
+            : owner(owner_in), session_id(std::move(session_id_in)) {}
+
+        ~WorkerReservation() {
+            if (!active) return;
+            std::lock_guard lk(owner->workers_mu);
+            --owner->inflight_count;
+            owner->inflight_sessions.erase(session_id);
+            // Keep notify under the lock. A waiter cannot destroy the cv
+            // after seeing count==0 while this notify is still executing.
+            owner->workers_cv.notify_all();
+        }
+    };
 
     /// Cached client handle returned by ACPServer::client().
     std::shared_ptr<ACPClient>                    client_handle;
@@ -197,6 +221,19 @@ struct ACPServer::Impl {
         // this thread keeps the old callable alive until it returns.
         auto s = std::atomic_load_explicit(&sink_, std::memory_order_acquire);
         if (s && *s) (*s)(env);
+    }
+
+    void emit_internal_error(const neograph::json& id,
+                             const char* prefix,
+                             const char* detail = nullptr) noexcept {
+        try {
+            std::string message(prefix);
+            if (detail) message += detail;
+            emit(jsonrpc_error(-32603, message, id));
+        } catch (...) {
+            // A failing transport/sink cannot be used to report its own
+            // failure, but it must never escape a detached worker.
+        }
     }
 };
 
@@ -287,25 +324,31 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
     // and unbounded-grow the worker tracking, or (b) race two prompts
     // on the same session_id, which the engine's checkpoint store
     // (keyed by thread_id) cannot disambiguate.
+    neograph::json rejection;
+    auto reservation = std::make_shared<WorkerReservation>(
+        this, req.session_id);
     {
         std::lock_guard lk(workers_mu);
         if (inflight_count >= max_inflight_prompts) {
             // -32000 Server error per JSON-RPC §5.1 (server-defined range).
-            emit(jsonrpc_error(-32000,
+            rejection = jsonrpc_error(-32000,
                 std::string("ACP server overloaded: ")
                 + std::to_string(max_inflight_prompts)
-                + " concurrent prompts in flight; retry shortly", id));
-            return;
-        }
-        if (inflight_sessions.count(req.session_id)) {
-            emit(jsonrpc_error(-32000,
+                + " concurrent prompts in flight; retry shortly", id);
+        } else if (inflight_sessions.count(req.session_id)) {
+            rejection = jsonrpc_error(-32000,
                 std::string("session_id ") + req.session_id
                 + " already has a prompt in flight; ACP requires "
-                  "single-flight per session", id));
-            return;
+                  "single-flight per session", id);
+        } else {
+            inflight_sessions.insert(req.session_id);
+            ++inflight_count;
+            reservation->active = true;
         }
-        ++inflight_count;
-        inflight_sessions.insert(req.session_id);
+    }
+    if (!rejection.is_null()) {
+        emit(rejection);
+        return;
     }
 
     // Run the engine on a detached worker so the run-loop reader can
@@ -314,75 +357,106 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
     // The thread is detached because completed workers don't need
     // joining individually; the dtor / drain path waits on
     // inflight_count via workers_cv instead.
-    std::thread worker([this, req = std::move(req), id, my_cancel]() mutable {
-        auto& a = *adapter;
+    try {
+#if defined(NEOGRAPH_ACP_TESTING)
+        if (fail_next_worker_launch.exchange(false, std::memory_order_acq_rel)) {
+            throw std::system_error(
+                std::make_error_code(std::errc::resource_unavailable_try_again),
+                "injected ACP worker launch failure");
+        }
+#endif
+        std::thread worker(
+            [this, req = std::move(req), id, my_cancel, reservation]() mutable {
+                try {
+                    auto& a = *adapter;
 
-        neograph::graph::RunConfig cfg;
-        cfg.thread_id = req.session_id;
-        cfg.input     = a.build_initial_state(req.prompt, req.session_id);
+                    neograph::graph::RunConfig cfg;
+                    cfg.thread_id = req.session_id;
 
-        StopReason  stop          = StopReason::EndTurn;
-        bool        graph_failed  = false;
-        std::string agent_text;
+                    StopReason  stop         = StopReason::EndTurn;
+                    bool        graph_failed = false;
+                    std::string agent_text;
+                    std::string graph_error;
+
+                    try {
+                        cfg.input = a.build_initial_state(
+                            req.prompt, req.session_id);
+                        auto rr = engine->run(cfg);
+                        agent_text = a.extract_agent_text(rr.output);
+                    } catch (const std::exception& e) {
+                        graph_failed = true;
+                        graph_error = e.what();
+                    } catch (...) {
+                        graph_failed = true;
+                        graph_error = "unknown exception";
+                    }
+
+                    if (graph_failed) {
+                        // ACP's StopReason vocabulary has no generic error
+                        // value. Preserve the existing protocol shape:
+                        // diagnostic update, then a normal end_turn response.
+                        SessionNotification n;
+                        n.session_id = req.session_id;
+                        n.update.session_update = "agent_message_chunk";
+                        n.update.content = ContentBlock::text_block(
+                            std::string("(graph error: ") + graph_error + ")");
+                        neograph::json nj;
+                        to_json(nj, n);
+                        emit(jsonrpc_notify("session/update", std::move(nj)));
+                    } else {
+                        bool was_cancelled = my_cancel->exchange(
+                            false, std::memory_order_acq_rel);
+                        if (was_cancelled) {
+                            stop = StopReason::Cancelled;
+                        } else {
+                            SessionNotification n;
+                            n.session_id = req.session_id;
+                            n.update.session_update = "agent_message_chunk";
+                            n.update.content =
+                                ContentBlock::text_block(agent_text);
+                            neograph::json nj;
+                            to_json(nj, n);
+                            emit(jsonrpc_notify(
+                                "session/update", std::move(nj)));
+                        }
+                    }
+
+                    PromptResponse resp;
+                    resp.stop_reason = stop;
+                    neograph::json rj;
+                    to_json(rj, resp);
+                    emit(jsonrpc_result(std::move(rj), id));
+                } catch (const std::exception& e) {
+                    emit_internal_error(
+                        id, "ACP prompt worker failed: ", e.what());
+                } catch (...) {
+                    emit_internal_error(
+                        id, "ACP prompt worker failed: unknown exception");
+                }
+                // The captured reservation is the last owner after dispatch
+                // returns. Its destructor cleans every worker exit path.
+            });
 
         try {
-            auto rr = engine->run(cfg);
-            agent_text = a.extract_agent_text(rr.output);
-        } catch (const std::exception& e) {
-            // ACP's StopReason vocabulary doesn't include a generic
-            // "error" value — surface engine failures as a final
-            // agent_message_chunk and end the turn normally. The chunk
-            // text carries the diagnostic.
-            SessionNotification n;
-            n.session_id = req.session_id;
-            n.update.session_update = "agent_message_chunk";
-            n.update.content = ContentBlock::text_block(
-                std::string("(graph error: ") + e.what() + ")");
-            neograph::json nj; to_json(nj, n);
-            emit(jsonrpc_notify("session/update", std::move(nj)));
-            graph_failed = true;
-        }
-
-        if (!graph_failed) {
-            bool was_cancelled = my_cancel->exchange(
-                false, std::memory_order_acq_rel);
-            if (was_cancelled) {
-                stop = StopReason::Cancelled;
-            } else {
-                SessionNotification n;
-                n.session_id = req.session_id;
-                n.update.session_update = "agent_message_chunk";
-                n.update.content = ContentBlock::text_block(agent_text);
-                neograph::json nj; to_json(nj, n);
-                emit(jsonrpc_notify("session/update", std::move(nj)));
+            worker.detach();
+        } catch (...) {
+            if (worker.joinable()) {
+                worker.join();
             }
+            throw;
         }
-
-        PromptResponse resp;
-        resp.stop_reason = stop;
-        neograph::json rj;
-        to_json(rj, resp);
-        emit(jsonrpc_result(std::move(rj), id));
-
-        // Decrement inflight + clear single-flight reservation.
-        // Must happen even on exception above (those are caught
-        // earlier), but use a final lock here to be sure.
-        //
-        // notify_all MUST run inside the lock — otherwise the dtor's
-        // cv.wait can wake on count==0, exit the wait scope, and tear
-        // the server down before this worker finishes notify_all,
-        // touching a destroyed cv. Linux pthread is permissive enough
-        // to limp through; macOS libc++ aborts with EINVAL. (Reproduced
-        // by ACPServer.RejectsSecondPromptOnSameSession on macos-14.)
-        {
-            std::lock_guard lk(workers_mu);
-            --inflight_count;
-            inflight_sessions.erase(req.session_id);
-            workers_cv.notify_all();
-        }
-    });
-
-    worker.detach();
+        reservation.reset();
+    } catch (const std::exception& e) {
+        // If std::thread construction fails, no worker owns the reservation.
+        // Dropping the local owner rolls back count + session before replying.
+        reservation.reset();
+        emit_internal_error(
+            id, "ACP prompt worker launch failed: ", e.what());
+    } catch (...) {
+        reservation.reset();
+        emit_internal_error(id,
+            "ACP prompt worker launch failed: unknown exception");
+    }
 }
 
 void
@@ -463,6 +537,16 @@ void ACPServer::set_notification_sink(NotificationSink sink) {
                                std::memory_order_release);
 }
 
+#if defined(NEOGRAPH_ACP_TESTING)
+void ACPServer::fail_next_worker_launch_for_testing() {
+    impl_->fail_next_worker_launch.store(true, std::memory_order_release);
+}
+
+void ACPServer::fail_next_handle_message_for_testing() {
+    impl_->fail_next_handle_message.store(true, std::memory_order_release);
+}
+#endif
+
 void ACPServer::stop() {
     impl_->stop_flag.store(true, std::memory_order_release);
 }
@@ -535,6 +619,12 @@ ACPServer::call_client(std::string method,
 
 neograph::json
 ACPServer::handle_message(const neograph::json& env) {
+#if defined(NEOGRAPH_ACP_TESTING)
+    if (impl_->fail_next_handle_message.exchange(false,
+                                                  std::memory_order_acq_rel)) {
+        throw std::runtime_error("injected ACP handle_message failure");
+    }
+#endif
     bool has_method = env.contains("method") && !env["method"].is_null();
 
     // Response to one of OUR outbound requests — fulfil the promise
@@ -594,6 +684,25 @@ void ACPServer::run(std::istream& in, std::ostream& out) {
     };
     RunningGuard running_guard{&impl_->running};
 
+    // Established before allocating/installing the run sink so every exit,
+    // including stream and dispatch exceptions, drains workers before the
+    // sink's captured output pointer can become invalid.
+    struct RunCleanupGuard {
+        Impl* impl;
+        ~RunCleanupGuard() {
+            {
+                std::unique_lock lk(impl->workers_mu);
+                impl->workers_cv.wait(lk, [this]{
+                    return impl->inflight_count == 0;
+                });
+            }
+            std::atomic_store_explicit(
+                &impl->sink_, std::shared_ptr<NotificationSink>{},
+                std::memory_order_release);
+        }
+    };
+    RunCleanupGuard cleanup_guard{impl_.get()};
+
     auto out_mu = std::make_shared<std::mutex>();
     auto out_ptr = &out;
 
@@ -625,7 +734,21 @@ void ACPServer::run(std::istream& in, std::ostream& out) {
             continue;
         }
 
-        auto resp = handle_message(env);
+        neograph::json resp;
+        try {
+            resp = handle_message(env);
+        } catch (const std::exception& e) {
+            auto request_id = env.is_object() && env.contains("id")
+                                ? env["id"] : neograph::json();
+            resp = jsonrpc_error(
+                -32603, std::string("Internal error: ") + e.what(),
+                request_id);
+        } catch (...) {
+            auto request_id = env.is_object() && env.contains("id")
+                                ? env["id"] : neograph::json();
+            resp = jsonrpc_error(
+                -32603, "Internal error: unknown exception", request_id);
+        }
         if (!resp.is_null()) {
             std::lock_guard lk(*out_mu);
             out << resp.dump() << '\n';
@@ -633,19 +756,6 @@ void ACPServer::run(std::istream& in, std::ostream& out) {
         }
     }
 
-    // Drain workers before tearing the sink down — otherwise a worker
-    // that finishes after run() returns would write through a dangling
-    // stream pointer. Workers are detached; wait on inflight_count.
-    {
-        std::unique_lock lk(impl_->workers_mu);
-        impl_->workers_cv.wait(lk, [this]{
-            return impl_->inflight_count == 0;
-        });
-    }
-
-    std::atomic_store_explicit(&impl_->sink_,
-                               std::shared_ptr<NotificationSink>{},
-                               std::memory_order_release);
 }
 
 void ACPServer::run() {

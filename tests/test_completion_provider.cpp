@@ -166,8 +166,6 @@ TEST(CompletionProvider, RequestOwnsParamsAndCallbackAcrossSuspension) {
     EXPECT_EQ(chunks, (std::vector<std::string>{"owned-after-suspend"}));
 }
 
-NEOGRAPH_PUSH_IGNORE_DEPRECATED
-
 TEST(CompletionProvider, EveryLegacyEntryIsAOneHopAdapter) {
     RequestProvider provider;
     CompletionParams params;
@@ -183,8 +181,6 @@ TEST(CompletionProvider, EveryLegacyEntryIsAOneHopAdapter) {
               "collect");
     EXPECT_EQ(provider.calls, 5);
 }
-
-NEOGRAPH_POP_IGNORE_DEPRECATED
 
 TEST(CompletionProvider, FreeAdapterPreservesNewProviderRequest) {
     RequestProvider provider;
@@ -212,8 +208,6 @@ TEST(CompletionProvider, FreeAdapterPreservesLegacyStreamWithoutObserver) {
     EXPECT_EQ(provider.complete_calls, 0);
 }
 
-NEOGRAPH_PUSH_IGNORE_DEPRECATED
-
 TEST(CompletionProvider, LegacyAsyncStreamAcceptsEmptyCallback) {
     LegacyStreamProvider provider;
     CompletionParams params;
@@ -224,5 +218,3 @@ TEST(CompletionProvider, LegacyAsyncStreamAcceptsEmptyCallback) {
         EXPECT_EQ(result.message.content, "legacy-stream");
     });
 }
-
-NEOGRAPH_POP_IGNORE_DEPRECATED

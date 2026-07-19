@@ -36,6 +36,20 @@ using neograph::graph::NodeFactory;
 using neograph::graph::NodeInput;
 using neograph::graph::NodeOutput;
 
+namespace neograph::acp {
+
+struct ACPServerTestAccess {
+    static void fail_next_worker_launch(ACPServer& server) {
+        server.fail_next_worker_launch_for_testing();
+    }
+
+    static void fail_next_handle_message(ACPServer& server) {
+        server.fail_next_handle_message_for_testing();
+    }
+};
+
+}  // namespace neograph::acp
+
 namespace {
 
 class EchoNode : public GraphNode {
@@ -76,6 +90,53 @@ std::shared_ptr<GraphEngine> build_echo_engine() {
     auto unique = GraphEngine::compile(def, ctx);
     return std::shared_ptr<GraphEngine>(std::move(unique));
 }
+
+class ThrowingAdapter : public ACPGraphAdapter {
+  public:
+    enum class Stage { BuildInitialState, ExtractAgentText };
+
+    explicit ThrowingAdapter(Stage stage) : stage_(stage) {}
+
+    neograph::json build_initial_state(
+        const std::vector<ContentBlock>& blocks,
+        const std::string& session_id) const override {
+        if (stage_ == Stage::BuildInitialState) {
+            throw std::runtime_error("build_initial_state failed");
+        }
+        return ACPGraphAdapter::build_initial_state(blocks, session_id);
+    }
+
+    std::string extract_agent_text(
+        const neograph::json& output) const override {
+        if (stage_ == Stage::ExtractAgentText) {
+            throw 42;
+        }
+        return ACPGraphAdapter::extract_agent_text(output);
+    }
+
+  private:
+    Stage stage_;
+};
+
+class BlockingAdapter : public ACPGraphAdapter {
+  public:
+    explicit BlockingAdapter(std::shared_future<void> release)
+        : release_(std::move(release)) {}
+
+    std::future<void> entered_future() { return entered_.get_future(); }
+
+    neograph::json build_initial_state(
+        const std::vector<ContentBlock>& blocks,
+        const std::string& session_id) const override {
+        entered_.set_value();
+        release_.wait();
+        return ACPGraphAdapter::build_initial_state(blocks, session_id);
+    }
+
+  private:
+    mutable std::promise<void> entered_;
+    std::shared_future<void>   release_;
+};
 
 ACPServer make_server() {
     auto engine = build_echo_engine();
@@ -199,6 +260,108 @@ TEST(ACPServer, PromptRunsGraphAndEmitsUpdate) {
     EXPECT_TRUE(saw_chunk);
 }
 
+TEST(ACPServer, BuildInitialStateExceptionIsContained) {
+    CapturingSink cap;
+    auto adapter = std::make_shared<ThrowingAdapter>(
+        ThrowingAdapter::Stage::BuildInitialState);
+    ACPServer server(build_echo_engine(),
+                     {{"name", "test-acp"}, {"version", "0.0.1"}},
+                     adapter);
+    server.set_notification_sink(cap.as_sink());
+
+    server.handle_message(make_request(1, "session/prompt",
+        {{"sessionId", "build-error-session"},
+         {"prompt", neograph::json::array({
+             neograph::json{{"type", "text"}, {"text", "hi"}}})}}));
+
+    auto resp = cap.wait_for_response(1);
+    ASSERT_TRUE(resp.contains("result")) << resp.dump();
+    EXPECT_EQ(resp["result"].value("stopReason", std::string()), "end_turn");
+
+    auto updates = cap.notifications_for("session/update");
+    ASSERT_EQ(updates.size(), 1u);
+    EXPECT_NE(updates[0]["params"]["update"]["content"]
+                  .value("text", std::string()).find("build_initial_state failed"),
+              std::string::npos);
+}
+
+TEST(ACPServer, NonStdExtractAgentTextExceptionIsContained) {
+    CapturingSink cap;
+    auto adapter = std::make_shared<ThrowingAdapter>(
+        ThrowingAdapter::Stage::ExtractAgentText);
+    ACPServer server(build_echo_engine(),
+                     {{"name", "test-acp"}, {"version", "0.0.1"}},
+                     adapter);
+    server.set_notification_sink(cap.as_sink());
+
+    server.handle_message(make_request(1, "session/prompt",
+        {{"sessionId", "extract-error-session"},
+         {"prompt", neograph::json::array({
+             neograph::json{{"type", "text"}, {"text", "hi"}}})}}));
+
+    auto resp = cap.wait_for_response(1);
+    ASSERT_TRUE(resp.contains("result")) << resp.dump();
+    EXPECT_EQ(resp["result"].value("stopReason", std::string()), "end_turn");
+
+    auto updates = cap.notifications_for("session/update");
+    ASSERT_EQ(updates.size(), 1u);
+    EXPECT_NE(updates[0]["params"]["update"]["content"]
+                  .value("text", std::string()).find("unknown exception"),
+              std::string::npos);
+}
+
+TEST(ACPServer, NotificationSinkExceptionIsContained) {
+    CapturingSink cap;
+    ACPServer server(build_echo_engine(),
+                     {{"name", "test-acp"}, {"version", "0.0.1"}});
+    auto capture = cap.as_sink();
+    std::atomic<bool> throw_once{true};
+    server.set_notification_sink([&](const neograph::json& env) {
+        if (throw_once.exchange(false, std::memory_order_acq_rel)) {
+            throw std::runtime_error("sink failed");
+        }
+        capture(env);
+    });
+
+    server.handle_message(make_request(1, "session/prompt",
+        {{"sessionId", "sink-error-session"},
+         {"prompt", neograph::json::array({
+             neograph::json{{"type", "text"}, {"text", "hi"}}})}}));
+
+    auto resp = cap.wait_for_response(1);
+    ASSERT_TRUE(resp.contains("error")) << resp.dump();
+    EXPECT_EQ(resp["error"].value("code", 0), -32603);
+    EXPECT_NE(resp["error"].value("message", std::string()).find("sink failed"),
+              std::string::npos);
+}
+
+TEST(ACPServer, WorkerLaunchFailureRollsBackReservation) {
+    CapturingSink cap;
+    ACPServer server(build_echo_engine(),
+                     {{"name", "test-acp"}, {"version", "0.0.1"}});
+    server.set_notification_sink(cap.as_sink());
+    ACPServerTestAccess::fail_next_worker_launch(server);
+
+    auto prompt = [] {
+        return neograph::json::array({
+            neograph::json{{"type", "text"}, {"text", "hi"}}});
+    };
+    server.handle_message(make_request(1, "session/prompt",
+        {{"sessionId", "launch-error-session"}, {"prompt", prompt()}}));
+
+    auto failed = cap.wait_for_response(1);
+    ASSERT_TRUE(failed.contains("error")) << failed.dump();
+    EXPECT_EQ(failed["error"].value("code", 0), -32603);
+
+    // The same session must be immediately reusable. If launch failure left
+    // its reservation behind, this would return the single-flight -32000.
+    server.handle_message(make_request(2, "session/prompt",
+        {{"sessionId", "launch-error-session"}, {"prompt", prompt()}}));
+    auto retried = cap.wait_for_response(2);
+    ASSERT_TRUE(retried.contains("result")) << retried.dump();
+    EXPECT_EQ(retried["result"].value("stopReason", std::string()), "end_turn");
+}
+
 TEST(ACPServer, CancelBeforeFinalReturnsCancelled) {
     auto server = make_server();
     CapturingSink cap;
@@ -315,6 +478,64 @@ TEST(ACPServer, RunPumpsNdjsonThroughStreams) {
     }
     EXPECT_TRUE(saw_chunk);
     EXPECT_TRUE(saw_resp);
+}
+
+TEST(ACPServer, RunExceptionDrainsWorkerAndClearsSink) {
+    std::promise<void> release;
+    auto adapter = std::make_shared<BlockingAdapter>(
+        release.get_future().share());
+    auto entered = adapter->entered_future();
+    ACPServer server(build_echo_engine(),
+                     {{"name", "test-acp"}, {"version", "0.0.1"}},
+                     adapter);
+    ACPServerTestAccess::fail_next_handle_message(server);
+
+    std::ostringstream input;
+    input << make_request(2, "initialize",
+        {{"protocolVersion", 1},
+         {"clientCapabilities", neograph::json::object()}}).dump()
+          << '\n';
+    input << make_request(1, "session/prompt",
+        {{"sessionId", "run-error-session"},
+         {"prompt", neograph::json::array({
+             neograph::json{{"type", "text"}, {"text", "hi"}}})}}).dump()
+          << '\n';
+
+    std::istringstream in(input.str());
+    std::ostringstream out;
+    auto run = std::async(std::launch::async, [&] { server.run(in, out); });
+
+    auto entered_status = entered.wait_for(std::chrono::seconds(5));
+    if (entered_status != std::future_status::ready) {
+        release.set_value();
+        FAIL() << "prompt worker did not enter the blocking adapter";
+    }
+    EXPECT_EQ(run.wait_for(std::chrono::milliseconds(100)),
+              std::future_status::timeout)
+        << "run() returned without draining the in-flight worker";
+
+    release.set_value();
+    ASSERT_EQ(run.wait_for(std::chrono::seconds(5)),
+              std::future_status::ready);
+    EXPECT_NO_THROW(run.get());
+    EXPECT_FALSE(server.is_running());
+
+    std::istringstream responses(out.str());
+    std::string line;
+    bool saw_internal_error = false;
+    while (std::getline(responses, line)) {
+        auto response = neograph::json::parse(line);
+        if (response.value("id", 0) == 2 && response.contains("error")) {
+            saw_internal_error =
+                response["error"].value("code", 0) == -32603;
+        }
+    }
+    EXPECT_TRUE(saw_internal_error) << out.str();
+
+    // run() owns and clears its stream sink after draining the worker.
+    EXPECT_THROW(server.call_client("test/no_transport", {},
+                                    std::chrono::milliseconds(1)),
+                 std::runtime_error);
 }
 
 // ---------------------------------------------------------------------------
@@ -815,11 +1036,27 @@ TEST(ACPServer, RejectsSecondPromptOnSameSession) {
     // applies to every test that wires a stack-local sink.
     CapturingSink cap;
     ACPServer server(engine, info);
-    server.set_notification_sink(cap.as_sink());
-
     auto sess_resp = server.handle_message(make_request(1, "session/new",
         {{"cwd", "."}, {"mcpServers", neograph::json::array()}}));
     auto sid = sess_resp["result"].value("sessionId", std::string());
+
+    // Re-enter prompt handling from a rejection callback. Before the fix,
+    // rejection was emitted while workers_mu was held and this callback
+    // deadlocked trying to acquire the same mutex. The one-shot flag avoids
+    // recursively submitting another prompt for the nested rejection.
+    auto capture = cap.as_sink();
+    std::atomic<bool> reenter_once{true};
+    server.set_notification_sink([&](const neograph::json& env) {
+        if (env.value("id", -1) == 3
+            && env.contains("error")
+            && reenter_once.exchange(false, std::memory_order_acq_rel)) {
+            server.handle_message(make_request(4, "session/prompt",
+                {{"sessionId", sid},
+                 {"prompt", neograph::json::array({
+                     neograph::json{{"type", "text"}, {"text", "nested"}}})}}));
+        }
+        capture(env);
+    });
 
     // First prompt — dispatched async, will stall in StallNode.
     auto first = server.handle_message(make_request(2, "session/prompt",
@@ -840,6 +1077,9 @@ TEST(ACPServer, RejectsSecondPromptOnSameSession) {
     auto err_env = cap.wait_for_response(3, std::chrono::seconds(2));
     ASSERT_TRUE(err_env.contains("error")) << "expected error envelope, got: " << err_env.dump();
     EXPECT_EQ(err_env["error"].value("code", 0), -32000);
+    auto nested_err = cap.wait_for_response(4, std::chrono::seconds(2));
+    ASSERT_TRUE(nested_err.contains("error"));
+    EXPECT_EQ(nested_err["error"].value("code", 0), -32000);
 
     // Release the stall so the first worker can finish + dtor drain works.
     stall->store(false, std::memory_order_release);

@@ -1,8 +1,6 @@
 // Stage 3 / Semester 3.6 (API surface) regression — GraphEngine now
 // exposes run_async / run_stream_async / resume_async returning
-// asio::awaitable<RunResult>. The current implementation is a thin
-// wrapper that co_returns the matching sync call (the engine internals
-// are not yet coroutine-native). These cases pin the wrapper contract:
+// asio::awaitable<RunResult>. These cases pin the public contract:
 //
 //   * run_async resolves to the same RunResult as run() on the happy
 //     path.
@@ -19,20 +17,35 @@
 
 #include <gtest/gtest.h>
 #include <neograph/neograph.h>
+#include <neograph/async/http_client.h>
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
+#include <asio/ip/tcp.hpp>
+#include <asio/post.hpp>
+#include <asio/read_until.hpp>
+#include <asio/redirect_error.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/streambuf.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
+#include <asio/write.hpp>
 
 #include <atomic>
+#include <chrono>
+#include <mutex>
 #include <stdexcept>
+#include <thread>
+#include <vector>
 
 using namespace neograph;
 using namespace neograph::graph;
 
 namespace {
 
-json minimal_graph(const std::string& node_name) {
+json minimal_graph(const std::string& node_name,
+                   const std::string& node_type = "custom") {
     return {
         {"name", "async_api_graph"},
         {"channels", {
@@ -40,7 +53,7 @@ json minimal_graph(const std::string& node_name) {
             {"result",   {{"reducer", "overwrite"}}},
         }},
         {"nodes", {
-            {node_name, {{"type", "custom"}}},
+            {node_name, {{"type", node_type}}},
         }},
         {"edges", {
             {{"from", "__start__"}, {"to", node_name}},
@@ -89,6 +102,125 @@ void register_thrower() {
             return std::make_unique<ThrowingNode>(name);
         });
 }
+
+struct ReleasableHttpServer {
+    asio::io_context io;
+    asio::ip::tcp::acceptor acceptor{io};
+    std::thread worker;
+    std::atomic<int> requests{0};
+    std::atomic<bool> released{false};
+    unsigned short port = 0;
+
+    ReleasableHttpServer() {
+        acceptor.open(asio::ip::tcp::v4());
+        acceptor.set_option(asio::ip::tcp::acceptor::reuse_address(true));
+        acceptor.bind(asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 0));
+        acceptor.listen();
+        port = acceptor.local_endpoint().port();
+        asio::co_spawn(io, accept_loop(), asio::detached);
+        worker = std::thread([this] { io.run(); });
+    }
+
+    ~ReleasableHttpServer() {
+        release();
+        asio::post(io, [this] {
+            asio::error_code ec;
+            acceptor.close(ec);
+        });
+        if (worker.joinable()) worker.join();
+    }
+
+    void release() {
+        released.store(true, std::memory_order_release);
+        asio::post(io, [] {});
+    }
+
+    asio::awaitable<void> handle(asio::ip::tcp::socket socket) {
+        try {
+            asio::streambuf request;
+            co_await asio::async_read_until(
+                socket, request, "\r\n\r\n", asio::use_awaitable);
+            requests.fetch_add(1, std::memory_order_release);
+
+            asio::steady_timer poll(co_await asio::this_coro::executor);
+            while (!released.load(std::memory_order_acquire)) {
+                poll.expires_after(std::chrono::milliseconds(2));
+                co_await poll.async_wait(asio::use_awaitable);
+            }
+
+            static constexpr char response[] =
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Length: 2\r\n"
+                "Connection: close\r\n\r\n"
+                "ok";
+            co_await asio::async_write(
+                socket, asio::buffer(response, sizeof(response) - 1),
+                asio::use_awaitable);
+        } catch (...) {
+            // A cancelled client closes its socket before release(), which is
+            // the expected fixed-path outcome.
+        }
+    }
+
+    asio::awaitable<void> accept_loop() {
+        for (;;) {
+            asio::ip::tcp::socket socket{io};
+            asio::error_code ec;
+            co_await acceptor.async_accept(
+                socket, asio::redirect_error(asio::use_awaitable, ec));
+            if (ec) co_return;
+            asio::co_spawn(io, handle(std::move(socket)), asio::detached);
+        }
+    }
+};
+
+struct OperationTokensSeen {
+    std::mutex mu;
+    std::vector<CancelToken*> tokens;
+};
+
+class StallingHttpNode final : public GraphNode {
+public:
+    StallingHttpNode(std::string name, unsigned short port,
+                     OperationTokensSeen* seen)
+        : name_(std::move(name)), port_(port), seen_(seen) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        {
+            std::lock_guard<std::mutex> lock(seen_->mu);
+            seen_->tokens.push_back(in.ctx.cancel_token.get());
+        }
+        auto ex = co_await asio::this_coro::executor;
+        co_await neograph::async::async_post(
+            ex, "127.0.0.1", std::to_string(port_), "/stall", "{}",
+            {}, false, {});
+        co_return NodeOutput{};
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+    unsigned short port_;
+    OperationTokensSeen* seen_;
+};
+
+class TokenObserverNode final : public GraphNode {
+public:
+    TokenObserverNode(std::string name, std::atomic<CancelToken*>* seen)
+        : name_(std::move(name)), seen_(seen) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        seen_->store(in.ctx.cancel_token.get(), std::memory_order_release);
+        co_return NodeOutput{};
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+    std::atomic<CancelToken*>* seen_;
+};
 
 } // namespace
 
@@ -264,4 +396,166 @@ TEST(GraphEngineAsyncApi, ConcurrentRunAsyncOnSharedIoContext) {
     io.run();
 
     EXPECT_EQ(done.load(), N);
+}
+
+TEST(GraphEngineAsyncApi, SharedParentCancelsBothOperationChildren) {
+    ReleasableHttpServer server;
+    OperationTokensSeen seen;
+    NodeFactory::instance().register_type("operation_cancel_http",
+        [&server, &seen](const std::string& name, const json&,
+                         const NodeContext&) {
+            return std::make_unique<StallingHttpNode>(
+                name, server.port, &seen);
+        });
+
+    auto engine = GraphEngine::compile(
+        minimal_graph("worker", "operation_cancel_http"), NodeContext{});
+    auto parent = std::make_shared<CancelToken>();
+
+    asio::io_context io;
+    std::atomic<int> done{0};
+    std::atomic<int> cancelled{0};
+    std::atomic<int> unexpected{0};
+    std::atomic<bool> aborted_before_release{false};
+
+    for (int i = 0; i < 2; ++i) {
+        asio::co_spawn(
+            io,
+            [&, i]() -> asio::awaitable<void> {
+                RunConfig cfg;
+                cfg.thread_id = "shared-parent-" + std::to_string(i);
+                cfg.cancel_token = parent;
+                try {
+                    (void)co_await engine->run_async(std::move(cfg));
+                } catch (const CancelledException&) {
+                    cancelled.fetch_add(1, std::memory_order_relaxed);
+                } catch (...) {
+                    unexpected.fetch_add(1, std::memory_order_relaxed);
+                }
+                done.fetch_add(1, std::memory_order_release);
+            },
+            asio::detached);
+    }
+
+    std::thread canceller([&] {
+        const auto requests_deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (server.requests.load(std::memory_order_acquire) < 2 &&
+               std::chrono::steady_clock::now() < requests_deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        parent->cancel();
+
+        // On fixed code both operations abort before this fallback. On the
+        // old code parent cancellation is not bound inside C++ run_async, so
+        // release the mock response after a bounded wait to make the test fail
+        // by assertion rather than hang forever.
+        const auto cancel_deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while (done.load(std::memory_order_acquire) < 2 &&
+               std::chrono::steady_clock::now() < cancel_deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        aborted_before_release.store(
+            done.load(std::memory_order_acquire) == 2,
+            std::memory_order_release);
+        server.release();
+    });
+
+    io.run();
+    canceller.join();
+
+    EXPECT_EQ(server.requests.load(), 2);
+    EXPECT_EQ(done.load(), 2);
+    EXPECT_EQ(cancelled.load(), 2)
+        << "one parent cancel must abort both child-bound HTTP awaits";
+    EXPECT_EQ(unexpected.load(), 0)
+        << "operation_aborted must surface as CancelledException";
+    EXPECT_TRUE(aborted_before_release.load())
+        << "run_async cancellation must abort the socket await without the "
+           "mock server releasing a response";
+
+    std::lock_guard<std::mutex> lock(seen.mu);
+    ASSERT_EQ(seen.tokens.size(), 2u);
+    EXPECT_NE(seen.tokens[0], parent.get());
+    EXPECT_NE(seen.tokens[1], parent.get());
+    EXPECT_NE(seen.tokens[0], seen.tokens[1])
+        << "concurrent runs must receive distinct operation children";
+}
+
+TEST(GraphEngineAsyncApi, RunUsesOperationChild) {
+    std::atomic<CancelToken*> seen{nullptr};
+    NodeFactory::instance().register_type("operation_cancel_run_sync",
+        [&seen](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<TokenObserverNode>(name, &seen);
+        });
+
+    auto engine = GraphEngine::compile(
+        minimal_graph("worker", "operation_cancel_run_sync"), NodeContext{});
+    auto parent = std::make_shared<CancelToken>();
+    RunConfig cfg;
+    cfg.thread_id = "run-operation-child-sync";
+    cfg.cancel_token = parent;
+
+    (void)engine->run(cfg);
+
+    ASSERT_NE(seen.load(std::memory_order_acquire), nullptr);
+    EXPECT_NE(seen.load(std::memory_order_acquire), parent.get());
+}
+
+TEST(GraphEngineAsyncApi, RunStreamUsesOperationChild) {
+    std::atomic<CancelToken*> seen{nullptr};
+    NodeFactory::instance().register_type("operation_cancel_stream_sync",
+        [&seen](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<TokenObserverNode>(name, &seen);
+        });
+
+    auto engine = GraphEngine::compile(
+        minimal_graph("worker", "operation_cancel_stream_sync"),
+        NodeContext{});
+    auto parent = std::make_shared<CancelToken>();
+    RunConfig cfg;
+    cfg.thread_id = "stream-operation-child-sync";
+    cfg.cancel_token = parent;
+
+    (void)engine->run_stream(cfg, [](const GraphEvent&) {});
+
+    ASSERT_NE(seen.load(std::memory_order_acquire), nullptr);
+    EXPECT_NE(seen.load(std::memory_order_acquire), parent.get());
+}
+
+TEST(GraphEngineAsyncApi, RunStreamAsyncUsesOperationChild) {
+    std::atomic<CancelToken*> seen{nullptr};
+    NodeFactory::instance().register_type("operation_cancel_stream_async",
+        [&seen](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<TokenObserverNode>(name, &seen);
+        });
+
+    auto engine = GraphEngine::compile(
+        minimal_graph("worker", "operation_cancel_stream_async"),
+        NodeContext{});
+    auto parent = std::make_shared<CancelToken>();
+    RunConfig cfg;
+    cfg.thread_id = "stream-operation-child-async";
+    cfg.cancel_token = parent;
+
+    asio::io_context io;
+    std::exception_ptr error;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            try {
+                (void)co_await engine->run_stream_async(
+                    cfg, [](const GraphEvent&) {});
+            } catch (...) {
+                error = std::current_exception();
+            }
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_FALSE(error);
+    ASSERT_NE(seen.load(std::memory_order_acquire), nullptr);
+    EXPECT_NE(seen.load(std::memory_order_acquire), parent.get());
 }

@@ -30,7 +30,9 @@
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
+#include <asio/error.hpp>
 #include <asio/io_context.hpp>
+#include <asio/system_error.hpp>
 #include <asio/thread_pool.hpp>
 
 #include <cstddef>
@@ -39,6 +41,63 @@
 #include <utility>
 
 namespace neograph::async {
+
+namespace detail {
+
+// Drive an engine operation using the exact child token already forked by the
+// GraphEngine entry point. The public run_sync(awaitable, CancelToken*) path
+// below intentionally forks because its raw token is a caller-owned parent;
+// using it here would create a grandchild and make RunContext's token differ
+// from the slot bound to the operation's co_spawn.
+template <typename T>
+T run_sync_operation(
+    asio::awaitable<T> aw,
+    std::shared_ptr<neograph::graph::CancelToken> operation) {
+    if (operation) {
+        operation->throw_if_cancelled("run_sync operation entry");
+    }
+
+    asio::io_context io;
+    std::optional<T> result;
+    std::exception_ptr err;
+
+    auto body = [&]() -> asio::awaitable<void> {
+        try {
+            result.emplace(co_await std::move(aw));
+        } catch (...) {
+            err = std::current_exception();
+        }
+        co_return;
+    };
+
+    if (operation) {
+        operation->bind_executor(io.get_executor());
+        asio::co_spawn(
+            io, body(),
+            asio::bind_cancellation_slot(operation->slot(), asio::detached));
+    } else {
+        asio::co_spawn(io, body(), asio::detached);
+    }
+    io.run();
+
+    if (err) {
+        if (operation && operation->is_cancelled()) {
+            try {
+                std::rethrow_exception(err);
+            } catch (const asio::system_error& error) {
+                if (error.code() == asio::error::operation_aborted) {
+                    throw neograph::graph::CancelledException(
+                        "run_sync operation aborted");
+                }
+            } catch (...) {
+            }
+        }
+        std::rethrow_exception(err);
+    }
+    return std::move(*result);
+}
+
+} // namespace detail
 
 /// Run @p aw to completion on a fresh single-threaded io_context
 /// and return its result. Any exception thrown inside the coroutine

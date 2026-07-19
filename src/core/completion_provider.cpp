@@ -4,8 +4,6 @@
 
 namespace neograph {
 
-NEOGRAPH_PUSH_IGNORE_DEPRECATED
-
 CompletionProvider::~CompletionProvider() = default;
 
 asio::awaitable<ChatCompletion>
@@ -71,7 +69,5 @@ invoke_completion(Provider& provider, CompletionRequest request) {
     }
     co_return co_await provider.complete_async(request.params());
 }
-
-NEOGRAPH_POP_IGNORE_DEPRECATED
 
 } // namespace neograph

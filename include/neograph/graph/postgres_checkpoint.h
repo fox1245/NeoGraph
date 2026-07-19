@@ -80,6 +80,10 @@ struct pg_conn;
 
 namespace neograph::graph {
 
+namespace test_access {
+class PostgresCheckpointStoreTestAccess;
+}
+
 /// RAII wrapper around a libpq PGconn. Owns the connection; closes
 /// via PQfinish in the destructor. Non-copyable, non-movable to match
 /// the pool's slot-index access pattern (pool owns unique_ptr<PgConn>).
@@ -102,6 +106,26 @@ struct PgConn {
  * the connection eagerly and runs `ensure_schema()` so callers get
  * an immediate failure if credentials or DDL permissions are wrong,
  * rather than a delayed surprise on first save().
+ *
+ * ## Async connection deadline
+ *
+ * Async initial/replacement connection attempts use one NeoGraph-wide
+ * deadline for the complete attempt, including every host and resolved IP.
+ * A positive `connect_timeout` written directly in @p conn_str supplies the
+ * deadline in seconds, with libpq's documented two-second minimum. Values from
+ * `PGCONNECT_TIMEOUT` or a service file are not available before the initial
+ * nonblocking connection step and therefore use NeoGraph's 30-second default.
+ * If the explicit value is absent, zero, or negative, NeoGraph also applies
+ * that production-safety default. This intentionally
+ * differs from libpq's synchronous per-host timeout semantics: an async
+ * multi-host attempt receives one budget rather than one budget per host.
+ * Synchronous construction and synchronous replacement retain native libpq
+ * behavior and are unchanged by this policy.
+ *
+ * Cancelling an in-flight async query quarantines its pool connection and
+ * sends PostgreSQL's out-of-band cancel request on NeoGraph's bounded worker
+ * pool before closing that connection. The cancelled operation is never
+ * retried; the empty slot is rebuilt lazily by the next operation.
  */
 class NEOGRAPH_API PostgresCheckpointStore : public CheckpointStore {
 public:
@@ -115,7 +139,7 @@ public:
                                       size_t pool_size = 8);
 
     /// Number of times a pool slot's connection was replaced after a
-    /// broken-connection detection. Cumulative across the whole store;
+    /// broken connection or an interrupted async exchange. Cumulative;
     /// useful for monitoring (e.g. Prometheus gauge) and for tests that
     /// want to assert the retry path fired.
     size_t reconnect_count() const { return reconnect_count_; }
@@ -155,9 +179,9 @@ public:
     // concurrent save_async calls across pool slots actually overlap
     // instead of serialising on the main worker thread.
     //
-    // Behaviour identical to the sync peers (same retry semantics,
-    // same broken-connection auto-replacement, same schema). Only the
-    // wire-level wait is non-blocking.
+    // Successful operations use the same storage schema and values as the
+    // sync peers. Async connection setup/replacement additionally follows
+    // the global deadline policy documented on this class.
 
     asio::awaitable<void> save_async(const Checkpoint& cp) override;
     asio::awaitable<std::optional<Checkpoint>>
@@ -190,6 +214,11 @@ public:
     size_t blob_count();
 
 private:
+    // Constructs only the slot scheduler for deterministic pool tests.
+    // The friend test helper never calls a method that dereferences pool_.
+    struct PoolOnlyTag {};
+    explicit PostgresCheckpointStore(PoolOnlyTag, size_t pool_size);
+
     void ensure_schema();
 
     /// Execute a closure with the connection mutex held. Centralises
@@ -208,7 +237,16 @@ private:
     /// Acquire a free pool slot index (blocks if none available).
     /// MUST be paired with `release_slot`.
     size_t acquire_slot();
+    asio::awaitable<size_t> acquire_slot_async();
     void release_slot(size_t idx);
+    void rebuild_slot(size_t idx);
+    asio::awaitable<void> rebuild_slot_async(size_t idx);
+    size_t waiter_count_for_test();
+    static asio::awaitable<bool> wait_socket_either_for_test(int fd);
+    static void set_async_connection_test_seams(int poll_delay_ms,
+                                                int timeout_ms);
+    static int async_connection_timeout_ms_for_test(
+        const std::string& conn_str);
 
     /// Original connection string, retained so individual pool slots
     /// can be rebuilt on demand after a broken-connection detection.
@@ -219,15 +257,18 @@ private:
     std::vector<std::unique_ptr<PgConn>> pool_;
 
     /// Free slot indices, drained on acquire and refilled on release.
-    /// Guarded by `pool_mutex_`; callers wait on `pool_cv_` when empty.
+    /// Guarded by `pool_mutex_`. Fair mixed waiter state lives in an
+    /// out-of-object sidecar so this exported class keeps its original ABI.
     std::queue<size_t> free_;
     std::mutex pool_mutex_;
-    std::condition_variable pool_cv_;
+    std::condition_variable pool_cv_;  // Retained at its original ABI offset.
 
-    /// Cumulative count of broken-connection-driven slot replacements.
+    /// Cumulative count of connection slot replacements.
     /// Atomic so monitoring threads can read without taking the pool
     /// mutex.
     std::atomic<size_t> reconnect_count_{0};
+
+    friend class test_access::PostgresCheckpointStoreTestAccess;
 };
 
 } // namespace neograph::graph

@@ -40,8 +40,10 @@
 #include <neograph/observability/tracer.h>
 #include <neograph/provider.h>
 
+#include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 
 namespace neograph::observability {
 
@@ -62,17 +64,22 @@ namespace neograph::observability {
  * `close()` is also called by the destructor — explicit close is
  * recommended only when the user wants to inspect the tracer's
  * exported spans before the session goes out of scope (e.g. in
- * tests). Double-close is a no-op.
+ * tests). Double-close is a no-op. Copies of `cb` are safe to retain:
+ * they become no-ops after close/destruction, and `close()` waits for
+ * callbacks that already entered before finalizing their spans.
  */
 class NEOGRAPH_API OpenInferenceTracerSession {
 public:
+    using ChildSpanStarter =
+        std::function<std::unique_ptr<Span>(Tracer&, std::string_view)>;
+
     /// Engine event callback. Pass to `engine.run_stream()`.
     graph::GraphStreamCallback cb;
 
     OpenInferenceTracerSession();
     ~OpenInferenceTracerSession();
 
-    // Non-copyable, movable.
+    // Non-copyable, movable. Move assignment closes the target first.
     OpenInferenceTracerSession(const OpenInferenceTracerSession&) = delete;
     OpenInferenceTracerSession& operator=(const OpenInferenceTracerSession&) = delete;
     OpenInferenceTracerSession(OpenInferenceTracerSession&&) noexcept;
@@ -99,9 +106,14 @@ public:
     /// (`PrintTracer`) for the canonical shape.
     void close();
 
-    /// Internal — exposed so `OpenInferenceProvider` can open LLM
-    /// child spans under the currently-active node span.
+    /// Snapshot of the current span. The pointer is only valid until another
+    /// session operation or `close()`; use `child_span_starter()` when opening
+    /// a child concurrently with session teardown.
     Span* current_parent() const noexcept;
+
+    /// Return a copied operation that opens a child while leasing the current
+    /// parent through `Tracer::start_span`. Safe across close/destruction.
+    ChildSpanStarter child_span_starter() const;
 
 private:
     struct Impl;
@@ -148,15 +160,22 @@ class NEOGRAPH_API OpenInferenceProvider : public Provider {
 public:
     /// @param inner         Provider to delegate to.
     /// @param tracer        Tracer for span emission. Must outlive `*this`.
-    /// @param parent_lookup Optional callback returning the current node
-    ///                      span the LLM call should nest under (e.g.
-    ///                      bound to an `OpenInferenceTracerSession::current_parent`).
-    ///                      May be null — null parent opens the LLM
-    ///                      span as a root.
+    /// @param parent_lookup Optional callback returning the parent span. The
+    ///                      caller must keep that span alive until this tracer's
+    ///                      `start_span` returns. Do not bind `current_parent()`
+    ///                      when close may run concurrently; use the session
+    ///                      overload below for teardown-safe parent attachment.
     /// @param span_name     Span name for each LLM call (default "llm.complete").
     OpenInferenceProvider(std::shared_ptr<Provider> inner,
                           Tracer& tracer,
                           std::function<Span*()> parent_lookup = nullptr,
+                          std::string span_name = "llm.complete");
+
+    /// Safe parent-aware overload. The copied starter does not retain the
+    /// session object and becomes a root-span starter after session teardown.
+    OpenInferenceProvider(std::shared_ptr<Provider> inner,
+                          Tracer& tracer,
+                          const OpenInferenceTracerSession& session,
                           std::string span_name = "llm.complete");
     ~OpenInferenceProvider() override;
 
@@ -172,13 +191,10 @@ public:
     complete_stream_async(const CompletionParams& params,
                           const StreamCallback& on_chunk) override;
 
-    /// v1.0 single-dispatch override (Candidate 6 PR6). Anchors
-    /// invoke() so engine `provider->invoke(...)` calls land here
-    /// directly and emit one span, instead of the base default
-    /// re-forwarding to the 4-virtual chain (which would still emit
-    /// a span via the 4-virtual override but go through one extra
-    /// vtable hop). v1.0 collapses the 4 overrides' span-recording
-    /// bodies into invoke().
+    /// Callback-selected compatibility override. Engine
+    /// `provider->invoke(...)` calls land here and route through the
+    /// stable complete* tracing methods above so each request emits
+    /// exactly one span.
     asio::awaitable<ChatCompletion>
     invoke(const CompletionParams& params, StreamCallback on_chunk) override;
 

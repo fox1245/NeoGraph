@@ -82,19 +82,15 @@ public:
     asio::awaitable<ChatCompletion>
     complete_async(const CompletionParams& params) override;
 
-    /// Streaming retry path remains synchronous — `complete_stream()`
-    /// has no awaitable peer on Provider, and async streaming through
-    /// the schema/openai providers still uses httplib. Once those
-    /// migrate this method can grow an awaitable cousin.
+    /// Synchronous streaming retry path. The inherited
+    /// `complete_stream_async()` peer runs this method through Provider's
+    /// worker-thread bridge so it does not block the awaiting executor.
     ChatCompletion complete_stream(const CompletionParams& params,
                                    const StreamCallback& on_chunk) override;
 
-    /// v1.0 single-dispatch override (Candidate 6 PR6). Anchors invoke()
-    /// on this decorator so engine `provider->invoke(...)` calls hit
-    /// retry/backoff directly. v0.9 body routes through the existing
-    /// 4-virtual overrides (which already wrap the inner provider with
-    /// retry); v1.0 folds the retry loop into invoke() and deletes the
-    /// legacy methods.
+    /// Callback-selected compatibility override. Engine
+    /// `provider->invoke(...)` calls route through the stable complete*
+    /// methods above and keep their retry/backoff behavior.
     asio::awaitable<ChatCompletion>
     invoke(const CompletionParams& params, StreamCallback on_chunk) override;
 

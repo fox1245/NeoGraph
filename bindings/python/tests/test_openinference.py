@@ -13,6 +13,7 @@ import json
 import pytest
 
 import neograph_engine as ng
+from neograph_engine import _neograph as _native
 
 pytest.importorskip("opentelemetry")
 
@@ -66,6 +67,17 @@ class _FakeProvider(ng.Provider):
         usage.total_tokens = self._pt + self._ct
         result.usage = usage
         return result
+
+
+class _FakeStreamingProvider(_FakeProvider):
+    def __init__(self, chunks):
+        super().__init__(reply="".join(chunks))
+        self._chunks = chunks
+
+    def complete_stream(self, params, on_chunk):
+        for chunk in self._chunks:
+            on_chunk(chunk)
+        return self.complete(params)
 
 
 # ── A NeoGraph node that calls the provider once ────────────────────
@@ -322,3 +334,159 @@ def test_provider_wrapper_propagates_exceptions(tracer_and_exporter):
     # Status is ERROR after we set it; OTel SDK exposes status_code via
     # status object on the readable span.
     assert spans[0].status.status_code.name == "ERROR"
+
+
+def test_provider_exposes_incremental_complete_stream(tracer_and_exporter):
+    """The Python Provider surface must retain each native stream chunk."""
+    tracer, exporter = tracer_and_exporter
+    wrapped = OpenInferenceProvider(
+        _FakeStreamingProvider(["one", "-", "two"]), tracer)
+    params = ng.CompletionParams()
+    received = []
+
+    result = wrapped.complete_stream(params, received.append)
+
+    assert result.message.content == "one-two"
+    assert received == ["one", "-", "two"]
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    assert [event.attributes["chunk"] for event in spans[0].events] == [
+        "one", "-", "two"]
+    assert spans[0].attributes["output.value"] == "one-two"
+
+
+def test_provider_binding_exposes_complete_stream_fallback():
+    """Concrete/native Providers can be streamed through the Python base API."""
+    inner = _FakeProvider(reply="single chunk")
+    received = []
+
+    result = ng.Provider.complete_stream(
+        inner, ng.CompletionParams(), received.append)
+
+    assert result.message.content == "single chunk"
+    assert received == ["single chunk"]
+
+
+def test_provider_binding_preserves_incremental_stream_chunks():
+    inner = _FakeStreamingProvider(["one", "-", "two"])
+    received = []
+
+    result = ng.Provider.complete_stream(
+        inner, ng.CompletionParams(), received.append)
+
+    assert result.message.content == "one-two"
+    assert received == ["one", "-", "two"]
+
+
+def test_provider_binding_retained_stream_callback_remains_safe():
+    class _RetainingProvider(_FakeProvider):
+        retained_callback = None
+
+        def complete_stream(self, params, on_chunk):
+            self.retained_callback = on_chunk
+            return self.complete(params)
+
+    inner = _RetainingProvider(reply="complete")
+    received = []
+
+    result = ng.Provider.complete_stream(
+        inner, ng.CompletionParams(), received.append)
+    inner.retained_callback("late")
+
+    assert result.message.content == "complete"
+    assert received == ["late"]
+
+
+def test_native_provider_copies_and_destroys_callback_without_gil():
+    provider = _native._CallbackThreadProvider()
+    received = []
+
+    result = provider.complete_stream(
+        ng.CompletionParams(), received.append)
+
+    assert result.message.content == "one-two"
+    assert received == ["one", "-", "two"]
+    assert provider.worker_started_without_gil
+    assert provider.worker_finished_without_gil
+
+
+class _TestSpan:
+    def __init__(self, failure=None):
+        self.failure = failure
+
+    def set_attribute(self, *args):
+        if self.failure == "attribute":
+            raise RuntimeError("trace attribute failed")
+
+    def set_status(self, *args):
+        if self.failure == "attribute":
+            raise RuntimeError("trace status failed")
+
+    def add_event(self, *args, **kwargs):
+        if self.failure == "attribute":
+            raise RuntimeError("trace event failed")
+
+
+class _TracingContext:
+    def __init__(self, failure=None):
+        self.failure = failure
+
+    def __enter__(self):
+        if self.failure == "enter":
+            raise RuntimeError("trace enter failed")
+        return _TestSpan(self.failure)
+
+    def __exit__(self, *args):
+        if self.failure == "exit":
+            raise RuntimeError("trace exit failed")
+
+
+class _UnreliableTracer:
+    def __init__(self, failure):
+        self.failure = failure
+
+    def start_as_current_span(self, name):
+        if self.failure == "start":
+            raise RuntimeError("trace start failed")
+        return _TracingContext(self.failure)
+
+
+class _BoomProvider(_FakeProvider):
+    def complete(self, params):
+        raise ValueError("inner failure")
+
+    def complete_stream(self, params, on_chunk):
+        raise ValueError("inner failure")
+
+
+@pytest.mark.parametrize("failure", ["start", "enter", "attribute", "exit"])
+@pytest.mark.parametrize("streaming", [False, True])
+def test_tracing_failure_does_not_block_inner_call(failure, streaming):
+    inner = (_FakeStreamingProvider(["one", "-", "two"])
+             if streaming else _FakeProvider(reply="still called"))
+    wrapped = OpenInferenceProvider(
+        inner, _UnreliableTracer(failure))
+
+    received = []
+    if streaming:
+        result = wrapped.complete_stream(
+            ng.CompletionParams(), received.append)
+    else:
+        result = wrapped.complete(ng.CompletionParams())
+
+    assert result.message.content == ("one-two" if streaming else "still called")
+    if streaming:
+        assert received == ["one", "-", "two"]
+
+
+@pytest.mark.parametrize("failure", ["start", "enter", "attribute", "exit"])
+@pytest.mark.parametrize("streaming", [False, True])
+def test_tracing_failure_does_not_replace_inner_exception(failure, streaming):
+    wrapped = OpenInferenceProvider(
+        _BoomProvider(), _UnreliableTracer(failure))
+
+    with pytest.raises(ValueError, match="inner failure"):
+        if streaming:
+            wrapped.complete_stream(ng.CompletionParams(), lambda chunk: None)
+        else:
+            wrapped.complete(ng.CompletionParams())

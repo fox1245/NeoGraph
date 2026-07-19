@@ -185,15 +185,15 @@ ChatMessage parse_response_message(const json& choice);
 
 ## 2. Provider 인터페이스
 
-**헤더:** `neograph/provider.h`
+**헤더:** `neograph/provider.h`, `neograph/completion_provider.h`
 **네임스페이스:** `neograph`
 
 LLM provider의 추상 인터페이스를 정의한다. OpenAI, Claude, Gemini 등 모든 provider가 이 인터페이스를 구현한다.
 
-> **커스텀 Provider를 작성하신다면?**
-> [`ASYNC_GUIDE.md` §9.3](ASYNC_GUIDE.md#93-provider) 의
-> 결정표 참조 — `complete()`, `complete_async()`, 혹은 둘 다
-> override할지 결정 가이드.
+> **새 커스텀 Provider를 작성하신다면?** `CompletionProvider`를 상속하고
+> `do_invoke()` 하나를 재정의하세요. 기존 `Provider` 구현과 `complete*` 호출은
+> 제거 계획 없이 계속 지원합니다. 자세한 내용은
+> [`ASYNC_GUIDE.md` §9.3](ASYNC_GUIDE.md#93-provider)을 참고하세요.
 
 ### 2.1 StreamCallback
 
@@ -223,19 +223,30 @@ struct CompletionParams {
 
 ### 2.3 Provider (추상 클래스)
 
+기존 구현과 호출자를 위한 안정 호환 인터페이스다. 컴파일러 폐기 경고가 없고
+제거 계획도 없다. 새 구현에는 아래 `CompletionProvider`를 권장한다.
+
 ```cpp
 class Provider {
 public:
     virtual ~Provider() = default;
 
-    // 동기 호출
-    virtual ChatCompletion complete(const CompletionParams& params) = 0;
+    virtual ChatCompletion complete(const CompletionParams& params);
 
-    // 스트리밍 호출: 토큰마다 on_chunk를 호출하고, 완료 시 전체 결과를 반환
+    virtual asio::awaitable<ChatCompletion>
+    complete_async(const CompletionParams& params);
+
     virtual ChatCompletion complete_stream(const CompletionParams& params,
-                                           const StreamCallback& on_chunk) = 0;
+                                           const StreamCallback& on_chunk);
 
-    // provider 이름 (예: "openai", "claude", "gemini")
+    virtual asio::awaitable<ChatCompletion>
+    complete_stream_async(const CompletionParams& params,
+                          const StreamCallback& on_chunk);
+
+    virtual asio::awaitable<ChatCompletion>
+    invoke(const CompletionParams& params,
+           StreamCallback on_chunk = nullptr);
+
     virtual std::string get_name() const = 0;
 };
 ```
@@ -243,32 +254,46 @@ public:
 | 메서드 | 설명 |
 |--------|------|
 | `complete()` | 블로킹 호출. 전체 응답이 생성된 후 반환 |
+| `complete_async()` | 코루틴 기반 비동기 호출 |
 | `complete_stream()` | 토큰이 생성될 때마다 `on_chunk`를 호출. 최종 `ChatCompletion`도 반환 |
+| `complete_stream_async()` | 비동기 스트리밍 호출 |
+| `invoke()` | callback 유무로 수집/스트리밍을 고르는 기존 호환 진입점 |
 | `get_name()` | provider 식별 문자열 |
 
-**커스텀 provider 구현 예:**
+각 동기/비동기 짝 중 적어도 하나는 재정의해야 한다. 기존 구현은 이 계약을
+그대로 사용해도 된다. 호환성·보안 수정은 계속 적용하지만, 새 기능은 명시적
+요청 API에만 추가될 수 있다.
+
+### 2.4 CompletionProvider (새 구현에 권장)
+
+`CompletionRequest`가 수집과 스트리밍을 명시적으로 구분하므로 callback이 없는
+스트리밍 요청도 표현할 수 있다. 구현자는 `do_invoke()` 하나만 재정의한다.
 
 ```cpp
-class MyProvider : public neograph::Provider {
+class MyProvider : public neograph::CompletionProvider {
 public:
-    neograph::ChatCompletion complete(const neograph::CompletionParams& params) override {
-        // HTTP 호출 등 구현
-        neograph::ChatCompletion result;
-        result.message.role = "assistant";
-        result.message.content = "응답 내용";
-        return result;
-    }
-
-    neograph::ChatCompletion complete_stream(
-        const neograph::CompletionParams& params,
-        const neograph::StreamCallback& on_chunk) override {
-        auto result = complete(params);
-        if (on_chunk) on_chunk(result.message.content);
-        return result;
+    asio::awaitable<neograph::ChatCompletion>
+    do_invoke(neograph::CompletionRequest request) override {
+        if (request.streaming()) {
+            // callback이 없어도 스트리밍 전송을 사용한다.
+            // callback이 있으면 request.on_chunk()(chunk)로 전달한다.
+        } else {
+            // 수집 전송으로 전체 응답을 받는다.
+        }
+        co_return result;
     }
 
     std::string get_name() const override { return "my_provider"; }
 };
+```
+
+새 직접 호출은 전송 방식을 명시한다.
+
+```cpp
+auto full = co_await provider.invoke_request(
+    neograph::CompletionRequest::collect(params));
+auto streamed = co_await provider.invoke_request(
+    neograph::CompletionRequest::stream(params, on_chunk));
 ```
 
 ---

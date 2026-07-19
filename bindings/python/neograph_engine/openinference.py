@@ -353,6 +353,8 @@ class OpenInferenceProvider(Provider):
                  *, span_name: str = "llm.complete"):
         super().__init__()
         _require_otel()
+        if inner is None:
+            raise ValueError("OpenInferenceProvider requires a non-null provider")
         self._inner = inner
         self._tracer = tracer
         self._span_name = span_name
@@ -363,30 +365,99 @@ class OpenInferenceProvider(Provider):
         except Exception:
             return "openinference(provider)"
 
-    def complete(self, params):
-        from opentelemetry.trace import Status, StatusCode
+    def _start_span(self):
+        try:
+            manager = self._tracer.start_as_current_span(self._span_name)
+            return manager, manager.__enter__()
+        except BaseException:
+            return None, None
 
-        with self._tracer.start_as_current_span(self._span_name) as span:
+    @staticmethod
+    def _end_span(manager, exc_info=(None, None, None)) -> None:
+        if manager is None:
+            return
+        try:
+            manager.__exit__(*exc_info)
+        except BaseException:
+            pass
+
+    @staticmethod
+    def _set_error(span, error: BaseException) -> None:
+        if span is None:
+            return
+        try:
+            from opentelemetry.trace import Status, StatusCode
+            span.set_status(Status(StatusCode.ERROR, str(error)))
+        except BaseException:
+            pass
+
+    def complete(self, params):
+        manager, span = self._start_span()
+        if span is not None:
             try:
                 self._record_input(span, params)
-            except Exception:
+            except BaseException:
                 pass
 
-            try:
-                result = self._inner.complete(params)
-            except Exception as e:
-                try:
-                    span.set_status(Status(StatusCode.ERROR, str(e)))
-                except Exception:
-                    pass
-                raise
+        try:
+            result = self._inner.complete(params)
+        except BaseException as error:
+            self._set_error(span, error)
+            self._end_span(
+                manager, (type(error), error, error.__traceback__))
+            raise
 
+        if span is not None:
             try:
+                from opentelemetry.trace import Status, StatusCode
                 self._record_output(span, result)
                 span.set_status(Status(StatusCode.OK))
-            except Exception:
+            except BaseException:
                 pass
-            return result
+        self._end_span(manager)
+        return result
+
+    def complete_stream(self, params, on_chunk):
+        manager, span = self._start_span()
+        if span is not None:
+            try:
+                self._record_input(span, params)
+            except BaseException:
+                pass
+
+        chunks = []
+
+        def traced_chunk(chunk):
+            try:
+                chunks.append(chunk)
+            except BaseException:
+                pass
+            if span is not None:
+                try:
+                    span.add_event("llm.token", {"chunk": chunk})
+                except BaseException:
+                    pass
+            if on_chunk is not None:
+                on_chunk(chunk)
+
+        try:
+            result = self._inner.complete_stream(params, traced_chunk)
+        except BaseException as error:
+            self._set_error(span, error)
+            self._end_span(
+                manager, (type(error), error, error.__traceback__))
+            raise
+
+        if span is not None:
+            try:
+                from opentelemetry.trace import Status, StatusCode
+                self._record_output(span, result)
+                span.set_attribute(_OI_OUTPUT_VALUE, "".join(chunks))
+                span.set_status(Status(StatusCode.OK))
+            except BaseException:
+                pass
+        self._end_span(manager)
+        return result
 
     def _record_input(self, span, params) -> None:
         span.set_attribute(_OI_SPAN_KIND, "LLM")

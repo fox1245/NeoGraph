@@ -70,6 +70,8 @@ class NEOGRAPH_API CompletionRequest {
  *
  * This is a separate derived interface: Provider's object layout and vtable
  * are unchanged, and existing Provider subclasses require no source changes.
+ * The final methods below are stable adapters for existing callers. New direct
+ * calls should prefer invoke_request() so transport mode remains explicit.
  */
 class NEOGRAPH_API CompletionProvider : public Provider {
   public:
@@ -78,25 +80,20 @@ class NEOGRAPH_API CompletionProvider : public Provider {
     asio::awaitable<ChatCompletion>
     invoke_request(CompletionRequest request);
 
-    [[deprecated("use invoke_request(CompletionRequest::collect(...))")]]
     ChatCompletion complete(const CompletionParams& params) final override;
 
-    [[deprecated("use invoke_request(CompletionRequest::collect(...))")]]
     asio::awaitable<ChatCompletion>
     complete_async(const CompletionParams& params) final override;
 
-    [[deprecated("use invoke_request(CompletionRequest::stream(...))")]]
     ChatCompletion complete_stream(
         const CompletionParams& params,
         const StreamCallback& on_chunk) final override;
 
-    [[deprecated("use invoke_request(CompletionRequest::stream(...))")]]
     asio::awaitable<ChatCompletion>
     complete_stream_async(
         const CompletionParams& params,
         const StreamCallback& on_chunk) final override;
 
-    [[deprecated("use invoke_request() with an explicit CompletionRequest")]]
     asio::awaitable<ChatCompletion>
     invoke(const CompletionParams& params,
            StreamCallback on_chunk = nullptr) final override;
