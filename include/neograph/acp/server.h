@@ -41,6 +41,7 @@
 namespace neograph::acp {
 
 class ACPServer;
+struct ACPServerTestAccess;
 
 /**
  * @brief Map between ACP `ContentBlock[]` and the engine's channels.
@@ -284,6 +285,13 @@ class NEOGRAPH_API ACPServer {
                                     = std::chrono::seconds(30));
 
   private:
+    friend struct ACPServerTestAccess;
+
+    // Defined only in test builds. Kept private so the deterministic thread
+    // failure seams are not part of the production ACP API.
+    void fail_next_worker_launch_for_testing();
+    void fail_next_handle_message_for_testing();
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
