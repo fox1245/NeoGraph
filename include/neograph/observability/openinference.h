@@ -160,10 +160,11 @@ class NEOGRAPH_API OpenInferenceProvider : public Provider {
 public:
     /// @param inner         Provider to delegate to.
     /// @param tracer        Tracer for span emission. Must outlive `*this`.
-    /// @param parent_lookup Legacy raw-parent callback. It is invoked for
-    ///                      compatibility, but its unleased pointer is not
-    ///                      attached because concurrent close could invalidate
-    ///                      it. Use the session overload for parent attachment.
+    /// @param parent_lookup Optional callback returning the parent span. The
+    ///                      caller must keep that span alive until this tracer's
+    ///                      `start_span` returns. Do not bind `current_parent()`
+    ///                      when close may run concurrently; use the session
+    ///                      overload below for teardown-safe parent attachment.
     /// @param span_name     Span name for each LLM call (default "llm.complete").
     OpenInferenceProvider(std::shared_ptr<Provider> inner,
                           Tracer& tracer,

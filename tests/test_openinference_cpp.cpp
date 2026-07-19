@@ -334,6 +334,61 @@ public:
     obs::OpenInferenceTracerSession* session = nullptr;
 };
 
+struct BlockingDestructionState {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool child_start_entered = false;
+    bool release_child_start = false;
+    bool root_destructor_entered = false;
+    bool release_root_destructor = false;
+};
+
+class BlockingDestructorSpan : public obs::Span {
+public:
+    BlockingDestructorSpan(std::shared_ptr<BlockingDestructionState> state,
+                           bool block_destructor)
+        : state_(std::move(state)), block_destructor_(block_destructor) {}
+
+    ~BlockingDestructorSpan() override {
+        if (!block_destructor_) return;
+        std::unique_lock lock(state_->mu);
+        state_->root_destructor_entered = true;
+        state_->cv.notify_all();
+        state_->cv.wait(lock, [&] { return state_->release_root_destructor; });
+    }
+
+    void set_attribute(std::string_view, std::string_view) override {}
+    void set_attribute(std::string_view, int64_t) override {}
+    void set_attribute(std::string_view, double) override {}
+    void set_attribute_bool(std::string_view, bool) override {}
+    void add_event(std::string_view, std::string_view) override {}
+    void set_status_ok() override {}
+    void set_status_error(std::string_view) override {}
+    void end() override {}
+
+private:
+    std::shared_ptr<BlockingDestructionState> state_;
+    bool block_destructor_;
+};
+
+class BlockingWrapperDestructionTracer : public obs::Tracer {
+public:
+    std::unique_ptr<obs::Span> start_span(std::string_view name,
+                                          obs::Span*) override {
+        if (name == "llm.complete") {
+            std::unique_lock lock(state->mu);
+            state->child_start_entered = true;
+            state->cv.notify_all();
+            state->cv.wait(lock, [&] { return state->release_child_start; });
+        }
+        return std::make_unique<BlockingDestructorSpan>(
+            state, name == "graph.run");
+    }
+
+    std::shared_ptr<BlockingDestructionState> state =
+        std::make_shared<BlockingDestructionState>();
+};
+
 class NonStdAsyncProvider : public Provider {
 public:
     ChatCompletion complete(const CompletionParams&) override { return {}; }
@@ -706,6 +761,22 @@ TEST(OpenInferenceCpp, ParentLookupFailureDoesNotBlockInnerCall) {
     EXPECT_EQ(spans[0]->end_calls, 1);
 }
 
+TEST(OpenInferenceCpp, LegacyParentLookupPreservesCallerOwnedHierarchy) {
+    InMemoryTracer tracer;
+    auto parent = tracer.start_span("caller.parent", nullptr);
+    auto inner = std::make_shared<FakeProvider>();
+    obs::OpenInferenceProvider wrapped(
+        inner, tracer, [&]() -> obs::Span* { return parent.get(); });
+
+    auto result = wrapped.complete({});
+
+    EXPECT_EQ(result.message.content, "ok");
+    auto spans = tracer.snapshot();
+    ASSERT_EQ(spans.size(), 2u);
+    EXPECT_EQ(spans[1]->parent, parent.get());
+    EXPECT_EQ(spans[1]->end_calls, 1);
+}
+
 TEST(OpenInferenceCpp, ParentLeaseSurvivesConcurrentCloseThroughStartSpan) {
     using namespace std::chrono_literals;
 
@@ -755,6 +826,50 @@ TEST(OpenInferenceCpp, ReentrantCloseFromStartSpanDoesNotDeadlock) {
     ASSERT_EQ(completion.wait_for(2s), std::future_status::ready);
     EXPECT_EQ(completion.get().message.content, "ok");
     EXPECT_EQ(session.current_parent(), nullptr);
+}
+
+TEST(OpenInferenceCpp, CloseWaitsForFinalSpanWrapperDestruction) {
+    using namespace std::chrono_literals;
+
+    BlockingWrapperDestructionTracer tracer;
+    auto session = obs::openinference_tracer(tracer);
+    auto inner = std::make_shared<FakeProvider>();
+    obs::OpenInferenceProvider wrapped(inner, tracer, session);
+
+    auto completion = std::async(std::launch::async, [&] {
+        return wrapped.complete({});
+    });
+    {
+        std::unique_lock lock(tracer.state->mu);
+        ASSERT_TRUE(tracer.state->cv.wait_for(lock, 2s, [&] {
+            return tracer.state->child_start_entered;
+        }));
+    }
+
+    auto closing = std::async(std::launch::async, [&] { session.close(); });
+    {
+        std::lock_guard lock(tracer.state->mu);
+        tracer.state->release_child_start = true;
+    }
+    tracer.state->cv.notify_all();
+
+    {
+        std::unique_lock lock(tracer.state->mu);
+        ASSERT_TRUE(tracer.state->cv.wait_for(lock, 2s, [&] {
+            return tracer.state->root_destructor_entered;
+        }));
+    }
+    EXPECT_EQ(closing.wait_for(50ms), std::future_status::timeout);
+
+    {
+        std::lock_guard lock(tracer.state->mu);
+        tracer.state->release_root_destructor = true;
+    }
+    tracer.state->cv.notify_all();
+
+    EXPECT_EQ(closing.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(completion.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(completion.get().message.content, "ok");
 }
 
 TEST(OpenInferenceCpp, StartSpanFailureDoesNotBlockInnerCall) {

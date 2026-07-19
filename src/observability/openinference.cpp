@@ -152,6 +152,8 @@ struct OpenInferenceTracerSession::Impl {
             if (batch.root) {
                 try { batch.root->end(); } catch (...) {}
             }
+            batch.spans.clear();
+            batch.root.reset();
             if (batch.closes_state) {
                 std::lock_guard<std::mutex> lock(mu);
                 finalized = true;
@@ -678,13 +680,11 @@ std::shared_ptr<ProviderSpanState> start_provider_span(
         if (child_span_starter) {
             span = child_span_starter(*tracer, span_name);
         } else {
-            // A raw parent callback cannot carry a lifetime lease. Invoke it
-            // for compatibility, but open a root span rather than racing a
-            // concurrent session close with a dangling parent pointer.
+            Span* parent = nullptr;
             if (parent_lookup) {
-                try { (void)parent_lookup(); } catch (...) {}
+                try { parent = parent_lookup(); } catch (...) {}
             }
-            span = tracer->start_span(span_name, nullptr);
+            span = tracer->start_span(span_name, parent);
         }
     } catch (...) {
         return {};
