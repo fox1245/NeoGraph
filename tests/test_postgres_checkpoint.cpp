@@ -16,8 +16,11 @@
 #include <libpq-fe.h>
 
 #include <asio/co_spawn.hpp>
+#include <asio/bind_cancellation_slot.hpp>
+#include <asio/cancellation_signal.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
+#include <asio/steady_timer.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -30,7 +33,87 @@
 using namespace neograph::graph;
 using json = neograph::json;
 
+namespace neograph::graph::test_access {
+
+class PostgresCheckpointStoreTestAccess {
+public:
+    static std::unique_ptr<PostgresCheckpointStore> make_pool(size_t pool_size) {
+        return std::unique_ptr<PostgresCheckpointStore>(
+            new PostgresCheckpointStore(
+                PostgresCheckpointStore::PoolOnlyTag{}, pool_size));
+    }
+
+    static size_t acquire(PostgresCheckpointStore& store) {
+        return store.acquire_slot();
+    }
+
+    static asio::awaitable<size_t> acquire_async(
+        PostgresCheckpointStore& store) {
+        co_return co_await store.acquire_slot_async();
+    }
+
+    static void release(PostgresCheckpointStore& store, size_t idx) {
+        store.release_slot(idx);
+    }
+
+    static size_t free_count(PostgresCheckpointStore& store) {
+        std::lock_guard lock(store.pool_mutex_);
+        return store.free_.size();
+    }
+
+    static size_t waiter_count(PostgresCheckpointStore& store) {
+        std::lock_guard lock(store.pool_mutex_);
+        return store.async_waiters_.size();
+    }
+};
+
+} // namespace neograph::graph::test_access
+
 namespace {
+
+using PoolTestAccess = test_access::PostgresCheckpointStoreTestAccess;
+
+struct TestPgConn {
+    PGconn* raw = nullptr;
+    ~TestPgConn() { if (raw) PQfinish(raw); }
+};
+
+struct TestPgResult {
+    PGresult* raw = nullptr;
+    ~TestPgResult() { if (raw) PQclear(raw); }
+};
+
+std::optional<int> wait_for_blocked_checkpoint_lock(PGconn* observer) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        TestPgResult result{PQexec(observer,
+            "SELECT pid FROM pg_locks "
+            "WHERE relation = 'neograph_checkpoints'::regclass "
+            "  AND NOT granted LIMIT 1")};
+        if (result.raw && PQresultStatus(result.raw) == PGRES_TUPLES_OK
+            && PQntuples(result.raw) == 1) {
+            return std::stoi(PQgetvalue(result.raw, 0, 0));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return std::nullopt;
+}
+
+bool wait_for_backend_exit(PGconn* observer, int pid) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    std::string sql = "SELECT NOT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = "
+                    + std::to_string(pid) + ")";
+    while (std::chrono::steady_clock::now() < deadline) {
+        TestPgResult result{PQexec(observer, sql.c_str())};
+        if (result.raw && PQresultStatus(result.raw) == PGRES_TUPLES_OK
+            && PQntuples(result.raw) == 1
+            && std::string(PQgetvalue(result.raw, 0, 0)) == "t") {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return false;
+}
 
 const char* pg_url() {
     const char* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
@@ -86,6 +169,87 @@ protected:
 };
 
 } // namespace
+
+TEST(PostgresCheckpointPoolTest, AsyncWaitDoesNotBlockIoContext) {
+    auto pool = PoolTestAccess::make_pool(/*pool_size=*/1);
+    const size_t occupied = PoolTestAccess::acquire(*pool);
+
+    asio::io_context io;
+    std::optional<std::chrono::milliseconds> heartbeat_elapsed;
+    std::exception_ptr waiter_error;
+    bool waiter_done = false;
+    auto started = std::chrono::steady_clock::now();
+
+    asio::steady_timer heartbeat(io, std::chrono::milliseconds(20));
+    heartbeat.async_wait([&](const asio::error_code& ec) {
+        if (!ec) {
+            heartbeat_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started);
+        }
+    });
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> {
+            size_t idx = co_await PoolTestAccess::acquire_async(*pool);
+            PoolTestAccess::release(*pool, idx);
+        },
+        [&](std::exception_ptr error) {
+            waiter_error = error;
+            waiter_done = true;
+        });
+
+    // A separate thread bounds the pre-fix blocking acquire. The heartbeat
+    // must run well before this releases the only slot.
+    std::thread releaser([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        PoolTestAccess::release(*pool, occupied);
+    });
+
+    io.run();
+    releaser.join();
+
+    EXPECT_EQ(waiter_error, nullptr);
+    EXPECT_TRUE(waiter_done);
+    ASSERT_TRUE(heartbeat_elapsed.has_value());
+    EXPECT_LT(*heartbeat_elapsed, std::chrono::milliseconds(150))
+        << "an async pool waiter blocked the io_context heartbeat for "
+        << heartbeat_elapsed->count() << "ms";
+    EXPECT_EQ(PoolTestAccess::free_count(*pool), 1u);
+}
+
+TEST(PostgresCheckpointPoolTest, CancelledWaiterIsRemoved) {
+    auto pool = PoolTestAccess::make_pool(/*pool_size=*/1);
+    const size_t occupied = PoolTestAccess::acquire(*pool);
+
+    asio::io_context io;
+    asio::cancellation_signal cancel;
+    std::exception_ptr waiter_error;
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> {
+            (void)co_await PoolTestAccess::acquire_async(*pool);
+        },
+        asio::bind_cancellation_slot(cancel.slot(),
+            [&](std::exception_ptr error) { waiter_error = error; }));
+    asio::steady_timer cancel_timer(io, std::chrono::milliseconds(20));
+    cancel_timer.async_wait([&](const asio::error_code& ec) {
+        if (!ec) cancel.emit(asio::cancellation_type::all);
+    });
+
+    io.run();
+
+    ASSERT_NE(waiter_error, nullptr);
+    try {
+        std::rethrow_exception(waiter_error);
+    } catch (const asio::system_error& error) {
+        EXPECT_EQ(error.code(), asio::error::operation_aborted);
+    } catch (...) {
+        FAIL() << "cancelled pool waiter returned an unexpected exception";
+    }
+    EXPECT_EQ(PoolTestAccess::waiter_count(*pool), 0u);
+
+    PoolTestAccess::release(*pool, occupied);
+    EXPECT_EQ(PoolTestAccess::free_count(*pool), 1u)
+        << "a cancelled waiter retained or lost the released pool slot";
+}
 
 TEST_F(PostgresCheckpointTest, SaveAndLoadLatestRoundTrip) {
     auto cp = make_state_cp("t", 0, {{"x", {42, 1}}, {"msg", {"hi", 2}}});
@@ -554,3 +718,116 @@ TEST_F(PostgresCheckpointTest, AsyncSavesOverlapAcrossPoolSlots) {
         << "ms — likely serialising instead of overlapping";
 }
 
+TEST_F(PostgresCheckpointTest, SqlErrorsLeavePoolConnectionReusable) {
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_THROW((void)store->list("sql-error", -1), std::runtime_error);
+    }
+
+    asio::io_context io;
+    std::exception_ptr async_error;
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> {
+            (void)co_await store->list_async("sql-error", -1);
+        },
+        [&](std::exception_ptr error) { async_error = error; });
+    io.run();
+
+    EXPECT_NE(async_error, nullptr);
+    EXPECT_NO_THROW((void)store->load_latest("after-sql-error"));
+}
+
+TEST_F(PostgresCheckpointTest, CancelledAsyncQueryDiscardsConnectionWithoutRetry) {
+    store = std::make_unique<PostgresCheckpointStore>(pg_url(), /*pool_size=*/1);
+    store->drop_schema();
+    auto cp = make_state_cp("cancel-write", 0, {{"x", {1, 1}}});
+
+    TestPgConn locker{PQconnectdb(pg_url())};
+    ASSERT_EQ(PQstatus(locker.raw), CONNECTION_OK) << PQerrorMessage(locker.raw);
+    {
+        TestPgResult result{PQexec(locker.raw,
+            "DROP SEQUENCE IF EXISTS neograph_cancel_attempt_seq CASCADE;"
+            "CREATE SEQUENCE neograph_cancel_attempt_seq;"
+            "CREATE OR REPLACE FUNCTION neograph_count_cancel_attempt() "
+            "RETURNS trigger LANGUAGE plpgsql AS $$"
+            "BEGIN PERFORM nextval('neograph_cancel_attempt_seq'); RETURN NEW; END"
+            "$$;"
+            "CREATE TRIGGER neograph_count_cancel_attempt "
+            "BEFORE INSERT OR UPDATE ON neograph_checkpoints "
+            "FOR EACH ROW EXECUTE FUNCTION neograph_count_cancel_attempt()")};
+        ASSERT_NE(result.raw, nullptr);
+        ASSERT_EQ(PQresultStatus(result.raw), PGRES_COMMAND_OK)
+            << PQresultErrorMessage(result.raw);
+    }
+    {
+        TestPgResult result{PQexec(locker.raw,
+            "BEGIN; LOCK TABLE neograph_checkpoints IN ACCESS EXCLUSIVE MODE")};
+        ASSERT_NE(result.raw, nullptr);
+        ASSERT_EQ(PQresultStatus(result.raw), PGRES_COMMAND_OK)
+            << PQresultErrorMessage(result.raw);
+    }
+    TestPgConn observer{PQconnectdb(pg_url())};
+    ASSERT_EQ(PQstatus(observer.raw), CONNECTION_OK) << PQerrorMessage(observer.raw);
+
+    asio::io_context io;
+    asio::cancellation_signal cancel;
+    std::exception_ptr save_error;
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> { co_await store->save_async(cp); },
+        asio::bind_cancellation_slot(cancel.slot(),
+            [&](std::exception_ptr error) { save_error = error; }));
+    std::thread io_thread([&] { io.run(); });
+
+    auto blocked_pid = wait_for_blocked_checkpoint_lock(observer.raw);
+    if (!blocked_pid) {
+        TestPgResult result{PQexec(locker.raw, "ROLLBACK")};
+        io_thread.join();
+        FAIL() << "async save never reached the PostgreSQL table lock";
+    }
+
+    asio::post(io, [&] { cancel.emit(asio::cancellation_type::all); });
+    if (!wait_for_backend_exit(observer.raw, *blocked_pid)) {
+        TestPgResult result{PQexec(locker.raw, "ROLLBACK")};
+        io_thread.join();
+        FAIL() << "cancelled async save did not discard its PostgreSQL backend";
+    }
+    {
+        TestPgResult result{PQexec(locker.raw, "COMMIT")};
+    }
+    io_thread.join();
+
+    ASSERT_NE(save_error, nullptr);
+    try {
+        std::rethrow_exception(save_error);
+    } catch (const asio::system_error& error) {
+        EXPECT_EQ(error.code(), asio::error::operation_aborted);
+    } catch (...) {
+        FAIL() << "cancelled async query returned an unexpected exception";
+    }
+    EXPECT_EQ(store->reconnect_count(), 1u);
+
+    int attempts = -1;
+    {
+        TestPgResult result{PQexec(observer.raw,
+            "SELECT CASE WHEN is_called THEN last_value ELSE 0 END "
+            "FROM neograph_cancel_attempt_seq")};
+        ASSERT_NE(result.raw, nullptr);
+        ASSERT_EQ(PQresultStatus(result.raw), PGRES_TUPLES_OK)
+            << PQresultErrorMessage(result.raw);
+        attempts = std::stoi(PQgetvalue(result.raw, 0, 0));
+    }
+    EXPECT_EQ(attempts, 0)
+        << "a cancelled write reached PostgreSQL after its connection was discarded";
+    EXPECT_FALSE(store->load_by_id(cp.id).has_value())
+        << "a cancelled write was retried on the replacement connection";
+
+    {
+        TestPgResult result{PQexec(observer.raw,
+            "DROP TRIGGER IF EXISTS neograph_count_cancel_attempt "
+            "ON neograph_checkpoints;"
+            "DROP FUNCTION IF EXISTS neograph_count_cancel_attempt();"
+            "DROP SEQUENCE IF EXISTS neograph_cancel_attempt_seq")};
+        ASSERT_NE(result.raw, nullptr);
+        ASSERT_EQ(PQresultStatus(result.raw), PGRES_COMMAND_OK)
+            << PQresultErrorMessage(result.raw);
+    }
+}

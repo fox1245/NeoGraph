@@ -68,6 +68,7 @@
 #include <neograph/graph/checkpoint.h>
 #include <atomic>
 #include <condition_variable>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -79,6 +80,10 @@
 struct pg_conn;
 
 namespace neograph::graph {
+
+namespace test_access {
+class PostgresCheckpointStoreTestAccess;
+}
 
 /// RAII wrapper around a libpq PGconn. Owns the connection; closes
 /// via PQfinish in the destructor. Non-copyable, non-movable to match
@@ -115,7 +120,7 @@ public:
                                       size_t pool_size = 8);
 
     /// Number of times a pool slot's connection was replaced after a
-    /// broken-connection detection. Cumulative across the whole store;
+    /// broken connection or an interrupted async exchange. Cumulative;
     /// useful for monitoring (e.g. Prometheus gauge) and for tests that
     /// want to assert the retry path fired.
     size_t reconnect_count() const { return reconnect_count_; }
@@ -190,6 +195,11 @@ public:
     size_t blob_count();
 
 private:
+    // Constructs only the slot scheduler for deterministic pool tests.
+    // The friend test helper never calls a method that dereferences pool_.
+    struct PoolOnlyTag {};
+    explicit PostgresCheckpointStore(PoolOnlyTag, size_t pool_size);
+
     void ensure_schema();
 
     /// Execute a closure with the connection mutex held. Centralises
@@ -208,7 +218,9 @@ private:
     /// Acquire a free pool slot index (blocks if none available).
     /// MUST be paired with `release_slot`.
     size_t acquire_slot();
+    asio::awaitable<size_t> acquire_slot_async();
     void release_slot(size_t idx);
+    void rebuild_slot(size_t idx);
 
     /// Original connection string, retained so individual pool slots
     /// can be rebuilt on demand after a broken-connection detection.
@@ -219,15 +231,21 @@ private:
     std::vector<std::unique_ptr<PgConn>> pool_;
 
     /// Free slot indices, drained on acquire and refilled on release.
-    /// Guarded by `pool_mutex_`; callers wait on `pool_cv_` when empty.
+    /// Guarded by `pool_mutex_`; sync callers wait on `pool_cv_` while
+    /// async callers queue in `async_waiters_` without blocking an executor.
     std::queue<size_t> free_;
     std::mutex pool_mutex_;
     std::condition_variable pool_cv_;
 
-    /// Cumulative count of broken-connection-driven slot replacements.
+    struct AsyncSlotWaiter;
+    std::deque<std::shared_ptr<AsyncSlotWaiter>> async_waiters_;
+
+    /// Cumulative count of connection slot replacements.
     /// Atomic so monitoring threads can read without taking the pool
     /// mutex.
     std::atomic<size_t> reconnect_count_{0};
+
+    friend class test_access::PostgresCheckpointStoreTestAccess;
 };
 
 } // namespace neograph::graph
