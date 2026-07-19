@@ -259,6 +259,81 @@ public:
     bool release_node_start = false;
 };
 
+struct ParentLifetimeState {
+    std::atomic<bool> alive{true};
+    std::atomic<bool> ended{false};
+};
+
+class ParentLifetimeSpan : public obs::Span {
+public:
+    explicit ParentLifetimeSpan(std::shared_ptr<ParentLifetimeState> state)
+        : state_(std::move(state)) {}
+    ~ParentLifetimeSpan() override { state_->alive.store(false); }
+
+    void set_attribute(std::string_view, std::string_view) override {}
+    void set_attribute(std::string_view, int64_t) override {}
+    void set_attribute(std::string_view, double) override {}
+    void set_attribute_bool(std::string_view, bool) override {}
+    void add_event(std::string_view, std::string_view) override {}
+    void set_status_ok() override {}
+    void set_status_error(std::string_view) override {}
+    void end() override { state_->ended.store(true); }
+
+private:
+    std::shared_ptr<ParentLifetimeState> state_;
+};
+
+class BlockingParentLifetimeTracer : public obs::Tracer {
+public:
+    std::unique_ptr<obs::Span> start_span(std::string_view name,
+                                          obs::Span* parent) override {
+        std::shared_ptr<ParentLifetimeState> parent_state;
+        {
+            std::lock_guard lock(mu);
+            if (parent) parent_state = state_by_span.at(parent);
+        }
+
+        if (name == "llm.complete") {
+            std::unique_lock lock(window_mu);
+            child_start_entered = true;
+            cv.notify_all();
+            cv.wait(lock, [&] { return release_child_start; });
+            parent_usable_during_start = parent_state
+                && parent_state->alive.load() && !parent_state->ended.load();
+        }
+
+        auto state = std::make_shared<ParentLifetimeState>();
+        auto span = std::make_unique<ParentLifetimeSpan>(state);
+        {
+            std::lock_guard lock(mu);
+            state_by_span.emplace(span.get(), std::move(state));
+        }
+        return span;
+    }
+
+    std::mutex window_mu;
+    std::condition_variable cv;
+    bool child_start_entered = false;
+    bool release_child_start = false;
+    bool parent_usable_during_start = false;
+
+private:
+    std::mutex mu;
+    std::unordered_map<obs::Span*, std::shared_ptr<ParentLifetimeState>>
+        state_by_span;
+};
+
+class ReentrantCloseTracer : public InMemoryTracer {
+public:
+    std::unique_ptr<obs::Span> start_span(std::string_view name,
+                                          obs::Span* parent) override {
+        if (name == "llm.complete" && session) session->close();
+        return InMemoryTracer::start_span(name, parent);
+    }
+
+    obs::OpenInferenceTracerSession* session = nullptr;
+};
+
 class NonStdAsyncProvider : public Provider {
 public:
     ChatCompletion complete(const CompletionParams&) override { return {}; }
@@ -321,6 +396,7 @@ TEST(OpenInferenceCpp, TracerOpensChainRootAndPerNodeChild) {
     EXPECT_EQ(spans[0]->name, "graph.run");
     EXPECT_EQ(spans[0]->attrs_str["openinference.span.kind"], "CHAIN");
     EXPECT_TRUE(spans[0]->ended);
+    EXPECT_EQ(spans[0]->end_calls, 1);
 
     // Node child: name "node.researcher", parent = root, CHAIN
     EXPECT_EQ(spans[1]->name, "node.researcher");
@@ -331,6 +407,7 @@ TEST(OpenInferenceCpp, TracerOpensChainRootAndPerNodeChild) {
     EXPECT_EQ(spans[1]->attrs_str["output.mime_type"], "application/json");
     EXPECT_EQ(spans[1]->status, "ok");
     EXPECT_TRUE(spans[1]->ended);
+    EXPECT_EQ(spans[1]->end_calls, 1);
 
     // input.value JSON contains node name; output.value JSON contains the data.
     auto in_json = neograph::json::parse(spans[1]->attrs_str["input.value"]);
@@ -360,11 +437,13 @@ TEST(OpenInferenceCpp, TracerSurfacesErrorAndInterrupt) {
     EXPECT_EQ(spans[1]->status_message, "kaboom");
     EXPECT_EQ(spans[1]->attrs_str["neograph.error"], "kaboom");
     EXPECT_TRUE(spans[1]->ended);
+    EXPECT_EQ(spans[1]->end_calls, 1);
 
     // b: INTERRUPT
     EXPECT_EQ(spans[2]->name, "node.b");
     EXPECT_TRUE(spans[2]->attrs_bool["neograph.interrupted"]);
     EXPECT_TRUE(spans[2]->ended);
+    EXPECT_EQ(spans[2]->end_calls, 1);
 }
 
 TEST(OpenInferenceCpp, TracerRecordsLLMTokenAsSpanEvent) {
@@ -625,6 +704,57 @@ TEST(OpenInferenceCpp, ParentLookupFailureDoesNotBlockInnerCall) {
     EXPECT_EQ(spans[0]->parent, nullptr);
     EXPECT_TRUE(spans[0]->ended);
     EXPECT_EQ(spans[0]->end_calls, 1);
+}
+
+TEST(OpenInferenceCpp, ParentLeaseSurvivesConcurrentCloseThroughStartSpan) {
+    using namespace std::chrono_literals;
+
+    BlockingParentLifetimeTracer tracer;
+    auto session = obs::openinference_tracer(tracer);
+    auto inner = std::make_shared<FakeProvider>();
+    obs::OpenInferenceProvider wrapped(inner, tracer, session);
+
+    auto completion = std::async(std::launch::async, [&] {
+        return wrapped.complete({});
+    });
+    {
+        std::unique_lock lock(tracer.window_mu);
+        ASSERT_TRUE(tracer.cv.wait_for(lock, 2s, [&] {
+            return tracer.child_start_entered;
+        }));
+    }
+
+    auto closing = std::async(std::launch::async, [&] { session.close(); });
+    EXPECT_EQ(closing.wait_for(50ms), std::future_status::timeout);
+
+    {
+        std::lock_guard lock(tracer.window_mu);
+        tracer.release_child_start = true;
+    }
+    tracer.cv.notify_all();
+
+    EXPECT_EQ(completion.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(closing.wait_for(2s), std::future_status::ready);
+    EXPECT_TRUE(tracer.parent_usable_during_start);
+    EXPECT_EQ(completion.get().message.content, "ok");
+}
+
+TEST(OpenInferenceCpp, ReentrantCloseFromStartSpanDoesNotDeadlock) {
+    using namespace std::chrono_literals;
+
+    ReentrantCloseTracer tracer;
+    auto session = obs::openinference_tracer(tracer);
+    tracer.session = &session;
+    auto inner = std::make_shared<FakeProvider>();
+    obs::OpenInferenceProvider wrapped(inner, tracer, session);
+
+    auto completion = std::async(std::launch::async, [&] {
+        return wrapped.complete({});
+    });
+
+    ASSERT_EQ(completion.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(completion.get().message.content, "ok");
+    EXPECT_EQ(session.current_parent(), nullptr);
 }
 
 TEST(OpenInferenceCpp, StartSpanFailureDoesNotBlockInnerCall) {

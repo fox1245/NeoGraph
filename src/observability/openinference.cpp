@@ -12,11 +12,14 @@
 #include <neograph/json.h>
 
 #include <algorithm>
+#include <condition_variable>
 #include <exception>
+#include <list>
 #include <map>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace neograph::observability {
@@ -73,62 +76,207 @@ std::string node_output_blob(const std::string& node_name, const json& data) {
 
 struct OpenInferenceTracerSession::Impl {
     struct State {
+        using SpanList = std::list<std::unique_ptr<Span>>;
+
+        struct FinalizeBatch {
+            SpanList spans;
+            std::unique_ptr<Span> root;
+            bool closes_state = false;
+        };
+
         Tracer* tracer = nullptr;
         std::string root_name;
         std::string node_span_prefix;
         std::unique_ptr<Span> root_span;
         bool closed = false;
+        bool finalizing = false;
+        bool finalized = false;
+        size_t in_flight = 0;
+        std::thread::id finalizer_thread;
 
-        // Serializes complete callback executions with close(). A copied
-        // callback holds only a weak_ptr, so it becomes a no-op after the
-        // session state is destroyed.
-        mutable std::mutex callback_mu;
-        std::map<std::string, std::vector<std::unique_ptr<Span>>> pending;
+        // Session operations hold a gate, not this mutex, while invoking
+        // arbitrary tracer code. close() waits for ordinary concurrent
+        // operations, while a re-entrant close is finalized by the last
+        // operation leaving the gate.
+        mutable std::mutex mu;
+        std::condition_variable cv;
+        std::map<std::thread::id, size_t> operation_owners;
+        std::map<std::string, SpanList> pending;
+        SpanList retired;
         std::vector<Span*> active_nodes;
 
         // Best-effort current parent for callers without thread-local span
-        // context. Protected by callback_mu because ending a span invalidates
+        // context. Protected by mu because ending a span invalidates
         // this raw pointer.
         Span* active_node = nullptr;
 
+        bool acquire_operation(Span** parent = nullptr) {
+            std::lock_guard<std::mutex> lock(mu);
+            if (closed) return false;
+            try {
+                ++operation_owners[std::this_thread::get_id()];
+            } catch (...) {
+                return false;
+            }
+            ++in_flight;
+            if (parent) {
+                *parent = active_node ? active_node : root_span.get();
+            }
+            return true;
+        }
+
+        FinalizeBatch collect_locked(bool closing) {
+            FinalizeBatch batch;
+            batch.spans.splice(batch.spans.end(), retired);
+            if (closing) {
+                for (auto& [node, stack] : pending) {
+                    batch.spans.splice(batch.spans.end(), stack);
+                }
+                pending.clear();
+                active_nodes.clear();
+                active_node = nullptr;
+                batch.root = std::move(root_span);
+                batch.closes_state = true;
+                finalizing = true;
+                finalizer_thread = std::this_thread::get_id();
+            }
+            return batch;
+        }
+
+        void run_batch(FinalizeBatch batch) noexcept {
+            for (auto& span : batch.spans) {
+                if (span) {
+                    try { span->end(); } catch (...) {}
+                }
+            }
+            if (batch.root) {
+                try { batch.root->end(); } catch (...) {}
+            }
+            if (batch.closes_state) {
+                std::lock_guard<std::mutex> lock(mu);
+                finalized = true;
+                finalizing = false;
+                finalizer_thread = {};
+                cv.notify_all();
+            }
+        }
+
+        void release_operation() noexcept {
+            FinalizeBatch batch;
+            {
+                std::lock_guard<std::mutex> lock(mu);
+                const auto owner = std::this_thread::get_id();
+                auto it = operation_owners.find(owner);
+                if (it != operation_owners.end()) {
+                    if (--it->second == 0) operation_owners.erase(it);
+                }
+                if (in_flight > 0) --in_flight;
+                if (in_flight == 0) {
+                    if (closed && !finalizing && !finalized) {
+                        batch = collect_locked(true);
+                    } else if (!closed && !retired.empty()) {
+                        batch = collect_locked(false);
+                    }
+                }
+            }
+            run_batch(std::move(batch));
+        }
+
+        void close() {
+            FinalizeBatch batch;
+            {
+                std::unique_lock<std::mutex> lock(mu);
+                if (finalized) return;
+                closed = true;
+
+                const auto caller = std::this_thread::get_id();
+                const bool reentrant = operation_owners.contains(caller);
+                if (finalizing) {
+                    if (reentrant || finalizer_thread == caller) return;
+                    cv.wait(lock, [&] { return finalized; });
+                    return;
+                }
+                if (in_flight == 0) {
+                    batch = collect_locked(true);
+                } else if (reentrant) {
+                    return;
+                } else {
+                    cv.wait(lock, [&] { return finalized; });
+                    return;
+                }
+            }
+            run_batch(std::move(batch));
+        }
+
         void add_node_span(const std::string& node,
                            std::unique_ptr<Span> span) noexcept {
+            std::unique_ptr<Span> failed;
             try {
+                std::lock_guard<std::mutex> lock(mu);
                 auto& stack = pending[node];
                 stack.push_back(std::move(span));
                 Span* current = stack.back().get();
                 try {
                     active_nodes.push_back(current);
                 } catch (...) {
-                    span = std::move(stack.back());
-                    stack.pop_back();
-                    if (span) {
-                        try { span->end(); } catch (...) {}
-                    }
+                    retired.splice(retired.end(), stack, std::prev(stack.end()));
                     return;
                 }
                 active_node = current;
             } catch (...) {
-                if (span) {
-                    try { span->end(); } catch (...) {}
-                }
+                failed = std::move(span);
+            }
+            if (failed) {
+                try { failed->end(); } catch (...) {}
             }
         }
 
-        std::unique_ptr<Span> take_node_span(const std::string& node) {
+        Span* retire_node_span(const std::string& node) {
+            std::lock_guard<std::mutex> lock(mu);
             auto it = pending.find(node);
-            if (it == pending.end() || it->second.empty()) return {};
+            if (it == pending.end() || it->second.empty()) return nullptr;
 
-            auto span = std::move(it->second.back());
-            it->second.pop_back();
-            if (!span) return {};
+            Span* span = it->second.back().get();
+            if (!span) return nullptr;
 
             active_nodes.erase(
-                std::remove(active_nodes.begin(), active_nodes.end(), span.get()),
+                std::remove(active_nodes.begin(), active_nodes.end(), span),
                 active_nodes.end());
             active_node = active_nodes.empty() ? nullptr : active_nodes.back();
+            retired.splice(retired.end(), it->second, std::prev(it->second.end()));
             return span;
         }
+
+        Span* token_span(const std::string& node) const noexcept {
+            std::lock_guard<std::mutex> lock(mu);
+            auto it = pending.find(node);
+            if (it == pending.end() || it->second.empty()) return nullptr;
+            return it->second.back().get();
+        }
+
+        Span* current_parent_snapshot() const noexcept {
+            std::lock_guard<std::mutex> lock(mu);
+            if (closed) return nullptr;
+            return active_node ? active_node : root_span.get();
+        }
+    };
+
+    struct Operation {
+        explicit Operation(std::shared_ptr<State> state,
+                           bool capture_parent = false)
+            : state(std::move(state)),
+              parent(nullptr),
+              active(this->state->acquire_operation(
+                  capture_parent ? &parent : nullptr)) {}
+        ~Operation() {
+            if (active) state->release_operation();
+        }
+
+        explicit operator bool() const noexcept { return active; }
+
+        std::shared_ptr<State> state;
+        Span* parent = nullptr;
+        bool active = false;
     };
 
     std::shared_ptr<State> state = std::make_shared<State>();
@@ -158,32 +306,28 @@ void OpenInferenceTracerSession::close() {
     if (!impl_) return;
     auto state = impl_->state;
     if (!state) return;
-
-    std::lock_guard<std::mutex> lock(state->callback_mu);
-    if (state->closed) return;
-    state->closed = true;
-    state->active_node = nullptr;
-    state->active_nodes.clear();
-    for (auto& [node, stack] : state->pending) {
-        while (!stack.empty()) {
-            try { stack.back()->end(); } catch (...) {}
-            stack.pop_back();
-        }
-    }
-    state->pending.clear();
-    if (state->root_span) {
-        try { state->root_span->end(); } catch (...) {}
-        state->root_span.reset();
-    }
+    state->close();
 }
 
 Span* OpenInferenceTracerSession::current_parent() const noexcept {
     if (!impl_) return nullptr;
     auto state = impl_->state;
     if (!state) return nullptr;
-    std::lock_guard<std::mutex> lock(state->callback_mu);
-    if (state->closed) return nullptr;
-    return state->active_node ? state->active_node : state->root_span.get();
+    return state->current_parent_snapshot();
+}
+
+OpenInferenceTracerSession::ChildSpanStarter
+OpenInferenceTracerSession::child_span_starter() const {
+    std::weak_ptr<Impl::State> weak_state;
+    if (impl_) weak_state = impl_->state;
+    return [weak_state](Tracer& tracer, std::string_view name) {
+        auto state = weak_state.lock();
+        if (!state) return tracer.start_span(name, nullptr);
+
+        Impl::Operation operation(state, true);
+        if (!operation) return tracer.start_span(name, nullptr);
+        return tracer.start_span(name, operation.parent);
+    };
 }
 
 OpenInferenceTracerSession openinference_tracer(Tracer& tracer,
@@ -206,8 +350,8 @@ OpenInferenceTracerSession openinference_tracer(Tracer& tracer,
         auto state = weak_state.lock();
         if (!state) return;
 
-        std::lock_guard<std::mutex> callback_lock(state->callback_mu);
-        if (state->closed || !state->tracer) return;
+        OpenInferenceTracerSession::Impl::Operation operation(state);
+        if (!operation || !state->tracer) return;
 
         const std::string& node = ev.node_name;
         try {
@@ -243,7 +387,7 @@ OpenInferenceTracerSession openinference_tracer(Tracer& tracer,
             }
 
             case graph::GraphEvent::Type::NODE_END: {
-                auto span = state->take_node_span(node);
+                Span* span = state->retire_node_span(node);
                 if (!span) break;
                 try {
                     if (ev.data.is_object()) {
@@ -259,17 +403,16 @@ OpenInferenceTracerSession openinference_tracer(Tracer& tracer,
                                 std::string("neograph.") + kv.key(), val);
                         }
                     }
-                    span->set_attribute(kOutputValue,
-                                        node_output_blob(node, ev.data));
+                    span->set_attribute(
+                        kOutputValue, node_output_blob(node, ev.data));
                     span->set_attribute(kOutputMime, "application/json");
                     span->set_status_ok();
                 } catch (...) {}
-                try { span->end(); } catch (...) {}
                 break;
             }
 
             case graph::GraphEvent::Type::ERROR: {
-                auto span = state->take_node_span(node);
+                Span* span = state->retire_node_span(node);
                 if (!span) break;
                 std::string msg = "unknown error";
                 try {
@@ -280,16 +423,14 @@ OpenInferenceTracerSession openinference_tracer(Tracer& tracer,
                     span->set_attribute("neograph.error", msg);
                     span->set_status_error(msg);
                 } catch (...) {}
-                try { span->end(); } catch (...) {}
                 break;
             }
 
             case graph::GraphEvent::Type::INTERRUPT: {
-                auto span = state->take_node_span(node);
+                Span* span = state->retire_node_span(node);
                 if (!span) break;
                 try { span->set_attribute_bool("neograph.interrupted", true); }
                 catch (...) {}
-                try { span->end(); } catch (...) {}
                 break;
             }
 
@@ -299,9 +440,7 @@ OpenInferenceTracerSession openinference_tracer(Tracer& tracer,
                 // timeline view; OTel SDK exporters treat them as
                 // span events (not new spans) so cardinality stays
                 // bounded.
-                auto it = state->pending.find(node);
-                if (it == state->pending.end() || it->second.empty()) break;
-                Span* current = it->second.back().get();
+                Span* current = state->token_span(node);
                 if (!current) break;
                 std::string payload = ev.data.is_string()
                     ? ev.data.get<std::string>() : ev.data.dump();
@@ -332,6 +471,7 @@ struct OpenInferenceProvider::Impl {
     std::shared_ptr<Provider> inner;
     Tracer* tracer = nullptr;
     std::function<Span*()> parent_lookup;
+    OpenInferenceTracerSession::ChildSpanStarter child_span_starter;
     std::string span_name;
 };
 
@@ -348,6 +488,22 @@ OpenInferenceProvider::OpenInferenceProvider(
     impl_->inner = std::move(inner);
     impl_->tracer = &tracer;
     impl_->parent_lookup = std::move(parent_lookup);
+    impl_->span_name = std::move(span_name);
+}
+
+OpenInferenceProvider::OpenInferenceProvider(
+    std::shared_ptr<Provider> inner,
+    Tracer& tracer,
+    const OpenInferenceTracerSession& session,
+    std::string span_name)
+    : impl_(std::make_unique<Impl>()) {
+    if (!inner) {
+        throw std::invalid_argument(
+            "OpenInferenceProvider requires a non-null inner Provider");
+    }
+    impl_->inner = std::move(inner);
+    impl_->tracer = &tracer;
+    impl_->child_span_starter = session.child_span_starter();
     impl_->span_name = std::move(span_name);
 }
 
@@ -514,16 +670,22 @@ private:
 std::shared_ptr<ProviderSpanState> start_provider_span(
     Tracer* tracer,
     const std::function<Span*()>& parent_lookup,
+    const OpenInferenceTracerSession::ChildSpanStarter& child_span_starter,
     const std::string& span_name,
     const CompletionParams& params) noexcept {
-    Span* parent = nullptr;
-    if (parent_lookup) {
-        try { parent = parent_lookup(); } catch (...) {}
-    }
-
     std::unique_ptr<Span> span;
     try {
-        span = tracer->start_span(span_name, parent);
+        if (child_span_starter) {
+            span = child_span_starter(*tracer, span_name);
+        } else {
+            // A raw parent callback cannot carry a lifetime lease. Invoke it
+            // for compatibility, but open a root span rather than racing a
+            // concurrent session close with a dangling parent pointer.
+            if (parent_lookup) {
+                try { (void)parent_lookup(); } catch (...) {}
+            }
+            span = tracer->start_span(span_name, nullptr);
+        }
     } catch (...) {
         return {};
     }
@@ -548,7 +710,8 @@ std::shared_ptr<ProviderSpanState> start_provider_span(
 
 ChatCompletion OpenInferenceProvider::complete(const CompletionParams& params) {
     auto trace = start_provider_span(
-        impl_->tracer, impl_->parent_lookup, impl_->span_name, params);
+        impl_->tracer, impl_->parent_lookup, impl_->child_span_starter,
+        impl_->span_name, params);
     ProviderSpanGuard guard(trace);
     try {
         auto result = impl_->inner->complete(params);
@@ -566,7 +729,8 @@ ChatCompletion OpenInferenceProvider::complete(const CompletionParams& params) {
 asio::awaitable<ChatCompletion>
 OpenInferenceProvider::complete_async(const CompletionParams& params) {
     auto trace = start_provider_span(
-        impl_->tracer, impl_->parent_lookup, impl_->span_name, params);
+        impl_->tracer, impl_->parent_lookup, impl_->child_span_starter,
+        impl_->span_name, params);
     ProviderSpanGuard guard(trace);
     try {
         auto result = co_await impl_->inner->complete_async(params);
@@ -585,7 +749,8 @@ ChatCompletion OpenInferenceProvider::complete_stream(
     const CompletionParams& params,
     const StreamCallback& on_chunk) {
     auto trace = start_provider_span(
-        impl_->tracer, impl_->parent_lookup, impl_->span_name, params);
+        impl_->tracer, impl_->parent_lookup, impl_->child_span_starter,
+        impl_->span_name, params);
     ProviderSpanGuard guard(trace);
 
     std::string accumulated;
@@ -614,7 +779,8 @@ OpenInferenceProvider::complete_stream_async(
     const CompletionParams& params,
     const StreamCallback& on_chunk) {
     auto trace = start_provider_span(
-        impl_->tracer, impl_->parent_lookup, impl_->span_name, params);
+        impl_->tracer, impl_->parent_lookup, impl_->child_span_starter,
+        impl_->span_name, params);
     ProviderSpanGuard guard(trace);
 
     std::shared_ptr<std::string> accumulated;
