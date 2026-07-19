@@ -273,8 +273,9 @@ void GraphEngine::update_state(const std::string& thread_id,
     // super-step saves propagate this for the same reason.
     new_cp.barrier_state   = cp.barrier_state;
     new_cp.step            = cp.step;
-    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+    const int64_t now = static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
     // update_state preserves the parent's step, so millisecond timestamp ties
     // would leave durable stores unable to identify the newer checkpoint.
     new_cp.timestamp       = std::max(now, cp.timestamp + 1);

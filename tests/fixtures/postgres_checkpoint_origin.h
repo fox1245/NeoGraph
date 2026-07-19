@@ -92,7 +92,10 @@ private:
     std::atomic<size_t> reconnect_count_{0};
 };
 
-#if defined(__linux__) && defined(__x86_64__) && INTPTR_MAX == INT64_MAX
+#if defined(__ANDROID__) && defined(__aarch64__) && INTPTR_MAX == INT64_MAX
+static_assert(sizeof(PostgresCheckpointStore) == 200);
+static_assert(alignof(PostgresCheckpointStore) == 8);
+#elif defined(__linux__) && defined(__x86_64__) && INTPTR_MAX == INT64_MAX
 static_assert(sizeof(PostgresCheckpointStore) == 240);
 static_assert(alignof(PostgresCheckpointStore) == 8);
 #elif defined(__linux__) && defined(__aarch64__) && INTPTR_MAX == INT64_MAX
