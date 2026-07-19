@@ -46,7 +46,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   호출자에게 있다.
 - **PostgreSQL 비동기 연결의 전역 제한 시간 정책 명문화.** 비동기 최초
   연결·교체는 모든 host/IP를 합쳐 하나의 제한 시간을 사용한다. 양수
-  `connect_timeout`은 최소 2초로 적용하고, 미지정·0·음수이면 운영 안전
+  connection string에 직접 쓴 `connect_timeout`은 최소 2초로 적용하고,
+  미지정·0·음수이거나 환경변수·service file로만 지정한 값이면 운영 안전
   기본값 30초를 사용한다. libpq의 host별 동기 제한 시간과 의도적으로
   다르며, 동기 생성·교체 동작은 바꾸지 않았다.
 - **JARVIS mock 빌드 복구 (issue #130).** 음성 의존성이 없을 때

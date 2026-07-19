@@ -111,9 +111,12 @@ struct PgConn {
  *
  * Async initial/replacement connection attempts use one NeoGraph-wide
  * deadline for the complete attempt, including every host and resolved IP.
- * A positive libpq `connect_timeout` supplies the deadline in seconds, with
- * libpq's documented two-second minimum. If it is absent, zero, or negative,
- * NeoGraph applies a 30-second production-safety default. This intentionally
+ * A positive `connect_timeout` written directly in @p conn_str supplies the
+ * deadline in seconds, with libpq's documented two-second minimum. Values from
+ * `PGCONNECT_TIMEOUT` or a service file are not available before the initial
+ * nonblocking connection step and therefore use NeoGraph's 30-second default.
+ * If the explicit value is absent, zero, or negative, NeoGraph also applies
+ * that production-safety default. This intentionally
  * differs from libpq's synchronous per-host timeout semantics: an async
  * multi-host attempt receives one budget rather than one budget per host.
  * Synchronous construction and synchronous replacement retain native libpq
