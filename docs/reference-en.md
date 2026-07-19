@@ -1138,6 +1138,13 @@ Cooperative cancel primitive shared between caller and engine. Construct
 via `std::make_shared<CancelToken>()`, hand to `RunConfig.cancel_token`,
 and call `cancel()` from any thread to abort the in-flight run —
 including the LLM HTTP socket if a node is mid-`provider.complete_async`.
+Each engine run forks its own operation child, so one parent can safely cancel
+multiple concurrent runs without sharing an asio cancellation slot.
+
+Engine operation children retain themselves until their posted cancellation
+emit executes. If application code calls `bind_executor()` directly on a token
+it constructed itself, the application must keep that token alive until the
+executor drains; the engine cannot supply ownership for an external object.
 
 ```cpp
 class CancelToken {

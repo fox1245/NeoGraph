@@ -25,23 +25,21 @@ namespace {
 
 // Records the cancel-token pointer it observed on `state` and writes
 // the node name into a "saw_token" channel so we can assert post-run
-// that every fan-out branch saw the same parent token.
+// that every fan-out branch saw the same operation child.
 class CancelObserverNode : public GraphNode {
 public:
     explicit CancelObserverNode(std::string n,
-                                std::atomic<int>* observed_count,
-                                CancelToken* expected)
-        : n_(std::move(n)), count_(observed_count), expected_(expected) {}
+                                 std::atomic<int>* observed_count,
+                                 std::atomic<CancelToken*>* operation,
+                                 CancelToken* parent)
+        : n_(std::move(n)), count_(observed_count), operation_(operation),
+          parent_(parent) {}
 
     asio::awaitable<NodeOutput> run(NodeInput in) override {
-        // Read the token pointer; record only if it matches the parent
-        // run's token. A null or mismatched pointer is the actual bug
-        // — if the test sees that, count_ stays unchanged and the
-        // assertion below fails.
-        // NOTE: this still reads the legacy state.run_cancel_token() smuggling
-        // channel — 9d will switch it to in.ctx.cancel_token.get() (or this
-        // whole test gets superseded by the in.ctx.cancel_token coverage).
-        if (in.ctx.cancel_token.get() == expected_ && expected_ != nullptr) {
+        auto* token = in.ctx.cancel_token.get();
+        CancelToken* unset = nullptr;
+        operation_->compare_exchange_strong(unset, token);
+        if (token && token != parent_ && token == operation_->load()) {
             count_->fetch_add(1, std::memory_order_relaxed);
         }
         // Emit a small write so the engine has something to commit.
@@ -55,7 +53,8 @@ public:
 private:
     std::string n_;
     std::atomic<int>* count_;
-    CancelToken* expected_;
+    std::atomic<CancelToken*>* operation_;
+    CancelToken* parent_;
 };
 
 // Send-fan-out source that emits N Sends pointing at a worker target.
@@ -84,6 +83,7 @@ private:
 // State + counter pair needed by the factory closures.
 struct TestFixture {
     std::atomic<int> observed_count{0};
+    std::atomic<CancelToken*> operation_token{nullptr};
     std::shared_ptr<CancelToken> token;
 };
 
@@ -95,7 +95,8 @@ void register_observer_factory(const std::string& type_name,
         [fix](const std::string& name, const json&, const NodeContext&)
             -> std::unique_ptr<GraphNode> {
             return std::make_unique<CancelObserverNode>(
-                name, &fix->observed_count, fix->token.get());
+                name, &fix->observed_count, &fix->operation_token,
+                fix->token.get());
         });
 }
 
@@ -113,11 +114,10 @@ void register_fanout_factory(const std::string& type_name,
 
 // =========================================================================
 // Static parallel fan-out: a → {b, c, d} via plain edges. All three
-// workers share the parent state by reference, so the cancel token is
-// read directly off it. Was already correct in v0.3.0 — this test
-// locks it in so the optimization doesn't regress.
+// workers share one operation child by reference. The caller's parent
+// remains a fan-out handle and is never bound directly to this run.
 // =========================================================================
-TEST(CancelTokenPropagation, StaticParallelFanOutSeesParentToken) {
+TEST(CancelTokenPropagation, StaticParallelFanOutSeesOperationChild) {
     TestFixture fix;
     fix.token = std::make_shared<CancelToken>();
 
@@ -150,6 +150,7 @@ TEST(CancelTokenPropagation, StaticParallelFanOutSeesParentToken) {
 
     // a, b, c each saw the token = 3.
     EXPECT_EQ(fix.observed_count.load(), 3);
+    EXPECT_NE(fix.operation_token.load(), fix.token.get());
     EXPECT_FALSE(result.interrupted);
 }
 
@@ -158,10 +159,10 @@ TEST(CancelTokenPropagation, StaticParallelFanOutSeesParentToken) {
 // shared worker type. Each Send runs on an isolated GraphState built
 // from serialize() + restore(); without the v0.3.1 fix, run_cancel_token
 // is null in the worker's state. The observer node only increments
-// when token == expected, so a null token leaves count == 0 and the
-// assertion fails.
+// when every branch sees the operation child, so a null or parent token
+// leaves count below 4 and the assertion fails.
 // =========================================================================
-TEST(CancelTokenPropagation, MultiSendFanOutSeesParentToken) {
+TEST(CancelTokenPropagation, MultiSendFanOutSeesOperationChild) {
     TestFixture fix;
     fix.token = std::make_shared<CancelToken>();
 
@@ -189,10 +190,10 @@ TEST(CancelTokenPropagation, MultiSendFanOutSeesParentToken) {
     cfg.cancel_token = fix.token;
     auto result = engine->run(cfg);
 
-    // 4 send-spawned workers, each reading the parent cancel token
-    // off its isolated GraphState. The dispatcher is a different node
-    // type so it does not contribute. Pre-fix this would have been 0.
+    // 4 send-spawned workers all read the operation child from RunContext.
+    // The dispatcher is a different node type so it does not contribute.
     EXPECT_EQ(fix.observed_count.load(), 4);
+    EXPECT_NE(fix.operation_token.load(), fix.token.get());
     EXPECT_FALSE(result.interrupted);
 }
 

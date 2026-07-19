@@ -7,7 +7,9 @@
 #include <asio/co_spawn.hpp>
 #include <asio/deferred.hpp>
 #include <asio/experimental/parallel_group.hpp>
+#include <asio/error.hpp>
 #include <asio/steady_timer.hpp>
+#include <asio/system_error.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 
@@ -258,6 +260,16 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
             // cancel flag, the second HTTP call would slip through,
             // and the cost leak would persist for max_retries × ~3 s.
             throw;
+        } catch (const asio::system_error& error) {
+            // Socket/timer cancellation enters node code as
+            // operation_aborted. Once this operation's token is set, that is
+            // cancellation control flow, not a retryable transport failure.
+            if (ctx.cancel_token && ctx.cancel_token->is_cancelled() &&
+                error.code() == asio::error::operation_aborted) {
+                throw CancelledException(
+                    "node " + node_name + " operation aborted");
+            }
+            retryable_err = std::current_exception();
         } catch (const std::bad_alloc&) {
             // OOM is not retryable. Sleeping then re-running won't
             // free memory; it just delays the inevitable failure

@@ -93,6 +93,11 @@ public:
      * Safe to call before ``bind_executor()``: in that case only the
      * polling flag is set; whoever later binds the executor will
      * notice via ``is_cancelled()`` before any HTTP work has begun.
+     *
+     * Engine-created operation children retain themselves until a posted
+     * emit executes. A directly constructed token has no such ownership
+     * source: callers that use ``bind_executor()`` themselves must keep that
+     * token alive until the executor has drained all posted work.
      */
     void cancel() noexcept {
         if (cancelled_.exchange(true, std::memory_order_acq_rel)) {
@@ -107,12 +112,15 @@ public:
             ex_snapshot = ex_;
         }
         if (ex_snapshot) {
-            // Post the emit onto the strand that owns the signal —
-            // emit() is documented as not thread-safe across executors.
-            // The engine binds the same executor it co_spawns on.
-            asio::post(ex_snapshot, [this]() {
-                sig_.emit(asio::cancellation_type::all);
-            });
+            // A forked operation child records a weak self-reference and can
+            // retain itself through this posted emit. Directly constructed
+            // tokens return an empty keep_alive and preserve the 0.11.x
+            // caller-owned lifetime contract.
+            auto keep_alive = self_keep_alive_for_post();
+            asio::post(ex_snapshot,
+                       [this, keep_alive = std::move(keep_alive)]() {
+                           sig_.emit(asio::cancellation_type::all);
+                       });
         }
 
         // v1.0 (9c): the legacy ``add_cancel_hook`` / hooks_ iteration
@@ -130,7 +138,7 @@ public:
             std::lock_guard<std::mutex> lk(children_mu_);
             live_children.reserve(children_.size());
             for (auto& w : children_) {
-                if (auto sp = w.lock()) {
+                if (auto sp = w.lock(); sp && sp.get() != this) {
                     live_children.push_back(std::move(sp));
                 }
             }
@@ -156,6 +164,9 @@ public:
      * before the run started) the bind also schedules an immediate
      * emit so the just-spawned coroutine unwinds at its first
      * co_await checkpoint.
+     *
+     * @warning Outside GraphEngine, the caller owns the lifetime contract:
+     * keep a directly constructed token alive until the bound executor drains.
      */
     void bind_executor(asio::any_io_executor ex) {
         bool fire_immediately = false;
@@ -165,11 +176,17 @@ public:
             fire_immediately = cancelled_.load(std::memory_order_acquire);
         }
         if (fire_immediately) {
-            std::lock_guard<std::mutex> lk(mu_);
-            if (ex_) {
-                asio::post(ex_, [this]() {
-                    sig_.emit(asio::cancellation_type::all);
-                });
+            asio::any_io_executor ex_snapshot;
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                ex_snapshot = ex_;
+            }
+            if (ex_snapshot) {
+                auto keep_alive = self_keep_alive_for_post();
+                asio::post(ex_snapshot,
+                           [this, keep_alive = std::move(keep_alive)]() {
+                               sig_.emit(asio::cancellation_type::all);
+                           });
             }
         }
     }
@@ -207,12 +224,13 @@ public:
      * ``cancel()`` on the parent walks the live children list and
      * cascades — every child's signal fires on its own bound executor.
      *
-     *
      * **Lifetime / ownership**: returns a ``shared_ptr<CancelToken>``;
      * the parent stores a ``weak_ptr`` so a forked child that goes
      * out of scope is automatically pruned from the cascade list on
-     * the next ``cancel()`` / ``fork()``. The parent itself can outlive
-     * its children freely.
+     * the next ``cancel()`` / ``fork()``. A forked child also records a
+     * weak self-reference in its existing child list. A posted signal emit
+     * locks and captures that reference, retaining engine operation children
+     * until the emit has executed without changing ``CancelToken``'s layout.
      *
      * **Eager-cancel safety**: if the parent is already cancelled at
      * the time of ``fork()``, the new child is constructed with its
@@ -235,6 +253,14 @@ public:
         // shared_ptr ctor allocates the control block; cheap relative
         // to a real cancel scope (one io_context spin-up downstream).
         auto child = std::shared_ptr<CancelToken>(new CancelToken());
+
+        // Preserve the 0.11.x object layout by using the existing weak-child
+        // list as the ownership source for posted emits. cancel() excludes this
+        // self entry from parent-to-child propagation.
+        {
+            std::lock_guard<std::mutex> lk(child->children_mu_);
+            child->children_.push_back(child);
+        }
 
         {
             std::lock_guard<std::mutex> lk(children_mu_);
@@ -264,16 +290,25 @@ public:
     }
 
 private:
+    std::shared_ptr<CancelToken> self_keep_alive_for_post() {
+        std::lock_guard<std::mutex> lk(children_mu_);
+        for (auto& candidate : children_) {
+            if (auto self = candidate.lock(); self.get() == this) {
+                return self;
+            }
+        }
+        return {};
+    }
+
     std::atomic<bool>        cancelled_{false};
     mutable std::mutex       mu_;        // guards ex_ vs cancel() race
     asio::any_io_executor    ex_;        // bound by engine before HTTP I/O
     asio::cancellation_signal sig_;      // for asio operation cancel
 
-    // Hierarchical cascade list. Each entry is a child token
-    // produced by ``fork()``. ``cancel()`` walks live children and
-    // cascades. Stored as ``weak_ptr`` so a child that goes out of
-    // scope (its run_sync returned, run completed) is automatically
-    // pruned on the next ``cancel()`` / ``fork()`` traversal.
+    // Hierarchical cascade list. Entries are children produced by fork(); a
+    // forked token also keeps one weak self-entry so posted emits can retain
+    // the operation without adding a data member or changing the 0.11.x ABI.
+    // cancel() skips that self-entry while cascading.
     mutable std::mutex children_mu_;
     std::vector<std::weak_ptr<CancelToken>> children_;
 };

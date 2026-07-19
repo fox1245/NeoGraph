@@ -28,6 +28,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **취소 작업별 상태와 게시된 emit 수명 안전성.** `GraphEngine::run`, `run_async`,
+  `run_stream`, `run_stream_async`는 호출자가 준 parent에서 실행별 child를
+  하나씩 만들고, 그 child만 내부 `co_spawn`/sync bridge에 묶으며 같은
+  child를 `RunContext`로 전달한다. 따라서 parent 하나로 동시에 실행 중인
+  여러 run을 모두 취소해도 cancellation slot이 서로 덮이지 않는다.
+  Fork된 실행 child는 기존 `shared_ptr` 소유권을 게시된 emit까지 유지해
+  엔진 작업 종료와 emit 실행 사이의 use-after-free를 막는다.
+  취소 때문에 생긴 asio `operation_aborted`는 재시도 가능한 노드 오류가
+  아니라 `CancelledException`으로 전달한다.
+  `CancelToken`의 0.11.x 객체 배치와 inline/header-only 동작은 그대로다.
+  단, 외부 코드가 직접 만든 token에 `bind_executor()`를 호출한 경우에는
+  해당 executor의 게시 작업이 끝날 때까지 token을 살려 둘 책임이 여전히
+  호출자에게 있다.
 - **JARVIS mock 빌드 복구 (issue #130).** 음성 의존성이 없을 때
   `MicCapture`가 불완전한 타입으로 남아 `cookbook_jarvis` 컴파일이 실패하던
   문제를 수정했다. `NEOGRAPH_JARVIS_FORCE_MOCK`을 추가해 ASan CI가 runner의
