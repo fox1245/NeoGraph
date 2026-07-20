@@ -2749,9 +2749,9 @@ available tools, and wraps them as NeoGraph `Tool` instances.
 
 Two transports are available:
 
-- **HTTP** — `MCPClient("http://host:port")`. Each tool call opens a short-lived
-  session against the server (Streamable HTTP transport, `Mcp-Session-Id` header
-  echoed per-request).
+- **HTTP** — `MCPClient("http://host:port")`. Discovered tools retain the
+  originating Streamable HTTP session, including `Mcp-Session-Id`, negotiated
+  protocol version, timeout, and custom headers.
 - **stdio** — `MCPClient({"python", "server.py"})`. The client `fork`+`execvp`s the
   subprocess, wires bidirectional pipes, and exchanges newline-delimited JSON-RPC
   over the child's stdin/stdout. The subprocess lives as long as the
@@ -2764,9 +2764,9 @@ Wraps a single MCP server tool as a local `Tool` implementation. Two
 constructors, one per transport; `MCPClient::get_tools()` picks the right one.
 
 ```cpp
-class MCPTool : public Tool {
+class MCPTool : public AsyncTool {
 public:
-    // HTTP mode — each execute() opens a fresh session against server_url.
+    // Legacy direct-construction mode. Discovered tools reuse their client session.
     MCPTool(const std::string& server_url,
             const std::string& name,
             const std::string& description,
@@ -2779,8 +2779,11 @@ public:
             const std::string& description,
             const json& input_schema);
 
-    ChatTool   get_definition() const override;
-    std::string execute(const json& arguments) override;
+    const ToolDefinition& get_mcp_definition() const noexcept;
+    CallToolResult execute_result(const json& arguments);
+    asio::awaitable<CallToolResult> execute_result_async(const json& arguments);
+    ChatTool get_definition() const override;
+    asio::awaitable<std::string> execute_async(const json& arguments) override;
     std::string get_name() const override;
 };
 ```
@@ -2802,19 +2805,22 @@ class MCPClient {
 public:
     // HTTP transport.
     explicit MCPClient(const std::string& server_url);
+    MCPClient(const std::string& server_url, MCPClientConfig config);
 
     // stdio transport — fork+exec the subprocess.
     explicit MCPClient(std::vector<std::string> argv);
 
     bool initialize(const std::string& client_name = "neograph");
+    bool is_initialized() const noexcept;
+    InitializeResult get_initialize_result() const;
     std::vector<std::unique_ptr<Tool>> get_tools();
+    ListToolsPage list_tools(std::optional<std::string> cursor = std::nullopt);
+    std::vector<ToolDefinition> get_tool_definitions();
     json call_tool(const std::string& name, const json& arguments);
+    CallToolResult call_tool_result(const std::string& name,
+                                    const json& arguments);
 
-    // Lower-level: arbitrary JSON-RPC method dispatch. Used internally
-    // by initialize / get_tools / call_tool; exposed for callers that
-    // want to drive a non-tool MCP method (resources/list,
-    // prompts/list, etc.) without breaking out of NeoGraph's transport.
-    json rpc_call(const std::string& method, const json& params);
+    // Low-level async dispatch retained for source compatibility.
     asio::awaitable<json>
     rpc_call_async(const std::string& method, const json& params);
 };
@@ -2831,10 +2837,13 @@ versions may reject these requests — pin server-side or upgrade.
 |--------|-------------|
 | `MCPClient(url)` | Construct an HTTP-mode client |
 | `MCPClient(argv)` | Spawn a subprocess and construct a stdio-mode client. `argv[0]` is resolved via `PATH` (execvp). Throws on fork/exec failure. Refuses Windows `.bat`/`.cmd` for safety (Round 3 hardening) |
-| `initialize(client_name)` | Perform the MCP initialization handshake. Returns `true` on success. Must be called before `get_tools()` or `call_tool()` |
-| `get_tools()` | Discovers tools from the server and returns them as `std::unique_ptr<Tool>` instances ready for use with `Agent` or `GraphEngine` |
+| `initialize(client_name)` | Perform the MCP initialization handshake once. Repeated calls are idempotent; protocol/transport failures throw |
+| `get_initialize_result()` | Return negotiated protocol, capabilities, server info, instructions, and raw result |
+| `list_tools(cursor)` | Fetch one page while treating the cursor as opaque |
+| `get_tool_definitions()` | Follow all pages and preserve complete tool metadata |
+| `get_tools()` | Discover all pages and return session-preserving `MCPTool` instances |
 | `call_tool(name, arguments)` | Invokes a tool by name with the given arguments. Returns the raw JSON response |
-| `rpc_call(method, params)` | Arbitrary JSON-RPC method on the same transport. Sync facade over `rpc_call_async`. |
+| `call_tool_result(name, arguments)` | Typed result preserving content, structured content, `isError`, and `_meta` |
 | `rpc_call_async(method, params)` | Coroutine version. The "real" implementation — `rpc_call` is a thin sync wrapper. |
 
 **HTTP usage:**

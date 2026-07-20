@@ -12,7 +12,13 @@ overlap rather than queueing.
 
 import json
 import sys
+import threading
 import time
+
+_write_lock = threading.Lock()
+_state_lock = threading.Lock()
+_initialized = False
+_initializing = False
 
 
 TOOLS = [
@@ -38,11 +44,22 @@ TOOLS = [
 ]
 
 
+def write_response(response):
+    with _write_lock:
+        sys.stdout.write(json.dumps(response) + "\n")
+        sys.stdout.flush()
+
+
 def handle(request):
+    global _initialized, _initializing
     method = request.get("method")
     params = request.get("params") or {}
 
     if method == "initialize":
+        with _state_lock:
+            if _initialized or _initializing:
+                return None
+            _initializing = True
         return {
             "protocolVersion": "2025-11-25",
             "capabilities": {"tools": {}},
@@ -50,9 +67,15 @@ def handle(request):
         }
 
     if method == "tools/list":
+        with _state_lock:
+            if not _initialized:
+                return None
         return {"tools": TOOLS}
 
     if method == "tools/call":
+        with _state_lock:
+            if not _initialized:
+                return None
         name = params.get("name")
         args = params.get("arguments") or {}
         if name == "slow_echo":
@@ -68,7 +91,18 @@ def handle(request):
     return None
 
 
+def handle_request(request):
+    result = handle(request)
+    if result is None:
+        response = {"jsonrpc": "2.0", "id": request["id"],
+                    "error": {"code": -32601, "message": "method not found"}}
+    else:
+        response = {"jsonrpc": "2.0", "id": request["id"], "result": result}
+    write_response(response)
+
+
 def main():
+    global _initialized, _initializing
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -81,17 +115,17 @@ def main():
         # Notifications carry no id and get no reply — replying to one is a
         # protocol violation the client is entitled to be upset about.
         if "id" not in request:
+            if request.get("method") == "notifications/initialized":
+                with _state_lock:
+                    if _initializing:
+                        _initialized = True
+                        _initializing = False
             continue
 
-        result = handle(request)
-        if result is None:
-            response = {"jsonrpc": "2.0", "id": request["id"],
-                        "error": {"code": -32601, "message": "method not found"}}
-        else:
-            response = {"jsonrpc": "2.0", "id": request["id"], "result": result}
-
-        sys.stdout.write(json.dumps(response) + "\n")
-        sys.stdout.flush()
+        # The write lock preserves one-line framing while request IDs let the
+        # client correlate out-of-order replies.
+        threading.Thread(target=handle_request, args=(request,),
+                         daemon=True).start()
 
 
 if __name__ == "__main__":

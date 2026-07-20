@@ -598,6 +598,11 @@ thin `run_sync(rpc_call_async(...))` facade. **Not user-extensible**
 If you need a custom MCP transport, write a new class; don't
 inherit.
 
+HTTP requests overlap normally. stdio writes complete JSON lines under a
+short write lock, then a single reader correlates out-of-order replies by
+JSON-RPC id. Therefore stdio calls also overlap when the subprocess processes
+requests concurrently; a serial subprocess remains the throughput floor.
+
 ### 9.6 `Tool` vs `AsyncTool`
 
 Asymmetric by design. Pick one at class declaration time:

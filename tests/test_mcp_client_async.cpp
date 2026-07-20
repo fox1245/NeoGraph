@@ -26,6 +26,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -63,6 +64,17 @@ struct MockMcpServer {
             } catch (...) {
                 // unparseable body -> id stays 0, method stays empty
             }
+            if (status == 200 && method == "initialize") {
+                res.set_content(
+                    R"({"jsonrpc":"2.0","id":)" + std::to_string(id) +
+                        R"(,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"mock","version":"1"}}})",
+                    "application/json");
+                return;
+            }
+            if (status == 200 && method == "notifications/initialized") {
+                res.status = 204;
+                return;
+            }
             std::string body = body_template;
             auto replace_all = [&](const std::string& from, const std::string& to) {
                 size_t p = 0;
@@ -91,6 +103,27 @@ struct MockMcpServer {
     std::string url() const {
         return "http://127.0.0.1:" + std::to_string(port);
     }
+};
+
+struct ServerGuard {
+    explicit ServerGuard(httplib::Server& server)
+      : svr(server)
+      , port(svr.bind_to_any_port("127.0.0.1"))
+      , thread([this] { svr.listen_after_bind(); })
+    {
+        for (int i = 0; i < 200 && !svr.is_running(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+
+    ~ServerGuard() {
+        svr.stop();
+        if (thread.joinable()) thread.join();
+    }
+
+    httplib::Server& svr;
+    int port;
+    std::thread thread;
 };
 
 } // namespace
@@ -124,7 +157,7 @@ TEST(MCPClientAsync, SyncRpcCallBridgesThroughAsync) {
 
     EXPECT_TRUE(result.is_object());
     EXPECT_EQ(result.value("echo", ""), "tools/call");
-    EXPECT_EQ(mock.request_count.load(), 1);
+    EXPECT_EQ(mock.request_count.load(), 3);
 }
 
 TEST(MCPClientAsync, ParsesSseFramedResponse) {
@@ -154,6 +187,21 @@ TEST(MCPClientAsync, JsonRpcErrorSurfacesAsRuntimeError) {
         FAIL() << "expected runtime_error";
     } catch (const std::runtime_error& e) {
         EXPECT_NE(std::string(e.what()).find("method not found"),
+                  std::string::npos);
+    }
+}
+
+TEST(MCPClientAsync, RejectsMismatchedJsonRpcResponseId) {
+    MockMcpServer mock;
+    mock.body_template =
+        R"({"jsonrpc":"2.0","id":999999,"result":{"ok":true}})";
+
+    mcp::MCPClient client(mock.url());
+    try {
+        client.call_tool("mismatched", json::object());
+        FAIL() << "expected mismatched response id to fail";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("id does not match"),
                   std::string::npos);
     }
 }
@@ -212,10 +260,25 @@ TEST(MCPClientAsync, UrlWithMcpSuffixIsNotDoubled) {
     svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
         hits_mcp.fetch_add(1, std::memory_order_relaxed);
         int id = 0;
+        std::string method;
         try {
             auto parsed = json::parse(req.body);
-            if (parsed.is_object()) id = parsed.value("id", 0);
+            if (parsed.is_object()) {
+                id = parsed.value("id", 0);
+                method = parsed.value("method", std::string{});
+            }
         } catch (...) { }
+        if (method == "notifications/initialized") {
+            res.status = 204;
+            return;
+        }
+        if (method == "initialize") {
+            res.set_content(
+                R"({"jsonrpc":"2.0","id":)" + std::to_string(id) +
+                    R"(,"result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"url-test","version":"1"}}})",
+                "application/json");
+            return;
+        }
         res.set_content(
             R"({"jsonrpc":"2.0","id":)" + std::to_string(id) +
                 R"(,"result":{"ok":true}})",
@@ -235,7 +298,8 @@ TEST(MCPClientAsync, UrlWithMcpSuffixIsNotDoubled) {
 
     EXPECT_TRUE(result.is_object());
     EXPECT_EQ(result.value("ok", false), true);
-    EXPECT_EQ(hits_mcp.load(), 1);  // reached /mcp exactly once, no /mcp/mcp
+    // initialize + initialized notification + tools/call all reached /mcp.
+    EXPECT_EQ(hits_mcp.load(), 3);
 
     svr.stop();
     if (t.joinable()) t.join();
@@ -264,10 +328,25 @@ TEST(MCPClientAsync, SessionIdHeaderRoundTrips) {
         // tracking stays refreshed.
         res.set_header("Mcp-Session-Id", assigned_sid);
         int id = 0;
+        std::string method;
         try {
             auto parsed = json::parse(req.body);
-            if (parsed.is_object()) id = parsed.value("id", 0);
+            if (parsed.is_object()) {
+                id = parsed.value("id", 0);
+                method = parsed.value("method", std::string{});
+            }
         } catch (...) { }
+        if (method == "notifications/initialized") {
+            res.status = 204;
+            return;
+        }
+        if (method == "initialize") {
+            std::string body = R"({"jsonrpc":"2.0","id":)"
+                + std::to_string(id)
+                + R"(,"result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"session-test","version":"1"}}})";
+            res.set_content(body, "application/json");
+            return;
+        }
         std::string body = R"({"jsonrpc":"2.0","id":)"
             + std::to_string(id) + R"(,"result":{"ok":true}})";
         res.set_content(body, "application/json");
@@ -290,7 +369,286 @@ TEST(MCPClientAsync, SessionIdHeaderRoundTrips) {
     svr.stop();
     if (t.joinable()) t.join();
 
-    // 3 requests total, 2 of which should have echoed the session id
-    // (the very first didn't have one yet).
-    EXPECT_EQ(seen_session_echoes.load(), 2);
+    // initialize assigns the id; the notification and three tool calls echo it.
+    EXPECT_EQ(seen_session_echoes.load(), 4);
+}
+
+TEST(MCPClientAsync, StrictLifecyclePaginationAndRichResults) {
+    std::atomic<int> initialize_count{0};
+    std::atomic<int> notification_count{0};
+    std::atomic<int> list_count{0};
+    std::atomic<int> call_count{0};
+    std::atomic<int> violations{0};
+    std::atomic<bool> initialized{false};
+    const std::string sid = "strict-session";
+
+    httplib::Server svr;
+    svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+        json request = json::parse(req.body);
+        const auto method = request.value("method", std::string{});
+        const int id = request.value("id", 0);
+
+        auto reply = [&](json result) {
+            res.set_content(json{{"jsonrpc", "2.0"}, {"id", id},
+                                 {"result", std::move(result)}}.dump(),
+                            "application/json");
+        };
+        auto rpc_error = [&](int code, const std::string& message, json data) {
+            res.set_content(json{{"jsonrpc", "2.0"}, {"id", id},
+                                 {"error", {{"code", code},
+                                            {"message", message},
+                                            {"data", std::move(data)}}}}.dump(),
+                            "application/json");
+        };
+
+        if (req.get_header_value("X-Static") != "static-value"
+            || req.get_header_value("Authorization") != "Bearer dynamic-token") {
+            violations.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        if (method == "initialize") {
+            if (initialize_count.fetch_add(1, std::memory_order_relaxed) != 0) {
+                rpc_error(-32001, "repeated initialize", nullptr);
+                return;
+            }
+            res.set_header("Mcp-Session-Id", sid);
+            reply({{"protocolVersion", "2025-11-25"},
+                   {"capabilities", {{"tools", {{"listChanged", true}}}}},
+                   {"serverInfo", {{"name", "strict"}, {"version", "1.2.3"}}},
+                   {"instructions", "Use typed results."}});
+            return;
+        }
+
+        if (req.get_header_value("Mcp-Session-Id") != sid
+            || req.get_header_value("MCP-Protocol-Version") != "2025-11-25") {
+            violations.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (method == "notifications/initialized") {
+            notification_count.fetch_add(1, std::memory_order_relaxed);
+            initialized.store(true, std::memory_order_release);
+            res.status = 204;
+            return;
+        }
+        if (!initialized.load(std::memory_order_acquire)) {
+            violations.fetch_add(1, std::memory_order_relaxed);
+            rpc_error(-32002, "not initialized", nullptr);
+            return;
+        }
+
+        if (method == "tools/list") {
+            list_count.fetch_add(1, std::memory_order_relaxed);
+            const auto& params = request.value("params", json::object());
+            if (!params.contains("cursor")) {
+                reply({
+                    {"tools", json::array({{
+                        {"name", "rich"},
+                        {"title", "Rich result"},
+                        {"description", "Returns every supported result shape"},
+                        {"icons", json::array({{{"src", "data:image/png;base64,AA=="},
+                                                {"mimeType", "image/png"}}})},
+                        {"inputSchema", {{"type", "object"}}},
+                        {"outputSchema", {{"type", "object"},
+                                          {"required", json::array({"answer"})},
+                                          {"properties", {{"answer", {{"type", "integer"}}}}}}},
+                        {"annotations", {{"readOnlyHint", true}}},
+                        {"execution", {{"taskSupport", "forbidden"}}},
+                        {"_meta", {{"catalog", "first"}}},
+                    }})},
+                    {"nextCursor", "page-2"},
+                    {"_meta", {{"page", 1}}},
+                });
+                return;
+            }
+            if (params.value("cursor", "") != "page-2") {
+                rpc_error(-32602, "bad cursor", params);
+                return;
+            }
+            reply({{"tools", json::array({
+                       {{"name", "tool_error"},
+                        {"description", "Returns isError"},
+                        {"inputSchema", {{"type", "object"}}}},
+                       {{"name", "bad_schema"},
+                        {"description", "Violates its output schema"},
+                        {"inputSchema", {{"type", "object"}}},
+                        {"outputSchema", {{"type", "object"},
+                                          {"required", json::array({"answer"})},
+                                          {"properties", {{"answer", {{"type", "integer"}}}}}}}},
+                   })},
+                   {"_meta", {{"page", 2}}}});
+            return;
+        }
+
+        if (method == "tools/call") {
+            call_count.fetch_add(1, std::memory_order_relaxed);
+            const auto& params = request.value("params", json::object());
+            const auto name = params.value("name", std::string{});
+            if (name == "rich") {
+                reply({{"content", json::array({
+                           {{"type", "text"}, {"text", "answer: 42"}},
+                           {{"type", "image"}, {"data", "AA=="},
+                            {"mimeType", "image/png"}},
+                       })},
+                       {"structuredContent", {{"answer", 42}}},
+                       {"isError", false},
+                       {"_meta", {{"trace", "trace-1"}}}});
+                return;
+            }
+            if (name == "tool_error") {
+                reply({{"content", json::array({{{"type", "text"},
+                                                  {"text", "tool failed"}}})},
+                       {"isError", true},
+                       {"_meta", {{"retryable", false}}}});
+                return;
+            }
+            if (name == "bad_schema") {
+                reply({{"content", json::array()},
+                       {"structuredContent", {{"answer", "not-an-integer"}}}});
+                return;
+            }
+            rpc_error(-32602, "unknown tool", {{"name", name}});
+            return;
+        }
+
+        rpc_error(-32601, "method not found", {{"method", method}});
+    });
+
+    ServerGuard server(svr);
+    ASSERT_TRUE(svr.is_running());
+
+    std::atomic<int> provider_calls{0};
+    mcp::MCPClientConfig config;
+    config.headers = {{"X-Static", "static-value"}};
+    config.header_provider = [&] {
+        provider_calls.fetch_add(1, std::memory_order_relaxed);
+        return mcp::HeaderList{{"Authorization", "Bearer dynamic-token"}};
+    };
+    mcp::MCPClient client(
+        "http://127.0.0.1:" + std::to_string(server.port) + "/mcp", config);
+
+    EXPECT_TRUE(client.initialize("strict-test"));
+    EXPECT_TRUE(client.initialize("ignored-after-first-init"));
+    EXPECT_TRUE(client.is_initialized());
+    const auto init = client.get_initialize_result();
+    EXPECT_EQ(init.protocol_version, "2025-11-25");
+    EXPECT_EQ(init.server_info.value("name", ""), "strict");
+    EXPECT_EQ(init.instructions, "Use typed results.");
+
+    auto tools = client.get_tools();
+    ASSERT_EQ(tools.size(), 3u);
+    EXPECT_EQ(initialize_count.load(), 1);
+    EXPECT_EQ(notification_count.load(), 1);
+    EXPECT_EQ(list_count.load(), 2);
+
+    auto* rich = dynamic_cast<mcp::MCPTool*>(tools[0].get());
+    ASSERT_NE(rich, nullptr);
+    const auto& definition = rich->get_mcp_definition();
+    EXPECT_EQ(definition.title, "Rich result");
+    EXPECT_EQ(definition.annotations.value("readOnlyHint", false), true);
+    EXPECT_EQ(definition.meta.value("catalog", ""), "first");
+
+    const auto result = rich->execute_result(json::object());
+    EXPECT_FALSE(result.is_error);
+    EXPECT_EQ(result.content.size(), 2u);
+    EXPECT_EQ(result.content[1].value("type", ""), "image");
+    EXPECT_EQ(result.structured_content.value("answer", 0), 42);
+    EXPECT_EQ(result.meta.value("trace", ""), "trace-1");
+
+    auto* tool_error = dynamic_cast<mcp::MCPTool*>(tools[1].get());
+    ASSERT_NE(tool_error, nullptr);
+    const auto error_result = tool_error->execute_result(json::object());
+    EXPECT_TRUE(error_result.is_error);
+    EXPECT_THROW(tool_error->execute(json::object()), std::runtime_error);
+
+    auto* bad_schema = dynamic_cast<mcp::MCPTool*>(tools[2].get());
+    ASSERT_NE(bad_schema, nullptr);
+    EXPECT_THROW(bad_schema->execute_result(json::object()), std::runtime_error);
+
+    try {
+        client.call_tool_result("missing", json::object());
+        FAIL() << "expected MCPError";
+    } catch (const mcp::MCPError& e) {
+        EXPECT_EQ(e.code(), -32602);
+        EXPECT_EQ(e.data().value("name", ""), "missing");
+    }
+
+    EXPECT_EQ(initialize_count.load(), 1);
+    EXPECT_EQ(violations.load(), 0);
+    EXPECT_GE(provider_calls.load(), 1);
+    EXPECT_EQ(call_count.load(), 5);
+
+}
+
+TEST(MCPClientAsync, ConfiguredRequestTimeoutIsEnforced) {
+    httplib::Server svr;
+    svr.Post("/mcp", [](const httplib::Request&, httplib::Response& res) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        res.set_content("{}", "application/json");
+    });
+    ServerGuard server(svr);
+    ASSERT_TRUE(svr.is_running());
+
+    mcp::MCPClientConfig config;
+    config.request_timeout = std::chrono::milliseconds(20);
+    mcp::MCPClient client(
+        "http://127.0.0.1:" + std::to_string(server.port), config);
+    EXPECT_THROW(client.initialize(), std::runtime_error);
+    EXPECT_FALSE(client.is_initialized());
+
+}
+
+TEST(MCPClientAsync, FailedInitializationClearsNegotiatedHttpStateBeforeRetry) {
+    std::atomic<int> initialize_count{0};
+    std::atomic<int> notification_count{0};
+    std::atomic<int> leaked_state{0};
+
+    httplib::Server svr;
+    svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+        const auto request = json::parse(req.body);
+        const auto method = request.value("method", std::string{});
+        const int id = request.value("id", 0);
+        if (method == "initialize") {
+            if (!req.get_header_value("Mcp-Session-Id").empty()
+                || !req.get_header_value("MCP-Protocol-Version").empty()) {
+                leaked_state.fetch_add(1, std::memory_order_relaxed);
+            }
+            const int attempt = initialize_count.fetch_add(
+                1, std::memory_order_relaxed) + 1;
+            res.set_header("Mcp-Session-Id", "session-" + std::to_string(attempt));
+            res.set_content(
+                json{{"jsonrpc", "2.0"}, {"id", id},
+                     {"result", {{"protocolVersion", "2025-11-25"},
+                                 {"capabilities", json::object()},
+                                 {"serverInfo", {{"name", "retry"},
+                                                 {"version", "1"}}}}}}.dump(),
+                "application/json");
+            return;
+        }
+        if (method == "notifications/initialized") {
+            const int attempt = notification_count.fetch_add(
+                1, std::memory_order_relaxed) + 1;
+            if (attempt == 1) {
+                res.status = 500;
+                res.set_content("first notification failed", "text/plain");
+            } else {
+                EXPECT_EQ(req.get_header_value("Mcp-Session-Id"), "session-2");
+                EXPECT_EQ(req.get_header_value("MCP-Protocol-Version"),
+                          "2025-11-25");
+                res.status = 204;
+            }
+            return;
+        }
+        res.status = 400;
+    });
+    ServerGuard server(svr);
+    ASSERT_TRUE(svr.is_running());
+
+    mcp::MCPClient client(
+        "http://127.0.0.1:" + std::to_string(server.port));
+    EXPECT_THROW(client.initialize(), std::runtime_error);
+    EXPECT_FALSE(client.is_initialized());
+    EXPECT_TRUE(client.initialize());
+    EXPECT_TRUE(client.is_initialized());
+    EXPECT_EQ(initialize_count.load(), 2);
+    EXPECT_EQ(notification_count.load(), 2);
+    EXPECT_EQ(leaked_state.load(), 0);
 }

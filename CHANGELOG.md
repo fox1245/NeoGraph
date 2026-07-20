@@ -28,6 +28,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **MCP 2025-11-25 tool-client contract modernization (issue #147 M0).**
+  Initialization is now idempotent and retains negotiated server metadata;
+  HTTP tools reuse the discovery session; `/mcp` endpoint construction is
+  shared by requests and notifications; tool discovery follows opaque cursors;
+  and JSON-RPC code/data, full tool metadata, non-text content,
+  `structuredContent`, `isError`, and `_meta` survive C++ and Python paths.
+  Added configurable HTTP timeout/static/dynamic headers, output-schema
+  validation, strict response-ID checking, and typed `InitializeResult`,
+  `ToolDefinition`, `ListToolsPage`, and `CallToolResult` APIs. SSE detection now
+  uses `Content-Type` rather than misclassifying JSON containing `data:` URLs.
 - **취소 작업별 상태와 게시된 emit 수명 안전성.** `GraphEngine::run`, `run_async`,
   `run_stream`, `run_stream_async`는 호출자가 준 parent에서 실행별 child를
   하나씩 만들고, 그 child만 내부 `co_spawn`/sync bridge에 묶으며 같은

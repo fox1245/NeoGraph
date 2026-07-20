@@ -78,39 +78,24 @@ TEST(MCPStdioAsync, RpcCallAsyncRoundTripsThroughSubprocess) {
     asio::io_context io;
     mcp::MCPClient client({python_cmd(), fixture.string()});
 
-    // Build init params outside the coroutine — nested brace-init list
-    // inside a coroutine body triggers a GCC 13 ICE (build_special_
-    // member_call). Same pattern that bit Sem 1.5 conn_pool work.
-    json init_params;
-    init_params["protocolVersion"] = "2025-03-26";
-    init_params["capabilities"] = json::object();
-    init_params["clientInfo"] = json::object();
-    init_params["clientInfo"]["name"] = "test";
-    init_params["clientInfo"]["version"] = "0";
-
-    json initialize_result;
-    json tools_result;
+    mcp::InitializeResult initialize_result;
+    mcp::ListToolsPage tools_result;
     asio::co_spawn(
         io,
         [&]() -> asio::awaitable<void> {
-            initialize_result = co_await client.rpc_call_async(
-                "initialize", init_params);
-            tools_result = co_await client.rpc_call_async(
-                "tools/list", json::object());
+            co_await client.initialize_async("test");
+            initialize_result = client.get_initialize_result();
+            tools_result = co_await client.list_tools_async();
         },
         asio::detached);
     io.run();
 
-    EXPECT_TRUE(initialize_result.is_object());
-    EXPECT_TRUE(tools_result.is_object());
-    ASSERT_TRUE(tools_result.contains("tools"));
-    auto tools = tools_result["tools"];
-    ASSERT_TRUE(tools.is_array());
-    ASSERT_EQ(tools.size(), 1u);
-    EXPECT_EQ(tools[0].value("name", std::string{}), "echo");
+    EXPECT_EQ(initialize_result.server_info.value("name", ""), "stdio-echo");
+    ASSERT_EQ(tools_result.tools.size(), 1u);
+    EXPECT_EQ(tools_result.tools[0].name, "echo");
 }
 
-TEST(MCPStdioAsync, ConcurrentAsyncCallsOnSameSessionSerializeSafely) {
+TEST(MCPStdioAsync, ConcurrentAsyncCallsOnSameSessionCompleteSafely) {
     // Awaitable-mutex regression (Sem 4 follow-up). Before the lock
     // migrated off std::mutex, two coroutines on the same single-
     // threaded io_context calling the same session would deadlock:
@@ -133,13 +118,6 @@ TEST(MCPStdioAsync, ConcurrentAsyncCallsOnSameSessionSerializeSafely) {
     // live executor.
     asio::io_context io;
     mcp::MCPClient client({python_cmd(), fixture.string()});
-    json init_params;
-    init_params["protocolVersion"] = "2025-03-26";
-    init_params["capabilities"] = json::object();
-    init_params["clientInfo"] = json::object();
-    init_params["clientInfo"]["name"] = "test";
-    init_params["clientInfo"]["version"] = "0";
-
     std::atomic<int> done{0};
     std::array<json, 3> results;
 
@@ -149,7 +127,7 @@ TEST(MCPStdioAsync, ConcurrentAsyncCallsOnSameSessionSerializeSafely) {
     asio::co_spawn(
         io,
         [&]() -> asio::awaitable<void> {
-            co_await client.rpc_call_async("initialize", init_params);
+            co_await client.initialize_async("test");
             // Now fan out three parallel calls on the same session.
             // Each nested co_spawn returns a deferred op for a
             // parallel_group... but we can also just co_await three
@@ -222,13 +200,6 @@ TEST(MCPStdioAsync, ConcurrentStdioCallsOverlapIO) {
     asio::io_context io;
     mcp::MCPClient client({python_cmd(), fixture.string()});
 
-    json init_params;
-    init_params["protocolVersion"] = "2025-03-26";
-    init_params["capabilities"] = json::object();
-    init_params["clientInfo"] = json::object();
-    init_params["clientInfo"]["name"] = "test";
-    init_params["clientInfo"]["version"] = "0";
-
     // Pre-build each call's params OUTSIDE the coroutine (GCC 13 nested
     // brace-init-in-coroutine ICE). Each carries a distinct marker so we
     // can prove the demux routed each response to the RIGHT caller.
@@ -250,7 +221,7 @@ TEST(MCPStdioAsync, ConcurrentStdioCallsOverlapIO) {
     asio::co_spawn(
         io,
         [&]() -> asio::awaitable<void> {
-            co_await client.rpc_call_async("initialize", init_params);
+            co_await client.initialize_async("test");
             auto t0 = std::chrono::steady_clock::now();
             for (int i = 0; i < kN; ++i) {
                 asio::co_spawn(

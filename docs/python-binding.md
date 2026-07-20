@@ -258,17 +258,26 @@ tools in the same `NodeContext`.
 
 `client.call_tool(name, args)` calls one directly, outside any graph.
 
-**They overlap — over HTTP.** MCP tools are network round-trips, which is the
-case where concurrent dispatch pays, and `MCPTool` is a real C++ `AsyncTool`. But
-the two transports are not the same, and it is worth knowing which one you have:
+**They overlap when the server does.** MCP tools are network round-trips, which
+is the case where concurrent dispatch pays, and `MCPTool` is a real C++
+`AsyncTool`. HTTP uses concurrent requests; stdio frames writes and correlates
+out-of-order replies by JSON-RPC id:
 
 | transport | 3 calls × 0.4 s |
 |---|---|
 | HTTP | **0.41 s** — each call is its own request |
-| stdio | 1.2 s — one subprocess, one pipe; the client takes a capacity-1 lock, so calls queue |
+| stdio | **~0.4 s** with a concurrent server — one pipe, request-ID multiplexed |
 
-That stdio number is not a NeoGraph limitation to be optimised away; it is what
-a single pipe means. If you need MCP calls to overlap, use an HTTP server.
+A subprocess that handles requests serially still takes ~1.2 s. Multiplexing
+removes the client-side bottleneck; it cannot create server-side concurrency.
+
+Initialization is automatic for `get_tools()` and `call_tool()`, and an explicit
+`initialize()` remains valid and idempotent. `get_initialize_result()` exposes
+the negotiated protocol, capabilities, server info, and instructions.
+`get_tool_definitions()` follows all pagination cursors and retains complete MCP
+metadata. Use `call_tool_result()` or `MCPTool.execute_result()` when you need
+`structured_content`, non-text blocks, `is_error`, or `_meta`; `call_tool()` is
+the source-compatible raw JSON facade.
 
 The stdio subprocess is terminated when the last reference to the session is
 dropped — the client, or any tool it produced.
