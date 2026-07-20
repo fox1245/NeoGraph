@@ -73,7 +73,7 @@ add_executable(neograph_tests
     test_schema_provider_stream_async_outer_io.cpp
 )
 
-if(NEOGRAPH_BUILD_MCP)
+if(NEOGRAPH_BUILD_MCP_CLIENT)
     # A stdio MCP tool used from inside a graph run — the combination nothing
     # covered, and a use-after-free until the session stopped depending on an
     # io_context it does not own.
@@ -82,6 +82,10 @@ if(NEOGRAPH_BUILD_MCP)
         test_mcp_client_async.cpp
         test_mcp_stdio_async.cpp
     )
+endif()
+
+if(NEOGRAPH_BUILD_MCP_SERVER)
+    target_sources(neograph_tests PRIVATE test_mcp_server.cpp)
 endif()
 
 if(NEOGRAPH_BUILD_A2A)
@@ -141,8 +145,12 @@ target_link_libraries(neograph_tests PRIVATE
     GTest::gtest_main
 )
 
-if(NEOGRAPH_BUILD_MCP)
+if(NEOGRAPH_BUILD_MCP_CLIENT)
     target_link_libraries(neograph_tests PRIVATE neograph::mcp)
+endif()
+
+if(NEOGRAPH_BUILD_MCP_SERVER)
+    target_link_libraries(neograph_tests PRIVATE neograph::mcp_server)
 endif()
 
 if(NEOGRAPH_BUILD_A2A)

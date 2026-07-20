@@ -10,6 +10,7 @@
  * #include <neograph/neograph.h>          // Core + graph engine
  * #include <neograph/llm/openai_provider.h> // OpenAI provider (optional)
  * #include <neograph/mcp/client.h>          // MCP client (optional)
+ * #include <neograph/mcp/server.h>          // MCP server (optional)
  * @endcode
  */
 #pragma once

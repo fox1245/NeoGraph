@@ -66,6 +66,7 @@ struct NEOGRAPH_API ToolDefinition {
     json        raw = json::object();
 
     static ToolDefinition from_json(const json& value);
+    json to_json() const;
 };
 
 struct NEOGRAPH_API ListToolsPage {
@@ -85,6 +86,7 @@ struct NEOGRAPH_API CallToolResult {
     json raw = json::object();
 
     static CallToolResult from_json(const json& value);
+    json to_json() const;
 };
 
 } // namespace neograph::mcp
