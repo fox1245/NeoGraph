@@ -31,6 +31,47 @@ GraphAgentAdapter::build_initial_state(const std::string& user_text) const {
     return state;
 }
 
+std::optional<Artifact> GraphAgentAdapter::build_output_artifact(
+    const neograph::json&, const std::string&) const {
+    return std::nullopt;
+}
+
+StructuredOutputAdapter::StructuredOutputAdapter(std::string contract,
+                                                 int version,
+                                                 std::string data_channel,
+                                                 std::string input_channel)
+    : contract_(std::move(contract)),
+      version_(version),
+      data_channel_(std::move(data_channel)),
+      input_channel_(std::move(input_channel)) {
+    if (contract_.find_first_not_of(" \t\n\r") == std::string::npos) {
+        throw std::invalid_argument("structured output contract is required");
+    }
+    if (version_ < 1) throw std::invalid_argument("structured output version must be positive");
+    if (data_channel_.empty()) throw std::invalid_argument("structured output data channel is required");
+}
+
+std::string StructuredOutputAdapter::input_channel() const { return input_channel_; }
+std::string StructuredOutputAdapter::output_channel() const { return "response"; }
+
+std::optional<Artifact> StructuredOutputAdapter::build_output_artifact(
+    const neograph::json& output, const std::string& task_id) const {
+    if (!output.contains("channels")) return std::nullopt;
+    const auto& channels = output["channels"];
+    if (!channels.contains(data_channel_) || !channels[data_channel_].contains("value")) {
+        return std::nullopt;
+    }
+    Part part;
+    part.kind = "data";
+    part.data = {{"contract", contract_}, {"version", version_},
+                 {"value", channels[data_channel_]["value"]}};
+    Artifact artifact;
+    artifact.artifact_id = task_id + "-artifact";
+    artifact.name = contract_;
+    artifact.parts.push_back(std::move(part));
+    return artifact;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -92,8 +133,9 @@ std::string extract_agent_text(const neograph::json& output,
 }
 
 Task build_response_task(const std::string& task_id,
-                         const std::string& context_id,
-                         const std::string& agent_text) {
+                          const std::string& context_id,
+                          const std::string& agent_text,
+                          std::optional<Artifact> artifact = std::nullopt) {
     Message reply;
     reply.message_id = fresh_uuid_like();
     reply.role       = Role::Agent;
@@ -107,6 +149,7 @@ Task build_response_task(const std::string& task_id,
     t.status.state    = TaskState::Completed;
     t.status.message  = reply;
     t.history.push_back(std::move(reply));
+    if (artifact) t.artifacts.push_back(std::move(*artifact));
     return t;
 }
 
@@ -333,7 +376,8 @@ Task A2AServer::Impl::run_graph(
             result.status.state = TaskState::Canceled;
         } else {
             auto agent_text = extract_agent_text(rr.output, a.output_channel());
-            result = build_response_task(task_id, context_id, agent_text);
+            result = build_response_task(task_id, context_id, agent_text,
+                                         a.build_output_artifact(rr.output, task_id));
         }
     } catch (const std::exception& e) {
         result = build_failure_task(

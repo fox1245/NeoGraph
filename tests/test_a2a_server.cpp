@@ -50,6 +50,21 @@ class EchoNode : public GraphNode {
     std::string name_;
 };
 
+class JsonSiteNode : public GraphNode {
+  public:
+    JsonSiteNode(std::string name) : name_(std::move(name)) {}
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"response", json("SiteSpec ready")});
+        out.writes.push_back(ChannelWrite{
+            "site_spec", json{{"schemaVersion", 1}, {"name", "Demo"}}});
+        co_return out;
+    }
+    std::string get_name() const override { return name_; }
+  private:
+    std::string name_;
+};
+
 std::shared_ptr<GraphEngine> build_echo_engine() {
     auto& factory = NodeFactory::instance();
     factory.register_type("echo",
@@ -129,6 +144,46 @@ TEST(A2AServer, MessageSendRoundTrip) {
     auto last = task.history.back();
     ASSERT_FALSE(last.parts.empty());
     EXPECT_EQ(last.parts[0].text, "echo:hello world");
+}
+
+TEST(A2AServer, StructuredOutputAdapterReturnsVersionedDataArtifact) {
+    auto& factory = NodeFactory::instance();
+    factory.register_type("json_site",
+        [](const std::string& name, const neograph::json&, const NodeContext&) {
+            return std::make_unique<JsonSiteNode>(name);
+        });
+    neograph::json def = {
+        {"name", "site-spec-graph"},
+        {"channels", {
+            {"prompt", { {"reducer", "overwrite"} }},
+            {"response", { {"reducer", "overwrite"} }},
+            {"site_spec", { {"reducer", "overwrite"} }},
+        }},
+        {"nodes", {{"site", {{"type", "json_site"}}}}},
+        {"edges", neograph::json::array({
+            neograph::json{{"from", "__start__"}, {"to", "site"}},
+            neograph::json{{"from", "site"}, {"to", "__end__"}},
+        })},
+    };
+    NodeContext context;
+    auto engine = std::shared_ptr<GraphEngine>(GraphEngine::compile(def, context));
+    auto adapter = std::make_shared<StructuredOutputAdapter>(
+        "neograph/site-spec", 1, "site_spec");
+    A2AServer server(engine, build_card(0), adapter);
+    ASSERT_TRUE(server.start_async("127.0.0.1", 0));
+    A2AClient client("http://127.0.0.1:" + std::to_string(server.port()));
+    auto task = client.send_message_sync("compose");
+    server.stop();
+
+    ASSERT_EQ(task.artifacts.size(), 1u);
+    ASSERT_FALSE(task.history.empty());
+    EXPECT_EQ(task.history.back().parts[0].text, "SiteSpec ready");
+    ASSERT_EQ(task.artifacts[0].parts.size(), 1u);
+    const auto& part = task.artifacts[0].parts[0];
+    EXPECT_EQ(part.kind, "data");
+    EXPECT_EQ(part.data["contract"], "neograph/site-spec");
+    EXPECT_EQ(part.data["version"], 1);
+    EXPECT_EQ(part.data["value"]["name"], "Demo");
 }
 
 TEST(A2AServer, TaskGetReturnsLatestSnapshot) {

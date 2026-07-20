@@ -27,6 +27,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace neograph::a2a {
@@ -52,6 +53,32 @@ class NEOGRAPH_API GraphAgentAdapter {
     /// inbound user text to @ref input_channel(). Override to add
     /// system prompts, conversation history, etc.
     virtual neograph::json build_initial_state(const std::string& user_text) const;
+
+    /// Optionally promote a graph output into a typed A2A artifact.
+    virtual std::optional<Artifact> build_output_artifact(
+        const neograph::json& output,
+        const std::string& task_id) const;
+};
+
+/// Adapt one JSON-valued graph output channel into a versioned A2A DataPart.
+class NEOGRAPH_API StructuredOutputAdapter final : public GraphAgentAdapter {
+  public:
+    StructuredOutputAdapter(std::string contract,
+                            int version,
+                            std::string data_channel,
+                            std::string input_channel = "prompt");
+
+    std::string input_channel() const override;
+    std::string output_channel() const override;
+    std::optional<Artifact> build_output_artifact(
+        const neograph::json& output,
+        const std::string& task_id) const override;
+
+  private:
+    std::string contract_;
+    int         version_;
+    std::string data_channel_;
+    std::string input_channel_;
 };
 
 /**
