@@ -111,7 +111,12 @@ endif()
 # find_package() calls are skipped entirely (see line ~258).
 option(NEOGRAPH_BUILD_ASYNC    "Build neograph::async (asio::ssl HTTP/HTTPS/WS client)" ON)
 option(NEOGRAPH_BUILD_LLM      "Build neograph::llm (LLM providers)"     ON)
-option(NEOGRAPH_BUILD_MCP      "Build neograph::mcp (MCP client)"        ON)
+option(NEOGRAPH_BUILD_MCP      "Build MCP components (compatibility umbrella)" ON)
+set(_neograph_mcp_component_default ${NEOGRAPH_BUILD_MCP})
+option(NEOGRAPH_BUILD_MCP_CLIENT "Build neograph::mcp MCP client"
+       ${_neograph_mcp_component_default})
+option(NEOGRAPH_BUILD_MCP_SERVER "Build neograph::mcp_server local MCP server"
+       ${_neograph_mcp_component_default})
 option(NEOGRAPH_BUILD_A2A      "Build neograph::a2a (Agent-to-Agent client)" ON)
 option(NEOGRAPH_BUILD_ACP      "Build neograph::acp (Agent Client Protocol server)" ON)
 option(NEOGRAPH_BUILD_UTIL     "Build neograph::util (utilities)"        ON)
@@ -308,14 +313,14 @@ target_link_libraries(asio INTERFACE Threads::Threads)
 # fail loud — neograph_async is their link target and skipping it would
 # yield a confusing "undefined reference to OpenSSL::SSL" link error
 # many minutes into the build.
-if(NOT NEOGRAPH_BUILD_ASYNC AND (NEOGRAPH_BUILD_LLM OR NEOGRAPH_BUILD_MCP OR NEOGRAPH_BUILD_A2A OR NEOGRAPH_BUILD_PYBIND))
+if(NOT NEOGRAPH_BUILD_ASYNC AND (NEOGRAPH_BUILD_LLM OR NEOGRAPH_BUILD_MCP_CLIENT OR NEOGRAPH_BUILD_A2A OR NEOGRAPH_BUILD_PYBIND))
     message(FATAL_ERROR
         "NEOGRAPH_BUILD_ASYNC=OFF is incompatible with "
         "NEOGRAPH_BUILD_LLM/MCP/A2A/PYBIND=ON — those targets link "
         "against neograph_async. Either flip ASYNC back ON, or turn "
         "the dependent components OFF in the same configure call.")
 endif()
-if(NEOGRAPH_BUILD_ASYNC OR NEOGRAPH_BUILD_LLM OR NEOGRAPH_BUILD_MCP OR NEOGRAPH_BUILD_A2A)
+if(NEOGRAPH_BUILD_ASYNC OR NEOGRAPH_BUILD_LLM OR NEOGRAPH_BUILD_MCP_CLIENT OR NEOGRAPH_BUILD_A2A)
     find_package(OpenSSL REQUIRED)
 endif()
 
@@ -614,9 +619,24 @@ if(NEOGRAPH_BUILD_LLM)
 endif()
 
 # ===========================================================================
-# neograph::mcp — MCP client (JSON-RPC over HTTP/stdio)
+# MCP shared values, client, and server. The server target deliberately does
+# not link neograph::async or OpenSSL, so server-only builds stay lightweight.
 # ===========================================================================
-if(NEOGRAPH_BUILD_MCP)
+if(NEOGRAPH_BUILD_MCP_CLIENT OR NEOGRAPH_BUILD_MCP_SERVER)
+    add_library(neograph_mcp_types
+        src/mcp/types.cpp
+    )
+    target_include_directories(neograph_mcp_types
+        PUBLIC
+            $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+    )
+    target_compile_definitions(neograph_mcp_types PRIVATE NEOGRAPH_BUILDING_LIBRARY)
+    target_link_libraries(neograph_mcp_types PUBLIC neograph_core)
+    add_library(neograph::mcp_types ALIAS neograph_mcp_types)
+endif()
+
+if(NEOGRAPH_BUILD_MCP_CLIENT)
     add_library(neograph_mcp
         src/mcp/client.cpp
     )
@@ -629,11 +649,27 @@ if(NEOGRAPH_BUILD_MCP)
 
     target_compile_definitions(neograph_mcp PRIVATE NEOGRAPH_BUILDING_LIBRARY)
     target_link_libraries(neograph_mcp
-        PUBLIC  neograph_core
+        PUBLIC  neograph_core neograph_mcp_types
         PRIVATE neograph_async OpenSSL::SSL OpenSSL::Crypto
     )
 
     add_library(neograph::mcp ALIAS neograph_mcp)
+endif()
+
+if(NEOGRAPH_BUILD_MCP_SERVER)
+    add_library(neograph_mcp_server
+        src/mcp/server.cpp
+    )
+    target_include_directories(neograph_mcp_server
+        PUBLIC
+            $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+    )
+    target_compile_definitions(neograph_mcp_server PRIVATE NEOGRAPH_BUILDING_LIBRARY)
+    target_link_libraries(neograph_mcp_server
+        PUBLIC neograph_core neograph_mcp_types
+    )
+    add_library(neograph::mcp_server ALIAS neograph_mcp_server)
 endif()
 
 # ===========================================================================
@@ -1160,11 +1196,11 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             OFF)
         if(NEOGRAPH_BUILD_COOKBOOK_JARVIS
            AND NEOGRAPH_BUILD_LLM
-           AND NEOGRAPH_BUILD_MCP)
+           AND NEOGRAPH_BUILD_MCP_CLIENT)
             add_subdirectory(examples/cookbook/jarvis)
         endif()
 
-        if(NEOGRAPH_BUILD_MCP)
+        if(NEOGRAPH_BUILD_MCP_CLIENT)
             add_executable(example_mcp_agent examples/03_mcp_agent.cpp)
             target_link_libraries(example_mcp_agent PRIVATE neograph::core neograph::llm neograph::mcp cppdotenv)
 
@@ -1301,6 +1337,13 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             target_link_libraries(example_clay_chatbot PRIVATE neograph::core neograph::llm raylib cppdotenv)
             target_include_directories(example_clay_chatbot PRIVATE ${DEPS_DIR})
         endif()
+    endif()
+
+    # Reusable MCP server smoke target. It has no LLM or client dependency and
+    # is the same stdio binary used by Inspector and host interoperability tests.
+    if(NEOGRAPH_BUILD_MCP_SERVER)
+        add_executable(example_mcp_server examples/59_mcp_server.cpp)
+        target_link_libraries(example_mcp_server PRIVATE neograph::mcp_server)
     endif()
 endif()
 
@@ -1500,7 +1543,11 @@ if(NEOGRAPH_INSTALL_EXPORT)
         endif()
     endforeach()
 
-    foreach(_comp async llm mcp a2a acp util postgres sqlite)
+    if(TARGET neograph_mcp_types)
+        list(APPEND NEOGRAPH_EXPORT_TARGETS neograph_mcp_types)
+    endif()
+
+    foreach(_comp async llm mcp mcp_server a2a acp util postgres sqlite)
         if(TARGET neograph_${_comp})
             list(APPEND NEOGRAPH_EXPORT_TARGETS neograph_${_comp})
             list(APPEND NEOGRAPH_COMPONENTS_BUILT ${_comp})
@@ -1603,6 +1650,7 @@ if(NEOGRAPH_BUILD_PYBIND)
     # not be located" — which is exactly what flipping NEOGRAPH_BUILD_MCP=ON in
     # pyproject.toml without touching this list did.
     if(TARGET neograph_mcp)
+        list(APPEND NEOGRAPH_PYBIND_LIBS neograph_mcp_types)
         list(APPEND NEOGRAPH_PYBIND_LIBS neograph_mcp)
     endif()
     # neograph_a2a ships when A2A is built. Same reasoning as above:

@@ -222,7 +222,8 @@ version-locked visual editor). Built-in **OpenInference tracer**, no extra link.
 vLLM/Ollama — any OpenAI-compatible API) · `SchemaProvider` (Claude, Gemini, or
 any custom vendor via JSON schema) · ReAct `Agent` loop with streaming.
 
-**Integrations** — MCP client (`neograph::mcp`, HTTP + stdio) · Agent-to-Agent
+**Integrations** — MCP client (`neograph::mcp`, HTTP + stdio) · local MCP server
+(`neograph::mcp_server`, stdio) · Agent-to-Agent
 (`neograph::a2a`, server + client + caller node) · Agent Client Protocol
 (`neograph::acp`, editor-driven) · gRPC service (`neograph::grpc`, opt-in) ·
 async HTTP/HTTPS/WS + SSE (`neograph::async`).
@@ -230,6 +231,10 @@ async HTTP/HTTPS/WS + SSE (`neograph::async`).
 **Durable state** — `PostgresCheckpointStore`, `SqliteCheckpointStore`, and
 `InMemoryCheckpointStore` behind one `CheckpointStore` interface (all
 Python-bound). Lock-free `RequestQueue` + `AsyncTool` in `neograph::util`.
+
+`NEOGRAPH_BUILD_MCP` remains the compatibility umbrella for both MCP roles.
+Use `NEOGRAPH_BUILD_MCP_CLIENT` or `NEOGRAPH_BUILD_MCP_SERVER` for a narrow
+build; the server-only target does not require `neograph::async` or OpenSSL.
 
 Full capability list and the 55+ runnable examples:
 [`examples/README.md`](examples/README.md).
