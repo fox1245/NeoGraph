@@ -30,6 +30,7 @@
 #include <neograph/tool.h>
 
 #include <pybind11/pybind11.h>
+#include <pybind11/chrono.h>
 #include <pybind11/stl.h>
 
 #include <memory>
@@ -45,6 +46,83 @@ void init_mcp(py::module_& m) {
         "MCP (Model Context Protocol) client — connect to a remote tool server, "
         "discover its catalogue, and hand the tools straight to a graph node.");
 
+    py::register_exception<neograph::mcp::MCPError>(mcp, "MCPError",
+                                                     PyExc_RuntimeError);
+
+    py::class_<neograph::mcp::MCPClientConfig>(mcp, "MCPClientConfig")
+        .def(py::init<>())
+        .def_readwrite("request_timeout",
+                       &neograph::mcp::MCPClientConfig::request_timeout)
+        .def_readwrite("headers", &neograph::mcp::MCPClientConfig::headers,
+            "Static HTTP headers as (name, value) pairs. Use this for bearer "
+            "tokens that do not need per-request refresh.");
+
+    py::class_<neograph::mcp::InitializeResult>(mcp, "InitializeResult")
+        .def_readonly("protocol_version",
+                      &neograph::mcp::InitializeResult::protocol_version)
+        .def_readonly("instructions",
+                      &neograph::mcp::InitializeResult::instructions)
+        .def_property_readonly("capabilities", [](const neograph::mcp::InitializeResult& self) {
+            return json_to_py(self.capabilities);
+        })
+        .def_property_readonly("server_info", [](const neograph::mcp::InitializeResult& self) {
+            return json_to_py(self.server_info);
+        })
+        .def_property_readonly("raw", [](const neograph::mcp::InitializeResult& self) {
+            return json_to_py(self.raw);
+        });
+
+    py::class_<neograph::mcp::ToolDefinition>(mcp, "ToolDefinition")
+        .def_readonly("name", &neograph::mcp::ToolDefinition::name)
+        .def_readonly("title", &neograph::mcp::ToolDefinition::title)
+        .def_readonly("description", &neograph::mcp::ToolDefinition::description)
+        .def_property_readonly("icons", [](const neograph::mcp::ToolDefinition& self) {
+            return json_to_py(self.icons);
+        })
+        .def_property_readonly("input_schema", [](const neograph::mcp::ToolDefinition& self) {
+            return json_to_py(self.input_schema);
+        })
+        .def_property_readonly("output_schema", [](const neograph::mcp::ToolDefinition& self) {
+            return json_to_py(self.output_schema);
+        })
+        .def_property_readonly("annotations", [](const neograph::mcp::ToolDefinition& self) {
+            return json_to_py(self.annotations);
+        })
+        .def_property_readonly("execution", [](const neograph::mcp::ToolDefinition& self) {
+            return json_to_py(self.execution);
+        })
+        .def_property_readonly("meta", [](const neograph::mcp::ToolDefinition& self) {
+            return json_to_py(self.meta);
+        })
+        .def_property_readonly("raw", [](const neograph::mcp::ToolDefinition& self) {
+            return json_to_py(self.raw);
+        });
+
+    py::class_<neograph::mcp::ListToolsPage>(mcp, "ListToolsPage")
+        .def_readonly("tools", &neograph::mcp::ListToolsPage::tools)
+        .def_readonly("next_cursor", &neograph::mcp::ListToolsPage::next_cursor)
+        .def_property_readonly("meta", [](const neograph::mcp::ListToolsPage& self) {
+            return json_to_py(self.meta);
+        })
+        .def_property_readonly("raw", [](const neograph::mcp::ListToolsPage& self) {
+            return json_to_py(self.raw);
+        });
+
+    py::class_<neograph::mcp::CallToolResult>(mcp, "CallToolResult")
+        .def_readonly("is_error", &neograph::mcp::CallToolResult::is_error)
+        .def_property_readonly("content", [](const neograph::mcp::CallToolResult& self) {
+            return json_to_py(self.content);
+        })
+        .def_property_readonly("structured_content", [](const neograph::mcp::CallToolResult& self) {
+            return json_to_py(self.structured_content);
+        })
+        .def_property_readonly("meta", [](const neograph::mcp::CallToolResult& self) {
+            return json_to_py(self.meta);
+        })
+        .def_property_readonly("raw", [](const neograph::mcp::CallToolResult& self) {
+            return json_to_py(self.raw);
+        });
+
     // MCPTool is a neograph::Tool. Bind it with the C++ Tool as its base so it
     // satisfies isinstance checks and can go into NodeContext(tools=[...])
     // without being mistaken for a Python tool.
@@ -53,11 +131,29 @@ void init_mcp(py::module_& m) {
         "A tool living on an MCP server. Produced by MCPClient.get_tools(); you "
         "do not construct these yourself.\n\n"
         "It is a C++ AsyncTool — it genuinely suspends — so several MCP calls in "
-        "one turn overlap rather than queueing. That holds for the HTTP "
-        "transport; stdio has a single pipe and the client serializes it.")
+        "one turn overlap rather than queueing. HTTP uses concurrent requests; "
+        "stdio multiplexes request IDs over its single pipe when the server can "
+        "process requests concurrently.")
         .def("get_name", &neograph::mcp::MCPTool::get_name)
         .def("get_definition", &neograph::mcp::MCPTool::get_definition,
-            "The ChatTool the model sees: name, description, parameter schema.");
+            "The ChatTool the model sees: name, description, parameter schema.")
+        .def("get_mcp_definition",
+             &neograph::mcp::MCPTool::get_mcp_definition,
+             py::return_value_policy::reference_internal,
+             "The complete MCP tool definition, including output schema and metadata.")
+        .def("execute_result",
+             [](neograph::mcp::MCPTool& self, py::object arguments) {
+                 json args = arguments.is_none() ? json::object()
+                                                 : py_to_json(arguments);
+                 neograph::mcp::CallToolResult result;
+                 {
+                     py::gil_scoped_release release;
+                     result = self.execute_result(args);
+                 }
+                 return result;
+             },
+             py::arg("arguments") = py::none(),
+             "Execute directly and preserve structured, non-text, error, and metadata fields.");
 
     py::class_<neograph::mcp::MCPClient>(mcp, "MCPClient",
         "Client for an MCP server.\n\n"
@@ -68,17 +164,30 @@ void init_mcp(py::module_& m) {
         "dropped — which is the client, or any tool it produced.")
         .def(py::init<const std::string&>(), py::arg("server_url"),
             "HTTP transport. Tool calls made through this server overlap.")
+        .def(py::init<const std::string&, neograph::mcp::MCPClientConfig>(),
+             py::arg("server_url"), py::arg("config"))
         .def(py::init<std::vector<std::string>>(), py::arg("argv"),
             "stdio transport: spawn a subprocess and speak JSON-RPC over its "
             "pipes. argv[0] is resolved via PATH.\n\n"
-            "Note that one pipe means one request at a time: the client takes a "
-            "capacity-1 lock, so calls to a stdio server are serialized. For "
-            "overlapping calls, use the HTTP transport.")
+            "Requests are correlated by JSON-RPC id, so calls overlap when the "
+            "subprocess handles requests concurrently.")
         .def("initialize", &neograph::mcp::MCPClient::initialize,
             py::arg("client_name") = "neograph",
             py::call_guard<py::gil_scoped_release>(),
-            "Perform the MCP handshake. Returns False if it failed. Call this "
-            "before get_tools().")
+            "Perform the MCP handshake once. Repeated calls are idempotent; "
+            "protocol and transport failures raise.")
+        .def("is_initialized", &neograph::mcp::MCPClient::is_initialized)
+        .def("get_initialize_result",
+             &neograph::mcp::MCPClient::get_initialize_result,
+             "Return negotiated protocol, capabilities, server info, and instructions.")
+        .def("list_tools", &neograph::mcp::MCPClient::list_tools,
+             py::arg("cursor") = py::none(),
+             py::call_guard<py::gil_scoped_release>(),
+             "Fetch one tools/list page using an opaque cursor.")
+        .def("get_tool_definitions",
+             &neograph::mcp::MCPClient::get_tool_definitions,
+             py::call_guard<py::gil_scoped_release>(),
+             "Fetch every tools/list page and preserve complete MCP metadata.")
         .def("get_tools",
             [](neograph::mcp::MCPClient& self) {
                 std::vector<std::unique_ptr<neograph::Tool>> tools;
@@ -119,7 +228,22 @@ void init_mcp(py::module_& m) {
             py::arg("name"), py::arg("arguments") = py::none(),
             "Call a tool by name, outside any graph. Returns the server's raw "
             "response — the MCP content envelope, "
-            "{\"content\": [{\"type\": \"text\", \"text\": ...}]}.");
+            "{\"content\": [{\"type\": \"text\", \"text\": ...}]}.")
+        .def("call_tool_result",
+            [](neograph::mcp::MCPClient& self, const std::string& name,
+               py::object arguments) {
+                json args = arguments.is_none() ? json::object()
+                                                : py_to_json(arguments);
+                neograph::mcp::CallToolResult result;
+                {
+                    py::gil_scoped_release release;
+                    result = self.call_tool_result(name, args);
+                }
+                return result;
+            },
+            py::arg("name"), py::arg("arguments") = py::none(),
+            "Call a tool and preserve all MCP result fields. Tool-level "
+            "isError remains data; JSON-RPC failures raise MCPError.");
 }
 
 }  // namespace neograph::pybind

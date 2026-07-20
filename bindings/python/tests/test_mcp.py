@@ -16,11 +16,9 @@ MCP tools are network round-trips, exactly the case where concurrent dispatch
 pays. But the two transports are not the same, and pretending otherwise would be
 a lie told with a passing test:
 
-  - **stdio has one pipe.** Our client takes a capacity-1 lock around it, so
-    calls are serialized *by us*, not by the server. Three 0.4 s calls take
-    1.2 s and there is no way around it short of multiplexing JSON-RPC ids over
-    the pipe. `test_stdio_calls_are_serialized` pins that, so nobody reads the
-    HTTP number below and assumes it holds everywhere.
+  - **stdio has one pipe, multiplexed by JSON-RPC id.** Writes are framed and a
+    single reader routes out-of-order replies to their callers. Calls overlap
+    when the subprocess itself handles them concurrently.
 
   - **HTTP has no such bottleneck.** Each call is its own request, and MCPTool
     is a real C++ AsyncTool, so three calls overlap.
@@ -60,7 +58,16 @@ TOOLS = [
      "inputSchema": {"type": "object",
                      "properties": {"text": {"type": "string"},
                                     "delay": {"type": "number"}},
-                     "required": ["text"]}},
+                      "required": ["text"]}},
+    {"name": "rich", "title": "Rich result",
+     "description": "Return structured and non-text content",
+     "icons": [{"src": "data:image/png;base64,AA==", "mimeType": "image/png"}],
+     "inputSchema": {"type": "object"},
+     "outputSchema": {"type": "object", "required": ["answer"],
+                      "properties": {"answer": {"type": "integer"}}},
+     "annotations": {"readOnlyHint": True},
+     "execution": {"taskSupport": "forbidden"},
+     "_meta": {"catalog": "python"}},
 ]
 
 
@@ -74,19 +81,46 @@ class _Handler(BaseHTTPRequestHandler):
         method = request.get("method")
         params = request.get("params") or {}
 
+        if method != "initialize":
+            if (self.headers.get("Mcp-Session-Id") != "python-session" or
+                    self.headers.get("MCP-Protocol-Version") != "2025-11-25"):
+                body = json.dumps({"jsonrpc": "2.0", "id": request.get("id"),
+                                   "error": {"code": -32002,
+                                             "message": "missing session state"}}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
         if method == "initialize":
             result = {"protocolVersion": "2025-11-25",
                       "capabilities": {"tools": {}},
                       "serverInfo": {"name": "http-echo", "version": "0.1.0"}}
         elif method == "tools/list":
-            result = {"tools": TOOLS}
+            if "cursor" not in params:
+                result = {"tools": TOOLS[:2], "nextCursor": "page-2",
+                          "_meta": {"page": 1}}
+            else:
+                assert params["cursor"] == "page-2"
+                result = {"tools": TOOLS[2:], "_meta": {"page": 2}}
         elif method == "tools/call":
             args = params.get("arguments") or {}
             if params.get("name") == "slow_echo":
                 time.sleep(float(args.get("delay", 0.3)))
-            result = {"content": [{"type": "text",
-                                   "text": args.get("text", "")}],
-                      "isError": False}
+            if params.get("name") == "rich":
+                result = {"content": [
+                              {"type": "text", "text": "answer: 42"},
+                              {"type": "image", "data": "AA==",
+                               "mimeType": "image/png"}],
+                          "structuredContent": {"answer": 42},
+                          "isError": False,
+                          "_meta": {"trace": "python-trace"}}
+            else:
+                result = {"content": [{"type": "text",
+                                        "text": args.get("text", "")}],
+                          "isError": False}
         else:
             result = None
 
@@ -98,6 +132,8 @@ class _Handler(BaseHTTPRequestHandler):
         body = json.dumps({"jsonrpc": "2.0", "id": request["id"],
                            "result": result}).encode()
         self.send_response(200)
+        if method == "initialize":
+            self.send_header("Mcp-Session-Id", "python-session")
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -227,27 +263,20 @@ def test_a_graph_can_use_a_remote_tool(stdio_client):
     assert len(tool_msgs) == 1
 
 
-def test_stdio_calls_are_serialized(stdio_client):
-    """The honest boundary, pinned so the HTTP number below cannot be
-    over-read.
-
-    One subprocess, one pipe. Our client takes a capacity-1 lock around it, so
-    three calls queue — and that is our doing, not the server's. Anyone who
-    needs MCP calls to overlap wants the HTTP transport.
-    """
+def test_stdio_calls_overlap_when_server_is_concurrent(stdio_client):
+    """The pipe is framed once, while request IDs demultiplex replies."""
     delay = 0.3
     definition = _graph_calling(
         "slow_echo", 3, '{"text": "x", "delay": %s}' % delay)
 
     tool_msgs, elapsed = _run(definition, stdio_client.get_tools(),
-                              "mcp-stdio-serial", expect_text="x")
+                              "mcp-stdio-concurrent", expect_text="x")
 
     assert len(tool_msgs) == 3
     print(f"\n[MEASURE] stdio, 3 MCP calls x {delay}s: {elapsed:.2f}s "
-          f"(serialized by the single pipe)")
-    assert elapsed > 3 * delay * 0.8, (
-        "stdio calls appear to have overlapped — either the capacity-1 lock is "
-        "gone, or this test no longer measures what it thinks it does")
+          f"(request-ID multiplexed)")
+    assert elapsed < 2 * delay, (
+        f"stdio requests serialized unexpectedly: {elapsed:.2f}s")
 
 
 # ── HTTP ────────────────────────────────────────────────────────────────────
@@ -258,7 +287,35 @@ def test_http_tools_are_discovered(http_url):
 
     tools = client.get_tools()
 
-    assert sorted(t.get_name() for t in tools) == ["echo", "slow_echo"]
+    assert sorted(t.get_name() for t in tools) == ["echo", "rich", "slow_echo"]
+
+
+def test_http_typed_metadata_pagination_and_session(http_url):
+    config = mcp.MCPClientConfig()
+    config.headers = [("X-Test", "python")]
+    client = mcp.MCPClient(http_url + "/mcp", config)
+
+    assert client.initialize("neograph-test")
+    assert client.initialize("idempotent")
+    init = client.get_initialize_result()
+    assert init.protocol_version == "2025-11-25"
+    assert init.server_info["name"] == "http-echo"
+
+    first = client.list_tools()
+    assert first.next_cursor == "page-2"
+    assert first.meta == {"page": 1}
+    definitions = client.get_tool_definitions()
+    rich_definition = next(d for d in definitions if d.name == "rich")
+    assert rich_definition.title == "Rich result"
+    assert rich_definition.annotations["readOnlyHint"] is True
+    assert rich_definition.meta == {"catalog": "python"}
+
+    rich = next(t for t in client.get_tools() if t.get_name() == "rich")
+    result = rich.execute_result({})
+    assert result.structured_content == {"answer": 42}
+    assert result.content[1]["type"] == "image"
+    assert result.meta == {"trace": "python-trace"}
+    assert result.is_error is False
 
 
 def test_http_tool_calls_overlap(http_url):

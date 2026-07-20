@@ -14,12 +14,13 @@
 #pragma once
 
 #include <neograph/api.h>
+#include <neograph/mcp/types.h>
 #include <neograph/tool.h>
 
 #include <asio/awaitable.hpp>
 
 #include <memory>
-#include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,8 @@ namespace detail {
 /// and a mutex serialising concurrent rpc_call() calls. Destroying the
 /// session sends SIGTERM to the child and reaps it via waitpid.
 class StdioSession;
+class HttpSession;
+class ClientMetadata;
 }
 
 /**
@@ -41,8 +44,9 @@ class StdioSession;
  */
 class NEOGRAPH_API MCPTool : public AsyncTool {
   public:
-    /// HTTP-mode constructor. Each execute() opens an ephemeral
-    /// MCPClient against @p server_url.
+    /// Legacy HTTP-mode constructor. Each execute() opens an ephemeral
+    /// MCPClient against @p server_url. Tools returned by MCPClient::get_tools()
+    /// instead retain the originating HTTP session.
     MCPTool(const std::string& server_url,
             const std::string& name,
             const std::string& description,
@@ -56,6 +60,13 @@ class NEOGRAPH_API MCPTool : public AsyncTool {
             const std::string& description,
             const json& input_schema);
 
+    /// Full MCP definition, including outputSchema and annotations.
+    const ToolDefinition& get_mcp_definition() const noexcept { return definition_; }
+
+    /// Typed execution preserving all content block kinds and MCP result fields.
+    CallToolResult execute_result(const json& arguments);
+    asio::awaitable<CallToolResult> execute_result_async(const json& arguments);
+
     ChatTool get_definition() const override;
 
     /**
@@ -64,19 +75,25 @@ class NEOGRAPH_API MCPTool : public AsyncTool {
      * @return Result string (text content joined by newlines) or JSON dump.
      */
     /// Native async execution — overlaps with sibling tool calls when a
-    /// node dispatches several at once. stdio rides the session's
-    /// awaitable lock; HTTP runs an ephemeral handshake+call coroutine
-    /// (no run_sync, so no per-call io_context blocks a worker thread).
+    /// node dispatches several at once. stdio correlates in-flight calls by
+    /// JSON-RPC id; discovered HTTP tools reuse their originating session.
     asio::awaitable<std::string> execute_async(const json& arguments) override;
 
-    std::string get_name() const override { return name_; }
+    std::string get_name() const override { return definition_.name; }
 
   private:
+    friend class MCPClient;
+    MCPTool(std::shared_ptr<detail::HttpSession> session,
+            std::shared_ptr<detail::ClientMetadata> metadata,
+            ToolDefinition definition);
+    MCPTool(std::shared_ptr<detail::StdioSession> session,
+            ToolDefinition definition);
+
     std::string server_url_;                              ///< Non-empty in HTTP mode.
+    std::shared_ptr<detail::HttpSession> http_session_;   ///< Shared originating HTTP session.
+    std::shared_ptr<detail::ClientMetadata> metadata_;   ///< Shared lifecycle/negotiation state.
     std::shared_ptr<detail::StdioSession> stdio_session_; ///< Non-null in stdio mode.
-    std::string name_;
-    std::string description_;
-    json input_schema_;
+    ToolDefinition definition_;
 };
 
 /**
@@ -105,6 +122,7 @@ class NEOGRAPH_API MCPClient {
      * @param server_url URL of the MCP server (e.g., "http://localhost:8000").
      */
     explicit MCPClient(const std::string& server_url);
+    MCPClient(const std::string& server_url, MCPClientConfig config);
 
     /**
      * @brief Construct a stdio-mode MCP client by spawning a subprocess.
@@ -117,10 +135,15 @@ class NEOGRAPH_API MCPClient {
      */
     explicit MCPClient(std::vector<std::string> argv);
 
+    MCPClient(const MCPClient&) = delete;
+    MCPClient& operator=(const MCPClient&) = delete;
+    MCPClient(MCPClient&&) = delete;
+    MCPClient& operator=(MCPClient&&) = delete;
+
     /**
      * @brief Initialize the connection and perform the MCP handshake.
      * @param client_name Client identifier sent during handshake (default: "neograph").
-     * @return True if initialization succeeded, false otherwise.
+     * @return True after initialization. Protocol and transport failures throw.
      */
     bool initialize(const std::string& client_name = "neograph");
 
@@ -129,32 +152,48 @@ class NEOGRAPH_API MCPClient {
     /// HTTP client without blocking a worker thread in run_sync.
     asio::awaitable<bool> initialize_async(const std::string& client_name = "neograph");
 
+    bool is_initialized() const noexcept;
+    InitializeResult get_initialize_result() const;
+
     /**
      * @brief Discover tools from the MCP server.
      * @return Vector of Tool unique_ptrs (MCPTool instances).
      */
     std::vector<std::unique_ptr<Tool>> get_tools();
 
+    /// Fetch one tools/list page. The cursor is opaque and is echoed verbatim.
+    ListToolsPage list_tools(
+        const std::optional<std::string>& cursor = std::nullopt);
+    asio::awaitable<ListToolsPage> list_tools_async(
+        const std::optional<std::string>& cursor = std::nullopt);
+
+    /// Fetch all pages while preserving the complete MCP definitions.
+    std::vector<ToolDefinition> get_tool_definitions();
+
     /**
      * @brief Call a tool directly by name.
      * @param name Tool name on the server.
      * @param arguments JSON object of tool arguments.
-     * @return JSON response from the server.
+     * @return Raw MCP tools/call result object from the server.
      */
     json call_tool(const std::string& name, const json& arguments);
+
+    CallToolResult call_tool_result(const std::string& name,
+                                    const json& arguments);
 
     /// Async variant of call_tool() — awaits the tools/call RPC without
     /// blocking. Used by MCPTool::execute_async for concurrent dispatch.
     asio::awaitable<json> call_tool_async(const std::string& name,
                                           const json& arguments);
+    asio::awaitable<CallToolResult> call_tool_result_async(
+        const std::string& name,
+        const json& arguments);
 
     /**
      * @brief Async variant of rpc_call for the HTTP transport.
      *
-     * stdio sessions still drive their own blocking exchange (see 2.7
-     * for the asio::posix migration); this awaitable resolves to the
-     * stdio result on the calling thread when the client is in stdio
-     * mode, so callers can use one async path uniformly.
+     * Both transports are coroutine-native. stdio uses a session-owned
+     * io_context and request-id demultiplexer; HTTP awaits async_post.
      *
      * @param method JSON-RPC method name.
      * @param params Method parameters (defaults to empty object).
@@ -165,35 +204,17 @@ class NEOGRAPH_API MCPClient {
         const json& params = json::object());
 
   private:
+    friend class MCPTool;
+    MCPClient(std::shared_ptr<detail::HttpSession> session,
+              std::shared_ptr<detail::ClientMetadata> metadata);
+
     /// Sync rpc_call — for stdio it dispatches synchronously; for HTTP
     /// it routes through `run_sync(rpc_call_async(...))`.
     json rpc_call(const std::string& method, const json& params = json::object());
 
-    // HTTP state (empty strings when in stdio mode).
-    std::string server_url_;
-    std::string host_;
-    std::string path_prefix_;
-    /// Mutex guarding the HTTP-state fields below
-    /// (`session_id_`, `negotiated_protocol_version_`, `request_id_`).
-    /// Concurrent `rpc_call_async` invocations on the same client would
-    /// otherwise race on string assignment from the InitializeResult /
-    /// `Mcp-Session-Id` header read paths — `std::string` SSO writes
-    /// are not atomic. The mutex is held only while building the
-    /// outgoing header list and absorbing the response state, NOT
-    /// across the network call itself, so concurrent in-flight RPCs
-    /// remain possible.
-    mutable std::mutex http_state_mu_;
-    std::string session_id_;
-    /// Protocol version negotiated during initialize. The MCP spec
-    /// requires the client to echo this on every subsequent HTTP request
-    /// in the `MCP-Protocol-Version` header (transports/Streamable HTTP §
-    /// "Protocol Version Header", spec 2025-11-25). Empty until
-    /// initialize completes.
-    std::string negotiated_protocol_version_;
-    int request_id_ = 0;
-
-    // stdio state (null when in HTTP mode).
+    std::shared_ptr<detail::HttpSession> http_session_;
     std::shared_ptr<detail::StdioSession> stdio_session_;
+    std::shared_ptr<detail::ClientMetadata> metadata_;
 };
 
 } // namespace neograph::mcp

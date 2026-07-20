@@ -11,6 +11,7 @@
 #include <asio/detached.hpp>
 #include <asio/experimental/channel.hpp>
 #include <asio/read_until.hpp>
+#include <asio/steady_timer.hpp>
 #include <asio/streambuf.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
@@ -35,17 +36,164 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <istream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <system_error>
 #include <thread>
+#include <unordered_map>
 
 namespace neograph::mcp {
+
+MCPError::MCPError(int code, std::string message, json data)
+  : std::runtime_error(std::move(message))
+  , code_(code)
+  , data_(std::move(data))
+{
+}
+
+InitializeResult InitializeResult::from_json(const json& value) {
+    if (!value.is_object()) {
+        throw std::invalid_argument("MCP initialize result must be an object");
+    }
+    InitializeResult result;
+    result.raw = value;
+    if (!value.contains("protocolVersion")
+        || !value["protocolVersion"].is_string()
+        || value["protocolVersion"].get<std::string>().empty()) {
+        throw std::invalid_argument(
+            "MCP initialize result must contain a non-empty protocolVersion");
+    }
+    if (!value.contains("capabilities") || !value["capabilities"].is_object()
+        || !value.contains("serverInfo") || !value["serverInfo"].is_object()) {
+        throw std::invalid_argument(
+            "MCP initialize result must contain capabilities and serverInfo objects");
+    }
+    if (value.contains("instructions") && !value["instructions"].is_string()) {
+        throw std::invalid_argument("MCP initialize instructions must be a string");
+    }
+    result.protocol_version = value["protocolVersion"].get<std::string>();
+    result.capabilities = value["capabilities"];
+    result.server_info = value["serverInfo"];
+    result.instructions = value.value("instructions", "");
+    return result;
+}
+
+ToolDefinition ToolDefinition::from_json(const json& value) {
+    if (!value.is_object()) {
+        throw std::invalid_argument("MCP tool definition must be an object");
+    }
+    ToolDefinition result;
+    result.raw = value;
+    result.name = value.value("name", "");
+    result.title = value.value("title", "");
+    result.description = value.value("description", "");
+    result.icons = value.value("icons", json::array());
+    result.input_schema = value.value("inputSchema", json::object());
+    if (value.contains("outputSchema")) result.output_schema = value["outputSchema"];
+    result.annotations = value.value("annotations", json::object());
+    result.execution = value.value("execution", json::object());
+    result.meta = value.value("_meta", json::object());
+    if (result.name.empty()) {
+        throw std::invalid_argument("MCP tool definition is missing name");
+    }
+    if (!result.input_schema.is_object()) {
+        throw std::invalid_argument("MCP tool inputSchema must be an object");
+    }
+    if (!result.output_schema.is_null() && !result.output_schema.is_object()) {
+        throw std::invalid_argument("MCP tool outputSchema must be an object");
+    }
+    if (!result.icons.is_array() || !result.annotations.is_object()
+        || !result.execution.is_object() || !result.meta.is_object()) {
+        throw std::invalid_argument("MCP tool metadata has an invalid type");
+    }
+    return result;
+}
+
+ListToolsPage ListToolsPage::from_json(const json& value) {
+    if (!value.is_object() || !value.contains("tools")
+        || !value["tools"].is_array()) {
+        throw std::invalid_argument("MCP tools/list result must contain a tools array");
+    }
+    ListToolsPage result;
+    result.raw = value;
+    for (const auto& tool : value["tools"]) {
+        result.tools.push_back(ToolDefinition::from_json(tool));
+    }
+    if (value.contains("nextCursor") && !value["nextCursor"].is_null()) {
+        if (!value["nextCursor"].is_string()) {
+            throw std::invalid_argument("MCP tools/list nextCursor must be a string");
+        }
+        result.next_cursor = value["nextCursor"].get<std::string>();
+    }
+    result.meta = value.value("_meta", json::object());
+    if (!result.meta.is_object()) {
+        throw std::invalid_argument("MCP tools/list _meta must be an object");
+    }
+    return result;
+}
+
+CallToolResult CallToolResult::from_json(const json& value) {
+    if (!value.is_object()) {
+        throw std::invalid_argument("MCP tools/call result must be an object");
+    }
+    CallToolResult result;
+    result.raw = value;
+    result.content = value.value("content", json::array());
+    if (value.contains("structuredContent")) {
+        result.structured_content = value["structuredContent"];
+    }
+    result.is_error = value.value("isError", false);
+    result.meta = value.value("_meta", json::object());
+    if (!result.content.is_array()) {
+        throw std::invalid_argument("MCP tools/call content must be an array");
+    }
+    if (!result.structured_content.is_null()
+        && !result.structured_content.is_object()) {
+        throw std::invalid_argument(
+            "MCP tools/call structuredContent must be an object");
+    }
+    if (!result.meta.is_object()) {
+        throw std::invalid_argument("MCP tools/call _meta must be an object");
+    }
+    return result;
+}
+
+namespace {
+json extract_rpc_result(const json& response, int expected_id,
+                        std::string_view transport) {
+    const std::string prefix = "MCP " + std::string(transport) + " RPC";
+    if (!response.is_object() || response.value("jsonrpc", "") != "2.0") {
+        throw std::runtime_error(prefix + " response is not a JSON-RPC 2.0 object");
+    }
+    if (!response.contains("id") || response["id"] != expected_id) {
+        throw std::runtime_error(prefix + " response id does not match the request");
+    }
+    const bool has_result = response.contains("result");
+    const bool has_error = response.contains("error");
+    if (has_result == has_error) {
+        throw std::runtime_error(
+            prefix + " response must contain exactly one of result or error");
+    }
+    if (has_error) {
+        const auto& error = response["error"];
+        if (!error.is_object()) {
+            throw std::runtime_error(prefix + " error must be an object");
+        }
+        throw MCPError(error.value("code", -32603),
+                       prefix + " error: " + error.value("message", "unknown"),
+                       error.value("data", json(nullptr)));
+    }
+    return response["result"];
+}
+} // namespace
 
 // ===========================================================================
 // detail::StdioSession — subprocess-backed JSON-RPC channel
@@ -60,6 +208,49 @@ namespace neograph::mcp {
 // identical; members diverge where the handle type does. Members are
 // commented by platform below.
 namespace detail {
+
+class HttpSession {
+public:
+    HttpSession(std::string url, MCPClientConfig client_config)
+      : server_url(std::move(url))
+      , endpoint(async::split_async_endpoint(server_url))
+      , config(std::move(client_config))
+    {
+        if (endpoint.host.empty()) {
+            throw std::invalid_argument("MCP server URL has no host");
+        }
+        const auto& prefix = endpoint.prefix;
+        if (prefix.empty() || prefix == "/") {
+            path = "/mcp";
+        } else if (prefix == "/mcp"
+                   || (prefix.size() > 4
+                       && prefix.compare(prefix.size() - 4, 4, "/mcp") == 0)) {
+            path = prefix;
+        } else {
+            path = prefix + "/mcp";
+        }
+    }
+
+    std::string server_url;
+    async::AsyncEndpoint endpoint;
+    std::string path;
+    MCPClientConfig config;
+    std::mutex mu;
+    std::string session_id;
+    std::string protocol_version;
+    int request_id = 0;
+};
+
+class ClientMetadata {
+public:
+    enum class Lifecycle { created, initializing, initialized };
+
+    mutable std::mutex mu;
+    std::condition_variable changed;
+    Lifecycle lifecycle = Lifecycle::created;
+    InitializeResult initialize_result;
+    std::unordered_map<std::string, json> output_schemas;
+};
 
 #ifdef _WIN32
 using NativeHandle = HANDLE;
@@ -653,12 +844,7 @@ json StdioSession::rpc_call(const std::string& method, const json& params) {
         if (!resp.contains("id")) continue;          // notification from server
         if (resp["id"] != id)     continue;          // response to a prior call?
 
-        if (resp.contains("error")) {
-            auto err = resp["error"];
-            throw std::runtime_error(
-                "MCP stdio RPC error: " + err.value("message", "unknown"));
-        }
-        return resp.value("result", json::object());
+        return extract_rpc_result(resp, id, "stdio");
     }
     throw std::runtime_error("StdioSession::rpc_call: giving up after 1024 lines");
 }
@@ -946,14 +1132,9 @@ StdioSession::do_exchange(std::string method, json params) {
         co_await chan->async_receive(asio::use_awaitable);
 
     json& resp = *respptr;
-    if (resp.contains("error")) {
-        auto err = resp["error"];
-        throw std::runtime_error(
-            "MCP stdio RPC error: " + err.value("message", "unknown"));
-    }
     // Bind to a named local before co_return — dodges the GCC 13
     // build_special_member_call ICE on co_return of a brace/temp.
-    json result = resp.value("result", json::object());
+    json result = extract_rpc_result(resp, id, "stdio");
     co_return result;
 }
 
@@ -963,18 +1144,134 @@ StdioSession::do_exchange(std::string method, json params) {
 // Shared helper — shape an MCP tools/call result into a string for the LLM.
 // ===========================================================================
 namespace {
-std::string format_tool_result(const json& result) {
-    if (result.contains("content") && result["content"].is_array()) {
+bool schema_type_matches(const json& value, const std::string& type) {
+    if (type == "null") return value.is_null();
+    if (type == "boolean") return value.is_boolean();
+    if (type == "object") return value.is_object();
+    if (type == "array") return value.is_array();
+    if (type == "number") return value.is_number();
+    if (type == "integer") return value.is_number_integer();
+    if (type == "string") return value.is_string();
+    return true;
+}
+
+void validate_schema_value(const json& value, const json& schema,
+                           const std::string& path) {
+    if (!schema.is_object()) {
+        throw std::runtime_error("MCP outputSchema at " + path
+                                 + " must be an object");
+    }
+    if (schema.contains("const") && value != schema["const"]) {
+        throw std::runtime_error("MCP structuredContent at " + path
+                                 + " does not match const");
+    }
+    if (schema.contains("enum") && schema["enum"].is_array()) {
+        bool matched = false;
+        for (const auto& candidate : schema["enum"]) {
+            if (value == candidate) { matched = true; break; }
+        }
+        if (!matched) {
+            throw std::runtime_error("MCP structuredContent at " + path
+                                     + " is not in enum");
+        }
+    }
+    if (schema.contains("type")) {
+        bool matched = false;
+        if (schema["type"].is_string()) {
+            matched = schema_type_matches(value, schema["type"].get<std::string>());
+        } else if (schema["type"].is_array()) {
+            for (const auto& type : schema["type"]) {
+                if (type.is_string()
+                    && schema_type_matches(value, type.get<std::string>())) {
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if (!matched) {
+            throw std::runtime_error("MCP structuredContent at " + path
+                                     + " has the wrong JSON type");
+        }
+    }
+    if (value.is_object()) {
+        if (schema.contains("required") && schema["required"].is_array()) {
+            for (const auto& name : schema["required"]) {
+                if (name.is_string() && !value.contains(name.get<std::string>())) {
+                    throw std::runtime_error("MCP structuredContent at " + path
+                                             + " is missing required property "
+                                             + name.get<std::string>());
+                }
+            }
+        }
+        const json properties = schema.value("properties", json::object());
+        if (properties.is_object()) {
+            for (auto it = properties.begin(); it != properties.end(); ++it) {
+                if (value.contains(it.key())) {
+                    validate_schema_value(value[it.key()], it.value(),
+                                          path + "/" + it.key());
+                }
+            }
+        }
+        if (schema.value("additionalProperties", true) == false
+            && properties.is_object()) {
+            for (auto it = value.begin(); it != value.end(); ++it) {
+                if (!properties.contains(it.key())) {
+                    throw std::runtime_error("MCP structuredContent at " + path
+                                             + " has unexpected property " + it.key());
+                }
+            }
+        }
+    }
+    if (value.is_array() && schema.contains("items")
+        && schema["items"].is_object()) {
+        for (std::size_t i = 0; i < value.size(); ++i) {
+            validate_schema_value(value[i], schema["items"],
+                                  path + "/" + std::to_string(i));
+        }
+    }
+}
+
+void validate_tool_result(const CallToolResult& result,
+                          const json& output_schema) {
+    if (output_schema.is_null()) return;
+    if (result.structured_content.is_null()) {
+        throw std::runtime_error(
+            "MCP tool advertised outputSchema but returned no structuredContent");
+    }
+    validate_schema_value(result.structured_content, output_schema, "$ ");
+}
+
+std::string format_tool_result(const CallToolResult& result) {
+    if (result.content.is_array()) {
         std::string output;
-        for (const auto& item : result["content"]) {
+        for (const auto& item : result.content) {
             if (item.value("type", "") == "text") {
                 if (!output.empty()) output += "\n";
                 output += item.value("text", "");
             }
         }
-        return output;
+        if (!output.empty()) return output;
     }
-    return result.dump();
+    if (!result.structured_content.is_null()) {
+        return result.structured_content.dump();
+    }
+    if (!result.content.empty()) return result.content.dump();
+    return result.raw.dump();
+}
+
+ToolDefinition legacy_definition(const std::string& name,
+                                 const std::string& description,
+                                 const json& input_schema) {
+    ToolDefinition definition;
+    definition.name = name;
+    definition.description = description;
+    definition.input_schema = input_schema;
+    definition.raw = {
+        {"name", name},
+        {"description", description},
+        {"inputSchema", input_schema},
+    };
+    return definition;
 }
 } // namespace
 
@@ -987,10 +1284,10 @@ MCPTool::MCPTool(const std::string& server_url,
                  const std::string& description,
                  const json& input_schema)
   : server_url_(server_url)
+  , http_session_(nullptr)
+  , metadata_(nullptr)
   , stdio_session_(nullptr)
-  , name_(name)
-  , description_(description)
-  , input_schema_(input_schema)
+  , definition_(legacy_definition(name, description, input_schema))
 {
 }
 
@@ -999,23 +1296,54 @@ MCPTool::MCPTool(std::shared_ptr<detail::StdioSession> session,
                  const std::string& description,
                  const json& input_schema)
   : server_url_()
+  , http_session_(nullptr)
+  , metadata_(nullptr)
   , stdio_session_(std::move(session))
-  , name_(name)
-  , description_(description)
-  , input_schema_(input_schema)
+  , definition_(legacy_definition(name, description, input_schema))
+{
+}
+
+MCPTool::MCPTool(std::shared_ptr<detail::HttpSession> session,
+                 std::shared_ptr<detail::ClientMetadata> metadata,
+                 ToolDefinition definition)
+  : http_session_(std::move(session))
+  , metadata_(std::move(metadata))
+  , definition_(std::move(definition))
+{
+}
+
+MCPTool::MCPTool(std::shared_ptr<detail::StdioSession> session,
+                 ToolDefinition definition)
+  : stdio_session_(std::move(session))
+  , definition_(std::move(definition))
 {
 }
 
 ChatTool MCPTool::get_definition() const {
-    return { name_, description_, input_schema_ };
+    return { definition_.name, definition_.description,
+             definition_.input_schema };
 }
 
-asio::awaitable<std::string> MCPTool::execute_async(const json& arguments) {
+CallToolResult MCPTool::execute_result(const json& arguments) {
+    return async::run_sync(execute_result_async(arguments));
+}
+
+asio::awaitable<CallToolResult>
+MCPTool::execute_result_async(const json& arguments) {
     if (stdio_session_) {
-        json params{{"name", name_}, {"arguments", arguments}};
+        json params{{"name", definition_.name}, {"arguments", arguments}};
         json result = co_await stdio_session_->rpc_call_async("tools/call", params);
-        std::string text = format_tool_result(result);
-        co_return text;
+        auto typed = CallToolResult::from_json(result);
+        validate_tool_result(typed, definition_.output_schema);
+        co_return typed;
+    }
+
+    if (http_session_) {
+        auto client = std::unique_ptr<MCPClient>(
+            new MCPClient(http_session_, metadata_));
+        auto typed = co_await client->call_tool_result_async(
+            definition_.name, arguments);
+        co_return typed;
     }
 
     // HTTP — one ephemeral client per call, driven fully async. Unlike
@@ -1031,8 +1359,18 @@ asio::awaitable<std::string> MCPTool::execute_async(const json& arguments) {
     // it — the object lives on the heap, the frame only owns a pointer.
     auto client = std::make_unique<MCPClient>(server_url_);
     co_await client->initialize_async();
-    json result = co_await client->call_tool_async(name_, arguments);
+    auto typed = co_await client->call_tool_result_async(
+        definition_.name, arguments);
+    validate_tool_result(typed, definition_.output_schema);
+    co_return typed;
+}
+
+asio::awaitable<std::string> MCPTool::execute_async(const json& arguments) {
+    auto result = co_await execute_result_async(arguments);
     std::string text = format_tool_result(result);
+    if (result.is_error) {
+        throw std::runtime_error("MCP tool execution error: " + text);
+    }
     co_return text;
 }
 
@@ -1041,17 +1379,15 @@ asio::awaitable<std::string> MCPTool::execute_async(const json& arguments) {
 // ===========================================================================
 
 MCPClient::MCPClient(const std::string& server_url)
-  : server_url_(server_url)
+  : MCPClient(server_url, MCPClientConfig{})
 {
-    host_ = server_url;
-    auto scheme_end = host_.find("://");
-    if (scheme_end != std::string::npos) {
-        auto path_start = host_.find('/', scheme_end + 3);
-        if (path_start != std::string::npos) {
-            path_prefix_ = host_.substr(path_start);
-            host_        = host_.substr(0, path_start);
-        }
-    }
+}
+
+MCPClient::MCPClient(const std::string& server_url, MCPClientConfig config)
+  : http_session_(std::make_shared<detail::HttpSession>(
+        server_url, std::move(config)))
+  , metadata_(std::make_shared<detail::ClientMetadata>())
+{
 }
 
 // ===========================================================================
@@ -1060,6 +1396,14 @@ MCPClient::MCPClient(const std::string& server_url)
 
 MCPClient::MCPClient(std::vector<std::string> argv)
   : stdio_session_(detail::StdioSession::spawn(argv))
+  , metadata_(std::make_shared<detail::ClientMetadata>())
+{
+}
+
+MCPClient::MCPClient(std::shared_ptr<detail::HttpSession> session,
+                     std::shared_ptr<detail::ClientMetadata> metadata)
+  : http_session_(std::move(session))
+  , metadata_(std::move(metadata))
 {
 }
 
@@ -1080,32 +1424,53 @@ MCPClient::rpc_call_async(const std::string& method, const json& params) {
         co_return co_await stdio_session_->rpc_call_async(method, params);
     }
 
-    // Build the request envelope + headers under http_state_mu_ — the
+    auto session = http_session_;
+    if (!session) {
+        throw std::logic_error("MCP client has no transport");
+    }
+
+    // Build the request envelope + headers under the session mutex — the
     // shared fields (request_id_, session_id_, negotiated_protocol_version_)
     // would otherwise race across concurrent rpc_call_async invocations.
     // We hold the lock only while reading/writing those fields, NOT
     // across the network call below.
     int                                              this_id;
     std::vector<std::pair<std::string, std::string>> headers;
+    HeaderProvider header_provider;
     {
-        std::lock_guard lk(http_state_mu_);
-        this_id = ++request_id_;
+        std::lock_guard lk(session->mu);
+        this_id = ++session->request_id;
         headers = {
             {"Content-Type", "application/json"},
             {"Accept",       "application/json, text/event-stream"},
-            {"Host",         "localhost"},
         };
-        if (!session_id_.empty()) {
-            headers.emplace_back("Mcp-Session-Id", session_id_);
+        headers.insert(headers.end(), session->config.headers.begin(),
+                       session->config.headers.end());
+        header_provider = session->config.header_provider;
+        if (!session->session_id.empty()) {
+            headers.emplace_back("Mcp-Session-Id", session->session_id);
         }
         // Spec MUST (transports / Streamable HTTP § "Protocol Version
         // Header"): include MCP-Protocol-Version on every HTTP request
         // after initialize. Strict 2025-11-25 servers respond 400 Bad
         // Request without it. Skip on the initialize call itself —
         // negotiated_protocol_version_ is empty until initialize returns.
-        if (!negotiated_protocol_version_.empty()) {
+        if (!session->protocol_version.empty()) {
             headers.emplace_back("MCP-Protocol-Version",
-                                 negotiated_protocol_version_);
+                                 session->protocol_version);
+        }
+    }
+    // User callbacks may refresh credentials or re-enter application code. Run
+    // them after releasing the session mutex so they cannot deadlock the client.
+    if (header_provider) {
+        auto dynamic_headers = header_provider();
+        headers.insert(headers.end(), dynamic_headers.begin(),
+                       dynamic_headers.end());
+    }
+    for (const auto& [name, value] : headers) {
+        if (name.empty() || name.find_first_of("\r\n") != std::string::npos
+            || value.find_first_of("\r\n") != std::string::npos) {
+            throw std::invalid_argument("MCP header contains CR/LF or an empty name");
         }
     }
 
@@ -1116,41 +1481,20 @@ MCPClient::rpc_call_async(const std::string& method, const json& params) {
     body["params"]  = params;
     auto body_str = body.dump();
 
-    auto endpoint = async::split_async_endpoint(server_url_);
-
-    // Build the request path idempotently. `split_async_endpoint` puts the
-    // URL's path into `prefix`, so a user who configures the full MCP
-    // endpoint (`http://host:8000/mcp`) already has prefix == "/mcp". If we
-    // blindly appended "/mcp" we'd request "/mcp/mcp" and get a 404 even
-    // though the user gave a correct URL (issue #66). Only append the
-    // suffix when it isn't already there.
-    std::string path;
-    auto ends_with_mcp = [](const std::string& s) {
-        return s == "/mcp" ||
-               (s.size() > 4 && s.compare(s.size() - 4, 4, "/mcp") == 0);
-    };
-    if (endpoint.prefix.empty() || endpoint.prefix == "/") {
-        path = "/mcp";
-    } else if (ends_with_mcp(endpoint.prefix)) {
-        path = endpoint.prefix;
-    } else {
-        path = endpoint.prefix + "/mcp";
-    }
-
     async::RequestOptions opts;
-    opts.timeout = std::chrono::seconds(30);
+    opts.timeout = session->config.request_timeout;
 
     auto ex = co_await asio::this_coro::executor;
     async::HttpResponse res;
     try {
         res = co_await async::async_post(
             ex,
-            endpoint.host,
-            endpoint.port,
-            path,
+            session->endpoint.host,
+            session->endpoint.port,
+            session->path,
             body_str,
             std::move(headers),
-            endpoint.tls,
+            session->endpoint.tls,
             opts);
     } catch (const std::system_error& e) {
         throw std::runtime_error(std::string("MCP request failed: ") + e.what());
@@ -1161,14 +1505,15 @@ MCPClient::rpc_call_async(const std::string& method, const json& params) {
     // sends this header on the initialize response; subsequent rpc
     // calls must echo it back so the server routes to the same session.
     if (auto sid = res.get_header("Mcp-Session-Id"); !sid.empty()) {
-        std::lock_guard lk(http_state_mu_);
-        session_id_ = std::string(sid);
+        std::lock_guard lk(session->mu);
+        session->session_id = std::string(sid);
     }
 
     if (res.status != 200) {
-        std::string scheme = endpoint.tls ? "https://" : "http://";
+        std::string scheme = session->endpoint.tls ? "https://" : "http://";
         std::string full_url =
-            scheme + endpoint.host + ":" + endpoint.port + path;
+            scheme + session->endpoint.host + ":" + session->endpoint.port
+            + session->path;
         std::string hint;
         if (res.status == 404) {
             hint = " — the server has no MCP endpoint at this path. Check the "
@@ -1185,17 +1530,17 @@ MCPClient::rpc_call_async(const std::string& method, const json& params) {
     // pack multiple SSE events into one response (e.g. an in-stream
     // server→client request followed by the JSON-RPC response). Walk
     // the events and pick the first one whose payload's `id` matches
-    // our request, falling back to the last-seen JSON if none matches.
+    // our request. Server requests and notifications remain unsupported,
+    // but cannot be mistaken for this call's response.
     // This replaces a previous implementation that grabbed only the
     // first `data:` line and dropped any subsequent events.
     json resp;
-    if (res.body.find("data:") != std::string::npos) {
+    const auto response_content_type = std::string(res.get_header("Content-Type"));
+    if (response_content_type.find("text/event-stream") != std::string::npos) {
         // Parse SSE event stream: events separated by "\n\n", lines
         // within an event starting with "data:" are concatenated with
         // newlines per the W3C SSE spec.
         json matched;
-        json last;
-        bool have_last = false;
         size_t pos = 0;
         while (pos < res.body.size()) {
             auto event_end = res.body.find("\n\n", pos);
@@ -1224,8 +1569,6 @@ MCPClient::rpc_call_async(const std::string& method, const json& params) {
             if (data.empty()) continue;
             try {
                 json frame = json::parse(data);
-                last = frame;
-                have_last = true;
                 if (frame.contains("id")
                     && frame["id"].is_number_integer()
                     && frame["id"].get<int>() == this_id) {
@@ -1238,207 +1581,315 @@ MCPClient::rpc_call_async(const std::string& method, const json& params) {
         }
         if (!matched.is_null()) {
             resp = std::move(matched);
-        } else if (have_last) {
-            resp = std::move(last);
         } else {
-            throw std::runtime_error("MCP SSE response had no parseable events");
+            throw std::runtime_error(
+                "MCP SSE response had no JSON-RPC response matching the request id");
         }
     } else {
         resp = json::parse(res.body);
     }
 
-    if (resp.contains("error")) {
-        auto err = resp["error"];
-        throw std::runtime_error("MCP RPC error: " + err.value("message", "unknown"));
-    }
-
-    co_return resp.value("result", json::object());
+    co_return extract_rpc_result(resp, this_id, "HTTP");
 }
 
-bool MCPClient::initialize(const std::string& client_name) {
+namespace {
+
+json initialize_params(const std::string& client_name) {
     json params;
-    // Latest MCP spec at the time of writing — see
-    // https://modelcontextprotocol.io/specification/2025-11-25/. The server
-    // negotiates back via InitializeResult.protocolVersion (typically the
-    // same value, or downgraded if the server only knows an older version);
-    // we capture that and echo it on every subsequent HTTP request.
     params["protocolVersion"] = "2025-11-25";
     params["capabilities"]    = json::object();
     params["clientInfo"]      = {{"name", client_name}, {"version", "0.1.0"}};
+    return params;
+}
 
-    auto init_result = rpc_call("initialize", params);
+void store_initialize_result(
+    const std::shared_ptr<detail::ClientMetadata>& metadata,
+    InitializeResult result) {
     {
-        std::lock_guard lk(http_state_mu_);
-        if (init_result.contains("protocolVersion")
-            && init_result["protocolVersion"].is_string()) {
-            negotiated_protocol_version_ =
-                init_result["protocolVersion"].get<std::string>();
-        } else {
-            // Server didn't echo a version back — assume it agreed to ours.
-            negotiated_protocol_version_ = "2025-11-25";
-        }
+        std::lock_guard lk(metadata->mu);
+        metadata->initialize_result = std::move(result);
+        metadata->lifecycle = detail::ClientMetadata::Lifecycle::initialized;
     }
+    metadata->changed.notify_all();
+}
 
-    // Send initialized notification.
-    if (stdio_session_) {
-        stdio_session_->notify("notifications/initialized", json::object());
-        return true;
+void reset_initialization(
+    const std::shared_ptr<detail::HttpSession>& http_session,
+    const std::shared_ptr<detail::ClientMetadata>& metadata) {
+    if (http_session) {
+        std::lock_guard lk(http_session->mu);
+        http_session->session_id.clear();
+        http_session->protocol_version.clear();
     }
-
-    // HTTP notification path. Per the MCP spec this is a notification
-    // (no id) but the server still returns a status code on the HTTP
-    // envelope, and a 4xx/5xx here means the session is misconfigured —
-    // silently swallowing it (as the pre-audit code did) would leave the
-    // caller with an "initialized" MCPClient that actually isn't.
-    json notify;
-    notify["jsonrpc"] = "2.0";
-    notify["method"]  = "notifications/initialized";
-    notify["params"]  = json::object();
-
-    auto endpoint = async::split_async_endpoint(server_url_);
-    std::vector<std::pair<std::string, std::string>> headers;
     {
-        std::lock_guard lk(http_state_mu_);
-        headers = {
-            {"Content-Type", "application/json"},
-            {"Accept",       "application/json, text/event-stream"},
-            {"Host",         "localhost"},
-        };
-        if (!session_id_.empty()) {
-            headers.emplace_back("Mcp-Session-Id", session_id_);
+        std::lock_guard lk(metadata->mu);
+        metadata->lifecycle = detail::ClientMetadata::Lifecycle::created;
+        metadata->initialize_result = {};
+        metadata->output_schemas.clear();
+    }
+    metadata->changed.notify_all();
+}
+
+HeaderList notification_headers(const std::shared_ptr<detail::HttpSession>& session) {
+    HeaderList headers = {
+        {"Content-Type", "application/json"},
+        {"Accept", "application/json, text/event-stream"},
+    };
+    HeaderProvider provider;
+    {
+        std::lock_guard lk(session->mu);
+        headers.insert(headers.end(), session->config.headers.begin(),
+                       session->config.headers.end());
+        provider = session->config.header_provider;
+        if (!session->session_id.empty()) {
+            headers.emplace_back("Mcp-Session-Id", session->session_id);
         }
-        // Spec MUST (transports / Streamable HTTP § "Protocol Version
-        // Header"). Strict 2025-11-25 servers respond 400 without it.
-        if (!negotiated_protocol_version_.empty()) {
-            headers.emplace_back("MCP-Protocol-Version",
-                                 negotiated_protocol_version_);
+        if (!session->protocol_version.empty()) {
+            headers.emplace_back("MCP-Protocol-Version", session->protocol_version);
         }
     }
+    if (provider) {
+        auto dynamic_headers = provider();
+        headers.insert(headers.end(), dynamic_headers.begin(), dynamic_headers.end());
+    }
+    for (const auto& [name, value] : headers) {
+        if (name.empty() || name.find_first_of("\r\n") != std::string::npos
+            || value.find_first_of("\r\n") != std::string::npos) {
+            throw std::invalid_argument("MCP header contains CR/LF or an empty name");
+        }
+    }
+    return headers;
+}
 
-    auto notify_body = notify.dump();
-    auto res = async::run_sync([&]() -> asio::awaitable<async::HttpResponse> {
-        auto ex = co_await asio::this_coro::executor;
-        co_return co_await async::async_post(
-            ex,
-            endpoint.host,
-            endpoint.port,
-            endpoint.prefix + "/mcp",
-            notify_body,
-            headers,
-            endpoint.tls);
-    }());
-
-    // 200 OK and 202 Accepted are both valid per MCP spec for
-    // notifications. Anything else is an error.
-    if (res.status != 200 && res.status != 202 && res.status != 204) {
+asio::awaitable<void> send_initialized_notification(
+    const std::shared_ptr<detail::HttpSession>& session) {
+    json notify = {
+        {"jsonrpc", "2.0"},
+        {"method", "notifications/initialized"},
+        {"params", json::object()},
+    };
+    async::RequestOptions opts;
+    opts.timeout = session->config.request_timeout;
+    auto ex = co_await asio::this_coro::executor;
+    auto res = co_await async::async_post(
+        ex, session->endpoint.host, session->endpoint.port, session->path,
+        notify.dump(), notification_headers(session), session->endpoint.tls, opts);
+    if (res.status < 200 || res.status >= 300) {
         throw std::runtime_error(
             "MCP initialize notification returned HTTP "
             + std::to_string(res.status) + ": " + res.body);
     }
+    co_return;
+}
 
-    return true;
+} // namespace
+
+bool MCPClient::initialize(const std::string& client_name) {
+    {
+        std::unique_lock lk(metadata_->mu);
+        while (metadata_->lifecycle
+               == detail::ClientMetadata::Lifecycle::initializing) {
+            metadata_->changed.wait(lk);
+        }
+        if (metadata_->lifecycle
+            == detail::ClientMetadata::Lifecycle::initialized) {
+            return true;
+        }
+        metadata_->lifecycle = detail::ClientMetadata::Lifecycle::initializing;
+    }
+
+    try {
+        auto raw = rpc_call("initialize", initialize_params(client_name));
+        auto result = InitializeResult::from_json(raw);
+        if (http_session_) {
+            {
+                std::lock_guard lk(http_session_->mu);
+                http_session_->protocol_version = result.protocol_version;
+            }
+            async::run_sync(send_initialized_notification(http_session_));
+        } else {
+            stdio_session_->notify("notifications/initialized", json::object());
+        }
+        store_initialize_result(metadata_, std::move(result));
+        return true;
+    } catch (...) {
+        reset_initialization(http_session_, metadata_);
+        throw;
+    }
 }
 
 asio::awaitable<bool> MCPClient::initialize_async(const std::string& client_name) {
-    json params;
-    params["protocolVersion"] = "2025-11-25";
-    params["capabilities"]    = json::object();
-    params["clientInfo"]      = {{"name", client_name}, {"version", "0.1.0"}};
+    bool owner = false;
+    for (;;) {
+        {
+            std::lock_guard lk(metadata_->mu);
+            if (metadata_->lifecycle
+                == detail::ClientMetadata::Lifecycle::initialized) {
+                co_return true;
+            }
+            if (metadata_->lifecycle
+                == detail::ClientMetadata::Lifecycle::created) {
+                metadata_->lifecycle =
+                    detail::ClientMetadata::Lifecycle::initializing;
+                owner = true;
+                break;
+            }
+        }
+        asio::steady_timer timer(co_await asio::this_coro::executor);
+        timer.expires_after(std::chrono::milliseconds(1));
+        co_await timer.async_wait(asio::use_awaitable);
+    }
 
-    auto init_result = co_await rpc_call_async("initialize", params);
-    {
-        std::lock_guard lk(http_state_mu_);
-        if (init_result.contains("protocolVersion")
-            && init_result["protocolVersion"].is_string()) {
-            negotiated_protocol_version_ =
-                init_result["protocolVersion"].get<std::string>();
+    try {
+        auto raw = co_await rpc_call_async(
+            "initialize", initialize_params(client_name));
+        auto result = InitializeResult::from_json(raw);
+        if (http_session_) {
+            {
+                std::lock_guard lk(http_session_->mu);
+                http_session_->protocol_version = result.protocol_version;
+            }
+            co_await send_initialized_notification(http_session_);
         } else {
-            negotiated_protocol_version_ = "2025-11-25";
+            stdio_session_->notify("notifications/initialized", json::object());
         }
-    }
-
-    if (stdio_session_) {
-        stdio_session_->notify("notifications/initialized", json::object());
+        store_initialize_result(metadata_, std::move(result));
         co_return true;
+    } catch (...) {
+        reset_initialization(http_session_, metadata_);
+        throw;
     }
+}
 
-    // HTTP initialized notification — same envelope/headers as the sync
-    // initialize(), but awaited directly instead of through run_sync.
-    json notify;
-    notify["jsonrpc"] = "2.0";
-    notify["method"]  = "notifications/initialized";
-    notify["params"]  = json::object();
+bool MCPClient::is_initialized() const noexcept {
+    std::lock_guard lk(metadata_->mu);
+    return metadata_->lifecycle
+        == detail::ClientMetadata::Lifecycle::initialized;
+}
 
-    auto endpoint = async::split_async_endpoint(server_url_);
-    std::vector<std::pair<std::string, std::string>> headers;
-    {
-        std::lock_guard lk(http_state_mu_);
-        headers = {
-            {"Content-Type", "application/json"},
-            {"Accept",       "application/json, text/event-stream"},
-            {"Host",         "localhost"},
-        };
-        if (!session_id_.empty()) {
-            headers.emplace_back("Mcp-Session-Id", session_id_);
-        }
-        if (!negotiated_protocol_version_.empty()) {
-            headers.emplace_back("MCP-Protocol-Version",
-                                 negotiated_protocol_version_);
-        }
+InitializeResult MCPClient::get_initialize_result() const {
+    std::lock_guard lk(metadata_->mu);
+    if (metadata_->lifecycle
+        != detail::ClientMetadata::Lifecycle::initialized) {
+        throw std::logic_error("MCP client has not been initialized");
     }
-
-    auto notify_body = notify.dump();
-    auto ex  = co_await asio::this_coro::executor;
-    auto res = co_await async::async_post(
-        ex, endpoint.host, endpoint.port, endpoint.prefix + "/mcp",
-        notify_body, headers, endpoint.tls);
-
-    if (res.status != 200 && res.status != 202 && res.status != 204) {
-        throw std::runtime_error(
-            "MCP initialize notification returned HTTP "
-            + std::to_string(res.status) + ": " + res.body);
-    }
-    co_return true;
+    return metadata_->initialize_result;
 }
 
 std::vector<std::unique_ptr<Tool>> MCPClient::get_tools() {
-    initialize();
-
-    auto result = rpc_call("tools/list", json::object());
+    auto definitions = get_tool_definitions();
     std::vector<std::unique_ptr<Tool>> tools;
-
-    if (result.contains("tools") && result["tools"].is_array()) {
-        for (const auto& t : result["tools"]) {
-            auto name   = t.value("name", "");
-            auto desc   = t.value("description", "");
-            auto schema = t.value("inputSchema", json::object());
-
-            if (stdio_session_) {
-                tools.push_back(std::make_unique<MCPTool>(
-                    stdio_session_, name, desc, schema));
-            } else {
-                tools.push_back(std::make_unique<MCPTool>(
-                    server_url_, name, desc, schema));
-            }
+    tools.reserve(definitions.size());
+    for (auto& definition : definitions) {
+        if (stdio_session_) {
+            tools.push_back(std::unique_ptr<Tool>(
+                new MCPTool(stdio_session_, std::move(definition))));
+        } else {
+            tools.push_back(std::unique_ptr<Tool>(
+                new MCPTool(http_session_, metadata_, std::move(definition))));
         }
     }
-
     return tools;
 }
 
+ListToolsPage MCPClient::list_tools(
+    const std::optional<std::string>& cursor) {
+    initialize();
+    json params = json::object();
+    if (cursor) params["cursor"] = *cursor;
+    auto page = ListToolsPage::from_json(rpc_call("tools/list", params));
+    {
+        std::lock_guard lk(metadata_->mu);
+        for (const auto& tool : page.tools) {
+            metadata_->output_schemas[tool.name] = tool.output_schema;
+        }
+    }
+    return page;
+}
+
+asio::awaitable<ListToolsPage> MCPClient::list_tools_async(
+    const std::optional<std::string>& cursor) {
+    co_await initialize_async();
+    json params = json::object();
+    if (cursor) params["cursor"] = *cursor;
+    auto raw = co_await rpc_call_async("tools/list", params);
+    auto page = ListToolsPage::from_json(raw);
+    {
+        std::lock_guard lk(metadata_->mu);
+        for (const auto& tool : page.tools) {
+            metadata_->output_schemas[tool.name] = tool.output_schema;
+        }
+    }
+    co_return page;
+}
+
+std::vector<ToolDefinition> MCPClient::get_tool_definitions() {
+    std::vector<ToolDefinition> definitions;
+    std::optional<std::string> cursor;
+    do {
+        auto page = list_tools(cursor);
+        definitions.insert(definitions.end(),
+                           std::make_move_iterator(page.tools.begin()),
+                           std::make_move_iterator(page.tools.end()));
+        if (page.next_cursor == cursor && cursor) {
+            throw std::runtime_error(
+                "MCP tools/list returned the same nextCursor repeatedly");
+        }
+        cursor = std::move(page.next_cursor);
+    } while (cursor);
+    return definitions;
+}
+
 json MCPClient::call_tool(const std::string& name, const json& arguments) {
+    initialize();
     json params;
     params["name"]      = name;
     params["arguments"] = arguments;
     return rpc_call("tools/call", params);
 }
 
+CallToolResult MCPClient::call_tool_result(
+    const std::string& name, const json& arguments) {
+    auto result = CallToolResult::from_json(call_tool(name, arguments));
+    json output_schema;
+    bool has_output_schema = false;
+    {
+        std::lock_guard lk(metadata_->mu);
+        auto it = metadata_->output_schemas.find(name);
+        if (it != metadata_->output_schemas.end()) {
+            output_schema = it->second;
+            has_output_schema = true;
+        }
+    }
+    if (has_output_schema) validate_tool_result(result, output_schema);
+    return result;
+}
+
 asio::awaitable<json>
 MCPClient::call_tool_async(const std::string& name, const json& arguments) {
+    co_await initialize_async();
     json params;
     params["name"]      = name;
     params["arguments"] = arguments;
     co_return co_await rpc_call_async("tools/call", params);
+}
+
+asio::awaitable<CallToolResult> MCPClient::call_tool_result_async(
+    const std::string& name, const json& arguments) {
+    auto raw = co_await call_tool_async(name, arguments);
+    auto result = CallToolResult::from_json(raw);
+    json output_schema;
+    bool has_output_schema = false;
+    {
+        std::lock_guard lk(metadata_->mu);
+        auto it = metadata_->output_schemas.find(name);
+        if (it != metadata_->output_schemas.end()) {
+            output_schema = it->second;
+            has_output_schema = true;
+        }
+    }
+    if (has_output_schema) validate_tool_result(result, output_schema);
+    co_return result;
 }
 
 } // namespace neograph::mcp

@@ -13,6 +13,9 @@ Ubuntu/macOS Python 3.x without fastmcp or a venv.
 import json
 import sys
 
+initialized = False
+initializing = False
+
 
 def reply(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
@@ -20,7 +23,11 @@ def reply(obj):
 
 
 def handle(req):
+    global initialized, initializing
     if "id" not in req:
+        if req.get("method") == "notifications/initialized" and initializing:
+            initialized = True
+            initializing = False
         return  # notification
 
     rid = req["id"]
@@ -28,6 +35,14 @@ def handle(req):
     params = req.get("params", {}) or {}
 
     if method == "initialize":
+        if initialized or initializing:
+            reply({
+                "jsonrpc": "2.0",
+                "id": rid,
+                "error": {"code": -32001, "message": "repeated initialize"},
+            })
+            return
+        initializing = True
         reply({
             "jsonrpc": "2.0",
             "id": rid,
@@ -40,6 +55,13 @@ def handle(req):
         return
 
     if method == "tools/list":
+        if not initialized:
+            reply({
+                "jsonrpc": "2.0",
+                "id": rid,
+                "error": {"code": -32002, "message": "not initialized"},
+            })
+            return
         reply({
             "jsonrpc": "2.0",
             "id": rid,
@@ -59,6 +81,13 @@ def handle(req):
         return
 
     if method == "tools/call":
+        if not initialized:
+            reply({
+                "jsonrpc": "2.0",
+                "id": rid,
+                "error": {"code": -32002, "message": "not initialized"},
+            })
+            return
         reply({
             "jsonrpc": "2.0",
             "id": rid,
