@@ -1,13 +1,14 @@
 # NeoGraph Harness MCP
 
 NeoGraph Harness compiles a bounded multi-worker workflow before it runs. The
-MCP surface stays at five tools:
+stable MCP surface stays at six tools:
 
 - `neograph_schema` discovers the installed request contract and presets.
 - `neograph_compile` elaborates, compiles, and validates without executing.
 - `neograph_start` starts a retained artifact or an inline request.
 - `neograph_get` polls compact status or dereferences a result artifact URI.
-- `neograph_cancel` cooperatively cancels a queued or running workflow.
+- `neograph_resume` validates and submits the exact pending host result.
+- `neograph_cancel` cooperatively cancels a queued, running, or waiting workflow.
 
 The shipped presets are `fanout_judge`, `pr_review_panel`, `bug_triage`, and
 `research_synthesis`. Presets produce ordinary strict-core graph artifacts, so
@@ -35,6 +36,18 @@ For host interoperability smoke tests only, set `NEOGRAPH_HARNESS_SMOKE=1`.
 That explicit mode uses a deterministic in-process provider returning a valid
 zero-findings review, requires no API key, and must not be used as an LLM
 quality test.
+
+Durable host-brokered calls require both record and checkpoint persistence.
+The example enables both with one explicit directory:
+
+```bash
+export NEOGRAPH_HARNESS_STATE_DIR="$PWD/.neograph-harness-state"
+```
+
+This stores immutable artifacts and run records as atomic JSON files and graph
+checkpoints in `checkpoints.db`. The directory survives server restarts. A
+`host_brokered` catalog entry is rejected at compile time when either store is
+missing, so a workflow cannot advertise resumability it does not have.
 
 ## Host Setup
 
@@ -180,6 +193,73 @@ The host should follow this sequence:
 4. If detail is needed, call `neograph_get` with the same `run_id` and a
    returned `neograph://runs/...` URI as `uri`. Do not pull traces into context
    by default.
+
+## Host-Brokered Resume
+
+Use `executor.kind: "host_brokered"` when the MCP host, rather than the worker
+process, owns a capability. Set `executor.interaction` to `"tool_result"`
+(default) or `"input"`. The provider executor validates the requested arguments
+and returns one of two non-terminal run states:
+
+- `awaiting_tool_results`: the host must execute the named capability.
+- `input_required`: the host must collect an input value.
+
+`neograph_get` includes a `pending` object with a unique `call_id`, `tool_id`,
+validated `arguments`, and `result_schema`. Submit exactly that call through:
+
+```json
+{
+  "run_id": "run_...",
+  "call_id": "hcall_...",
+  "result": {"answer": "validated host result"}
+}
+```
+
+`neograph_resume` rejects a mismatched call ID, a result that violates the
+declared schema, an expired call, and a late result for a non-waiting run. An
+identical duplicate is acknowledged without re-executing the graph; a
+conflicting duplicate is rejected. The accepted resume intent is persisted
+before execution is scheduled, so polling after a process crash restarts the
+resume from the `NodeInterrupt` checkpoint without repeating successful sibling
+workers.
+
+Run snapshots include `created_at`, `updated_at`, `expires_at`, and
+`poll_after_ms`. The default TTL is 24 hours and the default polling interval is
+one second; embeddings can override both through `HarnessServiceConfig`.
+
+## Experimental Tasks Profile
+
+MCP Tasks is not part of core MCP 2025-11-25 and the upstream extension still
+labels itself experimental. NeoGraph therefore keeps it disabled by default and
+separate from the stable `run_id` plus `neograph_get` polling contract.
+
+To opt in on the example server, durable state must also be enabled:
+
+```bash
+export NEOGRAPH_HARNESS_STATE_DIR="$PWD/.neograph-harness-state"
+export NEOGRAPH_HARNESS_EXPERIMENTAL_TASKS=1
+```
+
+The server then advertises `io.modelcontextprotocol/tasks`, marks
+`neograph_start` with optional task support, and serves `tasks/get`,
+`tasks/update`, and `tasks/cancel`. It returns a `CreateTaskResult` only when the
+individual `tools/call` request includes:
+
+```json
+{
+  "_meta": {
+    "io.modelcontextprotocol/clientCapabilities": {
+      "extensions": {"io.modelcontextprotocol/tasks": {}}
+    }
+  }
+}
+```
+
+Clients without that request opt-in receive the ordinary `CallToolResult` and
+continue polling `neograph_get`; enabling the profile does not alter the stable
+fallback. Task statuses are `working`, `input_required`, `completed`, `failed`,
+and `cancelled`. `tasks/update.inputResponses` is keyed by the pending
+`call_id`, and polling clients should honor `pollIntervalMs` and `ttlMs`.
 
 ## Capability Backends
 

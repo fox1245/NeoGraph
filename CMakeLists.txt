@@ -1354,6 +1354,12 @@ if(NEOGRAPH_BUILD_EXAMPLES)
                 examples/60_harness_mcp_server.cpp)
             target_link_libraries(example_harness_mcp_server PRIVATE
                 neograph::mcp_server neograph::llm)
+            if(NEOGRAPH_BUILD_SQLITE)
+                target_link_libraries(example_harness_mcp_server PRIVATE
+                    neograph::sqlite)
+                target_compile_definitions(example_harness_mcp_server PRIVATE
+                    NEOGRAPH_HARNESS_HAVE_SQLITE)
+            endif()
         endif()
     endif()
 endif()

@@ -6,14 +6,19 @@
 
 #include <neograph/api.h>
 #include <neograph/graph/cancel.h>
+#include <neograph/graph/checkpoint.h>
 #include <neograph/json.h>
 
+#include <chrono>
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
-namespace neograph { class Provider; }
+namespace neograph {
+class Provider;
+}
 
 namespace neograph::mcp {
 
@@ -26,6 +31,8 @@ enum class HarnessWorkerResponseKind {
     TOOL_ERROR,
     TIMEOUT,
     CANCELLED,
+    AWAITING_TOOL_RESULTS,
+    INPUT_REQUIRED,
 };
 
 /** Input handed to the embedding's provider/tool execution backend. */
@@ -36,6 +43,7 @@ struct HarnessWorkerCall {
     json policy;
     std::size_t attempt = 1;
     std::string repair_feedback;
+    std::optional<json> resume_value;
 };
 
 /** Typed worker response; failure classes never masquerade as valid output. */
@@ -50,16 +58,16 @@ struct NEOGRAPH_API HarnessWorkerResponse {
     static HarnessWorkerResponse tool_error(std::string message);
     static HarnessWorkerResponse timeout(std::string message = {});
     static HarnessWorkerResponse cancelled(std::string message = {});
+    static HarnessWorkerResponse awaiting_tool_results(json pending);
+    static HarnessWorkerResponse input_required(json pending);
 };
 
 using HarnessWorkerExecutor = std::function<HarnessWorkerResponse(
-    const HarnessWorkerCall&,
-    const std::shared_ptr<graph::CancelToken>&)>;
+    const HarnessWorkerCall&, const std::shared_ptr<graph::CancelToken>&)>;
 
-using HarnessCapabilityExecutor = std::function<json(
-    const json& tool_definition,
-    const json& arguments,
-    const std::shared_ptr<graph::CancelToken>&)>;
+using HarnessCapabilityExecutor = std::function<json(const json& tool_definition,
+                                                     const json& arguments,
+                                                     const std::shared_ptr<graph::CancelToken>&)>;
 
 struct HarnessProviderExecutorConfig {
     std::shared_ptr<Provider> provider;
@@ -69,13 +77,45 @@ struct HarnessProviderExecutorConfig {
 };
 
 /// Build a worker executor that calls a NeoGraph Provider directly.
-NEOGRAPH_API HarnessWorkerExecutor make_provider_harness_executor(
-    HarnessProviderExecutorConfig config);
+NEOGRAPH_API HarnessWorkerExecutor
+make_provider_harness_executor(HarnessProviderExecutorConfig config);
+
+/** Durable storage boundary for retained Harness artifacts and run records. */
+class NEOGRAPH_API HarnessRecordStore {
+public:
+    virtual ~HarnessRecordStore() = default;
+
+    virtual void save_artifact(const std::string& artifact_id, const json& record)      = 0;
+    virtual std::optional<json> load_artifact(const std::string& artifact_id)           = 0;
+    virtual void                save_run(const std::string& run_id, const json& record) = 0;
+    virtual std::optional<json> load_run(const std::string& run_id)                     = 0;
+};
+
+/** Atomic JSON-file implementation suitable for local process restarts. */
+class NEOGRAPH_API FileHarnessRecordStore final : public HarnessRecordStore {
+public:
+    explicit FileHarnessRecordStore(std::string root_directory);
+    ~FileHarnessRecordStore() override;
+
+    void                save_artifact(const std::string& artifact_id, const json& record) override;
+    std::optional<json> load_artifact(const std::string& artifact_id) override;
+    void                save_run(const std::string& run_id, const json& record) override;
+    std::optional<json> load_run(const std::string& run_id) override;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 
 struct HarnessServiceConfig {
     HarnessWorkerExecutor worker_executor;
+    std::shared_ptr<graph::CheckpointStore> checkpoint_store;
+    std::shared_ptr<HarnessRecordStore>     record_store;
     std::size_t max_artifacts = 128;
     std::size_t max_runs = 128;
+    std::chrono::milliseconds               poll_interval{1000};
+    std::chrono::milliseconds               run_ttl{std::chrono::hours(24)};
+    bool                                    enable_experimental_tasks = false;
 };
 
 /**
@@ -92,7 +132,7 @@ public:
     HarnessService(const HarnessService&) = delete;
     HarnessService& operator=(const HarnessService&) = delete;
 
-    /// Register neograph_schema/compile/start/get/cancel on a server.
+    /// Register neograph_schema/compile/start/get/resume/cancel on a server.
     void register_tools(MCPServer& server);
 
     /// Build-specific schemas, node palette, presets, and capabilities.
@@ -104,9 +144,11 @@ public:
     /// Start from {artifact_id} or compile-and-start from {request}.
     json start(const json& arguments);
 
+    /// Resume the exact pending call with a schema-validated host result.
+    json resume(const json& arguments);
+
     /// Return a compact snapshot for a run.
-    json get(const std::string& run_id,
-             const std::string& view = "status") const;
+    json get(const std::string& run_id, const std::string& view = "status") const;
 
     /// Dereference a neograph://runs/<run_id>/<view> result URI.
     json read(const std::string& uri) const;

@@ -1,10 +1,12 @@
 #include <neograph/mcp/harness.h>
-
 #include <neograph/mcp/json_schema.h>
 #include <neograph/provider.h>
 
+#include <atomic>
 #include <filesystem>
 #include <map>
+#include <random>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -12,8 +14,7 @@
 namespace neograph::mcp {
 namespace {
 
-bool is_within(const std::filesystem::path& child,
-               const std::filesystem::path& root) {
+bool is_within(const std::filesystem::path& child, const std::filesystem::path& root) {
     auto child_it = child.begin();
     auto root_it = root.begin();
     for (; root_it != root.end(); ++root_it, ++child_it) {
@@ -26,26 +27,22 @@ std::filesystem::path resolved_path(const std::filesystem::path& value) {
     std::error_code error;
     auto absolute = std::filesystem::absolute(value, error);
     if (error) {
-        throw std::runtime_error("cannot resolve Harness path: "
-                                 + value.string());
+        throw std::runtime_error("cannot resolve Harness path: " + value.string());
     }
     auto resolved = std::filesystem::weakly_canonical(absolute, error);
     if (error) {
-        throw std::runtime_error("cannot canonicalize Harness path: "
-                                 + absolute.string());
+        throw std::runtime_error("cannot canonicalize Harness path: " + absolute.string());
     }
     return resolved;
 }
 
-json enforce_path_policy(const HarnessWorkerCall& call, const json& tool,
-                         const json& arguments) {
+json enforce_path_policy(const HarnessWorkerCall& call, const json& tool, const json& arguments) {
     const auto path_arguments = tool.value("path_arguments", json::array());
     if (path_arguments.empty()) return arguments;
 
     const auto roots = call.policy.value("workspace_roots", json::array());
     if (roots.empty()) {
-        throw std::runtime_error(
-            "path-bearing tool requires policy.workspace_roots");
+        throw std::runtime_error("path-bearing tool requires policy.workspace_roots");
     }
 
     std::vector<std::filesystem::path> normalized_roots;
@@ -71,8 +68,8 @@ json enforce_path_policy(const HarnessWorkerCall& call, const json& tool,
             }
         }
         if (!allowed) {
-            throw std::runtime_error("tool path escapes configured workspace roots: "
-                                     + candidate.string());
+            throw std::runtime_error("tool path escapes configured workspace roots: " +
+                                     candidate.string());
         }
         normalized_arguments[key] = candidate.string();
     }
@@ -101,15 +98,25 @@ std::string worker_prompt(const HarnessWorkerCall& call) {
     if (!call.repair_feedback.empty()) {
         contract["repair_feedback"] = call.repair_feedback;
     }
+    if (call.resume_value) {
+        contract["host_resume"] = *call.resume_value;
+    }
     return "Execute this worker contract. Use only the supplied tools. Return only "
-           "one JSON value conforming to output_schema, without Markdown fences.\n"
-           + contract.dump(2);
+           "one JSON value conforming to output_schema, without Markdown fences.\n" +
+           contract.dump(2);
+}
+
+std::string host_call_id() {
+    static const std::uint64_t        nonce = std::random_device{}();
+    static std::atomic<std::uint64_t> sequence{1};
+    std::ostringstream                out;
+    out << "hcall_" << std::hex << nonce << '_' << sequence.fetch_add(1, std::memory_order_relaxed);
+    return out.str();
 }
 
 } // namespace
 
-HarnessWorkerExecutor make_provider_harness_executor(
-    HarnessProviderExecutorConfig config) {
+HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConfig config) {
     if (!config.provider) {
         throw std::invalid_argument("Harness provider executor requires a provider");
     }
@@ -117,9 +124,8 @@ HarnessWorkerExecutor make_provider_harness_executor(
         throw std::invalid_argument("max_tool_rounds must be between 1 and 64");
     }
 
-    return [config = std::move(config)](
-               const HarnessWorkerCall& call,
-               const std::shared_ptr<graph::CancelToken>& cancel) {
+    return [config = std::move(config)](const HarnessWorkerCall&                   call,
+                                        const std::shared_ptr<graph::CancelToken>& cancel) {
         std::map<std::string, json> catalog;
         for (const auto& tool : call.tool_catalog) {
             catalog[tool["id"].get<std::string>()] = tool;
@@ -148,12 +154,10 @@ HarnessWorkerExecutor make_provider_harness_executor(
 
             if (completion.message.tool_calls.empty()) {
                 if (completion.message.content.empty()) {
-                    return HarnessWorkerResponse::empty(
-                        "provider returned empty content");
+                    return HarnessWorkerResponse::empty("provider returned empty content");
                 }
                 try {
-                    return HarnessWorkerResponse::success(
-                        json::parse(completion.message.content));
+                    return HarnessWorkerResponse::success(json::parse(completion.message.content));
                 } catch (const std::exception& error) {
                     return HarnessWorkerResponse::parse_error(error.what());
                 }
@@ -166,18 +170,31 @@ HarnessWorkerExecutor make_provider_harness_executor(
                     return HarnessWorkerResponse::tool_error(
                         "provider requested undeclared tool: " + tool_call.name);
                 }
-                if (!config.capability_executor) {
-                    return HarnessWorkerResponse::tool_error(
-                        "provider requested a tool but no capability executor is configured");
-                }
                 try {
                     auto arguments = json::parse(tool_call.arguments);
                     validate_json_value(arguments, tool_it->second["input_schema"],
                                         "Harness tool arguments", "$");
-                    arguments = enforce_path_policy(
-                        call, tool_it->second, arguments);
-                    auto result = config.capability_executor(
-                        tool_it->second, arguments, cancel);
+                    arguments           = enforce_path_policy(call, tool_it->second, arguments);
+                    const auto executor = tool_it->second.value("executor", json::object());
+                    if (executor.value("kind", "") == "host_brokered") {
+                        json pending = {
+                            {"call_id", host_call_id()},
+                            {"provider_call_id", tool_call.id},
+                            {"tool_id", tool_call.name},
+                            {"arguments", std::move(arguments)},
+                            {"result_schema",
+                             tool_it->second.value("output_schema", json::object())},
+                        };
+                        if (executor.value("interaction", "tool_result") == "input") {
+                            return HarnessWorkerResponse::input_required(std::move(pending));
+                        }
+                        return HarnessWorkerResponse::awaiting_tool_results(std::move(pending));
+                    }
+                    if (!config.capability_executor) {
+                        return HarnessWorkerResponse::tool_error(
+                            "provider requested a tool but no capability executor is configured");
+                    }
+                    auto result = config.capability_executor(tool_it->second, arguments, cancel);
                     if (tool_it->second.contains("output_schema")) {
                         validate_json_value(result, tool_it->second["output_schema"],
                                             "Harness tool result", "$");

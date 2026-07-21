@@ -456,18 +456,38 @@ GraphEngine::run_stream_async(RunConfig config,
 RunResult GraphEngine::resume(const std::string& thread_id,
                                const json& resume_value,
                                const GraphStreamCallback& cb) {
-    return neograph::async::run_sync(resume_async(thread_id, resume_value, cb));
+    RunConfig config;
+    config.thread_id = thread_id;
+    return resume(config, resume_value, cb);
 }
 
-asio::awaitable<RunResult>
-GraphEngine::resume_async(const std::string& thread_id,
-                          const json& resume_value,
-                          const GraphStreamCallback& cb) {
+RunResult GraphEngine::resume(const RunConfig&           config,
+                              const json&                resume_value,
+                              const GraphStreamCallback& cb) {
+    return neograph::async::run_sync(resume_async(config, resume_value, cb));
+}
+
+asio::awaitable<RunResult> GraphEngine::resume_async(const std::string&         thread_id,
+                                                     const json&                resume_value,
+                                                     const GraphStreamCallback& cb) {
+    RunConfig config;
+    config.thread_id = thread_id;
+    co_return co_await resume_async(std::move(config), resume_value, cb);
+}
+
+asio::awaitable<RunResult> GraphEngine::resume_async(RunConfig           config,
+                                                     json                resume_value,
+                                                     GraphStreamCallback cb) {
     // Sem 3.7.5: real async resume. Mirrors sync resume() but the
     // load_latest and the downstream super-step loop go through
     // their *_async peers, so the whole resume path is non-blocking.
     if (!checkpoint_store_)
         throw std::runtime_error("Cannot resume: no checkpoint store configured");
+
+    if (config.thread_id.empty()) {
+        throw std::invalid_argument("Cannot resume: thread_id is required");
+    }
+    const auto& thread_id = config.thread_id;
 
     auto cp_opt = co_await checkpoint_store_->load_latest_async(thread_id);
     if (!cp_opt)
@@ -480,10 +500,6 @@ GraphEngine::resume_async(const std::string& thread_id,
         result.checkpoint_id = cp_opt->id;
         co_return result;
     }
-
-    RunConfig config;
-    config.thread_id = thread_id;
-    config.max_steps = 50;
 
     co_return co_await execute_graph_async(
         config, cb, cp_opt->next_nodes, &resume_value);

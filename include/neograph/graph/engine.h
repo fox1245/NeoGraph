@@ -505,11 +505,26 @@ public:
                      const json& resume_value = json(),
                      const GraphStreamCallback& cb = nullptr);
 
+    /**
+     * @brief Resume while preserving caller cancellation and deadline settings.
+     *
+     * `config.thread_id` identifies the interrupted session. Input is ignored;
+     * the latest checkpoint remains the source of resumed graph state.
+     */
+    RunResult resume(const RunConfig&           config,
+                     const json&                resume_value = json(),
+                     const GraphStreamCallback& cb           = nullptr);
+
     /// Async peer of resume — non-blocking coroutine surface.
     asio::awaitable<RunResult> resume_async(
         const std::string& thread_id,
         const json& resume_value = json(),
         const GraphStreamCallback& cb = nullptr);
+
+    /// Async peer of the RunConfig-preserving resume overload.
+    asio::awaitable<RunResult> resume_async(RunConfig           config,
+                                            json                resume_value = json(),
+                                            GraphStreamCallback cb           = nullptr);
 
     // ── State inspection & manipulation (LangGraph Checkpointer API) ──
 

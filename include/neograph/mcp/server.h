@@ -16,6 +16,7 @@
 #include <istream>
 #include <memory>
 #include <ostream>
+#include <string>
 
 namespace neograph::mcp {
 
@@ -41,6 +42,13 @@ class NEOGRAPH_API MCPServer {
     using ToolHandler = std::function<CallToolResult(
         const json&, const std::shared_ptr<graph::CancelToken>&)>;
 
+    /// Extension hook for polymorphic tool results such as CreateTaskResult.
+    using RawToolHandler =
+        std::function<json(const json&, const std::shared_ptr<graph::CancelToken>&, const json&)>;
+
+    /// Synchronous extension-method handler; the server wraps the JSON result.
+    using MethodHandler = std::function<json(const json&, const json&)>;
+
     /// Receives complete JSON-RPC response envelopes produced asynchronously.
     using ResponseSink = std::function<void(const json&)>;
 
@@ -52,6 +60,15 @@ class NEOGRAPH_API MCPServer {
 
     /// Add a tool. Names must be unique and registration closes at initialize.
     void register_tool(ToolDefinition definition, ToolHandler handler);
+
+    /// Add a tool whose result shape is selected using request metadata.
+    void register_raw_tool(ToolDefinition definition, RawToolHandler handler);
+
+    /// Register an extension JSON-RPC method before initialization.
+    void register_method(std::string method, MethodHandler handler);
+
+    /// Advertise an explicitly enabled MCP extension capability.
+    void register_extension(std::string identifier, json settings = json::object());
 
     /// Process one parsed JSON-RPC message. Tool calls may complete via sink.
     json handle_message(const json& envelope);
