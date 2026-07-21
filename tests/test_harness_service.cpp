@@ -18,6 +18,10 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 using namespace std::chrono_literals;
 
@@ -1038,6 +1042,9 @@ TEST(HarnessServiceTest, SqliteRecordStoreBusyTimeoutWaitsForWriter) {
     sqlite3*                                 blocker = nullptr;
     ASSERT_EQ(sqlite3_open(database.string().c_str(), &blocker), SQLITE_OK);
     ASSERT_EQ(sqlite3_exec(blocker, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr), SQLITE_OK);
+    ASSERT_EQ(records.load_artifact("artifact_1"),
+              std::optional<json>({{"artifact_id", "artifact_1"}, {"request", json::object()}}))
+        << "WAL readers must remain available while another connection owns the writer lock";
 
     std::exception_ptr failure;
     const auto started = std::chrono::steady_clock::now();
@@ -1210,6 +1217,130 @@ INSERT INTO neograph_harness_runs VALUES
     ASSERT_EQ(records.list_events("run_1").size(), 1u);
     EXPECT_EQ(records.list_events("run_1")[0]["event_type"], "migration.verified");
 }
+
+TEST(HarnessServiceTest, SqliteSchemaMigrationRollsBackOnMalformedLegacyRecord) {
+    const auto           root = unique_temp_path("neograph-harness-migration-rollback");
+    TempDirectoryCleanup cleanup(root);
+    std::filesystem::create_directories(root);
+    const auto database = root / "runs.db";
+    sqlite3*   legacy   = nullptr;
+    ASSERT_EQ(sqlite3_open(database.string().c_str(), &legacy), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(legacy, R"SQL(
+CREATE TABLE neograph_harness_schema (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1), version INTEGER NOT NULL
+);
+INSERT INTO neograph_harness_schema VALUES (1, 2);
+CREATE TABLE neograph_harness_artifacts (
+    artifact_id TEXT PRIMARY KEY, record_json TEXT NOT NULL, created_at_ms INTEGER NOT NULL
+);
+CREATE TABLE neograph_harness_runs (
+    run_id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL, revision_digest TEXT NOT NULL DEFAULT '',
+    protocol_version TEXT NOT NULL DEFAULT '', profile TEXT NOT NULL DEFAULT '',
+    record_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL,
+    FOREIGN KEY (artifact_id) REFERENCES neograph_harness_artifacts (artifact_id)
+);
+INSERT INTO neograph_harness_artifacts VALUES
+    ('artifact_1', '{"artifact_id":"artifact_1","request":{}}', 1);
+INSERT INTO neograph_harness_runs VALUES
+    ('run_1', 'artifact_1', '', '', '', '{malformed', 1);
+)SQL",
+                           nullptr, nullptr, nullptr),
+              SQLITE_OK);
+    sqlite3_close(legacy);
+
+    EXPECT_THROW(neograph::mcp::SqliteHarnessRecordStore records(database.string()),
+                 std::exception);
+    ASSERT_EQ(sqlite3_open(database.string().c_str(), &legacy), SQLITE_OK);
+    sqlite3_stmt* version = nullptr;
+    ASSERT_EQ(
+        sqlite3_prepare_v2(legacy, "SELECT version FROM neograph_harness_schema WHERE singleton=1",
+                           -1, &version, nullptr),
+        SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(version), SQLITE_ROW);
+    EXPECT_EQ(sqlite3_column_int(version, 0), 2);
+    sqlite3_finalize(version);
+    sqlite3_stmt* columns = nullptr;
+    ASSERT_EQ(sqlite3_prepare_v2(legacy, "PRAGMA table_info(neograph_harness_runs)", -1, &columns,
+                                 nullptr),
+              SQLITE_OK);
+    bool saw_status = false;
+    while (sqlite3_step(columns) == SQLITE_ROW) {
+        const auto* name = sqlite3_column_text(columns, 1);
+        if (name && std::string(reinterpret_cast<const char*>(name)) == "status") {
+            saw_status = true;
+        }
+    }
+    sqlite3_finalize(columns);
+    EXPECT_FALSE(saw_status) << "failed migration must roll back its ALTER TABLE statements";
+    ASSERT_EQ(sqlite3_exec(legacy,
+                           "UPDATE neograph_harness_runs SET record_json="
+                           "'{\"run_id\":\"run_1\",\"artifact_id\":\"artifact_1\","
+                           "\"status\":\"completed\"}' WHERE run_id='run_1'",
+                           nullptr, nullptr, nullptr),
+              SQLITE_OK);
+    sqlite3_close(legacy);
+
+    neograph::mcp::SqliteHarnessRecordStore migrated(database.string());
+    ASSERT_TRUE(migrated.load_run("run_1").has_value());
+}
+
+#ifndef _WIN32
+TEST(HarnessServiceTest, SqliteJournalRollsBackAbruptWriterProcessDeath) {
+    const auto           root = unique_temp_path("neograph-harness-abrupt-death");
+    TempDirectoryCleanup cleanup(root);
+    std::filesystem::create_directories(root);
+    const auto database = root / "runs.db";
+    {
+        neograph::mcp::SqliteHarnessRecordStore records(database.string());
+        records.save_artifact("artifact_1", {
+                                                {"artifact_id", "artifact_1"},
+                                                {"request", json::object()},
+                                            });
+        records.save_run("run_1", {
+                                      {"run_id", "run_1"},
+                                      {"artifact_id", "artifact_1"},
+                                      {"revision_digest", "revision"},
+                                      {"protocol_version", "protocol"},
+                                      {"profile", "profile"},
+                                      {"status", "running"},
+                                  });
+    }
+
+    const auto child = fork();
+    ASSERT_GE(child, 0);
+    if (child == 0) {
+        sqlite3* writer = nullptr;
+        if (sqlite3_open(database.string().c_str(), &writer) != SQLITE_OK) _exit(2);
+        const auto result = sqlite3_exec(writer, R"SQL(
+BEGIN IMMEDIATE;
+INSERT INTO neograph_harness_journal
+    (run_id, sequence, artifact_id, revision_digest, protocol_version, profile,
+     event_type, payload_json, created_at_ms)
+VALUES ('run_1', 1, 'artifact_1', 'revision', 'protocol', 'profile',
+        'partial.event', '{}', 1);
+)SQL",
+                                         nullptr, nullptr, nullptr);
+        _exit(result == SQLITE_OK ? 0 : 3);
+    }
+    int status = 0;
+    ASSERT_EQ(waitpid(child, &status, 0), child);
+    ASSERT_TRUE(WIFEXITED(status));
+    ASSERT_EQ(WEXITSTATUS(status), 0);
+
+    neograph::mcp::SqliteHarnessRecordStore records(database.string());
+    EXPECT_TRUE(records.list_events("run_1").empty());
+    records.append_event({
+        {"run_id", "run_1"},
+        {"artifact_id", "artifact_1"},
+        {"revision_digest", "revision"},
+        {"protocol_version", "protocol"},
+        {"profile", "profile"},
+        {"event_type", "recovered.event"},
+        {"payload", json::object()},
+    });
+    ASSERT_EQ(records.list_events("run_1").size(), 1u);
+}
+#endif
 
 TEST(HarnessServiceTest, SqliteRetentionDeletesTerminalLeavesBeforeReferencedSources) {
     const auto           root = unique_temp_path("neograph-harness-retention");
