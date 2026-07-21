@@ -1,5 +1,5 @@
 ---
-name: neograph-harness
+name: neograph-harness-authoring
 description: Compile and run bounded PR review, bug triage, or research synthesis panels through the NeoGraph Harness MCP tools. Use when a task benefits from multiple schema-constrained workers, strict preflight validation, read-only workspace policy, compact polling, and URI-linked detailed artifacts.
 ---
 
