@@ -321,6 +321,10 @@ TEST(HarnessServiceTest, EnforcesReadOnlyWorkspaceAndEvidenceContracts) {
 }
 
 TEST(HarnessServiceTest, ProviderExecutorRunsDeclaredToolsAndValidatesPaths) {
+    const auto workspace = unique_temp_path("neograph-harness-path-policy");
+    std::filesystem::create_directories(workspace / "src");
+    const auto expected_path =
+        std::filesystem::weakly_canonical(workspace / "src/main.cpp").string();
     auto provider = std::make_shared<ScriptedProvider>();
     neograph::ChatCompletion tool_request;
     tool_request.message.role = "assistant";
@@ -335,11 +339,12 @@ TEST(HarnessServiceTest, ProviderExecutorRunsDeclaredToolsAndValidatesPaths) {
     neograph::mcp::HarnessProviderExecutorConfig config;
     config.provider = provider;
     config.model = "test-model";
-    config.capability_executor = [&capability_calls](const json& tool, const json& arguments,
-                                                     const auto&) {
+    config.capability_executor = [&capability_calls, expected_path](const json& tool,
+                                                                    const json& arguments,
+                                                                    const auto&) {
         ++capability_calls;
         EXPECT_EQ(tool["id"], "repo.read");
-        EXPECT_EQ(arguments["path"], "/workspace/src/main.cpp");
+        EXPECT_EQ(arguments["path"], expected_path);
         return json{{"content", "int main() {}"}};
     };
     auto executor = neograph::mcp::make_provider_harness_executor(std::move(config));
@@ -359,7 +364,7 @@ TEST(HarnessServiceTest, ProviderExecutorRunsDeclaredToolsAndValidatesPaths) {
         {"path_arguments", json::array({"path"})},
         {"executor", {{"kind", "builtin"}}},
     }});
-    call.policy = {{"workspace_roots", json::array({"/workspace"})}};
+    call.policy = {{"workspace_roots", json::array({workspace.string()})}};
     auto response = executor(call, std::make_shared<neograph::graph::CancelToken>());
 
     EXPECT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::VALUE);
@@ -369,6 +374,7 @@ TEST(HarnessServiceTest, ProviderExecutorRunsDeclaredToolsAndValidatesPaths) {
     EXPECT_EQ(provider->calls[0].model, "test-model");
     ASSERT_EQ(provider->calls[1].messages.size(), 3u);
     EXPECT_EQ(provider->calls[1].messages.back().role, "tool");
+    std::filesystem::remove_all(workspace);
 }
 
 TEST(HarnessServiceTest, ProviderExecutorRejectsWorkspaceEscapeBeforeToolCall) {
@@ -790,7 +796,7 @@ TEST(HarnessServiceTest, ExpiredHostResultIsRejectedAndPersisted) {
         config.checkpoint_store = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
         config.record_store =
             std::make_shared<neograph::mcp::FileHarnessRecordStore>(root.string());
-        config.run_ttl = 20ms;
+        config.run_ttl = 500ms;
         neograph::mcp::HarnessProviderExecutorConfig provider_config;
         provider_config.provider = provider;
         config.worker_executor =
@@ -803,7 +809,12 @@ TEST(HarnessServiceTest, ExpiredHostResultIsRejectedAndPersisted) {
         auto waiting = wait_terminal(service, run_id);
         ASSERT_EQ(waiting["status"], "awaiting_tool_results");
         call_id = waiting["pending"]["call_id"].get<std::string>();
-        std::this_thread::sleep_for(30ms);
+        const auto expires_at = waiting["expires_at"].get<int64_t>();
+        while (std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+                   .count() <= expires_at) {
+            std::this_thread::sleep_for(1ms);
+        }
         EXPECT_THROW(
             service.resume(
                 {{"run_id", run_id}, {"call_id", call_id}, {"result", {{"answer", "late"}}}}),
