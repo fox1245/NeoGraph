@@ -82,6 +82,7 @@ if(NEOGRAPH_BUILD_MCP_CLIENT)
         test_mcp_client_async.cpp
         test_mcp_stdio_async.cpp
     )
+    target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_MCP_CLIENT)
 endif()
 
 if(NEOGRAPH_BUILD_MCP_SERVER)
@@ -89,6 +90,10 @@ if(NEOGRAPH_BUILD_MCP_SERVER)
         test_mcp_server.cpp
         test_harness_service.cpp
     )
+endif()
+
+if(NEOGRAPH_BUILD_MCP_HTTP_SERVER)
+    target_sources(neograph_tests PRIVATE test_mcp_http_server.cpp)
 endif()
 
 if(NEOGRAPH_BUILD_MCP_CLIENT AND NEOGRAPH_BUILD_MCP_SERVER)
@@ -158,6 +163,10 @@ endif()
 
 if(NEOGRAPH_BUILD_MCP_SERVER)
     target_link_libraries(neograph_tests PRIVATE neograph::mcp_server)
+endif()
+
+if(NEOGRAPH_BUILD_MCP_HTTP_SERVER)
+    target_link_libraries(neograph_tests PRIVATE neograph::mcp_http_server)
 endif()
 
 if(NEOGRAPH_BUILD_A2A)

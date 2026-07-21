@@ -49,6 +49,58 @@ checkpoints in `checkpoints.db`. The directory survives server restarts. A
 `host_brokered` catalog entry is rejected at compile time when either store is
 missing, so a workflow cannot advertise resumability it does not have.
 
+## Streamable HTTP
+
+Remote transport is opt-in so the existing stdio-only target remains small and
+does not silently gain an HTTP/OpenSSL dependency:
+
+```bash
+cmake -S . -B build-harness-http \
+  -DNEOGRAPH_BUILD_EXAMPLES=OFF \
+  -DNEOGRAPH_BUILD_LLM=ON \
+  -DNEOGRAPH_BUILD_MCP_SERVER=ON \
+  -DNEOGRAPH_BUILD_MCP_HTTP_SERVER=ON \
+  -DNEOGRAPH_BUILD_HARNESS_MCP_BINARY=ON
+cmake --build build-harness-http --target neograph_harness_mcp -j
+cmake --install build-harness-http --prefix "$HOME/.local"
+
+export NEOGRAPH_HARNESS_TRANSPORT=http
+export NEOGRAPH_HARNESS_HTTP_HOST=127.0.0.1
+export NEOGRAPH_HARNESS_HTTP_PORT=8080
+"$HOME/.local/bin/neograph-harness-mcp"
+```
+
+The endpoint is `http://127.0.0.1:8080/mcp`. It implements the published MCP
+2025-11-25 Streamable HTTP POST contract with per-session MCP lifecycles and
+JSON responses. Notifications return HTTP 202. DELETE terminates a session.
+The optional standalone GET/SSE channel is deliberately not implemented and
+returns HTTP 405, which the transport specification explicitly permits.
+
+Security defaults are transport-level and do not couple authentication to
+`GraphEngine` or `HarnessService`:
+
+- The default bind is `127.0.0.1`; a non-loopback bind is rejected unless a
+  bearer authorizer is configured.
+- Every supplied `Origin` is rejected unless it exactly matches an entry in
+  `NEOGRAPH_HARNESS_ALLOWED_ORIGINS` (comma-separated in the executable).
+- `NEOGRAPH_HARNESS_BEARER_TOKEN` enables the executable's single-principal
+  bearer boundary. Library embeddings can use
+  `MCPHttpServerConfig::bearer_authorizer` for OAuth/JWT validation and return a
+  stable principal/scope.
+- Sessions are bound to the returned authorization scope. A different valid
+  principal cannot reuse a leaked `Mcp-Session-Id`.
+- The `MCPHttpServer` factory receives that validated scope and returns an
+  `MCPHttpServerSession` owner. Multi-tenant embeddings must use the scope to
+  select isolated Harness record/checkpoint stores; no auth state enters the
+  graph runtime itself.
+- Request payload, HTTP worker, queue, session, and response-wait limits are
+  bounded by `MCPHttpServerConfig`.
+
+For any non-loopback deployment, terminate TLS at a trusted reverse proxy and
+use its OAuth/OIDC validation or an equivalent `bearer_authorizer`. Forward the
+original `Authorization` and `Origin` headers, do not expose a cleartext public
+listener, and deploy one authorization domain per Harness state directory.
+
 ## Host Setup
 
 Use an absolute path for `SERVER`:
@@ -281,3 +333,18 @@ and A2A services remain separate trust boundaries and should enforce the same
 root policy to close filesystem time-of-check/time-of-use races.
 With `policy.read_only: true`, compilation rejects every catalog entry not
 marked `read_only: true`.
+
+## Distribution And Protocol Profiles
+
+The supported local distribution path is the installable
+`neograph-harness-mcp` binary above. Source builds can continue using the
+example target, and Python wheels remain library/runtime packages rather than
+implicitly installing a remote daemon. MCPB and official registry publication
+remain release/discovery packaging options; they are not required for the wire
+protocol and should be added only with signed release artifacts and an explicit
+remote-auth deployment manifest.
+
+NeoGraph currently publishes only the dated MCP `2025-11-25` profile. Final
+SEPs describing a future stateless protocol do not create a new wire version;
+no successor profile will be advertised until the MCP project publishes a new
+dated specification.
