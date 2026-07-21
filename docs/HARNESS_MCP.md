@@ -161,6 +161,10 @@ branch returns `started: false`, `status: "incompatible_fork"`, and
 machine-readable `H_FORK_*` diagnostics with `path` and `witness`; it creates no
 run or fork checkpoint.
 
+A checkpoint store is required. Without a record store, a fork may reference
+only source runs and artifacts still resident in the current service process;
+configure both stores for fork lineage that must survive a restart.
+
 A compatible branch is labeled `compatible_fork` and carries both
 `source_run_id` and `source_checkpoint_id` in start responses, snapshots, and
 lifecycle journal events. Execution resumes at the selected checkpoint's

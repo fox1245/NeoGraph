@@ -1598,6 +1598,9 @@ struct HarnessService::Impl {
         policy.protected_run_ids      = protected_runs;
         for (const auto& [run_id, run] : runs) {
             std::lock_guard run_lock(run->mutex);
+            // SQLite status/dependency predicates are authoritative. This flag
+            // additionally protects terminal state while its execution thread
+            // is still finalizing the journal and persistence sequence.
             if (run->execution_finished) continue;
             policy.protected_run_ids.push_back(run_id);
             policy.protected_artifact_ids.push_back(run->artifact_id);
@@ -1860,9 +1863,10 @@ struct HarnessService::Impl {
         } execution_finished{run};
         {
             std::lock_guard lock(run->mutex);
-            run->status = "running";
-            run->resume_scheduled = resume_value.has_value();
-            run->updated_at       = unix_millis();
+            run->status             = "running";
+            run->resume_scheduled   = resume_value.has_value();
+            run->execution_finished = false;
+            run->updated_at         = unix_millis();
         }
         try {
             persist_run(run);
@@ -2075,9 +2079,10 @@ struct HarnessService::Impl {
                 run->updated_at          = unix_millis();
                 rejected_recorded_resume = true;
             } else {
-                run->resume_scheduled = true;
-                value                 = run->resume_value;
-                artifact_id           = run->artifact_id;
+                run->resume_scheduled   = true;
+                run->execution_finished = false;
+                value                   = run->resume_value;
+                artifact_id             = run->artifact_id;
             }
         }
         if (rejected_recorded_resume) {
