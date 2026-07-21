@@ -70,6 +70,39 @@ json request(json workers = json::array({worker("reviewer")})) {
     };
 }
 
+json dsl_request(std::string judge_name, std::string worker_results_reducer = "append") {
+    auto       value       = request();
+    const auto worker_node = "worker_0";
+    value["harness"]       = {
+        {"mode", "dsl"},
+        {"definition",
+               {
+             {"schema_version", 1},
+             {"name", "fork_compatibility_test"},
+             {"channels",
+                    {
+                  {"task", {{"reducer", "overwrite"}, {"initial", json::object()}}},
+                  {"worker_results",
+                         {{"reducer", std::move(worker_results_reducer)}, {"initial", json::array()}}},
+                  {"final_result", {{"reducer", "overwrite"}, {"initial", nullptr}}},
+              }},
+             {"nodes",
+                    {
+                  {worker_node, {{"type", "neograph_harness_worker"}, {"worker_id", "reviewer"}}},
+                  {judge_name,
+                         {{"type", "neograph_harness_judge"},
+                          {"barrier", {{"wait_for", json::array({worker_node})}}}}},
+              }},
+             {"edges", json::array({
+                           {{"from", "__start__"}, {"to", worker_node}},
+                           {{"from", worker_node}, {"to", judge_name}},
+                           {{"from", judge_name}, {"to", "__end__"}},
+                       })},
+         }},
+    };
+    return value;
+}
+
 json host_brokered_request(std::string interaction = "tool_result") {
     auto value                   = request();
     value["workers"][0]["tools"] = json::array({"host.lookup"});
@@ -224,6 +257,7 @@ TEST(HarnessServiceTest, ExposesSmallStableMcpToolSurface) {
     EXPECT_EQ(listed["result"]["tools"][5]["name"], "neograph_start");
     bool saw_debug_views = false;
     bool saw_replay      = false;
+    bool saw_fork        = false;
     for (const auto& tool : listed["result"]["tools"]) {
         EXPECT_TRUE(tool.contains("outputSchema"));
         EXPECT_EQ(tool["inputSchema"].value("type", ""), "object");
@@ -236,11 +270,15 @@ TEST(HarnessServiceTest, ExposesSmallStableMcpToolSurface) {
         } else if (tool["name"] == "neograph_start") {
             const auto replay = tool["inputSchema"]["properties"]["replay"];
             EXPECT_EQ(replay["properties"]["mode"]["enum"].size(), 2u);
+            const auto fork = tool["inputSchema"]["properties"]["fork"];
+            EXPECT_EQ(fork["required"].size(), 3u);
             saw_replay = true;
+            saw_fork   = true;
         }
     }
     EXPECT_TRUE(saw_debug_views);
     EXPECT_TRUE(saw_replay);
+    EXPECT_TRUE(saw_fork);
 
     auto invalid_get = server.handle_message({
         {"jsonrpc", "2.0"},
@@ -1373,6 +1411,141 @@ TEST(HarnessServiceTest, DebugViewsExposeJournalAndCheckpointHistoryThroughUris)
                  std::invalid_argument);
     EXPECT_THROW(service.read(artifacts["trace"]["uri"].get<std::string>() + "?limit=1&limit=2"),
                  std::invalid_argument);
+}
+
+TEST(HarnessServiceTest, CompatibleForkResumesExactCheckpointWithTargetArtifact) {
+    const auto           root = unique_temp_path("neograph-harness-compatible-fork");
+    TempDirectoryCleanup cleanup(root);
+    std::filesystem::create_directories(root);
+    auto records     = std::make_shared<neograph::mcp::FileHarnessRecordStore>(root.string());
+    auto checkpoints = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
+    std::atomic<int>     live_calls{0};
+    HarnessServiceConfig config;
+    config.record_store     = records;
+    config.checkpoint_store = checkpoints;
+    config.worker_executor  = [&](const HarnessWorkerCall&, const auto&) {
+        live_calls.fetch_add(1, std::memory_order_relaxed);
+        return HarnessWorkerResponse::success({
+            {"status", "ok"},
+            {"findings", json::array({{{"evidence", "source checkpoint"}}})},
+        });
+    };
+    HarnessService service(std::move(config));
+
+    const auto source_artifact = service.compile(dsl_request("judge"));
+    ASSERT_TRUE(source_artifact["ok"].get<bool>()) << source_artifact.dump();
+    const auto source_start  = service.start({{"artifact_id", source_artifact["artifact_id"]}});
+    const auto source_run_id = source_start["run_id"].get<std::string>();
+    ASSERT_EQ(wait_terminal(service, source_run_id)["status"], "completed");
+    ASSERT_EQ(live_calls.load(std::memory_order_relaxed), 1);
+
+    std::string source_checkpoint_id;
+    for (const auto& checkpoint : checkpoints->list(source_run_id)) {
+        if (checkpoint.next_nodes.size() == 1 && checkpoint.next_nodes[0] == "judge") {
+            source_checkpoint_id = checkpoint.id;
+            break;
+        }
+    }
+    ASSERT_FALSE(source_checkpoint_id.empty());
+
+    auto repaired_request                          = dsl_request("judge");
+    repaired_request["workers"][0]["instructions"] = "Repaired worker instructions";
+    const auto target_artifact                     = service.compile(repaired_request);
+    ASSERT_TRUE(target_artifact["ok"].get<bool>()) << target_artifact.dump();
+    ASSERT_NE(target_artifact["artifact_id"], source_artifact["artifact_id"]);
+
+    const auto started = service.start({
+        {"fork",
+         {{"source_run_id", source_run_id},
+          {"checkpoint_id", source_checkpoint_id},
+          {"artifact_id", target_artifact["artifact_id"]}}},
+    });
+    ASSERT_TRUE(started["started"].get<bool>()) << started.dump();
+    EXPECT_EQ(started["execution_mode"], "compatible_fork");
+    EXPECT_EQ(started["source_run_id"], source_run_id);
+    EXPECT_EQ(started["source_checkpoint_id"], source_checkpoint_id);
+
+    const auto fork_run_id = started["run_id"].get<std::string>();
+    const auto finished    = wait_terminal(service, fork_run_id);
+    ASSERT_EQ(finished["status"], "completed") << finished.dump();
+    EXPECT_EQ(finished["execution_mode"], "compatible_fork");
+    EXPECT_EQ(finished["source_checkpoint_id"], source_checkpoint_id);
+    ASSERT_EQ(finished["result"]["findings"].size(), 1u);
+    EXPECT_EQ(finished["result"]["findings"][0]["evidence"], "source checkpoint");
+    EXPECT_EQ(live_calls.load(std::memory_order_relaxed), 1)
+        << "forking after the worker checkpoint must not execute the worker again";
+
+    bool saw_fork_anchor = false;
+    for (const auto& checkpoint : checkpoints->list(fork_run_id)) {
+        if (!checkpoint.metadata.contains("forked_from")) continue;
+        EXPECT_EQ(checkpoint.parent_id, source_checkpoint_id);
+        EXPECT_EQ(checkpoint.metadata["forked_from"]["thread_id"], source_run_id);
+        EXPECT_EQ(checkpoint.metadata["forked_from"]["checkpoint_id"], source_checkpoint_id);
+        saw_fork_anchor = true;
+    }
+    EXPECT_TRUE(saw_fork_anchor);
+}
+
+TEST(HarnessServiceTest, IncompatibleForkReturnsChannelAndContinuationDiagnosticsBeforeRun) {
+    const auto           root = unique_temp_path("neograph-harness-incompatible-fork");
+    TempDirectoryCleanup cleanup(root);
+    std::filesystem::create_directories(root);
+    auto records     = std::make_shared<neograph::mcp::FileHarnessRecordStore>(root.string());
+    auto checkpoints = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
+    HarnessServiceConfig config;
+    config.record_store     = records;
+    config.checkpoint_store = checkpoints;
+    config.max_runs         = 1;
+    config.worker_executor  = [](const HarnessWorkerCall&, const auto&) {
+        return HarnessWorkerResponse::success({{"status", "ok"}, {"findings", json::array()}});
+    };
+    HarnessService service(std::move(config));
+
+    const auto source_artifact = service.compile(dsl_request("source_judge"));
+    ASSERT_TRUE(source_artifact["ok"].get<bool>()) << source_artifact.dump();
+    const auto source_start  = service.start({{"artifact_id", source_artifact["artifact_id"]}});
+    const auto source_run_id = source_start["run_id"].get<std::string>();
+    ASSERT_EQ(wait_terminal(service, source_run_id)["status"], "completed");
+
+    std::string source_checkpoint_id;
+    for (const auto& checkpoint : checkpoints->list(source_run_id)) {
+        if (checkpoint.next_nodes.size() == 1 && checkpoint.next_nodes[0] == "source_judge") {
+            source_checkpoint_id = checkpoint.id;
+            break;
+        }
+    }
+    ASSERT_FALSE(source_checkpoint_id.empty());
+
+    const auto target_artifact = service.compile(dsl_request("target_judge", "overwrite"));
+    ASSERT_TRUE(target_artifact["ok"].get<bool>()) << target_artifact.dump();
+    const auto rejected = service.start({
+        {"fork",
+         {{"source_run_id", source_run_id},
+          {"checkpoint_id", source_checkpoint_id},
+          {"artifact_id", target_artifact["artifact_id"]}}},
+    });
+    ASSERT_FALSE(rejected["started"].get<bool>());
+    EXPECT_EQ(rejected["status"], "incompatible_fork");
+    EXPECT_EQ(rejected["source_checkpoint_id"], source_checkpoint_id);
+
+    bool saw_reducer   = false;
+    bool saw_next_node = false;
+    for (const auto& diagnostic : rejected["diagnostics"]) {
+        EXPECT_EQ(diagnostic["phase"], "compatibility");
+        EXPECT_TRUE(diagnostic.contains("witness"));
+        if (diagnostic["code"] == "H_FORK_CHANNEL_REDUCER") {
+            EXPECT_EQ(diagnostic["witness"]["channel"], "worker_results");
+            EXPECT_EQ(diagnostic["witness"]["source_reducer"], "append");
+            EXPECT_EQ(diagnostic["witness"]["target_reducer"], "overwrite");
+            saw_reducer = true;
+        }
+        if (diagnostic["code"] == "H_FORK_NEXT_NODE") {
+            EXPECT_EQ(diagnostic["witness"]["node_id"], "source_judge");
+            saw_next_node = true;
+        }
+    }
+    EXPECT_TRUE(saw_reducer) << rejected.dump();
+    EXPECT_TRUE(saw_next_node) << rejected.dump();
 }
 
 TEST(HarnessServiceTest, RecordedReplaySurvivesReconnectWithoutCallingLiveExecutor) {

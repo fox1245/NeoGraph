@@ -235,8 +235,9 @@ json run_snapshot_schema() {
             "revision_digest":{"type":"string"},
             "protocol_version":{"type":"string"},
             "profile":{"type":"string"},
-            "execution_mode":{"enum":["live","live_replay","recorded_replay"]},
+            "execution_mode":{"enum":["live","live_replay","recorded_replay","compatible_fork"]},
             "source_run_id":{"type":"string"},
+            "source_checkpoint_id":{"type":"string"},
             "status":{"type":"string"},
             "created_at":{"type":"integer"},
             "updated_at":{"type":"integer"},
@@ -441,6 +442,93 @@ json make_diagnostic(std::string phase,
         {"source", std::move(source)},
     };
     return value;
+}
+
+json fork_compatibility_diagnostics(const json&              source_core,
+                                    const json&              target_core,
+                                    const graph::Checkpoint& checkpoint) {
+    json       diagnostics = json::array();
+    const auto path        = "$.fork.checkpoint_id";
+    if (checkpoint.schema_version != graph::CHECKPOINT_SCHEMA_VERSION) {
+        diagnostics.push_back(
+            make_diagnostic("compatibility", "H_FORK_CHECKPOINT_SCHEMA", "error", path,
+                            "fork checkpoint schema is incompatible with this runtime",
+                            {{"checkpoint_schema_version", checkpoint.schema_version},
+                             {"runtime_schema_version", graph::CHECKPOINT_SCHEMA_VERSION}}));
+    }
+
+    const auto source_channels = source_core.value("channels", json::object());
+    const auto target_channels = target_core.value("channels", json::object());
+    if (!checkpoint.channel_values.is_object() || !checkpoint.channel_values.contains("channels") ||
+        !checkpoint.channel_values["channels"].is_object()) {
+        diagnostics.push_back(
+            make_diagnostic("compatibility", "H_FORK_CHECKPOINT_STATE", "error", path,
+                            "fork checkpoint does not contain serialized channel state"));
+    } else {
+        for (const auto& [name, state] : checkpoint.channel_values["channels"].items()) {
+            (void)state;
+            const auto channel_path = "$.harness.definition.channels." + name;
+            if (!source_channels.is_object() || !source_channels.contains(name)) {
+                diagnostics.push_back(
+                    make_diagnostic("compatibility", "H_FORK_SOURCE_CHANNEL", "error", channel_path,
+                                    "fork checkpoint channel is absent from its source artifact",
+                                    {{"channel", name}, {"checkpoint_id", checkpoint.id}}));
+                continue;
+            }
+            if (!target_channels.is_object() || !target_channels.contains(name)) {
+                diagnostics.push_back(make_diagnostic(
+                    "compatibility", "H_FORK_CHANNEL_MISSING", "error", channel_path,
+                    "target artifact would discard a checkpoint channel",
+                    {{"channel", name}, {"checkpoint_id", checkpoint.id}}));
+                continue;
+            }
+            const auto source_reducer = source_channels[name].value("reducer", "overwrite");
+            const auto target_reducer = target_channels[name].value("reducer", "overwrite");
+            if (source_reducer != target_reducer) {
+                diagnostics.push_back(make_diagnostic(
+                    "compatibility", "H_FORK_CHANNEL_REDUCER", "error", channel_path,
+                    "target artifact changes the reducer for a restored checkpoint channel",
+                    {{"channel", name},
+                     {"source_reducer", source_reducer},
+                     {"target_reducer", target_reducer}}));
+            }
+        }
+    }
+
+    const auto target_nodes = target_core.value("nodes", json::object());
+    for (const auto& node : checkpoint.next_nodes) {
+        if (node == graph::END_NODE) continue;
+        if (!target_nodes.is_object() || !target_nodes.contains(node)) {
+            diagnostics.push_back(make_diagnostic(
+                "compatibility", "H_FORK_NEXT_NODE", "error", "$.harness.definition.nodes." + node,
+                "target artifact does not expose a checkpoint continuation node",
+                {{"node_id", node}, {"checkpoint_id", checkpoint.id}}));
+        }
+    }
+
+    const auto source_nodes = source_core.value("nodes", json::object());
+    for (const auto& [node, arrivals] : checkpoint.barrier_state) {
+        const auto source_interface = source_nodes.is_object() && source_nodes.contains(node)
+                                          ? source_nodes[node].value("barrier", json())
+                                          : json();
+        const auto target_interface = target_nodes.is_object() && target_nodes.contains(node)
+                                          ? target_nodes[node].value("barrier", json())
+                                          : json();
+        if (source_interface != target_interface) {
+            json arrived = json::array();
+            for (const auto& upstream : arrivals)
+                arrived.push_back(upstream);
+            diagnostics.push_back(
+                make_diagnostic("compatibility", "H_FORK_BARRIER_INTERFACE", "error",
+                                "$.harness.definition.nodes." + node + ".barrier",
+                                "target artifact changes an active checkpoint barrier interface",
+                                {{"node_id", node},
+                                 {"arrived", std::move(arrived)},
+                                 {"source_barrier", source_interface},
+                                 {"target_barrier", target_interface}}));
+        }
+    }
+    return diagnostics;
 }
 
 bool diagnostics_have_errors(const json& diagnostics) {
@@ -1361,6 +1449,8 @@ struct HarnessService::Impl {
     struct Artifact {
         std::string id;
         std::string revision_digest;
+        std::string protocol_version = MCP_PROTOCOL_VERSION;
+        std::string profile          = kHarnessProfile;
         json request;
         json core;
         json sourcemap;
@@ -1376,6 +1466,7 @@ struct HarnessService::Impl {
         std::string profile = kHarnessProfile;
         std::string                         execution_mode   = "live";
         std::string                         source_run_id;
+        std::string                         source_checkpoint_id;
         std::string status = "queued";
         json result;
         json details;
@@ -1436,8 +1527,8 @@ struct HarnessService::Impl {
         return {
             {"artifact_id", artifact.id},
             {"revision_digest", artifact.revision_digest},
-            {"protocol_version", MCP_PROTOCOL_VERSION},
-            {"profile", kHarnessProfile},
+            {"protocol_version", artifact.protocol_version},
+            {"profile", artifact.profile},
             {"request", artifact.request},
             {"core", artifact.core},
             {"sourcemap", artifact.sourcemap},
@@ -1454,6 +1545,7 @@ struct HarnessService::Impl {
             {"profile", run.profile},
             {"execution_mode", run.execution_mode},
             {"source_run_id", run.source_run_id},
+            {"source_checkpoint_id", run.source_checkpoint_id},
             {"status", run.status},
             {"result", run.result},
             {"details", run.details},
@@ -1506,6 +1598,8 @@ struct HarnessService::Impl {
         artifact->core        = record->at("core");
         artifact->revision_digest = record->value(
             "revision_digest", revision_digest(artifact->request, artifact->core));
+        artifact->protocol_version = record->value("protocol_version", MCP_PROTOCOL_VERSION);
+        artifact->profile          = record->value("profile", kHarnessProfile);
         artifact->sourcemap   = record->value("sourcemap", json::array());
         artifact->diagnostics = record->value("diagnostics", json::array());
         std::lock_guard lock(mutex);
@@ -1533,6 +1627,7 @@ struct HarnessService::Impl {
         run->profile = record->value("profile", kHarnessProfile);
         run->execution_mode   = record->value("execution_mode", "live");
         run->source_run_id    = record->value("source_run_id", "");
+        run->source_checkpoint_id = record->value("source_checkpoint_id", "");
         run->status       = record->at("status").get<std::string>();
         run->result       = record->value("result", json());
         run->details      = record->value("details", json());
@@ -1724,6 +1819,9 @@ struct HarnessService::Impl {
                 {"status", "running"},
             };
             if (!run->source_run_id.empty()) lifecycle["source_run_id"] = run->source_run_id;
+            if (!run->source_checkpoint_id.empty()) {
+                lifecycle["source_checkpoint_id"] = run->source_checkpoint_id;
+            }
             detail::append_harness_journal_event(journal_context(*run),
                                                  resume_value ? "run.resumed" : "run.started",
                                                  std::move(lifecycle));
@@ -1767,13 +1865,24 @@ struct HarnessService::Impl {
             engine->set_worker_count(
                 static_cast<std::size_t>(budgets.value("max_parallel_workers", 4)));
 
+            if (!run->source_checkpoint_id.empty()) {
+                const auto fork_checkpoint_id =
+                    engine->fork(run->source_run_id, run->id, run->source_checkpoint_id);
+                detail::append_harness_journal_event(
+                    journal_context(*run), "run.forked",
+                    {{"source_run_id", run->source_run_id},
+                     {"source_checkpoint_id", run->source_checkpoint_id},
+                     {"fork_checkpoint_id", fork_checkpoint_id}});
+            }
+
             graph::RunConfig run_config;
             run_config.thread_id = run->id;
             run_config.input = {{"task", artifact->request["task"]}};
             run_config.max_steps = budgets.value("max_steps", 40);
             run_config.cancel_token = run->cancel;
-            auto graph_result =
-                resume_value ? engine->resume(run_config, *resume_value) : engine->run(run_config);
+            auto graph_result = !run->source_checkpoint_id.empty() ? engine->resume(run_config)
+                                : resume_value ? engine->resume(run_config, *resume_value)
+                                               : engine->run(run_config);
             if (recorded_results && graph_result.interrupted) {
                 throw std::runtime_error(
                     "recorded replay cannot request live input or tool results");
@@ -2042,6 +2151,8 @@ json HarnessService::schema() const {
              {"durable_runs", static_cast<bool>(impl_->config.record_store)},
              {"recorded_result_replay", static_cast<bool>(impl_->journal)},
              {"live_replay", true},
+             {"compatible_fork",
+              static_cast<bool>(impl_->config.checkpoint_store && impl_->config.record_store)},
              {"host_brokered_resume",
               static_cast<bool>(impl_->config.checkpoint_store && impl_->config.record_store)},
              {"experimental_tasks", impl_->config.enable_experimental_tasks},
@@ -2060,9 +2171,11 @@ json HarnessService::start(const json& arguments) {
     std::string artifact_id;
     std::string                             execution_mode = "live";
     std::string                             source_run_id;
+    std::string                             source_checkpoint_id;
     std::string                             source_revision_digest;
     std::string                             source_protocol_version;
     std::string                             source_profile;
+    std::shared_ptr<Impl::Run>              fork_source;
     std::shared_ptr<RecordedHarnessResults> recorded_results;
     if (arguments.contains("replay")) {
         if (arguments.contains("request") || arguments.contains("artifact_id")) {
@@ -2107,6 +2220,36 @@ json HarnessService::start(const json& arguments) {
                 impl_->load_recorded_results(source_run_id, artifact_id, source_revision_digest,
                                              source_protocol_version, source_profile);
         }
+    } else if (arguments.contains("fork")) {
+        if (arguments.size() != 1) {
+            throw std::invalid_argument("neograph_start fork cannot include other start modes");
+        }
+        const auto& fork = arguments["fork"];
+        if (!fork.is_object() || fork.size() != 3 || !fork.contains("source_run_id") ||
+            !fork["source_run_id"].is_string() || !fork.contains("checkpoint_id") ||
+            !fork["checkpoint_id"].is_string() || !fork.contains("artifact_id") ||
+            !fork["artifact_id"].is_string()) {
+            throw std::invalid_argument(
+                "neograph_start fork requires only string source_run_id, checkpoint_id, and "
+                "artifact_id");
+        }
+        source_run_id        = fork["source_run_id"].get<std::string>();
+        source_checkpoint_id = fork["checkpoint_id"].get<std::string>();
+        artifact_id          = fork["artifact_id"].get<std::string>();
+        if (source_run_id.empty() || source_checkpoint_id.empty() || artifact_id.empty()) {
+            throw std::invalid_argument("neograph_start fork identifiers must not be empty");
+        }
+        fork_source = impl_->find_run(source_run_id);
+        if (!fork_source) {
+            throw std::invalid_argument("unknown Harness fork source_run_id: " + source_run_id);
+        }
+        {
+            std::lock_guard lock(fork_source->mutex);
+            source_revision_digest  = fork_source->revision_digest;
+            source_protocol_version = fork_source->protocol_version;
+            source_profile          = fork_source->profile;
+        }
+        execution_mode = "compatible_fork";
     } else if (arguments.contains("request")) {
         if (arguments.contains("artifact_id")) {
             throw std::invalid_argument(
@@ -2125,16 +2268,89 @@ json HarnessService::start(const json& arguments) {
     } else if (arguments.contains("artifact_id") && arguments["artifact_id"].is_string()) {
         artifact_id = arguments["artifact_id"].get<std::string>();
     } else {
-        throw std::invalid_argument("neograph_start requires artifact_id, request, or replay");
+        throw std::invalid_argument(
+            "neograph_start requires artifact_id, request, replay, or fork");
     }
 
     auto artifact = impl_->find_artifact(artifact_id);
     if (!artifact) {
         throw std::invalid_argument("unknown Harness artifact_id: " + artifact_id);
     }
-    if (!source_run_id.empty()) {
+    if (!source_run_id.empty() && execution_mode != "compatible_fork") {
         if (source_revision_digest != artifact->revision_digest) {
             throw std::invalid_argument("Harness replay source revision is unavailable");
+        }
+    }
+    if (execution_mode == "compatible_fork") {
+        json diagnostics = json::array();
+        if (!impl_->config.checkpoint_store) {
+            diagnostics.push_back(make_diagnostic("compatibility", "H_FORK_CHECKPOINT_STORE",
+                                                  "error", "$.fork.checkpoint_id",
+                                                  "compatible fork requires a checkpoint store"));
+        }
+        if (source_protocol_version != MCP_PROTOCOL_VERSION ||
+            artifact->protocol_version != MCP_PROTOCOL_VERSION) {
+            diagnostics.push_back(
+                make_diagnostic("compatibility", "H_FORK_PROTOCOL", "error", "$.fork",
+                                "source run and target artifact must use the current MCP protocol",
+                                {{"source_protocol_version", source_protocol_version},
+                                 {"target_protocol_version", artifact->protocol_version},
+                                 {"runtime_protocol_version", MCP_PROTOCOL_VERSION}}));
+        }
+        if (source_profile != kHarnessProfile || artifact->profile != kHarnessProfile) {
+            diagnostics.push_back(make_diagnostic(
+                "compatibility", "H_FORK_PROFILE", "error", "$.fork",
+                "source run and target artifact must use the current Harness profile",
+                {{"source_profile", source_profile},
+                 {"target_profile", artifact->profile},
+                 {"runtime_profile", kHarnessProfile}}));
+        }
+        auto source_artifact = impl_->find_artifact(fork_source->artifact_id);
+        if (!source_artifact) {
+            diagnostics.push_back(make_diagnostic(
+                "compatibility", "H_FORK_SOURCE_ARTIFACT", "error", "$.fork.source_run_id",
+                "fork source run references an unavailable artifact",
+                {{"source_run_id", source_run_id}, {"artifact_id", fork_source->artifact_id}}));
+        } else if (source_artifact->revision_digest != source_revision_digest) {
+            diagnostics.push_back(make_diagnostic(
+                "compatibility", "H_FORK_SOURCE_REVISION", "error", "$.fork.source_run_id",
+                "fork source run revision does not match its retained artifact",
+                {{"run_revision_digest", source_revision_digest},
+                 {"artifact_revision_digest", source_artifact->revision_digest}}));
+        }
+
+        std::optional<graph::Checkpoint> checkpoint;
+        if (impl_->config.checkpoint_store) {
+            checkpoint = impl_->config.checkpoint_store->load_by_id(source_checkpoint_id);
+            if (!checkpoint) {
+                diagnostics.push_back(make_diagnostic(
+                    "compatibility", "H_FORK_CHECKPOINT_NOT_FOUND", "error", "$.fork.checkpoint_id",
+                    "fork checkpoint is unavailable", {{"checkpoint_id", source_checkpoint_id}}));
+            } else if (checkpoint->thread_id != source_run_id) {
+                diagnostics.push_back(make_diagnostic(
+                    "compatibility", "H_FORK_CHECKPOINT_OWNER", "error", "$.fork.checkpoint_id",
+                    "fork checkpoint does not belong to the source run",
+                    {{"checkpoint_id", source_checkpoint_id},
+                     {"checkpoint_run_id", checkpoint->thread_id},
+                     {"source_run_id", source_run_id}}));
+            } else if (source_artifact) {
+                const auto interface_diagnostics = fork_compatibility_diagnostics(
+                    source_artifact->core, artifact->core, *checkpoint);
+                for (const auto& diagnostic : interface_diagnostics) {
+                    diagnostics.push_back(diagnostic);
+                }
+            }
+        }
+        if (diagnostics_have_errors(diagnostics)) {
+            return {
+                {"started", false},
+                {"status", "incompatible_fork"},
+                {"artifact_id", artifact_id},
+                {"execution_mode", execution_mode},
+                {"source_run_id", source_run_id},
+                {"source_checkpoint_id", source_checkpoint_id},
+                {"diagnostics", std::move(diagnostics)},
+            };
         }
     }
     auto run = std::make_shared<Impl::Run>();
@@ -2148,6 +2364,7 @@ json HarnessService::start(const json& arguments) {
         run->revision_digest = artifact->revision_digest;
         run->execution_mode  = execution_mode;
         run->source_run_id   = source_run_id;
+        run->source_checkpoint_id = source_checkpoint_id;
         run->expires_at      = run->created_at + impl_->config.run_ttl.count();
         impl_->runs[run->id] = run;
         try {
@@ -2157,6 +2374,9 @@ json HarnessService::start(const json& arguments) {
                 {"status", "queued"},
             };
             if (!source_run_id.empty()) lifecycle["source_run_id"] = source_run_id;
+            if (!source_checkpoint_id.empty()) {
+                lifecycle["source_checkpoint_id"] = source_checkpoint_id;
+            }
             detail::append_harness_journal_event(impl_->journal_context(*run), "run.queued",
                                                  std::move(lifecycle));
             impl_->threads.emplace_back([impl             = impl_.get(), run, artifact,
@@ -2176,6 +2396,7 @@ json HarnessService::start(const json& arguments) {
         {"status", "queued"},
     };
     if (!source_run_id.empty()) response["source_run_id"] = source_run_id;
+    if (!source_checkpoint_id.empty()) response["source_checkpoint_id"] = source_checkpoint_id;
     return response;
 }
 
@@ -2316,6 +2537,9 @@ json HarnessService::get(const std::string& run_id,
             {"poll_after_ms", impl_->config.poll_interval.count()},
         };
         if (!run->source_run_id.empty()) snapshot["source_run_id"] = run->source_run_id;
+        if (!run->source_checkpoint_id.empty()) {
+            snapshot["source_checkpoint_id"] = run->source_checkpoint_id;
+        }
         if (!run->pending.is_null()) snapshot["pending"] = run->pending;
         result  = run->result;
         details = run->details;
@@ -2480,11 +2704,11 @@ void HarnessService::register_tools(MCPServer& server) {
     auto start_definition = tool_definition(
         "neograph_start", "Start Harness",
         "Start a retained artifact, compile-and-start an inline request, or replay a completed "
-        "run.",
+        "run, or compatibility-check and fork a retained artifact from an exact checkpoint.",
         json::parse(
-            R"JSON({"type":"object","description":"Provide exactly one of artifact_id, request, or replay.","properties":{"artifact_id":{"type":"string","description":"Artifact returned by neograph_compile."},"request":{"type":"object","description":"Inline Harness request; do not also provide artifact_id."},"replay":{"type":"object","required":["source_run_id","mode"],"properties":{"source_run_id":{"type":"string"},"mode":{"enum":["recorded","live"],"description":"recorded injects FULL journal results without live calls; live executes the source artifact again."}},"additionalProperties":false}},"additionalProperties":false})JSON"),
+            R"JSON({"type":"object","description":"Provide exactly one of artifact_id, request, replay, or fork.","properties":{"artifact_id":{"type":"string","description":"Artifact returned by neograph_compile."},"request":{"type":"object","description":"Inline Harness request; do not also provide artifact_id."},"replay":{"type":"object","required":["source_run_id","mode"],"properties":{"source_run_id":{"type":"string"},"mode":{"enum":["recorded","live"],"description":"recorded injects FULL journal results without live calls; live executes the source artifact again."}},"additionalProperties":false},"fork":{"type":"object","required":["source_run_id","checkpoint_id","artifact_id"],"properties":{"source_run_id":{"type":"string"},"checkpoint_id":{"type":"string","description":"Exact preceding checkpoint to branch from."},"artifact_id":{"type":"string","description":"Compiled target artifact whose channel and continuation interfaces are compatibility-checked before the fork is retained."}},"additionalProperties":false}},"additionalProperties":false})JSON"),
         json::parse(
-            R"JSON({"type":"object","required":["started","status"],"properties":{"started":{"type":"boolean"},"run_id":{"type":"string"},"artifact_id":{"type":"string"},"execution_mode":{"enum":["live","live_replay","recorded_replay"]},"source_run_id":{"type":"string"},"status":{"type":"string"},"diagnostics":{"type":"array"},"artifacts":{"type":"object"}},"additionalProperties":true})JSON"));
+            R"JSON({"type":"object","required":["started","status"],"properties":{"started":{"type":"boolean"},"run_id":{"type":"string"},"artifact_id":{"type":"string"},"execution_mode":{"enum":["live","live_replay","recorded_replay","compatible_fork"]},"source_run_id":{"type":"string"},"source_checkpoint_id":{"type":"string"},"status":{"type":"string"},"diagnostics":{"type":"array"},"artifacts":{"type":"object"}},"additionalProperties":true})JSON"));
     if (impl_->config.enable_experimental_tasks) {
         start_definition.execution = {{"taskSupport", "optional"}};
         server.register_raw_tool(
