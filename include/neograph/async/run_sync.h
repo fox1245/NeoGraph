@@ -94,6 +94,9 @@ T run_sync_operation(
         }
         std::rethrow_exception(err);
     }
+    if (!result && operation && operation->is_cancelled()) {
+        throw neograph::graph::CancelledException("run_sync operation aborted before entry");
+    }
     return std::move(*result);
 }
 
