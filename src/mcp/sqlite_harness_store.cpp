@@ -1,5 +1,6 @@
 #include <neograph/mcp/sqlite_harness_store.h>
 
+#include "harness_journal_internal.h"
 #include <sqlite3.h>
 
 #include <algorithm>
@@ -87,7 +88,7 @@ json redacted_json(const json& value, const std::set<std::string>& redacted_keys
         json result = json::object();
         for (const auto [key, child] : value.items()) {
             if (redacted_keys.contains(lowercase(key))) {
-                result[key] = "[REDACTED]";
+                result[key] = detail::kHarnessRedactedMarker;
             } else {
                 result[key] = redacted_json(child, redacted_keys);
             }

@@ -19,6 +19,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -234,6 +235,8 @@ json run_snapshot_schema() {
             "revision_digest":{"type":"string"},
             "protocol_version":{"type":"string"},
             "profile":{"type":"string"},
+            "execution_mode":{"enum":["live","live_replay","recorded_replay"]},
+            "source_run_id":{"type":"string"},
             "status":{"type":"string"},
             "created_at":{"type":"integer"},
             "updated_at":{"type":"integer"},
@@ -503,14 +506,164 @@ std::string response_kind_name(HarnessWorkerResponseKind kind) {
     return "unknown";
 }
 
+bool contains_redacted_marker(const json& value) {
+    if (value.is_string()) {
+        return value.get<std::string>() == detail::kHarnessRedactedMarker;
+    }
+    if (value.is_array()) {
+        for (const auto& entry : value) {
+            if (contains_redacted_marker(entry)) return true;
+        }
+    } else if (value.is_object()) {
+        for (const auto& [key, entry] : value.items()) {
+            (void)key;
+            if (contains_redacted_marker(entry)) return true;
+        }
+    }
+    return false;
+}
+
+class RecordedHarnessResults {
+public:
+    using Key        = std::pair<std::string, std::string>;
+    using Invocation = std::vector<json>;
+
+    explicit RecordedHarnessResults(std::map<Key, std::deque<Invocation>> invocations)
+        : invocations_(std::move(invocations)) {
+        for (const auto& [key, values] : invocations_) {
+            (void)key;
+            remaining_ += values.size();
+        }
+    }
+
+    Invocation take(const std::string& node_id, const std::string& worker_id) {
+        std::lock_guard lock(mutex_);
+        auto            it = invocations_.find({node_id, worker_id});
+        if (it == invocations_.end() || it->second.empty()) {
+            throw std::runtime_error("recorded replay has no result for node " + node_id +
+                                     " worker " + worker_id);
+        }
+        auto result = std::move(it->second.front());
+        it->second.pop_front();
+        --remaining_;
+        return result;
+    }
+
+    void require_exhausted() const {
+        std::lock_guard lock(mutex_);
+        if (remaining_ != 0) {
+            throw std::runtime_error("recorded replay did not consume every worker invocation");
+        }
+    }
+
+private:
+    mutable std::mutex                    mutex_;
+    std::map<Key, std::deque<Invocation>> invocations_;
+    std::size_t                           remaining_ = 0;
+};
+
+std::shared_ptr<RecordedHarnessResults> recorded_results_from_events(
+    const std::vector<json>& events,
+    const std::string&       run_id,
+    const std::string&       artifact_id,
+    const std::string&       revision_digest,
+    const std::string&       protocol_version,
+    const std::string&       profile) {
+    using Key = RecordedHarnessResults::Key;
+    std::map<Key, RecordedHarnessResults::Invocation>             pending;
+    std::map<Key, std::deque<RecordedHarnessResults::Invocation>> invocations;
+
+    for (const auto& event : events) {
+        if (event.value("run_id", "") != run_id || event.value("artifact_id", "") != artifact_id ||
+            event.value("revision_digest", "") != revision_digest ||
+            event.value("protocol_version", "") != protocol_version ||
+            event.value("profile", "") != profile) {
+            throw std::runtime_error("recorded replay journal binding mismatch");
+        }
+        const auto event_type = event.value("event_type", "");
+        if (event_type != "worker.attempt.completed" &&
+            event_type != "worker.attempt.interrupted") {
+            continue;
+        }
+        const auto node_id   = event.value("node_id", "");
+        const auto worker_id = event.value("worker_id", "");
+        if (node_id.empty() || worker_id.empty()) {
+            throw std::runtime_error("recorded replay worker event is missing its identity");
+        }
+        const Key key{node_id, worker_id};
+        if (event_type == "worker.attempt.interrupted") {
+            pending.erase(key);
+            continue;
+        }
+
+        if (!event.contains("payload") || !event["payload"].is_object()) {
+            throw std::runtime_error("recorded replay requires FULL journal worker payloads");
+        }
+        const auto& payload          = event["payload"];
+        const auto  outcome          = payload.value("outcome", "");
+        const auto  expected_attempt = pending[key].size() + 1;
+        if (event.value("attempt", std::size_t{0}) != expected_attempt) {
+            throw std::runtime_error("recorded replay worker attempts are incomplete or unordered");
+        }
+        if (outcome == "valid") {
+            if (!payload.contains("output") || contains_redacted_marker(payload["output"])) {
+                throw std::runtime_error("recorded replay requires FULL journal worker outputs");
+            }
+        } else if (outcome == "retryable_failure") {
+            const auto reason = payload.value("retry_reason", "");
+            if (reason.empty()) {
+                throw std::runtime_error("recorded replay requires FULL journal retry payloads");
+            }
+            if (!payload.contains("output") || contains_redacted_marker(payload["output"])) {
+                throw std::runtime_error("recorded replay requires FULL journal worker outputs");
+            }
+        } else {
+            throw std::runtime_error("recorded replay worker outcome is unsupported: " + outcome);
+        }
+
+        pending[key].push_back(event);
+        const bool terminal = outcome == "valid" || (outcome == "retryable_failure" &&
+                                                     !payload.value("retry_scheduled", false));
+        if (terminal) {
+            invocations[key].push_back(std::move(pending[key]));
+            pending.erase(key);
+        }
+    }
+    if (!pending.empty()) {
+        throw std::runtime_error("recorded replay journal ends inside a worker invocation");
+    }
+    if (invocations.empty()) {
+        throw std::runtime_error("recorded replay found no completed worker invocations");
+    }
+    return std::make_shared<RecordedHarnessResults>(std::move(invocations));
+}
+
+HarnessWorkerResponse recorded_worker_response(const json& event) {
+    const auto& payload = event["payload"];
+    const auto  outcome = payload.value("outcome", "");
+    if (outcome == "valid") return HarnessWorkerResponse::success(payload["output"]);
+    const auto reason  = payload.value("retry_reason", "");
+    const auto message = payload.value("message", "");
+    if (reason == "schema_validation") {
+        return HarnessWorkerResponse::success(payload.value("output", json(nullptr)));
+    }
+    if (reason == "empty_response") return HarnessWorkerResponse::empty(message);
+    if (reason == "parse_error") return HarnessWorkerResponse::parse_error(message);
+    if (reason == "tool_error") return HarnessWorkerResponse::tool_error(message);
+    if (reason == "timeout") return HarnessWorkerResponse::timeout(message);
+    throw std::runtime_error("recorded replay failure kind is unsupported: " + reason);
+}
+
 class HarnessRuntimeProvider final : public Provider {
 public:
-    HarnessRuntimeProvider(json                          request,
-                           HarnessWorkerExecutor         executor,
-                           detail::HarnessJournalContext journal_context = {})
+    HarnessRuntimeProvider(json                                    request,
+                           HarnessWorkerExecutor                   executor,
+                           detail::HarnessJournalContext           journal_context  = {},
+                           std::shared_ptr<RecordedHarnessResults> recorded_results = nullptr)
         : request_(std::move(request)),
           executor_(std::move(executor)),
-          journal_context_(std::move(journal_context)) {
+          journal_context_(std::move(journal_context)),
+          recorded_results_(std::move(recorded_results)) {
         for (const auto& worker : request_["workers"]) {
             workers_[worker["id"].get<std::string>()] = worker;
         }
@@ -542,6 +695,15 @@ public:
         std::string feedback;
         std::string failure_kind = "empty_response";
         int attempts_made = 0;
+        const auto  recorded_attempts         = recorded_results_
+                                                    ? recorded_results_->take(node_id, worker_id)
+                                                    : RecordedHarnessResults::Invocation{};
+        const auto  require_recorded_consumed = [&](std::size_t count) {
+            if (recorded_results_ && recorded_attempts.size() != count) {
+                throw std::runtime_error(
+                    "recorded replay worker attempt count diverged from the source run");
+            }
+        };
         for (int attempt = 0; attempt <= max_retries_; ++attempt) {
             attempts_made = attempt + 1;
             cancel->throw_if_cancelled("before Harness worker " + worker_id);
@@ -566,7 +728,13 @@ public:
             call.resume_value    = resume_value;
 
             HarnessWorkerResponse response;
-            if (!executor_) {
+            if (recorded_results_) {
+                if (static_cast<std::size_t>(attempt) >= recorded_attempts.size()) {
+                    throw std::runtime_error(
+                        "recorded replay exhausted worker attempts before execution completed");
+                }
+                response = recorded_worker_response(recorded_attempts[attempt]);
+            } else if (!executor_) {
                 response =
                     HarnessWorkerResponse::tool_error("no Harness worker executor is configured");
             } else {
@@ -574,6 +742,7 @@ public:
             }
 
             if (response.kind == HarnessWorkerResponseKind::CANCELLED) {
+                require_recorded_consumed(static_cast<std::size_t>(attempt + 1));
                 detail::append_harness_journal_event(
                     attempt_context, "worker.attempt.completed",
                     {{"duration_ms",
@@ -624,6 +793,7 @@ public:
                              {"outcome", "valid"},
                              {"output", response.value},
                              {"validation", "passed"}});
+                        require_recorded_consumed(static_cast<std::size_t>(attempt + 1));
                         return {
                             {"worker_id", worker_id},
                             {"status", "valid"},
@@ -637,28 +807,26 @@ public:
                 }
             } else {
                 failure_kind = response_kind_name(response.kind);
-                feedback = response.message.empty() ? failure_kind : response.message;
-                if (response.kind == HarnessWorkerResponseKind::TIMEOUT ||
-                    response.kind == HarnessWorkerResponseKind::TOOL_ERROR) {
-                    break;
-                }
+                feedback     = response.message.empty() ? failure_kind : response.message;
             }
+            const bool stop_retry = response.kind == HarnessWorkerResponseKind::TIMEOUT ||
+                                    response.kind == HarnessWorkerResponseKind::TOOL_ERROR;
             detail::append_harness_journal_event(
                 attempt_context, "worker.attempt.completed",
-                {{"duration_ms",
-                  std::chrono::duration_cast<std::chrono::milliseconds>(
-                      std::chrono::steady_clock::now() - attempt_started)
-                      .count()},
+                {{"duration_ms", std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - attempt_started)
+                                     .count()},
                  {"outcome", "retryable_failure"},
-                 {"retry_scheduled", attempt < max_retries_},
+                 {"retry_scheduled", !stop_retry && attempt < max_retries_},
                  {"retry_reason", failure_kind},
                  {"validation", failure_kind == "schema_validation" ? "failed" : "not_run"},
                  {"message", feedback},
-                 {"output", response.kind == HarnessWorkerResponseKind::VALUE
-                                ? response.value
-                                : json(nullptr)}});
+                 {"output", response.kind == HarnessWorkerResponseKind::VALUE ? response.value
+                                                                              : json(nullptr)}});
+            if (stop_retry) break;
         }
 
+        require_recorded_consumed(static_cast<std::size_t>(attempts_made));
         return {
             {"worker_id", worker_id}, {"status", "failed"},        {"failure_kind", failure_kind},
             {"message", feedback},    {"attempts", attempts_made},
@@ -672,6 +840,7 @@ private:
     std::map<std::string, json> tools_;
     int max_retries_ = 1;
     detail::HarnessJournalContext journal_context_;
+    std::shared_ptr<RecordedHarnessResults> recorded_results_;
 };
 
 class HarnessWorkerNode final : public graph::GraphNode {
@@ -1205,6 +1374,8 @@ struct HarnessService::Impl {
         std::string revision_digest;
         std::string protocol_version = MCP_PROTOCOL_VERSION;
         std::string profile = kHarnessProfile;
+        std::string                         execution_mode   = "live";
+        std::string                         source_run_id;
         std::string status = "queued";
         json result;
         json details;
@@ -1281,6 +1452,8 @@ struct HarnessService::Impl {
             {"revision_digest", run.revision_digest},
             {"protocol_version", run.protocol_version},
             {"profile", run.profile},
+            {"execution_mode", run.execution_mode},
+            {"source_run_id", run.source_run_id},
             {"status", run.status},
             {"result", run.result},
             {"details", run.details},
@@ -1358,6 +1531,8 @@ struct HarnessService::Impl {
         run->revision_digest = record->value("revision_digest", "");
         run->protocol_version = record->value("protocol_version", MCP_PROTOCOL_VERSION);
         run->profile = record->value("profile", kHarnessProfile);
+        run->execution_mode   = record->value("execution_mode", "live");
+        run->source_run_id    = record->value("source_run_id", "");
         run->status       = record->at("status").get<std::string>();
         run->result       = record->value("result", json());
         run->details      = record->value("details", json());
@@ -1504,9 +1679,38 @@ struct HarnessService::Impl {
         return result;
     }
 
-    void execute(std::shared_ptr<Run>      run,
-                 std::shared_ptr<Artifact> artifact,
-                 std::optional<json>       resume_value = std::nullopt) {
+    std::shared_ptr<RecordedHarnessResults> load_recorded_results(
+        const std::string& run_id,
+        const std::string& artifact_id,
+        const std::string& revision_digest,
+        const std::string& protocol_version,
+        const std::string& profile) const {
+        if (!journal) {
+            throw std::invalid_argument("recorded replay requires a Harness journal");
+        }
+        std::vector<json> events;
+        std::size_t       cursor = 0;
+        while (true) {
+            const auto page = journal->list_events(run_id, cursor, 1000);
+            if (page.empty()) break;
+            for (const auto& event : page) {
+                const auto sequence = event.value("sequence", std::size_t{0});
+                if (sequence <= cursor) {
+                    throw std::runtime_error("recorded replay journal sequence did not advance");
+                }
+                cursor = sequence;
+                events.push_back(event);
+            }
+            if (page.size() < 1000) break;
+        }
+        return recorded_results_from_events(events, run_id, artifact_id, revision_digest,
+                                            protocol_version, profile);
+    }
+
+    void execute(std::shared_ptr<Run>                    run,
+                 std::shared_ptr<Artifact>               artifact,
+                 std::optional<json>                     resume_value     = std::nullopt,
+                 std::shared_ptr<RecordedHarnessResults> recorded_results = nullptr) {
         {
             std::lock_guard lock(run->mutex);
             run->status = "running";
@@ -1515,9 +1719,14 @@ struct HarnessService::Impl {
         }
         try {
             persist_run(run);
-            detail::append_harness_journal_event(
-                journal_context(*run), resume_value ? "run.resumed" : "run.started",
-                {{"status", "running"}});
+            json lifecycle = {
+                {"execution_mode", run->execution_mode},
+                {"status", "running"},
+            };
+            if (!run->source_run_id.empty()) lifecycle["source_run_id"] = run->source_run_id;
+            detail::append_harness_journal_event(journal_context(*run),
+                                                 resume_value ? "run.resumed" : "run.started",
+                                                 std::move(lifecycle));
         } catch (const std::exception& error) {
             {
                 std::lock_guard lock(run->mutex);
@@ -1551,7 +1760,7 @@ struct HarnessService::Impl {
         std::unique_ptr<graph::GraphEngine> engine;
         try {
             auto provider = std::make_shared<HarnessRuntimeProvider>(
-                artifact->request, config.worker_executor, journal_context(*run));
+                artifact->request, config.worker_executor, journal_context(*run), recorded_results);
             graph::NodeContext context;
             context.provider = std::move(provider);
             engine = graph::GraphEngine::compile(artifact->core, context, config.checkpoint_store);
@@ -1565,6 +1774,11 @@ struct HarnessService::Impl {
             run_config.cancel_token = run->cancel;
             auto graph_result =
                 resume_value ? engine->resume(run_config, *resume_value) : engine->run(run_config);
+            if (recorded_results && graph_result.interrupted) {
+                throw std::runtime_error(
+                    "recorded replay cannot request live input or tool results");
+            }
+            if (recorded_results) recorded_results->require_exhausted();
 
             json interrupt_payload;
             std::string interrupt_correlation;
@@ -1687,13 +1901,26 @@ struct HarnessService::Impl {
     void ensure_resume_scheduled(const std::shared_ptr<Run>& run) {
         json        value;
         std::string artifact_id;
+        bool        rejected_recorded_resume = false;
         {
             std::lock_guard lock(run->mutex);
             if (run->status != "queued" || run->resume_value.is_null() || run->resume_scheduled)
                 return;
-            run->resume_scheduled = true;
-            value                 = run->resume_value;
-            artifact_id           = run->artifact_id;
+            if (run->execution_mode == "recorded_replay") {
+                run->status              = "failed";
+                run->error               = "recorded replay cannot resume with live input";
+                run->resume_value        = nullptr;
+                run->updated_at          = unix_millis();
+                rejected_recorded_resume = true;
+            } else {
+                run->resume_scheduled = true;
+                value                 = run->resume_value;
+                artifact_id           = run->artifact_id;
+            }
+        }
+        if (rejected_recorded_resume) {
+            persist_run(run);
+            return;
         }
         auto artifact = find_artifact(artifact_id);
         if (!artifact) {
@@ -1813,6 +2040,8 @@ json HarnessService::schema() const {
              {"read_only_workspace_policy", true},
              {"compact_results", true},
              {"durable_runs", static_cast<bool>(impl_->config.record_store)},
+             {"recorded_result_replay", static_cast<bool>(impl_->journal)},
+             {"live_replay", true},
              {"host_brokered_resume",
               static_cast<bool>(impl_->config.checkpoint_store && impl_->config.record_store)},
              {"experimental_tasks", impl_->config.enable_experimental_tasks},
@@ -1829,7 +2058,56 @@ json HarnessService::start(const json& arguments) {
         throw std::invalid_argument("neograph_start arguments must be an object");
     }
     std::string artifact_id;
-    if (arguments.contains("request")) {
+    std::string                             execution_mode = "live";
+    std::string                             source_run_id;
+    std::string                             source_revision_digest;
+    std::string                             source_protocol_version;
+    std::string                             source_profile;
+    std::shared_ptr<RecordedHarnessResults> recorded_results;
+    if (arguments.contains("replay")) {
+        if (arguments.contains("request") || arguments.contains("artifact_id")) {
+            throw std::invalid_argument(
+                "neograph_start replay cannot include artifact_id or request");
+        }
+        const auto& replay = arguments["replay"];
+        if (!replay.is_object() || replay.size() != 2 || !replay.contains("source_run_id") ||
+            !replay["source_run_id"].is_string() || !replay.contains("mode") ||
+            !replay["mode"].is_string()) {
+            throw std::invalid_argument(
+                "neograph_start replay requires only string source_run_id and mode");
+        }
+        source_run_id   = replay["source_run_id"].get<std::string>();
+        const auto mode = replay["mode"].get<std::string>();
+        if (source_run_id.empty() || (mode != "recorded" && mode != "live")) {
+            throw std::invalid_argument(
+                "neograph_start replay mode must be recorded or live with a source_run_id");
+        }
+        auto source = impl_->find_run(source_run_id);
+        if (!source) {
+            throw std::invalid_argument("unknown Harness replay source_run_id: " + source_run_id);
+        }
+        {
+            std::lock_guard lock(source->mutex);
+            if (source->status != "completed") {
+                throw std::invalid_argument("Harness replay source run must be completed");
+            }
+            if (source->protocol_version != MCP_PROTOCOL_VERSION ||
+                source->profile != kHarnessProfile) {
+                throw std::invalid_argument(
+                    "Harness replay source protocol or profile is incompatible");
+            }
+            artifact_id             = source->artifact_id;
+            source_revision_digest  = source->revision_digest;
+            source_protocol_version = source->protocol_version;
+            source_profile          = source->profile;
+            execution_mode          = mode == "recorded" ? "recorded_replay" : "live_replay";
+        }
+        if (mode == "recorded") {
+            recorded_results =
+                impl_->load_recorded_results(source_run_id, artifact_id, source_revision_digest,
+                                             source_protocol_version, source_profile);
+        }
+    } else if (arguments.contains("request")) {
         if (arguments.contains("artifact_id")) {
             throw std::invalid_argument(
                 "neograph_start accepts exactly one of artifact_id or request");
@@ -1847,12 +2125,17 @@ json HarnessService::start(const json& arguments) {
     } else if (arguments.contains("artifact_id") && arguments["artifact_id"].is_string()) {
         artifact_id = arguments["artifact_id"].get<std::string>();
     } else {
-        throw std::invalid_argument("neograph_start requires artifact_id or request");
+        throw std::invalid_argument("neograph_start requires artifact_id, request, or replay");
     }
 
     auto artifact = impl_->find_artifact(artifact_id);
     if (!artifact) {
         throw std::invalid_argument("unknown Harness artifact_id: " + artifact_id);
+    }
+    if (!source_run_id.empty()) {
+        if (source_revision_digest != artifact->revision_digest) {
+            throw std::invalid_argument("Harness replay source revision is unavailable");
+        }
     }
     auto run = std::make_shared<Impl::Run>();
     {
@@ -1863,25 +2146,37 @@ json HarnessService::start(const json& arguments) {
         run->id = impl_->id("run");
         run->artifact_id = artifact_id;
         run->revision_digest = artifact->revision_digest;
+        run->execution_mode  = execution_mode;
+        run->source_run_id   = source_run_id;
         run->expires_at      = run->created_at + impl_->config.run_ttl.count();
         impl_->runs[run->id] = run;
         try {
             impl_->persist_run(run);
-            detail::append_harness_journal_event(
-                impl_->journal_context(*run), "run.queued", {{"status", "queued"}});
-            impl_->threads.emplace_back(
-                [impl = impl_.get(), run, artifact] { impl->execute(run, artifact); });
+            json lifecycle = {
+                {"execution_mode", execution_mode},
+                {"status", "queued"},
+            };
+            if (!source_run_id.empty()) lifecycle["source_run_id"] = source_run_id;
+            detail::append_harness_journal_event(impl_->journal_context(*run), "run.queued",
+                                                 std::move(lifecycle));
+            impl_->threads.emplace_back([impl             = impl_.get(), run, artifact,
+                                         recorded_results = std::move(recorded_results)] {
+                impl->execute(run, artifact, std::nullopt, std::move(recorded_results));
+            });
         } catch (...) {
             impl_->runs.erase(run->id);
             throw;
         }
     }
-    return {
+    json response = {
         {"started", true},
         {"run_id", run->id},
         {"artifact_id", artifact_id},
+        {"execution_mode", execution_mode},
         {"status", "queued"},
     };
+    if (!source_run_id.empty()) response["source_run_id"] = source_run_id;
+    return response;
 }
 
 json HarnessService::resume(const json& arguments) {
@@ -2013,12 +2308,14 @@ json HarnessService::get(const std::string& run_id,
             {"revision_digest", run->revision_digest},
             {"protocol_version", run->protocol_version},
             {"profile", run->profile},
+            {"execution_mode", run->execution_mode},
             {"status", run->status},
             {"created_at", run->created_at},
             {"updated_at", run->updated_at},
             {"expires_at", run->expires_at},
             {"poll_after_ms", impl_->config.poll_interval.count()},
         };
+        if (!run->source_run_id.empty()) snapshot["source_run_id"] = run->source_run_id;
         if (!run->pending.is_null()) snapshot["pending"] = run->pending;
         result  = run->result;
         details = run->details;
@@ -2182,11 +2479,12 @@ void HarnessService::register_tools(MCPServer& server) {
 
     auto start_definition = tool_definition(
         "neograph_start", "Start Harness",
-        "Start a retained artifact or compile-and-start an inline Harness request.",
+        "Start a retained artifact, compile-and-start an inline request, or replay a completed "
+        "run.",
         json::parse(
-            R"JSON({"type":"object","description":"Provide exactly one of artifact_id or request.","properties":{"artifact_id":{"type":"string","description":"Artifact returned by neograph_compile."},"request":{"type":"object","description":"Inline Harness request; do not also provide artifact_id."}},"additionalProperties":false})JSON"),
+            R"JSON({"type":"object","description":"Provide exactly one of artifact_id, request, or replay.","properties":{"artifact_id":{"type":"string","description":"Artifact returned by neograph_compile."},"request":{"type":"object","description":"Inline Harness request; do not also provide artifact_id."},"replay":{"type":"object","required":["source_run_id","mode"],"properties":{"source_run_id":{"type":"string"},"mode":{"enum":["recorded","live"],"description":"recorded injects FULL journal results without live calls; live executes the source artifact again."}},"additionalProperties":false}},"additionalProperties":false})JSON"),
         json::parse(
-            R"JSON({"type":"object","required":["started","status"],"properties":{"started":{"type":"boolean"},"run_id":{"type":"string"},"artifact_id":{"type":"string"},"status":{"type":"string"},"diagnostics":{"type":"array"},"artifacts":{"type":"object"}},"additionalProperties":true})JSON"));
+            R"JSON({"type":"object","required":["started","status"],"properties":{"started":{"type":"boolean"},"run_id":{"type":"string"},"artifact_id":{"type":"string"},"execution_mode":{"enum":["live","live_replay","recorded_replay"]},"source_run_id":{"type":"string"},"status":{"type":"string"},"diagnostics":{"type":"array"},"artifacts":{"type":"object"}},"additionalProperties":true})JSON"));
     if (impl_->config.enable_experimental_tasks) {
         start_definition.execution = {{"taskSupport", "optional"}};
         server.register_raw_tool(
