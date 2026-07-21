@@ -91,6 +91,10 @@ if(NEOGRAPH_BUILD_MCP_SERVER)
     )
 endif()
 
+if(NEOGRAPH_BUILD_MCP_CLIENT AND NEOGRAPH_BUILD_MCP_SERVER)
+    target_sources(neograph_tests PRIVATE test_harness_mcp_backend.cpp)
+endif()
+
 if(NEOGRAPH_BUILD_A2A)
     target_sources(neograph_tests PRIVATE
         test_a2a_types.cpp

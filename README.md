@@ -223,7 +223,8 @@ vLLM/Ollama — any OpenAI-compatible API) · `SchemaProvider` (Claude, Gemini, 
 any custom vendor via JSON schema) · ReAct `Agent` loop with streaming.
 
 **Integrations** — MCP client (`neograph::mcp`, HTTP + stdio) · local MCP server
-(`neograph::mcp_server`, stdio) · Agent-to-Agent
+(`neograph::mcp_server`, stdio) · compiler-backed multi-worker
+[Harness MCP](docs/HARNESS_MCP.md) · Agent-to-Agent
 (`neograph::a2a`, server + client + caller node) · Agent Client Protocol
 (`neograph::acp`, editor-driven) · gRPC service (`neograph::grpc`, opt-in) ·
 async HTTP/HTTPS/WS + SSE (`neograph::async`).

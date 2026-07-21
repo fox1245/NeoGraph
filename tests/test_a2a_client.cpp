@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 #include <neograph/a2a/client.h>
+#include <neograph/a2a/harness_backend.h>
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
@@ -130,6 +131,23 @@ TEST(A2AClient, FetchAgentCardReadsWellKnownPath) {
     EXPECT_EQ(card.name,             "mock-agent");
     EXPECT_EQ(card.protocol_version, "0.3.0");
     EXPECT_EQ(card.preferred_transport, "JSONRPC");
+}
+
+TEST(A2AClient, HarnessAdapterCallsConfiguredAgent) {
+    MockA2AServer srv;
+    auto client = std::make_shared<A2AClient>(srv.url());
+    auto executor = make_harness_capability_executor({{"research", client}});
+    json tool = {
+        {"id", "research.ask"},
+        {"executor", {{"kind", "a2a"}, {"agent", "research"}}},
+    };
+
+    auto result = executor(tool, {{"question", "What changed?"}},
+        std::make_shared<neograph::graph::CancelToken>());
+
+    EXPECT_EQ(srv.last_method, "message/send");
+    EXPECT_EQ(result["id"], "task-1");
+    EXPECT_EQ(result["status"]["state"], "completed");
 }
 
 TEST(A2AClient, FetchAgentCardCachesByDefault) {

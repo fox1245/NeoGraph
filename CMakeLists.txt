@@ -640,6 +640,7 @@ endif()
 if(NEOGRAPH_BUILD_MCP_CLIENT)
     add_library(neograph_mcp
         src/mcp/client.cpp
+        src/mcp/harness_mcp_backend.cpp
     )
 
     target_include_directories(neograph_mcp
@@ -661,6 +662,7 @@ if(NEOGRAPH_BUILD_MCP_SERVER)
     add_library(neograph_mcp_server
         src/mcp/server.cpp
         src/mcp/harness.cpp
+        src/mcp/harness_provider.cpp
     )
     target_include_directories(neograph_mcp_server
         PUBLIC
@@ -683,6 +685,7 @@ if(NEOGRAPH_BUILD_A2A)
         src/a2a/client.cpp
         src/a2a/server.cpp
         src/a2a/a2a_caller_node.cpp
+        src/a2a/harness_backend.cpp
     )
 
     target_include_directories(neograph_a2a
@@ -1346,6 +1349,12 @@ if(NEOGRAPH_BUILD_EXAMPLES)
     if(NEOGRAPH_BUILD_MCP_SERVER)
         add_executable(example_mcp_server examples/59_mcp_server.cpp)
         target_link_libraries(example_mcp_server PRIVATE neograph::mcp_server)
+        if(NEOGRAPH_BUILD_LLM)
+            add_executable(example_harness_mcp_server
+                examples/60_harness_mcp_server.cpp)
+            target_link_libraries(example_harness_mcp_server PRIVATE
+                neograph::mcp_server neograph::llm)
+        endif()
     endif()
 endif()
 

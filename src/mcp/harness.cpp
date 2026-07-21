@@ -22,6 +22,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -59,6 +60,7 @@ json harness_request_schema() {
                 "input_schema":{"type":"object"},
                 "output_schema":{"type":"object"},
                 "read_only":{"type":"boolean"},
+                "path_arguments":{"type":"array","items":{"type":"string"}},
                 "executor":{"type":"object","required":["kind"],"properties":{
                     "kind":{"enum":["builtin","mcp","a2a","host_brokered","script"]},
                     "tool":{"type":"string"},
@@ -73,7 +75,9 @@ json harness_request_schema() {
                 "max_worker_retries":{"type":"integer"}
             },"additionalProperties":false},
             "policy":{"type":"object","properties":{
-                "read_only":{"type":"boolean"}
+                "read_only":{"type":"boolean"},
+                "workspace_roots":{"type":"array","items":{"type":"string"}},
+                "evidence_required":{"type":"array","items":{"type":"string"}}
             },"additionalProperties":false}
         },
         "additionalProperties":false
@@ -231,6 +235,7 @@ public:
             call.task = task;
             call.worker = worker_it->second;
             call.tool_catalog = selected_tools;
+            call.policy = request_.value("policy", json::object());
             call.attempt = static_cast<std::size_t>(attempt + 1);
             call.repair_feedback = feedback;
 
@@ -412,10 +417,10 @@ void register_harness_node_types() {
     });
 }
 
-json preset_fanout_judge(const json& request) {
+json preset_fanout_judge(const json& request, const std::string& preset) {
     json core = {
         {"schema_version", 1},
-        {"name", "harness_fanout_judge"},
+        {"name", "harness_" + preset},
         {"channels", {
             {"task", {{"reducer", "overwrite"}, {"initial", json::object()}}},
             {"worker_results", {{"reducer", "append"}, {"initial", json::array()}}},
@@ -463,6 +468,16 @@ void validate_bindings(const json& request, const json& core,
     std::map<std::string, json> tools;
     std::set<std::string> duplicates;
 
+    for (const auto& root : request.value("policy", json::object())
+                                .value("workspace_roots", json::array())) {
+        if (root.get<std::string>().empty()) {
+            diagnostics.push_back(make_diagnostic(
+                "binding", "H_WORKSPACE_ROOT", "error",
+                "$.policy.workspace_roots",
+                "workspace roots must not contain empty paths"));
+        }
+    }
+
     std::size_t index = 0;
     for (const auto& worker : request["workers"]) {
         const auto id = worker.value("id", "");
@@ -485,6 +500,36 @@ void validate_bindings(const json& request, const json& core,
             "error", "$.workers", "duplicate worker id: " + id, {{"id", id}}));
     }
 
+    const auto evidence_required = request.value("policy", json::object())
+                                       .value("evidence_required", json::array());
+    if (!evidence_required.empty()) {
+        for (const auto& [id, worker] : workers) {
+            const auto properties = worker["output_schema"].value(
+                "properties", json::object());
+            const auto findings = properties.value("findings", json::object());
+            const auto item = findings.value("items", json::object());
+            const auto item_properties = item.value("properties", json::object());
+            const auto item_required = item.value("required", json::array());
+            for (const auto& field_json : evidence_required) {
+                const auto field = field_json.get<std::string>();
+                bool required = false;
+                for (const auto& required_json : item_required) {
+                    if (required_json == field_json) {
+                        required = true;
+                        break;
+                    }
+                }
+                if (!item_properties.contains(field) || !required) {
+                    diagnostics.push_back(make_diagnostic(
+                        "binding", "H_EVIDENCE_SCHEMA", "error",
+                        "$.workers." + id + ".output_schema",
+                        "worker finding schema must require evidence field: " + field,
+                        {{"worker_id", id}, {"field", field}}));
+                }
+            }
+        }
+    }
+
     index = 0;
     for (const auto& tool : request.value("tool_catalog", json::array())) {
         const auto id = tool.value("id", "");
@@ -502,6 +547,20 @@ void validate_bindings(const json& request, const json& core,
         } catch (const std::exception& error) {
             diagnostics.push_back(make_diagnostic("binding", "H_TOOL_SCHEMA",
                 "error", path, error.what()));
+        }
+
+        for (const auto& argument_json : tool.value("path_arguments", json::array())) {
+            const auto argument = argument_json.get<std::string>();
+            const auto properties = tool["input_schema"].value(
+                "properties", json::object());
+            if (!properties.contains(argument)
+                || properties[argument].value("type", "") != "string") {
+                diagnostics.push_back(make_diagnostic(
+                    "binding", "H_PATH_ARGUMENT", "error",
+                    path + ".path_arguments",
+                    "path_arguments must name string properties in input_schema",
+                    {{"tool_id", id}, {"argument", argument}}));
+            }
         }
 
         const auto executor = tool.value("executor", json::object());
@@ -529,6 +588,14 @@ void validate_bindings(const json& request, const json& core,
         if (read_only && !tool.value("read_only", false)) {
             diagnostics.push_back(make_diagnostic("binding", "H_WRITE_TOOL",
                 "error", path, "read-only harness contains a write-capable tool",
+                {{"tool_id", id}}));
+        }
+        if (!tool.value("path_arguments", json::array()).empty()
+            && request.value("policy", json::object())
+                   .value("workspace_roots", json::array()).empty()) {
+            diagnostics.push_back(make_diagnostic(
+                "binding", "H_WORKSPACE_ROOT", "error", path,
+                "path-bearing tools require policy.workspace_roots",
                 {{"tool_id", id}}));
         }
     }
@@ -564,7 +631,7 @@ void validate_bindings(const json& request, const json& core,
             } else {
                 diagnostics.push_back(make_diagnostic("binding", "H_NODE_TYPE",
                     "error", "$.harness.definition.nodes." + node_name + ".type",
-                    "M2 Harness DSL only permits compiler-backed worker and judge nodes",
+                    "Harness DSL only permits compiler-backed worker and judge nodes",
                     {{"node", node_name}, {"type", type}}));
             }
         }
@@ -643,6 +710,7 @@ struct HarnessService::Impl {
         std::string artifact_id;
         std::string status = "queued";
         json result;
+        json details;
         std::string error;
         std::shared_ptr<graph::CancelToken> cancel =
             std::make_shared<graph::CancelToken>();
@@ -696,10 +764,13 @@ struct HarnessService::Impl {
             const auto harness = request["harness"];
             const auto mode = harness.value("mode", "");
             if (mode == "preset") {
-                if (harness.value("preset", "") != "fanout_judge") {
+                static const std::set<std::string> presets = {
+                    "fanout_judge", "pr_review_panel", "bug_triage",
+                    "research_synthesis"};
+                if (presets.find(harness.value("preset", "")) == presets.end()) {
                     diagnostics.push_back(make_diagnostic("request", "H_PRESET",
                         "error", "$.harness.preset",
-                        "M2 supports the fanout_judge preset"));
+                        "unknown Harness preset"));
                 }
             } else if (mode == "dsl" && !harness.contains("definition")) {
                 diagnostics.push_back(make_diagnostic("request", "H_DSL_DEFINITION",
@@ -717,7 +788,7 @@ struct HarnessService::Impl {
             try {
                 const auto harness = request["harness"];
                 json surface = harness.value("mode", "") == "preset"
-                    ? preset_fanout_judge(request)
+                    ? preset_fanout_judge(request, harness.value("preset", ""))
                     : harness["definition"];
                 auto elaborated = graph::Elaborator::elaborate(surface);
                 core = std::move(elaborated.core);
@@ -827,8 +898,20 @@ struct HarnessService::Impl {
                 run->status = "max_steps_exhausted";
             } else {
                 run->status = "completed";
-                run->result = graph_result.channel_raw("final_result");
-                run->result["execution_trace"] = graph_result.execution_trace;
+                run->details = graph_result.channel_raw("final_result");
+                run->details["execution_trace"] = graph_result.execution_trace;
+                const auto base_uri = "neograph://runs/" + run->id;
+                run->result = {
+                    {"outcome", run->details.value("outcome", "unknown")},
+                    {"valid_workers", run->details.value("valid_workers", 0)},
+                    {"failed_workers", run->details.value("failed_workers", 0)},
+                    {"finding_count",
+                     run->details.value("findings", json::array()).size()},
+                    {"artifacts", {
+                        {"details", {{"uri", base_uri + "/details"}}},
+                        {"trace", {{"uri", base_uri + "/trace"}}},
+                    }},
+                };
             }
         } catch (const graph::CancelledException& error) {
             std::lock_guard lock(run->mutex);
@@ -869,17 +952,43 @@ HarnessService::~HarnessService() = default;
 
 json HarnessService::schema() const {
     json executor_kinds = json::array({
-        {{"kind", "builtin"}, {"availability", "binding-only-in-m2"}},
-        {{"kind", "mcp"}, {"availability", "binding-only-in-m2"}},
-        {{"kind", "a2a"}, {"availability", "binding-only-in-m2"}},
+        {{"kind", "builtin"}, {"availability", "provider-capability-adapter"}},
+        {{"kind", "mcp"}, {"availability", "downstream-client-adapter"}},
+        {{"kind", "a2a"}, {"availability", "downstream-client-adapter"}},
         {{"kind", "host_brokered"}, {"availability", "requires-neograph-resume-m4"}},
         {{"kind", "script"}, {"availability", "disabled"}},
     });
     const auto request = harness_request_schema();
     return {
         {"protocol_version", MCP_PROTOCOL_VERSION},
-        {"service", "neograph-harness-m2"},
-        {"presets", json::array({"fanout_judge"})},
+        {"service", "neograph-harness-m3"},
+        {"presets", json::array({"fanout_judge", "pr_review_panel",
+                                  "bug_triage", "research_synthesis"})},
+        {"preset_contracts", {
+            {"fanout_judge", {
+                {"topology", "parallel workers, barrier, normalized judge"},
+            }},
+            {"pr_review_panel", {
+                {"topology", "parallel review specialists, evidence judge"},
+                {"recommended_roles", json::array(
+                    {"correctness", "security", "regression"})},
+                {"recommended_policy", {
+                    {"read_only", true},
+                    {"evidence_required", json::array(
+                        {"file", "line", "evidence"})},
+                }},
+            }},
+            {"bug_triage", {
+                {"topology", "parallel hypotheses, reproduction judge"},
+                {"recommended_roles", json::array(
+                    {"reproducer", "root_cause", "fix_validator"})},
+            }},
+            {"research_synthesis", {
+                {"topology", "parallel sources, contradiction-aware judge"},
+                {"recommended_roles", json::array(
+                    {"researcher", "skeptic", "synthesizer"})},
+            }},
+        }},
         {"executor_kinds", std::move(executor_kinds)},
         {"request_schema", request},
         {"schemas", {
@@ -897,6 +1006,11 @@ json HarnessService::schema() const {
             {"semantic_validation", true},
             {"binding_validation", true},
             {"bounded_worker_repair", true},
+            {"direct_provider_workers", true},
+            {"downstream_mcp_tools", true},
+            {"downstream_a2a_tools", true},
+            {"read_only_workspace_policy", true},
+            {"compact_results", true},
             {"durable_runs", false},
         }},
     };
@@ -966,7 +1080,8 @@ json HarnessService::start(const json& arguments) {
     };
 }
 
-json HarnessService::get(const std::string& run_id) const {
+json HarnessService::get(const std::string& run_id,
+                         const std::string& view) const {
     std::shared_ptr<Impl::Run> run;
     {
         std::lock_guard lock(impl_->mutex);
@@ -982,9 +1097,42 @@ json HarnessService::get(const std::string& run_id) const {
         {"artifact_id", run->artifact_id},
         {"status", run->status},
     };
-    if (!run->result.is_null()) snapshot["result"] = run->result;
+    if (view == "status") {
+        if (!run->result.is_null()) snapshot["result"] = run->result;
+    } else if (view == "details") {
+        if (!run->details.is_null()) snapshot["result"] = run->details;
+    } else if (view == "trace") {
+        if (!run->details.is_null()) {
+            snapshot["result"] = {
+                {"execution_trace", run->details.value(
+                    "execution_trace", json::array())},
+            };
+        }
+    } else if (view == "artifacts") {
+        if (!run->result.is_null()) {
+            snapshot["result"] = run->result.value("artifacts", json::object());
+        }
+    } else {
+        throw std::invalid_argument(
+            "Harness view must be status, details, trace, or artifacts");
+    }
     if (!run->error.empty()) snapshot["error"] = run->error;
     return snapshot;
+}
+
+json HarnessService::read(const std::string& uri) const {
+    constexpr std::string_view prefix = "neograph://runs/";
+    if (uri.rfind(prefix.data(), 0) != 0) {
+        throw std::invalid_argument("unsupported Harness artifact URI: " + uri);
+    }
+    const auto remainder = uri.substr(prefix.size());
+    const auto separator = remainder.rfind('/');
+    if (separator == std::string::npos || separator == 0
+        || separator + 1 == remainder.size()) {
+        throw std::invalid_argument("malformed Harness artifact URI: " + uri);
+    }
+    return get(remainder.substr(0, separator),
+               remainder.substr(separator + 1));
 }
 
 bool HarnessService::cancel(const std::string& run_id) {
@@ -1011,7 +1159,7 @@ void HarnessService::register_tools(MCPServer& server) {
         json::parse(R"JSON({"type":"object","required":["service","request_schema","node_palette"],"properties":{"service":{"type":"string"},"request_schema":{"type":"object"},"node_palette":{"type":"object"}},"additionalProperties":true})JSON"), true),
         [this](const json&, const auto&) {
             auto value = schema();
-            return mcp_result(std::move(value), "NeoGraph Harness M2 schema");
+            return mcp_result(std::move(value), "NeoGraph Harness M3 schema");
         });
 
     server.register_tool(tool_definition(
@@ -1029,7 +1177,7 @@ void HarnessService::register_tools(MCPServer& server) {
     server.register_tool(tool_definition(
         "neograph_start", "Start Harness",
         "Start a retained artifact or compile-and-start an inline Harness request.",
-        json::parse(R"JSON({"type":"object","properties":{"artifact_id":{"type":"string"},"request":{"type":"object"}},"additionalProperties":false})JSON"),
+        json::parse(R"JSON({"type":"object","description":"Provide exactly one of artifact_id or request.","properties":{"artifact_id":{"type":"string","description":"Artifact returned by neograph_compile."},"request":{"type":"object","description":"Inline Harness request; do not also provide artifact_id."}},"additionalProperties":false})JSON"),
         json::parse(R"JSON({"type":"object","required":["started","status"],"properties":{"started":{"type":"boolean"},"run_id":{"type":"string"},"artifact_id":{"type":"string"},"status":{"type":"string"},"diagnostics":{"type":"array"},"artifacts":{"type":"object"}},"additionalProperties":true})JSON")),
         [this](const json& arguments, const auto&) {
             auto value = start(arguments);
@@ -1041,11 +1189,19 @@ void HarnessService::register_tools(MCPServer& server) {
 
     server.register_tool(tool_definition(
         "neograph_get", "Get Harness run",
-        "Read compact run status, result, and failure classification.",
-        json::parse(R"JSON({"type":"object","required":["run_id"],"properties":{"run_id":{"type":"string"}},"additionalProperties":false})JSON"),
+        "Read compact run status or dereference a detailed neograph:// run artifact URI.",
+        json::parse(R"JSON({"type":"object","required":["run_id"],"properties":{"run_id":{"type":"string"},"view":{"enum":["status","details","trace","artifacts"],"description":"Named view used when uri is absent."},"uri":{"type":"string","description":"Returned artifact URI. When present, its embedded view is authoritative."}},"additionalProperties":false})JSON"),
         run_snapshot_schema(), true),
         [this](const json& arguments, const auto&) {
-            auto value = get(arguments["run_id"].get<std::string>());
+            const bool has_uri = arguments.contains("uri");
+            const auto run_id = arguments["run_id"].get<std::string>();
+            auto value = has_uri
+                ? read(arguments["uri"].get<std::string>())
+                : get(run_id, arguments.value("view", "status"));
+            if (value.value("run_id", "") != run_id) {
+                throw std::invalid_argument(
+                    "Harness artifact URI does not belong to run_id");
+            }
             const auto text = "Harness run " + value.value("run_id", "")
                 + ": " + value.value("status", "unknown");
             return mcp_result(std::move(value), text);

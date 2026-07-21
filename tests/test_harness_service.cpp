@@ -3,9 +3,11 @@
 #include <neograph/graph/compiler.h>
 #include <neograph/mcp/harness.h>
 #include <neograph/mcp/server.h>
+#include <neograph/provider.h>
 
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <string>
 #include <thread>
 
@@ -64,11 +66,30 @@ json wait_terminal(HarnessService& service, const std::string& run_id,
     while (std::chrono::steady_clock::now() < deadline) {
         auto snapshot = service.get(run_id);
         const auto status = snapshot["status"].get<std::string>();
-        if (status != "queued" && status != "running") return snapshot;
+        if (status != "queued" && status != "running") {
+            return service.get(run_id, "details");
+        }
         std::this_thread::sleep_for(2ms);
     }
-    return service.get(run_id);
+    return service.get(run_id, "details");
 }
+
+class ScriptedProvider final : public neograph::Provider {
+public:
+    std::vector<neograph::ChatCompletion> completions;
+    std::vector<neograph::CompletionParams> calls;
+
+    neograph::ChatCompletion complete(
+        const neograph::CompletionParams& params) override {
+        calls.push_back(params);
+        if (completions.empty()) throw std::runtime_error("no scripted completion");
+        auto result = completions.front();
+        completions.erase(completions.begin());
+        return result;
+    }
+
+    std::string get_name() const override { return "scripted-harness-provider"; }
+};
 
 TEST(HarnessServiceTest, ExposesSmallStableMcpToolSurface) {
     HarnessService service;
@@ -100,7 +121,18 @@ TEST(HarnessServiceTest, ExposesSmallStableMcpToolSurface) {
     EXPECT_EQ(listed["result"]["tools"][4]["name"], "neograph_start");
     for (const auto& tool : listed["result"]["tools"]) {
         EXPECT_TRUE(tool.contains("outputSchema"));
+        EXPECT_EQ(tool["inputSchema"].value("type", ""), "object");
     }
+
+    auto invalid_get = server.handle_message({
+        {"jsonrpc", "2.0"}, {"id", 3}, {"method", "tools/call"},
+        {"params", {{"name", "neograph_get"}, {"arguments", json::object()}}},
+    });
+    ASSERT_TRUE(invalid_get.contains("result"));
+    EXPECT_TRUE(invalid_get["result"]["isError"].get<bool>());
+    EXPECT_NE(invalid_get["result"]["content"][0]["text"]
+                  .get<std::string>().find("missing required property run_id"),
+              std::string::npos);
 }
 
 TEST(HarnessServiceTest, MalformedHarnessCannotProduceExecutableArtifact) {
@@ -146,6 +178,218 @@ TEST(HarnessServiceTest, PresetAndEquivalentDslCompileToCanonicalCore) {
                   preset["artifacts"]["core_lockfile"]["content"]),
               neograph::graph::GraphCompiler::canon(
                   dsl["artifacts"]["core_lockfile"]["content"]));
+}
+
+TEST(HarnessServiceTest, ShipsReviewTriageAndResearchPresets) {
+    HarnessService service;
+    auto schema = service.schema();
+    EXPECT_EQ(schema["preset_contracts"].size(), 4u);
+    for (const auto* preset : {
+             "pr_review_panel", "bug_triage", "research_synthesis"}) {
+        auto value = request();
+        value["harness"]["preset"] = preset;
+        auto compiled = service.compile(value);
+        ASSERT_TRUE(compiled["ok"].get<bool>()) << compiled.dump();
+        EXPECT_EQ(compiled["artifacts"]["core_lockfile"]["content"]["name"],
+                  std::string("harness_") + preset);
+    }
+}
+
+TEST(HarnessServiceTest, EnforcesReadOnlyWorkspaceAndEvidenceContracts) {
+    HarnessService service;
+    auto value = request();
+    value["harness"]["preset"] = "pr_review_panel";
+    value["policy"] = {
+        {"read_only", true},
+        {"workspace_roots", json::array({"/workspace"})},
+        {"evidence_required", json::array({"file", "line", "evidence"})},
+    };
+    value["workers"][0]["tools"] = json::array({"repo.read"});
+    value["tool_catalog"] = json::array({{
+        {"id", "repo.read"},
+        {"description", "Read a workspace file"},
+        {"input_schema", {
+            {"type", "object"},
+            {"properties", {{"path", {{"type", "string"}}}}},
+            {"required", json::array({"path"})},
+        }},
+        {"read_only", true},
+        {"path_arguments", json::array({"path"})},
+        {"executor", {{"kind", "mcp"}, {"server_ref", "repo"},
+                       {"tool", "read_file"}}},
+    }});
+
+    auto rejected = service.compile(value);
+    EXPECT_FALSE(rejected["ok"].get<bool>());
+    bool saw_evidence = false;
+    for (const auto& diagnostic : rejected["diagnostics"]) {
+        if (diagnostic["code"] == "H_EVIDENCE_SCHEMA") saw_evidence = true;
+    }
+    EXPECT_TRUE(saw_evidence) << rejected.dump();
+
+    value["workers"][0]["output_schema"]["properties"]["findings"]["items"] = {
+        {"type", "object"},
+        {"required", json::array({"file", "line", "evidence"})},
+        {"properties", {
+            {"file", {{"type", "string"}}},
+            {"line", {{"type", "integer"}}},
+            {"evidence", {{"type", "string"}}},
+        }},
+    };
+    auto accepted = service.compile(value);
+    EXPECT_TRUE(accepted["ok"].get<bool>()) << accepted.dump();
+
+    value["tool_catalog"][0]["read_only"] = false;
+    auto write_rejected = service.compile(value);
+    EXPECT_FALSE(write_rejected["ok"].get<bool>());
+}
+
+TEST(HarnessServiceTest, ProviderExecutorRunsDeclaredToolsAndValidatesPaths) {
+    auto provider = std::make_shared<ScriptedProvider>();
+    neograph::ChatCompletion tool_request;
+    tool_request.message.role = "assistant";
+    tool_request.message.tool_calls.push_back(
+        {"call-1", "repo.read", R"({"path":"src/main.cpp"})"});
+    neograph::ChatCompletion final;
+    final.message.role = "assistant";
+    final.message.content = R"({"status":"ok","findings":[]})";
+    provider->completions = {tool_request, final};
+
+    int capability_calls = 0;
+    neograph::mcp::HarnessProviderExecutorConfig config;
+    config.provider = provider;
+    config.model = "test-model";
+    config.capability_executor = [&capability_calls](
+        const json& tool, const json& arguments, const auto&) {
+        ++capability_calls;
+        EXPECT_EQ(tool["id"], "repo.read");
+        EXPECT_EQ(arguments["path"], "/workspace/src/main.cpp");
+        return json{{"content", "int main() {}"}};
+    };
+    auto executor = neograph::mcp::make_provider_harness_executor(
+        std::move(config));
+
+    HarnessWorkerCall call;
+    call.task = {{"objective", "Review"}};
+    call.worker = worker("reviewer", json::array({"repo.read"}));
+    call.tool_catalog = json::array({{
+        {"id", "repo.read"},
+        {"description", "Read file"},
+        {"input_schema", {
+            {"type", "object"},
+            {"required", json::array({"path"})},
+            {"properties", {{"path", {{"type", "string"}}}}},
+        }},
+        {"path_arguments", json::array({"path"})},
+        {"executor", {{"kind", "builtin"}}},
+    }});
+    call.policy = {{"workspace_roots", json::array({"/workspace"})}};
+    auto response = executor(call, std::make_shared<neograph::graph::CancelToken>());
+
+    EXPECT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::VALUE);
+    EXPECT_EQ(response.value["status"], "ok");
+    EXPECT_EQ(capability_calls, 1);
+    ASSERT_EQ(provider->calls.size(), 2u);
+    EXPECT_EQ(provider->calls[0].model, "test-model");
+    ASSERT_EQ(provider->calls[1].messages.size(), 3u);
+    EXPECT_EQ(provider->calls[1].messages.back().role, "tool");
+}
+
+TEST(HarnessServiceTest, ProviderExecutorRejectsWorkspaceEscapeBeforeToolCall) {
+    auto provider = std::make_shared<ScriptedProvider>();
+    neograph::ChatCompletion tool_request;
+    tool_request.message.tool_calls.push_back(
+        {"call-1", "repo.read", R"({"path":"../secret.txt"})"});
+    provider->completions = {tool_request};
+
+    int capability_calls = 0;
+    neograph::mcp::HarnessProviderExecutorConfig config;
+    config.provider = provider;
+    config.capability_executor = [&capability_calls](const json&, const json&,
+                                                     const auto&) {
+        ++capability_calls;
+        return json::object();
+    };
+    auto executor = neograph::mcp::make_provider_harness_executor(
+        std::move(config));
+    HarnessWorkerCall call;
+    call.task = {{"objective", "Review"}};
+    call.worker = worker("reviewer");
+    call.tool_catalog = json::array({{
+        {"id", "repo.read"},
+        {"description", "Read file"},
+        {"input_schema", {
+            {"type", "object"},
+            {"properties", {{"path", {{"type", "string"}}}}},
+        }},
+        {"path_arguments", json::array({"path"})},
+        {"executor", {{"kind", "builtin"}}},
+    }});
+    call.policy = {{"workspace_roots", json::array({"/workspace"})}};
+
+    auto response = executor(call, std::make_shared<neograph::graph::CancelToken>());
+    EXPECT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::TOOL_ERROR);
+    EXPECT_NE(response.message.find("escapes configured workspace roots"),
+              std::string::npos);
+    EXPECT_EQ(capability_calls, 0);
+}
+
+TEST(HarnessServiceTest, ProviderExecutorRejectsSymlinkWorkspaceEscape) {
+#ifdef _WIN32
+    GTEST_SKIP() << "directory symlink creation requires host privileges on Windows";
+#else
+    const auto base = std::filesystem::temp_directory_path()
+        / ("neograph-harness-path-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    const auto workspace = base / "workspace";
+    const auto outside = base / "outside";
+    std::filesystem::create_directories(workspace);
+    std::filesystem::create_directories(outside);
+    std::error_code link_error;
+    std::filesystem::create_directory_symlink(
+        outside, workspace / "link", link_error);
+    if (link_error) {
+        std::filesystem::remove_all(base);
+        GTEST_SKIP() << "cannot create test symlink: " << link_error.message();
+    }
+
+    auto provider = std::make_shared<ScriptedProvider>();
+    neograph::ChatCompletion tool_request;
+    tool_request.message.tool_calls.push_back(
+        {"call-1", "repo.read", R"({"path":"link/secret.txt"})"});
+    provider->completions = {tool_request};
+    int capability_calls = 0;
+    neograph::mcp::HarnessProviderExecutorConfig config;
+    config.provider = provider;
+    config.capability_executor = [&capability_calls](const json&, const json&,
+                                                     const auto&) {
+        ++capability_calls;
+        return json::object();
+    };
+    auto executor = neograph::mcp::make_provider_harness_executor(
+        std::move(config));
+    HarnessWorkerCall call;
+    call.task = {{"objective", "Review"}};
+    call.worker = worker("reviewer");
+    call.tool_catalog = json::array({{
+        {"id", "repo.read"},
+        {"description", "Read file"},
+        {"input_schema", {
+            {"type", "object"},
+            {"properties", {{"path", {{"type", "string"}}}}},
+        }},
+        {"path_arguments", json::array({"path"})},
+        {"executor", {{"kind", "builtin"}}},
+    }});
+    call.policy = {{"workspace_roots", json::array({workspace.string()})}};
+
+    auto response = executor(call, std::make_shared<neograph::graph::CancelToken>());
+    EXPECT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::TOOL_ERROR);
+    EXPECT_NE(response.message.find("escapes configured workspace roots"),
+              std::string::npos);
+    EXPECT_EQ(capability_calls, 0);
+    std::filesystem::remove_all(base);
+#endif
 }
 
 TEST(HarnessServiceTest, BindingDiagnosticCarriesElaboratorSourceCoordinate) {
@@ -266,6 +510,38 @@ TEST(HarnessServiceTest, PreservesPartialWorkerOutcome) {
     auto finished = wait_terminal(service, started["run_id"].get<std::string>());
     ASSERT_EQ(finished["status"], "completed") << finished.dump();
     EXPECT_EQ(finished["result"]["outcome"], "partial");
+}
+
+TEST(HarnessServiceTest, ReturnsCompactResultAndUriLinkedDetails) {
+    HarnessServiceConfig config;
+    config.worker_executor = [](const HarnessWorkerCall&, const auto&) {
+        return HarnessWorkerResponse::success({
+            {"status", "ok"},
+            {"findings", json::array({{{"evidence", "line 1"}}})},
+        });
+    };
+    HarnessService service(std::move(config));
+    auto compiled = service.compile(request());
+    ASSERT_TRUE(compiled["ok"].get<bool>()) << compiled.dump();
+    auto started = service.start({{"artifact_id", compiled["artifact_id"]}});
+    const auto run_id = started["run_id"].get<std::string>();
+    (void)wait_terminal(service, run_id);
+
+    auto compact = service.get(run_id);
+    ASSERT_EQ(compact["status"], "completed");
+    EXPECT_EQ(compact["result"]["finding_count"], 1);
+    EXPECT_FALSE(compact["result"].contains("workers"));
+    EXPECT_EQ(compact["result"]["artifacts"]["details"]["uri"],
+              "neograph://runs/" + run_id + "/details");
+    auto details = service.get(run_id, "details");
+    EXPECT_EQ(details["result"]["workers"].size(), 1u);
+    auto linked = service.read(
+        compact["result"]["artifacts"]["details"]["uri"]
+            .get<std::string>());
+    EXPECT_EQ(linked, details);
+    auto trace = service.get(run_id, "trace");
+    EXPECT_TRUE(trace["result"]["execution_trace"].is_array());
+    EXPECT_THROW(service.get(run_id, "invalid"), std::invalid_argument);
 }
 
 TEST(HarnessServiceTest, DistinguishesEmptyResponseAndWorkerTimeout) {
