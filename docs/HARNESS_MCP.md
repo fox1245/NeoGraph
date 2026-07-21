@@ -44,10 +44,16 @@ The example enables both with one explicit directory:
 export NEOGRAPH_HARNESS_STATE_DIR="$PWD/.neograph-harness-state"
 ```
 
-This stores immutable artifacts and run records as atomic JSON files and graph
-checkpoints in `checkpoints.db`. The directory survives server restarts. A
+This stores immutable artifacts and mutable run records in `runs.db`, and graph
+checkpoints in `checkpoints.db`. Both SQLite stores use WAL mode and a bounded
+busy timeout. The directory survives server restarts. A
 `host_brokered` catalog entry is rejected at compile time when either store is
 missing, so a workflow cannot advertise resumability it does not have.
+
+Custom embeddings can construct the same backend through
+`SqliteHarnessRecordStore` from the optional `neograph::mcp_sqlite` target.
+`FileHarnessRecordStore` remains available for deployments that prefer atomic
+JSON files.
 
 ## Streamable HTTP
 

@@ -10,6 +10,9 @@
 
 #include <neograph/neograph.h>
 #include <neograph/async/run_sync.h>
+#ifdef NEOGRAPH_CONSUMER_HAS_MCP_SQLITE
+#include <neograph/mcp/sqlite_harness_store.h>
+#endif
 
 #include <cstdlib>
 #include <iostream>
@@ -58,5 +61,22 @@ int main() {
         std::cerr << "unexpected channel value\n";
         return EXIT_FAILURE;
     }
+
+#ifdef NEOGRAPH_CONSUMER_HAS_MCP_SQLITE
+    neograph::mcp::SqliteHarnessRecordStore records(":memory:");
+    records.save_artifact("artifact_installed", {
+        {"artifact_id", "artifact_installed"},
+        {"request", json::object()},
+    });
+    records.save_run("run_installed", {
+        {"run_id", "run_installed"},
+        {"artifact_id", "artifact_installed"},
+        {"status", "completed"},
+    });
+    if (records.load_run("run_installed")->value("status", "") != "completed") {
+        std::cerr << "installed SqliteHarnessRecordStore failed\n";
+        return EXIT_FAILURE;
+    }
+#endif
     return EXIT_SUCCESS;
 }

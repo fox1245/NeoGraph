@@ -17,18 +17,14 @@
  * The CMake target machinery sets ``NEOGRAPH_BUILDING_LIBRARY`` (a
  * ``target_compile_definitions`` PRIVATE on each ``neograph_*``
  * library) and ``NEOGRAPH_STATIC_BUILD`` (when ``BUILD_SHARED_LIBS``
- * is OFF). Headers don't need any other glue.
+ * is OFF). Component-specific macros also receive their owning target's
+ * private build definition.
  *
- * Why a custom macro instead of CMake's ``generate_export_header``?
- * The engine ships several libraries (``neograph_core``,
- * ``neograph_async``, ``neograph_llm``, ...) that can include each
- * other's public headers. ``generate_export_header`` produces a
- * per-library macro; managing four separate ``XXX_EXPORT`` ifdefs
- * across the headers gets tangled fast. A single ``NEOGRAPH_API``
- * keyed on whether ANY neograph_* TU is being compiled keeps the
- * source tree clean — at the cost of treating cross-library calls
- * inside the engine as if every public symbol were a same-library
- * call (which they effectively are during the engine's own build).
+ * Most engine libraries use the shared ``NEOGRAPH_API`` macro. Components
+ * whose public headers are intentionally consumed by another NeoGraph DLL
+ * may define a narrower macro below. MSVC eagerly emits helpers for exported
+ * classes, so treating those cross-DLL declarations as exports can create
+ * references to implementations owned by the wrong DLL.
  */
 #pragma once
 
@@ -48,6 +44,22 @@
     #define NEOGRAPH_API __attribute__((visibility("default")))
 #else
     #define NEOGRAPH_API
+#endif
+
+// Harness declarations belong to neograph_mcp_server but are also consumed by
+// the MCP client, A2A adapter, and SQLite store libraries.
+#if defined(NEOGRAPH_STATIC_BUILD)
+    #define NEOGRAPH_MCP_SERVER_API
+#elif defined(_WIN32) || defined(__CYGWIN__)
+    #if defined(NEOGRAPH_BUILDING_MCP_SERVER)
+        #define NEOGRAPH_MCP_SERVER_API __declspec(dllexport)
+    #else
+        #define NEOGRAPH_MCP_SERVER_API __declspec(dllimport)
+    #endif
+#elif defined(__GNUC__) && __GNUC__ >= 4
+    #define NEOGRAPH_MCP_SERVER_API __attribute__((visibility("default")))
+#else
+    #define NEOGRAPH_MCP_SERVER_API
 #endif
 
 // PR 4 (v0.4.0): cross-compiler deprecation-warning suppression.

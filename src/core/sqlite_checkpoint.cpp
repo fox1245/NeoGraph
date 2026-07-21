@@ -21,6 +21,7 @@
 #include <sqlite3.h>
 
 #include <chrono>
+#include <limits>
 #include <stdexcept>
 
 namespace neograph::graph {
@@ -245,7 +246,15 @@ constexpr const char* kSelectCols =
 
 // ── Construction / lifetime ───────────────────────────────────────────
 
-SqliteCheckpointStore::SqliteCheckpointStore(const std::string& db_path) {
+SqliteCheckpointStore::SqliteCheckpointStore(const std::string& db_path)
+    : SqliteCheckpointStore(db_path, std::chrono::seconds(5)) {}
+
+SqliteCheckpointStore::SqliteCheckpointStore(
+    const std::string& db_path, std::chrono::milliseconds busy_timeout) {
+    if (busy_timeout.count() < 0 ||
+        busy_timeout.count() > std::numeric_limits<int>::max()) {
+        throw std::invalid_argument("SqliteCheckpointStore: busy timeout is out of range");
+    }
     if (sqlite3_open(db_path.c_str(), &db_) != SQLITE_OK) {
         std::string msg = "SqliteCheckpointStore: open failed: ";
         msg += sqlite3_errmsg(db_);
@@ -253,19 +262,30 @@ SqliteCheckpointStore::SqliteCheckpointStore(const std::string& db_path) {
         db_ = nullptr;
         throw std::runtime_error(std::move(msg));
     }
-    // WAL gives us non-blocking readers and durable writes via fsync at
-    // checkpoint time. Foreign keys aren't used (we manage references in
-    // app code), but enabling them now would future-proof the schema.
-    exec_ddl("PRAGMA journal_mode=WAL;");
-    exec_ddl("PRAGMA foreign_keys=ON;");
-    // synchronous=NORMAL is the WAL-recommended default — fsyncs on
-    // checkpoint, not every commit. ~10× faster than FULL with no
-    // durability loss for crashes; only OS crashes can lose the last
-    // few transactions in WAL. For a CheckpointStore that's a good
-    // trade because the engine is the source of truth in RAM until
-    // commit anyway.
-    exec_ddl("PRAGMA synchronous=NORMAL;");
-    ensure_schema();
+    try {
+        // https://www.sqlite.org/c3ref/busy_timeout.html (fetched 2026-07-21)
+        // waits through transient writer contention up to the configured budget.
+        if (sqlite3_busy_timeout(db_, static_cast<int>(busy_timeout.count())) != SQLITE_OK) {
+            throw_sqlite_error(db_, "cannot configure busy timeout");
+        }
+        // WAL gives us non-blocking readers and durable writes via fsync at
+        // checkpoint time. Foreign keys aren't used (we manage references in
+        // app code), but enabling them now would future-proof the schema.
+        exec_ddl("PRAGMA journal_mode=WAL;");
+        exec_ddl("PRAGMA foreign_keys=ON;");
+        // synchronous=NORMAL is the WAL-recommended default — fsyncs on
+        // checkpoint, not every commit. ~10× faster than FULL with no
+        // durability loss for crashes; only OS crashes can lose the last
+        // few transactions in WAL. For a CheckpointStore that's a good
+        // trade because the engine is the source of truth in RAM until
+        // commit anyway.
+        exec_ddl("PRAGMA synchronous=NORMAL;");
+        ensure_schema();
+    } catch (...) {
+        sqlite3_close(db_);
+        db_ = nullptr;
+        throw;
+    }
 }
 
 SqliteCheckpointStore::~SqliteCheckpointStore() {

@@ -6,8 +6,8 @@ That is the whole of MCP that matters here — it is JSON-RPC with a handshake a
 a tool-listing convention, which is precisely why "Python users can just reach
 for fastmcp" was never a real design boundary.
 
-`slow_echo` sleeps, so a test can prove that several MCP tool calls in one turn
-overlap rather than queueing.
+`slow_echo` sleeps, so tests can prove that the same multiplexed client overlaps
+against a concurrent server and waits against a `--serial` server.
 """
 
 import json
@@ -19,6 +19,7 @@ _write_lock = threading.Lock()
 _state_lock = threading.Lock()
 _initialized = False
 _initializing = False
+_serial = "--serial" in sys.argv[1:]
 
 
 TOOLS = [
@@ -122,10 +123,14 @@ def main():
                         _initializing = False
             continue
 
-        # The write lock preserves one-line framing while request IDs let the
-        # client correlate out-of-order replies.
-        threading.Thread(target=handle_request, args=(request,),
-                         daemon=True).start()
+        # The wire remains one framed pipe in both modes. Execution policy is
+        # deliberately selectable so tests do not confuse transport
+        # multiplexing with server-side concurrency.
+        if _serial:
+            handle_request(request)
+        else:
+            threading.Thread(target=handle_request, args=(request,),
+                             daemon=True).start()
 
 
 if __name__ == "__main__":

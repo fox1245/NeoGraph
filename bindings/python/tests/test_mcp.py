@@ -164,6 +164,13 @@ def stdio_client():
     return client
 
 
+@pytest.fixture
+def serial_stdio_client():
+    client = mcp.MCPClient([sys.executable, SERVER, "--serial"])
+    assert client.initialize("neograph-test"), "the MCP handshake failed"
+    return client
+
+
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 def _graph_calling(tool_name, count, arguments='{"text": "x"}'):
@@ -277,6 +284,22 @@ def test_stdio_calls_overlap_when_server_is_concurrent(stdio_client):
           f"(request-ID multiplexed)")
     assert elapsed < 2 * delay, (
         f"stdio requests serialized unexpectedly: {elapsed:.2f}s")
+
+
+def test_stdio_calls_wait_when_server_is_serial(serial_stdio_client):
+    """Request-ID multiplexing cannot make a serial server execute in parallel."""
+    delay = 0.3
+    definition = _graph_calling(
+        "slow_echo", 3, '{"text": "x", "delay": %s}' % delay)
+
+    tool_msgs, elapsed = _run(definition, serial_stdio_client.get_tools(),
+                              "mcp-stdio-serial", expect_text="x")
+
+    assert len(tool_msgs) == 3
+    print(f"\n[MEASURE] serial stdio server, 3 MCP calls x {delay}s: "
+          f"{elapsed:.2f}s")
+    assert elapsed >= 2.5 * delay, (
+        f"serial stdio server unexpectedly overlapped requests: {elapsed:.2f}s")
 
 
 # ── HTTP ────────────────────────────────────────────────────────────────────

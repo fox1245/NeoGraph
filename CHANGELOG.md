@@ -9,6 +9,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **SQLite Harness record store (issue #147 follow-up).** Added the optional
+  `neograph::mcp_sqlite` target and `SqliteHarnessRecordStore` for WAL-backed,
+  schema-versioned artifact/run persistence with immutable artifact and run-to-
+  artifact bindings. The Harness MCP binary now stores records in `runs.db`,
+  while checkpoints remain in `checkpoints.db`.
+
 ### Changed
 
 - **Provider API 영구 호환 정책 (issue #5).** `Provider::complete()`,

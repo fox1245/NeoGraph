@@ -12,6 +12,7 @@
 #
 #   find_package(NeoGraph CONFIG REQUIRED)
 #   target_link_libraries(app PRIVATE neograph::core neograph::llm)
+#   target_link_libraries(harness PRIVATE neograph::mcp_sqlite)
 
 include(CMakeFindDependencyMacro)
 

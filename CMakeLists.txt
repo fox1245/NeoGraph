@@ -676,11 +676,29 @@ if(NEOGRAPH_BUILD_MCP_SERVER)
             $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
     )
-    target_compile_definitions(neograph_mcp_server PRIVATE NEOGRAPH_BUILDING_LIBRARY)
+    target_compile_definitions(neograph_mcp_server PRIVATE
+        NEOGRAPH_BUILDING_LIBRARY NEOGRAPH_BUILDING_MCP_SERVER)
     target_link_libraries(neograph_mcp_server
         PUBLIC neograph_core neograph_mcp_types
     )
     add_library(neograph::mcp_server ALIAS neograph_mcp_server)
+endif()
+
+if(NEOGRAPH_BUILD_MCP_SERVER AND NEOGRAPH_BUILD_SQLITE)
+    add_library(neograph_mcp_sqlite
+        src/mcp/sqlite_harness_store.cpp
+    )
+    target_include_directories(neograph_mcp_sqlite
+        PUBLIC
+            $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+    )
+    target_compile_definitions(neograph_mcp_sqlite PRIVATE NEOGRAPH_BUILDING_LIBRARY)
+    target_link_libraries(neograph_mcp_sqlite
+        PUBLIC  neograph_mcp_server
+        PRIVATE SQLite::SQLite3
+    )
+    add_library(neograph::mcp_sqlite ALIAS neograph_mcp_sqlite)
 endif()
 
 if(NEOGRAPH_BUILD_MCP_HTTP_SERVER)
@@ -859,7 +877,8 @@ if(NEOGRAPH_BUILD_HARNESS_MCP_BINARY)
     target_link_libraries(neograph_harness_mcp PRIVATE
         neograph::mcp_server neograph::llm)
     if(NEOGRAPH_BUILD_SQLITE)
-        target_link_libraries(neograph_harness_mcp PRIVATE neograph::sqlite)
+        target_link_libraries(neograph_harness_mcp PRIVATE
+            neograph::sqlite neograph::mcp_sqlite)
         target_compile_definitions(neograph_harness_mcp PRIVATE
             NEOGRAPH_HARNESS_HAVE_SQLITE)
     endif()
@@ -1416,7 +1435,7 @@ if(NEOGRAPH_BUILD_EXAMPLES)
                 neograph::mcp_server neograph::llm)
             if(NEOGRAPH_BUILD_SQLITE)
                 target_link_libraries(example_harness_mcp_server PRIVATE
-                    neograph::sqlite)
+                    neograph::sqlite neograph::mcp_sqlite)
                 target_compile_definitions(example_harness_mcp_server PRIVATE
                     NEOGRAPH_HARNESS_HAVE_SQLITE)
             endif()
@@ -1630,7 +1649,7 @@ if(NEOGRAPH_INSTALL_EXPORT)
         list(APPEND NEOGRAPH_EXPORT_TARGETS neograph_mcp_types)
     endif()
 
-    foreach(_comp async llm mcp mcp_server mcp_http_server a2a acp util postgres sqlite)
+    foreach(_comp async llm mcp mcp_server mcp_sqlite mcp_http_server a2a acp util postgres sqlite)
         if(TARGET neograph_${_comp})
             list(APPEND NEOGRAPH_EXPORT_TARGETS neograph_${_comp})
             list(APPEND NEOGRAPH_COMPONENTS_BUILT ${_comp})

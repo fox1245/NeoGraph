@@ -46,6 +46,7 @@
 
 #include <neograph/api.h>
 #include <neograph/graph/checkpoint.h>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -68,6 +69,9 @@ public:
     /// @param db_path Filesystem path or ":memory:". Anything sqlite3_open accepts.
     /// @throws std::runtime_error on open or DDL failure.
     explicit SqliteCheckpointStore(const std::string& db_path);
+    /// Configure how long writes wait for a competing SQLite writer.
+    SqliteCheckpointStore(const std::string& db_path,
+                          std::chrono::milliseconds busy_timeout);
 
     ~SqliteCheckpointStore() override;
 

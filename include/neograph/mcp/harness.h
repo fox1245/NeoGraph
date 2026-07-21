@@ -47,7 +47,7 @@ struct HarnessWorkerCall {
 };
 
 /** Typed worker response; failure classes never masquerade as valid output. */
-struct NEOGRAPH_API HarnessWorkerResponse {
+struct NEOGRAPH_MCP_SERVER_API HarnessWorkerResponse {
     HarnessWorkerResponseKind kind = HarnessWorkerResponseKind::VALUE;
     json value;
     std::string message;
@@ -77,11 +77,11 @@ struct HarnessProviderExecutorConfig {
 };
 
 /// Build a worker executor that calls a NeoGraph Provider directly.
-NEOGRAPH_API HarnessWorkerExecutor
+NEOGRAPH_MCP_SERVER_API HarnessWorkerExecutor
 make_provider_harness_executor(HarnessProviderExecutorConfig config);
 
 /** Durable storage boundary for retained Harness artifacts and run records. */
-class NEOGRAPH_API HarnessRecordStore {
+class NEOGRAPH_MCP_SERVER_API HarnessRecordStore {
 public:
     virtual ~HarnessRecordStore() = default;
 
@@ -92,7 +92,7 @@ public:
 };
 
 /** Atomic JSON-file implementation suitable for local process restarts. */
-class NEOGRAPH_API FileHarnessRecordStore final : public HarnessRecordStore {
+class NEOGRAPH_MCP_SERVER_API FileHarnessRecordStore final : public HarnessRecordStore {
 public:
     explicit FileHarnessRecordStore(std::string root_directory);
     ~FileHarnessRecordStore() override;
@@ -124,7 +124,7 @@ struct HarnessServiceConfig {
  * `register_tools()` captures this service by reference; the service must
  * outlive the MCPServer and be destroyed only after the server has stopped.
  */
-class NEOGRAPH_API HarnessService {
+class NEOGRAPH_MCP_SERVER_API HarnessService {
 public:
     explicit HarnessService(HarnessServiceConfig config = {});
     ~HarnessService();
