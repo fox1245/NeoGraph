@@ -9,6 +9,7 @@
 #endif
 #ifdef NEOGRAPH_HARNESS_HAVE_SQLITE
 #include <neograph/graph/sqlite_checkpoint.h>
+#include <neograph/mcp/sqlite_harness_store.h>
 #endif
 
 #ifdef NEOGRAPH_HARNESS_HAVE_HTTP
@@ -19,6 +20,7 @@
 #include <vector>
 #endif
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <utility>
@@ -104,8 +106,9 @@ int main() {
         neograph::mcp::make_provider_harness_executor(std::move(executor_config));
 #ifdef NEOGRAPH_HARNESS_HAVE_SQLITE
     if (const auto state_dir = environment("NEOGRAPH_HARNESS_STATE_DIR"); !state_dir.empty()) {
+        std::filesystem::create_directories(state_dir);
         harness_config.record_store =
-            std::make_shared<neograph::mcp::FileHarnessRecordStore>(state_dir);
+            std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(state_dir + "/runs.db");
         harness_config.checkpoint_store =
             std::make_shared<neograph::graph::SqliteCheckpointStore>(state_dir + "/checkpoints.db");
         harness_config.enable_experimental_tasks =

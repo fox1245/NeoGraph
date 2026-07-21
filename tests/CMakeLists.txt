@@ -186,6 +186,9 @@ endif()
 
 if(NEOGRAPH_BUILD_SQLITE)
     target_link_libraries(neograph_tests PRIVATE neograph::sqlite)
+    if(NEOGRAPH_BUILD_MCP_SERVER)
+        target_link_libraries(neograph_tests PRIVATE neograph::mcp_sqlite SQLite::SQLite3)
+    endif()
 endif()
 
 include(GoogleTest)

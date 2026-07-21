@@ -4,6 +4,8 @@
 #include <gtest/gtest.h>
 #ifdef NEOGRAPH_TESTS_HAVE_SQLITE
 #include <neograph/graph/sqlite_checkpoint.h>
+#include <neograph/mcp/sqlite_harness_store.h>
+#include <sqlite3.h>
 #endif
 #include <neograph/mcp/harness.h>
 #include <neograph/mcp/server.h>
@@ -842,9 +844,94 @@ TEST(HarnessServiceTest, ExpiredHostResultIsRejectedAndPersisted) {
 }
 
 #ifdef NEOGRAPH_TESTS_HAVE_SQLITE
+TEST(HarnessServiceTest, SqliteRecordStoreReopensAndKeepsArtifactsImmutable) {
+    const auto root = unique_temp_path("neograph-harness-sqlite-records");
+    TempDirectoryCleanup cleanup(root);
+    std::filesystem::create_directories(root);
+    const auto database = root / "runs.db";
+
+    const json artifact = {
+        {"artifact_id", "artifact_1"},
+        {"request", {{"task", "review"}}},
+    };
+    const json run = {
+        {"run_id", "run_1"},
+        {"artifact_id", "artifact_1"},
+        {"status", "queued"},
+    };
+    {
+        neograph::mcp::SqliteHarnessRecordStore records(database.string());
+        records.save_artifact("artifact_1", artifact);
+        records.save_artifact("artifact_1", artifact);
+        records.save_run("run_1", run);
+
+        auto changed = artifact;
+        changed["request"]["task"] = "mutated";
+        EXPECT_THROW(records.save_artifact("artifact_1", changed), std::invalid_argument);
+    }
+    {
+        neograph::mcp::SqliteHarnessRecordStore records(database.string());
+        ASSERT_EQ(records.load_artifact("artifact_1"), std::optional<json>(artifact));
+        ASSERT_EQ(records.load_run("run_1"), std::optional<json>(run));
+
+        auto completed = run;
+        completed["status"] = "completed";
+        records.save_run("run_1", completed);
+        EXPECT_EQ((*records.load_run("run_1"))["status"], "completed");
+
+        auto rebound = completed;
+        rebound["artifact_id"] = "artifact_2";
+        EXPECT_THROW(records.save_run("run_1", rebound), std::invalid_argument);
+        EXPECT_THROW(records.save_run("run_missing", {
+            {"run_id", "run_missing"},
+            {"artifact_id", "artifact_missing"},
+            {"status", "queued"},
+        }), std::runtime_error);
+    }
+}
+
+TEST(HarnessServiceTest, SqliteRecordStoreBusyTimeoutWaitsForWriter) {
+    const auto root = unique_temp_path("neograph-harness-sqlite-busy");
+    TempDirectoryCleanup cleanup(root);
+    std::filesystem::create_directories(root);
+    const auto database = root / "runs.db";
+
+    neograph::mcp::SqliteHarnessRecordStore records(database.string(), 500ms);
+    records.save_artifact("artifact_1", {
+        {"artifact_id", "artifact_1"},
+        {"request", json::object()},
+    });
+    sqlite3*                                 blocker = nullptr;
+    ASSERT_EQ(sqlite3_open(database.string().c_str(), &blocker), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(blocker, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr), SQLITE_OK);
+
+    std::exception_ptr failure;
+    const auto started = std::chrono::steady_clock::now();
+    std::thread writer([&] {
+        try {
+            records.save_run("run_waiting", {
+                {"run_id", "run_waiting"},
+                {"artifact_id", "artifact_1"},
+                {"status", "queued"},
+            });
+        } catch (...) {
+            failure = std::current_exception();
+        }
+    });
+    std::this_thread::sleep_for(75ms);
+    EXPECT_EQ(sqlite3_exec(blocker, "COMMIT;", nullptr, nullptr, nullptr), SQLITE_OK);
+    writer.join();
+    sqlite3_close(blocker);
+
+    EXPECT_FALSE(failure);
+    EXPECT_GE(std::chrono::steady_clock::now() - started, 75ms);
+    EXPECT_TRUE(records.load_run("run_waiting").has_value());
+}
+
 TEST(HarnessServiceTest, DurableHostResumeSurvivesServiceAndDatabaseReconnect) {
     const auto root     = unique_temp_path("neograph-harness-resume");
     const auto database = root / "checkpoints.db";
+    const auto records_database = root / "runs.db";
     std::filesystem::create_directories(root);
     auto                     provider = std::make_shared<ScriptedProvider>();
     neograph::ChatCompletion tool_request;
@@ -861,7 +948,7 @@ TEST(HarnessServiceTest, DurableHostResumeSurvivesServiceAndDatabaseReconnect) {
         config.checkpoint_store =
             std::make_shared<neograph::graph::SqliteCheckpointStore>(database.string());
         config.record_store =
-            std::make_shared<neograph::mcp::FileHarnessRecordStore>(root.string());
+            std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(records_database.string());
         neograph::mcp::HarnessProviderExecutorConfig provider_config;
         provider_config.provider = provider;
         config.worker_executor =
@@ -881,7 +968,7 @@ TEST(HarnessServiceTest, DurableHostResumeSurvivesServiceAndDatabaseReconnect) {
         config.checkpoint_store =
             std::make_shared<neograph::graph::SqliteCheckpointStore>(database.string());
         config.record_store =
-            std::make_shared<neograph::mcp::FileHarnessRecordStore>(root.string());
+            std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(records_database.string());
         neograph::mcp::HarnessProviderExecutorConfig provider_config;
         provider_config.provider = provider;
         config.worker_executor =
@@ -923,6 +1010,7 @@ TEST(HarnessServiceTest, DurableHostResumeSurvivesServiceAndDatabaseReconnect) {
 TEST(HarnessServiceTest, PersistedResumeIntentRecoversBeforeThreadSpawn) {
     const auto root     = unique_temp_path("neograph-harness-resume-intent");
     const auto database = root / "checkpoints.db";
+    const auto records_database = root / "runs.db";
     std::filesystem::create_directories(root);
     auto                     provider = std::make_shared<ScriptedProvider>();
     neograph::ChatCompletion tool_request;
@@ -939,7 +1027,7 @@ TEST(HarnessServiceTest, PersistedResumeIntentRecoversBeforeThreadSpawn) {
         config.checkpoint_store =
             std::make_shared<neograph::graph::SqliteCheckpointStore>(database.string());
         config.record_store =
-            std::make_shared<neograph::mcp::FileHarnessRecordStore>(root.string());
+            std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(records_database.string());
         neograph::mcp::HarnessProviderExecutorConfig provider_config;
         provider_config.provider = provider;
         config.worker_executor =
@@ -954,7 +1042,8 @@ TEST(HarnessServiceTest, PersistedResumeIntentRecoversBeforeThreadSpawn) {
         call_id = waiting["pending"]["call_id"].get<std::string>();
     }
 
-    auto records = std::make_shared<neograph::mcp::FileHarnessRecordStore>(root.string());
+    auto records =
+        std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(records_database.string());
     auto record  = records->load_run(run_id);
     ASSERT_TRUE(record.has_value());
     (*record)["consumed"][call_id] = {{"answer", "found"}};

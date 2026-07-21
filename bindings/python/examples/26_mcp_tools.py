@@ -27,12 +27,12 @@ instead of queueing. This program measures it.
 But the two transports are not the same, and it would be easy to overstate:
 
   - **HTTP** — each call is its own request. Three 0.4 s calls take ~0.4 s.
-  - **stdio** — one subprocess, one pipe. Our client takes a capacity-1 lock
-    around it, so calls are serialized *by us*. Three 0.4 s calls take 1.2 s,
-    and nothing about the graph engine can change that.
+  - **stdio** — one subprocess and one framed pipe, multiplexed by JSON-RPC ID.
+    Calls overlap when the server processes requests concurrently; a serial
+    server still makes three 0.4 s calls take 1.2 s.
 
-Both numbers are printed below. If you want MCP calls to overlap, you want the
-HTTP transport, and that is a property of MCP, not of NeoGraph.
+The test suite measures both stdio server policies instead of attributing either
+behavior to the transport itself.
 """
 
 import json
@@ -174,21 +174,20 @@ def main():
         assert http.initialize("demo"), "handshake failed"
         concurrent = run_against(http, "overlapped", "mcp-http")
 
-        print("\nstdio transport  (a subprocess, one pipe)\n")
+        print("\nstdio transport  (a subprocess, one multiplexed pipe)\n")
         stdio_server = os.path.join(
             os.path.dirname(os.path.dirname(__file__)),
             "tests", "mcp_echo_server.py")
         if os.path.exists(stdio_server):
             stdio = ng.mcp.MCPClient([sys.executable, stdio_server])
             assert stdio.initialize("demo"), "handshake failed"
-            # the echo server names its slow tool differently; skip the timing
-            print("  (see tests/test_mcp.py for the stdio timing — one pipe,")
-            print("   one call at a time: 3 x 0.3s takes 0.90s)")
+            print("  (tests/test_mcp.py measures concurrent and --serial")
+            print("   server policies over this same multiplexed transport)")
 
         print(f"\n  -> HTTP overlapped: {N * DELAY:.1f}s of work in "
               f"{concurrent:.2f}s ({N * DELAY / concurrent:.1f}x).")
-        print("     stdio cannot: one pipe, one request in flight. That is MCP,")
-        print("     not NeoGraph — and it is why the client says so out loud.\n")
+        print("     stdio request IDs also permit overlap; the server decides")
+        print("     whether requests execute concurrently or serially.\n")
     finally:
         server.shutdown()
         server.server_close()

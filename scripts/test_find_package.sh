@@ -8,7 +8,7 @@
 # unit test in the repo links against the build tree, where the headers, the
 # vendored deps and the libraries are all reachable by accident.
 #
-#   exit 0 — a consumer can find_package(NeoGraph), link neograph::core, and run
+#   exit 0 — a consumer can find_package(NeoGraph), link core/mcp_sqlite, and run
 #   exit 1 — it cannot, at whichever of the four stages failed
 #
 # Usage: scripts/test_find_package.sh [--keep] [--shared]

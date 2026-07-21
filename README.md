@@ -224,7 +224,8 @@ any custom vendor via JSON schema) · ReAct `Agent` loop with streaming.
 
 **Integrations** — MCP client (`neograph::mcp`, HTTP + stdio) · local MCP server
 (`neograph::mcp_server`, stdio) · opt-in Streamable HTTP server
-(`neograph::mcp_http_server`) · compiler-backed multi-worker
+(`neograph::mcp_http_server`) · SQLite Harness records
+(`neograph::mcp_sqlite`) · compiler-backed multi-worker
 [Harness MCP](docs/HARNESS_MCP.md) · Agent-to-Agent
 (`neograph::a2a`, server + client + caller node) · Agent Client Protocol
 (`neograph::acp`, editor-driven) · gRPC service (`neograph::grpc`, opt-in) ·
@@ -232,7 +233,9 @@ async HTTP/HTTPS/WS + SSE (`neograph::async`).
 
 **Durable state** — `PostgresCheckpointStore`, `SqliteCheckpointStore`, and
 `InMemoryCheckpointStore` behind one `CheckpointStore` interface (all
-Python-bound). Lock-free `RequestQueue` + `AsyncTool` in `neograph::util`.
+Python-bound), plus `SqliteHarnessRecordStore` for immutable Harness artifacts
+and restart-safe run records. Lock-free `RequestQueue` + `AsyncTool` in
+`neograph::util`.
 
 `NEOGRAPH_BUILD_MCP` remains the compatibility umbrella for both MCP roles.
 Use `NEOGRAPH_BUILD_MCP_CLIENT` or `NEOGRAPH_BUILD_MCP_SERVER` for a narrow

@@ -11,3 +11,7 @@ find_package(NeoGraph CONFIG REQUIRED)
 
 add_executable(consumer main.cpp)
 target_link_libraries(consumer PRIVATE neograph::core)
+if(TARGET neograph::mcp_sqlite)
+    target_link_libraries(consumer PRIVATE neograph::mcp_sqlite)
+    target_compile_definitions(consumer PRIVATE NEOGRAPH_CONSUMER_HAS_MCP_SQLITE)
+endif()
