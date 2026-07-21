@@ -1211,6 +1211,78 @@ INSERT INTO neograph_harness_runs VALUES
     EXPECT_EQ(records.list_events("run_1")[0]["event_type"], "migration.verified");
 }
 
+TEST(HarnessServiceTest, SqliteRetentionDeletesTerminalLeavesBeforeReferencedSources) {
+    const auto           root = unique_temp_path("neograph-harness-retention");
+    TempDirectoryCleanup cleanup(root);
+    std::filesystem::create_directories(root);
+    neograph::mcp::SqliteHarnessRecordStore records((root / "runs.db").string());
+    for (int index = 1; index <= 3; ++index) {
+        const auto artifact_id = "artifact_" + std::to_string(index);
+        records.save_artifact(artifact_id, {
+                                               {"artifact_id", artifact_id},
+                                               {"request", json::object()},
+                                           });
+    }
+    const auto run = [](std::string run_id, std::string artifact_id, std::string status,
+                        std::string source_run_id = {}) {
+        return json{
+            {"run_id", std::move(run_id)},
+            {"artifact_id", std::move(artifact_id)},
+            {"revision_digest", "revision"},
+            {"protocol_version", "protocol"},
+            {"profile", "profile"},
+            {"status", std::move(status)},
+            {"source_run_id", std::move(source_run_id)},
+        };
+    };
+    records.save_run("run_source", run("run_source", "artifact_1", "completed"));
+    records.save_run("run_fork", run("run_fork", "artifact_2", "completed", "run_source"));
+    records.save_run("run_active", run("run_active", "artifact_3", "running"));
+    EXPECT_THROW(
+        records.save_run("run_orphan", run("run_orphan", "artifact_2", "completed", "missing")),
+        std::invalid_argument);
+    records.append_event({
+        {"run_id", "run_fork"},
+        {"artifact_id", "artifact_2"},
+        {"revision_digest", "revision"},
+        {"protocol_version", "protocol"},
+        {"profile", "profile"},
+        {"event_type", "retention.test"},
+        {"payload", json::object()},
+    });
+
+    neograph::mcp::HarnessRetentionPolicy blocked;
+    blocked.max_runs      = 1;
+    blocked.max_artifacts = 1;
+    blocked.protected_run_ids.push_back("run_fork");
+    const auto blocked_result = records.cleanup_retained(blocked);
+    EXPECT_TRUE(blocked_result.run_ids.empty());
+    EXPECT_TRUE(blocked_result.artifact_ids.empty());
+    EXPECT_TRUE(records.load_run("run_source").has_value());
+    EXPECT_TRUE(records.load_run("run_fork").has_value());
+
+    neograph::mcp::HarnessRetentionPolicy remove_leaf;
+    remove_leaf.max_runs      = 2;
+    remove_leaf.max_artifacts = 2;
+    const auto leaf_result    = records.cleanup_retained(remove_leaf);
+    ASSERT_EQ(leaf_result.run_ids, std::vector<std::string>({"run_fork"}));
+    ASSERT_EQ(leaf_result.artifact_ids, std::vector<std::string>({"artifact_2"}));
+    EXPECT_FALSE(records.load_run("run_fork").has_value());
+    EXPECT_TRUE(records.list_events("run_fork").empty());
+    EXPECT_TRUE(records.load_run("run_source").has_value());
+    EXPECT_TRUE(records.load_run("run_active").has_value());
+
+    neograph::mcp::HarnessRetentionPolicy remove_source;
+    remove_source.max_runs      = 1;
+    remove_source.max_artifacts = 1;
+    const auto source_result    = records.cleanup_retained(remove_source);
+    ASSERT_EQ(source_result.run_ids, std::vector<std::string>({"run_source"}));
+    ASSERT_EQ(source_result.artifact_ids, std::vector<std::string>({"artifact_1"}));
+    EXPECT_FALSE(records.load_run("run_source").has_value());
+    EXPECT_TRUE(records.load_run("run_active").has_value());
+    EXPECT_TRUE(records.load_artifact("artifact_3").has_value());
+}
+
 TEST(HarnessServiceTest, JournalCorrelatesProviderAndCapabilityCallsToWorkerAttempt) {
     const auto root = unique_temp_path("neograph-harness-journal-correlation");
     TempDirectoryCleanup cleanup(root);
