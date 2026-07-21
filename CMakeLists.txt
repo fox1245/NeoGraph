@@ -625,6 +625,7 @@ endif()
 if(NEOGRAPH_BUILD_MCP_CLIENT OR NEOGRAPH_BUILD_MCP_SERVER)
     add_library(neograph_mcp_types
         src/mcp/types.cpp
+        src/mcp/json_schema.cpp
     )
     target_include_directories(neograph_mcp_types
         PUBLIC
@@ -659,6 +660,7 @@ endif()
 if(NEOGRAPH_BUILD_MCP_SERVER)
     add_library(neograph_mcp_server
         src/mcp/server.cpp
+        src/mcp/harness.cpp
     )
     target_include_directories(neograph_mcp_server
         PUBLIC

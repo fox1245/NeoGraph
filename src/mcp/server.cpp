@@ -1,6 +1,6 @@
 #include <neograph/mcp/server.h>
+#include <neograph/mcp/json_schema.h>
 
-#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -44,180 +44,11 @@ std::string request_key(const json& id) {
     return "n:" + id.dump();
 }
 
-bool schema_type_matches(const json& value, const std::string& type) {
-    if (type == "null") return value.is_null();
-    if (type == "boolean") return value.is_boolean();
-    if (type == "object") return value.is_object();
-    if (type == "array") return value.is_array();
-    if (type == "number") return value.is_number();
-    if (type == "integer") return value.is_number_integer();
-    if (type == "string") return value.is_string();
-    throw std::invalid_argument("unsupported JSON Schema type: " + type);
-}
-
-void validate_schema_shape(const json& schema, const std::string& path) {
-    if (!schema.is_object()) {
-        throw std::invalid_argument("JSON Schema at " + path + " must be an object");
-    }
-    if (schema.contains("type")) {
-        const auto validate_type = [&path](const json& type) {
-            if (!type.is_string()) {
-                throw std::invalid_argument("JSON Schema type at " + path
-                                            + " must contain strings");
-            }
-            static const std::vector<std::string> supported = {
-                "null", "boolean", "object", "array", "number", "integer", "string"
-            };
-            const auto name = type.get<std::string>();
-            if (std::find(supported.begin(), supported.end(), name) == supported.end()) {
-                throw std::invalid_argument("unsupported JSON Schema type: " + name);
-            }
-        };
-        if (schema["type"].is_string()) {
-            validate_type(schema["type"]);
-        } else if (schema["type"].is_array()) {
-            for (const auto& type : schema["type"]) validate_type(type);
-        } else {
-            throw std::invalid_argument("JSON Schema type at " + path
-                                        + " must be a string or array");
-        }
-    }
-    if (schema.contains("enum") && !schema["enum"].is_array()) {
-        throw std::invalid_argument("JSON Schema enum at " + path
-                                    + " must be an array");
-    }
-    if (schema.contains("required")) {
-        if (!schema["required"].is_array()) {
-            throw std::invalid_argument("JSON Schema required at " + path
-                                        + " must be an array");
-        }
-        for (const auto& name : schema["required"]) {
-            if (!name.is_string()) {
-                throw std::invalid_argument("JSON Schema required at " + path
-                                            + " must contain strings");
-            }
-        }
-    }
-    if (schema.contains("properties")) {
-        if (!schema["properties"].is_object()) {
-            throw std::invalid_argument("JSON Schema properties at " + path
-                                        + " must be an object");
-        }
-        for (auto it = schema["properties"].begin();
-             it != schema["properties"].end(); ++it) {
-            validate_schema_shape(it.value(), path + "/properties/" + it.key());
-        }
-    }
-    if (schema.contains("items")) {
-        validate_schema_shape(schema["items"], path + "/items");
-    }
-}
-
-void validate_value(const json& value, const json& schema,
-                    const std::string& subject, const std::string& path) {
-    if (!schema.is_object()) {
-        throw std::invalid_argument(subject + " schema at " + path
-                                    + " must be an object");
-    }
-    if (schema.contains("const") && value != schema["const"]) {
-        throw std::invalid_argument(subject + " at " + path
-                                    + " does not match const");
-    }
-    if (schema.contains("enum")) {
-        if (!schema["enum"].is_array()) {
-            throw std::invalid_argument(subject + " schema enum at " + path
-                                        + " must be an array");
-        }
-        bool matched = false;
-        for (const auto& candidate : schema["enum"]) {
-            if (candidate == value) {
-                matched = true;
-                break;
-            }
-        }
-        if (!matched) {
-            throw std::invalid_argument(subject + " at " + path
-                                        + " is not in enum");
-        }
-    }
-    if (schema.contains("type")) {
-        bool matched = false;
-        const auto& types = schema["type"];
-        if (types.is_string()) {
-            matched = schema_type_matches(value, types.get<std::string>());
-        } else if (types.is_array()) {
-            for (const auto& type : types) {
-                if (!type.is_string()) {
-                    throw std::invalid_argument(subject + " schema type at "
-                                                + path + " must contain strings");
-                }
-                if (schema_type_matches(value, type.get<std::string>())) {
-                    matched = true;
-                    break;
-                }
-            }
-        } else {
-            throw std::invalid_argument(subject + " schema type at " + path
-                                        + " must be a string or array");
-        }
-        if (!matched) {
-            throw std::invalid_argument(subject + " at " + path
-                                        + " has the wrong JSON type");
-        }
-    }
-    if (value.is_object()) {
-        if (schema.contains("required")) {
-            if (!schema["required"].is_array()) {
-                throw std::invalid_argument(subject + " schema required at "
-                                            + path + " must be an array");
-            }
-            for (const auto& name : schema["required"]) {
-                if (!name.is_string()) {
-                    throw std::invalid_argument(subject
-                        + " schema required entries must be strings");
-                }
-                const auto property = name.get<std::string>();
-                if (!value.contains(property)) {
-                    throw std::invalid_argument(subject + " at " + path
-                                                + " is missing required property "
-                                                + property);
-                }
-            }
-        }
-        const json properties = schema.value("properties", json::object());
-        if (!properties.is_object()) {
-            throw std::invalid_argument(subject + " schema properties at "
-                                        + path + " must be an object");
-        }
-        for (auto it = properties.begin(); it != properties.end(); ++it) {
-            if (value.contains(it.key())) {
-                validate_value(value[it.key()], it.value(), subject,
-                               path + "/" + it.key());
-            }
-        }
-        if (schema.value("additionalProperties", true) == false) {
-            for (auto it = value.begin(); it != value.end(); ++it) {
-                if (!properties.contains(it.key())) {
-                    throw std::invalid_argument(subject + " at " + path
-                                                + " has unexpected property "
-                                                + it.key());
-                }
-            }
-        }
-    }
-    if (value.is_array() && schema.contains("items")) {
-        for (std::size_t i = 0; i < value.size(); ++i) {
-            validate_value(value[i], schema["items"], subject,
-                           path + "/" + std::to_string(i));
-        }
-    }
-}
-
 void validate_definition(const ToolDefinition& definition) {
     ToolDefinition::from_json(definition.to_json());
-    validate_schema_shape(definition.input_schema, "inputSchema");
+    validate_json_schema(definition.input_schema, "inputSchema");
     if (!definition.output_schema.is_null()) {
-        validate_schema_shape(definition.output_schema, "outputSchema");
+        validate_json_schema(definition.output_schema, "outputSchema");
     }
 }
 
@@ -307,9 +138,9 @@ struct MCPServer::Impl {
                         throw std::invalid_argument(
                             "tool advertised outputSchema but returned no structuredContent");
                     }
-                    validate_value(result.structured_content,
-                                   task->tool.definition.output_schema,
-                                   "MCP tool structuredContent", "$");
+                    validate_json_value(result.structured_content,
+                                        task->tool.definition.output_schema,
+                                        "MCP tool structuredContent", "$");
                 }
                 task->cancel->throw_if_cancelled("after tool execution");
             } catch (const graph::CancelledException& e) {
@@ -399,8 +230,8 @@ struct MCPServer::Impl {
             tool = it->second;
         }
         try {
-            validate_value(arguments, tool.definition.input_schema,
-                           "MCP tool arguments", "$");
+            validate_json_value(arguments, tool.definition.input_schema,
+                                "MCP tool arguments", "$");
         } catch (const std::exception& e) {
             return rpc_result(tool_error(e.what()).to_json(), id);
         }
