@@ -223,6 +223,7 @@ TEST(HarnessServiceTest, ExposesSmallStableMcpToolSurface) {
     EXPECT_EQ(listed["result"]["tools"][4]["name"], "neograph_schema");
     EXPECT_EQ(listed["result"]["tools"][5]["name"], "neograph_start");
     bool saw_debug_views = false;
+    bool saw_replay      = false;
     for (const auto& tool : listed["result"]["tools"]) {
         EXPECT_TRUE(tool.contains("outputSchema"));
         EXPECT_EQ(tool["inputSchema"].value("type", ""), "object");
@@ -232,9 +233,14 @@ TEST(HarnessServiceTest, ExposesSmallStableMcpToolSurface) {
             EXPECT_EQ(schema["after_sequence"]["minimum"], 0);
             EXPECT_EQ(schema["view"]["enum"].size(), 7u);
             saw_debug_views = true;
+        } else if (tool["name"] == "neograph_start") {
+            const auto replay = tool["inputSchema"]["properties"]["replay"];
+            EXPECT_EQ(replay["properties"]["mode"]["enum"].size(), 2u);
+            saw_replay = true;
         }
     }
     EXPECT_TRUE(saw_debug_views);
+    EXPECT_TRUE(saw_replay);
 
     auto invalid_get = server.handle_message({
         {"jsonrpc", "2.0"},
@@ -1369,11 +1375,162 @@ TEST(HarnessServiceTest, DebugViewsExposeJournalAndCheckpointHistoryThroughUris)
                  std::invalid_argument);
 }
 
+TEST(HarnessServiceTest, RecordedReplaySurvivesReconnectWithoutCallingLiveExecutor) {
+    const auto           root = unique_temp_path("neograph-harness-recorded-replay");
+    TempDirectoryCleanup cleanup(root);
+    std::filesystem::create_directories(root);
+    neograph::mcp::SqliteHarnessJournalConfig journal_config;
+    journal_config.mode = neograph::mcp::HarnessJournalPayloadMode::FULL;
+    auto records        = std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(
+        (root / "runs.db").string(), 5s, journal_config);
+    std::atomic<int> live_calls{0};
+    std::string      source_run_id;
+    json             source_workers;
+
+    {
+        HarnessServiceConfig config;
+        config.record_store    = records;
+        config.worker_executor = [&](const HarnessWorkerCall& call, const auto&) {
+            live_calls.fetch_add(1, std::memory_order_relaxed);
+            const auto worker_id = call.worker["id"].get<std::string>();
+            if (worker_id == "a" && call.attempt == 1) {
+                return HarnessWorkerResponse::parse_error("recorded parse failure");
+            }
+            return HarnessWorkerResponse::success({
+                {"status", "ok"},
+                {"findings", json::array({{{"evidence", "source " + worker_id}}})},
+            });
+        };
+        HarnessService service(std::move(config));
+        const auto     compiled = service.compile(request(json::array({worker("a"), worker("b")})));
+        ASSERT_TRUE(compiled["ok"].get<bool>()) << compiled.dump();
+        const auto started = service.start({{"artifact_id", compiled["artifact_id"]}});
+        source_run_id      = started["run_id"].get<std::string>();
+        const auto source  = wait_terminal(service, source_run_id);
+        ASSERT_EQ(source["status"], "completed") << source.dump();
+        source_workers = source["result"]["workers"];
+        EXPECT_EQ(live_calls.load(std::memory_order_relaxed), 3);
+    }
+
+    HarnessServiceConfig config;
+    config.record_store    = records;
+    config.worker_executor = [&](const HarnessWorkerCall& call, const auto&) {
+        live_calls.fetch_add(1, std::memory_order_relaxed);
+        const auto worker_id = call.worker["id"].get<std::string>();
+        if (worker_id == "a" && call.attempt == 1) {
+            return HarnessWorkerResponse::parse_error("live parse failure");
+        }
+        return HarnessWorkerResponse::success({
+            {"status", "ok"},
+            {"findings", json::array({{{"evidence", "live " + worker_id}}})},
+        });
+    };
+    HarnessService service(std::move(config));
+
+    const auto recorded = service.start({
+        {"replay", {{"source_run_id", source_run_id}, {"mode", "recorded"}}},
+    });
+    ASSERT_TRUE(recorded["started"].get<bool>());
+    EXPECT_EQ(recorded["execution_mode"], "recorded_replay");
+    EXPECT_EQ(recorded["source_run_id"], source_run_id);
+    const auto recorded_run_id = recorded["run_id"].get<std::string>();
+    const auto replayed        = wait_terminal(service, recorded_run_id);
+    ASSERT_EQ(replayed["status"], "completed") << replayed.dump();
+    EXPECT_EQ(replayed["execution_mode"], "recorded_replay");
+    EXPECT_EQ(replayed["source_run_id"], source_run_id);
+    EXPECT_EQ(replayed["result"]["workers"], source_workers);
+    EXPECT_EQ(live_calls.load(std::memory_order_relaxed), 3)
+        << "recorded replay must not invoke provider/tool execution";
+
+    const auto live = service.start({
+        {"replay", {{"source_run_id", source_run_id}, {"mode", "live"}}},
+    });
+    EXPECT_EQ(live["execution_mode"], "live_replay");
+    const auto live_result = wait_terminal(service, live["run_id"].get<std::string>());
+    ASSERT_EQ(live_result["status"], "completed") << live_result.dump();
+    EXPECT_EQ(live_result["execution_mode"], "live_replay");
+    EXPECT_EQ(live_result["source_run_id"], source_run_id);
+    EXPECT_EQ(live_calls.load(std::memory_order_relaxed), 6);
+    ASSERT_EQ(live_result["result"]["findings"].size(), 2u);
+    EXPECT_EQ(live_result["result"]["findings"][0]["evidence"], "live a");
+    EXPECT_EQ(live_result["result"]["findings"][1]["evidence"], "live b");
+}
+
+TEST(HarnessServiceTest, RecordedReplayRejectsRedactedWorkerOutputs) {
+    const auto           root = unique_temp_path("neograph-harness-redacted-replay");
+    TempDirectoryCleanup cleanup(root);
+    std::filesystem::create_directories(root);
+    auto records =
+        std::make_shared<neograph::mcp::SqliteHarnessRecordStore>((root / "runs.db").string());
+    HarnessServiceConfig config;
+    config.record_store    = records;
+    config.worker_executor = [](const HarnessWorkerCall&, const auto&) {
+        return HarnessWorkerResponse::success({{"status", "ok"}, {"findings", json::array()}});
+    };
+    HarnessService service(std::move(config));
+    const auto     compiled = service.compile(request());
+    ASSERT_TRUE(compiled["ok"].get<bool>()) << compiled.dump();
+    const auto started       = service.start({{"artifact_id", compiled["artifact_id"]}});
+    const auto source_run_id = started["run_id"].get<std::string>();
+    ASSERT_EQ(wait_terminal(service, source_run_id)["status"], "completed");
+
+    EXPECT_THROW(service.start({
+                     {"replay", {{"source_run_id", source_run_id}, {"mode", "recorded"}}},
+                 }),
+                 std::runtime_error);
+}
+
+TEST(HarnessServiceTest, RecordedReplayPreservesTerminalWorkerFailure) {
+    const auto           root = unique_temp_path("neograph-harness-failed-replay");
+    TempDirectoryCleanup cleanup(root);
+    std::filesystem::create_directories(root);
+    neograph::mcp::SqliteHarnessJournalConfig journal_config;
+    journal_config.mode = neograph::mcp::HarnessJournalPayloadMode::FULL;
+    auto records        = std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(
+        (root / "runs.db").string(), 5s, journal_config);
+    std::atomic<int>     live_calls{0};
+    HarnessServiceConfig config;
+    config.record_store    = records;
+    config.worker_executor = [&](const HarnessWorkerCall&, const auto&) {
+        live_calls.fetch_add(1, std::memory_order_relaxed);
+        return HarnessWorkerResponse::timeout("recorded timeout");
+    };
+    HarnessService service(std::move(config));
+    const auto     compiled = service.compile(request());
+    ASSERT_TRUE(compiled["ok"].get<bool>()) << compiled.dump();
+    const auto started       = service.start({{"artifact_id", compiled["artifact_id"]}});
+    const auto source_run_id = started["run_id"].get<std::string>();
+    const auto source        = wait_terminal(service, source_run_id);
+    ASSERT_EQ(source["status"], "completed") << source.dump();
+    ASSERT_EQ(source["result"]["workers"][0]["failure_kind"], "timeout");
+
+    const auto replay   = service.start({
+        {"replay", {{"source_run_id", source_run_id}, {"mode", "recorded"}}},
+    });
+    const auto replayed = wait_terminal(service, replay["run_id"].get<std::string>());
+    ASSERT_EQ(replayed["status"], "completed") << replayed.dump();
+    EXPECT_EQ(replayed["result"]["workers"], source["result"]["workers"]);
+    EXPECT_EQ(live_calls.load(std::memory_order_relaxed), 1);
+
+    const auto events               = records->list_events(source_run_id);
+    bool       saw_terminal_attempt = false;
+    for (const auto& event : events) {
+        if (event["event_type"] == "worker.attempt.completed" &&
+            event["payload"].value("retry_reason", "") == "timeout") {
+            EXPECT_FALSE(event["payload"]["retry_scheduled"].get<bool>());
+            saw_terminal_attempt = true;
+        }
+    }
+    EXPECT_TRUE(saw_terminal_attempt);
+}
+
 TEST(HarnessServiceTest, DurableHostResumeSurvivesServiceAndDatabaseReconnect) {
     const auto root     = unique_temp_path("neograph-harness-resume");
     const auto database = root / "checkpoints.db";
     const auto records_database = root / "runs.db";
     std::filesystem::create_directories(root);
+    neograph::mcp::SqliteHarnessJournalConfig journal_config;
+    journal_config.mode               = neograph::mcp::HarnessJournalPayloadMode::FULL;
     auto                     provider = std::make_shared<ScriptedProvider>();
     neograph::ChatCompletion tool_request;
     tool_request.message.tool_calls.push_back(
@@ -1388,8 +1545,8 @@ TEST(HarnessServiceTest, DurableHostResumeSurvivesServiceAndDatabaseReconnect) {
         HarnessServiceConfig config;
         config.checkpoint_store =
             std::make_shared<neograph::graph::SqliteCheckpointStore>(database.string());
-        config.record_store =
-            std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(records_database.string());
+        config.record_store = std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(
+            records_database.string(), 5s, journal_config);
         neograph::mcp::HarnessProviderExecutorConfig provider_config;
         provider_config.provider = provider;
         config.worker_executor =
@@ -1408,8 +1565,8 @@ TEST(HarnessServiceTest, DurableHostResumeSurvivesServiceAndDatabaseReconnect) {
         HarnessServiceConfig config;
         config.checkpoint_store =
             std::make_shared<neograph::graph::SqliteCheckpointStore>(database.string());
-        config.record_store =
-            std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(records_database.string());
+        config.record_store = std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(
+            records_database.string(), 5s, journal_config);
         neograph::mcp::HarnessProviderExecutorConfig provider_config;
         provider_config.provider = provider;
         config.worker_executor =
@@ -1446,7 +1603,28 @@ TEST(HarnessServiceTest, DurableHostResumeSurvivesServiceAndDatabaseReconnect) {
     ASSERT_EQ(provider->calls.size(), 2u);
     EXPECT_NE(provider->calls[1].messages[0].content.find("host_resume"), std::string::npos);
     {
-        neograph::mcp::SqliteHarnessRecordStore records(records_database.string());
+        HarnessServiceConfig config;
+        config.checkpoint_store =
+            std::make_shared<neograph::graph::SqliteCheckpointStore>(database.string());
+        config.record_store = std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(
+            records_database.string(), 5s, journal_config);
+        neograph::mcp::HarnessProviderExecutorConfig provider_config;
+        provider_config.provider = provider;
+        config.worker_executor =
+            neograph::mcp::make_provider_harness_executor(std::move(provider_config));
+        HarnessService service(std::move(config));
+        const auto     replay   = service.start({
+            {"replay", {{"source_run_id", run_id}, {"mode", "recorded"}}},
+        });
+        const auto     replayed = wait_terminal(service, replay["run_id"].get<std::string>());
+        ASSERT_EQ(replayed["status"], "completed") << replayed.dump();
+        EXPECT_EQ(replayed["execution_mode"], "recorded_replay");
+    }
+    EXPECT_EQ(provider->calls.size(), 2u)
+        << "replaying a resumed run must not repeat provider or host calls";
+    {
+        neograph::mcp::SqliteHarnessRecordStore records(records_database.string(), 5s,
+                                                        journal_config);
         const auto events = records.list_events(run_id);
         std::string requested;
         std::string accepted;

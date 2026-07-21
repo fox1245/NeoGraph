@@ -92,6 +92,26 @@ preserved. The `diff` view is computed from the checkpoint store rather than
 the journal and can contain full channel values; treat access to it like access
 to the existing detailed run result.
 
+## Replay Modes
+
+`neograph_start` can replay a completed run without adding another MCP tool:
+
+```json
+{"replay":{"source_run_id":"run_123","mode":"recorded"}}
+```
+
+`recorded` re-executes the compiler-locked graph with the source journal's
+completed worker-attempt results. It never calls the configured worker,
+provider, MCP, A2A, or capability executor. The source artifact revision,
+protocol, and profile must still match, and the journal must use `FULL` payload
+mode. `REDACTED` and `METADATA_ONLY` journals deliberately cannot replay because
+they do not retain the exact worker output. Interrupted attempts are discarded;
+the completed post-resume worker invocation is replayed.
+
+Use `mode: "live"` to execute the same retained artifact with live providers and
+tools. Snapshots and journal lifecycle events label runs as `recorded_replay` or
+`live_replay` and include `source_run_id`; ordinary starts remain `live`.
+
 ## Streamable HTTP
 
 Remote transport is opt-in so the existing stdio-only target remains small and

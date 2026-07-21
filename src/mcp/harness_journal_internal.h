@@ -8,6 +8,8 @@
 
 namespace neograph::mcp::detail {
 
+inline constexpr const char* kHarnessRedactedMarker = "[REDACTED]";
+
 struct HarnessJournalContext {
     std::shared_ptr<HarnessJournal> journal;
     std::string run_id;
