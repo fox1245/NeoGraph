@@ -30,7 +30,8 @@ struct SqliteHarnessJournalConfig {
 
 /** Local SQLite implementation of Harness snapshots and the causal journal. */
 class NEOGRAPH_API SqliteHarnessRecordStore final : public HarnessRecordStore,
-                                                    public HarnessJournal {
+                                                    public HarnessJournal,
+                                                    public HarnessRetentionStore {
 public:
     /// Open or create a store with a five-second SQLite busy timeout.
     explicit SqliteHarnessRecordStore(const std::string& db_path);
@@ -53,6 +54,7 @@ public:
     std::vector<json>   list_events(const std::string& run_id,
                                     std::size_t        after_sequence = 0,
                                     std::size_t        limit = 1000) override;
+    HarnessRetentionResult cleanup_retained(const HarnessRetentionPolicy& policy) override;
 
 private:
     struct Impl;
