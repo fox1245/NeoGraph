@@ -7,7 +7,8 @@
 
 namespace neograph::mcp {
 
-HarnessCapabilityExecutor make_mcp_harness_capability_executor(
+std::function<json(const json&, const json&, const std::shared_ptr<graph::CancelToken>&)>
+make_mcp_harness_capability_executor(
     std::map<std::string, std::shared_ptr<MCPClient>> clients) {
     return [clients = std::move(clients)](
                const json& tool, const json& arguments,
