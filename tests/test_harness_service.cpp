@@ -100,6 +100,19 @@ std::filesystem::path unique_temp_path(const std::string& stem) {
             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
 }
 
+class TempDirectoryCleanup {
+public:
+    explicit TempDirectoryCleanup(std::filesystem::path path) : path_(std::move(path)) {}
+
+    ~TempDirectoryCleanup() {
+        std::error_code error;
+        std::filesystem::remove_all(path_, error);
+    }
+
+private:
+    std::filesystem::path path_;
+};
+
 struct ServerResponses {
     std::mutex              mutex;
     std::condition_variable cv;
@@ -470,8 +483,9 @@ TEST(HarnessServiceTest, ProviderExecutorRejectsSymlinkWorkspaceEscape) {
 }
 
 TEST(HarnessServiceTest, ExperimentalTasksProfileNegotiatesAndResumesInput) {
-    const auto               root     = unique_temp_path("neograph-harness-tasks");
-    auto                     provider = std::make_shared<ScriptedProvider>();
+    const auto           root = unique_temp_path("neograph-harness-tasks");
+    TempDirectoryCleanup cleanup(root);
+    auto                 provider = std::make_shared<ScriptedProvider>();
     neograph::ChatCompletion tool_request;
     tool_request.message.tool_calls.push_back(
         {"provider-call", "host.lookup", R"({"query":"needle"})"});
@@ -579,11 +593,11 @@ TEST(HarnessServiceTest, ExperimentalTasksProfileNegotiatesAndResumesInput) {
     });
     EXPECT_EQ(completed["result"]["status"], "completed") << completed.dump();
     EXPECT_EQ(completed["result"]["result"]["structuredContent"]["status"], "completed");
-    std::filesystem::remove_all(root);
 }
 
 TEST(HarnessServiceTest, ExperimentalTasksProfileFallsBackWithoutRequestOptIn) {
     const auto           root = unique_temp_path("neograph-harness-tasks-fallback");
+    TempDirectoryCleanup cleanup(root);
     HarnessServiceConfig config;
     config.checkpoint_store = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
     config.record_store = std::make_shared<neograph::mcp::FileHarnessRecordStore>(root.string());
@@ -661,7 +675,6 @@ TEST(HarnessServiceTest, ExperimentalTasksProfileFallsBackWithoutRequestOptIn) {
         {"params", {{"taskId", run_id}}},
     });
     EXPECT_EQ(rejected["error"]["code"], -32602);
-    std::filesystem::remove_all(root);
 }
 
 TEST(HarnessServiceTest, HostBrokeredToolsRequireDurableStores) {
