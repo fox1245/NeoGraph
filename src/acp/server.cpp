@@ -112,6 +112,12 @@ std::string fresh_session_id() {
     return buf;
 }
 
+bool is_interrupt_phase(neograph::graph::CheckpointPhase phase) {
+    return phase == neograph::graph::CheckpointPhase::Before ||
+           phase == neograph::graph::CheckpointPhase::After ||
+           phase == neograph::graph::CheckpointPhase::NodeInterrupt;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -140,6 +146,9 @@ struct ACPServer::Impl {
 
     std::mutex                                    sessions_mu;
     std::map<std::string, std::string>            sessions;
+    /// Sessions whose latest engine result is paused. The next prompt is
+    /// consumed as the resume value exactly once instead of starting at entry.
+    std::set<std::string>                         interrupted_sessions;
     /// Per-session cancel flags held behind shared_ptrs so a worker
     /// thread can capture the pointer at dispatch time (under the
     /// lock) and read/write the flag thereafter without re-traversing
@@ -176,6 +185,9 @@ struct ACPServer::Impl {
     std::condition_variable                       workers_cv;
     int                                           inflight_count = 0;
     std::set<std::string>                         inflight_sessions;
+    /// Sessions currently being restored from checkpoint. Prompt admission
+    /// rejects these until the persisted interrupt state is installed.
+    std::set<std::string>                         resuming_sessions;
     int                                           max_inflight_prompts = 32;
 #if defined(NEOGRAPH_ACP_TESTING)
     std::atomic<bool>                             fail_next_worker_launch{false};
@@ -186,6 +198,7 @@ struct ACPServer::Impl {
         Impl*       owner;
         std::string session_id;
         bool        active = false;
+        bool        session_active = false;
 
         WorkerReservation(Impl* owner_in, std::string session_id_in)
             : owner(owner_in), session_id(std::move(session_id_in)) {}
@@ -194,10 +207,32 @@ struct ACPServer::Impl {
             if (!active) return;
             std::lock_guard lk(owner->workers_mu);
             --owner->inflight_count;
-            owner->inflight_sessions.erase(session_id);
+            if (session_active) owner->inflight_sessions.erase(session_id);
             // Keep notify under the lock. A waiter cannot destroy the cv
             // after seeing count==0 while this notify is still executing.
             owner->workers_cv.notify_all();
+        }
+
+        void release_session() {
+            std::lock_guard lk(owner->workers_mu);
+            if (!session_active) return;
+            owner->inflight_sessions.erase(session_id);
+            session_active = false;
+        }
+    };
+
+    struct ResumeReservation {
+        Impl*       owner;
+        std::string session_id;
+        bool        active = false;
+
+        ResumeReservation(Impl* owner_in, std::string session_id_in)
+            : owner(owner_in), session_id(std::move(session_id_in)) {}
+
+        ~ResumeReservation() {
+            if (!active) return;
+            std::lock_guard lk(owner->workers_mu);
+            owner->resuming_sessions.erase(session_id);
         }
     };
 
@@ -209,7 +244,9 @@ struct ACPServer::Impl {
     neograph::json handle_initialize(const neograph::json& params,
                                      const neograph::json& id);
     neograph::json handle_session_new(const neograph::json& params,
-                                      const neograph::json& id);
+                                       const neograph::json& id);
+    neograph::json handle_session_resume(const neograph::json& params,
+                                          const neograph::json& id);
     void           handle_session_prompt(ACPServer& owner,
                                          const neograph::json& params,
                                          const neograph::json& id);
@@ -289,6 +326,64 @@ ACPServer::Impl::handle_session_new(const neograph::json& params,
     return jsonrpc_result(std::move(rj), id);
 }
 
+neograph::json
+ACPServer::Impl::handle_session_resume(const neograph::json& params,
+                                       const neograph::json& id) {
+    ResumeSessionRequest req;
+    try { from_json(params, req); }
+    catch (const std::exception& e) {
+        return jsonrpc_error(-32602, std::string("Invalid params: ") + e.what(), id);
+    }
+
+    ResumeReservation reservation(this, req.session_id);
+    {
+        std::lock_guard lk(workers_mu);
+        if (inflight_sessions.count(req.session_id) ||
+            resuming_sessions.count(req.session_id)) {
+            return jsonrpc_error(
+                -32000,
+                "session_id " + req.session_id + " is already in use",
+                id);
+        }
+        resuming_sessions.insert(req.session_id);
+        reservation.active = true;
+    }
+
+    std::vector<neograph::graph::Checkpoint> history;
+    try {
+        history = engine->get_state_history(req.session_id, 1);
+    } catch (const std::exception& e) {
+        return jsonrpc_error(
+            -32603, std::string("Failed to restore session: ") + e.what(), id);
+    }
+    if (history.empty()) {
+        return jsonrpc_error(-32001, "Unknown session: " + req.session_id, id);
+    }
+
+    {
+        std::lock_guard lk(sessions_mu);
+        auto existing = sessions.find(req.session_id);
+        if (existing != sessions.end() && !existing->second.empty() &&
+            existing->second != req.cwd) {
+            return jsonrpc_error(
+                -32602, "session/resume cwd does not match the existing session", id);
+        }
+        sessions[req.session_id] = req.cwd;
+        if (!cancel_flags.count(req.session_id)) {
+            cancel_flags[req.session_id] =
+                std::make_shared<std::atomic<bool>>(false);
+        }
+        if (is_interrupt_phase(history.front().interrupt_phase)) {
+            interrupted_sessions.insert(req.session_id);
+        } else {
+            interrupted_sessions.erase(req.session_id);
+        }
+    }
+
+    // ACP v1 session/resume restores context without replaying session/update.
+    return jsonrpc_result(neograph::json::object(), id);
+}
+
 void
 ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                                        const neograph::json& params,
@@ -300,25 +395,10 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
         return;
     }
 
-    // Capture the cancel-flag shared_ptr while holding sessions_mu so the
-    // worker can read/write it later without re-traversing the map.
-    std::shared_ptr<std::atomic<bool>> my_cancel;
-    {
-        std::lock_guard lk(sessions_mu);
-        if (sessions.count(req.session_id) == 0) {
-            sessions[req.session_id] = "";
-        }
-        auto it = cancel_flags.find(req.session_id);
-        if (it == cancel_flags.end() || !it->second) {
-            my_cancel = std::make_shared<std::atomic<bool>>(false);
-            cancel_flags[req.session_id] = my_cancel;
-        } else {
-            my_cancel = it->second;
-        }
-    }
-
     // Backpressure: refuse new prompts when the in-flight cap is hit
-    // or the same session_id is already executing. Without these
+    // or the same session_id is already executing/restoring. Reserve the
+    // session before reading its interrupt state so session/resume cannot
+    // install that state between the read and worker admission. Without these
     // guards a misbehaving peer that pipelines prompts faster than
     // the engine completes would (a) exhaust the host's thread quota
     // and unbounded-grow the worker tracking, or (b) race two prompts
@@ -335,20 +415,41 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                 std::string("ACP server overloaded: ")
                 + std::to_string(max_inflight_prompts)
                 + " concurrent prompts in flight; retry shortly", id);
-        } else if (inflight_sessions.count(req.session_id)) {
+        } else if (inflight_sessions.count(req.session_id) ||
+                   resuming_sessions.count(req.session_id)) {
             rejection = jsonrpc_error(-32000,
                 std::string("session_id ") + req.session_id
-                + " already has a prompt in flight; ACP requires "
-                  "single-flight per session", id);
+                + " is already in use; ACP requires single-flight "
+                  "per session", id);
         } else {
             inflight_sessions.insert(req.session_id);
             ++inflight_count;
             reservation->active = true;
+            reservation->session_active = true;
         }
     }
     if (!rejection.is_null()) {
         emit(rejection);
         return;
+    }
+
+    // Capture the cancel-flag shared_ptr while holding sessions_mu so the
+    // worker can read/write it later without re-traversing the map.
+    std::shared_ptr<std::atomic<bool>> my_cancel;
+    bool resume_pending = false;
+    {
+        std::lock_guard lk(sessions_mu);
+        if (sessions.count(req.session_id) == 0) {
+            sessions[req.session_id] = "";
+        }
+        auto it = cancel_flags.find(req.session_id);
+        if (it == cancel_flags.end() || !it->second) {
+            my_cancel = std::make_shared<std::atomic<bool>>(false);
+            cancel_flags[req.session_id] = my_cancel;
+        } else {
+            my_cancel = it->second;
+        }
+        resume_pending = interrupted_sessions.count(req.session_id) != 0;
     }
 
     // Run the engine on a detached worker so the run-loop reader can
@@ -366,7 +467,8 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
         }
 #endif
         std::thread worker(
-            [this, req = std::move(req), id, my_cancel, reservation]() mutable {
+            [this, req = std::move(req), id, my_cancel, reservation,
+             resume_pending]() mutable {
                 try {
                     auto& a = *adapter;
 
@@ -377,12 +479,20 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                     bool        graph_failed = false;
                     std::string agent_text;
                     std::string graph_error;
+                    neograph::graph::RunResult run_result;
 
                     try {
-                        cfg.input = a.build_initial_state(
-                            req.prompt, req.session_id);
-                        auto rr = engine->run(cfg);
-                        agent_text = a.extract_agent_text(rr.output);
+                        if (resume_pending) {
+                            run_result = engine->resume(
+                                cfg, neograph::json(a.extract_user_text(req.prompt)));
+                        } else {
+                            cfg.input = a.build_initial_state(
+                                req.prompt, req.session_id);
+                            run_result = engine->run(cfg);
+                        }
+                        if (!run_result.interrupted) {
+                            agent_text = a.extract_agent_text(run_result.output);
+                        }
                     } catch (const std::exception& e) {
                         graph_failed = true;
                         graph_error = e.what();
@@ -404,10 +514,46 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                         to_json(nj, n);
                         emit(jsonrpc_notify("session/update", std::move(nj)));
                     } else {
+                        {
+                            std::lock_guard lk(sessions_mu);
+                            if (run_result.interrupted) {
+                                interrupted_sessions.insert(req.session_id);
+                            } else {
+                                interrupted_sessions.erase(req.session_id);
+                            }
+                        }
                         bool was_cancelled = my_cancel->exchange(
                             false, std::memory_order_acq_rel);
                         if (was_cancelled) {
                             stop = StopReason::Cancelled;
+                        } else if (run_result.interrupted) {
+                            const auto reason = run_result.interrupt_value.value(
+                                "reason", run_result.interrupt_value.value(
+                                    "message", std::string("Graph execution interrupted")));
+                            const auto payload = run_result.interrupt_value.contains("value")
+                                ? run_result.interrupt_value["value"]
+                                : neograph::json();
+
+                            SessionNotification n;
+                            n.session_id = req.session_id;
+                            n.update.session_update = "agent_message_chunk";
+                            n.update.content = ContentBlock::text_block(reason);
+                            // ACP v1 reserves `_meta` for implementation metadata.
+                            // Source: agent-client-protocol-schema/src/v1/ext.rs
+                            // (fetched 2026-07-21 for NeoGraph #153).
+                            n.update.raw = {
+                                {"_meta", {
+                                    {"neograph/interrupt", {
+                                        {"node", run_result.interrupt_node},
+                                        {"reason", reason},
+                                        {"payload", payload},
+                                        {"checkpointId", run_result.checkpoint_id},
+                                    }},
+                                }},
+                            };
+                            neograph::json nj;
+                            to_json(nj, n);
+                            emit(jsonrpc_notify("session/update", std::move(nj)));
                         } else {
                             SessionNotification n;
                             n.session_id = req.session_id;
@@ -425,11 +571,17 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                     resp.stop_reason = stop;
                     neograph::json rj;
                     to_json(rj, resp);
+                    // The graph and all session-state updates are complete.
+                    // Admit the next turn before publishing this response so a
+                    // reentrant/fast client cannot observe a stale busy state.
+                    reservation->release_session();
                     emit(jsonrpc_result(std::move(rj), id));
                 } catch (const std::exception& e) {
+                    reservation->release_session();
                     emit_internal_error(
                         id, "ACP prompt worker failed: ", e.what());
                 } catch (...) {
+                    reservation->release_session();
                     emit_internal_error(
                         id, "ACP prompt worker failed: unknown exception");
                 }
@@ -495,6 +647,7 @@ ACPServer::ACPServer(std::shared_ptr<neograph::graph::GraphEngine> engine,
     impl_->engine  = std::move(engine);
     impl_->info    = std::move(info);
     impl_->adapter = adapter ? adapter : std::make_shared<ACPGraphAdapter>();
+    impl_->caps.session.resume = true;
 }
 
 ACPServer::~ACPServer() {
@@ -657,6 +810,9 @@ ACPServer::handle_message(const neograph::json& env) {
     }
     if (method == "session/new") {
         return impl_->handle_session_new(params, id);
+    }
+    if (method == "session/resume") {
+        return impl_->handle_session_resume(params, id);
     }
     if (method == "session/prompt") {
         // Async dispatch — the worker will emit the response via the sink.

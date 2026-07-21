@@ -232,4 +232,27 @@ TEST(ACPTypes, NewSessionRequestCarriesMcpServers) {
     EXPECT_EQ(decoded.mcp_servers[0].raw.value("name", std::string()), "fs");
 }
 
+TEST(ACPTypes, ResumeSessionRequestUsesCamelCase) {
+    ResumeSessionRequest req;
+    req.session_id = "sess-abc";
+    req.cwd = "/home/user/proj";
+    req.mcp_servers.push_back(McpServerConfig{
+        json{{"name", "fs"}, {"command", "fs-mcp"}}});
+
+    json j;
+    to_json(j, req);
+    EXPECT_EQ(j.value("sessionId", std::string()), "sess-abc");
+    EXPECT_EQ(j.value("cwd", std::string()), "/home/user/proj");
+    ASSERT_EQ(j["mcpServers"].size(), 1u);
+    EXPECT_EQ(j["mcpServers"][0].value("name", std::string()), "fs");
+
+    ResumeSessionRequest decoded;
+    from_json(j, decoded);
+    EXPECT_EQ(decoded.session_id, "sess-abc");
+    EXPECT_EQ(decoded.cwd, "/home/user/proj");
+    ASSERT_EQ(decoded.mcp_servers.size(), 1u);
+    EXPECT_EQ(decoded.mcp_servers[0].raw.value("command", std::string()),
+              "fs-mcp");
+}
+
 }  // namespace
