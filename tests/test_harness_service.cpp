@@ -222,10 +222,19 @@ TEST(HarnessServiceTest, ExposesSmallStableMcpToolSurface) {
     EXPECT_EQ(listed["result"]["tools"][0]["name"], "neograph_cancel");
     EXPECT_EQ(listed["result"]["tools"][4]["name"], "neograph_schema");
     EXPECT_EQ(listed["result"]["tools"][5]["name"], "neograph_start");
+    bool saw_debug_views = false;
     for (const auto& tool : listed["result"]["tools"]) {
         EXPECT_TRUE(tool.contains("outputSchema"));
         EXPECT_EQ(tool["inputSchema"].value("type", ""), "object");
+        if (tool["name"] == "neograph_get") {
+            const auto schema = tool["inputSchema"]["properties"];
+            EXPECT_EQ(schema["limit"]["maximum"], 1000);
+            EXPECT_EQ(schema["after_sequence"]["minimum"], 0);
+            EXPECT_EQ(schema["view"]["enum"].size(), 7u);
+            saw_debug_views = true;
+        }
     }
+    EXPECT_TRUE(saw_debug_views);
 
     auto invalid_get = server.handle_message({
         {"jsonrpc", "2.0"},
@@ -277,6 +286,60 @@ TEST(HarnessServiceTest, JournalFailureFailsRunWithoutEscapingWorkerThread) {
     const auto failed = wait_terminal(service, started["run_id"].get<std::string>());
     EXPECT_EQ(failed["status"], "failed");
     EXPECT_NE(failed["error"].get<std::string>().find("journal unavailable"), std::string::npos);
+}
+
+TEST(HarnessServiceTest, DebugViewsReportUnavailableWithoutDurableStores) {
+    HarnessServiceConfig config;
+    config.worker_executor = [](const HarnessWorkerCall&, const auto&) {
+        return HarnessWorkerResponse::success({{"status", "ok"}, {"findings", json::array()}});
+    };
+    HarnessService service(std::move(config));
+    const auto     compiled = service.compile(request());
+    ASSERT_TRUE(compiled["ok"].get<bool>()) << compiled.dump();
+    const auto started = service.start({{"artifact_id", compiled["artifact_id"]}});
+    const auto run_id  = started["run_id"].get<std::string>();
+    ASSERT_EQ(wait_terminal(service, run_id)["status"], "completed");
+
+    const auto attempts = service.get(run_id, "attempts");
+    EXPECT_FALSE(attempts["result"]["journal_available"].get<bool>());
+    EXPECT_TRUE(attempts["result"]["events"].empty());
+    const auto checkpoints = service.get(run_id, "checkpoints");
+    EXPECT_FALSE(checkpoints["result"]["available"].get<bool>());
+    EXPECT_TRUE(checkpoints["result"]["checkpoints"].empty());
+    const auto diff = service.get(run_id, "diff");
+    EXPECT_FALSE(diff["result"]["available"].get<bool>());
+    EXPECT_TRUE(diff["result"]["diffs"].empty());
+
+    EXPECT_THROW(service.get(run_id, "status", 1, 100), std::invalid_argument);
+    EXPECT_THROW(service.get(run_id, "details", 0, 1), std::invalid_argument);
+    EXPECT_THROW(service.get(run_id, "attempts", 0, 0), std::invalid_argument);
+    EXPECT_THROW(service.get(run_id, "attempts", 0, 1001), std::invalid_argument);
+}
+
+TEST(HarnessServiceTest, TraceIsReadableBeforeRunDetailsExist) {
+    std::atomic<bool>    release_worker{false};
+    HarnessServiceConfig config;
+    config.worker_executor = [&](const HarnessWorkerCall&, const auto&) {
+        while (!release_worker.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(1ms);
+        }
+        return HarnessWorkerResponse::success({{"status", "ok"}, {"findings", json::array()}});
+    };
+    HarnessService service(std::move(config));
+    const auto     compiled = service.compile(request());
+    ASSERT_TRUE(compiled["ok"].get<bool>()) << compiled.dump();
+    const auto started = service.start({{"artifact_id", compiled["artifact_id"]}});
+    const auto run_id  = started["run_id"].get<std::string>();
+
+    json trace;
+    try {
+        trace = service.get(run_id, "trace");
+    } catch (const std::exception& error) {
+        ADD_FAILURE() << error.what();
+    }
+    release_worker.store(true, std::memory_order_release);
+    EXPECT_TRUE(trace["result"]["execution_trace"].empty());
+    EXPECT_EQ(wait_terminal(service, run_id)["status"], "completed");
 }
 
 TEST(HarnessServiceTest, PresetAndEquivalentDslCompileToCanonicalCore) {
@@ -1202,6 +1265,108 @@ TEST(HarnessServiceTest, JournalCorrelatesProviderAndCapabilityCallsToWorkerAtte
     EXPECT_TRUE(capability_completed);
     EXPECT_TRUE(worker_completed);
     EXPECT_TRUE(terminal);
+}
+
+TEST(HarnessServiceTest, DebugViewsExposeJournalAndCheckpointHistoryThroughUris) {
+    const auto           root = unique_temp_path("neograph-harness-debug-views");
+    TempDirectoryCleanup cleanup(root);
+    std::filesystem::create_directories(root);
+    auto records =
+        std::make_shared<neograph::mcp::SqliteHarnessRecordStore>((root / "runs.db").string());
+    auto checkpoint_store = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
+    HarnessServiceConfig config;
+    config.record_store     = records;
+    config.checkpoint_store = checkpoint_store;
+    config.worker_executor  = [](const HarnessWorkerCall&, const auto&) {
+        return HarnessWorkerResponse::success({
+            {"status", "ok"},
+            {"findings", json::array({{{"evidence", "line 1"}}})},
+        });
+    };
+    HarnessService service(std::move(config));
+    const auto     compiled = service.compile(request());
+    ASSERT_TRUE(compiled["ok"].get<bool>()) << compiled.dump();
+    const auto started  = service.start({{"artifact_id", compiled["artifact_id"]}});
+    const auto run_id   = started["run_id"].get<std::string>();
+    const auto finished = wait_terminal(service, run_id);
+    ASSERT_EQ(finished["status"], "completed") << finished.dump();
+
+    const auto artifacts = service.get(run_id, "artifacts")["result"];
+    ASSERT_TRUE(artifacts.contains("attempts"));
+    ASSERT_TRUE(artifacts.contains("checkpoints"));
+    ASSERT_TRUE(artifacts.contains("diff"));
+
+    json       attempts;
+    const auto journal_deadline = std::chrono::steady_clock::now() + 1s;
+    do {
+        attempts = service.get(run_id, "attempts", 0, 1);
+        if (attempts["result"]["has_more"].get<bool>()) break;
+        std::this_thread::sleep_for(2ms);
+    } while (std::chrono::steady_clock::now() < journal_deadline);
+    ASSERT_TRUE(attempts["result"]["journal_available"].get<bool>());
+    ASSERT_EQ(attempts["result"]["events"].size(), 1u);
+    ASSERT_TRUE(attempts["result"]["has_more"].get<bool>());
+    const auto cursor       = attempts["result"]["next_after_sequence"].get<std::size_t>();
+    const auto attempts_uri = artifacts["attempts"]["uri"].get<std::string>() +
+                              "?after_sequence=" + std::to_string(cursor) + "&limit=1";
+    const auto next_attempt = service.read(attempts_uri);
+    ASSERT_EQ(next_attempt["result"]["events"].size(), 1u);
+    EXPECT_GT(next_attempt["result"]["events"][0]["sequence"].get<std::size_t>(), cursor);
+    EXPECT_EQ(next_attempt["result"]["events"][0]["payload"]["output"], "[REDACTED]");
+
+    const auto trace = service.read(artifacts["trace"]["uri"].get<std::string>() + "?limit=2");
+    EXPECT_FALSE(trace["result"]["execution_trace"].empty());
+    EXPECT_LE(trace["result"]["events"].size(), 2u);
+
+    const auto checkpoints = service.read(artifacts["checkpoints"]["uri"].get<std::string>());
+    ASSERT_TRUE(checkpoints["result"]["available"].get<bool>());
+    ASSERT_FALSE(checkpoints["result"]["checkpoints"].empty());
+    EXPECT_TRUE(checkpoints["result"]["checkpoints"][0].contains("checkpoint_id"));
+    EXPECT_FALSE(checkpoints["result"]["checkpoints"][0].contains("channel_values"));
+
+    const auto diffs = service.read(artifacts["diff"]["uri"].get<std::string>() + "?limit=2");
+    ASSERT_TRUE(diffs["result"]["available"].get<bool>());
+    ASSERT_FALSE(diffs["result"]["diffs"].empty());
+    EXPECT_TRUE(diffs["result"]["diffs"][0].contains("changed_channels"));
+    bool saw_channel_change = false;
+    for (const auto& diff : diffs["result"]["diffs"]) {
+        if (!diff["changed_channels"].empty()) saw_channel_change = true;
+    }
+    EXPECT_TRUE(saw_channel_change);
+
+    neograph::graph::Checkpoint legacy_parent;
+    legacy_parent.id             = "legacy-parent";
+    legacy_parent.thread_id      = run_id;
+    legacy_parent.channel_values = {{"channels", {{"legacy", "before"}}}};
+    legacy_parent.step           = 100;
+    checkpoint_store->save(legacy_parent);
+    auto legacy_child           = legacy_parent;
+    legacy_child.id             = "legacy-child";
+    legacy_child.parent_id      = legacy_parent.id;
+    legacy_child.channel_values = {{"channels", {{"legacy", "after"}}}};
+    legacy_child.step           = 101;
+    checkpoint_store->save(legacy_child);
+    auto orphan      = legacy_child;
+    orphan.id        = "orphan";
+    orphan.parent_id = "missing-parent";
+    orphan.step      = 102;
+    checkpoint_store->save(orphan);
+
+    const auto legacy_diffs = service.get(run_id, "diff", 0, 3)["result"]["diffs"];
+    ASSERT_EQ(legacy_diffs.size(), 3u);
+    EXPECT_FALSE(legacy_diffs[0]["parent_available"].get<bool>());
+    ASSERT_EQ(legacy_diffs[1]["changed_channels"].size(), 1u);
+    EXPECT_EQ(legacy_diffs[1]["changed_channels"][0]["before"], "before");
+    EXPECT_EQ(legacy_diffs[1]["changed_channels"][0]["after"], "after");
+    EXPECT_THROW(
+        service.read(artifacts["checkpoints"]["uri"].get<std::string>() + "?after_sequence=1"),
+        std::invalid_argument);
+    EXPECT_THROW(service.read(artifacts["trace"]["uri"].get<std::string>() + "?unknown=1"),
+                 std::invalid_argument);
+    EXPECT_THROW(service.read(artifacts["trace"]["uri"].get<std::string>() + "?"),
+                 std::invalid_argument);
+    EXPECT_THROW(service.read(artifacts["trace"]["uri"].get<std::string>() + "?limit=1&limit=2"),
+                 std::invalid_argument);
 }
 
 TEST(HarnessServiceTest, DurableHostResumeSurvivesServiceAndDatabaseReconnect) {

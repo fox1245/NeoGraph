@@ -1,3 +1,4 @@
+#include <neograph/graph/checkpoint.h>
 #include <neograph/graph/compiler.h>
 #include <neograph/graph/elaborator.h>
 #include <neograph/graph/engine.h>
@@ -21,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <random>
@@ -229,11 +231,182 @@ json run_snapshot_schema() {
         "properties":{
             "run_id":{"type":"string"},
             "artifact_id":{"type":"string"},
+            "revision_digest":{"type":"string"},
+            "protocol_version":{"type":"string"},
+            "profile":{"type":"string"},
             "status":{"type":"string"},
+            "created_at":{"type":"integer"},
+            "updated_at":{"type":"integer"},
+            "expires_at":{"type":"integer"},
+            "poll_after_ms":{"type":"integer"},
+            "pending":{"type":"object"},
             "result":{"type":"object"},
             "error":{"type":"string"}
         },"additionalProperties":true
     })JSON");
+}
+
+json checkpoint_summary(const graph::Checkpoint& checkpoint) {
+    json channel_names = json::array();
+    if (checkpoint.channel_values.is_object() && checkpoint.channel_values.contains("channels") &&
+        checkpoint.channel_values["channels"].is_object()) {
+        for (const auto [name, value] : checkpoint.channel_values["channels"].items()) {
+            (void)value;
+            channel_names.push_back(name);
+        }
+    }
+    return {
+        {"checkpoint_id", checkpoint.id},
+        {"parent_checkpoint_id", checkpoint.parent_id},
+        {"current_node", checkpoint.current_node},
+        {"next_nodes", checkpoint.next_nodes},
+        {"phase", graph::to_string(checkpoint.interrupt_phase)},
+        {"step", checkpoint.step},
+        {"timestamp", checkpoint.timestamp},
+        {"schema_version", checkpoint.schema_version},
+        {"channel_names", std::move(channel_names)},
+    };
+}
+
+std::map<std::string, json> checkpoint_channels(const graph::Checkpoint& checkpoint) {
+    std::map<std::string, json> channels;
+    if (!checkpoint.channel_values.is_object() || !checkpoint.channel_values.contains("channels") ||
+        !checkpoint.channel_values["channels"].is_object()) {
+        return channels;
+    }
+    for (const auto [name, value] : checkpoint.channel_values["channels"].items()) {
+        channels.emplace(name, value);
+    }
+    return channels;
+}
+
+void add_channel_snapshot(json&       entry,
+                          const char* value_key,
+                          const char* version_key,
+                          const json& channel) {
+    if (!channel.is_object()) {
+        entry[value_key] = channel;
+        return;
+    }
+    entry[value_key] = channel.value("value", json());
+    if (channel.contains("version")) entry[version_key] = channel["version"];
+}
+
+json checkpoint_diff(const graph::Checkpoint&                checkpoint,
+                     const std::optional<graph::Checkpoint>& parent) {
+    if (!checkpoint.parent_id.empty() && !parent) {
+        return {
+            {"checkpoint_id", checkpoint.id},
+            {"parent_checkpoint_id", checkpoint.parent_id},
+            {"node_id", checkpoint.current_node},
+            {"phase", graph::to_string(checkpoint.interrupt_phase)},
+            {"step", checkpoint.step},
+            {"timestamp", checkpoint.timestamp},
+            {"parent_available", false},
+            {"changed_channels", json::array()},
+        };
+    }
+    const auto before = parent ? checkpoint_channels(*parent) : std::map<std::string, json>{};
+    const auto after  = checkpoint_channels(checkpoint);
+    std::set<std::string> names;
+    for (const auto& [name, value] : before) {
+        (void)value;
+        names.insert(name);
+    }
+    for (const auto& [name, value] : after) {
+        (void)value;
+        names.insert(name);
+    }
+
+    json changed = json::array();
+    for (const auto& name : names) {
+        const auto before_it = before.find(name);
+        const auto after_it  = after.find(name);
+        if (before_it != before.end() && after_it != after.end() &&
+            before_it->second == after_it->second) {
+            continue;
+        }
+        json entry = {{"channel", name}};
+        if (before_it == before.end()) {
+            entry["operation"] = "added";
+            entry["before"]    = nullptr;
+        } else {
+            entry["operation"] = after_it == after.end() ? "removed" : "changed";
+            add_channel_snapshot(entry, "before", "before_version", before_it->second);
+        }
+        if (after_it == after.end()) {
+            entry["after"] = nullptr;
+        } else {
+            add_channel_snapshot(entry, "after", "after_version", after_it->second);
+        }
+        changed.push_back(std::move(entry));
+    }
+    return {
+        {"checkpoint_id", checkpoint.id},
+        {"parent_checkpoint_id", checkpoint.parent_id},
+        {"node_id", checkpoint.current_node},
+        {"phase", graph::to_string(checkpoint.interrupt_phase)},
+        {"step", checkpoint.step},
+        {"timestamp", checkpoint.timestamp},
+        {"parent_available", true},
+        {"changed_channels", std::move(changed)},
+    };
+}
+
+std::size_t parse_view_size(const std::string& value, const char* name) {
+    if (value.empty() || !std::all_of(value.begin(), value.end(), [](unsigned char character) {
+            return std::isdigit(character);
+        })) {
+        throw std::invalid_argument(std::string("invalid Harness ") + name);
+    }
+    std::size_t        parsed = 0;
+    unsigned long long number = 0;
+    try {
+        number = std::stoull(value, &parsed);
+    } catch (const std::exception&) {
+        throw std::invalid_argument(std::string("invalid Harness ") + name);
+    }
+    if (parsed != value.size() || number > std::numeric_limits<std::size_t>::max()) {
+        throw std::invalid_argument(std::string("invalid Harness ") + name);
+    }
+    return static_cast<std::size_t>(number);
+}
+
+json journal_page(const std::shared_ptr<HarnessJournal>& journal,
+                  const std::string&                     run_id,
+                  std::size_t                            after_sequence,
+                  std::size_t                            limit,
+                  bool                                   attempts_only) {
+    json        events              = json::array();
+    std::size_t scan_cursor         = after_sequence;
+    std::size_t next_after_sequence = after_sequence;
+    bool        has_more            = false;
+    if (journal) {
+        while (true) {
+            const auto batch = journal->list_events(run_id, scan_cursor, 1000);
+            if (batch.empty()) break;
+            for (const auto& event : batch) {
+                scan_cursor           = event["sequence"].get<std::size_t>();
+                const auto event_type = event.value("event_type", "");
+                if (attempts_only && event_type.rfind("worker.attempt.", 0) != 0) continue;
+                if (events.size() == limit) {
+                    has_more = true;
+                    break;
+                }
+                events.push_back(event);
+                next_after_sequence = scan_cursor;
+            }
+            if (has_more || batch.size() < 1000) break;
+        }
+        if (!has_more && events.empty()) next_after_sequence = scan_cursor;
+    }
+    return {
+        {"events", std::move(events)},
+        {"journal_available", static_cast<bool>(journal)},
+        {"after_sequence", after_sequence},
+        {"next_after_sequence", next_after_sequence},
+        {"has_more", has_more},
+    };
 }
 
 json worker_result_schema() {
@@ -1435,6 +1608,9 @@ struct HarnessService::Impl {
                                              {
                              {"details", {{"uri", base_uri + "/details"}}},
                              {"trace", {{"uri", base_uri + "/trace"}}},
+                             {"attempts", {{"uri", base_uri + "/attempts"}}},
+                             {"checkpoints", {{"uri", base_uri + "/checkpoints"}}},
+                             {"diff", {{"uri", base_uri + "/diff"}}},
                          }},
                     };
                 }
@@ -1786,8 +1962,32 @@ json HarnessService::resume(const json& arguments) {
 }
 
 json HarnessService::get(const std::string& run_id, const std::string& view) const {
+    return get(run_id, view, 0, 100);
+}
+
+json HarnessService::get(const std::string& run_id,
+                         const std::string& view,
+                         std::size_t        after_sequence,
+                         std::size_t        limit) const {
+    if (limit == 0 || limit > 1000) {
+        throw std::invalid_argument("Harness view limit must be between 1 and 1000");
+    }
     auto run = impl_->find_run(run_id);
     if (!run) throw std::invalid_argument("unknown Harness run_id: " + run_id);
+    const bool journal_view    = view == "trace" || view == "attempts";
+    const bool checkpoint_view = view == "checkpoints" || view == "diff";
+    const bool unpaged_view    = view == "status" || view == "details" || view == "artifacts";
+    if (!journal_view && !checkpoint_view && !unpaged_view) {
+        throw std::invalid_argument(
+            "Harness view must be status, details, trace, attempts, checkpoints, diff, or "
+            "artifacts");
+    }
+    if (after_sequence != 0 && !journal_view) {
+        throw std::invalid_argument("after_sequence applies only to trace and attempts views");
+    }
+    if (limit != 100 && unpaged_view) {
+        throw std::invalid_argument("limit applies only to debugger views");
+    }
     bool expired = false;
     {
         std::lock_guard lock(run->mutex);
@@ -1801,35 +2001,79 @@ json HarnessService::get(const std::string& run_id, const std::string& view) con
     }
     if (expired) impl_->persist_run(run);
     impl_->ensure_resume_scheduled(run);
-    std::lock_guard lock(run->mutex);
-    json            snapshot = {
-        {"run_id", run->id},
-        {"artifact_id", run->artifact_id},
-        {"status", run->status},
-        {"created_at", run->created_at},
-        {"updated_at", run->updated_at},
-        {"expires_at", run->expires_at},
-        {"poll_after_ms", impl_->config.poll_interval.count()},
-    };
-    if (!run->pending.is_null()) snapshot["pending"] = run->pending;
-    if (view == "status") {
-        if (!run->result.is_null()) snapshot["result"] = run->result;
-    } else if (view == "details") {
-        if (!run->details.is_null()) snapshot["result"] = run->details;
-    } else if (view == "trace") {
-        if (!run->details.is_null()) {
-            snapshot["result"] = {
-                {"execution_trace", run->details.value("execution_trace", json::array())},
-            };
-        }
-    } else if (view == "artifacts") {
-        if (!run->result.is_null()) {
-            snapshot["result"] = run->result.value("artifacts", json::object());
-        }
-    } else {
-        throw std::invalid_argument("Harness view must be status, details, trace, or artifacts");
+    json        snapshot;
+    json        result;
+    json        details;
+    std::string error;
+    {
+        std::lock_guard lock(run->mutex);
+        snapshot = {
+            {"run_id", run->id},
+            {"artifact_id", run->artifact_id},
+            {"revision_digest", run->revision_digest},
+            {"protocol_version", run->protocol_version},
+            {"profile", run->profile},
+            {"status", run->status},
+            {"created_at", run->created_at},
+            {"updated_at", run->updated_at},
+            {"expires_at", run->expires_at},
+            {"poll_after_ms", impl_->config.poll_interval.count()},
+        };
+        if (!run->pending.is_null()) snapshot["pending"] = run->pending;
+        result  = run->result;
+        details = run->details;
+        error   = run->error;
     }
-    if (!run->error.empty()) snapshot["error"] = run->error;
+
+    if (view == "status") {
+        if (!result.is_null()) snapshot["result"] = std::move(result);
+    } else if (view == "details") {
+        if (!details.is_null()) snapshot["result"] = std::move(details);
+    } else if (view == "trace") {
+        auto page = journal_page(impl_->journal, run_id, after_sequence, limit, false);
+        page["execution_trace"] =
+            details.is_object() ? details.value("execution_trace", json::array()) : json::array();
+        snapshot["result"] = std::move(page);
+    } else if (view == "attempts") {
+        snapshot["result"] = journal_page(impl_->journal, run_id, after_sequence, limit, true);
+    } else if (view == "checkpoints") {
+        json checkpoints = json::array();
+        if (impl_->config.checkpoint_store) {
+            for (const auto& checkpoint :
+                 impl_->config.checkpoint_store->list(run_id, static_cast<int>(limit))) {
+                checkpoints.push_back(checkpoint_summary(checkpoint));
+            }
+        }
+        snapshot["result"] = {
+            {"available", static_cast<bool>(impl_->config.checkpoint_store)},
+            {"checkpoints", std::move(checkpoints)},
+            {"limit", limit},
+        };
+    } else if (view == "diff") {
+        json diffs = json::array();
+        if (impl_->config.checkpoint_store) {
+            const auto checkpoints =
+                impl_->config.checkpoint_store->list(run_id, static_cast<int>(limit));
+            for (const auto& checkpoint : checkpoints) {
+                std::optional<graph::Checkpoint> parent;
+                if (!checkpoint.parent_id.empty()) {
+                    parent = impl_->config.checkpoint_store->load_by_id(checkpoint.parent_id);
+                    if (parent && parent->thread_id != run_id) parent.reset();
+                }
+                diffs.push_back(checkpoint_diff(checkpoint, parent));
+            }
+        }
+        snapshot["result"] = {
+            {"available", static_cast<bool>(impl_->config.checkpoint_store)},
+            {"diffs", std::move(diffs)},
+            {"limit", limit},
+        };
+    } else if (view == "artifacts") {
+        if (!result.is_null()) {
+            snapshot["result"] = result.value("artifacts", json::object());
+        }
+    }
+    if (!error.empty()) snapshot["error"] = std::move(error);
     return snapshot;
 }
 
@@ -1839,11 +2083,51 @@ json HarnessService::read(const std::string& uri) const {
         throw std::invalid_argument("unsupported Harness artifact URI: " + uri);
     }
     const auto remainder = uri.substr(prefix.size());
-    const auto separator = remainder.rfind('/');
-    if (separator == std::string::npos || separator == 0 || separator + 1 == remainder.size()) {
+    const auto query_separator = remainder.find('?');
+    const auto path            = remainder.substr(0, query_separator);
+    const auto separator       = path.rfind('/');
+    if (separator == std::string::npos || separator == 0 || separator + 1 == path.size()) {
         throw std::invalid_argument("malformed Harness artifact URI: " + uri);
     }
-    return get(remainder.substr(0, separator), remainder.substr(separator + 1));
+    std::size_t after_sequence     = 0;
+    std::size_t limit              = 100;
+    bool        saw_after_sequence = false;
+    bool        saw_limit          = false;
+    if (query_separator != std::string::npos) {
+        const auto query = remainder.substr(query_separator + 1);
+        if (query.empty() || query.back() == '&') {
+            throw std::invalid_argument("malformed Harness artifact URI query: " + uri);
+        }
+        std::size_t offset = 0;
+        while (offset < query.size()) {
+            const auto end    = query.find('&', offset);
+            const auto part   = query.substr(offset, end == std::string::npos ? end : end - offset);
+            const auto equals = part.find('=');
+            if (equals == std::string::npos || equals == 0 || equals + 1 == part.size()) {
+                throw std::invalid_argument("malformed Harness artifact URI query: " + uri);
+            }
+            const auto key   = part.substr(0, equals);
+            const auto value = part.substr(equals + 1);
+            if (key == "after_sequence") {
+                if (saw_after_sequence) {
+                    throw std::invalid_argument("duplicate Harness artifact URI query: " + key);
+                }
+                saw_after_sequence = true;
+                after_sequence     = parse_view_size(value, "after_sequence");
+            } else if (key == "limit") {
+                if (saw_limit) {
+                    throw std::invalid_argument("duplicate Harness artifact URI query: " + key);
+                }
+                saw_limit = true;
+                limit     = parse_view_size(value, "limit");
+            } else {
+                throw std::invalid_argument("unknown Harness artifact URI query: " + key);
+            }
+            if (end == std::string::npos) break;
+            offset = end + 1;
+        }
+    }
+    return get(path.substr(0, separator), path.substr(separator + 1), after_sequence, limit);
 }
 
 bool HarnessService::cancel(const std::string& run_id) {
@@ -1933,13 +2217,15 @@ void HarnessService::register_tools(MCPServer& server) {
             "neograph_get", "Get Harness run",
             "Read compact run status or dereference a detailed neograph:// run artifact URI.",
             json::parse(
-                R"JSON({"type":"object","required":["run_id"],"properties":{"run_id":{"type":"string"},"view":{"enum":["status","details","trace","artifacts"],"description":"Named view used when uri is absent."},"uri":{"type":"string","description":"Returned artifact URI. When present, its embedded view is authoritative."}},"additionalProperties":false})JSON"),
+                R"JSON({"type":"object","required":["run_id"],"properties":{"run_id":{"type":"string"},"view":{"enum":["status","details","trace","attempts","checkpoints","diff","artifacts"],"description":"Named view used when uri is absent."},"uri":{"type":"string","description":"Returned artifact URI. When present, its embedded view and query are authoritative."},"after_sequence":{"type":"integer","minimum":0,"description":"Journal cursor for trace and attempts views."},"limit":{"type":"integer","minimum":1,"maximum":1000,"description":"Maximum journal events, checkpoints, or diffs to return."}},"additionalProperties":false})JSON"),
             run_snapshot_schema(), true),
         [this](const json& arguments, const auto&) {
             const bool has_uri = arguments.contains("uri");
             const auto run_id = arguments["run_id"].get<std::string>();
             auto       value   = has_uri ? read(arguments["uri"].get<std::string>())
-                                         : get(run_id, arguments.value("view", "status"));
+                                         : get(run_id, arguments.value("view", "status"),
+                                               arguments.value("after_sequence", std::uint64_t{0}),
+                                               arguments.value("limit", std::uint64_t{100}));
             if (value.value("run_id", "") != run_id) {
                 throw std::invalid_argument("Harness artifact URI does not belong to run_id");
             }

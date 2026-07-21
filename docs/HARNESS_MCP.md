@@ -65,6 +65,33 @@ run order through `HarnessJournal::list_events(run_id, after_sequence, limit)`.
 `FileHarnessRecordStore` remains available for deployments that prefer atomic
 JSON files; it does not implement the journal boundary.
 
+## Debugger Views
+
+`neograph_get` keeps `status` as its compact default and adds four debugger
+views without adding another MCP tool:
+
+| View | Result |
+|---|---|
+| `attempts` | Journaled worker attempt start/completion/interruption events |
+| `trace` | Existing ordered GraphEngine node trace plus the causal journal timeline |
+| `checkpoints` | Payload-free checkpoint metadata: ID, parent, node, phase, step, and channel names |
+| `diff` | Channel values and versions changed between each checkpoint and its parent |
+
+`attempts` and `trace` accept `after_sequence` as an opaque forward cursor. All
+four views accept `limit` from 1 through 1000. Returned artifact URIs can carry
+the same pagination as a query, for example:
+
+```text
+neograph://runs/run_123/attempts?after_sequence=17&limit=50
+```
+
+Only `after_sequence` and `limit` are accepted in these URIs. Unknown or
+malformed query fields fail instead of being ignored. Journal-backed views
+return the payload exactly as persisted, so the configured redaction mode is
+preserved. The `diff` view is computed from the checkpoint store rather than
+the journal and can contain full channel values; treat access to it like access
+to the existing detailed run result.
+
 ## Streamable HTTP
 
 Remote transport is opt-in so the existing stdio-only target remains small and

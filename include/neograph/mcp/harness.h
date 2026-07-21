@@ -163,6 +163,12 @@ public:
     /// Return a compact snapshot for a run.
     json get(const std::string& run_id, const std::string& view = "status") const;
 
+    /// Return a paginated debugger view without changing the compact default.
+    json get(const std::string& run_id,
+             const std::string& view,
+             std::size_t        after_sequence,
+             std::size_t        limit) const;
+
     /// Dereference a neograph://runs/<run_id>/<view> result URI.
     json read(const std::string& uri) const;
 
