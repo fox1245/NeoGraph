@@ -223,7 +223,9 @@ vLLM/Ollama — any OpenAI-compatible API) · `SchemaProvider` (Claude, Gemini, 
 any custom vendor via JSON schema) · ReAct `Agent` loop with streaming.
 
 **Integrations** — MCP client (`neograph::mcp`, HTTP + stdio) · local MCP server
-(`neograph::mcp_server`, stdio) · Agent-to-Agent
+(`neograph::mcp_server`, stdio) · opt-in Streamable HTTP server
+(`neograph::mcp_http_server`) · compiler-backed multi-worker
+[Harness MCP](docs/HARNESS_MCP.md) · Agent-to-Agent
 (`neograph::a2a`, server + client + caller node) · Agent Client Protocol
 (`neograph::acp`, editor-driven) · gRPC service (`neograph::grpc`, opt-in) ·
 async HTTP/HTTPS/WS + SSE (`neograph::async`).
@@ -234,7 +236,8 @@ Python-bound). Lock-free `RequestQueue` + `AsyncTool` in `neograph::util`.
 
 `NEOGRAPH_BUILD_MCP` remains the compatibility umbrella for both MCP roles.
 Use `NEOGRAPH_BUILD_MCP_CLIENT` or `NEOGRAPH_BUILD_MCP_SERVER` for a narrow
-build; the server-only target does not require `neograph::async` or OpenSSL.
+build; the stdio server-only target does not require `neograph::async` or
+OpenSSL. Enable `NEOGRAPH_BUILD_MCP_HTTP_SERVER` explicitly for remote HTTP.
 
 Full capability list and the 55+ runnable examples:
 [`examples/README.md`](examples/README.md).
