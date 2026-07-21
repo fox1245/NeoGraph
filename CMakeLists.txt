@@ -676,7 +676,8 @@ if(NEOGRAPH_BUILD_MCP_SERVER)
             $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
     )
-    target_compile_definitions(neograph_mcp_server PRIVATE NEOGRAPH_BUILDING_LIBRARY)
+    target_compile_definitions(neograph_mcp_server PRIVATE
+        NEOGRAPH_BUILDING_LIBRARY NEOGRAPH_BUILDING_MCP_SERVER)
     target_link_libraries(neograph_mcp_server
         PUBLIC neograph_core neograph_mcp_types
     )
