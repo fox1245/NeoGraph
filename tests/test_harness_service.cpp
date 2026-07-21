@@ -1486,6 +1486,78 @@ TEST(HarnessServiceTest, CompatibleForkResumesExactCheckpointWithTargetArtifact)
     EXPECT_TRUE(saw_fork_anchor);
 }
 
+TEST(HarnessServiceTest, CompatibleForkLoadsSourceAndTargetAcrossSqliteReconnect) {
+    const auto           root = unique_temp_path("neograph-harness-fork-reconnect");
+    TempDirectoryCleanup cleanup(root);
+    std::filesystem::create_directories(root);
+    const auto       records_database    = root / "runs.db";
+    const auto       checkpoint_database = root / "checkpoints.db";
+    std::atomic<int> live_calls{0};
+    std::string      source_run_id;
+    std::string      source_checkpoint_id;
+    std::string      target_artifact_id;
+
+    {
+        auto checkpoints =
+            std::make_shared<neograph::graph::SqliteCheckpointStore>(checkpoint_database.string());
+        HarnessServiceConfig config;
+        config.record_store =
+            std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(records_database.string());
+        config.checkpoint_store = checkpoints;
+        config.worker_executor  = [&](const HarnessWorkerCall&, const auto&) {
+            live_calls.fetch_add(1, std::memory_order_relaxed);
+            return HarnessWorkerResponse::success({
+                {"status", "ok"},
+                {"findings", json::array({{{"evidence", "durable source"}}})},
+            });
+        };
+        HarnessService service(std::move(config));
+        const auto     source_artifact = service.compile(dsl_request("judge"));
+        ASSERT_TRUE(source_artifact["ok"].get<bool>()) << source_artifact.dump();
+        const auto source_start = service.start({{"artifact_id", source_artifact["artifact_id"]}});
+        source_run_id           = source_start["run_id"].get<std::string>();
+        ASSERT_EQ(wait_terminal(service, source_run_id)["status"], "completed");
+        for (const auto& checkpoint : checkpoints->list(source_run_id)) {
+            if (checkpoint.next_nodes.size() == 1 && checkpoint.next_nodes[0] == "judge") {
+                source_checkpoint_id = checkpoint.id;
+                break;
+            }
+        }
+        ASSERT_FALSE(source_checkpoint_id.empty());
+
+        auto repaired                          = dsl_request("judge");
+        repaired["workers"][0]["instructions"] = "Durably repaired instructions";
+        const auto target_artifact             = service.compile(repaired);
+        ASSERT_TRUE(target_artifact["ok"].get<bool>()) << target_artifact.dump();
+        target_artifact_id = target_artifact["artifact_id"].get<std::string>();
+    }
+
+    {
+        HarnessServiceConfig config;
+        config.record_store =
+            std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(records_database.string());
+        config.checkpoint_store =
+            std::make_shared<neograph::graph::SqliteCheckpointStore>(checkpoint_database.string());
+        config.worker_executor = [&](const HarnessWorkerCall&, const auto&) {
+            live_calls.fetch_add(1, std::memory_order_relaxed);
+            return HarnessWorkerResponse::success({{"status", "ok"}, {"findings", json::array()}});
+        };
+        HarnessService service(std::move(config));
+        const auto     started = service.start({
+            {"fork",
+                 {{"source_run_id", source_run_id},
+                  {"checkpoint_id", source_checkpoint_id},
+                  {"artifact_id", target_artifact_id}}},
+        });
+        ASSERT_TRUE(started["started"].get<bool>()) << started.dump();
+        const auto finished = wait_terminal(service, started["run_id"].get<std::string>());
+        ASSERT_EQ(finished["status"], "completed") << finished.dump();
+        ASSERT_EQ(finished["result"]["findings"].size(), 1u);
+        EXPECT_EQ(finished["result"]["findings"][0]["evidence"], "durable source");
+    }
+    EXPECT_EQ(live_calls.load(std::memory_order_relaxed), 1);
+}
+
 TEST(HarnessServiceTest, IncompatibleForkReturnsChannelAndContinuationDiagnosticsBeforeRun) {
     const auto           root = unique_temp_path("neograph-harness-incompatible-fork");
     TempDirectoryCleanup cleanup(root);

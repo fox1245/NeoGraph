@@ -112,6 +112,44 @@ Use `mode: "live"` to execute the same retained artifact with live providers and
 tools. Snapshots and journal lifecycle events label runs as `recorded_replay` or
 `live_replay` and include `source_run_id`; ordinary starts remain `live`.
 
+## Compatible Fork
+
+Compile a repaired Harness first, then branch an exact preceding checkpoint into
+that target artifact through the existing `neograph_start` tool:
+
+```json
+{
+  "fork": {
+    "source_run_id": "run_123",
+    "checkpoint_id": "550e8400-e29b-41d4-a716-446655440000",
+    "artifact_id": "artifact_repaired"
+  }
+}
+```
+
+The source checkpoint must belong to `source_run_id`. Before allocating a run,
+the Harness verifies the checkpoint schema, source revision, MCP protocol,
+Harness profile, every restored channel and reducer, every continuation node,
+and any active barrier interface against the target artifact. An incompatible
+branch returns `started: false`, `status: "incompatible_fork"`, and
+machine-readable `H_FORK_*` diagnostics with `path` and `witness`; it creates no
+run or fork checkpoint.
+
+A compatible branch is labeled `compatible_fork` and carries both
+`source_run_id` and `source_checkpoint_id` in start responses, snapshots, and
+lifecycle journal events. Execution resumes at the selected checkpoint's
+`next_nodes`; already committed predecessors do not run again. The target
+artifact supplies the repaired topology, worker contracts, and tool catalogue,
+while restored channel values, including the original task channel, come from
+the source checkpoint. Use a fresh start rather than a fork when the task input
+itself must change.
+
+The source run, artifact, and selected checkpoint are references of the fork and
+must remain retained while compatibility checking or fork execution can use
+them. Retention cleanup must remove dependents first or preserve referenced
+sources; it must never delete a source checkpoint between preflight and branch
+creation.
+
 ## Streamable HTTP
 
 Remote transport is opt-in so the existing stdio-only target remains small and

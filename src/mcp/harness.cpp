@@ -455,6 +455,7 @@ json fork_compatibility_diagnostics(const json&              source_core,
                             "fork checkpoint schema is incompatible with this runtime",
                             {{"checkpoint_schema_version", checkpoint.schema_version},
                              {"runtime_schema_version", graph::CHECKPOINT_SCHEMA_VERSION}}));
+        return diagnostics;
     }
 
     const auto source_channels = source_core.value("channels", json::object());
@@ -1872,6 +1873,7 @@ struct HarnessService::Impl {
                     journal_context(*run), "run.forked",
                     {{"source_run_id", run->source_run_id},
                      {"source_checkpoint_id", run->source_checkpoint_id},
+                     {"target_artifact_id", run->artifact_id},
                      {"fork_checkpoint_id", fork_checkpoint_id}});
             }
 
@@ -2151,8 +2153,7 @@ json HarnessService::schema() const {
              {"durable_runs", static_cast<bool>(impl_->config.record_store)},
              {"recorded_result_replay", static_cast<bool>(impl_->journal)},
              {"live_replay", true},
-             {"compatible_fork",
-              static_cast<bool>(impl_->config.checkpoint_store && impl_->config.record_store)},
+             {"compatible_fork", static_cast<bool>(impl_->config.checkpoint_store)},
              {"host_brokered_resume",
               static_cast<bool>(impl_->config.checkpoint_store && impl_->config.record_store)},
              {"experimental_tasks", impl_->config.enable_experimental_tasks},
