@@ -224,6 +224,24 @@ public:
     }
 };
 
+class BlockingTerminalJournal final : public neograph::mcp::HarnessJournal {
+public:
+    void append_event(const json& event) override {
+        if (event.value("event_type", "") != "run.terminal") return;
+        terminal_started.store(true, std::memory_order_release);
+        while (!release_terminal.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(1ms);
+        }
+    }
+
+    std::vector<json> list_events(const std::string&, std::size_t, std::size_t) override {
+        return {};
+    }
+
+    std::atomic<bool> terminal_started{false};
+    std::atomic<bool> release_terminal{false};
+};
+
 TEST(HarnessServiceTest, ExposesSmallStableMcpToolSurface) {
     HarnessService service;
     neograph::mcp::MCPServerConfig server_config;
@@ -334,6 +352,30 @@ TEST(HarnessServiceTest, JournalFailureFailsRunWithoutEscapingWorkerThread) {
     const auto failed = wait_terminal(service, started["run_id"].get<std::string>());
     EXPECT_EQ(failed["status"], "failed");
     EXPECT_NE(failed["error"].get<std::string>().find("journal unavailable"), std::string::npos);
+}
+
+TEST(HarnessServiceTest, TerminalStatusIsPublishedAfterJournalFinalization) {
+    HarnessServiceConfig config;
+    config.worker_executor = [](const HarnessWorkerCall&, const auto&) {
+        return HarnessWorkerResponse::success({{"status", "ok"}, {"findings", json::array()}});
+    };
+    auto           journal = std::make_shared<BlockingTerminalJournal>();
+    HarnessService service(std::move(config), journal);
+    const auto     compiled = service.compile(request());
+    ASSERT_TRUE(compiled["ok"].get<bool>()) << compiled.dump();
+    const auto started = service.start({{"artifact_id", compiled["artifact_id"]}});
+    const auto run_id  = started["run_id"].get<std::string>();
+
+    const auto deadline = std::chrono::steady_clock::now() + 1s;
+    while (!journal->terminal_started.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_TRUE(journal->terminal_started.load(std::memory_order_acquire));
+    EXPECT_EQ(service.get(run_id)["status"], "running");
+
+    journal->release_terminal.store(true, std::memory_order_release);
+    EXPECT_EQ(wait_terminal(service, run_id)["status"], "completed");
 }
 
 TEST(HarnessServiceTest, DebugViewsReportUnavailableWithoutDurableStores) {
@@ -1456,12 +1498,6 @@ TEST(HarnessServiceTest, HarnessCapacityCleanupPreservesReplaySourceAndDropsLeaf
     const auto replay_run_id = replay_start["run_id"].get<std::string>();
     ASSERT_EQ(wait_terminal(service, replay_run_id)["status"], "completed");
 
-    const auto deadline = std::chrono::steady_clock::now() + 1s;
-    while (records->list_events(replay_run_id).empty() &&
-           std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(2ms);
-    }
-    std::this_thread::sleep_for(2ms);
     const auto replacement_start = service.start({{"artifact_id", replacement["artifact_id"]}});
     ASSERT_EQ(wait_terminal(service, replacement_start["run_id"].get<std::string>())["status"],
               "completed");

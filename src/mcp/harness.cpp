@@ -2713,6 +2713,13 @@ json HarnessService::get(const std::string& run_id,
     std::string error;
     {
         std::lock_guard lock(run->mutex);
+        auto            visible_status = run->status;
+        if (!run->execution_finished &&
+            (visible_status == "completed" || visible_status == "failed" ||
+             visible_status == "cancelled" || visible_status == "timeout" ||
+             visible_status == "max_steps_exhausted")) {
+            visible_status = "running";
+        }
         snapshot = {
             {"run_id", run->id},
             {"artifact_id", run->artifact_id},
@@ -2720,7 +2727,7 @@ json HarnessService::get(const std::string& run_id,
             {"protocol_version", run->protocol_version},
             {"profile", run->profile},
             {"execution_mode", run->execution_mode},
-            {"status", run->status},
+            {"status", std::move(visible_status)},
             {"created_at", run->created_at},
             {"updated_at", run->updated_at},
             {"expires_at", run->expires_at},
