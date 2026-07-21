@@ -444,9 +444,24 @@ json make_diagnostic(std::string phase,
     return value;
 }
 
+json harness_checkpoint_binding(const std::string& run_id,
+                                const std::string& artifact_id,
+                                const std::string& revision_digest,
+                                const std::string& protocol_version,
+                                const std::string& profile) {
+    return {
+        {"run_id", run_id},
+        {"artifact_id", artifact_id},
+        {"revision_digest", revision_digest},
+        {"protocol_version", protocol_version},
+        {"profile", profile},
+    };
+}
+
 json fork_compatibility_diagnostics(const json&              source_core,
                                     const json&              target_core,
-                                    const graph::Checkpoint& checkpoint) {
+                                    const graph::Checkpoint& checkpoint,
+                                    const json&              expected_binding) {
     json       diagnostics = json::array();
     const auto path        = "$.fork.checkpoint_id";
     if (checkpoint.schema_version != graph::CHECKPOINT_SCHEMA_VERSION) {
@@ -455,6 +470,15 @@ json fork_compatibility_diagnostics(const json&              source_core,
                             "fork checkpoint schema is incompatible with this runtime",
                             {{"checkpoint_schema_version", checkpoint.schema_version},
                              {"runtime_schema_version", graph::CHECKPOINT_SCHEMA_VERSION}}));
+        return diagnostics;
+    }
+    const auto binding =
+        checkpoint.metadata.is_object() ? checkpoint.metadata.value("harness", json()) : json();
+    if (binding != expected_binding) {
+        diagnostics.push_back(
+            make_diagnostic("compatibility", "H_FORK_CHECKPOINT_BINDING", "error", path,
+                            "fork checkpoint Harness binding does not match its source run",
+                            {{"expected", expected_binding}, {"actual", binding}}));
         return diagnostics;
     }
 
@@ -531,6 +555,86 @@ json fork_compatibility_diagnostics(const json&              source_core,
     }
     return diagnostics;
 }
+
+class BoundHarnessCheckpointStore final : public graph::CheckpointStore {
+public:
+    BoundHarnessCheckpointStore(std::shared_ptr<graph::CheckpointStore> inner, json binding)
+        : inner_(std::move(inner)), binding_(std::move(binding)) {
+        if (!inner_) throw std::invalid_argument("Harness checkpoint store must not be null");
+    }
+
+    void save(const graph::Checkpoint& checkpoint) override { inner_->save(bound(checkpoint)); }
+    std::optional<graph::Checkpoint> load_latest(const std::string& thread_id) override {
+        return inner_->load_latest(thread_id);
+    }
+    std::optional<graph::Checkpoint> load_by_id(const std::string& id) override {
+        return inner_->load_by_id(id);
+    }
+    std::vector<graph::Checkpoint> list(const std::string& thread_id, int limit) override {
+        return inner_->list(thread_id, limit);
+    }
+    void delete_thread(const std::string& thread_id) override { inner_->delete_thread(thread_id); }
+
+    asio::awaitable<void> save_async(const graph::Checkpoint& checkpoint) override {
+        auto     copy = bound(checkpoint);
+        co_await inner_->save_async(copy);
+    }
+    asio::awaitable<std::optional<graph::Checkpoint>> load_latest_async(
+        const std::string& thread_id) override {
+        co_return co_await inner_->load_latest_async(thread_id);
+    }
+    asio::awaitable<std::optional<graph::Checkpoint>> load_by_id_async(
+        const std::string& id) override {
+        co_return co_await inner_->load_by_id_async(id);
+    }
+    asio::awaitable<std::vector<graph::Checkpoint>> list_async(const std::string& thread_id,
+                                                               int                limit) override {
+        co_return co_await inner_->list_async(thread_id, limit);
+    }
+    asio::awaitable<void> delete_thread_async(const std::string& thread_id) override {
+        co_await inner_->delete_thread_async(thread_id);
+    }
+
+    void put_writes(const std::string&         thread_id,
+                    const std::string&         parent_checkpoint_id,
+                    const graph::PendingWrite& write) override {
+        inner_->put_writes(thread_id, parent_checkpoint_id, write);
+    }
+    std::vector<graph::PendingWrite> get_writes(const std::string& thread_id,
+                                                const std::string& parent_checkpoint_id) override {
+        return inner_->get_writes(thread_id, parent_checkpoint_id);
+    }
+    void clear_writes(const std::string& thread_id,
+                      const std::string& parent_checkpoint_id) override {
+        inner_->clear_writes(thread_id, parent_checkpoint_id);
+    }
+    asio::awaitable<void> put_writes_async(const std::string&         thread_id,
+                                           const std::string&         parent_checkpoint_id,
+                                           const graph::PendingWrite& write) override {
+        auto     thread = thread_id;
+        auto     parent = parent_checkpoint_id;
+        auto     copy   = write;
+        co_await inner_->put_writes_async(thread, parent, copy);
+    }
+    asio::awaitable<std::vector<graph::PendingWrite>> get_writes_async(
+        const std::string& thread_id, const std::string& parent_checkpoint_id) override {
+        co_return co_await inner_->get_writes_async(thread_id, parent_checkpoint_id);
+    }
+    asio::awaitable<void> clear_writes_async(const std::string& thread_id,
+                                             const std::string& parent_checkpoint_id) override {
+        co_await inner_->clear_writes_async(thread_id, parent_checkpoint_id);
+    }
+
+private:
+    graph::Checkpoint bound(graph::Checkpoint checkpoint) const {
+        if (!checkpoint.metadata.is_object()) checkpoint.metadata = json::object();
+        checkpoint.metadata["harness"] = binding_;
+        return checkpoint;
+    }
+
+    std::shared_ptr<graph::CheckpointStore> inner_;
+    json                                    binding_;
+};
 
 bool diagnostics_have_errors(const json& diagnostics) {
     for (const auto& diagnostic : diagnostics) {
@@ -1917,7 +2021,15 @@ struct HarnessService::Impl {
                 artifact->request, config.worker_executor, journal_context(*run), recorded_results);
             graph::NodeContext context;
             context.provider = std::move(provider);
-            engine = graph::GraphEngine::compile(artifact->core, context, config.checkpoint_store);
+            std::shared_ptr<graph::CheckpointStore> checkpoint_store = config.checkpoint_store;
+            if (checkpoint_store) {
+                checkpoint_store = std::make_shared<BoundHarnessCheckpointStore>(
+                    std::move(checkpoint_store),
+                    harness_checkpoint_binding(run->id, run->artifact_id, run->revision_digest,
+                                               run->protocol_version, run->profile));
+            }
+            engine =
+                graph::GraphEngine::compile(artifact->core, context, std::move(checkpoint_store));
             engine->set_worker_count(
                 static_cast<std::size_t>(budgets.value("max_parallel_workers", 4)));
 
@@ -2392,7 +2504,10 @@ json HarnessService::start(const json& arguments) {
                      {"source_run_id", source_run_id}}));
             } else if (source_artifact) {
                 const auto interface_diagnostics = fork_compatibility_diagnostics(
-                    source_artifact->core, artifact->core, *checkpoint);
+                    source_artifact->core, artifact->core, *checkpoint,
+                    harness_checkpoint_binding(source_run_id, source_artifact->id,
+                                               source_revision_digest, source_protocol_version,
+                                               source_profile));
                 for (const auto& diagnostic : interface_diagnostics) {
                     diagnostics.push_back(diagnostic);
                 }

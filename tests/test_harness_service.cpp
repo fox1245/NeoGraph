@@ -1497,6 +1497,15 @@ TEST(HarnessServiceTest, DebugViewsExposeJournalAndCheckpointHistoryThroughUris)
     ASSERT_FALSE(checkpoints["result"]["checkpoints"].empty());
     EXPECT_TRUE(checkpoints["result"]["checkpoints"][0].contains("checkpoint_id"));
     EXPECT_FALSE(checkpoints["result"]["checkpoints"][0].contains("channel_values"));
+    for (const auto& checkpoint : checkpoint_store->list(run_id)) {
+        ASSERT_TRUE(checkpoint.metadata.contains("harness"));
+        const auto binding = checkpoint.metadata["harness"];
+        EXPECT_EQ(binding["run_id"], run_id);
+        EXPECT_EQ(binding["artifact_id"], compiled["artifact_id"]);
+        EXPECT_EQ(binding["revision_digest"], finished["revision_digest"]);
+        EXPECT_EQ(binding["protocol_version"], "2025-11-25");
+        EXPECT_EQ(binding["profile"], "harness-m4");
+    }
 
     const auto diffs = service.read(artifacts["diff"]["uri"].get<std::string>() + "?limit=2");
     ASSERT_TRUE(diffs["result"]["available"].get<bool>());

@@ -46,10 +46,11 @@ export NEOGRAPH_HARNESS_STATE_DIR="$PWD/.neograph-harness-state"
 
 This stores immutable artifacts, mutable run records, and an append-only causal
 journal in `runs.db`, and graph checkpoints in `checkpoints.db`. Journal rows
-bind the run to its immutable compiled revision digest, MCP protocol version,
-and Harness profile. Worker attempts include duration, validation/retry outcome,
-and correlation IDs that join provider, capability, and host-brokered calls to
-their issuing attempt. Both SQLite stores use WAL mode and a bounded busy
+and every Harness-created checkpoint bind the run to its immutable artifact,
+compiled revision digest, MCP protocol version, and Harness profile. Worker
+attempts include duration, validation/retry outcome, and correlation IDs that
+join provider, capability, and host-brokered calls to their issuing attempt.
+Both SQLite stores use WAL mode and a bounded busy
 timeout. Existing version-1 record databases migrate transactionally to version
 3 when opened. The directory survives server restarts. A
 `host_brokered` catalog entry is rejected at compile time when either store is
