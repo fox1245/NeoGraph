@@ -669,6 +669,7 @@ if(NEOGRAPH_BUILD_MCP_SERVER)
     add_library(neograph_mcp_server
         src/mcp/server.cpp
         src/mcp/harness.cpp
+        src/mcp/harness_journal.cpp
         src/mcp/harness_provider.cpp
     )
     target_include_directories(neograph_mcp_server

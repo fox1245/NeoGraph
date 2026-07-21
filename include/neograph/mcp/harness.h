@@ -15,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace neograph {
 class Provider;
@@ -80,6 +81,17 @@ struct HarnessProviderExecutorConfig {
 NEOGRAPH_MCP_SERVER_API HarnessWorkerExecutor
 make_provider_harness_executor(HarnessProviderExecutorConfig config);
 
+/** Append-only causal event boundary, separate from mutable run snapshots. */
+class NEOGRAPH_MCP_SERVER_API HarnessJournal {
+public:
+    virtual ~HarnessJournal() = default;
+
+    virtual void append_event(const json& event) = 0;
+    virtual std::vector<json> list_events(const std::string& run_id,
+                                          std::size_t        after_sequence = 0,
+                                          std::size_t        limit = 1000) = 0;
+};
+
 /** Durable storage boundary for retained Harness artifacts and run records. */
 class NEOGRAPH_MCP_SERVER_API HarnessRecordStore {
 public:
@@ -127,6 +139,7 @@ struct HarnessServiceConfig {
 class NEOGRAPH_MCP_SERVER_API HarnessService {
 public:
     explicit HarnessService(HarnessServiceConfig config = {});
+    HarnessService(HarnessServiceConfig config, std::shared_ptr<HarnessJournal> journal);
     ~HarnessService();
 
     HarnessService(const HarnessService&) = delete;

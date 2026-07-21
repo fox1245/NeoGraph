@@ -9,6 +9,8 @@
 #include <neograph/mcp/server.h>
 #include <neograph/provider.h>
 
+#include "harness_journal_internal.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -44,11 +46,28 @@ namespace {
 constexpr const char* kWorkerNodeType = "neograph_harness_worker";
 constexpr const char* kJudgeNodeType = "neograph_harness_judge";
 constexpr const char* kTasksExtension = "io.modelcontextprotocol/tasks";
+constexpr const char* kHarnessProfile = "harness-m4";
 
 int64_t unix_millis() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch())
         .count();
+}
+
+std::string revision_digest(const json& request, const json& core) {
+    const auto canonical = json({{"core", core},
+                                 {"profile", kHarnessProfile},
+                                 {"protocol_version", MCP_PROTOCOL_VERSION},
+                                 {"request", request}})
+                               .dump();
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (const auto character : canonical) {
+        hash ^= static_cast<unsigned char>(character);
+        hash *= 1099511628211ULL;
+    }
+    std::ostringstream out;
+    out << "fnv1a64:" << std::hex << std::setfill('0') << std::setw(16) << hash;
+    return out.str();
 }
 
 std::string iso8601(int64_t millis) {
@@ -313,8 +332,12 @@ std::string response_kind_name(HarnessWorkerResponseKind kind) {
 
 class HarnessRuntimeProvider final : public Provider {
 public:
-    HarnessRuntimeProvider(json request, HarnessWorkerExecutor executor)
-        : request_(std::move(request)), executor_(std::move(executor)) {
+    HarnessRuntimeProvider(json                          request,
+                           HarnessWorkerExecutor         executor,
+                           detail::HarnessJournalContext journal_context = {})
+        : request_(std::move(request)),
+          executor_(std::move(executor)),
+          journal_context_(std::move(journal_context)) {
         for (const auto& worker : request_["workers"]) {
             workers_[worker["id"].get<std::string>()] = worker;
         }
@@ -326,7 +349,8 @@ public:
 
     std::string get_name() const override { return "harness-worker-executor"; }
 
-    json execute(const std::string&                         worker_id,
+    json execute(const std::string&                         node_id,
+                 const std::string&                         worker_id,
                  const json&                                task,
                  const std::optional<json>&                 resume_value,
                  const std::shared_ptr<graph::CancelToken>& cancel) const {
@@ -348,6 +372,17 @@ public:
         for (int attempt = 0; attempt <= max_retries_; ++attempt) {
             attempts_made = attempt + 1;
             cancel->throw_if_cancelled("before Harness worker " + worker_id);
+            auto attempt_context = journal_context_;
+            attempt_context.node_id = node_id;
+            attempt_context.worker_id = worker_id;
+            attempt_context.attempt = static_cast<std::size_t>(attempt + 1);
+            detail::ScopedHarnessJournalContext journal_scope(attempt_context);
+            const auto attempt_started = std::chrono::steady_clock::now();
+            detail::append_harness_journal_event(
+                attempt_context, "worker.attempt.started",
+                {{"has_resume_value", resume_value.has_value()},
+                 {"repair", !feedback.empty()},
+                 {"selected_tools", worker_it->second.value("tools", json::array())}});
             HarnessWorkerCall call;
             call.task = task;
             call.worker = worker_it->second;
@@ -366,6 +401,14 @@ public:
             }
 
             if (response.kind == HarnessWorkerResponseKind::CANCELLED) {
+                detail::append_harness_journal_event(
+                    attempt_context, "worker.attempt.completed",
+                    {{"duration_ms",
+                      std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - attempt_started)
+                          .count()},
+                     {"outcome", "cancelled"},
+                     {"message", response.message}});
                 throw graph::CancelledException(
                     response.message.empty() ? "Harness worker cancelled" : response.message);
             }
@@ -374,6 +417,15 @@ public:
                 response.kind == HarnessWorkerResponseKind::INPUT_REQUIRED) {
                 auto pending     = response.value;
                 pending["state"] = response_kind_name(response.kind);
+                detail::append_harness_journal_event(
+                    attempt_context, "worker.attempt.interrupted",
+                    {{"duration_ms",
+                      std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - attempt_started)
+                          .count()},
+                     {"pending", pending},
+                     {"reason", pending["state"]}},
+                    pending.value("call_id", ""));
                 throw graph::NodeInterrupt(
                     response.kind == HarnessWorkerResponseKind::INPUT_REQUIRED
                         ? "Harness worker requires host input"
@@ -390,6 +442,15 @@ public:
                     try {
                         validate_json_value(response.value, worker_it->second["output_schema"],
                                             "Harness worker output", "$");
+                        detail::append_harness_journal_event(
+                            attempt_context, "worker.attempt.completed",
+                            {{"duration_ms",
+                              std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now() - attempt_started)
+                                  .count()},
+                             {"outcome", "valid"},
+                             {"output", response.value},
+                             {"validation", "passed"}});
                         return {
                             {"worker_id", worker_id},
                             {"status", "valid"},
@@ -409,6 +470,20 @@ public:
                     break;
                 }
             }
+            detail::append_harness_journal_event(
+                attempt_context, "worker.attempt.completed",
+                {{"duration_ms",
+                  std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - attempt_started)
+                      .count()},
+                 {"outcome", "retryable_failure"},
+                 {"retry_scheduled", attempt < max_retries_},
+                 {"retry_reason", failure_kind},
+                 {"validation", failure_kind == "schema_validation" ? "failed" : "not_run"},
+                 {"message", feedback},
+                 {"output", response.kind == HarnessWorkerResponseKind::VALUE
+                                ? response.value
+                                : json(nullptr)}});
         }
 
         return {
@@ -423,6 +498,7 @@ private:
     std::map<std::string, json> workers_;
     std::map<std::string, json> tools_;
     int max_retries_ = 1;
+    detail::HarnessJournalContext journal_context_;
 };
 
 class HarnessWorkerNode final : public graph::GraphNode {
@@ -435,8 +511,8 @@ public:
     asio::awaitable<graph::NodeOutput> run(graph::NodeInput in) override {
         auto cancel = in.ctx.cancel_token;
         if (!cancel) cancel = std::make_shared<graph::CancelToken>();
-        auto result =
-            runtime_->execute(worker_id_, in.state.get("task"), in.ctx.resume_value, cancel);
+        auto result = runtime_->execute(name_, worker_id_, in.state.get("task"),
+                                        in.ctx.resume_value, cancel);
         graph::NodeOutput output;
         output.writes.push_back({"worker_results", std::move(result)});
         co_return output;
@@ -942,6 +1018,7 @@ std::optional<json> FileHarnessRecordStore::load_run(const std::string& run_id) 
 struct HarnessService::Impl {
     struct Artifact {
         std::string id;
+        std::string revision_digest;
         json request;
         json core;
         json sourcemap;
@@ -952,6 +1029,9 @@ struct HarnessService::Impl {
         mutable std::mutex mutex;
         std::string id;
         std::string artifact_id;
+        std::string revision_digest;
+        std::string protocol_version = MCP_PROTOCOL_VERSION;
+        std::string profile = kHarnessProfile;
         std::string status = "queued";
         json result;
         json details;
@@ -966,14 +1046,17 @@ struct HarnessService::Impl {
         std::shared_ptr<graph::CancelToken> cancel     = std::make_shared<graph::CancelToken>();
     };
 
-    explicit Impl(HarnessServiceConfig value)
-        : config(std::move(value)), nonce(std::random_device{}()) {
+    Impl(HarnessServiceConfig value, std::shared_ptr<HarnessJournal> journal_value)
+        : config(std::move(value)), journal(std::move(journal_value)), nonce(std::random_device{}()) {
         if (config.poll_interval.count() <= 0 || config.run_ttl.count() <= 0) {
             throw std::invalid_argument("Harness poll_interval and run_ttl must be positive");
         }
         if (config.enable_experimental_tasks && !config.record_store) {
             throw std::invalid_argument(
                 "experimental Tasks profile requires a durable record_store");
+        }
+        if (!journal && config.record_store) {
+            journal = std::dynamic_pointer_cast<HarnessJournal>(config.record_store);
         }
         register_harness_node_types();
     }
@@ -1008,6 +1091,9 @@ struct HarnessService::Impl {
     json artifact_record(const Artifact& artifact) const {
         return {
             {"artifact_id", artifact.id},
+            {"revision_digest", artifact.revision_digest},
+            {"protocol_version", MCP_PROTOCOL_VERSION},
+            {"profile", kHarnessProfile},
             {"request", artifact.request},
             {"core", artifact.core},
             {"sourcemap", artifact.sourcemap},
@@ -1019,6 +1105,9 @@ struct HarnessService::Impl {
         return {
             {"run_id", run.id},
             {"artifact_id", run.artifact_id},
+            {"revision_digest", run.revision_digest},
+            {"protocol_version", run.protocol_version},
+            {"profile", run.profile},
             {"status", run.status},
             {"result", run.result},
             {"details", run.details},
@@ -1029,6 +1118,17 @@ struct HarnessService::Impl {
             {"created_at", run.created_at},
             {"updated_at", run.updated_at},
             {"expires_at", run.expires_at},
+        };
+    }
+
+    detail::HarnessJournalContext journal_context(const Run& run) const {
+        return {
+            journal,
+            run.id,
+            run.artifact_id,
+            run.revision_digest,
+            run.protocol_version,
+            run.profile,
         };
     }
 
@@ -1058,6 +1158,8 @@ struct HarnessService::Impl {
         artifact->id          = artifact_id;
         artifact->request     = record->at("request");
         artifact->core        = record->at("core");
+        artifact->revision_digest = record->value(
+            "revision_digest", revision_digest(artifact->request, artifact->core));
         artifact->sourcemap   = record->value("sourcemap", json::array());
         artifact->diagnostics = record->value("diagnostics", json::array());
         std::lock_guard lock(mutex);
@@ -1080,6 +1182,9 @@ struct HarnessService::Impl {
         auto run          = std::make_shared<Run>();
         run->id           = run_id;
         run->artifact_id  = record->at("artifact_id").get<std::string>();
+        run->revision_digest = record->value("revision_digest", "");
+        run->protocol_version = record->value("protocol_version", MCP_PROTOCOL_VERSION);
+        run->profile = record->value("profile", kHarnessProfile);
         run->status       = record->at("status").get<std::string>();
         run->result       = record->value("result", json());
         run->details      = record->value("details", json());
@@ -1090,6 +1195,13 @@ struct HarnessService::Impl {
         run->created_at   = record->value("created_at", unix_millis());
         run->updated_at   = record->value("updated_at", run->created_at);
         run->expires_at   = record->value("expires_at", int64_t{0});
+        if (run->revision_digest.empty()) {
+            auto artifact = find_artifact(run->artifact_id);
+            if (!artifact) {
+                throw std::runtime_error("Harness run revision artifact is unavailable");
+            }
+            run->revision_digest = artifact->revision_digest;
+        }
         if (run->status == "running" && !run->resume_value.is_null()) {
             run->status = "queued";
         }
@@ -1198,6 +1310,7 @@ struct HarnessService::Impl {
         artifact->id = id("artifact");
         artifact->request = request;
         artifact->core = core;
+        artifact->revision_digest = revision_digest(request, core);
         artifact->sourcemap = sourcemap;
         artifact->diagnostics = diagnostics;
         const auto base_uri = "neograph://artifacts/" + artifact->id;
@@ -1229,11 +1342,20 @@ struct HarnessService::Impl {
         }
         try {
             persist_run(run);
+            detail::append_harness_journal_event(
+                journal_context(*run), resume_value ? "run.resumed" : "run.started",
+                {{"status", "running"}});
         } catch (const std::exception& error) {
-            std::lock_guard lock(run->mutex);
-            run->status           = "failed";
-            run->error            = std::string("cannot persist Harness run: ") + error.what();
-            run->resume_scheduled = false;
+            {
+                std::lock_guard lock(run->mutex);
+                run->status = "failed";
+                run->error = std::string("cannot initialize Harness journal: ") + error.what();
+                run->resume_scheduled = false;
+                run->updated_at = unix_millis();
+            }
+            try {
+                persist_run(run);
+            } catch (...) {}
             return;
         }
 
@@ -1255,8 +1377,8 @@ struct HarnessService::Impl {
 
         std::unique_ptr<graph::GraphEngine> engine;
         try {
-            auto provider =
-                std::make_shared<HarnessRuntimeProvider>(artifact->request, config.worker_executor);
+            auto provider = std::make_shared<HarnessRuntimeProvider>(
+                artifact->request, config.worker_executor, journal_context(*run));
             graph::NodeContext context;
             context.provider = std::move(provider);
             engine = graph::GraphEngine::compile(artifact->core, context, config.checkpoint_store);
@@ -1271,47 +1393,59 @@ struct HarnessService::Impl {
             auto graph_result =
                 resume_value ? engine->resume(run_config, *resume_value) : engine->run(run_config);
 
-            std::lock_guard lock(run->mutex);
-            // CancelToken callbacks are bound to the engine's executor. Drain
-            // that executor while holding the same lock used by cancel().
-            engine.reset();
-            run->cancel     = std::make_shared<graph::CancelToken>();
-            run->updated_at = unix_millis();
-            if (graph_result.interrupted) {
-                if (!graph_result.interrupt_value.contains("value") ||
-                    !graph_result.interrupt_value["value"].is_object()) {
-                    throw std::runtime_error("Harness interrupt omitted its pending-call payload");
+            json interrupt_payload;
+            std::string interrupt_correlation;
+            {
+                std::lock_guard lock(run->mutex);
+                // CancelToken callbacks are bound to the engine's executor. Drain
+                // that executor while holding the same lock used by cancel().
+                engine.reset();
+                run->cancel     = std::make_shared<graph::CancelToken>();
+                run->updated_at = unix_millis();
+                if (graph_result.interrupted) {
+                    if (!graph_result.interrupt_value.contains("value") ||
+                        !graph_result.interrupt_value["value"].is_object()) {
+                        throw std::runtime_error(
+                            "Harness interrupt omitted its pending-call payload");
+                    }
+                    auto       pending = graph_result.interrupt_value["value"];
+                    const auto state   = pending.value("state", "");
+                    if (state != "awaiting_tool_results" && state != "input_required") {
+                        throw std::runtime_error(
+                            "Harness interrupt returned an unsupported pending state");
+                    }
+                    run->pending = std::move(pending);
+                    run->status  = state;
+                    interrupt_payload = {{"pending", run->pending}, {"status", run->status}};
+                    interrupt_correlation = run->pending.value("call_id", "");
+                } else if (graph_result.max_steps_exhausted()) {
+                    run->status = "max_steps_exhausted";
+                } else {
+                    run->status = "completed";
+                    run->pending                    = nullptr;
+                    run->details = graph_result.channel_raw("final_result");
+                    run->details["execution_trace"] = graph_result.execution_trace;
+                    const auto base_uri = "neograph://runs/" + run->id;
+                    run->result                     = {
+                        {"outcome", run->details.value("outcome", "unknown")},
+                        {"valid_workers", run->details.value("valid_workers", 0)},
+                        {"failed_workers", run->details.value("failed_workers", 0)},
+                        {"finding_count", run->details.value("findings", json::array()).size()},
+                        {"artifacts",
+                                             {
+                             {"details", {{"uri", base_uri + "/details"}}},
+                             {"trace", {{"uri", base_uri + "/trace"}}},
+                         }},
+                    };
                 }
-                auto       pending = graph_result.interrupt_value["value"];
-                const auto state   = pending.value("state", "");
-                if (state != "awaiting_tool_results" && state != "input_required") {
-                    throw std::runtime_error(
-                        "Harness interrupt returned an unsupported pending state");
-                }
-                run->pending = std::move(pending);
-                run->status  = state;
-            } else if (graph_result.max_steps_exhausted()) {
-                run->status = "max_steps_exhausted";
-            } else {
-                run->status = "completed";
-                run->pending                    = nullptr;
-                run->details = graph_result.channel_raw("final_result");
-                run->details["execution_trace"] = graph_result.execution_trace;
-                const auto base_uri = "neograph://runs/" + run->id;
-                run->result                     = {
-                    {"outcome", run->details.value("outcome", "unknown")},
-                    {"valid_workers", run->details.value("valid_workers", 0)},
-                    {"failed_workers", run->details.value("failed_workers", 0)},
-                    {"finding_count", run->details.value("findings", json::array()).size()},
-                    {"artifacts",
-                                         {
-                         {"details", {{"uri", base_uri + "/details"}}},
-                         {"trace", {{"uri", base_uri + "/trace"}}},
-                     }},
-                };
+                run->resume_value     = nullptr;
+                run->resume_scheduled = false;
             }
-            run->resume_value     = nullptr;
-            run->resume_scheduled = false;
+            if (!interrupt_payload.is_null()) {
+                detail::append_harness_journal_event(
+                    journal_context(*run), "run.interrupted", std::move(interrupt_payload),
+                    std::move(interrupt_correlation));
+            }
         } catch (const graph::CancelledException& error) {
             std::lock_guard lock(run->mutex);
             engine.reset();
@@ -1349,10 +1483,28 @@ struct HarnessService::Impl {
         timer.join();
         try {
             persist_run(run);
+            json terminal_payload;
+            {
+                std::lock_guard lock(run->mutex);
+                if (run->status != "awaiting_tool_results" && run->status != "input_required") {
+                    terminal_payload = {
+                        {"error", run->error}, {"result", run->result}, {"status", run->status}};
+                }
+            }
+            if (!terminal_payload.is_null()) {
+                detail::append_harness_journal_event(
+                    journal_context(*run), "run.terminal", std::move(terminal_payload));
+            }
         } catch (const std::exception& error) {
-            std::lock_guard lock(run->mutex);
-            run->status = "failed";
-            run->error  = std::string("cannot persist Harness run: ") + error.what();
+            {
+                std::lock_guard lock(run->mutex);
+                run->status = "failed";
+                run->error = std::string("cannot finalize Harness journal: ") + error.what();
+                run->updated_at = unix_millis();
+            }
+            try {
+                persist_run(run);
+            } catch (...) {}
         }
     }
 
@@ -1398,6 +1550,7 @@ struct HarnessService::Impl {
     }
 
     HarnessServiceConfig config;
+    std::shared_ptr<HarnessJournal> journal;
     std::uint64_t nonce;
     std::atomic<std::uint64_t> next_id{1};
     mutable std::mutex mutex;
@@ -1407,7 +1560,11 @@ struct HarnessService::Impl {
 };
 
 HarnessService::HarnessService(HarnessServiceConfig config)
-    : impl_(std::make_unique<Impl>(std::move(config))) {}
+    : HarnessService(std::move(config), nullptr) {}
+
+HarnessService::HarnessService(HarnessServiceConfig config,
+                               std::shared_ptr<HarnessJournal> journal)
+    : impl_(std::make_unique<Impl>(std::move(config), std::move(journal))) {}
 
 HarnessService::~HarnessService() = default;
 
@@ -1529,10 +1686,13 @@ json HarnessService::start(const json& arguments) {
         }
         run->id = impl_->id("run");
         run->artifact_id = artifact_id;
+        run->revision_digest = artifact->revision_digest;
         run->expires_at      = run->created_at + impl_->config.run_ttl.count();
         impl_->runs[run->id] = run;
         try {
             impl_->persist_run(run);
+            detail::append_harness_journal_event(
+                impl_->journal_context(*run), "run.queued", {{"status", "queued"}});
             impl_->threads.emplace_back(
                 [impl = impl_.get(), run, artifact] { impl->execute(run, artifact); });
         } catch (...) {
@@ -1608,6 +1768,11 @@ json HarnessService::resume(const json& arguments) {
     }
     if (!duplicate) impl_->persist_run(run);
     if (expired) throw std::invalid_argument("Harness run has expired");
+    if (!duplicate) {
+        detail::append_harness_journal_event(
+            impl_->journal_context(*run), "host_brokered.result.accepted",
+            {{"result", arguments["result"]}}, call_id);
+    }
     impl_->ensure_resume_scheduled(run);
     std::string status;
     {
@@ -1694,9 +1859,11 @@ bool HarnessService::cancel(const std::string& run_id) {
             run->pending    = nullptr;
             run->updated_at = unix_millis();
         }
-    run->cancel->cancel();
+        run->cancel->cancel();
     }
     impl_->persist_run(run);
+    detail::append_harness_journal_event(
+        impl_->journal_context(*run), "run.cancel.requested", {{"status", "cancelled"}});
     return true;
 }
 

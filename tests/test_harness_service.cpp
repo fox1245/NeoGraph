@@ -174,6 +174,19 @@ public:
     std::string get_name() const override { return "scripted-harness-provider"; }
 };
 
+class StartFailingJournal final : public neograph::mcp::HarnessJournal {
+public:
+    void append_event(const json& event) override {
+        if (event.value("event_type", "") == "run.started") {
+            throw std::runtime_error("journal unavailable");
+        }
+    }
+
+    std::vector<json> list_events(const std::string&, std::size_t, std::size_t) override {
+        return {};
+    }
+};
+
 TEST(HarnessServiceTest, ExposesSmallStableMcpToolSurface) {
     HarnessService service;
     neograph::mcp::MCPServerConfig server_config;
@@ -250,6 +263,20 @@ TEST(HarnessServiceTest, MalformedHarnessCannotProduceExecutableArtifact) {
     auto started = service.start({{"request", malformed}});
     EXPECT_FALSE(started["started"].get<bool>());
     EXPECT_EQ(started["status"], "compile_failed");
+}
+
+TEST(HarnessServiceTest, JournalFailureFailsRunWithoutEscapingWorkerThread) {
+    HarnessServiceConfig config;
+    config.worker_executor = [](const HarnessWorkerCall&, const auto&) {
+        return HarnessWorkerResponse::success({{"status", "ok"}, {"findings", json::array()}});
+    };
+    HarnessService service(std::move(config), std::make_shared<StartFailingJournal>());
+    const auto compiled = service.compile(request());
+    ASSERT_TRUE(compiled["ok"].get<bool>()) << compiled.dump();
+    const auto started = service.start({{"artifact_id", compiled["artifact_id"]}});
+    const auto failed = wait_terminal(service, started["run_id"].get<std::string>());
+    EXPECT_EQ(failed["status"], "failed");
+    EXPECT_NE(failed["error"].get<std::string>().find("journal unavailable"), std::string::npos);
 }
 
 TEST(HarnessServiceTest, PresetAndEquivalentDslCompileToCanonicalCore) {
@@ -928,6 +955,255 @@ TEST(HarnessServiceTest, SqliteRecordStoreBusyTimeoutWaitsForWriter) {
     EXPECT_TRUE(records.load_run("run_waiting").has_value());
 }
 
+TEST(HarnessServiceTest, SqliteJournalOrdersEventsAndRedactsPayloadsAtRest) {
+    const auto root = unique_temp_path("neograph-harness-journal");
+    TempDirectoryCleanup cleanup(root);
+    std::filesystem::create_directories(root);
+    const auto database = root / "runs.db";
+
+    neograph::mcp::SqliteHarnessRecordStore records(database.string());
+    records.save_artifact("artifact_1", {
+        {"artifact_id", "artifact_1"},
+        {"request", json::object()},
+    });
+    const json run = {
+        {"run_id", "run_1"},
+        {"artifact_id", "artifact_1"},
+        {"revision_digest", "fnv1a64:1234"},
+        {"protocol_version", "2025-11-25"},
+        {"profile", "harness-m4"},
+        {"status", "queued"},
+    };
+    records.save_run("run_1", run);
+    const auto event = [](std::string type, json payload) {
+        return json{
+            {"run_id", "run_1"},
+            {"artifact_id", "artifact_1"},
+            {"revision_digest", "fnv1a64:1234"},
+            {"protocol_version", "2025-11-25"},
+            {"profile", "harness-m4"},
+            {"event_type", std::move(type)},
+            {"correlation_id", "call_1"},
+            {"node_id", "worker_0"},
+            {"worker_id", "reviewer"},
+            {"attempt", 1},
+            {"payload", std::move(payload)},
+        };
+    };
+    records.append_event(event("worker.attempt.started", {
+        {"authorization", "Bearer secret"},
+        {"nested", {{"safe", "visible"}, {"token", "hidden"}}},
+    }));
+    records.append_event(event("worker.attempt.completed", {{"result", {{"answer", "42"}}}}));
+
+    const auto events = records.list_events("run_1");
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_EQ(events[0]["sequence"], 1);
+    EXPECT_EQ(events[1]["sequence"], 2);
+    EXPECT_EQ(events[0]["payload"]["authorization"], "[REDACTED]");
+    EXPECT_EQ(events[0]["payload"]["nested"]["token"], "[REDACTED]");
+    EXPECT_EQ(events[0]["payload"]["nested"]["safe"], "visible");
+    EXPECT_EQ(events[1]["payload"]["result"], "[REDACTED]");
+    ASSERT_EQ(records.list_events("run_1", 1, 1).size(), 1u);
+    EXPECT_EQ(records.list_events("run_1", 1, 1)[0]["sequence"], 2);
+
+    auto mismatched = event("tampered", json::object());
+    mismatched["revision_digest"] = "fnv1a64:different";
+    EXPECT_THROW(records.append_event(mismatched), std::invalid_argument);
+    auto rebound = run;
+    rebound["revision_digest"] = "fnv1a64:different";
+    EXPECT_THROW(records.save_run("run_1", rebound), std::invalid_argument);
+}
+
+TEST(HarnessServiceTest, SqliteJournalSupportsMetadataOnlyAndFullPayloadModes) {
+    const auto root = unique_temp_path("neograph-harness-journal-modes");
+    TempDirectoryCleanup cleanup(root);
+    std::filesystem::create_directories(root);
+
+    const auto exercise = [&](const std::string& name,
+                              neograph::mcp::HarnessJournalPayloadMode mode) {
+        neograph::mcp::SqliteHarnessJournalConfig journal_config;
+        journal_config.mode = mode;
+        neograph::mcp::SqliteHarnessRecordStore records(
+            (root / name).string(), 5s, std::move(journal_config));
+        records.save_artifact("artifact_1", {
+            {"artifact_id", "artifact_1"},
+            {"request", json::object()},
+        });
+        records.save_run("run_1", {
+            {"run_id", "run_1"},
+            {"artifact_id", "artifact_1"},
+            {"revision_digest", "revision"},
+            {"protocol_version", "protocol"},
+            {"profile", "profile"},
+            {"status", "queued"},
+        });
+        records.append_event({
+            {"run_id", "run_1"},
+            {"artifact_id", "artifact_1"},
+            {"revision_digest", "revision"},
+            {"protocol_version", "protocol"},
+            {"profile", "profile"},
+            {"event_type", "test.event"},
+            {"payload", {{"secret", "keep only in full"}, {"visible", true}}},
+        });
+        return records.list_events("run_1")[0]["payload"];
+    };
+
+    EXPECT_EQ(exercise("metadata.db", neograph::mcp::HarnessJournalPayloadMode::METADATA_ONLY),
+              json::object());
+    const auto full = exercise("full.db", neograph::mcp::HarnessJournalPayloadMode::FULL);
+    EXPECT_EQ(full["secret"], "keep only in full");
+    EXPECT_TRUE(full["visible"].get<bool>());
+}
+
+TEST(HarnessServiceTest, SqliteJournalMigratesVersionOneRunBindings) {
+    const auto root = unique_temp_path("neograph-harness-journal-migration");
+    TempDirectoryCleanup cleanup(root);
+    std::filesystem::create_directories(root);
+    const auto database = root / "runs.db";
+    sqlite3* legacy = nullptr;
+    ASSERT_EQ(sqlite3_open(database.string().c_str(), &legacy), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(legacy, R"SQL(
+CREATE TABLE neograph_harness_schema (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1), version INTEGER NOT NULL
+);
+INSERT INTO neograph_harness_schema VALUES (1, 1);
+CREATE TABLE neograph_harness_artifacts (
+    artifact_id TEXT PRIMARY KEY, record_json TEXT NOT NULL, created_at_ms INTEGER NOT NULL
+);
+CREATE TABLE neograph_harness_runs (
+    run_id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL, record_json TEXT NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    FOREIGN KEY (artifact_id) REFERENCES neograph_harness_artifacts (artifact_id)
+);
+INSERT INTO neograph_harness_artifacts VALUES
+    ('artifact_1', '{"artifact_id":"artifact_1","request":{}}', 1);
+INSERT INTO neograph_harness_runs VALUES
+    ('run_1', 'artifact_1', '{"run_id":"run_1","artifact_id":"artifact_1","status":"queued"}', 1);
+)SQL", nullptr, nullptr, nullptr), SQLITE_OK);
+    sqlite3_close(legacy);
+
+    neograph::mcp::SqliteHarnessRecordStore records(database.string());
+    auto run = records.load_run("run_1");
+    ASSERT_TRUE(run.has_value());
+    (*run)["revision_digest"] = "revision";
+    (*run)["protocol_version"] = "protocol";
+    (*run)["profile"] = "profile";
+    records.save_run("run_1", *run);
+    records.append_event({
+        {"run_id", "run_1"},
+        {"artifact_id", "artifact_1"},
+        {"revision_digest", "revision"},
+        {"protocol_version", "protocol"},
+        {"profile", "profile"},
+        {"event_type", "migration.verified"},
+        {"payload", json::object()},
+    });
+    ASSERT_EQ(records.list_events("run_1").size(), 1u);
+    EXPECT_EQ(records.list_events("run_1")[0]["event_type"], "migration.verified");
+}
+
+TEST(HarnessServiceTest, JournalCorrelatesProviderAndCapabilityCallsToWorkerAttempt) {
+    const auto root = unique_temp_path("neograph-harness-journal-correlation");
+    TempDirectoryCleanup cleanup(root);
+    std::filesystem::create_directories(root);
+    auto records = std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(
+        (root / "runs.db").string());
+    auto provider = std::make_shared<ScriptedProvider>();
+    neograph::ChatCompletion tool_request;
+    tool_request.message.tool_calls.push_back(
+        {"capability-call", "catalog.lookup", R"({"query":"needle"})"});
+    neograph::ChatCompletion final;
+    final.message.content = R"({"status":"ok","findings":[]})";
+    provider->completions = {tool_request, final};
+
+    auto authored = request();
+    authored["workers"][0]["tools"] = json::array({"catalog.lookup"});
+    authored["tool_catalog"] = json::array({{
+        {"id", "catalog.lookup"},
+        {"description", "Look up a catalog value"},
+        {"input_schema", {
+            {"type", "object"},
+            {"required", json::array({"query"})},
+            {"properties", {{"query", {{"type", "string"}}}}},
+            {"additionalProperties", false},
+        }},
+        {"output_schema", {
+            {"type", "object"},
+            {"required", json::array({"answer"})},
+            {"properties", {{"answer", {{"type", "string"}}}}},
+            {"additionalProperties", false},
+        }},
+        {"executor", {{"kind", "mcp"}, {"server_ref", "catalog-server"}}},
+    }});
+    HarnessServiceConfig config;
+    config.record_store = records;
+    neograph::mcp::HarnessProviderExecutorConfig provider_config;
+    provider_config.provider = provider;
+    provider_config.capability_executor = [](const json&, const json&, const auto&) {
+        return json{{"answer", "found"}};
+    };
+    config.worker_executor =
+        neograph::mcp::make_provider_harness_executor(std::move(provider_config));
+    HarnessService service(std::move(config));
+    const auto compiled = service.compile(authored);
+    ASSERT_TRUE(compiled["ok"].get<bool>()) << compiled.dump();
+    const auto started = service.start({{"artifact_id", compiled["artifact_id"]}});
+    const auto run_id = started["run_id"].get<std::string>();
+    ASSERT_EQ(wait_terminal(service, run_id)["status"], "completed");
+
+    const auto persisted = records->load_run(run_id);
+    ASSERT_TRUE(persisted.has_value());
+    EXPECT_FALSE((*persisted)["revision_digest"].get<std::string>().empty());
+    EXPECT_EQ((*persisted)["protocol_version"], "2025-11-25");
+    EXPECT_EQ((*persisted)["profile"], "harness-m4");
+
+    std::vector<json> events;
+    const auto journal_deadline = std::chrono::steady_clock::now() + 1s;
+    do {
+        events = records->list_events(run_id);
+        bool flushed = false;
+        for (const auto& event : events) {
+            if (event["event_type"] == "run.terminal") {
+                flushed = true;
+                break;
+            }
+        }
+        if (flushed) break;
+        std::this_thread::sleep_for(2ms);
+    } while (std::chrono::steady_clock::now() < journal_deadline);
+    std::size_t provider_started = 0;
+    std::size_t provider_completed = 0;
+    bool capability_started = false;
+    bool capability_completed = false;
+    bool worker_completed = false;
+    bool terminal = false;
+    for (const auto& event : events) {
+        const auto type = event["event_type"].get<std::string>();
+        if (type == "provider.call.started") ++provider_started;
+        if (type == "provider.call.completed") ++provider_completed;
+        if (type == "capability.call.started") {
+            capability_started = event.value("correlation_id", "") == "capability-call";
+        }
+        if (type == "capability.call.completed") {
+            capability_completed = event.value("correlation_id", "") == "capability-call";
+        }
+        if (type == "worker.attempt.completed") {
+            worker_completed = event.value("node_id", "") == "worker_0" &&
+                               event.value("worker_id", "") == "reviewer" &&
+                               event.value("attempt", 0) == 1;
+        }
+        if (type == "run.terminal") terminal = event["payload"]["status"] == "completed";
+    }
+    EXPECT_EQ(provider_started, 2u);
+    EXPECT_EQ(provider_completed, 2u);
+    EXPECT_TRUE(capability_started);
+    EXPECT_TRUE(capability_completed);
+    EXPECT_TRUE(worker_completed);
+    EXPECT_TRUE(terminal);
+}
+
 TEST(HarnessServiceTest, DurableHostResumeSurvivesServiceAndDatabaseReconnect) {
     const auto root     = unique_temp_path("neograph-harness-resume");
     const auto database = root / "checkpoints.db";
@@ -1004,6 +1280,22 @@ TEST(HarnessServiceTest, DurableHostResumeSurvivesServiceAndDatabaseReconnect) {
     }
     ASSERT_EQ(provider->calls.size(), 2u);
     EXPECT_NE(provider->calls[1].messages[0].content.find("host_resume"), std::string::npos);
+    {
+        neograph::mcp::SqliteHarnessRecordStore records(records_database.string());
+        const auto events = records.list_events(run_id);
+        std::string requested;
+        std::string accepted;
+        for (const auto& event : events) {
+            if (event["event_type"] == "host_brokered.call.requested") {
+                requested = event.value("correlation_id", "");
+            }
+            if (event["event_type"] == "host_brokered.result.accepted") {
+                accepted = event.value("correlation_id", "");
+            }
+        }
+        EXPECT_EQ(requested, call_id);
+        EXPECT_EQ(accepted, call_id);
+    }
     std::filesystem::remove_all(root);
 }
 
