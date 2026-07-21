@@ -10,6 +10,7 @@
  * Methods served (client → agent):
  *   - initialize
  *   - session/new
+ *   - session/resume
  *   - session/prompt
  *   - session/cancel  (notification — no response)
  *
@@ -17,7 +18,7 @@
  *   - session/update  (streaming notification while a prompt is in flight)
  *
  * Deferred (return JSON-RPC -32601 Method not found until added):
- *   authenticate, session/load, session/resume, session/list, session/close,
+ *   authenticate, session/load, session/list, session/close,
  *   session/set_config_option, session/set_mode.
  *
  * Adapter pattern mirrors neograph::a2a — by default the inbound prompt
@@ -201,8 +202,8 @@ class NEOGRAPH_API ACPServer {
     ~ACPServer();
 
     /// Mutable access to the capabilities advertised in initialize.
-    /// Defaults: load_session=false, no prompt extras, no MCP transports
-    /// (stdio is required by spec — its presence is implicit).
+    /// Defaults: session.resume=true, load_session=false, no prompt extras,
+    /// no MCP transports (stdio is required by spec — its presence is implicit).
     AgentCapabilities&       capabilities();
     const AgentCapabilities& capabilities() const;
 

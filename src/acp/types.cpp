@@ -247,6 +247,28 @@ void from_json(const json& j, NewSessionResponse& r) {
     if (j.contains("modes"))         r.modes          = j["modes"];
 }
 
+void to_json(json& j, const ResumeSessionRequest& r) {
+    j = json::object();
+    j["sessionId"] = r.session_id;
+    j["cwd"] = r.cwd;
+    auto arr = json::array();
+    for (const auto& server : r.mcp_servers) {
+        arr.push_back(server.raw.is_null() ? json::object() : server.raw);
+    }
+    j["mcpServers"] = std::move(arr);
+}
+
+void from_json(const json& j, ResumeSessionRequest& r) {
+    r.session_id = j.at("sessionId").get<std::string>();
+    r.cwd = j.at("cwd").get<std::string>();
+    r.mcp_servers.clear();
+    if (j.contains("mcpServers") && j["mcpServers"].is_array()) {
+        for (const auto& value : j["mcpServers"]) {
+            r.mcp_servers.push_back(McpServerConfig{value});
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // session/prompt
 // ---------------------------------------------------------------------------

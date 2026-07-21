@@ -14,13 +14,13 @@
  *   - Capabilities (Agent / Client / Prompt / Mcp / Fs)
  *   - Initialize request / response
  *   - ContentBlock variants (text / image / audio / resource_link / resource)
- *   - session/new and session/prompt request/response shapes
+ *   - session/new, session/resume, and session/prompt request/response shapes
  *   - SessionNotification (session/update streamed by the agent)
  *   - StopReason
  *   - CancelNotification
  *
  * Deferred (modelled as free-form `json` for forward-compat):
- *   session/load, session/resume, session/list, session/close,
+ *   session/load, session/list, session/close,
  *   session/set_config_option, session/set_mode, fs/&#42; and terminal/&#42;
  *   (these are agent→client requests — added when the engine wants to
  *    use them). The wildcards are HTML-entity-escaped because the
@@ -160,6 +160,18 @@ struct NEOGRAPH_API NewSessionResponse {
     /// populated by adapters that want to expose runtime knobs.
     json        config_options;
     json        modes;
+};
+
+// ---------------------------------------------------------------------------
+// session/resume
+// ---------------------------------------------------------------------------
+
+/// Reconnect to a persisted session without replaying conversation history.
+/// ACP v1 requires the client to resend cwd and MCP server configuration.
+struct NEOGRAPH_API ResumeSessionRequest {
+    std::string                  session_id;
+    std::string                  cwd;
+    std::vector<McpServerConfig> mcp_servers;
 };
 
 // ---------------------------------------------------------------------------
@@ -363,6 +375,9 @@ NEOGRAPH_API void from_json(const json& j, NewSessionRequest& r);
 
 NEOGRAPH_API void to_json(json& j, const NewSessionResponse& r);
 NEOGRAPH_API void from_json(const json& j, NewSessionResponse& r);
+
+NEOGRAPH_API void to_json(json& j, const ResumeSessionRequest& r);
+NEOGRAPH_API void from_json(const json& j, ResumeSessionRequest& r);
 
 NEOGRAPH_API void to_json(json& j, const PromptRequest& r);
 NEOGRAPH_API void from_json(const json& j, PromptRequest& r);
