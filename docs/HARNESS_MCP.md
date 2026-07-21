@@ -51,7 +51,7 @@ and Harness profile. Worker attempts include duration, validation/retry outcome,
 and correlation IDs that join provider, capability, and host-brokered calls to
 their issuing attempt. Both SQLite stores use WAL mode and a bounded busy
 timeout. Existing version-1 record databases migrate transactionally to version
-2 when opened. The directory survives server restarts. A
+3 when opened. The directory survives server restarts. A
 `host_brokered` catalog entry is rejected at compile time when either store is
 missing, so a workflow cannot advertise resumability it does not have.
 
@@ -64,6 +64,32 @@ and should only be enabled for data approved for storage. Events can be read in
 run order through `HarnessJournal::list_events(run_id, after_sequence, limit)`.
 `FileHarnessRecordStore` remains available for deployments that prefer atomic
 JSON files; it does not implement the journal boundary.
+
+### Retention
+
+The SQLite store implements the optional `HarnessRetentionStore` sibling
+interface; the stable `HarnessRecordStore` vtable is unchanged. Before retaining
+an artifact or starting a run, `HarnessService` applies `max_artifacts` and
+`max_runs` from `HarnessServiceConfig`. Defaults are 128 each.
+
+Cleanup removes only terminal leaf runs. Queued, running, and input-waiting runs
+are protected, as are in-process executions that have not finished journal
+finalization. A replay or fork row records `source_run_id`, so its source cannot
+be removed while that dependent remains retained. If space is needed, the
+dependent leaf is removed first; the source becomes eligible only in a later
+step after no retained row references it. Limits are therefore soft when every
+candidate is active, explicitly protected, or still referenced.
+
+Within `runs.db`, one transaction deletes a run's journal rows before its run
+row and deletes an artifact only after no run references it. After that commit,
+the Harness removes the deleted run's checkpoint thread from the separately
+configured checkpoint store. A crash or checkpoint-backend failure during that
+second phase can leave unreachable checkpoint storage, but cannot leave a
+retained replay/fork pointing at a deleted source record. A later administrative
+or backend-specific orphan sweep may reclaim such checkpoint-only residue.
+
+`FileHarnessRecordStore` does not implement durable cleanup; its historical
+in-memory artifact-cache eviction and hard run-capacity behavior remain.
 
 ## Debugger Views
 

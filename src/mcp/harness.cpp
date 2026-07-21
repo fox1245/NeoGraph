@@ -1475,6 +1475,7 @@ struct HarnessService::Impl {
         json                                consumed = json::object();
         json                                resume_value;
         bool                                resume_scheduled = false;
+        bool                                execution_finished = false;
         std::string error;
         int64_t                             created_at = unix_millis();
         int64_t                             updated_at = created_at;
@@ -1484,8 +1485,10 @@ struct HarnessService::Impl {
 
     Impl(HarnessServiceConfig value, std::shared_ptr<HarnessJournal> journal_value)
         : config(std::move(value)), journal(std::move(journal_value)), nonce(std::random_device{}()) {
-        if (config.poll_interval.count() <= 0 || config.run_ttl.count() <= 0) {
-            throw std::invalid_argument("Harness poll_interval and run_ttl must be positive");
+        if (config.poll_interval.count() <= 0 || config.run_ttl.count() <= 0 ||
+            config.max_artifacts == 0 || config.max_runs == 0) {
+            throw std::invalid_argument(
+                "Harness limits, poll_interval, and run_ttl must be positive");
         }
         if (config.enable_experimental_tasks && !config.record_store) {
             throw std::invalid_argument(
@@ -1581,6 +1584,42 @@ struct HarnessService::Impl {
         config.record_store->save_run(run->id, record);
     }
 
+    void cleanup_retained_locked(std::size_t                     max_artifacts,
+                                 std::size_t                     max_runs,
+                                 const std::vector<std::string>& protected_artifacts = {},
+                                 const std::vector<std::string>& protected_runs      = {}) {
+        auto* retention = dynamic_cast<HarnessRetentionStore*>(config.record_store.get());
+        if (!retention) return;
+
+        HarnessRetentionPolicy policy;
+        policy.max_artifacts          = max_artifacts;
+        policy.max_runs               = max_runs;
+        policy.protected_artifact_ids = protected_artifacts;
+        policy.protected_run_ids      = protected_runs;
+        for (const auto& [run_id, run] : runs) {
+            std::lock_guard run_lock(run->mutex);
+            if (run->execution_finished) continue;
+            policy.protected_run_ids.push_back(run_id);
+            policy.protected_artifact_ids.push_back(run->artifact_id);
+        }
+
+        const auto removed = retention->cleanup_retained(policy);
+        for (const auto& run_id : removed.run_ids) {
+            runs.erase(run_id);
+            if (config.checkpoint_store) {
+                try {
+                    config.checkpoint_store->delete_thread(run_id);
+                } catch (...) {
+                    // The authoritative run record is gone; a failed secondary
+                    // checkpoint cleanup leaves only unreachable storage.
+                }
+            }
+        }
+        for (const auto& artifact_id : removed.artifact_ids) {
+            artifacts_by_id.erase(artifact_id);
+        }
+    }
+
     std::shared_ptr<Artifact> find_artifact(const std::string& artifact_id) {
         {
             std::lock_guard lock(mutex);
@@ -1639,6 +1678,9 @@ struct HarnessService::Impl {
         run->created_at   = record->value("created_at", unix_millis());
         run->updated_at   = record->value("updated_at", run->created_at);
         run->expires_at   = record->value("expires_at", int64_t{0});
+        run->execution_finished   = run->status == "completed" || run->status == "failed" ||
+                                  run->status == "cancelled" || run->status == "timeout" ||
+                                  run->status == "expired" || run->status == "max_steps_exhausted";
         if (run->revision_digest.empty()) {
             auto artifact = find_artifact(run->artifact_id);
             if (!artifact) {
@@ -1764,7 +1806,9 @@ struct HarnessService::Impl {
         result["artifacts"]["diagnostics"]["uri"] = base_uri + "/diagnostics";
 
         std::lock_guard lock(mutex);
-        if (artifacts_by_id.size() >= config.max_artifacts && !artifacts_by_id.empty()) {
+        cleanup_retained_locked(config.max_artifacts - 1, config.max_runs);
+        if (!dynamic_cast<HarnessRetentionStore*>(config.record_store.get()) &&
+            artifacts_by_id.size() >= config.max_artifacts && !artifacts_by_id.empty()) {
             artifacts_by_id.erase(artifacts_by_id.begin());
         }
         artifacts_by_id[artifact->id] = std::move(artifact);
@@ -1807,6 +1851,13 @@ struct HarnessService::Impl {
                  std::shared_ptr<Artifact>               artifact,
                  std::optional<json>                     resume_value     = std::nullopt,
                  std::shared_ptr<RecordedHarnessResults> recorded_results = nullptr) {
+        struct ExecutionFinished {
+            std::shared_ptr<Run> run;
+            ~ExecutionFinished() {
+                std::lock_guard lock(run->mutex);
+                run->execution_finished = true;
+            }
+        } execution_finished{run};
         {
             std::lock_guard lock(run->mutex);
             run->status = "running";
@@ -2357,7 +2408,25 @@ json HarnessService::start(const json& arguments) {
     auto run = std::make_shared<Impl::Run>();
     {
         std::lock_guard lock(impl_->mutex);
-        if (impl_->runs.size() >= impl_->config.max_runs) {
+        std::vector<std::string> protected_runs;
+        if (!source_run_id.empty()) protected_runs.push_back(source_run_id);
+        impl_->cleanup_retained_locked(impl_->config.max_artifacts, impl_->config.max_runs - 1,
+                                       {artifact_id}, protected_runs);
+        std::size_t active_runs = 0;
+        for (const auto& [id, existing] : impl_->runs) {
+            (void)id;
+            std::lock_guard run_lock(existing->mutex);
+            if (existing->status == "queued" || existing->status == "running" ||
+                existing->status == "awaiting_tool_results" ||
+                existing->status == "input_required") {
+                ++active_runs;
+            }
+        }
+        const auto retained_capacity =
+            dynamic_cast<HarnessRetentionStore*>(impl_->config.record_store.get())
+                ? active_runs
+                : impl_->runs.size();
+        if (retained_capacity >= impl_->config.max_runs) {
             throw std::runtime_error("Harness run capacity is exhausted");
         }
         run->id = impl_->id("run");

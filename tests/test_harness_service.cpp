@@ -1283,6 +1283,64 @@ TEST(HarnessServiceTest, SqliteRetentionDeletesTerminalLeavesBeforeReferencedSou
     EXPECT_TRUE(records.load_artifact("artifact_3").has_value());
 }
 
+TEST(HarnessServiceTest, HarnessCapacityCleanupPreservesReplaySourceAndDropsLeafCheckpoints) {
+    const auto           root = unique_temp_path("neograph-harness-capacity-cleanup");
+    TempDirectoryCleanup cleanup(root);
+    std::filesystem::create_directories(root);
+    auto records =
+        std::make_shared<neograph::mcp::SqliteHarnessRecordStore>((root / "runs.db").string());
+    auto                 checkpoints = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
+    std::atomic<int>     calls{0};
+    HarnessServiceConfig config;
+    config.record_store     = records;
+    config.checkpoint_store = checkpoints;
+    config.max_artifacts    = 2;
+    config.max_runs         = 2;
+    config.worker_executor  = [&](const HarnessWorkerCall&, const auto&) {
+        calls.fetch_add(1, std::memory_order_relaxed);
+        return HarnessWorkerResponse::success({{"status", "ok"}, {"findings", json::array()}});
+    };
+    HarnessService service(std::move(config));
+
+    auto first_request                       = request();
+    first_request["task"]["objective"]       = "first";
+    const auto first                         = service.compile(first_request);
+    auto       source_request                = request();
+    source_request["task"]["objective"]      = "source";
+    const auto source                        = service.compile(source_request);
+    auto       replacement_request           = request();
+    replacement_request["task"]["objective"] = "replacement";
+    const auto replacement                   = service.compile(replacement_request);
+    ASSERT_TRUE(first["ok"].get<bool>() && source["ok"].get<bool>() &&
+                replacement["ok"].get<bool>());
+    EXPECT_FALSE(records->load_artifact(first["artifact_id"].get<std::string>()).has_value());
+    EXPECT_TRUE(records->load_artifact(source["artifact_id"].get<std::string>()).has_value());
+
+    const auto source_start  = service.start({{"artifact_id", source["artifact_id"]}});
+    const auto source_run_id = source_start["run_id"].get<std::string>();
+    ASSERT_EQ(wait_terminal(service, source_run_id)["status"], "completed");
+    const auto replay_start  = service.start({
+        {"replay", {{"source_run_id", source_run_id}, {"mode", "live"}}},
+    });
+    const auto replay_run_id = replay_start["run_id"].get<std::string>();
+    ASSERT_EQ(wait_terminal(service, replay_run_id)["status"], "completed");
+
+    const auto deadline = std::chrono::steady_clock::now() + 1s;
+    while (records->list_events(replay_run_id).empty() &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(2ms);
+    }
+    std::this_thread::sleep_for(2ms);
+    const auto replacement_start = service.start({{"artifact_id", replacement["artifact_id"]}});
+    ASSERT_EQ(wait_terminal(service, replacement_start["run_id"].get<std::string>())["status"],
+              "completed");
+
+    EXPECT_TRUE(records->load_run(source_run_id).has_value());
+    EXPECT_FALSE(records->load_run(replay_run_id).has_value());
+    EXPECT_TRUE(checkpoints->list(replay_run_id).empty());
+    EXPECT_EQ(calls.load(std::memory_order_relaxed), 3);
+}
+
 TEST(HarnessServiceTest, JournalCorrelatesProviderAndCapabilityCallsToWorkerAttempt) {
     const auto root = unique_temp_path("neograph-harness-journal-correlation");
     TempDirectoryCleanup cleanup(root);
