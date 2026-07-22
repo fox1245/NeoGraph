@@ -142,8 +142,9 @@ void NodeExecutor::maybe_warn_serial_fanout(std::size_t width) const {
         << " is executing serially on a single thread because no "
         << "engine-owned worker pool is installed (build() default "
         << "is EngineConfig::worker_count == 1).\n"
-        << "    Set EngineConfig::worker_count before build() to enable real "
-           "parallel fan-out. Compatibility setters must run before the first run().\n"
+        << "    Set EngineConfig::worker_count before build(), or call "
+           "set_worker_count(N) / set_worker_count_auto() before the first run(), "
+           "to enable real parallel fan-out.\n"
         << "    Suppress this warning with the environment variable "
         << "NEOGRAPH_SUPPRESS_FANOUT_WARNING=1.\n";
     std::fputs(oss.str().c_str(), stderr);
