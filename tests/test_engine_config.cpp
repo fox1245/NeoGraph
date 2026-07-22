@@ -81,6 +81,8 @@ public:
 
 std::atomic<int> CountingNode::calls{0};
 
+std::atomic<int> link_factory_calls{0};
+
 void register_node(const std::string& type, NodeFactoryFn factory) {
     NodeFactory::instance().register_type(
         type, std::move(factory), json::parse(R"({"type":"object","properties":{}})"),
@@ -166,4 +168,38 @@ TEST(EngineConfigTest, EnablesNodeCacheAtConstructionTime) {
     EXPECT_EQ(engine->run(run).channel<int>("output"), 7);
     EXPECT_EQ(engine->run(run).channel<int>("output"), 7);
     EXPECT_EQ(CountingNode::calls.load(), 1);
+}
+
+TEST(CompiledGraphLinkTest, ConsumesCompiledGraphWithoutRunningFactoriesAgain) {
+    link_factory_calls = 0;
+    register_node("compiled_graph_link", [](const std::string&, const json&, const NodeContext&) {
+        ++link_factory_calls;
+        return std::make_unique<EchoNode>();
+    });
+
+    const auto  definition = one_node_graph("compiled_graph_link");
+    NodeContext context;
+    auto        graph = GraphCompiler::compile(definition, context);
+    GraphCompiler::verify_roundtrip(definition, graph);
+    EXPECT_EQ(link_factory_calls.load(), 1);
+
+    auto engine = GraphEngine::link(std::move(graph));
+    EXPECT_EQ(link_factory_calls.load(), 1);
+
+    RunConfig run;
+    run.input = {{"input", "linked"}};
+    EXPECT_EQ(engine->run(run).channel<std::string>("output"), "linked");
+}
+
+TEST(CompiledGraphLinkTest, AppliesSemanticValidationBeforeRuntimeConstruction) {
+    register_node("compiled_graph_link_invalid",
+                  [](const std::string&, const json&, const NodeContext&) {
+                      return std::make_unique<EchoNode>();
+                  });
+
+    NodeContext context;
+    auto graph = GraphCompiler::compile(one_node_graph("compiled_graph_link_invalid"), context);
+    graph.edges.push_back({"missing", "work"});
+
+    EXPECT_THROW((void)GraphEngine::link(std::move(graph)), std::runtime_error);
 }
