@@ -924,7 +924,7 @@ TEST(HarnessServiceTest, WaitingHostCallCanBeCancelled) {
         auto       waiting = wait_terminal(service, run_id);
         ASSERT_EQ(waiting["status"], "input_required") << waiting.dump();
         EXPECT_TRUE(service.cancel(run_id));
-        EXPECT_EQ(service.get(run_id)["status"], "cancelled");
+        EXPECT_EQ(wait_terminal(service, run_id)["status"], "cancelled");
         EXPECT_FALSE(service.cancel(run_id));
     }
     std::filesystem::remove_all(root);
