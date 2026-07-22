@@ -15,7 +15,9 @@
 #include <neograph/json.h>
 
 using neograph::json;
+using neograph::graph::ChannelKey;
 using neograph::graph::RunResult;
+using neograph::graph::RunStatus;
 
 namespace {
 
@@ -127,6 +129,24 @@ TEST(RunResultChannel, WrappedWithoutValueKeyFallsThroughToFlatLookup) {
     EXPECT_EQ(r.channel<std::string>("weird"), "from-flat");
 }
 
+TEST(RunResultChannel, TypedKeyReadsAndTriesWithoutStringlyCallSites) {
+    const ChannelKey<int> counter("counter");
+    const ChannelKey<int> missing("missing");
+    auto                  r = make_wrapped("counter", json(42));
+
+    EXPECT_EQ(r.channel(counter), 42);
+    ASSERT_TRUE(r.try_channel(counter).has_value());
+    EXPECT_EQ(*r.try_channel(counter), 42);
+    EXPECT_FALSE(r.try_channel(missing).has_value());
+}
+
+TEST(RunResultChannel, TypedKeyPreservesTypeErrors) {
+    const ChannelKey<int> counter("counter");
+    auto                  r = make_wrapped("counter", json("not a number"));
+
+    EXPECT_THROW((void)r.try_channel(counter), json::type_error);
+}
+
 TEST(RunResultStatus, MaxStepsExhaustedReadsReservedMarker) {
     RunResult r;
     r.output = json{{"_neograph", {{"max_steps_exhausted", true}}}};
@@ -147,4 +167,16 @@ TEST(RunResultStatus, MaxStepsExhaustedRejectsMalformedOrCollidingJson) {
 
     r.output = json{{"_neograph", {{"max_steps_exhausted", false}}}};
     EXPECT_FALSE(r.max_steps_exhausted());
+}
+
+TEST(RunResultStatus, ReportsCompletedInterruptedAndStepLimit) {
+    RunResult result;
+    result.output = json::object();
+    EXPECT_EQ(result.status(), RunStatus::Completed);
+
+    result.output = json{{"_neograph", {{"max_steps_exhausted", true}}}};
+    EXPECT_EQ(result.status(), RunStatus::StepLimit);
+
+    result.interrupted = true;
+    EXPECT_EQ(result.status(), RunStatus::Interrupted);
 }
