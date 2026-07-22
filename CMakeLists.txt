@@ -417,6 +417,7 @@ add_library(neograph_core
     src/core/node_cache.cpp
     src/core/scheduler.cpp
     src/core/graph_state.cpp
+    src/core/graph_events.cpp
     src/core/graph_node.cpp
     src/core/tool_dispatch.cpp
     src/core/graph_loader.cpp

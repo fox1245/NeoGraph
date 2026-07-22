@@ -294,6 +294,33 @@ inline void record_usage(const RunContext& ctx, const ChatCompletion& completion
 }
 
 /**
+ * @brief Typed channel name for RunResult access.
+ *
+ * ChannelKey binds a channel name to its expected C++ value type without
+ * changing the JSON-backed channel model. Keep keys as reusable constants and
+ * pass them to RunResult::channel() or RunResult::try_channel().
+ */
+template <typename T>
+class ChannelKey {
+public:
+    using value_type = T;
+
+    explicit ChannelKey(std::string name) : name_(std::move(name)) {}
+
+    const std::string& name() const noexcept { return name_; }
+
+private:
+    std::string name_;
+};
+
+/// @brief Normal, paused, or step-limited outcome of a successful run call.
+enum class RunStatus {
+    Completed,
+    Interrupted,
+    StepLimit,
+};
+
+/**
  * @brief Result of a graph execution run.
  *
  * ## ``output`` shape (issue #25)
@@ -353,6 +380,13 @@ struct RunResult {
         return yyjson_mut_is_bool(marker) && yyjson_mut_get_bool(marker);
     }
 
+    /// @brief Return a typed outcome without changing the legacy result layout.
+    RunStatus status() const noexcept {
+        if (interrupted) return RunStatus::Interrupted;
+        if (max_steps_exhausted()) return RunStatus::StepLimit;
+        return RunStatus::Completed;
+    }
+
     /// @brief Read a channel value as type ``T`` (issue #25).
     ///
     /// Looks up the value in ``output``. Tries the canonical
@@ -372,6 +406,19 @@ struct RunResult {
     template <typename T>
     T channel(const std::string& name) const {
         return channel_raw(name).get<T>();
+    }
+
+    /// @brief Read a channel using a reusable typed key.
+    template <typename T>
+    T channel(const ChannelKey<T>& key) const {
+        return channel<T>(key.name());
+    }
+
+    /// @brief Read a typed channel when present, preserving conversion errors.
+    template <typename T>
+    std::optional<T> try_channel(const ChannelKey<T>& key) const {
+        if (!has_channel(key.name())) return std::nullopt;
+        return channel(key);
     }
 
     /// @brief Read a channel value as a raw ``json`` node (issue #25).
