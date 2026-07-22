@@ -215,8 +215,8 @@ int main(int argc, char** argv) {
     // ---- Spawn the model's harness with a checkpointer; run + roll back ----
     std::cout << "── Spawning the model's harness (checkpointed) ──\n";
     auto store = std::make_shared<ng::InMemoryCheckpointStore>();
-    auto engine = ng::GraphEngine::compile(accepted_core, ctx);
-    engine->set_checkpoint_store(store);
+    auto engine = ng::GraphEngine::build(
+        accepted_core, ng::EngineConfig{.node_context = ctx, .checkpoint_store = store});
 
     ng::RunConfig rc;
     rc.thread_id = "beast-live";

@@ -85,8 +85,7 @@ int main() {
                 name, cfg.value("delay_ms", 50));
         });
 
-    auto engine = ng::GraphEngine::compile(one_step_graph("worker"),
-                                           ng::NodeContext{});
+    auto engine = ng::GraphEngine::build(one_step_graph("worker"), ng::EngineConfig{});
 
     asio::io_context io;
     constexpr int N = 3;

@@ -154,7 +154,8 @@ int main() {
         })}
     };
 
-    auto engine = neograph::graph::GraphEngine::compile(definition, ctx);
+    auto engine = neograph::graph::GraphEngine::build(
+        definition, neograph::graph::EngineConfig{.node_context = ctx});
 
     // Run 3 test cases
     struct TestCase {

@@ -287,7 +287,8 @@ int main(int argc, char** argv) {
     };
 
     NodeContext ctx;
-    auto unique_engine = GraphEngine::compile(def, ctx);
+    auto        unique_engine =
+        GraphEngine::build(def, neograph::graph::EngineConfig{.node_context = ctx});
     auto engine = std::shared_ptr<GraphEngine>(std::move(unique_engine));
 
     // AgentCard — 자비스 라우터가 "coder" 이름으로 찾는다

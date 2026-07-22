@@ -4,7 +4,7 @@
 // shape for multi-tenant servers that want shed-load semantics instead
 // of unbounded memory growth — but there's no runnable example. Most
 // existing examples use `std::async`, `engine->run_async()` on an
-// io_context, or `set_worker_count(N)` for in-run fan-out; none show
+// io_context, or `EngineConfig::worker_count` for in-run fan-out; none show
 // the RequestQueue API.
 //
 // What this example shows:
@@ -78,8 +78,10 @@ int main() {
         });
 
     NodeContext ctx;
-    auto engine = GraphEngine::compile(work_graph(), ctx,
-                                       std::make_shared<InMemoryCheckpointStore>());
+    auto        engine = GraphEngine::build(
+        work_graph(),
+        EngineConfig{.node_context     = ctx,
+                            .checkpoint_store = std::make_shared<InMemoryCheckpointStore>()});
 
     // ── Tiny pool: only 4 workers, only 8 pending allowed ────────────
     //

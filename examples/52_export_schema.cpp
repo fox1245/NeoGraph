@@ -15,7 +15,7 @@
 //
 // `node_types` reflects whatever is registered in NodeFactory at call
 // time, so an embedder's custom node types appear here too — register
-// them before calling, exactly as you would before compile().
+// them before calling, exactly as you would before build().
 //
 // Usage:
 //   ./example_export_schema > schema.json

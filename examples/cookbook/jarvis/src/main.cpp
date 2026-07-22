@@ -871,11 +871,6 @@ int main(int argc, char** argv) {
         neograph::graph::NodeContext ctx;
         ctx.provider = synth_provider;  // llm_call 노드(response_synth)가 사용
 
-        auto engine_uptr =
-            neograph::graph::GraphEngine::compile(graph_def, ctx);
-        auto engine =
-            std::shared_ptr<neograph::graph::GraphEngine>(engine_uptr.release());
-
         // ── 5.5) 파일 영속 Store 생성 + 엔진에 주입 ─────────────────────────
         // MemoryLookupNode / MemoryCommitNode 가 ctx.store 를 통해 대화 기록을
         // 읽고 쓴다. JsonFileStore 라 프로세스를 재시작해도 기억이 유지됨
@@ -887,7 +882,9 @@ int main(int argc, char** argv) {
                                               : "jarvis_memory.json";
         auto jarvis_store =
             std::make_shared<jarvis::memory::JsonFileStore>(mem_path);
-        engine->set_store(jarvis_store);
+        auto engine_uptr = neograph::graph::GraphEngine::build(
+            graph_def, neograph::graph::EngineConfig{.node_context = ctx, .store = jarvis_store});
+        auto engine = std::shared_ptr<neograph::graph::GraphEngine>(engine_uptr.release());
         std::cerr << "[jarvis] 파일 영속 Store 주입 완료 (" << mem_path << ")\n";
 
         // ── 6) 자비스 A2A self-server 기동 ──────────────────────────────────

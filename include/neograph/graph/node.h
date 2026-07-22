@@ -8,17 +8,12 @@
  * - IntentClassifierNode: LLM-based intent routing
  * - SubgraphNode: hierarchical graph composition
  *
- * # v0.4.x migration navigator (external authors)
+ * # Custom node API
  *
- * Writing a custom node subclass in v0.4.x? **Keep using the legacy
- * 8-virtual surface** (`execute` / `execute_async` / `execute_full` /
- * `execute_stream` and their `_async` pairs) — those still work and
- * the engine drives them on every dispatch path. The new unified
- * `run(NodeInput) -> awaitable<NodeOutput>` virtual is additive in
- * v0.4.0 (PR 2 in `ROADMAP_v1.md`): it forwards to the legacy chain
- * by default, so existing subclasses compile unchanged. PR 4 of the
- * same plan will mark the legacy virtuals `[[deprecated]]`; v1.0
- * deletes them.
+ * Custom nodes implement the single coroutine-native
+ * `run(NodeInput) -> awaitable<NodeOutput>` virtual. The pre-v1
+ * `execute*` virtual cross-product has been removed; see
+ * `docs/migration-v0.4-to-v1.0.md` for before/after examples.
  *
  * The engine threads `RunContext` through `NodeInput::ctx`. Nodes can use
  * cancellation, usage accounting, thread/step/stream metadata, Store access,
@@ -30,7 +25,7 @@
  *   - `examples/02_custom_graph.cpp` — custom node subclass
  *   - `examples/05_parallel_fanout.cpp` — Send / Command pattern
  *
- * @see ROADMAP_v1.md for the v0.4 → v1.0 PR sequence
+ * @see docs/migration-v0.4-to-v1.0.md
  */
 #pragma once
 
@@ -52,21 +47,13 @@ namespace neograph::graph {
 struct RunContext;
 
 /**
- * @brief Per-call input bundle for the v0.4 unified ``run()`` virtual.
+ * @brief Per-call input bundle for the unified ``run()`` virtual.
  *
- * Replaces the ``(state[, cb])`` parameter pair that the legacy 8-
- * virtual cross-product passed around. New nodes override
+ * Replaces the old ``(state[, cb])`` parameter pair. Nodes override
  * ``GraphNode::run(NodeInput) -> awaitable<NodeOutput>`` and read
  * everything they need (state, per-run metadata, optional streaming
  * sink) from this struct. Trivially constructed at the dispatch site;
- * cheap to pass by const reference.
- *
- * **PR 2 (v0.4.0)**: ``run()`` is additive — the default body
- * forwards to the legacy 8-virtual chain, so existing C++ subclasses
- * continue to compile and work unchanged. PR 4 marks the legacy
- * virtuals ``[[deprecated]]``; v1.0 deletes them.
- *
- * @see ROADMAP_v1.md "Execution plan" → PR 2
+ * copied into the coroutine frame so its references survive suspension.
  */
 struct NodeInput {
     /// Snapshot of the channel state visible to this node.
@@ -85,35 +72,16 @@ struct NodeInput {
     const GraphStreamCallback* stream_cb = nullptr;
 };
 
-/// Output of the v0.4 unified ``run()`` virtual. Same shape as the
-/// legacy ``NodeResult`` (writes + optional Command + Sends), aliased
-/// here so user code can use either name interchangeably during the
-/// deprecation window. The ROADMAP names it ``NodeOutput`` because the
-/// "input → output" pairing reads more naturally than "input → result"
-/// at the call site; the underlying structure is unchanged.
+/// Output of the unified ``run()`` virtual. Alias for ``NodeResult``:
+/// channel writes plus optional Command and Send directives.
 using NodeOutput = NodeResult;
-
-/// PR 4 (v0.4.0): deprecation marker for the legacy 8-virtual chain.
-/// Centralised so the message stays consistent across every override
-/// point. v0.4.x emits ``-Wdeprecated-declarations`` warnings; v1.0
-/// removes the marked methods entirely. See ROADMAP_v1.md PR 9.
-///
-/// Migration recipe with case-by-case before/after examples:
-/// docs/migration-v0.4-to-v1.0.md
-#define NEOGRAPH_DEPRECATED_VIRTUAL                                  \
-    [[deprecated(                                                    \
-        "v0.4: override run(NodeInput) -> awaitable<NodeOutput> "    \
-        "instead. The legacy 8-virtual chain is preserved for "      \
-        "back-compat through v0.5 and removed in v1.0. "             \
-        "Migration recipe: docs/migration-v0.4-to-v1.0.md")]]
 
 /**
  * @brief Abstract base class for all graph nodes.
  *
  * Nodes are the building blocks of the graph. Each node reads from
  * the graph state and produces channel writes (and optionally Command
- * or Send directives). Override execute() for basic nodes, or
- * execute_full() to use Command/Send.
+ * or Send directives). Override ``run(NodeInput)`` for every node shape.
  *
  * ## Thread safety
  *
@@ -132,8 +100,7 @@ public:
     virtual ~GraphNode() = default;
 
     /**
-     * @brief v0.4 unified dispatch entry — replaces the 8-virtual cross
-     *        product over (sync/async) × (writes/full) × (stream/non-stream).
+     * @brief Unified dispatch entry for sync work, async work, and streaming.
      *
      * **New nodes override THIS method.** Read ``in.state`` for channel
      * inputs, read ``in.ctx`` for available per-run metadata (cancel token,
@@ -142,17 +109,10 @@ public:
      * for ``NodeResult``) populated with channel writes plus optional
      * ``Command`` / ``Send`` directives.
      *
-     * **Legacy nodes that override one of the 8 virtuals** keep
-     * working unchanged: the default body of ``run()`` below forwards
-     * to ``execute_full_async`` / ``execute_full_stream_async``, which
-     * preserves the existing default-fallback chain (and its
-     * ``ExecuteDefaultGuard`` recursion guard).
-     *
      * The engine (``NodeExecutor::execute_node_with_retry_async``)
-     * dispatches via this method as of PR 2. Sync-vs-async is no
-     * longer a user concern — return whatever your body needs to
-     * ``co_return`` (sync work: ``co_return execute(...)``; async work:
-     * ``co_return co_await provider->complete_async(...)``).
+     * dispatches only through this method. Sync-vs-async is no longer
+     * a public virtual cross-product: perform immediate work before
+     * ``co_return``, or ``co_await`` asynchronous dependencies.
      *
      * @code
      * class MyNode : public GraphNode {
@@ -167,8 +127,7 @@ public:
      * };
      * @endcode
      *
-     * @see ROADMAP_v1.md "Execution plan" → PR 2; ``NodeInput`` and
-     * ``NodeOutput`` above.
+     * @see ``NodeInput`` and ``NodeOutput`` above.
      *
      * **Lifetime note**: ``in`` is taken **by value** so the coroutine
      * frame owns its own copy of the struct. The ``state`` / ``ctx``
@@ -204,7 +163,7 @@ public:
      */
     LLMCallNode(const std::string& name, const NodeContext& ctx);
 
-    /// v0.4 PR 9a: unified ``run`` override. Builds completion params,
+    /// Unified ``run`` override. Builds completion params,
     /// calls ``provider_->complete_async`` (or ``complete_stream_async``
     /// when ``in.stream_cb`` is non-null and bridges per-token events
     /// to GraphEvent), writes the assistant message to the
@@ -231,12 +190,9 @@ private:
  * Reads the last assistant message from the "messages" channel,
  * executes each tool call, and writes tool result messages back.
  *
- * Deliberately does NOT override `execute_stream`: tool execution is
- * synchronous work against the user's `Tool` implementations and
- * produces no LLM token stream to emit. The default `execute_stream`
- * inherited from GraphNode falls through to `execute()`, which is the
- * intended behaviour. Emit your own progress events from inside your
- * Tool if you need fine-grained observability.
+ * Tool dispatch does not emit LLM token events because it executes tool calls,
+ * not a model stream. Tools can emit their own progress through application
+ * observability when finer-grained reporting is needed.
  */
 class NEOGRAPH_API ToolDispatchNode : public GraphNode {
 public:
@@ -247,7 +203,7 @@ public:
      */
     ToolDispatchNode(const std::string& name, const NodeContext& ctx);
 
-    /// v0.4 PR 9a: unified ``run`` — finds the latest assistant
+    /// Unified ``run`` — finds the latest assistant
     /// message with tool_calls, dispatches each call to the matching
     /// Tool, writes tool result messages back to the ``messages``
     /// channel.

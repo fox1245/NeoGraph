@@ -305,10 +305,9 @@ Linux host with a matching libc and it runs.
 | Dynamic dependencies | `libc.so.6` only |
 
 `example_plan_executor` sleeps 120 ms per Send target to simulate an
-LLM call; the 5-way fan-out runs serially on the default
-single-threaded super-step loop. Call `engine->set_worker_count(N)`
-after `compile()` for multi-threaded fan-out (cuts this demo's wall
-time roughly in half on a 2-core host). Steady-state RSS is unaffected.
+LLM call. The example opts into a hardware-sized fan-out pool through
+`EngineConfig::worker_count` before `GraphEngine::build()`, so the five
+targets execute concurrently. Steady-state RSS is unaffected.
 
 ```bash
 cmake -B build-minsize -S . \

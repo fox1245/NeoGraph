@@ -7,7 +7,7 @@
 // 흐름:
 //   1) 그래프를 JSON 으로 기술 — 채널 1개 + 노드 1개 + 엣지
 //   2) 노드 타입을 등록
-//   3) compile → run → 결과를 result.channel<T>(name) 으로 꺼냄
+//   3) build → run → 결과를 result.channel<T>(name) 으로 꺼냄
 //
 // 실행: ./example_minimal     출력: "HELLO"
 
@@ -52,7 +52,7 @@ int main() {
 
     // (3) 컴파일 → 실행 → 결과 꺼냄.
     NodeContext ctx;
-    auto engine = GraphEngine::compile(def, ctx);
+    auto        engine = GraphEngine::build(def, EngineConfig{.node_context = ctx});
 
     RunConfig cfg;
     cfg.input = {{"text", "hello"}};

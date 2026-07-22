@@ -1,8 +1,13 @@
-# NeoGraph API Reference (한국어)
+# NeoGraph API 내러티브 투어 (한국어)
 
 > NeoGraph -- C++ 그래프 에이전트 엔진 라이브러리
 >
 > 버전: 1.0 | 네임스페이스: `neograph`, `neograph::graph`, `neograph::llm`, `neograph::mcp`, `neograph::util`
+
+이 문서는 NeoGraph의 권장 사용 경로를 순서대로 설명하는 투어이며 전체 타입
+목록이 아니다. 모든 public 타입과 멤버의 canonical reference는 public header에서
+매 push마다 생성되는 [Doxygen](https://fox1245.github.io/NeoGraph/)을 사용한다.
+여기서는 실제 agent를 만들 때 자주 만나는 core, graph, LLM, MCP API에 집중한다.
 
 ---
 
@@ -482,23 +487,23 @@ struct Send {
 };
 ```
 
-`Send`는 `NodeResult::sends`에 담아 반환한다. 엔진이 각 Send에 대해
+`Send`는 `NodeOutput::sends`에 담아 반환한다. 엔진이 각 Send에 대해
 대상 노드를 개별적으로 실행하고, 결과를 리듀서를 통해 합산한다.
 
 **사용 예:**
 
 ```cpp
-NodeResult execute_full(const GraphState& state) override {
-    NodeResult nr;
+asio::awaitable<NodeOutput> run(NodeInput in) override {
+    NodeOutput out;
     std::vector<std::string> topics = {"AI", "반도체", "양자컴퓨팅"};
 
     for (const auto& topic : topics) {
-        nr.sends.push_back(Send{
+        out.sends.push_back(Send{
             "researcher",                         // 실행할 노드
             json({{"topic", topic}})              // 각 실행마다 다른 입력
         });
     }
-    return nr;
+    co_return out;
 }
 ```
 
@@ -516,27 +521,27 @@ struct Command {
 };
 ```
 
-`Command`는 `NodeResult::command`에 담아 반환한다.
+`Command`는 `NodeOutput::command`에 담아 반환한다.
 
 **사용 예:**
 
 ```cpp
-NodeResult execute_full(const GraphState& state) override {
-    auto score = state.get("score").get<double>();
-    NodeResult nr;
+asio::awaitable<NodeOutput> run(NodeInput in) override {
+    auto score = in.state.get("score").get<double>();
+    NodeOutput out;
 
     if (score > 0.8) {
-        nr.command = Command{
+        out.command = Command{
             "summarizer",   // 높은 점수 -> 요약 노드로 직행
             {ChannelWrite{"status", json("approved")}}
         };
     } else {
-        nr.command = Command{
+        out.command = Command{
             "researcher",   // 낮은 점수 -> 추가 조사
             {ChannelWrite{"status", json("needs_more_research")}}
         };
     }
-    return nr;
+    co_return out;
 }
 ```
 
@@ -641,7 +646,9 @@ struct NodeContext {
 ```
 
 `tools`는 비소유(non-owning) 포인터다.
-도구의 수명은 `GraphEngine::own_tools()` 또는 호출자가 관리해야 한다.
+새 엔진에서는 `ToolSet`을 `EngineResources`로 이동해 전달하는 방식을 권장한다.
+`GraphEngine::build()`가 `NodeContext`에 비소유 view를 연결하고 엔진 수명 동안
+도구 객체를 소유한다. 기존 `own_tools()`와 호출자 소유 방식도 호환된다.
 
 ---
 
@@ -671,6 +678,20 @@ struct GraphEvent {
 ```cpp
 using GraphStreamCallback = std::function<void(const GraphEvent&)>;
 ```
+
+`GraphEvent`는 안정적인 콜백/JSON 형상으로 유지된다. payload를 타입으로
+처리하려면 같은 실행 API에 `adapt_typed_stream()`을 사용할 수 있다.
+
+```cpp
+auto callback = adapt_typed_stream([](const TypedGraphEvent& event) {
+    std::visit([](const auto& typed) {
+        // NodeStartEvent, LlmTokenEvent 등 각 대안을 처리한다.
+    }, event);
+});
+```
+
+직접 변환은 `to_typed_event()`를 사용한다. 잘못된 payload나 향후 버전이
+추가한 형상은 스트리밍 콜백에서 예외를 던지는 대신 `RawGraphEvent`가 된다.
 
 **특수 노드 이름:**
 
@@ -776,12 +797,9 @@ state.write("messages", json::array({msg2})); // -> [msg1, msg2]
 **헤더:** `neograph/graph/node.h`
 **네임스페이스:** `neograph::graph`
 
-> **커스텀 GraphNode를 작성하신다면?** `execute*` 가상함수가
-> 4개 있고 각각의 async peer까지 총 8개. 잘못 고르면
-> `Command`/`Send`가 조용히 드롭되거나, 이벤트 루프가 얼거나,
-> 무한 재귀. 전체 결정 매트릭스 + 알려진 함정은
-> [`ASYNC_GUIDE.md` §9.2](ASYNC_GUIDE.md#92-graphnode--the-four-quadrant-matrix)
-> 참조.
+> **커스텀 GraphNode를 작성한다면** 단 하나의
+> `run(NodeInput) -> asio::awaitable<NodeOutput>`을 구현한다.
+> v1.0에서 옛 `execute*` 8-virtual chain은 제거되었다.
 
 ### 6.1 GraphNode (추상 클래스)
 
@@ -792,35 +810,14 @@ class GraphNode {
 public:
     virtual ~GraphNode() = default;
 
-    // 기본 실행: 상태를 읽고 채널 쓰기를 반환
-    virtual std::vector<ChannelWrite> execute(const GraphState& state) = 0;
-
-    // 스트리밍 실행 (기본: execute()에 위임)
-    virtual std::vector<ChannelWrite> execute_stream(
-        const GraphState& state, const GraphStreamCallback& cb);
-
-    // 확장 실행: Send/Command를 포함한 NodeResult 반환
-    // 기본 구현은 execute()를 호출하여 writes만 채운 NodeResult를 반환
-    virtual NodeResult execute_full(const GraphState& state);
-
-    // 확장 스트리밍 실행
-    virtual NodeResult execute_full_stream(
-        const GraphState& state, const GraphStreamCallback& cb);
-
-    // 노드 이름
+    virtual asio::awaitable<NodeOutput> run(NodeInput in) = 0;
     virtual std::string get_name() const = 0;
 };
 ```
 
-| 메서드 | 오버라이드 시점 |
-|--------|---------------|
-| `execute()` | 기본 노드. 채널 쓰기만 필요할 때 |
-| `execute_full()` | Send 또는 Command를 사용해야 할 때 |
-| `execute_stream()` | 스트리밍 이벤트를 발생시켜야 할 때 |
-| `execute_full_stream()` | Send/Command + 스트리밍이 모두 필요할 때 |
-
-엔진은 `execute_full()` (또는 스트리밍 시 `execute_full_stream()`)을 호출한다.
-기본 구현이 `execute()`를 래핑하므로, 단순 노드는 `execute()`만 구현하면 된다.
+`in.state`에서 채널을 읽고 `NodeOutput::writes`, `command`, `sends`를 채운다.
+스트리밍이 필요하면 `in.stream_cb`가 null인지 확인한 뒤 `GraphEvent`를 보낸다.
+취소, 현재 step, thread ID, Store는 `in.ctx`에서 접근한다.
 
 ---
 
@@ -834,9 +831,7 @@ class LLMCallNode : public GraphNode {
 public:
     LLMCallNode(const std::string& name, const NodeContext& ctx);
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override;
-    std::vector<ChannelWrite> execute_stream(
-        const GraphState& state, const GraphStreamCallback& cb) override;
+    asio::awaitable<NodeOutput> run(NodeInput in) override;
     std::string get_name() const override;
 };
 ```
@@ -860,7 +855,7 @@ class ToolDispatchNode : public GraphNode {
 public:
     ToolDispatchNode(const std::string& name, const NodeContext& ctx);
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override;
+    asio::awaitable<NodeOutput> run(NodeInput in) override;
     std::string get_name() const override;
 };
 ```
@@ -883,7 +878,7 @@ public:
                          const std::string& prompt,          // 분류 프롬프트
                          std::vector<std::string> valid_routes); // 유효한 경로 목록
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override;
+    asio::awaitable<NodeOutput> run(NodeInput in) override;
     std::string get_name() const override;
 };
 ```
@@ -919,9 +914,7 @@ public:
                  std::map<std::string, std::string> input_map = {},
                  std::map<std::string, std::string> output_map = {});
 
-    std::vector<ChannelWrite> execute(const GraphState& state) override;
-    std::vector<ChannelWrite> execute_stream(
-        const GraphState& state, const GraphStreamCallback& cb) override;
+    asio::awaitable<NodeOutput> run(NodeInput in) override;
     std::string get_name() const override;
 };
 ```
@@ -950,7 +943,34 @@ auto sub = std::make_unique<SubgraphNode>(
 
 NeoGraph의 핵심 실행 엔진. JSON 정의로 그래프를 컴파일하고 super-step 루프로 실행한다.
 
-### 7.1 RunConfig
+### 7.1 EngineConfig와 EngineResources
+
+새 코드는 엔진을 만들기 전에 의존성과 정책을 한 번에 구성한다.
+
+```cpp
+struct EngineConfig {
+    NodeContext node_context;
+    std::shared_ptr<CheckpointStore> checkpoint_store;
+    std::shared_ptr<Store> store;
+    std::optional<RetryPolicy> retry_policy;
+    std::map<std::string, RetryPolicy> node_retry_policies;
+    ToolGate tool_gate;
+    std::size_t worker_count = 1;
+    std::set<std::string> cached_nodes;
+};
+
+struct EngineResources {
+    ToolSet tools;
+    std::shared_ptr<const GraphRegistry> registry;
+};
+```
+
+`ToolSet`은 고정된 도구 집합을 소유하는 move-only 타입이다. `GraphRegistry`는
+엔진별 reducer/condition/node-factory overlay이며, 등록되지 않은 이름은 기존
+process-global registry로 fallback한다. 둘 다 `build()` 또는 `link()`에 넘기기
+전에 구성해야 한다.
+
+### 7.2 RunConfig
 
 실행 설정.
 
@@ -960,12 +980,15 @@ struct RunConfig {
     json        input;                           // 초기 채널 값 (예: {"messages": [...]})
     int         max_steps  = 50;                 // 루프 안전 제한
     StreamMode  stream_mode = StreamMode::ALL;   // 수신할 이벤트 종류
+    std::shared_ptr<CancelToken> cancel_token;    // 협력적 취소
+    std::shared_ptr<UsageAccumulator> usage;      // 선택적 토큰 누적기
+    bool        resume_if_exists = false;         // 기존 checkpoint에서 시작
 };
 ```
 
 ---
 
-### 7.2 RunResult
+### 7.3 RunResult
 
 실행 결과.
 
@@ -979,6 +1002,12 @@ struct RunResult {
     std::vector<std::string> execution_trace;    // 실행된 노드 순서
 
     bool max_steps_exhausted() const noexcept;    // 실행할 작업을 남기고 한도 도달
+    RunStatus status() const noexcept;            // Completed, Interrupted, StepLimit
+
+    template <typename T> T channel(const std::string& name) const;
+    template <typename T> T channel(const ChannelKey<T>& key) const;
+    template <typename T>
+    std::optional<T> try_channel(const ChannelKey<T>& key) const;
 };
 ```
 
@@ -986,16 +1015,36 @@ struct RunResult {
 경우에만 `true`를 반환한다. 마지막 허용 단계에서 정확히 `__end__`에 도달한
 정상 실행은 `false`다.
 
+`status()`는 public `RunResult` data layout을 바꾸지 않고
+`RunStatus::Completed`, `RunStatus::Interrupted`, `RunStatus::StepLimit` 중
+하나를 반환한다. 재사용할 채널 이름과 C++ 타입은 `ChannelKey<T>`로 묶는다.
+
+```cpp
+inline const ChannelKey<std::string> Answer{"answer"};
+auto answer = result.channel(Answer);
+auto optional = result.try_channel(Answer);
+```
+
 ---
 
-### 7.3 GraphEngine 클래스
+### 7.4 GraphEngine 클래스
 
 ```cpp
 class GraphEngine {
 public:
-    // ── 컴파일 ──
+    // ── 생성 ──
 
-    static std::unique_ptr<GraphEngine> compile(
+    static std::unique_ptr<GraphEngine> build(
+        const json& definition, EngineConfig config);
+    static std::unique_ptr<GraphEngine> build(
+        const json& definition, EngineConfig config, EngineResources resources);
+
+    static std::unique_ptr<GraphEngine> link(
+        CompiledGraph graph, EngineConfig config = {});
+    static std::unique_ptr<GraphEngine> link(
+        CompiledGraph graph, EngineConfig config, EngineResources resources);
+
+    static std::unique_ptr<GraphEngine> compile( // 호환 facade
         const json& definition,
         const NodeContext& default_context,
         std::shared_ptr<CheckpointStore> store = nullptr);
@@ -1054,9 +1103,39 @@ public:
 
 ---
 
-### 7.4 compile()
+### 7.5 build() / link()
 
-JSON 정의와 기본 컨텍스트로 그래프를 컴파일한다.
+```cpp
+EngineConfig config;
+config.node_context.provider = provider;
+config.checkpoint_store = checkpoint_store;
+config.store = store;
+config.worker_count = 4;
+config.cached_nodes.insert("retrieve");
+
+std::vector<std::unique_ptr<Tool>> owned_tools;
+owned_tools.push_back(std::make_unique<SearchTool>());
+auto registry = std::make_shared<GraphRegistry>();
+// 엔진 전용 reducer, condition, node type을 registry에 등록한다.
+
+EngineResources resources{
+    .tools = ToolSet(std::move(owned_tools)),
+    .registry = registry,
+};
+
+auto engine = GraphEngine::build(definition, std::move(config),
+                                 std::move(resources));
+```
+
+`build()`는 JSON 정의를 compile, 검증, link하고 완전히 설정된 엔진을 반환한다.
+`link()`는 이미 검사하거나 변환한 `CompiledGraph`를 move로 소비하고 런타임
+설정을 적용한다.
+
+### 7.6 compile() 호환 API
+
+JSON 정의와 기본 컨텍스트로 그래프를 컴파일한다. 기존 signature와 동작을
+보존하며 내부적으로 `build()`에 위임한다. 새 코드에서 store, retry, worker,
+cache, tool gate를 설정할 때는 `EngineConfig`를 권장한다.
 
 ```cpp
 static std::unique_ptr<GraphEngine> compile(
@@ -1124,13 +1203,9 @@ int main() {
     std::vector<std::unique_ptr<Tool>> tools;
     tools.push_back(std::make_unique<MyTool>());
 
-    std::vector<Tool*> tool_ptrs;
-    for (auto& t : tools) tool_ptrs.push_back(t.get());
-
     // 컨텍스트 구성
     NodeContext ctx;
     ctx.provider = provider;
-    ctx.tools = tool_ptrs;
     ctx.instructions = "당신은 유용한 도우미입니다.";
 
     // JSON 정의
@@ -1151,9 +1226,14 @@ int main() {
         })}
     };
 
-    // 컴파일 + 실행
-    auto engine = GraphEngine::compile(definition, ctx);
-    engine->own_tools(std::move(tools));
+    // 생성 + 실행: 도구 소유권도 엔진으로 이동
+    EngineConfig engine_config;
+    engine_config.node_context = ctx;
+    EngineResources resources{
+        .tools = ToolSet(std::move(tools)),
+    };
+    auto engine = GraphEngine::build(definition, std::move(engine_config),
+                                     std::move(resources));
 
     RunConfig config;
     config.input = {{"messages", json::array({
@@ -1172,7 +1252,7 @@ int main() {
 
 ---
 
-### 7.5 run()
+### 7.7 run()
 
 그래프를 동기적으로 실행한다.
 
@@ -1184,7 +1264,7 @@ RunResult run(const RunConfig& config);
 
 ---
 
-### 7.6 run_stream()
+### 7.8 run_stream()
 
 스트리밍 이벤트를 발생시키며 그래프를 실행한다.
 
@@ -1218,7 +1298,7 @@ auto result = engine->run_stream(config,
 
 ---
 
-### 7.7 resume()
+### 7.9 resume()
 
 HITL 인터럽트 후 실행을 재개한다.
 
@@ -1239,7 +1319,10 @@ RunResult resume(const std::string& thread_id,
 ```cpp
 // 1. checkpoint store 준비
 auto store = std::make_shared<InMemoryCheckpointStore>();
-auto engine = GraphEngine::compile(definition, ctx, store);
+EngineConfig engine_config;
+engine_config.node_context = ctx;
+engine_config.checkpoint_store = store;
+auto engine = GraphEngine::build(definition, std::move(engine_config));
 
 // 2. 첫 실행 (tools 노드 전에 인터럽트)
 RunConfig config;
@@ -1262,7 +1345,7 @@ if (result.interrupted) {
 
 ---
 
-### 7.8 get_state() / get_state_history()
+### 7.10 get_state() / get_state_history()
 
 ```cpp
 // 스레드의 최신 상태 조회
@@ -1278,7 +1361,7 @@ std::vector<Checkpoint> get_state_history(const std::string& thread_id,
 
 ---
 
-### 7.9 update_state()
+### 7.11 update_state()
 
 실행 중이 아닌 스레드의 상태를 외부에서 수정한다.
 
@@ -1296,7 +1379,7 @@ void update_state(const std::string& thread_id,
 
 ---
 
-### 7.10 fork()
+### 7.12 fork()
 
 기존 스레드의 checkpoint를 기반으로 새 스레드를 분기한다.
 time-travel 디버깅이나 what-if 분석에 활용한다.
@@ -1317,7 +1400,10 @@ std::string fork(const std::string& source_thread_id,
 
 ---
 
-### 7.11 설정 메서드
+### 7.13 호환 설정 메서드
+
+아래 setter는 기존 코드를 위해 유지된다. 새 엔진은 실행을 시작하기 전에
+`EngineConfig`와 `EngineResources`로 같은 값을 전달하는 방식을 권장한다.
 
 ```cpp
 // 도구 소유권을 엔진에 이전 (수명 관리)
@@ -1341,16 +1427,15 @@ void set_node_retry_policy(const std::string& node_name,
 const std::string& get_graph_name() const;
 ```
 
-**재시도 정책 설정 예:**
+**새 코드의 재시도 정책 설정 예:**
 
 ```cpp
-auto engine = GraphEngine::compile(definition, ctx);
-
 // 전체 기본: 3회 재시도, 200ms 시작, 2배 백오프, 최대 5초
-engine->set_retry_policy({3, 200, 2.0f, 5000});
-
-// LLM 노드만 5회 재시도
-engine->set_node_retry_policy("llm", {5, 500, 2.0f, 10000});
+EngineConfig engine_config;
+engine_config.node_context = ctx;
+engine_config.retry_policy = RetryPolicy{3, 200, 2.0f, 5000};
+engine_config.node_retry_policies["llm"] = RetryPolicy{5, 500, 2.0f, 10000};
+auto engine = GraphEngine::build(definition, std::move(engine_config));
 ```
 
 ---
@@ -1358,8 +1443,8 @@ engine->set_node_retry_policy("llm", {5, 500, 2.0f, 10000});
 ## 7b. 엔진 내부 구성 요소
 
 `GraphEngine`은 얇은 오케스트레이터이며, 실제 일은 네 개의 전용 클래스에 위임한다.
-일반 사용자는 직접 건드릴 일이 없지만(전부 `GraphEngine::compile()`에서 생성되어
-`execute_graph()`에서 구동됨), 공개 헤더로 노출되어 있어 JSON 없이 직접 구성하거나,
+일반 사용자는 직접 건드릴 일이 없지만(전부 `GraphEngine::build()` 또는 호환
+`compile()`에서 생성되어 `execute_graph()`에서 구동됨), 공개 헤더로 노출되어 있어 JSON 없이 직접 구성하거나,
 커스텀 체크포인트 흐름을 만들거나, 테스트에서 특정 부분을 스텁할 수 있다.
 
 | 클래스 | 헤더 | 역할 |
@@ -1407,8 +1492,8 @@ public:
 } // namespace neograph::graph
 ```
 
-`GraphEngine::compile()`은 내부적으로 `GraphCompiler::compile()`을 호출한 뒤
-결과 필드를 엔진의 런타임 슬롯으로 move한다. 잘못된 edge나 등록되지 않은 노드
+`GraphEngine::build()`는 내부적으로 `GraphCompiler::compile()`을 호출하고 결과를
+검증한 뒤 `GraphEngine::link()`에 넘긴다. 잘못된 edge나 등록되지 않은 노드
 타입 같은 파싱 실패는 런타임 상태를 만들기 전에 여기서 터진다.
 
 ### Scheduler
@@ -1713,9 +1798,10 @@ public:
 ```cpp
 auto store = std::make_shared<InMemoryCheckpointStore>();
 
-auto engine = GraphEngine::compile(definition, ctx, store);
-// 또는
-engine->set_checkpoint_store(store);
+EngineConfig engine_config;
+engine_config.node_context = ctx;
+engine_config.checkpoint_store = store;
+auto engine = GraphEngine::build(definition, std::move(engine_config));
 
 // 실행 후 이력 조회
 auto history = store->list("thread-001");
@@ -1811,7 +1897,10 @@ public:
 
 ```cpp
 auto store = std::make_shared<InMemoryStore>();
-engine->set_store(store);
+EngineConfig engine_config;
+engine_config.node_context = ctx;
+engine_config.store = store;
+auto engine = GraphEngine::build(definition, std::move(engine_config));
 
 // 노드 내부에서 Store 접근 (engine->get_store())
 // 사용자 선호도 저장
@@ -1839,7 +1928,9 @@ for (const auto& p : prefs) {
 **네임스페이스:** `neograph::graph`
 
 JSON 정의로 그래프를 컴파일할 때 노드 타입, 리듀서, 조건 함수를
-이름으로 검색하는 싱글턴 레지스트리들.
+이름으로 검색하는 기존 싱글턴 레지스트리들. 새 코드는 `GraphRegistry`를
+`EngineResources`로 전달해 엔진별 overlay를 만들 수 있으며, 로컬에 없는
+이름만 이 process-global registry로 fallback한다.
 
 ### 10.1 ReducerRegistry
 
@@ -2754,9 +2845,9 @@ __start__ -> planner --(Send: researcher x N)--> evaluator --(Command)--> summar
 class PlannerNode : public GraphNode {
     int round_ = 0;
 public:
-    NodeResult execute_full(const GraphState& state) override {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
         round_++;
-        auto query = state.get("query").get<std::string>();
+        auto query = in.state.get("query").get<std::string>();
 
         std::vector<std::string> topics;
         if (round_ == 1)
@@ -2764,23 +2855,19 @@ public:
         else
             topics = {"risks", "outlook"};
 
-        NodeResult nr;
-        nr.writes.push_back(ChannelWrite{"plan", json({
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"plan", json({
             {"round", round_}, {"topics", topics}
         })});
 
         // 각 주제에 대해 researcher 노드를 개별 실행
         for (const auto& topic : topics) {
-            nr.sends.push_back(Send{
+            out.sends.push_back(Send{
                 "researcher",
                 json({{"topic", topic}})
             });
         }
-        return nr;
-    }
-
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        return execute_full(state).writes;
+        co_return out;
     }
 
     std::string get_name() const override { return "planner"; }
@@ -2789,27 +2876,23 @@ public:
 // EvaluatorNode: 결과를 평가하고 Command로 분기
 class EvaluatorNode : public GraphNode {
 public:
-    NodeResult execute_full(const GraphState& state) override {
-        auto findings = state.get("findings");
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto findings = in.state.get("findings");
         int count = findings.is_array() ? (int)findings.size() : 0;
 
-        NodeResult nr;
+        NodeOutput out;
         if (count >= 5) {
-            nr.command = Command{
+            out.command = Command{
                 "summarizer",
                 {ChannelWrite{"status", json("sufficient")}}
             };
         } else {
-            nr.command = Command{
+            out.command = Command{
                 "planner",
                 {ChannelWrite{"status", json("needs_more_data")}}
             };
         }
-        return nr;
-    }
-
-    std::vector<ChannelWrite> execute(const GraphState& state) override {
-        return execute_full(state).writes;
+        co_return out;
     }
 
     std::string get_name() const override { return "evaluator"; }
@@ -2858,7 +2941,7 @@ json definition = {
 };
 
 NodeContext ctx;
-auto engine = GraphEngine::compile(definition, ctx);
+auto engine = GraphEngine::build(definition, EngineConfig{.node_context = ctx});
 
 RunConfig config;
 config.input = {{"query", "AI 반도체 시장 분석"}};

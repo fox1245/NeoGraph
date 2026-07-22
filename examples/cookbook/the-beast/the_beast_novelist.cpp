@@ -320,7 +320,7 @@ int main(int argc, char** argv) {
     std::cout << "harness passed the coherence gate. writing";
     std::cout << (g_prov ? " (live — this takes a few minutes)…\n" : " (stub)…\n");
 
-    auto engine = ng::GraphEngine::compile(core, ctx);
+    auto          engine = ng::GraphEngine::build(core, ng::EngineConfig{.node_context = ctx});
     ng::RunConfig rc; rc.max_steps = total + 5;
     auto res = engine->run(rc);
     std::string book = res.has_channel("book") ? res.channel<json>("book").get<std::string>() : "";

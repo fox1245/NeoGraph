@@ -90,7 +90,7 @@ it, diff it, revert a whole generation.
 ## Act III — roll back (checkpointer time-travel)
 
 The surviving harness is spawned with an `InMemoryCheckpointStore`
-attached (`engine->set_checkpoint_store(store)`). The engine snapshots
+attached through `EngineConfig::checkpoint_store`. The engine snapshots
 state at the end of every super-step. Afterwards:
 
 - `store->list("beast-run")` returns the full timeline — you can *see*
