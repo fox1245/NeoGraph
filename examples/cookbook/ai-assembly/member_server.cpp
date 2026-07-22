@@ -161,7 +161,8 @@ int main(int argc, char** argv) {
         })},
     };
     NodeContext ctx;
-    auto unique_engine = GraphEngine::compile(def, ctx);
+    auto        unique_engine =
+        GraphEngine::build(def, neograph::graph::EngineConfig{.node_context = ctx});
     auto engine = std::shared_ptr<GraphEngine>(std::move(unique_engine));
 
     // AgentCard advertises this persona to the rest of the assembly.

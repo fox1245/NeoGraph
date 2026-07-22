@@ -108,7 +108,7 @@ static Fit fitness(const json& core, const ng::NodeContext& ctx) {
         if (ng::GraphValidator::validate(cg).has_errors()) return {};
     } catch (const std::exception&) { return {}; }
     try {
-        auto engine = ng::GraphEngine::compile(core, ctx);
+        auto          engine = ng::GraphEngine::build(core, ng::EngineConfig{.node_context = ctx});
         ng::RunConfig rc; rc.max_steps = 40; rc.input = {{"acc", 0}};
         auto res = engine->run(rc);
         json av = res.has_channel("acc") ? res.channel<json>("acc") : json(0);

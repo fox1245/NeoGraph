@@ -105,7 +105,7 @@ void NodeExecutor::init_state(GraphState& state) const {
 
 void NodeExecutor::maybe_warn_serial_fanout(std::size_t width) const {
     // Only relevant when the engine has no owned pool — that's the
-    // compile() default (set_worker_count(1)) and the case where a
+    // build() default (EngineConfig::worker_count == 1) and the case where a
     // fan-out of width >= 2 silently runs sequentially. With a pool
     // installed, real parallelism is in effect and nothing to warn
     // about.
@@ -140,11 +140,10 @@ void NodeExecutor::maybe_warn_serial_fanout(std::size_t width) const {
     std::ostringstream oss;
     oss << "[neograph] warning: fan-out of width " << width
         << " is executing serially on a single thread because no "
-        << "engine-owned worker pool is installed (compile() default "
-        << "is set_worker_count(1)).\n"
-        << "    Call engine->set_worker_count_auto() or "
-        << "engine->set_worker_count(N) once after compile() and "
-        << "before run() to enable real parallel fan-out.\n"
+        << "engine-owned worker pool is installed (build() default "
+        << "is EngineConfig::worker_count == 1).\n"
+        << "    Set EngineConfig::worker_count before build() to enable real "
+           "parallel fan-out. Compatibility setters must run before the first run().\n"
         << "    Suppress this warning with the environment variable "
         << "NEOGRAPH_SUPPRESS_FANOUT_WARNING=1.\n";
     std::fputs(oss.str().c_str(), stderr);

@@ -193,7 +193,7 @@ int main() {
         }},
     };
     NodeContext ctx;
-    auto engine = GraphEngine::compile(def, ctx);
+    auto        engine = GraphEngine::build(def, EngineConfig{.node_context = ctx});
 
     // Use run_stream so the session's cb fires NODE_START/END events.
     RunConfig cfg;

@@ -210,7 +210,8 @@ int main() {
 
         NodeContext ctx;
         auto store = std::make_shared<InMemoryCheckpointStore>();
-        auto engine = GraphEngine::compile(def, ctx, store);
+        auto        engine =
+            GraphEngine::build(def, EngineConfig{.node_context = ctx, .checkpoint_store = store});
 
         // Small payment: passes normally
         RunConfig cfg;
@@ -260,15 +261,15 @@ int main() {
         };
 
         NodeContext ctx;
-        auto engine = GraphEngine::compile(def, ctx);
-
-        // Set per-node retry policy
         RetryPolicy retry;
         retry.max_retries = 5;
         retry.initial_delay_ms = 10;   // Short for demo purposes
         retry.backoff_multiplier = 2.0f;
         retry.max_delay_ms = 100;
-        engine->set_node_retry_policy("unstable_api", retry);
+        EngineConfig engine_config;
+        engine_config.node_context                        = ctx;
+        engine_config.node_retry_policies["unstable_api"] = retry;
+        auto engine = GraphEngine::build(def, std::move(engine_config));
 
         RunConfig cfg;
         cfg.stream_mode = StreamMode::EVENTS | StreamMode::DEBUG;
@@ -295,7 +296,7 @@ int main() {
         };
 
         NodeContext ctx;
-        auto engine = GraphEngine::compile(def, ctx);
+        auto        engine = GraphEngine::build(def, EngineConfig{.node_context = ctx});
 
         RunConfig cfg;
         cfg.input = {{"amount", 30000}};
@@ -385,7 +386,7 @@ int main() {
         std::vector<TestCase> cases = {{95, "premium"}, {72, "standard"}, {40, "basic"}};
 
         for (const auto& tc : cases) {
-            auto engine = GraphEngine::compile(def, ctx);
+            auto      engine = GraphEngine::build(def, EngineConfig{.node_context = ctx});
             RunConfig cfg;
             cfg.input = {{"score", tc.score}};
             cfg.stream_mode = StreamMode::EVENTS | StreamMode::UPDATES;
@@ -402,7 +403,7 @@ int main() {
     //
     // NOTE: this block exercises the Store API in isolation in `main()`
     // (put / get / search) and connects an InMemoryStore to a graph via
-    // `engine->set_store(...)`, but does NOT show a node reading from
+    // `EngineConfig::store`, but does NOT show a node reading from
     // Store *during a run*. For the live-node pattern — capturing
     // `shared_ptr<Store>` in a factory closure and reading inside
     // `run()` — see `examples/43_store_personalization.cpp`.
@@ -455,8 +456,7 @@ int main() {
             })}
         };
         NodeContext ctx;
-        auto engine = GraphEngine::compile(def, ctx);
-        engine->set_store(store);
+        auto engine = GraphEngine::build(def, EngineConfig{.node_context = ctx, .store = store});
 
         std::cout << "\n  Engine store connection: "
                   << (engine->get_store() ? "OK" : "FAIL")

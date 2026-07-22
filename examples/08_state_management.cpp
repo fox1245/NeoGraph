@@ -96,7 +96,8 @@ int main() {
     ctx.provider = provider;
 
     auto store = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
-    auto engine = neograph::graph::GraphEngine::compile(definition, ctx, store);
+    auto engine = neograph::graph::GraphEngine::build(
+        definition, neograph::graph::EngineConfig{.node_context = ctx, .checkpoint_store = store});
 
     // ================================================================
     // 1. Execute → interrupt → get_state

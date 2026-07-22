@@ -246,71 +246,87 @@ private:
 
 static std::vector<Document> create_knowledge_base() {
     return {
-        {"doc_1", "NeoGraph Overview",
+        {"doc_1",
+         "NeoGraph Overview",
          "NeoGraph is a C++17 graph-based agent orchestration engine. "
          "It brings LangGraph-level capabilities to C++ with zero Python dependency. "
          "Key features include JSON-defined graphs, parallel fan-out via "
          "asio::experimental::make_parallel_group, "
          "checkpointing for time-travel debugging, and HITL support.",
-         "README.md", {}},
+         "README.md",
+         {}},
 
-        {"doc_2", "NeoGraph Architecture",
+        {"doc_2",
+         "NeoGraph Architecture",
          "NeoGraph consists of four modules: neograph::core (graph engine), "
          "neograph::llm (LLM providers for OpenAI, Claude, Gemini), "
          "neograph::mcp (MCP client for JSON-RPC tool discovery), and "
          "neograph::util (lock-free RequestQueue). The core module has zero "
          "network dependencies.",
-         "docs/architecture.md", {}},
+         "docs/architecture.md",
+         {}},
 
-        {"doc_3", "Send and Command",
+        {"doc_3",
+         "Send and Command",
          "Send enables dynamic fan-out: a node can spawn N parallel tasks at runtime "
          "by returning Send objects. Command enables routing override: a node can "
          "simultaneously update state AND control which node executes next, "
          "bypassing normal edge-based routing. Both are processed by the asio "
          "coroutine fan-out runtime (no Taskflow as of 3.0).",
-         "docs/features.md", {}},
+         "docs/features.md",
+         {}},
 
-        {"doc_4", "Checkpointing and HITL",
+        {"doc_4",
+         "Checkpointing and HITL",
          "NeoGraph supports full state snapshots at every super-step via the "
          "CheckpointStore interface. InMemoryCheckpointStore is provided for testing. "
          "Human-in-the-Loop (HITL) is supported through interrupt_before, "
          "interrupt_after, and dynamic NodeInterrupt exceptions. The resume() API "
          "continues execution from the interrupted checkpoint.",
-         "docs/features.md", {}},
+         "docs/features.md",
+         {}},
 
-        {"doc_5", "Performance Comparison",
+        {"doc_5",
+         "Performance Comparison",
          "NeoGraph produces a ~5MB static binary vs ~500MB for Python+LangGraph. "
          "Memory usage is ~10MB vs ~300MB. Cold start is instant vs seconds. "
          "Parallel fan-out of 3 workers completing in 150ms tasks takes ~150ms "
          "(parallel) vs 370ms (sequential). NeoGraph uses asio coroutines on a "
          "shared io_context for cooperative I/O overlap, unlike Python's GIL-"
          "limited asyncio. CPU-parallel fan-out is opt-in via "
-         "engine->set_worker_count(N), which installs an asio::thread_pool.",
-         "README.md", {}},
+         "EngineConfig::worker_count, which installs an asio::thread_pool.",
+         "README.md",
+         {}},
 
-        {"doc_6", "LLM Provider Support",
+        {"doc_6",
+         "LLM Provider Support",
          "NeoGraph supports multiple LLM providers through two mechanisms: "
          "OpenAIProvider for any OpenAI-compatible API (OpenAI, Groq, Together, "
          "vLLM, Ollama), and SchemaProvider which adapts to any LLM API via a "
          "JSON schema. Built-in schemas are provided for OpenAI, Claude, and Gemini. "
          "New providers can be added by creating a JSON schema file.",
-         "docs/providers.md", {}},
+         "docs/providers.md",
+         {}},
 
-        {"doc_7", "Cross-thread Store",
+        {"doc_7",
+         "Cross-thread Store",
          "The Store interface provides namespaced key-value storage that persists "
          "across threads. Use cases include long-term user preferences, shared "
          "knowledge, and agent memory. Namespace is a vector of strings forming a "
          "hierarchical path. InMemoryStore is provided; implement the Store "
          "interface for Redis or a database backend.",
-         "docs/features.md", {}},
+         "docs/features.md",
+         {}},
 
-        {"doc_8", "ReAct Agent Pattern",
+        {"doc_8",
+         "ReAct Agent Pattern",
          "The ReAct (Reasoning + Acting) pattern alternates between LLM calls and "
          "tool execution. NeoGraph provides create_react_graph() which builds a "
          "standard 2-node graph: llm_call -> tool_dispatch -> loop until done. "
          "The Agent class provides a simpler non-graph alternative. Both support "
          "streaming via callbacks.",
-         "docs/patterns.md", {}},
+         "docs/patterns.md",
+         {}},
     };
 }
 

@@ -367,7 +367,7 @@ planner ─┬─ Send("researcher", {topic: "A"})  ─┐
 
 ### Worker-count tuning
 
-`compile()` defaults to `set_worker_count(1)` — no engine-owned thread
+`build()` defaults to `EngineConfig::worker_count == 1` — no engine-owned thread
 pool, fan-out branches dispatch inline on the coroutine's own
 executor. That's a no-allocate fast path that's cheap for sequential
 graphs and safe for nodes that hold non-thread-safe state.
@@ -660,11 +660,13 @@ warning the first time a multi-Send fan-out runs without an opted-in
 pool — that's a hint, not an error. Python custom nodes see GIL
 contention on small fan-outs, so bench with both 1 and N.
 
-### "RunResult has no .status / .final_state attribute"
+### "Python RunResult has no .status / .final_state attribute"
 
-It doesn't. Use `result.output`, `result.interrupted`,
-`result.execution_trace`. See the table in the README's
-"Reading the output" section.
+The Python binding doesn't expose those attributes. Use `result.output`,
+`result.interrupted`, `result.max_steps_exhausted`, and
+`result.execution_trace`. C++ callers can use `RunResult::status()` for the
+typed `Completed` / `Interrupted` / `StepLimit` view. See the table in the
+README's "Reading the output" section.
 
 ### "Unknown reducer: <name>"
 

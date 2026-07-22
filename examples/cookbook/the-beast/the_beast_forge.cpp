@@ -219,8 +219,12 @@ int main(int argc, char** argv) {
 
     // ---------- PHASE 5: SPAWN with all tools bound ----------
     std::cout << "── SPAWN · run the agent it wrote, tools bound ──\n";
-    auto engine = ng::GraphEngine::compile(core, ctx);
-    engine->own_tools(std::move(owned));
+    ng::EngineConfig engine_config;
+    engine_config.node_context = ctx;
+    engine_config.node_context.tools.clear();
+    ng::EngineResources resources;
+    resources.tools = neograph::ToolSet(std::move(owned));
+    auto engine     = ng::GraphEngine::build(core, std::move(engine_config), std::move(resources));
     ng::RunConfig rc;
     rc.max_steps = 12;
     rc.input = {{"messages", json::array({{{"role", "user"}, {"content", task}}})}};

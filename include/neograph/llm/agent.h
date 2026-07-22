@@ -112,7 +112,8 @@ class NEOGRAPH_API Agent {
     /**
      * @brief Intercept every tool call before it runs (issue #89).
      *
-     * The same gate the graph path takes from ``RunConfig::tool_gate``. Both
+     * The same gate the graph path takes from ``EngineConfig::tool_gate`` or
+     * ``GraphEngine::set_tool_gate``. Both
      * route through one dispatcher (issue #87), which is what stops a
      * capability like this from landing in one path and silently missing the
      * other — as concurrency once did.

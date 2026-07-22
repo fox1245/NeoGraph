@@ -76,7 +76,7 @@ int main() {
     };
 
     NodeContext ctx;
-    auto engine = GraphEngine::compile(def, ctx);
+    auto        engine = GraphEngine::build(def, EngineConfig{.node_context = ctx});
 
     RunConfig cfg;
     cfg.input = {{"counter", 0}};

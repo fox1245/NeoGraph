@@ -206,8 +206,12 @@ int main(int argc, char** argv) {
     std::cout << "── Spawning the agent it wrote — live, tools bound ──\n";
     std::cout << "  user task: " << task << "\n";
 
-    auto engine = ng::GraphEngine::compile(core, ctx);
-    engine->own_tools(std::move(tools));   // engine owns the tool lifetimes
+    ng::EngineConfig engine_config;
+    engine_config.node_context = ctx;
+    engine_config.node_context.tools.clear();
+    ng::EngineResources resources;
+    resources.tools = neograph::ToolSet(std::move(tools));
+    auto engine     = ng::GraphEngine::build(core, std::move(engine_config), std::move(resources));
 
     ng::RunConfig rc;
     rc.max_steps = 12;                     // bound the ReAct loop
