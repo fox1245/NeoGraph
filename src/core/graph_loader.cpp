@@ -1,12 +1,14 @@
+#include <neograph/graph/engine.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
-#include <neograph/graph/engine.h>
+#include <neograph/graph/registry.h>
 #include <neograph/graph/state.h>
+
 #include <algorithm>
-#include <stdexcept>
 #include <fstream>
-#include <vector>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 // Stamped into export_schema() so external tooling can detect when its
 // cached schema is older than the engine. Defined by CMake
@@ -485,6 +487,96 @@ std::unique_ptr<GraphNode> NodeFactory::create(
             "See docs/troubleshooting.md \"Unknown node type\".");
     }
     return it->second(name, config, ctx);
+}
+
+// =========================================================================
+// GraphRegistry
+// =========================================================================
+
+const GraphRegistry& GraphRegistry::global() {
+    static const GraphRegistry registry;
+    return registry;
+}
+
+void GraphRegistry::register_reducer(const std::string& name, ReducerFn fn) {
+    reducers_[name] = std::move(fn);
+}
+
+void GraphRegistry::register_condition(const std::string& name, ConditionFn fn) {
+    conditions_[name] = std::move(fn);
+    condition_specs_.erase(name);
+}
+
+void GraphRegistry::register_condition(const std::string& name,
+                                       ConditionFn        fn,
+                                       ConditionSpec      spec) {
+    conditions_[name]      = std::move(fn);
+    condition_specs_[name] = std::move(spec);
+}
+
+void GraphRegistry::register_type(const std::string& type, NodeFactoryFn fn) {
+    register_type(type, std::move(fn), json::parse(R"JSON({
+                      "type": "object",
+                      "description": "No declared config schema; any object accepted."
+                  })JSON"));
+}
+
+void GraphRegistry::register_type(const std::string& type, NodeFactoryFn fn, json config_schema) {
+    node_factories_[type] = std::move(fn);
+    node_schemas_[type]   = std::move(config_schema);
+    node_effects_.erase(type);
+}
+
+void GraphRegistry::register_type(const std::string& type,
+                                  NodeFactoryFn      fn,
+                                  json               config_schema,
+                                  json               effects) {
+    node_factories_[type] = std::move(fn);
+    node_schemas_[type]   = std::move(config_schema);
+    node_effects_[type]   = std::move(effects);
+}
+
+ReducerFn GraphRegistry::reducer(const std::string& name) const {
+    auto it = reducers_.find(name);
+    return it != reducers_.end() ? it->second : ReducerRegistry::instance().get(name);
+}
+
+ConditionFn GraphRegistry::condition(const std::string& name) const {
+    auto it = conditions_.find(name);
+    return it != conditions_.end() ? it->second : ConditionRegistry::instance().get(name);
+}
+
+std::optional<ConditionSpec> GraphRegistry::condition_spec(const std::string& name) const {
+    if (conditions_.count(name)) {
+        auto it = condition_specs_.find(name);
+        return it == condition_specs_.end() ? std::nullopt
+                                            : std::optional<ConditionSpec>(it->second);
+    }
+    return ConditionRegistry::instance().condition_spec(name);
+}
+
+std::unique_ptr<GraphNode> GraphRegistry::create(const std::string& type,
+                                                 const std::string& name,
+                                                 const json&        config,
+                                                 const NodeContext& ctx) const {
+    auto it = node_factories_.find(type);
+    return it != node_factories_.end() ? it->second(name, config, ctx)
+                                       : NodeFactory::instance().create(type, name, config, ctx);
+}
+
+json GraphRegistry::config_schema(const std::string& type) const {
+    if (!node_factories_.count(type)) return NodeFactory::instance().config_schema(type);
+    auto it = node_schemas_.find(type);
+    return it != node_schemas_.end()
+               ? it->second
+               : json::parse(
+                     R"JSON({"type":"object","description":"No declared config schema; any object accepted."})JSON");
+}
+
+json GraphRegistry::node_effects(const std::string& type) const {
+    if (!node_factories_.count(type)) return NodeFactory::instance().node_effects(type);
+    auto it = node_effects_.find(type);
+    return it != node_effects_.end() ? it->second : json();
 }
 
 } // namespace neograph::graph

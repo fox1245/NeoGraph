@@ -83,6 +83,108 @@ std::atomic<int> CountingNode::calls{0};
 
 std::atomic<int> link_factory_calls{0};
 
+class OwnedProbeTool final : public Tool {
+public:
+    static std::atomic<int> destructions;
+
+    ~OwnedProbeTool() override { ++destructions; }
+
+    ChatTool get_definition() const override {
+        return {"owned_probe", "ToolSet lifetime probe", json::object()};
+    }
+    std::string execute(const json&) override { return "tool-alive"; }
+    std::string get_name() const override { return "owned_probe"; }
+};
+
+std::atomic<int> OwnedProbeTool::destructions{0};
+
+class ToolProbeNode final : public GraphNode {
+public:
+    explicit ToolProbeNode(Tool* tool) : tool_(tool) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
+        out.writes.push_back({"output", tool_->execute(json::object())});
+        co_return out;
+    }
+
+    std::string get_name() const override { return "work"; }
+
+private:
+    Tool* tool_;
+};
+
+class RegistryProbeNode final : public GraphNode {
+public:
+    explicit RegistryProbeNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
+        if (name_ == "seed") {
+            out.writes.push_back({"value", 1});
+        } else {
+            out.writes.push_back({"output", name_});
+        }
+        co_return out;
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+json registry_graph() {
+    return {
+        {"schema_version", 1},
+        {"name", "registry_isolation"},
+        {"channels",
+         {
+             {"value", {{"reducer", "engine_local_reducer"}, {"initial", 0}}},
+             {"output", {{"reducer", "overwrite"}}},
+         }},
+        {"nodes",
+         {
+             {"seed", {{"type", "engine_local_node"}}},
+             {"one", {{"type", "engine_local_node"}}},
+             {"eleven", {{"type", "engine_local_node"}}},
+             {"wrong", {{"type", "engine_local_node"}}},
+         }},
+        {"edges", json::array({
+                      {{"from", "__start__"}, {"to", "seed"}},
+                      {{"from", "one"}, {"to", "__end__"}},
+                      {{"from", "eleven"}, {"to", "__end__"}},
+                      {{"from", "wrong"}, {"to", "__end__"}},
+                  })},
+        {"conditional_edges",
+         json::array({
+             {{"from", "seed"},
+              {"condition", "engine_local_condition"},
+              {"routes", {{"one", "one"}, {"eleven", "eleven"}, {"wrong", "wrong"}}}},
+         })},
+    };
+}
+
+std::shared_ptr<GraphRegistry> make_registry(int         reducer_bias,
+                                             int         expected_value,
+                                             std::string route) {
+    auto registry = std::make_shared<GraphRegistry>();
+    registry->register_type("engine_local_node",
+                            [](const std::string& name, const json&, const NodeContext&) {
+                                return std::make_unique<RegistryProbeNode>(name);
+                            });
+    registry->register_reducer("engine_local_reducer",
+                               [reducer_bias](const json& current, const json& incoming) {
+                                   return current.get<int>() + incoming.get<int>() + reducer_bias;
+                               });
+    registry->register_condition(
+        "engine_local_condition",
+        [expected_value, route = std::move(route)](const GraphState& state) {
+            return state.get("value").get<int>() == expected_value ? route : "wrong";
+        });
+    return registry;
+}
+
 void register_node(const std::string& type, NodeFactoryFn factory) {
     NodeFactory::instance().register_type(
         type, std::move(factory), json::parse(R"({"type":"object","properties":{}})"),
@@ -202,4 +304,63 @@ TEST(CompiledGraphLinkTest, AppliesSemanticValidationBeforeRuntimeConstruction) 
     graph.edges.push_back({"missing", "work"});
 
     EXPECT_THROW((void)GraphEngine::link(std::move(graph)), std::runtime_error);
+}
+
+TEST(EngineResourcesTest, KeepsOwnedToolSetAliveForEngineLifetime) {
+    OwnedProbeTool::destructions = 0;
+
+    auto registry = std::make_shared<GraphRegistry>();
+    registry->register_type(
+        "owned_tool_probe", [](const std::string&, const json&, const NodeContext& context) {
+            if (context.tools.size() != 1) {
+                throw std::runtime_error("owned ToolSet was not bound to NodeContext");
+            }
+            return std::make_unique<ToolProbeNode>(context.tools.front());
+        });
+
+    std::vector<std::unique_ptr<Tool>> tools;
+    tools.push_back(std::make_unique<OwnedProbeTool>());
+
+    EngineResources resources;
+    resources.tools    = ToolSet(std::move(tools));
+    resources.registry = registry;
+    auto engine        = GraphEngine::build(one_node_graph("owned_tool_probe"), EngineConfig{},
+                                            std::move(resources));
+
+    EXPECT_EQ(OwnedProbeTool::destructions.load(), 0);
+    RunConfig run;
+    EXPECT_EQ(engine->run(run).channel<std::string>("output"), "tool-alive");
+
+    engine.reset();
+    EXPECT_EQ(OwnedProbeTool::destructions.load(), 1);
+}
+
+TEST(EngineResourcesTest, IsolatesNodeReducerAndConditionRegistrationsPerEngine) {
+    EngineResources first_resources;
+    first_resources.registry = make_registry(0, 1, "one");
+    auto first = GraphEngine::build(registry_graph(), EngineConfig{}, std::move(first_resources));
+
+    EngineResources second_resources;
+    second_resources.registry = make_registry(10, 11, "eleven");
+    auto second = GraphEngine::build(registry_graph(), EngineConfig{}, std::move(second_resources));
+
+    RunConfig run;
+    EXPECT_EQ(first->run(run).channel<std::string>("output"), "one");
+    EXPECT_EQ(second->run(run).channel<std::string>("output"), "eleven");
+    EXPECT_THROW((void)GraphEngine::build(registry_graph(), EngineConfig{}), std::runtime_error);
+}
+
+TEST(EngineResourcesTest, RejectsAmbiguousOwnedAndRawToolBindings) {
+    EngineConfig   config;
+    OwnedProbeTool raw_tool;
+    config.node_context.tools = {&raw_tool};
+
+    std::vector<std::unique_ptr<Tool>> tools;
+    tools.push_back(std::make_unique<OwnedProbeTool>());
+    EngineResources resources;
+    resources.tools = ToolSet(std::move(tools));
+
+    EXPECT_THROW(
+        (void)GraphEngine::build(one_node_graph("unused"), std::move(config), std::move(resources)),
+        std::invalid_argument);
 }

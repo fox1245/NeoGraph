@@ -1,5 +1,7 @@
 #include <neograph/graph/compiler.h>
 #include <neograph/graph/node.h>
+#include <neograph/graph/registry.h>
+
 #include <algorithm>
 #include <cstdio>
 #include <vector>
@@ -136,6 +138,12 @@ json canon_conditional(const json& e) {
 
 CompiledGraph GraphCompiler::compile(const json& definition,
                                      const NodeContext& default_context) {
+    return compile(definition, default_context, GraphRegistry::global());
+}
+
+CompiledGraph GraphCompiler::compile(const json&          definition,
+                                     const NodeContext&   default_context,
+                                     const GraphRegistry& registry) {
     CompiledGraph cg;
     std::vector<std::string> errors;
     std::set<std::string> top_consumed;
@@ -223,7 +231,7 @@ CompiledGraph GraphCompiler::compile(const json& definition,
         top_consumed.insert("nodes");
         for (const auto& [name, node_def] : definition["nodes"].items()) {
             auto type = node_def.value("type", "");
-            auto node = NodeFactory::instance().create(type, name, node_def, default_context);
+            auto node      = registry.create(type, name, node_def, default_context);
             cg.nodes[name] = std::move(node);
 
             std::set<std::string> node_consumed = {"type"};
@@ -267,7 +275,7 @@ CompiledGraph GraphCompiler::compile(const json& definition,
             // registered without a schema stay permissive (the
             // cookbook's custom nodes carry free-form config).
             if (strict) {
-                const json schema = NodeFactory::instance().config_schema(type);
+                const json schema = registry.config_schema(type);
                 bool open = !schema.contains("properties");
                 if (schema.contains("additionalProperties")) {
                     const auto& ap = schema["additionalProperties"];

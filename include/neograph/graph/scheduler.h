@@ -22,7 +22,9 @@
 
 #include <neograph/api.h>
 #include <neograph/graph/types.h>
+
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <vector>
@@ -30,6 +32,7 @@
 namespace neograph::graph {
 
 class GraphState;
+class GraphRegistry;
 
 /**
  * @brief Per-node routing signal emitted by this super-step.
@@ -100,6 +103,12 @@ public:
     Scheduler(const std::vector<Edge>& edges,
               const std::vector<ConditionalEdge>& conditional_edges,
               BarrierSpecs barrier_specs = {});
+
+    /// @brief Bind routing to a per-engine registry overlay.
+    Scheduler(const std::vector<Edge>&             edges,
+              const std::vector<ConditionalEdge>&  conditional_edges,
+              BarrierSpecs                         barrier_specs,
+              std::shared_ptr<const GraphRegistry> registry);
 
     /**
      * @brief Resolve the direct successors of a node.
@@ -224,6 +233,7 @@ private:
     const std::vector<Edge>& edges_;
     const std::vector<ConditionalEdge>& conditional_edges_;
     BarrierSpecs barrier_specs_;
+    std::shared_ptr<const GraphRegistry> registry_;
 };
 
 } // namespace neograph::graph
