@@ -145,6 +145,24 @@ TEST(GraphState, GetNonExistent) {
     EXPECT_TRUE(val.is_null());
 }
 
+TEST(GraphState, TypedChannelKeyReadsDeclaredValue) {
+    GraphState state;
+    state.init_channel("count", ReducerType::OVERWRITE, overwrite_fn(), json(7));
+
+    const ChannelKey<int> count{"count"};
+    EXPECT_EQ(state.get(count), 7);
+    ASSERT_TRUE(state.try_get(count).has_value());
+    EXPECT_EQ(*state.try_get(count), 7);
+}
+
+TEST(GraphState, TypedTryGetDistinguishesMissingFromTypeMismatch) {
+    GraphState state;
+    state.init_channel("status", ReducerType::OVERWRITE, overwrite_fn(), json("ready"));
+
+    EXPECT_FALSE(state.try_get(ChannelKey<int>{"missing"}).has_value());
+    EXPECT_THROW((void)state.try_get(ChannelKey<int>{"status"}), json::type_error);
+}
+
 // ── Global Version ──
 
 TEST(GraphState, GlobalVersion) {

@@ -59,7 +59,7 @@ int main() {
 
     NodeContext ctx;
     ctx.provider = std::make_shared<llm::MockProvider>();
-    auto engine = GraphEngine::build(
+    auto engine = GraphEngine::build_strict(
         definition, EngineConfig{.node_context = std::move(ctx)});
 
     RunConfig cfg;

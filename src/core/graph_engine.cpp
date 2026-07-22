@@ -30,6 +30,27 @@ std::size_t default_worker_count() {
     auto n = std::thread::hardware_concurrency();
     return n > 0 ? static_cast<std::size_t>(n) : 4u;
 }
+
+void report_validation(const ValidationReport& report, int schema_version) {
+    if (schema_version >= 1) {
+        if (report.has_errors()) {
+            throw std::runtime_error(
+                "graph validation failed (schema_version "
+                + std::to_string(schema_version) + "):\n" + report.summary());
+        }
+        for (const auto* warning : report.warnings()) {
+            std::fprintf(stderr, "[neograph] lint [%s] %s: %s\n",
+                         warning->code.c_str(), warning->path.c_str(),
+                         warning->message.c_str());
+        }
+    } else {
+        for (const auto* error : report.errors()) {
+            std::fprintf(stderr, "[neograph] warning: [%s] %s: %s\n",
+                         error->code.c_str(), error->path.c_str(),
+                         error->message.c_str());
+        }
+    }
+}
 } // namespace
 
 // =========================================================================
@@ -53,8 +74,8 @@ std::unique_ptr<GraphEngine> GraphEngine::build(const json& definition, EngineCo
 }
 
 std::unique_ptr<GraphEngine> GraphEngine::build(const json&     definition,
-                                                EngineConfig    config,
-                                                EngineResources resources) {
+                                                 EngineConfig    config,
+                                                 EngineResources resources) {
     if (!resources.tools.empty()) {
         if (!config.node_context.tools.empty()) {
             throw std::invalid_argument(
@@ -65,15 +86,38 @@ std::unique_ptr<GraphEngine> GraphEngine::build(const json&     definition,
     }
 
     const auto& registry = resources.registry ? *resources.registry : GraphRegistry::global();
-    auto        cg       = GraphCompiler::compile(definition, config.node_context, registry);
+    auto topology = GraphCompiler::parse(definition, registry);
 
     // Translation validation: assert nothing was silently dropped or
     // rewired between the JSON definition and the compiled graph.
     // Strict documents (schema_version >= 1) fail hard; legacy
     // documents get a stderr warning. Must run before the moves below.
-    GraphCompiler::verify_roundtrip(definition, cg);
+    GraphCompiler::verify_roundtrip(definition, topology);
 
-    return link(std::move(cg), std::move(config), std::move(resources));
+    // Static semantics operate on the declarative topology before factories
+    // create runtime nodes. Legacy documents keep warning-only behavior.
+    report_validation(GraphValidator::validate(topology, registry),
+                      topology.schema_version);
+
+    auto cg = GraphCompiler::link(std::move(topology), config.node_context, registry);
+    return link_impl(std::move(cg), std::move(config), std::move(resources), false);
+}
+
+std::unique_ptr<GraphEngine> GraphEngine::build_strict(const json& definition,
+                                                        EngineConfig config) {
+    return build_strict(definition, std::move(config), {});
+}
+
+std::unique_ptr<GraphEngine> GraphEngine::build_strict(const json&     definition,
+                                                        EngineConfig    config,
+                                                        EngineResources resources) {
+    json strict_definition = definition;
+    if (!strict_definition.contains("schema_version")
+        || (strict_definition["schema_version"].is_number_integer()
+            && strict_definition["schema_version"].get<int>() == 0)) {
+        strict_definition["schema_version"] = 1;
+    }
+    return build(strict_definition, std::move(config), std::move(resources));
 }
 
 std::unique_ptr<GraphEngine> GraphEngine::link(CompiledGraph cg, EngineConfig config) {
@@ -83,30 +127,45 @@ std::unique_ptr<GraphEngine> GraphEngine::link(CompiledGraph cg, EngineConfig co
 std::unique_ptr<GraphEngine> GraphEngine::link(CompiledGraph   cg,
                                                EngineConfig    config,
                                                EngineResources resources) {
+    return link_impl(std::move(cg), std::move(config), std::move(resources), true);
+}
+
+std::unique_ptr<GraphEngine> GraphEngine::link(ValidatedTopology topology,
+                                               EngineConfig config) {
+    return link(std::move(topology), std::move(config), {});
+}
+
+std::unique_ptr<GraphEngine> GraphEngine::link(ValidatedTopology topology,
+                                               EngineConfig config,
+                                               EngineResources resources) {
+    if (!resources.tools.empty()) {
+        if (!config.node_context.tools.empty()) {
+            throw std::invalid_argument(
+                "GraphEngine::link received both EngineResources::tools and "
+                "NodeContext::tools; use the owned ToolSet only");
+        }
+        config.node_context.tools = resources.tools.view();
+    }
+
+    const auto& registry = resources.registry ? *resources.registry : GraphRegistry::global();
+    report_validation(topology.report(), topology.topology().schema_version);
+    auto cg = GraphCompiler::link(std::move(topology).release(),
+                                  config.node_context, registry);
+    return link_impl(std::move(cg), std::move(config), std::move(resources), false);
+}
+
+std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
+                                                    EngineConfig    config,
+                                                    EngineResources resources,
+                                                    bool validate) {
     // Static semantic analysis (issue #75 M2). Strict documents:
     // errors throw, warnings go to stderr. Legacy documents: only
     // errors are surfaced (as stderr warnings — they were silent
     // breakage before, e.g. a dangling edge or an empty route map),
     // heuristic lint is suppressed to keep existing graphs quiet.
-    {
+    if (validate) {
         const auto& registry = resources.registry ? *resources.registry : GraphRegistry::global();
-        auto        report   = GraphValidator::validate(cg, registry);
-        if (cg.schema_version >= 1) {
-            if (report.has_errors()) {
-                std::string msg = "graph validation failed (schema_version "
-                    + std::to_string(cg.schema_version) + "):\n" + report.summary();
-                throw std::runtime_error(msg);
-            }
-            for (const auto* w : report.warnings()) {
-                std::fprintf(stderr, "[neograph] lint [%s] %s: %s\n",
-                             w->code.c_str(), w->path.c_str(), w->message.c_str());
-            }
-        } else {
-            for (const auto* e : report.errors()) {
-                std::fprintf(stderr, "[neograph] warning: [%s] %s: %s\n",
-                             e->code.c_str(), e->path.c_str(), e->message.c_str());
-            }
-        }
+        report_validation(GraphValidator::validate(cg, registry), cg.schema_version);
     }
 
     auto engine = std::unique_ptr<GraphEngine>(new GraphEngine());
@@ -269,6 +328,31 @@ RetryPolicy GraphEngine::get_retry_policy(const std::string& node_name) const {
 // =========================================================================
 // get_state / get_state_history / update_state / fork
 // =========================================================================
+
+GraphAdmin GraphEngine::admin() noexcept {
+    return GraphAdmin(*this);
+}
+
+std::optional<json> GraphAdmin::get_state(const std::string& thread_id) const {
+    return engine_->get_state(thread_id);
+}
+
+std::vector<Checkpoint> GraphAdmin::get_state_history(
+    const std::string& thread_id, int limit) const {
+    return engine_->get_state_history(thread_id, limit);
+}
+
+void GraphAdmin::update_state(const std::string& thread_id,
+                              const json& channel_writes,
+                              const std::string& as_node) const {
+    engine_->update_state(thread_id, channel_writes, as_node);
+}
+
+std::string GraphAdmin::fork(const std::string& source_thread_id,
+                             const std::string& new_thread_id,
+                             const std::string& checkpoint_id) const {
+    return engine_->fork(source_thread_id, new_thread_id, checkpoint_id);
+}
 
 std::optional<json> GraphEngine::get_state(const std::string& thread_id) const {
     if (!checkpoint_store_) return std::nullopt;

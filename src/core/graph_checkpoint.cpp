@@ -9,6 +9,94 @@
 
 namespace neograph::graph {
 
+namespace {
+
+class CapabilityCheckpointStore final : public CheckpointStore {
+public:
+    explicit CapabilityCheckpointStore(std::shared_ptr<CheckpointStoreCore> core)
+        : core_(std::move(core)),
+          async_(std::dynamic_pointer_cast<AsyncCheckpointStore>(core_)),
+          pending_(std::dynamic_pointer_cast<PendingWritesCheckpointStore>(core_)) {}
+
+    void save(const Checkpoint& cp) override { core_->save(cp); }
+    std::optional<Checkpoint> load_latest(const std::string& thread_id) override {
+        return core_->load_latest(thread_id);
+    }
+    std::optional<Checkpoint> load_by_id(const std::string& id) override {
+        return core_->load_by_id(id);
+    }
+    std::vector<Checkpoint> list(const std::string& thread_id, int limit) override {
+        return core_->list(thread_id, limit);
+    }
+    void delete_thread(const std::string& thread_id) override {
+        core_->delete_thread(thread_id);
+    }
+
+    asio::awaitable<void> save_async(const Checkpoint& cp) override {
+        if (async_) {
+            co_await async_->save_async(cp);
+        } else {
+            core_->save(cp);
+        }
+    }
+    asio::awaitable<std::optional<Checkpoint>>
+    load_latest_async(const std::string& thread_id) override {
+        if (async_) co_return co_await async_->load_latest_async(thread_id);
+        co_return core_->load_latest(thread_id);
+    }
+    asio::awaitable<std::optional<Checkpoint>>
+    load_by_id_async(const std::string& id) override {
+        if (async_) co_return co_await async_->load_by_id_async(id);
+        co_return core_->load_by_id(id);
+    }
+    asio::awaitable<std::vector<Checkpoint>>
+    list_async(const std::string& thread_id, int limit) override {
+        if (async_) co_return co_await async_->list_async(thread_id, limit);
+        co_return core_->list(thread_id, limit);
+    }
+    asio::awaitable<void> delete_thread_async(const std::string& thread_id) override {
+        if (async_) {
+            co_await async_->delete_thread_async(thread_id);
+        } else {
+            core_->delete_thread(thread_id);
+        }
+    }
+
+    void put_writes(const std::string& thread_id,
+                    const std::string& parent_checkpoint_id,
+                    const PendingWrite& write) override {
+        if (pending_) pending_->put_writes(thread_id, parent_checkpoint_id, write);
+    }
+    std::vector<PendingWrite> get_writes(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id) override {
+        return pending_ ? pending_->get_writes(thread_id, parent_checkpoint_id)
+                        : std::vector<PendingWrite>{};
+    }
+    void clear_writes(const std::string& thread_id,
+                      const std::string& parent_checkpoint_id) override {
+        if (pending_) pending_->clear_writes(thread_id, parent_checkpoint_id);
+    }
+
+private:
+    std::shared_ptr<CheckpointStoreCore> core_;
+    std::shared_ptr<AsyncCheckpointStore> async_;
+    std::shared_ptr<PendingWritesCheckpointStore> pending_;
+};
+
+} // namespace
+
+std::shared_ptr<CheckpointStore>
+adapt_checkpoint_store(std::shared_ptr<CheckpointStoreCore> core) {
+    if (!core) {
+        throw std::invalid_argument("adapt_checkpoint_store requires a non-null core");
+    }
+    if (auto legacy = std::dynamic_pointer_cast<CheckpointStore>(core)) {
+        return legacy;
+    }
+    return std::make_shared<CapabilityCheckpointStore>(std::move(core));
+}
+
 // =========================================================================
 // CheckpointStore — sync ↔ async crossover defaults (Sem 3.1)
 // =========================================================================

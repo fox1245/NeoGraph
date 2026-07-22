@@ -6,6 +6,7 @@
 #include <map>
 #include <queue>
 #include <set>
+#include <stdexcept>
 
 namespace neograph::graph {
 
@@ -21,7 +22,7 @@ json string_set_to_array(const std::set<std::string>& s) {
 }
 
 struct Ctx {
-    const CompiledGraph& cg;
+    const TopologySpec& cg;
     const GraphRegistry&  registry;
     std::set<std::string> node_names;
     // Static successor map: plain edges + every conditional route
@@ -436,13 +437,22 @@ std::string ValidationReport::summary() const {
 }
 
 ValidationReport GraphValidator::validate(const CompiledGraph& cg) {
-    return validate(cg, GraphRegistry::global());
+    return validate(cg.topology(), GraphRegistry::global());
 }
 
 ValidationReport GraphValidator::validate(const CompiledGraph& cg, const GraphRegistry& registry) {
-    Ctx c{cg, registry, {}, {}, {}};
-    for (const auto& [name, node] : cg.nodes) {
-        (void)node;
+    return validate(cg.topology(), registry);
+}
+
+ValidationReport GraphValidator::validate(const TopologySpec& topology) {
+    return validate(topology, GraphRegistry::global());
+}
+
+ValidationReport GraphValidator::validate(const TopologySpec& topology,
+                                          const GraphRegistry& registry) {
+    Ctx c{topology, registry, {}, {}, {}};
+    for (const auto& [name, node_def] : topology.node_defs) {
+        (void)node_def;
         c.node_names.insert(name);
     }
 
@@ -457,6 +467,22 @@ ValidationReport GraphValidator::validate(const CompiledGraph& cg, const GraphRe
     check_effects(c);
 
     return ValidationReport{std::move(c.out)};
+}
+
+ValidatedTopology GraphValidator::require_valid(TopologySpec topology) {
+    return require_valid(std::move(topology), GraphRegistry::global());
+}
+
+ValidatedTopology GraphValidator::require_valid(TopologySpec topology,
+                                                 const GraphRegistry& registry) {
+    auto report = validate(topology, registry);
+    if (report.has_errors()) {
+        throw std::runtime_error(
+            "graph validation failed (schema_version "
+            + std::to_string(topology.schema_version) + "):\n"
+            + report.summary());
+    }
+    return ValidatedTopology(std::move(topology), std::move(report));
 }
 
 } // namespace neograph::graph

@@ -122,3 +122,19 @@ TEST(AdminApiBarrierPreservation, ForkCarriesBarrierStateToNewThread) {
     EXPECT_EQ(1u, forked->barrier_state["join"].count("a"));
     EXPECT_EQ(1u, forked->barrier_state["join"].count("c"));
 }
+
+TEST(AdminApiFacade, DelegatesStateHistoryUpdateAndFork) {
+    auto store = seed_cp_with_barrier("admin-facade-src", {});
+    auto engine = compile_minimal_engine(store);
+    auto admin = engine->admin();
+
+    ASSERT_TRUE(admin.get_state("admin-facade-src").has_value());
+    EXPECT_EQ(admin.get_state_history("admin-facade-src").size(), 1u);
+
+    admin.update_state("admin-facade-src", json{{"a_done", true}}, "join");
+    EXPECT_EQ(admin.get_state_history("admin-facade-src").size(), 2u);
+
+    auto forked_id = admin.fork("admin-facade-src", "admin-facade-dst");
+    EXPECT_FALSE(forked_id.empty());
+    EXPECT_TRUE(admin.get_state("admin-facade-dst").has_value());
+}

@@ -9,8 +9,10 @@
 #pragma once
 
 #include <neograph/api.h>
+#include <neograph/graph/channel_key.h>
 #include <neograph/graph/types.h>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <vector>
 
@@ -43,6 +45,27 @@ public:
      * @return The current value, or null if the channel does not exist.
      */
     json get(const std::string& channel) const;
+
+    /**
+     * @brief Read and convert a channel using a reusable typed key.
+     * @throws json::type_error If the current value cannot be converted to T.
+     */
+    template <typename T>
+    T get(const ChannelKey<T>& channel) const {
+        return get(channel.name()).template get<T>();
+    }
+
+    /**
+     * @brief Read a typed channel when it is declared.
+     *
+     * Missing channels return std::nullopt. Conversion failures remain errors
+     * so a schema/type mismatch is not mistaken for absence.
+     */
+    template <typename T>
+    std::optional<T> try_get(const ChannelKey<T>& channel) const {
+        if (!has_channel(channel.name())) return std::nullopt;
+        return get(channel);
+    }
 
     /**
      * @brief Convenience method to read the "messages" channel as a vector of ChatMessage.

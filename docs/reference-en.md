@@ -1307,9 +1307,11 @@ if (auto optional = result.try_channel(Answer)) {
 
 ### GraphEngine
 
-The main engine class. New code should use `build()` for a JSON definition or
-`link()` for an already inspected or transformed `CompiledGraph`. `compile()`
-and post-construction setters remain compatibility facades.
+The main engine class. New code should use `build_strict()` for a JSON definition;
+it rejects invalid topology before any node is instantiated. Use `link()` with a
+`ValidatedTopology` when parse, validation, inspection, or transformation must be
+separate steps. The lenient `build()`, `CompiledGraph` link overloads, `compile()`,
+and post-construction setters remain compatibility paths.
 
 ```cpp
 class GraphEngine {
@@ -1320,6 +1322,16 @@ public:
         const json& definition, EngineConfig config);
     static std::unique_ptr<GraphEngine> build(
         const json& definition, EngineConfig config, EngineResources resources);
+
+    static std::unique_ptr<GraphEngine> build_strict(
+        const json& definition, EngineConfig config);
+    static std::unique_ptr<GraphEngine> build_strict(
+        const json& definition, EngineConfig config, EngineResources resources);
+
+    static std::unique_ptr<GraphEngine> link(
+        ValidatedTopology topology, EngineConfig config = {});
+    static std::unique_ptr<GraphEngine> link(
+        ValidatedTopology topology, EngineConfig config, EngineResources resources);
 
     static std::unique_ptr<GraphEngine> link(
         CompiledGraph graph, EngineConfig config = {});
@@ -1354,6 +1366,8 @@ public:
         const GraphStreamCallback& cb = nullptr);
 
     // ---- State Inspection & Manipulation ----
+
+    GraphAdmin admin(); // borrowed facade; must not outlive this engine
 
     std::optional<json> get_state(const std::string& thread_id) const;
 
@@ -1702,6 +1716,9 @@ struct CompiledGraph {
 
 class GraphCompiler {
 public:
+    static TopologySpec parse(const json& definition);
+    static CompiledGraph link(TopologySpec topology,
+                              const NodeContext& default_context);
     static CompiledGraph compile(const json& definition,
                                  const NodeContext& default_context);
 };
@@ -1709,10 +1726,19 @@ public:
 } // namespace neograph::graph
 ```
 
-`GraphEngine::build()` calls `GraphCompiler::compile()`, verifies the result,
-then hands it to `GraphEngine::link()`. Parsing
-failures (malformed edge, unknown node type) surface here before any
-runtime state is built.
+`GraphCompiler::parse()` produces a `TopologySpec` without constructing nodes.
+`GraphValidator::validate()` returns structured diagnostics, while
+`GraphValidator::require_valid()` returns a `ValidatedTopology` or throws
+`std::runtime_error`. Only `GraphCompiler::link()` resolves factories and
+instantiates runtime nodes. `compile()` remains the compatibility composition of
+parse and link, and `GraphEngine::build()` retains its lenient warning behavior.
+New code can enforce the full boundary with `GraphEngine::build_strict()` or:
+
+```cpp
+auto spec = GraphCompiler::parse(definition);
+auto validated = GraphValidator::require_valid(std::move(spec));
+auto engine = GraphEngine::link(std::move(validated), config, resources);
+```
 
 ### Scheduler
 
@@ -1956,10 +1982,9 @@ struct Checkpoint {
 };
 
 // Wire-stable schema version. Bump on layout-incompatible changes.
-// Currently 2 (added `barrier_state`). Typed `uint32_t` (Round 5
-// fix — was a platform-variable `int` round-tripping through JSON,
-// which left an undocumented door for `-1` sentinel values).
-constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 2;
+// v2 added `barrier_state`; v3 records pending-write mode support.
+// Typed `uint32_t`: schema versions are non-negative wire values.
+constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
 ```
 
 | Field | Type | Description |
@@ -1976,19 +2001,19 @@ constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 2;
 | `metadata` | `json` | Arbitrary user-defined data |
 | `step` | `int64_t` | Super-step counter |
 | `timestamp` | `int64_t` | Creation time in Unix epoch milliseconds |
-| `schema_version` | `std::uint32_t` | On-wire layout version (see `CHECKPOINT_SCHEMA_VERSION`, currently `2`). Round 5 widened this from `int` to fixed-width unsigned — schema versions are non-negative and a platform-variable `int` width was wrong for a value persisted to disk and round-tripped through JSON. Persistent `CheckpointStore` implementations should serialize it and treat `0` on a deserialized blob as "pre-versioned" (e.g. the field was absent — migration is the caller's responsibility) |
+| `schema_version` | `std::uint32_t` | On-wire layout version (see `CHECKPOINT_SCHEMA_VERSION`, currently `3`). Round 5 widened this from `int` to fixed-width unsigned — schema versions are non-negative and a platform-variable `int` width was wrong for a value persisted to disk and round-tripped through JSON. Persistent `CheckpointStore` implementations should serialize it and treat `0` on a deserialized blob as "pre-versioned" (e.g. the field was absent — migration is the caller's responsibility) |
 
 ### CheckpointStore
 
 Abstract interface for checkpoint persistence. Implement this to store checkpoints
 in a database, file system, or any other backend.
 
-> **Writing a custom store?** This is a fat interface (5 sync core +
-> 5 async peers + 3 sync pending-writes + 3 async pending-writes =
-> **16 virtuals**). Defaults bridge sync↔async in both directions
-> (sync calls `run_sync(async)`; async calls `execute_in_pool(sync)`)
-> so a backend can override only one side per method — but
-> overriding NEITHER yields infinite mutual recursion at call time.
+> **Writing a custom store?** New implementations should implement the smallest
+> applicable capability: `CheckpointStoreCore`, optionally
+> `AsyncCheckpointStore` and/or `PendingWritesCheckpointStore`, then pass it
+> through `adapt_checkpoint_store()`. The existing `CheckpointStore` interface
+> remains the compatibility contract. Its async defaults invoke the sync methods;
+> a sync-only backend therefore remains valid, but its async calls are blocking.
 > See [`ASYNC_GUIDE.md` §9.4](ASYNC_GUIDE.md#94-checkpointstore).
 
 ```cpp

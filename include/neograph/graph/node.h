@@ -30,6 +30,7 @@
 #pragma once
 
 #include <neograph/api.h>
+#include <neograph/graph/run_context.h>
 #include <neograph/graph/types.h>
 #include <neograph/graph/state.h>
 
@@ -38,13 +39,6 @@
 #include <stdexcept>
 
 namespace neograph::graph {
-
-/// Per-run dispatch metadata. Defined in
-/// ``neograph/graph/engine.h``; forward-declared here because
-/// ``node.h`` is below ``engine.h`` in the include order (a full
-/// ``#include`` would loop). The translation unit
-/// (``graph_node.cpp``) pulls in ``engine.h`` to see the layout.
-struct RunContext;
 
 /**
  * @brief Per-call input bundle for the unified ``run()`` virtual.
