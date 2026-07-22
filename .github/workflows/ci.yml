@@ -369,15 +369,21 @@ jobs:
           awk -v v="$ops" 'BEGIN{ if (v+0 < 300000) { print "FAIL ops/s: " v " < 300000"; exit 1 } print "ok ops/s: " v }'
           awk -v v="$rss" 'BEGIN{ if (v+0 > 120)    { print "FAIL rss: "   v " > 120 MB"; exit 1 } print "ok rss: " v " MB" }'
 
-      - name: Gate — bench_neograph (engine overhead ceiling seq 60µs / par 300µs)
+      - name: Gate — bench_neograph worker=1 (engine overhead ceiling seq 60µs / par 300µs)
         run: |
-          out=$(./build-bench/bench_neograph)
+          out=$(./build-bench/bench_neograph 10000 5000 1)
           echo "$out"
           # Output: tab-separated `seq<TAB>count<TAB>total_ms<TAB>per_op_us`
           seq_us=$(echo "$out" | awk -F'\t' '$1=="seq" {print $4}')
           par_us=$(echo "$out" | awk -F'\t' '$1=="par" {print $4}')
           awk -v v="$seq_us" 'BEGIN{ if (v+0 > 60)  { print "FAIL seq: " v "us > 60"; exit 1 } print "ok seq: " v "us" }'
           awk -v v="$par_us" 'BEGIN{ if (v+0 > 300) { print "FAIL par: " v "us > 300"; exit 1 } print "ok par: " v "us" }'
+
+          # Exercise the explicit hardware-concurrency mode without treating its
+          # thread-pool coordination cost as the worker=1 regression signal.
+          auto_out=$(./build-bench/bench_neograph 100 50 auto)
+          echo "$auto_out"
+          echo "$auto_out" | awk -F'\t' '$1=="config" && $2=="par_workers" && $3 ~ /^auto\(/ {found=1} END {exit !found}'
 
   # Compile + ctest under -fsanitize=address,undefined and run the
   # no-network examples in the same configuration. ASan caught a
