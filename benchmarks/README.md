@@ -51,12 +51,12 @@ Python field: 3-run median per framework. Versions: neograph v3.0.0,
 langgraph 1.1.9, haystack-ai 2.28.0, pydantic-graph 1.85.1,
 llama-index-core 0.14.21, autogen-agentchat 0.7.5.
 
-A re-measurement on current master (2026-04-27) is included below
-the reference run. Only one change since v3.0.0 affected the
-`par` row — `worker_count`'s default flipped to
-`hardware_concurrency` (commit `b59444f`, v0.1.4) to match real
-LLM workloads. The pre-flip fast path is still reachable in one
-line via `engine->set_worker_count(1)` — see *Notes* after the table.
+A re-measurement on then-current master (2026-04-29) is included below
+the reference run. The `par` row reports both supported execution
+regimes explicitly: the current `worker_count=1` default and the
+engine-owned pool enabled by `set_worker_count_auto()`. See *Notes*
+after the table for why a no-I/O microbenchmark should keep these
+numbers separate.
 
 ![Engine-overhead benchmark: per-iteration latency and peak RSS](../docs/images/bench-engine-overhead.png)
 
@@ -65,15 +65,16 @@ line via `engine->set_worker_count(1)` — see *Notes* after the table.
 | Framework | `seq` (3-node chain) | `par` (fan-out 5 + join) | `seq` vs. NeoGraph | `par` vs. NeoGraph |
 |-----------|---------------------:|-------------------------:|-------------------:|-------------------:|
 | **NeoGraph v3.0.0** *(reference, 2026-04-22)* | **5.0** | **11.8** | 1× | 1× |
-| **NeoGraph master** *(today, default `worker_count=hardware_concurrency`)* | **5.25** | **278** | 1× | 1× |
-| **NeoGraph master** *(today, `set_worker_count(1)`)* | **5.25** | **14.4** | 1× | 1× |
-| Haystack 2.28.0 | 139.85 | 278.48 | 28.0× / 26.6× / 26.6× | 23.6× / 1.0× / 19.3× |
-| pydantic-graph 1.87.0 | 227.14 | 280.26¹ | 45.4× / 43.3× / 43.3× | 23.7×¹ / 1.0×¹ / 19.5×¹ |
-| LangGraph 1.1.10 | 642.62 | 2,261.55 | 128.5× / 122.4× / 122.4× | 191.7× / 8.1× / 157.1× |
-| LlamaIndex Workflow 0.14.21 | 1,564.54 | 4,373.76 | 312.9× / 298.0× / 298.0× | 370.7× / 15.7× / 303.7× |
-| AutoGen GraphFlow 0.7.5 | 3,126.86 | 7,281.08 | 625.4× / 595.6× / 595.6× | 617.0× / 26.2× / 505.6× |
+| **NeoGraph master** *(2026-04-29, default `worker_count=1`)* | **5.25** | **14.4** | 1× | 1× |
+| **NeoGraph master** *(2026-04-29, `set_worker_count_auto()`)* | **5.25** | **278** | 1× | 1× |
+| Haystack 2.28.0 | 139.85 | 278.48 | 28.0× / 26.6× / 26.6× | 23.6× / 19.3× / 1.0× |
+| pydantic-graph 1.87.0 | 227.14 | 280.26¹ | 45.4× / 43.3× / 43.3× | 23.7×¹ / 19.5×¹ / 1.0×¹ |
+| LangGraph 1.1.10 | 642.62 | 2,261.55 | 128.5× / 122.4× / 122.4× | 191.7× / 157.1× / 8.1× |
+| LlamaIndex Workflow 0.14.21 | 1,564.54 | 4,373.76 | 312.9× / 298.0× / 298.0× | 370.7× / 303.7× / 15.7× |
+| AutoGen GraphFlow 0.7.5 | 3,126.86 | 7,281.08 | 625.4× / 595.6× / 595.6× | 617.0× / 505.6× / 26.2× |
 
-Rightmost two columns show three ratios: vs. v3.0.0 reference / vs. master default / vs. master worker=1.
+Rightmost two columns show three ratios: vs. v3.0.0 reference / vs. master
+worker=1 default / vs. master auto-worker mode.
 
 The 2026-04-29 re-measurement (above) reproduces the 2026-04-22 reference within ±10 % per row — same machine, same toolchain, same workload. The README's headline claims (130× LangGraph, 600× AutoGen on `seq`) hold on master HEAD.
 
@@ -82,32 +83,35 @@ support fan-out. Not a parallel workload; included for completeness.
 
 ### Notes on the `par` row (`seq` is unchanged)
 
-The `par` 11.8 → 283 µs gap on master is entirely the default
-flip:
+The `par` 14.4 → 278 µs gap is the measured cost of opting into an
+engine-owned thread pool for five nodes that do no real work:
 
-* **`worker_count` default went 1 → `hardware_concurrency`** in
-  commit `b59444f` (v0.1.4). The previous default left multi-Send
-  fan-out single-threaded — a typical Python `plan + 5 researchers
-  + synthesize` graph paid one extra batch of LLM latency to N+1
-  batching. The new default sizes the engine pool to all available
-  cores so the same workload parallelizes out of the box. Net
-  effect on this micro-bench: +270 µs of thread-pool coordination
-  per iter that's invisible in any LLM-bound workflow (a 100 ms
-  LLM round-trip dwarfs 280 µs thread setup).
-* **The pre-flip fast path is still reachable** — `set_worker_count(1)`
-  drops the engine-owned thread pool entirely and dispatches fan-out
-  branches directly on the caller's executor (single-thread
-  io_context for `run_sync`, the caller's pool for `run_async`).
-  Measured here at 14.4 µs, statistical tie with the v3.0.0 11.8 µs
-  number. Right pick for CPU-tiny workloads or graphs whose nodes
-  hold non-thread-safe state.
+* **Current `build()` / `compile()` default: `worker_count=1`.** No
+  engine-owned pool is installed, so fan-out dispatches on the caller's
+  executor. This is the 14.4 µs row and the correct regression signal for
+  CPU-tiny nodes or graphs whose nodes hold non-thread-safe state.
+* **Parallel fan-out is explicit.** `set_worker_count_auto()` sizes the
+  pool to `hardware_concurrency`; `set_worker_count(N)` chooses a fixed
+  ceiling. This is the 278 µs row. The coordination cost is visible here
+  because each worker only appends one integer, but is negligible beside a
+  100 ms LLM call and allows independent nodes to overlap.
+
+Run both regimes without changing the benchmark source:
+
+```bash
+./build/bench_neograph 10000 5000 1
+./build/bench_neograph 10000 5000 auto
+```
+
+The third argument applies to the `par` engine and accepts `1` (default),
+`auto`, or any positive worker count. Output includes a
+`config\tpar_workers\t...` row so saved results retain their execution mode.
 
 The headline still holds: NeoGraph wins every row of the table by
 8×–600× depending on framework and configuration. The "199× faster
-than LangGraph on `par`" claim is reproducible today via
-`set_worker_count(1)` (163× at the same setting); the new default
-trades a chunk of micro-bench overhead for real concurrency on
-LLM workloads.
+than LangGraph on `par`" reference was 163× in the 2026-04-29
+worker=1 measurement; auto-worker mode trades microbenchmark overhead
+for real concurrency in blocking or CPU-bound nodes.
 
 ### End-to-end process metrics
 
@@ -128,6 +132,50 @@ NeoGraph 3.0's default super-step loop runs the coroutine on a
 single-threaded io_context via `run_sync`; CPU-parallel fan-out is
 opt-in via `engine->set_worker_count(N)`. For I/O-bound node
 workloads the single thread still overlaps via co_await suspension.
+
+## Linux ARM64 baseline: Neoverse-N1
+
+This is a separate native ARM64 platform baseline from
+[#165](https://github.com/fox1245/NeoGraph/issues/165), not a regression
+comparison with the x86_64 table above. It is pinned to revision `d7a6477`
+and its own dependency set so later measurements remain attributable.
+
+| Item | Value |
+|---|---|
+| Date | 2026-07-22 |
+| OS | Ubuntu 24.04, Linux `6.17.0-1018-oracle` |
+| Architecture | `aarch64` |
+| CPU | 4 vCPU, ARM Neoverse-N1 |
+| Memory | 23 GiB, no swap |
+| Compiler / CMake | GCC 13.3.0 / CMake 3.28.3 |
+| Python | CPython 3.12.3 |
+| NeoGraph revision | `d7a6477` |
+
+The workload and iteration counts match the primary benchmark: 10,000
+`seq` iterations and 5,000 `par` iterations after compiling each graph
+once. NeoGraph was measured 10 times and each Python implementation three
+times; the table reports medians. Checkpointing, network I/O, model calls,
+and sleeps were disabled. Whole-process peak RSS came from
+`/usr/bin/time -f "%e s, %M KB"`.
+
+| Framework | `seq` (µs/iter) | `par` (µs/iter) | `seq` vs. NeoGraph | `par` vs. NeoGraph | Peak RSS |
+|---|---:|---:|---:|---:|---:|
+| **NeoGraph** | **9.50** | **21.80** | 1× | 1× | **4.35 MB** |
+| Haystack 3.0.0 | 153.44 | 329.67 | 16.2× | 15.1× | 73.6 MB |
+| pydantic-graph 1.87.0 | 342.60 | 405.87¹ | 36.1× | 18.6×¹ | 32.1 MB |
+| LangGraph 1.2.9 | 1,037.55 | 3,289.22 | 109.2× | 150.9× | 63.7 MB |
+| LlamaIndex 0.14.23 | 2,765.04 | 7,824.85 | 291.1× | 358.9× | 96.9 MB |
+| AutoGen 0.7.5 | 4,166.39 | 9,571.11 | 438.6× | 439.0× | 47.8 MB |
+
+NeoGraph used the worker=1 default, so the `par` row measures topology,
+reducer, and serial dispatch overhead rather than engine-owned thread-pool
+execution. Use the explicit `auto` benchmark mode for a separate parallel
+fan-out measurement; do not combine the two modes into one headline.
+
+¹ pydantic-graph cannot model this fan-out topology; its `par` row is the
+same serial six-node emulation described above. Version 1.87.0 was pinned
+because the then-current 2.15.0 API no longer supported the benchmark's
+`Graph(...)` constructor. Processes were not CPU-pinned or cgroup-constrained.
 
 ## What the numbers mean
 
