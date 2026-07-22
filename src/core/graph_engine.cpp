@@ -59,6 +59,10 @@ std::unique_ptr<GraphEngine> GraphEngine::build(const json& definition, EngineCo
     // documents get a stderr warning. Must run before the moves below.
     GraphCompiler::verify_roundtrip(definition, cg);
 
+    return link(std::move(cg), std::move(config));
+}
+
+std::unique_ptr<GraphEngine> GraphEngine::link(CompiledGraph cg, EngineConfig config) {
     // Static semantic analysis (issue #75 M2). Strict documents:
     // errors throw, warnings go to stderr. Legacy documents: only
     // errors are surfaced (as stderr warnings — they were silent

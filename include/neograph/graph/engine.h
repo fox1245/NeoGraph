@@ -467,6 +467,29 @@ struct RunResult {
 class NEOGRAPH_API GraphEngine {
 public:
     /**
+     * @brief Link an already compiled graph into a configured runtime.
+     *
+     * This is the canonical runtime boundary for callers that explicitly run
+     * GraphCompiler and inspect or transform the resulting CompiledGraph. It
+     * performs semantic validation, consumes the graph by move, and applies
+     * every EngineConfig option without parsing the source JSON again.
+     *
+     * Translation round-trip verification requires the original JSON and is
+     * therefore performed by build() before it delegates here. Callers using
+     * link() directly are responsible for calling GraphCompiler::verify_roundtrip
+     * when they need that source-to-IR guarantee.
+     *
+     * EngineConfig::node_context is ignored because CompiledGraph already owns
+     * its instantiated nodes. The remaining runtime configuration is applied.
+     *
+     * @param graph Compiled graph to consume.
+     * @param config Runtime configuration applied before the engine is returned.
+     * @return A configured GraphEngine ready for execution.
+     * @throws std::runtime_error If semantic validation fails in strict mode.
+     */
+    static std::unique_ptr<GraphEngine> link(CompiledGraph graph, EngineConfig config = {});
+
+    /**
      * @brief Build a ready-to-run engine from one construction-time config.
      *
      * New code should prefer this entry point when it needs runtime Store,
