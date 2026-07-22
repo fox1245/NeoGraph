@@ -28,6 +28,8 @@
 
 namespace neograph::graph {
 
+class GraphRegistry;
+
 /// One static-analysis finding, with a machine-readable witness
 /// (counterexample) for tooling to highlight.
 struct Diagnostic {
@@ -92,6 +94,9 @@ public:
      * execute anything.
      */
     static ValidationReport validate(const CompiledGraph& cg);
+
+    /// @brief Validate using a local-first registry overlay.
+    static ValidationReport validate(const CompiledGraph& cg, const GraphRegistry& registry);
 };
 
 } // namespace neograph::graph

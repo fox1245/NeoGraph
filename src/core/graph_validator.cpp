@@ -1,5 +1,7 @@
-#include <neograph/graph/validator.h>
 #include <neograph/graph/loader.h>
+#include <neograph/graph/registry.h>
+#include <neograph/graph/validator.h>
+
 #include <algorithm>
 #include <map>
 #include <queue>
@@ -20,6 +22,7 @@ json string_set_to_array(const std::set<std::string>& s) {
 
 struct Ctx {
     const CompiledGraph& cg;
+    const GraphRegistry&  registry;
     std::set<std::string> node_names;
     // Static successor map: plain edges + every conditional route
     // target. The scheduler's fallback route is always one of the
@@ -244,7 +247,7 @@ void check_routes(Ctx& c) {
             continue;
         }
 
-        auto spec = ConditionRegistry::instance().condition_spec(ce.condition);
+        auto spec = c.registry.condition_spec(ce.condition);
         if (!spec) continue;   // no declared contract — skip
 
         const std::set<std::string> labels(spec->labels.begin(), spec->labels.end());
@@ -292,7 +295,7 @@ void check_effects(Ctx& c) {
     std::map<std::string, std::pair<std::set<std::string>, std::set<std::string>>>
         node_rw;   // node -> (reads, writes)
     for (const auto& n : c.node_names) {
-        const json eff = NodeFactory::instance().node_effects(c.node_type(n));
+        const json eff = c.registry.node_effects(c.node_type(n));
         if (eff.is_null() || !eff.is_object()) return;   // gate: skip family
         std::set<std::string> reads, writes;
         if (eff.contains("reads"))
@@ -433,7 +436,11 @@ std::string ValidationReport::summary() const {
 }
 
 ValidationReport GraphValidator::validate(const CompiledGraph& cg) {
-    Ctx c{cg, {}, {}, {}};
+    return validate(cg, GraphRegistry::global());
+}
+
+ValidationReport GraphValidator::validate(const CompiledGraph& cg, const GraphRegistry& registry) {
+    Ctx c{cg, registry, {}, {}, {}};
     for (const auto& [name, node] : cg.nodes) {
         (void)node;
         c.node_names.insert(name);

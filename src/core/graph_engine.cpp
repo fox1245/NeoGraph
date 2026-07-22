@@ -51,7 +51,23 @@ std::unique_ptr<GraphEngine> GraphEngine::compile(
 }
 
 std::unique_ptr<GraphEngine> GraphEngine::build(const json& definition, EngineConfig config) {
-    auto cg = GraphCompiler::compile(definition, config.node_context);
+    return build(definition, std::move(config), {});
+}
+
+std::unique_ptr<GraphEngine> GraphEngine::build(const json&     definition,
+                                                EngineConfig    config,
+                                                EngineResources resources) {
+    if (!resources.tools.empty()) {
+        if (!config.node_context.tools.empty()) {
+            throw std::invalid_argument(
+                "GraphEngine::build received both EngineResources::tools and "
+                "NodeContext::tools; use the owned ToolSet only");
+        }
+        config.node_context.tools = resources.tools.view();
+    }
+
+    const auto& registry = resources.registry ? *resources.registry : GraphRegistry::global();
+    auto        cg       = GraphCompiler::compile(definition, config.node_context, registry);
 
     // Translation validation: assert nothing was silently dropped or
     // rewired between the JSON definition and the compiled graph.
@@ -59,17 +75,24 @@ std::unique_ptr<GraphEngine> GraphEngine::build(const json& definition, EngineCo
     // documents get a stderr warning. Must run before the moves below.
     GraphCompiler::verify_roundtrip(definition, cg);
 
-    return link(std::move(cg), std::move(config));
+    return link(std::move(cg), std::move(config), std::move(resources));
 }
 
 std::unique_ptr<GraphEngine> GraphEngine::link(CompiledGraph cg, EngineConfig config) {
+    return link(std::move(cg), std::move(config), {});
+}
+
+std::unique_ptr<GraphEngine> GraphEngine::link(CompiledGraph   cg,
+                                               EngineConfig    config,
+                                               EngineResources resources) {
     // Static semantic analysis (issue #75 M2). Strict documents:
     // errors throw, warnings go to stderr. Legacy documents: only
     // errors are surfaced (as stderr warnings — they were silent
     // breakage before, e.g. a dangling edge or an empty route map),
     // heuristic lint is suppressed to keep existing graphs quiet.
     {
-        auto report = GraphValidator::validate(cg);
+        const auto& registry = resources.registry ? *resources.registry : GraphRegistry::global();
+        auto        report   = GraphValidator::validate(cg, registry);
         if (cg.schema_version >= 1) {
             if (report.has_errors()) {
                 std::string msg = "graph validation failed (schema_version "
@@ -106,6 +129,7 @@ std::unique_ptr<GraphEngine> GraphEngine::link(CompiledGraph cg, EngineConfig co
     engine->checkpoint_store_    = std::move(config.checkpoint_store);
     engine->store_               = std::move(config.store);
     engine->tool_gate_           = std::move(config.tool_gate);
+    engine->owned_tools_         = std::move(resources.tools).release();
     for (const auto& node_name : config.cached_nodes) {
         engine->node_cache_.set_enabled(node_name, true);
     }
@@ -117,8 +141,17 @@ std::unique_ptr<GraphEngine> GraphEngine::link(CompiledGraph cg, EngineConfig co
     // and deadlock conditional self-loops. Explicitly-declared barriers
     // (via the node's "barrier": {"wait_for": [...]} field) opt back
     // into AND-join semantics for those specific nodes.
-    engine->scheduler_ = std::make_unique<Scheduler>(
-        engine->edges_, engine->conditional_edges_, std::move(cg.barrier_specs));
+    engine->scheduler_ =
+        std::make_unique<Scheduler>(engine->edges_, engine->conditional_edges_,
+                                    std::move(cg.barrier_specs), resources.registry);
+
+    GraphEngine* self         = engine.get();
+    auto         retry_lookup = [self](const std::string& node_name) {
+        return self->get_retry_policy(node_name);
+    };
+    engine->executor_ = std::make_unique<NodeExecutor>(
+        engine->nodes_, engine->channel_defs_, std::move(retry_lookup),
+        std::move(resources.registry), nullptr, &engine->node_cache_);
 
     // NodeExecutor owns retry + fan-out + Send invocation. Bind the
     // retry-policy lookup to this engine's per-node override map so
@@ -201,20 +234,19 @@ void GraphEngine::set_worker_count(std::size_t n) {
     // resizable. Dtor joins the old pool's workers, so callers must
     // not resize across an in-flight run() (documented on declaration).
     GraphEngine* self = this;
+    auto         registry     = executor_ ? executor_->registry_ : nullptr;
     auto retry_lookup = [self](const std::string& node_name) {
         return self->get_retry_policy(node_name);
     };
     if (n == 1) {
         pool_.reset();
-        executor_ = std::make_unique<NodeExecutor>(
-            nodes_, channel_defs_, std::move(retry_lookup),
-            nullptr, &node_cache_);
+        executor_ = std::make_unique<NodeExecutor>(nodes_, channel_defs_, std::move(retry_lookup),
+                                                   std::move(registry), nullptr, &node_cache_);
         return;
     }
     pool_ = std::make_unique<asio::thread_pool>(n);
-    executor_ = std::make_unique<NodeExecutor>(
-        nodes_, channel_defs_, std::move(retry_lookup),
-        pool_.get(), &node_cache_);
+    executor_ = std::make_unique<NodeExecutor>(nodes_, channel_defs_, std::move(retry_lookup),
+                                               std::move(registry), pool_.get(), &node_cache_);
 }
 
 void GraphEngine::set_worker_count_auto() {
@@ -350,14 +382,7 @@ std::string GraphEngine::fork(const std::string& source_thread_id,
 // =========================================================================
 
 void GraphEngine::init_state(GraphState& state) const {
-    for (const auto& cd : channel_defs_) {
-        auto reducer = ReducerRegistry::instance().get(cd.reducer_name);
-        json initial = cd.initial_value;
-        if (cd.type == ReducerType::APPEND && initial.is_null()) {
-            initial = json::array();
-        }
-        state.init_channel(cd.name, cd.type, reducer, initial);
-    }
+    executor_->init_state(state);
 }
 
 void GraphEngine::apply_input(GraphState& state, const json& input) const {

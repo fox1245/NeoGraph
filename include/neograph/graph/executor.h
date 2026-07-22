@@ -60,6 +60,7 @@
 namespace neograph::graph {
 
 class GraphState;
+class GraphRegistry;
 
 /// Per-run metadata carried alongside ``GraphState`` through every
 /// dispatch path. Defined in ``neograph/graph/engine.h``; forward-
@@ -102,6 +103,14 @@ public:
         RetryPolicyLookup retry_policy_for,
         asio::thread_pool* fan_out_pool = nullptr,
         NodeCache* node_cache = nullptr);
+
+    /// @brief Construct with a per-engine registry overlay.
+    NodeExecutor(const std::map<std::string, std::unique_ptr<GraphNode>>& nodes,
+                 const std::vector<ChannelDef>&                           channel_defs,
+                 RetryPolicyLookup                                        retry_policy_for,
+                 std::shared_ptr<const GraphRegistry>                     registry,
+                 asio::thread_pool*                                       fan_out_pool = nullptr,
+                 NodeCache*                                               node_cache   = nullptr);
 
     /**
      * @brief Execute a single node in the current super-step.
@@ -209,6 +218,8 @@ public:
         const RunContext& ctx);
 
 private:
+    friend class GraphEngine;
+
     /// Initialize a clean GraphState using the engine's channel defs.
     /// Used by the multi-send path to build each target's isolated copy.
     void init_state(GraphState& state) const;
@@ -231,6 +242,7 @@ private:
     const std::map<std::string, std::unique_ptr<GraphNode>>& nodes_;
     const std::vector<ChannelDef>& channel_defs_;
     RetryPolicyLookup retry_policy_for_;
+    std::shared_ptr<const GraphRegistry>                     registry_;
     asio::thread_pool* fan_out_pool_ = nullptr;
     NodeCache*         node_cache_   = nullptr;
     mutable std::atomic<bool> warned_serial_fanout_{false};

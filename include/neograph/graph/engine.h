@@ -16,11 +16,13 @@
 #include <neograph/graph/executor.h>
 #include <neograph/graph/node.h>
 #include <neograph/graph/node_cache.h>
+#include <neograph/graph/registry.h>
 #include <neograph/graph/scheduler.h>
 #include <neograph/graph/state.h>
 #include <neograph/graph/store.h>
 #include <neograph/graph/types.h>
 #include <neograph/tool_dispatch.h>   // ToolGate (issue #89)
+#include <neograph/tool_set.h>
 
 #include <asio/awaitable.hpp>
 #include <asio/thread_pool.hpp>
@@ -73,6 +75,19 @@ struct EngineConfig {
 
     /// Pure nodes whose result cache should be enabled at construction time.
     std::set<std::string> cached_nodes;
+};
+
+/**
+ * @brief Owned construction resources layered beside EngineConfig.
+ *
+ * Kept as a sibling type so the already-public EngineConfig and NodeContext
+ * layouts remain unchanged. Empty resources preserve the legacy raw-tool and
+ * process-global registry behavior. Move this value into build() or link();
+ * ToolSet ownership transfers to the resulting engine.
+ */
+struct EngineResources {
+    ToolSet                              tools;
+    std::shared_ptr<const GraphRegistry> registry;
 };
 
 /**
@@ -490,6 +505,17 @@ public:
     static std::unique_ptr<GraphEngine> link(CompiledGraph graph, EngineConfig config = {});
 
     /**
+     * @brief Link with owned tools and a per-engine registry overlay.
+     *
+     * For directly compiled graphs, the caller must have used tools.view() in
+     * the NodeContext and the same registry in GraphCompiler::compile(). The
+     * canonical build() overload performs both bindings automatically.
+     */
+    static std::unique_ptr<GraphEngine> link(CompiledGraph   graph,
+                                             EngineConfig    config,
+                                             EngineResources resources);
+
+    /**
      * @brief Build a ready-to-run engine from one construction-time config.
      *
      * New code should prefer this entry point when it needs runtime Store,
@@ -502,6 +528,16 @@ public:
      * @throws std::runtime_error If the graph definition is invalid.
      */
     static std::unique_ptr<GraphEngine> build(const json& definition, EngineConfig config);
+
+    /**
+     * @brief Build with exact tool ownership and a local-first registry.
+     *
+     * resources.tools replaces NodeContext::tools with pointers to the owned
+     * collection. Supplying both forms is rejected as ambiguous.
+     */
+    static std::unique_ptr<GraphEngine> build(const json&     definition,
+                                              EngineConfig    config,
+                                              EngineResources resources);
 
     /**
      * @brief Compile a graph from a JSON definition.

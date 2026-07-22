@@ -50,10 +50,9 @@ class GraphNode;
 ///     tests; tests must use unique type names or deregister.
 ///   - Pybind users: state survives pytest-case boundaries.
 ///
-/// A future major version (v1.0) is expected to thread per-engine
-/// `Registry` instances through `NodeContext`/`compile()`, with the
-/// global singleton kept as a default-fallback layer. Until then,
-/// avoid duplicate registrations across test cases / embedders.
+/// New code that needs isolation can register an EngineResources
+/// `GraphRegistry`; entries there take precedence and this singleton remains
+/// the built-in/default fallback layer.
 class NEOGRAPH_API ReducerRegistry {
 public:
     /// @brief Get the singleton instance.

@@ -1,13 +1,14 @@
-#include <neograph/graph/executor.h>
-#include <neograph/graph/engine.h>   // RunContext (forward-declared in executor.h)
-#include <neograph/graph/state.h>
-#include <neograph/graph/loader.h>
 #include <neograph/graph/cancel.h>
+#include <neograph/graph/engine.h>  // RunContext (forward-declared in executor.h)
+#include <neograph/graph/executor.h>
+#include <neograph/graph/loader.h>
+#include <neograph/graph/registry.h>
+#include <neograph/graph/state.h>
 
 #include <asio/co_spawn.hpp>
 #include <asio/deferred.hpp>
-#include <asio/experimental/parallel_group.hpp>
 #include <asio/error.hpp>
+#include <asio/experimental/parallel_group.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/system_error.hpp>
 #include <asio/this_coro.hpp>
@@ -15,12 +16,12 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cstdlib>
-#include <cstring>
-#include <random>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 
@@ -69,21 +70,31 @@ inline std::string make_send_task_id(int step, size_t idx,
 // NodeExecutor construction + helpers
 // =========================================================================
 
-NodeExecutor::NodeExecutor(
-    const std::map<std::string, std::unique_ptr<GraphNode>>& nodes,
-    const std::vector<ChannelDef>& channel_defs,
-    RetryPolicyLookup retry_policy_for,
-    asio::thread_pool* fan_out_pool,
-    NodeCache* node_cache)
+NodeExecutor::NodeExecutor(const std::map<std::string, std::unique_ptr<GraphNode>>& nodes,
+                           const std::vector<ChannelDef>&                           channel_defs,
+                           RetryPolicyLookup  retry_policy_for,
+                           asio::thread_pool* fan_out_pool,
+                           NodeCache*         node_cache)
+    : NodeExecutor(
+          nodes, channel_defs, std::move(retry_policy_for), nullptr, fan_out_pool, node_cache) {}
+
+NodeExecutor::NodeExecutor(const std::map<std::string, std::unique_ptr<GraphNode>>& nodes,
+                           const std::vector<ChannelDef>&                           channel_defs,
+                           RetryPolicyLookup                    retry_policy_for,
+                           std::shared_ptr<const GraphRegistry> registry,
+                           asio::thread_pool*                   fan_out_pool,
+                           NodeCache*                           node_cache)
     : nodes_(nodes),
       channel_defs_(channel_defs),
       retry_policy_for_(std::move(retry_policy_for)),
+      registry_(std::move(registry)),
       fan_out_pool_(fan_out_pool),
       node_cache_(node_cache) {}
 
 void NodeExecutor::init_state(GraphState& state) const {
     for (const auto& cd : channel_defs_) {
-        auto reducer = ReducerRegistry::instance().get(cd.reducer_name);
+        auto reducer = registry_ ? registry_->reducer(cd.reducer_name)
+                                 : ReducerRegistry::instance().get(cd.reducer_name);
         json initial = cd.initial_value;
         if (cd.type == ReducerType::APPEND && initial.is_null()) {
             initial = json::array();

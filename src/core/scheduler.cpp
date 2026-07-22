@@ -1,6 +1,7 @@
+#include <neograph/graph/loader.h>
+#include <neograph/graph/registry.h>
 #include <neograph/graph/scheduler.h>
 #include <neograph/graph/state.h>
-#include <neograph/graph/loader.h>
 
 #include <algorithm>
 #include <set>
@@ -8,19 +9,27 @@
 
 namespace neograph::graph {
 
-Scheduler::Scheduler(const std::vector<Edge>& edges,
+Scheduler::Scheduler(const std::vector<Edge>&            edges,
                      const std::vector<ConditionalEdge>& conditional_edges,
-                     BarrierSpecs barrier_specs)
+                     BarrierSpecs                        barrier_specs)
+    : Scheduler(edges, conditional_edges, std::move(barrier_specs), nullptr) {}
+
+Scheduler::Scheduler(const std::vector<Edge>&             edges,
+                     const std::vector<ConditionalEdge>&  conditional_edges,
+                     BarrierSpecs                         barrier_specs,
+                     std::shared_ptr<const GraphRegistry> registry)
     : edges_(edges),
       conditional_edges_(conditional_edges),
-      barrier_specs_(std::move(barrier_specs)) {}
+      barrier_specs_(std::move(barrier_specs)),
+      registry_(std::move(registry)) {}
 
 std::vector<std::string> Scheduler::resolve_next_nodes(
     const std::string& current, const GraphState& state) const {
 
     for (const auto& ce : conditional_edges_) {
         if (ce.from == current) {
-            auto cond_fn = ConditionRegistry::instance().get(ce.condition);
+            auto cond_fn = registry_ ? registry_->condition(ce.condition)
+                                     : ConditionRegistry::instance().get(ce.condition);
             auto result  = cond_fn(state);
             auto it = ce.routes.find(result);
             if (it != ce.routes.end()) return {it->second};

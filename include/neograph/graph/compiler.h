@@ -28,6 +28,8 @@
 
 namespace neograph::graph {
 
+class GraphRegistry;
+
 class GraphNode;
 
 /**
@@ -153,6 +155,18 @@ public:
      */
     static CompiledGraph compile(const json& definition,
                                  const NodeContext& default_context);
+
+    /**
+     * @brief Compile with a local-first registry overlay.
+     *
+     * Missing entries fall back to the process-global registries, preserving
+     * built-ins and existing registrations without process-wide mutation.
+     * Pass the same registry through EngineResources when linking the result,
+     * so runtime reducer and condition lookup uses the same overlay.
+     */
+    static CompiledGraph compile(const json&          definition,
+                                 const NodeContext&   default_context,
+                                 const GraphRegistry& registry);
 
     /**
      * @brief Canonicalize a topology JSON document for equivalence

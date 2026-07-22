@@ -16,17 +16,19 @@
 #pragma once
 
 // Foundation types
-#include <neograph/types.h>
-#include <neograph/provider.h>
 #include <neograph/completion_provider.h>
+#include <neograph/provider.h>
 #include <neograph/tool.h>
+#include <neograph/tool_set.h>
+#include <neograph/types.h>
 
 // Graph engine
-#include <neograph/graph/types.h>
-#include <neograph/graph/state.h>
-#include <neograph/graph/node.h>
-#include <neograph/graph/engine.h>
 #include <neograph/graph/checkpoint.h>
+#include <neograph/graph/engine.h>
 #include <neograph/graph/loader.h>
+#include <neograph/graph/node.h>
 #include <neograph/graph/react_graph.h>
+#include <neograph/graph/registry.h>
+#include <neograph/graph/state.h>
 #include <neograph/graph/store.h>
+#include <neograph/graph/types.h>
