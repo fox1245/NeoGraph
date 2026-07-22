@@ -28,12 +28,52 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace neograph::graph {
+
+/**
+ * @brief Construction-time configuration for a GraphEngine.
+ *
+ * This is the canonical path for new code: collect runtime dependencies and
+ * policies first, then hand the complete configuration to GraphEngine::build().
+ * The resulting engine is ready to run without a sequence of post-compile
+ * setter calls.
+ *
+ * Existing GraphEngine::compile() and configuration setters remain supported.
+ * compile() is a compatibility facade over build(), and the setters update the
+ * same internal state represented here.
+ */
+struct EngineConfig {
+    /// Provider, tools, model, and instructions used while factories create nodes.
+    NodeContext node_context;
+
+    /// Optional durable execution-state backend.
+    std::shared_ptr<CheckpointStore> checkpoint_store;
+
+    /// Optional cross-thread long-term memory exposed as RunContext::store.
+    std::shared_ptr<Store> store;
+
+    /// Optional override for the topology's default retry policy.
+    std::optional<RetryPolicy> retry_policy;
+
+    /// Per-node retry overrides applied before the first run.
+    std::map<std::string, RetryPolicy> node_retry_policies;
+
+    /// Engine-wide tool policy, preserved across run() and resume().
+    ToolGate tool_gate;
+
+    /// Fan-out worker count. One preserves the historical no-pool fast path.
+    std::size_t worker_count = 1;
+
+    /// Pure nodes whose result cache should be enabled at construction time.
+    std::set<std::string> cached_nodes;
+};
 
 /**
  * @brief Configuration for a graph execution run.
@@ -427,6 +467,20 @@ struct RunResult {
 class NEOGRAPH_API GraphEngine {
 public:
     /**
+     * @brief Build a ready-to-run engine from one construction-time config.
+     *
+     * New code should prefer this entry point when it needs runtime Store,
+     * retry, worker, cache, or tool-gate configuration. It applies every option
+     * before returning the engine, avoiding a partially configured interval.
+     *
+     * @param definition JSON graph definition.
+     * @param config Node construction context and engine runtime configuration.
+     * @return A configured GraphEngine ready for execution.
+     * @throws std::runtime_error If the graph definition is invalid.
+     */
+    static std::unique_ptr<GraphEngine> build(const json& definition, EngineConfig config);
+
+    /**
      * @brief Compile a graph from a JSON definition.
      *
      * Parses the JSON graph definition, creates nodes via NodeFactory,
@@ -437,6 +491,9 @@ public:
      * @param store Optional checkpoint store for persistence (nullptr = no checkpointing).
      * @return A compiled GraphEngine ready for execution.
      * @throws std::runtime_error If the graph definition is invalid.
+     *
+     * @note Compatibility facade. This overload retains its original signature
+     *       and behavior and delegates to build().
      */
     static std::unique_ptr<GraphEngine> compile(
         const json& definition,

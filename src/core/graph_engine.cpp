@@ -44,8 +44,14 @@ std::unique_ptr<GraphEngine> GraphEngine::compile(
     const json& definition,
     const NodeContext& default_context,
     std::shared_ptr<CheckpointStore> store) {
+    EngineConfig config;
+    config.node_context     = default_context;
+    config.checkpoint_store = std::move(store);
+    return build(definition, std::move(config));
+}
 
-    auto cg = GraphCompiler::compile(definition, default_context);
+std::unique_ptr<GraphEngine> GraphEngine::build(const json& definition, EngineConfig config) {
+    auto cg = GraphCompiler::compile(definition, config.node_context);
 
     // Translation validation: assert nothing was silently dropped or
     // rewired between the JSON definition and the compiled graph.
@@ -89,6 +95,16 @@ std::unique_ptr<GraphEngine> GraphEngine::compile(
     if (cg.retry_policy) {
         engine->default_retry_policy_ = *cg.retry_policy;
     }
+    if (config.retry_policy) {
+        engine->default_retry_policy_ = *config.retry_policy;
+    }
+    engine->node_retry_policies_ = std::move(config.node_retry_policies);
+    engine->checkpoint_store_    = std::move(config.checkpoint_store);
+    engine->store_               = std::move(config.store);
+    engine->tool_gate_           = std::move(config.tool_gate);
+    for (const auto& node_name : config.cached_nodes) {
+        engine->node_cache_.set_enabled(node_name, true);
+    }
 
     // Signal-based dispatch — see Scheduler. A node becomes ready in
     // super-step S+1 iff some node in step S routed to it (regular edge,
@@ -129,9 +145,7 @@ std::unique_ptr<GraphEngine> GraphEngine::compile(
     // bodies, large fan-out, etc.) call `set_worker_count_auto()` or
     // `set_worker_count(N)` explicitly. The opt-in surface is
     // documented in `docs/migration-v0.4-to-v1.0.md`.
-    engine->set_worker_count(1);
-
-    engine->checkpoint_store_ = std::move(store);
+    engine->set_worker_count(config.worker_count);
     return engine;
 }
 
