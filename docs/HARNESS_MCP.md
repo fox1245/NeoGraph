@@ -44,16 +44,142 @@ The example enables both with one explicit directory:
 export NEOGRAPH_HARNESS_STATE_DIR="$PWD/.neograph-harness-state"
 ```
 
-This stores immutable artifacts and mutable run records in `runs.db`, and graph
-checkpoints in `checkpoints.db`. Both SQLite stores use WAL mode and a bounded
-busy timeout. The directory survives server restarts. A
+This stores immutable artifacts, mutable run records, and an append-only causal
+journal in `runs.db`, and graph checkpoints in `checkpoints.db`. Journal rows
+and every Harness-created checkpoint bind the run to its immutable artifact,
+compiled revision digest, MCP protocol version, and Harness profile. Worker
+attempts include duration, validation/retry outcome, and correlation IDs that
+join provider, capability, and host-brokered calls to their issuing attempt.
+Both SQLite stores use WAL mode and a bounded busy
+timeout. Existing version-1 record databases migrate transactionally to version
+3 when opened. The directory survives server restarts. A
 `host_brokered` catalog entry is rejected at compile time when either store is
 missing, so a workflow cannot advertise resumability it does not have.
 
 Custom embeddings can construct the same backend through
 `SqliteHarnessRecordStore` from the optional `neograph::mcp_sqlite` target.
+The default journal mode recursively replaces common secret and content fields
+with `[REDACTED]` before SQLite sees them. `METADATA_ONLY` discards every event
+payload; `FULL` preserves provider content, tool arguments, and results exactly
+and should only be enabled for data approved for storage. Events can be read in
+run order through `HarnessJournal::list_events(run_id, after_sequence, limit)`.
 `FileHarnessRecordStore` remains available for deployments that prefer atomic
-JSON files.
+JSON files; it does not implement the journal boundary.
+
+### Retention
+
+The SQLite store implements the optional `HarnessRetentionStore` sibling
+interface; the stable `HarnessRecordStore` vtable is unchanged. Before retaining
+an artifact or starting a run, `HarnessService` applies `max_artifacts` and
+`max_runs` from `HarnessServiceConfig`. Defaults are 128 each.
+
+Cleanup removes only terminal leaf runs. Queued, running, and input-waiting runs
+are protected, as are in-process executions that have not finished journal
+finalization. A replay or fork row records `source_run_id`, so its source cannot
+be removed while that dependent remains retained. If space is needed, the
+dependent leaf is removed first; the source becomes eligible only in a later
+step after no retained row references it. Limits are therefore soft when every
+candidate is active, explicitly protected, or still referenced.
+
+Within `runs.db`, one transaction deletes a run's journal rows before its run
+row and deletes an artifact only after no run references it. After that commit,
+the Harness removes the deleted run's checkpoint thread from the separately
+configured checkpoint store. A crash or checkpoint-backend failure during that
+second phase can leave unreachable checkpoint storage, but cannot leave a
+retained replay/fork pointing at a deleted source record. A later administrative
+or backend-specific orphan sweep may reclaim such checkpoint-only residue.
+
+`FileHarnessRecordStore` does not implement durable cleanup; its historical
+in-memory artifact-cache eviction and hard run-capacity behavior remain.
+
+## Debugger Views
+
+`neograph_get` keeps `status` as its compact default and adds four debugger
+views without adding another MCP tool:
+
+| View | Result |
+|---|---|
+| `attempts` | Journaled worker attempt start/completion/interruption events |
+| `trace` | Existing ordered GraphEngine node trace plus the causal journal timeline |
+| `checkpoints` | Payload-free checkpoint metadata: ID, parent, node, phase, step, and channel names |
+| `diff` | Channel values and versions changed between each checkpoint and its parent |
+
+`attempts` and `trace` accept `after_sequence` as an opaque forward cursor. All
+four views accept `limit` from 1 through 1000. Returned artifact URIs can carry
+the same pagination as a query, for example:
+
+```text
+neograph://runs/run_123/attempts?after_sequence=17&limit=50
+```
+
+Only `after_sequence` and `limit` are accepted in these URIs. Unknown or
+malformed query fields fail instead of being ignored. Journal-backed views
+return the payload exactly as persisted, so the configured redaction mode is
+preserved. The `diff` view is computed from the checkpoint store rather than
+the journal and can contain full channel values; treat access to it like access
+to the existing detailed run result.
+
+## Replay Modes
+
+`neograph_start` can replay a completed run without adding another MCP tool:
+
+```json
+{"replay":{"source_run_id":"run_123","mode":"recorded"}}
+```
+
+`recorded` re-executes the compiler-locked graph with the source journal's
+completed worker-attempt results. It never calls the configured worker,
+provider, MCP, A2A, or capability executor. The source artifact revision,
+protocol, and profile must still match, and the journal must use `FULL` payload
+mode. `REDACTED` and `METADATA_ONLY` journals deliberately cannot replay because
+they do not retain the exact worker output. Interrupted attempts are discarded;
+the completed post-resume worker invocation is replayed.
+
+Use `mode: "live"` to execute the same retained artifact with live providers and
+tools. Snapshots and journal lifecycle events label runs as `recorded_replay` or
+`live_replay` and include `source_run_id`; ordinary starts remain `live`.
+
+## Compatible Fork
+
+Compile a repaired Harness first, then branch an exact preceding checkpoint into
+that target artifact through the existing `neograph_start` tool:
+
+```json
+{
+  "fork": {
+    "source_run_id": "run_123",
+    "checkpoint_id": "550e8400-e29b-41d4-a716-446655440000",
+    "artifact_id": "artifact_repaired"
+  }
+}
+```
+
+The source checkpoint must belong to `source_run_id`. Before allocating a run,
+the Harness verifies the checkpoint schema, source revision, MCP protocol,
+Harness profile, every restored channel and reducer, every continuation node,
+and any active barrier interface against the target artifact. An incompatible
+branch returns `started: false`, `status: "incompatible_fork"`, and
+machine-readable `H_FORK_*` diagnostics with `path` and `witness`; it creates no
+run or fork checkpoint.
+
+A checkpoint store is required. Without a record store, a fork may reference
+only source runs and artifacts still resident in the current service process;
+configure both stores for fork lineage that must survive a restart.
+
+A compatible branch is labeled `compatible_fork` and carries both
+`source_run_id` and `source_checkpoint_id` in start responses, snapshots, and
+lifecycle journal events. Execution resumes at the selected checkpoint's
+`next_nodes`; already committed predecessors do not run again. The target
+artifact supplies the repaired topology, worker contracts, and tool catalogue,
+while restored channel values, including the original task channel, come from
+the source checkpoint. Use a fresh start rather than a fork when the task input
+itself must change.
+
+The source run, artifact, and selected checkpoint are references of the fork and
+must remain retained while compatibility checking or fork execution can use
+them. Retention cleanup must remove dependents first or preserve referenced
+sources; it must never delete a source checkpoint between preflight and branch
+creation.
 
 ## Streamable HTTP
 

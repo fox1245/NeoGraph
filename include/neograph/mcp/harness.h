@@ -12,9 +12,11 @@
 #include <chrono>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace neograph {
 class Provider;
@@ -80,6 +82,17 @@ struct HarnessProviderExecutorConfig {
 NEOGRAPH_MCP_SERVER_API HarnessWorkerExecutor
 make_provider_harness_executor(HarnessProviderExecutorConfig config);
 
+/** Append-only causal event boundary, separate from mutable run snapshots. */
+class NEOGRAPH_MCP_SERVER_API HarnessJournal {
+public:
+    virtual ~HarnessJournal() = default;
+
+    virtual void append_event(const json& event) = 0;
+    virtual std::vector<json> list_events(const std::string& run_id,
+                                          std::size_t        after_sequence = 0,
+                                          std::size_t        limit = 1000) = 0;
+};
+
 /** Durable storage boundary for retained Harness artifacts and run records. */
 class NEOGRAPH_MCP_SERVER_API HarnessRecordStore {
 public:
@@ -89,6 +102,27 @@ public:
     virtual std::optional<json> load_artifact(const std::string& artifact_id)           = 0;
     virtual void                save_run(const std::string& run_id, const json& record) = 0;
     virtual std::optional<json> load_run(const std::string& run_id)                     = 0;
+};
+
+/** Count-bounded cleanup policy for stores that support durable retention. */
+struct HarnessRetentionPolicy {
+    std::size_t              max_artifacts = std::numeric_limits<std::size_t>::max();
+    std::size_t              max_runs      = std::numeric_limits<std::size_t>::max();
+    std::vector<std::string> protected_artifact_ids;
+    std::vector<std::string> protected_run_ids;
+};
+
+/** Records removed by one atomic record-store cleanup pass. */
+struct HarnessRetentionResult {
+    std::vector<std::string> artifact_ids;
+    std::vector<std::string> run_ids;
+};
+
+/** Optional sibling boundary; HarnessRecordStore's stable vtable remains unchanged. */
+class NEOGRAPH_MCP_SERVER_API HarnessRetentionStore {
+public:
+    virtual ~HarnessRetentionStore()                                                      = default;
+    virtual HarnessRetentionResult cleanup_retained(const HarnessRetentionPolicy& policy) = 0;
 };
 
 /** Atomic JSON-file implementation suitable for local process restarts. */
@@ -127,6 +161,7 @@ struct HarnessServiceConfig {
 class NEOGRAPH_MCP_SERVER_API HarnessService {
 public:
     explicit HarnessService(HarnessServiceConfig config = {});
+    HarnessService(HarnessServiceConfig config, std::shared_ptr<HarnessJournal> journal);
     ~HarnessService();
 
     HarnessService(const HarnessService&) = delete;
@@ -149,6 +184,12 @@ public:
 
     /// Return a compact snapshot for a run.
     json get(const std::string& run_id, const std::string& view = "status") const;
+
+    /// Return a paginated debugger view without changing the compact default.
+    json get(const std::string& run_id,
+             const std::string& view,
+             std::size_t        after_sequence,
+             std::size_t        limit) const;
 
     /// Dereference a neograph://runs/<run_id>/<view> result URI.
     json read(const std::string& uri) const;

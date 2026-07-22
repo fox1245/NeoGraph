@@ -2,7 +2,10 @@
 #include <neograph/mcp/json_schema.h>
 #include <neograph/provider.h>
 
+#include "harness_journal_internal.h"
+
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <map>
 #include <random>
@@ -144,13 +147,53 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
         for (std::size_t round = 0; round < config.max_tool_rounds; ++round) {
             cancel->throw_if_cancelled("before provider Harness completion");
             ChatCompletion completion;
+            const auto provider_correlation = detail::journal_correlation_id("provider");
+            const auto provider_started = std::chrono::steady_clock::now();
+            detail::append_current_harness_journal_event(
+                "provider.call.started",
+                {{"message_count", params.messages.size()},
+                 {"model", params.model},
+                 {"round", round + 1},
+                 {"tool_count", params.tools.size()}},
+                provider_correlation);
             try {
                 completion = config.provider->complete(params);
             } catch (const graph::CancelledException&) {
+                detail::append_current_harness_journal_event(
+                    "provider.call.completed",
+                    {{"duration_ms",
+                      std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - provider_started)
+                          .count()},
+                     {"outcome", "cancelled"}},
+                    provider_correlation);
                 return HarnessWorkerResponse::cancelled();
             } catch (const std::exception& error) {
+                detail::append_current_harness_journal_event(
+                    "provider.call.completed",
+                    {{"duration_ms",
+                      std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - provider_started)
+                          .count()},
+                     {"error", error.what()},
+                     {"outcome", "error"}},
+                    provider_correlation);
                 return HarnessWorkerResponse::tool_error(error.what());
             }
+            detail::append_current_harness_journal_event(
+                "provider.call.completed",
+                {{"content", completion.message.content},
+                 {"duration_ms",
+                  std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - provider_started)
+                      .count()},
+                 {"outcome", completion.message.tool_calls.empty() ? "content" : "tool_calls"},
+                 {"tool_call_count", completion.message.tool_calls.size()},
+                 {"usage",
+                  {{"completion_tokens", completion.usage.completion_tokens},
+                   {"prompt_tokens", completion.usage.prompt_tokens},
+                   {"total_tokens", completion.usage.total_tokens}}}},
+                provider_correlation);
 
             if (completion.message.tool_calls.empty()) {
                 if (completion.message.content.empty()) {
@@ -177,14 +220,22 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                     arguments           = enforce_path_policy(call, tool_it->second, arguments);
                     const auto executor = tool_it->second.value("executor", json::object());
                     if (executor.value("kind", "") == "host_brokered") {
+                        const auto call_id = host_call_id();
                         json pending = {
-                            {"call_id", host_call_id()},
+                            {"call_id", call_id},
                             {"provider_call_id", tool_call.id},
                             {"tool_id", tool_call.name},
                             {"arguments", std::move(arguments)},
                             {"result_schema",
                              tool_it->second.value("output_schema", json::object())},
                         };
+                        detail::append_current_harness_journal_event(
+                            "host_brokered.call.requested",
+                            {{"arguments", pending["arguments"]},
+                             {"interaction", executor.value("interaction", "tool_result")},
+                             {"provider_call_id", tool_call.id},
+                             {"tool_id", tool_call.name}},
+                            call_id);
                         if (executor.value("interaction", "tool_result") == "input") {
                             return HarnessWorkerResponse::input_required(std::move(pending));
                         }
@@ -194,11 +245,48 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                         return HarnessWorkerResponse::tool_error(
                             "provider requested a tool but no capability executor is configured");
                     }
-                    auto result = config.capability_executor(tool_it->second, arguments, cancel);
-                    if (tool_it->second.contains("output_schema")) {
-                        validate_json_value(result, tool_it->second["output_schema"],
-                                            "Harness tool result", "$");
+                    const auto capability_correlation =
+                        tool_call.id.empty() ? detail::journal_correlation_id("capability")
+                                             : tool_call.id;
+                    const auto capability_started = std::chrono::steady_clock::now();
+                    detail::append_current_harness_journal_event(
+                        "capability.call.started",
+                        {{"arguments", arguments},
+                         {"executor_kind", executor.value("kind", "builtin")},
+                         {"tool_id", tool_call.name}},
+                        capability_correlation);
+                    json result;
+                    try {
+                        result = config.capability_executor(tool_it->second, arguments, cancel);
+                        if (tool_it->second.contains("output_schema")) {
+                            validate_json_value(result, tool_it->second["output_schema"],
+                                                "Harness tool result", "$");
+                        }
+                    } catch (const std::exception& error) {
+                        detail::append_current_harness_journal_event(
+                            "capability.call.completed",
+                            {{"duration_ms",
+                              std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now() - capability_started)
+                                  .count()},
+                             {"error", error.what()},
+                             {"executor_kind", executor.value("kind", "builtin")},
+                             {"outcome", "error"},
+                             {"tool_id", tool_call.name}},
+                            capability_correlation);
+                        throw;
                     }
+                    detail::append_current_harness_journal_event(
+                        "capability.call.completed",
+                        {{"duration_ms",
+                          std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - capability_started)
+                              .count()},
+                         {"executor_kind", executor.value("kind", "builtin")},
+                         {"outcome", "success"},
+                         {"result", result},
+                         {"tool_id", tool_call.name}},
+                        capability_correlation);
                     ChatMessage message;
                     message.role = "tool";
                     message.tool_call_id = tool_call.id;
