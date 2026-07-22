@@ -96,7 +96,8 @@ int main() {
     };
 
     auto store  = std::make_shared<InMemoryCheckpointStore>();
-    auto engine = GraphEngine::compile(definition, ctx, store);
+    auto engine = GraphEngine::build(definition,
+                                     EngineConfig{.node_context = ctx, .checkpoint_store = store});
 
     const std::string thread = "session-1";
 

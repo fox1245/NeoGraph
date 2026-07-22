@@ -121,7 +121,7 @@ int main() {
     //
     // Channel definition uses `"reducer": "sum"` — the literal string
     // is what gets passed through to ReducerRegistry::get("sum"). If
-    // the registry name is misspelled, compile() throws — try changing
+    // the registry name is misspelled, build() throws — try changing
     // "sum" to "summ" below to see the failure mode.
     json def = {
         {"name", "custom_reducer_demo"},
@@ -150,7 +150,7 @@ int main() {
     };
 
     NodeContext ctx;
-    auto engine = GraphEngine::compile(def, ctx);
+    auto        engine = GraphEngine::build(def, EngineConfig{.node_context = ctx});
 
     RunConfig cfg;
     cfg.thread_id = "t1";

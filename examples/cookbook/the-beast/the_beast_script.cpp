@@ -405,7 +405,7 @@ int main(int argc, char** argv) {
 
     // ---- spawn: the loop is driven by model-written goto logic ----
     std::cout << "\n── Spawning — the node's own code drives the loop via goto ──\n";
-    auto engine = ng::GraphEngine::compile(core, ctx);
+    auto          engine = ng::GraphEngine::build(core, ng::EngineConfig{.node_context = ctx});
     ng::RunConfig rc;
     rc.max_steps = 20;
     rc.input = {{"counter", 0}};

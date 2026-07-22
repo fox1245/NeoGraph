@@ -67,8 +67,6 @@ int main(int argc, char** argv) {
 
     neograph::mcp::MCPClient mcp_client(mcp_url);
     auto tools = mcp_client.get_tools();
-    std::vector<neograph::Tool*> tool_ptrs;
-    for (auto& t : tools) tool_ptrs.push_back(t.get());
     std::cout << "[*] " << tools.size()
               << " MCP tools available (agent may or may not call them)\n\n";
 
@@ -95,15 +93,17 @@ int main(int argc, char** argv) {
 
     neograph::graph::NodeContext ctx;
     ctx.provider = provider;
-    ctx.tools    = tool_ptrs;
     ctx.instructions =
         "You are an assistant. Answer from your own knowledge first. "
         "Use the provided tools only if the user explicitly asks for "
         "real-time or external data.";
 
     auto store  = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
-    auto engine = neograph::graph::GraphEngine::compile(definition, ctx, store);
-    engine->own_tools(std::move(tools));
+    neograph::graph::EngineResources resources;
+    resources.tools = neograph::ToolSet(std::move(tools));
+    auto engine     = neograph::graph::GraphEngine::build(
+        definition, neograph::graph::EngineConfig{.node_context = ctx, .checkpoint_store = store},
+        std::move(resources));
 
     // ---------- Round 1 ----------
     std::cout << "User: " << question << "\n\n";

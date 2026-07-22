@@ -62,12 +62,8 @@ int main() {
     std::vector<std::unique_ptr<neograph::Tool>> tools;
     tools.push_back(std::make_unique<LookupTool>());
 
-    std::vector<neograph::Tool*> tool_ptrs;
-    for (auto& t : tools) tool_ptrs.push_back(t.get());
-
     neograph::graph::NodeContext ctx;
     ctx.provider = provider;
-    ctx.tools = tool_ptrs;
 
     // JSON-based graph definition — subgraph included inline
     neograph::json definition = {
@@ -104,8 +100,10 @@ int main() {
         })}
     };
 
-    auto engine = neograph::graph::GraphEngine::compile(definition, ctx);
-    engine->own_tools(std::move(tools));
+    neograph::graph::EngineResources resources;
+    resources.tools = neograph::ToolSet(std::move(tools));
+    auto engine     = neograph::graph::GraphEngine::build(
+        definition, neograph::graph::EngineConfig{.node_context = ctx}, std::move(resources));
 
     // Execute
     std::cout << "=== Subgraph (Supervisor Pattern) ===\n\n";

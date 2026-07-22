@@ -56,8 +56,8 @@ int main() {
     };
 
     NodeContext ctx;
-    auto engine = GraphEngine::compile(def, ctx);
-    engine->set_node_cache_enabled("expensive", true);
+    auto        engine =
+        GraphEngine::build(def, EngineConfig{.node_context = ctx, .cached_nodes = {"expensive"}});
 
     // First run — miss.
     RunConfig cfg;

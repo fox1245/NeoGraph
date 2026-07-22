@@ -19,7 +19,7 @@ Every synchronous I/O point in the engine now has an awaitable peer:
 |---|---|---|
 | Provider | `complete` / `complete_stream` | `complete_async` / `complete_stream_async` |
 | CheckpointStore | `save` / `load_latest` / `load_by_id` / `list` / `delete_thread` / `put_writes` / `get_writes` / `clear_writes` | `*_async` for each |
-| GraphNode | `execute` / `execute_stream` / `execute_full` / `execute_full_stream` | `*_async` for each |
+| GraphNode | — | `run(NodeInput) -> asio::awaitable<NodeOutput>` is the single canonical override |
 | GraphEngine | `run` / `run_stream` / `resume` | `run_async` / `run_stream_async` / `resume_async` |
 | MCPClient | `rpc_call` | `rpc_call_async` |
 | Tool | `execute` (user interface — frozen) | wrap with `AsyncTool` adapter |
@@ -39,7 +39,7 @@ path.
 
 ## 2. The crossover-default pattern
 
-Every sync/async pair on the abstract base classes is connected by a
+Every remaining sync/async pair on Provider and persistence abstractions is connected by a
 pair of default implementations that bridge each direction:
 
 ```cpp
@@ -68,17 +68,17 @@ defaults until the stack overflows. Documented; no runtime guard
 |---|---|
 | Issues real non-blocking I/O (HTTP, MCP, DB, timer) | **async peer** — inherit the sync facade |
 | Pure CPU work, or blocks briefly on a sync library | **sync peer** — inherit the async bridge |
-| Must emit `Command` or `Send` from a coroutine body (graph nodes) | override `execute_full_async` directly |
-| Streaming-aware LLM node that produces writes through a token stream | both `execute_async` (for non-stream paths) and either `execute_stream_async` or `execute_full_stream_async` |
+| Custom `GraphNode` | override `run(NodeInput)`; return writes, `Command`, and `Send` in one `NodeOutput` |
 
 ### Why not a single unified API?
 
-Collapsing sync into async (making every call a coroutine) would
-force every existing Tool, every user-authored GraphNode, every
+Collapsing every public abstraction into async would
+force every existing Tool and every
 CheckpointStore subclass to acknowledge the async machinery —
 including cases where it buys nothing (a tool that adds two
-numbers). The crossover pair is the zero-migration-cost path:
-legacy implementors change nothing.
+numbers). The crossover pair remains the zero-migration-cost path for
+those abstractions. `GraphNode` was intentionally collapsed to one
+coroutine override in v1.0.
 
 ---
 
@@ -170,15 +170,16 @@ halves is a contract violation.
 ```cpp
 class MyNode : public GraphNode {
   public:
-    asio::awaitable<std::vector<ChannelWrite>>
-    execute_async(const GraphState& state) override {
-        CompletionParams params = build_params(state);
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        CompletionParams params = build_params(in.state);
+        params.cancel_token = in.ctx.cancel_token;
         auto completion = co_await provider_->complete_async(params);
 
         neograph::json msg;
         to_json(msg, completion.message);
-        co_return std::vector<ChannelWrite>{
-            ChannelWrite{"messages", json::array({msg})}};
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"messages", json::array({msg})});
+        co_return out;
     }
 
     std::string get_name() const override { return name_; }
@@ -188,10 +189,9 @@ class MyNode : public GraphNode {
 };
 ```
 
-The node's sync `execute()` comes from the `GraphNode` crossover
-default and routes through `run_sync`. For graph users who drive
-everything through `engine->run_async()`, this node participates in
-the io_context overlap without an OS thread per run.
+The engine drives this same coroutine from sync and async entry points. With
+`engine->run_async()`, the node participates in io_context overlap without an
+OS thread per run.
 
 ---
 
@@ -274,31 +274,12 @@ GraphEngine::run_async(const RunConfig& config) {
 }
 ```
 
-### 4.4 `execute_full_stream_async` default re-runs the node
+### 4.4 Streaming from a custom node
 
-The default `execute_full_stream_async` in `GraphNode` runs
-`execute_full_async` first, then if no `Command` or `Send` was
-emitted, replaces the writes with a second call through
-`execute_stream_async`. This is the correct behaviour for LLM nodes
-where the streaming path is what produces the writes (token
-assembly), but for nodes whose `execute_async` already did all the
-work it's a redundant second run — visible as 2× wall-clock cost
-in traces.
-
-Nodes that don't stream should override `execute_full_stream_async`
-directly to short-circuit:
-
-```cpp
-asio::awaitable<NodeResult>
-execute_full_stream_async(const GraphState& state,
-                          const GraphStreamCallback&) override {
-    auto writes = co_await execute_async(state);
-    co_return NodeResult{std::move(writes)};
-}
-```
-
-See `examples/05_parallel_fanout.cpp` for the pattern in a
-real node.
+`GraphNode::run(NodeInput)` executes once per dispatch. Emit events only when
+`in.stream_cb` is non-null, and return the same `NodeOutput` regardless of
+whether the caller used a streaming engine entry point. The legacy
+`execute_full_stream_async` double-execution fallback no longer exists.
 
 ### 4.5 MCP stdio single-session concurrency
 
@@ -349,7 +330,7 @@ and so on.
       or shared event loop?
 - [ ] If shared event loop → migrate call sites to `run_async` /
       `run_stream_async`.
-- [ ] If your custom nodes do real I/O → override `execute_async`.
+- [ ] Custom nodes implement `run(NodeInput)` and `co_await` real I/O directly.
 - [ ] If your tools do real I/O → derive from `AsyncTool`, override
       `execute_async`.
 - [ ] If you use the Postgres checkpoint store → use its `*_async`
@@ -379,28 +360,26 @@ coroutine runtime by removing Taskflow and routing sync entry points
 through `run_sync(execute_graph_async)`. The 2.0 async API shape is
 unchanged — the differences are in the defaults and the new opt-ins.
 
-### 8.1 `execute_full_async` default now bridges through sync `execute_full`
+### 8.1 `GraphNode::run(NodeInput)` replaces the legacy override chain
 
-In 2.0 the default was:
-
-```cpp
-auto writes = co_await execute_async(state);
-co_return NodeResult{std::move(writes)};
-```
-
-Which silently dropped `Command` / `Send` emitted from a sync
-`execute_full` override — never caught in 2.0 because sync `run()`
-bypassed the coroutine path. 3.0 switched the default to:
+v1.0 removed the eight `execute*` virtuals. A custom node now has one
+override for sync and async engine entry points, streaming, and control flow:
 
 ```cpp
-co_return execute_full(state);
+asio::awaitable<NodeOutput> run(NodeInput in) override {
+    NodeOutput out;
+    out.writes.push_back({"answer", co_await fetch_answer(in)});
+    out.command = Command{.goto_node = "review"};
+    if (in.stream_cb) {
+        (*in.stream_cb)({GraphEvent::Type::LLM_TOKEN, get_name(), json("done")});
+    }
+    co_return out;
+}
 ```
 
-So nodes that override **sync** `execute_full` to emit `Command` /
-`Send` now work through every entry point. Nodes that override
-**async** `execute_async` but need non-blocking I/O AND
-`Command` / `Send` must override `execute_full_async` directly (see
-`examples/05_parallel_fanout.cpp` for the shape).
+Code migrating from earlier releases must move its state reads to
+`in.state`, run metadata to `in.ctx`, streaming sink to `in.stream_cb`,
+and writes/`Command`/`Send` values into the returned `NodeOutput`.
 
 ### 8.2 `GraphEngine::set_worker_count(N)` — opt-in CPU parallel fan-out
 
@@ -411,14 +390,18 @@ io_context — I/O-bound branches still overlap via co_await suspension,
 but CPU-bound branches serialize.
 
 ```cpp
-auto engine = GraphEngine::compile(def, ctx, store);
-engine->set_worker_count(std::thread::hardware_concurrency());
+EngineConfig engine_config;
+engine_config.node_context = ctx;
+engine_config.checkpoint_store = store;
+engine_config.worker_count = std::thread::hardware_concurrency();
+auto engine = GraphEngine::build(def, std::move(engine_config));
 // Now run_parallel_async dispatches branches to an engine-owned
 // asio::thread_pool of that size.
 ```
 
-Must be called before any concurrent `run()`; rebuilding the pool
-across in-flight runs is not safe. `run_async` callers who drive a
+Set this before construction when possible. The compatibility setter must be
+called before any concurrent `run()`; rebuilding the pool across in-flight
+runs is not safe. `run_async` callers who drive a
 multi-threaded `asio::thread_pool` themselves don't need this — their
 caller-side executor already parallelizes the branches.
 
@@ -452,101 +435,32 @@ per-request code.
 
 ---
 
-## 9. Override decision guide — which virtual(s) to pick
+## 9. Override decision guide
 
-NeoGraph exposes sync and async peers as **separate public virtuals**
-across every extension point (`GraphNode`, `Provider`,
-`CheckpointStore`). The sync ↔ async bridging happens in the
-base-class defaults (§2), but the user still has to choose **which
-member of each pair to override**. Picking wrong produces subtle
-failure modes — silent `Command` / `Send` drops, frozen event
-loops, or infinite recursion.
-
-This section is the decision table. Headers claim the contract; this
-guide tells you which member of the contract to implement.
+`GraphNode` has one canonical override. Provider and persistence
+interfaces retain separate sync/async peers for compatibility.
 
 ### 9.1 Two-minute version
 
 | You write a… | Override | Inherit as-is |
 |---|---|---|
-| CPU-only `GraphNode`, no `Command` / `Send` | `execute()` | every async peer + both `_full` variants |
-| `GraphNode` that emits `Command` / `Send` | `execute_full()` | every async peer |
-| Async-I/O `GraphNode`, no `Command` / `Send` | `execute_async()` | sync `execute()` + both `_full` variants (but see §9.2.2 pitfall #2) |
-| Async-I/O `GraphNode` that emits `Command` / `Send` | `execute_full_async()` | every other peer |
-| Streaming LLM node (cb-driven token emission) | see §9.2 quadrant table | — |
+| Any custom `GraphNode` | `run(NodeInput)` | `get_name()` is the only other required virtual |
 | New custom LLM backend | inherit `CompletionProvider`, override `do_invoke()` | all existing `Provider` entry points are final adapters |
 | Custom `CheckpointStore`, async-capable backend | all eight `*_async` peers | sync peers bridge via `run_sync` |
 | Custom `CheckpointStore`, sync-only backend | all eight sync peers | async peers bridge via `run_sync` |
 | Custom sync `Tool` | inherit `Tool`, override `execute()` | — |
 | Custom async `Tool` | inherit `AsyncTool`, override `execute_async()` | sync `execute()` is `final`, bridges |
 
-### 9.2 `GraphNode` — the four-quadrant matrix
+### 9.2 `GraphNode`
 
-Two orthogonal axes: **streaming?** and **emits `Command` / `Send`?**.
-Pick the quadrant, then pick sync or async inside it based on
-whether your implementation does blocking work.
+Always override `run(NodeInput)`. CPU-only work can execute directly before
+`co_return`; real asynchronous I/O should be `co_await`ed. The engine invokes
+the same method from `run`, `run_async`, streaming, resume, and Send fan-out,
+so there is no override-selection matrix and no sync/async fallback recursion.
 
-|  | no `Command` / `Send` | emits `Command` / `Send` |
-|---|---|---|
-| **no streaming** | `execute` (sync) or `execute_async` (async) | `execute_full` (sync) or `execute_full_async` (async) |
-| **streaming-aware** (cb-driven tokens) | `execute_stream` (sync) or `execute_stream_async` (async) | `execute_full_stream` (sync) or `execute_full_stream_async` (async) |
-
-Rule of thumb: **if you don't know, override `execute()`**. That
-gives you the widest default-bridge coverage — every other virtual
-has a default that eventually calls back to `execute()`.
-
-#### 9.2.1 How the defaults wire up (3.0)
-
-```
-execute                    → run_sync(execute_async)
-execute_async              → co_return execute()
-execute_stream(state, cb)  → execute(state)        // cb is ignored unless overridden
-execute_stream_async       → co_await execute_async(state)
-execute_full               → NodeResult{execute()}
-execute_full_async         → co_return execute_full()            (3.0 fix)
-execute_full_stream        → execute_full(), replace writes via execute_stream if no Command/Send
-execute_full_stream_async  → co_await execute_full_async(state), replace writes via execute_stream_async
-```
-
-**Golden rule**: as long as you override **at least one of the
-sync/async pair at the level you care about**, you won't
-infinite-recurse. Overriding **neither** `execute` nor `execute_async`
-makes the two defaults call each other forever — the first invocation
-stack-overflows.
-
-#### 9.2.2 Pitfalls
-
-1. **Override `execute_async` only + emit `Command` / `Send` from
-   `execute_full`** → **silently dropped in async path**. The default
-   `execute_full_async` now calls sync `execute_full` (3.0 fix), but
-   sync `execute_full`'s default is `NodeResult{execute()}` which
-   calls your `execute_async` through `run_sync`. The writes come
-   through, but `Command` / `Send` added by overriding
-   `execute_full` (sync) only are lost because the async path
-   actually went through `execute` → `execute_async`, not through
-   your `execute_full`. **Fix**: override `execute_full_async`
-   directly.
-2. **Override `execute()` only + engine driven on a single-thread
-   `io_context`** → **blocks the event loop**. The default
-   `execute_full_async` calls sync `execute_full` → sync `execute`
-   on the current coroutine thread. Other coroutines on that
-   `io_context` freeze for the duration. **Fix**: if `execute()` is
-   fast (< ~100 µs), no action needed. Otherwise port to
-   `execute_async` with coroutine-friendly waits, or drive the
-   engine on an `asio::thread_pool` instead of a single-thread
-   context (via `run_async` on a multi-threaded executor, or
-   `engine->set_worker_count(N)` for sync `run()` callers).
-3. **Override `execute_full_stream_async` for a non-streaming node**
-   → **node runs twice**. The default streams by first calling
-   `execute_full_async` for full NodeResult + directives, then if
-   no `Command` / `Send` was emitted, discards the writes and
-   re-invokes `execute_stream_async` to collect fresh writes via
-   the cb. Correct for token-streaming LLM nodes; wasteful
-   elsewhere. **Fix**: override `execute_full_stream_async` with
-   `{ auto w = co_await execute_async(state); co_return NodeResult{std::move(w)}; }`.
-4. **Override neither `execute` nor `execute_async`** → **infinite
-   recursion**. Both defaults call each other. Compile-time
-   undetectable. **Fix**: override at least one.
+Do not block a shared single-thread `io_context` for long periods. Move blocking
+work to an executor or use coroutine-friendly I/O. `EngineConfig::worker_count`
+controls the engine-owned pool used by sync callers that need parallel fan-out.
 
 ### 9.3 `Provider`
 

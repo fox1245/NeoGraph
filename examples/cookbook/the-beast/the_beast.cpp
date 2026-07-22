@@ -204,8 +204,8 @@ int main() {
     // Spawn a validated harness with a checkpointer; rewind its run.
     std::cout << "── ACT III · spawn + roll back through the checkpointer ──\n";
     auto store = std::make_shared<ng::InMemoryCheckpointStore>();
-    auto engine = ng::GraphEngine::compile(seed_core, ctx);
-    engine->set_checkpoint_store(store);
+    auto engine = ng::GraphEngine::build(
+        seed_core, ng::EngineConfig{.node_context = ctx, .checkpoint_store = store});
 
     ng::RunConfig run_cfg;
     run_cfg.thread_id = "beast-run";

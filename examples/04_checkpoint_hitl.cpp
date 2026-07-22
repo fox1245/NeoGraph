@@ -93,18 +93,16 @@ int main() {
         {"interrupt_before", neograph::json::array({"tools"})}
     };
 
-    // Prepare tool pointers
-    std::vector<neograph::Tool*> tool_ptrs;
-    for (auto& t : tools) tool_ptrs.push_back(t.get());
-
     neograph::graph::NodeContext ctx;
     ctx.provider = provider;
-    ctx.tools = tool_ptrs;
 
     // Checkpoint store (in-memory)
     auto store = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
-    auto engine = neograph::graph::GraphEngine::compile(definition, ctx, store);
-    engine->own_tools(std::move(tools));
+    neograph::graph::EngineResources resources;
+    resources.tools = neograph::ToolSet(std::move(tools));
+    auto engine     = neograph::graph::GraphEngine::build(
+        definition, neograph::graph::EngineConfig{.node_context = ctx, .checkpoint_store = store},
+        std::move(resources));
 
     // === First run: up to interrupt ===
     std::cout << "=== Phase 1: Waiting for approval after order analysis ===\n\n";

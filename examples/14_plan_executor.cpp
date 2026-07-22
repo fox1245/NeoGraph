@@ -158,13 +158,15 @@ int main() {
             return std::make_unique<ExecutorNode>();
         });
 
-    auto store  = std::make_shared<InMemoryCheckpointStore>();
-    auto engine = GraphEngine::compile(make_graph(), NodeContext{}, store);
-
+    auto store = std::make_shared<InMemoryCheckpointStore>();
     // ExecutorNode 가 sync sleep_for 120ms 로 LLM 호출을 흉내내기 때문에,
     // 워커 풀 없이 (v1.0 기본 = 1) 돌리면 5 sub-topic 이 600ms 순차로 깎인다.
     // hardware_concurrency 만큼 풀어 진짜 fan-out 으로 동작시킨다.
-    engine->set_worker_count_auto();
+    auto         workers = std::thread::hardware_concurrency();
+    EngineConfig engine_config;
+    engine_config.checkpoint_store = store;
+    engine_config.worker_count     = workers > 0 ? workers : 4u;
+    auto engine                    = GraphEngine::build(make_graph(), std::move(engine_config));
 
     RunConfig cfg;
     cfg.thread_id = "research-42";

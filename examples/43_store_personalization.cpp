@@ -22,7 +22,7 @@
 //
 // New code should prefer (1) — fewer captures, less boilerplate, and
 // the engine guarantees `in.ctx.store` is the same Store instance
-// `set_store(...)` was called with. This example sticks with (2) so
+// passed through `EngineConfig::store`. This example sticks with (2) so
 // the contrast with example 09 (Store-in-main-only) stays direct.
 //
 // No API key required.
@@ -44,8 +44,8 @@ using namespace neograph::graph;
 //                and `language` from the Store, emits a personalised
 //                greeting on the `reply` channel.
 //
-// The Store is captured in the closure — there is no
-// NodeContext::store. If you forget to set_store() on the engine and
+// The Store is captured in the closure as well as supplied through
+// EngineConfig. If you omit the config value and
 // also forget to capture it, the node silently degrades to defaults.
 class GreetNode : public GraphNode {
     std::shared_ptr<Store> store_;
@@ -154,8 +154,8 @@ int main() {
         });
 
     NodeContext ctx;
-    auto engine = GraphEngine::compile(make_graph(), ctx);
-    engine->set_store(store);  // Engine also holds it for get_store().
+    auto        engine =
+        GraphEngine::build(make_graph(), EngineConfig{.node_context = ctx, .store = store});
 
     // ── Three different user sessions on three different thread_ids ──
     struct Session {

@@ -107,7 +107,7 @@ static Sig sig_fast(const Genome& g) {
     return {f0, f1};
 }
 static double run_engine(const json& core, const ng::NodeContext& ctx, double x) {
-    auto engine = ng::GraphEngine::compile(core, ctx);
+    auto          engine = ng::GraphEngine::build(core, ng::EngineConfig{.node_context = ctx});
     ng::RunConfig rc; rc.max_steps = N + 4; rc.input = {{"acc", x}};
     auto res = engine->run(rc);
     json av = res.has_channel("acc") ? res.channel<json>("acc") : json(0);

@@ -206,9 +206,6 @@ int main() {
 
         std::vector<std::unique_ptr<neograph::Tool>> owned_tools;
         owned_tools.push_back(std::make_unique<CalculatorTool>());
-        std::vector<neograph::Tool*> tool_ptrs;
-        for (auto& t : owned_tools) tool_ptrs.push_back(t.get());
-
         // Standard 2-node ReAct loop: llm → (has_tool_calls?) → tools → llm.
         neograph::json definition = {
             {"name", "react_async_streaming"},
@@ -227,7 +224,6 @@ int main() {
 
         neograph::graph::NodeContext ctx;
         ctx.provider = provider;
-        ctx.tools    = tool_ptrs;
         ctx.instructions =
             "You are a ReAct agent. You MUST use the calculator tool for "
             "every arithmetic operation, even if the answer seems obvious "
@@ -237,8 +233,12 @@ int main() {
             "(no tool call).";
 
         auto store  = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
-        auto engine = neograph::graph::GraphEngine::compile(definition, ctx, store);
-        engine->own_tools(std::move(owned_tools));
+        neograph::graph::EngineResources resources;
+        resources.tools = neograph::ToolSet(std::move(owned_tools));
+        auto engine     = neograph::graph::GraphEngine::build(
+            definition,
+            neograph::graph::EngineConfig{.node_context = ctx, .checkpoint_store = store},
+            std::move(resources));
 
         const std::string question = "What is 15 * 28 + 7?";
 

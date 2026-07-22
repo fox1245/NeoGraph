@@ -131,7 +131,8 @@ struct ToolDecision {
  * Awaitable, so a gate may do real work — ask a policy service, hit a database,
  * prompt over a socket — without blocking the executor.
  *
- * Set it on `RunConfig::tool_gate` (graph) or `Agent::set_tool_gate` (standalone).
+ * Set it through `EngineConfig::tool_gate` or `GraphEngine::set_tool_gate`
+ * (graph), or `Agent::set_tool_gate` (standalone).
  * Unset means every call runs, exactly as before this existed.
  */
 using ToolGate =

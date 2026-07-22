@@ -137,7 +137,7 @@ static Sig sig_fast(const Genome& g) {
 
 // Ground truth: compile the topology and RUN it on one battery input.
 static double run_engine(const json& core, const ng::NodeContext& ctx, double x) {
-    auto engine = ng::GraphEngine::compile(core, ctx);
+    auto          engine = ng::GraphEngine::build(core, ng::EngineConfig{.node_context = ctx});
     ng::RunConfig rc;
     rc.max_steps = N + 4;
     rc.input = {{"acc", x}};

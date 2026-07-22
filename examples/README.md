@@ -40,8 +40,8 @@ If this is your first time:
 
 | First | What you learn |
 |---|---|
-| [`51_minimal.cpp`](51_minimal.cpp) | The smallest working program — compile, run, read `result.channel<T>("name")`. No API key. |
-| [`02_custom_graph.cpp`](02_custom_graph.cpp) | Compile a JSON graph definition, run it. No API key. |
+| [`51_minimal.cpp`](51_minimal.cpp) | The smallest working program — build, run, read `result.channel<T>("name")`. No API key. |
+| [`02_custom_graph.cpp`](02_custom_graph.cpp) | Build a JSON graph definition, run it. No API key. |
 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | Async fan-out with `make_parallel_group`. No API key. |
 | [`10_send_command.cpp`](10_send_command.cpp) | `Send` (dynamic fan-out) + `Command` (routing override). No API key. |
 | [`01_react_agent.cpp`](01_react_agent.cpp) | ReAct loop with a real LLM + a calculator tool. **Needs `OPENAI_API_KEY`.** |
@@ -56,7 +56,7 @@ demonstrate, not by file number.
 
 | # | File | Setup | What it shows |
 |---|------|-------|---------------|
-| 02 | [`02_custom_graph.cpp`](02_custom_graph.cpp) | offline | Compile a JSON graph + run it. The shortest useful program in this repo. |
+| 02 | [`02_custom_graph.cpp`](02_custom_graph.cpp) | offline | Build a JSON graph + run it. The shortest useful program in this repo. |
 | 05 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | offline | Async fan-out — three "researcher" nodes co-run on one io_context, summarizer fans them in. |
 | 06 | [`06_subgraph.cpp`](06_subgraph.cpp) | offline | Hierarchical composition — outer supervisor graph delegates to an inner ReAct subgraph. |
 | 07 | [`07_intent_routing.cpp`](07_intent_routing.cpp) | offline | Classifier → conditional edge → math / translate / general expert. |
@@ -65,7 +65,7 @@ demonstrate, not by file number.
 | 10 | [`10_send_command.cpp`](10_send_command.cpp) | offline | Planner→Send→researcher→Command(loop|finish) — the canonical Send+Command pattern. |
 | 42 | [`42_custom_reducer_condition.cpp`](42_custom_reducer_condition.cpp) | offline | Register custom channel reducers and edge conditions from C++ — extend the JSON vocabulary without touching the engine. |
 | 43 | [`43_store_personalization.cpp`](43_store_personalization.cpp) | offline | Cross-thread `Store` reached from inside a node via `in.ctx.store` — per-user node behaviour from shared namespaced memory. |
-| 51 | [`51_minimal.cpp`](51_minimal.cpp) | offline | The shortest working program — compile, run, `result.channel<T>("name")`. The fresh-user template. |
+| 51 | [`51_minimal.cpp`](51_minimal.cpp) | offline | The shortest working program — build, run, `result.channel<T>("name")`. The fresh-user template. |
 | 52 | [`52_export_schema.cpp`](52_export_schema.cpp) | offline | `NodeFactory::export_schema()` → topology JSON Schema dump. The version-locked source of truth a codeless visual editor builds its palette from. |
 | 56 | [`56_history_compaction.cpp`](56_history_compaction.cpp) | offline (optional OpenAI) | Bounded message window — when history exceeds the budget the dropped prefix is replaced by an LLM-written summary. Mock provider by default. |
 

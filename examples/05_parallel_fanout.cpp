@@ -158,7 +158,8 @@ int main() {
     };
 
     neograph::graph::NodeContext ctx;  // Custom nodes, no Provider/Tool needed
-    auto engine = neograph::graph::GraphEngine::compile(definition, ctx);
+    auto                         engine = neograph::graph::GraphEngine::build(
+        definition, neograph::graph::EngineConfig{.node_context = ctx});
 
     std::cout << "=== Parallel Fan-out / Fan-in (async edition) ===\n\n";
 

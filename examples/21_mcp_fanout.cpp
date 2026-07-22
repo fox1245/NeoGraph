@@ -16,13 +16,14 @@
 // weather / calculator) so the demo is deterministic and stays offline
 // for the LLM axis.
 
-#include <neograph/neograph.h>
 #include <neograph/mcp/client.h>
+#include <neograph/neograph.h>
 
 #include <chrono>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 
 using namespace neograph;
 using namespace neograph::graph;
@@ -180,13 +181,14 @@ int main(int argc, char** argv) {
     };
 
     NodeContext ctx;
-    auto engine = GraphEngine::compile(definition, ctx);
-
     // 3 MCP 호출을 같은 super-step 에서 동시에 보내려면 워커 수를 늘려야 함.
-    // v1.0 부터 기본 워커 수가 1 이라 (compile() 주석 참조), 명시 안 하면
-    // 세 호출이 순차로 깎여서 wall-time 이 합산된다. set_worker_count_auto()
-    // 는 hardware_concurrency() 만큼 풀어준다.
-    engine->set_worker_count_auto();
+    // v1.0 부터 기본 워커 수가 1 이라 명시 안 하면 세 호출이 순차로 깎여서
+    // wall-time 이 합산된다.
+    auto         workers = std::thread::hardware_concurrency();
+    EngineConfig engine_config;
+    engine_config.node_context = ctx;
+    engine_config.worker_count = workers > 0 ? workers : 4u;
+    auto engine                = GraphEngine::build(definition, std::move(engine_config));
 
     std::cout << "[*] Fanning out 3 MCP tool calls in parallel...\n\n";
 

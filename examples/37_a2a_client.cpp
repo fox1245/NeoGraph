@@ -126,7 +126,8 @@ int main(int argc, char** argv) {
     };
 
     NodeContext ctx;  // remote agent doesn't need a Provider/Tool
-    auto engine = GraphEngine::compile(definition, ctx);
+    auto        engine =
+        GraphEngine::build(definition, neograph::graph::EngineConfig{.node_context = ctx});
 
     RunConfig cfg;
     cfg.thread_id     = "a2a-graph-1";

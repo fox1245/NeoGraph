@@ -341,7 +341,7 @@ enum class RunStatus {
  * Use the ``channel<T>(name)`` accessor below to read a channel value
  * without committing to either shape — it checks the channels wrapper
  * first, then falls back to a flat top-level key with the same name.
- * That way the same call site works against ``GraphEngine::compile``-
+ * That way the same call site works against ``GraphEngine::build``-
  * built graphs (channels-wrapped only) and ``react_graph``-built
  * graphs (channels-wrapped + flat-key projections) alike.
  */
@@ -471,7 +471,7 @@ struct RunResult {
  *
  * ## Thread safety
  *
- * After `compile()` returns, the graph definition (nodes, edges, channels)
+ * After `build()` or `link()` returns, the graph definition (nodes, edges, channels)
  * is treated as immutable. A single GraphEngine instance is therefore safe
  * to share across user threads that invoke `run()` / `run_stream()` /
  * `resume()` concurrently with **distinct `thread_id`s** — each call
@@ -505,7 +505,10 @@ struct RunResult {
  *   implementations must be thread-safe.
  *
  * @code
- * auto engine = GraphEngine::compile(graph_json, context, checkpoint_store);
+ * EngineConfig engine_config;
+ * engine_config.node_context = context;
+ * engine_config.checkpoint_store = checkpoint_store;
+ * auto engine = GraphEngine::build(graph_json, std::move(engine_config));
  * RunConfig config;
  * config.thread_id = "session-1";
  * config.input = {{"messages", json::array({{{"role","user"},{"content","Hello"}}})}};
@@ -514,17 +517,12 @@ struct RunResult {
  *
  * @see RunConfig, RunResult, GraphNode
  *
- * @note Public surface size — this class exposes ~23 public methods
- * spanning three concerns: graph execution (run/run_async/run_stream/
+ * @note This class spans three concerns: graph execution (run/run_async/run_stream/
  * resume), state administration (get_state/update_state/fork), and
- * runtime configuration (set_retry_policy/set_worker_count/
- * set_node_cache_enabled/set_checkpoint_store/own_tools). A future
- * major version (v1.0) is expected to split into `GraphEngine` (run
- * + resume only), `GraphAdmin` (state inspection/update/fork), and a
- * `GraphConfigBuilder` consumed at compile time. The current shape
- * is kept so existing examples and downstream consumers don't break;
- * the class-level docs above flag mutator setters as "configuration,
- * not runtime" already.
+ * compatibility configuration setters. New code should pass all construction
+ * policy through EngineConfig and EngineResources. The setters remain so
+ * existing downstream consumers do not break; they are configuration, not
+ * runtime control.
  */
 class NEOGRAPH_API GraphEngine {
 public:

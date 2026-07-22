@@ -126,7 +126,7 @@ static Verdict validate(const json& core, const ng::NodeContext& ctx) {
 enum class Outcome { CLEAN, FAULT, STALL };
 static Outcome execute(const json& core, const ng::NodeContext& ctx) {
     try {
-        auto engine = ng::GraphEngine::compile(core, ctx);
+        auto          engine = ng::GraphEngine::build(core, ng::EngineConfig{.node_context = ctx});
         ng::RunConfig rc; rc.max_steps = 32; rc.input = {{"out", 0}};
         auto res = engine->run(rc);
         return (int)res.execution_trace.size() >= rc.max_steps ? Outcome::STALL : Outcome::CLEAN;

@@ -40,9 +40,6 @@ int main(int argc, char** argv) {
     auto tools = mcp_client.get_tools();
     std::cout << "[*] Discovered " << tools.size() << " MCP tools from " << mcp_url << "\n";
 
-    std::vector<neograph::Tool*> tool_ptrs;
-    for (auto& t : tools) tool_ptrs.push_back(t.get());
-
     // --- LLM ---
     neograph::llm::OpenAIProvider::Config cfg;
     cfg.api_key = api_key;
@@ -69,14 +66,16 @@ int main(int argc, char** argv) {
 
     neograph::graph::NodeContext ctx;
     ctx.provider = provider;
-    ctx.tools = tool_ptrs;
     ctx.instructions =
         "You are a helpful assistant. Always call a tool when the user's "
         "question can be answered by one.";
 
     auto store  = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
-    auto engine = neograph::graph::GraphEngine::compile(definition, ctx, store);
-    engine->own_tools(std::move(tools));
+    neograph::graph::EngineResources resources;
+    resources.tools = neograph::ToolSet(std::move(tools));
+    auto engine     = neograph::graph::GraphEngine::build(
+        definition, neograph::graph::EngineConfig{.node_context = ctx, .checkpoint_store = store},
+        std::move(resources));
 
     // --- Phase 1: run until tool approval gate ---
     std::cout << "\n=== Phase 1 — run until interrupt_before(\"tools\") ===\n";

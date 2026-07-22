@@ -259,10 +259,10 @@ pool (CPU-bound bodies, large fan-out widths).
 `re-agent` commits `2a5c5dc` / `5993935` and replicated in NeoGraph
 master.
 
-**Root cause:** pure-write `GraphNode` subclasses (no `Command`, no
-`Send`) ran `execute()` once for the result and once for the stream
-hook. Override `execute_full_stream` (or `execute_full_stream_async`)
-to dedup.
+**Root cause on pre-v1 releases:** pure-write `GraphNode` subclasses (no
+`Command`, no `Send`) could run once for the result and once for the stream
+hook. Upgrade and implement the single `run(NodeInput)` override; v1 invokes
+that method once and exposes the optional stream sink as `in.stream_cb`.
 
 If you're using the `@ng.node` decorator (not subclassing), this is
 already handled.

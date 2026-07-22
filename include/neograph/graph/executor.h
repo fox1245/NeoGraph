@@ -141,8 +141,8 @@ public:
         const RunContext& ctx);
 
     /// Inner retry loop with exponential backoff + NodeInterrupt
-    /// short-circuit. Drives node->execute_full_(stream_)async via
-    /// co_await and uses asio::steady_timer.async_wait for backoff so
+    /// short-circuit. Drives node->run(NodeInput) via co_await and uses
+    /// asio::steady_timer.async_wait for backoff so
     /// the executor is not frozen during retry waits. NodeInterrupt +
     /// exception semantics preserved bit-for-bit; GCC-13-safe (catch
     /// block captures the exception via std::optional, co_await

@@ -105,7 +105,7 @@ static double run_acc(const Genome& g, const ng::NodeContext& ctx) {
     json core = {{"schema_version", 1}, {"name", "arith"},
                  {"channels", {{"acc", {{"reducer", "overwrite"}, {"initial", 0}}}}},
                  {"nodes", nodes}, {"edges", edges}};
-    auto engine = ng::GraphEngine::compile(core, ctx);
+    auto          engine = ng::GraphEngine::build(core, ng::EngineConfig{.node_context = ctx});
     ng::RunConfig rc; rc.max_steps = N + 4; rc.input = {{"acc", 0}};
     auto res = engine->run(rc);
     json av = res.has_channel("acc") ? res.channel<json>("acc") : json(0);

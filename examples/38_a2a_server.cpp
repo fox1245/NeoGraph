@@ -88,7 +88,7 @@ std::shared_ptr<GraphEngine> build_demo_engine() {
         })},
     };
     NodeContext ctx;
-    auto engine = GraphEngine::compile(def, ctx);
+    auto engine = GraphEngine::build(def, neograph::graph::EngineConfig{.node_context = ctx});
     return std::shared_ptr<GraphEngine>(std::move(engine));
 }
 

@@ -61,7 +61,8 @@ int main() {
 
     auto store = std::make_shared<SqliteCheckpointStore>(":memory:");
     NodeContext ctx;
-    auto engine = GraphEngine::compile(def, ctx, store);
+    auto        engine =
+        GraphEngine::build(def, EngineConfig{.node_context = ctx, .checkpoint_store = store});
 
     // RunResult::channel<T>(name) handles both shapes — channels-wrapper
     // (canonical) and flat-key projections (e.g. react_graph's

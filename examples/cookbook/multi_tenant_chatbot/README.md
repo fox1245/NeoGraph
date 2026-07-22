@@ -45,7 +45,7 @@ public:
                 return it->second;
             }
         }
-        auto raw = GraphEngine::compile(def, ctx);
+        auto raw = GraphEngine::build(def, EngineConfig{.node_context = ctx});
         std::shared_ptr<GraphEngine> engine(raw.release());
         std::unique_lock lk(mu_);
         cache_.emplace(key, engine);

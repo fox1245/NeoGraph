@@ -33,12 +33,10 @@ std::size_t default_worker_count() {
 } // namespace
 
 // =========================================================================
-// compile(): JSON definition -> GraphEngine
+// compile(): compatibility facade over the canonical build() path
 //
-// Parsing is delegated to GraphCompiler (pure JSON → CompiledGraph). This
-// function is now just a thin adapter: move every parsed field into the
-// engine's runtime home, then construct the Scheduler from the resulting
-// edge topology + barrier specs.
+// Keep the original signature and behavior while routing construction through
+// EngineConfig so both entry points share one implementation.
 // =========================================================================
 std::unique_ptr<GraphEngine> GraphEngine::compile(
     const json& definition,

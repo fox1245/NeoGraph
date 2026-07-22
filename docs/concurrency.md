@@ -95,7 +95,10 @@ executor you already use.
 
 ```cpp
 // One engine, many concurrent sessions — no external runtime required.
-auto engine = GraphEngine::compile(def, ctx, std::make_shared<InMemoryCheckpointStore>());
+EngineConfig engine_config;
+engine_config.node_context = ctx;
+engine_config.checkpoint_store = std::make_shared<InMemoryCheckpointStore>();
+auto engine = GraphEngine::build(def, std::move(engine_config));
 
 std::vector<std::future<RunResult>> sessions;
 for (const auto& user : users) {
@@ -113,7 +116,7 @@ Works the same way with an `asio::thread_pool`, a `std::async`-backed
 task system, or your web framework's worker pool — NeoGraph stays out
 of the executor decision. If you need CPU-parallel fan-out *inside*
 a single sync `run()` call (rather than N sync `run()`s on N threads),
-call `engine->set_worker_count(N)` once after `compile()` to install
+set `EngineConfig::worker_count` before `build()` to install
 an engine-owned `asio::thread_pool` that `run_parallel_async` and the
 multi-Send branch dispatch onto.
 
@@ -129,8 +132,10 @@ the built-in lock-free queue — no external executor needed:
 using namespace neograph::util;
 
 RequestQueue pool(16, 1000);           // 16 workers, max 1000 pending sessions
-auto engine = GraphEngine::compile(def, ctx,
-                                   std::make_shared<InMemoryCheckpointStore>());
+EngineConfig engine_config;
+engine_config.node_context = ctx;
+engine_config.checkpoint_store = std::make_shared<InMemoryCheckpointStore>();
+auto engine = GraphEngine::build(def, std::move(engine_config));
 
 std::vector<RunResult>          results(users.size());
 std::vector<std::future<void>>  futs;
@@ -190,7 +195,10 @@ link `neograph::postgres` and swap `InMemoryCheckpointStore` for
 
 auto store = std::make_shared<PostgresCheckpointStore>(
     "postgresql://user:pass@host:5432/dbname");
-auto engine = GraphEngine::compile(def, ctx, store);
+EngineConfig engine_config;
+engine_config.node_context = ctx;
+engine_config.checkpoint_store = store;
+auto engine = GraphEngine::build(def, std::move(engine_config));
 ```
 
 The schema mirrors LangGraph's `PostgresSaver` (three tables prefixed
