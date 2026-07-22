@@ -1,6 +1,6 @@
 /**
  * @file graph/validator.h
- * @brief Static semantic analysis over a CompiledGraph (issue #75 M2).
+ * @brief Static semantic analysis over declarative or compiled topology.
  *
  * GraphValidator is the pass layer between parsing (GraphCompiler, M1:
  * every key consumed) and execution (GraphEngine): it checks what the
@@ -24,6 +24,7 @@
 #include <neograph/api.h>
 #include <neograph/graph/compiler.h>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace neograph::graph {
@@ -50,8 +51,47 @@ struct NEOGRAPH_API ValidationReport {
     std::string summary() const;
 };
 
+/**
+ * @brief Topology proven free of static semantic errors.
+ *
+ * Construct through GraphValidator::require_valid(). Warnings remain available
+ * for tooling, but the wrapped topology is guaranteed to have no error-level
+ * diagnostics at validation time.
+ */
+class NEOGRAPH_API ValidatedTopology {
+public:
+    const TopologySpec& topology() const noexcept { return topology_; }
+    const ValidationReport& report() const noexcept { return report_; }
+    TopologySpec release() && { return std::move(topology_); }
+
+private:
+    friend class GraphValidator;
+
+    ValidatedTopology(TopologySpec topology, ValidationReport report)
+        : topology_(std::move(topology)), report_(std::move(report)) {}
+
+    TopologySpec topology_;
+    ValidationReport report_;
+};
+
 class NEOGRAPH_API GraphValidator {
 public:
+    /// @brief Validate declarative topology before runtime node creation.
+    static ValidationReport validate(const TopologySpec& topology);
+
+    /// @brief Validate declarative topology with a local registry overlay.
+    static ValidationReport validate(const TopologySpec& topology,
+                                     const GraphRegistry& registry);
+
+    /**
+     * @brief Validate and wrap a topology, throwing when any error is found.
+     */
+    static ValidatedTopology require_valid(TopologySpec topology);
+
+    /// @brief Validate and wrap using a local registry overlay.
+    static ValidatedTopology require_valid(TopologySpec topology,
+                                           const GraphRegistry& registry);
+
     /**
      * @brief Run all static checks against a compiled graph.
      *

@@ -144,7 +144,16 @@ CompiledGraph GraphCompiler::compile(const json& definition,
 CompiledGraph GraphCompiler::compile(const json&          definition,
                                      const NodeContext&   default_context,
                                      const GraphRegistry& registry) {
-    CompiledGraph cg;
+    return link(parse(definition, registry), default_context, registry);
+}
+
+TopologySpec GraphCompiler::parse(const json& definition) {
+    return parse(definition, GraphRegistry::global());
+}
+
+TopologySpec GraphCompiler::parse(const json& definition,
+                                  const GraphRegistry& registry) {
+    TopologySpec topology;
     std::vector<std::string> errors;
     std::set<std::string> top_consumed;
 
@@ -157,16 +166,16 @@ CompiledGraph GraphCompiler::compile(const json&          definition,
                 "topology 'schema_version' must be a non-negative integer, got: "
                 + sv.dump());
         }
-        cg.schema_version = sv.get<int>();
-        if (cg.schema_version > kSupportedSchemaVersion) {
+        topology.schema_version = sv.get<int>();
+        if (topology.schema_version > kSupportedSchemaVersion) {
             throw std::runtime_error(
-                "topology schema_version " + std::to_string(cg.schema_version)
+                "topology schema_version " + std::to_string(topology.schema_version)
                 + " is newer than this engine supports (max "
                 + std::to_string(kSupportedSchemaVersion)
                 + "). Upgrade NeoGraph or re-export the topology.");
         }
     }
-    const bool strict = cg.schema_version >= 1;
+    const bool strict = topology.schema_version >= 1;
 
     auto require_container = [&](const char* field, bool expects_object,
                                  bool legacy_object_allowed = false) {
@@ -193,7 +202,7 @@ CompiledGraph GraphCompiler::compile(const json&          definition,
     require_container("edges", false, true);
     require_container("conditional_edges", false, true);
 
-    cg.name = definition.value("name", "unnamed_graph");
+    topology.name = definition.value("name", "unnamed_graph");
     top_consumed.insert("name");
 
     // --- Channels ---
@@ -222,7 +231,7 @@ CompiledGraph GraphCompiler::compile(const json&          definition,
                 enforce_consumed(ch_def, ch_consumed,
                                  "channels." + name, errors);
             }
-            cg.channel_defs.push_back(std::move(cd));
+            topology.channel_defs.push_back(std::move(cd));
         }
     }
 
@@ -231,8 +240,7 @@ CompiledGraph GraphCompiler::compile(const json&          definition,
         top_consumed.insert("nodes");
         for (const auto& [name, node_def] : definition["nodes"].items()) {
             auto type = node_def.value("type", "");
-            auto node      = registry.create(type, name, node_def, default_context);
-            cg.nodes[name] = std::move(node);
+            topology.node_defs[name] = node_def;
 
             std::set<std::string> node_consumed = {"type"};
 
@@ -251,7 +259,7 @@ CompiledGraph GraphCompiler::compile(const json&          definition,
                     }
                 }
                 if (!wait_for.empty()) {
-                    cg.barrier_specs[name] = std::move(wait_for);
+                    topology.barrier_specs[name] = std::move(wait_for);
                 } else if (strict) {
                     // Historically an empty/missing wait_for was
                     // silently dropped — the node quietly lost its
@@ -291,16 +299,6 @@ CompiledGraph GraphCompiler::compile(const json&          definition,
                 }
             }
 
-            // Verbatim node definition minus "barrier" — barriers are
-            // re-emitted from barrier_specs so translation validation
-            // compares compiled state, not an input echo. (Copy-skip:
-            // the yyjson wrapper has no erase().)
-            json stored = json::object();
-            for (const auto& [k, v] : node_def.items()) {
-                if (k == "barrier") continue;
-                stored[k] = v;
-            }
-            cg.node_defs[name] = std::move(stored);
         }
     }
 
@@ -324,7 +322,7 @@ CompiledGraph GraphCompiler::compile(const json&          definition,
             }
         }
         if (strict) enforce_consumed(edge_def, e_consumed, path, errors);
-        cg.conditional_edges.push_back(std::move(ce));
+        topology.conditional_edges.push_back(std::move(ce));
     };
 
     if (definition.contains("edges")) {
@@ -345,7 +343,7 @@ CompiledGraph GraphCompiler::compile(const json&          definition,
                 e.from = edge_def.at("from").get<std::string>();
                 e.to   = edge_def.at("to").get<std::string>();
                 if (strict) enforce_consumed(edge_def, {"from", "to"}, path, errors);
-                cg.edges.push_back(std::move(e));
+                topology.edges.push_back(std::move(e));
             }
         }
     }
@@ -363,13 +361,13 @@ CompiledGraph GraphCompiler::compile(const json&          definition,
     if (definition.contains("interrupt_before")) {
         top_consumed.insert("interrupt_before");
         for (const auto& n : definition["interrupt_before"]) {
-            cg.interrupt_before.insert(n.get<std::string>());
+            topology.interrupt_before.insert(n.get<std::string>());
         }
     }
     if (definition.contains("interrupt_after")) {
         top_consumed.insert("interrupt_after");
         for (const auto& n : definition["interrupt_after"]) {
-            cg.interrupt_after.insert(n.get<std::string>());
+            topology.interrupt_after.insert(n.get<std::string>());
         }
     }
 
@@ -388,7 +386,7 @@ CompiledGraph GraphCompiler::compile(const json&          definition,
         policy.max_delay_ms       = rp.value("max_delay_ms", 5000);
         rp_consumed.insert("max_delay_ms");
         if (strict) enforce_consumed(rp, rp_consumed, "retry_policy", errors);
-        cg.retry_policy = policy;
+        topology.retry_policy = policy;
     }
 
     if (strict) {
@@ -396,7 +394,7 @@ CompiledGraph GraphCompiler::compile(const json&          definition,
         if (!errors.empty()) {
             std::string msg =
                 "strict topology validation failed (schema_version "
-                + std::to_string(cg.schema_version) + "), "
+                + std::to_string(topology.schema_version) + "), "
                 + std::to_string(errors.size()) + " error(s):";
             for (const auto& e : errors) msg += "\n  - " + e;
             msg += "\nAnnotation keys ('_'/'x-' prefixes) are always allowed. "
@@ -406,6 +404,37 @@ CompiledGraph GraphCompiler::compile(const json&          definition,
         }
     }
 
+    return topology;
+}
+
+CompiledGraph GraphCompiler::link(TopologySpec topology,
+                                  const NodeContext& default_context) {
+    return link(std::move(topology), default_context, GraphRegistry::global());
+}
+
+CompiledGraph GraphCompiler::link(TopologySpec topology,
+                                  const NodeContext& default_context,
+                                  const GraphRegistry& registry) {
+    CompiledGraph cg;
+    cg.name              = std::move(topology.name);
+    cg.channel_defs      = std::move(topology.channel_defs);
+    cg.edges             = std::move(topology.edges);
+    cg.conditional_edges = std::move(topology.conditional_edges);
+    cg.barrier_specs     = std::move(topology.barrier_specs);
+    cg.interrupt_before  = std::move(topology.interrupt_before);
+    cg.interrupt_after   = std::move(topology.interrupt_after);
+    cg.retry_policy      = std::move(topology.retry_policy);
+    cg.schema_version    = topology.schema_version;
+    for (const auto& [name, node_def] : topology.node_defs) {
+        const auto type = node_def.value("type", "");
+        cg.nodes[name] = registry.create(type, name, node_def, default_context);
+
+        json stored = json::object();
+        for (const auto& [key, value] : node_def.items()) {
+            if (key != "barrier") stored[key] = value;
+        }
+        cg.node_defs[name] = std::move(stored);
+    }
     return cg;
 }
 
@@ -413,7 +442,7 @@ CompiledGraph GraphCompiler::compile(const json&          definition,
 // Re-emission + canonicalization + translation validation
 // =========================================================================
 
-json CompiledGraph::to_json() const {
+json TopologySpec::to_json() const {
     json j = json::object();
     if (schema_version > 0) j["schema_version"] = schema_version;
     j["name"] = name;
@@ -432,7 +461,10 @@ json CompiledGraph::to_json() const {
     if (!node_defs.empty()) {
         json nodes = json::object();
         for (const auto& [nname, ndef] : node_defs) {
-            json n = ndef;
+            json n = json::object();
+            for (const auto& [key, value] : ndef.items()) {
+                if (key != "barrier") n[key] = value;
+            }
             auto bit = barrier_specs.find(nname);
             if (bit != barrier_specs.end()) {
                 json wait_for = json::array();
@@ -487,6 +519,33 @@ json CompiledGraph::to_json() const {
     }
 
     return j;
+}
+
+TopologySpec CompiledGraph::topology() const {
+    TopologySpec result;
+    result.name              = name;
+    result.channel_defs      = channel_defs;
+    result.edges             = edges;
+    result.conditional_edges = conditional_edges;
+    result.barrier_specs     = barrier_specs;
+    result.interrupt_before  = interrupt_before;
+    result.interrupt_after   = interrupt_after;
+    result.retry_policy      = retry_policy;
+    result.schema_version    = schema_version;
+    result.node_defs         = node_defs;
+    for (const auto& [name, wait_for_set] : barrier_specs) {
+        auto node = result.node_defs.find(name);
+        if (node == result.node_defs.end()) continue;
+        json wait_for = json::array();
+        for (const auto& upstream : wait_for_set) wait_for.push_back(upstream);
+        node->second["barrier"] =
+            json{{"wait_for", std::move(wait_for)}};
+    }
+    return result;
+}
+
+json CompiledGraph::to_json() const {
+    return topology().to_json();
 }
 
 json GraphCompiler::canon(const json& definition) {
@@ -751,8 +810,13 @@ json GraphCompiler::upgrade_to_latest(const json& definition) {
 
 void GraphCompiler::verify_roundtrip(const json& definition,
                                      const CompiledGraph& cg) {
+    verify_roundtrip(definition, cg.topology());
+}
+
+void GraphCompiler::verify_roundtrip(const json& definition,
+                                     const TopologySpec& topology) {
     const json a = canon(definition);
-    const json b = canon(cg.to_json());
+    const json b = canon(topology.to_json());
     if (a == b) return;
 
     // Structural mismatch report: what compilation lost or rewired.
@@ -763,7 +827,7 @@ void GraphCompiler::verify_roundtrip(const json& definition,
         "to its definition — the compiler dropped or rewired something:";
     for (const auto& m : mismatches) msg += "\n  - " + m;
 
-    if (cg.schema_version >= 1) {
+    if (topology.schema_version >= 1) {
         throw std::runtime_error(msg);
     }
     // Lenient documents keep compiling (historical behavior), but the

@@ -1,4 +1,5 @@
 #include <neograph/neograph.h>
+#include <neograph/graph/validator.h>
 
 #include <gtest/gtest.h>
 
@@ -217,6 +218,37 @@ TEST(EngineConfigTest, LegacyCompileDelegatesWithoutBehaviorChange) {
     EXPECT_EQ(legacy_result.execution_trace, configured_result.execution_trace);
 }
 
+TEST(EngineConfigTest, StrictBuildRejectsUnknownKeysWithoutMutatingDefinition) {
+    register_node("engine_config_strict",
+                  [](const std::string&, const json&, const NodeContext&) {
+                      return std::make_unique<EchoNode>();
+                  });
+
+    auto definition = one_node_graph("engine_config_strict");
+    json legacy = json::object();
+    for (const auto& [key, value] : definition.items()) {
+        if (key != "schema_version") legacy[key] = value;
+    }
+    legacy["conditionnal_edges"] = json::array();
+
+    EXPECT_NO_THROW((void)GraphEngine::build(legacy, EngineConfig{}));
+    EXPECT_THROW((void)GraphEngine::build_strict(legacy, EngineConfig{}),
+                 std::runtime_error);
+    EXPECT_FALSE(legacy.contains("schema_version"));
+}
+
+TEST(EngineConfigTest, StrictBuildPreservesInvalidDeclaredSchemaVersion) {
+    auto definition = one_node_graph("unused");
+    definition["schema_version"] = "1";
+
+    EXPECT_THROW((void)GraphEngine::build_strict(definition, EngineConfig{}),
+                 std::runtime_error);
+
+    definition["schema_version"] = 1.5;
+    EXPECT_THROW((void)GraphEngine::build_strict(definition, EngineConfig{}),
+                 std::runtime_error);
+}
+
 TEST(EngineConfigTest, AppliesRuntimeConfigurationBeforeFirstRun) {
     register_node("engine_config_probe", [](const std::string&, const json&, const NodeContext&) {
         return std::make_unique<ConfigProbeNode>();
@@ -304,6 +336,55 @@ TEST(CompiledGraphLinkTest, AppliesSemanticValidationBeforeRuntimeConstruction) 
     graph.edges.push_back({"missing", "work"});
 
     EXPECT_THROW((void)GraphEngine::link(std::move(graph)), std::runtime_error);
+}
+
+TEST(ValidatedTopologyLinkTest, ParsesAndValidatesBeforeCreatingRuntimeNodes) {
+    link_factory_calls = 0;
+    auto registry = std::make_shared<GraphRegistry>();
+    registry->register_type(
+        "validated_topology_echo",
+        [](const std::string&, const json&, const NodeContext&) {
+            ++link_factory_calls;
+            return std::make_unique<EchoNode>();
+        });
+
+    const auto definition = one_node_graph("validated_topology_echo");
+    auto topology = GraphCompiler::parse(definition, *registry);
+    EXPECT_EQ(link_factory_calls.load(), 0);
+    EXPECT_NO_THROW(GraphCompiler::verify_roundtrip(definition, topology));
+
+    auto validated = GraphValidator::require_valid(std::move(topology), *registry);
+    EXPECT_EQ(link_factory_calls.load(), 0);
+    EXPECT_FALSE(validated.report().has_errors());
+
+    EngineResources resources;
+    resources.registry = registry;
+    auto engine = GraphEngine::link(std::move(validated), EngineConfig{},
+                                    std::move(resources));
+    EXPECT_EQ(link_factory_calls.load(), 1);
+
+    RunConfig run;
+    run.input = {{"input", "validated"}};
+    EXPECT_EQ(engine->run(run).channel<std::string>("output"), "validated");
+}
+
+TEST(ValidatedTopologyLinkTest, RejectsSemanticErrorsBeforeCreatingNodes) {
+    link_factory_calls = 0;
+    auto registry = std::make_shared<GraphRegistry>();
+    registry->register_type(
+        "invalid_validated_topology",
+        [](const std::string&, const json&, const NodeContext&) {
+            ++link_factory_calls;
+            return std::make_unique<EchoNode>();
+        });
+
+    auto definition = one_node_graph("invalid_validated_topology");
+    definition["edges"].push_back({{"from", "work"}, {"to", "missing"}});
+    auto topology = GraphCompiler::parse(definition, *registry);
+
+    EXPECT_THROW((void)GraphValidator::require_valid(std::move(topology), *registry),
+                 std::runtime_error);
+    EXPECT_EQ(link_factory_calls.load(), 0);
 }
 
 TEST(EngineResourcesTest, KeepsOwnedToolSetAliveForEngineLifetime) {

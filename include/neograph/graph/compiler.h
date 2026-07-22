@@ -1,12 +1,11 @@
 /**
  * @file graph/compiler.h
- * @brief Pure JSON-definition → CompiledGraph parser, extracted from GraphEngine.
+ * @brief JSON → declarative topology parsing and runtime node linking.
  *
- * GraphCompiler turns a JSON graph definition into a CompiledGraph — a
- * value-type bundle of channels, nodes, edges, barriers, interrupts, and
- * retry policy. It has NO knowledge of runtime (threading, checkpointing,
- * execution) and NO dependency on GraphEngine; it depends only on
- * NodeFactory (to instantiate GraphNode subclasses).
+ * GraphCompiler first parses JSON into a TopologySpec with no live nodes, then
+ * links that topology into a CompiledGraph by invoking node factories. It has
+ * no knowledge of runtime threading, checkpointing, or execution and no
+ * dependency on GraphEngine.
  *
  * Why a separate stage: parsing failures surface here cleanly
  * (malformed edge, unknown reducer, missing node type) before any
@@ -48,6 +47,28 @@ struct ChannelDef {
     /// key so CompiledGraph::to_json() can re-emit exactly what was
     /// declared (round-trip fidelity).
     bool         has_initial = false;
+};
+
+/**
+ * @brief Declarative graph topology with no live node instances or runtime state.
+ *
+ * This is the inspectable boundary between JSON parsing and runtime linking.
+ * node_defs preserves the exact objects passed to NodeFactory; to_json()
+ * canonicalizes barrier declarations from barrier_specs.
+ */
+struct NEOGRAPH_API TopologySpec {
+    std::string name;
+    std::vector<ChannelDef> channel_defs;
+    std::vector<Edge> edges;
+    std::vector<ConditionalEdge> conditional_edges;
+    BarrierSpecs barrier_specs;
+    std::set<std::string> interrupt_before;
+    std::set<std::string> interrupt_after;
+    std::optional<RetryPolicy> retry_policy;
+    int schema_version = 0;
+    std::map<std::string, json> node_defs;
+
+    json to_json() const;
 };
 
 /**
@@ -105,17 +126,38 @@ struct CompiledGraph {
      * v0.1.0–v0.1.7 conditional_edges regression class.
      */
     json to_json() const;
+
+    /// @brief Copy the declarative portion without live GraphNode instances.
+    TopologySpec topology() const;
 };
 
 /**
- * @brief Stateless JSON → CompiledGraph translator.
+ * @brief Stateless JSON parser and node-instantiation linker.
  *
- * Single static entry point. Separating this stage lets routing /
- * execution tests build a CompiledGraph fixture directly (bypassing
- * JSON) and lets parsing tests run without touching the runtime.
+ * parse() is the pure declarative boundary; link() creates GraphNode instances.
+ * compile() remains the compatibility composition of both operations.
  */
 class NEOGRAPH_API GraphCompiler {
 public:
+    /**
+     * @brief Parse JSON into a declarative topology without creating nodes.
+     */
+    static TopologySpec parse(const json& definition);
+
+    /// @brief Pure parse using a local-first registry for schema metadata.
+    static TopologySpec parse(const json& definition, const GraphRegistry& registry);
+
+    /**
+     * @brief Instantiate runtime nodes from an already parsed topology.
+     */
+    static CompiledGraph link(TopologySpec topology,
+                              const NodeContext& default_context);
+
+    /// @brief Instantiate nodes using a local-first registry overlay.
+    static CompiledGraph link(TopologySpec topology,
+                              const NodeContext& default_context,
+                              const GraphRegistry& registry);
+
     /**
      * @brief Parse a JSON graph definition into a CompiledGraph.
      *
@@ -230,7 +272,11 @@ public:
      * compiling, but silent drops become visible).
      */
     static void verify_roundtrip(const json& definition,
-                                 const CompiledGraph& cg);
+                                  const CompiledGraph& cg);
+
+    /// @brief Translation validation before runtime node instantiation.
+    static void verify_roundtrip(const json& definition,
+                                 const TopologySpec& topology);
 };
 
 } // namespace neograph::graph

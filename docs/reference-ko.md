@@ -1029,6 +1029,11 @@ auto optional = result.try_channel(Answer);
 
 ### 7.4 GraphEngine 클래스
 
+새 코드는 JSON 정의를 만들 때 `build_strict()`를 사용한다. 이 경로는 노드를
+생성하기 전에 topology 전체를 검증한다. parse, 검증, 검사 또는 변환 단계를
+분리해야 하면 `ValidatedTopology`를 `link()`에 전달한다. 기존 `build()`,
+`CompiledGraph` link overload, `compile()`은 호환성을 위한 lenient 경로다.
+
 ```cpp
 class GraphEngine {
 public:
@@ -1038,6 +1043,16 @@ public:
         const json& definition, EngineConfig config);
     static std::unique_ptr<GraphEngine> build(
         const json& definition, EngineConfig config, EngineResources resources);
+
+    static std::unique_ptr<GraphEngine> build_strict(
+        const json& definition, EngineConfig config);
+    static std::unique_ptr<GraphEngine> build_strict(
+        const json& definition, EngineConfig config, EngineResources resources);
+
+    static std::unique_ptr<GraphEngine> link(
+        ValidatedTopology topology, EngineConfig config = {});
+    static std::unique_ptr<GraphEngine> link(
+        ValidatedTopology topology, EngineConfig config, EngineResources resources);
 
     static std::unique_ptr<GraphEngine> link(
         CompiledGraph graph, EngineConfig config = {});
@@ -1073,6 +1088,8 @@ public:
         const GraphStreamCallback& cb = nullptr);
 
     // ── 상태 조회/조작 ──
+
+    GraphAdmin admin(); // borrowed facade: GraphEngine보다 오래 보관하면 안 됨
 
     std::optional<json> get_state(const std::string& thread_id) const;
 
@@ -1485,6 +1502,9 @@ struct CompiledGraph {
 
 class GraphCompiler {
 public:
+    static TopologySpec parse(const json& definition);
+    static CompiledGraph link(TopologySpec topology,
+                              const NodeContext& default_context);
     static CompiledGraph compile(const json& definition,
                                  const NodeContext& default_context);
 };
@@ -1492,9 +1512,19 @@ public:
 } // namespace neograph::graph
 ```
 
-`GraphEngine::build()`는 내부적으로 `GraphCompiler::compile()`을 호출하고 결과를
-검증한 뒤 `GraphEngine::link()`에 넘긴다. 잘못된 edge나 등록되지 않은 노드
-타입 같은 파싱 실패는 런타임 상태를 만들기 전에 여기서 터진다.
+`GraphCompiler::parse()`는 node를 생성하지 않고 `TopologySpec`을 만든다.
+`GraphValidator::validate()`는 구조화된 진단을 반환하고,
+`GraphValidator::require_valid()`는 `ValidatedTopology`를 반환하거나
+`std::runtime_error`를 던진다. factory 해석과 runtime node 생성은
+`GraphCompiler::link()`에서만 수행한다. `compile()`은 parse와 link를 합친 호환
+helper이고 `GraphEngine::build()`는 기존 lenient warning 동작을 유지한다. 새
+코드는 `GraphEngine::build_strict()` 또는 다음 경로로 전체 경계를 강제한다.
+
+```cpp
+auto spec = GraphCompiler::parse(definition);
+auto validated = GraphValidator::require_valid(std::move(spec));
+auto engine = GraphEngine::link(std::move(validated), config, resources);
+```
 
 ### Scheduler
 
@@ -1724,7 +1754,7 @@ struct Checkpoint {
     json        metadata;         // 사용자 정의 메타데이터
     int64_t     step;             // super-step 번호
     int64_t     timestamp;        // Unix epoch 밀리초
-    int         schema_version = CHECKPOINT_SCHEMA_VERSION;  // 레이아웃 버전 (현재 2)
+    std::uint32_t schema_version = CHECKPOINT_SCHEMA_VERSION;  // 레이아웃 버전 (현재 3)
 
     static std::string generate_id(); // UUID v4 생성
 };
@@ -1738,23 +1768,25 @@ struct Checkpoint {
 | `interrupt_phase` | `CheckpointPhase` enum. `Before` -- interrupt_before, `After` -- interrupt_after, `Completed` -- super-step 정상 종료, `NodeInterrupt` -- 노드 내부에서 `NodeInterrupt` throw, `Updated` -- `update_state()`로 외부 주입. 문자열 인코딩은 `to_string()` / `parse_checkpoint_phase()` |
 | `barrier_state` | barrier 별 누적 upstream 집합. 아직 발사되지 않은 barrier에 대해서만 항목이 존재 — Scheduler가 barrier를 발사할 때 해당 항목을 clear한다. `scheduler.h`의 `BarrierState` 와 동일한 shape. schema v2부터 존재하며, v1 blob은 빈 map으로 로드 (pre-v2 동작과 동등) |
 | `step` | 몇 번째 super-step에서 생성되었는지 |
-| `schema_version` | 현재 `2`. persistent `CheckpointStore` 구현은 이 값을 직렬화해야 하며, `0`은 pre-versioned blob (마이그레이션 책임은 호출자에게) |
+| `schema_version` | 현재 `3`. persistent `CheckpointStore` 구현은 이 값을 직렬화해야 하며, `0`은 pre-versioned blob (마이그레이션 책임은 호출자에게) |
 
 ---
 
-### 8.2 CheckpointStore (추상 클래스)
+### 8.2 Checkpoint capability와 CheckpointStore
 
 checkpoint 영속화 인터페이스. 데이터베이스, 파일 시스템 등으로 구현 가능.
 
-> **커스텀 store를 작성하신다면?** sync 8개, async peer 8개.
-> [`ASYNC_GUIDE.md` §9.4](ASYNC_GUIDE.md#94-checkpointstore) 참조 —
-> 백엔드가 async-capable이면 async 전부 override, blocking이면 sync
-> 전부 override (섞지 말 것).
+> **커스텀 store를 작성한다면?** 새 구현은 필요한 최소 capability인
+> `CheckpointStoreCore`를 구현하고, 필요할 때 `AsyncCheckpointStore` 및
+> `PendingWritesCheckpointStore`를 추가한 뒤 `adapt_checkpoint_store()`로
+> 연결한다. 기존 `CheckpointStore`는 호환 contract로 유지된다. async 기본
+> 구현은 sync 메서드를 호출하므로 sync-only backend도 유효하지만 async 호출은
+> blocking이다. [`ASYNC_GUIDE.md` §9.4](ASYNC_GUIDE.md#94-checkpointstore) 참조.
 
 ```cpp
-class CheckpointStore {
+class CheckpointStoreCore {
 public:
-    virtual ~CheckpointStore() = default;
+    virtual ~CheckpointStoreCore() = default;
 
     virtual void save(const Checkpoint& cp) = 0;
     virtual std::optional<Checkpoint> load_latest(const std::string& thread_id) = 0;
@@ -1763,6 +1795,9 @@ public:
                                           int limit = 100) = 0;
     virtual void delete_thread(const std::string& thread_id) = 0;
 };
+
+std::shared_ptr<CheckpointStore> adapt_checkpoint_store(
+    std::shared_ptr<CheckpointStoreCore> core);
 ```
 
 | 메서드 | 설명 |

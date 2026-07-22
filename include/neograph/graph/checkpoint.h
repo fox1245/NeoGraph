@@ -15,6 +15,7 @@
 
 #include <cstdint>
 
+#include <memory>
 #include <optional>
 #include <mutex>
 #include <map>
@@ -153,6 +154,60 @@ struct PendingWrite {
 };
 
 /**
+ * @brief Mandatory synchronous checkpoint persistence capability.
+ *
+ * New backends may implement this small, recursion-free contract and pass it
+ * through adapt_checkpoint_store(). The legacy CheckpointStore remains
+ * unchanged for existing backends and consumers.
+ */
+class NEOGRAPH_API CheckpointStoreCore {
+public:
+    virtual ~CheckpointStoreCore() = default;
+
+    virtual void save(const Checkpoint& cp) = 0;
+    virtual std::optional<Checkpoint> load_latest(const std::string& thread_id) = 0;
+    virtual std::optional<Checkpoint> load_by_id(const std::string& id) = 0;
+    virtual std::vector<Checkpoint> list(const std::string& thread_id,
+                                         int limit = 100) = 0;
+    virtual void delete_thread(const std::string& thread_id) = 0;
+};
+
+/**
+ * @brief Optional coroutine-native checkpoint capability.
+ */
+class NEOGRAPH_API AsyncCheckpointStore {
+public:
+    virtual ~AsyncCheckpointStore() = default;
+
+    virtual asio::awaitable<void> save_async(const Checkpoint& cp) = 0;
+    virtual asio::awaitable<std::optional<Checkpoint>>
+    load_latest_async(const std::string& thread_id) = 0;
+    virtual asio::awaitable<std::optional<Checkpoint>>
+    load_by_id_async(const std::string& id) = 0;
+    virtual asio::awaitable<std::vector<Checkpoint>>
+    list_async(const std::string& thread_id, int limit = 100) = 0;
+    virtual asio::awaitable<void>
+    delete_thread_async(const std::string& thread_id) = 0;
+};
+
+/**
+ * @brief Optional fine-grained pending-writes capability.
+ */
+class NEOGRAPH_API PendingWritesCheckpointStore {
+public:
+    virtual ~PendingWritesCheckpointStore() = default;
+
+    virtual void put_writes(const std::string& thread_id,
+                            const std::string& parent_checkpoint_id,
+                            const PendingWrite& write) = 0;
+    virtual std::vector<PendingWrite> get_writes(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id) = 0;
+    virtual void clear_writes(const std::string& thread_id,
+                              const std::string& parent_checkpoint_id) = 0;
+};
+
+/**
  * @brief Abstract interface for checkpoint persistence backends.
  *
  * Implement this to store checkpoints in databases, files, or other
@@ -193,21 +248,13 @@ struct PendingWrite {
  *
  * @see InMemoryCheckpointStore for a reference implementation.
  */
-/// @note Backend authors: this is a "fat" interface (5 sync core +
-///       5 async peers + 3 pending-writes + 1 async pending = 14
-///       virtuals). Defaults bridge sync↔async in both directions
-///       (sync calls run_sync(async); async calls execute_in_pool(sync))
-///       so a backend can override only one side per method — but
-///       overriding NEITHER yields infinite mutual recursion at call
-///       time. The contract is enforced at runtime, not at compile
-///       time. A future major version (v1.0) is expected to split
-///       this into:
-///         - `CheckpointStoreCore`         — 5 sync mandatory virtuals
-///         - `AsyncCheckpointStore`        — async peer mixin (optional)
-///         - `PendingWritesCheckpointStore` — pending-writes mixin
-///       The current monolithic shape is kept for back-compat. New
-///       backends should override at least one of (sync, async) per
-///       method to avoid infinite recursion.
+/// @note Backend authors: this legacy interface remains intentionally unchanged
+///       for ABI compatibility. New backends should implement the mandatory
+///       CheckpointStoreCore and optional AsyncCheckpointStore /
+///       PendingWritesCheckpointStore capabilities, then call
+///       adapt_checkpoint_store(). Existing subclasses should continue to
+///       override at least one of each sync/async pair to avoid the historical
+///       crossover defaults recursing when neither side is implemented.
 class NEOGRAPH_API CheckpointStore {
 public:
     virtual ~CheckpointStore() = default;
@@ -337,6 +384,22 @@ public:
         const std::string& thread_id,
         const std::string& parent_checkpoint_id);
 };
+
+/**
+ * @brief Adapt split checkpoint capabilities to the legacy engine contract.
+ *
+ * The returned object keeps @p core alive. If the same implementation also
+ * derives from AsyncCheckpointStore or PendingWritesCheckpointStore, the
+ * adapter detects and delegates those optional capabilities. If it already
+ * implements CheckpointStore, the original shared object is returned. Without
+ * AsyncCheckpointStore, async calls execute the synchronous core operation on
+ * the caller's coroutine thread, matching the legacy CheckpointStore fallback;
+ * I/O-bound backends should implement the async capability.
+ *
+ * @throws std::invalid_argument If core is null.
+ */
+NEOGRAPH_API std::shared_ptr<CheckpointStore>
+adapt_checkpoint_store(std::shared_ptr<CheckpointStoreCore> core);
 
 /**
  * @brief In-memory checkpoint store for testing and single-process use.

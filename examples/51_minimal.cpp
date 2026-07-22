@@ -19,11 +19,13 @@
 using namespace neograph;
 using namespace neograph::graph;
 
+const ChannelKey<std::string> text_channel{"text"};
+
 // 노드 한 개. 채널 "text" 를 읽어서 대문자로 바꿔 다시 같은 채널에 씀.
 class UpperNode : public GraphNode {
 public:
     asio::awaitable<NodeOutput> run(NodeInput in) override {
-        std::string s = in.state.get("text").get<std::string>();
+        std::string s = in.state.get(text_channel);
         for (auto& c : s) c = static_cast<char>(std::toupper(c));
         NodeOutput out;
         out.writes.push_back(ChannelWrite{"text", json(s)});
@@ -52,12 +54,12 @@ int main() {
 
     // (3) 컴파일 → 실행 → 결과 꺼냄.
     NodeContext ctx;
-    auto        engine = GraphEngine::build(def, EngineConfig{.node_context = ctx});
+    auto        engine = GraphEngine::build_strict(def, EngineConfig{.node_context = ctx});
 
     RunConfig cfg;
     cfg.input = {{"text", "hello"}};
     auto result = engine->run(cfg);
 
-    std::cout << result.channel<std::string>("text") << "\n";   // → HELLO
+    std::cout << result.channel(text_channel) << "\n";   // → HELLO
     return 0;
 }
