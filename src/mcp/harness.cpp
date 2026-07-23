@@ -1012,8 +1012,7 @@ public:
                 failure_kind = response_kind_name(response.kind);
                 feedback     = response.message.empty() ? failure_kind : response.message;
             }
-            const bool stop_retry = response.kind == HarnessWorkerResponseKind::TIMEOUT ||
-                                    response.kind == HarnessWorkerResponseKind::TOOL_ERROR;
+            const bool stop_retry = response.kind == HarnessWorkerResponseKind::TOOL_ERROR;
             detail::append_harness_journal_event(
                 attempt_context, "worker.attempt.completed",
                 {{"duration_ms", std::chrono::duration_cast<std::chrono::milliseconds>(
