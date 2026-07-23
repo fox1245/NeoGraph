@@ -60,15 +60,16 @@ struct MockServer {
     std::string     retry_after;  // header value when status == 429
 
     MockServer() {
-        svr.Post("/v1/chat/completions",
-                 [this](const httplib::Request&, httplib::Response& res) {
-                     request_count.fetch_add(1, std::memory_order_relaxed);
-                     res.status = status;
-                     if (!retry_after.empty()) {
-                         res.set_header("Retry-After", retry_after);
-                     }
-                     res.set_content(body, "application/json");
-                 });
+        const auto handler = [this](const httplib::Request&, httplib::Response& res) {
+            request_count.fetch_add(1, std::memory_order_relaxed);
+            res.status = status;
+            if (!retry_after.empty()) {
+                res.set_header("Retry-After", retry_after);
+            }
+            res.set_content(body, "application/json");
+        };
+        svr.Post("/v1/chat/completions", handler);
+        svr.Post("/api/v1/chat/completions", handler);
 
         port = svr.bind_to_any_port("127.0.0.1");
         t = std::thread([this] { svr.listen_after_bind(); });
@@ -145,6 +146,24 @@ TEST(OpenAIProviderAsync, SyncCompleteBridgesThroughRunSync) {
     EXPECT_EQ(result.message.content, "pong");
     EXPECT_EQ(result.usage.total_tokens, 9);
     EXPECT_EQ(mock.request_count.load(), 1);
+}
+
+TEST(OpenAIProviderAsync, SyncCompleteAcceptsVersionedAndUnversionedBaseUrls) {
+    MockServer mock;
+    ASSERT_GT(mock.port, 0);
+
+    for (const std::string suffix : {"", "/api", "/api/v1", "/api/v1/"}) {
+        auto config = make_config(mock);
+        config.base_url += suffix;
+        auto provider = llm::OpenAIProvider::create(config);
+        try {
+            EXPECT_EQ(provider->complete(make_params()).message.content, "pong");
+        } catch (const std::exception& error) {
+            ADD_FAILURE() << "base URL suffix " << suffix << " failed: " << error.what();
+        }
+    }
+
+    EXPECT_EQ(mock.request_count.load(), 4);
 }
 
 TEST(OpenAIProviderAsync, RateLimitErrorCarriesRetryAfter) {
@@ -249,6 +268,20 @@ TEST(OpenAIProviderStream, SuccessfulContentAndUsageRemainIntact) {
     EXPECT_EQ(completion.usage.prompt_tokens, 7);
     EXPECT_EQ(completion.usage.completion_tokens, 2);
     EXPECT_EQ(completion.usage.total_tokens, 9);
+}
+
+TEST(OpenAIProviderStream, VersionedBaseUrlDoesNotDuplicateVersionPath) {
+    MockServer mock;
+    mock.body = "data: {\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\n"
+                "data: [DONE]\n\n";
+    auto config = make_config(mock);
+    config.base_url += "/api/v1/";
+
+    auto provider = llm::OpenAIProvider::create(config);
+    auto completion = provider->complete_stream(make_params(), {});
+
+    EXPECT_EQ(completion.message.content, "pong");
+    EXPECT_EQ(mock.request_count.load(), 1);
 }
 
 TEST(OpenAIProviderStream, EmptyChoicesRemainAValidEmptyCompletion) {

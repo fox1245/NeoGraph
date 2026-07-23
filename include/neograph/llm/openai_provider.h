@@ -40,7 +40,9 @@ class NEOGRAPH_API OpenAIProvider : public Provider {
     /// Configuration for OpenAI-compatible API connections.
     struct Config {
         std::string api_key;                              ///< API key for authentication.
-        std::string base_url = "https://api.openai.com";  ///< Base URL of the API endpoint.
+        /// Base URL of the API endpoint. Both unversioned URLs and URLs ending
+        /// in `/v1` are accepted; the provider adds the missing version path.
+        std::string base_url = "https://api.openai.com";
         std::string default_model = "gpt-4o-mini";        ///< Default model name.
         /// HTTP request timeout in seconds. Note: NeoGraph's public
         /// surface currently uses a mix of `int seconds` (here, in
