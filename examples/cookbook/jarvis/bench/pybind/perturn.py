@@ -16,8 +16,8 @@ if which == "neograph":
         def __init__(self, name, ch):
             super().__init__(); self._n = name; self._ch = ch
         def get_name(self): return self._n
-        def execute(self, state):
-            v = state.get("v") or 0
+        def run(self, input):
+            v = input.state.get("v") or 0
             return [ng.ChannelWrite(self._ch, v + 1)]
 
     for i in range(5):
