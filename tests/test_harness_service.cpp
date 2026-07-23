@@ -195,6 +195,16 @@ json wait_terminal(HarnessService&           service,
     return service.get(run_id, "details");
 }
 
+void expect_structured_text_fallback(const json& response) {
+    ASSERT_TRUE(response.contains("result")) << response.dump();
+    const auto& result = response["result"];
+    ASSERT_TRUE(result.contains("structuredContent")) << result.dump();
+    ASSERT_GE(result["content"].size(), 2u) << result.dump();
+    EXPECT_EQ(result["content"][1]["type"], "text");
+    EXPECT_EQ(json::parse(result["content"][1]["text"].get<std::string>()),
+              result["structuredContent"]);
+}
+
 class ScriptedProvider final : public neograph::Provider {
 public:
     std::vector<neograph::ChatCompletion> completions;
@@ -313,6 +323,77 @@ TEST(HarnessServiceTest, ExposesSmallStableMcpToolSurface) {
     EXPECT_NE(invalid_get["result"]["content"][0]["text"].get<std::string>().find(
                   "missing required property run_id"),
               std::string::npos);
+}
+
+TEST(HarnessServiceTest, MirrorsStructuredToolResultsIntoTextContent) {
+    HarnessServiceConfig config;
+    config.worker_executor = [](const HarnessWorkerCall&, const auto&) {
+        return HarnessWorkerResponse::success({{"status", "ok"}, {"findings", json::array()}});
+    };
+    HarnessService                 service(std::move(config));
+    neograph::mcp::MCPServerConfig server_config;
+    server_config.server_info = {{"name", "harness-test"}, {"version", "1"}};
+    neograph::mcp::MCPServer server(server_config);
+    ServerResponses          responses;
+    server.set_response_sink(responses.sink());
+    service.register_tools(server);
+
+    server.handle_message({
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "initialize"},
+        {"params",
+         {
+             {"protocolVersion", "2025-11-25"},
+             {"capabilities", json::object()},
+             {"clientInfo", {{"name", "test"}, {"version", "1"}}},
+         }},
+    });
+    server.handle_message({
+        {"jsonrpc", "2.0"},
+        {"method", "notifications/initialized"},
+        {"params", json::object()},
+    });
+    const auto call = [&server, &responses](int id, std::string name, json arguments) {
+        EXPECT_TRUE(
+            server
+                .handle_message({
+                    {"jsonrpc", "2.0"},
+                    {"id", id},
+                    {"method", "tools/call"},
+                    {"params", {{"name", std::move(name)}, {"arguments", std::move(arguments)}}},
+                })
+                .is_null());
+        return responses.wait(id);
+    };
+
+    const auto schema_response = call(2, "neograph_schema", json::object());
+    expect_structured_text_fallback(schema_response);
+    EXPECT_EQ(schema_response["result"]["content"][0]["text"], "NeoGraph Harness M4 schema");
+
+    auto malformed                   = request();
+    malformed["workers"][0]["tools"] = json::array({"missing.tool"});
+    const auto compile_response      = call(3, "neograph_compile", std::move(malformed));
+    expect_structured_text_fallback(compile_response);
+    EXPECT_FALSE(compile_response["result"]["structuredContent"]["ok"].get<bool>());
+    EXPECT_FALSE(compile_response["result"]["structuredContent"]["diagnostics"].empty());
+
+    const auto compiled = service.compile(request());
+    ASSERT_TRUE(compiled["ok"].get<bool>()) << compiled.dump();
+    const auto started = service.start({{"artifact_id", compiled["artifact_id"]}});
+    const auto run_id  = started["run_id"].get<std::string>();
+    ASSERT_EQ(wait_terminal(service, run_id)["status"], "completed");
+
+    const auto details_response =
+        call(4, "neograph_get", {{"run_id", run_id}, {"view", "details"}});
+    expect_structured_text_fallback(details_response);
+    EXPECT_EQ(details_response["result"]["structuredContent"]["result"]["valid_workers"], 1);
+
+    const auto trace_response =
+        call(5, "neograph_get", {{"run_id", run_id}, {"view", "trace"}, {"limit", 10}});
+    expect_structured_text_fallback(trace_response);
+    EXPECT_TRUE(
+        trace_response["result"]["structuredContent"]["result"].contains("execution_trace"));
 }
 
 TEST(HarnessServiceTest, MalformedHarnessCannotProduceExecutableArtifact) {
@@ -774,7 +855,11 @@ TEST(HarnessServiceTest, ExperimentalTasksProfileNegotiatesAndResumesInput) {
         {"params", {{"taskId", task_id}}},
     });
     EXPECT_EQ(completed["result"]["status"], "completed") << completed.dump();
-    EXPECT_EQ(completed["result"]["result"]["structuredContent"]["status"], "completed");
+    const auto& task_result = completed["result"]["result"];
+    EXPECT_EQ(task_result["structuredContent"]["status"], "completed");
+    ASSERT_GE(task_result["content"].size(), 2u);
+    EXPECT_EQ(json::parse(task_result["content"][1]["text"].get<std::string>()),
+              task_result["structuredContent"]);
 }
 
 TEST(HarnessServiceTest, ExperimentalTasksProfileFallsBackWithoutRequestOptIn) {

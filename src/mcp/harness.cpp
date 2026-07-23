@@ -102,6 +102,16 @@ void require_tasks_negotiated(const json& context) {
     }
 }
 
+json structured_text_content(const json& structured, std::string summary) {
+    // MCP 2025-11-25 recommends a serialized JSON TextContent fallback for
+    // clients that do not surface structuredContent.
+    // https://modelcontextprotocol.io/specification/2025-11-25/server/tools#structured-content
+    return json::array({
+        {{"type", "text"}, {"text", std::move(summary)}},
+        {{"type", "text"}, {"text", structured.dump()}},
+    });
+}
+
 json task_from_snapshot(const json& snapshot, bool creation = false) {
     const auto  harness_status = snapshot.value("status", "failed");
     std::string status         = "working";
@@ -150,7 +160,7 @@ json task_from_snapshot(const json& snapshot, bool creation = false) {
         };
     } else if (status == "completed") {
         CallToolResult result;
-        result.content = json::array({{{"type", "text"}, {"text", "Harness run completed"}}});
+        result.content            = structured_text_content(snapshot, "Harness run completed");
         result.structured_content = snapshot;
         task["result"]            = result.to_json();
     } else if (status == "failed") {
@@ -1403,7 +1413,7 @@ void validate_bindings(const json& request,
 
 CallToolResult mcp_result(json structured, std::string text) {
     CallToolResult result;
-    result.content = json::array({{{"type", "text"}, {"text", std::move(text)}}});
+    result.content            = structured_text_content(structured, std::move(text));
     result.structured_content = std::move(structured);
     return result;
 }
