@@ -224,13 +224,18 @@ public:
     std::string get_name() const override { return "scripted-harness-provider"; }
 };
 
-class TimeoutProvider final : public neograph::Provider {
+class AsioErrorProvider final : public neograph::Provider {
 public:
+    explicit AsioErrorProvider(asio::error_code error) : error_(error) {}
+
     neograph::ChatCompletion complete(const neograph::CompletionParams&) override {
-        throw asio::system_error(asio::error::timed_out);
+        throw asio::system_error(error_);
     }
 
-    std::string get_name() const override { return "timeout-harness-provider"; }
+    std::string get_name() const override { return "asio-error-harness-provider"; }
+
+private:
+    asio::error_code error_;
 };
 
 class StartFailingJournal final : public neograph::mcp::HarnessJournal {
@@ -667,7 +672,8 @@ TEST(HarnessServiceTest, ProviderExecutorRunsDeclaredToolsAndValidatesPaths) {
 
 TEST(HarnessServiceTest, ProviderExecutorPreservesTransportTimeoutKind) {
     neograph::mcp::HarnessProviderExecutorConfig config;
-    config.provider = std::make_shared<TimeoutProvider>();
+    config.provider = std::make_shared<AsioErrorProvider>(
+        asio::error::make_error_code(asio::error::timed_out));
     auto executor = neograph::mcp::make_provider_harness_executor(std::move(config));
 
     HarnessWorkerCall call;
@@ -676,6 +682,21 @@ TEST(HarnessServiceTest, ProviderExecutorPreservesTransportTimeoutKind) {
     auto response = executor(call, std::make_shared<neograph::graph::CancelToken>());
 
     EXPECT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::TIMEOUT);
+    EXPECT_FALSE(response.message.empty());
+}
+
+TEST(HarnessServiceTest, ProviderExecutorKeepsOtherAsioFailuresAsToolErrors) {
+    neograph::mcp::HarnessProviderExecutorConfig config;
+    config.provider = std::make_shared<AsioErrorProvider>(
+        asio::error::make_error_code(asio::error::connection_refused));
+    auto executor = neograph::mcp::make_provider_harness_executor(std::move(config));
+
+    HarnessWorkerCall call;
+    call.task = {{"objective", "Review"}};
+    call.worker = worker("reviewer");
+    auto response = executor(call, std::make_shared<neograph::graph::CancelToken>());
+
+    EXPECT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::TOOL_ERROR);
     EXPECT_FALSE(response.message.empty());
 }
 
