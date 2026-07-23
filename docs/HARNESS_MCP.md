@@ -30,7 +30,12 @@ export NEOGRAPH_HARNESS_MODEL=gpt-4o-mini
 
 `NEOGRAPH_HARNESS_API_KEY` takes precedence over `OPENAI_API_KEY`.
 `NEOGRAPH_HARNESS_BASE_URL` selects any OpenAI-compatible endpoint. The server
-writes protocol messages only to stdout and diagnostics only to stderr.
+accepts both an unversioned base such as `https://openrouter.ai/api` and the
+provider's documented versioned form such as `https://openrouter.ai/api/v1`;
+it adds `/v1` only when missing. The server writes protocol messages only to
+stdout and diagnostics only to stderr. See the
+[OpenRouter quickstart](https://openrouter.ai/docs/quickstart) for its current
+endpoint format.
 
 For host interoperability smoke tests only, set `NEOGRAPH_HARNESS_SMOKE=1`.
 That explicit mode uses a deterministic in-process provider returning a valid

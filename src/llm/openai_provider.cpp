@@ -95,6 +95,16 @@ static std::pair<std::string, std::string> parse_url(const std::string& base_url
 
 namespace {
 
+std::string chat_completions_path(std::string prefix) {
+    while (!prefix.empty() && prefix.back() == '/') prefix.pop_back();
+    // OpenRouter documents an OpenAI-compatible base URL ending in /api/v1.
+    // Source: https://openrouter.ai/docs/quickstart (fetched 2026-07-23).
+    if (prefix.size() >= 3 && prefix.compare(prefix.size() - 3, 3, "/v1") == 0) {
+        return prefix + "/chat/completions";
+    }
+    return prefix + "/v1/chat/completions";
+}
+
 // Parse Retry-After. Supports the seconds-integer shape only (the
 // HTTP-date shape is rare in practice for LLM endpoints; matching
 // SchemaProvider's behavior). Returns -1 when missing or unparsable.
@@ -130,7 +140,7 @@ OpenAIProvider::complete_async(const CompletionParams& params)
     auto res = co_await conn_pool_->async_post(
         endpoint.host,
         endpoint.port,
-        endpoint.prefix + "/v1/chat/completions",
+        chat_completions_path(endpoint.prefix),
         body_str,
         std::move(headers),
         endpoint.tls,
@@ -202,7 +212,7 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
     std::string error_body;
     httplib::Request request;
     request.method = "POST";
-    request.path = prefix + "/v1/chat/completions";
+    request.path = chat_completions_path(prefix);
     request.headers = headers;
     request.body = body.dump();
     request.set_header("Content-Type", "application/json");
