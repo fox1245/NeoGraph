@@ -33,7 +33,7 @@ GROQ_API_KEY=... bash bench/run_bench_e2e.sh
 ```
 
 Shared demo MCP server container (time/calc/weather) + 24-turn mixed set (direct tool call ·
-parallel fan-out · chat · memory recall), ABBA order交叉 for 2 rounds each:
+parallel fan-out · chat · memory recall), ABBA order interleaving for 2 rounds each:
 
 | Round (execution order) | mean | p50 | max | Notes |
 |---|---|---|---|---|
