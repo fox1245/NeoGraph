@@ -1,11 +1,11 @@
 """Custom Python GraphNode subclassing — commit 2 of the binding.
 
 Covers:
-  - Subclassing neograph.GraphNode with override of execute()
+  - Subclassing neograph.GraphNode with override of run(input)
   - NodeFactory.register_type wiring a Python factory
   - Round-tripping ChannelWrite emissions through the engine
-  - execute_full() returning Command (routing override)
-  - execute_full() returning Send list (dynamic fan-out)
+  - run(input) returning Command (routing override)
+  - run(input) returning Send list (dynamic fan-out)
   - @neograph.node decorator sugar for write-only nodes
 """
 
@@ -22,6 +22,23 @@ def _next_type(prefix):
     global _uid
     _uid += 1
     return f"{prefix}_{_uid}"
+
+
+def test_missing_run_has_actionable_migration_error():
+    class MissingRunNode(neograph.GraphNode):
+        def get_name(self):
+            return "missing_run"
+
+    node = MissingRunNode()
+    try:
+        node.run(None)
+    except NotImplementedError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("GraphNode.run() must reject a missing override")
+
+    assert "run(input)" in message
+    assert "docs/migration-v0.4-to-v1.0.md" in message
 
 
 def test_simple_counter_node_runs_in_sequence():
@@ -73,7 +90,7 @@ def test_simple_counter_node_runs_in_sequence():
 
 
 def test_graph_state_methods_visible_to_python():
-    """The GraphState passed into execute() exposes get / channel_names / etc."""
+    """The GraphState exposed through NodeInput has get/channel_names/etc."""
     type_name = _next_type("inspect")
     seen = {}
 
@@ -115,7 +132,7 @@ def test_graph_state_methods_visible_to_python():
 
 
 def test_command_routing_override():
-    """execute_full() can return a Command to override edge-based routing."""
+    """run(input) can return a Command to override edge-based routing."""
     type_name_router = _next_type("router")
     type_name_taken = _next_type("taken")
     type_name_skipped = _next_type("skipped")
@@ -190,7 +207,7 @@ def test_command_routing_override():
 
 
 def test_send_fan_out():
-    """execute_full() can return Sends for dynamic fan-out."""
+    """run(input) can return Sends for dynamic fan-out."""
     type_name_fanout = _next_type("fanout")
     type_name_worker = _next_type("worker")
 
@@ -341,7 +358,7 @@ def test_concurrent_runs_with_python_node():
     """Confirm the GIL handling holds up under N concurrent run() calls.
 
     Each run() releases the GIL inside C++ and re-acquires only when
-    dispatching into the Python execute() body. Multiple runs at once
+    dispatching into the Python run() body. Multiple runs at once
     must therefore not deadlock and not interleave channel state
     across thread_ids.
     """

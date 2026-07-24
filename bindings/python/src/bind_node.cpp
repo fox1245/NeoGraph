@@ -8,14 +8,9 @@
 // as `unique_ptr<GraphNode>` and pybind11's trampoline holders don't
 // compose cleanly with that.
 //
-// Engine entry points (graph_executor.cpp:140-143):
-//
-//   execute_full_async(state)         ← every async run
-//   execute_full_stream_async(s, cb)  ← every streaming run
-//
-// Both are coroutines. We override them to `co_return` the sync
-// counterparts so a Python user only has to provide `execute()` (or
-// `execute_full()`) without thinking about coroutines.
+// The engine calls GraphNode::run(NodeInput). PyGraphNodeOwner keeps the
+// coroutine boundary in C++ and invokes the user's regular Python
+// `run(self, input)` method while holding the GIL.
 //
 // GIL contract:
 //   - Every Python attribute access acquires the GIL via
@@ -33,7 +28,6 @@
 #include "json_bridge.h"
 #include "opaque_types.h"
 
-#include <neograph/api.h>  // NEOGRAPH_PUSH/POP_IGNORE_DEPRECATED
 #include <neograph/graph/engine.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
@@ -126,13 +120,13 @@ NodeResult coerce_to_node_result(py::handle obj) {
             } else if (py::isinstance<Command>(item)) {
                 if (r.command.has_value()) {
                     throw py::type_error(
-                        "execute_full() returned multiple Command "
+                        "run(input) returned multiple Command "
                         "instances; only one is allowed per node.");
                 }
                 r.command = item.cast<Command>();
             } else {
                 throw py::type_error(
-                    "execute_full() result list must contain "
+                    "run(input) result list must contain "
                     "ChannelWrite / Send / Command instances; got " +
                     std::string(py::str(item.get_type()).cast<std::string>()));
             }
@@ -141,7 +135,7 @@ NodeResult coerce_to_node_result(py::handle obj) {
     }
 
     throw py::type_error(
-        "execute() / execute_full() must return a list of "
+        "run(input) must return an iterable of "
         "ChannelWrite, a NodeResult, a Command, a Send, or None; got " +
         std::string(py::str(obj.get_type()).cast<std::string>()));
 }
@@ -378,37 +372,6 @@ public:
     }
 
 private:
-    bool has_user_method(const char* name) const {
-        // Walk the actual __class__ MRO rather than just calling
-        // hasattr — the Python GraphNode base supplies stubs that
-        // hasattr would always see, masking whether the *subclass*
-        // overrode the method. We're looking for a method that's
-        // defined on a class strictly derived from `neograph.GraphNode`
-        // (i.e. user code, not the base).
-        if (!py::hasattr(py_obj_, name)) return false;
-        py::object cls = py_obj_.attr("__class__");
-        py::object base_module;
-        try {
-            base_module = py::module_::import("neograph_engine");
-        } catch (const py::error_already_set&) {
-            // Should never happen — if neograph isn't importable we
-            // wouldn't be here. Conservative fallback: hasattr.
-            return true;
-        }
-        py::object base = base_module.attr("GraphNode");
-        // Iterate the MRO; the first class that defines `name` in its
-        // own __dict__ wins. If that class IS the base, the user did
-        // not override.
-        py::tuple mro = cls.attr("__mro__");
-        for (auto klass : mro) {
-            py::object dict = klass.attr("__dict__");
-            if (py::cast<py::dict>(dict).contains(name)) {
-                return !klass.is(base);
-            }
-        }
-        return false;
-    }
-
     py::object py_obj_;
 };
 
