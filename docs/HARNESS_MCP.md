@@ -365,7 +365,9 @@ the Harness tools. A suitable request is:
     "max_steps": 10,
     "timeout_seconds": 600,
     "max_parallel_workers": 2,
-    "max_worker_retries": 1
+    "max_worker_retries": 1,
+    "provider_timeout_seconds": 60,
+    "max_output_tokens": 4096
   },
   "policy": {
     "read_only": true,
@@ -373,6 +375,19 @@ the Harness tools. A suitable request is:
   }
 }
 ```
+
+### Provider Budgets
+
+`budgets.provider_timeout_seconds` limits one provider completion attempt to
+1--600 seconds. `budgets.max_output_tokens` limits one completion to 1--128000
+generated tokens. Both are optional: omitting either preserves the previous
+behavior, with no Harness deadline and the provider's existing output limit.
+
+A worker may set either field to a smaller value. A worker value above the
+Harness-wide value is rejected at compile time. On a deadline, Harness cancels
+only the child cancellation token supplied to that provider call; it does not
+cancel sibling workers or the enclosing run. The provider must honor the token,
+so a provider that cannot be interrupted may return after its deadline.
 
 The host should follow this sequence:
 

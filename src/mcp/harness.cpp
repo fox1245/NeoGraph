@@ -52,6 +52,8 @@ constexpr const char* kHarnessResultChannel = "final_result";
 constexpr const char* kTasksExtension = "io.modelcontextprotocol/tasks";
 constexpr const char* kHarnessProfile = "harness-m4";
 
+json effective_provider_budget(const json& request, const json& worker);
+
 int64_t unix_millis() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch())
@@ -192,6 +194,8 @@ json harness_request_schema() {
                 "id":{"type":"string"},
                 "instructions":{"type":"string"},
                 "tools":{"type":"array","items":{"type":"string"}},
+                "provider_timeout_seconds":{"type":"integer"},
+                "max_output_tokens":{"type":"integer"},
                 "output_schema":{"type":"object"}
             },"additionalProperties":false}},
             "tool_catalog":{"type":"array","items":{"type":"object","required":["id","description","input_schema","executor"],"properties":{
@@ -213,7 +217,9 @@ json harness_request_schema() {
                 "max_steps":{"type":"integer"},
                 "timeout_seconds":{"type":"integer"},
                 "max_parallel_workers":{"type":"integer"},
-                "max_worker_retries":{"type":"integer"}
+                "max_worker_retries":{"type":"integer"},
+                "provider_timeout_seconds":{"type":"integer"},
+                "max_output_tokens":{"type":"integer"}
             },"additionalProperties":false},
             "policy":{"type":"object","properties":{
                 "read_only":{"type":"boolean"},
@@ -925,6 +931,8 @@ public:
             HarnessWorkerCall call;
             call.task = task;
             call.worker = worker_it->second;
+            call.worker["_harness_provider_budget"] = effective_provider_budget(
+                request_, worker_it->second);
             call.tool_catalog = selected_tools;
             call.policy = request_.value("policy", json::object());
             call.attempt = static_cast<std::size_t>(attempt + 1);
@@ -1229,6 +1237,16 @@ void validate_range(const json& budgets,
                 std::to_string(maximum),
             {{"value", value}, {"minimum", minimum}, {"maximum", maximum}}));
     }
+}
+
+json effective_provider_budget(const json& request, const json& worker) {
+    const auto budgets = request.value("budgets", json::object());
+    return {
+        {"provider_timeout_seconds",
+         worker.value("provider_timeout_seconds", budgets.value("provider_timeout_seconds", 0))},
+        {"max_output_tokens",
+         worker.value("max_output_tokens", budgets.value("max_output_tokens", -1))},
+    };
 }
 
 void validate_bindings(const json& request,
@@ -1861,6 +1879,33 @@ struct HarnessService::Impl {
             validate_range(budgets, "timeout_seconds", 1, 86400, 600, diagnostics);
             validate_range(budgets, "max_parallel_workers", 1, 64, 4, diagnostics);
             validate_range(budgets, "max_worker_retries", 0, 5, 1, diagnostics);
+            if (budgets.contains("provider_timeout_seconds")) {
+                validate_range(budgets, "provider_timeout_seconds", 1, 600, 1, diagnostics);
+            }
+            if (budgets.contains("max_output_tokens")) {
+                validate_range(budgets, "max_output_tokens", 1, 128000, 1, diagnostics);
+            }
+            const int provider_timeout = budgets.value("provider_timeout_seconds", 600);
+            const int max_output_tokens = budgets.value("max_output_tokens", 128000);
+            std::size_t worker_index = 0;
+            for (const auto& worker : request["workers"]) {
+                const auto path = "$.workers[" + std::to_string(worker_index++) + "]";
+                for (const auto& [name, maximum] :
+                     std::initializer_list<std::pair<const char*, int>>{
+                         {"provider_timeout_seconds", provider_timeout},
+                         {"max_output_tokens", max_output_tokens}}) {
+                    if (!worker.contains(name)) continue;
+                    const int value = worker[name].get<int>();
+                    if (value < 1 || value > maximum) {
+                        diagnostics.push_back(make_diagnostic(
+                            "request", "H_WORKER_BUDGET", "error", path + "." + name,
+                            std::string(name) + " must be between 1 and " +
+                                std::to_string(maximum) +
+                                " and must not exceed the Harness-wide limit",
+                            {{"value", value}, {"maximum", maximum}}));
+                    }
+                }
+            }
         }
 
         if (!diagnostics_have_errors(diagnostics)) {
