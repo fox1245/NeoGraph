@@ -55,6 +55,7 @@ em++ -std=c++20 -O3 -flto -fexceptions -pthread \
   wasm/smoke.cpp \
   src/core/json.cpp deps/yyjson/yyjson.c \
   src/core/graph_engine.cpp src/core/graph_compiler.cpp \
+  src/core/graph_validator.cpp src/core/tool_dispatch.cpp \
   src/core/graph_coordinator.cpp src/core/graph_executor.cpp \
   src/core/scheduler.cpp src/core/graph_state.cpp \
   src/core/graph_node.cpp src/core/graph_loader.cpp \
