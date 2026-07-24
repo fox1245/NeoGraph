@@ -120,9 +120,9 @@ The shape of the value must match the reducer:
 ### Reading state from a node
 
 ```python
-def execute(self, state):
-    msgs    = state.get("messages") or []     # list of message dicts
-    counter = state.get("counter") or 0
+def run(self, input):
+    msgs    = input.state.get("messages") or []  # list of message dicts
+    counter = input.state.get("counter") or 0
     ...
 ```
 
@@ -170,8 +170,9 @@ subclass `GraphNode`.
 
 ### 3.3 The full `GraphNode` subclass
 
-Override `run(input)` for full control. As of v0.4.0 this is the
-canonical entry point — one method, one signature:
+Override `run(input)` for full control. It was introduced in v0.4.0 and is
+the only custom-node entry point from v0.9.0 onward — one method, one
+signature:
 
 ```python
 class Researcher(ng.GraphNode):
@@ -207,8 +208,8 @@ automatically.
 > **Migrating from v0.3.x:** the 8-virtual chain (`execute`,
 > `execute_async`, `execute_full`, `execute_full_async`,
 > `execute_stream`, `execute_stream_async`, `execute_full_stream`,
-> `execute_full_stream_async`) still compiles in v0.4.x but is
-> `[[deprecated]]` and removed in v1.0.0. Replace with a single
+> `execute_full_stream_async`) was deprecated in v0.4.x and removed in
+> v0.9.0 during v1 preparation. Replace it with a single
 > `run(input)` override; read state from `input.state`, emit tokens
 > via `input.stream_cb` when non-None, read the cancel token from
 > `input.ctx.cancel_token`.

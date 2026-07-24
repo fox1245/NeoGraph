@@ -1,15 +1,15 @@
-# Migration: 옛 8-virtual chain → 새 `run(NodeInput)` (v0.4 → v1.0)
+# 이전 안내: 옛 8개 virtual → `run(NodeInput)` (v0.4.x → v0.9+)
 
-NeoGraph v0.4 가 노드의 dispatch 진입점을 `run(NodeInput) ->
+NeoGraph v0.4는 노드를 호출하는 진입점을 `run(NodeInput) ->
 awaitable<NodeOutput>` 하나로 통합했습니다. 옛 8개 virtual
 (`execute` / `execute_async` / `execute_stream` /
-`execute_stream_async` 와 그 `_full` 짝꿍) 은 `[[deprecated]]` 마킹돼
-있고 v1.0 에서 삭제됩니다. 이 문서가 옮기는 절차.
+`execute_stream_async`와 그 `_full` 짝꿍)은 v0.4.x에서 사용 중단
+경고를 거친 뒤 v1 준비 릴리스인 v0.9.0에서 삭제됐습니다. 이 문서는
+옛 노드를 현재 API로 옮기는 절차입니다.
 
-> v0.4 ~ v0.x 동안에는 옛 virtual 들이 그대로 동작합니다 — 한 번에
-> 다 옮길 필요 없고, 새 노드만 새 모양으로 짜도 무방. 이 문서는
-> v1.0 직전 (또는 v0.x 사이클에서 컴파일러 경고가 거슬리기 시작할
-> 때) 보면 됩니다.
+> v0.9.0 이상에서는 `run(NodeInput)`을 구현하지 않은 C++ 하위 클래스는
+> 추상 클래스라 컴파일되지 않습니다. Python 하위 클래스도
+> `run(self, input)`을 구현해야 합니다.
 
 ## 왜 옮기나
 
@@ -30,7 +30,7 @@ Send 는 `NodeOutput` 에 들어 있어서 추가 virtual 필요 없음. 스트�
 
 | 옛 virtual | 옮긴 모양 |
 |---|---|
-| `execute(state)` | `co_return NodeOutput{ .writes = {...} };` (sync 본문) |
+| `execute(state)` | `NodeOutput out; out.writes = {...}; co_return out;` (sync 본문) |
 | `execute_async(state)` | `co_return co_await provider->complete_async(...);` 같은 native async |
 | `execute_stream(state, cb)` | `if (in.stream_cb) (*in.stream_cb)(event); co_return NodeOutput{...};` |
 | `execute_stream_async(state, cb)` | 위 + native async (`co_await ...`) |
@@ -41,6 +41,29 @@ Send 는 `NodeOutput` 에 들어 있어서 추가 virtual 필요 없음. 스트�
 
 핵심: **8 갈래가 `NodeOutput` 의 어느 필드를 채우느냐 + `in.stream_cb`
 사용 유무 + `co_await` 사용 유무 의 조합**으로 표현 가능. virtual 은 1개.
+
+### Python의 가장 흔한 변환
+
+**옛 코드:**
+
+```python
+class CounterNode(ng.GraphNode):
+    def execute(self, state):
+        current = state.get("count") or 0
+        return [ng.ChannelWrite("count", current + 1)]
+```
+
+**현재 코드:**
+
+```python
+class CounterNode(ng.GraphNode):
+    def run(self, input):
+        current = input.state.get("count") or 0
+        return [ng.ChannelWrite("count", current + 1)]
+```
+
+Python의 `run`은 `async def`가 아니라 일반 `def`입니다. 스트리밍 실행에서는
+`input.stream_cb`가 이벤트를 받는 함수이고, 일반 실행에서는 `None`입니다.
 
 ## 케이스별 변환 예제
 
@@ -152,7 +175,9 @@ asio::awaitable<NodeOutput> run(NodeInput in) override {
 NodeResult execute_full(const GraphState& state) override {
     NodeResult r;
     r.writes.push_back({"step", json("dispatched")});
-    r.command = Command{.goto_node = "next_router"};   // 라우팅 강제
+    Command command;
+    command.goto_node = "next_router";
+    r.command = command;   // 라우팅 강제
     return r;
 }
 ```
@@ -162,7 +187,9 @@ NodeResult execute_full(const GraphState& state) override {
 asio::awaitable<NodeOutput> run(NodeInput in) override {
     NodeOutput out;   // NodeOutput == NodeResult — 같은 타입의 alias
     out.writes.push_back({"step", json("dispatched")});
-    out.command = Command{.goto_node = "next_router"};
+    Command command;
+    command.goto_node = "next_router";
+    out.command = command;
     co_return out;
 }
 ```
@@ -225,41 +252,17 @@ asio::awaitable<NodeOutput> run(NodeInput in) override {
 → 둘은 같은 타입의 별명입니다. `NodeOutput out; out.writes=...;
 out.command=...; out.sends=...; co_return out;` 만 하면 됨.
 
-### 옛 virtual 도 같이 두는 transitional 패턴
-
-마이그레이션 중간에 새 `run()` 도 박고 옛 `execute()` 도 그대로
-두면, **새 `run()` 이 우선**되어서 호출됩니다 (engine 의 PR 2
-dispatch). 옛 본문은 dead code — 안전하게 지우면 됩니다.
-
-```cpp
-class MyNode : public GraphNode {
-public:
-    // 새 진입점 — 우선됨
-    asio::awaitable<NodeOutput> run(NodeInput in) override { ... }
-
-    // 옛 진입점 — 호출 안 됨 (dead). 지워도 됨.
-    std::vector<ChannelWrite> execute(const GraphState&) override {
-        // ...
-    }
-};
-```
-
 ## 마이그레이션 안 하면
 
-v0.4 ~ v0.x 동안:
-- 옛 virtual override 는 그대로 동작
-- `[[deprecated]]` 컴파일러 경고가 뜸 (`-Wdeprecated-declarations`)
-- 컴파일 / 런타임 모두 멀쩡 — 그냥 시끄러울 뿐
+v0.9.0 이상에서는 옛 8개 virtual이 없습니다.
 
-v1.0 에서:
-- 옛 8 virtual 전부 삭제
-- 옛 모양 노드는 컴파일 안 됨 (`'execute' marked override but doesn't
-  override anything in the base class`)
-- 그 시점에 옮겨야 함
+- C++의 옛 `override`는 `'execute' marked override but does not override`
+  같은 컴파일 오류를 냅니다.
+- Python에서 `execute()`만 구현한 노드는 `run(input)` 구현을 요구하는
+  `NotImplementedError`를 냅니다.
 
-선제 마이그레이션 추천 — 노드 개수가 많을수록 v1.0 직후 한꺼번에
-옮기는 게 부담. 새 노드부터 새 모양으로 짜고, 옛 노드는 시간 날 때
-하나씩.
+옛 메서드를 이름만 남겨 두는 전환 패턴도 사용하지 마세요. 엔진은
+`run(NodeInput)`만 호출하므로 옛 본문은 실행되지 않습니다.
 
 ## 일괄 옮기는 스크립트가 있나?
 

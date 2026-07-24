@@ -1,5 +1,10 @@
 # Pybind11 binding — next-session handoff
 
+> **Historical handoff:** the binding described here has shipped. Current
+> custom Python nodes implement `run(input)`; the legacy `execute*` node
+> surface was removed in v0.9.0. See `docs/python-binding.md` and
+> `docs/migration-v0.4-to-v1.0.md` for the supported API.
+
 Living plan for the next NeoGraph session. Sister docs / context the
 next session should also read:
 
@@ -16,7 +21,7 @@ next session should also read:
    Goal: a Python script can call `compile(json_def, ctx).run(config)`
    and round-trip a JSON state.
 2. **Custom Python nodes (~2-4 h)**: pybind11 trampoline so a Python
-   subclass of `neograph.GraphNode` can override `execute(state)` and
+   subclass of `neograph.GraphNode` can implement `run(input)` and
    the engine dispatches into Python under proper GIL handling.
 3. **Wheel packaging (~1-2 d)**: manylinux + macOS arm64 + Win wheels
    carrying `libneograph_*.so` plus the binding. Synergizes with the
@@ -119,8 +124,8 @@ class MyAnalyzeNode(neograph.GraphNode):
         super().__init__()
         self.provider = provider
 
-    def execute(self, state):
-        target = state.get("target_function")
+    def run(self, input):
+        target = input.state.get("target_function")
         # ...do work in Python, possibly calling self.provider.complete(...)
         return [neograph.ChannelWrite("findings", [proposal])]
 
@@ -139,7 +144,7 @@ GIL handling — *the* hairy bit. Two rules:
    the engine churns.
 2. **C++ that calls into a Python node acquires the GIL**:
    the node trampoline wraps every dispatch with
-   `py::gil_scoped_acquire` before invoking the Python `execute` method,
+   `py::gil_scoped_acquire` before invoking the Python `run` method,
    then releases when returning.
 
 The engine already runs Send branches on `fan_out_pool_` worker

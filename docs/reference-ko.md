@@ -807,7 +807,7 @@ state.write("messages", json::array({msg2})); // -> [msg1, msg2]
 
 > **커스텀 GraphNode를 작성한다면** 단 하나의
 > `run(NodeInput) -> asio::awaitable<NodeOutput>`을 구현한다.
-> v1.0에서 옛 `execute*` 8-virtual chain은 제거되었다.
+> v1 준비 릴리스인 v0.9.0에서 옛 `execute*` 8개 virtual은 제거되었다.
 
 ### 6.1 GraphNode (추상 클래스)
 

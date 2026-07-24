@@ -362,14 +362,17 @@ unchanged — the differences are in the defaults and the new opt-ins.
 
 ### 8.1 `GraphNode::run(NodeInput)` replaces the legacy override chain
 
-v1.0 removed the eight `execute*` virtuals. A custom node now has one
-override for sync and async engine entry points, streaming, and control flow:
+The v0.9.0 v1-preparation release removed the eight `execute*` virtuals.
+A custom node now has one override for sync and async engine entry points,
+streaming, and control flow:
 
 ```cpp
 asio::awaitable<NodeOutput> run(NodeInput in) override {
     NodeOutput out;
     out.writes.push_back({"answer", co_await fetch_answer(in)});
-    out.command = Command{.goto_node = "review"};
+    Command command;
+    command.goto_node = "review";
+    out.command = command;
     if (in.stream_cb) {
         (*in.stream_cb)({GraphEvent::Type::LLM_TOKEN, get_name(), json("done")});
     }

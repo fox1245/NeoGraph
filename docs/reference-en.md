@@ -921,8 +921,8 @@ class GraphNode {
 public:
     virtual ~GraphNode() = default;
 
-    // v0.4 unified dispatch entry. Override this in new code.
-    virtual asio::awaitable<NodeOutput> run(NodeInput in);
+    // The only custom-node dispatch entry.
+    virtual asio::awaitable<NodeOutput> run(NodeInput in) = 0;
 
     virtual std::string get_name() const = 0;
 };
@@ -985,7 +985,7 @@ public:
 };
 ```
 
-> **Legacy chain (removed in v1.0).** Pre-v0.4
+> **Legacy chain (removed in v0.9.0 during v1 preparation).** Pre-v0.4
 > code overrode one of `execute` / `execute_async` / `execute_full` /
 > `execute_full_async` / `execute_stream` / `execute_stream_async` /
 > `execute_full_stream` / `execute_full_stream_async`. Picking the
