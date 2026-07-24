@@ -52,11 +52,6 @@ constexpr const char* kHarnessResultChannel = "final_result";
 constexpr const char* kTasksExtension = "io.modelcontextprotocol/tasks";
 constexpr const char* kHarnessProfile = "harness-m4";
 
-bool is_externally_consumed_harness_result(const graph::Diagnostic& diagnostic) {
-    return diagnostic.code == "E6" && diagnostic.witness.contains("writers") &&
-           diagnostic.witness.value("channel", "") == kHarnessResultChannel;
-}
-
 int64_t unix_millis() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch())
@@ -1172,7 +1167,9 @@ void register_harness_node_types() {
             },
             json::parse(
                 R"JSON({"type":"object","properties":{},"additionalProperties":false})JSON"),
-            json::parse(R"JSON({"reads":["worker_results"],"writes":["final_result"]})JSON"));
+            json{{"reads", json::array({"worker_results"})},
+                 {"writes", json::array({kHarnessResultChannel})},
+                 {"exports", json::array({kHarnessResultChannel})}});
     });
 }
 
@@ -1889,9 +1886,6 @@ struct HarnessService::Impl {
                 graph::GraphCompiler::verify_roundtrip(core, compiled);
                 auto report = graph::GraphValidator::validate(compiled);
                 for (const auto& diagnostic : report.diagnostics) {
-                    // HarnessService consumes this channel after graph execution,
-                    // so an in-graph write-only warning is not actionable here.
-                    if (is_externally_consumed_harness_result(diagnostic)) continue;
                     diagnostics.push_back(make_diagnostic("static", diagnostic.code,
                                                           diagnostic.severity, diagnostic.path,
                                                           diagnostic.message, diagnostic.witness));

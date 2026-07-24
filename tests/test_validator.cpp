@@ -49,6 +49,28 @@ void ensure_vtypes_registered() {
         },
         json::parse(R"({"type":"object"})"),
         json::parse(R"({"reads":["out"],"writes":[]})"));
+    NodeFactory::instance().register_type(
+        "vfx_exporter",
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<VNoopNode>(name);
+        },
+        json::parse(R"({"type":"object"})"),
+        json::parse(R"({"reads":[],"writes":["out"],"exports":["out"]})"));
+    NodeFactory::instance().register_type(
+        "vfx_export_only",
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<VNoopNode>(name);
+        },
+        json::parse(R"({"type":"object"})"),
+        json::parse(R"({"reads":[],"writes":[],"exports":["out"]})"));
+    NodeFactory::instance().register_type(
+        "vfx_mixed_exporter",
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<VNoopNode>(name);
+        },
+        json::parse(R"({"type":"object"})"),
+        json::parse(
+            R"({"reads":[],"writes":["out","internal"],"exports":["out"]})"));
     // closed two-label condition for E10 tests.
     ConditionRegistry::instance().register_condition(
         "vcond_binary",
@@ -330,6 +352,43 @@ TEST(Validator, E6_WriteOnlyChannelWarns) {
     EXPECT_EQ(e6[0]->witness["channel"].get<std::string>(), "out");
     ASSERT_TRUE(e6[0]->witness.contains("writers"));
     EXPECT_EQ(e6[0]->witness["writers"].size(), 1u);
+}
+
+TEST(Validator, E6_ExportedWriteOnlyChannelIsExternallyConsumed) {
+    json def = {
+        {"channels", {{"out", {{"reducer", "overwrite"}}}}},
+        {"nodes", {{"w", {{"type", "vfx_exporter"}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "w"}}})},
+    };
+    auto r = validate_def(def);
+    EXPECT_TRUE(by_code(r, "E6").empty()) << r.summary();
+}
+
+TEST(Validator, E6_ExportWithoutMatchingWriteDoesNotSuppressWarning) {
+    json def = {
+        {"channels", {{"out", {{"reducer", "overwrite"}}}}},
+        {"nodes", {{"w", {{"type", "vfx_writer"}}},
+                   {"e", {{"type", "vfx_export_only"}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "w"}},
+                               {{"from", "w"}, {"to", "e"}}})},
+    };
+    auto r = validate_def(def);
+    auto e6 = by_code(r, "E6");
+    ASSERT_EQ(e6.size(), 1u) << r.summary();
+    EXPECT_EQ(e6[0]->witness["channel"].get<std::string>(), "out");
+}
+
+TEST(Validator, E6_MixedExportsStillWarnForInternalWriteOnlyChannel) {
+    json def = {
+        {"channels", {{"out", {{"reducer", "overwrite"}}},
+                      {"internal", {{"reducer", "overwrite"}}}}},
+        {"nodes", {{"w", {{"type", "vfx_mixed_exporter"}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "w"}}})},
+    };
+    auto r = validate_def(def);
+    auto e6 = by_code(r, "E6");
+    ASSERT_EQ(e6.size(), 1u) << r.summary();
+    EXPECT_EQ(e6[0]->witness["channel"].get<std::string>(), "internal");
 }
 
 TEST(Validator, E5_OverwriteRaceBetweenFanOutSiblingsWarns) {
