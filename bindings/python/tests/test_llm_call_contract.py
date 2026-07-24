@@ -65,6 +65,14 @@ class _CapturingProvider(ng.Provider):
         return "capturing"
 
 
+def test_chat_completion_exposes_normalized_stop_reason():
+    completion = ng.ChatCompletion()
+
+    assert completion.stop_reason == "unknown"
+    completion.stop_reason = "max_tokens"
+    assert completion.stop_reason == "max_tokens"
+
+
 def _definition(node):
     return {
         "name": "llm-call-contract",

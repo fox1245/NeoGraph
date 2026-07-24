@@ -94,7 +94,16 @@
     "usage_path": "usage",
     "prompt_tokens_field": "input_tokens",
     "completion_tokens_field": "output_tokens",
-    "total_tokens_field": ""
+    "total_tokens_field": "",
+    "stop_reason_path": "stop_reason",
+    "stop_reason_map": {
+      "end_turn": "end_turn",
+      "max_tokens": "max_tokens",
+      "stop_sequence": "stop_sequence",
+      "tool_use": "tool_use",
+      "refusal": "refusal"
+    },
+    "default_stop_reason": "end_turn"
   },
   "streaming": {
     "format": "sse_events",
@@ -127,6 +136,7 @@
       "message_stop": {
         "action": "done"
       }
-    }
+    },
+    "stop_reason_path": "delta.stop_reason"
   }
 }

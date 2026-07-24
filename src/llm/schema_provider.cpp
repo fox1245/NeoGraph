@@ -311,6 +311,23 @@ void SchemaProvider::parse_schema()
     resp_.prompt_tokens_field = resp.value("prompt_tokens_field", "prompt_tokens");
     resp_.completion_tokens_field = resp.value("completion_tokens_field", "completion_tokens");
     resp_.total_tokens_field = resp.value("total_tokens_field", "total_tokens");
+    resp_.stop_reason_path = resp.value("stop_reason_path", "");
+    if (resp.contains("stop_reason_map") && resp["stop_reason_map"].is_object()) {
+        for (const auto& [raw, normalized] : resp["stop_reason_map"].items()) {
+            if (normalized.is_string()) {
+                resp_.stop_reason_map[raw] = normalized.get<std::string>();
+            }
+        }
+    }
+    resp_.stop_reason_status_path = resp.value("stop_reason_status_path", "");
+    if (resp.contains("stop_reason_status_map") && resp["stop_reason_status_map"].is_object()) {
+        for (const auto& [raw, normalized] : resp["stop_reason_status_map"].items()) {
+            if (normalized.is_string()) {
+                resp_.stop_reason_status_map[raw] = normalized.get<std::string>();
+            }
+        }
+    }
+    resp_.default_stop_reason = resp.value("default_stop_reason", "unknown");
 
     // --- Streaming ---
     auto st = schema_["streaming"];
@@ -335,6 +352,8 @@ void SchemaProvider::parse_schema()
     stream_.delta_function_call_field = st.value("function_call_field", "functionCall");
     stream_.delta_tool_call_name_field = st.value("tool_call_name_field", "name");
     stream_.delta_tool_call_args_field = st.value("tool_call_args_field", "args");
+    stream_.stop_reason_path = st.value("stop_reason_path", "");
+    stream_.stop_reason_status_path = st.value("stop_reason_status_path", "");
     if (st.contains("events")) {
         stream_.events_config = st["events"];
     }
@@ -1173,6 +1192,58 @@ ChatCompletion::Usage SchemaProvider::parse_usage(const json& resp_json) const {
     return usage;
 }
 
+std::string SchemaProvider::parse_stop_reason(const json& resp_json) const {
+    auto map_reason = [](const json& value,
+                         const std::map<std::string, std::string>& mapping,
+                         bool unknown_when_unmapped) {
+        if (!value.is_string()) return std::string{};
+        const auto raw = value.get<std::string>();
+        const auto it = mapping.find(raw);
+        if (it != mapping.end()) return it->second;
+        return unknown_when_unmapped ? std::string("unknown") : std::string{};
+    };
+
+    if (!resp_.stop_reason_path.empty()) {
+        if (const auto value = json_path::at_path(resp_json, resp_.stop_reason_path)) {
+            if (const auto mapped = map_reason(*value, resp_.stop_reason_map, true); !mapped.empty()) {
+                return mapped;
+            }
+        }
+    }
+    if (!resp_.stop_reason_status_path.empty()) {
+        if (const auto value = json_path::at_path(resp_json, resp_.stop_reason_status_path)) {
+            return map_reason(*value, resp_.stop_reason_status_map, false);
+        }
+    }
+    return {};
+}
+
+std::string SchemaProvider::parse_stream_stop_reason(const json& event_json) const {
+    auto map_reason = [](const json& value,
+                         const std::map<std::string, std::string>& mapping,
+                         bool unknown_when_unmapped) {
+        if (!value.is_string()) return std::string{};
+        const auto raw = value.get<std::string>();
+        const auto it = mapping.find(raw);
+        if (it != mapping.end()) return it->second;
+        return unknown_when_unmapped ? std::string("unknown") : std::string{};
+    };
+
+    if (!stream_.stop_reason_path.empty()) {
+        if (const auto value = json_path::at_path(event_json, stream_.stop_reason_path)) {
+            if (const auto mapped = map_reason(*value, resp_.stop_reason_map, true); !mapped.empty()) {
+                return mapped;
+            }
+        }
+    }
+    if (!stream_.stop_reason_status_path.empty()) {
+        if (const auto value = json_path::at_path(event_json, stream_.stop_reason_status_path)) {
+            return map_reason(*value, resp_.stop_reason_status_map, false);
+        }
+    }
+    return {};
+}
+
 // ============================================================================
 // HTTP: complete()
 // ============================================================================
@@ -1266,6 +1337,12 @@ SchemaProvider::complete_async(const CompletionParams& params)
         std::lock_guard<std::mutex> lock(schema_mutex_);
         completion.message = parse_response(resp_json);
         completion.usage = parse_usage(resp_json);
+        completion.stop_reason = parse_stop_reason(resp_json);
+        if (completion.stop_reason.empty()) {
+            completion.stop_reason = completion.message.tool_calls.empty()
+                ? resp_.default_stop_reason
+                : "tool_use";
+        }
     }
 
     co_return completion;
@@ -1329,6 +1406,7 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
     std::string full_content;
     std::map<int, ToolCall> tc_map;
     std::string line_buffer;
+    std::string observed_stop_reason;
 
     // SSE_EVENTS: track current block/item (used by Claude and OpenAI Responses)
     struct EventBlock {
@@ -1370,6 +1448,9 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
 
                     try {
                         auto j = json::parse(payload);
+                        if (const auto reason = parse_stream_stop_reason(j); !reason.empty()) {
+                            observed_stop_reason = reason;
+                        }
 
                         // Usage capture: OpenAI-compatible endpoints emit
                         // `usage` on the FINAL chunk (with empty choices,
@@ -1464,6 +1545,9 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
 
                     try {
                         auto j = json::parse(payload);
+                        if (const auto reason = parse_stream_stop_reason(j); !reason.empty()) {
+                            observed_stop_reason = reason;
+                        }
 
                         if (!stream_.events_config.contains(current_event_type)) continue;
                         auto event_cfg = stream_.events_config[current_event_type];
@@ -1620,6 +1704,9 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
     for (auto& [idx, tc] : tc_map) {
         completion.message.tool_calls.push_back(tc);
     }
+    completion.stop_reason = observed_stop_reason.empty()
+        ? (completion.message.tool_calls.empty() ? resp_.default_stop_reason : "tool_use")
+        : observed_stop_reason;
 
     return completion;
 }
@@ -1829,6 +1916,7 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
     completion.message.role = "assistant";
     std::string full_content;
     std::map<int, ToolCall> tc_map;
+    std::string observed_stop_reason;
 
     struct EventBlock {
         std::string type;
@@ -1919,6 +2007,9 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
 
         std::string event_type = j.value("type", "");
         if (event_type.empty()) continue;
+        if (const auto reason = parse_stream_stop_reason(j); !reason.empty()) {
+            observed_stop_reason = reason;
+        }
 
         // Server-side error frames terminate the stream with detail.
         if (event_type == "error") {
@@ -2014,6 +2105,9 @@ SchemaProvider::complete_stream_ws_responses(const CompletionParams& params,
     for (auto& [_, tc] : tc_map) {
         completion.message.tool_calls.push_back(tc);
     }
+    completion.stop_reason = observed_stop_reason.empty()
+        ? (completion.message.tool_calls.empty() ? resp_.default_stop_reason : "tool_use")
+        : observed_stop_reason;
     co_return completion;
 }
 
