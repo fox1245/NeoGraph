@@ -1,68 +1,66 @@
-# JARVIS — 음성으로 말 거는 메타 오케스트레이터
+# JARVIS — Voice-Driven Meta-Orchestrator
 
-> 클라우드 0개 의존, 라즈베리파이 한 대에서 돌아가는 자비스.
-> 마이크가 토니, NeoGraph 가 자비스, 도구·전문가는 자비스의 부하들.
+> Cloud-zero dependency, runs on a single Raspberry Pi.
+> Microphone is Tony, NeoGraph is JARVIS, tools/experts are JARVIS's subordinates.
 
-이 cookbook 은 "음성 TTS 예제" 가 아닙니다. NeoGraph 의 멀티에이전트
-프리미티브 — MCP 도구, A2A 양방향, 비동기 병렬, Store 메모리, ReAct
-서브그래프 — 를 **음성 한 줄로 묶어내는** 한 개의 시연입니다.
+This cookbook is **not** a "voice TTS example". It's a demonstration of NeoGraph's
+multi-agent primitives — MCP tools, bidirectional A2A, async parallel, Store memory,
+ReAct subgraph — **woven together with a single line of voice**.
 
-## 이게 왜 자비스인가
+## Why This Is JARVIS
 
-영화 속 자비스가 "음성 TTS 가 있는 챗봇" 이어서 자비스가 아닙니다.
-자비스는 이 다섯 가지를 동시에 합니다:
+JARVIS in movies isn't a chatbot with voice TTS. JARVIS does five things simultaneously:
 
-1. 토니가 말 끝나기 전에 의도를 잡는다 — **빠른 의도 분류**
-2. 자기가 직접 답할 수 있으면 답하고, 아니면 부하한테 시킨다 — **4-way 라우팅**
-3. 동시에 여러 정보를 모은다 — **병렬 fan-out**
-4. 어제 한 얘기를 기억한다 — **장기 메모리**
-5. 다른 자비스/시스템에서 자비스를 부를 수 있다 — **A2A 양방향**
+1. Grabs intent before Tony finishes speaking — **fast intent classification**
+2. Answers directly if possible, otherwise delegates to subordinates — **4-way routing**
+3. Gathers multiple pieces of information at once — **parallel fan-out**
+4. Remembers yesterday's conversation — **long-term memory**
+5. Can be called by other JARVIS/systems — **bidirectional A2A**
 
-그래서 이 cookbook 의 핵심은 **그래프 모양** 이지 음성이 아닙니다.
-음성은 입출력 껍데기일 뿐이고, 안에 들어가는 NeoGraph 의 오케스트레이션이
-"자비스 느낌" 을 만듭니다.
+So the core of this cookbook is the **graph shape**, not voice. Voice is just the
+input/output shell; what creates the "JARVIS feel" is the orchestration inside NeoGraph.
 
-## 전체 그래프
+## Full Graph
 
 ```
                           ┌────────────────────────┐
-                          │ 백그라운드 트리거       │
-                          │ (타이머 / 외부 이벤트)  │  ── A2A 서버로
-                          └───────────┬────────────┘     자비스 호출도 여기로
+                          │ Background triggers    │
+                          │ (timer / external events)│ ── A2A server for
+                          └───────────┬────────────┘     JARVIS calls go here
                                       │
-[마이크]──[VAD]──[whisper.cpp STT]──[memory_lookup]──[intent_router]
-   miniaudio                          ▲                   │
-                                      │ Store             │
-                                      │ (대화 누적)        │
-                                      │                   │ 라우터가 4-way 결정
-                                      │                   │ (chat 은 합성기 직행)
-                                      │                   │
-                          ┌───────────┴───────────────────┴───────────────┐
-                          │                                                │
-                  [direct_branch]        [delegate_branch]        [parallel_branch]
-                       │                       │                       │
-              MCP 도구 1회 호출        A2A 로 전문가에게 통째       Send / fan-out
-              (시간, 날씨, 메모 등)    위임 (코더, 연구자, ...)     으로 여러 도구 동시
-                       │                       │                       │
-                       └───────────────────────┼───────────────────────┘
-                                               │
-                                       [response_synth]
-                                       (큰 LLM 으로 자연 응답 합성)
-                                               │
-                                               ↓
-                                  [supertonic TTS] ──→ [스피커]
-                                  (감지된 언어 그대로)     miniaudio
+ [Microphone]──[VAD]──[whisper.cpp STT]──[memory_lookup]──[intent_router]
+    miniaudio                          ▲                   │
+                                       │ Store             │
+                                       │ (conversation accumulation)│
+                                       │                   │ Router makes 4-way decision
+                                       │                   │ (chat goes directly to synthesizer)
+                                       │                   │
+                           ┌───────────┴───────────────────┴───────────────┐
+                           │                                                │
+                   [direct_branch]        [delegate_branch]        [parallel_branch]
+                        │                       │                       │
+               MCP tool single call        Delegate to expert entirely       Send / fan-out
+               (time, weather, memo, etc.)    (coder, researcher, ...)     to multiple tools simultaneously
+                        │                       │                       │
+                        └───────────────────────┼───────────────────────┘
+                                                │
+                                        [response_synth]
+                                        (synthesize natural response with large LLM)
+                                                │
+                                                ↓
+                                   [supertonic TTS] ──→ [Speaker]
+                                   (in detected language)     miniaudio
 ```
 
-## 두 개의 카탈로그 JSON — 자비스의 "내가 뭘 할 수 있는지"
+## Two Catalog JSON Files — JARVIS's "What I Can Do"
 
-자비스가 시작될 때 두 파일을 읽고 능력 목록을 구성합니다.
-**코드 재컴파일 없이 능력을 추가/제거할 수 있다는 뜻** 입니다.
+When JARVIS starts, it reads two files and builds its capability list.
+**This means you can add/remove capabilities without recompiling code.**
 
-### `config/mcp_catalog.json` — 도구
+### `config/mcp_catalog.json` — Tools
 
-자비스가 직접 호출할 수 있는 함수형 도구 목록.
-각 항목은 MCP 서버 한 개에 대응 (HTTP 또는 stdio).
+A list of function-type tools JARVIS can call directly.
+Each entry corresponds to one MCP server (HTTP or stdio).
 
 ```json
 {
@@ -71,27 +69,27 @@
       "name": "time_weather",
       "transport": "http",
       "url": "http://127.0.0.1:8000",
-      "description": "현재 시간, 날씨, 환율 같은 짧은 즉답성 정보",
+      "description": "Short, immediate-answer information like current time, weather, exchange rates",
       "enabled": true
     },
     {
       "name": "personal_memo",
       "transport": "stdio",
       "command": ["python3", "examples/demo_mcp_stdio_server.py"],
-      "description": "토니의 개인 메모 저장/검색",
+      "description": "Tony's personal memo storage/retrieval",
       "enabled": true
     }
   ]
 }
 ```
 
-시작 시 각 MCP 서버에서 `get_tools()` 호출 → 도구 정의 합쳐서
-라우터의 시스템 프롬프트에 "사용 가능한 도구" 로 주입.
+On startup, it calls `get_tools()` on each MCP server → merges tool definitions
+and injects them into the router's system prompt as "available tools".
 
-### `config/agent_registry.json` — 전문가 (A2A)
+### `config/agent_registry.json` — Experts (A2A)
 
-자비스가 통째로 위임할 수 있는 서브에이전트들. 각각 별도 프로세스/머신
-에서 도는 A2A 엔드포인트.
+Sub-agents JARVIS can delegate entire tasks to. Each runs as a separate process/machine
+as an A2A endpoint.
 
 ```json
 {
@@ -99,28 +97,27 @@
     {
       "name": "coder",
       "url": "http://127.0.0.1:8210",
-      "expertise": "코드 작성, 리뷰, 디버깅",
+      "expertise": "Code writing, review, debugging",
       "fetch_card_on_start": true
     },
     {
       "name": "researcher",
       "url": "http://127.0.0.1:8211",
-      "expertise": "웹 검색 + 요약, 학술 자료 정리",
+      "expertise": "Web search + summarization, academic paper organization",
       "fetch_card_on_start": true
     }
   ]
 }
 ```
 
-시작 시 각 URL 에 `AgentCard` 요청 → 응답하는 놈만 활성화.
-**중요한 트릭**: A2A 표준 따르는 어떤 외부 에이전트라도 — 다른 사람이
-만든 Python A2A 봇이든, 또 다른 NeoGraph 인스턴스든 — 이 JSON 에
-URL 만 추가하면 자비스의 부하가 됩니다.
+On startup, it requests `AgentCard` from each URL → activates only those that respond.
+**Key trick**: Any external agent that follows the A2A standard — whether it's a Python
+A2A bot someone else made, another NeoGraph instance, etc. — can become JARVIS's
+subordinate by just adding its URL to this JSON.
 
-## 라우터 (의도 분류) — 자비스의 두뇌
+## Router (Intent Classification) — JARVIS's Brain
 
-작은/빠른 LLM (예: `gpt-4o-mini` 또는 로컬 `llama-3.2-1b`) 한 번 호출로
-다음 JSON 을 받습니다.
+A single call to a small/fast LLM (e.g., `gpt-4o-mini` or local `llama-3.2-1b`) returns:
 
 ```json
 {
@@ -131,167 +128,167 @@ URL 만 추가하면 자비스의 부하가 됩니다.
 }
 ```
 
-- `chat` — 도구도 위임도 없이 합성기가 자기 지식 + 대화 기억으로 직접 답변.
-  인사, 자기소개, 잡담, "아까 뭐라고 했지" 류 대화 회상. 라우터가 카탈로그에
-  없는 도구/에이전트를 발명하면 검증 단계에서 이 모드로 강등된다.
-- `direct` — 도구 한 번. 결과가 단순하면 (`"15시 30분"`) `skip_synthesis=true`
-  로 응답 합성도 생략하고 TTS 직행. **빠르다.**
-- `delegate` — `delegate_to` 가 가리키는 A2A 엔드포인트로 통째로 던짐.
-  결과 받아서 음성용 한 줄 요약만 합성.
-- `parallel` — `tool_calls` 가 여러 개. NeoGraph 의 `make_parallel_group`
-  으로 동시 실행, reducer 가 결과 합쳐서 응답 합성.
+- `chat` — No tools or delegation. Synthesizer answers directly using its own knowledge + conversation memory.
+  Greetings, self-introduction, small talk, "what did I say earlier?" style conversation recall. If the router
+  invents tools/agents not in the catalog, the validation stage demotes to this mode.
+- `direct` — Single tool call. If the result is simple (`"3:30 PM"`), skip synthesis with `skip_synthesis=true`
+  and go straight to TTS. **Fast.**
+- `delegate` — Delegate entirely to the A2A endpoint pointed by `delegate_to`.
+  After getting the result, synthesize only a one-line summary for voice.
+- `parallel` — Multiple `tool_calls`. Execute simultaneously using NeoGraph's `make_parallel_group`,
+  reducer combines results for the synthesizer.
 
-### 왜 라우터 / 합성기를 나누는가
+### Why Separate Router and Synthesizer
 
-전부 한 큰 LLM 으로 ReAct 돌리면 매 턴 1-3초씩 걸려서 자비스 느낌이 안 납니다.
-- 라우터: 작은 모델, ~200ms, JSON 한 번
-- 합성기: 큰 모델, ~800-1500ms, 자연어 한 번
-- 도구가 즉답성이면 합성기 생략 → ~500ms 안에 응답 시작
+Running everything through one large LLM with ReAct would take 1-3 seconds per turn, killing the JARVIS feel.
+- Router: small model, ~200ms, single JSON
+- Synthesizer: large model, ~800-1500ms, single natural language response
+- If tool provides immediate answer, skip synthesizer → response starts in ~500ms
 
-영화 자비스가 토니 말 끝나자마자 답하는 그 텀포는 이 분리에서 나옵니다.
+The quick response timing in movie JARVIS comes from this separation.
 
-## 메모리 (`Store`)
+## Memory (`Store`)
 
-매 턴 시작 시 `memory_lookup` 노드가 NeoGraph `Store` 에서 최근 N턴 +
-사용자 선호 (`tony.prefers.language=ko`, `tony.last_topic=...`) 끌어옴.
+At the start of each turn, the `memory_lookup` node pulls the last N turns + user preferences
+(`tony.prefers.language=ko`, `tony.last_topic=...`) from NeoGraph `Store`.
 
-매 턴 종료 시 자비스 응답 + 토니 발화 + 사용된 도구를 Store 에 push.
-다음 턴 라우터가 "아까 그거" 같은 지칭 해소 가능. `JsonFileStore` 로
-파일 영속 — 재시작해도 기억 유지. 빈 턴(STT 실패·노이즈)은 커밋에서
-제외해 기억 오염 방지. `prefs.native_lang` 에 추정 네이티브 언어를 유지
-(언어 관성).
+At the end of each turn, JARVIS pushes the response + Tony's utterance + used tools to Store.
+Next turn's router can resolve references like "that thing I mentioned earlier". `JsonFileStore`
+persists to file — remembers across restarts. Empty turns (STT failure / noise) are excluded
+from commits to prevent memory pollution. `prefs.native_lang` maintains the estimated native language
+(language consistency).
 
-## A2A 양방향 — 자비스가 부르고 자비스가 불린다
+## Bidirectional A2A — JARVIS Calls and Is Called
 
-- **부르기**: `agent_registry.json` 의 전문가들에게 `A2AClient` 로 위임.
-- **불리기**: 자비스 자체도 `A2AServer` (포트 8200) 띄움.
-  - 다른 시스템에서 `POST /v1/messages` 로 자비스에 텍스트 메시지 보낼 수 있음.
-  - 휴대폰 앱, 다른 NeoGraph 인스턴스, 심지어 또 다른 자비스가 호출 가능.
-  - 텍스트 입력은 마이크/STT 단계를 건너뛰고 라우터로 직행.
+- **Calling**: Delegate to experts via `A2AClient` from `agent_registry.json`.
+- **Being called**: JARVIS itself exposes an `A2AServer` (port 8200).
+  - External systems can send text messages to JARVIS via `POST /v1/messages`.
+  - Mobile apps, other NeoGraph instances, even another JARVIS can call it.
+  - Text input skips the microphone/STT stage and goes directly to the router.
 
-**자비스끼리 통신 시연**: 토니 집의 자비스(8200) ↔ 회사 자비스(8201).
-"회사 자비스한테 오늘 회의록 받아와" → 집 자비스가 회사 자비스에 A2A
-호출 → 응답을 토니에게 음성으로.
+**JARVIS-to-JARVIS communication demo**: Home JARVIS (8200) ↔ Office JARVIS (8201).
+"Get today's meeting minutes from office JARVIS" → Home JARVIS calls office JARVIS via A2A
+→ Response delivered to Tony via voice.
 
-## 백그라운드 트리거 (proactive)
+## Background Triggers (Proactive)
 
-별도 비동기 그래프가 백그라운드에서 돌면서:
-- 타이머 (5분마다 캘린더 체크)
-- 외부 이벤트 (집안 센서, 메일 수신)
-- 외부 A2A 호출
+A separate async graph runs in the background:
+- Timer (check calendar every 5 minutes)
+- External events (home sensors, email receipt)
+- External A2A calls
 
-이벤트 발생 시 자비스 메인 그래프에 메시지 주입 → 토니가 묻기 전에
-자비스가 먼저 말함. ("Sir, 회의 10분 전입니다.")
+When an event occurs, it injects a message into JARVIS's main graph → JARVIS speaks
+before Tony asks. ("Sir, meeting in 10 minutes.")
 
-NeoGraph 의 `27_async_concurrent_runs.cpp` 패턴 그대로 사용.
+Uses NeoGraph's `27_async_concurrent_runs.cpp` pattern exactly.
 
-## 디렉토리 구성
+## Directory Structure
 
 ```
 jarvis/
-├── README.md                      ← 지금 이 문서
-├── CMakeLists.txt                 외부 의존(whisper/onnxruntime/miniaudio) gated
-├── config/                        기본 config (그래프·카탈로그·레지스트리·persona)
-├── config-demo/                   실행용 프리셋 (real-tools / mock)
-├── config-bench*/                 벤치용 config
+├── README.md                      ← This document
+├── CMakeLists.txt                 External dependencies (whisper/onnxruntime/miniaudio) gated
+├── config/                        Default config (graph · catalog · registry · persona)
+├── config-demo/                   Execution preset (real-tools / mock)
+├── config-bench*/                 Benchmark config
 ├── src/
-│   ├── main.cpp                   진입점 (노드 등록·그래프 컴파일·메인 루프)
-│   ├── audio/                     miniaudio 캡처(+Silero VAD)·재생, supertonic TTS
-│   ├── stt/                       whisper_node(다국어·언어관성) + moonshine_node(엣지)
-│   ├── orchestrator/              라우터, MCP 카탈로그 로더, A2A 디스패처
-│   └── memory/                    Store 기반 대화 메모리(JsonFileStore 영속)
-├── specialists/                   coder / researcher (별도 A2A 서버)
-├── bench/                         NeoGraph vs LangGraph 벤치 (쌍둥이·드라이버·Docker)
-├── assets/download.sh             whisper/supertonic/moonshine/silero 모델 다운로드
+│   ├── main.cpp                   Entry point (node registration · graph compilation · main loop)
+│   ├── audio/                     miniaudio capture (+Silero VAD) · playback, supertonic TTS
+│   ├── stt/                       whisper_node (multi-language · language consistency) + moonshine_node (edge)
+│   ├── orchestrator/              Router, MCP catalog loader, A2A dispatcher
+│   └── memory/                    Store-based conversation memory (JsonFileStore persistence)
+├── specialists/                   coder / researcher (separate A2A servers)
+├── bench/                         NeoGraph vs LangGraph benchmark (twin · driver · Docker)
+├── assets/download.sh             Download whisper/supertonic/moonshine/silero models
 ├── scripts/
-│   ├── run_jarvis.sh              실행 wrapper (LD_LIBRARY_PATH·ROCm·dxg 자동)
-│   ├── jarvis_repl.py             한글 readline REPL (텍스트/wav 입력)
-│   ├── build_whisper_hip.sh       whisper.cpp ROCm/HIP GPU 빌드
-│   └── demo_mcp_server.py         데모 MCP 서버 (시간/날씨/계산)
-└── docs/architecture.md          그래프 노드별 상세 설명
+│   ├── run_jarvis.sh              Execution wrapper (LD_LIBRARY_PATH · ROCm · dxg auto)
+│   ├── jarvis_repl.py             Korean readline REPL (text/wav input)
+│   ├── build_whisper_hip.sh       Build whisper.cpp ROCm/HIP GPU
+│   └── demo_mcp_server.py         Demo MCP server (time/weather/calc)
+└── docs/architecture.md          Detailed node-by-node graph explanation
 ```
 
-## 빌드 / 실행
+## Build / Run
 
 ```bash
-# 1. 모델 다운로드 (whisper-large-v3-turbo ~1.6GB + supertonic + silero VAD)
-#    경량: JARVIS_WHISPER=small bash assets/download.sh  (라즈베리파이/CPU)
+# 1. Download models (whisper-large-v3-turbo ~1.6GB + supertonic + silero VAD)
+#    Lightweight: JARVIS_WHISPER=small bash assets/download.sh  (Raspberry Pi / CPU)
 bash examples/cookbook/jarvis/assets/download.sh
 
-# 2. 빌드 — onnxruntime, whisper.cpp, miniaudio 시스템에서 찾아짐(없으면 mock)
+# 2. Build — onnxruntime, whisper.cpp, miniaudio found on system (or mock if missing)
 cmake -B build-jarvis -DNEOGRAPH_BUILD_COOKBOOK_JARVIS=ON
 cmake --build build-jarvis --target cookbook_jarvis -j
 
-# 3a. 실행 — 텍스트/wav 입력 (한글 라인편집 REPL 권장)
+# 3a. Run — text/wav input (Korean line-edit REPL recommended)
 cd examples/cookbook/jarvis
-python3 scripts/jarvis_repl.py                 # .env 의 OPENAI_API_KEY 자동 로드
-#   토니 ▸ 안녕?                                # 텍스트
-#   토니 ▸ wav:/경로/음성.wav                    # 오디오 파일 → STT
+python3 scripts/jarvis_repl.py                 # Automatically loads OPENAI_API_KEY from .env
+#   Tony ▸ Hello?                                # Text
+#   Tony ▸ wav:/path/to/audio.wav                # Audio file → STT
 
-# 3b. 실행 — 라이브 마이크 (miniaudio 캡처 + Silero VAD)
+# 3b. Run — live microphone (miniaudio capture + Silero VAD)
 JARVIS_MIC=1 bash scripts/run_jarvis.sh config-demo/real-tools
-#   "온라인" 뜬 뒤 말하면 → 발화 끝 감지 → STT → 응답 → TTS
+#   "Online" appears → speak → voice end detection → STT → response → TTS
 
-# (도구 데모용 MCP 서버 — 별도 터미널)
-python3 scripts/demo_mcp_server.py 8888        # 시간/날씨/계산
+# (Demo MCP server for tools — separate terminal)
+python3 scripts/demo_mcp_server.py 8888        # Time/weather/calc
 ```
 
-LLM 프로바이더는 `.env` 의 `OPENAI_API_KEY`(OpenAI 직결) 또는
-`OPENAI_BASE_URL`+`JARVIS_ROUTER_MODEL`/`JARVIS_SYNTH_MODEL`(Groq/Cerebras 등
-OpenAI 호환) 으로 선택. 없으면 MockProvider 로 오프라인 동작(에코).
+LLM provider selected by `OPENAI_API_KEY` in `.env` (direct OpenAI) or
+`OPENAI_BASE_URL`+`JARVIS_ROUTER_MODEL`/`JARVIS_SYNTH_MODEL` (Groq/Cerebras/etc.
+OpenAI-compatible). Without it, runs offline with MockProvider (echo).
 
-## 음성 스택 세부
+## Voice Stack Details
 
-### 라이브 마이크 (miniaudio + Silero VAD)
-`JARVIS_MIC=1` 또는 config `use_microphone:true`. 캡처 워커 스레드가 512샘플
-윈도우로 Silero VAD 를 돌려 발화 시작/끝을 감지(200ms 프리롤, 500ms 무음 종료).
-**백프레셔**: 추론 중 캡처를 폐기해 TTS 에코·스테일 발화·시작 노이즈를 차단.
-디바이스 실패(WSL2 마이크 미연결 등) 시 stdin 자동 폴백. 튜닝:
-`JARVIS_VAD_THRESHOLD`(기본 0.5), 관측: `JARVIS_MIC_DEBUG=1`.
+### Live Microphone (miniaudio + Silero VAD)
+`JARVIS_MIC=1` or config `use_microphone:true`. Capture worker thread runs Silero VAD
+on 512-sample window to detect speech start/end (200ms pre-roll, 500ms silence end).
+**Backpressure**: Discards capture during inference to block TTS echo, stale utterances,
+and start noise. Device failure (WSL2 microphone disconnected, etc.) falls back to stdin automatically.
+Tuning: `JARVIS_VAD_THRESHOLD` (default 0.5), observe: `JARVIS_MIC_DEBUG=1`.
 
-### STT — 두 가지 옵션 (config 의 `stt.type` 으로 스왑)
-- **`whisper_stt`** (기본): whisper.cpp. `language:"auto"` 로 99개 언어 자동
-  감지 → **화자 언어 그대로 응답·TTS**. **언어 관성**: store.prefs 에
-  네이티브 언어를 유지해, 짧은 발화가 외국어로 오인식돼도 홱 바뀌지 않고
-  고수(연속 오인식이어야 전환).
-- **`moonshine_stt`**: Moonshine-tiny ONNX(27M, supertonic 과 ORT 공유).
-  엣지·저지연·한국어 flavor. 언어별 모델이라 lang 고정.
+### STT — Two Options (swap via config `stt.type`)
+- **`whisper_stt`** (default): whisper.cpp. `language:"auto"` detects 99 languages automatically
+  → **Answers and TTS in speaker's language**. **Language consistency**: maintains native language
+  in store.prefs so short utterances misidentified as foreign don't suddenly switch (requires
+  consistent misidentification to switch).
+- **`moonshine_stt`**: Moonshine-tiny ONNX (27M, shares ORT with supertonic).
+  Edge, low-latency, Korean flavor. Language-specific model, so lang is fixed.
 
-### GPU 가속 (whisper.cpp ROCm/HIP)
-번들 whisper.cpp 는 CPU 전용 — large 가 CPU 로 ~32초(11초 클립). AMD GPU
-(gfx1201=R9700, ROCm≥7.2)면 `bash scripts/build_whisper_hip.sh` 로 GGML_HIP
-빌드 → **~7초(4.5×)**. run_jarvis.sh 가 ROCm 런타임·WSL dxg 를 자동 로드.
+### GPU Acceleration (whisper.cpp ROCm/HIP)
+Bundled whisper.cpp is CPU-only — large takes ~32s on CPU (11s clip). AMD GPU
+(gfx1201=R9700, ROCm≥7.2) run `bash scripts/build_whisper_hip.sh` for GGML_HIP
+build → **~7s (4.5×)**. run_jarvis.sh automatically loads ROCm runtime and WSL dxg.
 
-## 벤치 — NeoGraph vs LangGraph (`bench/`)
+## Benchmark — NeoGraph vs LangGraph (`bench/`)
 
-동일 토폴로지를 LangGraph 로 미러링해 프레임워크 오버헤드를 실측
-(`bench/README.md`). 동일 제약 컨테이너, 4층위(mock/E2E/nginx 경계계측/
-스트리밍 TTFT/파이썬-pybind). 요지: 그래프 오버헤드 0.38 vs 3.07ms/턴,
-기동 40ms vs ~3s, RSS 36 vs 561MB — 단 클라우드 LLM 턴 레이턴시는 공급자
-분산이 지배(경계계측으로 분리). `GROQ_API_KEY=... bash bench/run_bench.sh`.
+Mirrors identical topology (mic→stt→merge→memory→router→4-way→synth/skip→commit→tts)
+in LangGraph (Python twin `langgraph_twin.py`), measures in identical constraints
+(`--cpus=2 --memory=2g`) container.
 
-## 구현 상태
+```bash
+GROQ_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + groq 20 turns × both
+```
 
-**실기동 완료** — 실기기에서 라이브 음성 한 턴이 도는 것을 검증(실LLM Groq).
-mic→VAD→STT→라우터→4-way→합성→TTS 전 구간 + 메모리 영속 + A2A self-server.
+## Implementation Status
 
-알려진 한계 / 다음 버전:
-- **barge-in 미지원** — TTS 재생 중 발화는 백프레셔로 폐기(v2 에서 cancel
-  token 도입).
-- **스트리밍 STT 미적용** — 발화 완성 후 배치 전사. Moonshine v2 ergodic
-  encoder 로 청크 단위 스트리밍이 다음 후보.
-- **다중 화자·장기 메모리 압축** — 단일 화자 가정, turns 24개 상한.
-- **백그라운드 트리거(proactive)** — 설계만 있고 미구현.
+**Fully functional** — Verified live voice single-turn runs on real hardware (real LLM Groq).
+Mic→VAD→STT→router→4-way→synth→TTS full chain + memory persistence + A2A self-server.
 
-## 라이선스 / 외부 의존성
+Known limitations / next version:
+- **Barge-in not supported** — Utterances during TTS playback are discarded via backpressure
+  (will add cancel token in v2).
+- **Streaming STT not applied** — Batch transcription after utterance completion. Moonshine v2
+  ergodic encoder chunk-by-chunk streaming is the next candidate.
+- **Multi-speaker · long-memory compression** — Single-speaker assumption, 24-turn limit.
+- **Background triggers (proactive)** — Designed but not implemented.
 
-| 라이브러리 | 라이선스 | 역할 |
+## License / External Dependencies
+
+| Library | License | Role |
 |---|---|---|
-| [supertonic](https://github.com/supertone-inc/supertonic) | MIT | TTS (99M, ONNX, 31개 언어) |
-| [whisper.cpp](https://github.com/ggerganov/whisper.cpp) | MIT | STT (99개 언어 자동감지, CPU/ROCm) |
-| [Moonshine](https://github.com/moonshine-ai/moonshine) | MIT | 엣지 STT 옵션 (27M ONNX) |
-| [miniaudio](https://github.com/mackron/miniaudio) | MIT-0 / public domain | 마이크 캡처 + 스피커 재생 |
-| [Silero VAD](https://github.com/snakers4/silero-vad) | MIT | 발화 시작/끝 감지 (ONNX) |
-| ONNX Runtime | MIT | supertonic·moonshine·VAD 추론 |
-
-전부 MIT 계열 — NeoGraph 의 `THIRD_PARTY_LICENSES.md` 에 추가 예정.
+| [supertonic](https://github.com/supertone-inc/supertonic) | MIT | TTS (99M, ONNX, 31 languages) |
+| [whisper.cpp](https://github.com/ggerganov/whisper.cpp) | MIT | STT (99 languages auto-detect, CPU/ROCm) |
+| [Moonshine](https://github.com/moonshine-ai/moonshine) | MIT | Edge STT option (27M ONNX) |
+| [miniaudio](https://github.com/mackron/miniaudio) | MIT-0 / public domain | Microphone capture + speaker playback |
+| [Silero VAD](https://github.com/snakers4/silero-vad) | MIT | Speech start/end detection (ONNX) |
+| ONNX Runtime | MIT | supertonic·moonshine·VAD inference |
