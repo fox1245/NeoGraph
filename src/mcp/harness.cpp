@@ -48,8 +48,14 @@ namespace {
 
 constexpr const char* kWorkerNodeType = "neograph_harness_worker";
 constexpr const char* kJudgeNodeType = "neograph_harness_judge";
+constexpr const char* kHarnessResultChannel = "final_result";
 constexpr const char* kTasksExtension = "io.modelcontextprotocol/tasks";
 constexpr const char* kHarnessProfile = "harness-m4";
+
+bool is_externally_consumed_harness_result(const graph::Diagnostic& diagnostic) {
+    return diagnostic.code == "E6" && diagnostic.witness.contains("writers") &&
+           diagnostic.witness.value("channel", "") == kHarnessResultChannel;
+}
 
 int64_t unix_millis() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1129,7 +1135,7 @@ public:
             {"failed_workers", failed},
         };
         graph::NodeOutput output;
-        output.writes.push_back({"final_result", std::move(result)});
+        output.writes.push_back({kHarnessResultChannel, std::move(result)});
         co_return output;
     }
 
@@ -1178,7 +1184,7 @@ json preset_fanout_judge(const json& request, const std::string& preset) {
          {
              {"task", {{"reducer", "overwrite"}, {"initial", json::object()}}},
              {"worker_results", {{"reducer", "append"}, {"initial", json::array()}}},
-             {"final_result", {{"reducer", "overwrite"}, {"initial", nullptr}}},
+             {kHarnessResultChannel, {{"reducer", "overwrite"}, {"initial", nullptr}}},
          }},
         {"nodes", json::object()},
         {"edges", json::array()},
@@ -1883,6 +1889,9 @@ struct HarnessService::Impl {
                 graph::GraphCompiler::verify_roundtrip(core, compiled);
                 auto report = graph::GraphValidator::validate(compiled);
                 for (const auto& diagnostic : report.diagnostics) {
+                    // HarnessService consumes this channel after graph execution,
+                    // so an in-graph write-only warning is not actionable here.
+                    if (is_externally_consumed_harness_result(diagnostic)) continue;
                     diagnostics.push_back(make_diagnostic("static", diagnostic.code,
                                                           diagnostic.severity, diagnostic.path,
                                                           diagnostic.message, diagnostic.witness));
@@ -2097,7 +2106,7 @@ struct HarnessService::Impl {
                 } else {
                     run->status = "completed";
                     run->pending                    = nullptr;
-                    run->details = graph_result.channel_raw("final_result");
+                    run->details = graph_result.channel_raw(kHarnessResultChannel);
                     run->details["execution_trace"] = graph_result.execution_trace;
                     const auto base_uri = "neograph://runs/" + run->id;
                     run->result                     = {
