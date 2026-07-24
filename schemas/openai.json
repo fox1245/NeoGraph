@@ -87,7 +87,16 @@
     "usage_path": "usage",
     "prompt_tokens_field": "prompt_tokens",
     "completion_tokens_field": "completion_tokens",
-    "total_tokens_field": "total_tokens"
+    "total_tokens_field": "total_tokens",
+    "stop_reason_path": "choices.0.finish_reason",
+    "stop_reason_map": {
+      "stop": "end_turn",
+      "length": "max_tokens",
+      "tool_calls": "tool_use",
+      "function_call": "tool_use",
+      "content_filter": "content_filter"
+    },
+    "default_stop_reason": "end_turn"
   },
   "streaming": {
     "format": "sse_data",
@@ -99,6 +108,7 @@
     "tool_call_index_field": "index",
     "tool_call_id_field": "id",
     "tool_call_name_path": "function.name",
-    "tool_call_args_path": "function.arguments"
+    "tool_call_args_path": "function.arguments",
+    "stop_reason_path": "choices.0.finish_reason"
   }
 }

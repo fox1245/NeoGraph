@@ -210,6 +210,7 @@ Result of a single LLM completion call.
 ```cpp
 struct ChatCompletion {
     ChatMessage message;   // The assistant's response message
+    std::string stop_reason = "unknown";
     struct Usage {
         int prompt_tokens = 0;      // Tokens in the prompt
         int completion_tokens = 0;  // Tokens in the completion
@@ -221,9 +222,14 @@ struct ChatCompletion {
 | Field | Type | Description |
 |-------|------|-------------|
 | `message` | `ChatMessage` | The assistant's response (may include tool calls) |
+| `stop_reason` | `std::string` | Normalized provider completion reason: `end_turn`, `max_tokens`, `stop_sequence`, `tool_use`, `content_filter`, `refusal`, or `unknown` |
 | `usage.prompt_tokens` | `int` | Number of tokens in the input prompt |
 | `usage.completion_tokens` | `int` | Number of tokens in the generated completion |
 | `usage.total_tokens` | `int` | Total tokens consumed (prompt + completion) |
+
+`stop_reason` was added to the public C++ struct. Recompile applications and
+shared-library consumers when upgrading to this release because the struct's
+binary layout changed.
 
 ### Helper Functions
 

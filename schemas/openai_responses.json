@@ -87,7 +87,17 @@
     "usage_path": "usage",
     "prompt_tokens_field": "input_tokens",
     "completion_tokens_field": "output_tokens",
-    "total_tokens_field": "total_tokens"
+    "total_tokens_field": "total_tokens",
+    "stop_reason_path": "incomplete_details.reason",
+    "stop_reason_status_path": "status",
+    "stop_reason_map": {
+      "max_output_tokens": "max_tokens",
+      "content_filter": "content_filter"
+    },
+    "stop_reason_status_map": {
+      "incomplete": "unknown"
+    },
+    "default_stop_reason": "end_turn"
   },
   "streaming": {
     "format": "sse_events",
@@ -132,7 +142,12 @@
       },
       "response.completed": {
         "action": "done"
+      },
+      "response.incomplete": {
+        "action": "done"
       }
-    }
+    },
+    "stop_reason_path": "response.incomplete_details.reason",
+    "stop_reason_status_path": "response.status"
   }
 }

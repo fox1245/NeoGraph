@@ -94,7 +94,18 @@
     "usage_path": "usageMetadata",
     "prompt_tokens_field": "promptTokenCount",
     "completion_tokens_field": "candidatesTokenCount",
-    "total_tokens_field": "totalTokenCount"
+    "total_tokens_field": "totalTokenCount",
+    "stop_reason_path": "candidates.0.finishReason",
+    "stop_reason_map": {
+      "STOP": "end_turn",
+      "MAX_TOKENS": "max_tokens",
+      "SAFETY": "content_filter",
+      "RECITATION": "content_filter",
+      "BLOCKLIST": "content_filter",
+      "PROHIBITED_CONTENT": "content_filter",
+      "SPII": "content_filter"
+    },
+    "default_stop_reason": "end_turn"
   },
   "streaming": {
     "format": "sse_data",
@@ -105,6 +116,7 @@
     "text_field": "text",
     "function_call_field": "functionCall",
     "tool_call_name_field": "name",
-    "tool_call_args_field": "args"
+    "tool_call_args_field": "args",
+    "stop_reason_path": "candidates.0.finishReason"
   }
 }

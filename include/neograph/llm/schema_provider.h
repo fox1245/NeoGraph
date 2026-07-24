@@ -293,6 +293,11 @@ class NEOGRAPH_API SchemaProvider : public Provider {
         std::string prompt_tokens_field;
         std::string completion_tokens_field;
         std::string total_tokens_field;
+        std::string stop_reason_path;
+        std::map<std::string, std::string> stop_reason_map;
+        std::string stop_reason_status_path;
+        std::map<std::string, std::string> stop_reason_status_map;
+        std::string default_stop_reason = "unknown";
     };
 
     struct StreamConfig {
@@ -312,6 +317,8 @@ class NEOGRAPH_API SchemaProvider : public Provider {
         std::string delta_function_call_field;
         std::string delta_tool_call_name_field;
         std::string delta_tool_call_args_field;
+        std::string stop_reason_path;
+        std::string stop_reason_status_path;
         json events_config;
     };
 
@@ -395,6 +402,8 @@ class NEOGRAPH_API SchemaProvider : public Provider {
 
     ChatMessage parse_response(const json& resp_json) const;
     ChatCompletion::Usage parse_usage(const json& resp_json) const;
+    std::string parse_stop_reason(const json& resp_json) const;
+    std::string parse_stream_stop_reason(const json& event_json) const;
 
     std::string build_endpoint(const std::string& model, bool streaming) const;
     std::map<std::string, std::string> build_headers() const;

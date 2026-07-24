@@ -120,6 +120,7 @@ TEST(SchemaProviderResponsesStream, TextDeltasAccumulateAndUsageCaptured) {
     EXPECT_EQ(42, r.usage.prompt_tokens);
     EXPECT_EQ(18, r.usage.completion_tokens);
     EXPECT_EQ(60, r.usage.total_tokens);
+    EXPECT_EQ("end_turn", r.stop_reason);
 }
 
 TEST(SchemaProviderResponsesStream,

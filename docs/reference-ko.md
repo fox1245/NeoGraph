@@ -139,6 +139,7 @@ LLM 호출 결과. 응답 메시지와 토큰 사용량을 포함한다.
 ```cpp
 struct ChatCompletion {
     ChatMessage message;          // 응답 메시지
+    std::string stop_reason = "unknown"; // 정규화한 종료 사유
     struct Usage {
         int prompt_tokens = 0;    // 입력 토큰 수
         int completion_tokens = 0; // 출력 토큰 수
@@ -146,6 +147,13 @@ struct ChatCompletion {
     } usage;
 };
 ```
+
+`stop_reason`은 Provider가 응답을 끝낸 이유를 공통 값으로 바꿔 담는다.
+값은 `end_turn`, `max_tokens`, `stop_sequence`, `tool_use`,
+`content_filter`, `refusal`, `unknown` 중 하나다. 이 필드가 추가되어
+`ChatCompletion`의 C++ 바이너리 구조가 바뀌었으므로, 이 버전으로
+업그레이드할 때는 이를 사용하는 애플리케이션과 공유 라이브러리를 다시
+빌드해야 한다.
 
 ---
 

@@ -287,6 +287,7 @@ void init_provider(py::module_& m) {
     chat_completion
         .def(py::init<>())
         .def_readwrite("message", &neograph::ChatCompletion::message)
+        .def_readwrite("stop_reason", &neograph::ChatCompletion::stop_reason)
         .def_readwrite("usage",   &neograph::ChatCompletion::usage);
 
     py::class_<neograph::ChatCompletion::Usage>(chat_completion, "Usage",
