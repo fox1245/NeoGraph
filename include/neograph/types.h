@@ -61,6 +61,11 @@ struct ChatTool {
 struct ChatCompletion {
     ChatMessage message;  ///< The response message from the LLM.
 
+    /// Normalized reason the provider stopped: `end_turn`, `max_tokens`,
+    /// `stop_sequence`, `tool_use`, `content_filter`, `refusal`, or `unknown`.
+    /// Adding this field changes the C++ ABI; recompile consumers with this release.
+    std::string stop_reason = "unknown";
+
     /// Token usage statistics for the completion.
     struct Usage {
         int prompt_tokens = 0;      ///< Number of tokens in the prompt.

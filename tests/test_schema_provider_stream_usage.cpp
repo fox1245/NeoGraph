@@ -63,7 +63,7 @@ struct ClaudeStreamMock {
                     "data: {\"type\":\"content_block_stop\",\"index\":0}\n"
                     "\n"
                     "event: message_delta\n"
-                    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n"
+                     "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"stop_sequence\"},\"usage\":{\"output_tokens\":7}}\n"
                     "\n"
                     "event: message_stop\n"
                     "data: {\"type\":\"message_stop\"}\n"
@@ -99,7 +99,7 @@ struct OpenAIStreamMock {
                     "\n"
                     "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" there\"},\"finish_reason\":null}]}\n"
                     "\n"
-                    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n"
+                     "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n"
                     "\n"
                     "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15}}\n"
                     "\n"
@@ -152,6 +152,7 @@ TEST(SchemaProviderStreamUsage, ClaudeStreamingPopulatesUsage) {
         << "message_start's input_tokens lost — pre-audit regression";
     EXPECT_EQ(7, result.usage.completion_tokens)
         << "message_delta's output_tokens lost — pre-audit regression";
+    EXPECT_EQ("stop_sequence", result.stop_reason);
 }
 
 TEST(SchemaProviderStreamUsage, OpenAIStreamingPopulatesUsage) {
@@ -183,4 +184,5 @@ TEST(SchemaProviderStreamUsage, OpenAIStreamingPopulatesUsage) {
     EXPECT_EQ(12, result.usage.prompt_tokens);
     EXPECT_EQ(3,  result.usage.completion_tokens);
     EXPECT_EQ(15, result.usage.total_tokens);
+    EXPECT_EQ("max_tokens", result.stop_reason);
 }

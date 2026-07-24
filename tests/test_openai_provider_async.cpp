@@ -131,6 +131,7 @@ TEST(OpenAIProviderAsync, CompleteAsyncReturnsParsedCompletion) {
     EXPECT_EQ(result.usage.prompt_tokens, 7);
     EXPECT_EQ(result.usage.completion_tokens, 2);
     EXPECT_EQ(result.usage.total_tokens, 9);
+    EXPECT_EQ(result.stop_reason, "end_turn");
     EXPECT_EQ(mock.request_count.load(), 1);
 }
 
@@ -268,6 +269,7 @@ TEST(OpenAIProviderStream, SuccessfulContentAndUsageRemainIntact) {
     EXPECT_EQ(completion.usage.prompt_tokens, 7);
     EXPECT_EQ(completion.usage.completion_tokens, 2);
     EXPECT_EQ(completion.usage.total_tokens, 9);
+    EXPECT_EQ(completion.stop_reason, "end_turn");
 }
 
 TEST(OpenAIProviderStream, VersionedBaseUrlDoesNotDuplicateVersionPath) {

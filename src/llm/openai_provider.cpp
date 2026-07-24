@@ -118,6 +118,18 @@ int parse_retry_after_seconds(std::string_view raw) {
     return seconds;
 }
 
+std::string normalize_finish_reason(const json& choice) {
+    if (!choice.contains("finish_reason") || choice["finish_reason"].is_null()) {
+        return {};
+    }
+    const auto reason = choice.value("finish_reason", "");
+    if (reason == "stop") return "end_turn";
+    if (reason == "length") return "max_tokens";
+    if (reason == "tool_calls" || reason == "function_call") return "tool_use";
+    if (reason == "content_filter") return "content_filter";
+    return "unknown";
+}
+
 } // namespace
 
 asio::awaitable<ChatCompletion>
@@ -162,6 +174,10 @@ OpenAIProvider::complete_async(const CompletionParams& params)
 
     ChatCompletion completion;
     completion.message = parse_response_message(choice);
+    completion.stop_reason = normalize_finish_reason(choice);
+    if (completion.stop_reason.empty()) {
+        completion.stop_reason = completion.message.tool_calls.empty() ? "end_turn" : "tool_use";
+    }
 
     if (resp_json.contains("usage")) {
         auto u = resp_json["usage"];
@@ -207,6 +223,7 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
     // Buffer for partial SSE lines across chunk boundaries
     std::string line_buffer;
     std::exception_ptr stream_error;
+    std::string observed_stop_reason;
 
     int response_status = 0;
     std::string error_body;
@@ -276,6 +293,10 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
 
                     if (!j.contains("choices") || !j["choices"].is_array()
                         || j["choices"].empty()) continue;
+                    if (const auto reason = normalize_finish_reason(j["choices"][0]);
+                        !reason.empty()) {
+                        observed_stop_reason = reason;
+                    }
                     auto delta = j["choices"][0]["delta"];
 
                     // Content token
@@ -338,6 +359,9 @@ OpenAIProvider::complete_stream(const CompletionParams& params,
     for (auto& [idx, tc] : tc_map) {
         completion.message.tool_calls.push_back(tc);
     }
+    completion.stop_reason = observed_stop_reason.empty()
+        ? (completion.message.tool_calls.empty() ? "end_turn" : "tool_use")
+        : observed_stop_reason;
 
     return completion;
 }

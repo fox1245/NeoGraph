@@ -79,6 +79,8 @@ TEST(SchemaProviderWs, LiveRoundTripIfEnabled) {
         << "response.completed should populate prompt_tokens";
     EXPECT_GT(completion.usage.completion_tokens, 0)
         << "response.completed should populate completion_tokens";
+    EXPECT_EQ(completion.stop_reason, "end_turn")
+        << "response.completed should normalize to end_turn";
 }
 
 TEST(SchemaProviderWs, LiveToolCallIfEnabled) {
