@@ -37,6 +37,9 @@ private:
 
 std::string journal_correlation_id(const char* prefix);
 
+/// Returns the run identifier of the current worker attempt, if any.
+std::string current_harness_run_id();
+
 void append_harness_journal_event(const HarnessJournalContext& context,
                                   const std::string&           event_type,
                                   json                         payload = json::object(),
