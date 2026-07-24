@@ -11,6 +11,9 @@
 #include <neograph/mcp/server.h>
 #include <neograph/provider.h>
 
+#include <asio/error.hpp>
+#include <asio/system_error.hpp>
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -219,6 +222,20 @@ public:
     }
 
     std::string get_name() const override { return "scripted-harness-provider"; }
+};
+
+class AsioErrorProvider final : public neograph::Provider {
+public:
+    explicit AsioErrorProvider(asio::error_code error) : error_(error) {}
+
+    neograph::ChatCompletion complete(const neograph::CompletionParams&) override {
+        throw asio::system_error(error_);
+    }
+
+    std::string get_name() const override { return "asio-error-harness-provider"; }
+
+private:
+    asio::error_code error_;
 };
 
 class StartFailingJournal final : public neograph::mcp::HarnessJournal {
@@ -651,6 +668,50 @@ TEST(HarnessServiceTest, ProviderExecutorRunsDeclaredToolsAndValidatesPaths) {
     ASSERT_EQ(provider->calls[1].messages.size(), 3u);
     EXPECT_EQ(provider->calls[1].messages.back().role, "tool");
     std::filesystem::remove_all(workspace);
+}
+
+TEST(HarnessServiceTest, ProviderExecutorPreservesTransportTimeoutKind) {
+    neograph::mcp::HarnessProviderExecutorConfig config;
+    config.provider = std::make_shared<AsioErrorProvider>(
+        asio::error::make_error_code(asio::error::timed_out));
+    auto executor = neograph::mcp::make_provider_harness_executor(std::move(config));
+
+    HarnessWorkerCall call;
+    call.task = {{"objective", "Review"}};
+    call.worker = worker("reviewer");
+    auto response = executor(call, std::make_shared<neograph::graph::CancelToken>());
+
+    EXPECT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::TIMEOUT);
+    EXPECT_FALSE(response.message.empty());
+}
+
+TEST(HarnessServiceTest, ProviderExecutorKeepsOtherAsioFailuresAsToolErrors) {
+    neograph::mcp::HarnessProviderExecutorConfig config;
+    config.provider = std::make_shared<AsioErrorProvider>(
+        asio::error::make_error_code(asio::error::connection_refused));
+    auto executor = neograph::mcp::make_provider_harness_executor(std::move(config));
+
+    HarnessWorkerCall call;
+    call.task = {{"objective", "Review"}};
+    call.worker = worker("reviewer");
+    auto response = executor(call, std::make_shared<neograph::graph::CancelToken>());
+
+    EXPECT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::TOOL_ERROR);
+    EXPECT_FALSE(response.message.empty());
+}
+
+TEST(HarnessServiceTest, ProviderExecutorKeepsGenericFailuresAsToolErrors) {
+    neograph::mcp::HarnessProviderExecutorConfig config;
+    config.provider = std::make_shared<ScriptedProvider>();
+    auto executor = neograph::mcp::make_provider_harness_executor(std::move(config));
+
+    HarnessWorkerCall call;
+    call.task = {{"objective", "Review"}};
+    call.worker = worker("reviewer");
+    auto response = executor(call, std::make_shared<neograph::graph::CancelToken>());
+
+    EXPECT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::TOOL_ERROR);
+    EXPECT_EQ(response.message, "no scripted completion");
 }
 
 TEST(HarnessServiceTest, ProviderExecutorRejectsWorkspaceEscapeBeforeToolCall) {
@@ -2146,17 +2207,21 @@ TEST(HarnessServiceTest, RecordedReplayPreservesTerminalWorkerFailure) {
     const auto replayed = wait_terminal(service, replay["run_id"].get<std::string>());
     ASSERT_EQ(replayed["status"], "completed") << replayed.dump();
     EXPECT_EQ(replayed["result"]["workers"], source["result"]["workers"]);
-    EXPECT_EQ(live_calls.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(live_calls.load(std::memory_order_relaxed), 2);
 
     const auto events               = records->list_events(source_run_id);
+    bool       saw_retry            = false;
     bool       saw_terminal_attempt = false;
     for (const auto& event : events) {
         if (event["event_type"] == "worker.attempt.completed" &&
             event["payload"].value("retry_reason", "") == "timeout") {
-            EXPECT_FALSE(event["payload"]["retry_scheduled"].get<bool>());
-            saw_terminal_attempt = true;
+            if (event["payload"]["retry_scheduled"].get<bool>())
+                saw_retry = true;
+            else
+                saw_terminal_attempt = true;
         }
     }
+    EXPECT_TRUE(saw_retry);
     EXPECT_TRUE(saw_terminal_attempt);
 }
 
@@ -2525,7 +2590,7 @@ TEST(HarnessServiceTest, DistinguishesEmptyResponseAndWorkerTimeout) {
         auto finished = wait_terminal(service, started["run_id"].get<std::string>());
         ASSERT_EQ(finished["status"], "completed") << finished.dump();
         EXPECT_EQ(finished["result"]["workers"][0]["failure_kind"], "timeout");
-        EXPECT_EQ(finished["result"]["workers"][0]["attempts"], 1);
+        EXPECT_EQ(finished["result"]["workers"][0]["attempts"], 2);
     }
 }
 
