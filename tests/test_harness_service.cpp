@@ -536,6 +536,17 @@ TEST(HarnessServiceTest, PresetAndEquivalentDslCompileToCanonicalCore) {
     auto preset = service.compile(preset_request);
     ASSERT_TRUE(preset["ok"].get<bool>()) << preset.dump();
 
+    const auto has_final_result_e6 = [](const json& diagnostics) {
+        for (const auto& diagnostic : diagnostics) {
+            if (diagnostic["code"] == "E6" &&
+                diagnostic["path"] == "channels.final_result") {
+                return true;
+            }
+        }
+        return false;
+    };
+    EXPECT_FALSE(has_final_result_e6(preset["diagnostics"])) << preset.dump();
+
     auto dsl_request = preset_request;
     dsl_request["harness"] = {
         {"mode", "dsl"},
@@ -543,6 +554,8 @@ TEST(HarnessServiceTest, PresetAndEquivalentDslCompileToCanonicalCore) {
     };
     auto dsl = service.compile(dsl_request);
     ASSERT_TRUE(dsl["ok"].get<bool>()) << dsl.dump();
+    EXPECT_FALSE(has_final_result_e6(dsl["diagnostics"])) << dsl.dump();
+    EXPECT_EQ(preset["diagnostics"], dsl["diagnostics"]);
 
     EXPECT_EQ(
         neograph::graph::GraphCompiler::canon(preset["artifacts"]["core_lockfile"]["content"]),
