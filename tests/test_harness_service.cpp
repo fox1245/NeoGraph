@@ -562,6 +562,27 @@ TEST(HarnessServiceTest, PresetAndEquivalentDslCompileToCanonicalCore) {
         neograph::graph::GraphCompiler::canon(dsl["artifacts"]["core_lockfile"]["content"]));
 }
 
+#if GTEST_HAS_STREAM_REDIRECTION
+TEST(HarnessServiceTest, RuntimeValidationHonorsExportedFinalResult) {
+    HarnessServiceConfig config;
+    config.worker_executor = [](const HarnessWorkerCall&, const auto&) {
+        return HarnessWorkerResponse::success(
+            {{"status", "ok"}, {"findings", json::array()}});
+    };
+    HarnessService service(std::move(config));
+    const auto compiled = service.compile(request());
+    ASSERT_TRUE(compiled["ok"].get<bool>()) << compiled.dump();
+
+    testing::internal::CaptureStderr();
+    const auto started = service.start({{"artifact_id", compiled["artifact_id"]}});
+    const auto terminal = wait_terminal(service, started["run_id"].get<std::string>());
+    const auto errors = testing::internal::GetCapturedStderr();
+
+    ASSERT_EQ(terminal["status"], "completed") << terminal.dump();
+    EXPECT_EQ(errors.find("[E6] channels.final_result"), std::string::npos) << errors;
+}
+#endif
+
 TEST(HarnessServiceTest, ShipsReviewTriageAndResearchPresets) {
     HarnessService service;
     auto schema = service.schema();
