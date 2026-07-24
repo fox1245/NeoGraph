@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=3723c0b19d4814222cdd13695f57ac901efa025ea58a8bc39b728353738f4965 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=6780e2507de2b228368944012cc9ad6c04e504aced4b69b172f87ef51e90ff69 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -87,7 +87,7 @@
   - [EngineConfig 和 EngineResources](#engineconfig-and-engineresources)
   - [RunConfig](#runconfig)
   - [RunResult](#runresult)
-  - [GraphEngine](#graphengine-1)
+  - [GraphEngine](#graphengine)
 - [7b. 引擎内部](#7b-engine-internals)
   - [GraphCompiler](#graphcompiler)
   - [Scheduler](#scheduler)
@@ -129,6 +129,7 @@
 
 ---
 
+<a id="1-foundation-types"></a>
 ## 1. 基础类型
 
 **头文件：** `<neograph/types.h>`
@@ -224,6 +225,7 @@ struct ChatCompletion {
 `stop_reason` 已添加到公开 C++ 结构体。升级到此版本时请重新编译应用程序和
 共享库消费者，因为该结构体的二进制布局已变更。
 
+<a id="helper-functions"></a>
 ### 辅助函数
 
 #### `messages_to_json`
@@ -263,6 +265,7 @@ ChatMessage parse_response_message(const json& choice);
 
 **返回：** 一个 `ChatMessage`，填充了 role、content 和任何工具调用。
 
+<a id="adl-serialization"></a>
 ### ADL 序列化
 
 用于 nlohmann/json 集成的参数依赖查找（ADL）序列化函数。这些允许直接使用
@@ -280,6 +283,7 @@ void from_json(const json& j, ChatMessage& msg);
 
 ---
 
+<a id="2-provider-interface"></a>
 ## 2. Provider 接口
 
 **头文件：** `<neograph/provider.h>`、`<neograph/completion_provider.h>`
@@ -414,6 +418,7 @@ auto streamed = co_await provider.invoke_request(
 
 ---
 
+<a id="3-tool-interface"></a>
 ## 3. Tool 接口
 
 **头文件：** `<neograph/tool.h>`
@@ -475,6 +480,7 @@ public:
 
 ---
 
+<a id="4-graph-types"></a>
 ## 4. 图类型
 
 **头文件：** `<neograph/graph/types.h>`
@@ -813,6 +819,7 @@ using ConditionFn = std::function<std::string(const GraphState&)>;
 该函数检查当前图状态并返回一个字符串键。该键在 `ConditionalEdge::routes`
 映射中查找以确定下一个节点。
 
+<a id="constants"></a>
 ### 常量
 
 ```cpp
@@ -883,6 +890,7 @@ public:
 
 节点是图的计算单元。库提供了一个抽象基类和四种内置节点类型。
 
+<a id="graphnode-abstract"></a>
 ### GraphNode（抽象）
 
 子类重写一个方法：`run(NodeInput) -> awaitable<NodeOutput>`。读取状态，
@@ -1068,6 +1076,7 @@ public:
 
 核心执行引擎。编译图定义，管理状态转换，并通过超级步骤循环编排节点执行。
 
+<a id="engineconfig-and-engineresources"></a>
 ### EngineConfig 和 EngineResources
 
 新代码应在创建引擎之前组装构造依赖和策略：
@@ -1622,6 +1631,7 @@ const std::string& get_graph_name() const;
 
 ---
 
+<a id="7b-engine-internals"></a>
 ## 7b. 引擎内部
 
 `GraphEngine` 是一个轻量级的编排器，委托给四个专门构建的类。用户通常
@@ -1890,6 +1900,7 @@ public:
 
 ---
 
+<a id="8-checkpoint"></a>
 ## 8. 检查点
 
 **头文件：** `<neograph/graph/checkpoint.h>`
@@ -1898,6 +1909,7 @@ public:
 检查点通过保存和恢复图执行状态来实现持久性、时间旅行调试和人类参与
 工作流。
 
+<a id="checkpoint-struct"></a>
 ### Checkpoint（结构体）
 
 图执行状态在某个时间点的序列化快照。
@@ -2069,6 +2081,7 @@ struct StoreItem {
 };
 ```
 
+<a id="store-abstract"></a>
 ### Store（抽象）
 
 跨线程共享内存的抽象接口。
@@ -2218,6 +2231,7 @@ public:
 | `registered_types()` | 所有已注册节点类型名称的排序列表 |
 | `export_schema()` | 此引擎版本接受的拓扑 JSON 的机器可读描述（见 [拓扑 Schema 导出](#topology-schema-export-issue-56)） |
 
+<a id="built-in-registrations"></a>
 ### 内置注册
 
 库预注册了以下组件：
@@ -2245,6 +2259,7 @@ public:
 | `"intent_classifier"` | `IntentClassifierNode` | 基于 LLM 的意图分类。从 `config` 读取 `prompt` 和 `valid_routes` |
 | `"subgraph"` | `SubgraphNode` | 运行已编译的子图。从 `config` 读取 `input_map` 和 `output_map` |
 
+<a id="topology-schema-export-issue-56"></a>
 ### 拓扑 Schema 导出（issue #56）
 
 NeoGraph 运行一个*用 JSON 描述*的图；换一个 JSON 同一个引擎就变成不同
@@ -2544,6 +2559,7 @@ Studio 调色板在不获取额外依赖的情况下将它们显示为可用节�
 
 ---
 
+<a id="12-llm-module"></a>
 ## 12. LLM 模块
 
 ### OpenAIProvider
@@ -2738,6 +2754,7 @@ messages.push_back({"user", "What's the weather in Seoul?"});
 std::string response = agent.run(messages);
 ```
 
+<a id="json_path-utilities"></a>
 ### json_path 工具
 
 **头文件：** `<neograph/llm/json_path.h>`
@@ -2794,6 +2811,7 @@ set_path(data, "metadata.version", 2);
 
 ---
 
+<a id="13-mcp-module"></a>
 ## 13. MCP 模块
 
 **头文件：** `<neograph/mcp/client.h>`
@@ -2917,6 +2935,7 @@ auto tools = client.get_tools();   // MCPTools hold shared_ptr<StdioSession>
 
 ---
 
+<a id="14-util-module"></a>
 ## 14. Util 模块
 
 **头文件：** `<neograph/util/request_queue.h>`
@@ -2987,8 +3006,10 @@ if (!accepted) {
 
 ---
 
+<a id="usage-examples"></a>
 ## 使用示例
 
+<a id="minimal-react-agent"></a>
 ### 最简 ReAct Agent
 
 使用 NeoGraph 的最简单方式：一个带工具的 ReAct agent：
@@ -3022,6 +3043,7 @@ int main() {
 }
 ```
 
+<a id="custom-graph-with-conditional-routing"></a>
 ### 带条件路由的自定义图
 
 构建带条件边的图：
@@ -3088,6 +3110,7 @@ int main() {
 }
 ```
 
+<a id="human-in-the-loop-with-checkpointing"></a>
 ### 带检查点的人类参与
 
 使用中断请求人工批准：
@@ -3125,6 +3148,7 @@ if (result.interrupted) {
 }
 ```
 
+<a id="dynamic-fan-out-with-send"></a>
 ### 使用 Send 的动态扇出
 
 使用 `Send` 实现 map-reduce 模式：
@@ -3152,6 +3176,7 @@ public:
 会执行所有 send、收集其通道写入，然后再进入下一条
 图中的边。
 
+<a id="routing-override-with-command"></a>
 ### 使用 Command 的路由覆盖
 
 使用 `Command` 同时更新状态并控制路由：
@@ -3187,6 +3212,7 @@ public:
 返回 `Command` 时，其 `updates` 会应用到状态，执行
 直接跳转到指定的 `goto_node`，绕过正常的边路由。
 
+<a id="schemaprovider-multi-llm-support"></a>
 ### SchemaProvider 多 LLM 支持
 
 使用 `SchemaProvider` 在多个 LLM Provider 之间切换：
@@ -3220,6 +3246,7 @@ auto gemini = neograph::llm::SchemaProvider::create({
 neograph::llm::Agent agent(claude, std::move(tools), "You are helpful.");
 ```
 
+<a id="mcp-tool-integration"></a>
 ### MCP 工具集成
 
 连接 MCP 服务器并使用其工具：

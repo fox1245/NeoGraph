@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=2e0308ec524af955435efba31c943c890f3fd6f6c5c7d40c8a2fd174d2a8dc29 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=a7d9bae682dca57211d6c7ad0795977dc811bd5123934d73e9187a13e89e25f1 -->
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
 
 # NeoGraph 핵심 개념 - 서술형 가이드
@@ -17,7 +17,7 @@ C++ API에 1:1(클래스는 [`reference-en.md`](reference-en.md) 참조)
 > **이전에 LangGraph를 사용한 적이 있는 경우:** 기본 요소는 의도적으로
 > 동일 — 리듀서가 있는 채널, 쓰기를 내보내는 노드, 조건부
 > 가장자리, `Send`, `Command`, 체크포인트. 차이점은 다음에 설명되어 있습니다.
-> [Comparison with LangGraph](../README.md#comparison-with-langgraph) 켜짐
+> [Comparison with LangGraph](../README.md#vs-langgraph) 켜짐
 > README. 아래 서술은 아무 것도 가정하지 않습니다.
 
 ---
@@ -41,6 +41,7 @@ C++ API에 1:1(클래스는 [`reference-en.md`](reference-en.md) 참조)
 
 ---
 
+<a id="1-the-big-picture"></a>
 ## 1. 큰 그림
 
 NeoGraph **그래프**는 다음 네 가지를 의미합니다.
@@ -70,6 +71,7 @@ NeoGraph **그래프**는 다음 네 가지를 의미합니다.
 
 ---
 
+<a id="2-channels--reducers"></a>
 ## 2. 채널 및 리듀서
 
 모든 상태는 이름이 지정된 채널에 있습니다. 채널은 여러 곳에서 지속됩니다.
@@ -143,6 +145,7 @@ API 검사. 일반적으로 직접 읽지는 않습니다.
 
 ---
 
+<a id="3-nodes"></a>
 ## 3. 노드
 
 제어 순서에 따라 노드 유형을 등록하는 세 가지 방법은 다음과 같습니다.
@@ -248,6 +251,7 @@ class CalcTool(ng.Tool):
 
 ---
 
+<a id="4-edges--conditional-routing"></a>
 ## 4. 에지 및 조건부 라우팅
 
 ### 정적 가장자리
@@ -327,6 +331,7 @@ ng.ConditionRegistry.register_condition("is_long", is_long)
 
 ---
 
+<a id="5-send--dynamic-fan-out"></a>
 ## 5. 보내기 - 동적 팬아웃
 
 `Send`는 다음 단계 노드의 수가 의존하는 경우를 위한 것입니다.
@@ -395,6 +400,7 @@ engine.set_worker_count_auto()       # hardware_concurrency()
 
 ---
 
+<a id="6-command--routing-override--state-patch"></a>
 ## 6. 명령 - 라우팅 재정의 + 상태 패치
 
 `Command`를 사용하면 노드가 다음에 AND로 이동할 위치를 결정할 수 있습니다.
@@ -440,6 +446,7 @@ class Evaluator(ng.GraphNode):
 
 ---
 
+<a id="7-checkpoints-interrupts-hitl"></a>
 ## 7. 체크포인트, 인터럽트, HITL
 
 ### 체크포인트 저장소 설정
@@ -487,6 +494,7 @@ API를 재개합니다.
 
 ---
 
+<a id="8-streaming-events"></a>
 ## 8. 스트리밍 이벤트
 
 `run_stream` / `run_stream_async`는 이벤트가 발생하면 콜백을 호출합니다.
@@ -635,6 +643,7 @@ SaaS 계약, 추적당 가격 책정 없음.
 
 ---
 
+<a id="9-common-pitfalls"></a>
 ## 9. 일반적인 함정
 
 이것들은 모두 실제 사용자들에게 타격을 입었습니다. 에서 상호 참조됨

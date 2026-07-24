@@ -95,7 +95,7 @@ before a hand-written tour is worth the maintenance.
   - [EngineConfig and EngineResources](#engineconfig-and-engineresources)
   - [RunConfig](#runconfig)
   - [RunResult](#runresult)
-  - [GraphEngine](#graphengine-1)
+  - [GraphEngine](#graphengine)
 - [7b. Engine Internals](#7b-engine-internals)
   - [GraphCompiler](#graphcompiler)
   - [Scheduler](#scheduler)

@@ -113,6 +113,7 @@ N=10,000 同時 (1 CPU / 512 MB sandbox): NeoGraph 52 ms / 7 µs p99 /
 完全なマトリックス + 手法: [`docs/performance-deep-dive.md`](docs/performance-deep-dive.md)
 · [`benchmarks/README.md`](benchmarks/README.md)。
 
+<a id="quick-start"></a>
 ## クイックスタート
 
 **要件** — C++20 コンパイラ (GCC 13.3 コアグリーン; GCC 14.2+ / Clang 18+ /
@@ -156,6 +157,7 @@ echo "OPENAI_API_KEY=sk-..." > .env
 ./build/example_react_agent
 ```
 
+<a id="use-from-a-cmake-project"></a>
 ## CMake プロジェクトから使用
 
 `pip install` は Python 専用 (C++ ヘッダなし)。C++ の場合、`FetchContent` は

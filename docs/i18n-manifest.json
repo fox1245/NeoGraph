@@ -2,7 +2,7 @@
   "schema_version": 1,
   "canonical_locale": "en",
   "translation_locales": ["ko", "ja", "zh-CN"],
-  "strict": false,
+  "strict": true,
   "excluded": {
     "THIRD_PARTY_LICENSES.md": "Legal notices remain in their authoritative original form.",
     "skills/neograph-harness-authoring/SKILL.md": "Agent execution contract, not user documentation."

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=2e0308ec524af955435efba31c943c890f3fd6f6c5c7d40c8a2fd174d2a8dc29 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=a7d9bae682dca57211d6c7ad0795977dc811bd5123934d73e9187a13e89e25f1 -->
 # NeoGraph 核心概念——叙事指南
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -12,7 +12,7 @@
 > **如果你用过 LangGraph：** 这里的基本原语有意保持相同：
 > 带归约器的通道、发出写入的节点、条件边、`Send`、`Command`、
 > 检查点。差异见 README 的
-> [与 LangGraph 对比](../README.md#comparison-with-langgraph)。
+> [与 LangGraph 对比](../README.md#vs-langgraph)。
 > 下面的叙述不假设你已有背景。
 
 ---
@@ -34,6 +34,7 @@
 
 ---
 
+<a id="1-the-big-picture"></a>
 ## 1. 大局观
 
 一个 NeoGraph **图**有四件事：
@@ -60,6 +61,7 @@
 
 ---
 
+<a id="2-channels--reducers"></a>
 ## 2. 通道和归约器
 
 每个状态都存在于一个命名通道中。通道跨节点和跨超级步持续存在；节点通过写入来进行通信。
@@ -127,6 +129,7 @@ def run(self, input):
 
 ---
 
+<a id="3-nodes"></a>
 ## 3. 节点
 
 注册节点类型的三种方法，按控制顺序递增：
@@ -219,6 +222,7 @@ class CalcTool(ng.Tool):
 
 ---
 
+<a id="4-edges--conditional-routing"></a>
 ## 4. 边和条件路由
 
 ### 静态边
@@ -289,6 +293,7 @@ ng.ConditionRegistry.register_condition("is_long", is_long)
 
 ---
 
+<a id="5-send--dynamic-fan-out"></a>
 ## 5.Send — 动态扇出
 
 `Send`适用于下一步节点数量取决于状态的情况。经典用法：将搜索主题列表拆分为 N 个并行的研究人员调用。
@@ -339,6 +344,7 @@ engine.set_worker_count_auto()       # hardware_concurrency()
 
 ---
 
+<a id="6-command--routing-override--state-patch"></a>
 ## 6.Command — 路由覆盖 + 状态补丁
 
 `Command`让节点决定下一步去哪里，并且在相同的返回值中改变状态。它绕过常规的传出边。
@@ -377,6 +383,7 @@ class Evaluator(ng.GraphNode):
 
 ---
 
+<a id="7-checkpoints-interrupts-hitl"></a>
 ## 7.检查点、中断、HITL
 
 ### 设置检查点存储
@@ -415,6 +422,7 @@ result = await engine.resume_async(thread_id="t1",
 
 ---
 
+<a id="8-streaming-events"></a>
 ## 8. 流式事件
 
 `run_stream` / `run_stream_async`当事件触发时调用回调。模式是可进行“或”运算的位掩码：
@@ -544,6 +552,7 @@ with openinference_tracer(tracer) as cb:
 
 ---
 
+<a id="9-common-pitfalls"></a>
 ## 9. 常见陷阱
 
 这些都是真实用户所击中的；交叉引用自 [`docs/troubleshooting.md`](troubleshooting.md)。

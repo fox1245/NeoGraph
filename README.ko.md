@@ -104,6 +104,7 @@ auto result = engine->run(config);
 N=10,000 동시 (1 CPU / 512 MB 샌드박스): NeoGraph 52 ms / 7 µs p99 / 5.5 MB · LangGraph 23.4 s / 416 MB · LlamaIndex & AutoGen OOM-종료.
 전체 행렬 + 방법론: [`docs/performance-deep-dive.md`](docs/performance-deep-dive.md) · [`benchmarks/README.md`](benchmarks/README.md).
 
+<a id="quick-start"></a>
 ## 빠른 시작
 
 **요구사항** — C++20 컴파일러 (GCC 13.3 코어 통과; GCC 14.2+ / Clang 18+ / MSVC 2022 전체), CMake 3.16+, Python 3 (빌드 시 코드 생성). 기본 옵션으로 구성 시 OpenSSL, SQLite3, libpq, libcurl **개발** 패키지도 필요(런타임 `.so`만으로는 `find_package`를 만족시키지 못함):
@@ -138,6 +139,7 @@ echo "OPENAI_API_KEY=sk-..." > .env
 ./build/example_react_agent
 ```
 
+<a id="use-from-a-cmake-project"></a>
 ## CMake 프로젝트에서 사용
 
 `pip install`은 Python 전용 (C++ 헤더 없음). C++의 경우 `FetchContent`가 CMake의 `pip install`처럼 동작:

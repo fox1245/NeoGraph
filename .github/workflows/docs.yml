@@ -19,11 +19,10 @@ on:
       - 'Doxyfile'
       - 'pyproject.toml'                          # PROJECT_NUMBER source
       - '.github/workflows/docs.yml'
-      - 'docs/**.md'
+      - '**.md'
+      - 'docs/i18n-manifest.json'
+      - 'scripts/check_docs_i18n.py'
       - 'examples/**.cpp'
-      - 'examples/**/README.md'
-      - 'bindings/python/examples/README.md'
-      - 'README.md'
 
   workflow_dispatch:
 

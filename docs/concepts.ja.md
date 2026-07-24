@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=2e0308ec524af955435efba31c943c890f3fd6f6c5c7d40c8a2fd174d2a8dc29 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=a7d9bae682dca57211d6c7ad0795977dc811bd5123934d73e9187a13e89e25f1 -->
 # NeoGraph のコアコンセプト — ナラティブガイド
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -16,7 +16,7 @@ C++ API に対して 1:1 (クラスについては [`reference-en.md`](reference
 > **以前に LangGraph を使用したことがある場合:** プリミティブは意図的に
 > 同じ — リデューサーを備えたチャネル、書き込みを発行するノード、条件付き
 > エッジ、`Send`、`Command`、チェックポイント。違いについては、次のとおりです。
-> [Comparison with LangGraph](../README.md#comparison-with-langgraph)
+> [Comparison with LangGraph](../README.md#vs-langgraph)
 > README。以下の説明は何も仮定していません。
 
 ---
@@ -40,6 +40,7 @@ C++ API に対して 1:1 (クラスについては [`reference-en.md`](reference
 
 ---
 
+<a id="1-the-big-picture"></a>
 ## 1. 全体像
 
 NeoGraph **グラフ** には次の 4 つの要素があります。
@@ -69,6 +70,7 @@ NeoGraph **グラフ** には次の 4 つの要素があります。
 
 ---
 
+<a id="2-channels--reducers"></a>
 ## 2. チャネルとリデューサー
 
 すべての状態は名前付きチャネルに存在します。チャネルは複数にわたって持続します
@@ -142,6 +144,7 @@ def run(self, input):
 
 ---
 
+<a id="3-nodes"></a>
 ## 3. ノード
 
 ノード タイプを登録する 3 つの方法 (制御の昇順):
@@ -247,6 +250,7 @@ class CalcTool(ng.Tool):
 
 ---
 
+<a id="4-edges--conditional-routing"></a>
 ## 4. エッジと条件付きルーティング
 
 ### 静的エッジ
@@ -326,6 +330,7 @@ ng.ConditionRegistry.register_condition("is_long", is_long)
 
 ---
 
+<a id="5-send--dynamic-fan-out"></a>
 ## 5. 送信 — 動的ファンアウト
 
 `Send` は、次のステップのノードの数が依存する場合に使用します。
@@ -394,6 +399,7 @@ engine.set_worker_count_auto()       # hardware_concurrency()
 
 ---
 
+<a id="6-command--routing-override--state-patch"></a>
 ## 6. コマンド — ルーティングオーバーライド + ステートパッチ
 
 `Command` は、ノードが次にどこに行くかを決定し、その状態で状態を変化させます。
@@ -439,6 +445,7 @@ class Evaluator(ng.GraphNode):
 
 ---
 
+<a id="7-checkpoints-interrupts-hitl"></a>
 ## 7. チェックポイント、割り込み、HITL
 
 ### チェックポイント ストアのセットアップ
@@ -486,6 +493,7 @@ APIを再開します。
 
 ---
 
+<a id="8-streaming-events"></a>
 ## 8. ストリーミングイベント
 
 `run_stream` / `run_stream_async` は、イベントの発生時にコールバックを呼び出します。
@@ -634,6 +642,7 @@ SaaS 契約。トレースごとの料金設定はありません。
 
 ---
 
+<a id="9-common-pitfalls"></a>
 ## 9. よくある落とし穴
 
 これらはすべて実際のユーザーによってヒットされました。相互参照元

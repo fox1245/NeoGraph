@@ -15,7 +15,7 @@ generated reference).
 > **If you've used LangGraph before:** the primitives are intentionally
 > the same — channels with reducers, nodes that emit writes, conditional
 > edges, `Send`, `Command`, checkpoints. The differences are described in
-> [Comparison with LangGraph](../README.md#comparison-with-langgraph) on
+> [Comparison with LangGraph](../README.md#vs-langgraph) on
 > the README. The narrative below assumes nothing.
 
 ---

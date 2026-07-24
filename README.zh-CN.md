@@ -113,6 +113,7 @@ agent（参见 [`docs/concepts.md`](docs/concepts.md)）：
 完整矩阵 + 方法论：[`docs/performance-deep-dive.md`](docs/performance-deep-dive.md)
 · [`benchmarks/README.md`](benchmarks/README.md)。
 
+<a id="quick-start"></a>
 ## 快速入门
 
 **要求** — C++20 编译器（GCC 13.3 核心通过；GCC 14.2+ / Clang 18+ /
@@ -155,6 +156,7 @@ echo "OPENAI_API_KEY=sk-..." > .env
 ./build/example_react_agent
 ```
 
+<a id="use-from-a-cmake-project"></a>
 ## 从 CMake 项目中使用
 
 `pip install` 仅适用于 Python（不含 C++ 头文件）。对于 C++，
@@ -265,6 +267,7 @@ OpenSSL。通过 `NEOGRAPH_BUILD_MCP_HTTP_SERVER` 显式启用远程 HTTP。
 [`docs/reference-en.md` §7b](docs/reference-en.md#7b-engine-internals) ·
 [`docs/concurrency.md`](docs/concurrency.md) · [`docs/ASYNC_GUIDE.md`](docs/ASYNC_GUIDE.md)。
 
+<a id="vs-langgraph"></a>
 ## 对比 LangGraph
 
 | | LangGraph（Python） | NeoGraph（C++） |

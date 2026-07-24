@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=3723c0b19d4814222cdd13695f57ac901efa025ea58a8bc39b728353738f4965 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=6780e2507de2b228368944012cc9ad6c04e504aced4b69b172f87ef51e90ff69 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -81,7 +81,7 @@ Doxygen を参照する方針にして保留しています。規模が大きく
   - [EngineConfig と EngineResources](#engineconfig-and-engineresources)
   - [RunConfig](#runconfig)
   - [RunResult](#runresult)
-  - [GraphEngine](#graphengine-1)
+  - [GraphEngine](#graphengine)
 - [7b. エンジン内部](#7b-engine-internals)
   - [GraphCompiler](#graphcompiler)
   - [Scheduler](#scheduler)
@@ -121,6 +121,7 @@ Doxygen を参照する方針にして保留しています。規模が大きく
   - [SchemaProvider のマルチ LLM 対応](#schemaprovider-multi-llm-support)
   - [MCP ツール統合](#mcp-tool-integration)
 ---
+<a id="1-foundation-types"></a>
 ## 1. 基礎型
 **ヘッダー:** `<neograph/types.h>`
 **名前空間:** `neograph`
@@ -200,6 +201,7 @@ struct ChatCompletion {
 | `usage.total_tokens` | `int` | 消費したトークンの合計 (プロンプト + 補完結果) |
 `stop_reason` が公開 C++ 構造体に追加されました。このリリースへアップグレードする際は、
 共有ライブラリの利用側は、構造体のバイナリレイアウトが変わったため、このリリースへのアップグレード時に再コンパイルしてください。
+<a id="helper-functions"></a>
 ### ヘルパー関数
 #### `messages_to_json`
 メッセージベクターを OpenAI 互換の JSON ワイヤー形式に変換します。ツール呼び出し
@@ -240,6 +242,7 @@ void from_json(const json& j, ChatMessage& msg);
 
 すべてのフィールドは空文字列をデフォルトとする `value()` を使うため、欠落したフィールドにも対応できます。
 ---
+<a id="2-provider-interface"></a>
 ## 2. Provider インターフェース
 **ヘッダー:** `<neograph/provider.h>`, `<neograph/completion_provider.h>`
 **名前空間:** `neograph`
@@ -356,6 +359,7 @@ auto streamed = co_await provider.invoke_request(
 ```
 
 ---
+<a id="3-tool-interface"></a>
 ## 3. Tool インターフェース
 **ヘッダー:** `<neograph/tool.h>`
 **名前空間:** `neograph`
@@ -410,6 +414,7 @@ public:
 ```
 
 ---
+<a id="4-graph-types"></a>
 ## 4. グラフ型
 **ヘッダー:** `<neograph/graph/types.h>`
 **名前空間:** `neograph::graph`
@@ -745,6 +750,7 @@ public:
 **ヘッダー:** `<neograph/graph/node.h>`
 **名前空間:** `neograph::graph`
 ノードはグラフの計算単位です。ライブラリには抽象基底クラスと 4 種類の組み込みノードがあります。
+<a id="graphnode-abstract"></a>
 ### GraphNode (抽象)
 サブクラスがオーバーライドするメソッドは 1 つだけです: `run(NodeInput) -> awaitable<NodeOutput>`。
 状態を読み取り、処理を決め、書き込み (必要なら `Command` / `Send` も) を返します。
@@ -907,6 +913,7 @@ public:
 **ヘッダー:** `<neograph/graph/engine.h>`
 **名前空間:** `neograph::graph`
 コア実行エンジンです。グラフ定義をコンパイルし、状態遷移を管理し、スーパーステップループでノード実行を調整します。
+<a id="engineconfig-and-engineresources"></a>
 ### EngineConfig と EngineResources
 新しいコードでは、エンジンを作成する前に構築時の依存関係とポリシーを組み立てます:
 ```cpp
@@ -1393,6 +1400,7 @@ const std::string& get_graph_name() const;
 
 定義で指定されたグラフ名を返します。
 ---
+<a id="7b-engine-internals"></a>
 ## 7b. エンジン内部
 `GraphEngine` は 4 つの目的別クラスに委譲する薄いオーケストレーターです。通常、利用者が直接触れることはありません。これらは `GraphEngine::build()` (または互換ファサード `compile()`) 内で生成され、`execute_graph()` から駆動されますが、高度な利用者が JSON なしで構築したり、カスタムチェックポイントフローを駆動したり、テストで部品をスタブ化したりできるよう公開されています。
 | クラス | ヘッダー | 役割 |
@@ -1634,6 +1642,7 @@ public:
 - `execute_node_with_retry_async` は内部の再試行ループです。バックオフには `asio::steady_timer` を使うため、
   再試行待ちの間もエグゼキューターは停止しません。
 ---
+<a id="8-checkpoint"></a>
 ## 8. チェックポイント
 **ヘッダー:** `<neograph/graph/checkpoint.h>`
 **名前空間:** `neograph::graph`
@@ -1790,6 +1799,7 @@ struct StoreItem {
 };
 ```
 
+<a id="store-abstract"></a>
 ### Store (抽象)
 クロススレッド共有メモリの抽象インターフェースです。
 ```cpp
@@ -1922,6 +1932,7 @@ public:
 | `create(type, name, config, ctx)` | 指定 type のノードを作成します。type が登録されていない場合は例外を投げます |
 | `registered_types()` | 登録済みノード type 名のソート済みリスト |
 | `export_schema()` | このエンジンが受け付ける topology JSON の機械可読な説明 ([Topology Schema Export](#topology-schema-export-issue-56) を参照) |
+<a id="built-in-registrations"></a>
 ### 組み込み登録
 ライブラリは次のコンポーネントをあらかじめ登録します:
 **Reducers:**
@@ -1941,6 +1952,7 @@ public:
 | `"tool_dispatch"` | `ToolDispatchNode` | 最新の assistant メッセージからツール呼び出しを dispatch します |
 | `"intent_classifier"` | `IntentClassifierNode` | LLM による意図分類。`config` から `prompt` と `valid_routes` を読みます |
 | `"subgraph"` | `SubgraphNode` | コンパイル済みサブグラフを実行します。`config` から `input_map` と `output_map` を読みます |
+<a id="topology-schema-export-issue-56"></a>
 ### トポロジースキーマのエクスポート (issue #56)
 NeoGraph は *JSON で記述された* グラフを実行します。JSON を差し替えれば、同じエンジンが別のハーネスになります。
 同じエンジンが別のハーネスになります。`NodeFactory::export_schema()` は
@@ -2133,6 +2145,7 @@ Phoenix の代わりに Langfuse セルフホストへ向けるときは、エ�
   現在のスパンの有効化を決定的に制御します。
 - **`otel_tracer` と `openinference_tracer`:** バックエンドが APM 形式 (Jaeger、Datadog) で一般的なスパンを必要とするなら OTel 版を使います。Phoenix、Langfuse、Arize で LLM 形式の表示が必要なら OpenInference 版を使います。同じ実行で両者を組み合わせることはできません。エンジンのイベントストリームに対する代替コールバックです。
 ---
+<a id="11-react-graph"></a>
 ## 11. ReAct グラフ
 **ヘッダー:** `<neograph/graph/react_graph.h>`
 **名前空間:** `neograph::graph`
@@ -2192,6 +2205,7 @@ std::unique_ptr<GraphEngine> create_plan_execute_graph(
 3 つのカスタムノード型と `plan_empty` 条件を登録します (`std::call_once` により冪等)。
 `examples/14_plan_executor.cpp` に、保留書き込みによるクラッシュ / 再開を扱う Send ファンアウト版があります。
 ---
+<a id="12-llm-module"></a>
 ## 12. LLM モジュール
 ### OpenAIProvider
 **ヘッダー:** `<neograph/llm/openai_provider.h>`
@@ -2359,6 +2373,7 @@ messages.push_back({"user", "What's the weather in Seoul?"});
 std::string response = agent.run(messages);
 ```
 
+<a id="json_path-utilities"></a>
 ### json_path ユーティリティ
 **ヘッダー:** `<neograph/llm/json_path.h>`
 **名前空間:** `neograph::llm::json_path`
@@ -2409,6 +2424,7 @@ set_path(data, "metadata.version", 2);
 ```
 
 ---
+<a id="13-mcp-module"></a>
 ## 13. MCP モジュール
 **ヘッダー:** `<neograph/mcp/client.h>`
 **名前空間:** `neograph::mcp`
@@ -2512,6 +2528,7 @@ auto tools = client.get_tools();   // MCPTools hold shared_ptr<StdioSession>
 ```
 
 ---
+<a id="14-util-module"></a>
 ## 14. Util モジュール
 **ヘッダー:** `<neograph/util/request_queue.h>`
 **名前空間:** `neograph::util`
@@ -2573,7 +2590,9 @@ if (!accepted) {
 ```
 
 ---
+<a id="usage-examples"></a>
 ## 使用例
+<a id="minimal-react-agent"></a>
 ### 最小 ReAct エージェント
 NeoGraph を使う最も簡単な方法、つまりツール付き ReAct エージェントです:
 ```cpp
@@ -2605,6 +2624,7 @@ int main() {
 }
 ```
 
+<a id="custom-graph-with-conditional-routing"></a>
 ### 条件付きルーティングを持つカスタムグラフ
 条件エッジを持つグラフを構築します:
 ```cpp
@@ -2669,6 +2689,7 @@ int main() {
 }
 ```
 
+<a id="human-in-the-loop-with-checkpointing"></a>
 ### チェックポイントを使う Human-in-the-Loop
 人間の承認に中断を使います:
 ```cpp
@@ -2704,6 +2725,7 @@ if (result.interrupted) {
 }
 ```
 
+<a id="dynamic-fan-out-with-send"></a>
 ### Send による動的ファンアウト
 map-reduce パターンに `Send` を使います:
 ```cpp
@@ -2726,6 +2748,7 @@ public:
 ```
 
 各 `Send` は異なる入力で `"process_item"` ノードをディスパッチします。エンジンはすべての Send を実行し、
+<a id="routing-override-with-command"></a>
 ### Command によるルーティング上書き
 状態を同時に更新し、ルーティングを制御するために `Command` を使います:
 ```cpp
@@ -2758,6 +2781,7 @@ public:
 
 `Command` が返されると、その `updates` が状態に適用され、通常のエッジルーティングを迂回して
 指定された `goto_node` へ直接移動します。
+<a id="schemaprovider-multi-llm-support"></a>
 ### SchemaProvider によるマルチ LLM 対応
 `SchemaProvider` を使って LLM プロバイダーを切り替えます:
 ```cpp
@@ -2789,6 +2813,7 @@ auto gemini = neograph::llm::SchemaProvider::create({
 neograph::llm::Agent agent(claude, std::move(tools), "You are helpful.");
 ```
 
+<a id="mcp-tool-integration"></a>
 ### MCP ツール統合
 MCP サーバーに接続し、そのツールを使います:
 ```cpp

@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
+from urllib.parse import unquote, urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +29,10 @@ HEADER_RE = re.compile(
 HEADING_RE = re.compile(r"^(#{1,6})\s+", re.MULTILINE)
 FENCE_RE = re.compile(r"^```([^\n]*)\n(.*?)^```\s*$", re.MULTILINE | re.DOTALL)
 TABLE_DIVIDER_RE = re.compile(r"^\s*\|?(?:\s*:?-+:?\s*\|)+\s*$", re.MULTILINE)
+LINK_TARGET_RE = re.compile(r"!?\[[^\]]*\]\(([^)\s]+)")
+HTML_TARGET_RE = re.compile(r"\b(?:href|src)=[\"']([^\"']+)[\"']")
+EXPLICIT_ANCHOR_RE = re.compile(r"<a\s+(?:id|name)=[\"']([^\"']+)[\"']\s*></a>")
+MARKDOWN_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 
 
 def tracked_markdown() -> list[str]:
@@ -110,6 +115,83 @@ def add_navigation(text: str, navigation: str) -> str:
     return rendered + ("\n" if text.endswith("\n") else "")
 
 
+def markdown_headings(text: str) -> list[tuple[int, int, str]]:
+    headings = []
+    in_fence = False
+    for index, line in enumerate(text.splitlines()):
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        match = MARKDOWN_HEADING_RE.match(line)
+        if match:
+            headings.append((index, len(match.group(1)), match.group(2)))
+    return headings
+
+
+def link_targets(text: str) -> list[str]:
+    lines = []
+    in_fence = False
+    for line in text.splitlines():
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            lines.append(line)
+    prose = "\n".join(lines)
+    return LINK_TARGET_RE.findall(prose) + HTML_TARGET_RE.findall(prose)
+
+
+def github_heading_slugs(text: str) -> list[str]:
+    # GitHub preserves underscores, removes punctuation, and suffixes duplicates.
+    # https://github.com/Flet/github-slugger/blob/master/index.js (2026-07-25)
+    counts: dict[str, int] = {}
+    slugs = []
+    for _, _, heading in markdown_headings(text):
+        heading = re.sub(r"<[^>]+>", "", heading)
+        heading = re.sub(r"!?\[([^\]]+)\]\([^)]+\)", r"\1", heading)
+        heading = heading.replace("`", "").replace("*", "")
+        heading = re.sub(r"[^\w\s-]", "", heading.lower(), flags=re.UNICODE)
+        base = re.sub(r"\s", "-", heading).strip("-")
+        suffix = counts.get(base, 0)
+        counts[base] = suffix + 1
+        slugs.append(base if suffix == 0 else f"{base}-{suffix}")
+    return slugs
+
+
+def add_source_heading_anchors(source_text: str, translated_text: str) -> str:
+    source_slugs = github_heading_slugs(source_text)
+    translated_headings = markdown_headings(translated_text)
+    translated_slugs = github_heading_slugs(translated_text)
+    if len(source_slugs) != len(translated_headings):
+        raise ValueError("source and translation heading counts differ")
+
+    explicit = set(EXPLICIT_ANCHOR_RE.findall(translated_text))
+    needed = {
+        target[1:]
+        for target in link_targets(translated_text)
+        if target.startswith("#")
+    }
+    lines = translated_text.splitlines()
+    insertions = []
+    for source_slug, translated_slug, (line, _, _) in zip(
+        source_slugs, translated_slugs, translated_headings
+    ):
+        if (
+            source_slug
+            and source_slug in needed
+            and source_slug != translated_slug
+            and source_slug not in explicit
+        ):
+            insertions.append((line, f'<a id="{source_slug}"></a>'))
+            explicit.add(source_slug)
+    for line, anchor in reversed(insertions):
+        lines.insert(line, anchor)
+    rendered = "\n".join(lines)
+    return rendered + ("\n" if translated_text.endswith("\n") else "")
+
+
 def canonical_sources(files: list[str], manifest: dict) -> list[str]:
     excluded = set(manifest.get("excluded", {}))
     overridden_translations = {
@@ -138,7 +220,59 @@ def structure(text: str) -> dict:
             (match.group(1).strip(), match.group(2)) for match in FENCE_RE.finditer(text)
         ],
         "table_count": len(TABLE_DIVIDER_RE.findall(text)),
+        "link_targets": link_targets(text),
     }
+
+
+def unresolved_internal_links(
+    document: str, text: str, link_targets: list[str]
+) -> list[str]:
+    unresolved = set()
+    cached_text = {document: text}
+    cached_anchors = {}
+
+    for target in link_targets:
+        parsed = urlsplit(target)
+        if parsed.scheme or parsed.netloc or parsed.path.startswith("/"):
+            continue
+        if not parsed.fragment:
+            continue
+        if parsed.path and PurePosixPath(unquote(parsed.path)).suffix.lower() not in {
+            ".md",
+            ".markdown",
+        }:
+            continue
+
+        target_path = document
+        if parsed.path:
+            parent = str(PurePosixPath(document).parent)
+            target_path = posixpath.normpath(
+                posixpath.join(parent, unquote(parsed.path))
+            )
+
+        path = (ROOT / target_path).resolve()
+        try:
+            path.relative_to(ROOT)
+        except ValueError:
+            continue
+        if not path.exists():
+            unresolved.add(target)
+            continue
+        if not path.is_file():
+            continue
+
+        if target_path not in cached_anchors:
+            target_text = cached_text.get(target_path)
+            if target_text is None:
+                target_text = path.read_text(encoding="utf-8")
+                cached_text[target_path] = target_text
+            anchors = set(github_heading_slugs(target_text))
+            anchors.update(EXPLICIT_ANCHOR_RE.findall(target_text))
+            cached_anchors[target_path] = anchors
+        if unquote(parsed.fragment) not in cached_anchors[target_path]:
+            unresolved.add(target)
+
+    return sorted(unresolved)
 
 
 def validate_translation(
@@ -167,9 +301,18 @@ def validate_translation(
         errors.append(f"{translated}: fenced code blocks differ from {source}")
     if source_shape["table_count"] != translated_shape["table_count"]:
         errors.append(f"{translated}: table count differs from {source}")
+    if source_shape["link_targets"] != translated_shape["link_targets"]:
+        errors.append(f"{translated}: ordered link targets differ from {source}")
     navigation = navigation_line(source, translated, manifest)
     if navigation not in translated_text:
         errors.append(f"{translated}: missing or incorrect language navigation")
+    unresolved = unresolved_internal_links(
+        translated, translated_text, translated_shape["link_targets"]
+    )
+    if unresolved:
+        errors.append(
+            f"{translated}: unresolved internal links: {', '.join(unresolved)}"
+        )
     return errors
 
 
@@ -184,6 +327,11 @@ def main() -> int:
         "--write-navigation",
         action="store_true",
         help="insert the required language navigation into English sources",
+    )
+    parser.add_argument(
+        "--write-heading-anchors",
+        action="store_true",
+        help="insert source-heading anchors into existing translations",
     )
     args = parser.parse_args()
 
@@ -203,11 +351,30 @@ def main() -> int:
             if updated != text:
                 path.write_text(updated, encoding="utf-8")
 
+    if args.write_heading_anchors:
+        for source in sources:
+            source_text = (ROOT / source).read_text(encoding="utf-8")
+            for translated in translation_paths(source, manifest).values():
+                path = ROOT / translated
+                if not path.exists():
+                    continue
+                text = path.read_text(encoding="utf-8")
+                updated = add_source_heading_anchors(source_text, text)
+                if updated != text:
+                    path.write_text(updated, encoding="utf-8")
+
     expected_translations = set()
     for source in sources:
         source_text = (ROOT / source).read_text(encoding="utf-8")
         if navigation_line(source, source, manifest) not in source_text:
             errors.append(f"{source}: missing or incorrect language navigation")
+        unresolved = unresolved_internal_links(
+            source, source_text, structure(source_text)["link_targets"]
+        )
+        if unresolved:
+            errors.append(
+                f"{source}: unresolved internal links: {', '.join(unresolved)}"
+            )
         for locale, translated in translation_paths(source, manifest).items():
             expected_translations.add(translated)
             if translated not in tracked:
@@ -238,7 +405,7 @@ def main() -> int:
         for path in sorted(missing):
             print(f"  {path}")
     if errors:
-        print("translation errors:")
+        print("i18n errors:")
         for error in errors:
             print(f"  {error}")
 

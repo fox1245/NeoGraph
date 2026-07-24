@@ -922,8 +922,7 @@ Python トランポリンは現状のまま保持。
 
 HasMCP コールドメール (2026-05-15) はトリガーではないが、そのメールは
 「gRPC が次のトランスポート方向」という無料の業界シグナルを与えた。
-MCP コミュニティは [gRPC を標準トランスポートとして追加することを議論中]
-(https://github.com/modelcontextprotocol/modelcontextprotocol/issues/966) で、
+MCP コミュニティでは [gRPC を標準トランスポートとして追加すること](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/966) が議論されており、
 Google は gRPC-as-native-MCP-transport に取り組んでいる。gRPC は
 NeoGraph の 4 軸ナラティブのほぼすべての軸に整合 — protobuf バイナリ
 シリアライゼーション (パフォーマンス / 軽量)、HTTP/2 多重化 (マルチ

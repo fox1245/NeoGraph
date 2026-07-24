@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=3723c0b19d4814222cdd13695f57ac901efa025ea58a8bc39b728353738f4965 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=6780e2507de2b228368944012cc9ad6c04e504aced4b69b172f87ef51e90ff69 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -14,12 +14,10 @@ HEAD 기준이며 `include/neograph/`를 대조해 확인했다. 다만 다음 �
 `RateLimitedProvider`, `NodeCache`, `AsyncTool`, `create_deep_research_graph`)
 이 투어에서 다루지 않는 **헤더 공개 API를 포함한다**.
 
-> **모든 타입별 공개 API 표면을 빠짐없이 보려면, 위 모듈을 포함해
-> [fox1245.github.io/NeoGraph/](https://fox1245.github.io/NeoGraph/)의 Doxygen 출력을
-> [fox1245.github.io/NeoGraph/](https://fox1245.github.io/NeoGraph/),
-> 헤더에서 직접 생성되어 master에 push할 때마다 갱신되는
-> 사용하라. 이 내러티브 투어는 권장 진입점이며,
-> Doxygen이 정식 참조 문서다.**
+> **위의 모든 모듈을 포함해 타입별 전체 API 표면을 보려면,
+> [fox1245.github.io/NeoGraph/](https://fox1245.github.io/NeoGraph/)의
+> Doxygen 출력을 사용하라. 헤더에서 직접 생성되며 master에 push할 때마다
+> 갱신된다. 이 내러티브 투어는 권장 진입점이고, Doxygen이 정식 참조 문서다.**
 
 이렇게 나누면 내러티브는 끝까지 읽을 수 있을 만큼 작게 유지되고,
 자동 생성 Doxygen은 다음을 보장한다.
@@ -96,7 +94,7 @@ before a hand-written tour is worth the maintenance.
   - [EngineConfig and EngineResources](#engineconfig-and-engineresources)
   - [RunConfig](#runconfig)
   - [RunResult](#runresult)
-  - [GraphEngine](#graphengine-1)
+  - [GraphEngine](#graphengine)
 - [7b. Engine Internals](#7b-engine-internals)
   - [GraphCompiler](#graphcompiler)
   - [Scheduler](#scheduler)
