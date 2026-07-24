@@ -436,6 +436,72 @@ before execution is scheduled, so polling after a process crash restarts the
 resume from the `NodeInterrupt` checkpoint without repeating successful sibling
 workers.
 
+### External Effects And Reconciliation
+
+The ordinary host-brokered contract is backward compatible: a catalog entry
+without `executor.effect` remains `awaiting_tool_results` after a process
+restart and accepts the same `{run_id, call_id, result}` resume request.
+
+For a host capability that can make an externally visible, non-idempotent
+change, declare that risk explicitly. Effect metadata is valid only with the
+default `host_brokered` `tool_result` interaction; it is not input collection
+metadata.
+
+```json
+{
+  "executor": {
+    "kind": "host_brokered",
+    "effect": {
+      "idempotency": "unsupported",
+      "status_query": true,
+      "fencing": true
+    }
+  }
+}
+```
+
+The pending call then includes a durable `effect` object. Its `effect_id` and
+`idempotency_key` are scoped to the Harness run and differ from the provider's
+tool-call ID. `status_query` and `fencing` describe host capabilities; Harness
+records them but does not invent a provider-specific query or retry protocol.
+
+If the service reconnects while an `idempotency: "unsupported"` call is still
+waiting, it changes only that run to `ambiguous_effect`. This means the host
+may have performed the effect before the process stopped, but Harness cannot
+prove either outcome. The compact status includes `pending` and `ambiguity`,
+the journal records `host_brokered.effect.ambiguous`, and Harness neither
+replays the tool nor reports the effect as failed or completed.
+
+Resolve the ambiguity through `neograph_resume` after the host checks its own
+authoritative system:
+
+```json
+{"run_id":"run_...","call_id":"hcall_...","resolution":"completed","result":{"answer":"validated host result"}}
+```
+
+```json
+{"run_id":"run_...","call_id":"hcall_...","resolution":"failed"}
+```
+
+```json
+{"run_id":"run_...","call_id":"hcall_...","resolution":"unknown"}
+```
+
+`completed` validates and consumes `result`, then resumes from the checkpoint.
+`failed` records a terminal Harness failure without executing the worker again.
+`unknown` leaves the run in `ambiguous_effect` for later reconciliation. Exact
+duplicate completed, failed, or unknown submissions are idempotent; a conflicting
+completed or failed submission is rejected. Every non-duplicate reconciliation
+is journaled as `host_brokered.effect.reconciled`.
+
+An ambiguous effect is deliberately not cancellable and does not expire. A
+cancel or timeout cannot establish whether the external effect occurred; submit
+`unknown` if the authoritative system cannot resolve it yet.
+
+This protocol does not claim exactly-once delivery across a host crash. Hosts
+that support idempotency keys or a status query should use those systems to
+determine a real outcome before submitting a reconciliation.
+
 Run snapshots include `created_at`, `updated_at`, `expires_at`, and
 `poll_after_ms`. The default TTL is 24 hours and the default polling interval is
 one second; embeddings can override both through `HarnessServiceConfig`.

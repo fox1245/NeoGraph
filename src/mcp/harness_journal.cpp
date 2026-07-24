@@ -38,6 +38,10 @@ std::string journal_correlation_id(const char* prefix) {
     return out.str();
 }
 
+std::string current_harness_run_id() {
+    return current_context ? current_context->run_id : std::string{};
+}
+
 void append_harness_journal_event(const HarnessJournalContext& context,
                                   const std::string&            event_type,
                                   json                          payload,
