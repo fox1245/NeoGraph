@@ -383,6 +383,15 @@ The host should follow this sequence:
    returned `neograph://runs/...` URI as `uri`. Do not pull traces into context
    by default.
 
+### Finding Provenance
+
+The details artifact preserves each schema-validated worker response in
+`workers` and keeps the established flat `findings` array for existing clients.
+`finding_sources` is a same-length parallel array: each entry contains the
+aggregate `finding_index`, source `worker_id`, and that worker's `local_index`.
+Use it to identify the source of duplicate local IDs such as `F1`; do not add
+provenance fields to the worker's declared finding object.
+
 ## Host-Brokered Resume
 
 Use `executor.kind: "host_brokered"` when the MCP host, rather than the worker
