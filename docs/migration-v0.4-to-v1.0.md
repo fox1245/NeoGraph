@@ -1,50 +1,49 @@
-# 이전 안내: 옛 8개 virtual → `run(NodeInput)` (v0.4.x → v0.9+)
+# Migration Guide: Legacy 8 virtuals → `run(NodeInput)` (v0.4.x → v0.9+)
 
-NeoGraph v0.4는 노드를 호출하는 진입점을 `run(NodeInput) ->
-awaitable<NodeOutput>` 하나로 통합했습니다. 옛 8개 virtual
-(`execute` / `execute_async` / `execute_stream` /
-`execute_stream_async`와 그 `_full` 짝꿍)은 v0.4.x에서 사용 중단
-경고를 거친 뒤 v1 준비 릴리스인 v0.9.0에서 삭제됐습니다. 이 문서는
-옛 노드를 현재 API로 옮기는 절차입니다.
+NeoGraph v0.4 consolidated the node entry point into a single `run(NodeInput) ->
+awaitable<NodeOutput>`. The legacy 8 virtuals (`execute` / `execute_async` /
+`execute_stream` / `execute_stream_async` and their `_full` counterparts) were
+deprecated in v0.4.x and removed in v0.9.0, the v1 preparation release. This
+document outlines the procedure for migrating legacy nodes to the current API.
 
-> v0.9.0 이상에서는 `run(NodeInput)`을 구현하지 않은 C++ 하위 클래스는
-> 추상 클래스라 컴파일되지 않습니다. Python 하위 클래스도
-> `run(self, input)`을 구현해야 합니다.
+> In v0.9.0 and later, C++ subclasses that do not implement `run(NodeInput)` will
+> fail to compile as abstract classes. Python subclasses must also implement
+> `run(self, input)`.
 
-## 왜 옮기나
+## Why Migrate
 
-옛 모양 — `(sync/async) × (writes/full) × (stream/non-stream)` =
-8 virtual cross-product. 어느 하나만 override 하면 다른 7 개에서
-default 가 fallback chain 을 타고 호출됨. 안전한 조합도 있고
-런타임 함정 (예: sync `execute_full` + async dispatch → nested
-`run_sync` race) 도 있어서 사용자가 어느 함수를 override 해야 하는지
-명확하지 않음.
+Old pattern — `(sync/async) × (writes/full) × (stream/non-stream)` = 8 virtual
+cross-product. Overriding any single one causes the other 7 to fall back to the
+default chain. Some combinations are safe, but there are runtime pitfalls (e.g.,
+sync `execute_full` + async dispatch → nested `run_sync` race), making it
+unclear which function the user should override.
 
-새 모양 — `run(NodeInput) -> awaitable<NodeOutput>` 한 개. 하나만
-override. sync vs async 는 호출자 안 신경 씀 (사용자가 코루틴 안에
-`co_await` 으로 async 호출하든, 그냥 동기 코드 쓰든 자유). Command /
-Send 는 `NodeOutput` 에 들어 있어서 추가 virtual 필요 없음. 스트리밍
-콜백은 `NodeInput::stream_cb` (포인터, null 가능) 로 들어옴.
+New pattern — a single `run(NodeInput) -> awaitable<NodeOutput>`. Override only
+one. The sync vs async distinction is the caller's concern (users can use
+`co_await` inside coroutines or plain synchronous code freely). Command / Send
+are included in `NodeOutput`, so no additional virtuals are needed. Streaming
+callbacks arrive via `NodeInput::stream_cb` (a nullable pointer).
 
-## 8 virtual → 새 `run()` 매핑표
+## 8 virtuals → New `run()` Mapping
 
-| 옛 virtual | 옮긴 모양 |
+| Legacy Virtual | Migrated Form |
 |---|---|
-| `execute(state)` | `NodeOutput out; out.writes = {...}; co_return out;` (sync 본문) |
-| `execute_async(state)` | `co_return co_await provider->complete_async(...);` 같은 native async |
+| `execute(state)` | `NodeOutput out; out.writes = {...}; co_return out;` (sync body) |
+| `execute_async(state)` | Native async like `co_return co_await provider->complete_async(...);` |
 | `execute_stream(state, cb)` | `if (in.stream_cb) (*in.stream_cb)(event); co_return NodeOutput{...};` |
-| `execute_stream_async(state, cb)` | 위 + native async (`co_await ...`) |
+| `execute_stream_async(state, cb)` | Above + native async (`co_await ...`) |
 | `execute_full(state)` | `NodeOutput out; out.writes=...; out.command=...; co_return out;` |
-| `execute_full_async(state)` | 위 + native async |
-| `execute_full_stream(state, cb)` | `execute_full` + `in.stream_cb` 사용 |
-| `execute_full_stream_async(state, cb)` | 위 + native async |
+| `execute_full_async(state)` | Above + native async |
+| `execute_full_stream(state, cb)` | `execute_full` + `in.stream_cb` usage |
+| `execute_full_stream_async(state, cb)` | Above + native async |
 
-핵심: **8 갈래가 `NodeOutput` 의 어느 필드를 채우느냐 + `in.stream_cb`
-사용 유무 + `co_await` 사용 유무 의 조합**으로 표현 가능. virtual 은 1개.
+Key: **The 8 variants are expressible as combinations of which `NodeOutput` field
+is populated + whether `in.stream_cb` is used + whether `co_await` is used**.
+Only one virtual remains.
 
-### Python의 가장 흔한 변환
+### Most Common Python Migration
 
-**옛 코드:**
+**Old code:**
 
 ```python
 class CounterNode(ng.GraphNode):
@@ -53,7 +52,7 @@ class CounterNode(ng.GraphNode):
         return [ng.ChannelWrite("count", current + 1)]
 ```
 
-**현재 코드:**
+**Current code:**
 
 ```python
 class CounterNode(ng.GraphNode):
@@ -62,14 +61,15 @@ class CounterNode(ng.GraphNode):
         return [ng.ChannelWrite("count", current + 1)]
 ```
 
-Python의 `run`은 `async def`가 아니라 일반 `def`입니다. 스트리밍 실행에서는
-`input.stream_cb`가 이벤트를 받는 함수이고, 일반 실행에서는 `None`입니다.
+Python's `run` is a regular `def`, not `async def`. In streaming execution,
+`input.stream_cb` is a function that receives events; in regular execution, it
+is `None`.
 
-## 케이스별 변환 예제
+## Case-by-Case Conversion Examples
 
-### 케이스 1 — 가장 단순한 sync 노드
+### Case 1 — Simplest Sync Node
 
-**옛:**
+**Old:**
 ```cpp
 class MyNode : public GraphNode {
 public:
@@ -81,7 +81,7 @@ public:
 };
 ```
 
-**새:**
+**New:**
 ```cpp
 class MyNode : public GraphNode {
 public:
@@ -95,14 +95,14 @@ public:
 };
 ```
 
-차이:
+Differences:
 - `state` → `in.state`
-- 반환값을 `NodeOutput` 에 담음 (`writes` 필드)
-- 함수가 `asio::awaitable<NodeOutput>` 이고 마지막에 `co_return`
+- Return value wrapped in `NodeOutput` (`writes` field)
+- Function is `asio::awaitable<NodeOutput>` and ends with `co_return`
 
-### 케이스 2 — async LLM 노드 (`execute_async` 옮기기)
+### Case 2 — Async LLM Node (Migrating `execute_async`)
 
-**옛:**
+**Old:**
 ```cpp
 class TalkNode : public GraphNode {
     std::shared_ptr<Provider> prov_;
@@ -121,7 +121,7 @@ public:
 };
 ```
 
-**새:**
+**New:**
 ```cpp
 class TalkNode : public GraphNode {
     std::shared_ptr<Provider> prov_;
@@ -139,9 +139,9 @@ public:
 };
 ```
 
-### 케이스 3 — 스트리밍 노드 (`execute_stream` 옮기기)
+### Case 3 — Streaming Node (Migrating `execute_stream`)
 
-**옛:**
+**Old:**
 ```cpp
 std::vector<ChannelWrite>
 execute_stream(const GraphState& state, const GraphStreamCallback& cb) override {
@@ -152,10 +152,10 @@ execute_stream(const GraphState& state, const GraphStreamCallback& cb) override 
 }
 ```
 
-**새:**
+**New:**
 ```cpp
 asio::awaitable<NodeOutput> run(NodeInput in) override {
-    // in.stream_cb 는 포인터 — null 이면 호출자가 streaming 안 원함.
+    // in.stream_cb is a pointer — null means the caller does not want streaming.
     auto on_chunk = [&](const std::string& chunk) {
         if (in.stream_cb) {
             (*in.stream_cb)({GraphEvent::Type::LLM_TOKEN, "talk", json(chunk)});
@@ -168,24 +168,24 @@ asio::awaitable<NodeOutput> run(NodeInput in) override {
 }
 ```
 
-### 케이스 4 — Command / Send 쓰는 노드 (`execute_full` 옮기기)
+### Case 4 — Node Using Command / Send (Migrating `execute_full`)
 
-**옛:**
+**Old:**
 ```cpp
 NodeResult execute_full(const GraphState& state) override {
     NodeResult r;
     r.writes.push_back({"step", json("dispatched")});
     Command command;
     command.goto_node = "next_router";
-    r.command = command;   // 라우팅 강제
+    r.command = command;   // Force routing
     return r;
 }
 ```
 
-**새:**
+**New:**
 ```cpp
 asio::awaitable<NodeOutput> run(NodeInput in) override {
-    NodeOutput out;   // NodeOutput == NodeResult — 같은 타입의 alias
+    NodeOutput out;   // NodeOutput == NodeResult — alias of the same type
     out.writes.push_back({"step", json("dispatched")});
     Command command;
     command.goto_node = "next_router";
@@ -194,44 +194,44 @@ asio::awaitable<NodeOutput> run(NodeInput in) override {
 }
 ```
 
-`NodeOutput` 은 `NodeResult` 의 별명 — 옛 코드의 `NodeResult` 도
-그대로 컴파일됩니다.
+`NodeOutput` is an alias for `NodeResult` — legacy `NodeResult` code still
+compiles.
 
-## 자주 하는 실수
+## Common Mistakes
 
-### `NodeInput in` 은 by-value
+### `NodeInput in` is by-value
 
 ```cpp
-// ❌ 잘못 — 코루틴 ref-param UAF, pybind async path 에서 SEGV
+// ❌ Wrong — coroutine ref-param UAF, SEGV in pybind async path
 asio::awaitable<NodeOutput> run(const NodeInput& in) override { ... }
 
-// ✅ 맞음
+// ✅ Correct
 asio::awaitable<NodeOutput> run(NodeInput in) override { ... }
 ```
 
-이유: 코루틴 frame 이 인자 사본을 가져야 안전. 참조로 받으면
-호출자 stack frame 이 사라진 뒤 `in.state` 가 dangling. PR 2 작업
-중 실제로 발생한 버그.
+Reason: The coroutine frame must take an argument copy for safety. Receiving by
+reference leaves `in.state` dangling after the caller's stack frame disappears.
+A real bug that occurred during PR 2 work.
 
-### cancel / store / stream_cb 는 모두 `in.ctx` 에서
+### cancel / store / stream_cb all come from `in.ctx`
 
-옛 노드는 cancel token 을 `state.run_cancel_token_` 같은 smuggling
-채널로 받았는데, v0.4 부터는 `RunContext` 가 정식 plumbing:
+Legacy nodes received cancel tokens via smuggling channels like
+`state.run_cancel_token_`, but v0.4 introduced `RunContext` as official plumbing:
 
 ```cpp
 asio::awaitable<NodeOutput> run(NodeInput in) override {
-    // 취소 신호 확인
+    // Check cancellation signal
     if (in.ctx.cancel_token && in.ctx.cancel_token->is_cancelled()) {
         throw CancelledException("user cancelled");
     }
 
-    // Store 접근 (issue #27)
+    // Store access (issue #27)
     if (in.ctx.store) {
         auto user_pref = in.ctx.store->get({"users", in.ctx.thread_id}, "lang");
         // ...
     }
 
-    // Streaming sink (null 가능)
+    // Streaming sink (nullable)
     if (in.stream_cb) {
         (*in.stream_cb)({GraphEvent::Type::NODE_END, "my_node", json(...)});
     }
@@ -240,94 +240,96 @@ asio::awaitable<NodeOutput> run(NodeInput in) override {
 }
 ```
 
-현재 노드가 활용할 수 있는 `in.ctx` 필드는 `cancel_token`, `usage`,
-`thread_id`, `step`, `stream_mode`, `store`, `resume_value`입니다.
-`deadline`과 `trace_id`는 향후 `RunConfig` 확장을 위한 예약 슬롯으로,
-현재 엔진은 값을 채우지 않으며 Python에도 노출하지 않습니다.
+Fields of `in.ctx` available to nodes are: `cancel_token`, `usage`,
+`thread_id`, `step`, `stream_mode`, `store`, and `resume_value`. `deadline` and
+`trace_id` are reserved slots for future `RunConfig` extensions; the current
+engine does not populate them and does not expose them to Python.
 
-### `_full` virtual 옮기는 사람 — `co_return out;` 한 줄로 끝
+### Migrating `_full` virtuals — finish with `co_return out;` in one line
 
-옛 `execute_full` 사용자가 가장 자주 헤매는 부분:
-"`NodeResult` 는 옛 타입인데 `NodeOutput` 을 반환해야 하나?"
-→ 둘은 같은 타입의 별명입니다. `NodeOutput out; out.writes=...;
-out.command=...; out.sends=...; co_return out;` 만 하면 됨.
+The most common confusion for legacy `execute_full` users:
+"`NodeResult` is the old type, but must I return `NodeOutput`?"
+→ They are aliases of the same type. Just do `NodeOutput out;
+out.writes=...; out.command=...; out.sends=...; co_return out;`.
 
-## 마이그레이션 안 하면
+## What Happens If You Don't Migrate
 
-v0.9.0 이상에서는 옛 8개 virtual이 없습니다.
+In v0.9.0 and later, the legacy 8 virtuals are gone.
 
-- C++의 옛 `override`는 `'execute' marked override but does not override`
-  같은 컴파일 오류를 냅니다.
-- Python에서 `execute()`만 구현한 노드는 `run(input)` 구현을 요구하는
-  `NotImplementedError`를 냅니다.
+- C++ legacy `override` generates compilation errors like `'execute' marked
+  override but does not override`.
+- Python nodes implementing only `execute()` raise `NotImplementedError`
+  requiring `run(input)`.
 
-옛 메서드를 이름만 남겨 두는 전환 패턴도 사용하지 마세요. 엔진은
-`run(NodeInput)`만 호출하므로 옛 본문은 실행되지 않습니다.
+Do not use a transition pattern that leaves the old method names in place. The
+engine calls only `run(NodeInput)`, so old bodies never execute.
 
-## 일괄 옮기는 스크립트가 있나?
+## Is There a Bulk Migration Script?
 
-없습니다 — virtual 시그니처가 8 가지로 다양해서 정규식 변환이 깔끔하지
-않습니다. 케이스별 변환 (위 4 가지 예제) 을 사용자가 보고 손으로
-옮기는 게 안전.
+No — the virtual signatures vary across 8 forms, making regex-based conversion
+impractical. Users should read the case-by-case examples (the 4 examples above)
+and migrate manually.
 
-가장 자주 쓰이는 패턴 (`execute(state)` 만 override) 의 경우 다음
-정도의 sed/awk 한 줄이면 1차 변환 가능 — 검토는 사람이 해야 합니다:
+For the most common pattern (override only `execute(state)`), the following
+sed/awk one-liner may assist with the initial pass — human review is required:
 
 ```bash
-# 매우 거친 1차 변환 — 한 줄짜리 execute 만 override 하는 노드 한정.
-# 절대 -i 없이 dry-run 부터.
+# Very rough initial pass — nodes with single-line execute override only.
+# Always dry-run without -i first.
 grep -lE 'execute\(const GraphState' src/**/*.cpp
-# 결과 파일 하나씩 열어서 새 모양으로 손편집.
+# Manually edit each resulting file to the new pattern.
 ```
 
-복잡한 노드 (`execute_full`, `execute_stream_async` 등) 는 무조건
-손편집. 쇼트컷 없습니다.
+Complex nodes (`execute_full`, `execute_stream_async`, etc.) must be edited
+manually. There are no shortcuts.
 
 ---
 
-# Migration 2: `Provider` 호환 정책과 새 명시적 요청 API (v0.9+)
+# Migration 2: `Provider` Compatibility Policy and New Explicit Request API (v0.9+)
 
-기존 `Provider::complete*` 네 메서드와 callback 기반 `invoke()`는 안정 API로
-계속 지원하며 제거 계획이 없다. 기존 구현과 호출자는 옮기지 않아도 된다.
-다만 새 Provider 구현에는 `CompletionProvider::do_invoke()` 하나를 재정의하는
-방식을, 새 직접 호출에는 `invoke_request(CompletionRequest)`를 권장한다.
+The existing `Provider::complete*` four methods and callback-based `invoke()` are
+stable APIs with no removal plans. Existing implementations and callers need not
+migrate. However, new `Provider` implementations should override only
+`CompletionProvider::do_invoke()`, and new direct calls should use
+`invoke_request(CompletionRequest)`.
 
-## 기존 호출과 권장 새 호출
+## Existing vs Recommended New Call Patterns
 
-| 안정 호환 API | `CompletionProvider`를 직접 쓸 때 권장하는 API |
+| Stable Compatible API | Recommended API When Using `CompletionProvider` Directly |
 |---|---|
 | `complete(params)` | `run_sync(invoke_request(CompletionRequest::collect(params)))` |
 | `complete_async(params)` | `co_await invoke_request(CompletionRequest::collect(params))` |
 | `complete_stream(params, on_chunk)` | `run_sync(invoke_request(CompletionRequest::stream(params, on_chunk)))` |
 | `complete_stream_async(params, on_chunk)` | `co_await invoke_request(CompletionRequest::stream(params, on_chunk))` |
 
-`CompletionRequest`는 callback 유무와 전송 방식을 분리한다. 따라서 callback이
-없어도 `CompletionRequest::stream(params)`로 streaming 전송을 명시할 수 있다.
-`Provider&`나 `Provider*`만 가진 코드는 기존 `complete*`를 그대로 쓰면 된다.
+`CompletionRequest` separates callback presence from transport mode. Thus, even
+without a callback, `CompletionRequest::stream(params)` explicitly requests
+streaming transport. Code that holds only `Provider&` or `Provider*` can use
+existing `complete*` methods unchanged.
 
-## 케이스별 변환
+## Case-by-Case Conversion
 
-### Provider를 호출하는 사용자 코드
+### User Code Calling Provider
 
 ```cpp
-// 안정 호환 API — 계속 지원됨
+// Stable compatible API — continues to be supported
 auto completion = co_await provider->complete_async(params);
 ```
 
 ```cpp
-// CompletionProvider를 직접 쓰는 새 코드 — mode가 명시적
+// New code using `CompletionProvider` directly — mode is explicit
 auto completion = co_await provider.invoke_request(
     CompletionRequest::collect(params));
 ```
 
-### 사용자 정의 Provider subclass
+### Custom Provider Subclass
 
-기존 `Provider` subclass는 계속 동작한다. 새 구현은 별도
-`CompletionProvider`를 상속하고 `do_invoke()` 하나만 구현하는 방식을 권장한다.
-기존 `Provider`의 vtable과 Python `complete()` 계약은 바꾸지 않는다.
+Existing `Provider` subclasses continue to work. New implementations should
+inherit from `CompletionProvider` and implement only `do_invoke()`. The
+existing `Provider` vtable and Python `complete()` contract remain unchanged.
 
 ```cpp
-// 옛 모양 — async-native provider
+// Old pattern — async-native provider
 class MyProvider : public neograph::Provider {
 public:
     asio::awaitable<ChatCompletion>
@@ -347,14 +349,14 @@ public:
 ```
 
 ```cpp
-// 새 모양 — transport mode가 callback 유무와 분리됨
+// New pattern — transport mode is decoupled from callback presence
 class MyProvider : public neograph::CompletionProvider {
 public:
     asio::awaitable<ChatCompletion>
     do_invoke(CompletionRequest request) override {
         if (request.streaming()) {
-            // callback이 없어도 SSE/WS transport를 사용한다.
-            // callback이 있으면 토큰마다 request.on_chunk()(token).
+            // Uses SSE/WS transport even without callback.
+            // With callback, invokes request.on_chunk()(token) per token.
         } else {
             // ... HTTP call ...
         }
@@ -365,7 +367,7 @@ public:
 };
 ```
 
-새 호출자는 mode를 명시한다.
+New callers specify the mode explicitly.
 
 ```cpp
 auto full = co_await provider.invoke_request(
@@ -374,101 +376,104 @@ auto full = co_await provider.invoke_request(
 auto streamed = co_await provider.invoke_request(
     CompletionRequest::stream(params, on_chunk));
 
-// token을 관찰하지 않아도 streaming transport를 명시할 수 있다.
+// Can explicitly request streaming transport even without observing tokens.
 auto streamed_without_observer = co_await provider.invoke_request(
     CompletionRequest::stream(params));
 ```
 
-기존 네 virtual과 `invoke(params, on_chunk)`는 계속 지원된다.
-`CompletionProvider`의 final adapter가 모든 기존 진입점을 `do_invoke()`로 한 번만
-연결하므로 상호 재귀가 생기지 않는다.
+The legacy four virtuals and `invoke(params, on_chunk)` remain supported. The
+`CompletionProvider` final adapter connects all legacy entry points to
+`do_invoke()` once, preventing mutual recursion.
 
-## cancel 자동 propagation
+## Automatic Cancellation Propagation
 
-취소가 필요하면 `CompletionParams::cancel_token`을 명시한다. 엔진 내부 노드는
-`RunContext`의 token을 params에 넣어 Provider로 전달한다. thread-local 기반의
-암묵적 전달 경로는 더 이상 사용하지 않는다.
+If cancellation is needed, specify `CompletionParams::cancel_token`. Internal
+engine nodes pass the `RunContext` token to providers in params. The thread-local
+implicit propagation path is no longer used.
 
 ```cpp
-// engine 안 노드 본문 — 둘 다 동일하게 cancel 됨
+// Node body inside engine — both cancel identically
 co_await provider->invoke(params, nullptr);                    // OK
 neograph::async::run_sync(provider->invoke(params, nullptr));  // OK
 ```
 
-graph 밖에서 직접 호출하는 케이스 (`Agent` user code 등) 도 동일 —
-explicit cancel_token 안 주면 그냥 cancel 못 받음 (예전과 동일).
+Direct callers outside the graph (e.g., `Agent` user code) follow the same
+pattern — without an explicit cancel_token, cancellation cannot be received
+(same as before).
 
-## 마이그레이션 안 하면
+## What Happens If You Don't Migrate
 
-아무 조치도 필요 없다:
-- 기존 네 virtual 재정의와 직접 호출은 그대로 동작한다.
-- Provider 관련 `-Wdeprecated-declarations` 경고는 더 이상 발생하지 않는다.
-- 호환성·보안 수정은 기존 API에도 적용한다.
+No action is required:
+- Legacy virtual overrides and direct calls continue to work.
+- Provider-related `-Wdeprecated-declarations` warnings no longer occur.
+- Compatibility and security fixes apply to legacy APIs as well.
 
-기존 API 제거 계획은 없다. 다만 새 기능은 명시적 요청 계약에만 추가될 수
-있으므로, 새 구현은 `CompletionProvider`로 작성하는 편이 낫다.
+There are no plans to remove legacy APIs. However, new features may only be
+added to the explicit request contract, so implementing new features with
+`CompletionProvider` is preferable.
 
-## 자동 변환 가능?
+## Can It Be Automatically Converted?
 
-호출 사이트는 패턴 단순:
+Call sites follow simple patterns:
 
 ```bash
-# dry-run 으로 검토
+# Review with dry-run
 grep -rnE '->complete(_async|_stream|_stream_async)?\(' your/code
 
-# 그 다음 케이스별로 손편집 (위 매핑표 참고).
+# Then manually edit case-by-case (refer to the mapping table above).
 ```
 
-기존 Provider subclass를 `CompletionProvider::do_invoke()` 하나로 합치는 작업은
-선택 사항이며, 로직이 섞여 있어서 손편집이 필요하다.
+Merging legacy `Provider` subclasses into a single `CompletionProvider::do_invoke()`
+is optional and requires manual editing due to intertwined logic.
 
-## 관련 문서 / 이슈
+## Related Documentation / Issues
 
-- [`include/neograph/graph/node.h`](../include/neograph/graph/node.h) —
-  새 `run(NodeInput)` virtual 의 인라인 docstring (예제 포함)
-- [ROADMAP_v1.md](../ROADMAP_v1.md) — Candidate 1 (GraphNode 8-virtual
-  flattening) 의 상세 설계 메모
-- [troubleshooting.md](troubleshooting.md) — 실제 옮기다 부딪치는
-  컴파일 에러 / 런타임 차이 정리
-- [Issue #5](https://github.com/fox1245/NeoGraph/issues/5) — Provider의
-  한 메서드 구현 경로와 영구 호환 정책 결정 기록
+- [`include/neograph/graph/node.h`](../include/neograph/graph/node.h) — inline
+  docstring for the new `run(NodeInput)` virtual (includes examples)
+- [ROADMAP_v1.md](../ROADMAP_v1.md) — Detailed design notes for Candidate 1
+  (GraphNode 8-virtual flattening)
+- [troubleshooting.md](troubleshooting.md) — Compilation errors and runtime
+  differences encountered during actual migration
+- [Issue #5](https://github.com/fox1245/NeoGraph/issues/5) — Record of decision
+  on Provider method implementation path and permanent compatibility policy
 
 ---
 
-# Migration 3: `compile()` 의 worker pool default 가 1 로 (v0.1.4 회귀 복귀)
+# Migration 3: `compile()` worker pool default is 1 (v0.1.4 regression restoration)
 
-## 무엇이 바뀌었나
+## What Changed
 
-`GraphEngine::compile(def, ctx)` 의 default worker count 가 v0.1.4
-(`b59444f`) 부터 `std::thread::hardware_concurrency()` 였음. v1.0
-에서 다시 **`1` (= no engine-owned thread_pool)** 로 복귀.
+`GraphEngine::compile(def, ctx)` default worker count was
+`std::thread::hardware_concurrency()` from v0.1.4 (`b59444f`) but is restored to
+**`1` (= no engine-owned thread_pool)** in v1.0.
 
-## 왜
+## Why
 
-`hardware_concurrency` default 가 모든 fan-out 노드에 cross-thread
-submit 비용 (~6-7 µs/task) 부담시킴 — bench 의 par 측정 (5 워커
-+ summarizer) 이 11.6 µs → 44 µs 로 4× 회귀. 회귀를 우리 측정
-환경에서 git bisect 로 v0.1.4 의 `b59444f` 까지 좁힘.
+The `hardware_concurrency` default imposes cross-thread submit overhead (~6-7
+µs/task) on all fan-out nodes — bench par measurement (5 workers + summarizer)
+regressed from 11.6 µs to 44 µs, a 4× slowdown. Bisecting our measurement
+environment pinpointed v0.1.4's `b59444f` as the culprit.
 
-진짜 production workload (LLM call ms~s 단위) 는 submit overhead
-무시 가능, 그러나:
-- **단순 그래프 (no fan-out)** 도 pool overhead 부담 — 의미 없음
-- **non-thread-safe 노드 상태** 가 default 로 멀티 워커 노출 — 진짜
+Real production workloads (LLM calls in ms~s range) can ignore submit overhead,
+but:
+- **Simple graphs (no fan-out)** still pay pool overhead — meaningless
+- **Non-thread-safe node state** is exposed to multi-worker by default — a real
   footgun
 
-그래서 default 를 안전한 1 로 두고, 사용자가 진짜 fan-out 병렬화
-필요할 때 명시 opt-in.
+Thus, the default is safely set to 1, and users must explicitly opt-in for
+actual fan-out parallelization.
 
-## 마이그레이션
+## Migration
 
-fan-out 병렬화가 필요한 그래프 (예: `Send` 다수 발사, `parallel_group`,
-deep_research 의 5-researcher fan-out) 는 `compile()` 후 명시 호출:
+Graphs requiring fan-out parallelization (e.g., multiple `Send` dispatches,
+`parallel_group`, deep_research's 5-researcher fan-out) must call explicitly
+after `compile()`:
 
 ```cpp
 auto engine = GraphEngine::compile(def, ctx);
 engine->set_worker_count_auto();  // hardware_concurrency()
-// 또는
-engine->set_worker_count(4);  // 정확한 N 지정
+// or
+engine->set_worker_count(4);  // specify exact N
 ```
 
 ```python
@@ -476,39 +481,41 @@ engine = ng.GraphEngine.compile(def, ctx)
 engine.set_worker_count_auto()
 ```
 
-단순 그래프 (no fan-out) 또는 fan-out 이 가벼운 그래프 (LLM call
-dominant) 는 default 그대로 — pool overhead 0.
+Simple graphs (no fan-out) or light fan-out graphs (LLM call dominant) keep the
+default — 0 pool overhead.
 
-## 마이그레이션 안 하면
+## What Happens If You Don't Migrate
 
-- 사용자 그래프가 fan-out 시 단일 thread 로 직렬 실행 (정합 보장)
-- 진짜 wallclock 회복은 못 받음 — `set_worker_count_auto()` 명시
-  필요
+- User graphs with fan-out execute serially on a single thread (consistency
+  guaranteed)
+- Actual wallclock recovery is not achieved — explicit
+  `set_worker_count_auto()` is required
 
-## 영향 받는 NeoGraph 내부 예제
+## NeoGraph Internal Examples Affected
 
-본 변경 직후 함께 들어간 fan-out 가시화 패치 — 의도 보존을 위해
-명시 호출 추가. 사용자 코드도 같은 패턴이면 따라 적용:
+The fan-out visibility patch added alongside this change — explicit calls added
+to preserve intent. Apply the same pattern if your user code matches:
 
-- `examples/10_send_command.cpp` — sync `sleep_for` ResearcherNode 가
-  Send 로 fan-out, `engine->set_worker_count_auto()` 추가
-- `examples/14_plan_executor.cpp` — 5 sub-topic Send fan-out (sync
-  sleep_for), 동일하게 추가
-- `examples/21_mcp_fanout.cpp` — MCP tool call 3개 동시 발사, 동일
-- `examples/36_classifier_fanout.cpp` — 이미 `set_worker_count(5)` 명시
-  돼 있었음. 주석에서 거짓말 (지금 기본=hardware_concurrency) 만 수정
-- `src/core/deep_research_graph.cpp` 의 `create_deep_research_graph()`
-  builder — `compile()` 직후 `set_worker_count_auto()` 호출. supervisor
-  가 띄우는 N researcher 가 진짜로 동시 실행되도록
+- `examples/10_send_command.cpp` — sync `sleep_for` ResearcherNode fans out via
+  Send, `engine->set_worker_count_auto()` added
+- `examples/14_plan_executor.cpp` — 5 sub-topic Send fan-out (sync sleep_for),
+  same addition
+- `examples/21_mcp_fanout.cpp` — 3 MCP tool calls fired concurrently, same
+- `examples/36_classifier_fanout.cpp` — already had `set_worker_count(5)`
+  explicit. Fixed comment stating false default (current default is
+  hardware_concurrency)
+- `src/core/deep_research_graph.cpp` `create_deep_research_graph()` builder —
+  calls `set_worker_count_auto()` immediately after `compile()` so supervisor's
+  N researchers truly run concurrently
 
-`examples/05_parallel_fanout.cpp` 는 `io_context` 위 코루틴 timer
-overlap 방식 (sync sleep 없음) 이라 워커 풀 영향 없음 — 그대로 둠.
+`examples/05_parallel_fanout.cpp` uses coroutine timer overlap on `io_context`
+(no sync sleep), so worker pool has no effect — left unchanged.
 
-같은 패턴이 사용자 코드에 있다면:
+If the same pattern exists in user code:
 
 ```cpp
 auto engine = GraphEngine::compile(def, ctx);
-engine->set_worker_count_auto();   // ← 본 줄 추가
+engine->set_worker_count_auto();   // ← add this line
 ```
 
-자세한 측정 결과는 ROADMAP_v1.md 의 perf section 참조 (별도 추가).
+See ROADMAP_v1.md perf section for detailed measurements (separate addition).
