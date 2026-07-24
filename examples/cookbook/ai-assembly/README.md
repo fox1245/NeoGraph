@@ -1,4 +1,4 @@
-# AI National Assembly (AI National Assembly)
+# AI National Assembly
 
 A toy demo built **as a fresh NeoGraph user** — every API choice was
 made by reading the public docs (README, examples on github, Doxygen)

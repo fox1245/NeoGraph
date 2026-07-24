@@ -9,7 +9,7 @@ ReAct subgraph — **woven together with a single line of voice**.
 
 ## Why This Is JARVIS
 
-JARVIS in movies isn't a chatbot with voice TTS. JARVIS does five things simultaneously:
+JARVIS in the movies isn't just a chatbot with voice TTS. JARVIS does five things simultaneously:
 
 1. Grabs intent before Tony finishes speaking — **fast intent classification**
 2. Answers directly if possible, otherwise delegates to subordinates — **4-way routing**
@@ -18,7 +18,7 @@ JARVIS in movies isn't a chatbot with voice TTS. JARVIS does five things simulta
 5. Can be called by other JARVIS/systems — **bidirectional A2A**
 
 So the core of this cookbook is the **graph shape**, not voice. Voice is just the
-input/output shell; what creates the "JARVIS feel" is the orchestration inside NeoGraph.
+input/output shell; what creates the "JARVIS feel" is NeoGraph's orchestration engine.
 
 ## Full Graph
 

@@ -166,8 +166,8 @@ would be customer edits graph JSON in web UI → DB save → next request uses n
   With Postgres CheckpointStore, automatic persistence per thread_id.
 - **Per-customer Provider** — alice=gpt-4o-mini, bob=claude-haiku style
   different model/provider per customer. NodeContext::provider changes per customer.
-- **Streaming response** — `execute_stream_async` + SSE for token-level
-  streaming. Use NG's `execute_stream` path directly.
+- **Streaming response** — `run(input)` with `input.stream_cb` + SSE for token-level
+  streaming. Use NG's `run(NodeInput)` path with the stream callback directly.
 - **A/B experiment framework** — Traffic split via graph_def hash + customer_id sticky split.
   Extend code pattern directly.
 - **Streaming + cancel integration** — Abort outbound LLM socket on client disconnect.

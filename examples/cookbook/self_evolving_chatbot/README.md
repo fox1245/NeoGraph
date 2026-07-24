@@ -1,7 +1,7 @@
 # Self-Evolving Chatbot
 
-**Chatbot harness reshapes *its own* topology at runtime based on user behavior.
-A category only NeoGraph can do, not LangGraph.**
+**The chatbot harness reshapes *its own* topology at runtime based on user behavior.
+This capability is unique to NeoGraph; LangGraph cannot reshape a graph at runtime.**
 
 Natural extension of [multi_tenant_chatbot](../multi_tenant_chatbot/) cookbook — that one has
 customer harnesses *fixed*, this one *evolves*. Same compile cache + thread_id isolation
@@ -143,7 +143,7 @@ Compile cache size:  3   ← 5 customers → 3 distinct engine
    converge to ~10, engine memory stays nearly constant → real
    1000+ customer multi-tenant fits in one process.**
 
-5. **Sequential simulation only 7 minutes wall time** — Real production each customer
+5. **Sequential simulation takes only 7 minutes wall time** — In production, each customer is
    independent so parallel possible. 5 customers parallel = ~1.5 minutes +
    compile cache is concurrent access safe (`std::shared_mutex`) so no race.
 

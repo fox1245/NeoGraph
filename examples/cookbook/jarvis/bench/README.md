@@ -98,13 +98,13 @@ round-splitting guesswork.
 | NeoGraph | **631ms** | 744ms | 726ms |
 | LangGraph | **629ms** | 723ms | 753ms |
 
-- **Perceived TTFT effectively tied (delta −2ms).** NeoGraph TTFT appeared slower
+- **Perceived TTFT effectively tied (delta −2ms).** NeoGraph's apparently slower TTFT
   earlier (800 vs 603) was pure provider dispersion — this time Groq gave both
   fair window (upstream 726 vs 753) eliminating gap. Confirmed "NG round only bad luck"
   suspicion with reproduction.
 - **Completion time residual (pure framework) reproduced**: NeoGraph 4.1ms vs LangGraph
-  14.6ms (matches previous proxy round 3.5 vs 14.7). Framework's own overhead
-  conclusion solid.
+  14.6ms (matches previous proxy round 3.5 vs 14.7). The framework overhead
+  conclusion is solid.
 - **TTFT-residual is 0 within ±tens ms noise** (negative even appears). Compared to
   perceived TTFT 625ms vs upstream sum 673ms, resolution (±50ms) of subtracting two
   independent clocks (client monotonic vs nginx wall-clock) is larger than framework

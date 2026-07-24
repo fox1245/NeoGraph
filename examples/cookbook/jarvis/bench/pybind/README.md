@@ -37,10 +37,10 @@ python3 <bench>/pybind/perturn.py   langgraph 5000
 
 ## Implications
 
-Using NeoGraph from Python gives **Python ecosystem entire (HF·OpenAI SDK·pandas etc.
-inline in node body) + startup · RSS · throughput advantage simultaneously**.
+Using NeoGraph from Python provides **the entire Python ecosystem (HF·OpenAI SDK·pandas etc.
+inline in the node body) + startup · RSS · throughput advantages simultaneously**.
 That is, the dichotomy "performance is C++ standalone, ecosystem is Python" is wrong —
-Python mode gives both. standalone C++ goes one step further (startup 8ms · RSS
+Python mode gives both. Standalone C++ goes one step further (startup 8ms · RSS
 7.5MB) but only when node is C++ or tools called via HTTP.
 
 Caution: If node imports torch/HF, RSS is dominated by that library

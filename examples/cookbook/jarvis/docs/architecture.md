@@ -59,7 +59,7 @@ Python optimum reference verified 55-token character-level parity. int8(~28MB) r
 build (bundled reduced build excludes ConvInteger) → default fp32(~183MB).
 
 ### text_or_voice (`channel_merge`)
-- Selects living path between voice_in path(STT passed) and text_in path(external A2A)
+- Selects the active path between voice_in (STT passed) and text_in (external A2A)
 - Empty turn if both empty — graph passes through one cycle
 - External A2A call must also include `user_lang` (assumes "en" if missing)
 
@@ -95,7 +95,7 @@ build (bundled reduced build excludes ConvInteger) → default fp32(~183MB).
 ### response_synth (`llm_call`)
 - Large LLM (gpt-4o, ~800-1500ms)
 - System prompt = persona.txt [synth] (+ language instruction + session boundary comment)
-- Conversation history(memory_context.recent_turns) is **passed as messages array user/assistant
+- Conversation history (memory_context.recent_turns) is **passed as a messages array of user/assistant
   role turns** — previously, inline JSON in user message caused model to treat past answers
   as content verbatim (memory parrot).
 - Current turn user message = user_text + tool_results / delegated_reply attached
@@ -121,8 +121,8 @@ build (bundled reduced build excludes ConvInteger) → default fp32(~183MB).
 
 ## Outside Graph — Background Triggers / A2A Server
 
-JARVIS main graph is simple single utterance single response cycle, but main.cpp
-starts two additional things that complete JARVIS feel:
+The JARVIS main graph is a simple single-utterance, single-response cycle, but main.cpp
+starts two additional components that complete the JARVIS feel:
 
 ### Background Trigger Graph
 - Separate `GraphEngine` (or just std::thread)
