@@ -4,6 +4,9 @@
 
 #include "harness_journal_internal.h"
 
+#include <asio/error.hpp>
+#include <asio/system_error.hpp>
+
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -168,6 +171,19 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                      {"outcome", "cancelled"}},
                     provider_correlation);
                 return HarnessWorkerResponse::cancelled();
+            } catch (const asio::system_error& error) {
+                const bool timed_out = error.code() == asio::error::timed_out;
+                detail::append_current_harness_journal_event(
+                    "provider.call.completed",
+                    {{"duration_ms",
+                      std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - provider_started)
+                          .count()},
+                     {"error", error.what()},
+                     {"outcome", timed_out ? "timeout" : "error"}},
+                    provider_correlation);
+                if (timed_out) return HarnessWorkerResponse::timeout(error.what());
+                return HarnessWorkerResponse::tool_error(error.what());
             } catch (const std::exception& error) {
                 detail::append_current_harness_journal_event(
                     "provider.call.completed",
