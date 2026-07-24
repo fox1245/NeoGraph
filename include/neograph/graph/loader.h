@@ -235,8 +235,13 @@ public:
     /**
      * @brief Register a custom node type with a declared config schema
      *        AND a declared channel-effect contract.
-     * @param effects `{"reads": ["ch", ...], "writes": ["ch", ...]}` —
-     *        the channels instances of this type touch at runtime.
+     * @param effects `{"reads": ["ch", ...], "writes": ["ch", ...],
+     *        "exports": ["result", ...]}` — the channels instances of
+     *        this type touch at runtime. Optional `exports` marks written
+     *        channels that a caller consumes after graph execution, so
+     *        they are not reported as write-only by E6. Only exported
+     *        channels that are also declared in `writes` suppress E6;
+     *        the graph must still declare the channel itself.
      *        Enables static effect checking (GraphValidator E4/E5/E6:
      *        writes to undeclared channels, overwrite races, dead
      *        channels). Effect analysis only runs on graphs where
@@ -248,8 +253,8 @@ public:
 
     /**
      * @brief Declared channel effects for a node type.
-     * @return `{"reads":[...],"writes":[...]}`, or null json for types
-     *         registered without an effect contract.
+     * @return `{"reads":[...],"writes":[...],"exports":[...]}`, or null
+     *         json for types registered without an effect contract.
      */
     json node_effects(const std::string& type) const;
 
@@ -299,8 +304,12 @@ public:
      *   "$schema": "https://json-schema.org/draft/2020-12/schema",
      *   "topology": { ...JSON Schema for the top-level envelope... },
      *   "node_types": { "<type>": { ...config JSON Schema... }, ... },
+     *   "node_effects": {
+     *     "<type>": { "reads": [...], "writes": [...], "exports": [...] }
+     *   },
      *   "reducers":   ["append", "overwrite", ...],
-     *   "conditions": ["has_tool_calls", "route_channel", ...]
+     *   "conditions": ["has_tool_calls", "route_channel", ...],
+     *   "condition_specs": { ... }
      * }
      * @endcode
      *
@@ -309,6 +318,7 @@ public:
      * fragment is fixed (defined by the graph compiler); per-type
      * config schemas come from register_type's 3-arg overload, or
      * default to a permissive object for types registered without one.
+     * `node_effects` preserves each declared effect contract verbatim.
      *
      * @return The schema document as json.
      */

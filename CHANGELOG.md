@@ -36,6 +36,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Harness exported result lint (issue #173).** Node effect contracts may now
+  declare written channels in an optional `exports` array when callers consume
+  them after graph execution. Both Harness compilation and `GraphEngine`
+  runtime validation therefore keep E6 for truly write-only channels without
+  falsely warning on `final_result`.
 - **MCP 2025-11-25 tool-client contract modernization (issue #147 M0).**
   Initialization is now idempotent and retains negotiated server metadata;
   HTTP tools reuse the discovery session; `/mcp` endpoint construction is

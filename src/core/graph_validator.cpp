@@ -295,6 +295,7 @@ void check_effects(Ctx& c) {
     // whole family (an unknown type could touch anything).
     std::map<std::string, std::pair<std::set<std::string>, std::set<std::string>>>
         node_rw;   // node -> (reads, writes)
+    std::set<std::string> exported;
     for (const auto& n : c.node_names) {
         const json eff = c.registry.node_effects(c.node_type(n));
         if (eff.is_null() || !eff.is_object()) return;   // gate: skip family
@@ -303,6 +304,12 @@ void check_effects(Ctx& c) {
             for (const auto& ch : eff["reads"]) reads.insert(ch.get<std::string>());
         if (eff.contains("writes"))
             for (const auto& ch : eff["writes"]) writes.insert(ch.get<std::string>());
+        if (eff.contains("exports")) {
+            for (const auto& ch : eff["exports"]) {
+                const auto name = ch.get<std::string>();
+                if (writes.count(name)) exported.insert(name);
+            }
+        }
         node_rw[n] = {std::move(reads), std::move(writes)};
     }
 
@@ -353,7 +360,7 @@ void check_effects(Ctx& c) {
                    "channel '" + ch + "' is declared but no node reads or "
                    "writes it (dead channel)",
                    json{{"channel", ch}});
-        } else if (!r && w && !engine_channel) {
+        } else if (!r && w && !engine_channel && !exported.count(ch)) {
             c.warn("E6", "channels." + ch,
                    "channel '" + ch + "' is written but never read",
                    json{{"channel", ch},

@@ -118,6 +118,11 @@ TEST(SchemaEvolution, CurrentSchemaIsBackwardCompatibleWithSnapshot) {
                   string_set(cur["node_effects"][type]["reads"])) << type;
         EXPECT_EQ(string_set(snap_eff["writes"]),
                   string_set(cur["node_effects"][type]["writes"])) << type;
+        if (snap_eff.contains("exports")) {
+            ASSERT_TRUE(cur["node_effects"][type].contains("exports")) << type;
+            EXPECT_EQ(string_set(snap_eff["exports"]),
+                      string_set(cur["node_effects"][type]["exports"])) << type;
+        }
     }
 
     // Topology envelope: properties must not disappear.
