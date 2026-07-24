@@ -136,6 +136,16 @@ json host_brokered_request(std::string interaction = "tool_result") {
     return value;
 }
 
+json non_idempotent_host_effect_request() {
+    auto value = host_brokered_request();
+    value["tool_catalog"][0]["executor"]["effect"] = {
+        {"idempotency", "unsupported"},
+        {"status_query", true},
+        {"fencing", true},
+    };
+    return value;
+}
+
 std::filesystem::path unique_temp_path(const std::string& stem) {
     return std::filesystem::temp_directory_path() /
            (stem + "-" +
@@ -2576,6 +2586,147 @@ TEST(HarnessServiceTest, PersistedResumeIntentRecoversBeforeThreadSpawn) {
         auto finished = wait_terminal(service, run_id);
         ASSERT_EQ(finished["status"], "completed") << finished.dump();
         EXPECT_EQ(finished["result"]["outcome"], "zero_findings");
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST(HarnessServiceTest, AmbiguousHostEffectSurvivesReconnectAndReconciles) {
+    const auto root     = unique_temp_path("neograph-harness-ambiguous-effect");
+    const auto database = root / "checkpoints.db";
+    const auto records_database = root / "runs.db";
+    std::filesystem::create_directories(root);
+    neograph::mcp::SqliteHarnessJournalConfig journal_config;
+    journal_config.mode = neograph::mcp::HarnessJournalPayloadMode::FULL;
+    auto provider = std::make_shared<ScriptedProvider>();
+    neograph::ChatCompletion tool_request;
+    tool_request.message.tool_calls.push_back(
+        {"provider-call", "host.lookup", R"({"query":"needle"})"});
+    neograph::ChatCompletion final;
+    final.message.content = R"({"status":"ok","findings":[]})";
+    provider->completions = {tool_request, final};
+
+    std::string run_id;
+    std::string call_id;
+    std::string effect_id;
+    {
+        HarnessServiceConfig config;
+        config.checkpoint_store =
+            std::make_shared<neograph::graph::SqliteCheckpointStore>(database.string());
+        config.record_store = std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(
+            records_database.string(), 5s, journal_config);
+        neograph::mcp::HarnessProviderExecutorConfig provider_config;
+        provider_config.provider = provider;
+        config.worker_executor =
+            neograph::mcp::make_provider_harness_executor(std::move(provider_config));
+        HarnessService service(std::move(config));
+        auto compiled = service.compile(non_idempotent_host_effect_request());
+        ASSERT_TRUE(compiled["ok"].get<bool>()) << compiled.dump();
+        auto started = service.start({{"artifact_id", compiled["artifact_id"]}});
+        run_id = started["run_id"].get<std::string>();
+        auto waiting = wait_terminal(service, run_id);
+        ASSERT_EQ(waiting["status"], "awaiting_tool_results") << waiting.dump();
+        call_id = waiting["pending"]["call_id"].get<std::string>();
+        const auto& effect = waiting["pending"]["effect"];
+        effect_id = effect["effect_id"].get<std::string>();
+        EXPECT_NE(effect_id, waiting["pending"]["provider_call_id"].get<std::string>());
+        EXPECT_EQ(effect["idempotency_key"], effect_id);
+    }
+
+    {
+        HarnessServiceConfig config;
+        config.checkpoint_store =
+            std::make_shared<neograph::graph::SqliteCheckpointStore>(database.string());
+        auto records = std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(
+            records_database.string(), 5s, journal_config);
+        config.record_store = records;
+        neograph::mcp::HarnessProviderExecutorConfig provider_config;
+        provider_config.provider = provider;
+        config.worker_executor =
+            neograph::mcp::make_provider_harness_executor(std::move(provider_config));
+        HarnessService service(std::move(config));
+
+        auto ambiguous = service.get(run_id);
+        ASSERT_EQ(ambiguous["status"], "ambiguous_effect") << ambiguous.dump();
+        EXPECT_EQ(ambiguous["ambiguity"]["effect_id"], effect_id);
+        EXPECT_THROW(service.resume(
+                         {{"run_id", run_id}, {"call_id", call_id},
+                          {"result", {{"answer", "found"}}}}),
+                     std::invalid_argument);
+        auto unresolved = service.resume(
+            {{"run_id", run_id}, {"call_id", call_id}, {"resolution", "unknown"}});
+        EXPECT_FALSE(unresolved["accepted"].get<bool>());
+        auto accepted = service.resume(
+            {{"run_id", run_id}, {"call_id", call_id}, {"resolution", "completed"},
+             {"result", {{"answer", "found"}}}});
+        EXPECT_TRUE(accepted["accepted"].get<bool>());
+        auto duplicate = service.resume(
+            {{"run_id", run_id}, {"call_id", call_id}, {"resolution", "completed"},
+             {"result", {{"answer", "found"}}}});
+        EXPECT_TRUE(duplicate["duplicate"].get<bool>());
+        EXPECT_EQ(wait_terminal(service, run_id)["status"], "completed");
+
+        const auto events = records->list_events(run_id);
+        bool saw_ambiguous = false;
+        bool saw_reconciled = false;
+        for (const auto& event : events) {
+            if (event["event_type"] == "host_brokered.effect.ambiguous") saw_ambiguous = true;
+            if (event["event_type"] == "host_brokered.effect.reconciled") saw_reconciled = true;
+        }
+        EXPECT_TRUE(saw_ambiguous);
+        EXPECT_TRUE(saw_reconciled);
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST(HarnessServiceTest, AmbiguousHostEffectCanBeReconciledAsFailed) {
+    const auto root = unique_temp_path("neograph-harness-ambiguous-failed");
+    const auto database = root / "checkpoints.db";
+    const auto records_database = root / "runs.db";
+    std::filesystem::create_directories(root);
+    std::string run_id;
+    std::string call_id;
+    {
+        HarnessServiceConfig config;
+        config.checkpoint_store =
+            std::make_shared<neograph::graph::SqliteCheckpointStore>(database.string());
+        config.record_store =
+            std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(records_database.string());
+        config.worker_executor = [](const HarnessWorkerCall&, const auto&) {
+            return HarnessWorkerResponse::awaiting_tool_results({
+                {"call_id", "host-call"},
+                {"tool_id", "host.lookup"},
+                {"result_schema", {{"type", "object"}}},
+                {"effect", {{"effect_id", "test:host-call"},
+                            {"idempotency_key", "test:host-call"},
+                            {"idempotency", "unsupported"}}},
+            });
+        };
+        HarnessService service(std::move(config));
+        auto compiled = service.compile(host_brokered_request());
+        ASSERT_TRUE(compiled["ok"].get<bool>()) << compiled.dump();
+        auto started = service.start({{"artifact_id", compiled["artifact_id"]}});
+        run_id = started["run_id"].get<std::string>();
+        auto waiting = wait_terminal(service, run_id);
+        ASSERT_EQ(waiting["status"], "awaiting_tool_results");
+        call_id = waiting["pending"]["call_id"].get<std::string>();
+    }
+
+    {
+        HarnessServiceConfig config;
+        config.checkpoint_store =
+            std::make_shared<neograph::graph::SqliteCheckpointStore>(database.string());
+        config.record_store =
+            std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(records_database.string());
+        HarnessService service(std::move(config));
+        ASSERT_EQ(service.get(run_id)["status"], "ambiguous_effect");
+        auto failed = service.resume(
+            {{"run_id", run_id}, {"call_id", call_id}, {"resolution", "failed"}});
+        EXPECT_TRUE(failed["accepted"].get<bool>());
+        EXPECT_EQ(failed["status"], "failed");
+        auto duplicate = service.resume(
+            {{"run_id", run_id}, {"call_id", call_id}, {"resolution", "failed"}});
+        EXPECT_TRUE(duplicate["duplicate"].get<bool>());
+        EXPECT_EQ(service.get(run_id)["status"], "failed");
     }
     std::filesystem::remove_all(root);
 }

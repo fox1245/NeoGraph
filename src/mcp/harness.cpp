@@ -118,7 +118,8 @@ json structured_text_content(const json& structured, std::string summary) {
 json task_from_snapshot(const json& snapshot, bool creation = false) {
     const auto  harness_status = snapshot.value("status", "failed");
     std::string status         = "working";
-    if (harness_status == "awaiting_tool_results" || harness_status == "input_required")
+    if (harness_status == "awaiting_tool_results" || harness_status == "input_required" ||
+        harness_status == "ambiguous_effect")
         status = "input_required";
     else if (harness_status == "completed")
         status = "completed";
@@ -140,10 +141,28 @@ json task_from_snapshot(const json& snapshot, bool creation = false) {
         {"pollIntervalMs", snapshot.value("poll_after_ms", int64_t{1000})},
     };
     if (status == "input_required") {
-        const auto pending    = snapshot.at("pending");
+        const auto pending = snapshot.at("pending");
+        json requested_schema = pending.value("result_schema", json::object());
+        if (harness_status == "ambiguous_effect") {
+            requested_schema = {
+                {"oneOf", json::array({
+                    {{"type", "object"},
+                     {"required", json::array({"resolution", "result"})},
+                     {"properties", {{"resolution", {{"enum", json::array({"completed"})}}},
+                                     {"result", pending.value("result_schema", json::object())}}},
+                     {"additionalProperties", false}},
+                    {{"type", "object"},
+                     {"required", json::array({"resolution"})},
+                     {"properties", {{"resolution", {{"enum", json::array({"failed", "unknown"})}}}}},
+                     {"additionalProperties", false}},
+                })},
+            };
+        }
         task["statusMessage"] = harness_status == "input_required"
-                                    ? "Harness worker requires host input"
-                                    : "Harness worker awaits a host-brokered tool result";
+                                     ? "Harness worker requires host input"
+                                     : harness_status == "ambiguous_effect"
+                                         ? "Host-brokered effect requires operator reconciliation"
+                                     : "Harness worker awaits a host-brokered tool result";
         task["inputRequests"] = {
             {pending.at("call_id").get<std::string>(),
              {
@@ -152,7 +171,7 @@ json task_from_snapshot(const json& snapshot, bool creation = false) {
                   {
                       {"message",
                        "Provide result for " + pending.value("tool_id", "host capability")},
-                      {"requestedSchema", pending.value("result_schema", json::object())},
+                       {"requestedSchema", std::move(requested_schema)},
                       {"_meta",
                        {
                            {"toolId", pending.value("tool_id", "")},
@@ -210,7 +229,12 @@ json harness_request_schema() {
                     "tool":{"type":"string"},
                     "server_ref":{"type":"string"},
                     "agent":{"type":"string"},
-                    "interaction":{"enum":["tool_result","input"]}
+                    "interaction":{"enum":["tool_result","input"]},
+                    "effect":{"type":"object","required":["idempotency"],"properties":{
+                        "idempotency":{"enum":["supported","unsupported"]},
+                        "status_query":{"type":"boolean"},
+                        "fencing":{"type":"boolean"}
+                    },"additionalProperties":false}
                 },"additionalProperties":true}
             },"additionalProperties":false}},
             "budgets":{"type":"object","properties":{
@@ -259,8 +283,9 @@ json run_snapshot_schema() {
             "created_at":{"type":"integer"},
             "updated_at":{"type":"integer"},
             "expires_at":{"type":"integer"},
-            "poll_after_ms":{"type":"integer"},
-            "pending":{"type":"object"},
+             "poll_after_ms":{"type":"integer"},
+             "pending":{"type":"object"},
+             "ambiguity":{"type":"object"},
             "result":{"type":"object"},
             "error":{"type":"string"}
         },"additionalProperties":true
@@ -1362,6 +1387,11 @@ void validate_bindings(const json& request,
             diagnostics.push_back(make_diagnostic(
                 "binding", "H_HOST_BROKER_UNAVAILABLE", "error", path + ".executor.kind",
                 "host_brokered tools require both checkpoint_store and record_store"));
+        } else if (executor.contains("effect") &&
+                   (kind != "host_brokered" || executor.value("interaction", "tool_result") != "tool_result")) {
+            diagnostics.push_back(make_diagnostic(
+                "binding", "H_EFFECT_INTERACTION", "error", path + ".executor.effect",
+                "effect metadata requires a host_brokered tool_result interaction"));
         } else if (kind == "script") {
             diagnostics.push_back(make_diagnostic("binding", "H_SCRIPT_DISABLED", "error",
                                                   path + ".executor.kind",
@@ -1615,6 +1645,7 @@ struct HarnessService::Impl {
         json details;
         json                                pending;
         json                                consumed = json::object();
+        json                                reconciliations = json::object();
         json                                resume_value;
         bool                                resume_scheduled = false;
         bool                                execution_finished = false;
@@ -1697,6 +1728,7 @@ struct HarnessService::Impl {
             {"details", run.details},
             {"pending", run.pending},
             {"consumed", run.consumed},
+            {"reconciliations", run.reconciliations},
             {"resume_value", run.resume_value},
             {"error", run.error},
             {"created_at", run.created_at},
@@ -1818,6 +1850,7 @@ struct HarnessService::Impl {
         run->details      = record->value("details", json());
         run->pending      = record->value("pending", json());
         run->consumed     = record->value("consumed", json::object());
+        run->reconciliations = record->value("reconciliations", json::object());
         run->resume_value = record->value("resume_value", json());
         run->error        = record->value("error", "");
         run->created_at   = record->value("created_at", unix_millis());
@@ -1836,9 +1869,24 @@ struct HarnessService::Impl {
         if (run->status == "running" && !run->resume_value.is_null()) {
             run->status = "queued";
         }
+        const bool became_ambiguous =
+            run->status == "awaiting_tool_results" && run->pending.is_object() &&
+            run->pending.value("effect", json::object()).value("idempotency", "") == "unsupported";
+        if (became_ambiguous) {
+            run->status     = "ambiguous_effect";
+            run->updated_at = unix_millis();
+        }
         std::lock_guard lock(mutex);
         auto [it, inserted] = runs.emplace(run_id, run);
-        return inserted ? run : it->second;
+        if (!inserted) return it->second;
+        if (became_ambiguous) {
+            persist_run(run);
+            detail::append_harness_journal_event(
+                journal_context(*run), "host_brokered.effect.ambiguous",
+                {{"effect", run->pending["effect"]}, {"tool_id", run->pending.value("tool_id", "")}},
+                run->pending.value("call_id", ""));
+        }
+        return run;
     }
 
     json compile_request(const json& request, bool retain) {
@@ -2658,9 +2706,33 @@ json HarnessService::start(const json& arguments) {
 json HarnessService::resume(const json& arguments) {
     if (!arguments.is_object() || !arguments.contains("run_id") ||
         !arguments["run_id"].is_string() || !arguments.contains("call_id") ||
-        !arguments["call_id"].is_string() || !arguments.contains("result")) {
+        !arguments["call_id"].is_string()) {
         throw std::invalid_argument(
-            "neograph_resume requires string run_id, string call_id, and result");
+            "neograph_resume requires string run_id and string call_id");
+    }
+    const bool has_result = arguments.contains("result");
+    const bool has_resolution = arguments.contains("resolution");
+    if (!has_result && !has_resolution) {
+        throw std::invalid_argument(
+            "neograph_resume requires result unless resolving an ambiguous effect");
+    }
+    std::string resolution;
+    if (has_resolution) {
+        if (!arguments["resolution"].is_string()) {
+            throw std::invalid_argument("Harness effect resolution must be a string");
+        }
+        resolution = arguments["resolution"].get<std::string>();
+        if (resolution != "completed" && resolution != "failed" && resolution != "unknown") {
+            throw std::invalid_argument(
+                "Harness effect resolution must be completed, failed, or unknown");
+        }
+        if (resolution == "completed" && !has_result) {
+            throw std::invalid_argument("completed Harness effect resolution requires result");
+        }
+        if ((resolution == "failed" || resolution == "unknown") && has_result) {
+            throw std::invalid_argument(
+                "failed or unknown Harness effect resolution must not include result");
+        }
     }
     const auto run_id  = arguments["run_id"].get<std::string>();
     const auto call_id = arguments["call_id"].get<std::string>();
@@ -2672,18 +2744,31 @@ json HarnessService::resume(const json& arguments) {
                                  run->artifact_id);
     }
 
-    bool expired   = false;
+    const json submitted = has_resolution
+                               ? json({{"resolution", resolution},
+                                       {"result", has_result ? arguments["result"] : json(nullptr)}})
+                               : arguments["result"];
+    bool expired = false;
     bool duplicate = false;
+    bool accepted = false;
+    bool schedule_resume = false;
+    bool reconciliation = false;
+    std::string effect_id;
     {
         std::lock_guard lock(run->mutex);
         if (run->consumed.contains(call_id)) {
-            if (run->consumed[call_id] != arguments["result"]) {
+            if (run->consumed[call_id] != submitted) {
                 throw std::invalid_argument(
                     "conflicting duplicate result for consumed Harness call_id");
             }
             duplicate = true;
         }
-        if (!duplicate && run->expires_at > 0 && unix_millis() >= run->expires_at) {
+        if (!duplicate && resolution == "unknown" &&
+            run->reconciliations.value(call_id, "") == "unknown") {
+            duplicate = true;
+        }
+        if (!duplicate && run->status != "ambiguous_effect" && run->expires_at > 0 &&
+            unix_millis() >= run->expires_at) {
             run->status     = "expired";
             run->pending    = nullptr;
             run->updated_at = unix_millis();
@@ -2692,42 +2777,81 @@ json HarnessService::resume(const json& arguments) {
         if (duplicate || expired) {
             // Persist after releasing the run lock below.
         } else {
-            if (run->status != "awaiting_tool_results" && run->status != "input_required") {
-                throw std::invalid_argument(
-                    "late result rejected: Harness run is not awaiting input");
-            }
             if (!run->pending.is_object() || run->pending.value("call_id", "") != call_id) {
                 throw std::invalid_argument("Harness call_id does not match the pending call");
             }
-            if (run->pending.contains("result_schema")) {
-                validate_json_value(arguments["result"], run->pending["result_schema"],
-                                    "Harness resume result", "$");
+            if (run->status == "ambiguous_effect") {
+                if (!has_resolution) {
+                    throw std::invalid_argument(
+                        "ambiguous Harness effect requires an explicit resolution");
+                }
+                effect_id = run->pending.value("effect", json::object()).value("effect_id", "");
+                if (effect_id.empty()) {
+                    throw std::runtime_error("ambiguous Harness effect is missing its effect_id");
+                }
+                reconciliation = true;
+                if (resolution == "unknown") {
+                    run->reconciliations[call_id] = "unknown";
+                    run->updated_at = unix_millis();
+                } else if (resolution == "failed") {
+                    run->consumed[call_id] = submitted;
+                    run->status = "failed";
+                    run->error = "host-brokered effect reconciled as failed";
+                    run->execution_finished = true;
+                    run->updated_at = unix_millis();
+                    accepted = true;
+                } else {
+                    validate_json_value(arguments["result"], run->pending["result_schema"],
+                                        "Harness resume result", "$");
+                    run->consumed[call_id] = submitted;
+                    run->pending = nullptr;
+                    run->status = "queued";
+                    run->resume_value = {{"call_id", call_id}, {"result", arguments["result"]}};
+                    run->updated_at = unix_millis();
+                    accepted = true;
+                    schedule_resume = true;
+                }
+            } else if (has_resolution) {
+                throw std::invalid_argument(
+                    "Harness effect resolution applies only to an ambiguous effect");
+            } else if (run->status != "awaiting_tool_results" && run->status != "input_required") {
+                throw std::invalid_argument(
+                    "late result rejected: Harness run is not awaiting input");
+            } else {
+                if (run->pending.contains("result_schema")) {
+                    validate_json_value(arguments["result"], run->pending["result_schema"],
+                                        "Harness resume result", "$");
+                }
+                run->consumed[call_id] = arguments["result"];
+                run->pending = nullptr;
+                run->status = "queued";
+                run->resume_value = {{"call_id", call_id}, {"result", arguments["result"]}};
+                run->updated_at = unix_millis();
+                accepted = true;
+                schedule_resume = true;
             }
-            run->consumed[call_id] = arguments["result"];
-            run->pending           = nullptr;
-            run->status            = "queued";
-            run->resume_value      = {
-                {"call_id", call_id},
-                {"result", arguments["result"]},
-            };
-            run->updated_at = unix_millis();
         }
     }
     if (!duplicate) impl_->persist_run(run);
     if (expired) throw std::invalid_argument("Harness run has expired");
-    if (!duplicate) {
+    if (!duplicate && reconciliation) {
+        detail::append_harness_journal_event(
+            impl_->journal_context(*run), "host_brokered.effect.reconciled",
+            {{"effect_id", effect_id}, {"resolution", resolution}}, call_id);
+    }
+    if (!duplicate && accepted && has_result) {
         detail::append_harness_journal_event(
             impl_->journal_context(*run), "host_brokered.result.accepted",
             {{"result", arguments["result"]}}, call_id);
     }
-    impl_->ensure_resume_scheduled(run);
+    if (schedule_resume) impl_->ensure_resume_scheduled(run);
     std::string status;
     {
         std::lock_guard lock(run->mutex);
         status = run->status;
     }
     return {
-        {"accepted", !duplicate}, {"duplicate", duplicate}, {"run_id", run_id},
+        {"accepted", accepted}, {"duplicate", duplicate}, {"run_id", run_id},
         {"call_id", call_id},     {"status", status},
     };
 }
@@ -2803,6 +2927,9 @@ json HarnessService::get(const std::string& run_id,
             snapshot["source_checkpoint_id"] = run->source_checkpoint_id;
         }
         if (!run->pending.is_null()) snapshot["pending"] = run->pending;
+        if (run->status == "ambiguous_effect" && run->pending.is_object()) {
+            snapshot["ambiguity"] = run->pending.value("effect", json::object());
+        }
         result  = run->result;
         details = run->details;
         error   = run->error;
@@ -3021,9 +3148,9 @@ void HarnessService::register_tools(MCPServer& server) {
     server.register_tool(
         tool_definition(
             "neograph_resume", "Resume Harness run",
-            "Submit the exact pending host result and resume from the durable checkpoint.",
+            "Submit the exact pending host result, or reconcile an ambiguous host-brokered effect.",
             json::parse(
-                R"JSON({"type":"object","required":["run_id","call_id","result"],"properties":{"run_id":{"type":"string"},"call_id":{"type":"string"},"result":{}} ,"additionalProperties":false})JSON"),
+                R"JSON({"type":"object","required":["run_id","call_id"],"properties":{"run_id":{"type":"string"},"call_id":{"type":"string"},"result":{},"resolution":{"enum":["completed","failed","unknown"],"description":"Required only when reconciling an ambiguous host-brokered effect."}},"anyOf":[{"required":["result"]},{"required":["resolution"]}],"additionalProperties":false})JSON"),
             json::parse(
                 R"JSON({"type":"object","required":["accepted","duplicate","run_id","call_id","status"],"properties":{"accepted":{"type":"boolean"},"duplicate":{"type":"boolean"},"run_id":{"type":"string"},"call_id":{"type":"string"},"status":{"type":"string"}},"additionalProperties":false})JSON")),
         [this](const json& arguments, const auto&) {
@@ -3070,15 +3197,26 @@ void HarnessService::register_tools(MCPServer& server) {
         }
         const auto& responses = params["inputResponses"];
         const auto  response  = responses.begin();
-        auto        supplied  = response.value();
+        auto supplied = response.value();
         if (supplied.is_object() && supplied.contains("content")) {
             supplied = supplied["content"];
         }
-        (void)resume({
+        auto snapshot = get(params["taskId"].get<std::string>());
+        json resume_arguments = {
             {"run_id", params["taskId"]},
             {"call_id", response.key()},
-            {"result", std::move(supplied)},
-        });
+        };
+        if (snapshot.value("status", "") == "ambiguous_effect") {
+            if (!supplied.is_object() || !supplied.contains("resolution")) {
+                throw std::invalid_argument(
+                    "ambiguous Harness effect Tasks response requires resolution");
+            }
+            resume_arguments["resolution"] = supplied["resolution"];
+            if (supplied.contains("result")) resume_arguments["result"] = supplied["result"];
+        } else {
+            resume_arguments["result"] = std::move(supplied);
+        }
+        (void)resume(resume_arguments);
         return json{{"resultType", "complete"}};
     });
     server.register_method("tasks/cancel", [this](const json& params, const json& context) {

@@ -124,6 +124,23 @@ std::string host_call_id() {
     return out.str();
 }
 
+json effect_descriptor(const json& executor, const std::string& call_id) {
+    if (!executor.contains("effect")) return json();
+    const auto effect_namespace = detail::current_harness_run_id();
+    if (effect_namespace.empty()) {
+        throw std::runtime_error("Harness host-brokered effect is missing its run namespace");
+    }
+    const auto effect = executor["effect"];
+    const auto effect_id = effect_namespace + ":" + call_id;
+    return {
+        {"effect_id", effect_id},
+        {"idempotency_key", effect_id},
+        {"idempotency", effect.at("idempotency")},
+        {"status_query", effect.value("status_query", false)},
+        {"fencing", effect.value("fencing", false)},
+    };
+}
+
 class ProviderDeadline {
 public:
     ProviderDeadline(std::shared_ptr<graph::CancelToken> cancel, int timeout_seconds)
@@ -326,9 +343,13 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                             {"result_schema",
                              tool_it->second.value("output_schema", json::object())},
                         };
+                        if (const auto effect = effect_descriptor(executor, call_id); !effect.is_null()) {
+                            pending["effect"] = effect;
+                        }
                         detail::append_current_harness_journal_event(
                             "host_brokered.call.requested",
                             {{"arguments", pending["arguments"]},
+                             {"effect", pending.value("effect", json())},
                              {"interaction", executor.value("interaction", "tool_result")},
                              {"provider_call_id", tool_call.id},
                              {"tool_id", tool_call.name}},
