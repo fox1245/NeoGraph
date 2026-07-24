@@ -238,6 +238,18 @@ private:
     asio::error_code error_;
 };
 
+class CancellationAwareProvider final : public neograph::Provider {
+public:
+    neograph::ChatCompletion complete(const neograph::CompletionParams& params) override {
+        while (!params.cancel_token->is_cancelled()) {
+            std::this_thread::sleep_for(1ms);
+        }
+        throw neograph::graph::CancelledException("provider cancellation observed");
+    }
+
+    std::string get_name() const override { return "cancellation-aware-harness-provider"; }
+};
+
 class StartFailingJournal final : public neograph::mcp::HarnessJournal {
 public:
     void append_event(const json& event) override {
@@ -717,6 +729,124 @@ TEST(HarnessServiceTest, ProviderExecutorPreservesTransportTimeoutKind) {
 
     EXPECT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::TIMEOUT);
     EXPECT_FALSE(response.message.empty());
+}
+
+TEST(HarnessServiceTest, ProviderExecutorAppliesEffectiveOutputBudget) {
+    auto provider = std::make_shared<ScriptedProvider>();
+    neograph::ChatCompletion completion;
+    completion.message.content = R"({"status":"ok","findings":[]})";
+    provider->completions = {completion};
+    neograph::mcp::HarnessProviderExecutorConfig config;
+    config.provider = provider;
+    auto executor = neograph::mcp::make_provider_harness_executor(std::move(config));
+
+    HarnessWorkerCall call;
+    call.task = {{"objective", "Review"}};
+    call.worker = worker("reviewer");
+    call.worker["_harness_provider_budget"] = {
+        {"provider_timeout_seconds", 5}, {"max_output_tokens", 37}};
+    auto response = executor(call, std::make_shared<neograph::graph::CancelToken>());
+
+    ASSERT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::VALUE);
+    ASSERT_EQ(provider->calls.size(), 1u);
+    EXPECT_EQ(provider->calls[0].max_tokens, 37);
+}
+
+TEST(HarnessServiceTest, ProviderExecutorPreservesUnboundedDefaults) {
+    auto provider = std::make_shared<ScriptedProvider>();
+    neograph::ChatCompletion completion;
+    completion.message.content = R"({"status":"ok","findings":[]})";
+    provider->completions = {completion};
+    neograph::mcp::HarnessProviderExecutorConfig config;
+    config.provider = provider;
+    auto executor = neograph::mcp::make_provider_harness_executor(std::move(config));
+
+    HarnessWorkerCall call;
+    call.task = {{"objective", "Review"}};
+    call.worker = worker("reviewer");
+    const auto response = executor(call, std::make_shared<neograph::graph::CancelToken>());
+
+    ASSERT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::VALUE);
+    ASSERT_EQ(provider->calls.size(), 1u);
+    EXPECT_EQ(provider->calls[0].max_tokens, -1);
+}
+
+TEST(HarnessServiceTest, ProviderExecutorDeadlineCancelsOnlyProviderChild) {
+    neograph::mcp::HarnessProviderExecutorConfig config;
+    config.provider = std::make_shared<CancellationAwareProvider>();
+    auto executor = neograph::mcp::make_provider_harness_executor(std::move(config));
+
+    HarnessWorkerCall call;
+    call.task = {{"objective", "Review"}};
+    call.worker = worker("reviewer");
+    call.worker["_harness_provider_budget"] = {
+        {"provider_timeout_seconds", 1}, {"max_output_tokens", 10}};
+    auto parent = std::make_shared<neograph::graph::CancelToken>();
+    auto sibling = parent->fork();
+
+    const auto response = executor(call, parent);
+
+    EXPECT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::TIMEOUT);
+    EXPECT_FALSE(parent->is_cancelled());
+    EXPECT_FALSE(sibling->is_cancelled());
+}
+
+TEST(HarnessServiceTest, RejectsWorkerBudgetAboveHarnessMaximum) {
+    HarnessService service;
+    auto value = request();
+    value["budgets"]["provider_timeout_seconds"] = 10;
+    value["budgets"]["max_output_tokens"] = 100;
+    value["workers"][0]["provider_timeout_seconds"] = 11;
+    value["workers"][0]["max_output_tokens"] = 101;
+    const auto compiled = service.compile(value);
+    ASSERT_FALSE(compiled["ok"].get<bool>());
+    int budget_errors = 0;
+    for (const auto& diagnostic : compiled["diagnostics"])
+        if (diagnostic["code"] == "H_WORKER_BUDGET") ++budget_errors;
+    EXPECT_EQ(budget_errors, 2) << compiled.dump();
+}
+
+TEST(HarnessServiceTest, SuppliesEffectiveProviderBudgetsToWorker) {
+    json observed;
+    HarnessServiceConfig config;
+    config.worker_executor = [&observed](const HarnessWorkerCall& call, const auto&) {
+        observed = call.worker["_harness_provider_budget"];
+        return HarnessWorkerResponse::success({{"status", "ok"}, {"findings", json::array()}});
+    };
+    HarnessService service(std::move(config));
+    auto value = request();
+    value["budgets"]["provider_timeout_seconds"] = 30;
+    value["budgets"]["max_output_tokens"] = 100;
+    value["workers"][0]["provider_timeout_seconds"] = 5;
+    value["workers"][0]["max_output_tokens"] = 25;
+    const auto compiled = service.compile(value);
+    ASSERT_TRUE(compiled["ok"].get<bool>()) << compiled.dump();
+    const auto started = service.start({{"artifact_id", compiled["artifact_id"]}});
+    ASSERT_TRUE(started["started"].get<bool>()) << started.dump();
+    const auto terminal = wait_terminal(service, started["run_id"].get<std::string>());
+
+    EXPECT_EQ(terminal["status"], "completed") << terminal.dump();
+    EXPECT_EQ(observed["provider_timeout_seconds"], 5);
+    EXPECT_EQ(observed["max_output_tokens"], 25);
+}
+
+TEST(HarnessServiceTest, SuppliesUnboundedProviderBudgetByDefault) {
+    json observed;
+    HarnessServiceConfig config;
+    config.worker_executor = [&observed](const HarnessWorkerCall& call, const auto&) {
+        observed = call.worker["_harness_provider_budget"];
+        return HarnessWorkerResponse::success({{"status", "ok"}, {"findings", json::array()}});
+    };
+    HarnessService service(std::move(config));
+    const auto compiled = service.compile(request());
+    ASSERT_TRUE(compiled["ok"].get<bool>()) << compiled.dump();
+    const auto started = service.start({{"artifact_id", compiled["artifact_id"]}});
+    ASSERT_TRUE(started["started"].get<bool>()) << started.dump();
+    const auto terminal = wait_terminal(service, started["run_id"].get<std::string>());
+
+    EXPECT_EQ(terminal["status"], "completed") << terminal.dump();
+    EXPECT_EQ(observed["provider_timeout_seconds"], 0);
+    EXPECT_EQ(observed["max_output_tokens"], -1);
 }
 
 TEST(HarnessServiceTest, ProviderExecutorKeepsOtherAsioFailuresAsToolErrors) {
