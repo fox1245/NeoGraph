@@ -318,6 +318,20 @@ TEST(Validator, E6_DeadChannelWarns) {
     EXPECT_EQ(e6[0]->witness["channel"].get<std::string>(), "unused");
 }
 
+TEST(Validator, E6_WriteOnlyChannelWarns) {
+    json def = {
+        {"channels", {{"out", {{"reducer", "overwrite"}}}}},
+        {"nodes", {{"w", {{"type", "vfx_writer"}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "w"}}})},
+    };
+    auto r = validate_def(def);
+    auto e6 = by_code(r, "E6");
+    ASSERT_EQ(e6.size(), 1u) << r.summary();
+    EXPECT_EQ(e6[0]->witness["channel"].get<std::string>(), "out");
+    ASSERT_TRUE(e6[0]->witness.contains("writers"));
+    EXPECT_EQ(e6[0]->witness["writers"].size(), 1u);
+}
+
 TEST(Validator, E5_OverwriteRaceBetweenFanOutSiblingsWarns) {
     json def = {
         {"channels", {{"out", {{"reducer", "overwrite"}}}}},
