@@ -1,5 +1,7 @@
 # NeoGraph core concepts — a narrative guide
 
+**Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
+
 Read this once before diving into the examples. It builds up the
 mental model in the order you'd construct one yourself: graph →
 channels → nodes → edges → fan-out → routing override →

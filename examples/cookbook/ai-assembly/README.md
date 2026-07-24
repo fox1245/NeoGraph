@@ -1,5 +1,7 @@
 # AI National Assembly
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
 A toy demo built **as a fresh NeoGraph user** — every API choice was
 made by reading the public docs (README, examples on github, Doxygen)
 without ever opening NeoGraph's source. The point is two-fold:

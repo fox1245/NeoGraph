@@ -1,5 +1,7 @@
 # Stage 3 — asio-based Full Async Refactor Design
 
+**Languages:** [English](ASYNC_STAGE3_DESIGN.md) | [한국어](ASYNC_STAGE3_DESIGN.ko.md) | [日本語](ASYNC_STAGE3_DESIGN.ja.md) | [简体中文](ASYNC_STAGE3_DESIGN.zh-CN.md)
+
 Written: 2026-04-19 (feat/async-api)
 Prerequisite: Stage 1 timer PoC (c356e0f) + Stage 2 HTTP PoC (b008c11) completed.
 **Go decision** based on `bench_async_fanout` / `bench_async_http` results.

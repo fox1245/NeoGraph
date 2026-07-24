@@ -1,5 +1,7 @@
 # NeoGraph + Ollama (local LLM)
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
 Run NeoGraph graphs against a locally-served model on
 [Ollama](https://ollama.com) — no API keys, no network egress, full
 privacy. Two paths, both working with NeoGraph 0.2.3+:

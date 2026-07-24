@@ -1,5 +1,7 @@
 # Python Mode Benchmark — NeoGraph-from-Python vs LangGraph
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
 Core question: **Does using NeoGraph from Python via pybind (node body also Python) eliminate
 the advantages of standalone C++ (startup · RSS · throughput)?**
 

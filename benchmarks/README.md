@@ -1,5 +1,7 @@
 # NeoGraph vs. Python graph/pipeline frameworks — engine-overhead benchmark
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
 Measures the per-invocation overhead of NeoGraph against the leading
 Python orchestration frameworks on identically-shaped graphs with **no
 I/O, no sleep, no LLM calls**. The numbers reflect what the engine

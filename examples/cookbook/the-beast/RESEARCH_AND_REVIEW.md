@@ -1,5 +1,7 @@
 # "The Beast" — Code Review & Academic Positioning
 
+**Languages:** [English](RESEARCH_AND_REVIEW.md) | [한국어](RESEARCH_AND_REVIEW.ko.md) | [日本語](RESEARCH_AND_REVIEW.ja.md) | [简体中文](RESEARCH_AND_REVIEW.zh-CN.md)
+
 A consolidated review of the `the-beast/` cookbook (6 programs, ~1.6k LOC) plus
 its academic positioning. The review was produced by four independent agents
 run in parallel — one code reviewer (Opus) over the source, and three

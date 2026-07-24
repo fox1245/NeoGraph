@@ -1,5 +1,7 @@
 # Python Binding
 
+**Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
+
 NeoGraph ships as a `pip`-installable Python package, so the same
 C++ engine can drive a LangGraph-style workflow from a Jupyter
 notebook, a Gradio app, or a FastAPI service:

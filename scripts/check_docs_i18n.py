@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import posixpath
 import re
 import subprocess
 import sys
@@ -15,6 +16,12 @@ from pathlib import Path, PurePosixPath
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / "docs" / "i18n-manifest.json"
 TRANSLATION_SUFFIXES = (".ko.md", ".ja.md", ".zh-CN.md")
+LANGUAGE_LABELS = {
+    "en": "English",
+    "ko": "한국어",
+    "ja": "日本語",
+    "zh-CN": "简体中文",
+}
 HEADER_RE = re.compile(
     r"^<!-- neograph-i18n: source=(\S+) locale=(\S+) source_sha256=([0-9a-f]{64}) -->$"
 )
@@ -55,6 +62,54 @@ def translation_paths(source: str, manifest: dict) -> dict[str, str]:
     }
 
 
+def navigation_line(source: str, current: str, manifest: dict) -> str:
+    paths = {"en": source, **translation_paths(source, manifest)}
+    parent = str(PurePosixPath(current).parent)
+    if parent == ".":
+        parent = ""
+    links = []
+    for locale in ("en", *manifest["translation_locales"]):
+        target = posixpath.relpath(paths[locale], start=parent or ".")
+        links.append(f"[{LANGUAGE_LABELS[locale]}]({target})")
+    return "**Languages:** " + " | ".join(links)
+
+
+def add_navigation(text: str, navigation: str) -> str:
+    if navigation in text:
+        return text
+    lines = text.splitlines()
+    html_heading = next(
+        (index for index, line in enumerate(lines) if "<h1" in line),
+        None,
+    )
+    heading = html_heading
+    if heading is not None:
+        heading = next(
+            (
+                index
+                for index in range(heading, len(lines))
+                if lines[index].strip() == "</p>"
+            ),
+            heading,
+        )
+    else:
+        in_fence = False
+        for index, line in enumerate(lines):
+            if line.startswith("```"):
+                in_fence = not in_fence
+            elif not in_fence and line.startswith("# "):
+                heading = index
+                break
+    if heading is None:
+        raise ValueError("document has no level-1 Markdown or HTML heading")
+    tail = heading + 1
+    if tail < len(lines) and not lines[tail]:
+        tail += 1
+    lines[tail:tail] = [navigation, ""]
+    rendered = "\n".join(lines)
+    return rendered + ("\n" if text.endswith("\n") else "")
+
+
 def canonical_sources(files: list[str], manifest: dict) -> list[str]:
     excluded = set(manifest.get("excluded", {}))
     overridden_translations = {
@@ -86,7 +141,9 @@ def structure(text: str) -> dict:
     }
 
 
-def validate_translation(source: str, locale: str, translated: str) -> list[str]:
+def validate_translation(
+    source: str, locale: str, translated: str, manifest: dict
+) -> list[str]:
     errors = []
     source_text = (ROOT / source).read_text(encoding="utf-8")
     translated_text = (ROOT / translated).read_text(encoding="utf-8")
@@ -110,6 +167,9 @@ def validate_translation(source: str, locale: str, translated: str) -> list[str]
         errors.append(f"{translated}: fenced code blocks differ from {source}")
     if source_shape["table_count"] != translated_shape["table_count"]:
         errors.append(f"{translated}: table count differs from {source}")
+    navigation = navigation_line(source, translated, manifest)
+    if navigation not in translated_text:
+        errors.append(f"{translated}: missing or incorrect language navigation")
     return errors
 
 
@@ -119,6 +179,11 @@ def main() -> int:
         "--strict",
         action="store_true",
         help="fail when any translation is missing or stale, regardless of manifest mode",
+    )
+    parser.add_argument(
+        "--write-navigation",
+        action="store_true",
+        help="insert the required language navigation into English sources",
     )
     args = parser.parse_args()
 
@@ -130,14 +195,25 @@ def main() -> int:
     missing = []
     errors = []
 
+    if args.write_navigation:
+        for source in sources:
+            path = ROOT / source
+            text = path.read_text(encoding="utf-8")
+            updated = add_navigation(text, navigation_line(source, source, manifest))
+            if updated != text:
+                path.write_text(updated, encoding="utf-8")
+
     expected_translations = set()
     for source in sources:
+        source_text = (ROOT / source).read_text(encoding="utf-8")
+        if navigation_line(source, source, manifest) not in source_text:
+            errors.append(f"{source}: missing or incorrect language navigation")
         for locale, translated in translation_paths(source, manifest).items():
             expected_translations.add(translated)
             if translated not in tracked:
                 missing.append(translated)
                 continue
-            errors.extend(validate_translation(source, locale, translated))
+            errors.extend(validate_translation(source, locale, translated, manifest))
 
     known_translations = {
         path

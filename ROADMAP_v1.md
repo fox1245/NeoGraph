@@ -1,5 +1,7 @@
 # NeoGraph v1.0 — design sharpening roadmap
 
+**Languages:** [English](ROADMAP_v1.md) | [한국어](ROADMAP_v1.ko.md) | [日本語](ROADMAP_v1.ja.md) | [简体中文](ROADMAP_v1.zh-CN.md)
+
 This file tracks **architectural** changes targeted at a future v1.0
 major bump. These are NOT incremental patches; each is a public-API
 break candidate that needs a deprecation window. Maintained as a

@@ -1,5 +1,7 @@
 # JARVIS — Voice-Driven Meta-Orchestrator
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
 > Cloud-zero dependency, runs on a single Raspberry Pi.
 > Microphone is Tony, NeoGraph is JARVIS, tools/experts are JARVIS's subordinates.
 

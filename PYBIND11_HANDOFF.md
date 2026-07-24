@@ -1,5 +1,7 @@
 # Pybind11 binding — next-session handoff
 
+**Languages:** [English](PYBIND11_HANDOFF.md) | [한국어](PYBIND11_HANDOFF.ko.md) | [日本語](PYBIND11_HANDOFF.ja.md) | [简体中文](PYBIND11_HANDOFF.zh-CN.md)
+
 > **Historical handoff:** the binding described here has shipped. Current
 > custom Python nodes implement `run(input)`; the legacy `execute*` node
 > surface was removed in v0.9.0. See `docs/python-binding.md` and

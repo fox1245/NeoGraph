@@ -1,5 +1,7 @@
 # NeoGraph Async Guide
 
+**Languages:** [English](ASYNC_GUIDE.md) | [한국어](ASYNC_GUIDE.ko.md) | [日本語](ASYNC_GUIDE.ja.md) | [简体中文](ASYNC_GUIDE.zh-CN.md)
+
 Stage 3 / 2026-04 release. Target audience: users migrating existing
 NeoGraph code to the async API, or writing new code against it.
 

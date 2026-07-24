@@ -1,5 +1,7 @@
 # C++ API examples
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
 Fifty-six runnable C++ programs covering the NeoGraph engine surface.
 Each is a single file in this directory (with one Docker-Compose
 exception, [`26_postgres_react_hitl/`](26_postgres_react_hitl/)) — copy

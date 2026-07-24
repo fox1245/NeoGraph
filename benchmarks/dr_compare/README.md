@@ -1,5 +1,7 @@
 # dr_compare — NeoGraph vs LangGraph deep-research bench
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
 Two implementations of the same deep-research workflow (router → plan →
 fan-out 5 researchers via Send → synthesize), one per engine. Same
 prompts, same model, same Crawl4AI search, same Postgres checkpoint

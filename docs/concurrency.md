@@ -1,5 +1,7 @@
 # Concurrency & Async
 
+**Languages:** [English](concurrency.md) | [한국어](concurrency.ko.md) | [日本語](concurrency.ja.md) | [简体中文](concurrency.zh-CN.md)
+
 NeoGraph supports two concurrency models out of the box — pick the
 one that fits your hosting pattern:
 

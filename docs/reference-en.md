@@ -1,5 +1,7 @@
 # NeoGraph API — Narrative Tour
 
+**Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
+
 This document is a **guided narrative tour** of NeoGraph's public API,
 not a complete reference. It walks through the modules in the order
 you'll meet them when building a real agent: foundation types →

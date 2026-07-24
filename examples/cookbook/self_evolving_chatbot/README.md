@@ -1,5 +1,7 @@
 # Self-Evolving Chatbot
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
 **The chatbot harness reshapes *its own* topology at runtime based on user behavior.
 This capability is unique to NeoGraph; LangGraph cannot reshape a graph at runtime.**
 

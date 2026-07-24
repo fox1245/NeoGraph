@@ -1,5 +1,7 @@
 # Soundness of the Coherence Gate — a formal companion
 
+**Languages:** [English](SOUNDNESS.md) | [한국어](SOUNDNESS.ko.md) | [日本語](SOUNDNESS.ja.md) | [简体中文](SOUNDNESS.zh-CN.md)
+
 This is the theory behind the empirical harnesses in this cookbook. `gate_eval`
 *measured* the coherence gate sound on a labeled corpus; `gate_fuzz` *measured*
 it over thousands of mutants and mapped its boundary (sound relative to honest

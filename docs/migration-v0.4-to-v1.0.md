@@ -1,5 +1,7 @@
 # Migration Guide: Legacy 8 virtuals → `run(NodeInput)` (v0.4.x → v0.9+)
 
+**Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
+
 NeoGraph v0.4 consolidated the node entry point into a single `run(NodeInput) ->
 awaitable<NodeOutput>`. The legacy 8 virtuals (`execute` / `execute_async` /
 `execute_stream` / `execute_stream_async` and their `_full` counterparts) were

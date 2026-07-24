@@ -1,5 +1,7 @@
 # NeoGraph WASM — feasibility spike
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
 The graph engine compiled to WebAssembly. This directory is the
 **phase-1 spike** — proof that the engine layer (compile, run, executor,
 scheduler, coordinator, state, channels, NodeCache) builds and executes

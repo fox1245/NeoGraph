@@ -1,5 +1,7 @@
 # JARVIS Orchestration Benchmark — NeoGraph vs LangGraph
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
 Mirrors identical topology (mic→stt→merge→memory→router→4-way→synth/skip→commit→tts)
 in NeoGraph (C++ mock build) and LangGraph (Python twin `langgraph_twin.py`),
 measures in identical constraints (`--cpus=2 --memory=2g`) container.

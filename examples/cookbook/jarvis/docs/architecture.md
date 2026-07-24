@@ -1,5 +1,7 @@
 # JARVIS Graph — Node-by-Node Details
 
+**Languages:** [English](architecture.md) | [한국어](architecture.ko.md) | [日本語](architecture.ja.md) | [简体中文](architecture.zh-CN.md)
+
 What each node in `config/jarvis_graph.json` does and why it's in that position.
 Best read alongside the diagram in README.md.
 

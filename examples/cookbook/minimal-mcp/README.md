@@ -1,5 +1,7 @@
 # Minimal MCP — no fastmcp, no SDK, no API key
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
 Every other MCP example in this repo (03 / 20 / 21 / 22) wraps the MCP
 client inside a ReAct loop that needs `OPENAI_API_KEY`, and most MCP
 tutorials assume you `pip install fastmcp` (which pulls ~60 packages)

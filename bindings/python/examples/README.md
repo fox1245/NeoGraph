@@ -1,5 +1,7 @@
 # Python API examples
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
 Twenty-eight scripts covering the binding surface end-to-end.
 
 ## Setup
