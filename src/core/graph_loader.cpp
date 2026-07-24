@@ -439,6 +439,7 @@ json NodeFactory::export_schema() const {
     }
 
     // Per-type channel-effect contracts (only types that declared one).
+    // Preserve optional fields such as exports for external tooling.
     json node_effects = json::object();
     for (const auto& kv : registry_) {
         auto eit = effects_.find(kv.first);

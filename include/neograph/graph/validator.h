@@ -128,7 +128,9 @@ public:
      *        E5 overwrite-reducer channel written by two direct
      *        fan-out siblings (warning: racy last-writer-wins);
      *        E6 dead channel — declared but never read nor written,
-     *        read-only without initial value (warnings).
+     *        write-only unless declared as externally consumed through
+     *        an effect contract's optional `exports`, or read-only
+     *        without an initial value (warnings).
      *
      * Pure function of the CompiledGraph + registries; does not
      * execute anything.
