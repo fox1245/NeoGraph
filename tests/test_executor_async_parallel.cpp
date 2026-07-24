@@ -35,7 +35,7 @@ using namespace neograph::graph;
 
 namespace {
 
-// Async-native work node — each execute_async waits delay_ms on a
+// Async-native work node — each run waits delay_ms on a
 // timer and writes to the "findings" append channel. Async so that
 // the parallel path shows real overlap on a single-threaded
 // io_context.

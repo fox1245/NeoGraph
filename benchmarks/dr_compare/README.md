@@ -15,9 +15,18 @@ HTTP transport.
   percentiles.
 - `bench_mock.py` — engine-throughput harness with mocked LLM. Modules
   pre-loaded once, iters reuse the compiled engines.
+- `mem_probe.py` — worker scaling and concurrent fan-out RSS comparison.
+- `mem_prod_stack.py` — production-stack memory comparison.
 - `sweep.sh` — runs `bench_mock.py` across `(FANOUT, LLM_MOCK_MS)`
   variants.
 - `_run_single.py` — one-shot runner. Used for wire/strace probes.
+
+The memory probes require [psutil](https://github.com/giampaolo/psutil),
+installed as documented by the project:
+
+```sh
+python -m pip install psutil
+```
 
 ## Env knobs
 

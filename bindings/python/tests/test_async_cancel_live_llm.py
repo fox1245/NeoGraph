@@ -12,7 +12,7 @@ Two things this asserts that no mock-only test can:
      future has already been cancelled (the safe-resolve helper guard
      introduced alongside this fix).
 
-  2. The Python node's ``execute()`` either finishes within the cancel
+  2. The Python node's ``run(input)`` either finishes within the cancel
      deadline or, more commonly, is torn down before completion via
      asio's cancellation_signal propagating through the engine →
      Provider::complete → run_sync → ConnPool::async_post → socket op.

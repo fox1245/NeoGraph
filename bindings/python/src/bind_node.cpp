@@ -344,7 +344,8 @@ public:
     // Command / Send fields). The legacy 8-virtual chain
     // (`execute` / `execute_full` / `execute_stream` / ...) was
     // deprecated in v0.4 and removed in v1.0 (9b–9e). Python code
-    // still defining one of the legacy methods will hit AttributeError
+    // still defining only one of the legacy methods will hit the base
+    // class's actionable NotImplementedError
     // here — see docs/migration-v0.4-to-v1.0.md for the rewrite.
     //
     // Cancel propagation is now first-class: the user's run() body
@@ -463,7 +464,7 @@ void init_node(py::module_& m) {
         "Full node return shape: writes + optional Command (routing "
         "override) + optional Sends (dynamic fan-out). Construct one "
         "explicitly when emitting Command/Send; for writes-only nodes, "
-        "just return a list of ChannelWrite from execute().")
+        "just return a list of ChannelWrite from run(input).")
         .def(py::init([](std::vector<ChannelWrite> writes,
                          py::object command,
                          std::vector<Send> sends) {

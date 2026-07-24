@@ -6,8 +6,8 @@ import neograph_engine as ng
 
 
 class _CountingNode(ng.GraphNode):
-    """Bumps an instance counter every time .execute() runs.
-    Cache hits skip execute() entirely → counter stops growing."""
+    """Bumps an instance counter every time run(input) runs.
+    Cache hits skip run(input) entirely, so the counter stops growing."""
 
     def __init__(self, name):
         super().__init__()

@@ -108,7 +108,8 @@ else:
 class RouterNode(ng.GraphNode):
     def __init__(self, name): super().__init__(); self._n = name
     def get_name(self): return self._n
-    def execute_full(self, state):
+    def run(self, input):
+        state = input.state
         msgs = state.get("messages") or []
         last = next((m for m in reversed(msgs) if m.get("role") == "user"), None)
         if last and RESEARCH_TRIGGER_PATTERN.search(last.get("content", "")):
@@ -121,7 +122,8 @@ class RouterNode(ng.GraphNode):
 class GeneralChatNode(ng.GraphNode):
     def __init__(self, name): super().__init__(); self._n = name
     def get_name(self): return self._n
-    def execute(self, state):
+    def run(self, input):
+        state = input.state
         c = PROVIDER.complete(ng.CompletionParams(messages=state.get_messages()))
         return [ng.ChannelWrite("messages", [{
             "role": "assistant", "content": c.message.content}])]
@@ -130,7 +132,8 @@ class GeneralChatNode(ng.GraphNode):
 class ResearchPlanNode(ng.GraphNode):
     def __init__(self, name): super().__init__(); self._n = name
     def get_name(self): return self._n
-    def execute(self, state):
+    def run(self, input):
+        state = input.state
         topic = state.get("research_topic") or ""
         c = PROVIDER.complete(ng.CompletionParams(
             messages=[ng.ChatMessage(role="user", content=(
@@ -149,7 +152,8 @@ class ResearchPlanNode(ng.GraphNode):
 class FanOutNode(ng.GraphNode):
     def __init__(self, name): super().__init__(); self._n = name
     def get_name(self): return self._n
-    def execute_full(self, state):
+    def run(self, input):
+        state = input.state
         return [ng.Send("researcher", {"current_question": q})
                 for q in (state.get("sub_questions") or [])]
 
@@ -157,7 +161,8 @@ class FanOutNode(ng.GraphNode):
 class ResearcherNode(ng.GraphNode):
     def __init__(self, name): super().__init__(); self._n = name
     def get_name(self): return self._n
-    def execute_full(self, state):
+    def run(self, input):
+        state = input.state
         q = state.get("current_question") or ""
         evidence = ""
         if SEARCH_CLIENT:
@@ -189,7 +194,8 @@ class ResearcherNode(ng.GraphNode):
 class SynthesizeNode(ng.GraphNode):
     def __init__(self, name): super().__init__(); self._n = name
     def get_name(self): return self._n
-    def execute(self, state):
+    def run(self, input):
+        state = input.state
         topic    = state.get("research_topic") or ""
         findings = state.get("research_findings") or []
         sections = "\n\n".join(

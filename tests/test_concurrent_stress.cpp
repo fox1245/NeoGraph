@@ -72,9 +72,7 @@ public:
     }
 };
 
-// Planner — emits 3 Sends. Sync execute_full only (since the engine
-// fix in commit 6bd9632, the async path picks this up via the
-// execute_full_async default that routes to sync execute_full).
+// Planner emits three Sends from the unified coroutine entry point.
 class Planner : public GraphNode {
 public:
     std::string get_name() const override { return "planner"; }

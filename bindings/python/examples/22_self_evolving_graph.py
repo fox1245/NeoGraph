@@ -1,7 +1,7 @@
 """22 — Self-evolving graph: the agent rewrites its own JSON.
 
 Premise: NeoGraph definitions are JSON. A node's prompt can live in
-``node.config`` and be read at execute() time. So an agent can:
+``node.config`` and be read during ``run(input)``. So an agent can:
 
   1. Run its current graph on a task.
   2. Score the output against a goal.

@@ -1025,7 +1025,7 @@ void init_graph(py::module_& m) {
             py::arg("node_name"), py::arg("enabled"),
             "Opt a node into result caching. The executor hashes the "
             "input state and replays a cached NodeResult on hit, "
-            "skipping the node's execute() entirely. Off by default — "
+            "skipping the node's run(input) entirely. Off by default — "
             "only enable for pure nodes (deterministic, no side "
             "effects). Streaming runs (run_stream) bypass the cache "
             "for the affected node because cached hits cannot replay "
@@ -1222,7 +1222,7 @@ void init_graph(py::module_& m) {
                 // std::function, it dies when this lambda returns and
                 // the coroutine reads dangling memory on the asio
                 // worker — segfault deep inside the engine before the
-                // node's Python execute() ever fires.
+                // node's Python run(input) ever fires.
                 //
                 // (Caught the hard way: the engine's run_async path
                 // sidesteps this because it constructs the empty

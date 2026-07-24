@@ -41,6 +41,26 @@ def test_missing_run_has_actionable_migration_error():
     assert "docs/migration-v0.4-to-v1.0.md" in message
 
 
+def test_legacy_execute_only_has_actionable_migration_error():
+    class LegacyExecuteNode(neograph.GraphNode):
+        def get_name(self):
+            return "legacy_execute"
+
+        def execute(self, state):
+            return []
+
+    node = LegacyExecuteNode()
+    try:
+        node.run(None)
+    except NotImplementedError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("GraphNode must not dispatch through legacy execute()")
+
+    assert "run(input)" in message
+    assert "docs/migration-v0.4-to-v1.0.md" in message
+
+
 def test_simple_counter_node_runs_in_sequence():
     """A trivial subclass that increments a channel."""
     type_name = _next_type("counter_seq")

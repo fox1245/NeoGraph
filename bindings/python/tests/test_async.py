@@ -222,7 +222,7 @@ def test_run_async_cancel_does_not_double_resolve_future():
     type_name = _next_type("async_sleepy")
 
     class SleepyNode(neograph.GraphNode):
-        # time.sleep (not asyncio.sleep) — execute() is synchronous,
+        # time.sleep (not asyncio.sleep) — run(input) is synchronous,
         # runs on the engine's worker thread, releases GIL while
         # sleeping. The duration must outlive the test's cancel-point
         # so the worker is still running when we cancel the future.

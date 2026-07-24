@@ -36,7 +36,7 @@ def test_emit_token_with_none_cb_is_noop():
     emit_token(None, "n1", "anything")  # no exception
 
 
-def test_emit_token_runs_inside_execute_full_stream():
+def test_emit_token_runs_inside_node_run():
     """End-to-end: a node uses the helper to forward tokens; the engine's
     run_stream callback observes them in the events list."""
 
