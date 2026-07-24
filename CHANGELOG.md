@@ -36,6 +36,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Harness aggregate finding provenance (issue #174).** Details now include a
+  `finding_sources` array aligned with the existing flat `findings` array.
+  Every entry records its aggregate index, source worker ID, and worker-local
+  index without changing schema-validated worker output or the established
+  `findings` shape.
 - **Harness exported result lint (issue #173).** Node effect contracts may now
   declare written channels in an optional `exports` array when callers consume
   them after graph execution. Both Harness compilation and `GraphEngine`
