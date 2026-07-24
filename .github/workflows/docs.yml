@@ -42,6 +42,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check documentation locale inventory
+        run: python3 scripts/check_docs_i18n.py
+
       - name: Install Doxygen & Graphviz
         run: sudo apt-get update && sudo apt-get install -y doxygen graphviz
 
