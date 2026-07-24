@@ -1,6 +1,6 @@
 # Stage 3 — asio-based Full Async Refactor Design
 
-Author: 2026-04-19 (feat/async-api)
+Written: 2026-04-19 (feat/async-api)
 Prerequisite: Stage 1 timer PoC (c356e0f) + Stage 2 HTTP PoC (b008c11) completed.
 **Go decision** based on `bench_async_fanout` / `bench_async_http` results.
 
@@ -155,7 +155,7 @@ Goal: Establish migration path where users can actually benefit from async.
 
 | # | Task | File | Estimated |
 |---|---|---|---|
-| 4.1 | Async-ify 1-2 high-concurrency examples from examples (e.g. 05_parallel_fanout, 26_postgres) | `examples/` | 1 day |
+| 4.1 | Select 1-2 high-concurrency candidate examples for async conversion (e.g. 05_parallel_fanout, 26_postgres) | `examples/` | 1 day |
 | 4.2 | Helper for async offload of Tool — `AsyncTool` adapter | `include/neograph/tool.h` | 1 day |
 | 4.3 | Documentation — async guide, migration checklist | `docs/ASYNC_GUIDE.md` new | 1 day |
 | 4.4 | NEXT_SESSION.md / README update | — | 0.5 day |
@@ -195,7 +195,6 @@ Goal: Establish migration path where users can actually benefit from async.
 | Sync facade `run_sync(coro)` deadlock (single-thread io_context environment) | Runtime bug | User facade always wrapped with guard ensuring at least 1 worker thread in io_context |
 | Testing both sync/async paths → test count doubles | Maintenance cost | Define parameterized test once, automatically run both paths |
 | Example 26 regressions | Release delay | Examples not async-converted (Semester 4 only optional). OK if sync facade passes |
-| Shared diagram annotation | Documentation consistency | Translate to English in diagram annotation |
 
 ---
 
