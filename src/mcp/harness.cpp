@@ -1086,6 +1086,7 @@ public:
 
         json normalized = json::array();
         json findings = json::array();
+        json finding_sources = json::array();
         int valid = 0;
         int failed = 0;
         bool partial = false;
@@ -1108,7 +1109,13 @@ public:
             if (!output.contains("findings") || !output["findings"].is_array()) {
                 findings_contract = false;
             } else {
+                const auto worker_id = worker.value("worker_id", "");
+                std::size_t local_index = 0;
                 for (const auto& finding : output["findings"]) {
+                    finding_sources.push_back(
+                        {{"finding_index", findings.size()},
+                         {"worker_id", worker_id},
+                         {"local_index", local_index++}});
                     findings.push_back(finding);
                 }
             }
@@ -1126,6 +1133,7 @@ public:
             {"outcome", outcome},
             {"workers", std::move(normalized)},
             {"findings", std::move(findings)},
+            {"finding_sources", std::move(finding_sources)},
             {"valid_workers", valid},
             {"failed_workers", failed},
         };

@@ -1958,6 +1958,10 @@ TEST(HarnessServiceTest, CompatibleForkResumesExactCheckpointWithTargetArtifact)
     EXPECT_EQ(finished["source_checkpoint_id"], source_checkpoint_id);
     ASSERT_EQ(finished["result"]["findings"].size(), 1u);
     EXPECT_EQ(finished["result"]["findings"][0]["evidence"], "source checkpoint");
+    EXPECT_EQ(finished["result"]["finding_sources"],
+              json::array({{{"finding_index", 0},
+                            {"worker_id", "reviewer"},
+                            {"local_index", 0}}}));
     EXPECT_EQ(live_calls.load(std::memory_order_relaxed), 1)
         << "forking after the worker checkpoint must not execute the worker again";
 
@@ -2170,6 +2174,9 @@ TEST(HarnessServiceTest, RecordedReplaySurvivesReconnectWithoutCallingLiveExecut
     EXPECT_EQ(replayed["execution_mode"], "recorded_replay");
     EXPECT_EQ(replayed["source_run_id"], source_run_id);
     EXPECT_EQ(replayed["result"]["workers"], source_workers);
+    EXPECT_EQ(replayed["result"]["finding_sources"],
+              json::array({{{"finding_index", 0}, {"worker_id", "a"}, {"local_index", 0}},
+                           {{"finding_index", 1}, {"worker_id", "b"}, {"local_index", 0}}}));
     EXPECT_EQ(live_calls.load(std::memory_order_relaxed), 3)
         << "recorded replay must not invoke provider/tool execution";
 
@@ -2185,6 +2192,9 @@ TEST(HarnessServiceTest, RecordedReplaySurvivesReconnectWithoutCallingLiveExecut
     ASSERT_EQ(live_result["result"]["findings"].size(), 2u);
     EXPECT_EQ(live_result["result"]["findings"][0]["evidence"], "live a");
     EXPECT_EQ(live_result["result"]["findings"][1]["evidence"], "live b");
+    EXPECT_EQ(live_result["result"]["finding_sources"],
+              json::array({{{"finding_index", 0}, {"worker_id", "a"}, {"local_index", 0}},
+                           {{"finding_index", 1}, {"worker_id", "b"}, {"local_index", 0}}}));
 }
 
 TEST(HarnessServiceTest, RecordedReplayRejectsRedactedWorkerOutputs) {
@@ -2565,6 +2575,39 @@ TEST(HarnessServiceTest, PreservesPartialWorkerOutcome) {
     auto finished = wait_terminal(service, started["run_id"].get<std::string>());
     ASSERT_EQ(finished["status"], "completed") << finished.dump();
     EXPECT_EQ(finished["result"]["outcome"], "partial");
+}
+
+TEST(HarnessServiceTest, AggregatedFindingsRetainWorkerProvenance) {
+    HarnessServiceConfig config;
+    config.worker_executor = [](const HarnessWorkerCall& call, const auto&) {
+        return HarnessWorkerResponse::success({
+            {"status", "ok"},
+            {"findings",
+             json::array({{{"id", "F1"}, {"evidence", call.worker["id"]}},
+                          {{"id", "F2"}, {"evidence", call.worker["id"]}}})},
+        });
+    };
+    HarnessService service(std::move(config));
+    auto compiled = service.compile(request(json::array({worker("b"), worker("a")})));
+    ASSERT_TRUE(compiled["ok"].get<bool>()) << compiled.dump();
+    auto started = service.start({{"artifact_id", compiled["artifact_id"]}});
+    auto finished = wait_terminal(service, started["run_id"].get<std::string>());
+    ASSERT_EQ(finished["status"], "completed") << finished.dump();
+
+    ASSERT_EQ(finished["result"]["findings"].size(), 4u);
+    EXPECT_EQ(finished["result"]["findings"][0]["id"], "F1");
+    EXPECT_EQ(finished["result"]["findings"][2]["id"], "F1");
+    ASSERT_EQ(finished["result"]["finding_sources"].size(), 4u);
+    EXPECT_EQ(finished["result"]["finding_sources"][0],
+              json({{"finding_index", 0}, {"worker_id", "a"}, {"local_index", 0}}));
+    EXPECT_EQ(finished["result"]["finding_sources"][1],
+              json({{"finding_index", 1}, {"worker_id", "a"}, {"local_index", 1}}));
+    EXPECT_EQ(finished["result"]["finding_sources"][2],
+              json({{"finding_index", 2}, {"worker_id", "b"}, {"local_index", 0}}));
+    EXPECT_EQ(finished["result"]["finding_sources"][3],
+              json({{"finding_index", 3}, {"worker_id", "b"}, {"local_index", 1}}));
+    EXPECT_FALSE(finished["result"]["workers"][0]["output"]["findings"][0]
+                     .contains("worker_id"));
 }
 
 TEST(HarnessServiceTest, ReturnsCompactResultAndUriLinkedDetails) {
