@@ -135,7 +135,7 @@ static json par_graph() {
 }
 
 struct BenchResult {
-    long total_ms;
+    double total_ms;
     double per_iter_us;
 };
 
@@ -146,7 +146,7 @@ static BenchResult bench(GraphEngine* engine, int iters) {
     for (int i = 0; i < iters; ++i) {
         (void)engine->run(cfg);
     }
-    auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+    const auto total_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - t0).count();
 
     return {total_ms, (total_ms * 1000.0) / iters};
@@ -161,7 +161,7 @@ static BenchResult bench_stream(GraphEngine* engine, int iters, StreamMode mode)
     for (int i = 0; i < iters; ++i) {
         (void)engine->run_stream(cfg, discard);
     }
-    auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+    const auto total_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - t0).count();
 
     return {total_ms, (total_ms * 1000.0) / iters};
