@@ -611,78 +611,87 @@ Each PR must:
   - **Add a row to this table when it merges** — strike-through the
     proposed line, link the merge commit, note any scope drift.
 
-## Perf retrospective — `b59444f` 18일 잠재 par 회귀
+## Perf retrospective — `b59444f` 18-day latent par regression
 
-v1.0 cycle 막바지에 README 의 "engine overhead" 자랑 (par 11.8 µs)
-이 깨졌다는 게 드러났다. 측정 + 분신술 bisect 결과 단일 commit
-`b59444f` 가 18일 (2026-04-26 → 2026-05-13) 잠재해 있던 회귀였다.
+Near the end of the v1.0 cycle, the README's "engine overhead" boast
+(par 11.8 µs) was revealed to be broken. Measurement + parallel-bisect
+result: a single commit `b59444f` was the regression that had been
+latent for 18 days (2026-04-26 → 2026-05-13).
 
-### 무슨 일이 있었나
+### What happened
 
-- `b59444f` 가 `GraphEngine::compile()` 의 기본 워커 수를
-  `1` 에서 `std::thread::hardware_concurrency()` 로 바꿈. 의도:
-  fan-out 노드가 명시 설정 없이도 진짜 병렬 실행 받게.
-- 부작용: 1-node 시퀀셜 + 5-노드 fan-out micro-bench 가 **per-iter
-  cross-thread submit 비용 ~75 µs/iter** 추가로 부담. 11.8 µs →
-  283 µs (24×).
-- 4월 27일 perf audit (`project_perf_audit_2026-04-27.md`) 에서
-  `fd60aab` 가 "fix" 했다고 기록돼있는데, 그건 별개 회귀 (시간 측정
-  pattern) 였고 워커 수 기본값은 그대로 두었다. par micro-bench
-  자체는 "기본=hardware_concurrency" 모드에서 측정되고 있어서
-  numerically 정상으로 보였지만, 실제 README 의 11.8 µs 클레임은
-  pre-b59444f 시점의 값.
-- v1.0 cycle 의 Per-PR contract 가 "Not regress the bench" 요구함에도
-  당시 bench 가 같은 (회귀된) baseline 에서 측정되니 ±5% band 안에
-  들어와 무사통과. 18일 동안 잠재.
-- 2026-05-13 매 commit 별로 분신술 bisect (`git worktree add` 11개
-  병렬, taskset+chrt 측정) — `b59444f` 가 par 11.8 µs → 283 µs 점프
-  단일 commit 으로 확인. revert (`e5ecb08`) 로 11.8 → 12.2 µs 복귀.
+- `b59444f` changed `GraphEngine::compile()`'s default worker count
+  from `1` to `std::thread::hardware_concurrency()`. Intent: fan-out
+  nodes receive real parallel execution without explicit configuration.
+- Side effect: the 1-node sequential + 5-node fan-out micro-bench
+  picked up an additional **per-iter cross-thread submit cost of
+  ~75 µs/iter**. 11.8 µs → 283 µs (24×).
+- The April 27 perf audit (`project_perf_audit_2026-04-27.md`) records
+  `fd60aab` as the "fix", but that was a separate regression (timing-
+  measurement pattern) and left the worker-count default unchanged.
+  The par micro-bench itself was being measured in the
+  "default=hardware_concurrency" mode, so it looked numerically
+  normal, but the README's actual 11.8 µs claim was a pre-`b59444f`
+  value.
+- Although the v1.0 cycle's Per-PR contract requires "Not regress the
+  bench", the bench at the time was being measured against the same
+  (regressed) baseline, so it fell inside the ±5% band and passed
+  silently. Latent for 18 days.
+- On 2026-05-13, a per-commit parallel bisect (`git worktree add` for
+  11 worktrees in parallel, taskset+chrt measurement) confirmed
+  `b59444f` as the single commit responsible for the par 11.8 µs →
+  283 µs jump. Revert (`e5ecb08`) restored 11.8 → 12.2 µs.
 
-### Trade-off — 왜 기본=1 이 옳은가
+### Trade-off — why default=1 is correct
 
-`asio::thread_pool` cross-thread submit 은 task 당 약 75 µs. 노드
-하나의 실행 시간이 ms 단위 (LLM 호출, HTTP 등) 면 그 비용은 묻히지만
-NeoGraph 가 자랑하는 "engine overhead 시리얼/병렬 µs 단위" 패스에서는
-같은 차원 비용이라 직접 보임.
+A `asio::thread_pool` cross-thread submit costs roughly 75 µs per
+task. If a single node's execution time is in ms (LLM call, HTTP,
+etc.), that cost disappears into the noise — but on NeoGraph's
+celebrated "engine overhead serial/parallel µs-scale" path, it is
+the same order of magnitude and shows up directly.
 
-- **CPU-tiny / 시퀀셜 노드 (micro-bench, validator chain 등)** — 기본=1
-  이 압도적. 워커 풀 없이 io_context 한 스레드 위에서 sequential.
-- **진짜 fan-out 의도 (sleep-바운드 시뮬, 별도 process 호출, sync
-  HTTP)** — 사용자가 `engine->set_worker_count_auto()` 또는
-  `set_worker_count(N)` 명시 호출해야 함. 한 줄.
+- **CPU-tiny / sequential nodes (micro-bench, validator chain, etc.)** —
+  default=1 is overwhelmingly better. Sequential on a single
+  io_context thread with no worker pool.
+- **Genuine fan-out intent (sleep-bound sims, separate-process calls,
+  sync HTTP)** — the user must explicitly call
+  `engine->set_worker_count_auto()` or `set_worker_count(N)`. One line.
 
-이 트레이드오프를 명문화하려고 `e5ecb08` 의 commit message + 직후
-fan-out 예제 5곳 (10/14/21/36 + deep_research_graph builder) 에
-`set_worker_count_auto()` 명시 호출 추가 + migration doc 의 Migration
-3 섹션 보강.
+To make this trade-off explicit, `e5ecb08`'s commit message + the
+following fan-out example 5 sites (10/14/21/36 + the
+`deep_research_graph` builder) added explicit
+`set_worker_count_auto()` calls, and the migration doc's Migration 3
+section was beefed up.
 
-### Per-PR contract 보강 (다음 회귀 방지)
+### Per-PR contract reinforcement (preventing the next regression)
 
-`bench_neograph par` micro-bench 가 baseline 대비 ±5% 안에 있을지만
-검사하는 게 부족했음 — baseline 자체가 회귀된 상태에서 함께 미끄러질
-수 있음. 다음 패치에서:
+Checking only that `bench_neograph par` micro-bench is within ±5% of
+baseline was insufficient — when the baseline itself has regressed,
+it slides down together. In a follow-up patch:
 
-  - bench-regression CI 가 **README 에 명시된 절대 값** (`seq ≈ 5.0
-    µs`, `par ≈ 12 µs` 같은 wall-time anchor) 을 두 번째 게이트로
-    사용. baseline 자체 회귀 캐치.
-  - 또는 GitHub Actions 측 cron 으로 master → master 7일 회귀 측정
-    cron 추가 (nightly-soak 같은 패턴).
-  - per-PR diff 가 `GraphEngine::compile()` 또는 `set_worker_count` 를
-    건드리면 PR 본문에 "별도 micro-bench 측정 결과" 필수 (CODEOWNERS
-    훅으로 자동화).
+  - The bench-regression CI uses a **README-stated absolute value**
+    (`seq ≈ 5.0 µs`, `par ≈ 12 µs`, etc.) as a second wall-time-anchor
+    gate. Catches baseline-itself regressions.
+  - Or add a GitHub Actions cron for master → master 7-day regression
+    measurement (a nightly-soak-style pattern).
+  - If a per-PR diff touches `GraphEngine::compile()` or
+    `set_worker_count`, the PR body must include "separate micro-bench
+    measurement results" (automated via a CODEOWNERS hook).
 
-세 가지 다 후속 작업. v1.0 release 전 한 가지는 들어가야 함.
+All three are follow-up work. At least one must land before the v1.0
+release.
 
-### 무엇을 배웠나
+### What we learned
 
-1. **"기본값 변경"은 functional 한 의미가 없어 보여도 perf-critical 한
-   contract 일 수 있다.** README 가 자랑하는 숫자가 "기본값" 패스에서
-   나온 값이라면, 기본값 변경 = README 변경.
-2. **회귀 측정의 baseline 도 회귀할 수 있다.** ±band 비교만 하지 말고
-   절대값 anchor 도 두자.
-3. **분신술 bisect (병렬 worktree 11개 + 결과 취합) 가 18일 잠재 회귀
-   pinpoint 하는데 30분이면 충분.** Linear bisect 보다 훨씬 빠름 —
-   master 가 길어졌을 때 default 도구.
+1. **"Default-value change" can be a perf-critical contract even when
+   it has no functional meaning.** If the README's boast numbers come
+   from the "default" path, then default change = README change.
+2. **The baseline of regression measurement can itself regress.**
+   Don't only do ±band comparison; also set absolute-value anchors.
+3. **Parallel bisect (11 parallel worktrees + result aggregation)
+   pinpointed an 18-day-latent regression in 30 minutes.** Much
+   faster than linear bisect — the default tool when master has
+   grown long.
 
 ## Memory of v0.3.x traps to avoid during refactor
 
@@ -703,7 +712,7 @@ checklist when you touch the relevant area:
 | scikit-build-core 0.12.2 Windows single_config | `-G` flag detected, env-var ignored — Windows wheel loses SQLite=OFF override. Use `[[tool.scikit-build.overrides]]` + `cmake.define`. | `feedback_libcurl_unconditional_dep.md` |
 | Wheel OpenSSL CA path | manylinux libssl uses AlmaLinux paths absent on Ubuntu. `__init__.py` auto-set `SSL_CERT_FILE` from certifi. | `feedback_wheel_openssl_ca.md` |
 | pyproject.toml runtime deps not auto-installed in CI's PYTHONPATH flow | `pip install --quiet pytest` line must mirror pyproject.toml's `dependencies = [...]`. v0.3.2 lost this for pydantic. | (this session — add note in feedback) |
-| `compile()` default worker count regression | `b59444f` 가 기본을 `1 → hardware_concurrency` 로 바꿔 par micro-bench 11.8 → 283 µs (24×) 잠재. baseline 자체 회귀 패턴. fix `e5ecb08` 로 복귀. | "Perf retrospective" 섹션 (위) |
+| `compile()` default worker count regression | `b59444f` changed the default from `1 → hardware_concurrency`, latent par micro-bench 11.8 → 283 µs (24×). The baseline-itself-regresses pattern. Fix in `e5ecb08`. | "Perf retrospective" section (above) |
 
 If a refactor PR adds a new sub-library, new public class, new
 runtime dep, new test pattern that throws across pybind, new wheel
@@ -920,33 +929,40 @@ PR #10; the architectural cleanup landed through the additive
 
 | PR | Scope | Lands in |
 |---|---|---|
-| **#40 (PR1)** | `Provider::invoke(params, on_chunk = nullptr)` 새 virtual 추가. default impl 이 4 legacy virtual chain 으로 forward (모든 기존 Provider subclass 무변경 동작). 6 신규 ctest. | v0.9.0 |
-| **#41+#42 (PR2)** | engine 의 built-in LLM 노드 (`LLMCallNode`, `IntentClassifierNode`) 가 `provider->invoke(params, on_chunk)` 통해 dispatch. PR #41 가 stacked base 에만 머지되어 PR #42 로 master 재적용. | v0.9.0 |
-| **#43 (PR3)** | engine-내부 sync LLM 호출 사이트 모두 마이그레이션 — `agent.cpp` (5 사이트), `deep_research_graph.cpp` (6 사이트). `Provider::invoke()` default 에 thread-local cancel propagation parity 추가 (legacy `complete()` 의 `current_cancel_token()` 동작 재현). 3 신규 ctest. | v0.9.0 |
-| **#44 (PR4)** | 4 legacy virtual 모두 `[[deprecated]]` 마커. `plan_execute_graph.cpp` 3 사이트 invoke() 마이그레이션. `OpenInferenceProvider` 와 `RateLimitedProvider` (decorator 들) 의 4 virtual override 블록을 `NEOGRAPH_PUSH/POP_IGNORE_DEPRECATED` 로 감쌈 — internal forwarder warning 차단, user-facing override / 호출 사이트만 warning. | v0.9.0 |
-| **#45 (PR5)** | C++ examples 마이그레이션 (`31_local_transformer.cpp`, `cookbook/ai-assembly/member_server.cpp`). | v0.9.0 |
+| **#40 (PR1)** | Add new virtual `Provider::invoke(params, on_chunk = nullptr)`. Default impl forwards to the 4 legacy virtual chain (all existing Provider subclasses behave unchanged). 6 new ctest. | v0.9.0 |
+| **#41+#42 (PR2)** | Engine built-in LLM nodes (`LLMCallNode`, `IntentClassifierNode`) dispatch via `provider->invoke(params, on_chunk)`. PR #41 was merged only on the stacked base, then reapplied to master via PR #42. | v0.9.0 |
+| **#43 (PR3)** | Migrate all engine-internal sync LLM call sites — `agent.cpp` (5 sites), `deep_research_graph.cpp` (6 sites). Add thread-local cancel propagation parity to `Provider::invoke()` default (reproduces legacy `complete()`'s `current_cancel_token()` behavior). 3 new ctest. | v0.9.0 |
+| **#44 (PR4)** | Mark all 4 legacy virtuals with `[[deprecated]]`. Migrate 3 sites in `plan_execute_graph.cpp` to `invoke()`. Wrap the 4 virtual override blocks of `OpenInferenceProvider` and `RateLimitedProvider` (the decorators) in `NEOGRAPH_PUSH/POP_IGNORE_DEPRECATED` — blocks the internal-forwarder warning; only user-facing override / call sites warn. | v0.9.0 |
+| **#45 (PR5)** | C++ examples migration (`31_local_transformer.cpp`, `cookbook/ai-assembly/member_server.cpp`). | v0.9.0 |
 
 ### Additive compatibility path (revised 2026-07)
 
-기존 `Provider` vtable을 유지한 채 별도 `CompletionProvider`를 추가한다.
-새 구현은 explicit `CompletionRequest`를 받고 `do_invoke()` 하나만 재정의한다.
-기존 네 virtual과 callback 기반 `invoke()`는 final adapter를 통해 새 구현에
-연결되며, 기존 Provider subclass와 Python trampoline은 그대로 유지된다.
+Keep the existing `Provider` vtable and add a separate
+`CompletionProvider`. New implementations take an explicit
+`CompletionRequest` and override `do_invoke()` only. The existing
+four virtuals and the callback-based `invoke()` are wired into the
+new implementation through a final adapter; existing Provider
+subclasses and the Python trampoline are preserved as-is.
 
-기존 virtual은 안정 API로 계속 지원하며 제거 계획이 없다. 호환성·보안 수정은
-계속 적용하지만, 새 기능을 기존 네 virtual에 모두 역이식할 의무는 없다.
-새 구현과 새 직접 호출은 각각 `do_invoke()`와 `invoke_request()`를 권장한다.
-이 정책은 기존 공개 서명, virtual 순서, 객체 크기, vtable을 바꾸지 않는다.
-#127의 native async transport와 operation ownership은 이 API 정책과 별도다.
+The existing virtuals continue to be supported as a stable API with
+no removal plan. Compatibility and security fixes continue to apply,
+but there is no obligation to back-port all new features to the
+existing four virtuals. New implementations and new direct calls
+should use `do_invoke()` and `invoke_request()` respectively. This
+policy does not change existing public signatures, virtual order,
+object size, or vtable. #127's native async transport and operation
+ownership are separate from this API policy.
 
-후속 작업:
+Follow-up:
 
-  - **6b**: 새 Provider는 `CompletionProvider` 기반으로 작성. 기존 built-in의
-    즉시 상속 변경은 ABI 영향 때문에 하지 않는다.
-  - **6c**: native async transport와 request-owned cancellation/lifetime 완성.
-  - **adjacent**: `schema_provider.cpp` (1800 LoC) 의 `SchemaParser` /
-    `SchemaWireBuilder` / `SchemaProviderImpl` 분할 (위 6b 와 같은
-    PR 또는 별도 — 구현 시 결정).
+  - **6b**: New Providers are written against `CompletionProvider`. Do
+    not change the immediate inheritance of existing built-ins because
+    of ABI impact.
+  - **6c**: Complete native async transport and request-owned
+    cancellation / lifetime.
+  - **adjacent**: Split `schema_provider.cpp` (1800 LoC) into
+    `SchemaParser` / `SchemaWireBuilder` / `SchemaProviderImpl` (same
+    PR as 6b above or separate — decide at implementation time).
 
 ---
 
@@ -954,133 +970,153 @@ PR #10; the architectural cleanup landed through the additive
 
 ### Context
 
-HasMCP cold-email (2026-05-15) 이 trigger 한 게 아니라, 그 메일이
-"gRPC 가 다음 transport 방향" 이라는 업계 신호를 공짜로 줬다. MCP
-커뮤니티가 [gRPC를 표준 transport로 추가](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/966)
-논의 중이고 Google 이 gRPC-as-native-MCP-transport 작업 중. gRPC 는
-NeoGraph 4축 narrative 와 거의 모든 축에서 정합 — protobuf 바이너리
-직렬화(성능/경량), HTTP/2 multiplexing(multi-tenant connection 비용),
-네이티브 bidi streaming(token/event), 스키마 강제+작은 wire(임베디드).
+The HasMCP cold-email (2026-05-15) was not the trigger, but that
+email gave a free industry signal that "gRPC is the next transport
+direction." The MCP community is discussing [adding gRPC as a
+standard transport](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/966),
+and Google is working on gRPC-as-native-MCP-transport. gRPC aligns
+with almost every axis of NeoGraph's 4-axis narrative — protobuf
+binary serialization (performance / lightweight), HTTP/2
+multiplexing (multi-tenant connection cost), native bidi streaming
+(token / event), and schema enforcement + small wire (embedded).
 
-### 결정 (2026-05-15)
+### Decision (2026-05-15)
 
-- **자체 구현 X.** 통신 프로토콜은 reinvent-the-wheel 리스크가 큼 —
-  표준 `grpc++` + `protoc` 사용.
-- **opt-in only.** `NEOGRAPH_BUILD_GRPC` 옵션, **default OFF**.
-  grpc++ 가 protobuf + abseil + c-ares + re2 + zlib (수십 MB
-  transitive) 를 끌어와 "2 deps / libc.so.6 only / 1.2 MB binary"
-  경량 축을 깬다. default OFF 가 그걸 막는 유일한 방법 +
-  `cmake-option-default-flip-trap` (EDDSkills, 같은 세션 신설) 규율
-  적용: `find_package(Protobuf/gRPC)` 를 옵션 gate 안에만, default
-  flip 금지.
-- **NeoGraph-native API, MCP 표준과 독립.** `proto/neograph.proto` =
-  `GraphService { RunGraph(unary) / RunGraphStream(server-stream) /
-  Health }`. payload 는 JSON string (graph-as-data 속성 보존 — proto
-  강타입 메시지로 모델링하면 user graph 변경마다 .proto regen).
-  MCP-over-gRPC 표준이 확정되면 그때 MCP-shaped service 를 이것 옆에
-  추가 (이 service 무변경).
+- **No in-house implementation.** Communication protocols carry a
+  significant reinvent-the-wheel risk — use the standard `grpc++` +
+  `protoc`.
+- **opt-in only.** `NEOGRAPH_BUILD_GRPC` option, **default OFF**.
+  grpc++ pulls in protobuf + abseil + c-ares + re2 + zlib (tens of
+  MB transitive), breaking the "2 deps / libc.so.6 only / 1.2 MB
+  binary" lightweight axis. Default OFF is the only way to stop it,
+  and applies the `cmake-option-default-flip-trap` (EDDSkills, newly
+  added this session) discipline: `find_package(Protobuf/gRPC)` only
+  inside the option gate; no default flips.
+- **NeoGraph-native API, independent of the MCP standard.**
+  `proto/neograph.proto` = `GraphService { RunGraph(unary) /
+  RunGraphStream(server-stream) / Health }`. payload is a JSON
+  string (preserves the graph-as-data property — if we modeled it
+  with strongly-typed proto messages, every user graph change would
+  regenerate the .proto). Once the MCP-over-gRPC standard is fixed,
+  add an MCP-shaped service next to this one (this service
+  unchanged).
 
 ### Landed (v0.9.x cycle, scaffold)
 
-- `NEOGRAPH_BUILD_GRPC=OFF` 옵션 + conditional `find_package` + fatal
-  guard.
+- `NEOGRAPH_BUILD_GRPC=OFF` option + conditional `find_package` +
+  fatal guard.
 - `proto/neograph.proto`, `src/grpc/graph_service.cpp` (hash-keyed
-  compile cache — multi_tenant_chatbot cookbook 패턴 재사용),
-  `include/neograph/grpc/graph_service.h` (`NEOGRAPH_HAVE_GRPC` 가드),
-  `examples/52_grpc_server.cpp`.
+  compile cache — reuses the multi_tenant_chatbot cookbook pattern),
+  `include/neograph/grpc/graph_service.h` (`NEOGRAPH_HAVE_GRPC`
+  guard), `examples/52_grpc_server.cpp`.
 
 ### Verified — first grpc++-equipped build (2026-05-16)
 
-apt `libgrpc++-dev protobuf-compiler-grpc` (1.51.1) + protoc 3.21.12
-설치 후 `-DNEOGRAPH_BUILD_GRPC=ON` 빌드 + end-to-end 통과:
+After installing apt `libgrpc++-dev protobuf-compiler-grpc` (1.51.1)
++ protoc 3.21.12, build with `-DNEOGRAPH_BUILD_GRPC=ON` and
+end-to-end passes:
   - `neograph_grpc` / `example_grpc_server` / `example_grpc_client`
-    전부 컴파일·링크 OK.
+    all compile and link OK.
   - C++ client → server: **Health** (ok/version/default_graph),
     **RunGraph** unary (`{"text":"hello from grpc"}` →
     `"HELLO FROM GRPC"`, trace=[upper]), **RunGraphStream**
     (5 events, FINAL payload, status OK). `RESULT: PASS (failures=0)`.
-  - protoc codegen 경로 (raw `add_custom_command`) 동작. 단 **버그
-    1개 fix**: VERBATIM 모드에서 `ARGS --proto_path="${dir}"` 의
-    따옴표가 literal 로 전달돼 protoc 가 `"…/proto"` (따옴표 포함)
-    를 디렉토리로 인식 → "directory does not exist". 따옴표 제거
-    (`--proto_path=${dir}`) 로 닫음.
+  - protoc codegen path (raw `add_custom_command`) works. **One bug
+    fixed**: in VERBATIM mode the quotes in
+    `ARGS --proto_path="${dir}"` are passed literally, so protoc
+    sees `"…/proto"` (including the quotes) as the directory →
+    "directory does not exist". Removing the quotes
+    (`--proto_path=${dir}`) closed it.
 
-### WSL Windows-PATH 누출 함정 (재현 가능 — 빌드 환경 주의)
+### WSL Windows-PATH leak trap (reproducible — build environment warning)
 
-이 환경(WSL2, Windows PATH 거대 누출)에서 grpc++ ON 빌드 시 2개
-오염이 잡혔다. 깨끗한 Linux 호스트/CI 면 안 나지만 WSL 개발자는 부딪침:
+Two contaminations were caught when building with grpc++ ON in this
+environment (WSL2, massive Windows PATH leak). They do not appear on
+a clean Linux host / CI, but WSL developers hit them:
 
-  1. **anaconda re2** — `gRPCConfig.cmake` 가 `find_package(re2)` 할
-     때 시스템에 re2 cmake config 가 없으면(apt `libre2-dev` 는 안 깜)
-     PATH 의 `/mnt/c/ProgramData/anaconda3/Library/lib/cmake/re2/
-     re2Targets.cmake` (Windows) 를 잡고 `set_target_properties`
-     에러. fix: `-DCMAKE_IGNORE_PREFIX_PATH=/mnt/c;…` +
-     `-DCMAKE_IGNORE_PATH=…/anaconda3/Library/lib/cmake;…` → grpc 가
-     시스템 pkg-config re2 로 fallback ("Found RE2 via pkg-config").
-  2. **ZLIB include** — `FindZLIB` 가 lib 는 시스템
-     (`/usr/lib/.../libz.so`) 잡지만 `ZLIB_INCLUDE_DIR` 은 PATH 의
-     `/mnt/c/gtk/include` (Windows zlib.h) 를 잡음 → `-isystem
-     /mnt/c/gtk/include` 가 모든 grpc-링크 타깃에 누출 →
-     `/mnt/c/gtk/include/libintl.h` 가 `printf` 를 `libintl_printf`
-     매크로로 치환 → `std::printf` 컴파일 에러. fix:
-     `-DZLIB_INCLUDE_DIR=/usr/include -DZLIB_LIBRARY=/usr/lib/
-     x86_64-linux-gnu/libz.so` 명시.
+  1. **anaconda re2** — When `gRPCConfig.cmake` does
+     `find_package(re2)`, if no system re2 cmake config exists
+     (apt `libre2-dev` is not installed), it picks up
+     `/mnt/c/ProgramData/anaconda3/Library/lib/cmake/re2/
+     re2Targets.cmake` (Windows) from PATH and errors in
+     `set_target_properties`. Fix: `-DCMAKE_IGNORE_PREFIX_PATH=/mnt/c;…`
+     + `-DCMAKE_IGNORE_PATH=…/anaconda3/Library/lib/cmake;…` → grpc
+     falls back to system pkg-config re2 ("Found RE2 via
+     pkg-config").
+  2. **ZLIB include** — `FindZLIB` picks up the library from the
+     system (`/usr/lib/.../libz.so`) but `ZLIB_INCLUDE_DIR` from
+     `/mnt/c/gtk/include` (Windows zlib.h) in PATH → `-isystem
+     /mnt/c/gtk/include` leaks into every grpc-linked target →
+     `/mnt/c/gtk/include/libintl.h` rewrites `printf` as the
+     `libintl_printf` macro → `std::printf` compile error. Fix:
+     explicitly set `-DZLIB_INCLUDE_DIR=/usr/include
+     -DZLIB_LIBRARY=/usr/lib/x86_64-linux-gnu/libz.so`.
 
-  → 둘 다 `cmake-option-default-flip-trap` 의 사촌 (환경 누출이
-  find_package 를 엉뚱한 prefix 로 끌고 감). EDDSkills SKILL
-  `wsl-windows-path-cmake-find-leak` 추가 완료 (2026-05-16).
+  → Both are cousins of `cmake-option-default-flip-trap` (an
+  environment leak drags `find_package` to the wrong prefix). The
+  EDDSkills SKILL `wsl-windows-path-cmake-find-leak` was added
+  (2026-05-16).
 
-### NexaGraph 전신 분석 — gRPC-MCP 의 진짜 ROI 는 checkpoint
+### NexaGraph predecessor analysis — gRPC-MCP's real ROI is the checkpoint
 
-NeoGraph 의 전신 NexaGraph (`/root/Coding/NexaGraph`) 가 초기에 이미
-gRPC-MCP 를 구현·동작시켰음. 조사 결과 (Explore, 2026-05-16):
+NeoGraph's predecessor NexaGraph (`/root/Coding/NexaGraph`) had
+already implemented and operated gRPC-MCP early on. Investigation
+findings (Explore, 2026-05-16):
 
-- **구현 실체**: `proto/rag_service.proto` (RAGService, 11 unary RPC —
-  vector_search / graph_search / ingest / chat history / image task /
-  **graph checkpoint** 5 RPC), `src/nexagraph/grpc_client.cpp` 완전
-  구현, api_server.cpp 에서 `GRPC_TARGET` env 로 production 통합.
-  서버는 dual-transport (HTTP JSON-RPC + gRPC 50051). streaming 없음
-  (전부 unary).
-- **오버헤드 감소 주장** (`DOCS/grpc-client-plan.md`): 직렬화
-  1ms→0.01ms, 임베딩 1536d 15KB→6KB, 요청마다 새 연결→HTTP/2
-  multiplexing. **측정치 없음 — 설계 rationale 만.**
-- **정직한 평가**: 일반 MCP tool call 은 LLM inference (수백 ms) 가
-  dominant 라 직렬화 1ms 절감은 noise. gRPC 이득이 *실재하는* 영역은
-  **대용량 구조화 payload** — embedding 벡터, RAG ingest, 그리고
-  특히 **graph checkpoint** (channel_values_json + channel_versions_
-  json 이 step 마다 큼). 작은 tool metadata/string query 는 <1%
-  (인지 복잡도 안 맞음). 즉 "MCP 전반 빠르게" 가 아니라 "대용량
-  payload MCP" 한정.
+- **Implementation substance**: `proto/rag_service.proto`
+  (RAGService, 11 unary RPCs — vector_search / graph_search / ingest
+  / chat history / image task / **graph checkpoint** 5 RPCs),
+  `src/nexagraph/grpc_client.cpp` fully implemented, integrated in
+  production from api_server.cpp via the `GRPC_TARGET` env. Server is
+  dual-transport (HTTP JSON-RPC + gRPC 50051). No streaming (all
+  unary).
+- **Overhead-reduction claims** (`DOCS/grpc-client-plan.md`):
+  serialization 1ms→0.01ms, embedding 1536d 15KB→6KB, new
+  connection per request → HTTP/2 multiplexing. **No measurements —
+  design rationale only.**
+- **Honest evaluation**: For a typical MCP tool call, LLM inference
+  (hundreds of ms) is dominant, so the 1ms serialization saving is
+  noise. The area where gRPC's gain *actually exists* is
+  **large structured payloads** — embedding vectors, RAG ingest, and
+  especially **graph checkpoints** (`channel_values_json` +
+  `channel_versions_json` grow large every step). Small tool metadata
+  / string queries are <1% (cognitive complexity is not worth it). In
+  other words, not "MCP in general faster", but limited to
+  "large-payload MCP".
 
-**핵심 발견 — NeoGraph 도입 시 우선순위 재정렬:**
+**Key finding — reordering priorities when introducing in NeoGraph:**
 
-1. **gRPC CheckpointStore = 진짜 ROI (1순위 후보)**. NexaGraph 의
-   `grpc_checkpoint.cpp` 가 이미 **`neograph::graph::CheckpointStore`
-   를 상속** — NeoGraph 의 checkpoint 추상을 그때부터 썼다. 즉
-   NeoGraph 의 `Postgres/Sqlite CheckpointStore` 옆에 `GrpcCheckpoint
-   Store` 를 추가하는 형태로 거의 그대로 포팅 가능 (~150 LoC). 큰
-   payload + 표준(MCP #966) 무관 + 방금 만든 `neograph::grpc`
-   컴포넌트 안에 자연스럽게 들어감. checkpoint 는 step 마다 큰 JSON
-   blob 이라 gRPC binary 이득이 측정 가능한 유일한 hot path.
-2. **MCP-over-gRPC transport (일반 tool call) = 후순위**. LLM
-   dominant 라 이득 작음 + MCP-over-gRPC 표준 미확정(#966). 표준
-   확정 후, 그때도 RAG/embedding 같은 대용량 tool 에 한해.
+1. **gRPC CheckpointStore = real ROI (top-priority candidate)**.
+   NexaGraph's `grpc_checkpoint.cpp` already **inherits from
+   `neograph::graph::CheckpointStore`** — it used NeoGraph's
+   checkpoint abstraction from that point on. In other words, almost
+   drop-in porting in the form of adding `GrpcCheckpointStore` next
+   to NeoGraph's `Postgres/Sqlite CheckpointStore` (~150 LoC). Big
+   payload + independent of the (MCP #966) standard + fits naturally
+   inside the just-built `neograph::grpc` component. Checkpoints are
+   large JSON blobs every step, the only hot path where the gRPC
+   binary gain is actually measurable.
+2. **MCP-over-gRPC transport (general tool call) = lower priority**.
+   LLM dominant, so the gain is small + MCP-over-gRPC standard not
+   yet fixed (#966). After the standard is fixed, even then only for
+   large-payload tools like RAG / embedding.
 
 ### GrpcCheckpointStore — landed + measured (2026-05-16)
 
-`neograph::grpc` 에 `GrpcCheckpointStore`(client, `CheckpointStore`
-상속 — NexaGraph 와 동일) + `CheckpointServiceImpl`+`run_checkpoint_
-server`(server, 임의 `CheckpointStore` backend wrap) + `checkpoint_to
-/from_json` 헬퍼 추가. proto 에 `CheckpointService` 5 RPC. NexaGraph
-flat-mapping 이 못 한 NeoGraph rich fields (next_nodes vector /
-CheckpointPhase enum / barrier_state nested map / schema_version) 까지
-round-trip 보존 — example 54 correctness PASS.
+Added to `neograph::grpc`: `GrpcCheckpointStore` (client, inherits
+from `CheckpointStore` — same as NexaGraph) +
+`CheckpointServiceImpl`+`run_checkpoint_server` (server, wraps an
+arbitrary `CheckpointStore` backend) + `checkpoint_to/from_json`
+helpers. 5 RPCs in `CheckpointService` proto. Round-trip preservation
+of NeoGraph's rich fields (next_nodes vector / `CheckpointPhase` enum
+/ `barrier_state` nested map / `schema_version`) that NexaGraph's
+flat-mapping could not handle — example 54 correctness PASS.
 
-**측정 결과 (example_grpc_checkpoint, 1536-d embedding + 12-turn,
-200 iters, localhost loopback) — "PLAUSIBLE BUT UNPROVEN" 닫음. 단
-정직하게, 절반은 기각:**
+**Measurement result (example_grpc_checkpoint, 1536-d embedding +
+12-turn, 200 iters, localhost loopback) — closes "PLAUSIBLE BUT
+UNPROVEN". Honestly though, half is rejected:**
 
-| 항목 | 값 |
+| Metric | Value |
 |---|---|
 | JSON (checkpoint_json) | 29 080 B |
 | Protobuf wire (CheckpointBlob) | 29 131 B |
@@ -1088,163 +1124,187 @@ round-trip 보존 — example 54 correctness PASS.
 | protobuf / JSON-RPC payload | **99.9%** |
 | InMemory in-process | save 27 µs / load 36 µs |
 | gRPC round-trip | save 720 µs / load 755 µs |
-| gRPC 네트워크 오버헤드 | **+693 µs save / +719 µs load** |
+| gRPC network overhead | **+693 µs save / +719 µs load** |
 
-**정직한 결론 — NexaGraph 의 "직렬화 15KB→6KB binary 압축" 주장은
-NeoGraph 의 JSON-in-proto 설계에서 미달성 (payload 99.9% 동일).**
-이유: graph-as-data robustness 위해 checkpoint 전체를 proto string
-한 필드로 담음 → protobuf field-level 압축 안 걸림. NexaGraph 는
-field-per-member proto 라 압축됐지만 checkpoint format drift 마다
-proto regen (next_nodes/barrier_state/schema_version 추가 시마다). 즉
-**압축 vs schema-안정성 trade-off 에서 후자를 의도 선택했고, 그래서
-payload 이득은 0 이 맞다 (PROVEN: not beneficial by design).**
+**Honest conclusion — NexaGraph's "serialization 15KB→6KB binary
+compression" claim is unmet in NeoGraph's JSON-in-proto design
+(payload 99.9% identical).** Reason: for graph-as-data robustness,
+the entire checkpoint is packed as a single proto string field →
+protobuf field-level compression does not apply. NexaGraph had
+field-per-member proto so it compressed, but every checkpoint-format
+drift requires a proto regen (every time `next_nodes` /
+`barrier_state` / `schema_version` is added). In other words,
+**we deliberately chose schema-stability over compression in this
+trade-off, so the payload gain really is 0 (PROVEN: not beneficial
+by design).**
 
-gRPC 의 *실재* 이득은 transport 뿐 — HTTP/2 connection reuse (JSON-
-RPC/HTTP1.1 의 per-call connect 제거). 단일 loopback round-trip
-+700 µs 측정으론 안 드러남 (부하·원격 RTT 에서만 delta). 즉
-**transport 이득은 still load-test-dependent — 단발 측정으로 PROVEN
-못 함.**
+gRPC's *actual* gain is only transport — HTTP/2 connection reuse
+(eliminates the per-call connect of JSON-RPC / HTTP1.1). A single
+loopback round-trip of +700 µs does not show this (the delta only
+appears under load / remote RTT). In other words, **the transport
+gain is still load-test-dependent — cannot be PROVEN with a single
+measurement.**
 
-→ 우선순위 재확정:
-  - **GrpcCheckpointStore 의 진짜 가치 = "원격 checkpoint 를 typed
-    RPC + HTTP/2 connection-reuse 로" + "polyglot: 어느 언어 서버든
-    CheckpointService 구현 가능"**. NexaGraph 가 광고한 payload
-    압축이 아님. cookbook 으로 ship 하되 셀링 포인트를
-    "압축" 아니라 "typed remote checkpoint, DB driver 0 in agent
-    process" 로 정직하게.
-  - **MCP-over-gRPC transport (일반 tool call) = 보류 유지**. payload
-    압축이 JSON-in-proto 에서 안 걸리는 게 checkpoint 에서 측정으로
-    확인됐으니, tool call 도 같은 설계면 압축 이득 0 + LLM dominant.
-    표준 #966 확정 + field-per-member 가 정당화되는 대용량 binary
-    tool (raw embedding 등) 한정으로만 재검토.
-  - 남은 검증: 부하 상황 (N 동시 checkpoint save) 에서 HTTP/2
-    multiplexing 이 per-call-connect 대비 실제 delta 내는지 —
-    bench job 후보 (단발 아닌 sustained).
+→ Priority re-confirmed:
+  - **GrpcCheckpointStore's real value = "remote checkpoint via typed
+    RPC + HTTP/2 connection-reuse" + "polyglot: any language server
+    can implement `CheckpointService`"**. Not the payload compression
+    NexaGraph advertised. Ship it as a cookbook, but the honest
+    selling point is not "compression" but "typed remote checkpoint,
+    zero DB drivers in the agent process".
+  - **MCP-over-gRPC transport (general tool call) = hold**. Payload
+    compression does not apply with JSON-in-proto as confirmed by
+    checkpoint measurement, so if tool calls follow the same design
+    the compression gain is 0 + LLM dominant. Only reconsider for
+    large binary tools (raw embeddings, etc.) where the standard
+    (#966) is fixed and field-per-member is justified.
+  - Remaining verification: under load (N concurrent checkpoint
+    saves), does HTTP/2 multiplexing actually delta against
+    per-call-connect — bench job candidate (sustained, not
+    single-shot).
 
 ### ToolCalling: JSON-RPC vs gRPC head-to-head (2026-05-16)
 
-사용자 요청 — checkpoint 가 아니라 *tool call* 자체를 두 transport
-실서버로 head-to-head. `proto` 에 `ToolService.CallTool`, example 55
-가 **같은 compute fn 을 (a) httplib JSON-RPC 2.0 `tools/call` (MCP
-shape, HTTP/1.1 keep-alive) (b) gRPC ToolService (HTTP/2)** 양쪽에
-띄우고 동일 측정.
+User request — not checkpoint, but *tool call* itself, head-to-head
+against both transports on real servers. `proto` gets
+`ToolService.CallTool`, example 55 launches **the same compute fn on
+both (a) httplib JSON-RPC 2.0 `tools/call` (MCP shape, HTTP/1.1
+keep-alive) (b) gRPC ToolService (HTTP/2)** and measures the same.
 
-**정직성 사건 — "gRPC 70x faster" 는 측정 아티팩트였다.** 첫 실행:
-JSON-RPC p50 43 ms (payload 무관 고정). 43 ms = TCP delayed-ACK
-타이머의 교과서적 시그니처. 원인: `CPPHTTPLIB_TCP_NODELAY` 기본
-**false** → Nagle on, gRPC 는 TCP_NODELAY 기본 on → 불공정. 그대로
-"gRPC 70x" commit 했으면 거짓. `Server/Client::set_tcp_nodelay(true)`
-양쪽 적용 후 재측정.
+**Honesty incident — "gRPC 70x faster" was a measurement artifact.**
+First run: JSON-RPC p50 43 ms (constant regardless of payload).
+43 ms = textbook signature of the TCP delayed-ACK timer. Cause:
+`CPPHTTPLIB_TCP_NODELAY` default **false** → Nagle on, gRPC has
+TCP_NODELAY default on → unfair. Committing "gRPC 70x" as-is would
+have been a lie. Applied `Server/Client::set_tcp_nodelay(true)` on
+both sides and re-measured.
 
-**공정 조건 결과 (loopback, 양쪽 keep-alive+NODELAY, N=300 p50,
-2회 재현):**
+**Fair-condition result (loopback, both sides keep-alive + NODELAY,
+N=300 p50, 2 reproductions):**
 
-| payload | gRPC p50 | JSON-RPC p50 | 비율 |
+| payload | gRPC p50 | JSON-RPC p50 | ratio |
 |---|---|---|---|
-| tiny args (~30 B) | 433 / 448 µs | 436 / 410 µs | **0.99–1.09× (동률)** |
+| tiny args (~30 B) | 433 / 448 µs | 436 / 410 µs | **0.99–1.09× (tie)** |
 | 1536-float (~12 KB) | 655 / 680 µs | 1079 / 1016 µs | **0.61–0.67× (gRPC ~1.5×)** |
 | args wire (tiny) | 42 B | 118 B | envelope overhead |
-| args wire (12 KB) | 12025 B | 12100 B | **99% (압축 0)** |
+| args wire (12 KB) | 12025 B | 12100 B | **99% (compression 0)** |
 
-**진실:**
-- **작은 tool call (실제 tool call 의 대다수): JSON-RPC ≈ gRPC 동률.**
-  transport 교체 ROI ≈ 0.
-- **대용량 payload tool call (~12 KB+, embedding/RAG chunk 반환):
-  gRPC ~1.5×.** NexaGraph 가 말한 영역이지만 70× 아니라 1.5×.
-- payload 압축은 여전히 0 (JSON-in-proto, checkpoint 측정과 일관).
-- loopback 상한 — 실제 네트워크면 RTT 가 양쪽에 공통으로 더해져
-  비율은 더 1 에 수렴. 1.5× 는 best case.
+**Truth:**
+- **Small tool call (the majority of real tool calls): JSON-RPC ≈
+  gRPC tie.** Transport-switch ROI ≈ 0.
+- **Large-payload tool call (~12 KB+, embedding / RAG chunk return):
+  gRPC ~1.5×.** The area NexaGraph mentioned, but 1.5× not 70×.
+- Payload compression is still 0 (JSON-in-proto, consistent with the
+  checkpoint measurement).
+- Loopback ceiling — on a real network, RTT adds equally to both
+  sides and the ratio converges further toward 1. The 1.5× is the
+  best case.
 
-**Candidate 7 최종 판정:**
-- gRPC 의 ROI 는 (1) **polyglot sidecar / 원격 typed RPC** (언어
-  경계), (2) **대용량 payload tool/checkpoint 에서 ~1.5×**. 일반
-  tool call 대량 전환은 무가치 (동률 + 표준 #966 미확정).
-- MCP-over-gRPC transport: **보류 확정**. "일반 MCP tool call 빨라짐"
-  은 측정으로 반증됨 (동률). embedding-heavy tool 한정 + 표준
-  확정 후로만.
-- Nagle 사건 → EDDSkills SKILL 후보 `bench-shock-number-nagle-first`
-  (충격적 transport 벤치 숫자 = TCP_NODELAY/Nagle/delayed-ACK 부터
-  의심; `perf-regression-bench-bisect` 사촌). 사용자 승인 후 추가.
+**Candidate 7 final verdict:**
+- gRPC's ROI is (1) **polyglot sidecar / remote typed RPC** (language
+  boundary), (2) **~1.5× on large-payload tool / checkpoint**. Mass
+  migration of general tool calls is worthless (tie + standard #966
+  not yet fixed).
+- MCP-over-gRPC transport: **hold, confirmed**. "General MCP tool
+  calls get faster" is disproven by measurement (tie). Only after the
+  standard is fixed, and only for embedding-heavy tools.
+- Nagle incident → EDDSkills SKILL candidate
+  `bench-shock-number-nagle-first` (shocking transport-bench number
+  = suspect TCP_NODELAY / Nagle / delayed-ACK first; a cousin of
+  `perf-regression-bench-bisect`). Add after user approval.
 
-### 왜 NeoGraph JSON-RPC 가 gRPC 와 동률인가 — yyjson (PROVEN)
+### Why NeoGraph JSON-RPC ties gRPC — yyjson (PROVEN)
 
-사용자 통찰: "JSON-RPC 도 yyjson 으로 파싱하니 빠른 거고, 구조적으로
-gRPC 가 유리할 수밖에 없다." example 55 에 transport 뺀 순수 codec
-마이크로벤치 추가로 검증:
+User insight: "JSON-RPC parses with yyjson so it is fast; structurally
+gRPC has to win." Added a transport-stripped pure-codec microbench
+to example 55 to verify:
 
 | 12 KB payload, codec only, 5000 iters | µs |
 |---|---|
 | yyjson parse+dump | **38.9** |
 | protobuf ser+parse | **1.75** |
-| → yyjson / protobuf | **22.3× 느림** |
+| → yyjson / protobuf | **22.3× slower** |
 
-**사용자 말이 정확.** protobuf 는 구조적으로 22× 빠른 codec. 그런데
-round-trip 에서는 12 KB 기준 1.5× 로 희석 — 직렬화 차이 ~37 µs 가
-전체 round-trip 692–1096 µs 에서 작은 비중 (나머지는 socket I/O /
-syscall / HTTP framing). **즉 tool-call hot path 는 codec 이 아니라
-socket I/O dominant 라는 정량 증거.**
+**User is exactly right.** protobuf is a structurally 22× faster
+codec. But in the round-trip the difference dilutes to 1.5× at
+12 KB — the serialization gap ~37 µs is a small slice of the full
+round-trip 692–1096 µs (the rest is socket I/O / syscall / HTTP
+framing). **Quantitative evidence that the tool-call hot path is
+dominated by socket I/O, not the codec.**
 
-핵심 함의 — **NeoGraph 의 JSON-RPC 가 gRPC 와 동률인 건 yyjson 덕,
-JSON-RPC 프로토콜이 빨라서가 아니다.** 일반 스택 (Python `json` 은
-yyjson 대비 ~50×, 12 KB 에 ~2 ms) 이면 codec 이 round-trip 을
-dominate → 그쪽에서는 gRPC 가 구조적으로 압도. NeoGraph 만 yyjson
-이라 그 함정을 피함.
+Key implication — **NeoGraph's JSON-RPC ties gRPC thanks to yyjson,
+not because the JSON-RPC protocol is fast.** With a typical stack
+(Python's `json` is ~50× slower than yyjson, ~2 ms on 12 KB), the
+codec dominates the round-trip → there gRPC structurally dominates.
+Only NeoGraph uses yyjson and thus avoids that trap.
 
-→ 이건 숨은 셀링 포인트이자 Candidate 7 보류의 *최종* 근거:
-"다른 프레임워크는 JSON 파싱 병목이라 gRPC transport 가 절실하지만,
-NeoGraph 의 MCP/JSON-RPC 는 yyjson 이라 그렇지 않다." MCP-over-gRPC
-는 NeoGraph 한정으로는 ROI 가 더더욱 작다 (codec 우위가 이미
-yyjson 으로 상쇄됨). gRPC 는 polyglot/원격 경계 + 대용량 payload
-~1.5× 용도로만 — 확정.
+→ This is a hidden selling point and the *final* justification for
+holding Candidate 7: "Other frameworks have JSON-parsing as a
+bottleneck, so gRPC transport is critical for them, but NeoGraph's
+MCP / JSON-RPC is not because of yyjson." For NeoGraph specifically,
+MCP-over-gRPC has even less ROI (the codec advantage is already
+canceled by yyjson). gRPC is only for polyglot / remote boundary +
+~1.5× on large-payload purposes — confirmed.
 
-### NexaGraph 2차 수확 — history 압축 + GrpcRemoteTool (2026-05-16)
+### NexaGraph second harvest — history compression + GrpcRemoteTool (2026-05-16)
 
-NexaGraph 전수조사 후, 이미 가져온 `GrpcCheckpointStore` 외 *범용·
-비중복·NeoGraph 미보유* 인 것 3개를 추가 이식. (RAG 앱 전용 — proto/
-rag_mcp_server/backend 의 stdio·HTTP MCP — 은 NeoGraph 가 이미 보유
-하거나 그 앱 한정이라 제외. `DOCS/graph-engine-design.md` 는 사실
-NeoGraph 의 설계 원형이라 "이식" 대상 아님.)
+After a full NexaGraph survey, in addition to the already-ported
+`GrpcCheckpointStore`, three additional *general-purpose,
+non-duplicate, not-yet-in-NeoGraph* items were additionally ported.
+(The RAG-app-specific stdio / HTTP MCP in
+`proto/rag_mcp_server/backend` was excluded because NeoGraph already
+has it or it is app-specific. `DOCS/graph-engine-design.md` is in
+fact NeoGraph's design ancestor, so it is not a "porting" target.)
 
-1. **`neograph::history` (신규 core 유틸, additive)** — NexaGraph 의
-   CAF `compress_history` 액터에서 액터 껍데기 제거, 코어만 이식:
+1. **`neograph::history` (new core utility, additive)** — ported the
+   core only from NexaGraph's CAF `compress_history` actor with the
+   actor shell stripped off:
    - `compact_history(messages, Provider&, model, max_tokens=12000,
-     recent_keep=6) -> awaitable<CompactedHistory>` — 토큰 추정이
-     예산 초과면 (system 1개 + 마지막 N개) 제외 구간을 LLM 1회 호출로
-     요약, system-요약 메시지로 치환. `co_await provider.invoke()`
-     (deprecated `complete()` 안 씀, async-lib 의존 0 — core 내부도
-     coroutine 이미 사용).
-   - `sanitize_tool_calls(messages&)` — NeoGraph 에 **전무했던** 방어:
-     truncation 이 깨뜨린 OpenAI tool-pair (응답 없는 assistant
-     tool_call / 호출 없는 tool 메시지) 2-pass 제거, idempotent.
-     `compact_history` 가 출력에 내부 적용 → 압축 결과가 절대 400 안 남.
-   - `estimate_tokens` — ~3 chars/tok 보수 추정 (KO/EN 혼합).
-   - example 56 `history_compaction` (offline MockProvider, key 불필요)
-     — sanitize 3→1, compact 29 msgs/975 tok → 6 msgs/208 tok,
-     원본 불변 검증 PASS. `src/core/history.cpp` 가 모든 config 의
-     `neograph_core` 에 빌드됨 — 496/497 ctest PASS (1 실패 =
-     pre-existing `pybind_smoke` openinference 모듈 누락, 무관).
+     recent_keep=6) -> awaitable<CompactedHistory>` — when the token
+     estimate exceeds budget, summarize the section between (system
+     1 + last N) with a single LLM call, replacing it with a
+     system-summary message. `co_await provider.invoke()` (does not
+     use deprecated `complete()`, zero async-lib dependency — core
+     internals already use coroutines).
+   - `sanitize_tool_calls(messages&)` — a defense that NeoGraph
+     **completely lacked**: 2-pass removal of OpenAI tool-pairs broken
+     by truncation (assistant `tool_call` with no response / tool
+     message with no call), idempotent. `compact_history` applies it
+     internally to its output → the compression result never
+     produces a 400.
+   - `estimate_tokens` — conservative ~3 chars/tok estimate (mixed
+     KO / EN).
+   - example 56 `history_compaction` (offline MockProvider, no key
+     required) — sanitize 3→1, compact 29 msgs/975 tok →
+     6 msgs/208 tok, original-unchanged verification PASS.
+     `src/core/history.cpp` builds into `neograph_core` for all
+     configs — 496/497 ctest PASS (1 failure = pre-existing
+     `pybind_smoke` openinference module missing, unrelated).
 
-2. **`neograph::grpc::GrpcRemoteTool`** — example 55 가 tool 을 gRPC 로
-   *내보내는* (`run_tool_server`) 쪽이라면, 그 거울 — 원격
-   `ToolService.CallTool` 을 평범한 `neograph::Tool` 로 *끌어오는*
-   쪽. NexaGraph `GrpcTool` 어댑터 이식. pimpl (공개 헤더 grpc++-free,
-   `GrpcCheckpointStore` 와 동일 posture). 단순 proto 에 list-tools
-   RPC 없으니 definition 은 ctor 주입. server error → `runtime_error`
-   재throw (tool 에러, transport 에러 아님 — 로컬 Tool 과 동일 계약).
-   example 57 `grpc_remote_tool` — server thread + `Tool&` 다형 호출 +
-   에러 경로 PASS. **gRPC 의 ROI #1 (polyglot 원격 typed RPC) 의
-   소비자 측 구체화** — Agent 입장에서 프로세스 경계 tool 이 로컬
-   tool 과 호출부에서 구분 불가.
+2. **`neograph::grpc::GrpcRemoteTool`** — example 55 is the side that
+   *exports* tools via gRPC (`run_tool_server`), this is its mirror —
+   the side that *imports* a remote `ToolService.CallTool` as an
+   ordinary `neograph::Tool`. Ported NexaGraph's `GrpcTool` adapter.
+   pimpl (public header is grpc++-free, same posture as
+   `GrpcCheckpointStore`). Since the simple proto has no list-tools
+   RPC, the definition is injected via the ctor. Server error →
+   rethrow as `runtime_error` (tool error, not transport error —
+   same contract as a local Tool). example 57 `grpc_remote_tool` —
+   server thread + `Tool&` polymorphic call + error path PASS.
+   **Consumer-side materialization of gRPC's ROI #1 (polyglot remote
+   typed RPC)** — from the agent's viewpoint, the process-boundary
+   tool is indistinguishable from a local tool at the call site.
 
 ### Remaining (still open)
 
-  - CI 에 `grpc-build` job 추가 (apt deps + ON 빌드 +
-    `example_grpc_client`/`server` 스모크 — 깨끗한 ubuntu runner 라
-    위 WSL 함정은 없음).
-  - `RunGraphStream` 의 `ServerWriter::Write` 가 streaming node
-    callback 안에서 호출됨 — 현재 단일 super-step loop thread 가정.
-    multi-worker fan-out 그래프에서 callback 이 worker thread 에서
-    불리면 `ServerWriter` 동기화 필요 (gRPC `ServerWriter` 는
-    not thread-safe). 현 example 은 단일-노드라 미노출.
-  - TLS / auth 는 `run_server` 의 insecure 기본 대신 사용자 wiring
-    문서화.
+  - Add a `grpc-build` job to CI (apt deps + ON build +
+    `example_grpc_client` / `server` smoke — on a clean ubuntu runner
+    the WSL traps above do not apply).
+  - `RunGraphStream`'s `ServerWriter::Write` is called inside a
+    streaming-node callback — currently assumes a single super-step
+    loop thread. In multi-worker fan-out graphs, if the callback is
+    invoked on a worker thread, `ServerWriter` synchronization is
+    required (gRPC `ServerWriter` is not thread-safe). Current
+    examples are single-node, so this is not exposed.
+  - TLS / auth: document user wiring instead of `run_server`'s
+    insecure default.
