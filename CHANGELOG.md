@@ -19,6 +19,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`GraphNode::run(input)` 이전 안내 완결.** Python `GraphNode` 기본
+  클래스가 더 이상 삭제된 `execute*` 메서드를 안내하지 않으며,
+  `run(input)` 누락 시 이전 문서 경로가 포함된 `NotImplementedError`를
+  낸다. C++/Python reference, async/streaming 안내, 예제 README를 실제
+  v0.9.0 단일 진입점과 맞췄다. 이전 방법은
+  [`docs/migration-v0.4-to-v1.0.md`](docs/migration-v0.4-to-v1.0.md)에
+  C++와 Python 예제로 정리했다.
 - **Provider API 영구 호환 정책 (issue #5).** `Provider::complete()`,
   `complete_async()`, `complete_stream()`, `complete_stream_async()`와 callback 기반
   `invoke()`의 제거 계획을 철회하고 `[[deprecated]]` 경고를 없앴다. 기존 API에는
@@ -450,9 +457,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ROADMAP_v1.md 의 두 v1.0 단일 dispatch 통합이 한 사이클에 모임:
 
   - **Candidate 1 Phase B (`9b`–`9f`)** — `GraphNode` 의 legacy 8
-    virtual (`execute` / `execute_full` / `execute_async` /
-    `execute_stream` / `execute_full_async` / `execute_full_stream` /
-    `execute_full_stream_async` / `execute_full_async` 변종) +
+    virtual (`execute` / `execute_async` / `execute_stream` /
+    `execute_stream_async` / `execute_full` / `execute_full_async` /
+    `execute_full_stream` / `execute_full_stream_async`) +
     `add_cancel_hook` + `CurrentCancelTokenScope` + `state.
     run_cancel_token_` + `PyGraphNodeOwner` 의 6 legacy override 까지
     전부 삭제. **destructive** — deprecation window 가 닫힘. 사용자
@@ -527,7 +534,7 @@ Windows MSVC unistd.h / pybind pytest 마이그레이션) 도 본 [Unreleased]
   cancel_token` 이 유일한 cancel 채널. `src/core/cancel.cpp` 가 stub
   까지 비워짐 (파일 자체는 향후 삭제 가능 상태). (commit `9e8e956`)
 - **`PyGraphNodeOwner` 의 6 legacy override** — pybind trampoline 이
-  `run(self, input)` 만 호출. Python 사용자 코드도 v1.0 단일 메서드
+  `run(self, input)` 만 호출. Python 사용자 코드도 v0.9.0부터 단일 메서드
   필수. (commit `9e8e956`)
 - **2 obsolete pytest 파일** — `test_execute_stream_dispatch.py` (v0.3.2
   의 stream-only fallback dispatch 검증) + `test_streaming_only_error_
@@ -581,15 +588,17 @@ v1.0.0 직전에 제거되니 deprecation window 안에 마이그레이션 권�
 
 C++ 코드:
 ```cpp
-// 옛 (v0.x 까지)
+// 옛 (v0.8.x 까지)
 class MyNode : public GraphNode {
-    NodeResult execute_full(GraphState& state) override {
+    NodeResult execute_full(const GraphState& state) override {
         auto x = state.get("x");
-        return {.writes = {ChannelWrite{"y", json(/*...*/)}}};
+        NodeResult out;
+        out.writes.push_back(ChannelWrite{"y", json(/*...*/)});
+        return out;
     }
 };
 
-// v1.0 새 코드 (한 메서드, 코루틴 entry)
+// v0.9.0+ 현재 코드 (한 메서드, 코루틴 entry)
 class MyNode : public GraphNode {
     asio::awaitable<NodeOutput> run(NodeInput in) override {
         auto x = in.state.get("x");
@@ -603,13 +612,13 @@ class MyNode : public GraphNode {
 
 Python 코드:
 ```python
-# 옛 (v0.x 까지)
+# 옛 (v0.8.x 까지)
 class MyNode(neograph_engine.GraphNode):
     def execute(self, state):
         x = state.get("x") or 0
         return [neograph_engine.ChannelWrite("y", x * 2)]
 
-# v1.0 새 코드
+# v0.9.0+ 현재 코드
 class MyNode(neograph_engine.GraphNode):
     def run(self, input):
         state = input.state  # input.ctx.cancel_token / input.stream_cb 등도 접근 가능

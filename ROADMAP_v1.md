@@ -368,7 +368,7 @@ the class. Candidate 1 + 6 do.
 
 | # | Candidate | Status | Triggering rounds / issues |
 |---|---|---|---|
-| 1 | Single `run()` dispatch + tags | Proposed (v0.4 PR 2 plumbed `run(NodeInput)` additively; legacy 8 still live) | v0.3.1 #2, v0.3.2 #10 (×2 langs); pattern reinforced by #36 (9 downstream findings) |
+| 1 | Single `run()` dispatch + tags | **Landed in v0.9.0.** `run(NodeInput)` is pure virtual; the legacy 8 virtuals and fallback chain are gone. | v0.3.1 #2, v0.3.2 #10 (×2 langs); pattern reinforced by #36 (9 downstream findings) |
 | 2 | Explicit `RunContext` arg | **Landed in v0.4–v0.8** (`RunContext::store` field added v0.8 #27) | v0.3.1 multi-Send, v0.3.2 C++ scope |
 | 3 | Hierarchical CancelToken | **Landed in v0.4** (`CancelToken::fork()` + cascade) | v0.3.2 hooks, v0.3.2 emit-vs-bind |
 | 4 | Self-evolving graph runtime hooks | Research | TODO_v0.3.md #8 |
@@ -378,6 +378,10 @@ the class. Candidate 1 + 6 do.
 ---
 
 # Execution plan
+
+> **Status:** Candidate 1 is complete. The plan below records how the
+> migration was staged from v0.4.0 through the destructive v0.9.0
+> v1-preparation release; it is historical context, not remaining work.
 
 ## The user-facing motivation
 
@@ -465,16 +469,15 @@ independently shippable to PyPI as v0.4.0+i, v0.4.0+(i+1), etc.).
 | 6 ✓ | **Examples migrate** — landed `a2a24ef` (PR 6a, C++) + `0a76e3a` (PR 6b, Python) | 7 C++ + 19 Python examples (44 GraphNode subclasses total) switched to the unified ``run(NodeInput)`` API. PR 6a hand-migrated; PR 6b used an AST-scoped helper to safely batch-rewrite. Smoke runs match v0.3.2 outputs bit-for-bit. ctest 452/452 + pytest 96/96 green. | v0.4.x (split into 6a + 6b) |
 | 7 ✓ | **Pybind binding migrates** — landed `4e186a5` | ``PyGraphNodeOwner`` now overrides ``GraphNode::run(NodeInput)`` and dispatches to Python user's ``run`` method via ``has_user_method`` MRO walk; falls through to the legacy chain when not present. Bound ``RunContext`` / ``NodeInput`` / ``CancelToken`` to Python (re-exported from the package). Smuggling ``CurrentCancelTokenScope`` STAYS — the legacy chain still installs it for un-migrated user code. PR 9 deletes it along with the legacy 8 virtuals. ctest 452/452 + pytest 96/96 + 5 live LLM/WS green; new ``run(input)`` API exercised end-to-end. | v0.4.x |
 | 8 ✓ | **Docs rewrite** — landed `519a00b` | `docs/reference-en.md` §6 GraphNode collapsed to a single `run()` virtual; new RunContext + CancelToken (with `fork()` example) subsections under §7. README "Differences from LangGraph" picked up a "One node method" entry pointing at `run(input)`. The `@ng.node` decorator's internal `_DecoratorNode` now uses `run()` so the Five-second demo runs through the new path. concepts.md / troubleshooting.md sweeps deferred to PR 9 (where they become obviously stale once the legacy chain is deleted). | v0.5.0 |
-| 9 partial | **Old API removal** — PR 9a `d1070dc` (built-in nodes migrated to run()); 9b–e (legacy 8 virtuals + add_cancel_hook + smuggling thread_local + PyGraphNodeOwner legacy overrides) **deferred to v1.0.0 release moment** — ROADMAP itself says "Drop the old API only when the deprecation warnings have been quiet for a release", so removal waits for v0.4.0 ship + deprecation feedback period. See "Post-v0.4.0 plan" section below for the 4-way sub-PR split. | v1.0.0 |
+| 9 ✓ | **Old API removal** — built-in migration `d1070dc`; legacy GraphNode chain `19819d8`; cancel hook `1d786a5`; thread-local/Python legacy bridge `9e8e956`; obsolete Python tests `4392fbb`. | v0.9.0 |
 
-## Post-v0.4.0 plan (deprecation window → v1.0)
+## Completed post-v0.4.0 plan (historical)
 
-v0.4.0 shipped 2026-05-05 (`4cae42c`, tag `v0.4.0`). PR 1~9a + newcomer
-sweep (`ee11ed6`) all landed. The remaining work is split into two
-phases that run sequentially: a passive observation window, then the
-destructive removal release.
+v0.4.0 shipped 2026-05-05 (`4cae42c`, tag `v0.4.0`). The observation
+window and destructive removal described below have both completed;
+v0.9.0 shipped the removal on 2026-05-14.
 
-### Phase A — Deprecation window (observe, don't code)
+### Phase A — Deprecation window (completed)
 
 Duration: weeks ~ one minor cycle. No engine code changes; this phase
 exists so deprecation warnings have time to surface real downstream
@@ -514,11 +517,10 @@ Exit criterion: Phase A ends when deprecation warnings have been
 "quiet for a release" — concretely, one full minor cycle (e.g. v0.5.0
 shipped) with zero user-visible breakage tied to legacy paths.
 
-### Phase B — v1.0 destructive removal (4 sub-PRs, sequential)
+### Phase B — destructive removal (completed in v0.9.0)
 
-Each sub-PR is independently mergeable on master. Land in this order;
-each must keep ctest 452/452 + pytest 96/96 green at every step.
-**Do NOT bundle into one commit** — review and revert cost compounds.
+The sub-PRs landed independently in the order below so each step could
+be reviewed and reverted on its own.
 
 | Sub-PR | Scope | Risk | Files touched |
 |---|---|---|---|
@@ -565,7 +567,7 @@ Two small inaccuracies in earlier drafts that the audit caught:
     matrix runs need to verify wheel layout doesn't regress when
     SOVERSION suffix appears on Linux .so / macOS dylib install_name.
 
-### "What if we never remove?" cost analysis
+### Historical counterfactual: "What if we never remove?"
 
 If Phase B never lands (legacy stays in v1.0+), the system **does
 not break** — every current scenario keeps working, all 452 ctest
