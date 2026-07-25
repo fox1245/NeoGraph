@@ -1,5 +1,7 @@
 # NeoGraph Harness MCP
 
+**Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
+
 NeoGraph Harness compiles a bounded multi-worker workflow before it runs. The
 stable MCP surface stays at six tools:
 

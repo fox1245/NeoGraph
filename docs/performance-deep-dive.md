@@ -1,5 +1,7 @@
 # Performance deep-dive
 
+**Languages:** [English](performance-deep-dive.md) | [한국어](performance-deep-dive.ko.md) | [日本語](performance-deep-dive.ja.md) | [简体中文](performance-deep-dive.zh-CN.md)
+
 > Detailed measurements behind the **Performance** and **Lightweight**
 > axes. README has the headline numbers; this is the full evidence.
 

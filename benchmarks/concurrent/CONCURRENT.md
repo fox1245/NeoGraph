@@ -1,5 +1,7 @@
 # Concurrent-load benchmark — NeoGraph vs. Python graph frameworks
 
+**Languages:** [English](CONCURRENT.md) | [한국어](CONCURRENT.ko.md) | [日本語](CONCURRENT.ja.md) | [简体中文](CONCURRENT.zh-CN.md)
+
 Under a **burst** load — N requests submitted simultaneously, then the
 test waits for all to complete — how do these engines scale, and at
 what point does each approach stop being viable?

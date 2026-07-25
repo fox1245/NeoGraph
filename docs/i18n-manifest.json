@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "canonical_locale": "en",
+  "translation_locales": ["ko", "ja", "zh-CN"],
+  "strict": true,
+  "excluded": {
+    "THIRD_PARTY_LICENSES.md": "Legal notices remain in their authoritative original form.",
+    "skills/neograph-harness-authoring/SKILL.md": "Agent execution contract, not user documentation."
+  },
+  "path_overrides": {
+    "docs/reference-en.md": {
+      "ko": "docs/reference-ko.md",
+      "ja": "docs/reference-ja.md",
+      "zh-CN": "docs/reference-zh-CN.md"
+    }
+  }
+}

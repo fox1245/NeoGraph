@@ -11,10 +11,12 @@ Python interpreter. Compares:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import subprocess
 import sys
 
 PY = sys.executable
+EXAMPLES_DIR = Path(__file__).resolve().parents[2] / "bindings" / "python" / "examples"
 
 def _run(snippet: str) -> dict:
     out = subprocess.check_output([PY, "-c", snippet], stderr=subprocess.STDOUT)
@@ -63,7 +65,7 @@ def ng_concurrent_fanout(width: int):
     """NG: fan out `width` mock-LLM branches in parallel, measure peak RSS."""
     snippet = rf"""
 import json, time, psutil, sys
-sys.path.insert(0, '/root/Coding/NeoGraph/bindings/python/examples')
+sys.path.insert(0, {str(EXAMPLES_DIR)!r})
 from _common import ng
 
 WIDTH = {width}
@@ -71,14 +73,14 @@ WIDTH = {width}
 class Mock(ng.GraphNode):
     def __init__(self, name): super().__init__(); self._n = name
     def get_name(self): return self._n
-    def execute(self, state):
+    def run(self, input):
         time.sleep(0.5)  # simulate I/O
         return [ng.ChannelWrite("done", [1])]
 
 class Fanout(ng.GraphNode):
     def __init__(self, name): super().__init__(); self._n = name
     def get_name(self): return self._n
-    def execute_full(self, state):
+    def run(self, input):
         return [ng.Send("worker", {{}}) for _ in range(WIDTH)]
 
 ng.NodeFactory.register_type("fan", lambda name, c, ctx, _f=Fanout: _f(name))

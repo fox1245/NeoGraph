@@ -116,7 +116,7 @@ void init_state(py::module_& m) {
 
     // ── Send (dynamic fan-out) ───────────────────────────────────────────
     py::class_<Send>(m, "Send",
-        "Dynamic fan-out request. Returning Sends from execute_full() "
+        "Dynamic fan-out request. Returning Sends from run(input) "
         "dispatches the target node N times in parallel with distinct "
         "input dicts.")
         .def(py::init([](const std::string& target_node, py::object input) {

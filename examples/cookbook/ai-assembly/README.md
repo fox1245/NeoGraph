@@ -1,4 +1,6 @@
-# AI National Assembly (AI 국회)
+# AI National Assembly
+
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 A toy demo built **as a fresh NeoGraph user** — every API choice was
 made by reading the public docs (README, examples on github, Doxygen)
@@ -8,23 +10,23 @@ friction a brand-new C++ developer hits along the way.
 
 ## What it does
 
-Four 국회의원 (members of the National Assembly) sit on different ports,
+Four members of the National Assembly sit on different ports,
 each one an A2A endpoint backed by a distinct persona prompt and the
-same OpenAI model (`gpt-5.4-mini`). The Speaker (의장) is a separate
+same OpenAI model (`gpt-5.4-mini`). The Speaker (Speaker of the National Assembly) is a separate
 program that broadcasts a bill to every member in parallel via
 NeoGraph's `A2AClient`, parses each member's vote out of the reply, and
 declares the outcome.
 
 ```
                           ┌──────────────────┐
-                          │  의장 (speaker)  │
+                          │  Speaker         │
                           │   A2AClient ×4   │
                           └─────────┬────────┘
                 fetch_agent_card +    send_message_sync
             ┌──────────┬───────────┴───────────┬──────────┐
             ▼          ▼                       ▼          ▼
-       :8101 진보당  :8102 보수당          :8103 중도당  :8104 녹색당
-       김진보        박보수                정중도        나녹색
+       :8101 Progress    :8102 Conservative  :8103 Center  :8104 Green
+       Kim Jinbo         Park Bosu           Jung Jungdo   Na Noksaek
        (PersonaNode → OpenAI gpt-5.4-mini, persona-specific system prompt)
 ```
 
@@ -36,18 +38,18 @@ writes a `response` channel; the A2A server's default
 ## Live transcript (gpt-5.4-mini, 2026-04-29)
 
 Bill: [`bills/basic_income.txt`](bills/basic_income.txt) — universal
-basic income, 50만원/month, funded by land + carbon + progressive tax.
+basic income, 500,000 won/month, funded by land + carbon + progressive tax.
 
 ```
-[국회의장] 의안 상정: [국민기본소득법]
+[Speaker of the National Assembly] Bill submission: [National Basic Income Law]
 
-[진보당 김진보]   사회적 약자 보호 + 자산·탄소 과세 = 부합        → 찬성
-[보수당 박보수]   200조 의무지출 + 시장 왜곡 + 부동산 충격         → 반대
-[중도당 정중도]   취지 인정하나 금액 과다, 단계 축소 수정안 제안   → 반대
-[녹색당 나녹색]   탄소세 + 불로소득 과세 + 분배 정의               → 찬성
+[Progress Kim Jinbo]   Protecting socially vulnerable groups + asset/carbon taxation = alignment        → Support
+[Conservative Park Bosu]   200 trillion mandatory spending + market distortion + real estate shock    → Oppose
+[Center Jung Jungdo]   Acknowledging intent but excessive amount; suggests phased reduction amendment  → Oppose
+[Green Na Noksaek]   Carbon tax + unearned income taxation + equitable distribution                    → Support
 
-[국회의장] 표결 결과:  찬성 2  /  반대 2  /  기권 0
-[국회의장] 찬반 동수입니다 — 본 법안은 부결됩니다 (관례).
+[Speaker of the National Assembly] Vote result:  2 in favor  /  2 opposed  /  0 abstention
+[Speaker of the National Assembly] Tie vote — the bill is rejected (custom).
 ```
 
 Each persona's reasoning genuinely tracks their party's stated values.
@@ -132,7 +134,7 @@ in the parent shell first. Now documented in
   NeoGraph both handle parallel client requests cleanly out of the
   box.
 - `parse_vote` regex on free-form Korean text works because the model
-  reliably honors `투표: 찬성/반대/기권` when asked. Persona output
+  reliably honors `vote: support/oppose/abstain` when asked. Persona output
   staying inside the format made this a 5-line tally function.
 - Build was clean — FetchContent pulled v0.2.0, no manual dep
   installation. OpenSSL/CURL on a stock Ubuntu was enough.
@@ -146,12 +148,12 @@ ai-national-assembly/
 │   ├── member_server.cpp       # one binary, configurable persona
 │   └── speaker.cpp             # orchestrator, broadcasts bill, tallies
 ├── prompts/
-│   ├── jinbo.txt               # 진보당 김진보
-│   ├── bosu.txt                # 보수당 박보수
-│   ├── jungdo.txt              # 중도당 정중도
-│   └── nokdang.txt             # 녹색당 나녹색
+│   ├── jinbo.txt               # Kim Jinbo (Progress)
+│   ├── bosu.txt                # Park Bosu (Conservative)
+│   ├── jungdo.txt              # Jung Jungdo (Center)
+│   └── nokdang.txt             # Na Noksaek (Green)
 ├── bills/
-│   └── basic_income.txt        # sample bill: 국민기본소득법
+│   └── basic_income.txt        # sample bill: National Basic Income Law
 └── scripts/
     └── run_session.sh          # spin up 4 members + run speaker
 ```

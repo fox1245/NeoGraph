@@ -1,5 +1,7 @@
 # NeoGraph C++ API Reference {#mainpage}
 
+**Languages:** [English](doxygen-mainpage.md) | [한국어](doxygen-mainpage.ko.md) | [日本語](doxygen-mainpage.ja.md) | [简体中文](doxygen-mainpage.zh-CN.md)
+
 A C++17 graph agent engine library — LangGraph for C++, with optional
 Python bindings. This site is the **generated reference** for the
 public C++ headers in `include/neograph/`.

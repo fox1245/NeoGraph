@@ -1,5 +1,7 @@
 # Python Binding
 
+**Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
+
 NeoGraph ships as a `pip`-installable Python package, so the same
 C++ engine can drive a LangGraph-style workflow from a Jupyter
 notebook, a Gradio app, or a FastAPI service:
@@ -520,13 +522,14 @@ LangGraph Python — surfaced here so you don't hit them mid-port:
   but require integration glue. NeoGraph's `OpenInferenceProvider`
   *is* the integration glue — drop in, every `Provider.complete()`
   becomes an LLM span automatically.
-- **One node method** — `def run(self, input)` is the canonical
-  override as of **v0.4.0**. Read state from `input.state`, the live
+- **One node method** — `def run(self, input)` was introduced in
+  **v0.4.0** and is the only custom-node override from **v0.9.0** onward.
+  Read state from `input.state`, the live
   cancel handle from `input.ctx.cancel_token`, the streaming sink
   (or `None`) from `input.stream_cb`. Return a `list[ChannelWrite]`,
-  `list[Send]`, a `Command`, or a `NodeResult`. The legacy 8-virtual
-  chain is removed in v1.0.0 — `def run(self, input)` is the only
-  override.
+  `list[Send]`, a `Command`, or a `NodeResult`. See
+  [`migration-v0.4-to-v1.0.md`](migration-v0.4-to-v1.0.md) when moving
+  an older `execute*` node.
 - **Two Python deps, full stop** — `pip install neograph-engine`
   pulls `certifi` and `pydantic>=2.0` and that's the entire runtime
   dependency tree. The graph engine, schedulers, checkpoint stores,
@@ -541,9 +544,9 @@ LangGraph Python — surfaced here so you don't hit them mid-port:
   Pydantic v1→v2 broke the world in 2024, and import paths drift across
   every minor release.
   NeoGraph's Python surface is a thin pybind11 layer over a frozen
-  C++ ABI under semantic-versioning. **Code you write today against
-  v0.4.0 will compile against v1.x** — the deprecation window is the
-  *only* mechanism for breaking changes.
+  C++ ABI under semantic versioning. Custom nodes written against the
+  v0.4.x `execute*` compatibility window must migrate to `run(input)`;
+  v0.9.0 removed that legacy node surface during v1 preparation.
 - **No Docker required for deployment** — a direct consequence of
   the single-dep tree above. Production LangChain deployments
   effectively *require* Docker + a fully-pinned `requirements.txt`;

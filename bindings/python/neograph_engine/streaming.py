@@ -39,9 +39,8 @@ def emit_token(cb: Callable[[Any], None], node: str, data: Any) -> None:
     cb they received without checking.
 
     Args:
-        cb:   the stream callback received by ``execute_stream`` /
-              ``execute_full_stream``. Pass through whatever the engine
-              handed you. May be ``None``.
+        cb:   ``input.stream_cb`` from ``GraphNode.run(input)``. Pass
+              through whatever the engine handed you. May be ``None``.
         node: the emitting node's name. Conventionally ``self.get_name()``.
         data: the token payload — typically the delta string, but any
               JSON-serializable value works (the engine will round-trip

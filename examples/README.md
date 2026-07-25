@@ -1,5 +1,7 @@
 # C++ API examples
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
 Fifty-six runnable C++ programs covering the NeoGraph engine surface.
 Each is a single file in this directory (with one Docker-Compose
 exception, [`26_postgres_react_hitl/`](26_postgres_react_hitl/)) — copy
@@ -178,9 +180,9 @@ Each example is one of three setups:
    / mock-provider node — graph wired entirely from JSON, no
    subclassing. Closest to what `create_react_graph()` produces.
 2. **Custom `GraphNode` subclass** (05, 09, 10, 25): you control the
-   exact `execute_full(state)` body — emit `ChannelWrite`,  `Send`,
-   `Command`. This is where Send fan-out and Command routing overrides
-   live.
+   exact `run(NodeInput)` body — emit `ChannelWrite`, `Send`, or
+   `Command` through `NodeOutput`. This is where Send fan-out and
+   Command routing overrides live.
 3. **`SchemaProvider` for non-OpenAI shapes** (13, 15, 16, 17, 33):
    one JSON schema describes the wire shape (Anthropic, Gemini, the
    OpenAI Responses API, raw WebSocket), so the same `Agent` /

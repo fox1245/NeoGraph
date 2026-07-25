@@ -1,5 +1,7 @@
 # Changelog
 
+**Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
+
 All notable changes to NeoGraph are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
@@ -19,20 +21,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **Provider API 영구 호환 정책 (issue #5).** `Provider::complete()`,
-  `complete_async()`, `complete_stream()`, `complete_stream_async()`와 callback 기반
-  `invoke()`의 제거 계획을 철회하고 `[[deprecated]]` 경고를 없앴다. 기존 API에는
-  호환성·보안 수정을 계속 적용한다. 새 Provider 구현과 새 직접 호출에는 각각
-  `CompletionProvider::do_invoke()`와 `invoke_request(CompletionRequest)`를 권장하며,
-  새 기능을 기존 API에 모두 역이식하는 것은 보장하지 않는다. 공개 서명, virtual
-  순서, 객체 크기와 vtable은 바뀌지 않는다.
+- **`GraphNode::run(input)` migration guide complete.** Python `GraphNode` base class
+  no longer references deleted `execute*` methods; when `run(input)` is missing it
+  raises a `NotImplementedError` containing the migration documentation path.
+  C++/Python reference, async/streaming guides, and example READMEs have been
+  aligned with the actual v0.9.0 single entry point. Migration procedures are
+  documented with C++ and Python examples in
+  [`docs/migration-v0.4-to-v1.0.md`](docs/migration-v0.4-to-v1.0.md).
+- **Provider API permanent compatibility policy (issue #5).** The planned removal of
+  `Provider::complete()`, `complete_async()`, `complete_stream()`,
+  `complete_stream_async()`, and callback-based `invoke()` has been rescinded and
+  `[[deprecated]]` warnings have been removed. Existing APIs continue to receive
+  compatibility and security fixes. New Provider implementations and direct callers
+  are recommended to use `CompletionProvider::do_invoke()` and
+  `invoke_request(CompletionRequest)` respectively; backporting all new features into
+  existing APIs is not guaranteed. Public signatures, virtual ordering, object size,
+  and vtable remain unchanged.
 
 ### Removed
 
-- **폐기된 TransformerCPP 연동 예제.** 더 이상 제공되지 않는 외부 저장소에
-  의존하던 `example_inproc_gemma`, `NEOGRAPH_BUILD_LOCAL_INFERENCE_EXAMPLE`,
-  `TRANSFORMERCPP_DIR`를 제거했다. 일반 OpenAI 호환 로컬 서버를 사용하는
-  `example_local_transformer`는 유지한다.
+- **Deprecated TransformerCPP integration examples.** Removed `example_inproc_gemma`,
+  `NEOGRAPH_BUILD_LOCAL_INFERENCE_EXAMPLE`, and `TRANSFORMERCPP_DIR`, which depended on
+  an externally hosted repository that is no longer available. `example_local_transformer`,
+  which uses a standard OpenAI-compatible local server, is retained.
 
 ### Fixed
 
@@ -56,63 +67,67 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   validation, strict response-ID checking, and typed `InitializeResult`,
   `ToolDefinition`, `ListToolsPage`, and `CallToolResult` APIs. SSE detection now
   uses `Content-Type` rather than misclassifying JSON containing `data:` URLs.
-- **취소 작업별 상태와 게시된 emit 수명 안전성.** `GraphEngine::run`, `run_async`,
-  `run_stream`, `run_stream_async`는 호출자가 준 parent에서 실행별 child를
-  하나씩 만들고, 그 child만 내부 `co_spawn`/sync bridge에 묶으며 같은
-  child를 `RunContext`로 전달한다. 따라서 parent 하나로 동시에 실행 중인
-  여러 run을 모두 취소해도 cancellation slot이 서로 덮이지 않는다.
-  Fork된 실행 child는 기존 `shared_ptr` 소유권을 게시된 emit까지 유지해
-  엔진 작업 종료와 emit 실행 사이의 use-after-free를 막는다.
-  취소 때문에 생긴 asio `operation_aborted`는 재시도 가능한 노드 오류가
-  아니라 `CancelledException`으로 전달한다.
-  `CancelToken`의 0.11.x 객체 배치와 inline/header-only 동작은 그대로다.
-  따라서 이미 컴파일된 C++ 소비자가 갱신된 `fork()` 수명 동작까지 받으려면
-  재컴파일해야 한다. 공유 라이브러리만 교체해도 객체 배치는 호환되지만,
-  소비자 바이너리에 들어간 기존 inline 본문은 바뀌지 않는다.
-  단, 외부 코드가 직접 만든 token에 `bind_executor()`를 호출한 경우에는
-  해당 executor의 게시 작업이 끝날 때까지 token을 살려 둘 책임이 여전히
-  호출자에게 있다.
-- **PostgreSQL 비동기 연결의 전역 제한 시간 정책 명문화.** 비동기 최초
-  연결·교체는 모든 host/IP를 합쳐 하나의 제한 시간을 사용한다. 양수
-  connection string에 직접 쓴 `connect_timeout`은 최소 2초로 적용하고,
-  미지정·0·음수이거나 환경변수·service file로만 지정한 값이면 운영 안전
-  기본값 30초를 사용한다. libpq의 host별 동기 제한 시간과 의도적으로
-  다르며, 동기 생성·교체 동작은 바꾸지 않았다.
-- **JARVIS mock 빌드 복구 (issue #130).** 음성 의존성이 없을 때
-  `MicCapture`가 불완전한 타입으로 남아 `cookbook_jarvis` 컴파일이 실패하던
-  문제를 수정했다. `NEOGRAPH_JARVIS_FORCE_MOCK`을 추가해 ASan CI가 runner의
-  설치 패키지와 관계없이 외부 음성 의존성 없는 mock 구성을 항상 빌드한다.
-  세션 실행기도 실제 CMake 출력 경로와 specialist 대상 이름을 사용하고,
-  존재하는 `demo_mcp_server.py`를 기동하도록 맞췄다.
-- **노드 실패 문맥 보존 (issue #123).** C++ 실행 오류를 원래
-  `exception_ptr`과 실패 노드 이름·시도 횟수를 담은 `NodeExecutionError`로
-  전달하고, terminal `ERROR` event에도 같은 문맥을 기록한다. Python에서는
-  원래 예외 객체·타입·args·사용자 속성·traceback을 그대로 유지하면서
-  `.node_name`과 `.attempts` 속성만 추가한다. `NodeInterrupt`, 취소, 메모리
-  부족 예외는 기존 제어 흐름대로 감싸지 않는다.
+- **Per-task cancel status and published-emit lifetime safety.** `GraphEngine::run`,
+  `run_async`, `run_stream`, `run_stream_async` each create one execution child per
+  run from the caller-provided parent, bind only that child to the internal
+  `co_spawn`/sync bridge, and pass the same child as `RunContext`. Cancelling all
+  concurrent runs under a single parent therefore cannot overwrite each other's
+  cancellation slots. Forked execution children retain the existing `shared_ptr`
+  ownership through the published emit, preventing use-after-free between engine
+  work completion and emit execution. asio `operation_aborted` caused by
+  cancellation is propagated as `CancelledException` rather than as a retryable
+  node error. `CancelToken` 0.11.x object layout and inline/header-only behaviour
+  are unchanged. A recompile is required for already-compiled C++ consumers to
+  pick up the updated `fork()` lifetime behaviour. Replacing only the shared
+  library preserves object layout compatibility, but existing inline function
+  bodies embedded in consumer binaries do not change. However, when external
+  code calls `bind_executor()` on a token it created directly, the caller still
+  bears responsibility for keeping the token alive until the executor's posted
+  work completes.
+- **PostgreSQL async connection global timeout policy documented.** Async initial
+  connection and replacement use a single timeout across all host/IP addresses.
+  An explicit `connect_timeout` written directly in a positive connection string
+  is enforced with a minimum of 2 seconds; unspecified, zero, negative, or
+  environment-variable/service-file-only values use the operationally safe default
+  of 30 seconds. This differs intentionally from libpq's per-host synchronous
+  timeout; synchronous creation/replacement behaviour is unchanged.
+- **JARVIS mock build fix (issue #130).** Fixed `cookbook_jarvis` compilation failure
+  caused by `MicCapture` remaining an incomplete type when audio dependencies are
+  absent. Added `NEOGRAPH_JARVIS_FORCE_MOCK` so ASan CI always builds the mock
+  configuration regardless of the runner's installed packages. The session runner
+  now uses the actual CMake output path and specialist target name, and launches
+  the existing `demo_mcp_server.py` correctly.
+- **Node failure context preservation (issue #123).** C++ execution errors are
+  propagated as `NodeExecutionError` containing the original `exception_ptr`,
+  failed node name, and attempt count; the terminal `ERROR` event also records
+  the same context. In Python the original exception object, type, args, user
+  attributes, and traceback are preserved as-is, with only `.node_name` and
+  `.attempts` attributes added. `NodeInterrupt`, cancellation, and out-of-memory
+  exceptions follow existing control flow without being wrapped.
 
 ### Fixed (docs)
 
-- **Provider cookbook의 무시되던 노드별 prompt 제거 (issue #116).** 세 Python
-  예제가 built-in `llm_call`이 읽지 않는 `config.system`으로 여러 역할을
-  수행한다고 설명하던 문제를 수정했다. 각 예제를
-  `NodeContext.instructions`를 쓰는 strict 단일 호출 graph로 바꾸고 관련
-  README를 실제 동작에 맞췄다.
-- **예약된 `RunContext::deadline` 설명 정정 (issue #115).** 현재
-  `RunConfig`로 설정할 수 없고 Python에도 노출되지 않는 `deadline`과
-  `trace_id`를 사용 가능한 per-run metadata처럼 안내하던 문서와 Doxygen
-  주석을 수정했다.
-- **`GraphNode::run` 예제 서명 수정 (issue #129).** 공개 헤더 예제가 실제
-  by-value virtual과 달리 `const NodeInput&`를 받아 override에 실패하던 문제를
-  수정하고, 코루틴 인자 수명에 필요한 by-value 계약을 compile-time test로
-  고정했다.
+- **Removed ignored per-node prompts from Provider cookbook (issue #116).** Fixed
+  three Python examples that described multi-role behaviour using `config.system`
+  which the built-in `llm_call` does not read. Each example has been rewritten
+  as a strict single-call graph using `NodeContext.instructions`, with related
+  READMEs aligned with actual behaviour.
+- **Reserved `RunContext::deadline` documentation correction (issue #115).** Fixed
+  documentation and Doxygen comments that presented `deadline` and `trace_id` as
+  usable per-run metadata, when they cannot be set via `RunConfig` and are not
+  exposed in Python.
+- **`GraphNode::run` example signature fix (issue #129).** Fixed the public header
+  example accepting `const NodeInput&` (by reference) which failed to override
+  the actual by-value virtual, and locked down the by-value contract required
+  for coroutine argument lifetime with a compile-time test.
 
 ### Added
 
-- **하위 호환 Provider 이전 경로.** 새 `CompletionRequest`가 streaming mode를
-  callback 유무와 분리하고, `CompletionProvider`는 새 구현이 `do_invoke()`
-  하나만 작성하게 한다. 기존 `Provider` vtable, 네 legacy virtual, callback
-  기반 `invoke()`, Python `complete()` subclass 계약은 그대로 유지한다.
+- **Backward-compatible Provider migration path.** New `CompletionRequest` separates
+  streaming mode from callback presence, and `CompletionProvider` requires new
+  implementations to write only `do_invoke()`. The existing `Provider` vtable, four
+  legacy virtuals, callback-based `invoke()`, and Python `complete()` subclass
+  contract are retained.
 
 - **Python persistence backends** (#117) — `Store` and `CheckpointStore` are
   now constructible subclass bases with C++ virtual dispatch into Python.
@@ -126,303 +141,322 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exposes newest-first checkpoint records so callers can inspect parent links,
   metadata, steps, and IDs before forking from a historical state.
 
-- **DSL 표면 (elaboration 계층) + 스키마 진화 게이트** (#75 M4).
-  - **Elaborator**: `vars`(`{"$var":...}`·`${...}` 보간, 비순환 강제) /
-    `templates`+`use`(파라미터 정확 일치 강제, 노드 prefix 리네임 —
-    로컬 참조·barrier·routes까지, 채널은 공유 상태라 전역 병합) /
-    `when` 조건부 포함. **non-Turing-complete·total**: 모든 DSL 문서는
-    유한 시간에 유일한 코어로 정규화되고, 코어 문서에 대해선 항등
-    (멱등). 모든 에러가 DSL 소스 좌표(`use[2].args`, `vars.model`)로
-    보고되고, 소스맵(출력 위치→생성 구문)이 동봉된다. 락파일 워크플로:
-    `./example_elaborate harness.dsl.json > harness.json` (example 53).
-  - **`GraphCompiler::upgrade_to_latest()`**: v0→v1 무손실 기계 변환 —
-    strict 가 거부할 키를 전부 `x-upgraded-<키>` 주석 네임스페이스로
-    격리(데이터 삭제 0), 빈 barrier 는 명시적으로 제거. 코퍼스 전체에
-    대해 "legacy 관용 컴파일 IR == 업그레이드 후 strict 컴파일 IR"
-    (canon 동치, 버전 스탬프 제외)을 테스트로 보증.
-  - **스키마 진화 게이트**: `tests/fixtures/schema_snapshot.json`
-    베이스라인 대비 add-only 부분집합 판정(JSON Subschema 계열의
-    결정가능 서브셋) — 노드타입/프로퍼티/reducer/condition 제거,
-    required 증가, closed 조건 라벨 변경, effect 계약 변경이 전부
-    테스트 실패 = CI 머지 차단. 비호환 변경은 버전 범프 + 업그레이더 +
-    스냅샷 재생성을 같은 리뷰 커밋에서 강제.
+- **DSL surface (elaboration layer) + schema evolution gate** (#75 M4).
+  - **Elaborator**: `vars` (`{"$var":...}` / `${...}` interpolation, acyclic
+    enforcement) / `templates`+`use` (exact parameter match enforcement, node
+    prefix renaming — including local references, barriers, and routes; channels
+    are shared state so they merge globally) / `when` conditional inclusion.
+    **Non-Turing-complete and total**: every DSL document normalises to a unique
+    core in finite time and is idempotent with respect to that core. All errors
+    are reported with DSL source coordinates (`use[2].args`, `vars.model`) and a
+    source map (output position → generating syntax) is included. Lock-file
+    workflow: `./example_elaborate harness.dsl.json > harness.json` (example 53).
+  - **`GraphCompiler::upgrade_to_latest()`**: lossless v0→v1 mechanical transform —
+    keys that strict rejects are isolated into the `x-upgraded-<key>` comment
+    namespace (zero data deletion), empty barriers are explicitly removed. The
+    entire corpus is tested to guarantee "legacy permissive compilation IR ==
+    post-upgrade strict compilation IR" (canon equivalence, version stamp
+    excluded).
+  - **Schema evolution gate**: add-only subset judgement against
+    `tests/fixtures/schema_snapshot.json` baseline (decidable subset of the JSON
+    Subschema family) — removal of node types/properties/reducers/conditions,
+    required-set increases, closed-condition label changes, and effect contract
+    changes all cause test failure = CI merge block. Incompatible changes force
+    version bump + upgrader + snapshot regeneration in the same review commit.
 
-- **PBT/차분 검증 하네스** (#75 M3). 300-시드 결정론적 topology 생성기
-  (스키마 봉투에서 유효 strict 문서 생성, 기능 커버리지 자가 계측 —
-  conditional_edges/barrier/interrupt 등장률 30% 미달 시 테스트 실패:
-  "생성기가 안 건드린 기능"이 소리 없는 구멍이 아니라 실패가 되게).
-  - **mutation 검출**: 드롭 5종(conditional_edges/edge/barrier/
-    interrupt/channel) + 오배선 3종(route 붕괴/edge 재타깃/노드 개명 =
-    드롭+날조 상쇄) 전부에 대해 translation validation 이 매 적용마다
-    검출됨을 300-시드 코퍼스에서 확증. 적용률 하한(시드의 10%)도 단언.
-  - **레퍼런스 인터프리터 차분**: 문서화된 super-step 의미론(goto
-    선점·barrier 누적·사전순 폴백·암묵 __end__)을 코드 비공유로 재구현한
-    독립 모델과 Scheduler 를 12-step × 300-graph 대조 (DESIL 교훈:
-    verifier 만으론 wrong-execution 을 못 잡는다).
-  - **엔진↔Studio 공유 코퍼스**: `tests/fixtures/topology_corpus/` 15종
-    (유효 3 + E3~E11 위반 12)이 NeoGraph-Studio `tests/corpus/` 와
-    byte-동일, 양측이 같은 verdict(code:severity multiset)를 단언 —
-    두 구현이 조용히 갈라질 수 없음.
+- **PBT / delta verification harness** (#75 M3). 300-seed deterministic topology
+  generator (valid strict documents from schema envelope, self-instrumented
+  feature coverage — test fails when conditional_edges/barrier/interrupt
+  occurrence drops below 30%: untested features become failures, not silent
+  holes).
+  - **Mutation detection**: confirmed on a 300-seed corpus that translation
+    validation catches every application of all 5 drop types
+    (conditional_edges/edge/barrier/interrupt/channel) + 3 miswire types
+    (route collapse / edge retarget / node rename = drop+fabrication
+    counterbalance). Application-rate floor (10% of seeds) also asserted.
+  - **Reference interpreter delta**: an independent model re-implementing the
+    documented super-step semantics (goto preemption, barrier accumulation,
+    lexicographic fallback, implicit __end__) from a code-disjoint
+    implementation, compared against the Scheduler on 12-step × 300-graph
+    (DESIL lesson: a verifier alone cannot catch wrong-execution).
+  - **Engine ↔ Studio shared corpus**: `tests/fixtures/topology_corpus/` 15
+    variants (3 valid + 12 violating E3–E11) are byte-identical with
+    NeoGraph-Studio `tests/corpus/`, both asserting the same
+    verdict (code:severity multiset) — the two implementations cannot silently
+    diverge.
 
-- **GraphValidator — 토폴로지 정적 의미 검사 (E3~E11 + effect)** (#75 M2).
-  파싱(M1)과 실행 사이의 패스 계층. strict 문서(schema_version>=1)에서
-  에러는 컴파일 실패, 경고는 stderr lint; 관용 문서는 에러급만 stderr
-  경고로 표면화(기존 그래프 무소음). 판정 철학 = 체커 건전성 우선:
-  엔진 의미론상 절대 옳을 수 없는 것만 에러(dangling 참조 E3, 신호
-  경로 없는 barrier E8 — goto 는 barrier 회계를 우회하므로 구제 불가,
-  빈 routes E10 — 디스패치가 rend() 역참조 UB, 미선언 채널 write E4 —
-  런타임 확정 throw), Command.goto/Send 가 정당화할 수 있는 것은 경고
-  (도달성 E7, 탈출 없는 사이클 E11, barrier 없는 plain fan-in E9,
-  overwrite 경쟁 E5, dead channel E6). 모든 진단은 기계가 읽을 수 있는
-  witness(반례) JSON 동반 — Studio 캔버스 하이라이트용(M3).
-  - **route 완전성(E10)**: `ConditionSpec` 라벨 계약 도입.
-    `register_condition` 3-인자 오버로드로 조건의 출력 라벨 집합을
-    선언하면, closed 조건의 라우트는 라벨과 정확히 일치해야 한다 —
-    미커버 라벨은 스케줄러의 "사전순 마지막 라우트" 폴백(순서 의존
-    임의 타깃)으로 떨어지므로 에러. 빌트인 `has_tool_calls` =
-    closed {false,true}, `route_channel` = open + known {default}.
-  - **채널 effect 계약**: `register_type` 4-인자 오버로드로 노드
-    타입의 reads/writes 채널을 선언. 그래프의 **모든** 노드 타입이
-    선언한 경우에만 E4/E5/E6 분석 가동(미지 타입 하나면 전체 스킵 —
-    커버리지보다 건전성). 빌트인 3종(llm_call/tool_dispatch/
-    intent_classifier) 선언 완료.
-  - `export_schema()` 에 `node_effects`·`condition_specs` 추가
-    (기존 `conditions` 배열은 하위호환 유지). 신규 테스트 22개.
+- **GraphValidator — topology static semantic checks (E3–E11 + effect)** (#75 M2).
+  Pass layer between parsing (M1) and execution. In strict documents
+  (schema_version>=1) errors are compilation failures, warnings are stderr
+  lints; in permissive documents only error-level diagnostics surface as stderr
+  warnings (zero noise on existing graphs). Judgement philosophy = checker
+  soundness first: only things that can never be correct under engine semantics
+  are errors (dangling reference E3, barrier without signal path E8 — goto
+  bypasses barrier accounting so unrecoverable, empty routes E10 — dispatch
+  would dereference rend() UB, undeclared channel write E4 — confirmed throw
+  at runtime); things that Command.goto/Send can justify are warnings
+  (reachability E7, escapeless cycle E11, plain fan-in without barrier E9,
+  overwrite race E5, dead channel E6). Every diagnostic is accompanied by a
+  machine-readable witness (counterexample) JSON — for Studio canvas
+  highlighting (M3).
+  - **Route completeness (E10)**: `ConditionSpec` label contract introduced.
+    Declaring the output label set of a condition via the `register_condition`
+    3-argument overload requires closed-condition routes to match labels
+    exactly — uncovered labels fall to the scheduler's "lexicographic last
+    route" fallback (order-dependent arbitrary target), which is an error.
+    Built-in `has_tool_calls` = closed {false,true}, `route_channel` = open +
+    known {default}.
+  - **Channel effect contracts**: `register_type` 4-argument overload declares
+    per-node-type reads/writes channels. E4/E5/E6 analysis activates only when
+    **every** node type in the graph is declared (a single unknown type skips
+    the entire analysis — soundness over coverage). Built-in 3 types
+    (llm_call/tool_dispatch/intent_classifier) fully declared.
+  - `node_effects` · `condition_specs` added to `export_schema()` (existing
+    `conditions` array retained for backward compatibility). 22 new tests.
 
-- **토폴로지 컴파일 정합성 게이트 — 소비 회계 + translation validation** (#75 M1).
-  "조용한 의미 소실" 클래스(v0.1.0–v0.1.7 `conditional_edges` 무언 드롭과
-  동형의 사고)를 구조적으로 봉쇄하는 2중 장치:
-  - **소비 회계(consumed-key accounting)**: `"schema_version": 1` 을 선언한
-    문서는 strict 컴파일로 전환 — 파서가 소비하지 않은 키(오타
-    `conditionnal_edges`, 미지원 필드, 빈 `wait_for` 로 무언 드롭될
-    barrier, inline conditional 의 무시되는 `to`)가 전부 컴파일 에러로
-    모아서 보고된다. 마킹은 파싱 블록 **안**에서 이뤄지므로 파싱 단계를
-    지우면 마크도 함께 사라져, 해당 기능을 쓰는 strict 문서가 즉시
-    실패한다 — 드롭 회귀가 조용할 수 없는 구조. `_`/`x-` 접두 키
-    (`_comment`, `x-studio-*`)는 주석 네임스페이스로 항상 허용.
-    `schema_version` 없는 기존 문서는 관용 동작 그대로 (바이트 단위 보존).
-  - **translation validation**: `CompiledGraph::to_json()` 역방출 +
-    `GraphCompiler::canon()` 정규형으로 매 컴파일마다
-    `canon(입력) == canon(재방출)` 을 검사한다. 불일치(= 컴파일러가
-    뭔가를 떨어뜨렸거나 오배선)는 strict 문서에서 throw, 관용 문서에서
-    stderr 경고. 등가 판정은 구조 비교 — 라우트 키 뒤바뀜 같은 오배선도
-    잡는다 (존재-여부 비교가 놓치는 클래스).
-  - `NodeFactory::config_schema(type)` 조회 추가, `export_schema()` 에
-    `schema_version` 필드 문서화. 신규 테스트 27개
-    (`tests/test_compiler_strict.cpp`) — v0.1.x 드롭 mutant 시뮬레이션
-    (conditional_edges/barrier/interrupt 드롭 + 라우트 오배선) 포함.
+- **Topology compile-time consistency gate — consumed-key accounting + translation
+  validation** (#75 M1). Dual mechanism structurally blocking the "silent semantic
+  loss" class (same species as v0.1.0–v0.1.7 `conditional_edges` silent drops):
+  - **Consumed-key accounting**: documents declaring `"schema_version": 1` switch
+    to strict compilation — unconsumed keys (typo `conditionnal_edges`,
+    unsupported fields, barriers silently dropped by empty `wait_for`, ignored
+    `to` on inline conditionals) are all collected and reported as compilation
+    errors. Marking occurs **inside** the parse block, so erasing the parse stage
+    also erases marks, causing strict documents that use those features to fail
+    immediately — a structure where drop regressions cannot be silent. `_`/`x-`
+    prefixed keys (`_comment`, `x-studio-*`) are always allowed as comment
+    namespace. Existing documents without `schema_version` retain permissive
+    behaviour (byte-preserved).
+  - **Translation validation**: `CompiledGraph::to_json()` re-emission +
+    `GraphCompiler::canon()` normal form check `canon(input) ==
+    canon(re-emit)` on every compilation. Mismatches (= the compiler dropped
+    something or miswired) throw on strict documents and stderr-warn on
+    permissive documents. Equivalence is structural comparison — miswirings
+    like swapped route keys are also caught (a class that existence-comparison
+    misses).
+  - `NodeFactory::config_schema(type)` query added, `schema_version` field
+    documented in `export_schema()`. 27 new tests (`tests/test_compiler_strict.cpp`)
+    — v0.1.x drop-mutant simulation (conditional_edges/barrier/interrupt drops
+    + route miswirings) included.
 
 ## [0.11.1] - 2026-06-25
 
 ### Changed
 
-- **stdio MCP 동시 호출 — 상관 ID 디멀티플렉서로 I/O 겹침.**
-  `0.11.0` 의 동시 tool 디스패치는 HTTP MCP 만 실제로 겹쳤다. stdio MCP
-  는 `StdioSession::rpc_call_async` 가 용량-1 채널 락을 **요청→응답 왕복
-  전체** 동안 잡아, 한 턴의 여러 호출이 한 세션의 단일 파이프에서
-  차례로 직렬화됐다 (벽시계 ≈ 지연의 합). 파이프가 하나인 게 원인이
-  아니라 — JSON-RPC `id` 가 바로 한 연결을 파이프라이닝하라고 있는
-  장치다. 그 락을 상관 ID 디멀티플렉서로 교체했다:
-  - 용량-1 채널을 **쓰기 전용 락**으로 용도 변경 — 프레임 쓰기 순간만
-    잡으므로 두 호출의 바이트가 섞이지 않으면서 읽기는 더는 직렬화되지
-    않는다.
-  - 리더 코루틴 하나(`run_reader`)가 읽기 측을 독점해 응답 줄마다
-    JSON-RPC `id` 로 해당 호출의 sink 에 배달한다. N 개 동시 호출이
-    읽기를 겹쳐 벽시계 ≈ max(지연) — 단, **상대 MCP 서버가 동시
-    처리할 때만** 실익이 난다 (단일 스레드 순차 서버는 암달 바닥).
-  - 리더는 in-flight 호출이 있을 때만 lazy 하게 돌고 대기자가 비면
-    종료하므로 사설 `run_sync` io_context 가 정상 반환한다. 대기자는
-    호출자가 await 하는 동안만 존재하고 그 호출자가 `MCPTool` 의
-    `shared_ptr` 로 세션을 살려두므로 리더가 소멸된 세션을 건드릴 일이
-    없다 (소멸자 join 불필요). 파이프 EOF/오류 시 리더가 모든 sink 를
-    닫아, await 중인 호출자가 영원히 매달리는 대신 예외를 받는다.
-  - **API/문법 변화 없음** — 공개 헤더 불변, 기존 코드 재컴파일 불필요.
-    엔진 오버헤드 회귀 0 (`bench_neograph` interleaved A/B, seq/par Δ 0%).
-  - 테스트: 스레드 기반 지연 fixture `tests/fixtures/mcp_stdio_slow.py`
-    + `ConcurrentStdioCallsOverlapIO` (5×100 ms 호출이 ~130 ms 완료,
-    직렬 바닥 500 ms; 각 응답이 `id` 로 자기 호출자에 라우팅되는지 검증).
+- **stdio MCP concurrent calls — correlation-ID demultiplexer for I/O overlap.**
+  `0.11.0` concurrent tool dispatch only actually overlapped HTTP MCP. stdio MCP
+  held a capacity-1 channel lock for the **entire request→response round-trip**
+  in `StdioSession::rpc_call_async`, serialising multiple calls in one turn
+  through a single session pipe (wall time ≈ sum of latencies). The single pipe
+  was not the root cause — JSON-RPC `id` exists precisely to pipeline over one
+  connection. Replaced the lock with a correlation-ID demultiplexer:
+  - Repurposed the capacity-1 channel as a **write-only lock** — held only for
+    the instant of frame write, so two calls' bytes never interleave while reads
+    are no longer serialised.
+  - A single reader coroutine (`run_reader`) exclusively owns the read side and
+    delivers each response line to the correct caller's sink via JSON-RPC `id`.
+    N concurrent calls overlap reads so wall time ≈ max(latency) — but **only
+    when the peer MCP server processes concurrently** (a single-threaded
+    sequential server hits Amdahl's floor).
+  - The reader runs lazily only while in-flight calls exist and exits when
+    waiters are empty, so the private `run_sync` io_context returns normally.
+    Waiters exist only while their caller is awaiting and keep the session alive
+    via `MCPTool`'s `shared_ptr`, so the reader never touches a destroyed
+    session (no destructor join needed). On pipe EOF/error the reader closes all
+    sinks, so awaiting callers receive an exception instead of hanging
+    indefinitely.
+  - **No API/syntax change** — public headers unchanged, existing code needs no
+    recompilation. Engine overhead regression 0 (`bench_neograph` interleaved
+    A/B, seq/par Δ 0%).
+  - Tests: thread-based delay fixture `tests/fixtures/mcp_stdio_slow.py` +
+    `ConcurrentStdioCallsOverlapIO` (5×100 ms calls complete in ~130 ms vs.
+    500 ms serial floor; verifies each response routes to its caller via `id`).
     ASan+UBSan ×3 clean.
 
 ## [0.11.0] - 2026-06-25
 
 ### Added
 
-- **동시 tool 디스패치 — `Tool::execute_async` 정식 비동기 경로.**
-  `ToolDispatchNode` 가 한 어시스턴트 턴의 여러 `tool_call` 을 엔진의
-  `make_parallel_group` 으로 **동시에** 실행한다. 기존에는 동기
-  `execute()` 로 순차 실행돼, 특히 MCP 도구는 호출마다 `run_sync` 로
-  자체 `io_context` 를 띄워 막혀 병렬 MCP 호출이 겹치지 못했다
-  (외부 C++ 포크가 병렬 MCP 호출에서 발견). 수정:
-  - `Tool` 에 가상 `execute_async()` 추가 — 기본 구현이 동기
-    `execute()` 로 브리지하므로 기존 도구는 그대로 동작.
-  - `MCPTool` 을 `AsyncTool` 로 전환, `execute_async` 를 네이티브
-    구현 (stdio 는 `rpc_call_async`, HTTP 는 신규
-    `MCPClient::initialize_async`/`call_tool_async` 로 비동기 핸드셰이크
-    — `run_sync` 제거).
-  - `ToolDispatchNode::run` 은 노드 fan-out 과 동일한
-    `make_parallel_group` 관용구로 호출들을 동시 디스패치(단일 호출은
-    인라인), 결과는 호출 순서대로 적용. 동기 `execute()` 파사드 유지로
-    하위 호환.
-  - 검증: 478/478 ctest, Valgrind 누수 0, TSAN race 0.
+- **Concurrent tool dispatch — `Tool::execute_async` official async path.**
+  `ToolDispatchNode` executes multiple `tool_call`s from a single assistant turn
+  **concurrently** using the engine's `make_parallel_group`. Previously each call
+  ran sequentially via synchronous `execute()`, and MCP tools especially blocked
+  on spawning their own `io_context` via `run_sync` per call, preventing
+  parallel MCP calls from overlapping (discovered in an external C++ fork with
+  parallel MCP calls). Fix:
+  - Virtual `execute_async()` added to `Tool` — default implementation bridges to
+    synchronous `execute()`, so existing tools work unchanged.
+  - `MCPTool` converted to `AsyncTool` with native `execute_async` (stdio uses
+    `rpc_call_async`, HTTP uses new `MCPClient::initialize_async`/
+    `call_tool_async` for async handshake — `run_sync` removed).
+  - `ToolDispatchNode::run` dispatches calls concurrently via the same
+    `make_parallel_group` idiom as node fan-out (single calls are inlined),
+    results applied in call order. Backward-compatible via synchronous
+    `execute()` facade.
+  - Verification: 478/478 ctest, Valgrind 0 leaks, TSAN 0 races.
 
 ### Fixed
 
-- **Python 비동기 실행의 예외 보존 (issue #122).** `run_async`,
-  `run_stream_async`, `resume_async`가 Python 노드의 원래 예외를 문자열로
-  바꾼 새 `RuntimeError`로 덮어쓰던 문제를 수정. 이제 pybind11의 표준
-  예외 변환 경로를 거쳐 원래 Python 예외 객체·타입·사용자 속성·traceback을
-  보존하고, C++ `py::type_error`도 동기 실행과 같은 Python `TypeError`로
-  전달한다. `resume_async`의 빈 callback도 코루틴이 끝날 때까지 보관해
-  pybind11 3.x에서 드러난 dangling-reference 충돌을 함께 막았다.
+- **Python async execution exception preservation (issue #122).** Fixed
+  `run_async`, `run_stream_async`, and `resume_async` overwriting the original
+  Python node exception with a new `RuntimeError` wrapping it as a string. Now
+  the original Python exception object, type, user attributes, and traceback are
+  preserved through pybind11's standard exception conversion path, and C++
+  `py::type_error` is delivered as Python `TypeError` matching synchronous
+  execution. The empty callback in `resume_async` is now retained until the
+  coroutine completes, also fixing the dangling-reference conflict exposed in
+  pybind11 3.x.
 
 ### Fixed (docs)
 
-- **샌드박스 실측으로 드러난 README 요약 배지의 조건 누락·내부 모순 정정.**
-  "The four axes" 요약 표의 배지들이 본문/deep-dive 에 있는 측정 조건을
-  떼어내 과장처럼 읽히던 것을 본문 수치에 맞춰 정정 (측정 데이터 표 자체는
-  불변):
-  - **`p99 17 µs flat` → `p99 7 µs @ 10 K (1 CPU sandbox)`** — 배지의
-    17 µs 는 본문(`At N=10,000 concurrent ... 7 µs p99`)과 모순이었고
-    `flat` 은 µs 측정이 아니라 GPU-bound 부하 테스트의 run-latency
-    (648 ms) 에 해당하는 표현이었다. 배지를 본문의 측정 숫자·조건에 정렬.
-  - **`1.2 MB stripped binary` → `... (MinSizeRel static)`** — `libc.so.6`
-    only 와 1.2 MB 는 MinSizeRel + 정적 libstdc++ 빌드에서만 성립
-    (기본 Release 는 libstdc++/libgcc_s/libm/libc 동적 링크). deep-dive
-    §size 에 이미 명시돼 있던 조건을 배지에도 복원.
-  - **`2 wheel deps` → `2 direct wheel deps (... ; 7 with transitive)`**
-    — 직접 의존은 `certifi` + `pydantic` 둘이 맞으나 실제 설치 트리는
-    pydantic 의 transitive (pydantic-core, typing-extensions,
-    annotated-types, typing-inspection) 포함 7 패키지.
-- **deep-dive MinSizeRel 재현 명령에 `-DNEOGRAPH_BUILD_POSTGRES=OFF` 추가.**
-  POSTGRES 기본 ON 이라 libpq 없는 호스트에서 그대로 실행 시 configure
-  실패하던 것을 수정.
+- **README summary badges corrected for missing conditions and internal
+  contradictions revealed by sandbox measurements.** The "The four axes"
+  summary-table badges stripped measurement conditions from the body/deep-dive,
+  reading as exaggerated. Corrected to align with body measurement figures and
+  conditions (measurement data table itself unchanged):
+  - **`p99 17 µs flat` → `p99 7 µs @ 10 K (1 CPU sandbox)`** — the badge's
+    17 µs contradicted the body (`At N=10,000 concurrent ... 7 µs p99`) and
+    `flat` described GPU-bound load-test run-latency (648 ms), not a µs
+    measurement. Badge aligned with body measurement figures and conditions.
+  - **`1.2 MB stripped binary` → `... (MinSizeRel static)`** — `libc.so.6`-only
+    and 1.2 MB only hold for MinSizeRel + static libstdc++ builds (default
+    Release dynamically links libstdc++/libgcc_s/libm/libc). Condition already
+    documented in deep-dive §size restored to badge.
+  - **`2 wheel deps` → `2 direct wheel deps (... ; 7 with transitive)`** —
+    direct dependencies are indeed `certifi` + `pydantic` (two), but the actual
+    installation tree is 7 packages including pydantic transitive deps
+    (pydantic-core, typing-extensions, annotated-types, typing-inspection).
+- **Added `-DNEOGRAPH_BUILD_POSTGRES=OFF` to deep-dive MinSizeRel reproduction
+  command.** PostgreSQL defaults to ON, so configure fails on hosts without libpq
+  when run as-is. Fixed.
 
 ## [0.10.0] — 2026-05-20
 
 ### Added
 
-- **직렬 fan-out 일회성 stderr 경고 (issue #62, PR #63).** `compile()`
-  의 기본값은 `set_worker_count(1)` — 엔진 소유 스레드 풀 없이 fan-out
-  가지가 호출자 executor 에서 직렬 실행된다. 이 의도된 동작이 docs 만
-  믿고 multi-Send 그래프를 짠 사용자에게는 silent serial 로 보이는
-  함정이라, `NodeExecutor` 가 multi-Send (또는 multi-outgoing-edge)
-  fan-out 을 풀 없이 dispatch 하는 순간 stderr 에 처음 한 번만 안내
-  메시지를 출력하도록 추가. `std::atomic` + compare-exchange 로
-  동시 fan-out 에서도 정확히 1회 보장. `set_worker_count(N>=2)` 호출
-  시 `NodeExecutor` 자체가 재구축되므로 플래그도 자연 reset. 환경변수
-  `NEOGRAPH_SUPPRESS_FANOUT_WARNING=1` (또는 `true` / `yes`) 로 끌 수
-  있음 — 의도된 worker=1 직렬 실행, 벤치, CI stderr assertion 케이스용.
-  Linux + macOS 단위 테스트 5건 (`test_fanout_worker_warning.py`) 으로
-  발사 / 1회성 / pool 옵트인 silence / env-var silence / 단일 Send
-  무경고 cover. Windows 는 pytest capfd 가 wheel binary 의 MSVC CRT
-  fd 캐싱과 호환 안 돼 모듈 단위 skip — wheel binary 자체의 stderr
-  출력은 정상.
+- **Serial fan-out one-shot stderr warning (issue #62, PR #63).** The default of
+  `compile()` is `set_worker_count(1)` — fan-out branches execute serially on the
+  caller's executor with no engine-owned thread pool. This intended behaviour
+  looks like silent serial execution to users who built multi-Send graphs based
+  on docs alone. Added a one-shot guidance message to stderr the first time
+  `NodeExecutor` dispatches a multi-Send (or multi-outgoing-edge) fan-out
+  without a pool. `std::atomic` + compare-exchange guarantees exactly one
+  emission even under concurrent fan-out. Calling `set_worker_count(N>=2)`
+  rebuilds `NodeExecutor`, naturally resetting the flag. Suppressible via
+  environment variable `NEOGRAPH_SUPPRESS_FANOUT_WARNING=1` (or `true` / `yes`)
+  — for intentional worker=1 serial execution, benchmarks, and CI stderr
+  assertion cases. Covered by 5 Linux + macOS unit tests
+  (`test_fanout_worker_warning.py`): fire / one-shot / pool opt-in silence /
+  env-var silence / single-Send no-warning. Windows: pytest capfd is
+  incompatible with MSVC CRT fd caching in wheel binaries so module-level
+  skip — wheel binary stderr output itself is normal.
 
-- **토폴로지 JSON Schema export — `NodeFactory::export_schema()`
-  (issue #56, 코드 없는 비주얼 블록 에디터의 선결 과제).** 엔진이
-  먹는 토폴로지 JSON 형식을 기계가독 스키마(JSON Schema Draft
-  2020-12) 한 덩어리로 내보낸다: `{ neograph_version, $schema,
-  topology(고정 봉투), node_types, reducers, conditions }`. 별도
-  리포의 블록 에디터가 이 스키마로 팔레트를 자동 생성 → 에디터와
-  엔진이 버전 간 표류(drift)하지 않음. 전부 additive:
-    - `NodeFactory::register_type(type, fn, json config_schema)`
-      3-인자 변형 추가. 기존 2-인자는 permissive 기본 스키마로
-      위임 — 기존 사용자 노드/호출 안 깨짐.
+- **Topology JSON Schema export — `NodeFactory::export_schema()`** (issue #56,
+  prerequisite for code-free visual block editors). Exports the topology JSON
+  format the engine consumes as a machine-readable schema (JSON Schema Draft
+  2020-12) in one piece: `{ neograph_version, $schema, topology (fixed
+  envelope), node_types, reducers, conditions }`. A separate repo's block
+  editor auto-generates its palette from this schema → editor and engine
+  cannot drift across versions. Entirely additive:
+    - `NodeFactory::register_type(type, fn, json config_schema)` 3-argument
+      variant added. Existing 2-argument delegates to permissive default
+      schema — existing user nodes/calls unaffected.
     - `ReducerRegistry::names()` / `ConditionRegistry::names()` /
-      `NodeFactory::registered_types()` 조회 접근자 신설.
-    - 내장 4타입(`llm_call`/`tool_dispatch`/`intent_classifier`/
-      `subgraph`)에 설정 스키마 선언. `NEOGRAPH_VERSION` 을
-      컴파일 정의로 노출(pyproject.toml 단일 진실) → 스키마 버전
-      도장.
+      `NodeFactory::registered_types()` query accessors added.
+    - Configuration schema declared for 4 built-in types (`llm_call`/
+      `tool_dispatch`/`intent_classifier`/`subgraph`). `NEOGRAPH_VERSION`
+      exposed as a compile definition (pyproject.toml single source of truth)
+      → schema version stamp.
     - `examples/52_export_schema.cpp` (`example_export_schema`):
-      `./example_export_schema > schema.json` — 에디터 리포 CI 가
-      고정 NeoGraph 버전으로 산출물을 뽑는 표준 경로.
-    - 파이썬: `neograph_engine.export_schema()` → dict (에디터 리포
-      CI 가 `pip install neograph-engine` 후 덤프).
-    - `tests/test_schema_export.cpp` 8건 + `test_export_schema.py`
-      4건. 핵심: top-level `conditional_edges` 가 loader→compile
-      왕복에서 살아남는지 회귀 가드(v0.1.0~0.1.7 silent-drop
-      재발 방지).
+      `./example_export_schema > schema.json` — standard path for the editor
+      repo CI to produce the artifact pinned to a NeoGraph version.
+    - Python: `neograph_engine.export_schema()` → dict (editor repo CI
+      dumps after `pip install neograph-engine`).
+    - `tests/test_schema_export.cpp` 8 + `test_export_schema.py` 4. Key:
+      top-level `conditional_edges` surviving the loader→compile round-trip
+      (regression guard against v0.1.0–v0.1.7 silent-drop recurrence).
 
 ### Fixed
 
-- **토폴로지 최상위 컨테이너 형식 검증 (#126).** `channels`/`nodes`는
-  객체가 아니면 모든 모드에서 거부한다. `edges`/`conditional_edges`의
-  배열 검증은 strict 모드에서 강제하며, legacy의 keyed edge map 호환성은
-  유지한다. 오류에는 전체 입력 대신 경로와 JSON 종류만 기록한다.
-- **`max_steps` 종료 상태 노출 (#114).**
-  `RunResult::max_steps_exhausted()`와 Python의 읽기 전용
-  `RunResult.max_steps_exhausted` 속성을 추가했다. 실행할 노드가 남은 상태에서
-  `max_steps`에 도달했을 때만 참이며, 같은 상태를 gRPC 단건 응답과 스트리밍
-  마지막 JSON에서도 제공한다. C++ 구조체 크기는 바꾸지 않았다.
+- **Topology top-level container format validation (#126).** `channels`/`nodes`
+  must be objects; rejected in all modes if not. `edges`/`conditional_edges`
+  array validation enforced in strict mode, legacy keyed-edge-map compatibility
+  retained. Errors record the path and JSON type, not the full input.
+- **`max_steps` termination state exposed (#114).**
+  `RunResult::max_steps_exhausted()` and the read-only Python property
+  `RunResult.max_steps_exhausted` added. True only when `max_steps` is reached
+  while nodes remain to execute; same state provided in gRPC single-response
+  and streaming final JSON. C++ struct size unchanged.
 
-- **`set_worker_count` / `set_worker_count_auto` docstring 정정
-  (issue #62, PR #63).** v1.0 prep 사이클에 `compile()` 의 worker pool
-  기본값을 `set_worker_count(hardware_concurrency())` 에서
-  `set_worker_count(1)` 로 의도적으로 되돌렸는데 (사유는
-  `src/core/graph_engine.cpp:69-93` 주석 참조) 사용자 향한 docstring
-  4군데가 옛 클레임을 유지 → 사용자가 docs 그대로 믿고 짠 multi-Send
-  fan-out 이 영문 모르고 단일 스레드에서 직렬 실행되는 함정. 단위 테스트
-  (fake spawn, instant body) 로는 안 보이고 진짜 wall-time 들어가는
-  e2e 에서만 들킴.
-  - `bindings/python/src/bind_graph.cpp` 의 `set_worker_count` /
-    `set_worker_count_auto` Python docstring 두 개를 실제 동작에 맞게
-    다시 작성. `compile()` 기본은 1 이고 `set_worker_count_auto()` /
-    `set_worker_count(N>=2)` 가 명시적 opt-in 이라고 명문화.
-  - `include/neograph/graph/engine.h` 의 동일 두 함수 Doxygen 주석도
-    같이 정정. Doxygen Pages 가 master push 트리거로 자동 재빌드.
-  - `docs/concepts.md` / `docs/troubleshooting.md` / `docs/reference-en.md`
-    의 같은 stale 클레임 (default = hardware_concurrency) 정정.
+- **`set_worker_count` / `set_worker_count_auto` docstring correction
+  (issue #62, PR #63).** The v1.0 prep cycle intentionally reverted the
+  `compile()` worker pool default from `set_worker_count(hardware_concurrency())`
+  to `set_worker_count(1)` (see `src/core/graph_engine.cpp:69-93` comments for
+  rationale), but four user-facing docstrings retained the old claim → users
+  who built multi-Send fan-out graphs trusting docs got silent serial execution
+  on a single thread. Not visible with unit tests (fake spawn, instant body);
+  only exposed in real wall-time e2e.
+  - Rewrote both `set_worker_count` / `set_worker_count_auto` Python docstrings
+    in `bindings/python/src/bind_graph.cpp` to match actual behaviour:
+    `compile()` default is 1, `set_worker_count_auto()` /
+    `set_worker_count(N>=2)` is explicit opt-in.
+  - Corrected both Doxygen comments in `include/neograph/graph/engine.h`
+    accordingly. Doxygen Pages auto-rebuilds on master push.
+  - Corrected the same stale claim (default = hardware_concurrency) in
+    `docs/concepts.md` / `docs/troubleshooting.md` / `docs/reference-en.md`.
 
-- **v0.9.0 ship 시 누락된 신 API 마이그레이션 3건 보완.** v1.0 prep PR
-  `9b` (`19819d8`) 로 `GraphNode` legacy 8-virtual 체인이 destructive
-  삭제됐는데, 같은 사이클의 PR `#48` (`6e654ad`, "C++ examples migrate
-  to `GraphNode::run()`") 은 `examples/` 만 마이그레이션했고 다음 3개
-  파일은 빠져서 v0.9.0 release 가 빌드 불가 상태로 ship 됐음:
+- **Three missing API migrations from v0.9.0 ship supplemented.** PR `9b`
+  (`19819d8`) in the v1.0 prep cycle destructively removed the `GraphNode`
+  legacy 8-virtual chain, but PR `#48` (`6e654ad`, "C++ examples migrate to
+  `GraphNode::run()`") only migrated `examples/` — the following 3 files were
+  missed, shipping v0.9.0 in a build-broken state:
     - `benchmarks/stress/bench_sustained_concurrent.cpp` (Phase 3
-      sustained-burst 검증 핵심 벤치)
-    - `benchmarks/concurrent/bench_concurrent_neograph.cpp` (LangGraph
-      등 타 엔진과의 메모리·동시성 비교 매트릭스 본체)
-    - `wasm/smoke.cpp` (Phase 1 WASM feasibility 스모크)
+      sustained-burst verification key benchmark)
+    - `benchmarks/concurrent/bench_concurrent_neograph.cpp` (memory/
+      concurrency comparison matrix body against LangGraph and other engines)
+    - `wasm/smoke.cpp` (Phase 1 WASM feasibility smoke)
 
-  CI 가 이 타겟들을 add_executable 로 잡지 않거나 (Docker 빌드 의존)
-  별도 환경에 격리돼 있어서 master 머지 + tag 까지 통과한 흔적.
+  CI did not pick these targets up as add_executables or (Docker build
+  dependency) isolated them in a separate environment, so the merge to master
+  and tag passed.
 
-  **수정**: 셋 다 `std::vector<ChannelWrite> execute(const GraphState&)
-  override` → `asio::awaitable<NodeOutput> run(NodeInput in) override`
-  + `co_return out` 패턴으로 옮김. 노드 로직은 무변경.
+  **Fix**: all three migrated from `std::vector<ChannelWrite> execute(const
+  GraphState&) override` → `asio::awaitable<NodeOutput> run(NodeInput in)
+  override` + `co_return out` pattern. Node logic unchanged.
 
-  **v1.0 핵심 셀링 포인트 native 재현 확인**
+  **v1.0 key selling-point native re-verification**
   (`benchmarks/concurrent/results_v0.9.0_native_recheck.jsonl`):
-    - 동시성 10K · wall 10–23 ms · p99 17–21 µs · peak RSS **5.6 MB**
-      (v0.3.0 / v0.5.0 측정값과 일치 — destructive 9b 후에도 메모리
-      셀링 포인트 회귀 없음)
+    - Concurrency 10K · wall 10–23 ms · p99 17–21 µs · peak RSS **5.6 MB**
+      (matches v0.3.0 / v0.5.0 measurements — no memory selling-point
+      regression after destructive 9b)
     - 0 errors at 10K
-  **Docker 매트릭스 (LangGraph / Haystack / pydantic-graph / LlamaIndex
-  / AutoGen 6-way 비교) 도 같은 세션 안에서 재측정 완료**
+  **Docker matrix (LangGraph / Haystack / pydantic-graph / LlamaIndex /
+  AutoGen 6-way comparison) also re-measured within the same session**
   (`results_v0.9.0_docker_recheck.jsonl`).
 
-  매트릭스 재실행 과정에서 신 API 누락과 **별개의 회귀 1건 추가 발견** —
-  `benchmarks/concurrent/Dockerfile.neograph` 가 master 의 CMake 옵션
-  default 변경을 따라잡지 못해 빌드 자체가 안 되는 상태였음
-  (v0.9.0 ship 시점에도 같음). 시간이 지나면서 다음 옵션 default 가
-  OFF → ON 으로 바뀐 흔적:
+  During matrix re-run, one independent regression discovered alongside the
+  missing API migration — `benchmarks/concurrent/Dockerfile.neograph` could
+  not build at all because it failed to track CMake option default changes on
+  master (same at v0.9.0 ship time). Over time the following option defaults
+  flipped OFF → ON:
     - `NEOGRAPH_BUILD_POSTGRES` / `NEOGRAPH_BUILD_SQLITE`
-      (각각 `libpq-dev` / `libsqlite3-dev` 필요)
+      (requiring `libpq-dev` / `libsqlite3-dev` respectively)
     - `NEOGRAPH_BUILD_A2A` / `NEOGRAPH_BUILD_ACP`
-    - `NEOGRAPH_USE_LIBCURL` (`feedback_libcurl_unconditional_dep.md`
-      에서 한 번 닫힌 사고 — option toggle 만 추가되고 default 는
-      그대로 ON 이라 빈 컨테이너 빌드 경로 또 깨짐)
-    - `find_package(OpenSSL REQUIRED)` 는 옵션 토글 없이 unconditional
-      (CMakeLists.txt:256) — 별개 v1.0 cleanup 후보
+    - `NEOGRAPH_USE_LIBCURL` (one prior incident closed in
+      `feedback_libcurl_unconditional_dep.md` — only the option toggle was
+      added while the default remained ON, breaking the empty-container build
+      path again)
+    - `find_package(OpenSSL REQUIRED)` is unconditional without an option
+      toggle (CMakeLists.txt:256) — separate v1.0 cleanup candidate
 
-  **Dockerfile fix**: `libssl-dev` apt 추가 + 모든 비핵심 옵션을 명시적
-  `-DNEOGRAPH_BUILD_*=OFF` / `-DNEOGRAPH_USE_LIBCURL=OFF` 로 박음.
-  주석에 "drift 두 번 났던 이력이라 명시 freeze" 적어둠. CMakeLists.txt
-  의 `find_package(OpenSSL REQUIRED)` conditional 화는 별도 작업으로
-  남김 — 다른 빌드 path (PyPI wheel, ARM64 등) 영향 검증 필요.
+  **Dockerfile fix**: `libssl-dev` apt addition + all non-core options pinned
+  with explicit `-DNEOGRAPH_BUILD_*=OFF` / `-DNEOGRAPH_USE_LIBCURL=OFF`.
+  Comment notes "explicit freeze due to two drift incidents".
+  `find_package(OpenSSL REQUIRED)` conditionalisation in CMakeLists.txt left
+  as a separate task — impact verification needed for other build paths (PyPI
+  wheel, ARM64, etc.).
 
-  **6-way 매트릭스 핵심 결과** (concurrency=10000, 2 cpus / 1 GiB):
+  **6-way matrix key results** (concurrency=10000, 2 cpus / 1 GiB):
 
   | engine          | mode          | wall_ms | p99_us      | peak_MB | ok/err |
   |---|---|---|---|---|---|
@@ -433,167 +467,172 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   | autogen         | mp-pool-8     | 22428   | 82361       | 49.1    | 10000/0 |
   | llamaindex      | asyncio       | 26303   | 25912204    | 582.7   | 10000/0 |
 
-  NG vs LangGraph (마케팅 비교축): wall **237× 빠름**, p99 **4134×
-  빠름**, peak RSS **12× 적음**.
+  NG vs LangGraph (marketing comparison axis): wall **237× faster**, p99
+  **4134× faster**, peak RSS **12× lower**.
 
-  **가혹한 시나리오** (concurrency=10000, 1 cpu / 512 MiB):
+  **Harsh scenario** (concurrency=10000, 1 cpu / 512 MiB):
     - NG: 8 ms / 5.2 MB / 0 err / **ok**
     - LangGraph mp-pool-8: 7821 ms / 60.9 MB / 0 err / ok
-    - **LlamaIndex asyncio: OOM killed** (512 MB cap 초과)
+    - **LlamaIndex asyncio: OOM killed** (exceeded 512 MB cap)
     - **AutoGen asyncio: OOM killed**
 
-  v0.3.0 / v0.5.0 측정값 그대로 — **destructive 9b 후에도 NeoGraph
-  의 "10K 동시 worker, peak RSS 5 MB, OOM 안 됨" 셀링 포인트 회귀 0.**
+  Same v0.3.0 / v0.5.0 measurements — **no regression of NeoGraph's "10K
+  concurrent workers, peak RSS 5 MB, no OOM" selling point after destructive
+  9b.**
 
 ## [0.9.0] — 2026-05-14 — v1.0 prep (Candidate 1 Phase B + Candidate 6)
 
-ROADMAP_v1.md 의 두 v1.0 단일 dispatch 통합이 한 사이클에 모임:
+Two v1.0 single-dispatch unifications from ROADMAP_v1.md converge in one cycle:
 
-  - **Candidate 1 Phase B (`9b`–`9f`)** — `GraphNode` 의 legacy 8
-    virtual (`execute` / `execute_full` / `execute_async` /
-    `execute_stream` / `execute_full_async` / `execute_full_stream` /
-    `execute_full_stream_async` / `execute_full_async` 변종) +
+  - **Candidate 1 Phase B (`9b`–`9f`)** — all of `GraphNode`'s legacy 8
+    virtuals (`execute` / `execute_async` / `execute_stream` /
+    `execute_stream_async` / `execute_full` / `execute_full_async` /
+    `execute_full_stream` / `execute_full_stream_async`) +
     `add_cancel_hook` + `CurrentCancelTokenScope` + `state.
-    run_cancel_token_` + `PyGraphNodeOwner` 의 6 legacy override 까지
-    전부 삭제. **destructive** — deprecation window 가 닫힘. 사용자
-    GraphNode subclass / 사용자 Python 노드는 `run(NodeInput)`/
-    `def run(self, input)` 단일 메서드로 마이그레이션 필수.
+    run_cancel_token_` + all 6 `PyGraphNodeOwner` legacy overrides removed.
+    **Destructive** — deprecation window closed. User GraphNode subclasses /
+    user Python nodes must migrate to the single method `run(NodeInput)` /
+    `def run(self, input)`.
   - **Candidate 6** — `Provider` 4-virtual cross-product → 1-virtual
-    `invoke()`. 이쪽은 아직 추가 + deprecation 단계 — legacy 4 virtual
-    무변경 동작, deprecation warning 만 visible. v1.0.0 ship 직전에
-    그쪽 Phase B (`Provider` legacy 삭제) 도 닫음.
+    `invoke()`. Still in the addition + deprecation phase — legacy 4 virtuals
+    unchanged and functional, deprecation warnings only visible. That side's
+    Phase B (`Provider` legacy removal) also closes just before v1.0.0 ship.
 
-같은 사이클의 b59444f 잠재 par regression revert (`e5ecb08`) + fan-out
-예제 명시 호출 추가 + CI 환경 3 fix (httplib macro guard /
-Windows MSVC unistd.h / pybind pytest 마이그레이션) 도 본 [Unreleased]
-의 일부.
+The same cycle also includes b59444f's potential parallel-regression revert
+(`e5ecb08`) + explicit fan-out example calls + 3 CI environment fixes
+(httplib macro guard / Windows MSVC unistd.h / pybind pytest migration),
+all part of this [Unreleased].
 
 ### Added
 
-- **`Provider::invoke(params, on_chunk = nullptr)`** — v1.0 의
-  표준 단일 dispatch 진입점. 비스트리밍 (`on_chunk == nullptr`) 과
-  스트리밍 (`on_chunk` 전달) 을 한 메서드가 처리. 기존 4 virtual
-  cross-product (`complete` / `complete_async` / `complete_stream` /
-  `complete_stream_async`) 를 한 async-streaming-superset 으로 모음.
-  default impl 은 4 legacy virtual 로 forward 하므로 기존 Provider
-  subclass 무변경 동작. 6 신규 ctest (`ProviderInvokeDefault`).
+- **`Provider::invoke(params, on_chunk = nullptr)`** — v1.0 standard single
+  dispatch entry point. Handles both non-streaming (`on_chunk == nullptr`) and
+  streaming (`on_chunk` provided) in one method. Consolidates the previous
+  4-virtual cross-product (`complete` / `complete_async` / `complete_stream` /
+  `complete_stream_async`) into one async-streaming superset. Default
+  implementation forwards to the 4 legacy virtuals so existing Provider
+  subclasses work unchanged. 6 new ctest (`ProviderInvokeDefault`).
   (PR #40)
-- **`invoke()` cancel propagation parity** — `params.cancel_token` 미설정
-  + engine thread-local scope 활성 → `current_cancel_token()` 자동 stamp.
-  legacy sync `complete()` 의 동작과 동등 (engine 안의 노드 본문이
-  `provider->invoke(params, ...)` 부르면 running graph 의 cancel signal
-  자동 받음). 3 신규 ctest (`InvokeCancelPropagation`). (PR #43)
-
+- **`invoke()` cancel propagation parity** — when `params.cancel_token` is not
+  set and an engine thread-local scope is active, `current_cancel_token()` is
+  stamped automatically. Equivalent to legacy sync `complete()` behaviour (node
+  body inside the engine calling `provider->invoke(params, ...)` automatically
+  receives the running graph's cancel signal). 3 new ctest
+  (`InvokeCancelPropagation`). (PR #43)
 ### Changed
 
-- **engine 내부 모든 LLM 호출이 `invoke()` 통과** — `LLMCallNode`,
+- **All internal LLM calls in engine routed through `invoke()`** — `LLMCallNode`,
   `IntentClassifierNode` (PR #41/#42), `Agent::complete` /
   `Agent::run_stream` (PR #43), `SupervisorLLMNode` /
-  `ResearcherLLMNode` / `CompressNotesNode` / `FinalReportNode`
-  (PR #43), `PlannerNode` / `ExecutorNode` (PR #44). NeoGraph
-  내부의 LLM dispatch 가 한 표면으로 통일.
-- **C++ examples 마이그레이션 (2 file)** — `31_local_transformer.cpp`,
-  `cookbook/ai-assembly/member_server.cpp` 가 새 `invoke()` 사용.
-  사용자 빌드에서 deprecation warning 안 뜸. (PR #45)
-- **`GraphEngine::compile()` 기본 워커 수 1 로 복귀** (`e5ecb08`).
-  `b59444f` 가 18일 (2026-04-26 → 2026-05-13) 잠재한 par micro-bench
-  11.8 → 283 µs (24×) 회귀의 원인이었음 — 분신술 bisect (11 worktree
-  병렬) 로 commit 핀포인트. v1.0 부터 기본=1 (CPU-tiny 시퀀셜/병렬
-  dispatch 최적), fan-out 의도면 `engine->set_worker_count_auto()` 한
-  줄로 hardware_concurrency 열어줌. 영향 받는 fan-out 예제 5곳 (10/
-  14/21/36 + deep_research_graph builder) 명시 호출 추가. 자세한 내용
-  은 ROADMAP_v1.md 의 "Perf retrospective" 섹션.
+  `ResearcherLLMNode` / `CompressNotesNode` / `FinalReportNode` (PR #43),
+  `PlannerNode` / `ExecutorNode` (PR #44). LLM dispatch within NeoGraph
+  unified to a single surface.
+- **C++ examples migration (2 files)** — `31_local_transformer.cpp`,
+  `cookbook/ai-assembly/member_server.cpp` now use the new `invoke()`. No
+  deprecation warning in user builds. (PR #45)
+- **`GraphEngine::compile()` default worker count reverted to 1** (`e5ecb08`).
+  `b59444f` was the root cause of a latent 18-day (2026-04-26 → 2026-05-13)
+  parallel micro-bench regression of 11.8 → 283 µs (24×) — commit pinpointed
+  via bisection (11 worktrees in parallel). From v1.0 default=1 (optimal for
+  CPU-tiny sequential/parallel dispatch); for intentional fan-out add one line
+  `engine->set_worker_count_auto()` to open hardware_concurrency. Explicit
+  calls added to 5 affected fan-out examples (10/14/21/36 +
+  deep_research_graph builder). See "Perf retrospective" section in
+  ROADMAP_v1.md for details.
 
 ### Deprecated
 
 - **`Provider::complete` / `complete_async` / `complete_stream` /
-  `complete_stream_async`** — 4 legacy virtual 모두
-  `[[deprecated("v1.0 single-dispatch: use invoke(...)")]]` 마커.
-  legacy method 는 deprecation window 동안 그대로 동작. v1.0.0
-  에서 삭제. internal forwarder 는 `NEOGRAPH_PUSH/POP_IGNORE_DEPRECATED`
-  로 감싸서 user-facing override / 호출 사이트에만 warning. (PR #44)
+  `complete_stream_async`** — all 4 legacy virtuals carry
+  `[[deprecated("v1.0 single-dispatch: use invoke(...)")]]` markers. Legacy
+  methods function as-is through the deprecation window. Removed in v1.0.0.
+  Internal forwarders wrapped with `NEOGRAPH_PUSH/POP_IGNORE_DEPRECATED` so
+  warnings appear only at user-facing override / call sites. (PR #44)
 
 ### Removed (Candidate 1 Phase B — destructive)
 
-- **`GraphNode` legacy 8 virtual** — `execute(GraphState&)` /
-  `execute_full(...)` / 6 변종 + `ExecuteDefaultGuard` recursion guard
-  + 300+ 줄 default chain. 모두 삭제. `run(NodeInput)` 만 pure virtual.
-  (commit `19819d8`)
-- **`add_cancel_hook` + `Hook` RAII + `hooks_*` member + `cancel()`
-  의 hook iteration** — `cancel.h` 가 `fork()` + `cancel()` +
-  `is_cancelled()` + `slot()` 만 남음. (commit `1d786a5`)
-- **`CurrentCancelTokenScope` + `current_cancel_token()` thread_local
-  + `GraphState::run_cancel_token_` + 3 accessor** — `RunContext::
-  cancel_token` 이 유일한 cancel 채널. `src/core/cancel.cpp` 가 stub
-  까지 비워짐 (파일 자체는 향후 삭제 가능 상태). (commit `9e8e956`)
-- **`PyGraphNodeOwner` 의 6 legacy override** — pybind trampoline 이
-  `run(self, input)` 만 호출. Python 사용자 코드도 v1.0 단일 메서드
-  필수. (commit `9e8e956`)
-- **2 obsolete pytest 파일** — `test_execute_stream_dispatch.py` (v0.3.2
-  의 stream-only fallback dispatch 검증) + `test_streaming_only_error_
-  hint.py` (execute_full_stream takes priority — v1.0 에서 의미 없음).
+- **`GraphNode` legacy 8 virtuals** — `execute(GraphState&)` /
+  `execute_full(...)` / 6 variants + `ExecuteDefaultGuard` recursion guard
+  + 300+ lines of default chain. All removed. `run(NodeInput)` is the only
+  pure virtual. (commit `19819d8`)
+- **`add_cancel_hook` + `Hook` RAII + `hooks_*` member + `cancel()` hook
+  iteration** — `cancel.h` retains only `fork()` + `cancel()` +
+  `is_cancelled()` + `slot()`. (commit `1d786a5`)
+- **`CurrentCancelTokenScope` + `current_cancel_token()` thread_local +
+  `GraphState::run_cancel_token_` + 3 accessors** — `RunContext::cancel_token`
+  is the sole cancel channel. `src/core/cancel.cpp` emptied down to a stub
+  (file itself a future-delete candidate). (commit `9e8e956`)
+- **6 `PyGraphNodeOwner` legacy overrides** — pybind trampoline calls only
+  `run(self, input)`. Python user code also requires a single method from
+  v0.9.0. (commit `9e8e956`)
+- **2 obsolete pytest files** — `test_execute_stream_dispatch.py` (v0.3.2
+  stream-only fallback dispatch verification) + `test_streaming_only_error_
+  hint.py` (execute_full_stream takes priority — meaningless in v1.0).
   (commit `4392fbb`)
 
 ### Fixed
 
-- **fan-out 예제 5곳 명시 호출 추가** — `e5ecb08` 의 default 워커 수
-  복귀로 묻혔던 진짜 병렬성 의도를 살림: `examples/10_send_command.
-  cpp`, `examples/14_plan_executor.cpp`, `examples/21_mcp_fanout.cpp`,
-  `examples/36_classifier_fanout.cpp`, `src/core/deep_research_graph.
-  cpp` 의 `create_deep_research_graph()` builder 가 `set_worker_count_
-  auto()` 호출. 검증: `classifier_fanout` 4.22× speedup (25.2 ms 순차
-  → 6.0 ms 병렬). (commit `99c470b`)
-- **`bench_async_http` httplib macro guard** — `bench_async_http.cpp`
-  가 `<neograph/async/conn_pool.h>` 통해 `<httplib.h>` 를 끌어쓰는데
-  `CPPHTTPLIB_OPENSSL_SUPPORT` 미정의로 ODR 가드가 reject. CMake 의
-  target 에 `target_compile_definitions(... PRIVATE ...)` 박음.
+- **Explicit calls added to 5 fan-out examples** — restored the real parallel
+  intention buried by `e5ecb08`'s default worker count revert:
+  `examples/10_send_command.cpp`, `examples/14_plan_executor.cpp`,
+  `examples/21_mcp_fanout.cpp`, `examples/36_classifier_fanout.cpp`,
+  `src/core/deep_research_graph.cpp`'s `create_deep_research_graph()` builder
+  now calls `set_worker_count_auto()`. Verification: `classifier_fanout`
+  4.22× speedup (25.2 ms sequential → 6.0 ms parallel). (commit `99c470b`)
+- **`bench_async_http` httplib macro guard** — `bench_async_http.cpp` includes
+  `<httplib.h>` via `<neograph/async/conn_pool.h>` but `CPPHTTPLIB_OPENSSL_SUPPORT`
+  was undefined, causing the ODR guard to reject. Added
+  `target_compile_definitions(... PRIVATE ...)` to the CMake target.
   (commit `d4be42a`)
-- **Windows MSVC `unistd.h` 누락** — `test_schema_provider_extra_
-  fields_temperature.cpp` 가 POSIX-only `mkstemps` + `close` 사용으로
-  Windows 빌드 자체 실패. 파일 전체를 `#ifndef _WIN32` 가드 (커버리지
-  는 Linux/macOS 가 보장). (commit `3c49f12`)
-- **Python 테스트 16개 마이그레이션** — wheel CI 의 pytest 가 legacy
-  `def execute(self, state)` 패턴 28 노드 클래스에서 `AttributeError`
-  로 떨어짐. `def run(self, input)` 으로 일괄 마이그레이션,
-  streaming 노드는 `input.stream_cb` None-가드 추가. (commit `4392fbb`)
+- **Windows MSVC `unistd.h` missing** — `test_schema_provider_extra_
+  fields_temperature.cpp` used POSIX-only `mkstemps` + `close`, failing the
+  Windows build entirely. Wrapped the entire file in `#ifndef _WIN32` guard
+  (coverage guaranteed by Linux/macOS). (commit `3c49f12`)
+- **16 Python tests migrated** — wheel CI pytest hit `AttributeError` on 28 node
+  classes with legacy `def execute(self, state)` pattern. Batch-migrated to
+  `def run(self, input)`; streaming nodes gained `input.stream_cb` None-guard.
+  (commit `4392fbb`)
 
-### Migration (사용자 코드)
+### Migration (user code)
 
-**Provider 호출 (Candidate 6 — deprecation 단계)**
+**Provider calls (Candidate 6 — deprecation phase)**
 
-새 코드:
+New code:
 ```cpp
-// 비스트리밍
+// non-streaming
 auto completion = co_await provider->invoke(params, nullptr);
 
-// 스트리밍
+// streaming
 auto completion = co_await provider->invoke(params, on_chunk);
 
-// sync 사이트 (옛 complete() 자리)
+// sync site (replaces old complete())
 auto completion = neograph::async::run_sync(provider->invoke(params, nullptr));
 ```
 
-기존 4 virtual override 는 deprecation window 동안 그대로 동작하지만,
-`-Wdeprecated-declarations` warning 이 user override 사이트에 visible.
-v1.0.0 직전에 제거되니 deprecation window 안에 마이그레이션 권장.
+The 4 legacy virtual overrides continue to work through the deprecation
+window, but `-Wdeprecated-declarations` warnings are visible at user override
+sites. Removal occurs just before v1.0.0; migration within the deprecation
+window is recommended.
 
 **`GraphNode` subclass (Candidate 1 Phase B — destructive)**
 
-C++ 코드:
+C++ code:
 ```cpp
-// 옛 (v0.x 까지)
+// old (up to v0.8.x)
 class MyNode : public GraphNode {
-    NodeResult execute_full(GraphState& state) override {
+    NodeResult execute_full(const GraphState& state) override {
         auto x = state.get("x");
-        return {.writes = {ChannelWrite{"y", json(/*...*/)}}};
+        NodeResult out;
+        out.writes.push_back(ChannelWrite{"y", json(/*...*/)});
+        return out;
     }
 };
 
-// v1.0 새 코드 (한 메서드, 코루틴 entry)
+// v0.9.0+ current code (single method, coroutine entry)
 class MyNode : public GraphNode {
     asio::awaitable<NodeOutput> run(NodeInput in) override {
         auto x = in.state.get("x");
-        // in.ctx.cancel_token / in.ctx.step / in.stream_cb 도 접근 가능
+        // in.ctx.cancel_token / in.ctx.step / in.stream_cb also accessible
         NodeOutput out;
         out.writes.push_back(ChannelWrite{"y", json(/*...*/)});
         co_return out;
@@ -601,132 +640,136 @@ class MyNode : public GraphNode {
 };
 ```
 
-Python 코드:
+Python code:
 ```python
-# 옛 (v0.x 까지)
+# old (up to v0.8.x)
 class MyNode(neograph_engine.GraphNode):
     def execute(self, state):
         x = state.get("x") or 0
         return [neograph_engine.ChannelWrite("y", x * 2)]
 
-# v1.0 새 코드
+# v0.9.0+ current code
 class MyNode(neograph_engine.GraphNode):
     def run(self, input):
-        state = input.state  # input.ctx.cancel_token / input.stream_cb 등도 접근 가능
+        state = input.state  # input.ctx.cancel_token / input.stream_cb etc. also accessible
         x = state.get("x") or 0
         return [neograph_engine.ChannelWrite("y", x * 2)]
 ```
 
-**fan-out 의도 (워커 수 기본값 변경)**
+**Fan-out intent (worker count default change)**
 
 ```cpp
-// 옛 (v0.x 4월 후): 기본=hardware_concurrency 였지만 micro-bench 부담
-// v1.0: 기본=1. fan-out 의도면 한 줄 추가.
+// old (v0.x April+): default was hardware_concurrency but micro-bench burden
+// v1.0: default=1. Add one line for intentional fan-out.
 auto engine = GraphEngine::compile(def, ctx);
-engine->set_worker_count_auto();  // ← 본 줄 추가 (hardware_concurrency)
-// 또는 engine->set_worker_count(N);  // 명시 N
+engine->set_worker_count_auto();  // ← this line added (hardware_concurrency)
+// or engine->set_worker_count(N);  // explicit N
 ```
 
-`docs/migration-v0.4-to-v1.0.md` 의 Migration 1/2/3 섹션 (run() /
-ctx.cancel_token / 워커 수 기본) + Provider 섹션 (다음 docs sweep
-에서 추가 예정) 가 케이스별 before/after 안내.
+Migration 1/2/3 sections in `docs/migration-v0.4-to-v1.0.md` (run() /
+ctx.cancel_token / worker count default) + Provider section (to be added in
+next docs sweep) provide case-by-case before/after guidance.
 
-## [0.8.0] — 2026-05-13 — DX 폴리시 + downstream-driven API gaps 정리
+## [0.8.0] — 2026-05-13 — DX policy + downstream-driven API gaps addressed
 
-ProjectDatePop downstream 의 실사용 피드백 + 우리 자체 coverage diff 가
-드러낸 8 이슈 (#22, #25, #26, #27, #28, #34, #35 + #16 follow-up) 를
-한 minor bump 에 묶음. 새 public 도우미 두 개 (`RunResult::channel<T>`,
-`RunContext::store`), 11 새 offline 예제, `docs/migration-v0.4-to-v1.0.md`
-마이그레이션 가이드, 그리고 신참이 첫 30 분에 부딪치는 마찰면을
-줄이는 5-항목 DX 배치.
+Bundles 8 issues (#22, #25, #26, #27, #28, #34, #35 + #16 follow-up)
+surfaced by real-world downstream (ProjectDatePop) feedback and internal
+coverage diff into a single minor bump. Two new public helpers
+(`RunResult::channel<T>`, `RunContext::store`), 11 new offline examples,
+`docs/migration-v0.4-to-v1.0.md` migration guide, and a 5-item DX bundle
+reducing friction newcomers hit in their first 30 minutes.
 
 ### Added
 
 - **`RunResult::channel<T>(name)` / `channel_raw(name)` / `has_channel(name)`** —
-  결과에서 채널 값을 한 줄로 꺼내는 도우미. `output` 의 두 모양 (한 겹
-  들어간 `output["channels"][name]["value"]` 표준 + `react_graph` 같은
-  빌더가 추가하는 평탄 키) 모두 자동 처리. 9 신규 ctest. (Issue #25)
-- **`RunContext::store`** — 노드 본문이 `in.ctx.store->get(ns, key)` 한 줄로
-  Store 에 닿음. 옛 패턴 (`NodeFactory` 람다에서 `shared_ptr<Store>`
-  캡처) 도 그대로 동작 — 새 코드만 새 모양 쓰면 됨. 3 신규 ctest. (Issue #27)
-- **`Provider::complete_stream` non-pure default body** — minimal mock /
-  test fixture 가 `complete()` 만 override 해도 됨. 기존 streaming-native
-  override 는 그대로. 2 신규 ctest. (Issue #22)
-- **`neograph::json` arrays 의 `.front()` / `.back()`** — nlohmann muscle
-  memory 패턴 (`msgs.back()["content"]`) 이 컴파일됨. 4 신규 ctest. (Issue #26)
-- **11 new offline 예제 (41-51)** — `resume_if_exists_chat`,
+  one-liner helpers to extract channel values from the result. Both output
+  shapes (nested `output["channels"][name]["value"]` standard + flat keys added
+  by builders like `react_graph`) handled automatically. 9 new ctest. (Issue #25)
+- **`RunContext::store`** — node body reaches the Store with one line
+  `in.ctx.store->get(ns, key)`. The old pattern (capturing `shared_ptr<Store>`
+  in a `NodeFactory` lambda) still works — new code only needs the new shape.
+  3 new ctest. (Issue #27)
+- **`Provider::complete_stream` non-pure default body** — minimal mock / test
+  fixture only needs to override `complete()`. Existing streaming-native
+  overrides remain unchanged. 2 new ctest. (Issue #22)
+- **`neograph::json` arrays `.front()` / `.back()`** — nlohmann muscle-memory
+  pattern (`msgs.back()["content"]`) now compiles. 4 new ctest. (Issue #26)
+- **11 new offline examples (41-51)** — `resume_if_exists_chat`,
   `custom_reducer_condition`, `store_personalization`,
   `request_queue_backpressure`, `cancel_token`, `node_cache`,
-  `sqlite_checkpoint`, `openinference`, `async_tool`, `minimal`. 모두
-  rc=0, API key / 외부 서비스 의존 없음. 27/53 `NEOGRAPH_API` 클래스 중
-  zero-reference 였던 갭들을 채움.
-- **`examples/51_minimal.cpp`** — LLM·tool·mock provider 다 없는, 노드 1 개
-  짜리 30 줄 입문 예제. 5 분 안에 NeoGraph 가 어떤 모양으로 도는지
-  파악할 수 있게.
-- **`docs/migration-v0.4-to-v1.0.md`** — `[[deprecated]]` 마킹된 옛 8-virtual
-  chain (`execute` / `execute_async` / 등) → 새 `run(NodeInput) ->
-  awaitable<NodeOutput>` 으로 옮기는 케이스별 before/after 4 예제 + 자주
-  하는 실수. `NEOGRAPH_DEPRECATED_VIRTUAL` 매크로 메시지에서도 이 문서
-  링크.
-- **README "흔한 함정 5선" 섹션** — 신참이 첫 30 분에 부딪치는 5 가지
-  (`channel<T>` 사용, `in.ctx.store`, `neograph::graph::` 서브네임스페이스,
-  `<httplib.h>` 매크로, GCC 13 코루틴 ICE) 한 자리에. 각 항목에 fix +
-  관련 예제·이슈 링크.
-- **compile-time `#error` 가드 (`include/neograph/api.h`)** — 사용자 TU 가
-  `<httplib.h>` 를 NeoGraph 헤더보다 먼저 include 하면서
-  `CPPHTTPLIB_OPENSSL_SUPPORT` 빠뜨리면 명확한 메시지 + opt-out 매크로
-  (`NEOGRAPH_SKIP_HTTPLIB_MACRO_GUARD`) 와 함께 컴파일 fail. 옛 #16 의
-  런타임 SEGV 가 컴파일 타임 fail 로 격상.
-- **`example_minimal` 5 신규 친절 에러 메시지 ctest** — `Unknown reducer` /
-  `Unknown condition` / `Unknown node type` / `Write to unknown channel`
-  의 메시지가 사용 가능한 이름 + 등록 방법 + troubleshooting 링크를
-  본문에 박는 contract 잠금.
-- **`docs/troubleshooting.md` 새 항목 4개** — Tracer adapter `close()`
-  후 hang/crash (#24), GCC 13 코루틴 ICE (#23), 친절 에러 메시지 안내
-  (#22), `RunResult::output` 모양 (#25).
-- **`Tracer` + `OpenInferenceTracerSession::close()` 의 `@warning` 블록** —
-  어댑터 작성자에게 raw-pointer 함정 명시. `RecordedSpan` + 래퍼 분리
-  패턴이 정답이라고 안내. 기존 `tests/test_openinference_cpp.cpp::InMemoryTracer`
-  + 새 `examples/49_openinference.cpp::PrintTracer` 인용. (Issue #24)
+  `sqlite_checkpoint`, `openinference`, `async_tool`, `minimal`. All rc=0,
+  no API key / external service dependencies. Fills gaps among the 27/53
+  `NEOGRAPH_API` classes that previously had zero references.
+- **`examples/51_minimal.cpp`** — 30-line introductory example with one node,
+  no LLM, no tool, no mock provider. Understand how NeoGraph runs in under
+  5 minutes.
+- **`docs/migration-v0.4-to-v1.0.md`** — case-by-case before/after 4 examples +
+  common mistakes migrating from the `[[deprecated]]` old 8-virtual chain
+  (`execute` / `execute_async` / etc.) → new `run(NodeInput) ->
+  awaitable<NodeOutput>`. Also linked from the `NEOGRAPH_DEPRECATED_VIRTUAL`
+  macro message.
+- **README "Common pitfalls 5" section** — five things newcomers hit in their
+  first 30 minutes (`channel<T>` usage, `in.ctx.store`, `neograph::graph::`
+  sub-namespace, `<httplib.h>` macro, GCC 13 coroutine ICE) in one place.
+  Each item has a fix + related example/issue link.
+- **Compile-time `#error` guard (`include/neograph/api.h`)** — when a user TU
+  includes `<httplib.h>` before NeoGraph headers without `CPPHTTPLIB_OPENSSL_SUPPORT`,
+  compilation fails with a clear message + opt-out macro
+  (`NEOGRAPH_SKIP_HTTPLIB_MACRO_GUARD`). Promotes the old #16 runtime SEGV to a
+  compile-time failure.
+- **`example_minimal` 5 new friendly error-message ctest** — contract lock on
+  `Unknown reducer` / `Unknown condition` / `Unknown node type` / `Write to
+  unknown channel` messages embedding available names + registration method +
+  troubleshooting link in the message body.
+- **`docs/troubleshooting.md` 4 new entries** — Tracer adapter `close()`
+  hang/crash (#24), GCC 13 coroutine ICE (#23), friendly error message
+  guidance (#22), `RunResult::output` shape (#25).
+- **`Tracer` + `OpenInferenceTracerSession::close()` `@warning` block** —
+  explicitly documents the raw-pointer pitfall for adapter authors. Points to
+  the `RecordedSpan` + wrapper separation pattern as the correct approach.
+  References existing `tests/test_openinference_cpp.cpp::InMemoryTracer` + new
+  `examples/49_openinference.cpp::PrintTracer`. (Issue #24)
 
 ### Fixed
 
-- **`SchemaProvider::build_body` 의 `extra_fields` 가 `params.tools` 비어
-  있을 때 silent drop**. 옛 코드는 `extra_fields` 적용을 `if
-  (!params.tools.empty())` 안에 가둬서 schema 의 `reasoning`,
-  `response_format` 같은 핵심 필드가 tool 없는 호출에서 통째로 사라졌음.
-  Fix: tools 분기 밖으로 빼서 항상 적용. 3 신규 ctest. (Issue #34)
-- **`temperature_path` schema-side opt-out**. Reasoning model
-  (gpt-5.x, o-series) 은 `temperature` 와 `reasoning.effort` 가 배타인데,
-  schema 가 "이 provider 는 temperature 안 받음" 을 선언할 표면이 없어서
-  매 호출 `params.temperature = -1.0f` sentinel 로 우회해야 했음. Fix:
-  schema 에 `"temperature_path": null` 명시하면 build_body 가 아예 안
-  씀. 4 신규 ctest. (Issue #35)
-- **친절한 RuntimeError 메시지** — `ReducerRegistry::get` /
-  `ConditionRegistry::get` / `NodeFactory::create` 의 "Unknown <thing>:
-  foo" 와 `GraphState::write` / `apply_writes` 의 "Write to unknown
-  channel" 가 이제 사용 가능한 이름 목록 + 등록 방법 + troubleshooting
-  링크를 본문에 박음. 신참이 메시지만 보고 다음 행동 알 수 있음.
-- **`SchemaProvider::complete_stream_async` HTTP/SSE branch** 가 이제
-  long-lived dedicated `bridge_thread_` 에 dispatch (옛: `Provider`
-  base default 가 매 호출 fresh `std::thread` spawn). 옛 동작은
-  cold thread-local resolver / NSS state 가 glibc 의 `internal_strlen`
-  에서 SEGV 트리거. WS branch 는 이미 native co_await 라 영향 없음.
-  Token dispatch on awaiter's executor 보존 (PR #10 invariant). (Issue #16)
-- **`example/09_all_features.cpp`** Store demo 가 노드 본문 read 패턴은
-  `examples/43_store_personalization.cpp` 를 보라고 docstring pointer
-  추가. 옵션 2 — 옵션 3 (in-line live node) 은 #27 의 `RunContext::store`
-  가 land 한 후 두 예제 같이 정리. (Issue #28)
+- **`SchemaProvider::build_body` silent drop of `extra_fields` when
+  `params.tools` is empty.** Old code gated `extra_fields` application inside
+  `if (!params.tools.empty())`, causing core schema fields like `reasoning` and
+  `response_format` to disappear entirely from tool-less calls. Fix: moved
+  outside the tools branch so always applied. 3 new ctest. (Issue #34)
+- **`temperature_path` schema-side opt-out.** Reasoning models (gpt-5.x,
+  o-series) have mutually exclusive `temperature` and `reasoning.effort`, but
+  the schema had no way to declare "this provider does not accept temperature",
+  forcing a `params.temperature = -1.0f` sentinel workaround on every call.
+  Fix: specifying `"temperature_path": null` in the schema causes build_body
+  to skip it entirely. 4 new ctest. (Issue #35)
+- **Friendly RuntimeError messages** — `ReducerRegistry::get` /
+  `ConditionRegistry::get` / `NodeFactory::create` "Unknown <thing>: foo"
+  and `GraphState::write` / `apply_writes` `Write to unknown channel` now
+  embed available names + registration method + troubleshooting link in the
+  message body. Newcomers can determine next steps from the message alone.
+- **`SchemaProvider::complete_stream_async` HTTP/SSE branch** now dispatches on
+  a long-lived dedicated `bridge_thread_` (old: `Provider` base default spawned
+  a fresh `std::thread` per call). Old behaviour triggered an SEGV in glibc
+  `internal_strlen` with cold thread-local resolver / NSS state. WS branch is
+  already native co_await so unaffected. Token dispatch on awaiter's executor
+  preserved (PR #10 invariant). (Issue #16)
+- **`example/09_all_features.cpp`** Store demo — added docstring pointer directing
+  to `examples/43_store_personalization.cpp` for node-body read pattern.
+  Option 2 — option 3 (in-line live node) to be cleaned up together once
+  #27's `RunContext::store` lands. (Issue #28)
 
 ### Docs
 
-- `RunResult::output` 의 정식 모양 (channels-wrapped) 과 `react_graph`
-  같은 빌더가 추가하는 평탄 키 projection 의 관계를 헤더 docstring 에
-  명시. 새 도우미 (`channel<T>` / `channel_raw` / `has_channel`) 사용
-  추천. (Issue #25)
-- `RunContext::store` field 의 `@brief` 블록 — 두 plumbing 패턴
-  (`in.ctx.store` 권장 / 옛 factory-closure 캡처 호환) 코드 예제 나란히. (Issue #27)
-- `examples/43_store_personalization.cpp` 파일 머리 주석에 두 길 명시.
+- Canonical shape of `RunResult::output` (channels-wrapped) and its relationship
+  to flat-key projections added by builders like `react_graph` documented in
+  header docstring. Use of new helpers (`channel<T>` / `channel_raw` /
+  `has_channel`) recommended. (Issue #25)
+- `RunContext::store` field `@brief` block — two plumbing patterns
+  (`in.ctx.store` recommended / old factory-closure capture compatible) with
+  code examples side by side. (Issue #27)
+- Both paths documented in `examples/43_store_personalization.cpp` file header
+  comment.
 
 ## [0.7.0] — 2026-05-11 — C++ openinference + async streaming bridge
 

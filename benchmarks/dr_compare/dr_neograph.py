@@ -34,9 +34,11 @@ NG_TRANSPORT = os.environ.get("NG_TRANSPORT", "ws-responses")
 #                   (simulates LLM latency without hitting the network).
 #   MOCK_SEARCH   — "1" → skip Crawl4AI, return canned evidence string.
 #   FANOUT        — number of sub-questions to generate (default 5).
+#   NG_WORKER_COUNT — worker pool size for Send fan-out (default 4).
 LLM_MOCK_MS = int(os.environ.get("LLM_MOCK_MS", "-1"))  # -1 = real LLM
 MOCK_SEARCH = os.environ.get("MOCK_SEARCH", "0") == "1"
 FANOUT      = int(os.environ.get("FANOUT", "5"))
+NG_WORKER_COUNT = int(os.environ.get("NG_WORKER_COUNT", "4"))
 USE_INMEMORY = os.environ.get("USE_INMEMORY_CP", "0") == "1"
 
 RESEARCH_TRIGGER_PATTERN = re.compile(
@@ -108,7 +110,8 @@ else:
 class RouterNode(ng.GraphNode):
     def __init__(self, name): super().__init__(); self._n = name
     def get_name(self): return self._n
-    def execute_full(self, state):
+    def run(self, input):
+        state = input.state
         msgs = state.get("messages") or []
         last = next((m for m in reversed(msgs) if m.get("role") == "user"), None)
         if last and RESEARCH_TRIGGER_PATTERN.search(last.get("content", "")):
@@ -121,7 +124,8 @@ class RouterNode(ng.GraphNode):
 class GeneralChatNode(ng.GraphNode):
     def __init__(self, name): super().__init__(); self._n = name
     def get_name(self): return self._n
-    def execute(self, state):
+    def run(self, input):
+        state = input.state
         c = PROVIDER.complete(ng.CompletionParams(messages=state.get_messages()))
         return [ng.ChannelWrite("messages", [{
             "role": "assistant", "content": c.message.content}])]
@@ -130,7 +134,8 @@ class GeneralChatNode(ng.GraphNode):
 class ResearchPlanNode(ng.GraphNode):
     def __init__(self, name): super().__init__(); self._n = name
     def get_name(self): return self._n
-    def execute(self, state):
+    def run(self, input):
+        state = input.state
         topic = state.get("research_topic") or ""
         c = PROVIDER.complete(ng.CompletionParams(
             messages=[ng.ChatMessage(role="user", content=(
@@ -149,7 +154,8 @@ class ResearchPlanNode(ng.GraphNode):
 class FanOutNode(ng.GraphNode):
     def __init__(self, name): super().__init__(); self._n = name
     def get_name(self): return self._n
-    def execute_full(self, state):
+    def run(self, input):
+        state = input.state
         return [ng.Send("researcher", {"current_question": q})
                 for q in (state.get("sub_questions") or [])]
 
@@ -157,7 +163,8 @@ class FanOutNode(ng.GraphNode):
 class ResearcherNode(ng.GraphNode):
     def __init__(self, name): super().__init__(); self._n = name
     def get_name(self): return self._n
-    def execute_full(self, state):
+    def run(self, input):
+        state = input.state
         q = state.get("current_question") or ""
         evidence = ""
         if SEARCH_CLIENT:
@@ -189,7 +196,8 @@ class ResearcherNode(ng.GraphNode):
 class SynthesizeNode(ng.GraphNode):
     def __init__(self, name): super().__init__(); self._n = name
     def get_name(self): return self._n
-    def execute(self, state):
+    def run(self, input):
+        state = input.state
         topic    = state.get("research_topic") or ""
         findings = state.get("research_findings") or []
         sections = "\n\n".join(
@@ -242,12 +250,7 @@ _definition = {
 }
 
 _engine = ng.GraphEngine.compile(_definition, ng.NodeContext())
-# compile() already sizes the pool to hardware_concurrency(), which
-# covers FANOUT for typical machines. NG_WORKER_COUNT is honored only
-# if explicitly set, so legacy bench invocations still pin the old
-# `set_worker_count(4)` ceiling for A/B comparison.
-if "NG_WORKER_COUNT" in os.environ:
-    _engine.set_worker_count(int(os.environ["NG_WORKER_COUNT"]))
+_engine.set_worker_count(NG_WORKER_COUNT)
 if USE_INMEMORY or LLM_MOCK_MS >= 0:
     _engine.set_checkpoint_store(ng.InMemoryCheckpointStore())
 elif PG_DSN and getattr(ng, "_HAVE_POSTGRES", False):

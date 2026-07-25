@@ -1,5 +1,7 @@
 # NeoGraph API — Narrative Tour
 
+**Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
+
 This document is a **guided narrative tour** of NeoGraph's public API,
 not a complete reference. It walks through the modules in the order
 you'll meet them when building a real agent: foundation types →
@@ -93,7 +95,7 @@ before a hand-written tour is worth the maintenance.
   - [EngineConfig and EngineResources](#engineconfig-and-engineresources)
   - [RunConfig](#runconfig)
   - [RunResult](#runresult)
-  - [GraphEngine](#graphengine-1)
+  - [GraphEngine](#graphengine)
 - [7b. Engine Internals](#7b-engine-internals)
   - [GraphCompiler](#graphcompiler)
   - [Scheduler](#scheduler)
@@ -921,8 +923,8 @@ class GraphNode {
 public:
     virtual ~GraphNode() = default;
 
-    // v0.4 unified dispatch entry. Override this in new code.
-    virtual asio::awaitable<NodeOutput> run(NodeInput in);
+    // The only custom-node dispatch entry.
+    virtual asio::awaitable<NodeOutput> run(NodeInput in) = 0;
 
     virtual std::string get_name() const = 0;
 };
@@ -985,7 +987,7 @@ public:
 };
 ```
 
-> **Legacy chain (removed in v1.0).** Pre-v0.4
+> **Legacy chain (removed in v0.9.0 during v1 preparation).** Pre-v0.4
 > code overrode one of `execute` / `execute_async` / `execute_full` /
 > `execute_full_async` / `execute_stream` / `execute_stream_async` /
 > `execute_full_stream` / `execute_full_stream_async`. Picking the

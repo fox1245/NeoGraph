@@ -1,5 +1,7 @@
 # The Beast — generate · evolve · roll back
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
 > A self-evolving agent that writes its own harness, evolves it under the
 > DSL compiler, and rewinds its execution through the checkpointer.
 > **Generated. Evolved. Rewound. The Beast remains.**

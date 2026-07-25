@@ -1,5 +1,7 @@
 # Example 26 — Postgres-backed Deep Research with HITL
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
 Demonstrates two NeoGraph features end-to-end:
 
 1. **`PostgresCheckpointStore`** — durable checkpoints in real PostgreSQL

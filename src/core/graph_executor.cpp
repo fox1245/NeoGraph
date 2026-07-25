@@ -165,8 +165,8 @@ void NodeExecutor::apply_input(GraphState& state, const json& input) const {
 // execute_node_with_retry_async: inner retry loop
 // =========================================================================
 //
-// Drives node->execute_full_(stream_)async via co_await so a node
-// whose execute_async issues real non-blocking I/O lets the executor
+// Drives node->run(NodeInput) via co_await so a node whose run body
+// issues real non-blocking I/O lets the executor
 // serve other coroutines while this one is waiting. Backoff uses an
 // asio::steady_timer.async_wait so retry waits do not freeze workers.
 // NodeInterrupt and exception semantics match the pre-3.0 sync
@@ -181,13 +181,9 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
     StreamMode stream_mode,
     const RunContext& ctx) {
 
-    // PR 2 (v0.4.0): dispatch via the unified ``run(NodeInput)`` virtual.
-    // ``ctx`` reaches the user-overridable surface for the first time
-    // — new nodes read it directly, legacy nodes that don't override
-    // ``run()`` get the default body forwarding to the existing 8-
-    // virtual chain (priority order preserved). PR 1 plumbed ``ctx``
-    // through every dispatch hop; this is where it lands at the
-    // boundary the user actually sees.
+    // Dispatch through the unified ``run(NodeInput)`` virtual. ``ctx``
+    // and the optional streaming callback reach the user-overridable
+    // surface directly.
 
     auto node_it = nodes_.find(node_name);
     if (node_it == nodes_.end()) {
@@ -248,13 +244,8 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
         std::exception_ptr  retryable_err;
 
         try {
-            // PR 2: single dispatch point. NodeInput bundles the legacy
-            // (state[, cb]) tuple plus the per-run RunContext. The
-            // ``stream_cb`` field is null on the non-stream path so the
-            // default ``run()`` routes through ``execute_full_async``;
-            // non-null on the stream path so it routes through
-            // ``execute_full_stream_async``. Both branches preserve
-            // the legacy default-fallback chain bit-for-bit.
+            // Single dispatch point. NodeInput bundles state, per-run
+            // context, and the optional streaming callback.
             NodeInput in{state, ctx, cb ? &cb : nullptr};
             ok_result.emplace(co_await node_it->second->run(in));
         } catch (const NodeInterrupt&) {

@@ -1,5 +1,7 @@
 # Troubleshooting
 
+**Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
+
 Symptoms first, root causes and fixes after. If you hit something
 that's not here, please open an issue with the symptom — it'll likely
 go on this list afterwards.

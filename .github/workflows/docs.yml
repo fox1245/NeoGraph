@@ -19,11 +19,10 @@ on:
       - 'Doxyfile'
       - 'pyproject.toml'                          # PROJECT_NUMBER source
       - '.github/workflows/docs.yml'
-      - 'docs/**.md'
+      - '**.md'
+      - 'docs/i18n-manifest.json'
+      - 'scripts/check_docs_i18n.py'
       - 'examples/**.cpp'
-      - 'examples/**/README.md'
-      - 'bindings/python/examples/README.md'
-      - 'README.md'
 
   workflow_dispatch:
 
@@ -41,6 +40,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check documentation locale inventory
+        run: python3 scripts/check_docs_i18n.py
 
       - name: Install Doxygen & Graphviz
         run: sudo apt-get update && sudo apt-get install -y doxygen graphviz

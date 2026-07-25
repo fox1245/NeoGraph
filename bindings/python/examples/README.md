@@ -1,5 +1,7 @@
 # Python API examples
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
 Twenty-eight scripts covering the binding surface end-to-end.
 
 ## Setup
@@ -98,10 +100,11 @@ checkpointing in microseconds per step instead of LangGraph's
 Three patterns appear across the examples:
 
 1. **Python custom nodes** (01, 03, 04, 07, 09, 10, 11, 12, 13)
-   subclass `neograph_engine.GraphNode` and override `execute(state)`
-   or `execute_full(state)`. The engine dispatches into Python under
-   GIL handling — fan-out workers each acquire the GIL re-entrantly
-   so concurrent custom nodes don't deadlock.
+   subclass `neograph_engine.GraphNode` and implement `run(input)`.
+   Read channels from `input.state`, use `input.stream_cb` when present,
+   and return writes, `Command`, `Send`, or `NodeResult`. The engine
+   dispatches into Python under GIL handling so concurrent custom nodes
+   do not deadlock.
 
 2. **Python tools** (02, 06, 07) subclass `neograph_engine.Tool` and
    pass instances into `NodeContext(tools=[…])`. The engine takes

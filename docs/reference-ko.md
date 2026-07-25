@@ -1,862 +1,1030 @@
-# NeoGraph API 내러티브 투어 (한국어)
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=6780e2507de2b228368944012cc9ad6c04e504aced4b69b172f87ef51e90ff69 -->
+# NeoGraph API — 내러티브 투어
 
-> NeoGraph -- C++ 그래프 에이전트 엔진 라이브러리
->
-> 버전: 1.0 | 네임스페이스: `neograph`, `neograph::graph`, `neograph::llm`, `neograph::mcp`, `neograph::util`
+**Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 
-이 문서는 NeoGraph의 권장 사용 경로를 순서대로 설명하는 투어이며 전체 타입
-목록이 아니다. 모든 public 타입과 멤버의 canonical reference는 public header에서
-매 push마다 생성되는 [Doxygen](https://fox1245.github.io/NeoGraph/)을 사용한다.
-여기서는 실제 agent를 만들 때 자주 만나는 core, graph, LLM, MCP API에 집중한다.
+이 문서는 NeoGraph 공개 API를 안내하는 **내러티브 투어**이며,
+완전한 참조 문서가 아니다. 실제 에이전트를 만들 때 만나게 될 모듈을
+기초 타입 → 제공자/도구 인터페이스 → 그래프 타입 → 엔진 → 체크포인트 저장소 →
+provider/tool interfaces → graph types → engine → checkpoint store →
+다중 LLM → MCP 순서로 살펴본다. 아래 모양은 master
+HEAD 기준이며 `include/neograph/`를 대조해 확인했다. 다만 다음 모듈은
+(`neograph::a2a`, `neograph::acp`, `neograph::async`,
+`SqliteCheckpointStore`, `PostgresCheckpointStore`,
+`RateLimitedProvider`, `NodeCache`, `AsyncTool`, `create_deep_research_graph`)
+이 투어에서 다루지 않는 **헤더 공개 API를 포함한다**.
+
+> **위의 모든 모듈을 포함해 타입별 전체 API 표면을 보려면,
+> [fox1245.github.io/NeoGraph/](https://fox1245.github.io/NeoGraph/)의
+> Doxygen 출력을 사용하라. 헤더에서 직접 생성되며 master에 push할 때마다
+> 갱신된다. 이 내러티브 투어는 권장 진입점이고, Doxygen이 정식 참조 문서다.**
+
+이렇게 나누면 내러티브는 끝까지 읽을 수 있을 만큼 작게 유지되고,
+자동 생성 Doxygen은 다음을 보장한다.
+공개 API와 문서 표면이 어긋나지 않으며, `include/neograph/`와 1:1로
+대응하는 모양을 유지한다.
+
+**모듈 한눈에 보기:**
+
+| 모듈 | 네임스페이스 | 설명 | 투어 | Doxygen |
+|--------|-----------|-------------|------|---------|
+| 핵심 | `neograph` | 기초 타입, Provider와 Tool 인터페이스 | [§1–§3](#1-foundation-types) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph.html) |
+| 그래프 | `neograph::graph` | 그래프 엔진, 노드, 상태, 체크포인트, 저장소 | [§4–§11](#4-graph-types) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1graph.html) |
+| LLM | `neograph::llm` | LLM 제공자 구현과 Agent | [§12](#12-llm-module) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1llm.html) |
+| MCP | `neograph::mcp` | Model Context Protocol 클라이언트 | [§13](#13-mcp-module) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1mcp.html) |
+| 유틸리티 | `neograph::util` | 동시성 유틸리티 | [§14](#14-util-module) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1util.html) |
+| **A2A** | `neograph::a2a` | 에이전트 간 JSON-RPC 브리지(클라이언트 + 서버 + 스트리밍) | _Doxygen 전용_ | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1a2a.html) |
+| **ACP** | `neograph::acp` | Agent Client Protocol — stdio 기반 편집기↔에이전트 양방향 RPC | _Doxygen 전용_ | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1acp.html) |
+| **Async** | `neograph::async` | Asio HTTP/SSE/WS 도우미, ConnPool, run_sync | _Doxygen 전용_ | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1async.html) |
+
+The three "_Doxygen 전용_" rows are net-new modules added across
+recent audit and protocol-bridge work. They have full headers under
+`include/neograph/{a2a,acp,async}/` and are exercised by ctest
+suites, but writing dedicated narrative sections has been deferred
+in favour of pointing to Doxygen — both because they're large
+(A2A alone is ~5 classes + types module + caller node) and because
+new modules tend to keep evolving for one or two more releases
+before a hand-written tour is worth the maintenance.
+
+**편의 헤더:** `#include <neograph/neograph.h>`에는 전체 핵심 API와 그래프 엔진 API가 포함된다.
 
 ---
 
 ## 목차
 
-1. [기본 타입 (`neograph/types.h`)](#1-기본-타입)
-2. [Provider 인터페이스 (`neograph/provider.h`)](#2-provider-인터페이스)
-3. [Tool 인터페이스 (`neograph/tool.h`)](#3-tool-인터페이스)
-4. [그래프 타입 (`neograph/graph/types.h`)](#4-그래프-타입)
-5. [GraphState (`neograph/graph/state.h`)](#5-graphstate)
-6. [GraphNode (`neograph/graph/node.h`)](#6-graphnode)
-7. [GraphEngine (`neograph/graph/engine.h`)](#7-graphengine)
-7b. [엔진 내부 구성 요소](#7b-엔진-내부-구성-요소) — Compiler / Scheduler / Coordinator / NodeExecutor
-8. [체크포인트 (`neograph/graph/checkpoint.h`)](#8-체크포인트)
-9. [Store (`neograph/graph/store.h`)](#9-store)
-10. [로더 / 레지스트리 (`neograph/graph/loader.h`)](#10-로더--레지스트리)
-11. [ReAct 그래프 (`neograph/graph/react_graph.h`)](#11-react-그래프)
-12. [LLM 모듈 (`neograph/llm/`)](#12-llm-모듈)
-13. [MCP 모듈 (`neograph/mcp/`)](#13-mcp-모듈)
-14. [유틸리티 (`neograph/util/`)](#14-유틸리티)
+- [1. Foundation Types](#1-foundation-types)
+  - [ToolCall](#toolcall)
+  - [ChatMessage](#chatmessage)
+  - [ChatTool](#chattool)
+  - [ChatCompletion](#chatcompletion)
+  - [Helper Functions](#helper-functions)
+  - [ADL Serialization](#adl-serialization)
+- [2. Provider Interface](#2-provider-interface)
+  - [StreamCallback](#streamcallback)
+  - [CompletionParams](#completionparams)
+  - [Provider](#provider)
+- [3. Tool Interface](#3-tool-interface)
+  - [Tool](#tool)
+- [4. Graph Types](#4-graph-types)
+  - [ReducerType](#reducertype)
+  - [ReducerFn](#reducerfn)
+  - [Channel](#channel)
+  - [ChannelWrite](#channelwrite)
+  - [NodeInterrupt](#nodeinterrupt)
+  - [Send](#send)
+  - [Command](#command)
+  - [RetryPolicy](#retrypolicy)
+  - [StreamMode](#streammode)
+  - [Edge](#edge)
+  - [ConditionalEdge](#conditionaledge)
+  - [NodeContext](#nodecontext)
+  - [GraphEvent](#graphevent)
+  - [GraphStreamCallback](#graphstreamcallback)
+  - [NodeResult](#noderesult)
+  - [ConditionFn](#conditionfn)
+  - [Constants](#constants)
+- [5. GraphState](#5-graphstate)
+- [6. GraphNode](#6-graphnode)
+  - [GraphNode (abstract)](#graphnode-abstract)
+  - [LLMCallNode](#llmcallnode)
+  - [ToolDispatchNode](#tooldispatchnode)
+  - [IntentClassifierNode](#intentclassifiernode)
+  - [SubgraphNode](#subgraphnode)
+- [7. GraphEngine](#7-graphengine)
+  - [EngineConfig and EngineResources](#engineconfig-and-engineresources)
+  - [RunConfig](#runconfig)
+  - [RunResult](#runresult)
+  - [GraphEngine](#graphengine)
+- [7b. Engine Internals](#7b-engine-internals)
+  - [GraphCompiler](#graphcompiler)
+  - [Scheduler](#scheduler)
+  - [CheckpointCoordinator](#checkpointcoordinator)
+  - [NodeExecutor](#nodeexecutor)
+- [8. Checkpoint](#8-checkpoint)
+  - [Checkpoint (struct)](#checkpoint-struct)
+  - [CheckpointStore](#checkpointstore)
+  - [InMemoryCheckpointStore](#inmemorycheckpointstore)
+- [9. Store](#9-store)
+  - [Namespace](#namespace)
+  - [StoreItem](#storeitem)
+  - [Store (abstract)](#store-abstract)
+  - [InMemoryStore](#inmemorystore)
+- [10. Loader](#10-loader)
+  - [ReducerRegistry](#reducerregistry)
+  - [ConditionRegistry](#conditionregistry)
+  - [NodeFactory](#nodefactory)
+  - [Built-in Registrations](#built-in-registrations)
+- [11. React Graph](#11-react-graph)
+- [12. LLM Module](#12-llm-module)
+  - [OpenAIProvider](#openaiprovider)
+  - [SchemaProvider](#schemaprovider)
+  - [Agent](#agent)
+  - [json_path Utilities](#json_path-utilities)
+- [13. MCP Module](#13-mcp-module)
+  - [MCPTool](#mcptool)
+  - [MCPClient](#mcpclient)
+- [14. Util Module](#14-util-module)
+  - [RequestQueue](#requestqueue)
+- [Usage Examples](#usage-examples)
+  - [Minimal ReAct Agent](#minimal-react-agent)
+  - [Custom Graph with Conditional Routing](#custom-graph-with-conditional-routing)
+  - [Human-in-the-Loop with Checkpointing](#human-in-the-loop-with-checkpointing)
+  - [Dynamic Fan-Out with Send](#dynamic-fan-out-with-send)
+  - [Routing Override with Command](#routing-override-with-command)
+  - [SchemaProvider Multi-LLM Support](#schemaprovider-multi-llm-support)
+  - [MCP Tool Integration](#mcp-tool-integration)
 
 ---
 
-## 빠른 시작
+## 1. Foundation Types
 
-NeoGraph의 모든 핵심 API는 단일 헤더로 포함할 수 있다.
+**Header:** `<neograph/types.h>`
+**Namespace:** `neograph`
 
-```cpp
-#include <neograph/neograph.h>   // 핵심 타입 + 그래프 엔진 전체
-```
+Core data types shared across all modules. These model the LLM chat protocol:
+messages, tool calls, completions, and their JSON serialization.
 
-LLM provider, MCP, 유틸리티는 별도 헤더를 포함한다.
+### ToolCall
 
-```cpp
-#include <neograph/llm/openai_provider.h>  // OpenAI 호환 provider
-#include <neograph/llm/schema_provider.h>  // 멀티 벤더 provider
-#include <neograph/llm/agent.h>            // ReAct 에이전트 루프
-#include <neograph/mcp/client.h>           // MCP 클라이언트
-#include <neograph/util/request_queue.h>   // lock-free 워커풀
-```
-
----
-
-## 1. 기본 타입
-
-**헤더:** `neograph/types.h`
-**네임스페이스:** `neograph`
-
-LLM API 통신에 필요한 기초 데이터 구조체와 JSON 직렬화 헬퍼를 정의한다.
-
-### 1.1 ToolCall
-
-LLM이 요청한 도구 호출 하나를 나타낸다.
+Represents a single tool invocation requested by the LLM.
 
 ```cpp
 struct ToolCall {
-    std::string id;         // 호출 고유 식별자 (예: "call_abc123")
-    std::string name;       // 도구 이름 (예: "calculator")
-    std::string arguments;  // JSON 문자열 형태의 인자
+    std::string id;         // Unique identifier assigned by the LLM
+    std::string name;       // Name of the tool to call
+    std::string arguments;  // JSON-encoded string of arguments
 };
 ```
 
-| 필드 | 타입 | 설명 |
-|------|------|------|
-| `id` | `std::string` | provider가 부여한 호출 ID. tool 결과를 매칭할 때 사용 |
-| `name` | `std::string` | 호출할 도구의 이름 |
-| `arguments` | `std::string` | JSON 문자열. 실행 시 `json::parse()`로 파싱 |
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `std::string` | Unique identifier for this tool call (assigned by the LLM) |
+| `name` | `std::string` | Name of the tool function to invoke |
+| `arguments` | `std::string` | JSON-encoded string containing the call arguments |
 
-ADL 기반 JSON 직렬화(`to_json` / `from_json`)가 제공된다.
+### ChatMessage
 
----
-
-### 1.2 ChatMessage
-
-하나의 대화 메시지를 표현한다. 역할(role)에 따라 사용되는 필드가 달라진다.
+A single message in a conversation. Covers all roles: system, user, assistant, and tool.
 
 ```cpp
 struct ChatMessage {
-    std::string role;                    // "system" | "user" | "assistant" | "tool"
-    std::string content;                 // 텍스트 내용
-    std::vector<ToolCall> tool_calls;    // assistant 메시지의 도구 호출 목록
-    std::string tool_call_id;           // tool 결과 메시지의 호출 ID
-    std::string tool_name;              // tool 결과 메시지의 도구 이름
-    std::vector<std::string> image_urls; // Vision용 이미지 (base64 data URL 또는 HTTP URL)
+    std::string role;                    // "system", "user", "assistant", or "tool"
+    std::string content;                 // Text content of the message
+    std::vector<ToolCall> tool_calls;    // Tool calls (assistant messages only)
+    std::string tool_call_id;           // ID of the tool call this responds to (tool messages)
+    std::string tool_name;              // Name of the tool (tool messages)
+    std::vector<std::string> image_urls; // base64 data URLs or HTTP URLs for Vision
 };
 ```
 
-| role | 주로 쓰는 필드 |
-|------|---------------|
-| `"system"` | `content` |
-| `"user"` | `content`, `image_urls` (Vision) |
-| `"assistant"` | `content`, `tool_calls` |
-| `"tool"` | `content`, `tool_call_id`, `tool_name` |
+| Field | Type | Description |
+|-------|------|-------------|
+| `role` | `std::string` | Message role: `"system"`, `"user"`, `"assistant"`, or `"tool"` |
+| `content` | `std::string` | Text content of the message |
+| `tool_calls` | `std::vector<ToolCall>` | Tool calls requested by the assistant (empty for non-assistant messages) |
+| `tool_call_id` | `std::string` | ID linking this tool result to its originating tool call |
+| `tool_name` | `std::string` | Name of the tool that produced this result |
+| `image_urls` | `std::vector<std::string>` | Image URLs for multi-modal/vision messages. Accepts `data:image/...;base64,...` or `https://...` |
 
----
+### ChatTool
 
-### 1.3 ChatTool
-
-LLM에 전달할 도구 정의.
+Defines a tool available to the LLM.
 
 ```cpp
 struct ChatTool {
-    std::string name;        // 도구 이름
-    std::string description; // 도구 설명 (LLM이 참고)
-    json parameters;         // JSON Schema 객체 (인자 스키마)
+    std::string name;        // Tool name (unique identifier)
+    std::string description; // Human-readable description for the LLM
+    json parameters;         // JSON Schema describing the tool's parameters
 };
 ```
 
-**사용 예:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `std::string` | Unique tool name |
+| `description` | `std::string` | Description shown to the LLM to explain the tool's purpose |
+| `parameters` | `json` | JSON Schema object describing accepted parameters |
 
-```cpp
-neograph::ChatTool weather_tool{
-    "get_weather",
-    "지정한 도시의 현재 날씨를 조회합니다.",
-    {{"type", "object"},
-     {"properties", {
-         {"city", {{"type", "string"}, {"description", "도시 이름"}}}
-     }},
-     {"required", {"city"}}}
-};
-```
+### ChatCompletion
 
----
-
-### 1.4 ChatCompletion
-
-LLM 호출 결과. 응답 메시지와 토큰 사용량을 포함한다.
+Result of a single LLM completion call.
 
 ```cpp
 struct ChatCompletion {
-    ChatMessage message;          // 응답 메시지
-    std::string stop_reason = "unknown"; // 정규화한 종료 사유
+    ChatMessage message;   // The assistant's response message
+    std::string stop_reason = "unknown";
     struct Usage {
-        int prompt_tokens = 0;    // 입력 토큰 수
-        int completion_tokens = 0; // 출력 토큰 수
-        int total_tokens = 0;      // 합계
+        int prompt_tokens = 0;      // Tokens in the prompt
+        int completion_tokens = 0;  // Tokens in the completion
+        int total_tokens = 0;       // Total tokens used
     } usage;
 };
 ```
 
-`stop_reason`은 Provider가 응답을 끝낸 이유를 공통 값으로 바꿔 담는다.
-값은 `end_turn`, `max_tokens`, `stop_sequence`, `tool_use`,
-`content_filter`, `refusal`, `unknown` 중 하나다. 이 필드가 추가되어
-`ChatCompletion`의 C++ 바이너리 구조가 바뀌었으므로, 이 버전으로
-업그레이드할 때는 이를 사용하는 애플리케이션과 공유 라이브러리를 다시
-빌드해야 한다.
+| Field | Type | Description |
+|-------|------|-------------|
+| `message` | `ChatMessage` | The assistant's response (may include tool calls) |
+| `stop_reason` | `std::string` | Normalized provider completion reason: `end_turn`, `max_tokens`, `stop_sequence`, `tool_use`, `content_filter`, `refusal`, or `unknown` |
+| `usage.prompt_tokens` | `int` | Number of tokens in the input prompt |
+| `usage.completion_tokens` | `int` | Number of tokens in the generated completion |
+| `usage.total_tokens` | `int` | Total tokens consumed (prompt + completion) |
 
----
+`stop_reason` was added to the public C++ struct. Recompile applications and
+shared-library consumers when upgrading to this release because the struct's
+binary layout changed.
 
-### 1.5 헬퍼 함수
+### Helper Functions
 
-#### `messages_to_json()`
+#### `messages_to_json`
 
-`ChatMessage` 벡터를 OpenAI API 형식 JSON 배열로 변환한다.
-tool call, tool result, Vision(multi-modal) 메시지를 자동으로 올바른 형식으로 직렬화한다.
+Converts a message vector to the OpenAI-compatible JSON wire format. Handles tool call
+messages, tool result messages, and multi-modal (vision) messages with appropriate structure.
 
 ```cpp
 json messages_to_json(const std::vector<ChatMessage>& messages);
 ```
 
-**반환값:** OpenAI Chat API `messages` 배열 형식의 `json`.
+**Returns:** A `json` array where each element is a properly formatted message object.
 
-#### `tools_to_json()`
+#### `tools_to_json`
 
-`ChatTool` 벡터를 OpenAI API `tools` 배열 형식으로 변환한다.
+Converts tool definitions to the OpenAI-compatible JSON wire format, wrapping each tool
+in a `{type: "function", function: {...}}` envelope.
 
 ```cpp
 json tools_to_json(const std::vector<ChatTool>& tools);
 ```
 
-**반환값:** `[{"type":"function","function":{...}}, ...]` 형식의 `json`.
+**Returns:** A `json` array of tool definitions.
 
-#### `parse_response_message()`
+#### `parse_response_message`
 
-OpenAI API 응답의 `choices[i]` 객체에서 `ChatMessage`를 추출한다.
+Parses a single choice object from an OpenAI-format API response into a `ChatMessage`.
+Extracts the assistant's content and any tool calls from the `message` field.
 
 ```cpp
 ChatMessage parse_response_message(const json& choice);
 ```
 
-| 매개변수 | 설명 |
-|---------|------|
-| `choice` | `choices` 배열의 원소. `message` 키를 포함해야 함 |
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `choice` | `const json&` | A single element from the `choices` array (must contain a `message` field) |
 
-**반환값:** 파싱된 `ChatMessage`. tool_calls가 있으면 함께 추출된다.
+**Returns:** A `ChatMessage` with role, content, and any tool calls populated.
+
+### ADL Serialization
+
+Argument-Dependent Lookup (ADL) serialization functions for nlohmann/json integration.
+These allow direct use with `json j = my_tool_call;` and `my_tool_call = j.get<ToolCall>()`.
+
+```cpp
+void to_json(json& j, const ToolCall& tc);
+void from_json(const json& j, ToolCall& tc);
+
+void to_json(json& j, const ChatMessage& msg);
+void from_json(const json& j, ChatMessage& msg);
+```
+
+All fields use `value()` with empty-string defaults, making deserialization tolerant
+of missing fields.
 
 ---
 
-## 2. Provider 인터페이스
+## 2. Provider Interface
 
-**헤더:** `neograph/provider.h`, `neograph/completion_provider.h`
-**네임스페이스:** `neograph`
+**Headers:** `<neograph/provider.h>`, `<neograph/completion_provider.h>`
+**Namespace:** `neograph`
 
-LLM provider의 추상 인터페이스를 정의한다. OpenAI, Claude, Gemini 등 모든 provider가 이 인터페이스를 구현한다.
+The abstract interface for LLM backends. Implement this to add support for any LLM API.
 
-> **새 커스텀 Provider를 작성하신다면?** `CompletionProvider`를 상속하고
-> `do_invoke()` 하나를 재정의하세요. 기존 `Provider` 구현과 `complete*` 호출은
-> 제거 계획 없이 계속 지원합니다. 자세한 내용은
-> [`ASYNC_GUIDE.md` §9.3](ASYNC_GUIDE.md#93-provider)을 참고하세요.
+> **Writing a new Provider implementation?** Derive from
+> `CompletionProvider` and implement `do_invoke()`. Existing `Provider`
+> subclasses and `complete*` callers remain supported with no removal planned.
+> See [`ASYNC_GUIDE.md` §9.3](ASYNC_GUIDE.md#93-provider).
 
-### 2.1 StreamCallback
+### StreamCallback
 
-스트리밍 응답에서 토큰 단위로 호출되는 콜백.
+Type alias for the streaming token callback.
 
 ```cpp
 using StreamCallback = std::function<void(const std::string& chunk)>;
 ```
 
----
+Called once per token (or chunk) during streaming completion. The `chunk` parameter
+contains the incremental text fragment.
 
-### 2.2 CompletionParams
+### CompletionParams
 
-LLM 호출 매개변수.
+Parameters for a single LLM completion request.
 
 ```cpp
 struct CompletionParams {
-    std::string model;                  // 모델 이름 (예: "gpt-4o-mini")
-    std::vector<ChatMessage> messages;  // 대화 기록
-    std::vector<ChatTool> tools;        // 사용 가능한 도구 목록
-    float temperature = 0.7f;           // 샘플링 온도
-    int max_tokens = -1;                // 최대 출력 토큰 (-1이면 provider 기본값)
+    std::string model;                // Model identifier (e.g. "gpt-4o")
+    std::vector<ChatMessage> messages; // Conversation history
+    std::vector<ChatTool> tools;      // Available tools (empty = no tool use)
+    float temperature = 0.7f;         // Sampling temperature
+    int max_tokens = -1;              // Max tokens to generate (-1 = provider default)
 };
 ```
 
----
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `model` | `std::string` | `""` | Model to use. If empty, the provider's default model is used |
+| `messages` | `std::vector<ChatMessage>` | | Conversation messages in chronological order |
+| `tools` | `std::vector<ChatTool>` | `{}` | Tools available for the LLM to call. Empty disables tool use |
+| `temperature` | `float` | `0.7f` | Sampling temperature (0.0 = deterministic, higher = more random) |
+| `max_tokens` | `int` | `-1` | Maximum tokens to generate. `-1` lets the provider decide |
 
-### 2.3 Provider (추상 클래스)
+### Provider
 
-기존 구현과 호출자를 위한 안정 호환 인터페이스다. 컴파일러 폐기 경고가 없고
-제거 계획도 없다. 새 구현에는 아래 `CompletionProvider`를 권장한다.
+Stable compatibility base class for LLM providers. Existing implementations and
+callers may continue to use this interface. New implementations should prefer
+`CompletionProvider` below.
 
 ```cpp
 class Provider {
 public:
     virtual ~Provider() = default;
 
+    // Synchronous completion. Default body bridges to complete_async via
+    // run_sync — backends that override the async peer get sync for
+    // free, and vice versa. Override at least one side.
     virtual ChatCompletion complete(const CompletionParams& params);
 
+    // Async completion (asio coroutine). Default body co_returns
+    // complete(params).
     virtual asio::awaitable<ChatCompletion>
     complete_async(const CompletionParams& params);
 
+    // Streaming completion (sync). Default emits the collected result once.
     virtual ChatCompletion complete_stream(const CompletionParams& params,
                                            const StreamCallback& on_chunk);
 
+    // Async streaming peer. The default runs complete_stream on a worker
+    // thread and delivers callbacks on the awaiting executor.
     virtual asio::awaitable<ChatCompletion>
     complete_stream_async(const CompletionParams& params,
                           const StreamCallback& on_chunk);
 
+    // Stable callback-selected compatibility entry point.
     virtual asio::awaitable<ChatCompletion>
     invoke(const CompletionParams& params,
            StreamCallback on_chunk = nullptr);
 
+    // Only pure virtual on this interface — every backend must name
+    // itself.
     virtual std::string get_name() const = 0;
 };
 ```
 
-| 메서드 | 설명 |
-|--------|------|
-| `complete()` | 블로킹 호출. 전체 응답이 생성된 후 반환 |
-| `complete_async()` | 코루틴 기반 비동기 호출 |
-| `complete_stream()` | 토큰이 생성될 때마다 `on_chunk`를 호출. 최종 `ChatCompletion`도 반환 |
-| `complete_stream_async()` | 비동기 스트리밍 호출 |
-| `invoke()` | callback 유무로 수집/스트리밍을 고르는 기존 호환 진입점 |
-| `get_name()` | provider 식별 문자열 |
+| Method | Description |
+|--------|-------------|
+| `complete(params)` | Blocking completion. Default-bridges to `complete_async` via `neograph::async::run_sync`. |
+| `complete_async(params)` | Coroutine peer. Default `co_return complete(params)`. |
+| `complete_stream(params, on_chunk)` | Streaming completion. Calls `on_chunk` per chunk, returns the assembled `ChatCompletion`. |
+| `complete_stream_async(params, on_chunk)` | Async streaming peer (Round 4). Same `on_chunk` semantics. |
+| `invoke(params, on_chunk)` | Callback-selected compatibility entry point used by existing engine code. |
+| `get_name()` | Human-readable provider identifier (only pure virtual). |
 
-각 동기/비동기 짝 중 적어도 하나는 재정의해야 한다. 기존 구현은 이 계약을
-그대로 사용해도 된다. 호환성·보안 수정은 계속 적용하지만, 새 기능은 명시적
-요청 API에만 추가될 수 있다.
+**Override-at-least-one-side contract**: each `(sync, async)` pair
+defaults to the other; overriding neither yields infinite mutual
+recursion at call time. Same shape as `CheckpointStore`'s sync↔async
+bridge below.
 
-### 2.4 CompletionProvider (새 구현에 권장)
+These methods have no planned removal and no deprecation warnings. Compatibility
+and security fixes continue to apply; new capabilities may be exposed only through
+the explicit request API.
 
-`CompletionRequest`가 수집과 스트리밍을 명시적으로 구분하므로 callback이 없는
-스트리밍 요청도 표현할 수 있다. 구현자는 `do_invoke()` 하나만 재정의한다.
+### CompletionProvider
+
+Recommended base class for new C++ provider implementations. It preserves every
+`Provider` entry point through final adapters while giving implementations one
+request-mode-aware override.
 
 ```cpp
 class MyProvider : public neograph::CompletionProvider {
 public:
-    asio::awaitable<neograph::ChatCompletion>
-    do_invoke(neograph::CompletionRequest request) override {
+    asio::awaitable<ChatCompletion>
+    do_invoke(CompletionRequest request) override {
         if (request.streaming()) {
-            // callback이 없어도 스트리밍 전송을 사용한다.
-            // callback이 있으면 request.on_chunk()(chunk)로 전달한다.
+            // Use the streaming transport even when no observer is attached.
+            // If present, request.on_chunk() receives incremental text.
         } else {
-            // 수집 전송으로 전체 응답을 받는다.
+            // Use the collect transport.
         }
         co_return result;
     }
 
-    std::string get_name() const override { return "my_provider"; }
+    std::string get_name() const override { return "my-provider"; }
 };
 ```
 
-새 직접 호출은 전송 방식을 명시한다.
+New direct calls should make transport mode explicit:
 
 ```cpp
 auto full = co_await provider.invoke_request(
-    neograph::CompletionRequest::collect(params));
+    CompletionRequest::collect(params));
 auto streamed = co_await provider.invoke_request(
-    neograph::CompletionRequest::stream(params, on_chunk));
+    CompletionRequest::stream(params, on_chunk));
 ```
 
 ---
 
-## 3. Tool 인터페이스
+## 3. Tool Interface
 
-**헤더:** `neograph/tool.h`
-**네임스페이스:** `neograph`
+**Header:** `<neograph/tool.h>`
+**Namespace:** `neograph`
 
-LLM이 호출할 수 있는 도구의 추상 인터페이스.
+Abstract interface for tools that LLMs can call. Implement this to expose functions
+to the agent.
 
-> **커스텀 Tool을 작성하신다면?** sync 용으로 `Tool`을 상속할지,
-> async 용으로 `AsyncTool`을 상속할지 둘 중 하나만 골라야 함 (동시
-> 상속 불가 — `AsyncTool::execute`가 `final`).
-> [`ASYNC_GUIDE.md` §9.6](ASYNC_GUIDE.md#96-tool-vs-asynctool) 참조.
+> **Writing a custom Tool subclass?** See
+> [`ASYNC_GUIDE.md` §9.6](ASYNC_GUIDE.md#96-tool-vs-asynctool) for
+> when to inherit `Tool` (sync) vs `AsyncTool` (async). The two are
+> mutually exclusive — pick one.
+
+### Tool
 
 ```cpp
 class Tool {
 public:
     virtual ~Tool() = default;
 
-    // LLM에 전달할 도구 정의 (이름, 설명, 파라미터 스키마)
+    // Returns the tool's definition (name, description, parameter schema)
     virtual ChatTool get_definition() const = 0;
 
-    // 도구 실행. JSON 인자를 받아 문자열 결과를 반환
+    // Executes the tool with the given arguments, returns result as string
     virtual std::string execute(const json& arguments) = 0;
 
-    // 도구 이름
+    // Returns the tool's unique name
     virtual std::string get_name() const = 0;
 };
 ```
 
-**구현 예:**
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `get_definition()` | `ChatTool` | Returns the tool's metadata including JSON Schema for parameters |
+| `execute(arguments)` | `std::string` | Runs the tool with parsed JSON arguments. Returns the result as a string that will be sent back to the LLM |
+| `get_name()` | `std::string` | Unique identifier for this tool |
+
+**Example implementation:**
 
 ```cpp
-class CalculatorTool : public neograph::Tool {
+class WeatherTool : public neograph::Tool {
 public:
-    neograph::ChatTool get_definition() const override {
-        return {
-            "calculator",
-            "수학 표현식을 계산합니다.",
-            {{"type", "object"},
-             {"properties", {
-                 {"expression", {{"type", "string"}, {"description", "계산식"}}}
-             }},
-             {"required", {"expression"}}}
-        };
+    ChatTool get_definition() const override {
+        return {"get_weather", "Get current weather for a city", json::parse(R"({
+            "type": "object",
+            "properties": {
+                "city": {"type": "string", "description": "City name"}
+            },
+            "required": ["city"]
+        })")};
     }
 
-    std::string execute(const neograph::json& args) override {
-        std::string expr = args.value("expression", "");
-        // 계산 로직 ...
-        return R"({"result": 42})";
+    std::string execute(const json& args) override {
+        std::string city = args.at("city");
+        return "Weather in " + city + ": 22C, sunny";
     }
 
-    std::string get_name() const override { return "calculator"; }
+    std::string get_name() const override { return "get_weather"; }
 };
 ```
 
 ---
 
-## 4. 그래프 타입
+## 4. Graph Types
 
-**헤더:** `neograph/graph/types.h`
-**네임스페이스:** `neograph::graph`
+**Header:** `<neograph/graph/types.h>`
+**Namespace:** `neograph::graph`
 
-그래프 엔진의 핵심 타입들을 정의한다.
+Core types for the graph engine: channels, edges, events, and control-flow primitives.
 
-### 4.1 ReducerType
+### ReducerType
 
-채널에 값을 기록할 때 기존 값과 새 값을 합치는 전략.
+Determines how channel values are merged when written by multiple nodes.
 
 ```cpp
 enum class ReducerType {
-    OVERWRITE,  // 새 값으로 덮어쓰기 (기본값)
-    APPEND,     // 기존 배열에 추가 (배열 채널용)
-    CUSTOM      // 사용자 정의 리듀서 함수
+    OVERWRITE,  // New value replaces old value
+    APPEND,     // New value is appended (for array channels)
+    CUSTOM      // User-defined reducer function
 };
 ```
 
-#### ReducerFn
+### ReducerFn
 
-`CUSTOM` 리듀서의 함수 시그니처.
+Signature for custom reducer functions.
 
 ```cpp
 using ReducerFn = std::function<json(const json& current, const json& incoming)>;
 ```
 
----
+| Parameter | Description |
+|-----------|-------------|
+| `current` | The current channel value |
+| `incoming` | The new value being written |
 
-### 4.2 Channel
+**Returns:** The merged result that becomes the new channel value.
 
-상태 그래프의 단일 채널. 이름, 리듀서 타입, 현재 값, 버전을 보유한다.
+### Channel
+
+Internal representation of a named, versioned state channel with an associated reducer.
 
 ```cpp
 struct Channel {
-    std::string name;
-    ReducerType reducer_type = ReducerType::OVERWRITE;
-    ReducerFn   reducer;       // CUSTOM일 때만 사용
-    json        value;         // 현재 값
-    uint64_t    version = 0;   // 쓰기마다 증가
+    std::string name;                              // Channel name
+    ReducerType reducer_type = ReducerType::OVERWRITE; // Merge strategy
+    ReducerFn   reducer;                           // Custom reducer (when type == CUSTOM)
+    json        value;                             // Current value
+    uint64_t    version = 0;                       // Write counter
 };
 ```
 
----
+### ChannelWrite
 
-### 4.3 ChannelWrite
-
-노드가 출력하는 채널 쓰기 하나.
+A single write operation targeting a named channel. Nodes return vectors of these.
 
 ```cpp
 struct ChannelWrite {
-    std::string channel;  // 대상 채널 이름
-    json        value;    // 기록할 값
+    std::string channel;  // Target channel name
+    json        value;    // Value to write (merged via the channel's reducer)
 };
 ```
 
----
+### NodeInterrupt
 
-### 4.4 NodeInterrupt
-
-노드 실행 중 동적으로 breakpoint를 발생시키는 예외.
-HITL(Human-in-the-Loop) 워크플로에서 실행을 중단하고 사용자 입력을 기다릴 때 사용한다.
+Exception type thrown from within a node to trigger a dynamic breakpoint (human-in-the-loop).
+When thrown, execution pauses, a checkpoint is saved, and the interrupt can be resumed later.
 
 ```cpp
 class NodeInterrupt : public std::runtime_error {
 public:
     explicit NodeInterrupt(const std::string& reason);
-    NodeInterrupt(const std::string& reason, json value);   // 딸려 보낼 값까지
-    const std::string& reason() const;   // 사람이 읽을 이유
-    const json&        value()  const;   // 실어 보낸 값 (없으면 null)
-    const std::string& node()   const;   // 멈춘 노드 이름 (실행기가 찍어준다)
+    NodeInterrupt(const std::string& reason, json value);   // with a payload
+    const std::string& reason() const;
+    const json&        value()  const;   // null when no payload was attached
+    const std::string& node()   const;   // stamped by the executor
 };
 ```
 
-**양방향으로 정보가 오간다.** 승인 요청이 성립하려면 노드가 "무엇을 승인받아야
-하는지" 를 내보내고, 사람의 답이 그 노드로 되돌아와야 한다.
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `reason()` | `const std::string&` | The reason string passed to the constructor |
+| `value()` | `const json&` | The structured payload, or null if none was attached |
+| `node()` | `const std::string&` | The node that threw. The executor stamps this — a node body does not know what the graph definition called it |
+
+**The round trip.** An approval prompt needs information to travel in both
+directions: the node says *what* needs approving, and the human's answer has to
+come back to the node that asked.
 
 ```cpp
 asio::awaitable<NodeResult> run(NodeInput in) override {
-    // 사람의 답. 아무도 답하지 않았으면 비어 있다 — "아직 아무도 안 봤다" 와
-    // "안 된다고 했다" 를 구분할 수 있어야 하므로.
+    // The human's answer. Empty until someone has actually answered — which is
+    // how you tell "nobody has looked yet" from "the answer was no".
     const auto& verdict = in.ctx.resume_value;
 
-    if (amount >= 1000000 && !verdict) {
-        throw NodeInterrupt("고액 결제 승인 필요",
-                            json{{"amount", amount}, {"currency", "KRW"}});
+    if (needs_approval(in.state) && !verdict) {
+        throw NodeInterrupt("shell command needs approval",
+                            json{{"tool", "shell"}, {"cmd", "rm -rf build/"}});
     }
     if (verdict && !verdict->value("approved", false)) {
-        co_return 거절();
+        co_return refused();
     }
-    co_return 처리();
+    co_return proceed();
 }
 ```
 
-호출하는 쪽에서는 예외로 튀어나오지 않는다. 평범한 `RunResult` 로 돌아온다:
+The caller sees the pause as a normal `RunResult` — `NodeInterrupt` is not
+re-thrown at them:
 
 ```cpp
 auto r = engine->run(cfg);
 if (r.interrupted) {
-    r.interrupt_node;                    // "payment" — 어느 노드가 멈췄나
-    r.interrupt_value["reason"];         // 사람이 읽을 이유
-    r.interrupt_value["value"];          // 코드가 분기할 값 (없으면 키 자체가 없음)
-    engine->resume(cfg.thread_id, json{{"approved", true}});   // 답을 실어 재개
+    r.interrupt_node;                          // "risky"  — which node paused
+    r.interrupt_value["reason"];               // the sentence, for a human
+    r.interrupt_value["value"];                // the payload, to branch on
+                                               //   (key absent if none attached)
+    engine->resume(cfg.thread_id, json{{"approved", true}});   // the answer
 }
 ```
 
-`messages` 채널이 있는 그래프라면 `resume_value` 는 지금까지처럼 사용자 발화로도
-들어간다. `ctx.resume_value` 는 채널 이름과 무관하게 항상 동작하는 일반 경로다.
+`resume_value` also arrives as a user turn on a `messages` channel when the
+graph has one, which is how chat-shaped graphs have always received it.
+`ctx.resume_value` is the general path — it works whatever the graph's channels
+are called.
 
-이것이 **동적** 중단이다. 정적 중단(`interrupt_before` / `interrupt_after`) 은
-그래프를 짤 때 정해둔 노드에서 멈추는 것이라, "모델이 위험한 걸 요청했을 때만
-멈춰라" 를 표현하지 못한다.
+This is the *dynamic* form of interruption. The *static* form —
+`interrupt_before` / `interrupt_after` in the graph definition — pauses at a
+node chosen when the graph was written, which cannot express "pause only if the
+model asked for something dangerous".
 
----
+### Send
 
-### 4.5 Send
-
-동적 fan-out 요청. 하나의 노드가 여러 인스턴스로 분기 실행을 요청할 때 사용한다.
-map-reduce 패턴의 "map" 단계에 해당한다.
+Represents a dynamic fan-out request. A node can return `Send` objects to dispatch
+one or more nodes with different inputs, enabling map-reduce patterns.
 
 ```cpp
 struct Send {
-    std::string target_node;  // 실행할 대상 노드 이름
-    json        input;        // 해당 실행에 주입할 채널 값 (채널명 -> 값)
+    std::string target_node;  // Node to dispatch
+    json        input;        // Channel writes for that invocation
 };
 ```
 
-`Send`는 `NodeOutput::sends`에 담아 반환한다. 엔진이 각 Send에 대해
-대상 노드를 개별적으로 실행하고, 결과를 리듀서를 통해 합산한다.
+The engine executes each `Send` target with its own input, then continues the graph
+after all sends complete. Multiple sends to the same node run in sequence.
 
-**사용 예:**
+### Command
 
-```cpp
-asio::awaitable<NodeOutput> run(NodeInput in) override {
-    NodeOutput out;
-    std::vector<std::string> topics = {"AI", "반도체", "양자컴퓨팅"};
-
-    for (const auto& topic : topics) {
-        out.sends.push_back(Send{
-            "researcher",                         // 실행할 노드
-            json({{"topic", topic}})              // 각 실행마다 다른 입력
-        });
-    }
-    co_return out;
-}
-```
-
----
-
-### 4.6 Command
-
-라우팅 오버라이드 + 상태 업데이트를 동시에 수행하는 지시.
-기본 edge 라우팅을 무시하고 특정 노드로 직접 이동할 때 사용한다.
+Combined routing override and state update. A node returns a `Command` to simultaneously
+write state updates AND redirect execution to a specific next node, bypassing normal
+edge routing.
 
 ```cpp
 struct Command {
-    std::string                goto_node;  // 다음에 실행할 노드 (edge 라우팅 무시)
-    std::vector<ChannelWrite>  updates;    // 라우팅 전에 적용할 상태 업데이트
+    std::string               goto_node;  // Next node (overrides edge routing)
+    std::vector<ChannelWrite> updates;    // State updates to apply
 };
 ```
 
-`Command`는 `NodeOutput::command`에 담아 반환한다.
+| Field | Type | Description |
+|-------|------|-------------|
+| `goto_node` | `std::string` | Name of the node to execute next. Overrides normal edge resolution |
+| `updates` | `std::vector<ChannelWrite>` | Channel writes to apply before routing |
 
-**사용 예:**
+### RetryPolicy
 
-```cpp
-asio::awaitable<NodeOutput> run(NodeInput in) override {
-    auto score = in.state.get("score").get<double>();
-    NodeOutput out;
-
-    if (score > 0.8) {
-        out.command = Command{
-            "summarizer",   // 높은 점수 -> 요약 노드로 직행
-            {ChannelWrite{"status", json("approved")}}
-        };
-    } else {
-        out.command = Command{
-            "researcher",   // 낮은 점수 -> 추가 조사
-            {ChannelWrite{"status", json("needs_more_research")}}
-        };
-    }
-    co_return out;
-}
-```
-
----
-
-### 4.7 RetryPolicy
-
-노드 실행 실패 시 재시도 정책.
+Configures automatic retry behavior for node execution failures.
 
 ```cpp
 struct RetryPolicy {
-    int    max_retries        = 0;      // 최대 재시도 횟수 (0 = 재시도 없음)
-    int    initial_delay_ms   = 100;    // 첫 번째 재시도 대기 시간 (ms)
-    float  backoff_multiplier = 2.0f;   // 지수 백오프 배수
-    int    max_delay_ms       = 5000;   // 최대 대기 시간 상한 (ms)
+    int   max_retries        = 0;      // 0 = no retry
+    int   initial_delay_ms   = 100;    // First retry delay in milliseconds
+    float backoff_multiplier = 2.0f;   // Exponential backoff factor
+    int   max_delay_ms       = 5000;   // Maximum delay cap in milliseconds
+    float jitter_pct         = 0.0f;   // Per-retry jitter as a fraction of
+                                       // the computed delay (0.25 = ±25%).
+                                       // Default 0 = back-compat. Per-thread
+                                       // RNG, no global state.
 };
 ```
 
-재시도 간 대기 시간은 `initial_delay_ms * backoff_multiplier^(attempt-1)` 으로 계산되며,
-`max_delay_ms`를 초과하지 않는다.
+Delay for retry `n` is `min(initial_delay_ms * backoff_multiplier^n, max_delay_ms)`,
+optionally multiplied by `1 + uniform(-jitter_pct, +jitter_pct)` when
+`jitter_pct > 0`.
 
----
+### StreamMode
 
-### 4.8 StreamMode
-
-스트리밍 이벤트 필터링을 위한 비트플래그.
+Bitfield flags controlling which events are emitted during streaming execution.
 
 ```cpp
 enum class StreamMode : uint8_t {
-    EVENTS   = 0x01,   // NODE_START, NODE_END, INTERRUPT, ERROR
-    TOKENS   = 0x02,   // LLM_TOKEN
-    VALUES   = 0x04,   // 각 단계 후 전체 상태
-    UPDATES  = 0x08,   // 노드별 채널 쓰기 (delta)
-    DEBUG    = 0x10,    // 내부 디버그 정보 (재시도, 라우팅 결정 등)
-    ALL      = 0xFF    // 모든 이벤트
+    EVENTS  = 0x01,  // NODE_START, NODE_END, INTERRUPT, ERROR
+    TOKENS  = 0x02,  // LLM_TOKEN (individual tokens from streaming LLM calls)
+    VALUES  = 0x04,  // Full state snapshot after each step
+    UPDATES = 0x08,  // Channel write deltas per node
+    DEBUG   = 0x10,  // Internal debug info (retry attempts, routing decisions)
+    ALL     = 0xFF   // All event types
 };
 ```
 
-비트 OR로 조합 가능:
+Combine flags with bitwise OR:
 
 ```cpp
-config.stream_mode = StreamMode::EVENTS | StreamMode::TOKENS;
+StreamMode mode = StreamMode::EVENTS | StreamMode::TOKENS;
 ```
 
-**보조 함수:**
+**Operators:**
 
 ```cpp
-StreamMode operator|(StreamMode a, StreamMode b);
-StreamMode operator&(StreamMode a, StreamMode b);
-bool has_mode(StreamMode flags, StreamMode test);
+StreamMode operator|(StreamMode a, StreamMode b);  // Combine flags
+StreamMode operator&(StreamMode a, StreamMode b);  // Mask flags
+bool has_mode(StreamMode flags, StreamMode test);   // Test if flag is set
 ```
 
----
+### Edge
 
-### 4.9 Edge / ConditionalEdge
-
-그래프의 노드 간 연결을 정의한다.
-
-#### Edge (무조건 연결)
+A static directed edge between two nodes.
 
 ```cpp
 struct Edge {
-    std::string from;  // 출발 노드
-    std::string to;    // 도착 노드
+    std::string from;  // Source node name
+    std::string to;    // Target node name
 };
 ```
 
-#### ConditionalEdge (조건부 연결)
+Use the special constants `START_NODE` and `END_NODE` for graph entry and exit points.
+
+### ConditionalEdge
+
+A dynamic edge whose target is determined at runtime by a named condition function.
 
 ```cpp
 struct ConditionalEdge {
-    std::string from;                                // 출발 노드
-    std::string condition;                           // ConditionRegistry에 등록된 조건 이름
-    std::map<std::string, std::string> routes;       // 조건 결과 -> 도착 노드
+    std::string from;                              // Source node name
+    std::string condition;                         // Name in ConditionRegistry
+    std::map<std::string, std::string> routes;     // condition_result -> target node name
 };
 ```
 
-**JSON 정의 예:**
+At runtime, the engine calls the condition function (looked up by name in `ConditionRegistry`).
+The function's return value is used as a key into the `routes` map to determine the next node.
 
-```json
-{
-  "from": "llm",
-  "condition": "has_tool_calls",
-  "routes": { "true": "tools", "false": "__end__" }
-}
-```
+### NodeContext
 
----
-
-### 4.10 NodeContext
-
-노드 생성 시 주입되는 의존성 컨텍스트.
+Dependency injection container passed to node constructors. Provides access to the
+LLM provider, tools, and configuration.
 
 ```cpp
 struct NodeContext {
-    std::shared_ptr<Provider> provider;        // LLM provider
-    std::vector<Tool*>        tools;           // 도구 목록 (비소유 포인터)
-    std::string               model;           // 모델 이름
-    std::string               instructions;    // 시스템 프롬프트
-    json                      extra_config;    // 추가 설정
+    std::shared_ptr<Provider> provider;   // LLM provider
+    std::vector<Tool*>        tools;      // Available tools (non-owning)
+    std::string               model;      // Model override (empty = provider default)
+    std::string               instructions; // System prompt / instructions
+    json                      extra_config; // Additional configuration (node-type-specific)
 };
 ```
 
-`tools`는 비소유(non-owning) 포인터다.
-새 엔진에서는 `ToolSet`을 `EngineResources`로 이동해 전달하는 방식을 권장한다.
-`GraphEngine::build()`가 `NodeContext`에 비소유 view를 연결하고 엔진 수명 동안
-도구 객체를 소유한다. 기존 `own_tools()`와 호출자 소유 방식도 호환된다.
+For new engines, prefer moving a `ToolSet` through `EngineResources` instead
+of managing the pointees separately. `GraphEngine::build()` binds the
+corresponding non-owning view into `NodeContext` and keeps every tool alive for
+the engine's lifetime.
 
----
+### GraphEvent
 
-### 4.11 GraphEvent
-
-스트리밍 실행 중 발생하는 이벤트.
+Event emitted during streaming graph execution.
 
 ```cpp
 struct GraphEvent {
     enum class Type {
-        NODE_START,      // 노드 실행 시작
-        NODE_END,        // 노드 실행 완료
-        LLM_TOKEN,       // LLM 스트리밍 토큰
-        CHANNEL_WRITE,   // 채널 쓰기 발생
-        INTERRUPT,       // HITL 인터럽트 발생
-        ERROR            // 오류 발생
+        NODE_START,     // A node is about to execute
+        NODE_END,       // A node has finished executing
+        LLM_TOKEN,      // A single token from a streaming LLM call
+        CHANNEL_WRITE,  // A channel value was updated
+        INTERRUPT,      // Execution paused (NodeInterrupt or configured breakpoint)
+        ERROR           // An error occurred during execution
     };
 
-    Type        type;        // 이벤트 종류
-    std::string node_name;   // 관련 노드 이름
-    json        data;        // 이벤트별 데이터
+    Type        type;       // Event type
+    std::string node_name;  // Name of the node that produced this event
+    json        data;       // Event payload (varies by type)
 };
 ```
 
-#### GraphStreamCallback
+**Event data payloads:**
+
+| Type | `data` contents |
+|------|-----------------|
+| `NODE_START` | `{}` or node metadata |
+| `NODE_END` | Channel writes produced by the node |
+| `LLM_TOKEN` | `{"token": "..."}` |
+| `CHANNEL_WRITE` | `{"channel": "...", "value": ...}` |
+| `INTERRUPT` | `{"reason": "...", "node": "..."}` |
+| `ERROR` | `{"error": "...", "node": "..."}` |
+
+### GraphStreamCallback
+
+Type alias for the graph event callback used in streaming execution.
 
 ```cpp
 using GraphStreamCallback = std::function<void(const GraphEvent&)>;
 ```
 
-`GraphEvent`는 안정적인 콜백/JSON 형상으로 유지된다. payload를 타입으로
-처리하려면 같은 실행 API에 `adapt_typed_stream()`을 사용할 수 있다.
+`GraphEvent` remains the stable callback and JSON-facing shape. Code that wants
+typed payloads can adapt the same stream without changing the engine entry
+point:
 
 ```cpp
+using TypedGraphEvent = std::variant<NodeStartEvent, NodeEndEvent,
+    LlmTokenEvent, ChannelWriteEvent, StateSnapshotEvent, RoutingEvent,
+    SendDispatchEvent, InterruptEvent, ErrorEvent, RawGraphEvent>;
+
 auto callback = adapt_typed_stream([](const TypedGraphEvent& event) {
     std::visit([](const auto& typed) {
-        // NodeStartEvent, LlmTokenEvent 등 각 대안을 처리한다.
+        // Handle NodeStartEvent, LlmTokenEvent, and the other alternatives.
     }, event);
 });
 ```
 
-직접 변환은 `to_typed_event()`를 사용한다. 잘못된 payload나 향후 버전이
-추가한 형상은 스트리밍 콜백에서 예외를 던지는 대신 `RawGraphEvent`가 된다.
+`to_typed_event()` performs the conversion directly. Malformed payloads and
+payload shapes introduced by future versions become `RawGraphEvent` rather
+than throwing from the streaming callback.
 
-**특수 노드 이름:**
+### NodeResult
 
-- `"__send__"` -- Send 실행 관련 이벤트. `data["sends"]`에 Send 목록 포함
-- `"__routing__"` -- 라우팅 결정. `data["command_goto"]` 또는 `data["next_nodes"]` 포함
-
----
-
-### 4.12 NodeResult
-
-노드의 확장 실행 결과. 채널 쓰기 + Command + Send를 모두 포함할 수 있다.
+Extended return type from node execution. Wraps channel writes with optional
+`Command` and `Send` directives for advanced control flow.
 
 ```cpp
 struct NodeResult {
-    std::vector<ChannelWrite> writes;       // 채널 쓰기
-    std::optional<Command>    command;      // 라우팅 오버라이드 (없으면 기본 edge 사용)
-    std::vector<Send>         sends;        // 동적 fan-out 요청
+    std::vector<ChannelWrite> writes;           // Channel updates
+    std::optional<Command>    command;           // Routing override (if set)
+    std::vector<Send>         sends;             // Dynamic fan-out targets
 
     NodeResult() = default;
-    NodeResult(std::vector<ChannelWrite> w); // writes만으로 생성 (하위 호환)
+    NodeResult(std::vector<ChannelWrite> w);     // Implicit from plain writes
 };
 ```
 
----
+When `command` is set, normal edge routing is bypassed and execution jumps to
+`command->goto_node`. When `sends` is non-empty, the engine performs dynamic
+fan-out to the specified targets.
 
-### 4.13 ConditionFn / 특수 노드 이름
+### ConditionFn
+
+Signature for condition functions used in conditional edges.
 
 ```cpp
 using ConditionFn = std::function<std::string(const GraphState&)>;
+```
 
-constexpr const char* START_NODE = "__start__";  // 그래프 진입점
-constexpr const char* END_NODE   = "__end__";    // 그래프 종료점
+The function inspects the current graph state and returns a string key. This key is
+looked up in the `ConditionalEdge::routes` map to determine the next node.
+
+### Constants
+
+```cpp
+constexpr const char* START_NODE = "__start__";  // Graph entry point
+constexpr const char* END_NODE   = "__end__";    // Graph termination
+```
+
+These are used in edge definitions to mark graph entry and exit:
+
+```cpp
+Edge{START_NODE, "my_first_node"}
+Edge{"my_last_node", END_NODE}
 ```
 
 ---
 
 ## 5. GraphState
 
-**헤더:** `neograph/graph/state.h`
-**네임스페이스:** `neograph::graph`
+**Header:** `<neograph/graph/state.h>`
+**Namespace:** `neograph::graph`
 
-그래프 실행 중 공유되는 상태. 여러 채널로 구성되며, thread-safe한 읽기/쓰기를 지원한다.
+Thread-safe, versioned key-value state container for the graph. Each entry is a
+named channel with an associated reducer that controls how values are merged.
 
 ```cpp
 class GraphState {
 public:
-    // 채널 초기화 (리듀서 타입, 함수, 초기값 지정)
     void init_channel(const std::string& name,
                       ReducerType type,
                       ReducerFn reducer,
                       const json& initial_value = json());
 
-    // 채널 값 읽기 (shared lock -- 동시 읽기 가능)
     json get(const std::string& channel) const;
-
-    // "messages" 채널을 vector<ChatMessage>로 읽기 (편의 메서드)
     std::vector<ChatMessage> get_messages() const;
 
-    // 단일 채널 쓰기 (exclusive lock)
     void write(const std::string& channel, const json& value);
-
-    // 여러 채널에 원자적(atomic) 쓰기
     void apply_writes(const std::vector<ChannelWrite>& writes);
 
-    // 버전 조회
     uint64_t channel_version(const std::string& channel) const;
     uint64_t global_version() const;
 
-    // checkpoint를 위한 직렬화/복원
     json serialize() const;
     void restore(const json& data);
 
-    // 채널 이름 목록
     std::vector<std::string> channel_names() const;
 };
 ```
 
-| 메서드 | 잠금 방식 | 설명 |
-|--------|----------|------|
-| `get()` | shared lock | 읽기 전용, 동시 접근 가능 |
-| `get_messages()` | shared lock | `get("messages")`의 편의 래퍼 |
-| `write()` | exclusive lock | 단일 채널에 리듀서를 적용하여 쓰기 |
-| `apply_writes()` | exclusive lock | 여러 채널에 한 번에 쓰기 |
-| `serialize()` | -- | 전체 상태를 JSON으로 직렬화 |
-| `restore()` | -- | 직렬화된 JSON으로 상태 복원 |
-
-**OVERWRITE vs APPEND 리듀서 동작:**
-
-```cpp
-// OVERWRITE 채널 "status": 마지막 값만 유지
-state.write("status", json("running"));     // -> "running"
-state.write("status", json("done"));        // -> "done"
-
-// APPEND 채널 "messages": 배열에 요소 추가
-state.write("messages", json::array({msg1})); // -> [msg1]
-state.write("messages", json::array({msg2})); // -> [msg1, msg2]
-```
+| Method | Description |
+|--------|-------------|
+| `init_channel(name, type, reducer, initial_value)` | Register a channel with its reducer and optional initial value. Must be called before any read/write to that channel |
+| `get(channel)` | Read the current value of a channel. Thread-safe (shared lock) |
+| `get_messages()` | Convenience method: reads the `"messages"` channel and deserializes it as `std::vector<ChatMessage>` |
+| `write(channel, value)` | Write a value to a single channel through its reducer. Thread-safe (exclusive lock) |
+| `apply_writes(writes)` | Atomically apply a batch of `ChannelWrite` operations. All writes are applied under a single exclusive lock |
+| `channel_version(channel)` | Returns the write counter for a specific channel |
+| `global_version()` | Returns the global version counter (incremented on every write to any channel) |
+| `serialize()` | Serializes all channel values and versions to JSON (for checkpointing) |
+| `restore(data)` | Restores channel values and versions from serialized JSON |
+| `channel_names()` | Returns the names of all initialized channels |
 
 ---
 
 ## 6. GraphNode
 
-**헤더:** `neograph/graph/node.h`
-**네임스페이스:** `neograph::graph`
+**Header:** `<neograph/graph/node.h>`
+**Namespace:** `neograph::graph`
 
-> **커스텀 GraphNode를 작성한다면** 단 하나의
-> `run(NodeInput) -> asio::awaitable<NodeOutput>`을 구현한다.
-> v1.0에서 옛 `execute*` 8-virtual chain은 제거되었다.
+Nodes are the computational units of a graph. The library provides an
+abstract base class and four built-in node types.
 
-### 6.1 GraphNode (추상 클래스)
+### GraphNode (abstract)
 
-모든 그래프 노드의 기반 클래스.
+A subclass overrides ONE method: `run(NodeInput) -> awaitable<NodeOutput>`.
+Read state, decide what to do, return writes (and optionally `Command` /
+`Send`).
 
 ```cpp
 class GraphNode {
 public:
     virtual ~GraphNode() = default;
 
+    // The only custom-node dispatch entry.
     virtual asio::awaitable<NodeOutput> run(NodeInput in) = 0;
+
     virtual std::string get_name() const = 0;
+};
+
+struct NodeInput {
+    const GraphState&          state;       // channels visible to this node
+    const RunContext&          ctx;         // cancel_token, step, thread_id, ...
+    const GraphStreamCallback* stream_cb;   // null when not streaming
+};
+
+using NodeOutput = NodeResult;  // writes + optional Command + optional Sends
+```
+
+| Member | Description |
+|--------|-------------|
+| `in.state` | Read-only `GraphState`. Use `in.state.get(channel)` for reads |
+| `in.ctx.cancel_token` | Pass to `provider.complete(params)` so an LLM HTTP socket aborts on cancel, or poll `ctx.cancel_token->is_cancelled()` for your own loops |
+| `in.ctx.step` | Current super-step index |
+| `in.ctx.thread_id` | Mirrors `RunConfig::thread_id` |
+| `in.stream_cb` | Streaming sink; if non-null, emit `LLM_TOKEN` events through it. Null on non-streaming runs |
+| Return: `NodeOutput.writes` | Channel writes the engine merges via reducers |
+| Return: `NodeOutput.command` | Optional routing override (`goto_node` + state updates) |
+| Return: `NodeOutput.sends` | Optional dynamic fan-out — engine spawns one branch per `Send` |
+| `get_name()` | Returns the node's unique name within the graph |
+
+Minimal example:
+
+```cpp
+class CounterNode : public neograph::graph::GraphNode {
+public:
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto current = in.state.get("count");
+        int n = current.is_number() ? current.get<int>() : 0;
+        NodeOutput out;
+        out.writes.push_back({"count", n + 1});
+        co_return out;
+    }
+    std::string get_name() const override { return "counter"; }
 };
 ```
 
-`in.state`에서 채널을 읽고 `NodeOutput::writes`, `command`, `sends`를 채운다.
-스트리밍이 필요하면 `in.stream_cb`가 null인지 확인한 뒤 `GraphEvent`를 보낸다.
-취소, 현재 step, thread ID, Store는 `in.ctx`에서 접근한다.
+Async-native LLM call:
 
----
+```cpp
+class ChatNode : public neograph::graph::GraphNode {
+    std::shared_ptr<Provider> provider_;
+public:
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        CompletionParams params;
+        params.messages    = in.state.get_messages();
+        params.cancel_token = in.ctx.cancel_token;  // cancel propagates
+        auto reply = co_await provider_->complete_async(params);
+        NodeOutput out;
+        json msg;
+        to_json(msg, reply.message);
+        out.writes.push_back({"messages", json::array({msg})});
+        co_return out;
+    }
+    std::string get_name() const override { return "chat"; }
+};
+```
 
-### 6.2 LLMCallNode
+> **Legacy chain (removed in v0.9.0 during v1 preparation).** Pre-v0.4
+> code overrode one of `execute` / `execute_async` / `execute_full` /
+> `execute_full_async` / `execute_stream` / `execute_stream_async` /
+> `execute_full_stream` / `execute_full_stream_async`. Picking the
+> wrong one silently dropped `Command` / `Send`, froze the event loop,
+> or infinite-recursed — that's the seam `run()` collapses. The 8
+> legacy virtuals are no longer members of `GraphNode`; subclasses
+> migrating from an older release must implement `run(NodeInput)`.
 
-LLM API를 호출하는 내장 노드. `messages` 채널에서 대화 기록을 읽어
-LLM에 전달하고, 응답을 다시 `messages` 채널에 기록한다.
+### LLMCallNode
+
+Calls the LLM with the current conversation state. Reads from the
+`"messages"` channel, sends a completion request to the provider, and
+writes the assistant's response back. Streams `LLM_TOKEN` events when
+the run was started via `run_stream` / `run_stream_async`.
 
 ```cpp
 class LLMCallNode : public GraphNode {
 public:
     LLMCallNode(const std::string& name, const NodeContext& ctx);
-
     asio::awaitable<NodeOutput> run(NodeInput in) override;
     std::string get_name() const override;
 };
 ```
 
-- `NodeContext::provider`가 필수
-- `NodeContext::tools`가 있으면 LLM에 도구 정의를 함께 전달
-- `NodeContext::instructions`가 있으면 system 메시지로 추가
+| Constructor Parameter | Description |
+|-----------------------|-------------|
+| `name` | Node name |
+| `ctx` | Node context providing the LLM provider, tools, model, and instructions |
 
-**JSON 정의에서의 타입 이름:** `"llm_call"`
+(LLMCallNode overrides `run(NodeInput)` directly as of v0.4.0
+(PR 9a / commit `d1070dc`) — legacy 8-virtual chain is no longer
+on its hot path. The same applies to `ToolDispatchNode`,
+`IntentClassifierNode`, and `SubgraphNode`.)
 
----
+### ToolDispatchNode
 
-### 6.3 ToolDispatchNode
-
-LLM이 요청한 도구 호출을 실행하는 내장 노드.
-`messages` 채널에서 마지막 assistant 메시지의 `tool_calls`를 읽어
-각 도구를 실행하고, 결과를 `tool` role 메시지로 기록한다.
+Dispatches tool calls from the latest assistant message. Reads pending tool calls from
+the `"messages"` channel, executes each tool, and writes tool result messages back.
 
 ```cpp
 class ToolDispatchNode : public GraphNode {
@@ -868,92 +1036,77 @@ public:
 };
 ```
 
-**JSON 정의에서의 타입 이름:** `"tool_dispatch"`
+| Constructor Parameter | Description |
+|-----------------------|-------------|
+| `name` | Node name |
+| `ctx` | Node context (uses `ctx.tools` to look up and execute tools) |
 
----
+### IntentClassifierNode
 
-### 6.4 IntentClassifierNode
-
-LLM을 사용하여 사용자 의도를 분류하는 노드.
-분류 결과를 `__route__` 채널에 기록하고, `route_channel` 조건과 함께
-조건부 라우팅에 사용한다.
+Uses the LLM to classify user intent, then writes the classification result to the
+`"__route__"` channel. Designed for use with the `"route_channel"` built-in condition
+to enable dynamic intent-based routing.
 
 ```cpp
 class IntentClassifierNode : public GraphNode {
 public:
-    IntentClassifierNode(const std::string& name,
-                         const NodeContext& ctx,
-                         const std::string& prompt,          // 분류 프롬프트
-                         std::vector<std::string> valid_routes); // 유효한 경로 목록
+    IntentClassifierNode(const std::string& name, const NodeContext& ctx,
+                         const std::string& prompt,
+                         std::vector<std::string> valid_routes);
 
     asio::awaitable<NodeOutput> run(NodeInput in) override;
     std::string get_name() const override;
 };
 ```
 
-**JSON 정의에서의 타입 이름:** `"intent_classifier"`
+| Constructor Parameter | Type | Description |
+|-----------------------|------|-------------|
+| `name` | `std::string` | Node name |
+| `ctx` | `NodeContext` | Provider and model for the classification LLM call |
+| `prompt` | `std::string` | Classification prompt template |
+| `valid_routes` | `std::vector<std::string>` | Allowed classification values. The LLM output is validated against these |
 
-**사용 예 (JSON 정의):**
+### SubgraphNode
 
-```json
-{
-  "type": "intent_classifier",
-  "config": {
-    "prompt": "다음 문의를 분류하세요: billing, technical, general",
-    "valid_routes": ["billing", "technical", "general"]
-  }
-}
-```
-
----
-
-### 6.5 SubgraphNode
-
-컴파일된 `GraphEngine`을 하나의 노드로 실행하는 래퍼.
-계층적 구성(Supervisor 패턴, 중첩 워크플로)을 구현할 때 사용한다.
+Wraps a compiled `GraphEngine` as a single node, enabling hierarchical graph composition
+(supervisor pattern, nested workflows). Channel mappings control data flow between
+parent and child graphs.
 
 ```cpp
 class SubgraphNode : public GraphNode {
 public:
-    // input_map:  부모 채널 -> 자식 채널 (부모에서 읽어 자식 입력으로)
-    // output_map: 자식 채널 -> 부모 채널 (자식 결과를 부모에 기록)
     SubgraphNode(const std::string& name,
                  std::shared_ptr<GraphEngine> subgraph,
                  std::map<std::string, std::string> input_map = {},
                  std::map<std::string, std::string> output_map = {});
-
     asio::awaitable<NodeOutput> run(NodeInput in) override;
     std::string get_name() const override;
 };
 ```
 
-**JSON 정의에서의 타입 이름:** `"subgraph"`
+| Constructor Parameter | Type | Description |
+|-----------------------|------|-------------|
+| `name` | `std::string` | Node name in the parent graph |
+| `subgraph` | `std::shared_ptr<GraphEngine>` | The compiled child graph engine |
+| `input_map` | `std::map<std::string, std::string>` | `parent_channel -> child_channel` mapping. Read from parent, write to child input |
+| `output_map` | `std::map<std::string, std::string>` | `child_channel -> parent_channel` mapping. Read from child result, write to parent |
 
-**채널 매핑 예:**
-
-```cpp
-// 부모의 "user_query" -> 자식의 "messages"
-// 자식의 "result"    -> 부모의 "sub_output"
-auto sub = std::make_unique<SubgraphNode>(
-    "sub_agent",
-    compiled_subgraph,
-    {{"user_query", "messages"}},   // input_map
-    {{"result", "sub_output"}}      // output_map
-);
-```
+If the maps are empty, channels are mapped by name (identity mapping).
 
 ---
 
 ## 7. GraphEngine
 
-**헤더:** `neograph/graph/engine.h`
-**네임스페이스:** `neograph::graph`
+**Header:** `<neograph/graph/engine.h>`
+**Namespace:** `neograph::graph`
 
-NeoGraph의 핵심 실행 엔진. JSON 정의로 그래프를 컴파일하고 super-step 루프로 실행한다.
+The core execution engine. Compiles graph definitions, manages state transitions,
+and orchestrates node execution through a super-step loop.
 
-### 7.1 EngineConfig와 EngineResources
+### EngineConfig and EngineResources
 
-새 코드는 엔진을 만들기 전에 의존성과 정책을 한 번에 구성한다.
+New code should assemble construction dependencies and policies before creating
+the engine:
 
 ```cpp
 struct EngineConfig {
@@ -973,44 +1126,158 @@ struct EngineResources {
 };
 ```
 
-`ToolSet`은 고정된 도구 집합을 소유하는 move-only 타입이다. `GraphRegistry`는
-엔진별 reducer/condition/node-factory overlay이며, 등록되지 않은 이름은 기존
-process-global registry로 fallback한다. 둘 다 `build()` 또는 `link()`에 넘기기
-전에 구성해야 한다.
+`ToolSet` is a move-only owner for a fixed tool collection. `GraphRegistry` is
+a per-engine reducer, condition, and node-factory overlay; names absent from the
+overlay fall back to the existing process-global registries. Configure both
+before passing them to `build()` or `link()`. Runtime mutation is intentionally
+not part of the local-registry contract.
 
-### 7.2 RunConfig
+### RunConfig
 
-실행 설정.
+Configuration for a single graph execution run.
 
 ```cpp
 struct RunConfig {
-    std::string thread_id;                       // checkpoint 연결용 스레드 ID
-    json        input;                           // 초기 채널 값 (예: {"messages": [...]})
-    int         max_steps  = 50;                 // 루프 안전 제한
-    StreamMode  stream_mode = StreamMode::ALL;   // 수신할 이벤트 종류
-    std::shared_ptr<CancelToken> cancel_token;    // 협력적 취소
-    std::shared_ptr<UsageAccumulator> usage;      // 선택적 토큰 누적기
-    bool        resume_if_exists = false;         // 기존 checkpoint에서 시작
+    std::string                 thread_id;
+    json                        input;
+    int                         max_steps    = 50;
+    StreamMode                  stream_mode  = StreamMode::ALL;
+    std::shared_ptr<CancelToken> cancel_token;          // v0.3+
+    std::shared_ptr<UsageAccumulator> usage;             // optional accumulator
+    bool                        resume_if_exists = false; // v0.3.1+
 };
 ```
 
----
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `thread_id` | `std::string` | `""` | Identifies the conversation/session for checkpointing |
+| `input` | `json` | `{}` | Initial values written to channels before execution starts. Typically `{"messages": [...]}` |
+| `max_steps` | `int` | `50` | Maximum number of super-steps before forced termination (prevents infinite loops) |
+| `stream_mode` | `StreamMode` | `ALL` | Bitfield controlling which event types are emitted during streaming |
+| `cancel_token` | `std::shared_ptr<CancelToken>` | `nullptr` | Cooperative cancel handle. Engine wraps this into a `RunContext` and threads it to every node's `run(NodeInput)` call as `in.ctx.cancel_token` |
+| `usage` | `std::shared_ptr<UsageAccumulator>` | `nullptr` | Optional token accumulator. The engine creates one when omitted and exposes the active accumulator as `in.ctx.usage` |
+| `resume_if_exists` | `bool` | `false` | If `true` and a checkpoint exists for `thread_id`, seed from it before applying `input` (multi-turn chat shape) |
 
-### 7.3 RunResult
+### RunContext (v0.4 PR 1, exposed to nodes via `NodeInput.ctx`)
 
-실행 결과.
+Per-run dispatch metadata threaded by the engine. Constructed from `RunConfig`
+(with a new usage accumulator when none was supplied), the engine's Store,
+and an optional resume value. Nodes consume it inside a
+`run(NodeInput) -> NodeOutput` override via `in.ctx`.
+
+```cpp
+struct RunContext {
+    std::shared_ptr<CancelToken>  cancel_token;
+    std::shared_ptr<UsageAccumulator> usage;
+    std::optional<std::chrono::steady_clock::time_point> deadline; // reserved
+    std::string                   trace_id;     // reserved
+    std::string                   thread_id;
+    int                           step;
+    StreamMode                    stream_mode;
+    std::optional<json>           resume_value;
+    std::shared_ptr<Store>        store;
+};
+```
+
+| Field | Description |
+|-------|-------------|
+| `cancel_token` | The active token. Pass to `provider.complete(params)` so an LLM HTTP socket aborts on cancel, or poll `is_cancelled()` for your own loops |
+| `usage` | Shared token-accounting sink populated by the engine |
+| `deadline` | Reserved (no `RunConfig.deadline` field yet) |
+| `trace_id` | Reserved for OTel integration |
+| `thread_id` | Mirror of `RunConfig.thread_id` |
+| `step` | Current super-step index, updated each iteration |
+| `stream_mode` | Mirror of `RunConfig.stream_mode` |
+| `resume_value` | Value supplied to `GraphEngine::resume()`, or empty on a fresh run |
+| `store` | Store installed on the engine, or `nullptr` when none is configured |
+
+### CancelToken
+
+Cooperative cancel primitive shared between caller and engine. Construct
+via `std::make_shared<CancelToken>()`, hand to `RunConfig.cancel_token`,
+and call `cancel()` from any thread to abort the in-flight run —
+including the LLM HTTP socket if a node is mid-`provider.complete_async`.
+Each engine run forks its own operation child, so one parent can safely cancel
+multiple concurrent runs without sharing an asio cancellation slot.
+
+Engine operation children retain themselves until their posted cancellation
+emit executes. If application code calls `bind_executor()` directly on a token
+it constructed itself, the application must keep that token alive until the
+executor drains; the engine cannot supply ownership for an external object.
+Because these methods are inline in the public header, existing C++ consumers
+must be recompiled to receive the updated `fork()` lifetime behavior. The
+`CancelToken` object layout remains binary-compatible with 0.11.x.
+
+```cpp
+class CancelToken {
+public:
+    void cancel() noexcept;                            // request cancellation
+    bool is_cancelled() const noexcept;                // polling read
+
+    std::shared_ptr<CancelToken> fork();                // v0.4: child token
+    void bind_executor(asio::any_io_executor ex);
+    asio::cancellation_slot slot() noexcept;
+};
+```
+
+#### Hierarchical cancel (v0.4 `fork()`)
+
+Each child token has its own `cancellation_signal`; the parent's
+`cancel()` cascades to every live child. This is the structural
+replacement for the v0.3.x `add_cancel_hook` list (deprecated, removed
+in v1.0). Concurrent nested scopes — a multi-Send fan-out where every
+worker calls `provider.complete(params)` simultaneously — each
+`fork()` once and never overwrite each other's slot.
+
+```cpp
+// Caller side: one parent token, fan it out across N concurrent runs.
+auto parent = std::make_shared<neograph::graph::CancelToken>();
+
+RunConfig cfg_a; cfg_a.thread_id = "user-1"; cfg_a.cancel_token = parent;
+RunConfig cfg_b; cfg_b.thread_id = "user-2"; cfg_b.cancel_token = parent;
+
+auto fut_a = std::async(std::launch::async, [&] { return engine->run(cfg_a); });
+auto fut_b = std::async(std::launch::async, [&] { return engine->run(cfg_b); });
+
+// User hits stop in the UI:
+parent->cancel();   // cascades to every fork() child, every run aborts
+
+// Inside a node — pass the child to provider.complete so the HTTP
+// socket aborts on parent cancel without you doing any wiring:
+asio::awaitable<NodeOutput> run(NodeInput in) override {
+    CompletionParams params;
+    params.messages    = in.state.get_messages();
+    params.cancel_token = in.ctx.cancel_token;   // engine forks for you
+    auto reply = co_await provider_->complete_async(params);
+    NodeOutput out;
+    /* ... */
+    co_return out;
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `cancel()` | Idempotent, thread-safe. Sets the polling flag and emits the asio cancellation_signal on the bound executor; cascades to all live children via `fork()` |
+| `is_cancelled()` | Lock-free polling read |
+| `fork()` | **v0.4 PR 3.** Returns a child shared_ptr. Parent.cancel() cascades; if the parent is already cancelled at fork() time the child is constructed pre-cancelled (no emit-vs-bind race) |
+| `bind_executor(ex)` | Engine-internal; binds the executor that handles signal emits |
+| `slot()` | asio `cancellation_slot` for `bind_cancellation_slot` at `co_spawn` time |
+
+### RunResult
+
+Result returned after graph execution completes or is interrupted.
 
 ```cpp
 struct RunResult {
-    json        output;                          // 최종 직렬화된 상태
-    bool        interrupted       = false;       // HITL 인터럽트 발생 여부
-    std::string interrupt_node;                  // 인터럽트가 발생한 노드
-    json        interrupt_value;                 // 인터럽트 사유/값
-    std::string checkpoint_id;                   // 마지막 checkpoint ID
-    std::vector<std::string> execution_trace;    // 실행된 노드 순서
+    json        output;                          // Final serialized state
+    bool        interrupted       = false;       // True if execution was paused (HITL)
+    std::string interrupt_node;                  // Node that caused the interrupt
+    json        interrupt_value;                 // Value associated with the interrupt
+    std::string checkpoint_id;                   // ID of the last checkpoint saved
+    std::vector<std::string> execution_trace;    // Ordered list of executed node names
 
-    bool max_steps_exhausted() const noexcept;    // 실행할 작업을 남기고 한도 도달
-    RunStatus status() const noexcept;            // Completed, Interrupted, StepLimit
+    bool max_steps_exhausted() const noexcept;    // Limit stopped runnable work
+    RunStatus status() const noexcept;            // Completed, Interrupted, or StepLimit
 
     template <typename T> T channel(const std::string& name) const;
     template <typename T> T channel(const ChannelKey<T>& key) const;
@@ -1019,33 +1286,44 @@ struct RunResult {
 };
 ```
 
-`max_steps_exhausted()`는 실행할 노드가 남아 있는데 단계 한도에 도달한
-경우에만 `true`를 반환한다. 마지막 허용 단계에서 정확히 `__end__`에 도달한
-정상 실행은 `false`다.
+| Field | Type | Description |
+|-------|------|-------------|
+| `output` | `json` | Serialized final state of all channels |
+| `interrupted` | `bool` | `true` if execution was paused by an interrupt (HITL) |
+| `interrupt_node` | `std::string` | Name of the node that triggered the interrupt |
+| `interrupt_value` | `json` | Reason or payload from the interrupt |
+| `checkpoint_id` | `std::string` | UUID of the last saved checkpoint |
+| `execution_trace` | `std::vector<std::string>` | Ordered list of node names in execution order |
 
-`status()`는 public `RunResult` data layout을 바꾸지 않고
-`RunStatus::Completed`, `RunStatus::Interrupted`, `RunStatus::StepLimit` 중
-하나를 반환한다. 재사용할 채널 이름과 C++ 타입은 `ChannelKey<T>`로 묶는다.
+`max_steps_exhausted()` returns `true` only when the step ceiling stopped the
+run while runnable work remained. A graph that reaches `__end__` exactly on its
+last permitted step returns `false`.
+
+`status()` returns `RunStatus::Completed`, `RunStatus::Interrupted`, or
+`RunStatus::StepLimit` without changing the public `RunResult` data layout.
+`ChannelKey<T>` binds a reusable channel name to its expected C++ type:
 
 ```cpp
 inline const ChannelKey<std::string> Answer{"answer"};
+
 auto answer = result.channel(Answer);
-auto optional = result.try_channel(Answer);
+if (auto optional = result.try_channel(Answer)) {
+    std::cout << *optional << '\n';
+}
 ```
 
----
+### GraphEngine
 
-### 7.4 GraphEngine 클래스
-
-새 코드는 JSON 정의를 만들 때 `build_strict()`를 사용한다. 이 경로는 노드를
-생성하기 전에 topology 전체를 검증한다. parse, 검증, 검사 또는 변환 단계를
-분리해야 하면 `ValidatedTopology`를 `link()`에 전달한다. 기존 `build()`,
-`CompiledGraph` link overload, `compile()`은 호환성을 위한 lenient 경로다.
+The main engine class. New code should use `build_strict()` for a JSON definition;
+it rejects invalid topology before any node is instantiated. Use `link()` with a
+`ValidatedTopology` when parse, validation, inspection, or transformation must be
+separate steps. The lenient `build()`, `CompiledGraph` link overloads, `compile()`,
+and post-construction setters remain compatibility paths.
 
 ```cpp
 class GraphEngine {
 public:
-    // ── 생성 ──
+    // ---- Construction ----
 
     static std::unique_ptr<GraphEngine> build(
         const json& definition, EngineConfig config);
@@ -1067,12 +1345,11 @@ public:
     static std::unique_ptr<GraphEngine> link(
         CompiledGraph graph, EngineConfig config, EngineResources resources);
 
-    static std::unique_ptr<GraphEngine> compile( // 호환 facade
-        const json& definition,
-        const NodeContext& default_context,
+    static std::unique_ptr<GraphEngine> compile( // compatibility facade
+        const json& definition, const NodeContext& default_context,
         std::shared_ptr<CheckpointStore> store = nullptr);
 
-    // ── 실행 (sync) ──
+    // ---- Execution (sync) ----
 
     RunResult run(const RunConfig& config);
 
@@ -1083,7 +1360,7 @@ public:
                      const json& resume_value = json(),
                      const GraphStreamCallback& cb = nullptr);
 
-    // ── 실행 (async, 3.0) ──
+    // ---- Execution (async, 3.0) ----
 
     asio::awaitable<RunResult> run_async(const RunConfig& config);
 
@@ -1095,9 +1372,9 @@ public:
         const json& resume_value = json(),
         const GraphStreamCallback& cb = nullptr);
 
-    // ── 상태 조회/조작 ──
+    // ---- State Inspection & Manipulation ----
 
-    GraphAdmin admin(); // borrowed facade: GraphEngine보다 오래 보관하면 안 됨
+    GraphAdmin admin(); // borrowed facade; must not outlive this engine
 
     std::optional<json> get_state(const std::string& thread_id) const;
 
@@ -1112,23 +1389,38 @@ public:
                      const std::string& new_thread_id,
                      const std::string& checkpoint_id = "");
 
-    // ── 설정 ──
+    // ---- Compatibility configuration (prefer EngineConfig/EngineResources) ----
 
     void own_tools(std::vector<std::unique_ptr<Tool>> tools);
     void set_checkpoint_store(std::shared_ptr<CheckpointStore> store);
     void set_store(std::shared_ptr<Store> store);
     std::shared_ptr<Store> get_store() const;
     void set_retry_policy(const RetryPolicy& policy);
-    void set_node_retry_policy(const std::string& node_name,
-                               const RetryPolicy& policy);
-    void set_worker_count(std::size_t n);  // 3.0: opt-in fan-out pool
+    void set_node_retry_policy(const std::string& node_name, const RetryPolicy& policy);
+
+    // Fan-out worker pool. n==1 keeps the engine on the caller's
+    // executor (no engine-owned thread_pool); n>=2 installs an
+    // owned `asio::thread_pool` of size n. build() defaults to
+    // n==1 — prefer EngineConfig::worker_count to opt into
+    // real parallel fan-out. Throws `std::logic_error` if called
+    // while a run is in flight (Round 3 guard — `active_runs_`
+    // counter prevents tasks queued on the old pool from being
+    // silently dropped on swap).
+    void set_worker_count(std::size_t n);
+
+    // Compatibility convenience: set_worker_count(hardware_concurrency()).
+    void set_worker_count_auto();
+
+    // Per-node result caching. Disabled by default; opt in per node.
+    void set_node_cache_enabled(const std::string& node_name, bool enabled);
+    void clear_node_cache();
+    const NodeCache& node_cache() const;
+
     const std::string& get_graph_name() const;
 };
 ```
 
----
-
-### 7.5 build() / link()
+#### `build` and `link`
 
 ```cpp
 EngineConfig config;
@@ -1141,7 +1433,7 @@ config.cached_nodes.insert("retrieve");
 std::vector<std::unique_ptr<Tool>> owned_tools;
 owned_tools.push_back(std::make_unique<SearchTool>());
 auto registry = std::make_shared<GraphRegistry>();
-// 엔진 전용 reducer, condition, node type을 registry에 등록한다.
+// Register engine-local reducers, conditions, or node types on registry.
 
 EngineResources resources{
     .tools = ToolSet(std::move(owned_tools)),
@@ -1152,15 +1444,12 @@ auto engine = GraphEngine::build(definition, std::move(config),
                                  std::move(resources));
 ```
 
-`build()`는 JSON 정의를 compile, 검증, link하고 완전히 설정된 엔진을 반환한다.
-`link()`는 이미 검사하거나 변환한 `CompiledGraph`를 move로 소비하고 런타임
-설정을 적용한다.
+`build()` compiles, verifies, links, and returns a fully configured engine.
+`link()` consumes a `CompiledGraph` by move and applies runtime configuration;
+callers that compile manually remain responsible for any source-to-IR
+round-trip verification they require.
 
-### 7.6 compile() 호환 API
-
-JSON 정의와 기본 컨텍스트로 그래프를 컴파일한다. 기존 signature와 동작을
-보존하며 내부적으로 `build()`에 위임한다. 새 코드에서 store, retry, worker,
-cache, tool gate를 설정할 때는 `EngineConfig`를 권장한다.
+#### `compile` (compatibility)
 
 ```cpp
 static std::unique_ptr<GraphEngine> compile(
@@ -1169,163 +1458,94 @@ static std::unique_ptr<GraphEngine> compile(
     std::shared_ptr<CheckpointStore> store = nullptr);
 ```
 
-| 매개변수 | 설명 |
-|---------|------|
-| `definition` | 그래프 JSON 정의 |
-| `default_context` | 모든 노드에 전달되는 기본 컨텍스트 |
-| `store` | checkpoint 저장소 (nullptr이면 checkpoint 비활성화) |
+Compiles a graph from a JSON definition and returns an engine ready for execution.
+This original signature is preserved and delegates to `build()`. Prefer
+`EngineConfig` when new code needs stores, retry policy, worker configuration,
+caching, or a tool gate.
 
-**반환값:** 컴파일된 `GraphEngine` 인스턴스.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `definition` | `const json&` | Graph definition in JSON format (see below) |
+| `default_context` | `const NodeContext&` | Default context injected into all nodes |
+| `store` | `std::shared_ptr<CheckpointStore>` | Optional checkpoint store for persistence |
 
-#### JSON 정의 스키마
+**Graph definition JSON schema:**
 
 ```json
 {
   "name": "my_graph",
   "channels": {
-    "messages":     { "reducer": "append" },
-    "status":       { "reducer": "overwrite" },
-    "custom_field": { "reducer": "my_reducer", "initial_value": 0 }
+    "messages": {"reducer": "append"},
+    "status": {"reducer": "overwrite", "initial": "idle"}
   },
   "nodes": {
-    "llm":   { "type": "llm_call" },
-    "tools": { "type": "tool_dispatch" },
-    "my_node": { "type": "my_custom_type", "config": { ... } }
+    "llm": {"type": "llm_call"},
+    "tools": {"type": "tool_dispatch"}
   },
   "edges": [
-    { "from": "__start__", "to": "llm" },
-    { "from": "llm", "condition": "has_tool_calls",
-      "routes": { "true": "tools", "false": "__end__" } },
-    { "from": "tools", "to": "llm" }
+    {"from": "__start__", "to": "llm"},
+    {"from": "tools", "to": "llm"}
   ],
-  "interrupt_before": ["tools"],
-  "interrupt_after": ["llm"]
+  "conditional_edges": [
+    {
+      "from": "llm",
+      "condition": "has_tool_calls",
+      "routes": {"yes": "tools", "no": "__end__"}
+    }
+  ],
+  "interrupt_before": [],
+  "interrupt_after": ["tools"]
 }
 ```
 
-| 키 | 필수 | 설명 |
-|----|------|------|
-| `name` | O | 그래프 이름 |
-| `channels` | O | 채널 정의. 각 채널에 `reducer` 필수 |
-| `nodes` | O | 노드 정의. 각 노드에 `type` 필수 |
-| `edges` | O | 연결 정의. 무조건(`from`/`to`) 또는 조건부(`condition`/`routes`) |
-| `interrupt_before` | X | HITL: 이 노드 실행 전에 인터럽트 |
-| `interrupt_after` | X | HITL: 이 노드 실행 후에 인터럽트 |
+##### Barrier nodes (AND-join opt-in)
 
-**노드별 barrier (AND-join 옵트인):** 개별 노드 정의에 `"barrier": {"wait_for": ["a", "b"]}`를 추가하면 해당 노드는 **모든** 지정된 upstream이 신호를 보낼 때까지 실행을 지연함. signal dispatch 기본 모델은 비대칭 serial fan-in에서 join을 경로당 1회씩 중복 실행하는데, barrier가 이를 1회로 합침. 발사 후 상태가 리셋되어 loop 그래프에서도 재사용 가능. **영속성:** `CHECKPOINT_SCHEMA_VERSION = 2`부터 barrier 누적 상태(`Checkpoint::barrier_state`, `map<string, set<string>>`)가 모든 체크포인트에 저장되며 resume 시 복원됨. barrier 누적 중 인터럽트가 발생해도 부분 upstream 집합이 보존되어, 나머지 신호가 도착하면 정상적으로 발사됨. v1 blob은 빈 `barrier_state`로 로드됨 (기존 pre-v2 동작과 동등).
+A node declaration may include a `barrier` field to opt into AND-join
+semantics for that specific node. Under the default signal-dispatch
+model, a node fires every super-step that any upstream routes to it
+— which double-fires join nodes on asymmetric serial fan-in (paths
+of different lengths). A barrier gates the node until **all** listed
+upstreams have signaled at least once (across any number of
+super-steps):
 
-**전체 예제:**
-
-```cpp
-#include <neograph/neograph.h>
-
-using namespace neograph;
-using namespace neograph::graph;
-
-int main() {
-    // Provider + 도구 준비
-    auto provider = std::make_shared<MyProvider>();
-    std::vector<std::unique_ptr<Tool>> tools;
-    tools.push_back(std::make_unique<MyTool>());
-
-    // 컨텍스트 구성
-    NodeContext ctx;
-    ctx.provider = provider;
-    ctx.instructions = "당신은 유용한 도우미입니다.";
-
-    // JSON 정의
-    json definition = {
-        {"name", "assistant"},
-        {"channels", {
-            {"messages", {{"reducer", "append"}}}
-        }},
-        {"nodes", {
-            {"llm",   {{"type", "llm_call"}}},
-            {"tools", {{"type", "tool_dispatch"}}}
-        }},
-        {"edges", json::array({
-            {{"from", "__start__"}, {"to", "llm"}},
-            {{"from", "llm"}, {"condition", "has_tool_calls"},
-             {"routes", {{"true", "tools"}, {"false", "__end__"}}}},
-            {{"from", "tools"}, {"to", "llm"}}
-        })}
-    };
-
-    // 생성 + 실행: 도구 소유권도 엔진으로 이동
-    EngineConfig engine_config;
-    engine_config.node_context = ctx;
-    EngineResources resources{
-        .tools = ToolSet(std::move(tools)),
-    };
-    auto engine = GraphEngine::build(definition, std::move(engine_config),
-                                     std::move(resources));
-
-    RunConfig config;
-    config.input = {{"messages", json::array({
-        {{"role", "user"}, {"content", "안녕하세요?"}}
-    })}};
-
-    auto result = engine->run(config);
-
-    // 결과 확인
-    std::cout << "Trace: ";
-    for (const auto& n : result.execution_trace)
-        std::cout << n << " -> ";
-    std::cout << "END\n";
+```json
+"join": {
+  "type": "my_join",
+  "barrier": {"wait_for": ["a", "s2"]}
 }
 ```
 
----
+Fires once when both `a` and `s2` have signaled. State resets on
+fire, so loops through the barrier collect fresh signals each round.
 
-### 7.7 run()
+**Persistence:** since `CHECKPOINT_SCHEMA_VERSION = 2`, the barrier
+accumulator is persisted on every checkpoint (`Checkpoint::barrier_state`,
+a `map<string, set<string>>`) and restored on resume. Interrupts that
+land mid-accumulation are therefore safe — the partial upstream set
+survives the pause and the barrier fires as soon as the remaining
+signals arrive. v1 blobs deserialize with an empty `barrier_state`,
+matching pre-v2 behavior for those stored checkpoints.
 
-그래프를 동기적으로 실행한다.
+#### `run`
 
 ```cpp
 RunResult run(const RunConfig& config);
 ```
 
-그래프가 `__end__`에 도달하거나, 인터럽트가 발생하거나, `max_steps`에 도달하면 반환한다.
+Executes the graph synchronously (blocking). Starts from `START_NODE`, follows edges
+until `END_NODE` is reached or `max_steps` is exceeded.
 
----
-
-### 7.8 run_stream()
-
-스트리밍 이벤트를 발생시키며 그래프를 실행한다.
+#### `run_stream`
 
 ```cpp
 RunResult run_stream(const RunConfig& config,
                      const GraphStreamCallback& cb);
 ```
 
-`cb`에 `GraphEvent`가 실시간으로 전달된다. `config.stream_mode`로 수신할 이벤트를 필터링한다.
+Executes the graph with streaming events. The callback `cb` is invoked for each event
+matching the `config.stream_mode` filter.
 
-**사용 예:**
-
-```cpp
-auto result = engine->run_stream(config,
-    [](const GraphEvent& event) {
-        switch (event.type) {
-            case GraphEvent::Type::NODE_START:
-                std::cout << "[시작] " << event.node_name << "\n";
-                break;
-            case GraphEvent::Type::LLM_TOKEN:
-                std::cout << event.data.get<std::string>() << std::flush;
-                break;
-            case GraphEvent::Type::NODE_END:
-                std::cout << "\n[완료] " << event.node_name << "\n";
-                break;
-            default:
-                break;
-        }
-    });
-```
-
----
-
-### 7.9 resume()
-
-HITL 인터럽트 후 실행을 재개한다.
+#### `resume`
 
 ```cpp
 RunResult resume(const std::string& thread_id,
@@ -1333,62 +1553,32 @@ RunResult resume(const std::string& thread_id,
                  const GraphStreamCallback& cb = nullptr);
 ```
 
-| 매개변수 | 설명 |
-|---------|------|
-| `thread_id` | 재개할 세션의 스레드 ID |
-| `resume_value` | 사용자 응답 값 (인터럽트된 노드에 전달) |
-| `cb` | 스트리밍 콜백 (nullptr이면 비스트리밍) |
+Resumes execution from a previously interrupted checkpoint (human-in-the-loop).
 
-**HITL 워크플로 전체 예:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `thread_id` | `std::string` | Thread ID to resume |
+| `resume_value` | `json` | Optional value to inject before resuming (e.g., human approval) |
+| `cb` | `GraphStreamCallback` | Optional streaming callback. Pass `nullptr` for non-streaming resume |
+
+#### `get_state`
 
 ```cpp
-// 1. checkpoint store 준비
-auto store = std::make_shared<InMemoryCheckpointStore>();
-EngineConfig engine_config;
-engine_config.node_context = ctx;
-engine_config.checkpoint_store = store;
-auto engine = GraphEngine::build(definition, std::move(engine_config));
-
-// 2. 첫 실행 (tools 노드 전에 인터럽트)
-RunConfig config;
-config.thread_id = "session-001";
-config.input = {{"messages", json::array({
-    {{"role", "user"}, {"content", "MacBook Pro 1대 주문"}}
-})}};
-
-auto result = engine->run(config);
-
-if (result.interrupted) {
-    std::cout << "인터럽트 발생: " << result.interrupt_node << "\n";
-    // 사용자에게 승인 요청...
-
-    // 3. 승인 후 재개
-    auto resumed = engine->resume("session-001", json("승인"));
-    // 실행 계속...
-}
+std::optional<json> get_state(const std::string& thread_id) const;
 ```
 
----
+Returns the latest state for a thread, or `std::nullopt` if no checkpoint exists.
 
-### 7.10 get_state() / get_state_history()
+#### `get_state_history`
 
 ```cpp
-// 스레드의 최신 상태 조회
-std::optional<json> get_state(const std::string& thread_id) const;
-
-// 스레드의 checkpoint 이력 조회
 std::vector<Checkpoint> get_state_history(const std::string& thread_id,
                                           int limit = 100) const;
 ```
 
-`get_state()`는 checkpoint store에서 최신 checkpoint를 찾아
-채널 값을 JSON으로 반환한다. 해당 스레드가 없으면 `std::nullopt`.
+Returns the checkpoint history for a thread, ordered by timestamp (newest first).
 
----
-
-### 7.11 update_state()
-
-실행 중이 아닌 스레드의 상태를 외부에서 수정한다.
+#### `update_state`
 
 ```cpp
 void update_state(const std::string& thread_id,
@@ -1396,18 +1586,16 @@ void update_state(const std::string& thread_id,
                   const std::string& as_node = "");
 ```
 
-| 매개변수 | 설명 |
-|---------|------|
-| `thread_id` | 대상 스레드 ID |
-| `channel_writes` | `{"채널이름": 값}` 형태의 업데이트 |
-| `as_node` | 어떤 노드가 쓴 것처럼 기록 (빈 문자열이면 "external") |
+Manually updates the state for a thread by applying channel writes. Creates a new
+checkpoint with the updated state.
 
----
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `thread_id` | `std::string` | Target thread |
+| `channel_writes` | `json` | Object of `{channel: value}` pairs to apply |
+| `as_node` | `std::string` | Optional: record these writes as if from a specific node |
 
-### 7.12 fork()
-
-기존 스레드의 checkpoint를 기반으로 새 스레드를 분기한다.
-time-travel 디버깅이나 what-if 분석에 활용한다.
+#### `fork`
 
 ```cpp
 std::string fork(const std::string& source_thread_id,
@@ -1415,76 +1603,101 @@ std::string fork(const std::string& source_thread_id,
                  const std::string& checkpoint_id = "");
 ```
 
-| 매개변수 | 설명 |
-|---------|------|
-| `source_thread_id` | 원본 스레드 ID |
-| `new_thread_id` | 새 스레드 ID |
-| `checkpoint_id` | 분기 기준 checkpoint (빈 문자열이면 최신) |
+Creates a copy of a thread's state as a new thread. Useful for branching conversations
+or creating what-if scenarios.
 
-**반환값:** 새로 생성된 checkpoint의 ID.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `source_thread_id` | `std::string` | Thread to copy from |
+| `new_thread_id` | `std::string` | New thread identifier |
+| `checkpoint_id` | `std::string` | Optional: fork from a specific checkpoint (default: latest) |
 
----
+**Returns:** The checkpoint ID of the new forked state.
 
-### 7.13 호환 설정 메서드
-
-아래 setter는 기존 코드를 위해 유지된다. 새 엔진은 실행을 시작하기 전에
-`EngineConfig`와 `EngineResources`로 같은 값을 전달하는 방식을 권장한다.
+#### `own_tools`
 
 ```cpp
-// 도구 소유권을 엔진에 이전 (수명 관리)
 void own_tools(std::vector<std::unique_ptr<Tool>> tools);
+```
 
-// checkpoint 저장소 설정
+Transfers tool ownership to the engine. The engine stores them and keeps raw pointers
+valid for the lifetime of all `NodeContext.tools` references.
+
+#### `set_checkpoint_store`
+
+```cpp
 void set_checkpoint_store(std::shared_ptr<CheckpointStore> store);
+```
 
-// cross-thread 공유 메모리 설정
+Attaches a checkpoint store. Required for `resume()`, `get_state()`, `fork()`, and
+all state inspection methods.
+
+#### `set_store`
+
+```cpp
 void set_store(std::shared_ptr<Store> store);
+```
+
+Attaches a cross-thread shared memory store (see [Store](#9-store)).
+
+#### `get_store`
+
+```cpp
 std::shared_ptr<Store> get_store() const;
+```
 
-// 전체 노드의 기본 재시도 정책
+Returns the attached shared memory store, or `nullptr` if none is set.
+
+#### `set_retry_policy`
+
+```cpp
 void set_retry_policy(const RetryPolicy& policy);
+```
 
-// 특정 노드의 재시도 정책
-void set_node_retry_policy(const std::string& node_name,
-                           const RetryPolicy& policy);
+Sets the default retry policy for all nodes. Nodes without a specific policy
+will use this one.
 
-// 그래프 이름 조회
+#### `set_node_retry_policy`
+
+```cpp
+void set_node_retry_policy(const std::string& node_name, const RetryPolicy& policy);
+```
+
+Sets a retry policy for a specific node, overriding the default.
+
+#### `get_graph_name`
+
+```cpp
 const std::string& get_graph_name() const;
 ```
 
-**새 코드의 재시도 정책 설정 예:**
-
-```cpp
-// 전체 기본: 3회 재시도, 200ms 시작, 2배 백오프, 최대 5초
-EngineConfig engine_config;
-engine_config.node_context = ctx;
-engine_config.retry_policy = RetryPolicy{3, 200, 2.0f, 5000};
-engine_config.node_retry_policies["llm"] = RetryPolicy{5, 500, 2.0f, 10000};
-auto engine = GraphEngine::build(definition, std::move(engine_config));
-```
+Returns the name of the graph as specified in the definition.
 
 ---
 
-## 7b. 엔진 내부 구성 요소
+## 7b. Engine Internals
 
-`GraphEngine`은 얇은 오케스트레이터이며, 실제 일은 네 개의 전용 클래스에 위임한다.
-일반 사용자는 직접 건드릴 일이 없지만(전부 `GraphEngine::build()` 또는 호환
-`compile()`에서 생성되어 `execute_graph()`에서 구동됨), 공개 헤더로 노출되어 있어 JSON 없이 직접 구성하거나,
-커스텀 체크포인트 흐름을 만들거나, 테스트에서 특정 부분을 스텁할 수 있다.
+`GraphEngine` is a thin orchestrator that delegates to four purpose-built
+classes. Users typically never touch them directly — they are instantiated
+inside `GraphEngine::build()` (or its `compile()` compatibility facade) and
+driven from `execute_graph()` — but
+they are public so advanced callers can build without JSON, drive custom
+checkpoint flows, or stub pieces in tests.
 
-| 클래스 | 헤더 | 역할 |
-|--------|------|------|
-| [`GraphCompiler`](#graphcompiler) | `<neograph/graph/compiler.h>` | JSON → `CompiledGraph` 파싱 |
-| [`Scheduler`](#scheduler) | `<neograph/graph/scheduler.h>` | 라우팅 결정 (signal dispatch + barrier) |
-| [`CheckpointCoordinator`](#checkpointcoordinator) | `<neograph/graph/coordinator.h>` | 실행당 체크포인트 생명주기 |
-| [`NodeExecutor`](#nodeexecutor) | `<neograph/graph/executor.h>` | 재시도, 병렬 fan-out, Send 디스패치 |
+| Class | Header | Responsibility |
+|-------|--------|----------------|
+| [`GraphCompiler`](#graphcompiler) | `<neograph/graph/compiler.h>` | Parses JSON → `CompiledGraph` |
+| [`Scheduler`](#scheduler) | `<neograph/graph/scheduler.h>` | Routing decisions (signal dispatch + barriers) |
+| [`CheckpointCoordinator`](#checkpointcoordinator) | `<neograph/graph/coordinator.h>` | Per-run checkpoint lifecycle |
+| [`NodeExecutor`](#nodeexecutor) | `<neograph/graph/executor.h>` | Retry, parallel fan-out, Send dispatch |
 
 ### GraphCompiler
 
-**헤더:** `<neograph/graph/compiler.h>`
+**Header:** `<neograph/graph/compiler.h>`
 
-순수 JSON → 값 타입 변환. 런타임 의존성 없음 — 결과인 `CompiledGraph`는
-테스트에서 수동으로 만들거나 검사할 수 있는 이동 가능한 번들이다.
+Pure JSON → value-type translation. No runtime dependencies — the
+resulting `CompiledGraph` is a movable bundle you can inspect or
+construct by hand in tests.
 
 ```cpp
 namespace neograph::graph {
@@ -1520,13 +1733,13 @@ public:
 } // namespace neograph::graph
 ```
 
-`GraphCompiler::parse()`는 node를 생성하지 않고 `TopologySpec`을 만든다.
-`GraphValidator::validate()`는 구조화된 진단을 반환하고,
-`GraphValidator::require_valid()`는 `ValidatedTopology`를 반환하거나
-`std::runtime_error`를 던진다. factory 해석과 runtime node 생성은
-`GraphCompiler::link()`에서만 수행한다. `compile()`은 parse와 link를 합친 호환
-helper이고 `GraphEngine::build()`는 기존 lenient warning 동작을 유지한다. 새
-코드는 `GraphEngine::build_strict()` 또는 다음 경로로 전체 경계를 강제한다.
+`GraphCompiler::parse()` produces a `TopologySpec` without constructing nodes.
+`GraphValidator::validate()` returns structured diagnostics, while
+`GraphValidator::require_valid()` returns a `ValidatedTopology` or throws
+`std::runtime_error`. Only `GraphCompiler::link()` resolves factories and
+instantiates runtime nodes. `compile()` remains the compatibility composition of
+parse and link, and `GraphEngine::build()` retains its lenient warning behavior.
+New code can enforce the full boundary with `GraphEngine::build_strict()` or:
 
 ```cpp
 auto spec = GraphCompiler::parse(definition);
@@ -1536,11 +1749,11 @@ auto engine = GraphEngine::link(std::move(validated), config, resources);
 
 ### Scheduler
 
-**헤더:** `<neograph/graph/scheduler.h>`
+**Header:** `<neograph/graph/scheduler.h>`
 
-그래프 토폴로지(edges + conditional edges)를 소유하며, 이전 super-step이
-내보낸 라우팅 신호로부터 다음 super-step의 ready 집합을 계산한다. 스레딩,
-체크포인트, 재시도, HITL에 대해서는 아무것도 모름 — 그건 전부 엔진 쪽에 남는다.
+Owns the graph topology and computes each super-step's ready set from
+routing signals emitted by the previous step. No knowledge of
+threading, checkpointing, retries, or HITL — those stay in the engine.
 
 ```cpp
 namespace neograph::graph {
@@ -1574,7 +1787,7 @@ public:
         BarrierState& barrier_state) const;
 
     std::vector<std::string> resolve_next_nodes(
-        const std::string& from,
+        const std::string& current,
         const GraphState& state) const;
 
     const BarrierSpecs& barrier_specs() const;
@@ -1583,27 +1796,27 @@ public:
 } // namespace neograph::graph
 ```
 
-**의미론:**
+**Semantics:**
 
-- **Signal dispatch**: 노드는 step S에서 누가 명시적으로 라우팅해준 경우에만
-  step S+1에 ready가 된다 (일반 edge, 조건 edge 분기, `Command::goto_node`, Send).
-  정적 predecessor 맵은 사용하지 않음 — 그렇게 하면 XOR 라우팅과 AND fan-in이
-  뒤섞여 조건부 self-loop이 deadlock된다.
-- **Pairing invariant**: 호출자는 `just_ran[i] ↔ results[i]`가 1:1로 정렬된
-  상태로 넘겨야 한다. 타입 시그니처 자체가 이를 강제해 호출자가 두 배열을
-  비동기화할 수 없도록 막는다.
-- **Barrier**: `"barrier": {"wait_for": [...]}`로 선언한 노드는 명시된 모든
-  upstream이 신호를 보낸 뒤에만 발사된다. 누적 상태는 가변 `BarrierState`
-  맵을 통해 super-step들 사이를 넘어 유지되며, 발사 시점에 해당 항목이
-  리셋되어 barrier를 통과하는 루프 그래프도 정상 동작한다.
+- **Signal dispatch**: a node becomes ready in super-step S+1 iff some
+  node in step S explicitly routed to it (regular edge, conditional
+  edge branch, `Command::goto_node`, or Send). No static predecessor
+  map — that would conflate XOR routing with AND fan-in.
+- **Pairing invariant**: the caller must pass `just_ran` and `results`
+  with `just_ran[i] ↔ results[i]`. Enforced by the two-argument
+  overload's type signature so callers cannot desynchronize them.
+- **Barriers**: nodes declared with `"barrier": {"wait_for": [...]}`
+  gate on ALL listed upstreams having signaled, accumulated across
+  super-steps via the mutable `BarrierState` map. Fires reset the
+  entry so loops through the barrier work correctly.
 
 ### CheckpointCoordinator
 
-**헤더:** `<neograph/graph/coordinator.h>`
+**Header:** `<neograph/graph/coordinator.h>`
 
-`(CheckpointStore, thread_id)` 쌍을 래핑하는 실행당 객체. store가 null이거나
-thread_id가 비어 있으면 모든 메서드가 안전한 no-op이라서 호출 지점마다
-가드를 쓸 필요가 없다.
+Per-run wrapper over `(CheckpointStore, thread_id)`. Every method is a
+safe no-op when the store is null or thread_id is empty, so call sites
+never need to guard.
 
 ```cpp
 namespace neograph::graph {
@@ -1612,7 +1825,7 @@ struct ResumeContext {
     bool have_cp = false;
     std::string checkpoint_id;
     json channel_values;
-    int start_step = 0;  // phase-aware로 조정됨
+    int start_step = 0;  // Phase-adjusted
     CheckpointPhase phase = CheckpointPhase::Completed;
     std::vector<std::string> next_nodes;
     std::unordered_map<std::string, NodeResult> replay_results;
@@ -1651,19 +1864,21 @@ public:
 } // namespace neograph::graph
 ```
 
-**phase-aware step 오프셋:** `load_for_resume()`은 최신 체크포인트의
-`interrupt_phase`를 보고 `start_step`을 계산한다 — `Before` / `NodeInterrupt`는
-`cp.step`에서 재진입, `After` / `Completed` / `Updated`는 `+1` 전진.
-엔진의 resume 경로는 이 로직을 더 이상 반복하지 않는다.
+**Phase-aware step offset:** `load_for_resume()` reads the latest
+checkpoint's `interrupt_phase` and sets `start_step` accordingly —
+`Before` / `NodeInterrupt` re-enter at `cp.step`, `After` / `Completed` /
+`Updated` advance by +1. The engine's resume path never repeats this
+logic.
 
 ### NodeExecutor
 
-**헤더:** `<neograph/graph/executor.h>`
+**Header:** `<neograph/graph/executor.h>`
 
-super-step당 노드 호출을 소유한다: 재시도 루프, replay 조회, pending write 기록,
-`asio::experimental::make_parallel_group` 기반 fan-out, Send 디스패치. 3.0에서
-sync `run_one` / `run_parallel` / `run_sends` 트윈은 제거됐고 호출자는 `_async`
-피어를 사용한다.
+Owns per-super-step node invocation: retry loop, replay lookup,
+pending-write recording, parallel fan-out via
+`asio::experimental::make_parallel_group`, and Send dispatch. 3.0
+removed the sync `run_one` / `run_parallel` / `run_sends` twins;
+callers use the `_async` peers.
 
 ```cpp
 namespace neograph::graph {
@@ -1716,111 +1931,163 @@ public:
 } // namespace neograph::graph
 ```
 
-**불변식:**
+**Invariants:**
 
-- `run_one_async`와 `run_parallel_async`는 모두 `NodeInterrupt`를 rethrow하기
-  전에 `phase=NodeInterrupt`인 체크포인트를 저장하되, `next_nodes`를 해당 노드
-  하나로 좁힌다. 성공한 형제 노드들의 writes는 `pending_writes`에 이미 기록돼
-  있어 resume의 replay 맵이 그들을 건너뛰고 문제의 노드만 재실행한다.
-- `run_parallel_async`는 writes와 `Command.updates`를 `ready` 순서로 적용해
-  이후 Scheduler 호출의 `ready[i] ↔ results[i]` pairing이 그대로 유지된다.
-- `run_sends_async`: 단일 Send는 공유 state에서 재시도 포함으로 실행, 다중
-  Send는 각 타겟에 독립 state 복사(init + restore + input 적용)를 주고 재시도
-  없이 실행 — pre-3.0 의미론을 보존한다.
-- `fan_out_pool` (선택)이 parallel branch dispatch 위치를 결정한다. null이면
-  branch는 `co_await asio::this_coro::executor`에서 실행 — 단일 스레드 async
-  caller에는 문제 없지만 CPU-bound fan-out은 직렬화된다. non-null이면
-  `run_parallel_async`와 multi-Send branch가 `pool->get_executor()`에
-  `co_spawn`한다. sync `run()` caller는 `GraphEngine::set_worker_count(N)`으로
-  pool을 설치한다.
-- `execute_node_with_retry_async`가 안쪽 retry 루프: backoff는
-  `asio::steady_timer`를 사용해 retry 대기 중에도 executor가 멈추지 않는다.
+- `run_one_async` and `run_parallel_async` both save a
+  `phase=NodeInterrupt` checkpoint scoped to the interrupting node
+  before rethrowing `NodeInterrupt`, so resume re-enters just that
+  node (sibling writes are already in `pending_writes` and replay via
+  the map).
+- `run_parallel_async` applies writes + `Command.updates` in `ready`
+  order so `ready[i] ↔ results[i]` pairing holds for the subsequent
+  Scheduler call.
+- `run_sends_async`: single Send runs on the shared state with retry;
+  multi Send gives each target an isolated state copy (init + restore
+  + apply input) without retry — preserves pre-3.0 semantics.
+- `fan_out_pool` (optional) determines where parallel branches
+  dispatch. When null, branches run on `co_await asio::this_coro::
+  executor` — fine for single-thread async callers, but CPU-bound
+  fan-out serializes. When non-null, `run_parallel_async` and the
+  multi-Send branch `co_spawn` onto `pool->get_executor()` for real
+  thread parallelism. `GraphEngine::set_worker_count(N)` installs the
+  pool for sync `run()` callers.
+- `execute_node_with_retry_async` is the inner retry loop: backoff
+  uses an `asio::steady_timer` so the executor isn't frozen during
+  retry waits.
 
 ---
 
-## 8. 체크포인트
+## 8. Checkpoint
 
-**헤더:** `neograph/graph/checkpoint.h`
-**네임스페이스:** `neograph::graph`
+**Header:** `<neograph/graph/checkpoint.h>`
+**Namespace:** `neograph::graph`
 
-그래프 실행 상태의 스냅샷을 저장하고 복원하는 기능을 제공한다.
-HITL, time-travel 디버깅, 실행 기록 추적에 필수적이다.
+Checkpointing enables persistence, time-travel debugging, and human-in-the-loop
+workflows by saving and restoring graph execution state.
 
-### 8.1 Checkpoint
+### Checkpoint (struct)
+
+A serialized snapshot of graph execution state at a point in time.
 
 ```cpp
 struct Checkpoint {
-    std::string id;               // UUID v4
-    std::string thread_id;        // 세션 식별자
-    json        channel_values;   // 직렬화된 채널 데이터
-    json        channel_versions; // 채널별 버전 카운터
-    std::string parent_id;        // 이전 checkpoint (time-travel 체인)
-    std::string current_node;     // checkpoint 시점의 활성 노드
-    std::vector<std::string> next_nodes;  // 재개 시 실행할 노드 목록
+    std::string id;                // UUID v4
+    std::string thread_id;         // Conversation/session identifier
+    json        channel_values;    // Serialized channel data
+    json        channel_versions;  // Per-channel version counters
+    std::string parent_id;         // Previous checkpoint ID (for time-travel chain)
+    std::string current_node;      // Node that was active at checkpoint time
+    std::vector<std::string> next_nodes;  // Nodes to execute on resume
     CheckpointPhase interrupt_phase;  // Before | After | Completed | NodeInterrupt | Updated
-    std::map<std::string, std::set<std::string>> barrier_state;  // v2+: in-flight barrier 누적
-    json        metadata;         // 사용자 정의 메타데이터
-    int64_t     step;             // super-step 번호
-    int64_t     timestamp;        // Unix epoch 밀리초
-    std::uint32_t schema_version = CHECKPOINT_SCHEMA_VERSION;  // 레이아웃 버전 (현재 3)
+    std::map<std::string, std::set<std::string>> barrier_state;  // v2+: in-flight barrier accumulators
+    json        metadata;          // User-defined metadata
+    int64_t     step;              // Super-step number
+    int64_t     timestamp;         // Unix epoch milliseconds
+    std::uint32_t schema_version = CHECKPOINT_SCHEMA_VERSION;  // Layout version
 
-    static std::string generate_id(); // UUID v4 생성
+    static std::string generate_id();  // Generate UUID v4
 };
+
+// Wire-stable schema version. Bump on layout-incompatible changes.
+// v2 added `barrier_state`; v3 records pending-write mode support.
+// Typed `uint32_t`: schema versions are non-negative wire values.
+constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
 ```
 
-| 필드 | 설명 |
-|------|------|
-| `id` | 고유 식별자. `generate_id()`로 자동 생성 |
-| `thread_id` | 대화/세션 단위 식별자 |
-| `parent_id` | 이전 checkpoint와 연결 (체인) |
-| `interrupt_phase` | `CheckpointPhase` enum. `Before` -- interrupt_before, `After` -- interrupt_after, `Completed` -- super-step 정상 종료, `NodeInterrupt` -- 노드 내부에서 `NodeInterrupt` throw, `Updated` -- `update_state()`로 외부 주입. 문자열 인코딩은 `to_string()` / `parse_checkpoint_phase()` |
-| `barrier_state` | barrier 별 누적 upstream 집합. 아직 발사되지 않은 barrier에 대해서만 항목이 존재 — Scheduler가 barrier를 발사할 때 해당 항목을 clear한다. `scheduler.h`의 `BarrierState` 와 동일한 shape. schema v2부터 존재하며, v1 blob은 빈 map으로 로드 (pre-v2 동작과 동등) |
-| `step` | 몇 번째 super-step에서 생성되었는지 |
-| `schema_version` | 현재 `3`. persistent `CheckpointStore` 구현은 이 값을 직렬화해야 하며, `0`은 pre-versioned blob (마이그레이션 책임은 호출자에게) |
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `std::string` | Unique identifier (UUID v4) |
+| `thread_id` | `std::string` | Groups checkpoints by conversation/session |
+| `channel_values` | `json` | Serialized state of all channels |
+| `channel_versions` | `json` | Version counter for each channel |
+| `parent_id` | `std::string` | ID of the preceding checkpoint (forms a linked list for time-travel) |
+| `current_node` | `std::string` | Node that was executing when the checkpoint was taken |
+| `next_nodes` | `std::vector<std::string>` | All nodes scheduled for the next super-step (used by `resume()`). Under signal dispatch a super-step can leave several nodes simultaneously ready (parallel fan-out, conditional branches activating together), and every one of them must be persisted — storing a single node would silently drop siblings across a crash |
+| `interrupt_phase` | `CheckpointPhase` | Enum: `Before` (interrupt_before fired), `After` (interrupt_after fired), `Completed` (normal super-step cadence), `NodeInterrupt` (node threw `NodeInterrupt` mid-execution), `Updated` (external `update_state()` injection). `to_string()` and `parse_checkpoint_phase()` give a stable wire/log encoding |
+| `barrier_state` | `map<string, set<string>>` | Per-barrier accumulator of upstreams that have signaled so far. Entries only exist for barriers that are in-flight (not yet fired) — the Scheduler clears an entry when its barrier fires. Shape matches `BarrierState` from `scheduler.h`. Present since schema v2; v1 blobs deserialize with an empty map, which matches their pre-v2 behavior |
+| `metadata` | `json` | Arbitrary user-defined data |
+| `step` | `int64_t` | Super-step counter |
+| `timestamp` | `int64_t` | Creation time in Unix epoch milliseconds |
+| `schema_version` | `std::uint32_t` | On-wire layout version (see `CHECKPOINT_SCHEMA_VERSION`, currently `3`). Round 5 widened this from `int` to fixed-width unsigned — schema versions are non-negative and a platform-variable `int` width was wrong for a value persisted to disk and round-tripped through JSON. Persistent `CheckpointStore` implementations should serialize it and treat `0` on a deserialized blob as "pre-versioned" (e.g. the field was absent — migration is the caller's responsibility) |
 
----
+### CheckpointStore
 
-### 8.2 Checkpoint capability와 CheckpointStore
+Abstract interface for checkpoint persistence. Implement this to store checkpoints
+in a database, file system, or any other backend.
 
-checkpoint 영속화 인터페이스. 데이터베이스, 파일 시스템 등으로 구현 가능.
-
-> **커스텀 store를 작성한다면?** 새 구현은 필요한 최소 capability인
-> `CheckpointStoreCore`를 구현하고, 필요할 때 `AsyncCheckpointStore` 및
-> `PendingWritesCheckpointStore`를 추가한 뒤 `adapt_checkpoint_store()`로
-> 연결한다. 기존 `CheckpointStore`는 호환 contract로 유지된다. async 기본
-> 구현은 sync 메서드를 호출하므로 sync-only backend도 유효하지만 async 호출은
-> blocking이다. [`ASYNC_GUIDE.md` §9.4](ASYNC_GUIDE.md#94-checkpointstore) 참조.
+> **Writing a custom store?** New implementations should implement the smallest
+> applicable capability: `CheckpointStoreCore`, optionally
+> `AsyncCheckpointStore` and/or `PendingWritesCheckpointStore`, then pass it
+> through `adapt_checkpoint_store()`. The existing `CheckpointStore` interface
+> remains the compatibility contract. Its async defaults invoke the sync methods;
+> a sync-only backend therefore remains valid, but its async calls are blocking.
+> See [`ASYNC_GUIDE.md` §9.4](ASYNC_GUIDE.md#94-checkpointstore).
 
 ```cpp
-class CheckpointStoreCore {
+class CheckpointStore {
 public:
-    virtual ~CheckpointStoreCore() = default;
+    virtual ~CheckpointStore() = default;
 
-    virtual void save(const Checkpoint& cp) = 0;
-    virtual std::optional<Checkpoint> load_latest(const std::string& thread_id) = 0;
-    virtual std::optional<Checkpoint> load_by_id(const std::string& id) = 0;
-    virtual std::vector<Checkpoint> list(const std::string& thread_id,
-                                          int limit = 100) = 0;
-    virtual void delete_thread(const std::string& thread_id) = 0;
+    // ── Sync core (5 virtuals, non-pure with bridge defaults) ──────
+    virtual void save(const Checkpoint& cp);
+    virtual std::optional<Checkpoint> load_latest(const std::string& thread_id);
+    virtual std::optional<Checkpoint> load_by_id(const std::string& id);
+    virtual std::vector<Checkpoint>   list(const std::string& thread_id,
+                                           int limit = 100);
+    virtual void delete_thread(const std::string& thread_id);
+
+    // ── Async peers (5 virtuals, default co_return the sync call) ──
+    virtual asio::awaitable<void> save_async(const Checkpoint& cp);
+    virtual asio::awaitable<std::optional<Checkpoint>>
+        load_latest_async(const std::string& thread_id);
+    virtual asio::awaitable<std::optional<Checkpoint>>
+        load_by_id_async(const std::string& id);
+    virtual asio::awaitable<std::vector<Checkpoint>>
+        list_async(const std::string& thread_id, int limit = 100);
+    virtual asio::awaitable<void>
+        delete_thread_async(const std::string& thread_id);
+
+    // ── Pending writes — fine-grained super-step progress log ──────
+    //
+    // Default no-ops: backends that don't support per-node durable
+    // writes fall back to "full super-step replay" on resume.
+    virtual void put_writes(const std::string& thread_id,
+                            const std::string& parent_checkpoint_id,
+                            const PendingWrite& write) {}
+    virtual std::vector<PendingWrite> get_writes(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id) { return {}; }
+    virtual void clear_writes(const std::string& thread_id,
+                              const std::string& parent_checkpoint_id) {}
+
+    // ── Async pending-writes peers (default-bridge to sync) ────────
+    virtual asio::awaitable<void> put_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id,
+        const PendingWrite& write);
+    virtual asio::awaitable<std::vector<PendingWrite>> get_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id);
+    virtual asio::awaitable<void> clear_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id);
 };
-
-std::shared_ptr<CheckpointStore> adapt_checkpoint_store(
-    std::shared_ptr<CheckpointStoreCore> core);
 ```
 
-| 메서드 | 설명 |
-|--------|------|
-| `save()` | checkpoint 저장 |
-| `load_latest()` | 해당 스레드의 최신 checkpoint 로드 |
-| `load_by_id()` | ID로 특정 checkpoint 로드 |
-| `list()` | 스레드의 checkpoint 이력 조회 (timestamp 순) |
-| `delete_thread()` | 스레드의 모든 checkpoint 삭제 |
+| Method | Description |
+|--------|-------------|
+| `save(cp)` / `save_async(cp)` | Persist a checkpoint. Engine writes one per super-step. |
+| `load_latest(thread_id)` / `_async` | Load the most recent checkpoint for a thread. |
+| `load_by_id(id)` / `_async` | Load a specific checkpoint by UUID (time-travel). |
+| `list(thread_id, limit)` / `_async` | List checkpoints for a thread, newest first, up to `limit`. |
+| `delete_thread(thread_id)` / `_async` | Delete all checkpoints for a thread. |
+| `put_writes(thread_id, parent_cp, write)` / `_async` | Record a successful node execution mid-super-step. Engine calls this immediately after a node returns and *before* its writes apply to GraphState. Default no-op. |
+| `get_writes(thread_id, parent_cp)` / `_async` | Load pending writes attached to a parent checkpoint. Engine calls this on resume to skip already-completed tasks. Default empty. |
+| `clear_writes(thread_id, parent_cp)` / `_async` | Discard pending writes after the successor super-step's checkpoint has been durably saved. Default no-op. |
 
----
+### InMemoryCheckpointStore
 
-### 8.3 InMemoryCheckpointStore
-
-메모리 기반 구현. 테스트 및 단일 프로세스 환경에 적합하다.
+Thread-safe in-memory implementation suitable for testing and single-process applications.
 
 ```cpp
 class InMemoryCheckpointStore : public CheckpointStore {
@@ -1832,92 +2099,86 @@ public:
                                   int limit = 100) override;
     void delete_thread(const std::string& thread_id) override;
 
-    size_t size() const;  // 전체 checkpoint 개수 (테스트용)
+    size_t size() const;  // Total number of stored checkpoints
 };
-```
-
-**사용 예:**
-
-```cpp
-auto store = std::make_shared<InMemoryCheckpointStore>();
-
-EngineConfig engine_config;
-engine_config.node_context = ctx;
-engine_config.checkpoint_store = store;
-auto engine = GraphEngine::build(definition, std::move(engine_config));
-
-// 실행 후 이력 조회
-auto history = store->list("thread-001");
-for (const auto& cp : history) {
-    std::cout << "step=" << cp.step
-              << " node=" << cp.current_node
-              << " phase=" << to_string(cp.interrupt_phase) << "\n";
-}
 ```
 
 ---
 
 ## 9. Store
 
-**헤더:** `neograph/graph/store.h`
-**네임스페이스:** `neograph::graph`
+**Header:** `<neograph/graph/store.h>`
+**Namespace:** `neograph::graph`
 
-스레드 간 공유되는 영속적 키-값 저장소.
-사용자 선호도, 장기 기억, 에이전트 간 공유 지식 등에 활용한다.
+Cross-thread shared memory store. Provides namespaced key-value storage that persists
+across threads and graph executions. Use cases include long-term user preferences,
+shared knowledge bases, and agent memory.
 
-### 9.1 Namespace / StoreItem
+### Namespace
+
+A hierarchical path represented as a vector of strings.
 
 ```cpp
 using Namespace = std::vector<std::string>;
+```
 
+Example: `{"users", "user123", "preferences"}` represents the path `users/user123/preferences`.
+
+### StoreItem
+
+A single item in the store.
+
+```cpp
 struct StoreItem {
-    Namespace   ns;          // 계층적 네임스페이스 경로
-    std::string key;         // 항목 키
-    json        value;       // 저장된 값
-    int64_t     created_at;  // 생성 시각 (Unix epoch ms)
-    int64_t     updated_at;  // 수정 시각 (Unix epoch ms)
+    Namespace   ns;          // Namespace path
+    std::string key;         // Item key within the namespace
+    json        value;       // Stored value
+    int64_t     created_at;  // Creation timestamp (Unix epoch millis)
+    int64_t     updated_at;  // Last update timestamp (Unix epoch millis)
 };
 ```
 
-`Namespace`는 계층적 경로를 나타내는 문자열 벡터이다.
-예: `{"users", "user123", "preferences"}`
+### Store (abstract)
 
----
-
-### 9.2 Store (추상 클래스)
+Abstract interface for cross-thread shared memory.
 
 ```cpp
 class Store {
 public:
     virtual ~Store() = default;
 
-    // 값 저장 (생성 또는 갱신)
+    // Put a value (create or update)
     virtual void put(const Namespace& ns, const std::string& key,
                      const json& value) = 0;
 
-    // 단일 항목 조회
+    // Get a single item
     virtual std::optional<StoreItem> get(const Namespace& ns,
-                                          const std::string& key) const = 0;
+                                         const std::string& key) const = 0;
 
-    // 네임스페이스 접두사로 검색
+    // Search items under a namespace prefix
     virtual std::vector<StoreItem> search(const Namespace& ns_prefix,
                                            int limit = 100) const = 0;
 
-    // 항목 삭제
-    virtual void delete_item(const Namespace& ns,
-                              const std::string& key) = 0;
+    // Delete an item
+    virtual void delete_item(const Namespace& ns, const std::string& key) = 0;
 
-    // 접두사 아래의 네임스페이스 목록
+    // List namespaces under a prefix
     virtual std::vector<Namespace> list_namespaces(
         const Namespace& prefix = {}) const = 0;
 };
 ```
 
----
+| Method | Description |
+|--------|-------------|
+| `put(ns, key, value)` | Insert or update a value. Updates `updated_at` if the item already exists |
+| `get(ns, key)` | Retrieve a single item. Returns `std::nullopt` if not found |
+| `search(ns_prefix, limit)` | Find all items whose namespace starts with the given prefix |
+| `delete_item(ns, key)` | Remove an item from the store |
+| `list_namespaces(prefix)` | List all unique namespaces that start with the given prefix |
 
-### 9.3 InMemoryStore
+### InMemoryStore
 
-메모리 기반 구현. 프로세스 종료 시 데이터가 소멸된다.
+Thread-safe in-memory implementation for testing and single-process use.
 
 ```cpp
 class InMemoryStore : public Store {
@@ -1925,59 +2186,32 @@ public:
     void put(const Namespace& ns, const std::string& key,
              const json& value) override;
     std::optional<StoreItem> get(const Namespace& ns,
-                                  const std::string& key) const override;
+                                 const std::string& key) const override;
     std::vector<StoreItem> search(const Namespace& ns_prefix,
                                    int limit = 100) const override;
     void delete_item(const Namespace& ns, const std::string& key) override;
     std::vector<Namespace> list_namespaces(
         const Namespace& prefix = {}) const override;
 
-    size_t size() const;  // 전체 항목 수 (테스트용)
+    size_t size() const;  // Total number of stored items
 };
-```
-
-**사용 예:**
-
-```cpp
-auto store = std::make_shared<InMemoryStore>();
-EngineConfig engine_config;
-engine_config.node_context = ctx;
-engine_config.store = store;
-auto engine = GraphEngine::build(definition, std::move(engine_config));
-
-// 노드 내부에서 Store 접근 (engine->get_store())
-// 사용자 선호도 저장
-store->put({"users", "u001"}, "language", json("ko"));
-store->put({"users", "u001"}, "theme", json("dark"));
-
-// 조회
-auto item = store->get({"users", "u001"}, "language");
-if (item) {
-    std::cout << "Language: " << item->value << "\n"; // "ko"
-}
-
-// 네임스페이스 아래 전체 검색
-auto prefs = store->search({"users", "u001"});
-for (const auto& p : prefs) {
-    std::cout << p.key << " = " << p.value << "\n";
-}
 ```
 
 ---
 
-## 10. 로더 / 레지스트리
+## 10. Loader
 
-**헤더:** `neograph/graph/loader.h`
-**네임스페이스:** `neograph::graph`
+**Header:** `<neograph/graph/loader.h>`
+**Namespace:** `neograph::graph`
 
-JSON 정의로 그래프를 컴파일할 때 노드 타입, 리듀서, 조건 함수를
-이름으로 검색하는 기존 싱글턴 레지스트리들. 새 코드는 `GraphRegistry`를
-`EngineResources`로 전달해 엔진별 overlay를 만들 수 있으며, 로컬에 없는
-이름만 이 process-global registry로 fallback한다.
+Legacy singleton registries for reducers, conditions, and node types. These
+remain the process-global fallback for JSON-driven graph construction. New
+code can pass a `GraphRegistry` through `EngineResources`; its local entries
+take precedence while missing names continue to resolve here.
 
-### 10.1 ReducerRegistry
+### ReducerRegistry
 
-리듀서 함수 레지스트리.
+Singleton registry mapping string names to `ReducerFn` implementations.
 
 ```cpp
 class ReducerRegistry {
@@ -1986,31 +2220,20 @@ public:
 
     void register_reducer(const std::string& name, ReducerFn fn);
     ReducerFn get(const std::string& name) const;
-    std::vector<std::string> names() const;   // 등록된 이름 목록(정렬)
+    std::vector<std::string> names() const;
 };
 ```
 
-**내장 리듀서:**
+| Method | Description |
+|--------|-------------|
+| `instance()` | Returns the singleton instance |
+| `register_reducer(name, fn)` | Registers a custom reducer function |
+| `get(name)` | Looks up a reducer by name. Throws if not found |
+| `names()` | Sorted list of all registered reducer names (introspection for external tooling) |
 
-| 이름 | 동작 |
-|------|------|
-| `"overwrite"` | 새 값으로 완전히 대체 |
-| `"append"` | 기존 JSON 배열에 새 배열의 원소를 추가 |
+### ConditionRegistry
 
-**커스텀 리듀서 등록:**
-
-```cpp
-auto& reg = ReducerRegistry::instance();
-reg.register_reducer("sum", [](const json& current, const json& incoming) {
-    return json(current.get<int>() + incoming.get<int>());
-});
-```
-
----
-
-### 10.2 ConditionRegistry
-
-조건 함수 레지스트리. `ConditionalEdge`의 `condition` 필드에서 이름으로 참조된다.
+Singleton registry mapping string names to `ConditionFn` implementations.
 
 ```cpp
 class ConditionRegistry {
@@ -2019,44 +2242,20 @@ public:
 
     void register_condition(const std::string& name, ConditionFn fn);
     ConditionFn get(const std::string& name) const;
-    std::vector<std::string> names() const;   // 등록된 이름 목록(정렬)
+    std::vector<std::string> names() const;
 };
 ```
 
-**내장 조건:**
+| Method | Description |
+|--------|-------------|
+| `instance()` | Returns the singleton instance |
+| `register_condition(name, fn)` | Registers a custom condition function |
+| `get(name)` | Looks up a condition by name. Throws if not found |
+| `names()` | Sorted list of all registered condition names (introspection for external tooling) |
 
-| 이름 | 설명 | 반환값 |
-|------|------|--------|
-| `"has_tool_calls"` | `messages` 채널의 마지막 메시지에 tool_calls가 있는지 확인 | `"true"` / `"false"` |
-| `"route_channel"` | `__route__` 채널의 값을 라우팅 키로 반환 | 채널 값 문자열 |
+### NodeFactory
 
-**커스텀 조건 등록:**
-
-```cpp
-auto& reg = ConditionRegistry::instance();
-reg.register_condition("check_score", [](const GraphState& state) -> std::string {
-    auto score = state.get("score");
-    if (score.is_number() && score.get<double>() > 0.8)
-        return "high";
-    return "low";
-});
-```
-
-이후 JSON 정의에서:
-
-```json
-{
-  "from": "evaluator",
-  "condition": "check_score",
-  "routes": { "high": "summarizer", "low": "researcher" }
-}
-```
-
----
-
-### 10.3 NodeFactory
-
-노드 타입 팩토리. JSON 정의의 `type` 필드 값으로 노드 인스턴스를 생성한다.
+Singleton factory for creating `GraphNode` instances from JSON configuration.
 
 ```cpp
 using NodeFactoryFn = std::function<std::unique_ptr<GraphNode>(
@@ -2070,152 +2269,237 @@ public:
 
     void register_type(const std::string& type, NodeFactoryFn fn);
     void register_type(const std::string& type, NodeFactoryFn fn,
-                       json config_schema);     // 설정 스키마 동반(추가형)
+                       json config_schema);
     std::unique_ptr<GraphNode> create(const std::string& type,
                                        const std::string& name,
                                        const json& config,
                                        const NodeContext& ctx) const;
-    std::vector<std::string> registered_types() const;  // 타입 이름 목록
-    json export_schema() const;                 // 아래 10.4 참고
+    std::vector<std::string> registered_types() const;
+    json export_schema() const;
 };
 ```
 
-> `register_type` 의 3-인자 변형은 그 노드 타입의 `config` 가 받는
-> 필드를 JSON Schema(Draft 2020-12)로 같이 선언한다. 기존 2-인자는
-> 그대로 동작(기존 코드 안 깨짐) — 미지정 시 `{"type":"object"}`
-> (아무 객체나 허용). 이 스키마는 `export_schema()` 용이고 엔진이
-> compile 시 검증에 쓰지는 않는다.
+| Method | Description |
+|--------|-------------|
+| `instance()` | Returns the singleton instance |
+| `register_type(type, fn)` | Registers a node factory. Config schema defaults to a permissive `{"type":"object"}` |
+| `register_type(type, fn, config_schema)` | As above, with a declared JSON Schema (Draft 2020-12) for the node's `config`. Additive — the 2-arg overload still works unchanged. Used only by `export_schema()`; the engine does not validate config against it |
+| `create(type, name, config, ctx)` | Creates a node of the given type. Throws if the type is not registered |
+| `registered_types()` | Sorted list of all registered node type names |
+| `export_schema()` | Machine-readable description of the topology JSON this engine accepts (see [Topology Schema Export](#topology-schema-export-issue-56)) |
 
-**내장 노드 타입:**
+### Built-in Registrations
 
-| 타입 이름 | 클래스 | 설명 |
-|----------|--------|------|
-| `"llm_call"` | `LLMCallNode` | LLM API 호출 |
-| `"tool_dispatch"` | `ToolDispatchNode` | 도구 실행 |
-| `"intent_classifier"` | `IntentClassifierNode` | 의도 분류 |
-| `"subgraph"` | `SubgraphNode` | 하위 그래프 실행 |
+The library pre-registers the following components:
 
-**커스텀 노드 타입 등록:**
+**Reducers:**
 
-```cpp
-auto& factory = NodeFactory::instance();
+| Name | Behavior |
+|------|----------|
+| `"overwrite"` | Replaces the current value with the incoming value |
+| `"append"` | Appends the incoming value to the current array. If the incoming value is an array, its elements are concatenated |
 
-factory.register_type("my_node",
-    [](const std::string& name, const json& config, const NodeContext& ctx)
-        -> std::unique_ptr<GraphNode> {
-        return std::make_unique<MyCustomNode>(name, config, ctx);
-    });
-```
+**Conditions:**
 
-이후 JSON 정의에서:
+| Name | Behavior |
+|------|----------|
+| `"has_tool_calls"` | Inspects the last message in the `"messages"` channel. Returns `"yes"` if it contains tool calls, `"no"` otherwise |
+| `"route_channel"` | Reads the `"__route__"` channel and returns its string value. Used with `IntentClassifierNode` |
 
-```json
-{
-  "nodes": {
-    "processor": { "type": "my_node", "config": { "threshold": 0.5 } }
-  }
-}
-```
+**Node types:**
 
----
+| Type | Class | Description |
+|------|-------|-------------|
+| `"llm_call"` | `LLMCallNode` | Calls the LLM with current conversation state |
+| `"tool_dispatch"` | `ToolDispatchNode` | Dispatches tool calls from the latest assistant message |
+| `"intent_classifier"` | `IntentClassifierNode` | LLM-based intent classification. Reads `prompt` and `valid_routes` from `config` |
+| `"subgraph"` | `SubgraphNode` | Runs a compiled subgraph. Reads `input_map` and `output_map` from `config` |
 
-### 10.4 토폴로지 스키마 export (issue #56)
+### Topology Schema Export (issue #56)
 
-NeoGraph 는 그래프를 **JSON 으로 기술**한다 — JSON 만 갈아끼우면 같은
-엔진이 다른 하네스가 된다. `NodeFactory::export_schema()` 는 *이 엔진
-버전이 받는 토폴로지 JSON 형식*을 기계가 읽을 수 있는 한 덩어리로
-내보낸다. 덕분에 외부 도구 — 특히 코드 없는 비주얼 블록 에디터
-(NeoGraph Studio, 비공개 컴패니언 레포,
-issue #56) — 가 팔레트를 엔진에서 자동 생성해 **버전 간 표류(drift)가
-구조적으로 불가능**하다.
+NeoGraph runs a graph that is *described in JSON*; swap the JSON and the
+same engine becomes a different harness. `NodeFactory::export_schema()`
+emits a machine-readable description of exactly what topology JSON this
+engine version accepts, so external tooling — notably a code-free
+visual block editor (NeoGraph Studio, a private companion repo,
+issue #56) — can generate its palette from the engine and never drift
+out of sync.
 
-**같은 문서, 가져오는 경로 3가지:**
+**Three access paths, one document:**
 
-| 경로 | 방법 |
-|------|------|
+| From | How |
+|------|-----|
 | C++ | `neograph::graph::NodeFactory::instance().export_schema()` → `json` |
 | CLI | `./example_export_schema > schema.json` (`examples/52_export_schema.cpp`) |
-| 파이썬 | `neograph_engine.export_schema()` → `dict` |
+| Python | `neograph_engine.export_schema()` → `dict` |
 
-**문서 모양:**
+**Document shape:**
 
 ```jsonc
 {
   "neograph_version": "0.9.0",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "topology":   { /* 최상위 봉투의 JSON Schema: name, channels,
-                     nodes(type+config+barrier), edges,
-                     conditional_edges, interrupt_before,
+  "topology":   { /* JSON Schema for the top-level envelope:
+                     name, channels, nodes (type + config + barrier),
+                     edges, conditional_edges, interrupt_before,
                      interrupt_after, retry_policy */ },
-  "node_types": { "<타입>": { /* config JSON Schema */ }, ... },
+  "node_types": { "<type>": { /* config JSON Schema */ }, ... },
   "reducers":   ["append", "overwrite", ...],
   "conditions": ["has_tool_calls", "route_channel", ...]
 }
 ```
 
-- **`neograph_version`** 은 컴파일 시 `pyproject.toml`(버전 단일
-  진실)에서 박힌다. 도구는 캐시한 스키마와 이 값을 비교해 자기
-  팔레트가 엔진보다 구버전이면 경고할 수 있다.
-- **`node_types`** 는 호출 시점에 `NodeFactory` 에 등록돼 있는 것을
-  그대로 반영한다. 임베더가 만든 커스텀 노드 타입도 나오니, 팔레트에
-  넣고 싶으면 `compile()` 전과 똑같이 export 전에 먼저 등록하라.
-  3-인자 `register_type` 으로 등록한 타입은 선언한 설정 스키마를,
-  2-인자는 `{"type":"object"}`(아무 객체나 허용)를 갖는다.
-- **왕복 계약.** 토폴로지 JSON 을 뽑는 도구는 그걸 loader 에 다시
-  넣어 구조가 보존되는지 확인해야 한다. 특히 최상위
-  `conditional_edges` 블록은 v0.1.0~v0.1.7 에서 컴파일러가 조용히
-  버린 회귀가 있었다(v0.1.8 수정). 엔진 테스트
-  (`tests/test_schema_export.cpp`)가 이 회귀를 막고, 도구도 막아야
-  한다.
+- **`neograph_version`** is stamped at compile time from
+  `pyproject.toml` (single source of truth). A tool compares it to its
+  cached schema and warns when its palette is older than the engine.
+- **`node_types`** reflects whatever is registered in `NodeFactory` at
+  call time, so an embedder's custom node types appear too — register
+  them (and any custom reducers/conditions) *before* exporting, exactly
+  as you would before `compile()`. A type registered via the 3-arg
+  `register_type` carries its declared config schema; the 2-arg form
+  yields a permissive `{"type":"object"}`.
+- **Round-trip contract.** A tool that emits topology JSON should
+  round-trip it through the loader and assert structure is preserved.
+  In particular the top-level `conditional_edges` block was silently
+  dropped by the compiler in v0.1.0–v0.1.7 (fixed v0.1.8); the engine
+  test suite (`tests/test_schema_export.cpp`) guards this regression,
+  and tooling should too.
 
 ```cpp
 #include <neograph/graph/loader.h>
-// 팔레트에 넣을 커스텀 노드 타입이 있으면 먼저 등록 …
+// register custom node types first if you want them in the palette …
 auto schema = neograph::graph::NodeFactory::instance().export_schema();
 std::cout << schema.dump(2) << "\n";
 ```
 
 ---
 
-## 10.5. 관측성 — OpenTelemetry + OpenInference
+## 10.5. Observability — OpenTelemetry + OpenInference
 
-**모듈:** `neograph_engine.tracing` (OTel 기본) +
-`neograph_engine.openinference` (LLM 형태 attribute 레이어)
-**도입 버전:** OTel 레이어는 v0.3.x, OpenInference 레이어는 **v0.6.0**.
+**Module:** `neograph_engine.tracing` (OTel-shape) +
+`neograph_engine.openinference` (LLM-shape)
+**Since:** OTel layer in v0.3.x; OpenInference layer in **v0.6.0**.
 
-NeoGraph 의 `GraphEvent` 스트림을 OTel span 으로 매핑하는 헬퍼 두 개:
+NeoGraph emits its `GraphEvent` stream through the same callback the
+streaming API uses. Two helpers ride on top:
 
-  - **`otel_tracer(tracer)`** — 벤더 중립 OpenTelemetry. 한 run 당
-    root span + 노드별 child span + status / error / interrupt 매핑.
-    Jaeger / Tempo / Honeycomb / Datadog 등 OTel 백엔드 어디든 그대로 흐름.
+  - **`otel_tracer(tracer)`** — vendor-neutral OpenTelemetry spans.
+    Root span per run + child span per node + status / error / interrupt
+    mapping. Spans flow to any OTel backend (Jaeger, Tempo, Honeycomb,
+    Datadog, …). Useful when you already run an APM that just needs
+    spans-shaped data.
   - **`openinference_tracer(tracer)` + `OpenInferenceProvider`** —
-    그 위에 LLM 전용 attribute 레이어. 같은 OTel 메커니즘이지만
-    각 span 에 `openinference.span.kind` (`"CHAIN"` / `"LLM"`) +
-    LLM 키 (`llm.model_name`, `llm.input_messages.{i}.…`,
-    `llm.token_count.{prompt,completion,total}` 등) 를 박음.
-    Phoenix / Arize / Langfuse 가 trace 를 *대화 버블 + DAG +
-    per-call 토큰 비용* UI ("LangSmith UX") 로 렌더링.
+    LLM-shape attribute layer on top. Same OTel mechanics, but each
+    span carries `openinference.span.kind` (`"CHAIN"` / `"LLM"`) plus
+    LLM-specific keys (`llm.model_name`, `llm.input_messages.{i}.…`,
+    `llm.token_count.{prompt,completion,total}`, etc.) so a backend
+    that recognises the OpenInference convention — Phoenix, Arize,
+    Langfuse — renders the trace as a chat-bubble + DAG hierarchy +
+    per-call token cost UI (the "LangSmith UX").
 
-### `OpenInferenceProvider` 사용
+### `otel_tracer` — OTel-shape spans
 
-기존 `Provider` 를 감싸서 매 `complete()` 호출마다 LLM-kind child
-span 을 엽니다. 노드 body 가 이 wrapped provider 를 쓰면 LLM span
-이 *node span 의 child* 로 nest 됨 (v0.6.0 contextvar attach/detach
-fix 덕분).
+```python
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator, Optional
 
-LLM span 마다 박히는 attribute:
+@contextmanager
+def otel_tracer(
+    tracer: Any,
+    *,
+    root_name: str = "graph.run",
+    node_span_prefix: str = "node.",
+    attribute_prefix: str = "neograph",
+    on_event: Optional[Callable[[Any], None]] = None,
+) -> Iterator[Callable[[Any], None]]:
+    ...
+```
 
-| Attribute | 출처 |
+| Knob | Default | Purpose |
+|---|---|---|
+| `root_name` | `"graph.run"` | Span name for the per-run root span |
+| `node_span_prefix` | `"node."` | Prefix concatenated with each node name |
+| `attribute_prefix` | `"neograph"` | Prefix for engine-specific attributes (`neograph.node`, `neograph.next_nodes`, etc.) |
+| `on_event` | `None` | Optional secondary callback receiving every raw `GraphEvent` — useful for chaining with logging / metrics |
+
+Events handled: `NODE_START` opens a child span, `NODE_END` closes
+it (with `Status.OK`), `ERROR` records the exception and ends the
+span with `Status.ERROR`, `INTERRUPT` tags
+`{attribute_prefix}.interrupted = true` and ends.
+
+Concurrent fan-out (multi-Send): each node-name keeps a stack of
+open spans; `NODE_END` pops the most recent. Always-end-on-exit:
+the context-manager's `finally` block force-closes any spans still
+open if the run raises.
+
+```python
+from opentelemetry import trace
+from neograph_engine.tracing import otel_tracer
+
+tracer = trace.get_tracer("my-service")
+with otel_tracer(tracer) as cb:
+    engine.run_stream(cfg, cb)
+```
+
+### `openinference_tracer` — adds LLM-shape attributes
+
+Same shape, plus each span tagged
+`openinference.span.kind = "CHAIN"` and node payload encoded as
+`input.value` / `output.value` JSON blobs. Phoenix / Arize / Langfuse
+treat the trace as an LLM chain in their UI.
+
+```python
+@contextmanager
+def openinference_tracer(
+    tracer: Any,
+    *,
+    root_name: str = "graph.run",
+    node_span_prefix: str = "node.",
+    on_event: Optional[Callable[[Any], None]] = None,
+) -> Iterator[Callable[[Any], None]]:
+    ...
+```
+
+The tracer also attaches each node span as the OTel *current
+context* (via `otel_context.attach`) so a `Provider.complete()`
+call inside the node body opens its `llm.complete` span as a child
+of that node — the trace is a single connected tree, not 3+ orphan
+trace-IDs (the v0.6.0 contextvar-propagation fix).
+
+### `OpenInferenceProvider` — wraps any `Provider`
+
+```python
+class OpenInferenceProvider(Provider):
+    def __init__(self, inner: Provider, tracer: Any,
+                 *, span_name: str = "llm.complete"):
+        ...
+```
+
+On every `complete(params)` call it opens an LLM-kind child span
+under the current OTel context (so it nests under whichever node
+span is active), captures the OpenInference attributes, delegates
+to `inner.complete()`, then closes the span. Tracing failures are
+swallowed — observability never breaks the LLM call. Inner-provider
+exceptions are re-raised after the span is marked ERROR.
+
+Captured attributes per LLM span:
+
+| Attribute | Source |
 |---|---|
-| `openinference.span.kind` | 상수 `"LLM"` |
+| `openinference.span.kind` | constant `"LLM"` |
 | `llm.model_name` | `params.model` |
-| `llm.invocation_parameters` | `temperature` / `max_tokens` 등 JSON |
-| `llm.input_messages.{i}.message.role` / `.content` | `params.messages[i]` |
-| `llm.output_messages.0.message.role` / `.content` | `result.message` |
-| `llm.token_count.{prompt,completion,total}` | `result.usage.*` |
-| `input.value` / `output.value` | Langfuse 호환 JSON blob |
+| `llm.invocation_parameters` | JSON blob of `temperature`, `max_tokens`, `top_p`, `frequency_penalty`, `presence_penalty` (when set) |
+| `llm.input_messages.{i}.message.role` | `params.messages[i].role` |
+| `llm.input_messages.{i}.message.content` | `params.messages[i].content` |
+| `input.value` / `input.mime_type` | `params.messages` JSON / `application/json` (Langfuse-compatible blob) |
+| `llm.output_messages.0.message.role` | `result.message.role` |
+| `llm.output_messages.0.message.content` | `result.message.content` |
+| `output.value` / `output.mime_type` | `result.message.content` / `text/plain` |
+| `llm.token_count.prompt` | `result.usage.prompt_tokens` |
+| `llm.token_count.completion` | `result.usage.completion_tokens` |
+| `llm.token_count.total` | `result.usage.total_tokens` |
 
-### Phoenix end-to-end
+### End-to-end: NeoGraph + Phoenix in one block
 
 ```bash
 docker run -d -p 6006:6006 -p 4317:4317 arizephoenix/phoenix:latest
@@ -2237,38 +2521,50 @@ provider.add_span_processor(
 trace.set_tracer_provider(provider)
 tracer = trace.get_tracer("my-app")
 
-wrapped = OpenInferenceProvider(OpenAIProvider(api_key="sk-..."), tracer)
+inner = OpenAIProvider(api_key="sk-...")
+wrapped = OpenInferenceProvider(inner, tracer)
 ctx = ng.NodeContext(provider=wrapped)
 engine = ng.GraphEngine.compile(graph_def, ctx)
 
 with openinference_tracer(tracer) as cb:
     engine.run_stream(ng.RunConfig(input={"messages": [...]}), cb)
+
+# Open http://localhost:6006 — the trace renders as a chain with
+# each LLM call expanded into prompt / response / token counts.
 ```
 
-http://localhost:6006 열면 trace 가 chain 으로 렌더링.
-OTLP endpoint URL 만 Langfuse self-host 로 바꾸면 같은 trace 가
-거기에도 떨어짐.
+Endpoint URL is the only thing you change to point this at Langfuse
+self-host instead of Phoenix — both honour OpenInference and OTLP.
 
-### 비고
+### Notes
 
-- **Opt-in 의존성**: `opentelemetry-api` 는 base wheel 이 안 끌고
-  옴. import 시 첫 사용 시점에만 ImportError 발생.
-- **pybind 경계의 contextvar**: 두 tracer 모두 명시적
-  `otel_context.attach` + `detach` 토큰 쌍으로 current-span 활성화를
-  결정론적으로 제어 (`use_span(...).__enter__()` 패턴은 leak + 전파
-  안 되어 부적합).
-- **`otel_tracer` vs `openinference_tracer`**: APM (Jaeger, Datadog)
-  면 전자, Phoenix / Langfuse 의 LLM-trace 렌더링이 필요하면 후자.
-  한 run 에 둘 다 쓸 수는 없음.
+- **Opt-in dependency.** `opentelemetry-api` is not pulled by the
+  base wheel. Importing `neograph_engine.tracing` /
+  `.openinference` raises `ImportError` on first use only when the
+  package is missing — install with
+  `pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp`.
+- **OTel contextvars across pybind.** The `otel_tracer` in v0.3.x
+  documented that `trace.use_span(...).__enter__()` without
+  `__exit__()` leaks the contextvar AND doesn't reliably propagate
+  through the C++ → Python callback boundary. Both tracers now use
+  explicit `otel_context.attach` + `detach` token pairs to control
+  current-span activation deterministically.
+- **`otel_tracer` vs `openinference_tracer`.** Use the OTel one
+  when your backend is APM-shape (Jaeger, Datadog) and you want
+  generic spans. Use the OpenInference one when your backend is
+  Phoenix / Langfuse / Arize and you want LLM-shape rendering. The
+  two can't be combined on the same run — they're alternative
+  callbacks for the engine's event stream.
 
 ---
 
-## 11. ReAct 그래프
+## 11. React Graph
 
-**헤더:** `neograph/graph/react_graph.h`
-**네임스페이스:** `neograph::graph`
+**Header:** `<neograph/graph/react_graph.h>`
+**Namespace:** `neograph::graph`
 
-표준 ReAct(Reasoning + Acting) 패턴을 2-노드 그래프로 자동 구성하는 편의 함수.
+Convenience function that creates a standard ReAct (Reason + Act) agent as a two-node
+graph: `llm_call -> tool_dispatch -> (loop back if tool calls, else end)`.
 
 ```cpp
 std::unique_ptr<GraphEngine> create_react_graph(
@@ -2278,57 +2574,29 @@ std::unique_ptr<GraphEngine> create_react_graph(
     const std::string& model = "");
 ```
 
-| 매개변수 | 설명 |
-|---------|------|
-| `provider` | LLM provider |
-| `tools` | 사용할 도구 목록 (소유권 이전) |
-| `instructions` | 시스템 프롬프트 |
-| `model` | 모델 이름 (빈 문자열이면 provider 기본값) |
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `provider` | `std::shared_ptr<Provider>` | LLM provider |
+| `tools` | `std::vector<std::unique_ptr<Tool>>` | Tools available to the agent (ownership transferred) |
+| `instructions` | `std::string` | System prompt / instructions |
+| `model` | `std::string` | Model override (empty uses provider default) |
 
-**반환값:** 컴파일된 `GraphEngine`. 내부 구조:
+**Returns:** A compiled `GraphEngine` ready to run.
 
-```
-__start__ -> llm --(has_tool_calls)--> tools -> llm  (루프)
-                 \--(no tool_calls)--> __end__
-```
-
-**사용 예:**
-
-```cpp
-auto provider = neograph::llm::OpenAIProvider::create({
-    .api_key = "sk-...",
-    .default_model = "gpt-4o-mini"
-});
-
-std::vector<std::unique_ptr<neograph::Tool>> tools;
-tools.push_back(std::make_unique<WeatherTool>());
-tools.push_back(std::make_unique<CalculatorTool>());
-
-auto engine = neograph::graph::create_react_graph(
-    provider, std::move(tools),
-    "당신은 날씨와 계산을 도와주는 어시스턴트입니다.");
-
-neograph::graph::RunConfig config;
-config.input = {{"messages", neograph::json::array({
-    {{"role", "user"}, {"content", "서울 날씨와 화씨-섭씨 변환을 알려줘"}}
-})}};
-
-auto result = engine->run(config);
-```
-
-이 함수는 `Agent::run()`과 동일한 로직을 그래프 엔진으로 표현한 것이다.
-checkpoint, HITL, Send/Command 등 그래프 엔진의 모든 기능을 활용할 수 있다.
+This is functionally equivalent to using `Agent::run()` but as a graph engine, giving
+you access to checkpointing, streaming events, state inspection, and all other graph
+engine features.
 
 ---
 
-## 11b. Plan-and-Execute 그래프
+## 11b. Plan-and-Execute Graph
 
-**헤더:** `neograph/graph/plan_execute_graph.h`
-**네임스페이스:** `neograph::graph`
+**Header:** `<neograph/graph/plan_execute_graph.h>`
+**Namespace:** `neograph::graph`
 
-Plan-and-Execute 패턴을 자동 구성하는 편의 함수. planner가 JSON 배열 형태의
-단계 목록을 생성하면, executor가 각 단계를 내부 ReAct 루프로 순차 소비하고,
-responder가 `past_steps`를 근거로 최종 답변을 합성한다.
+Convenience factory for the Plan-and-Execute pattern: a planner emits a JSON
+array of steps, an executor consumes them one-by-one via an inner ReAct loop,
+and a responder composes the final answer from `past_steps`.
 
 ```
 __start__ → planner → [plan_empty? responder : executor]
@@ -2347,43 +2615,44 @@ std::unique_ptr<GraphEngine> create_plan_execute_graph(
     int max_step_iterations = 5);
 ```
 
-| 매개변수 | 설명 |
-|---------|------|
-| `provider` | 세 단계가 공유하는 LLM provider |
-| `tools` | executor가 사용할 도구 목록 (소유권 이전) |
-| `planner_prompt` | planner 시스템 프롬프트. 모델이 JSON 배열로 답하도록 지시해야 하며, ```json 펜스나 선행 산문은 파서가 허용한다 |
-| `executor_prompt` | 단일 단계를 처리하는 executor 시스템 프롬프트 (내부 ReAct 루프) |
-| `responder_prompt` | 최종 합성 단계 시스템 프롬프트 |
-| `model` | 모델 이름 (빈 문자열이면 provider 기본값) |
-| `max_step_iterations` | executor 한 단계당 tool-call 반복 상한 (안전장치) |
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `provider` | `std::shared_ptr<Provider>` | LLM provider shared by every phase |
+| `tools` | `std::vector<std::unique_ptr<Tool>>` | Tools the executor may invoke (ownership transferred) |
+| `planner_prompt` | `std::string` | System prompt for the planner; must instruct the model to reply with a JSON array of steps (fenced ```json blocks and leading prose are tolerated) |
+| `executor_prompt` | `std::string` | System prompt for the single-step executor (inner ReAct loop) |
+| `responder_prompt` | `std::string` | System prompt for the final synthesis phase |
+| `model` | `std::string` | Model override (empty uses provider default) |
+| `max_step_iterations` | `int` | Upper bound on tool-call iterations inside the executor per step |
 
-**사용 채널:** `plan`, `past_steps`, `final_response`, `messages`.
+**Channels populated:** `plan`, `past_steps`, `final_response`, `messages`.
 
-**반환값:** 컴파일된 `GraphEngine`. 커스텀 노드 타입 3종과 `plan_empty`
-조건은 최초 호출 시 한 번만 등록된다(`std::call_once`).
+**Returns:** A compiled `GraphEngine` ready to run. The factory registers its
+three custom node types and the `plan_empty` condition on first call
+(idempotent via `std::call_once`).
 
-Send 팬아웃 + 크래시/재개 변형 예제는 `examples/14_plan_executor.cpp` 참고.
+See `examples/14_plan_executor.cpp` for a Send-fan-out variant with crash /
+resume via pending-writes.
 
 ---
 
-## 12. LLM 모듈
+## 12. LLM Module
 
-**헤더:** `neograph/llm/openai_provider.h`, `neograph/llm/schema_provider.h`, `neograph/llm/agent.h`
-**네임스페이스:** `neograph::llm`
+### OpenAIProvider
 
-### 12.1 OpenAIProvider
+**Header:** `<neograph/llm/openai_provider.h>`
+**Namespace:** `neograph::llm`
 
-OpenAI 호환 API에 대한 구현. OpenAI 뿐 아니라
-동일한 API 형식을 사용하는 서비스(Azure OpenAI, Ollama, vLLM 등)에도 사용 가능하다.
+Provider implementation for the OpenAI API and OpenAI-compatible endpoints.
 
 ```cpp
 class OpenAIProvider : public Provider {
 public:
     struct Config {
-        std::string api_key;
-        std::string base_url = "https://api.openai.com";
-        std::string default_model = "gpt-4o-mini";
-        int timeout_seconds = 60;
+        std::string api_key;                          // API key
+        std::string base_url = "https://api.openai.com"; // API base URL
+        std::string default_model = "gpt-4o-mini";    // Default model
+        int timeout_seconds = 60;                     // HTTP timeout
     };
 
     static std::unique_ptr<OpenAIProvider> create(const Config& config);
@@ -2391,126 +2660,123 @@ public:
     ChatCompletion complete(const CompletionParams& params) override;
     ChatCompletion complete_stream(const CompletionParams& params,
                                    const StreamCallback& on_chunk) override;
-    std::string get_name() const override; // "openai"
+    std::string get_name() const override;  // Returns "openai"
 };
 ```
 
-**사용 예:**
+**Config fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `api_key` | `std::string` | | OpenAI API key |
+| `base_url` | `std::string` | `"https://api.openai.com"` | Base URL. Override for Azure, local models, or compatible APIs |
+| `default_model` | `std::string` | `"gpt-4o-mini"` | Model used when `CompletionParams::model` is empty |
+| `timeout_seconds` | `int` | `60` | HTTP request timeout |
+
+**Usage:**
 
 ```cpp
 auto provider = neograph::llm::OpenAIProvider::create({
-    .api_key = std::getenv("OPENAI_API_KEY"),
-    .base_url = "https://api.openai.com",
-    .default_model = "gpt-4o-mini",
-    .timeout_seconds = 30
-});
-
-neograph::CompletionParams params;
-params.messages = {{.role = "user", .content = "안녕하세요!"}};
-
-auto result = provider->complete(params);
-std::cout << result.message.content << "\n";
-```
-
-**Ollama 로컬 모델 사용:**
-
-```cpp
-auto provider = neograph::llm::OpenAIProvider::create({
-    .api_key = "ollama",
-    .base_url = "http://localhost:11434",
-    .default_model = "llama3"
+    .api_key = "sk-...",
+    .default_model = "gpt-4o"
 });
 ```
 
----
+### SchemaProvider
 
-### 12.2 SchemaProvider
+**Header:** `<neograph/llm/schema_provider.h>`
+**Namespace:** `neograph::llm`
 
-JSON 스키마 파일로 다양한 LLM provider를 지원하는 범용 구현.
-provider별 API 차이(메시지 형식, 도구 호출 방식, 스트리밍 형식 등)를
-JSON 설정 파일로 추상화한다.
+A schema-driven provider that supports multiple LLM APIs through JSON configuration
+files. Instead of hardcoding API-specific logic, `SchemaProvider` reads a schema that
+describes how to format requests, parse responses, and handle streaming for any API.
 
 ```cpp
 class SchemaProvider : public Provider {
 public:
     struct Config {
-        std::string schema_path;     // provider JSON 설정 파일 경로
-        std::string api_key;         // API 키 (환경변수보다 우선)
+        std::string schema_path;       // Schema name or file path
+        std::string api_key;           // API key (overrides env var)
         std::string default_model = "gpt-4o-mini";
-        int timeout_seconds = 60;
+        int         timeout_seconds = 60;
+        std::string base_url_override;  // Overrides schema's connection.base_url
+        bool        use_websocket = false;  // OpenAI Responses /v1/responses WS mode
+        bool        prefer_libcurl = false; // Switch HTTP transport to libcurl HTTP/2
     };
 
     static std::unique_ptr<SchemaProvider> create(const Config& config);
+    static std::shared_ptr<Provider>       create_shared(const Config& config);
 
     ChatCompletion complete(const CompletionParams& params) override;
+    asio::awaitable<ChatCompletion>
+    complete_async(const CompletionParams& params) override;
     ChatCompletion complete_stream(const CompletionParams& params,
                                    const StreamCallback& on_chunk) override;
     std::string get_name() const override;
 };
 ```
 
-**내장 스키마:**
+**Config fields:**
 
-| 스키마 이름 | 경로 (빌드인) | 대상 API |
-|------------|--------------|---------|
-| `"openai"` | 빌드 시 임베딩 | OpenAI Chat Completions |
-| `"claude"` | 빌드 시 임베딩 | Anthropic Messages API |
-| `"gemini"` | 빌드 시 임베딩 | Google Gemini API |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `schema_path` | `std::string` | | Built-in schema name or path to a custom schema JSON file |
+| `api_key` | `std::string` | | API key. If empty, falls back to the env var specified in the schema |
+| `default_model` | `std::string` | `"gpt-4o-mini"` | Default model identifier |
+| `timeout_seconds` | `int` | `60` | HTTP timeout |
+| `base_url_override` | `std::string` | `""` | If non-empty, overrides the schema's `connection.base_url`. Useful for test doubles and self-hosted OpenAI-compatible endpoints. |
+| `use_websocket` | `bool` | `false` | Drive `complete_stream` over `wss://` instead of HTTP/SSE. Currently supported only for the `"openai_responses"` schema (matches OpenAI's WebSocket mode at /v1/responses). |
+| `prefer_libcurl` | `bool` | `false` | Switch the non-streaming HTTP transport to libcurl (HTTP/2 + multiplexing + Cloudflare-friendly fingerprint). Build-time gated on `NEOGRAPH_USE_LIBCURL`. |
 
-내장 스키마는 `schema_path`에 스키마 이름(예: `"openai"`)만 지정하면 사용된다.
+**Built-in schemas:**
 
-**사용 예:**
+| Name | API | Notes |
+|------|-----|-------|
+| `"openai"` | OpenAI | Same behavior as `OpenAIProvider` |
+| `"claude"` | Anthropic Claude | Uses SSE event-based streaming |
+| `"gemini"` | Google Gemini | Uses function declarations format |
+
+**Custom schemas:** Pass a file path to `schema_path` to load a custom schema JSON file
+describing any API's request/response format.
+
+**Usage:**
 
 ```cpp
-// Claude API 사용
+// Using a built-in schema
 auto claude = neograph::llm::SchemaProvider::create({
     .schema_path = "claude",
-    .api_key = std::getenv("ANTHROPIC_API_KEY"),
+    .api_key = "sk-ant-...",
     .default_model = "claude-sonnet-4-20250514"
 });
 
-// Gemini API 사용
-auto gemini = neograph::llm::SchemaProvider::create({
-    .schema_path = "gemini",
-    .api_key = std::getenv("GOOGLE_API_KEY"),
-    .default_model = "gemini-2.0-flash"
-});
-
-// 커스텀 스키마 파일 사용
+// Using a custom schema file
 auto custom = neograph::llm::SchemaProvider::create({
     .schema_path = "/path/to/my_provider.json",
-    .api_key = "my-key",
-    .default_model = "my-model"
+    .api_key = "...",
+    .default_model = "my-model-v1"
 });
 ```
 
-#### SchemaProvider 내부 전략
+**Internal strategy enums** (documented for custom schema authors):
 
-SchemaProvider는 provider 간 차이를 다음 전략 열거형으로 처리한다:
+The schema file configures the following strategies:
 
-| 전략 카테고리 | 옵션 | 대상 provider |
-|-------------|------|-------------|
-| **SystemPromptStrategy** | `IN_MESSAGES` | OpenAI |
-| | `TOP_LEVEL` | Claude |
-| | `TOP_LEVEL_PARTS` | Gemini |
-| **ToolCallStrategy** | `TOOL_CALLS_ARRAY` | OpenAI |
-| | `CONTENT_ARRAY` | Claude |
-| | `PARTS_ARRAY` | Gemini |
-| **ToolResultStrategy** | `FLAT` | OpenAI |
-| | `CONTENT_ARRAY` | Claude |
-| | `PARTS_ARRAY` | Gemini |
-| **ResponseStrategy** | `CHOICES_MESSAGE` | OpenAI |
-| | `CONTENT_ARRAY` | Claude |
-| | `CANDIDATES_PARTS` | Gemini |
-| **StreamFormat** | `SSE_DATA` | OpenAI, Gemini |
-| | `SSE_EVENTS` | Claude |
+| Strategy | Options | Description |
+|----------|---------|-------------|
+| System prompt | `IN_MESSAGES`, `TOP_LEVEL`, `TOP_LEVEL_PARTS` | How the system prompt is placed in the request |
+| Tool calls | `TOOL_CALLS_ARRAY`, `CONTENT_ARRAY`, `PARTS_ARRAY` | How tool calls appear in assistant messages |
+| Tool results | `FLAT`, `CONTENT_ARRAY`, `PARTS_ARRAY` | How tool results are formatted |
+| Tool defs | `FUNCTION`, `NONE`, `FUNCTION_DECLARATIONS` | How tool definitions are wrapped |
+| Response | `CHOICES_MESSAGE`, `CONTENT_ARRAY`, `CANDIDATES_PARTS` | How responses are parsed |
+| Streaming | `SSE_DATA`, `SSE_EVENTS` | Streaming format |
 
----
+### Agent
 
-### 12.3 Agent
+**Header:** `<neograph/llm/agent.h>`
+**Namespace:** `neograph::llm`
 
-ReAct 루프를 직접 실행하는 고수준 에이전트.
-그래프 엔진 없이 LLM 호출 -> 도구 실행 -> 반복 루프를 수행한다.
+A simple agent that runs an LLM tool-use loop: call the LLM, execute any tool calls,
+feed results back, and repeat until the LLM responds with text only.
 
 ```cpp
 class Agent {
@@ -2520,140 +2786,141 @@ public:
           const std::string& instructions = "",
           const std::string& model = "");
 
-    // ReAct 루프 실행. 최종 텍스트 응답 반환
+    // Run the tool loop, returns the final text response
     std::string run(std::vector<ChatMessage>& messages,
                     int max_iterations = 10);
 
-    // 스트리밍 ReAct 루프
+    // Streaming variant: streams final response tokens
     std::string run_stream(std::vector<ChatMessage>& messages,
                            const StreamCallback& on_chunk,
                            int max_iterations = 10);
 
-    // 단일 LLM 호출 (도구 루프 없음)
+    // Single completion (no tool loop)
     ChatCompletion complete(const std::vector<ChatMessage>& messages);
 };
 ```
 
-| 메서드 | 설명 |
-|--------|------|
-| `run()` | LLM 호출 -> tool_calls가 있으면 실행 -> 결과를 messages에 추가 -> 반복. tool_calls가 없으면 종료 |
-| `run_stream()` | `run()`과 동일하되 최종 응답을 토큰 단위로 스트리밍 |
-| `complete()` | 단일 LLM 호출. 도구 루프 없음 |
+| Constructor Parameter | Type | Description |
+|-----------------------|------|-------------|
+| `provider` | `std::shared_ptr<Provider>` | LLM provider to use |
+| `tools` | `std::vector<std::unique_ptr<Tool>>` | Tools available to the agent (ownership transferred) |
+| `instructions` | `std::string` | System prompt prepended to messages |
+| `model` | `std::string` | Model override (empty uses provider default) |
 
-**사용 예:**
+| Method | Description |
+|--------|-------------|
+| `run(messages, max_iterations)` | Runs the full tool-use loop. Mutates `messages` in place with the full conversation. Returns the final assistant text response |
+| `run_stream(messages, on_chunk, max_iterations)` | Same as `run()` but streams the final response tokens via `on_chunk`. Tool-use iterations are not streamed |
+| `complete(messages)` | Single LLM call without tool loop. Useful for one-shot completions |
+
+**Usage:**
 
 ```cpp
-auto provider = neograph::llm::OpenAIProvider::create({
-    .api_key = "sk-..."
-});
+auto provider = neograph::llm::OpenAIProvider::create({.api_key = "sk-..."});
 
 std::vector<std::unique_ptr<neograph::Tool>> tools;
-tools.push_back(std::make_unique<SearchTool>());
+tools.push_back(std::make_unique<WeatherTool>());
 
 neograph::llm::Agent agent(provider, std::move(tools),
-                            "당신은 검색 도우미입니다.");
+                            "You are a helpful weather assistant.");
 
-std::vector<neograph::ChatMessage> messages = {
-    {.role = "user", .content = "NeoGraph 라이브러리가 뭐야?"}
-};
+std::vector<neograph::ChatMessage> messages;
+messages.push_back({"user", "What's the weather in Seoul?"});
 
-// 블로킹 실행
-std::string answer = agent.run(messages);
-std::cout << answer << "\n";
-
-// 또는 스트리밍
-std::string streamed = agent.run_stream(messages,
-    [](const std::string& chunk) {
-        std::cout << chunk << std::flush;
-    });
+std::string response = agent.run(messages);
 ```
 
-**`Agent` vs `create_react_graph()` 비교:**
+### json_path Utilities
 
-| 특성 | Agent | create_react_graph() |
-|------|-------|---------------------|
-| 도구 루프 | O | O |
-| checkpoint / HITL | X | O |
-| Send / Command | X | O |
-| 상태 관리 | 외부 messages 벡터 | 내장 GraphState |
-| 확장성 | 제한적 | 노드 추가/조건부 분기 등 자유롭게 확장 |
+**Header:** `<neograph/llm/json_path.h>`
+**Namespace:** `neograph::llm::json_path`
 
-단순한 ReAct 에이전트에는 `Agent`를, 복잡한 워크플로에는 `GraphEngine`을 사용한다.
-
----
-
-## 13. MCP 모듈
-
-**헤더:** `neograph/mcp/client.h`
-**네임스페이스:** `neograph::mcp`
-
-[Model Context Protocol (MCP)](https://modelcontextprotocol.io) 서버에 연결하여
-도구를 자동으로 발견하고 실행하는 기능을 제공한다. 두 가지 전송 방식을 지원한다.
-
-- **HTTP** — `MCPClient("http://host:port")`. 발견된 도구가 원래 Streamable
-  HTTP 세션과 `Mcp-Session-Id`, 협상된 프로토콜 버전, 헤더 설정을 유지.
-- **stdio** — `MCPClient({"python", "server.py"})`. 자식 프로세스를
-  `fork`+`execvp`로 띄우고 양방향 pipe로 newline-delimited JSON-RPC 교환.
-  자식 프로세스의 수명은 `MCPClient` 또는 `get_tools()`가 돌려준 어떤
-  `MCPTool`이든 살아있는 한 유지됨. 소멸 시 SIGTERM → waitpid(약 500ms 내)
-  → SIGKILL 폴백.
-
-### 13.1 MCPClient
-
-MCP 서버 연결 및 도구 발견 클라이언트.
-
-> `MCPClient`는 subclass를 전제로 설계되지 않음 — 그대로 사용.
-> `rpc_call_async()`가 실구현이고 `rpc_call()`은 sync 파사드.
-> [`ASYNC_GUIDE.md` §9.5](ASYNC_GUIDE.md#95-mcpclient) 참조.
+Utility functions for navigating and manipulating JSON values using dot-separated
+path strings. Used internally by `SchemaProvider` but available for general use.
 
 ```cpp
-class MCPClient {
-public:
-    explicit MCPClient(const std::string& server_url);     // HTTP
-    MCPClient(const std::string& server_url, MCPClientConfig config);
-    explicit MCPClient(std::vector<std::string> argv);     // stdio (subprocess)
+namespace json_path {
+    std::vector<std::string> split_path(const std::string& path);
+    const json* at_path(const json& root, const std::string& path);
+    json* at_path_mut(json& root, const std::string& path);
+    bool has_path(const json& root, const std::string& path);
 
-    bool initialize(const std::string& client_name = "neograph");
-    bool is_initialized() const noexcept;
-    InitializeResult get_initialize_result() const;
-    ListToolsPage list_tools(std::optional<std::string> cursor = std::nullopt);
-    std::vector<ToolDefinition> get_tool_definitions();
-    std::vector<std::unique_ptr<Tool>> get_tools();
-    json call_tool(const std::string& name, const json& arguments);
-    CallToolResult call_tool_result(const std::string& name,
-                                    const json& arguments);
-};
+    template<typename T>
+    T get_path(const json& root, const std::string& path, const T& default_val);
+
+    void set_path(json& root, const std::string& path, const json& value);
+}
 ```
 
-| 메서드 | 설명 |
-|--------|------|
-| `MCPClient(url)` | HTTP 모드 클라이언트 생성 |
-| `MCPClient(argv)` | 서브프로세스를 띄워 stdio 모드 클라이언트 생성. `argv[0]`은 `PATH`로 해결(execvp) |
-| `initialize()` | JSON-RPC 핸드셰이크를 한 번 수행. 반복 호출은 idempotent하며 실패 시 예외 |
-| `get_initialize_result()` | 프로토콜, capability, server info, instructions 보존 결과 반환 |
-| `list_tools(cursor)` | opaque cursor를 사용해 한 페이지 조회 |
-| `get_tool_definitions()` | 모든 페이지와 완전한 도구 metadata 조회 |
-| `get_tools()` | 모든 페이지를 조회하여 원래 세션을 유지하는 `MCPTool` 벡터 반환 |
-| `call_tool()` | `tools/call`을 호출하여 결과 JSON 반환 |
-| `call_tool_result()` | content, structured content, `isError`, `_meta`를 보존하는 typed 결과 반환 |
+| Function | Description |
+|----------|-------------|
+| `split_path(path)` | Splits a dot-path string into segments. Example: `"choices.0.message"` becomes `["choices", "0", "message"]` |
+| `at_path(root, path)` | Navigates into a JSON value by dot-path. Numeric segments index into arrays. Returns `nullptr` if the path does not exist |
+| `at_path_mut(root, path)` | Mutable version of `at_path` |
+| `has_path(root, path)` | Returns `true` if the dot-path exists in the JSON value |
+| `get_path<T>(root, path, default_val)` | Returns the value at the path converted to type `T`, or `default_val` if the path does not exist or conversion fails |
+| `set_path(root, path, value)` | Sets a value at a dot-path, creating intermediate objects as needed |
+
+**Examples:**
+
+```cpp
+using namespace neograph::llm::json_path;
+
+json data = json::parse(R"({"choices": [{"message": {"content": "Hello"}}]})");
+
+// Navigate
+const json* msg = at_path(data, "choices.0.message.content");
+// *msg == "Hello"
+
+// Check existence
+bool exists = has_path(data, "choices.0.message.role");
+// exists == false
+
+// Get with default
+std::string role = get_path<std::string>(data, "choices.0.message.role", "assistant");
+// role == "assistant"
+
+// Set value (creates intermediates)
+set_path(data, "metadata.version", 2);
+```
 
 ---
 
-### 13.2 MCPTool
+## 13. MCP Module
 
-MCP 서버의 원격 도구를 로컬 `Tool` 인터페이스로 래핑. 두 개의 생성자가 있으며,
-`MCPClient::get_tools()`가 전송 방식에 따라 자동으로 적절한 것을 선택한다.
+**Header:** `<neograph/mcp/client.h>`
+**Namespace:** `neograph::mcp`
+
+Model Context Protocol (MCP) client implementation. Connects to MCP servers, discovers
+available tools, and wraps them as NeoGraph `Tool` instances.
+
+Two transports are available:
+
+- **HTTP** — `MCPClient("http://host:port")`. Discovered tools retain the
+  originating Streamable HTTP session, including `Mcp-Session-Id`, negotiated
+  protocol version, timeout, and custom headers.
+- **stdio** — `MCPClient({"python", "server.py"})`. The client `fork`+`execvp`s the
+  subprocess, wires bidirectional pipes, and exchanges newline-delimited JSON-RPC
+  over the child's stdin/stdout. The subprocess lives as long as the
+  `MCPClient` *or any `MCPTool`* it produced; destruction sends SIGTERM and
+  reaps via `waitpid` (SIGKILL fallback after ~500 ms).
+
+### MCPTool
+
+Wraps a single MCP server tool as a local `Tool` implementation. Two
+constructors, one per transport; `MCPClient::get_tools()` picks the right one.
 
 ```cpp
 class MCPTool : public AsyncTool {
 public:
-    // 레거시 직접 생성 모드. 발견된 도구는 원래 클라이언트 세션을 재사용한다.
+    // Legacy direct-construction mode. Discovered tools reuse their client session.
     MCPTool(const std::string& server_url,
             const std::string& name,
             const std::string& description,
             const json& input_schema);
 
-    // stdio 모드 — 서브프로세스 세션을 shared_ptr로 역참조해 수명을 지탱한다.
+    // stdio mode — tool holds a shared_ptr back-ref to the subprocess
+    // session, keeping it alive as long as any tool is reachable.
     MCPTool(std::shared_ptr<detail::StdioSession> session,
             const std::string& name,
             const std::string& description,
@@ -2661,404 +2928,514 @@ public:
 
     const ToolDefinition& get_mcp_definition() const noexcept;
     CallToolResult execute_result(const json& arguments);
+    asio::awaitable<CallToolResult> execute_result_async(const json& arguments);
     ChatTool get_definition() const override;
     asio::awaitable<std::string> execute_async(const json& arguments) override;
     std::string get_name() const override;
 };
 ```
 
-`MCPClient::get_tools()`가 자동으로 `MCPTool` 인스턴스를 생성하므로,
-직접 생성할 일은 거의 없다.
+Usually you do not construct `MCPTool` directly — `MCPClient::get_tools()`
+discovers and wraps them.
 
-**사용 예:**
+### MCPClient
+
+Client that connects to an MCP server, performs the initialization handshake, and
+provides methods to discover and invoke tools.
+
+> `MCPClient` is not designed to be subclassed — you use it as-is.
+> `rpc_call_async()` is the real implementation and `rpc_call()` is
+> a thin sync facade. See [`ASYNC_GUIDE.md` §9.5](ASYNC_GUIDE.md#95-mcpclient).
 
 ```cpp
-// MCP 서버 연결
-neograph::mcp::MCPClient mcp("http://localhost:3000");
-if (!mcp.initialize("my_agent")) {
-    std::cerr << "MCP 연결 실패\n";
-    return 1;
-}
+class MCPClient {
+public:
+    // HTTP transport.
+    explicit MCPClient(const std::string& server_url);
+    MCPClient(const std::string& server_url, MCPClientConfig config);
 
-// 도구 발견
-auto mcp_tools = mcp.get_tools();
-std::cout << "발견된 도구: " << mcp_tools.size() << "개\n";
-for (const auto& t : mcp_tools) {
-    auto def = t->get_definition();
-    std::cout << "  - " << def.name << ": " << def.description << "\n";
-}
+    // stdio transport — fork+exec the subprocess.
+    explicit MCPClient(std::vector<std::string> argv);
 
-// Agent와 통합
-auto provider = neograph::llm::OpenAIProvider::create({.api_key = "sk-..."});
-neograph::llm::Agent agent(provider, std::move(mcp_tools),
-                            "MCP 도구를 사용하여 작업을 수행하세요.");
+    bool initialize(const std::string& client_name = "neograph");
+    bool is_initialized() const noexcept;
+    InitializeResult get_initialize_result() const;
+    std::vector<std::unique_ptr<Tool>> get_tools();
+    ListToolsPage list_tools(std::optional<std::string> cursor = std::nullopt);
+    std::vector<ToolDefinition> get_tool_definitions();
+    json call_tool(const std::string& name, const json& arguments);
+    CallToolResult call_tool_result(const std::string& name,
+                                    const json& arguments);
 
-std::vector<neograph::ChatMessage> messages = {
-    {.role = "user", .content = "최신 뉴스를 검색해줘"}
+    // Low-level async dispatch retained for source compatibility.
+    asio::awaitable<json>
+    rpc_call_async(const std::string& method, const json& params);
 };
-auto answer = agent.run(messages);
+```
 
-// GraphEngine과 통합
-auto engine = neograph::graph::create_react_graph(
-    provider, mcp.get_tools(), "MCP 도구를 활용하세요.");
+**Wire protocol:** NeoGraph's MCP client speaks
+`protocolVersion = "2025-11-25"`. HTTP transport sends the
+`MCP-Protocol-Version` header on every JSON-RPC request (Round 1 +
+Round 3 spec alignment); stdio transport carries the same version
+in the `initialize` payload. Servers running older protocol
+versions may reject these requests — pin server-side or upgrade.
+
+| Method | Description |
+|--------|-------------|
+| `MCPClient(url)` | Construct an HTTP-mode client |
+| `MCPClient(argv)` | Spawn a subprocess and construct a stdio-mode client. `argv[0]` is resolved via `PATH` (execvp). Throws on fork/exec failure. Refuses Windows `.bat`/`.cmd` for safety (Round 3 hardening) |
+| `initialize(client_name)` | Perform the MCP initialization handshake once. Repeated calls are idempotent; protocol/transport failures throw |
+| `get_initialize_result()` | Return negotiated protocol, capabilities, server info, instructions, and raw result |
+| `list_tools(cursor)` | Fetch one page while treating the cursor as opaque |
+| `get_tool_definitions()` | Follow all pages and preserve complete tool metadata |
+| `get_tools()` | Discover all pages and return session-preserving `MCPTool` instances |
+| `call_tool(name, arguments)` | Invokes a tool by name with the given arguments. Returns the raw JSON response |
+| `call_tool_result(name, arguments)` | Typed result preserving content, structured content, `isError`, and `_meta` |
+| `rpc_call_async(method, params)` | Coroutine version. The "real" implementation — `rpc_call` is a thin sync wrapper. |
+
+**HTTP usage:**
+
+```cpp
+neograph::mcp::MCPClient client("http://localhost:8000");
+client.initialize();
+auto tools = client.get_tools();
+```
+
+**stdio usage:**
+
+```cpp
+// argv[0] is resolved via PATH; pipe fds are closed in the child before execvp.
+neograph::mcp::MCPClient client({"python", "/path/to/server.py"});
+client.initialize();
+auto tools = client.get_tools();   // MCPTools hold shared_ptr<StdioSession>
 ```
 
 ---
 
-## 14. 유틸리티
+## 14. Util Module
 
-**헤더:** `neograph/util/request_queue.h`
-**네임스페이스:** `neograph::util`
+**Header:** `<neograph/util/request_queue.h>`
+**Namespace:** `neograph::util`
 
-### 14.1 RequestQueue
+### RequestQueue
 
-lock-free 작업 큐와 워커 풀. HTTP 서버 등에서 연결 수락과 LLM 호출을
-분리하여 동시성을 관리할 때 사용한다. backpressure 기능을 내장한다.
+Lock-free request queue with a worker thread pool and backpressure support.
+Decouples HTTP connection acceptance from LLM call concurrency in server applications.
 
 ```cpp
 class RequestQueue {
 public:
     struct Stats {
-        size_t pending;         // 대기 중인 작업 수
-        size_t active;          // 실행 중인 작업 수
-        size_t completed;       // 완료된 작업 수
-        size_t rejected;        // 거부된 작업 수 (큐 가득 참)
-        size_t num_workers;     // 워커 스레드 수
-        size_t max_queue_size;  // 최대 큐 크기
+        size_t pending;        // Tasks waiting in queue
+        size_t active;         // Tasks currently executing
+        size_t completed;      // Total completed tasks
+        size_t rejected;       // Tasks rejected due to full queue
+        size_t num_workers;    // Number of worker threads
+        size_t max_queue_size; // Maximum queue capacity
     };
 
-    // 생성자: 워커 수, 최대 큐 크기 지정
     RequestQueue(size_t num_workers = 128, size_t max_queue_size = 10000);
-
-    // 소멸자: 모든 워커를 종료하고 join
     ~RequestQueue();
 
-    // 복사/대입 금지
+    // Non-copyable
     RequestQueue(const RequestQueue&) = delete;
     RequestQueue& operator=(const RequestQueue&) = delete;
 
-    // 작업 제출. 큐가 가득 차면 {false, {}} 반환 (backpressure)
+    // Submit a task. Returns {accepted, future}.
+    // If the queue is full, returns {false, invalid_future}.
     template<typename F>
     std::pair<bool, std::future<void>> submit(F&& task);
 
-    // 현재 상태 조회
+    // Get current queue statistics
     Stats stats() const;
 };
 ```
 
-| 메서드 | 설명 |
-|--------|------|
-| `submit(task)` | 작업을 큐에 추가. 반환값: `{accepted, future}`. `accepted`가 `false`이면 큐 만석으로 거부됨 |
-| `stats()` | 현재 큐 상태 (pending, active, completed, rejected 등) |
+| Constructor Parameter | Type | Default | Description |
+|-----------------------|------|---------|-------------|
+| `num_workers` | `size_t` | `128` | Number of worker threads in the pool |
+| `max_queue_size` | `size_t` | `10000` | Maximum number of pending tasks. Tasks beyond this limit are rejected |
 
-**사용 예:**
+| Method | Description |
+|--------|-------------|
+| `submit(task)` | Enqueues a callable. Returns a pair: `first` is `true` if accepted (or `false` if the queue is full -- backpressure), `second` is a `std::future<void>` that resolves when the task completes or propagates exceptions |
+| `stats()` | Returns a snapshot of current queue statistics |
+
+The queue uses `moodycamel::ConcurrentQueue` internally for lock-free enqueue/dequeue
+and a condition variable to wake idle workers.
+
+**Usage:**
 
 ```cpp
-neograph::util::RequestQueue queue(4, 1000);  // 4 워커, 최대 1000건
+neograph::util::RequestQueue queue(4, 100);  // 4 workers, max 100 pending
 
-// 작업 제출
-auto [accepted, future] = queue.submit([&]() {
-    // LLM 호출 등 무거운 작업
-    auto result = provider->complete(params);
-    // 결과 처리...
+auto [accepted, future] = queue.submit([&] {
+    // Handle an incoming HTTP request
+    auto result = engine->run(config);
+    send_response(result);
 });
 
 if (!accepted) {
-    // 서버 과부하 — 503 반환 등
-    std::cerr << "큐 가득 참, 작업 거부\n";
-    return;
+    send_503_service_unavailable();
 }
-
-// 결과 대기 (필요 시)
-future.get();
-
-// 상태 확인
-auto s = queue.stats();
-std::cout << "대기: " << s.pending
-          << " 실행: " << s.active
-          << " 완료: " << s.completed
-          << " 거부: " << s.rejected << "\n";
-```
-
-내부적으로 [moodycamel::ConcurrentQueue](https://github.com/cameron314/concurrentqueue)를
-사용하여 lock-free 큐잉을 구현한다. 워커 스레드는 `condition_variable`로 대기하므로
-CPU busy-spin을 하지 않는다.
-
----
-
-## 부록 A: JSON 경로 유틸리티
-
-**헤더:** `neograph/llm/json_path.h`
-**네임스페이스:** `neograph::llm::json_path`
-
-SchemaProvider 내부에서 사용하는 JSON dot-path 탐색 유틸리티.
-
-```cpp
-// dot-path 분리: "choices.0.message" -> ["choices", "0", "message"]
-std::vector<std::string> split_path(const std::string& path);
-
-// 경로로 JSON 탐색 (읽기 전용). 없으면 nullptr
-const json* at_path(const json& root, const std::string& path);
-
-// 경로로 JSON 탐색 (쓰기 가능)
-json* at_path_mut(json& root, const std::string& path);
-
-// 경로 존재 여부
-bool has_path(const json& root, const std::string& path);
-
-// 경로의 값 조회. 없으면 기본값 반환
-template<typename T>
-T get_path(const json& root, const std::string& path, const T& default_val);
-
-// 경로에 값 설정. 중간 객체 자동 생성
-void set_path(json& root, const std::string& path, const json& value);
-```
-
-**사용 예:**
-
-```cpp
-using namespace neograph::llm::json_path;
-
-json data = {{"choices", json::array({{{"message", {{"content", "Hello"}}}}})};
-
-// 탐색
-auto* content = at_path(data, "choices.0.message.content");
-// -> json("Hello")
-
-// 기본값 포함 조회
-std::string text = get_path<std::string>(data, "choices.0.message.content", "");
-// -> "Hello"
-
-// 존재 확인
-bool exists = has_path(data, "choices.0.message.tool_calls");
-// -> false
-
-// 값 설정
-set_path(data, "metadata.model", json("gpt-4o"));
-// data["metadata"]["model"] == "gpt-4o"
 ```
 
 ---
 
-## 부록 B: 편의 헤더
+## Usage Examples
 
-`neograph/neograph.h`는 핵심 API 전체를 한 번에 포함하는 편의 헤더이다.
+### Minimal ReAct Agent
+
+The simplest way to use NeoGraph -- a ReAct agent with tools:
 
 ```cpp
 #include <neograph/neograph.h>
+#include <neograph/llm/openai_provider.h>
+#include <neograph/graph/react_graph.h>
+
+int main() {
+    auto provider = neograph::llm::OpenAIProvider::create({
+        .api_key = std::getenv("OPENAI_API_KEY"),
+        .default_model = "gpt-4o"
+    });
+
+    std::vector<std::unique_ptr<neograph::Tool>> tools;
+    tools.push_back(std::make_unique<WeatherTool>());
+
+    auto engine = neograph::graph::create_react_graph(
+        provider, std::move(tools),
+        "You are a helpful assistant with access to weather data."
+    );
+
+    neograph::graph::RunConfig config;
+    config.input = {{"messages", json::array({
+        {{"role", "user"}, {"content", "What's the weather in Tokyo?"}}
+    })}};
+
+    auto result = engine->run(config);
+    // result.output contains the final state with all messages
+}
 ```
 
-포함되는 헤더:
+### Custom Graph with Conditional Routing
 
-| 헤더 | 내용 |
-|------|------|
-| `neograph/types.h` | 기본 타입 (ChatMessage, ToolCall, ...) |
-| `neograph/provider.h` | Provider 추상 인터페이스 |
-| `neograph/tool.h` | Tool 추상 인터페이스 |
-| `neograph/graph/types.h` | 그래프 타입 (Send, Command, ...) |
-| `neograph/graph/state.h` | GraphState |
-| `neograph/graph/node.h` | GraphNode + 내장 노드 |
-| `neograph/graph/engine.h` | GraphEngine |
-| `neograph/graph/checkpoint.h` | Checkpoint, CheckpointStore |
-| `neograph/graph/loader.h` | NodeFactory, ReducerRegistry, ConditionRegistry |
-| `neograph/graph/react_graph.h` | create_react_graph() |
-| `neograph/graph/store.h` | Store, InMemoryStore |
-
-LLM provider, MCP, 유틸리티는 별도로 포함해야 한다.
-
----
-
-## 부록 C: Send/Command 통합 예제
-
-Send(동적 fan-out)와 Command(라우팅 오버라이드)를 함께 사용하는 리서치 에이전트 예제.
-
-### 그래프 구조
-
-```
-__start__ -> planner --(Send: researcher x N)--> evaluator --(Command)--> summarizer -> __end__
-                 ^                                                 |
-                 |                (Command: 추가 조사 필요)          |
-                 +------------------------------------------------+
-```
-
-### 노드 구현
+Building a graph with conditional edges:
 
 ```cpp
-// PlannerNode: 주제를 분석하고 Send로 동적 fan-out
-class PlannerNode : public GraphNode {
-    int round_ = 0;
-public:
-    asio::awaitable<NodeOutput> run(NodeInput in) override {
-        round_++;
-        auto query = in.state.get("query").get<std::string>();
+#include <neograph/neograph.h>
+#include <neograph/llm/openai_provider.h>
 
-        std::vector<std::string> topics;
-        if (round_ == 1)
-            topics = {"market_size", "key_players", "trends"};
-        else
-            topics = {"risks", "outlook"};
+using namespace neograph::graph;
+using json = nlohmann::json;
 
-        NodeOutput out;
-        out.writes.push_back(ChannelWrite{"plan", json({
-            {"round", round_}, {"topics", topics}
-        })});
+int main() {
+    auto provider = neograph::llm::OpenAIProvider::create({
+        .api_key = std::getenv("OPENAI_API_KEY")
+    });
 
-        // 각 주제에 대해 researcher 노드를 개별 실행
-        for (const auto& topic : topics) {
-            out.sends.push_back(Send{
-                "researcher",
-                json({{"topic", topic}})
-            });
-        }
-        co_return out;
+    std::vector<std::unique_ptr<neograph::Tool>> tools;
+    tools.push_back(std::make_unique<SearchTool>());
+    tools.push_back(std::make_unique<CalculatorTool>());
+
+    json definition = {
+        {"name", "assistant_graph"},
+        {"channels", {
+            {"messages", {{"reducer", "append"}}},
+            {"status",   {{"reducer", "overwrite"}, {"initial", "idle"}}}
+        }},
+        {"nodes", {
+            {"llm",   {{"type", "llm_call"}}},
+            {"tools", {{"type", "tool_dispatch"}}}
+        }},
+        {"edges", json::array({
+            {{"from", "__start__"}, {"to", "llm"}},
+            {{"from", "tools"},     {"to", "llm"}}
+        })},
+        {"conditional_edges", json::array({
+            {{"from", "llm"},
+             {"condition", "has_tool_calls"},
+             {"routes", {{"yes", "tools"}, {"no", "__end__"}}}}
+        })}
+    };
+
+    auto store = std::make_shared<InMemoryCheckpointStore>();
+    EngineConfig engine_config;
+    engine_config.node_context.provider = provider;
+    engine_config.node_context.model = "gpt-4o";
+    engine_config.node_context.instructions = "You are a helpful assistant.";
+    engine_config.checkpoint_store = store;
+    EngineResources resources{.tools = ToolSet(std::move(tools))};
+    auto engine = GraphEngine::build(definition, std::move(engine_config),
+                                     std::move(resources));
+
+    RunConfig config;
+    config.thread_id = "session-1";
+    config.input = {{"messages", json::array({
+        {{"role", "user"}, {"content", "Search for NeoGraph C++ library"}}
+    })}};
+
+    auto result = engine->run(config);
+
+    // Inspect execution trace
+    for (const auto& node : result.execution_trace) {
+        std::cout << "Executed: " << node << "\n";
     }
-
-    std::string get_name() const override { return "planner"; }
-};
-
-// EvaluatorNode: 결과를 평가하고 Command로 분기
-class EvaluatorNode : public GraphNode {
-public:
-    asio::awaitable<NodeOutput> run(NodeInput in) override {
-        auto findings = in.state.get("findings");
-        int count = findings.is_array() ? (int)findings.size() : 0;
-
-        NodeOutput out;
-        if (count >= 5) {
-            out.command = Command{
-                "summarizer",
-                {ChannelWrite{"status", json("sufficient")}}
-            };
-        } else {
-            out.command = Command{
-                "planner",
-                {ChannelWrite{"status", json("needs_more_data")}}
-            };
-        }
-        co_return out;
-    }
-
-    std::string get_name() const override { return "evaluator"; }
-};
+}
 ```
 
-### 그래프 정의 및 실행
+### Human-in-the-Loop with Checkpointing
+
+Using interrupts for human approval:
 
 ```cpp
-// 커스텀 노드 등록
-auto& factory = NodeFactory::instance();
-factory.register_type("planner", [](const std::string&, const json&, const NodeContext&) {
-    return std::make_unique<PlannerNode>();
-});
-factory.register_type("researcher", [](const std::string&, const json&, const NodeContext&) {
-    return std::make_unique<ResearcherNode>();
-});
-factory.register_type("evaluator", [](const std::string&, const json&, const NodeContext&) {
-    return std::make_unique<EvaluatorNode>();
-});
-factory.register_type("summarizer_node", [](const std::string&, const json&, const NodeContext&) {
-    return std::make_unique<SummarizerNode>();
-});
+auto store = std::make_shared<InMemoryCheckpointStore>();
+EngineConfig engine_config;
+engine_config.node_context = ctx;
+engine_config.checkpoint_store = store;
+auto engine = GraphEngine::build(definition, std::move(engine_config));
 
-json definition = {
-    {"name", "research_agent"},
-    {"channels", {
-        {"query",       {{"reducer", "overwrite"}}},
-        {"plan",        {{"reducer", "overwrite"}}},
-        {"topic",       {{"reducer", "overwrite"}}},   // Send가 주입하는 채널
-        {"findings",    {{"reducer", "append"}}},       // 리서치 결과 누적
-        {"status",      {{"reducer", "overwrite"}}},
-        {"summary",     {{"reducer", "overwrite"}}}
-    }},
-    {"nodes", {
-        {"planner",    {{"type", "planner"}}},
-        {"researcher", {{"type", "researcher"}}},
-        {"evaluator",  {{"type", "evaluator"}}},
-        {"summarizer", {{"type", "summarizer_node"}}}
-    }},
-    {"edges", json::array({
-        {{"from", "__start__"}, {"to", "planner"}},
-        {{"from", "planner"},   {"to", "evaluator"}},
-        {{"from", "summarizer"}, {"to", "__end__"}}
-    })}
-};
-
-NodeContext ctx;
-auto engine = GraphEngine::build(definition, EngineConfig{.node_context = ctx});
+// Configure interrupt after the "tools" node
+// (set "interrupt_after": ["tools"] in the JSON definition)
 
 RunConfig config;
-config.input = {{"query", "AI 반도체 시장 분석"}};
-config.max_steps = 20;
+config.thread_id = "approval-session";
+config.input = {{"messages", json::array({
+    {{"role", "user"}, {"content", "Delete all files in /tmp"}}
+})}};
 
-auto result = engine->run_stream(config, [](const GraphEvent& event) {
-    if (event.type == GraphEvent::Type::NODE_START &&
-        event.node_name == "__send__") {
-        std::cout << "Fan-out: " << event.data["sends"].size() << " tasks\n";
-    }
-});
+auto result = engine->run(config);
 
-// execution_trace: planner -> researcher(x3) -> evaluator
-//                  -> planner -> researcher(x2) -> evaluator
-//                  -> summarizer -> END
+if (result.interrupted) {
+    std::cout << "Interrupted at: " << result.interrupt_node << "\n";
+    std::cout << "Reason: " << result.interrupt_value.dump() << "\n";
+
+    // Get human input...
+    std::string approval = get_human_approval();
+
+    // Resume with the human's decision
+    auto resumed = engine->resume(
+        "approval-session",
+        {{"approved", approval == "yes"}}
+    );
+}
 ```
 
-핵심 포인트:
-- **Send**의 `input`은 채널명-값 매핑이다. 엔진이 `apply_input()`과 동일한 방식으로 상태에 주입한다.
-- **Command**의 `goto_node`는 기본 edge 라우팅을 완전히 무시하고 지정 노드로 이동한다.
-- Send로 실행된 노드들의 결과는 리듀서를 통해 합산된다 (`append` 리듀서라면 결과가 배열에 누적).
+### Dynamic Fan-Out with Send
+
+Using `Send` for map-reduce patterns:
+
+```cpp
+class FanOutNode : public GraphNode {
+public:
+    std::string get_name() const override { return "fan_out"; }
+
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto items = in.state.get("items");
+        NodeOutput result;
+        for (const auto& item : items) {
+            result.sends.push_back(Send{
+                "process_item",       // target node
+                {{"item", item}}      // input for that invocation
+            });
+        }
+        co_return result;
+    }
+};
+```
+
+Each `Send` dispatches the `"process_item"` node with a different input. The engine
+executes all sends, collecting their channel writes, before proceeding to the next
+edge in the graph.
+
+### Routing Override with Command
+
+Using `Command` to simultaneously update state and control routing:
+
+```cpp
+class RouterNode : public GraphNode {
+public:
+    std::string get_name() const override { return "router"; }
+
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        auto messages = in.state.get_messages();
+        auto last = messages.back().content;
+
+        NodeOutput result;
+
+        if (last.find("urgent") != std::string::npos) {
+            result.command = Command{
+                "urgent_handler",                          // goto node
+                {{{"channel", "priority"}, {"value", "high"}}} // state updates
+            };
+        } else {
+            result.command = Command{
+                "normal_handler",
+                {{{"channel", "priority"}, {"value", "normal"}}}
+            };
+        }
+
+        co_return result;
+    }
+};
+```
+
+When `Command` is returned, its `updates` are applied to the state and execution
+jumps directly to the specified `goto_node`, bypassing normal edge routing.
+
+### SchemaProvider Multi-LLM Support
+
+Using `SchemaProvider` to switch between LLM providers:
+
+```cpp
+#include <neograph/llm/schema_provider.h>
+
+// OpenAI
+auto openai = neograph::llm::SchemaProvider::create({
+    .schema_path = "openai",
+    .api_key = std::getenv("OPENAI_API_KEY"),
+    .default_model = "gpt-4o"
+});
+
+// Anthropic Claude
+auto claude = neograph::llm::SchemaProvider::create({
+    .schema_path = "claude",
+    .api_key = std::getenv("ANTHROPIC_API_KEY"),
+    .default_model = "claude-sonnet-4-20250514"
+});
+
+// Google Gemini
+auto gemini = neograph::llm::SchemaProvider::create({
+    .schema_path = "gemini",
+    .api_key = std::getenv("GEMINI_API_KEY"),
+    .default_model = "gemini-2.0-flash"
+});
+
+// All three implement the same Provider interface
+// Use any of them interchangeably with Agent or GraphEngine
+neograph::llm::Agent agent(claude, std::move(tools), "You are helpful.");
+```
+
+### MCP Tool Integration
+
+Connecting to an MCP server and using its tools:
+
+```cpp
+#include <neograph/mcp/client.h>
+#include <neograph/llm/openai_provider.h>
+#include <neograph/llm/agent.h>
+
+int main() {
+    // Connect to MCP server
+    neograph::mcp::MCPClient mcp("http://localhost:3000");
+    if (!mcp.initialize()) {
+        std::cerr << "Failed to connect to MCP server\n";
+        return 1;
+    }
+
+    // Discover tools from server
+    auto tools = mcp.get_tools();
+    std::cout << "Discovered " << tools.size() << " tools\n";
+
+    // Use discovered tools with an Agent
+    auto provider = neograph::llm::OpenAIProvider::create({
+        .api_key = std::getenv("OPENAI_API_KEY")
+    });
+
+    neograph::llm::Agent agent(provider, std::move(tools),
+                                "You have access to remote tools via MCP.");
+
+    std::vector<neograph::ChatMessage> messages;
+    messages.push_back({"user", "Use the available tools to help me."});
+
+    std::string response = agent.run(messages);
+    std::cout << response << "\n";
+}
+```
 
 ---
 
-## 부록 D: 전체 타입 색인
+## Beyond this tour
 
-| 타입/클래스 | 네임스페이스 | 헤더 |
-|------------|------------|------|
-| `ToolCall` | `neograph` | `types.h` |
-| `ChatMessage` | `neograph` | `types.h` |
-| `ChatTool` | `neograph` | `types.h` |
-| `ChatCompletion` | `neograph` | `types.h` |
-| `StreamCallback` | `neograph` | `provider.h` |
-| `CompletionParams` | `neograph` | `provider.h` |
-| `Provider` | `neograph` | `provider.h` |
-| `Tool` | `neograph` | `tool.h` |
-| `ReducerType` | `neograph::graph` | `graph/types.h` |
-| `ReducerFn` | `neograph::graph` | `graph/types.h` |
-| `Channel` | `neograph::graph` | `graph/types.h` |
-| `ChannelWrite` | `neograph::graph` | `graph/types.h` |
-| `NodeInterrupt` | `neograph::graph` | `graph/types.h` |
-| `Send` | `neograph::graph` | `graph/types.h` |
-| `Command` | `neograph::graph` | `graph/types.h` |
-| `RetryPolicy` | `neograph::graph` | `graph/types.h` |
-| `StreamMode` | `neograph::graph` | `graph/types.h` |
-| `Edge` | `neograph::graph` | `graph/types.h` |
-| `ConditionalEdge` | `neograph::graph` | `graph/types.h` |
-| `NodeContext` | `neograph::graph` | `graph/types.h` |
-| `GraphEvent` | `neograph::graph` | `graph/types.h` |
-| `NodeResult` | `neograph::graph` | `graph/types.h` |
-| `ConditionFn` | `neograph::graph` | `graph/types.h` |
-| `GraphState` | `neograph::graph` | `graph/state.h` |
-| `GraphNode` | `neograph::graph` | `graph/node.h` |
-| `LLMCallNode` | `neograph::graph` | `graph/node.h` |
-| `ToolDispatchNode` | `neograph::graph` | `graph/node.h` |
-| `IntentClassifierNode` | `neograph::graph` | `graph/node.h` |
-| `SubgraphNode` | `neograph::graph` | `graph/node.h` |
-| `RunConfig` | `neograph::graph` | `graph/engine.h` |
-| `RunResult` | `neograph::graph` | `graph/engine.h` |
-| `GraphEngine` | `neograph::graph` | `graph/engine.h` |
-| `Checkpoint` | `neograph::graph` | `graph/checkpoint.h` |
-| `CheckpointStore` | `neograph::graph` | `graph/checkpoint.h` |
-| `InMemoryCheckpointStore` | `neograph::graph` | `graph/checkpoint.h` |
-| `Namespace` | `neograph::graph` | `graph/store.h` |
-| `StoreItem` | `neograph::graph` | `graph/store.h` |
-| `Store` | `neograph::graph` | `graph/store.h` |
-| `InMemoryStore` | `neograph::graph` | `graph/store.h` |
-| `ReducerRegistry` | `neograph::graph` | `graph/loader.h` |
-| `ConditionRegistry` | `neograph::graph` | `graph/loader.h` |
-| `NodeFactory` | `neograph::graph` | `graph/loader.h` |
-| `NodeFactoryFn` | `neograph::graph` | `graph/loader.h` |
-| `OpenAIProvider` | `neograph::llm` | `llm/openai_provider.h` |
-| `SchemaProvider` | `neograph::llm` | `llm/schema_provider.h` |
-| `Agent` | `neograph::llm` | `llm/agent.h` |
-| `MCPClient` | `neograph::mcp` | `mcp/client.h` |
-| `MCPTool` | `neograph::mcp` | `mcp/client.h` |
-| `RequestQueue` | `neograph::util` | `util/request_queue.h` |
+The headers under `include/neograph/` carry public surface that
+isn't walked through above. Each block below is a one-paragraph
+pointer — the canonical doc lives in Doxygen, generated 1:1 from
+the headers and refreshed on every push to master.
+
+### `neograph::a2a` — Agent-to-Agent protocol
+
+**Header:** `<neograph/a2a/{client,server,types,a2a_caller_node}.h>`
+JSON-RPC 2.0 over Streamable HTTP. `A2AClient` calls a remote
+agent (`message/send`, `tasks/get`, `tasks/cancel`, AgentCard
+discovery, `message/stream` SSE); the server side adapts a
+NeoGraph `GraphEngine` into an A2A endpoint via
+`GraphAgentAdapter`. Dual `v0.3` / `v1` method-name dispatch —
+see commit `bc675a1`. Streaming uses `SseFrameSplitter` (client)
+and httplib chunked (server). Caller node embeds an A2A call as
+a graph node. **Full reference:**
+[Doxygen `namespaceneograph_1_1a2a`](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1a2a.html).
+
+### `neograph::acp` — Agent Client Protocol
+
+**Header:** `<neograph/acp/{server,types}.h>`
+Editor↔agent JSON-RPC over newline-delimited JSON on stdio (Zed,
+Gemini CLI, Neovim CodeCompanion). Bidirectional: client→agent
+(`initialize`, `session/{new,prompt,cancel}`) and agent→client
+(`fs/{read,write}_text_file`, `session/request_permission`) via
+late-bound `ACPClient`. `ACPServer::handle_message` async-dispatches
+prompts on a worker thread, capped at `max_inflight_prompts=32`
+with per-session single-flight + `-32000` backpressure. **Full
+reference:** [Doxygen `namespaceneograph_1_1acp`](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1acp.html).
+
+### `neograph::async` — HTTP/SSE/WS helpers
+
+**Header:** `<neograph/async/{conn_pool,http_client,sse_parser,ws_client,curl_h2_pool,run_sync}.h>`
+Coroutine-based HTTP/1.1 client + ConnPool with safe-method-only
+stale-idle retry (RFC 7231 §4.2.2 — POST etc. rethrow rather than
+silently double-apply); `SseEventParser` for OpenAI/Claude
+streaming; `WsClient` for OpenAI Responses WebSocket; libcurl
+`CurlH2Pool` for HTTP/2 + multiplexing on Cloudflare-fronted
+endpoints; `run_sync` for awaitable→sync bridges in the engine
+defaults. **Full reference:**
+[Doxygen `namespaceneograph_1_1async`](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1async.html).
+
+### Persistent checkpoint backends
+
+**Header:** `<neograph/graph/postgres_checkpoint.h>`,
+`<neograph/graph/sqlite_checkpoint.h>`
+`PostgresCheckpointStore` — libpq-based, 3-table schema (`neograph_*`)
+with channel-blob deduplication keyed on
+`(thread_id, channel, version)`; LangGraph `PostgresSaver` parity. Async
+initial/replacement connections use one global deadline across all hosts:
+positive `connect_timeout` written directly in the connection string (minimum
+2s), otherwise a 30s safety default. Environment and service-file timeout
+values are not available before initial connection setup and use that default.
+Synchronous libpq connection timeout behavior is unchanged.
+`SqliteCheckpointStore` — same shape, single-file backend, fits the
+edge / single-host deployments.
+**Full reference:**
+[`PostgresCheckpointStore`](https://fox1245.github.io/NeoGraph/classneograph_1_1graph_1_1PostgresCheckpointStore.html) ·
+[`SqliteCheckpointStore`](https://fox1245.github.io/NeoGraph/classneograph_1_1graph_1_1SqliteCheckpointStore.html).
+
+### Other public surface not in this tour
+
+- **`neograph::llm::RateLimitedProvider`** — wraps any `Provider`
+  with retry on 429 + Retry-After honour + capped exponential
+  backoff + max-total-wait gate (Round 5).
+  [Doxygen](https://fox1245.github.io/NeoGraph/classneograph_1_1llm_1_1RateLimitedProvider.html).
+- **`neograph::AsyncTool`** — `Tool` peer that exposes
+  `execute_async(json)` for tools whose work is naturally
+  coroutine-shaped (HTTP fetch, MCP call). Sync `execute()` is
+  `final`-routed through `run_sync`.
+- **`neograph::graph::NodeCache`** — per-node memoization, opt-in
+  at construction via `EngineConfig::cached_nodes` (the setter remains a
+  compatibility surface).
+- **`neograph::graph::create_deep_research_graph`** —
+  open_deep_research-style supervisor + sub-researcher fan-out,
+  used by `examples/25_deep_research.cpp`. Round 2 audit added
+  `BriefNode` LLM rewrite, `FinalReportNode` token-limit retry,
+  `ClarifyNode` HITL gate.
+
+If the type you need isn't in this tour and you can't find it in
+Doxygen either, check `include/neograph/` directly — every public
+header carries the same Doxygen-style comments that drive the
+generated reference.

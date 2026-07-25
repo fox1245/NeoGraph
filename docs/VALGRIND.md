@@ -1,5 +1,7 @@
 # Memory & sanitizer sweep (Valgrind / ASan / UBSan / soak)
 
+**Languages:** [English](VALGRIND.md) | [한국어](VALGRIND.ko.md) | [日本語](VALGRIND.ja.md) | [简体中文](VALGRIND.zh-CN.md)
+
 Ground-truth check that the example binaries and the test binary
 release every allocation they make. Runs under `valgrind --tool=memcheck
 --leak-check=full --show-leak-kinds=all`. The bar is **0 leaks, 0

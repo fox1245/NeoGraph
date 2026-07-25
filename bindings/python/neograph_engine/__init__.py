@@ -401,11 +401,11 @@ class NodeInterrupt(Exception):
 class GraphNode:
     """Base class for Python-defined graph nodes.
 
-    Subclass this and override ``execute()`` (and ``get_name()`` if you
-    don't pass the name through ``__init__``). For nodes that need to
-    emit ``Command`` (routing override) or ``Send`` (dynamic fan-out),
-    override ``execute_full()`` instead and return a :class:`NodeResult`
-    or a list mixing ``ChannelWrite`` / ``Command`` / ``Send``.
+    Subclass this and override ``run(input)`` and ``get_name()``. Read
+    graph state from ``input.state``, per-run metadata from ``input.ctx``,
+    and the optional streaming callback from ``input.stream_cb``. Return
+    channel writes, ``Command`` (routing override), ``Send`` (dynamic
+    fan-out), or a :class:`NodeResult` combining them.
 
     Register a factory so the JSON graph definition can reference your
     node by type name::
@@ -418,8 +418,8 @@ class GraphNode:
             def get_name(self):
                 return self._name
 
-            def execute(self, state):
-                current = state.get("count") or 0
+            def run(self, input):
+                current = input.state.get("count") or 0
                 return [neograph_engine.ChannelWrite("count", current + 1)]
 
         neograph_engine.NodeFactory.register_type(
@@ -427,16 +427,10 @@ class GraphNode:
             lambda name, config, ctx: CounterNode(name),
         )
 
-    The C++ engine calls ``execute_full_async()`` under the hood, but
-    the binding bridges that to your sync ``execute_full()`` /
-    ``execute()`` for you — you do NOT need to write coroutines from
-    Python. GIL handling is also automatic: every dispatch from an
-    engine worker thread acquires the GIL before calling into your
-    code, and releases it after returning.
-
-    Streaming: override ``execute_stream(state, callback)`` if your
-    node produces fine-grained events. The default reuses ``execute()``
-    and ignores the callback.
+    ``run`` is a regular Python method, not ``async def``. The C++ bridge
+    owns the coroutine boundary and acquires the GIL before each call.
+    During a streaming run, ``input.stream_cb`` is a callable accepting
+    one ``GraphEvent``; it is ``None`` for non-streaming runs.
     """
 
     def __init__(self):
@@ -451,27 +445,10 @@ class GraphNode:
             "GraphNode subclasses must override get_name() to return "
             "the unique node name within the graph.")
 
-    def execute(self, state):
-        # If the subclass only defines a streaming variant, the user
-        # almost certainly meant to drive the graph via run_stream() /
-        # run_stream_async() instead. Detect that and surface the hint
-        # so the error message points at the actual fix rather than at
-        # the missing override (TODO_v0.3.md item #2).
-        hint = ""
-        cls = type(self)
-        for stream_method in ("execute_full_stream", "execute_stream"):
-            base_attr = getattr(GraphNode, stream_method, None)
-            sub_attr  = getattr(cls,        stream_method, None)
-            if sub_attr is not None and sub_attr is not base_attr:
-                hint = (f" (this node defines {stream_method}() — call "
-                        f"engine.run_stream() / run_stream_async() instead "
-                        f"of run() / run_async() so the streaming variant "
-                        f"is dispatched.)")
-                break
+    def run(self, input):
         raise NotImplementedError(
-            "GraphNode subclasses must override execute() to return a "
-            "list of ChannelWrite, OR override execute_full() to return "
-            "a NodeResult with Command/Send." + hint)
+            "GraphNode subclasses must implement run(input). See "
+            "docs/migration-v0.4-to-v1.0.md for the execute* migration.")
 
 
 def node(type_name=None):
@@ -479,7 +456,7 @@ def node(type_name=None):
 
     Sugar for the common case where your node is a pure function of
     state: takes a :class:`GraphState`, returns a list of channel
-    writes. No subclassing, no ``execute_full()`` to think about.
+    writes. No subclassing and no ``NodeInput`` handling required.
 
     ::
 
@@ -493,7 +470,7 @@ def node(type_name=None):
     if not given). Internally we wrap it in a tiny GraphNode subclass.
 
     Limitations: decorator nodes can't emit Command / Send. Subclass
-    :class:`GraphNode` and override ``execute_full()`` for those.
+    :class:`GraphNode` and implement ``run(input)`` for those.
     """
 
     def decorator(fn):

@@ -1,5 +1,7 @@
 # v0.3 follow-ups
 
+**Languages:** [English](TODO_v0.3.md) | [한국어](TODO_v0.3.ko.md) | [日本語](TODO_v0.3.ja.md) | [简体中文](TODO_v0.3.zh-CN.md)
+
 Originally from the FastAPI SSE chat-demo feedback (2026-05-04).
 v0.3.0 ships cancel propagation; this file tracks the remaining
 mental-model and ergonomics gaps.

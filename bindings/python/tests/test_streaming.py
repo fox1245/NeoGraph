@@ -10,8 +10,7 @@ class _TokenEmitter(ng.GraphNode):
     """Test node that emits a fixed list of LLM tokens through the
     streaming callback. We can't easily fake a Provider here, so we
     drive the streaming path by calling the callback directly inside
-    execute_full_stream, which is the framework's preferred dispatch
-    point for streaming nodes."""
+    run(input), the framework's single node dispatch point."""
 
     def __init__(self, name, tokens):
         super().__init__()
