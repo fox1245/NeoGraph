@@ -221,7 +221,11 @@ asio::awaitable<NodeOutput> run(NodeInput in) override {
 }
 ```
 
-노드에서 사용 가능한 `in.ctx` 필드: `cancel_token`, `usage`, `thread_id`, `step`, `stream_mode`, `store`, `resume_value`. `deadline`과 `trace_id`는 미래 `RunConfig` 확장을 위한 예약 슬롯이며, 현재 엔진은 이들을 채우지 않고 Python에도 노출하지 않는다.
+C++ 노드에서 사용 가능한 `in.ctx` 필드: `cancel_token`, `usage`, `thread_id`,
+`step`, `stream_mode`, `store`, `resume_value`, `deadline`, `trace_id`. 마지막 두
+필드는 `RunMetadata`에서 설정하며 엔진은 중첩 subgraph까지 보존한다. 체크포인트
+라우팅은 엔진 내부 구현이며 공개 `RunContext` 필드가 아니다. Python은 아직
+`deadline`, `trace_id`를 노출하지 않는다.
 
 ### `_full` 가상 함수 이전 — `co_return out;` 한 줄로 마무리
 

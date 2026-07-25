@@ -236,10 +236,11 @@ asio::awaitable<NodeOutput> run(NodeInput in) override {
 }
 ```
 
-节点可用的 `in.ctx` 字段包括：`cancel_token`、`usage`、
-`thread_id`、`step`、`stream_mode`、`store` 和 `resume_value`。
-`deadline` 和 `trace_id` 是为未来 `RunConfig` 扩展保留的字段；当前
-引擎不填充它们，也不向 Python 暴露。
+C++ 节点可用的 `in.ctx` 字段包括：`cancel_token`、`usage`、`thread_id`、
+`step`、`stream_mode`、`store`、`resume_value`、`deadline` 和 `trace_id`。
+后两个字段由 `RunMetadata` 设置，且引擎会在嵌套 subgraph 中保留它们。检查点
+路由是引擎内部实现，不是公开的 `RunContext` 字段。Python 目前仍不暴露
+`deadline` 或 `trace_id`。
 
 ### 迁移 `_full` 虚函数 — 在一行内以 `co_return out;` 结束
 

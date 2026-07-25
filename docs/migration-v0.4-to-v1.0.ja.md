@@ -246,9 +246,11 @@ asio::awaitable<NodeOutput> run(NodeInput in) override {
 ```
 
 ノードが利用可能な `in.ctx` のフィールド: `cancel_token`、`usage`、
-`thread_id`、`step`、`stream_mode`、`store`、`resume_value`。`deadline` と
-`trace_id` は将来の `RunConfig` 拡張用の予約スロットであり、現在のエンジンは
-これらに値を設定せず、Python にも公開していません。
+`thread_id`、`step`、`stream_mode`、`store`、`resume_value`、`deadline`、
+`trace_id`。最後の 2 つは `RunMetadata` で設定し、エンジンはネストした
+subgraph まで保持します。チェックポイントの経路はエンジン内部であり、公開
+`RunContext` フィールドではありません。Python は `deadline` と `trace_id` を
+まだ公開していません。
 
 ### `_full` 仮想メソッドの移行 — 1 行で `co_return out;` で終了
 

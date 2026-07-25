@@ -183,7 +183,9 @@ class Researcher(ng.GraphNode):
         )
 ```
 
-Python 暴露`cancel_token`, `thread_id`, `step`, `stream_mode`, `store`， 和`resume_value`在`input.ctx`。 C++`deadline`和`trace_id`预留插槽以供将来使用`RunConfig`领域；引擎不会填充它们，Python 也不会公开它们。
+Python 在 `input.ctx` 上暴露 `cancel_token`、`thread_id`、`step`、`stream_mode`、
+`store` 和 `resume_value`。C++ 调用方可以在 `RunMetadata` 中设置 `deadline` 和
+`trace_id`，引擎会将它们传播到嵌套 subgraph。这两个字段目前仍未暴露给 Python 绑定。
 
 你也可以返回裸 `list[ChannelWrite]`当你不需要的时候`Send`或者`Command`— 绑定将其提升到`NodeResult`自动地。
 

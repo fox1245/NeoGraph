@@ -157,6 +157,17 @@ struct RunConfig {
 
 };
 
+/**
+ * @brief Optional per-run metadata without changing the stable RunConfig ABI.
+ *
+ * The engine copies this metadata into RunContext and preserves it through
+ * subgraphs. Python does not expose this C++-only extension yet.
+ */
+struct RunMetadata {
+    std::optional<std::chrono::steady_clock::time_point> deadline;
+    std::string trace_id;
+};
+
 /// @brief Normal, paused, or step-limited outcome of a successful run call.
 enum class RunStatus {
     Completed,
@@ -485,6 +496,10 @@ public:
      */
     RunResult run(const RunConfig& config);
 
+    /// Execute with optional C++ deadline and trace metadata. RunMetadata is
+    /// separate from RunConfig to preserve the latter's stable ABI.
+    RunResult run(const RunConfig& config, const RunMetadata& metadata);
+
     /**
      * @brief Async peer of run() — returns an awaitable yielding the result.
      *
@@ -505,6 +520,9 @@ public:
      */
     asio::awaitable<RunResult> run_async(RunConfig config);
 
+    /// Async peer that preserves the supplied C++ run metadata.
+    asio::awaitable<RunResult> run_async(RunConfig config, RunMetadata metadata);
+
     /**
      * @brief Execute the graph with streaming event callbacks.
      * @param config Run configuration.
@@ -514,11 +532,20 @@ public:
     RunResult run_stream(const RunConfig& config,
                          const GraphStreamCallback& cb);
 
+    /// Streaming execution with optional C++ deadline and trace metadata.
+    RunResult run_stream(const RunConfig& config,
+                         const GraphStreamCallback& cb,
+                         const RunMetadata& metadata);
+
     /// Async peer of run_stream — non-blocking coroutine surface.
     /// `config` and `cb` are taken by value for the same reason as
     /// run_async() — see that overload's docstring.
     asio::awaitable<RunResult> run_stream_async(
         RunConfig config, GraphStreamCallback cb);
+
+    /// Async streaming peer that preserves the supplied C++ run metadata.
+    asio::awaitable<RunResult> run_stream_async(
+        RunConfig config, GraphStreamCallback cb, RunMetadata metadata);
 
     /**
      * @brief Resume execution from a HITL interrupt.
@@ -536,7 +563,7 @@ public:
                      const GraphStreamCallback& cb = nullptr);
 
     /**
-     * @brief Resume while preserving caller cancellation and deadline settings.
+     * @brief Resume while preserving caller cancellation settings.
      *
      * `config.thread_id` identifies the interrupted session. Input is ignored;
      * the latest checkpoint remains the source of resumed graph state.
@@ -544,6 +571,14 @@ public:
     RunResult resume(const RunConfig&           config,
                      const json&                resume_value = json(),
                      const GraphStreamCallback& cb           = nullptr);
+
+    /// Resume with metadata for this new execution attempt. Deadlines are not
+    /// checkpointed because an absolute deadline from a previous attempt may be
+    /// stale; callers intentionally provide a fresh RunMetadata value.
+    RunResult resume(const RunConfig&           config,
+                     const json&                resume_value,
+                     const GraphStreamCallback& cb,
+                     const RunMetadata&         metadata);
 
     /// Async peer of resume — non-blocking coroutine surface.
     /// All arguments are copied before this function returns, so the returned
@@ -556,8 +591,14 @@ public:
 
     /// Async peer of the RunConfig-preserving resume overload.
     asio::awaitable<RunResult> resume_async(RunConfig           config,
-                                            json                resume_value = json(),
-                                            GraphStreamCallback cb           = nullptr);
+                                             json                resume_value = json(),
+                                             GraphStreamCallback cb           = nullptr);
+
+    /// Async resume peer with metadata for this new execution attempt.
+    asio::awaitable<RunResult> resume_async(RunConfig           config,
+                                             json                resume_value,
+                                             GraphStreamCallback cb,
+                                             RunMetadata          metadata);
 
     /// @brief Borrow the state-administration facade for this engine.
     GraphAdmin admin() noexcept;
@@ -770,6 +811,14 @@ public:
     const std::string& get_graph_name() const { return name_; }
 
 private:
+    friend class SubgraphNode;
+
+    struct RuntimeResources {
+        std::optional<std::shared_ptr<CheckpointStore>> checkpoint_store;
+        std::optional<std::shared_ptr<Store>> store;
+        std::optional<ToolGate> parent_tool_gate;
+    };
+
     GraphEngine() = default;
 
     static std::unique_ptr<GraphEngine> link_impl(CompiledGraph graph,
@@ -789,6 +838,24 @@ private:
         json resume_value,
         GraphStreamCallback cb);
 
+    asio::awaitable<RunResult> run_async_with_runtime(
+        RunConfig config,
+        GraphStreamCallback cb,
+        RunMetadata metadata,
+        RuntimeResources resources);
+
+    asio::awaitable<RunResult> resume_async_with_runtime(
+        RunConfig config,
+        json resume_value,
+        GraphStreamCallback cb,
+        RunMetadata metadata,
+        RuntimeResources resources);
+
+    asio::awaitable<RunResult> run_subgraph_async(
+        RunConfig config,
+        const RunContext& parent,
+        GraphStreamCallback cb);
+
     /// Super-step loop (coroutine). Owns: state init, interrupt
     /// gates, resume load, super-step commit, routing via Scheduler.
     /// Delegates: node invocation to NodeExecutor, checkpoint
@@ -798,7 +865,9 @@ private:
         const RunConfig& config,
         const GraphStreamCallback& cb,
         const std::vector<std::string>& resume_from = {},
-        const json* resume_value = nullptr);
+        const json* resume_value = nullptr,
+        const RunMetadata& metadata = {},
+        const RuntimeResources* resources = nullptr);
 
     RetryPolicy get_retry_policy(const std::string& node_name) const;
 

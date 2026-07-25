@@ -31,10 +31,10 @@ struct RunContext {
     /// Shared token accounting sink for this run and its subgraphs.
     std::shared_ptr<UsageAccumulator> usage;
 
-    /// Reserved absolute monotonic-clock deadline.
+    /// Absolute monotonic-clock deadline supplied through RunMetadata, when set.
     std::optional<std::chrono::steady_clock::time_point> deadline;
 
-    /// Reserved per-run trace correlator.
+    /// Per-run trace correlator supplied through RunMetadata.
     std::string trace_id;
 
     /// Mirrors RunConfig::thread_id.
@@ -52,8 +52,11 @@ struct RunContext {
     /// Optional cross-thread shared memory.
     std::shared_ptr<Store> store;
 
-    /// Engine-wide tool policy, empty when no gate is configured.
+    /// Effective tool policy for this invocation. It includes any inherited
+    /// parent policy and this engine's own policy, so a subgraph cannot weaken
+    /// a parent gate by using a different GraphEngine instance.
     ToolGate tool_gate;
+
 };
 
 /// @brief Fold a completion's token usage into the run's running total.

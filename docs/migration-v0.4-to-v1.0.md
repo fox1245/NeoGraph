@@ -242,10 +242,12 @@ asio::awaitable<NodeOutput> run(NodeInput in) override {
 }
 ```
 
-Fields of `in.ctx` available to nodes are: `cancel_token`, `usage`,
-`thread_id`, `step`, `stream_mode`, `store`, and `resume_value`. `deadline` and
-`trace_id` are reserved slots for future `RunConfig` extensions; the current
-engine does not populate them and does not expose them to Python.
+Fields of `in.ctx` available to C++ nodes are: `cancel_token`, `usage`,
+`thread_id`, `step`, `stream_mode`, `store`, `resume_value`, `deadline`, and
+`trace_id`. Set the latter two on `RunMetadata`; the engine preserves them
+through nested subgraphs. Checkpoint routing remains internal to the engine,
+not a public `RunContext` field. Python does not expose `deadline` or `trace_id`
+yet.
 
 ### Migrating `_full` virtuals — finish with `co_return out;` in one line
 

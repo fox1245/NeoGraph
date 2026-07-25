@@ -521,8 +521,8 @@ void init_node(py::module_& m) {
     // cancel_token (so they can pass it explicitly to
     // provider.complete instead of relying on the smuggling thread-local),
     // step (super-step counter), thread_id (RunConfig.thread_id), and
-    // stream_mode, store, and resume_value. ``deadline`` and ``trace_id`` are
-    // reserved for future RunConfig fields and stay default-constructed for now.
+    // stream_mode, store, and resume_value. C++ RunMetadata can also supply
+    // deadline and trace_id; those remain intentionally unbound in Python.
     py::class_<RunContext>(m, "RunContext",
         "Per-run dispatch metadata threaded by the engine. New nodes "
         "read this from ``input.ctx`` inside their ``run(input)`` "

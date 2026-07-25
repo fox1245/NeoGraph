@@ -203,10 +203,10 @@ class Researcher(ng.GraphNode):
         )
 ```
 
-Python은 `cancel_token`, `thread_id`, `step`, `stream_mode`, `store`를 노출합니다.
-및 `input.ctx`의 `resume_value`. C++ `deadline` 및 `trace_id` 슬롯은 다음과 같습니다.
-향후 `RunConfig` 필드를 위해 예약되었습니다. 엔진은 그것들을 채우지 않으며
-Python은 아직 이를 노출하지 않습니다.
+Python은 `input.ctx`에서 `cancel_token`, `thread_id`, `step`, `stream_mode`,
+`store`, `resume_value`를 노출합니다. C++ 호출자는 `RunMetadata`의 `deadline`과
+`trace_id`를 설정할 수 있고, 엔진은 이를 중첩 subgraph까지 전파합니다. 이 두
+필드는 아직 Python 바인딩에 노출되지 않습니다.
 
 필요하지 않은 경우 기본 `list[ChannelWrite]`를 반환할 수도 있습니다.
 `Send` 또는 `Command` - 바인딩이 `NodeResult`로 들어갑니다.
