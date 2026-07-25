@@ -348,6 +348,13 @@ void GraphAdmin::update_state(const std::string& thread_id,
     engine_->update_state(thread_id, channel_writes, as_node);
 }
 
+void GraphAdmin::update_state_writes(
+    const std::string& thread_id,
+    const std::vector<ChannelWrite>& channel_writes,
+    const std::string& as_node) const {
+    engine_->update_state_writes(thread_id, channel_writes, as_node);
+}
+
 std::string GraphAdmin::fork(const std::string& source_thread_id,
                              const std::string& new_thread_id,
                              const std::string& checkpoint_id) const {
@@ -368,8 +375,26 @@ std::vector<Checkpoint> GraphEngine::get_state_history(
 }
 
 void GraphEngine::update_state(const std::string& thread_id,
-                                const json& channel_writes,
-                                const std::string& as_node) {
+                               const json& channel_writes,
+                               const std::string& as_node) {
+    std::vector<ChannelWrite> writes;
+    if (channel_writes.is_object()) {
+        GraphState state;
+        init_state(state);
+        auto known = state.channel_names();
+        for (const auto& [key, value] : channel_writes.items()) {
+            if (std::find(known.begin(), known.end(), key) != known.end()) {
+                writes.push_back({key, value});
+            }
+        }
+    }
+    update_state_writes(thread_id, writes, as_node);
+}
+
+void GraphEngine::update_state_writes(
+    const std::string& thread_id,
+    const std::vector<ChannelWrite>& channel_writes,
+    const std::string& as_node) {
     if (!checkpoint_store_)
         throw std::runtime_error("Cannot update_state: no checkpoint store configured");
 
@@ -382,14 +407,7 @@ void GraphEngine::update_state(const std::string& thread_id,
     init_state(state);
     state.restore(cp.channel_values);
 
-    if (channel_writes.is_object()) {
-        auto known = state.channel_names();
-        for (const auto& [key, value] : channel_writes.items()) {
-            if (std::find(known.begin(), known.end(), key) != known.end()) {
-                state.write(key, value);
-            }
-        }
-    }
+    state.apply_writes(channel_writes);
 
     Checkpoint new_cp;
     new_cp.id              = Checkpoint::generate_id();

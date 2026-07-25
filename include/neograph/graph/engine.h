@@ -595,6 +595,16 @@ public:
                       const std::string& as_node = "");
 
     /**
+     * @brief Update state with ordered writes that preserve ChannelWrite modes.
+     *
+     * Unlike the JSON keyed form, this overload applies repeated channel writes
+     * in order and honors explicit overwrite intent.
+     */
+    void update_state_writes(const std::string& thread_id,
+                             const std::vector<ChannelWrite>& channel_writes,
+                             const std::string& as_node = "");
+
+    /**
      * @brief Fork a thread, creating a new thread from an existing checkpoint.
      *
      * Copies the specified checkpoint (or the latest) to a new thread ID,

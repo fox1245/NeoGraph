@@ -1585,9 +1585,15 @@ Returns the checkpoint history for a thread, ordered by timestamp (newest first)
 void update_state(const std::string& thread_id,
                   const json& channel_writes,
                   const std::string& as_node = "");
+
+void update_state_writes(const std::string& thread_id,
+                         const std::vector<ChannelWrite>& channel_writes,
+                         const std::string& as_node = "");
 ```
 
-Manually updates the state for a thread by applying channel writes. Creates a new
+Manually updates the state for a thread by applying channel writes. The JSON
+object form applies reducer writes by channel name. The `ChannelWrite` vector
+form preserves write order and explicit overwrite modes. Both create a new
 checkpoint with the updated state.
 
 | Parameter | Type | Description |

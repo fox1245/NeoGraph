@@ -459,11 +459,10 @@ LangGraph Python — surfaced here so you don't hit them mid-port:
   - list: `[ChannelWrite("messages", [...]), ...]` — symmetric with
     what every node body emits.
 
-  Duplicate channels in the list form are last-write-wins; for
-  multi-write-per-channel on an APPEND reducer (e.g. appending two
-  messages in one call), bundle the values into the value list:
-  `{"messages": [m1, m2]}`. Other types raise `TypeError` instead
-  of silently no-op'ing (a pre-v0.3.2 trap closed by item #5).
+   List entries are applied in order, including repeated channels, and
+   preserve `ChannelWrite.Mode.OVERWRITE`. The dict form remains a
+   reducer write per keyed value. Other types raise `TypeError` instead
+   of silently no-op'ing (a pre-v0.3.2 trap closed by item #5).
 - **`get_state(thread_id)` returns a nested dict — `get_state_view`
   is the flat helper** — `state["channels"]["messages"]["value"]`
   is the canonical raw shape (stable across versions). For

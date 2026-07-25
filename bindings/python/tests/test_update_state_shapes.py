@@ -4,13 +4,12 @@ dict and list[ChannelWrite] forms.
 Pre-fix the binding silently no-op'd when channel_writes was a
 list (the C++ engine checks `is_object()` and skips otherwise),
 which is exactly the shape a caller would build by collecting
-ChannelWrite from a node body. The new dispatch:
+ChannelWrite from a node body. The dispatch preserves that list's
+ChannelWrite modes and order:
 
-  - dict             {channel: value}        → existing path
-  - list of CW       [ChannelWrite(...), ...] → reduce to dict + apply
-  - anything else                              → TypeError (no silent no-op)
-
-Last-write-wins on duplicate channels matches dict-literal semantics.
+- dict             {channel: value}        → existing path
+- list of CW       [ChannelWrite(...), ...] → apply writes in order
+- anything else                              → TypeError (no silent no-op)
 """
 
 import pytest
@@ -95,6 +94,51 @@ def test_list_of_channelwrite_form_writes_through_reducer():
     assert _channel(state, "messages") == [{"role": "user", "content": "from list"}]
 
 
+def test_list_form_preserves_overwrite_mode():
+    """An explicit overwrite must bypass the append reducer."""
+    engine = _build_engine_with_messages()
+    engine.update_state(
+        "t1",
+        {"messages": [{"role": "user", "content": "old"}]},
+    )
+    engine.update_state(
+        "t1",
+        [neograph.ChannelWrite(
+            "messages",
+            [{"role": "assistant", "content": "replacement"}],
+            neograph.ChannelWrite.Mode.OVERWRITE,
+        )],
+    )
+    assert _channel(engine.get_state("t1"), "messages") == [
+        {"role": "assistant", "content": "replacement"},
+    ]
+
+
+def test_list_form_preserves_reduce_and_overwrite_order():
+    """Writes to one channel retain list order instead of collapsing to a dict."""
+    engine = _build_engine_with_messages()
+    engine.update_state(
+        "t1",
+        {"messages": [{"role": "user", "content": "seed"}]},
+    )
+    engine.update_state(
+        "t1",
+        [
+            neograph.ChannelWrite("messages", [{"role": "assistant", "content": "append"}]),
+            neograph.ChannelWrite(
+                "messages",
+                [{"role": "assistant", "content": "replace"}],
+                neograph.ChannelWrite.Mode.OVERWRITE,
+            ),
+            neograph.ChannelWrite("messages", [{"role": "user", "content": "after"}]),
+        ],
+    )
+    assert _channel(engine.get_state("t1"), "messages") == [
+        {"role": "assistant", "content": "replace"},
+        {"role": "user", "content": "after"},
+    ]
+
+
 def test_list_form_multiple_distinct_channels():
     """Multiple ChannelWrites covering different channels — all applied."""
     engine = _build_engine_with_messages()
@@ -110,24 +154,25 @@ def test_list_form_multiple_distinct_channels():
     assert _channel(state, "scratch")  == "scratch-value"
 
 
-def test_list_form_duplicate_channel_last_wins():
-    """Two writes to the same channel: last wins — matches dict literal
-    semantics. For multi-write per channel on an APPEND reducer, users
-    bundle the values into a list themselves (see test below)."""
+def test_list_form_duplicate_channel_writes_apply_in_order():
+    """Repeated reducer writes keep their individual list positions."""
     engine = _build_engine_with_messages()
     engine.update_state(
         "t1",
         [
-            neograph.ChannelWrite("scratch", "first"),
-            neograph.ChannelWrite("scratch", "second"),
+            neograph.ChannelWrite("messages", [{"role": "user", "content": "first"}]),
+            neograph.ChannelWrite("messages", [{"role": "assistant", "content": "second"}]),
         ],
     )
     state = engine.get_state("t1")
-    assert _channel(state, "scratch") == "second"
+    assert _channel(state, "messages") == [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "second"},
+    ]
 
 
-def test_list_form_bundle_for_append_reducer():
-    """Documented multi-message-in-one-call shape: bundle list values."""
+def test_list_form_accepts_bundled_values_for_append_reducer():
+    """One ChannelWrite may still carry multiple reducer values."""
     engine = _build_engine_with_messages()
     engine.update_state(
         "t1",

@@ -932,20 +932,12 @@ void init_graph(py::module_& m) {
                 // The list form is symmetric with how every node
                 // body builds writes, so it's the natural shape a
                 // caller from a Python REPL or UI would try.
-                json payload;
                 if (py::isinstance<py::dict>(channel_writes)) {
-                    payload = py_to_json(channel_writes);
+                    self.update_state(thread_id, py_to_json(channel_writes), as_node);
                 } else if (py::isinstance<py::list>(channel_writes) ||
                            py::isinstance<py::tuple>(channel_writes)) {
-                    // Reduce list[ChannelWrite] → dict {channel: value}.
-                    // If the same channel appears more than once, the
-                    // last value wins — matches dict-literal semantics
-                    // and keeps the engine's single-write-per-channel
-                    // invariant intact. For multi-write per channel
-                    // (e.g. appending two messages at once on an
-                    // APPEND-reduced channel), bundle the values into
-                    // a list yourself: {"messages": [m1, m2]}.
-                    payload = json::object();
+                    std::vector<ChannelWrite> writes;
+                    writes.reserve(py::len(channel_writes));
                     for (auto item : channel_writes) {
                         // Accept either an actual ChannelWrite instance
                         // or a duck-typed object exposing .channel /
@@ -960,10 +952,15 @@ void init_graph(py::module_& m) {
                                               .attr("__name__"))
                                       .cast<std::string>());
                         }
-                        std::string ch =
-                            item.attr("channel").cast<std::string>();
-                        payload[ch] = py_to_json(item.attr("value"));
+                        ChannelWrite write;
+                        write.channel = item.attr("channel").cast<std::string>();
+                        write.value = py_to_json(item.attr("value"));
+                        if (py::hasattr(item, "mode")) {
+                            write.mode = item.attr("mode").cast<ChannelWrite::Mode>();
+                        }
+                        writes.push_back(std::move(write));
                     }
+                    self.update_state_writes(thread_id, writes, as_node);
                 } else {
                     throw py::type_error(
                         "update_state: channel_writes must be a dict "
@@ -973,7 +970,6 @@ void init_graph(py::module_& m) {
                                     .attr("__name__"))
                             .cast<std::string>());
                 }
-                self.update_state(thread_id, payload, as_node);
             },
             py::arg("thread_id"),
             py::arg("channel_writes"),
@@ -981,15 +977,12 @@ void init_graph(py::module_& m) {
             "Apply channel writes to the latest checkpoint for "
             "thread_id and save a new checkpoint. Useful for injecting "
             "external state from a UI / REPL.\n\n"
-            "``channel_writes`` accepts two equivalent shapes:\n"
+            "``channel_writes`` accepts two shapes:\n"
             "  - ``dict``: ``{channel_name: value}`` — direct keyed form.\n"
             "  - ``list[ChannelWrite]``: ``[ChannelWrite('messages', [...])]``\n"
-            "    — symmetric with the shape every node body emits.\n"
-            "Duplicate channels in the list form are last-write-wins; "
-            "for multi-write per channel (e.g. APPEND-reduced messages), "
-            "bundle the values: ``{'messages': [m1, m2]}``. Other types "
-            "raise TypeError so a silent no-op (the pre-v0.3.2 trap) "
-            "can't reoccur.")
+            "    — applied in order and preserving each write mode.\n"
+            "Other types raise TypeError so a silent no-op (the pre-v0.3.2 "
+            "trap) can't reoccur.")
 
         .def("fork", &GraphEngine::fork,
             py::arg("source_thread_id"),
