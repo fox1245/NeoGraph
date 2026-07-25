@@ -91,3 +91,62 @@ TEST_F(StoreTest, EmptyNamespace) {
     ASSERT_TRUE(item.has_value());
     EXPECT_EQ(item->value, "root_val");
 }
+
+TEST_F(StoreTest, StructuredIdentityAvoidsDelimiterCollisions) {
+    store.put({"a", "b"}, "c", json("nested"));
+    store.put({"a"}, "b/c", json("slash-key"));
+
+    EXPECT_EQ(store.size(), 2u);
+    ASSERT_TRUE(store.get({"a", "b"}, "c").has_value());
+    ASSERT_TRUE(store.get({"a"}, "b/c").has_value());
+    EXPECT_EQ(store.get({"a", "b"}, "c")->value, "nested");
+    EXPECT_EQ(store.get({"a"}, "b/c")->value, "slash-key");
+
+    store.delete_item({"a", "b"}, "c");
+    EXPECT_FALSE(store.get({"a", "b"}, "c").has_value());
+    auto survivor = store.get({"a"}, "b/c");
+    ASSERT_TRUE(survivor.has_value());
+    EXPECT_EQ(survivor->value, "slash-key");
+}
+
+TEST_F(StoreTest, NamespacePrefixMatchesWholeComponents) {
+    store.put({"user", "one"}, "key", json(1));
+    store.put({"user", "two"}, "key", json(2));
+    store.put({"user2", "three"}, "key", json(3));
+
+    auto items = store.search({"user"});
+    ASSERT_EQ(items.size(), 2u);
+    for (const auto& item : items) {
+        ASSERT_FALSE(item.ns.empty());
+        EXPECT_EQ(item.ns.front(), "user");
+    }
+
+    auto namespaces = store.list_namespaces({"user"});
+    ASSERT_EQ(namespaces.size(), 2u);
+    for (const auto& ns : namespaces) {
+        ASSERT_FALSE(ns.empty());
+        EXPECT_EQ(ns.front(), "user");
+    }
+}
+
+TEST_F(StoreTest, EmptySlashAndUtf8ComponentsRemainDistinct) {
+    const std::string snowman = "\xE2\x98\x83";
+    store.put({}, "root", json("empty-namespace"));
+    store.put({""}, "root", json("empty-component"));
+    store.put({"", "a/b", snowman}, "k/x", json("slash-component"));
+    store.put({"", "a", "b", snowman}, "k/x", json("split-components"));
+
+    EXPECT_EQ(store.size(), 4u);
+    auto empty_ns = store.get({}, "root");
+    auto empty_component = store.get({""}, "root");
+    auto slash_component = store.get({"", "a/b", snowman}, "k/x");
+    auto split_components = store.get({"", "a", "b", snowman}, "k/x");
+    ASSERT_TRUE(empty_ns.has_value());
+    ASSERT_TRUE(empty_component.has_value());
+    ASSERT_TRUE(slash_component.has_value());
+    ASSERT_TRUE(split_components.has_value());
+    EXPECT_EQ(empty_ns->value, "empty-namespace");
+    EXPECT_EQ(empty_component->value, "empty-component");
+    EXPECT_EQ(slash_component->value, "slash-component");
+    EXPECT_EQ(split_components->value, "split-components");
+}

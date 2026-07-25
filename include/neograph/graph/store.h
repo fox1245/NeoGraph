@@ -92,8 +92,8 @@ public:
 /**
  * @brief In-memory store implementation for testing and single-process use.
  *
- * Thread-safe via mutex. Items are stored in a std::map keyed by
- * a composite string of namespace + key.
+ * Thread-safe via mutex. Items are stored in a std::map keyed by a
+ * collision-free length encoding of namespace components and item key.
  */
 class NEOGRAPH_API InMemoryStore : public Store {
 public:
