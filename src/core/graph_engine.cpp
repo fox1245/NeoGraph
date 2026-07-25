@@ -597,7 +597,8 @@ asio::awaitable<RunResult> GraphEngine::resume_async(const std::string&         
                                                      const GraphStreamCallback& cb) {
     RunConfig config;
     config.thread_id = thread_id;
-    co_return co_await resume_async(std::move(config), resume_value, cb);
+    return resume_async(
+        std::move(config), json(resume_value), GraphStreamCallback(cb));
 }
 
 asio::awaitable<RunResult> GraphEngine::resume_async(RunConfig           config,
