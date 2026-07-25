@@ -42,7 +42,8 @@ std::shared_ptr<CheckpointStore> seed_cp_with_barrier(
     // Minimal channel_values that restore() will accept.
     cp.channel_values = {
         {"a_done",       {{"value", true},  {"version", 1}}},
-        {"b_step1_done", {{"value", true},  {"version", 1}}}
+        {"b_step1_done", {{"value", true},  {"version", 1}}},
+        {"messages",     {{"value", json::array()}, {"version", 0}}}
     };
     cp.timestamp = 1;
     store->save(cp);
@@ -62,7 +63,8 @@ std::unique_ptr<GraphEngine> compile_minimal_engine(
         {"name", "minimal"},
         {"channels", {
             {"a_done",       {{"reducer", "overwrite"}}},
-            {"b_step1_done", {{"reducer", "overwrite"}}}
+            {"b_step1_done", {{"reducer", "overwrite"}}},
+            {"messages",     {{"reducer", "append"}}}
         }},
         {"nodes", {
             {"join", {{"type", "__aab_noop"}}}
@@ -137,4 +139,23 @@ TEST(AdminApiFacade, DelegatesStateHistoryUpdateAndFork) {
     auto forked_id = admin.fork("admin-facade-src", "admin-facade-dst");
     EXPECT_FALSE(forked_id.empty());
     EXPECT_TRUE(admin.get_state("admin-facade-dst").has_value());
+}
+
+TEST(AdminApi, OrderedChannelWritesPreserveModes) {
+    auto store = seed_cp_with_barrier("admin-ordered-writes", {});
+    auto engine = compile_minimal_engine(store);
+    auto admin = engine->admin();
+
+    ChannelWrite replace{"messages", json::array({"replacement"})};
+    replace.mode = ChannelWrite::Mode::Overwrite;
+    admin.update_state("admin-ordered-writes", std::vector<ChannelWrite>{
+        {"messages", json::array({"append-before"})},
+        replace,
+        {"messages", json::array({"append-after"})},
+    });
+
+    auto state = engine->get_state("admin-ordered-writes");
+    ASSERT_TRUE(state.has_value());
+    EXPECT_EQ((*state)["channels"]["messages"]["value"],
+              json::array({"replacement", "append-after"}));
 }

@@ -366,7 +366,9 @@ ng.ReducerRegistry.register_reducer("sum",
   - 列表：`[ChannelWrite("messages", [...]), ...]`— 对称于
 每个节点体发出什么。
 
-列表形式重复的通道为最后写入获胜；对于每通道多写APPEND 归约器（例如在一次调用中附加两条消息），将值捆绑到值列表中：`{"messages": [m1, m2]}`。其他类型筹集`TypeError`而不是默默无操作（由 item 关闭的 v0.3.2 之前的陷阱）#5）。
+列表项按顺序应用，包括重复通道，并保留 `ChannelWrite.Mode.OVERWRITE`。
+dict 形式仍对每个键值执行 reducer 写入。其他类型会引发 `TypeError`，而不是静默 no-op
+（由 item #5 关闭的 v0.3.2 之前陷阱）。
 - **`get_state(thread_id)`返回一个嵌套字典 -`get_state_view`
 是扁平帮手** —`state["channels"]["messages"]["value"]`是规范的原始形状（跨版本稳定）。对于符合人体工程学的点访问，请使用`view = engine.get_state_view(thread_id)`并阅读`view.messages`, `view.scratch`等直接。`view.raw`为需要版本/元数据的调用者公开未扁平化的字典。子类`StateView`带有用于类型化访问的声明字段（Pydantic v2）：`class ChatState(ng.StateView): messages: list[dict] = []`然后`engine.get_state_view(thread_id, model=ChatState)`。
 - **Python`Provider`子类仅绑定同步`complete`和

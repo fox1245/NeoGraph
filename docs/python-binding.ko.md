@@ -461,11 +461,10 @@ LangGraph 스타일의 "로드"에 대해 `cfg.resume_if_exists = True`를 설�
   - 목록: `[ChannelWrite("messages", [...]), ...]` — 대칭
     what every node body emits.
 
-목록 형식의 중복 채널은 마지막 쓰기 승리입니다. ~을 위한
-APPEND 감속기의 채널당 다중 쓰기(예: 2개 추가)
-메시지를 한 번 호출), 값을 값 목록에 묶습니다.
-`{"messages": [m1, m2]}`. 다른 유형은 대신 `TypeError`를 발생시킵니다.
-자동으로 작동하지 않습니다(v0.3.2 이전 트랩은 #5 항목으로 닫혔습니다).
+목록 항목은 중복 채널을 포함해 순서대로 적용되고
+`ChannelWrite.Mode.OVERWRITE`를 보존합니다. dict 형식은 각 키 값에
+reducer를 적용합니다. 다른 유형은 자동 no-op 대신 `TypeError`를
+발생시킵니다(v0.3.2 이전 트랩은 #5 항목으로 닫혔습니다).
 - **`get_state(thread_id)`는 중첩된 사전 — ​​`get_state_view`를 반환합니다.
 플랫 도우미** — `state["channels"]["messages"]["value"]`
 표준 원시 형태입니다(버전 전체에서 안정적임). 을 위한

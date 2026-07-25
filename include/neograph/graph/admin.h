@@ -6,6 +6,7 @@
 
 #include <neograph/api.h>
 #include <neograph/graph/checkpoint.h>
+#include <neograph/graph/types.h>
 #include <neograph/json.h>
 
 #include <optional>
@@ -32,6 +33,9 @@ public:
                                               int limit = 100) const;
     void update_state(const std::string& thread_id,
                       const json& channel_writes,
+                      const std::string& as_node = "") const;
+    void update_state(const std::string& thread_id,
+                      const std::vector<ChannelWrite>& channel_writes,
                       const std::string& as_node = "") const;
     std::string fork(const std::string& source_thread_id,
                      const std::string& new_thread_id,
