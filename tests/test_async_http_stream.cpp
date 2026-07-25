@@ -19,6 +19,7 @@
 #include <asio/redirect_error.hpp>
 #include <asio/streambuf.hpp>
 #include <asio/use_awaitable.hpp>
+#include <asio/use_future.hpp>
 #include <asio/write.hpp>
 
 #include <gtest/gtest.h>
@@ -26,6 +27,7 @@
 #include <atomic>
 #include <chrono>
 #include <exception>
+#include <istream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -41,9 +43,12 @@ struct ChunkedMockServer {
     asio::ip::tcp::acceptor acceptor{io};
     std::thread             worker;
     std::vector<std::string> chunks;
+    std::string             expected_path;
     unsigned short          port = 0;
 
-    ChunkedMockServer(std::vector<std::string> chs) : chunks(std::move(chs)) {
+    ChunkedMockServer(std::vector<std::string> chs,
+                      std::string expected = {})
+        : chunks(std::move(chs)), expected_path(std::move(expected)) {
         acceptor.open(asio::ip::tcp::v4());
         acceptor.set_option(asio::ip::tcp::acceptor::reuse_address(true));
         acceptor.bind(asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 0));
@@ -66,6 +71,16 @@ struct ChunkedMockServer {
             asio::streambuf buf;
             co_await asio::async_read_until(
                 sock, buf, "\r\n\r\n", asio::use_awaitable);
+            std::istream is(&buf);
+            std::string request_line;
+            std::getline(is, request_line);
+            std::string request_path;
+            auto sp1 = request_line.find(' ');
+            auto sp2 = request_line.find(
+                ' ', sp1 == std::string::npos ? 0 : sp1 + 1);
+            if (sp1 != std::string::npos && sp2 != std::string::npos) {
+                request_path = request_line.substr(sp1 + 1, sp2 - sp1 - 1);
+            }
             // (Body ignored for this mock.)
 
             // Write response headers.
@@ -78,7 +93,12 @@ struct ChunkedMockServer {
                                        asio::use_awaitable);
 
             // Emit each configured chunk.
-            for (const auto& c : chunks) {
+            const std::vector<std::string> mutated_chunks = {"mutated"};
+            const auto& response_chunks =
+                expected_path.empty() || request_path == expected_path
+                    ? chunks
+                    : mutated_chunks;
+            for (const auto& c : response_chunks) {
                 std::string frame;
                 frame.reserve(16 + c.size());
                 // Hex size, \r\n, payload, \r\n
@@ -278,6 +298,30 @@ TEST(AsyncPostStream, ServerErrorStatusStillDelivered) {
 
     EXPECT_EQ(status, 500);
     EXPECT_EQ(got, "oops nope");
+}
+
+TEST(AsyncHttpOwnership, StreamSnapshotsEndpointAndCallbackBeforeFirstResume) {
+    ChunkedMockServer srv({"owned"}, "/v1/stream");
+    asio::io_context io;
+    std::string host = "127.0.0.1";
+    std::string port = std::to_string(srv.port);
+    std::string path = "/v1/stream";
+    std::string body = "{}";
+    std::string received;
+    std::function<void(std::string_view)> callback =
+        [&](std::string_view chunk) { received.append(chunk); };
+
+    auto operation = neograph::async::async_post_stream(
+        io.get_executor(), host, port, path, body, {}, false, callback);
+    path = "/mutated";
+    callback = nullptr;
+
+    auto future = asio::co_spawn(io, std::move(operation), asio::use_future);
+    io.run();
+    auto resp = future.get();
+
+    EXPECT_EQ(resp.status, 200);
+    EXPECT_EQ(received, "owned");
 }
 
 }  // namespace

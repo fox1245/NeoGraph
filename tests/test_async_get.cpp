@@ -16,7 +16,10 @@
 #include <httplib.h>
 
 #include <asio/awaitable.hpp>
+#include <asio/co_spawn.hpp>
+#include <asio/io_context.hpp>
 #include <asio/this_coro.hpp>
+#include <asio/use_future.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -47,6 +50,27 @@ struct CapturingServer {
             record(req, "POST");
             res.status = 200;
             res.set_content(R"({"got":"bar"})", "application/json");
+        });
+        svr.Get("/snapshot", [this](const httplib::Request& req, httplib::Response& res) {
+            record(req, "GET");
+            res.status = 200;
+            res.set_content("snapshot", "text/plain");
+        });
+        svr.Get("/mutated", [this](const httplib::Request& req, httplib::Response& res) {
+            record(req, "GET");
+            res.status = 200;
+            res.set_content("mutated", "text/plain");
+        });
+        svr.Post("/snapshot", [this](const httplib::Request& req, httplib::Response& res) {
+            record(req, "POST");
+            res.status = 200;
+            res.set_content(req.body + "|" + req.get_header_value("X-Ownership"),
+                            "text/plain");
+        });
+        svr.Post("/mutated", [this](const httplib::Request& req, httplib::Response& res) {
+            record(req, "POST");
+            res.status = 200;
+            res.set_content("mutated", "text/plain");
         });
         port = svr.bind_to_any_port("127.0.0.1");
         t = std::thread([this] { svr.listen_after_bind(); });
@@ -164,6 +188,69 @@ TEST(AsyncGet, SurfacesNon200Status) {
 
     svr.stop();
     if (t.joinable()) t.join();
+}
+
+TEST(AsyncHttpOwnership, PostSnapshotsInputsBeforeFirstResume) {
+    CapturingServer srv;
+    asio::io_context io;
+    std::string host = "127.0.0.1";
+    std::string port = std::to_string(srv.port);
+    std::string path = "/snapshot";
+    std::string body = "original-body";
+    std::vector<std::pair<std::string, std::string>> headers = {
+        {"X-Ownership", "original-header"},
+    };
+
+    auto operation = async::async_post(
+        io.get_executor(), host, port, path, body, headers);
+    path = "/mutated";
+    body = "mutated-body";
+    headers[0].second = "mutated-header";
+
+    auto future = asio::co_spawn(io, std::move(operation), asio::use_future);
+    io.run();
+    auto resp = future.get();
+
+    EXPECT_EQ(resp.status, 200);
+    EXPECT_EQ(resp.body, "original-body|original-header");
+}
+
+TEST(AsyncHttpOwnership, GetSnapshotsEndpointBeforeFirstResume) {
+    CapturingServer srv;
+    asio::io_context io;
+    std::string host = "127.0.0.1";
+    std::string port = std::to_string(srv.port);
+    std::string path = "/snapshot";
+
+    auto operation = async::async_get(io.get_executor(), host, port, path);
+    path = "/mutated";
+
+    auto future = asio::co_spawn(io, std::move(operation), asio::use_future);
+    io.run();
+    auto resp = future.get();
+
+    EXPECT_EQ(resp.status, 200);
+    EXPECT_EQ(resp.body, "snapshot");
+}
+
+TEST(AsyncHttpOwnership, PostOwnsTemporariesUntilDelayedSpawn) {
+    CapturingServer srv;
+    asio::io_context io;
+
+    auto operation = async::async_post(
+        io.get_executor(),
+        std::string("127.0.0.1"),
+        std::to_string(srv.port),
+        std::string("/snapshot"),
+        std::string("temporary-body"),
+        {{"X-Ownership", "temporary-header"}});
+
+    auto future = asio::co_spawn(io, std::move(operation), asio::use_future);
+    io.run();
+    auto resp = future.get();
+
+    EXPECT_EQ(resp.status, 200);
+    EXPECT_EQ(resp.body, "temporary-body|temporary-header");
 }
 
 }  // namespace

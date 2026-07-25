@@ -27,6 +27,7 @@
 #include <asio/redirect_error.hpp>
 #include <asio/streambuf.hpp>
 #include <asio/use_awaitable.hpp>
+#include <asio/use_future.hpp>
 #include <asio/write.hpp>
 
 #include <gtest/gtest.h>
@@ -82,9 +83,17 @@ struct MockServer {
 
                 std::istream is(&buf);
                 std::string line;
+                std::string request_path;
                 long content_length = 0;
                 bool client_keepalive = true;
                 std::getline(is, line);  // request line
+                {
+                    auto sp1 = line.find(' ');
+                    auto sp2 = line.find(' ', sp1 == std::string::npos ? 0 : sp1 + 1);
+                    if (sp1 != std::string::npos && sp2 != std::string::npos) {
+                        request_path = line.substr(sp1 + 1, sp2 - sp1 - 1);
+                    }
+                }
                 while (std::getline(is, line)) {
                     if (!line.empty() && line.back() == '\r') line.pop_back();
                     if (line.empty()) break;
@@ -120,7 +129,9 @@ struct MockServer {
 
                 ++requests;
 
-                const std::string body = R"({"ok":true})";
+                const std::string body = request_path == "/x"
+                    ? R"({"ok":true})"
+                    : R"({"ok":false})";
                 const bool send_close = force_close.load() || !client_keepalive;
                 std::string resp;
                 resp.reserve(160 + body.size());
@@ -277,6 +288,26 @@ TEST(ConnPool, ParallelConverges) {
     EXPECT_LE(srv.accepted.load(), M);    // ≤ one socket per coro
     EXPECT_LE(pool.idle_count(), 4u);
     EXPECT_GT(pool.idle_count(), 0u);     // at least some reuse retained
+}
+
+TEST(AsyncHttpOwnership, ConnPoolSnapshotsRequestBeforeFirstResume) {
+    MockServer srv;
+    asio::io_context io;
+    neograph::async::ConnPool pool(io.get_executor());
+    std::string host = "127.0.0.1";
+    std::string port = std::to_string(srv.port);
+    std::string path = "/x";
+    std::string body = "{}";
+
+    auto operation = pool.async_post(host, port, path, body);
+    path = "/mutated";
+
+    auto future = asio::co_spawn(io, std::move(operation), asio::use_future);
+    io.run();
+    auto resp = future.get();
+
+    EXPECT_EQ(resp.status, 200);
+    EXPECT_EQ(resp.body, R"({"ok":true})");
 }
 
 }  // namespace
