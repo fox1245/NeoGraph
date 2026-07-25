@@ -80,6 +80,36 @@ def test_delete_and_list_namespaces():
     assert store.get(["users", "u1"], "a") is None
 
 
+def test_store_identity_preserves_components_and_slashes():
+    store = ng.InMemoryStore()
+    store.put(["a", "b"], "c", {"kind": "nested"})
+    store.put(["a"], "b/c", {"kind": "slash-key"})
+    store.put([], "root", {"kind": "empty-namespace"})
+    store.put([""], "root", {"kind": "empty-component"})
+
+    assert len(store) == 4
+    assert store.get(["a", "b"], "c").value == {"kind": "nested"}
+    assert store.get(["a"], "b/c").value == {"kind": "slash-key"}
+    assert store.get([], "root").value == {"kind": "empty-namespace"}
+    assert store.get([""], "root").value == {"kind": "empty-component"}
+
+
+def test_store_prefix_matches_complete_namespace_components():
+    store = ng.InMemoryStore()
+    store.put(["user", "one"], "key", 1)
+    store.put(["user", "two"], "key", 2)
+    store.put(["user2", "three"], "key", 3)
+
+    assert sorted(item.ns for item in store.search(["user"])) == [
+        ["user", "one"],
+        ["user", "two"],
+    ]
+    assert sorted(store.list_namespaces(["user"])) == [
+        ["user", "one"],
+        ["user", "two"],
+    ]
+
+
 def test_a_node_can_reach_the_store_through_its_context():
     """The point of the subsystem: a node remembering something across runs.
 
