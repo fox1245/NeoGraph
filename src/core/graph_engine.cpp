@@ -902,8 +902,10 @@ GraphEngine::execute_graph_async(const RunConfig& config,
         }
 
         // --- Collect Send requests ---
-        for (auto& nr : step_results) {
+        for (std::size_t i = 0; i < step_results.size(); ++i) {
+            auto& nr = step_results[i];
             for (auto& s : nr.sends) {
+                s.source_node = ready[i];
                 pending_sends.push_back(std::move(s));
             }
         }

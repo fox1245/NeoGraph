@@ -2,7 +2,7 @@ spec:
   id: issue-202-send-target-validation
   issue: 202
   parent: 187
-  status: proposed
+  status: implemented
   priority: P1
   kind: correctness
   depends_on: []
@@ -30,6 +30,8 @@ red_tests:
 
 implementation:
   - Centralize Send target resolution before single/multi dispatch diverge.
+  - Reject the complete Send batch before any sibling can execute or record a
+    pending write.
   - Preserve node exception and pending-write accounting.
   - Surface the same diagnostic through streaming and Python.
 

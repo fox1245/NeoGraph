@@ -237,6 +237,9 @@ private:
 struct Send {
     std::string target_node;  ///< Node to dispatch.
     json        input;        ///< Channel writes for that invocation.
+    // Filled by GraphEngine when it collects a node's output. User-created
+    // Sends leave this empty until they are returned from a node.
+    std::string source_node;
 };
 
 /**

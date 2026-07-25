@@ -676,6 +676,18 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
     std::vector<StepRouting> routings;
     if (sends.empty()) co_return routings;
 
+    // Validate the whole batch before any Send can run or record a pending
+    // write. This keeps single- and multi-Send failures identical and makes a
+    // mixed batch all-or-nothing at the dispatch boundary.
+    for (std::size_t si = 0; si < sends.size(); ++si) {
+        if (nodes_.find(sends[si].target_node) == nodes_.end()) {
+            throw std::runtime_error(
+                "Send from '" + sends[si].source_node
+                + "' targets unknown node '" + sends[si].target_node
+                + "' (Send invocation index " + std::to_string(si) + ")");
+        }
+    }
+
     if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
         json send_info = json::array();
         for (const auto& s : sends) {
@@ -693,8 +705,6 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
     // --- Single Send: sequential on shared state, with retry. ---
     if (sends.size() == 1) {
         const auto& s = sends[0];
-        auto node_it = nodes_.find(s.target_node);
-        if (node_it == nodes_.end()) co_return routings;
 
         const std::string task_id = make_send_task_id(
             step, 0, s.target_node, s.input);
@@ -748,10 +758,6 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
 
     auto worker = [&, this](std::size_t si) -> asio::awaitable<NodeResult> {
         const auto& s = sends[si];
-        auto node_it = nodes_.find(s.target_node);
-        if (node_it == nodes_.end()) {
-            co_return NodeResult{};  // silently skip missing target
-        }
 
         const std::string task_id = make_send_task_id(
             step, si, s.target_node, s.input);
