@@ -57,6 +57,13 @@ asio::awaitable<void> serve_one(asio::ip::tcp::socket sock) {
         hdr_end = buf.find("\r\n\r\n");
     }
     auto head = buf.substr(0, hdr_end);
+    if (head.rfind("GET / HTTP/1.1\r\n", 0) != 0 &&
+        head.rfind("GET /owned HTTP/1.1\r\n", 0) != 0) {
+        const std::string bad =
+            "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+        co_await asio::async_write(sock, asio::buffer(bad), asio::use_awaitable);
+        co_return;
+    }
     std::string key;
     {
         auto pos = head.find("Sec-WebSocket-Key:");
@@ -220,4 +227,67 @@ TEST_F(WsLoopback, LargeBinaryEcho) {
     auto echoed = fut.get();
     EXPECT_EQ(echoed.size(), big.size());
     EXPECT_EQ(echoed, big);
+}
+
+TEST_F(WsLoopback, DelayedOperationsOwnEndpointAndPayloads) {
+    asio::io_context client_ioc;
+    std::string host = "127.0.0.1";
+    std::string port = std::to_string(port_);
+    std::string path = "/owned";
+
+    auto connect_operation = ws_connect(
+        client_ioc.get_executor(), host, port, path, {}, /*tls=*/false);
+    path = "/change";
+    auto connect_future = asio::co_spawn(
+        client_ioc, std::move(connect_operation), asio::use_future);
+    client_ioc.run();
+    auto ws = connect_future.get();
+
+    client_ioc.restart();
+    std::string text = "owned-text";
+    auto text_operation = ws->send_text(text);
+    text = "mutated-text";
+    auto text_future = asio::co_spawn(
+        client_ioc, std::move(text_operation), asio::use_future);
+    client_ioc.run();
+    text_future.get();
+
+    client_ioc.restart();
+    auto text_recv_future = asio::co_spawn(
+        client_ioc, ws->recv(), asio::use_future);
+    client_ioc.run();
+    EXPECT_EQ(text_recv_future.get().payload, "owned-text");
+
+    client_ioc.restart();
+    std::string binary = "owned-binary";
+    auto binary_operation = ws->send_binary(binary);
+    binary = "mutated-binary";
+    auto binary_future = asio::co_spawn(
+        client_ioc, std::move(binary_operation), asio::use_future);
+    client_ioc.run();
+    binary_future.get();
+
+    client_ioc.restart();
+    auto binary_recv_future = asio::co_spawn(
+        client_ioc, ws->recv(), asio::use_future);
+    client_ioc.run();
+    EXPECT_EQ(binary_recv_future.get().payload, "owned-binary");
+
+    client_ioc.restart();
+    std::string reason = "owned-close";
+    auto close_operation = ws->send_close(1000, reason);
+    reason = "mutated-close";
+    auto close_future = asio::co_spawn(
+        client_ioc, std::move(close_operation), asio::use_future);
+    client_ioc.run();
+    close_future.get();
+
+    client_ioc.restart();
+    auto close_recv_future = asio::co_spawn(
+        client_ioc, ws->recv(), asio::use_future);
+    client_ioc.run();
+    auto close = close_recv_future.get();
+    ASSERT_EQ(close.op, WsOpcode::Close);
+    ASSERT_GE(close.payload.size(), 2u);
+    EXPECT_EQ(close.payload.substr(2), "owned-close");
 }

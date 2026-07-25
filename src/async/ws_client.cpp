@@ -265,17 +265,26 @@ WsClient& WsClient::operator=(WsClient&&) noexcept = default;
 // ── Frame send/recv ───────────────────────────────────────────────
 
 asio::awaitable<void> WsClient::send_text(std::string_view payload) {
-    co_await impl_->write_frame(WsOpcode::Text, true, payload);
-    co_return;
+    return send_frame_owned(WsOpcode::Text, std::string(payload));
 }
 
 asio::awaitable<void> WsClient::send_binary(std::string_view payload) {
-    co_await impl_->write_frame(WsOpcode::Binary, true, payload);
+    return send_frame_owned(WsOpcode::Binary, std::string(payload));
+}
+
+asio::awaitable<void> WsClient::send_frame_owned(
+    WsOpcode opcode, std::string payload) {
+    co_await impl_->write_frame(opcode, true, payload);
     co_return;
 }
 
 asio::awaitable<void> WsClient::send_close(
     std::uint16_t code, std::string_view reason) {
+    return send_close_owned(code, std::string(reason));
+}
+
+asio::awaitable<void> WsClient::send_close_owned(
+    std::uint16_t code, std::string reason) {
     if (impl_->close_sent) co_return;
     std::string payload;
     payload.reserve(2 + reason.size());
@@ -519,11 +528,11 @@ std::string build_upgrade_request(
 
 }  // namespace
 
-asio::awaitable<std::unique_ptr<WsClient>> ws_connect(
+asio::awaitable<std::unique_ptr<WsClient>> WsClient::connect_owned(
     asio::any_io_executor ex,
-    std::string_view host,
-    std::string_view port,
-    std::string_view path,
+    std::string host,
+    std::string port,
+    std::string path,
     std::vector<std::pair<std::string, std::string>> headers,
     bool tls) {
 
@@ -531,7 +540,7 @@ asio::awaitable<std::unique_ptr<WsClient>> ws_connect(
 
     asio::ip::tcp::resolver resolver{ex};
     auto endpoints = co_await resolver.async_resolve(
-        std::string(host), std::string(port), asio::use_awaitable);
+        host, port, asio::use_awaitable);
     co_await asio::async_connect(impl->socket, endpoints, asio::use_awaitable);
 
     if (tls) {
@@ -542,16 +551,15 @@ asio::awaitable<std::unique_ptr<WsClient>> ws_connect(
 
         impl->tls_stream = std::make_unique<
             asio::ssl::stream<asio::ip::tcp::socket&>>(impl->socket, *impl->ssl_ctx);
-        std::string host_str(host);
         if (!SSL_set_tlsext_host_name(
-                impl->tls_stream->native_handle(), host_str.c_str())) {
+                impl->tls_stream->native_handle(), host.c_str())) {
             throw asio::system_error{
                 asio::error_code{static_cast<int>(::ERR_get_error()),
                                  asio::error::get_ssl_category()},
                 "ws: SNI setup"};
         }
         impl->tls_stream->set_verify_callback(
-            asio::ssl::host_name_verification{host_str});
+            asio::ssl::host_name_verification{host});
         co_await impl->tls_stream->async_handshake(
             asio::ssl::stream_base::client, asio::use_awaitable);
     }
@@ -617,6 +625,18 @@ asio::awaitable<std::unique_ptr<WsClient>> ws_connect(
     impl->read_buf.erase(0, parsed->consumed);
 
     co_return std::unique_ptr<WsClient>(new WsClient(std::move(impl)));
+}
+
+asio::awaitable<std::unique_ptr<WsClient>> ws_connect(
+    asio::any_io_executor ex,
+    std::string_view host,
+    std::string_view port,
+    std::string_view path,
+    std::vector<std::pair<std::string, std::string>> headers,
+    bool tls) {
+    return WsClient::connect_owned(
+        std::move(ex), std::string(host), std::string(port),
+        std::string(path), std::move(headers), tls);
 }
 
 }  // namespace neograph::async

@@ -30,10 +30,12 @@
 #include <asio/streambuf.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
+#include <asio/use_future.hpp>
 #include <asio/write.hpp>
 
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -222,6 +224,52 @@ private:
     std::atomic<CancelToken*>* seen_;
 };
 
+class ResumeApprovalNode : public GraphNode {
+public:
+    explicit ResumeApprovalNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        if (!in.ctx.resume_value) {
+            throw NodeInterrupt("approval required");
+        }
+
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{
+            "result", in.ctx.resume_value->at("decision")});
+        co_return out;
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+json resume_graph() {
+    return {
+        {"name", "async_resume_ownership"},
+        {"channels", {{"result", {{"reducer", "overwrite"}}}}},
+        {"nodes", {{"approval", {{"type", "async_resume_approval"}}}}},
+        {"edges", {
+            {{"from", "__start__"}, {"to", "approval"}},
+            {{"from", "approval"}, {"to", "__end__"}},
+        }},
+    };
+}
+
+void register_resume_approval() {
+    NodeFactory::instance().register_type("async_resume_approval",
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<ResumeApprovalNode>(name);
+        });
+}
+
+void seed_interrupted_run(GraphEngine& engine, const std::string& thread_id) {
+    RunConfig cfg;
+    cfg.thread_id = thread_id;
+    ASSERT_TRUE(engine.run(cfg).interrupted);
+}
+
 } // namespace
 
 TEST(GraphEngineAsyncApi, RunAsyncMatchesSyncResult) {
@@ -340,31 +388,101 @@ TEST(GraphEngineAsyncApi, SubgraphFailureStillHonorsOuterRetry) {
 }
 
 TEST(GraphEngineAsyncApi, ResumeAsyncMatchesSyncResume) {
-    // resume_async needs a checkpoint store + a thread that has a
-    // checkpoint to resume from. Run once first to seed it, then drive
-    // resume_async.
-    register_writer("v");
+    register_resume_approval();
     auto store = std::make_shared<InMemoryCheckpointStore>();
-    auto engine = GraphEngine::compile(minimal_graph("worker"), NodeContext{}, store);
+    auto engine = GraphEngine::compile(resume_graph(), NodeContext{}, store);
+    seed_interrupted_run(*engine, "t-resume-sync");
+    seed_interrupted_run(*engine, "t-resume-async");
 
-    RunConfig cfg;
-    cfg.thread_id = "t-resume";
-    auto first = engine->run(cfg);
-    ASSERT_FALSE(first.checkpoint_id.empty());
+    json decision{{"decision", "approved"}};
+    auto sync_result = engine->resume("t-resume-sync", decision);
 
     asio::io_context io;
     RunResult resumed;
     asio::co_spawn(
         io,
         [&]() -> asio::awaitable<void> {
-            resumed = co_await engine->resume_async("t-resume");
+            resumed = co_await engine->resume_async(
+                "t-resume-async", decision);
         },
         asio::detached);
     io.run();
 
-    // Run that has already completed to END returns interrupted=false
-    // with no further work — match the sync resume() contract.
-    EXPECT_FALSE(resumed.interrupted);
+    EXPECT_EQ(resumed.output, sync_result.output);
+    EXPECT_EQ(resumed.interrupted, sync_result.interrupted);
+}
+
+TEST(GraphEngineAsyncApi, ResumeAsyncSnapshotsThreadIdBeforeFirstResume) {
+    register_resume_approval();
+    auto store = std::make_shared<InMemoryCheckpointStore>();
+    auto engine = GraphEngine::compile(resume_graph(), NodeContext{}, store);
+    seed_interrupted_run(*engine, "owned-thread-id");
+
+    std::string thread_id = "owned-thread-id";
+    auto operation = engine->resume_async(
+        thread_id, json{{"decision", "approved"}});
+
+    // asio::awaitable is lazy. Changing the caller's source after the API
+    // returns must not change which checkpoint the eventual coroutine loads.
+    thread_id = "different-thread-id";
+
+    asio::io_context io;
+    auto future = asio::co_spawn(io, std::move(operation), asio::use_future);
+    io.run();
+
+    ASSERT_NO_THROW({
+        auto result = future.get();
+        EXPECT_EQ(result.output["channels"]["result"]["value"], "approved");
+    });
+}
+
+TEST(GraphEngineAsyncApi, ResumeAsyncSnapshotsValueAndCallbackBeforeFirstResume) {
+    register_resume_approval();
+    auto store = std::make_shared<InMemoryCheckpointStore>();
+    auto engine = GraphEngine::compile(resume_graph(), NodeContext{}, store);
+    seed_interrupted_run(*engine, "owned-value-callback");
+
+    json decision{{"decision", "approved"}};
+    int event_count = 0;
+    const std::string thread_id = "owned-value-callback";
+    GraphStreamCallback callback =
+        [&](const GraphEvent&) { ++event_count; };
+    auto operation = engine->resume_async(
+        thread_id, decision, callback);
+
+    decision["decision"] = "mutated";
+    callback = nullptr;
+
+    asio::io_context io;
+    auto future = asio::co_spawn(io, std::move(operation), asio::use_future);
+    io.run();
+    auto result = future.get();
+
+    EXPECT_EQ(result.output["channels"]["result"]["value"], "approved");
+    EXPECT_GT(event_count, 0);
+}
+
+TEST(GraphEngineAsyncApi, ResumeAsyncOwnsTemporaryArgumentsUntilDelayedSpawn) {
+    register_resume_approval();
+    auto store = std::make_shared<InMemoryCheckpointStore>();
+    auto engine = GraphEngine::compile(resume_graph(), NodeContext{}, store);
+    seed_interrupted_run(*engine, "temporary-resume-input");
+
+    auto event_count = std::make_shared<std::atomic<int>>(0);
+    auto operation = engine->resume_async(
+        std::string("temporary-resume-input"),
+        json{{"decision", "approved"}},
+        GraphStreamCallback([event_count](const GraphEvent&) {
+            event_count->fetch_add(1, std::memory_order_relaxed);
+        }));
+
+    asio::io_context io;
+    auto future = asio::co_spawn(io, std::move(operation), asio::use_future);
+    io.run();
+    auto result = future.get();
+
+    EXPECT_EQ(result.output["channels"]["result"]["value"], "approved");
+    EXPECT_GT(event_count->load(std::memory_order_relaxed), 0);
 }
 
 TEST(GraphEngineAsyncApi, ConcurrentRunAsyncOnSharedIoContext) {

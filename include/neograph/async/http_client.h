@@ -96,6 +96,9 @@ struct RequestOptions {
 /// @param tls     When true, wrap the socket in asio::ssl::stream, do
 ///                TLS handshake with SNI=host, and verify the peer
 ///                certificate against the system trust store.
+///
+/// All request inputs are copied before this function returns, so the
+/// returned awaitable does not borrow the caller's strings or header vector.
 NEOGRAPH_API asio::awaitable<HttpResponse> async_post(
     asio::any_io_executor ex,
     std::string_view host,
@@ -110,6 +113,7 @@ NEOGRAPH_API asio::awaitable<HttpResponse> async_post(
 /// request with an empty body and no Content-Length / Content-Type
 /// headers — used for resources like the A2A `/.well-known/agent-card.json`
 /// discovery endpoint.
+/// Request inputs are copied before the returned awaitable is exposed.
 NEOGRAPH_API asio::awaitable<HttpResponse> async_get(
     asio::any_io_executor ex,
     std::string_view host,
@@ -144,6 +148,8 @@ struct HttpStreamResponse {
 ///
 /// The bytes passed to `on_chunk` are only valid for the duration
 /// of the callback invocation; copy them out if you need to retain.
+/// The callback object and request inputs are copied before this function
+/// returns. Objects referenced by the callback's captures remain caller-owned.
 NEOGRAPH_API asio::awaitable<HttpStreamResponse> async_post_stream(
     asio::any_io_executor ex,
     std::string_view host,

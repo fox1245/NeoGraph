@@ -300,20 +300,20 @@ asio::awaitable<HttpStreamResponse> async_post_stream_once_timed(
 
 // ── Public API ────────────────────────────────────────────────────
 
-asio::awaitable<HttpResponse> async_post(
+static asio::awaitable<HttpResponse> async_post_owned(
     asio::any_io_executor ex,
-    std::string_view host,
-    std::string_view port,
-    std::string_view path,
-    std::string_view body,
+    std::string host,
+    std::string port,
+    std::string path,
+    std::string body,
     std::vector<std::pair<std::string, std::string>> headers,
     bool tls,
     RequestOptions opts) {
 
     Target cur{
-        std::string(host), std::string(port), std::string(path), tls
+        std::move(host), std::move(port), std::move(path), tls
     };
-    std::string req_body(body);
+    std::string req_body(std::move(body));
     int hops = 0;
     for (;;) {
         auto resp = co_await async_post_once_timed(
@@ -334,6 +334,20 @@ asio::awaitable<HttpResponse> async_post(
         cur = parse_location(cur, resp.location);
         // Loop: next hop uses the new cur.
     }
+}
+
+asio::awaitable<HttpResponse> async_post(
+    asio::any_io_executor ex,
+    std::string_view host,
+    std::string_view port,
+    std::string_view path,
+    std::string_view body,
+    std::vector<std::pair<std::string, std::string>> headers,
+    bool tls,
+    RequestOptions opts) {
+    return async_post_owned(
+        std::move(ex), std::string(host), std::string(port),
+        std::string(path), std::string(body), std::move(headers), tls, opts);
 }
 
 // ── Async GET ─────────────────────────────────────────────────────
@@ -417,6 +431,20 @@ asio::awaitable<HttpResponse> async_get_once_timed(
     co_return std::get<0>(std::move(res));
 }
 
+static asio::awaitable<HttpResponse> async_get_owned(
+    asio::any_io_executor ex,
+    std::string host,
+    std::string port,
+    std::string path,
+    std::vector<std::pair<std::string, std::string>> headers,
+    bool tls,
+    RequestOptions opts) {
+
+    co_return co_await async_get_once_timed(
+        ex, std::move(host), std::move(port), std::move(path),
+        std::move(headers), tls, opts.timeout);
+}
+
 asio::awaitable<HttpResponse> async_get(
     asio::any_io_executor ex,
     std::string_view host,
@@ -425,18 +453,17 @@ asio::awaitable<HttpResponse> async_get(
     std::vector<std::pair<std::string, std::string>> headers,
     bool tls,
     RequestOptions opts) {
-
-    co_return co_await async_get_once_timed(
-        ex, std::string(host), std::string(port), std::string(path),
-        std::move(headers), tls, opts.timeout);
+    return async_get_owned(
+        std::move(ex), std::string(host), std::string(port),
+        std::string(path), std::move(headers), tls, opts);
 }
 
-asio::awaitable<HttpStreamResponse> async_post_stream(
+static asio::awaitable<HttpStreamResponse> async_post_stream_owned(
     asio::any_io_executor ex,
-    std::string_view host,
-    std::string_view port,
-    std::string_view path,
-    std::string_view body,
+    std::string host,
+    std::string port,
+    std::string path,
+    std::string body,
     std::vector<std::pair<std::string, std::string>> headers,
     bool tls,
     std::function<void(std::string_view chunk)> on_chunk,
@@ -449,9 +476,9 @@ asio::awaitable<HttpStreamResponse> async_post_stream(
     // redirect occurs. In practice, streaming endpoints always return
     // 200 or a fixed-body error, so this loop usually runs once.
     Target cur{
-        std::string(host), std::string(port), std::string(path), tls
+        std::move(host), std::move(port), std::move(path), tls
     };
-    std::string req_body(body);
+    std::string req_body(std::move(body));
     int hops = 0;
     for (;;) {
         auto resp = co_await async_post_stream_once_timed(
@@ -471,6 +498,22 @@ asio::awaitable<HttpStreamResponse> async_post_stream(
         // rather than guess a target.
         co_return resp;
     }
+}
+
+asio::awaitable<HttpStreamResponse> async_post_stream(
+    asio::any_io_executor ex,
+    std::string_view host,
+    std::string_view port,
+    std::string_view path,
+    std::string_view body,
+    std::vector<std::pair<std::string, std::string>> headers,
+    bool tls,
+    std::function<void(std::string_view chunk)> on_chunk,
+    RequestOptions opts) {
+    return async_post_stream_owned(
+        std::move(ex), std::string(host), std::string(port),
+        std::string(path), std::string(body), std::move(headers), tls,
+        std::move(on_chunk), opts);
 }
 
 } // namespace neograph::async

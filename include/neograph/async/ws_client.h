@@ -82,10 +82,12 @@ class NEOGRAPH_API WsClient {
 
     /// Send a text frame (FIN=1, no fragmentation). Payload must be
     /// valid UTF-8 per RFC 6455 §5.6 — this client does NOT validate;
-    /// the caller is responsible. Masked per §5.3.
+    /// the caller is responsible. Masked per §5.3. The payload is copied
+    /// before the returned awaitable is exposed.
     asio::awaitable<void> send_text(std::string_view payload);
 
-    /// Send a binary frame (FIN=1). Masked per §5.3.
+    /// Send a binary frame (FIN=1). Masked per §5.3. The payload is copied
+    /// before the returned awaitable is exposed.
     asio::awaitable<void> send_binary(std::string_view payload);
 
     /// Send a close frame with the given status code and optional
@@ -121,6 +123,18 @@ class NEOGRAPH_API WsClient {
     std::unique_ptr<Impl> impl_;
 
     explicit WsClient(std::unique_ptr<Impl>);
+
+    asio::awaitable<void> send_frame_owned(WsOpcode opcode,
+                                           std::string payload);
+    asio::awaitable<void> send_close_owned(std::uint16_t code,
+                                           std::string reason);
+    static asio::awaitable<std::unique_ptr<WsClient>> connect_owned(
+        asio::any_io_executor ex,
+        std::string host,
+        std::string port,
+        std::string path,
+        std::vector<std::pair<std::string, std::string>> headers,
+        bool tls);
 };
 
 /// Establish a WebSocket connection.
@@ -138,6 +152,7 @@ class NEOGRAPH_API WsClient {
 ///
 /// Throws asio::system_error on transport failure, std::runtime_error
 /// if the server refuses the upgrade (non-101 status or bad Accept).
+/// Request inputs are copied before the returned awaitable is exposed.
 NEOGRAPH_API asio::awaitable<std::unique_ptr<WsClient>> ws_connect(
     asio::any_io_executor ex,
     std::string_view host,

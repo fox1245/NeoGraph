@@ -73,6 +73,7 @@ public:
     /// reaching into another bucket from a pooled request hides
     /// too much for the library to do behind the caller's back.
     /// Use the free async_post for redirect-following.
+    /// Request inputs are copied before the returned awaitable is exposed.
     asio::awaitable<HttpResponse> async_post(
         std::string_view host,
         std::string_view port,
@@ -88,6 +89,15 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+
+    asio::awaitable<HttpResponse> async_post_owned(
+        std::string host,
+        std::string port,
+        std::string path,
+        std::string body,
+        std::vector<std::pair<std::string, std::string>> headers,
+        bool tls,
+        RequestOptions opts);
 };
 
 } // namespace neograph::async

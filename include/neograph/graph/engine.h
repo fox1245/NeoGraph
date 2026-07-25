@@ -546,6 +546,9 @@ public:
                      const GraphStreamCallback& cb           = nullptr);
 
     /// Async peer of resume — non-blocking coroutine surface.
+    /// All arguments are copied before this function returns, so the returned
+    /// awaitable does not borrow the caller's strings, JSON, or callback object.
+    /// Objects referenced by the callback's captures remain caller-owned.
     asio::awaitable<RunResult> resume_async(
         const std::string& thread_id,
         const json& resume_value = json(),
@@ -770,6 +773,11 @@ private:
 
     void init_state(GraphState& state) const;
     void apply_input(GraphState& state, const json& input) const;
+
+    asio::awaitable<RunResult> resume_async_owned(
+        std::string thread_id,
+        json resume_value,
+        GraphStreamCallback cb);
 
     /// Super-step loop (coroutine). Owns: state init, interrupt
     /// gates, resume load, super-step commit, routing via Scheduler.
