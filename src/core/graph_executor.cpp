@@ -5,6 +5,8 @@
 #include <neograph/graph/registry.h>
 #include <neograph/graph/state.h>
 
+#include "run_context_runtime.h"
+
 #include <asio/co_spawn.hpp>
 #include <asio/deferred.hpp>
 #include <asio/error.hpp>
@@ -63,6 +65,19 @@ inline std::string make_send_task_id(int step, size_t idx,
     return "s" + std::to_string(step) + ":send[" + std::to_string(idx)
            + "]:" + target + ":" + fnv1a_hex(input.dump());
 }
+
+class ScopedInvocationContext {
+public:
+    ScopedInvocationContext(const RunContext& parent, const std::string& task_id)
+        : context_(parent),
+          runtime_scope_(context_, detail::runtime_for_invocation(parent, task_id)) {}
+
+    const RunContext& context() const { return context_; }
+
+private:
+    RunContext context_;
+    detail::ScopedRunContextRuntime runtime_scope_;
+};
 
 } // namespace
 
@@ -395,8 +410,9 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
             // do NOT re-record. Just apply the recorded writes.
             ok_result.emplace(replay_it->second);
         } else {
+            ScopedInvocationContext node_ctx(ctx, task_id);
             ok_result.emplace(co_await execute_node_with_retry_async(
-                node_name, state, cb, stream_mode, ctx));
+                node_name, state, cb, stream_mode, node_ctx.context()));
 
             // Record BEFORE apply_writes so a crash between the two
             // still leaves a durable log for resume to replay.
@@ -490,8 +506,9 @@ NodeExecutor::run_parallel_async(
             // GCC-13: cannot co_await inside a catch handler. Classify
             // here, save + rethrow outside the try/catch.
             try {
+                ScopedInvocationContext node_ctx(ctx, task_id);
                 nr = co_await execute_node_with_retry_async(
-                    node_name, state, cb, stream_mode, ctx);
+                    node_name, state, cb, stream_mode, node_ctx.context());
             } catch (const NodeInterrupt& ni) {
                 interrupt = ni;
             }
@@ -549,8 +566,9 @@ NodeExecutor::run_parallel_async(
         if (replay_it != replay.end()) {
             co_return replay_it->second;
         }
+        ScopedInvocationContext node_ctx(ctx, task_id);
         auto nr = co_await execute_node_with_retry_async(
-            node_name, state, cb, stream_mode, ctx);
+            node_name, state, cb, stream_mode, node_ctx.context());
         co_await coord.record_pending_write_async(
             parent_cp_id, task_id, task_id, node_name, nr, step);
         co_return nr;
@@ -715,8 +733,9 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
             nr = replay_it->second;
         } else {
             apply_input(state, s.input);
+            ScopedInvocationContext node_ctx(ctx, task_id);
             nr = co_await execute_node_with_retry_async(
-                s.target_node, state, cb, stream_mode, ctx);
+                s.target_node, state, cb, stream_mode, node_ctx.context());
             co_await coord.record_pending_write_async(parent_cp_id,
                 task_id, task_id, s.target_node, nr, step);
         }
@@ -776,8 +795,9 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
         // is captured by value into this worker lambda — no
         // serialize/restore hop, no manual forward.
 
+        ScopedInvocationContext node_ctx(ctx, task_id);
         auto nr = co_await execute_node_with_retry_async(
-            s.target_node, send_state, cb, stream_mode, ctx);
+            s.target_node, send_state, cb, stream_mode, node_ctx.context());
         co_await coord.record_pending_write_async(parent_cp_id,
             task_id, task_id, s.target_node, nr, step);
         co_return nr;

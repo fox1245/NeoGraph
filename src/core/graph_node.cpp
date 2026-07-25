@@ -2,6 +2,8 @@
 #include <neograph/graph/engine.h>   // RunContext (forward-declared in node.h)
 #include <neograph/async/run_sync.h>
 #include <neograph/tool_dispatch.h>
+
+#include "run_context_runtime.h"
 #include <asio/co_spawn.hpp>
 #include <asio/deferred.hpp>
 #include <asio/experimental/parallel_group.hpp>
@@ -9,9 +11,35 @@
 #include <asio/use_awaitable.hpp>
 #include <algorithm>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 namespace neograph::graph {
+
+namespace {
+
+std::string length_frame(std::string_view value) {
+    return std::to_string(value.size()) + ":" + std::string(value);
+}
+
+// Child checkpoint identities must be stable for one logical invocation yet
+// distinct for sibling Send workers. Length-framing avoids delimiter collisions
+// when callers use arbitrary thread IDs or node names.
+std::string child_thread_id(const RunContext& parent, std::string_view node_name) {
+    // An empty root thread ID intentionally disables checkpointing. Deriving a
+    // shared anonymous child ID would re-enable it and let concurrent anonymous
+    // runs collide in the same child namespace.
+    if (parent.thread_id.empty()) return {};
+
+    const auto runtime = detail::runtime_for(parent);
+    const std::string invocation_id = runtime ? runtime->invocation_id : "root";
+    return "subgraph/" + length_frame(parent.thread_id)
+         + length_frame(node_name)
+         + length_frame(std::to_string(parent.step))
+         + length_frame(invocation_id);
+}
+
+}  // namespace
 
 // v1.0 destructive removal (9b): the 8-virtual `execute*` legacy chain,
 // the ExecuteDefaultGuard recursion guard, and the
@@ -310,7 +338,9 @@ std::vector<ChannelWrite> SubgraphNode::extract_output(
 
 asio::awaitable<NodeOutput> SubgraphNode::run(NodeInput in) {
     RunConfig config;
+    config.thread_id    = child_thread_id(in.ctx, name_);
     config.input        = build_subgraph_input(in.state);
+    config.stream_mode  = in.ctx.stream_mode;
     config.cancel_token = in.ctx.cancel_token;
     // #88: hand the parent's accumulator down. A subgraph runs on its own engine
     // with its own RunConfig, so without this a graph that delegates its LLM work
@@ -322,10 +352,28 @@ asio::awaitable<NodeOutput> SubgraphNode::run(NodeInput in) {
         // Forward the parent's stream sink so subgraph events (LLM
         // tokens, node enter/exit, etc.) surface at the parent
         // graph's caller without buffering.
-        auto result = co_await subgraph_->run_stream_async(config, *in.stream_cb);
+        auto result = co_await subgraph_->run_subgraph_async(
+            std::move(config), in.ctx, *in.stream_cb);
+        if (result.interrupted) {
+            const auto reason = result.interrupt_value.value(
+                "reason", "subgraph interrupted");
+            if (result.interrupt_value.contains("value")) {
+                throw NodeInterrupt(reason, result.interrupt_value["value"]);
+            }
+            throw NodeInterrupt(reason);
+        }
         subgraph_output = std::move(result.output);
     } else {
-        auto result = co_await subgraph_->run_async(config);
+        auto result = co_await subgraph_->run_subgraph_async(
+            std::move(config), in.ctx, nullptr);
+        if (result.interrupted) {
+            const auto reason = result.interrupt_value.value(
+                "reason", "subgraph interrupted");
+            if (result.interrupt_value.contains("value")) {
+                throw NodeInterrupt(reason, result.interrupt_value["value"]);
+            }
+            throw NodeInterrupt(reason);
+        }
         subgraph_output = std::move(result.output);
     }
 

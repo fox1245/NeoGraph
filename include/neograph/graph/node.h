@@ -17,8 +17,7 @@
  *
  * The engine threads `RunContext` through `NodeInput::ctx`. Nodes can use
  * cancellation, usage accounting, thread/step/stream metadata, Store access,
- * and resume values. The deadline and trace-id fields are reserved extension
- * slots and are not populated by current `RunConfig` APIs.
+ * resume values, and C++ RunMetadata deadline/trace metadata.
  *
  * Example overrides that match the v0.4.x surface:
  *   - `examples/01_react_agent.cpp` — basic ReAct agent
@@ -54,8 +53,8 @@ struct NodeInput {
     const GraphState&  state;
 
     /// Per-run metadata threaded by the engine — cancel token, usage,
-    /// thread_id, current super-step, stream mode, Store, and resume value.
-    /// Deadline and trace-id members are reserved and currently unpopulated.
+    /// thread_id, current super-step, stream mode, Store, resume value, and
+    /// any deadline/trace metadata supplied through C++ RunMetadata.
     const RunContext&  ctx;
 
     /// Streaming sink. ``nullptr`` for non-streaming runs (the engine
@@ -257,6 +256,18 @@ private:
  *
  * Enables the Supervisor pattern and nested workflows. Channels are
  * mapped between parent and child graphs via input_map and output_map.
+ *
+ * Runtime context is deliberately derived at the engine boundary rather than
+ * stored in additional public RunContext fields: cancellation reaches a child
+ * through a descendant operation token; usage, deadline, trace ID, and stream
+ * mode are inherited; and a non-empty child thread ID is a deterministic
+ * derivative of the parent invocation. An unscoped parent (empty thread ID)
+ * leaves the child unscoped, preserving the checkpoint coordinator's disabled
+ * behavior. A parent Store or checkpoint backend takes precedence when present,
+ * otherwise the child engine keeps its own configured resource.
+ * Parent ToolGate policy runs before the child's policy, so a child can narrow
+ * access but cannot bypass a parent deny or interrupt. A resumed parent resumes
+ * a child only when that child's derived checkpoint identity exists.
  *
  * @code
  * // Map parent "messages" -> child "messages", child "result" -> parent "findings"

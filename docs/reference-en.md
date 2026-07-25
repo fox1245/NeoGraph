@@ -1094,6 +1094,21 @@ public:
 
 If the maps are empty, channels are mapped by name (identity mapping).
 
+#### Runtime-context propagation
+
+`SubgraphNode` derives a child execution context at the engine boundary. It
+does not change the public `RunContext` layout.
+
+| Context value | Child semantics |
+|---------------|-----------------|
+| `cancel_token` | A descendant operation token is created, so parent cancellation reaches every child and grandchild. |
+| `usage`, `deadline`, `trace_id`, `stream_mode` | Inherited. `deadline` and `trace_id` originate from `RunMetadata`; a child cannot widen the parent's stream mode. |
+| `thread_id` | When the parent thread ID is non-empty, deterministically derived from it, the subgraph node name, super-step, and invocation identity. Sibling `Send` invocations therefore receive distinct checkpoint identities. An empty parent thread ID keeps the child unscoped and checkpointing disabled. |
+| `step` | Local to the child execution; it starts from the child checkpoint or zero. |
+| `store` | The parent Store is inherited when present; otherwise the child engine retains its configured Store. |
+| Tool policy | Parent `ToolGate` runs before the child's gate. A child may further restrict or rewrite an allowed call, but cannot bypass a parent deny or interrupt. |
+| Checkpoint backend and resume value | The parent backend is inherited when present; otherwise the child keeps its own backend. A parent resume follows a child checkpoint only when the child's derived checkpoint identity exists, forwarding a non-null resume value. Checkpoint routing is internal, not a public `RunContext` field. |
+
 ---
 
 ## 7. GraphEngine
@@ -1162,21 +1177,22 @@ struct RunConfig {
 ### RunContext (v0.4 PR 1, exposed to nodes via `NodeInput.ctx`)
 
 Per-run dispatch metadata threaded by the engine. Constructed from `RunConfig`
-(with a new usage accumulator when none was supplied), the engine's Store,
-and an optional resume value. Nodes consume it inside a
+(with a new usage accumulator when none was supplied), `RunMetadata`, the
+effective Store, and an optional resume value. Nodes consume it inside a
 `run(NodeInput) -> NodeOutput` override via `in.ctx`.
 
 ```cpp
 struct RunContext {
     std::shared_ptr<CancelToken>  cancel_token;
     std::shared_ptr<UsageAccumulator> usage;
-    std::optional<std::chrono::steady_clock::time_point> deadline; // reserved
-    std::string                   trace_id;     // reserved
+    std::optional<std::chrono::steady_clock::time_point> deadline;
+    std::string                   trace_id;
     std::string                   thread_id;
     int                           step;
     StreamMode                    stream_mode;
     std::optional<json>           resume_value;
     std::shared_ptr<Store>        store;
+    ToolGate                      tool_gate;
 };
 ```
 
@@ -1184,13 +1200,14 @@ struct RunContext {
 |-------|-------------|
 | `cancel_token` | The active token. Pass to `provider.complete(params)` so an LLM HTTP socket aborts on cancel, or poll `is_cancelled()` for your own loops |
 | `usage` | Shared token-accounting sink populated by the engine |
-| `deadline` | Reserved (no `RunConfig.deadline` field yet) |
-| `trace_id` | Reserved for OTel integration |
+| `deadline` | Optional absolute deadline from C++ `RunMetadata` |
+| `trace_id` | Optional trace correlator from C++ `RunMetadata` |
 | `thread_id` | Mirror of `RunConfig.thread_id` |
 | `step` | Current super-step index, updated each iteration |
 | `stream_mode` | Mirror of `RunConfig.stream_mode` |
 | `resume_value` | Value supplied to `GraphEngine::resume()`, or empty on a fresh run |
 | `store` | Store installed on the engine, or `nullptr` when none is configured |
+| `tool_gate` | Effective policy for this invocation, including any inherited parent policy |
 
 ### CancelToken
 

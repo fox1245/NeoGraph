@@ -199,9 +199,9 @@ class Researcher(ng.GraphNode):
 ```
 
 Python exposes `cancel_token`, `thread_id`, `step`, `stream_mode`, `store`,
-and `resume_value` on `input.ctx`. The C++ `deadline` and `trace_id` slots are
-reserved for future `RunConfig` fields; the engine does not populate them and
-Python does not expose them yet.
+and `resume_value` on `input.ctx`. C++ callers may set `deadline` and
+`trace_id` on `RunMetadata`; the engine propagates them through nested subgraphs.
+Those two fields are not exposed by the Python binding yet.
 
 You can also return a bare `list[ChannelWrite]` when you don't need
 `Send` or `Command` — the binding lifts it into a `NodeResult`

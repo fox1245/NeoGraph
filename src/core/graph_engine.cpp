@@ -1,4 +1,6 @@
 #include <neograph/graph/engine.h>
+
+#include "run_context_runtime.h"
 #include <neograph/graph/loader.h>
 #include <neograph/graph/validator.h>
 #include <neograph/graph/coordinator.h>
@@ -29,6 +31,32 @@ namespace {
 std::size_t default_worker_count() {
     auto n = std::thread::hardware_concurrency();
     return n > 0 ? static_cast<std::size_t>(n) : 4u;
+}
+
+// Preserve every policy boundary when a parent graph runs a child graph. The
+// parent decides first; only an Allow reaches the child policy. A parent rewrite
+// becomes the child's input, while a child rewrite can further narrow it.
+ToolGate compose_tool_gates(ToolGate parent, ToolGate local) {
+    if (!parent) return local;
+    if (!local) return parent;
+
+    return [parent = std::move(parent), local = std::move(local)](
+               ToolCall call, ToolGateContext context) -> asio::awaitable<ToolDecision> {
+        auto parent_decision = co_await parent(call, context);
+        if (parent_decision.kind != ToolDecision::Kind::Allow) {
+            co_return parent_decision;
+        }
+
+        if (parent_decision.args) {
+            call.arguments = parent_decision.args->dump();
+        }
+
+        auto local_decision = co_await local(std::move(call), std::move(context));
+        if (local_decision.kind != ToolDecision::Kind::Allow || local_decision.args) {
+            co_return local_decision;
+        }
+        co_return parent_decision;
+    };
 }
 
 void report_validation(const ValidationReport& report, int schema_version) {
@@ -500,6 +528,10 @@ void GraphEngine::apply_input(GraphState& state, const json& input) const {
 // =========================================================================
 
 RunResult GraphEngine::run(const RunConfig& config) {
+    return run(config, {});
+}
+
+RunResult GraphEngine::run(const RunConfig& config, const RunMetadata& metadata) {
     // Drive the async super-step loop on a single-threaded io_context
     // owned by the caller's stack — the coroutine machinery adds
     // roughly a promise/future per call, so we skip the extra
@@ -511,7 +543,7 @@ RunResult GraphEngine::run(const RunConfig& config) {
         operation_config.cancel_token = config.cancel_token->fork();
     }
     return neograph::async::detail::run_sync_operation(
-        execute_graph_async(operation_config, nullptr),
+        execute_graph_async(operation_config, nullptr, {}, nullptr, metadata),
         operation_config.cancel_token);
 }
 
@@ -526,12 +558,27 @@ RunResult GraphEngine::run(const RunConfig& config) {
 // alive on their own stack frame.
 asio::awaitable<RunResult>
 GraphEngine::run_async(RunConfig config) {
+    co_return co_await run_async(std::move(config), {});
+}
+
+asio::awaitable<RunResult>
+GraphEngine::run_async(RunConfig config, RunMetadata metadata) {
+    co_return co_await run_async_with_runtime(
+        std::move(config), nullptr, std::move(metadata), {});
+}
+
+asio::awaitable<RunResult> GraphEngine::run_async_with_runtime(
+    RunConfig config,
+    GraphStreamCallback cb,
+    RunMetadata metadata,
+    RuntimeResources resources) {
     auto operation = config.cancel_token
         ? config.cancel_token->fork()
         : std::shared_ptr<CancelToken>{};
     config.cancel_token = operation;
     if (!operation) {
-        co_return co_await execute_graph_async(config, nullptr);
+        co_return co_await execute_graph_async(
+            config, cb, {}, nullptr, metadata, &resources);
     }
 
     auto executor = co_await asio::this_coro::executor;
@@ -540,7 +587,7 @@ GraphEngine::run_async(RunConfig config) {
     try {
         co_return co_await asio::co_spawn(
             executor,
-            execute_graph_async(config, nullptr),
+            execute_graph_async(config, cb, {}, nullptr, metadata, &resources),
             asio::bind_cancellation_slot(
                 operation->slot(), asio::use_awaitable));
     } catch (const asio::system_error& error) {
@@ -554,46 +601,33 @@ GraphEngine::run_async(RunConfig config) {
 
 RunResult GraphEngine::run_stream(const RunConfig& config,
                                    const GraphStreamCallback& cb) {
+    return run_stream(config, cb, {});
+}
+
+RunResult GraphEngine::run_stream(const RunConfig& config,
+                                   const GraphStreamCallback& cb,
+                                   const RunMetadata& metadata) {
     RunConfig operation_config = config;
     if (config.cancel_token) {
         operation_config.cancel_token = config.cancel_token->fork();
     }
     return neograph::async::detail::run_sync_operation(
-        execute_graph_async(operation_config, cb),
+        execute_graph_async(operation_config, cb, {}, nullptr, metadata),
         operation_config.cancel_token);
 }
 
 asio::awaitable<RunResult>
 GraphEngine::run_stream_async(RunConfig config,
-                              GraphStreamCallback cb) {
-    // Same lifetime concern as run_async — both config and cb might
-    // be stack-local at the callsite, captured into a co_spawn'd
-    // awaitable that outlives the callsite. Take both by value.
-    auto operation = config.cancel_token
-        ? config.cancel_token->fork()
-        : std::shared_ptr<CancelToken>{};
-    config.cancel_token = operation;
-    if (!operation) {
-        co_return co_await execute_graph_async(config, cb);
-    }
+                               GraphStreamCallback cb) {
+    co_return co_await run_stream_async(std::move(config), std::move(cb), {});
+}
 
-    auto executor = co_await asio::this_coro::executor;
-    operation->bind_executor(executor);
-    operation->throw_if_cancelled("run_stream_async entry");
-    try {
-        co_return co_await asio::co_spawn(
-            executor,
-            execute_graph_async(config, cb),
-            asio::bind_cancellation_slot(
-                operation->slot(), asio::use_awaitable));
-    } catch (const asio::system_error& error) {
-        if (operation->is_cancelled() &&
-            error.code() == asio::error::operation_aborted) {
-            throw CancelledException(
-                "run_stream_async operation aborted");
-        }
-        throw;
-    }
+asio::awaitable<RunResult>
+GraphEngine::run_stream_async(RunConfig config,
+                              GraphStreamCallback cb,
+                              RunMetadata metadata) {
+    co_return co_await run_async_with_runtime(
+        std::move(config), std::move(cb), std::move(metadata), {});
 }
 
 RunResult GraphEngine::resume(const std::string& thread_id,
@@ -605,9 +639,17 @@ RunResult GraphEngine::resume(const std::string& thread_id,
 }
 
 RunResult GraphEngine::resume(const RunConfig&           config,
-                              const json&                resume_value,
-                              const GraphStreamCallback& cb) {
+                               const json&                resume_value,
+                               const GraphStreamCallback& cb) {
     return neograph::async::run_sync(resume_async(config, resume_value, cb));
+}
+
+RunResult GraphEngine::resume(const RunConfig&           config,
+                               const json&                resume_value,
+                               const GraphStreamCallback& cb,
+                               const RunMetadata&         metadata) {
+    return neograph::async::run_sync(
+        resume_async(config, resume_value, cb, metadata));
 }
 
 asio::awaitable<RunResult> GraphEngine::resume_async(const std::string&         thread_id,
@@ -620,12 +662,35 @@ asio::awaitable<RunResult> GraphEngine::resume_async(const std::string&         
 }
 
 asio::awaitable<RunResult> GraphEngine::resume_async(RunConfig           config,
-                                                     json                resume_value,
-                                                     GraphStreamCallback cb) {
+                                                       json                resume_value,
+                                                       GraphStreamCallback cb) {
+    co_return co_await resume_async_with_runtime(
+        std::move(config), std::move(resume_value), std::move(cb), {}, {});
+}
+
+asio::awaitable<RunResult> GraphEngine::resume_async(
+    RunConfig config,
+    json resume_value,
+    GraphStreamCallback cb,
+    RunMetadata metadata) {
+    co_return co_await resume_async_with_runtime(
+        std::move(config), std::move(resume_value), std::move(cb),
+        std::move(metadata), {});
+}
+
+asio::awaitable<RunResult> GraphEngine::resume_async_with_runtime(
+    RunConfig config,
+    json resume_value,
+    GraphStreamCallback cb,
+    RunMetadata metadata,
+    RuntimeResources resources) {
     // Sem 3.7.5: real async resume. Mirrors sync resume() but the
     // load_latest and the downstream super-step loop go through
     // their *_async peers, so the whole resume path is non-blocking.
-    if (!checkpoint_store_)
+    auto checkpoint_store = resources.checkpoint_store
+        ? *resources.checkpoint_store
+        : checkpoint_store_;
+    if (!checkpoint_store)
         throw std::runtime_error("Cannot resume: no checkpoint store configured");
 
     if (config.thread_id.empty()) {
@@ -633,7 +698,7 @@ asio::awaitable<RunResult> GraphEngine::resume_async(RunConfig           config,
     }
     const auto& thread_id = config.thread_id;
 
-    auto cp_opt = co_await checkpoint_store_->load_latest_async(thread_id);
+    auto cp_opt = co_await checkpoint_store->load_latest_async(thread_id);
     if (!cp_opt)
         throw std::runtime_error("No checkpoint found for thread: " + thread_id);
 
@@ -646,7 +711,42 @@ asio::awaitable<RunResult> GraphEngine::resume_async(RunConfig           config,
     }
 
     co_return co_await execute_graph_async(
-        config, cb, cp_opt->next_nodes, &resume_value);
+        config, cb, cp_opt->next_nodes, &resume_value, metadata, &resources);
+}
+
+asio::awaitable<RunResult> GraphEngine::run_subgraph_async(
+    RunConfig config,
+    const RunContext& parent,
+    GraphStreamCallback cb) {
+    RunMetadata metadata;
+    metadata.deadline = parent.deadline;
+    metadata.trace_id = parent.trace_id;
+
+    RuntimeResources resources;
+    auto parent_runtime = detail::runtime_for(parent);
+    if (parent_runtime && parent_runtime->checkpoint_store) {
+        resources.checkpoint_store = parent_runtime->checkpoint_store;
+    }
+    if (parent.store) {
+        resources.store = parent.store;
+    }
+    resources.parent_tool_gate = parent.tool_gate;
+
+    if (parent_runtime && parent_runtime->is_resume && resources.checkpoint_store) {
+        auto checkpoint = co_await (*resources.checkpoint_store)->load_latest_async(
+            config.thread_id);
+        if (checkpoint) {
+            const json resume_value = parent.resume_value
+                ? *parent.resume_value
+                : json();
+            co_return co_await resume_async_with_runtime(
+                std::move(config), resume_value, std::move(cb),
+                std::move(metadata), std::move(resources));
+        }
+    }
+
+    co_return co_await run_async_with_runtime(
+        std::move(config), std::move(cb), std::move(metadata), std::move(resources));
 }
 
 // =========================================================================
@@ -665,9 +765,11 @@ asio::awaitable<RunResult> GraphEngine::resume_async(RunConfig           config,
 
 asio::awaitable<RunResult>
 GraphEngine::execute_graph_async(const RunConfig& config,
-                                 const GraphStreamCallback& cb,
-                                 const std::vector<std::string>& resume_from,
-                                 const json* resume_value) {
+                                  const GraphStreamCallback& cb,
+                                  const std::vector<std::string>& resume_from,
+                                  const json* resume_value,
+                                  const RunMetadata& metadata,
+                                  const RuntimeResources* resources) {
     const bool is_resume = !resume_from.empty();
 
     // RAII inc/dec on the inflight-run counter — set_worker_count()
@@ -690,7 +792,10 @@ GraphEngine::execute_graph_async(const RunConfig& config,
     // below) on every NodeInput.
 
     StreamMode stream_mode = config.stream_mode;
-    CheckpointCoordinator coord(checkpoint_store_, config.thread_id);
+    auto checkpoint_store = resources && resources->checkpoint_store
+        ? *resources->checkpoint_store
+        : checkpoint_store_;
+    CheckpointCoordinator coord(checkpoint_store, config.thread_id);
 
     // PR 1 (v0.4.0): build the per-run RunContext from RunConfig and
     // carry it by reference through every NodeExecutor hop. Plumbing-
@@ -706,18 +811,26 @@ GraphEngine::execute_graph_async(const RunConfig& config,
     // otherwise this run gets a fresh one. Either way ctx.usage is non-null, so
     // node bodies never have to check.
     ctx.usage        = config.usage ? config.usage
-                                    : std::make_shared<UsageAccumulator>();
+                                     : std::make_shared<UsageAccumulator>();
+    ctx.deadline     = metadata.deadline;
+    ctx.trace_id     = metadata.trace_id;
     ctx.thread_id    = config.thread_id;
     ctx.stream_mode  = stream_mode;
-    ctx.store        = store_;   // issue #27 — node bodies reach Store via in.ctx.store
+    ctx.store = resources && resources->store ? *resources->store : store_;
     // issue #94 — the human's answer, readable by any node. Left empty on a
     // fresh run, which is how a node distinguishes "nobody has answered yet"
     // from "the answer was no". Only engaged on an actual resume, so the
     // common path pays no json allocation.
     if (resume_value && !resume_value->is_null()) ctx.resume_value = *resume_value;
-    ctx.tool_gate    = tool_gate_;   // issue #89 — engine-level, so resume() keeps it
-    // ctx.deadline / ctx.trace_id stay default-constructed for now —
-    // RunConfig has no source field for either. Future PRs add them.
+    auto parent_tool_gate = resources && resources->parent_tool_gate
+        ? *resources->parent_tool_gate
+        : ToolGate{};
+    ctx.tool_gate = compose_tool_gates(std::move(parent_tool_gate), tool_gate_);
+
+    auto runtime = std::make_shared<detail::RunContextRuntime>();
+    runtime->checkpoint_store = checkpoint_store;
+    runtime->is_resume = is_resume;
+    detail::ScopedRunContextRuntime runtime_scope(ctx, std::move(runtime));
 
     std::string last_checkpoint_id;
     int start_step = 0;
@@ -764,9 +877,9 @@ GraphEngine::execute_graph_async(const RunConfig& config,
         // overwritten. start_step continues monotonically from the
         // checkpoint's recorded step so per-thread step numbering
         // stays meaningful in the trace.
-        if (config.resume_if_exists && checkpoint_store_) {
+        if (config.resume_if_exists && checkpoint_store) {
             auto cp_opt =
-                co_await checkpoint_store_->load_latest_async(config.thread_id);
+                co_await checkpoint_store->load_latest_async(config.thread_id);
             if (cp_opt) {
                 state.restore(cp_opt->channel_values);
                 last_checkpoint_id = cp_opt->id;
