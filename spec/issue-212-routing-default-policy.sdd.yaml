@@ -1,0 +1,41 @@
+spec:
+  id: issue-212-routing-default-policy
+  issue: 212
+  parent: 187
+  status: proposed
+  priority: P1
+  kind: control-flow-contract
+  depends_on: [209]
+
+problem:
+  statement: >-
+    An unknown condition label currently selects the lexicographically last
+    route, making typos and new model output take an ordering-dependent path.
+  evidence:
+    - "src/core/scheduler.cpp:21-31"
+    - "tests/test_scheduler.cpp:83-101"
+
+contract:
+  closed_conditions: "All declared labels must be covered; unknown output is an error."
+  open_conditions: "Graph declares an explicit default target or fail policy."
+  invariants:
+    - Route map ordering never affects behavior.
+    - Diagnostics identify source node, condition, returned label, and known labels.
+    - Command.goto semantics remain higher priority than edge routing.
+
+red_tests:
+  - id: unknown-label-fails
+    assertion: "No route is selected by lexical order."
+  - id: explicit-default
+    assertion: "An open condition reaches only its declared default."
+  - id: closed-completeness
+    assertion: "Missing labels fail strict compilation."
+
+implementation:
+  - Extend graph schema and compiled edge representation with explicit policy.
+  - Remove scheduler last-route fallback.
+  - Provide an upgrader rule only when old intent can be inferred explicitly.
+
+acceptance:
+  - Unknown labels follow only declared error/default behavior.
+  - Scheduler, validator, schema export, corpus, and migration tests pass.

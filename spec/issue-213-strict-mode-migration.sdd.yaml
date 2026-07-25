@@ -1,0 +1,44 @@
+spec:
+  id: issue-213-strict-mode-migration
+  issue: 213
+  parent: 187
+  status: proposed
+  priority: P2
+  kind: schema-migration
+  depends_on: [209, 212]
+
+problem:
+  statement: >-
+    Strict compilation is opt-in through schema_version while canonical examples
+    omit a version and teach permissive legacy behavior to new users.
+  evidence:
+    - "src/core/graph_compiler.cpp:143-161"
+    - "examples/51_minimal.cpp:43"
+
+decisions_required:
+  - Define behavior for unversioned documents in v0.x and v1.
+  - Define warning and removal timeline for permissive compilation.
+  - Define upgrader, lockfile, comments, and source-map preservation rules.
+  - Define which examples and generated assets must declare the latest version.
+
+invariants:
+  - Existing legacy input never changes semantics silently.
+  - A default flip occurs only at a documented breaking boundary.
+  - Upgrade output strict-compiles to canonically equivalent IR.
+
+red_tests:
+  - id: canonical-example-is-strict
+    assertion: "Minimal and generated examples declare current schema version."
+  - id: legacy-warning
+    assertion: "Unversioned input follows the declared compatibility policy."
+  - id: upgrade-equivalence
+    assertion: "Legacy IR equals upgraded strict IR modulo version annotations."
+
+implementation:
+  - Publish migration policy before changing defaults.
+  - Version all recommended examples, templates, and generated definitions.
+  - Extend corpus coverage for legacy/current/upgraded triplets.
+
+acceptance:
+  - New users enter strict mode through every recommended path.
+  - Legacy behavior and end date are explicit and tested.

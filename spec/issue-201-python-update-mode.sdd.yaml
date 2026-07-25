@@ -1,0 +1,40 @@
+spec:
+  id: issue-201-python-update-mode
+  issue: 201
+  parent: 187
+  status: proposed
+  priority: P0
+  kind: correctness-parity
+  depends_on: []
+
+problem:
+  statement: >-
+    Python update_state list form flattens ChannelWrite into a dictionary and
+    loses its reducer-versus-overwrite mode.
+  evidence:
+    - "bindings/python/src/bind_graph.cpp:703-730"
+    - "include/neograph/graph/types.h:85-100"
+
+contract:
+  list_form: "Preserves each ChannelWrite value and mode in order."
+  dict_form: "Keeps its separately documented reducer semantics."
+  invariants:
+    - Administrative updates remain checkpointed and versioned.
+    - Mode behavior matches C++ GraphState writes.
+
+red_tests:
+  - id: overwrite-append-channel
+    assertion: "Explicit overwrite replaces accumulated messages."
+  - id: reduce-append-channel
+    assertion: "Default reduce still appends."
+  - id: mixed-write-order
+    assertion: "Reduce and overwrite writes are applied in list order."
+
+implementation:
+  - Route list form through a mode-preserving C++ update path.
+  - Keep dictionary conversion only for dictionary input.
+  - Update Python docs and type hints.
+
+acceptance:
+  - C++ and Python update_state mode matrices agree.
+  - Checkpoint, fork, version, and resume tests remain correct.

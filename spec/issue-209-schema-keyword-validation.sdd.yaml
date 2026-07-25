@@ -1,0 +1,45 @@
+spec:
+  id: issue-209-schema-keyword-validation
+  issue: 209
+  parent: 187
+  status: proposed
+  priority: P1
+  kind: compiler-correctness
+  depends_on: []
+
+problem:
+  statement: >-
+    Strict compilation uses node-schema properties for unknown-key checks but
+    does not enforce exported required, type, or enum constraints.
+  evidence:
+    - "src/core/graph_compiler.cpp:143-161,238-258"
+    - "src/core/graph_loader.cpp:220-235"
+
+contract:
+  supported_subset: [required, type, enum]
+  diagnostics:
+    - Aggregate deterministic violations instead of first-error exit.
+    - Include source coordinate, node name/type, keyword, expected, and actual.
+  invariants:
+    - Built-in and custom node schemas use the same validator.
+    - Exported schema and compiler claim exactly the same supported subset.
+    - Unsupported schema keywords are explicit, not silently enforced partially.
+
+red_tests:
+  - id: required-missing
+    assertion: "Missing intent_classifier routes fails strict compilation."
+  - id: wrong-type
+    assertion: "A property of the wrong JSON type fails at compile time."
+  - id: enum-mismatch
+    assertion: "Unknown enumerated value reports allowed values."
+  - id: multi-error-order
+    assertion: "Several violations are returned in stable order."
+
+implementation:
+  - Define a small value-level schema validator independent of NodeFactory parsing.
+  - Run it before node construction for strict documents.
+  - Extend corpus, mutation, and schema-evolution tests.
+
+acceptance:
+  - All supported keywords reject invalid documents before execution.
+  - Translation-validation and existing valid corpus remain green.

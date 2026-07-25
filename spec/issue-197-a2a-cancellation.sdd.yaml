@@ -1,0 +1,40 @@
+spec:
+  id: issue-197-a2a-cancellation
+  issue: 197
+  parent: 187
+  status: proposed
+  priority: P0
+  kind: correctness
+  depends_on: []
+
+problem:
+  statement: >-
+    A2A tasks/cancel flips a local flag but does not cancel the graph run, so
+    provider and tool work continue until normal completion.
+  evidence:
+    - "src/a2a/server.cpp:289-347"
+    - "src/a2a/server.cpp:480-501"
+
+contract:
+  - Each active task owns one CancelToken for exactly one graph run.
+  - tasks/cancel is idempotent and triggers that token immediately.
+  - Exactly one terminal A2A status sequence is emitted.
+  - Task and token entries are removed only by their owning generation.
+
+red_tests:
+  - id: cancel-inflight-provider
+    assertion: "Socket-level provider work aborts before its normal deadline."
+  - id: repeated-cancel
+    assertion: "Repeated cancellation emits no duplicate terminal result."
+  - id: cancel-race-matrix
+    assertion: "Before, during, and after completion states are deterministic."
+
+implementation:
+  - Replace or pair the atomic flag with a per-task CancelToken.
+  - Put the token into RunConfig before engine execution.
+  - Make map cleanup generation-safe and coordinate with issue 205.
+
+acceptance:
+  - In-flight graph/provider/cooperative-tool work observes cancellation.
+  - A2A status, events, task lookup, and cleanup remain consistent.
+  - Cancellation tests require no live provider.

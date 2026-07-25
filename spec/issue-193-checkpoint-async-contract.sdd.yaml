@@ -1,0 +1,46 @@
+spec:
+  id: issue-193-checkpoint-async-contract
+  issue: 193
+  parent: 187
+  status: proposed
+  priority: P1
+  kind: breaking-api
+  depends_on: [194]
+
+problem:
+  statement: >-
+    CheckpointStore has mutually recursive sync/async defaults and its async
+    defaults call sync backends inline, potentially blocking the graph executor.
+  evidence:
+    - "include/neograph/graph/checkpoint.h:196-338"
+    - "src/core/graph_checkpoint.cpp:21-81"
+
+contract:
+  canonical: "Engine-facing checkpoint operations are asynchronous."
+  sync_backends: "Use an explicit adapter with a bounded blocking executor."
+  pending_writes: "Expose as an explicit optional durability capability."
+  invariants:
+    - Missing mandatory operations fail before runtime recursion.
+    - Async engine paths never unknowingly block on backend I/O.
+    - Pending-write absence has one documented full-step replay behavior.
+    - Per-call atomicity remains required for every backend.
+
+red_tests:
+  - id: empty-backend-contract
+    assertion: "An incomplete backend cannot instantiate or fails explicitly."
+  - id: sync-adapter-does-not-block-io
+    assertion: "A timer progresses while a sync-only store operation waits."
+  - id: async-native-overlap
+    assertion: "Independent PostgreSQL operations overlap across pool slots."
+
+implementation:
+  - Inventory every engine, admin, Python, gRPC, and backend call site.
+  - Define async core and sync-only adapter ownership/lifecycle.
+  - Separate pending-write capability from snapshot CRUD.
+  - Migrate InMemory, SQLite, PostgreSQL, gRPC, and bindings independently.
+
+acceptance:
+  - No CheckpointStore method pair mutually recurses.
+  - Sync-only and async-native conformance suites pass.
+  - Resume and pending-write replay semantics remain deterministic.
+  - Blocking behavior is measured and documented.

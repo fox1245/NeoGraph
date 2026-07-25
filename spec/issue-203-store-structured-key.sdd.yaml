@@ -1,0 +1,42 @@
+spec:
+  id: issue-203-store-structured-key
+  issue: 203
+  parent: 187
+  status: proposed
+  priority: P0
+  kind: data-correctness
+  depends_on: []
+
+problem:
+  statement: >-
+    InMemoryStore joins namespace and key with slash, causing identity collisions
+    and component-prefix search errors.
+  evidence:
+    - "src/core/store.cpp:7-18,49-58"
+
+contract:
+  identity: "Namespace components plus key have an injective representation."
+  search: "Prefix means a prefix of complete namespace components."
+  supported_values:
+    - Empty namespace and empty component.
+    - Slash and arbitrary UTF-8 bytes in components and keys.
+  invariants:
+    - Put, get, delete, search, and namespace listing agree on identity.
+    - Existing timestamp and limit behavior is preserved.
+
+red_tests:
+  - id: delimiter-collision
+    assertion: "[a,b]+c and [a]+b/c remain distinct."
+  - id: component-prefix
+    assertion: "[user] does not match [user2]."
+  - id: encoded-edge-cases
+    assertion: "Empty and slash-containing components round-trip."
+
+implementation:
+  - Replace flattened string keys with tuple/structured keys or length encoding.
+  - Implement component-wise prefix comparison.
+  - Audit Python conversion and deterministic namespace ordering.
+
+acceptance:
+  - Collision and prefix red tests pass.
+  - Store C++ and Python suites pass without behavior ambiguity.

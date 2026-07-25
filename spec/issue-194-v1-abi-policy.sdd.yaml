@@ -1,0 +1,41 @@
+spec:
+  id: issue-194-v1-abi-policy
+  issue: 194
+  parent: 187
+  status: proposed
+  priority: P0
+  kind: release-contract
+  depends_on: []
+
+problem:
+  statement: >-
+    GraphNode, Provider, and CheckpointStore are exported polymorphic classes.
+    Virtual removal or reordering breaks existing shared-library binaries.
+  evidence:
+    - "include/neograph/graph/node.h:132"
+    - "include/neograph/provider.h:127"
+    - "include/neograph/graph/checkpoint.h:211"
+    - "CMakeLists.txt:143-203"
+
+decisions_required:
+  - Define whether all pre-v1 binaries must rebuild.
+  - Freeze the release that establishes final v1 vtable layouts.
+  - Define library VERSION, SOVERSION, and installed filenames.
+  - Define supported source and binary compatibility windows after v1.
+
+red_tests:
+  - id: installed-shared-consumer
+    assertion: "A separately built consumer loads and executes installed libraries."
+  - id: soname-inspection
+    assertion: "ELF and Mach-O metadata match the declared policy."
+
+implementation:
+  - Record ABI policy before issues 192 and 193 remove virtuals.
+  - Add CMake version properties and package metadata.
+  - Add old-consumer/new-library and new-consumer/new-library CI cases as applicable.
+  - Publish mandatory rebuild and migration notes.
+
+acceptance:
+  - VERSION and SOVERSION are deliberate and test-covered.
+  - Release notes identify every binary-incompatible boundary.
+  - Shared and static installed-consumer smoke tests pass.

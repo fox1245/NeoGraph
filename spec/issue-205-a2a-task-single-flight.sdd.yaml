@@ -1,0 +1,39 @@
+spec:
+  id: issue-205-a2a-task-single-flight
+  issue: 205
+  parent: 187
+  status: proposed
+  priority: P1
+  kind: concurrency
+  depends_on: [197]
+
+problem:
+  statement: >-
+    Two requests with one A2A task ID may execute concurrently, sharing a
+    checkpoint thread and replacing task/cancel map ownership.
+  evidence:
+    - "src/a2a/server.cpp:298-347"
+    - "src/acp/server.cpp:283-309"
+
+contract:
+  - One task ID has at most one active graph generation.
+  - A duplicate request receives an explicit error or documented join behavior.
+  - Cleanup from an old generation cannot erase a newer generation.
+  - Global admission is bounded separately from per-task single-flight.
+
+red_tests:
+  - id: same-task-concurrent
+    assertion: "Only one graph body begins."
+  - id: different-task-concurrent
+    assertion: "Distinct tasks may overlap within the global limit."
+  - id: cancel-replace-race
+    assertion: "Cancellation always targets the owning generation."
+
+implementation:
+  - Reserve task generation atomically before publishing Working state.
+  - Associate Task, CancelToken, and worker ownership in one record.
+  - Release reservation with generation checks on every terminal path.
+
+acceptance:
+  - Same-task races cannot corrupt checkpoints or task state.
+  - Cancellation, reconnect, lookup, and eviction tests pass.

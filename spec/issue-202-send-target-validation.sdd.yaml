@@ -1,0 +1,38 @@
+spec:
+  id: issue-202-send-target-validation
+  issue: 202
+  parent: 187
+  status: proposed
+  priority: P1
+  kind: correctness
+  depends_on: []
+
+problem:
+  statement: >-
+    Dynamic Send silently returns an empty result for an unknown target while
+    normal node dispatch throws. A typo can therefore look like partial success.
+  evidence:
+    - "src/core/graph_executor.cpp:665-670,721-725"
+
+contract:
+  - Every Send target must resolve before its work is considered accepted.
+  - Single and multi-Send paths use the same error type and diagnostic fields.
+  - A mixed valid/invalid fan-out has deterministic pending-write semantics.
+  - Statically knowable targets are validated before execution when possible.
+
+red_tests:
+  - id: unknown-single-send
+    assertion: "Run fails with source and target names."
+  - id: mixed-multi-send
+    assertion: "Failure and successful-sibling replay behavior are deterministic."
+  - id: resume-after-invalid-send
+    assertion: "No invalid task is recorded as completed."
+
+implementation:
+  - Centralize Send target resolution before single/multi dispatch diverge.
+  - Preserve node exception and pending-write accounting.
+  - Surface the same diagnostic through streaming and Python.
+
+acceptance:
+  - Unknown Send never becomes silent success.
+  - Existing valid Send, retry, interrupt, and resume tests pass.

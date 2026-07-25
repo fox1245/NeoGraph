@@ -1,0 +1,42 @@
+spec:
+  id: issue-195-graphnode-doc-contract
+  issue: 195
+  parent: 187
+  status: proposed
+  priority: P0
+  kind: documentation-correctness
+  depends_on: []
+
+problem:
+  statement: >-
+    GraphNode has only pure virtual run(NodeInput), while public headers,
+    references, diagnostics, and test prose still recommend removed methods.
+  evidence:
+    - "include/neograph/graph/node.h:11-34,65-68,98-118,147-151"
+    - "src/core/graph_executor.cpp:155-177,218-224"
+    - "docs/concepts.md and docs/reference-{en,ko}.md"
+
+scope:
+  in:
+    - Public headers and Doxygen comments.
+    - English and Korean references and concepts guide.
+    - Python diagnostics, dead helpers, and test descriptions.
+  out:
+    - Another GraphNode dispatch redesign.
+    - Historical changelog and explicitly labeled migration archaeology.
+
+red_tests:
+  - id: documented-minimal-node
+    assertion: "The documented custom node compiles and runs unchanged."
+  - id: stale-symbol-scan
+    assertion: "Legacy names appear only in approved historical files."
+
+implementation:
+  - Replace false fallback prose with the current pure run contract.
+  - Remove unused legacy macro and helper code after reference checks.
+  - Align C++ and Python examples and errors.
+
+acceptance:
+  - No active documentation tells users to override removed methods.
+  - Documentation snippets are compiled or executed in CI.
+  - Custom-node C++ and Python suites pass.
