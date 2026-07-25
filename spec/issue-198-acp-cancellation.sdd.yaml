@@ -2,7 +2,7 @@ spec:
   id: issue-198-acp-cancellation
   issue: 198
   parent: 187
-  status: proposed
+  status: implemented
   priority: P0
   kind: correctness
   depends_on: []

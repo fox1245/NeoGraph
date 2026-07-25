@@ -13,6 +13,7 @@
 #include <neograph/acp/server.h>
 #include <neograph/acp/types.h>
 #include <neograph/graph/engine.h>
+#include <neograph/graph/cancel.h>
 #include <neograph/graph/node.h>
 
 #include <chrono>
@@ -67,6 +68,34 @@ class EchoNode : public GraphNode {
     std::string name_;
 };
 
+struct CancelProbe {
+    std::atomic<bool> entered{false};
+    std::atomic<bool> completed{false};
+};
+
+class CancelAwareNode : public GraphNode {
+  public:
+    CancelAwareNode(std::string n, std::shared_ptr<CancelProbe> probe)
+        : name_(std::move(n)), probe_(std::move(probe)) {}
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        probe_->entered.store(true, std::memory_order_release);
+        const auto deadline = std::chrono::steady_clock::now()
+                            + std::chrono::seconds(1);
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (in.ctx.cancel_token && in.ctx.cancel_token->is_cancelled()) {
+                throw neograph::graph::CancelledException();
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        probe_->completed.store(true, std::memory_order_release);
+        co_return NodeOutput{};
+    }
+    std::string get_name() const override { return name_; }
+  private:
+    std::string name_;
+    std::shared_ptr<CancelProbe> probe_;
+};
+
 std::shared_ptr<GraphEngine> build_echo_engine() {
     NodeFactory::instance().register_type("acp_echo",
         [](const std::string& n, const neograph::json&, const NodeContext&) {
@@ -89,6 +118,24 @@ std::shared_ptr<GraphEngine> build_echo_engine() {
     NodeContext ctx;
     auto unique = GraphEngine::compile(def, ctx);
     return std::shared_ptr<GraphEngine>(std::move(unique));
+}
+
+std::shared_ptr<GraphEngine> build_cancel_aware_engine(
+    const std::shared_ptr<CancelProbe>& probe) {
+    NodeFactory::instance().register_type("acp_cancel_probe",
+        [probe](const std::string& n, const neograph::json&, const NodeContext&) {
+            return std::make_unique<CancelAwareNode>(n, probe);
+        });
+    neograph::json def = {
+        {"name", "acp-cancel"},
+        {"channels", {{"prompt", {{"reducer", "overwrite"}}}}},
+        {"nodes", {{"worker", {{"type", "acp_cancel_probe"}}}}},
+        {"edges", neograph::json::array({
+            neograph::json{{"from", "__start__"}, {"to", "worker"}},
+            neograph::json{{"from", "worker"}, {"to", "__end__"}},
+        })},
+    };
+    return std::shared_ptr<GraphEngine>(GraphEngine::compile(def, NodeContext{}));
 }
 
 class InterruptNode : public GraphNode {
@@ -688,6 +735,29 @@ TEST(ACPServer, CancelBeforeFinalReturnsCancelled) {
     auto resp = cap.wait_for_response(2);
     ASSERT_TRUE(resp.contains("result"));
     EXPECT_EQ(resp["result"].value("stopReason", std::string()), "cancelled");
+}
+
+TEST(ACPServer, CancelAbortsInflightPrompt) {
+    auto probe = std::make_shared<CancelProbe>();
+    ACPServer server(build_cancel_aware_engine(probe),
+                     {{"name", "test-acp"}, {"version", "0.0.1"}});
+    CapturingSink cap;
+    server.set_notification_sink(cap.as_sink());
+    const std::string sid = "acp-cancel-inflight";
+    server.handle_message(make_request(1, "session/prompt",
+        {{"sessionId", sid}, {"prompt", neograph::json::array({
+            neograph::json{{"type", "text"}, {"text", "cancel"}}})}}));
+    for (int i = 0; i < 200 && !probe->entered.load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_TRUE(probe->entered.load(std::memory_order_acquire));
+    neograph::json cancel = {{"jsonrpc", "2.0"}, {"method", "session/cancel"},
+                              {"params", {{"sessionId", sid}}}};
+    server.handle_message(cancel);
+    auto response = cap.wait_for_response(1, std::chrono::milliseconds(500));
+    ASSERT_TRUE(response.contains("result")) << response.dump();
+    EXPECT_EQ(response["result"].value("stopReason", std::string()), "cancelled");
+    EXPECT_FALSE(probe->completed.load(std::memory_order_acquire));
 }
 
 TEST(ACPServer, UnknownMethodReturnsMethodNotFound) {
