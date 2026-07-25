@@ -12,11 +12,13 @@
 #include <neograph/a2a/client.h>
 #include <neograph/a2a/types.h>
 #include <neograph/graph/engine.h>
+#include <neograph/graph/cancel.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -34,6 +36,8 @@ using neograph::graph::NodeInput;
 using neograph::graph::NodeOutput;
 
 namespace {
+
+using namespace std::chrono_literals;
 
 class EchoNode : public GraphNode {
   public:
@@ -65,6 +69,38 @@ class JsonSiteNode : public GraphNode {
     std::string name_;
 };
 
+struct CancelProbe {
+    std::atomic<bool> entered{false};
+    std::atomic<bool> normal_completion{false};
+};
+
+class CancelAwareNode : public GraphNode {
+  public:
+    CancelAwareNode(std::string name, std::shared_ptr<CancelProbe> probe)
+        : name_(std::move(name)), probe_(std::move(probe)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        probe_->entered.store(true, std::memory_order_release);
+        const auto deadline = std::chrono::steady_clock::now() + 1s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (in.ctx.cancel_token && in.ctx.cancel_token->is_cancelled()) {
+                throw neograph::graph::CancelledException();
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+        probe_->normal_completion.store(true, std::memory_order_release);
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"response", json("completed")});
+        co_return out;
+    }
+
+    std::string get_name() const override { return name_; }
+
+  private:
+    std::string                  name_;
+    std::shared_ptr<CancelProbe> probe_;
+};
+
 std::shared_ptr<GraphEngine> build_echo_engine() {
     auto& factory = NodeFactory::instance();
     factory.register_type("echo",
@@ -87,6 +123,28 @@ std::shared_ptr<GraphEngine> build_echo_engine() {
     };
     NodeContext ctx;
     auto unique = GraphEngine::compile(def, ctx);
+    return std::shared_ptr<GraphEngine>(std::move(unique));
+}
+
+std::shared_ptr<GraphEngine> build_cancel_aware_engine(
+    const std::shared_ptr<CancelProbe>& probe) {
+    NodeFactory::instance().register_type("a2a_cancel_probe",
+        [probe](const std::string& name, const neograph::json&, const NodeContext&) {
+            return std::make_unique<CancelAwareNode>(name, probe);
+        });
+    neograph::json def = {
+        {"name", "a2a-cancel-graph"},
+        {"channels", {
+            {"prompt", { {"reducer", "overwrite"} }},
+            {"response", { {"reducer", "overwrite"} }},
+        }},
+        {"nodes", {{"worker", {{"type", "a2a_cancel_probe"}}}}},
+        {"edges", neograph::json::array({
+            neograph::json{{"from", "__start__"}, {"to", "worker"}},
+            neograph::json{{"from", "worker"}, {"to", "__end__"}},
+        })},
+    };
+    auto unique = GraphEngine::compile(def, NodeContext{});
     return std::shared_ptr<GraphEngine>(std::move(unique));
 }
 
@@ -253,6 +311,43 @@ TEST(A2AServer, StaysUpAcrossIndependentClients) {
     // Server still healthy after all those round-trips — only an explicit
     // stop() (or a signal in the example) tears it down.
     EXPECT_TRUE(srv.server->is_running());
+}
+
+TEST(A2AServer, CancelTaskAbortsInflightGraphAndIsIdempotent) {
+    auto probe = std::make_shared<CancelProbe>();
+    A2AServer server(build_cancel_aware_engine(probe), build_card(0));
+    ASSERT_TRUE(server.start_async("127.0.0.1", 0));
+    const std::string url = "http://127.0.0.1:" + std::to_string(server.port());
+    const std::string task_id = "a2a-cancel-inflight";
+
+    std::promise<Task> completion;
+    auto done = completion.get_future();
+    std::thread runner([&] {
+        try {
+            A2AClient client(url);
+            completion.set_value(client.send_message_sync("cancel me", task_id));
+        } catch (...) {
+            completion.set_exception(std::current_exception());
+        }
+    });
+
+    for (int i = 0; i < 200 && !probe->entered.load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(5ms);
+    }
+    ASSERT_TRUE(probe->entered.load(std::memory_order_acquire));
+
+    A2AClient canceller(url);
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_EQ(canceller.cancel_task(task_id).status.state, TaskState::Canceled);
+    EXPECT_EQ(canceller.cancel_task(task_id).status.state, TaskState::Canceled);
+    ASSERT_EQ(done.wait_for(500ms), std::future_status::ready);
+    const auto task = done.get();
+    runner.join();
+    server.stop();
+
+    EXPECT_EQ(task.status.state, TaskState::Canceled);
+    EXPECT_FALSE(probe->normal_completion.load(std::memory_order_acquire));
+    EXPECT_LT(std::chrono::steady_clock::now() - start, 500ms);
 }
 
 TEST(A2AServer, MethodNotFoundReturnsCorrectCode) {

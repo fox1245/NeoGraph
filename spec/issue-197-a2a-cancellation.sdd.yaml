@@ -2,7 +2,7 @@ spec:
   id: issue-197-a2a-cancellation
   issue: 197
   parent: 187
-  status: proposed
+  status: implemented
   priority: P0
   kind: correctness
   depends_on: []
@@ -32,7 +32,8 @@ red_tests:
 implementation:
   - Replace or pair the atomic flag with a per-task CancelToken.
   - Put the token into RunConfig before engine execution.
-  - Make map cleanup generation-safe and coordinate with issue 205.
+  - Make map cleanup generation-safe; duplicate task admission remains scoped
+    to issue 205.
 
 acceptance:
   - In-flight graph/provider/cooperative-tool work observes cancellation.
