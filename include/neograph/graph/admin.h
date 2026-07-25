@@ -34,9 +34,9 @@ public:
     void update_state(const std::string& thread_id,
                       const json& channel_writes,
                       const std::string& as_node = "") const;
-    void update_state(const std::string& thread_id,
-                      const std::vector<ChannelWrite>& channel_writes,
-                      const std::string& as_node = "") const;
+    void update_state_writes(const std::string& thread_id,
+                             const std::vector<ChannelWrite>& channel_writes,
+                             const std::string& as_node = "") const;
     std::string fork(const std::string& source_thread_id,
                      const std::string& new_thread_id,
                      const std::string& checkpoint_id = "") const;

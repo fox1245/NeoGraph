@@ -348,10 +348,11 @@ void GraphAdmin::update_state(const std::string& thread_id,
     engine_->update_state(thread_id, channel_writes, as_node);
 }
 
-void GraphAdmin::update_state(const std::string& thread_id,
-                              const std::vector<ChannelWrite>& channel_writes,
-                              const std::string& as_node) const {
-    engine_->update_state(thread_id, channel_writes, as_node);
+void GraphAdmin::update_state_writes(
+    const std::string& thread_id,
+    const std::vector<ChannelWrite>& channel_writes,
+    const std::string& as_node) const {
+    engine_->update_state_writes(thread_id, channel_writes, as_node);
 }
 
 std::string GraphAdmin::fork(const std::string& source_thread_id,
@@ -387,12 +388,13 @@ void GraphEngine::update_state(const std::string& thread_id,
             }
         }
     }
-    update_state(thread_id, writes, as_node);
+    update_state_writes(thread_id, writes, as_node);
 }
 
-void GraphEngine::update_state(const std::string& thread_id,
-                               const std::vector<ChannelWrite>& channel_writes,
-                               const std::string& as_node) {
+void GraphEngine::update_state_writes(
+    const std::string& thread_id,
+    const std::vector<ChannelWrite>& channel_writes,
+    const std::string& as_node) {
     if (!checkpoint_store_)
         throw std::runtime_error("Cannot update_state: no checkpoint store configured");
 

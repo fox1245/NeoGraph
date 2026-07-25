@@ -960,7 +960,7 @@ void init_graph(py::module_& m) {
                         }
                         writes.push_back(std::move(write));
                     }
-                    self.update_state(thread_id, writes, as_node);
+                    self.update_state_writes(thread_id, writes, as_node);
                 } else {
                     throw py::type_error(
                         "update_state: channel_writes must be a dict "

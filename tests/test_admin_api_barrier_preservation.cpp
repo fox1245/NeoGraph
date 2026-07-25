@@ -148,7 +148,7 @@ TEST(AdminApi, OrderedChannelWritesPreserveModes) {
 
     ChannelWrite replace{"messages", json::array({"replacement"})};
     replace.mode = ChannelWrite::Mode::Overwrite;
-    admin.update_state("admin-ordered-writes", std::vector<ChannelWrite>{
+    admin.update_state_writes("admin-ordered-writes", std::vector<ChannelWrite>{
         {"messages", json::array({"append-before"})},
         replace,
         {"messages", json::array({"append-after"})},
