@@ -89,14 +89,31 @@ resolution:
     allocation for short values. Header vectors and callback wrappers retain
     their prior by-value copy behavior and are moved into the owned frame.
     Redirect and stale-connection retry loops receive the same frame-owned
-    values, so the fix adds no copy per hop or retry.
+    values, so the fix adds no copy per hop or retry. The 2026-07-26 delayed
+    cancellation regression exercises the streaming timeout race and confirms
+    the callback capture stays alive while the stored awaitable is pending,
+    releases after the timeout completes, and receives no late chunks.
 
 verification:
   targeted:
     command: >-
       ./build/tests/neograph_tests
       --gtest_filter=AsyncHttpOwnership.*:WsLoopback.DelayedOperationsOwnEndpointAndPayloads
-    result: "6 passed, 0 failed"
+    result: "6 passed, 0 failed before the delayed streaming cancellation regression was added"
+  delayed_stream_cancel:
+    command: >-
+      ./build-issue199-202/tests/neograph_tests
+      --gtest_filter=AsyncHttpOwnership.*:WsLoopback.DelayedOperationsOwnEndpointAndPayloads
+    result: "7 passed, 0 failed"
+  delayed_stream_cancel_asan:
+    configuration: >-
+      Debug; -fsanitize=address,undefined; ASAN_OPTIONS
+      detect_stack_use_after_return=1.
+    command: >-
+      ASAN_OPTIONS=detect_stack_use_after_return=1
+      ./build-issue199-202-asan/tests/neograph_tests
+      --gtest_filter=AsyncHttpOwnership.*:WsLoopback.DelayedOperationsOwnEndpointAndPayloads
+    result: "7 passed, 0 failed"
   behavior_matrix:
     command: >-
       ./build/tests/neograph_tests
