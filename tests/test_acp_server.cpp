@@ -96,6 +96,107 @@ class CancelAwareNode : public GraphNode {
     std::shared_ptr<CancelProbe> probe_;
 };
 
+struct DependencyProbe {
+    std::atomic<bool> provider_started{false};
+    std::atomic<bool> provider_release{false};
+    std::atomic<bool> provider_cancelled{false};
+    std::atomic<bool> tool_started{false};
+    std::atomic<bool> tool_cancelled{false};
+    std::shared_ptr<neograph::graph::CancelToken> token;
+};
+
+class CancellableProvider final : public neograph::Provider {
+  public:
+    explicit CancellableProvider(std::shared_ptr<DependencyProbe> probe)
+        : probe_(std::move(probe)) {}
+    asio::awaitable<neograph::ChatCompletion> complete_async(
+        const neograph::CompletionParams& params) override {
+        probe_->provider_started.store(true, std::memory_order_release);
+        while (true) {
+            if (probe_->provider_release.load(std::memory_order_acquire)) {
+                co_return neograph::ChatCompletion{};
+            }
+            if (params.cancel_token && params.cancel_token->is_cancelled()) {
+                probe_->provider_cancelled.store(true, std::memory_order_release);
+                throw neograph::graph::CancelledException();
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    neograph::ChatCompletion complete(const neograph::CompletionParams&) override {
+        throw std::runtime_error("sync provider path not expected");
+    }
+    std::string get_name() const override { return "cancellable"; }
+  private:
+    std::shared_ptr<DependencyProbe> probe_;
+};
+
+class CancellableTool final : public neograph::AsyncTool {
+  public:
+    explicit CancellableTool(std::shared_ptr<DependencyProbe> probe)
+        : probe_(std::move(probe)) {}
+    neograph::ChatTool get_definition() const override {
+        return {"mock_tool", "mock", neograph::json::object()};
+    }
+    std::string get_name() const override { return "mock_tool"; }
+    asio::awaitable<std::string> execute_async(const neograph::json&) override {
+        probe_->tool_started.store(true, std::memory_order_release);
+        while (true) {
+            if (probe_->token && probe_->token->is_cancelled()) {
+                probe_->tool_cancelled.store(true, std::memory_order_release);
+                throw neograph::graph::CancelledException();
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+  private:
+    std::shared_ptr<DependencyProbe> probe_;
+};
+
+class DependencyNode final : public GraphNode {
+  public:
+    DependencyNode(std::string name, std::shared_ptr<neograph::Provider> provider,
+                   std::shared_ptr<CancellableTool> tool,
+                   std::shared_ptr<DependencyProbe> probe)
+        : name_(std::move(name)), provider_(std::move(provider)),
+          tool_(std::move(tool)), probe_(std::move(probe)) {}
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        probe_->token = in.ctx.cancel_token;
+        neograph::CompletionParams params;
+        params.model = "mock";
+        params.cancel_token = in.ctx.cancel_token;
+        (void)co_await provider_->complete_async(params);
+        (void)co_await tool_->execute_async({});
+        co_return NodeOutput{};
+    }
+    std::string get_name() const override { return name_; }
+  private:
+    std::string name_;
+    std::shared_ptr<neograph::Provider> provider_;
+    std::shared_ptr<CancellableTool> tool_;
+    std::shared_ptr<DependencyProbe> probe_;
+};
+
+std::shared_ptr<GraphEngine> build_dependency_engine(
+    const std::shared_ptr<neograph::Provider>& provider,
+    const std::shared_ptr<CancellableTool>& tool,
+    const std::shared_ptr<DependencyProbe>& probe) {
+    NodeFactory::instance().register_type("acp_dependency",
+        [provider, tool, probe](const std::string& name, const neograph::json&, const NodeContext&) {
+            return std::make_unique<DependencyNode>(name, provider, tool, probe);
+        });
+    neograph::json def = {
+        {"name", "acp-dependency"},
+        {"channels", {{"prompt", {{"reducer", "overwrite"}}}}},
+        {"nodes", {{"worker", {{"type", "acp_dependency"}}}}},
+        {"edges", neograph::json::array({
+            neograph::json{{"from", "__start__"}, {"to", "worker"}},
+            neograph::json{{"from", "worker"}, {"to", "__end__"}},
+        })},
+    };
+    return std::shared_ptr<GraphEngine>(GraphEngine::compile(def, NodeContext{}));
+}
+
 std::shared_ptr<GraphEngine> build_echo_engine() {
     NodeFactory::instance().register_type("acp_echo",
         [](const std::string& n, const neograph::json&, const NodeContext&) {
@@ -764,6 +865,75 @@ TEST(ACPServer, CancelAbortsInflightPrompt) {
         if (env.value("id", 0) == 1 && env.contains("result")) ++response_count;
     }
     EXPECT_EQ(response_count, 1);
+}
+
+TEST(ACPServer, CancelReachesProviderAndToolFixtures) {
+    auto probe = std::make_shared<DependencyProbe>();
+    auto provider = std::make_shared<CancellableProvider>(probe);
+    auto tool = std::make_shared<CancellableTool>(probe);
+    ACPServer server(build_dependency_engine(provider, tool, probe),
+                     {{"name", "test-acp"}, {"version", "0.0.1"}});
+    CapturingSink cap;
+    server.set_notification_sink(cap.as_sink());
+    const std::string sid = "acp-dependency-cancel";
+    server.handle_message(make_request(1, "session/prompt",
+        {{"sessionId", sid}, {"prompt", neograph::json::array({
+            neograph::json{{"type", "text"}, {"text", "provider"}}})}}));
+    for (int i = 0; i < 200 && !probe->provider_started.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_TRUE(probe->provider_started.load());
+    server.handle_message({{"jsonrpc", "2.0"}, {"method", "session/cancel"},
+                           {"params", {{"sessionId", sid}}}});
+    auto canceled_provider = cap.wait_for_response(1);
+    ASSERT_TRUE(canceled_provider.contains("result"));
+    EXPECT_EQ(canceled_provider["result"].value("stopReason", std::string()),
+              "cancelled");
+    EXPECT_TRUE(probe->provider_cancelled.load());
+
+    probe->provider_release.store(true, std::memory_order_release);
+    const std::string tool_sid = "acp-tool-cancel";
+    server.handle_message(make_request(2, "session/prompt",
+        {{"sessionId", tool_sid}, {"prompt", neograph::json::array({
+            neograph::json{{"type", "text"}, {"text", "tool"}}})}}));
+    for (int i = 0; i < 200 && !probe->tool_started.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_TRUE(probe->tool_started.load());
+    server.handle_message({{"jsonrpc", "2.0"}, {"method", "session/cancel"},
+                           {"params", {{"sessionId", tool_sid}}}});
+    auto canceled_tool = cap.wait_for_response(2);
+    ASSERT_TRUE(canceled_tool.contains("result"));
+    EXPECT_EQ(canceled_tool["result"].value("stopReason", std::string()),
+              "cancelled");
+    EXPECT_TRUE(probe->tool_cancelled.load());
+}
+
+TEST(ACPServer, CancelAndDestructorDrainWithoutDuplicateResponse) {
+    auto probe = std::make_shared<CancelProbe>();
+    CapturingSink cap;
+    {
+        auto server = std::make_unique<ACPServer>(
+            build_cancel_aware_engine(probe),
+            neograph::json{{"name", "test-acp"}, {"version", "0.0.1"}});
+        server->set_notification_sink(cap.as_sink());
+        const std::string sid = "acp-dtor-cancel";
+        server->handle_message(make_request(7, "session/prompt",
+            {{"sessionId", sid}, {"prompt", neograph::json::array({
+                neograph::json{{"type", "text"}, {"text", "dtor"}}})}}));
+        for (int i = 0; i < 200 && !probe->entered.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        ASSERT_TRUE(probe->entered.load());
+        server->handle_message({{"jsonrpc", "2.0"}, {"method", "session/cancel"},
+                                {"params", {{"sessionId", sid}}}});
+    }
+    int responses = 0;
+    for (const auto& env : cap.envs) {
+        if (env.value("id", 0) == 7 && env.contains("result")) ++responses;
+    }
+    EXPECT_EQ(responses, 1);
+    EXPECT_FALSE(probe->completed.load());
 }
 
 TEST(ACPServer, UnknownMethodReturnsMethodNotFound) {
