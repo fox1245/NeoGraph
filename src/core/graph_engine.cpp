@@ -341,6 +341,7 @@ void GraphEngine::set_worker_count_auto() {
 
 void GraphEngine::set_node_cache_enabled(const std::string& node_name,
                                           bool enabled) {
+    node_cache_.set_policy(node_name, CacheKeyPolicy{});
     node_cache_.set_enabled(node_name, enabled);
 }
 
