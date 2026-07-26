@@ -70,6 +70,7 @@ class JsonSiteNode : public GraphNode {
 };
 
 struct CancelProbe {
+    std::atomic<int> starts{0};
     std::atomic<bool> entered{false};
     std::atomic<bool> normal_completion{false};
 };
@@ -80,6 +81,7 @@ class CancelAwareNode : public GraphNode {
         : name_(std::move(name)), probe_(std::move(probe)) {}
 
     asio::awaitable<NodeOutput> run(NodeInput in) override {
+        probe_->starts.fetch_add(1, std::memory_order_relaxed);
         probe_->entered.store(true, std::memory_order_release);
         const auto deadline = std::chrono::steady_clock::now() + 1s;
         while (std::chrono::steady_clock::now() < deadline) {
@@ -362,6 +364,45 @@ TEST(A2AServer, CancelUnknownBeforeStartIsDeterministic) {
             throw;
         }
     }, std::runtime_error);
+}
+
+TEST(A2AServer, DuplicateTaskIdIsRejectedWithoutReplacingOwner) {
+    auto probe = std::make_shared<CancelProbe>();
+    A2AServer server(build_cancel_aware_engine(probe), build_card(0));
+    ASSERT_TRUE(server.start_async("127.0.0.1", 0));
+    const std::string url = "http://127.0.0.1:" + std::to_string(server.port());
+    const std::string task_id = "a2a-duplicate";
+
+    std::promise<Task> completion;
+    auto done = completion.get_future();
+    std::thread runner([&] {
+        try {
+            A2AClient client(url);
+            completion.set_value(client.send_message_sync("owner", task_id));
+        } catch (...) {
+            completion.set_exception(std::current_exception());
+        }
+    });
+
+    for (int i = 0; i < 200 && !probe->entered.load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(5ms);
+    }
+    ASSERT_TRUE(probe->entered.load(std::memory_order_acquire));
+
+    A2AClient duplicate(url);
+    auto rejected = duplicate.send_message_sync("duplicate", task_id);
+    EXPECT_EQ(rejected.status.state, TaskState::Rejected);
+    ASSERT_FALSE(rejected.history.empty());
+    EXPECT_EQ(rejected.history.back().parts[0].text,
+              "task_id is already running");
+    EXPECT_EQ(probe->starts.load(std::memory_order_relaxed), 1);
+
+    A2AClient canceller(url);
+    EXPECT_EQ(canceller.cancel_task(task_id).status.state, TaskState::Canceled);
+    ASSERT_EQ(done.wait_for(500ms), std::future_status::ready);
+    EXPECT_EQ(done.get().status.state, TaskState::Canceled);
+    runner.join();
+    server.stop();
 }
 
 TEST(A2AServer, MethodNotFoundReturnsCorrectCode) {

@@ -173,6 +173,25 @@ Task build_failure_task(const std::string& task_id,
     return t;
 }
 
+Task build_rejected_task(const std::string& task_id,
+                        const std::string& context_id,
+                        const std::string& reason) {
+    Message reply;
+    reply.message_id = fresh_uuid_like();
+    reply.role       = Role::Agent;
+    reply.task_id    = task_id;
+    reply.context_id = context_id;
+    reply.parts.push_back(Part::text_part(reason));
+
+    Task t;
+    t.id             = task_id;
+    t.context_id     = context_id;
+    t.status.state   = TaskState::Rejected;
+    t.status.message = reply;
+    t.history.push_back(std::move(reply));
+    return t;
+}
+
 bool is_terminal(TaskState state) {
     return state == TaskState::Completed || state == TaskState::Canceled
         || state == TaskState::Failed || state == TaskState::Rejected
@@ -237,6 +256,7 @@ struct A2AServer::Impl {
     std::unordered_map<std::string, std::list<std::string>::iterator>
                                                               task_lru_pos;
     std::size_t max_tasks = 1024;
+    std::size_t max_inflight_runs = 32;
 
     /// Move a task_id to the most-recently-used (back) position, or
     /// insert it if it's new. Caller must hold tasks_mu.
@@ -357,6 +377,32 @@ Task A2AServer::Impl::run_graph(
     std::uint64_t generation = 0;
     {
         std::lock_guard lk(tasks_mu);
+        if (active_runs.contains(task_id)) {
+            auto rejected = build_rejected_task(
+                task_id, context_id, "task_id is already running");
+            if (on_event) {
+                TaskStatusUpdateEvent ev;
+                ev.task_id = task_id;
+                ev.context_id = context_id;
+                ev.status = rejected.status;
+                ev.final = true;
+                on_event(ev);
+            }
+            return rejected;
+        }
+        if (active_runs.size() >= max_inflight_runs) {
+            auto rejected = build_rejected_task(
+                task_id, context_id, "A2A server is at its in-flight task limit");
+            if (on_event) {
+                TaskStatusUpdateEvent ev;
+                ev.task_id = task_id;
+                ev.context_id = context_id;
+                ev.status = rejected.status;
+                ev.final = true;
+                on_event(ev);
+            }
+            return rejected;
+        }
         Task working;
         working.id            = task_id;
         working.context_id    = context_id;
