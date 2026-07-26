@@ -5,6 +5,7 @@
 #include <neograph/async/run_sync.h>
 
 #include <asio/awaitable.hpp>
+#include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
 
 #include <atomic>
@@ -49,6 +50,16 @@ json parse_response_body(const std::string& body) {
 A2AClient::A2AClient(std::string base_url)
     : base_url_(normalize_base_url(std::move(base_url))) {}
 
+void A2AClient::set_timeout(std::chrono::seconds t) {
+    std::lock_guard<std::mutex> lock(*state_mutex_);
+    timeout_ = t;
+}
+
+std::chrono::seconds A2AClient::request_timeout() const {
+    std::lock_guard<std::mutex> lock(*state_mutex_);
+    return timeout_;
+}
+
 // ---------------------------------------------------------------------------
 // JSON-RPC dispatch
 // ---------------------------------------------------------------------------
@@ -57,7 +68,7 @@ asio::awaitable<json>
 A2AClient::rpc_call_async(const std::string& method, const json& params) {
     json body = {
         {"jsonrpc", "2.0"},
-        {"id",      ++request_id_},
+        {"id",      request_id_.fetch_add(1, std::memory_order_relaxed) + 1},
         {"method",  method},
         {"params",  params},
     };
@@ -70,7 +81,7 @@ A2AClient::rpc_call_async(const std::string& method, const json& params) {
     };
 
     async::RequestOptions opts;
-    opts.timeout = timeout_;
+    opts.timeout = request_timeout();
 
     auto ex = co_await asio::this_coro::executor;
     async::HttpResponse res;
@@ -184,14 +195,35 @@ constexpr MethodPair k_cancel_task   = {"CancelTask",   "tasks/cancel"};
 
 asio::awaitable<AgentCard>
 A2AClient::fetch_agent_card_async(bool force) {
-    if (!force && card_loaded_) co_return cached_card_;
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lock(*state_mutex_);
+            if (!force && card_loaded_) co_return cached_card_;
+            if (!card_loading_) {
+                card_loading_ = true;
+                break;
+            }
+        }
+        auto timer = asio::steady_timer(co_await asio::this_coro::executor);
+        timer.expires_after(std::chrono::milliseconds(1));
+        co_await timer.async_wait(asio::use_awaitable);
+    }
+
+    std::function<void()> release_loading = [this] {
+        std::lock_guard<std::mutex> lock(*state_mutex_);
+        card_loading_ = false;
+    };
+    struct LoadingGuard {
+        std::function<void()> release;
+        ~LoadingGuard() { if (release) release(); }
+    } guard{release_loading};
 
     auto endpoint = async::split_async_endpoint(base_url_);
     std::vector<std::pair<std::string, std::string>> headers = {
         {"Accept", "application/json"},
     };
     async::RequestOptions opts;
-    opts.timeout = timeout_;
+    opts.timeout = request_timeout();
 
     auto ex = co_await asio::this_coro::executor;
     auto path = endpoint.prefix + kDiscoveryPath;
@@ -220,8 +252,13 @@ A2AClient::fetch_agent_card_async(bool force) {
             std::string("A2A AgentCard not valid JSON: ") + e.what());
     }
 
-    cached_card_ = card;
-    card_loaded_ = true;
+    {
+        std::lock_guard<std::mutex> lock(*state_mutex_);
+        cached_card_ = card;
+        card_loaded_ = true;
+        card_loading_ = false;
+    }
+    guard.release = {};
     co_return card;
 }
 
@@ -387,7 +424,7 @@ Task A2AClient::send_message_stream(const MessageSendParams& params,
     to_json(p, params);
     json body = {
         {"jsonrpc", "2.0"},
-        {"id",      ++request_id_},
+        {"id",      request_id_.fetch_add(1, std::memory_order_relaxed) + 1},
         {"method",  "message/stream"},
         {"params",  p},
     };
@@ -399,7 +436,7 @@ Task A2AClient::send_message_stream(const MessageSendParams& params,
     };
 
     async::RequestOptions opts;
-    opts.timeout = timeout_;
+    opts.timeout = request_timeout();
 
     Task last_task;
     SseFrameSplitter splitter;

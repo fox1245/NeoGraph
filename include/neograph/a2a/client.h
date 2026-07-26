@@ -23,6 +23,9 @@
 
 #include <chrono>
 #include <functional>
+#include <memory>
+#include <atomic>
+#include <mutex>
 #include <string>
 
 namespace neograph::a2a {
@@ -48,7 +51,7 @@ class NEOGRAPH_API A2AClient {
     explicit A2AClient(std::string base_url);
 
     /// Override the default 30 s request timeout.
-    void set_timeout(std::chrono::seconds t) { timeout_ = t; }
+    void set_timeout(std::chrono::seconds t);
 
     /**
      * @brief GET /.well-known/agent-card.json.
@@ -133,11 +136,16 @@ class NEOGRAPH_API A2AClient {
   private:
     std::string base_url_;
     std::chrono::seconds timeout_ = std::chrono::seconds(30);
-    int request_id_ = 0;
+    std::atomic<int> request_id_{0};
+
+    mutable std::shared_ptr<std::mutex> state_mutex_ = std::make_shared<std::mutex>();
+    bool card_loading_ = false;
 
     /// Cached agent card (populated by fetch_agent_card).
     AgentCard cached_card_;
     bool      card_loaded_ = false;
+
+    std::chrono::seconds request_timeout() const;
 };
 
 } // namespace neograph::a2a
