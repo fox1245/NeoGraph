@@ -1,4 +1,8 @@
 #include <neograph/llm/openai_provider.h>
+#include <neograph/graph/cancel.h>
+#include <asio/bind_cancellation_slot.hpp>
+#include <asio/co_spawn.hpp>
+#include <asio/use_awaitable.hpp>
 
 #include <neograph/async/conn_pool.h>
 #include <neograph/async/endpoint.h>
@@ -149,7 +153,7 @@ OpenAIProvider::complete_async(const CompletionParams& params)
         opts.timeout = std::chrono::seconds(config_.timeout_seconds);
     }
 
-    auto res = co_await conn_pool_->async_post(
+    auto request = conn_pool_->async_post(
         endpoint.host,
         endpoint.port,
         chat_completions_path(endpoint.prefix),
@@ -157,6 +161,19 @@ OpenAIProvider::complete_async(const CompletionParams& params)
         std::move(headers),
         endpoint.tls,
         opts);
+    auto executor = co_await asio::this_coro::executor;
+    auto operation = params.cancel_token
+        ? params.cancel_token->fork()
+        : std::shared_ptr<neograph::graph::CancelToken>{};
+    if (operation) {
+        operation->bind_executor(executor);
+    }
+    auto res = operation
+        ? co_await asio::co_spawn(
+              executor, std::move(request),
+              asio::bind_cancellation_slot(
+                  operation->slot(), asio::use_awaitable))
+        : co_await std::move(request);
 
     if (res.status == 429) {
         throw RateLimitError(

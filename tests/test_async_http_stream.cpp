@@ -27,8 +27,10 @@
 #include <atomic>
 #include <chrono>
 #include <exception>
+#include <memory>
 #include <istream>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -322,6 +324,97 @@ TEST(AsyncHttpOwnership, StreamSnapshotsEndpointAndCallbackBeforeFirstResume) {
 
     EXPECT_EQ(resp.status, 200);
     EXPECT_EQ(received, "owned");
+}
+
+TEST(AsyncHttpOwnership, StreamCancellationOwnsCallbackUntilAwaitableCompletes) {
+    struct SlowStreamServer {
+        asio::io_context io;
+        asio::ip::tcp::acceptor acceptor{io};
+        std::thread worker;
+        unsigned short port = 0;
+
+        SlowStreamServer() {
+            acceptor.open(asio::ip::tcp::v4());
+            acceptor.set_option(asio::ip::tcp::acceptor::reuse_address(true));
+            acceptor.bind(asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 0));
+            acceptor.listen();
+            port = acceptor.local_endpoint().port();
+            asio::co_spawn(io, accept_loop(), asio::detached);
+            worker = std::thread([this] { io.run(); });
+        }
+
+        ~SlowStreamServer() {
+            asio::error_code ec;
+            acceptor.close(ec);
+            io.stop();
+            if (worker.joinable()) worker.join();
+        }
+
+        asio::awaitable<void> accept_loop() {
+            asio::ip::tcp::socket sock{io};
+            asio::error_code ec;
+            co_await acceptor.async_accept(
+                sock, asio::redirect_error(asio::use_awaitable, ec));
+            if (ec) co_return;
+            try {
+                asio::streambuf buf;
+                co_await asio::async_read_until(sock, buf, "\r\n\r\n",
+                                                asio::use_awaitable);
+                asio::steady_timer timer(io);
+                timer.expires_after(std::chrono::milliseconds(200));
+                co_await timer.async_wait(asio::use_awaitable);
+                const std::string resp =
+                    "HTTP/1.1 200 OK\r\n"
+                    "Transfer-Encoding: chunked\r\n"
+                    "Connection: close\r\n\r\n"
+                    "4\r\nlate\r\n"
+                    "0\r\n\r\n";
+                co_await asio::async_write(sock, asio::buffer(resp),
+                                           asio::use_awaitable);
+            } catch (...) { }
+            asio::error_code ignored;
+            sock.close(ignored);
+        }
+    } srv;
+
+    struct CallbackState {
+        std::atomic<int>* chunks;
+        explicit CallbackState(std::atomic<int>* chunks) : chunks(chunks) {}
+        void operator()(std::string_view) const {
+            chunks->fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+
+    asio::io_context io;
+    std::atomic<int> chunks{0};
+    std::weak_ptr<CallbackState> weak_callback;
+
+    asio::awaitable<neograph::async::HttpStreamResponse> operation;
+    {
+        auto callback_state = std::make_shared<CallbackState>(&chunks);
+        weak_callback = callback_state;
+        neograph::async::RequestOptions opts;
+        opts.timeout = std::chrono::milliseconds(25);
+        operation = neograph::async::async_post_stream(
+            io.get_executor(), "127.0.0.1", std::to_string(srv.port),
+            "/v1/stream", "{}", {}, false,
+            [callback_state](std::string_view chunk) {
+                (*callback_state)(chunk);
+            },
+            opts);
+    }
+
+    ASSERT_FALSE(weak_callback.expired())
+        << "stored awaitable must own the callback before first resume";
+
+    auto future = asio::co_spawn(io, std::move(operation), asio::use_future);
+    io.run();
+
+    EXPECT_THROW((void)future.get(), asio::system_error);
+    EXPECT_TRUE(weak_callback.expired())
+        << "cancelled stream should release callback captures on completion";
+    EXPECT_EQ(chunks.load(std::memory_order_relaxed), 0)
+        << "timeout cancellation must not deliver late chunks";
 }
 
 }  // namespace

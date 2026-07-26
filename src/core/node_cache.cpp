@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 
 namespace neograph::graph {
 
@@ -16,21 +17,41 @@ bool NodeCache::is_enabled(const std::string& node_name) const {
     return enabled_nodes_.count(node_name) != 0;
 }
 
+void NodeCache::set_policy(const std::string& node_name, CacheKeyPolicy policy) {
+    std::lock_guard<std::mutex> lock(mu_);
+    policies_[node_name] = std::move(policy);
+}
+
+CacheKeyPolicy NodeCache::policy_for(const std::string& node_name) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = policies_.find(node_name);
+    return it == policies_.end() ? CacheKeyPolicy{} : it->second;
+}
+
 std::string NodeCache::make_key(const std::string& node_name,
-                                const std::string& state_hash) {
+                                 const std::string& state_hash,
+                                 const std::string& scope_key) {
     std::string k;
-    k.reserve(node_name.size() + 1 + state_hash.size());
-    k.append(node_name);
-    k.push_back(':');
-    k.append(state_hash);
+    k.reserve(node_name.size() + state_hash.size() + scope_key.size() + 32);
+    for (const auto* part : {&node_name, &scope_key, &state_hash}) {
+        k.append(std::to_string(part->size()));
+        k.push_back(':');
+        k.append(*part);
+    }
     return k;
 }
 
 std::optional<NodeResult> NodeCache::lookup(const std::string& node_name,
-                                            const std::string& state_hash) const {
+                                             const std::string& state_hash) const {
+    return lookup(node_name, state_hash, {});
+}
+
+std::optional<NodeResult> NodeCache::lookup(const std::string& node_name,
+                                             const std::string& state_hash,
+                                             const std::string& scope_key) const {
     std::lock_guard<std::mutex> lock(mu_);
     if (enabled_nodes_.count(node_name) == 0) return std::nullopt;
-    auto it = entries_.find(make_key(node_name, state_hash));
+    auto it = entries_.find(make_key(node_name, state_hash, scope_key));
     if (it == entries_.end()) {
         ++misses_;
         return std::nullopt;
@@ -42,9 +63,16 @@ std::optional<NodeResult> NodeCache::lookup(const std::string& node_name,
 void NodeCache::store(const std::string& node_name,
                       const std::string& state_hash,
                       NodeResult result) {
+    store(node_name, state_hash, {}, std::move(result));
+}
+
+void NodeCache::store(const std::string& node_name,
+                      const std::string& state_hash,
+                      const std::string& scope_key,
+                      NodeResult result) {
     std::lock_guard<std::mutex> lock(mu_);
     if (enabled_nodes_.count(node_name) == 0) return;
-    entries_[make_key(node_name, state_hash)] = std::move(result);
+    entries_[make_key(node_name, state_hash, scope_key)] = std::move(result);
 }
 
 void NodeCache::clear() {

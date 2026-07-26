@@ -2,9 +2,23 @@
 
 #include <neograph/graph/state.h>
 
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
 #include <stdexcept>
 
 namespace neograph::a2a {
+
+namespace {
+std::string fresh_caller_message_id() {
+    static std::atomic<std::uint64_t> counter{0};
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "ng-a2a-call-%016llx",
+                  static_cast<unsigned long long>(
+                      counter.fetch_add(1, std::memory_order_relaxed)));
+    return buf;
+}
+}
 
 using neograph::graph::ChannelWrite;
 using neograph::graph::GraphState;
@@ -38,8 +52,7 @@ asio::awaitable<NodeOutput> A2ACallerNode::run(NodeInput in) {
     auto context_id_val = in.state.get(output_key_ + "_context_id");
 
     MessageSendParams params;
-    params.message.message_id = name_ + "-" + std::to_string(
-        reinterpret_cast<std::uintptr_t>(this) & 0xFFFF);
+    params.message.message_id = fresh_caller_message_id();
     params.message.role = Role::User;
     params.message.parts.push_back(Part::text_part(std::move(prompt)));
     if (task_id_val.is_string())    params.message.task_id    = task_id_val.get<std::string>();

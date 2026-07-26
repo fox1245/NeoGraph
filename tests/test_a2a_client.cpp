@@ -10,15 +10,23 @@
 
 #include <gtest/gtest.h>
 #include <neograph/a2a/client.h>
+#include <neograph/a2a/a2a_caller_node.h>
 #include <neograph/a2a/harness_backend.h>
+#include <neograph/async/run_sync.h>
+#include <neograph/graph/run_context.h>
+#include <neograph/graph/state.h>
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
 
 #include <atomic>
 #include <chrono>
+#include <future>
+#include <mutex>
+#include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
 using namespace neograph;
 using namespace neograph::a2a;
@@ -32,6 +40,9 @@ struct MockA2AServer {
 
     std::atomic<int>           rpc_count{0};
     std::atomic<int>           card_count{0};
+    std::mutex                 observed_mutex;
+    std::vector<int>           request_ids;
+    std::vector<std::string>   message_ids;
     std::string                last_method;
     json                       last_params;
     std::string                last_card_request_path;
@@ -75,7 +86,10 @@ struct MockA2AServer {
         svr.Get("/.well-known/agent-card.json",
                 [this](const httplib::Request& req, httplib::Response& res) {
                     card_count.fetch_add(1, std::memory_order_relaxed);
-                    last_card_request_path = req.path;
+                    {
+                        std::lock_guard<std::mutex> lock(observed_mutex);
+                        last_card_request_path = req.path;
+                    }
                     res.status = 200;
                     res.set_content(card.dump(), "application/json");
                 });
@@ -83,14 +97,23 @@ struct MockA2AServer {
         svr.Post("/", [this](const httplib::Request& req, httplib::Response& res) {
             rpc_count.fetch_add(1, std::memory_order_relaxed);
             int id = 0;
+            json parsed;
             try {
-                auto parsed = json::parse(req.body);
+                parsed = json::parse(req.body);
                 if (parsed.is_object()) {
                     id           = parsed.value("id", 0);
+                    std::lock_guard<std::mutex> lock(observed_mutex);
                     last_method  = parsed.value("method", std::string());
                     if (parsed.contains("params")) last_params = parsed["params"];
                 }
             } catch (...) {}
+
+            {
+                std::lock_guard<std::mutex> lock(observed_mutex);
+                request_ids.push_back(id);
+                if (parsed.contains("params") && parsed["params"].contains("message"))
+                    message_ids.push_back(parsed["params"]["message"].value("messageId", std::string()));
+            }
 
             json envelope;
             envelope["jsonrpc"] = "2.0";
@@ -159,6 +182,147 @@ TEST(A2AClient, FetchAgentCardCachesByDefault) {
 
     (void)client.fetch_agent_card(/*force=*/true);
     EXPECT_EQ(srv.card_count.load(), 2);
+}
+
+TEST(A2AClient, ConcurrentFirstCardFetchInitializesCacheOnce) {
+    MockA2AServer srv;
+    A2AClient client(srv.url());
+    constexpr int callers = 16;
+    std::atomic<bool> start{false};
+    std::vector<std::future<AgentCard>> futures;
+    futures.reserve(callers);
+
+    for (int i = 0; i < callers; ++i) {
+        futures.push_back(std::async(std::launch::async, [&] {
+            while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+            return client.fetch_agent_card();
+        }));
+    }
+    start.store(true, std::memory_order_release);
+    for (auto& future : futures) EXPECT_EQ(future.get().name, "mock-agent");
+    EXPECT_EQ(srv.card_count.load(), 1);
+}
+
+TEST(A2AClient, ConcurrentCallsHaveUniqueRequestIdsWhileTimeoutChanges) {
+    MockA2AServer srv;
+    A2AClient client(srv.url());
+    constexpr int callers = 32;
+    std::atomic<bool> start{false};
+    std::vector<std::future<void>> futures;
+    futures.reserve(callers);
+
+    std::thread config_writer([&] {
+        while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+        for (int i = 1; i <= 1000; ++i) client.set_timeout(std::chrono::seconds(i % 3 + 1));
+    });
+    for (int i = 0; i < callers; ++i) {
+        futures.push_back(std::async(std::launch::async, [&] {
+            while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+            (void)client.send_message_sync("concurrent");
+        }));
+    }
+    start.store(true, std::memory_order_release);
+    for (auto& future : futures) future.get();
+    config_writer.join();
+
+    std::lock_guard<std::mutex> lock(srv.observed_mutex);
+    std::set<int> ids(srv.request_ids.begin(), srv.request_ids.end());
+    EXPECT_EQ(srv.request_ids.size(), static_cast<std::size_t>(callers));
+    EXPECT_EQ(ids.size(), srv.request_ids.size());
+}
+
+TEST(A2AClient, ConcurrentSendAndGetUseUniqueRequestIds) {
+    MockA2AServer srv;
+    A2AClient client(srv.url());
+    constexpr int callers = 16;
+    std::atomic<bool> start{false};
+    std::vector<std::future<void>> futures;
+    futures.reserve(callers * 2);
+
+    for (int i = 0; i < callers; ++i) {
+        futures.push_back(std::async(std::launch::async, [&] {
+            while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+            (void)client.send_message_sync("send");
+        }));
+        futures.push_back(std::async(std::launch::async, [&] {
+            while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+            (void)client.get_task("task-concurrent");
+        }));
+    }
+    start.store(true, std::memory_order_release);
+    for (auto& future : futures) future.get();
+
+    std::lock_guard<std::mutex> lock(srv.observed_mutex);
+    std::set<int> ids(srv.request_ids.begin(), srv.request_ids.end());
+    EXPECT_EQ(srv.request_ids.size(), static_cast<std::size_t>(callers * 2));
+    EXPECT_EQ(ids.size(), srv.request_ids.size());
+}
+
+TEST(A2AClient, ConcurrentForcedCardRefreshesAreSerialized) {
+    MockA2AServer srv;
+    A2AClient client(srv.url());
+    (void)client.fetch_agent_card();
+    constexpr int callers = 8;
+    std::atomic<bool> start{false};
+    std::vector<std::future<AgentCard>> futures;
+    futures.reserve(callers);
+
+    for (int i = 0; i < callers; ++i) {
+        futures.push_back(std::async(std::launch::async, [&] {
+            while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+            return client.fetch_agent_card(true);
+        }));
+    }
+    start.store(true, std::memory_order_release);
+    for (auto& future : futures) EXPECT_EQ(future.get().name, "mock-agent");
+    EXPECT_EQ(srv.card_count.load(), callers + 1);
+}
+
+TEST(A2ACallerNode, RepeatedCallsUseUniqueCallScopedMessageIds) {
+    MockA2AServer srv;
+    auto client = std::make_shared<A2AClient>(srv.url());
+    A2ACallerNode node("caller", client);
+    neograph::graph::GraphState state;
+    state.init_channel("prompt", neograph::graph::ReducerType::OVERWRITE,
+        [](const json&, const json& incoming) { return incoming; });
+    state.write("prompt", "hello");
+    neograph::graph::RunContext ctx;
+
+    for (int i = 0; i < 8; ++i)
+        (void)neograph::async::run_sync(node.run({state, ctx}));
+
+    std::lock_guard<std::mutex> lock(srv.observed_mutex);
+    std::set<std::string> ids(srv.message_ids.begin(), srv.message_ids.end());
+    EXPECT_EQ(srv.message_ids.size(), 8u);
+    EXPECT_EQ(ids.size(), srv.message_ids.size());
+    for (const auto& id : srv.message_ids) {
+        EXPECT_EQ(id.rfind("ng-a2a-call-", 0), 0u);
+        EXPECT_EQ(id.find("0x"), std::string::npos);
+    }
+}
+
+TEST(A2ACallerNode, ConcurrentCallsUseUniqueCallScopedMessageIds) {
+    MockA2AServer srv;
+    auto client = std::make_shared<A2AClient>(srv.url());
+    A2ACallerNode node("caller", client);
+    neograph::graph::GraphState state;
+    state.init_channel("prompt", neograph::graph::ReducerType::OVERWRITE,
+        [](const json&, const json& incoming) { return incoming; });
+    state.write("prompt", "hello");
+    neograph::graph::RunContext ctx;
+    constexpr int callers = 32;
+    std::vector<std::future<void>> futures;
+    for (int i = 0; i < callers; ++i) {
+        futures.push_back(std::async(std::launch::async, [&] {
+            (void)neograph::async::run_sync(node.run({state, ctx}));
+        }));
+    }
+    for (auto& future : futures) future.get();
+
+    std::lock_guard<std::mutex> lock(srv.observed_mutex);
+    std::set<std::string> ids(srv.message_ids.begin(), srv.message_ids.end());
+    EXPECT_EQ(srv.message_ids.size(), static_cast<std::size_t>(callers));
+    EXPECT_EQ(ids.size(), srv.message_ids.size());
 }
 
 TEST(A2AClient, SendMessageUsesCanonicalMethodName) {

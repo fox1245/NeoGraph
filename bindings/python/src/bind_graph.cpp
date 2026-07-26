@@ -1014,7 +1014,8 @@ void init_graph(py::module_& m) {
             "serially on a single thread until this (or set_worker_count(N)) "
             "is called explicitly. Must be called before any run().")
 
-        .def("set_node_cache_enabled", &GraphEngine::set_node_cache_enabled,
+        .def("set_node_cache_enabled",
+             py::overload_cast<const std::string&, bool>(&GraphEngine::set_node_cache_enabled),
             py::arg("node_name"), py::arg("enabled"),
             "Opt a node into result caching. The executor hashes the "
             "input state and replays a cached NodeResult on hit, "
@@ -1022,7 +1023,8 @@ void init_graph(py::module_& m) {
             "only enable for pure nodes (deterministic, no side "
             "effects). Streaming runs (run_stream) bypass the cache "
             "for the affected node because cached hits cannot replay "
-            "LLM_TOKEN events.")
+            "LLM_TOKEN events. Cache entries are execution-local; cross-run "
+            "reuse is available only through the C++ CacheKeyPolicy API.")
 
         .def("clear_node_cache", &GraphEngine::clear_node_cache,
             "Drop all cached NodeResults. Per-node enable state is "

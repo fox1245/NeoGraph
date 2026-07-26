@@ -23,10 +23,20 @@ public:
 
     std::string get_name() const override { return name_; }
 
-    asio::awaitable<NodeOutput> run(NodeInput /*in*/) override {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
         counter_->fetch_add(1, std::memory_order_relaxed);
+        std::string value = "hit";
+        if (in.ctx.store) {
+            if (auto item = in.ctx.store->get({"cache"}, "value")) {
+                value = item->value.get<std::string>();
+            }
+        }
+        if (in.ctx.tool_gate) {
+            auto decision = co_await in.ctx.tool_gate(ToolCall{}, ToolGateContext{});
+            value = decision.kind == ToolDecision::Kind::Allow ? "allow" : "deny";
+        }
         NodeOutput out;
-        out.writes.push_back(ChannelWrite{"out", json("hit")});
+        out.writes.push_back(ChannelWrite{"out", json(value)});
         co_return out;
     }
 
@@ -79,11 +89,31 @@ TEST(NodeCache, DisabledByDefault) {
     EXPECT_EQ(engine->node_cache().miss_count(), 0u);
 }
 
+TEST(NodeCache, DefaultScopePartitionsTenants) {
+    auto counter = std::make_shared<std::atomic<int>>(0);
+    auto engine  = build_engine_with_node(counter);
+    engine->set_node_cache_enabled("work", true);
+
+    RunConfig cfg;
+    cfg.input = json::object();
+    cfg.max_steps = 5;
+    cfg.thread_id = "tenant-a";
+    engine->run(cfg);
+    cfg.thread_id = "tenant-b";
+    engine->run(cfg);
+
+    EXPECT_EQ(counter->load(), 2);
+    EXPECT_EQ(engine->node_cache().hit_count(), 0u);
+    EXPECT_EQ(engine->node_cache().miss_count(), 2u);
+    EXPECT_EQ(engine->node_cache().size(), 2u);
+}
+
 TEST(NodeCache, EnabledNodeReplaysCachedResult) {
     auto counter = std::make_shared<std::atomic<int>>(0);
     auto engine  = build_engine_with_node(counter);
 
-    engine->set_node_cache_enabled("work", true);
+    engine->set_node_cache_enabled(
+        "work", true, CacheKeyPolicy{CacheScope::Reusable, {}});
 
     RunConfig cfg;
     cfg.thread_id = "t1";
@@ -171,4 +201,92 @@ TEST(NodeCache, DifferentInputsProduceDifferentEntries) {
     // Different seed inputs → different state hashes → two misses.
     EXPECT_EQ(counter->load(), 2);
     EXPECT_EQ(engine->node_cache().size(), 2u);
+}
+TEST(NodeCache, ReusableScopePartitionsDeclaredContext) {
+    auto counter = std::make_shared<std::atomic<int>>(0);
+    auto engine  = build_engine_with_node(counter);
+    engine->set_node_cache_enabled(
+        "work", true, CacheKeyPolicy{
+            CacheScope::Reusable,
+            [](const RunContext& ctx) { return ctx.thread_id; }});
+
+    RunConfig cfg;
+    cfg.input = json::object();
+    cfg.max_steps = 5;
+    cfg.thread_id = "tenant-a";
+    engine->run(cfg);
+    engine->run(cfg);
+    cfg.thread_id = "tenant-b";
+    engine->run(cfg);
+
+    EXPECT_EQ(counter->load(), 2);
+    EXPECT_EQ(engine->node_cache().hit_count(), 1u);
+    EXPECT_EQ(engine->node_cache().miss_count(), 2u);
+}
+std::string cached_out(const RunResult& result) {
+    return result.output["channels"]["out"]["value"].get<std::string>();
+}
+
+TEST(NodeCache, DefaultScopePartitionsStoreAndToolGate) {
+    auto counter = std::make_shared<std::atomic<int>>(0);
+    auto engine = build_engine_with_node(counter);
+    engine->set_node_cache_enabled("work", true);
+
+    auto first_store = std::make_shared<InMemoryStore>();
+    first_store->put({"cache"}, "value", "store-a");
+    engine->set_store(first_store);
+    RunConfig cfg;
+    cfg.thread_id = "same-thread";
+    cfg.input = json::object();
+    cfg.max_steps = 5;
+    EXPECT_EQ(cached_out(engine->run(cfg)), "store-a");
+
+    auto second_store = std::make_shared<InMemoryStore>();
+    second_store->put({"cache"}, "value", "store-b");
+    engine->set_store(second_store);
+    EXPECT_EQ(cached_out(engine->run(cfg)), "store-b");
+
+    engine->set_store({});
+    engine->set_tool_gate([](ToolCall, ToolGateContext) -> asio::awaitable<ToolDecision> {
+        co_return ToolDecision::allow();
+    });
+    EXPECT_EQ(cached_out(engine->run(cfg)), "allow");
+    engine->set_tool_gate([](ToolCall, ToolGateContext) -> asio::awaitable<ToolDecision> {
+        co_return ToolDecision::deny("policy-b");
+    });
+    EXPECT_EQ(cached_out(engine->run(cfg)), "deny");
+    EXPECT_EQ(counter->load(), 4);
+    EXPECT_EQ(engine->node_cache().hit_count(), 0u);
+}
+
+TEST(NodeCache, LegacyEnableResetsReusablePolicy) {
+    auto counter = std::make_shared<std::atomic<int>>(0);
+    auto engine = build_engine_with_node(counter);
+    engine->set_node_cache_enabled("work", true, CacheKeyPolicy{CacheScope::Reusable, {}});
+    RunConfig cfg;
+    cfg.input = json::object();
+    cfg.max_steps = 5;
+    engine->run(cfg);
+    engine->set_node_cache_enabled("work", false);
+    engine->set_node_cache_enabled("work", true);
+    engine->run(cfg);
+    EXPECT_EQ(counter->load(), 2);
+    EXPECT_EQ(engine->node_cache().hit_count(), 0u);
+}
+TEST(NodeCache, DefaultScopePartitionsAutoResume) {
+    auto counter = std::make_shared<std::atomic<int>>(0);
+    auto engine = build_engine_with_node(counter);
+    engine->set_node_cache_enabled("work", true);
+
+    RunConfig cfg;
+    cfg.thread_id = "resume-thread";
+    cfg.input = json::object();
+    cfg.max_steps = 5;
+    engine->run(cfg);
+    cfg.resume_if_exists = true;
+    engine->run(cfg);
+
+    EXPECT_EQ(counter->load(), 2);
+    EXPECT_EQ(engine->node_cache().hit_count(), 0u);
+    EXPECT_EQ(engine->node_cache().miss_count(), 2u);
 }

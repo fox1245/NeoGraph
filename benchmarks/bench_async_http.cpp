@@ -14,6 +14,10 @@
 //                      Mirrors today's schema_provider wire shape.
 //       --mode async : `--client-threads` io_context workers + N
 //                      coroutines each doing M async_post() calls.
+//       --mode ownership_construct : construct and destroy public HTTP
+//                      awaitables without resuming them. This isolates
+//                      the API-entry ownership facade cost from TCP, HTTP
+//                      parse, and coroutine scheduling.
 //
 // Output identical to bench_async_fanout (wall, ops/s, peak RSS) so
 // the two can be read side-by-side.
@@ -47,7 +51,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -62,6 +68,8 @@ struct Config {
     int         client_threads = 0;     // async only; 0 = hardware_concurrency
     int         server_threads = 4;
     int         port           = 18080;
+    std::string ownership_api  = "post"; // ownership_construct only
+    int         body_bytes     = 32;      // ownership_construct only
 };
 
 Config parse(int argc, char** argv) {
@@ -76,6 +84,8 @@ Config parse(int argc, char** argv) {
         else if (a == "--client-threads")  c.client_threads = std::stoi(next());
         else if (a == "--server-threads")  c.server_threads = std::stoi(next());
         else if (a == "--port")            c.port           = std::stoi(next());
+        else if (a == "--ownership-api")   c.ownership_api  = next();
+        else if (a == "--body-bytes")      c.body_bytes     = std::stoi(next());
     }
     if (c.client_threads == 0)
         c.client_threads = static_cast<int>(std::thread::hardware_concurrency());
@@ -95,6 +105,23 @@ double peak_rss_mb() {
         }
     }
     return -1.0;
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+template <class T>
+void do_not_optimize(const T& value) {
+    asm volatile("" : : "g"(&value) : "memory");
+}
+#else
+template <class T>
+void do_not_optimize(const T& value) {
+    (void)value;
+}
+#endif
+
+std::string make_body(int bytes) {
+    if (bytes <= 0) return {};
+    return std::string(static_cast<std::size_t>(bytes), 'x');
 }
 
 // ── Mock HTTP server ──────────────────────────────────────────────────
@@ -364,10 +391,67 @@ void run_async_pool(const Config& cfg) {
     for (auto& t : ts) t.join();
 }
 
+
+void run_ownership_construct(const Config& cfg) {
+    asio::io_context io;
+    const auto ex = io.get_executor();
+    neograph::async::ConnPool pool(ex);
+    const std::string host = "127.0.0.1";
+    const std::string port = std::to_string(cfg.port);
+    const std::string path = "/v1/messages";
+    const std::string body = make_body(cfg.body_bytes);
+    const std::vector<std::pair<std::string, std::string>> headers = {
+        {"Content-Type", "application/json"},
+        {"X-Bench", "ownership"},
+    };
+    std::function<void(std::string_view)> on_chunk = [](std::string_view) {};
+    const int total = cfg.concur * cfg.rounds;
+
+    for (int i = 0; i < total; ++i) {
+        if (cfg.ownership_api == "post") {
+            auto op = neograph::async::async_post(
+                ex, host, port, path, body, headers, false);
+            do_not_optimize(op);
+        } else if (cfg.ownership_api == "get") {
+            auto op = neograph::async::async_get(
+                ex, host, port, path, headers, false);
+            do_not_optimize(op);
+        } else if (cfg.ownership_api == "stream") {
+            auto op = neograph::async::async_post_stream(
+                ex, host, port, path, body, headers, false, on_chunk);
+            do_not_optimize(op);
+        } else if (cfg.ownership_api == "pool") {
+            auto op = pool.async_post(host, port, path, body, headers, false);
+            do_not_optimize(op);
+        } else {
+            throw std::runtime_error("unknown --ownership-api: " + cfg.ownership_api);
+        }
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     Config cfg = parse(argc, argv);
+
+    if (cfg.mode == "ownership_construct") {
+        auto t0 = std::chrono::steady_clock::now();
+        try {
+            run_ownership_construct(cfg);
+        } catch (const std::exception& e) {
+            std::cerr << e.what() << "\n";
+            return 2;
+        }
+        auto wall = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - t0).count();
+        const double total_ops = static_cast<double>(cfg.concur) * cfg.rounds;
+        std::printf("mode=%s api=%s ops=%.0f body_bytes=%d wall=%0.6fs "
+                    "ns/op=%0.1f rss_mb=%0.1f\n",
+                    cfg.mode.c_str(), cfg.ownership_api.c_str(), total_ops,
+                    cfg.body_bytes, wall, wall * 1.0e9 / total_ops,
+                    peak_rss_mb());
+        return 0;
+    }
 
     // Start the server. Its destructor (end of scope) stops the io.
     Server server(cfg.port, cfg.server_threads, cfg.latency_ms);

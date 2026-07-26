@@ -54,16 +54,18 @@ def test_cache_off_by_default():
 
 def test_enable_caches_identical_runs():
     e, node = _build()
+    # Python exposes the backward-compatible safe default only; cross-run
+    # reuse requires the C++ CacheKeyPolicy API.
     e.set_node_cache_enabled("work", True)
 
     for tid in ("a", "b", "c"):
         e.run(ng.RunConfig(thread_id=tid, input={}, max_steps=5))
 
-    assert node.calls == 1
+    assert node.calls == 3
     stats = e.node_cache_stats()
-    assert stats["hits"]   == 2
-    assert stats["misses"] == 1
-    assert stats["size"]   == 1
+    assert stats["hits"]   == 0
+    assert stats["misses"] == 3
+    assert stats["size"]   == 3
 
 
 def test_clear_drops_entries():

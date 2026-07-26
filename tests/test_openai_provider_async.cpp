@@ -14,13 +14,17 @@
 #include <gtest/gtest.h>
 #include <neograph/llm/openai_provider.h>
 #include <neograph/async/run_sync.h>
+#include <neograph/graph/cancel.h>
+#include <future>
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
 
 #include <asio/io_context.hpp>
 #include <asio/co_spawn.hpp>
+#include <asio/bind_cancellation_slot.hpp>
 #include <asio/detached.hpp>
+#include <asio/this_coro.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -55,6 +59,7 @@ struct MockServer {
     std::thread     t;
     int             port = 0;
     std::atomic<int> request_count{0};
+    std::atomic<bool> hold{false};
     int             status = 200;
     std::string     body  = kOpenAIBody;
     std::string     retry_after;  // header value when status == 429
@@ -62,6 +67,9 @@ struct MockServer {
     MockServer() {
         const auto handler = [this](const httplib::Request&, httplib::Response& res) {
             request_count.fetch_add(1, std::memory_order_relaxed);
+            while (hold.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
             res.status = status;
             if (!retry_after.empty()) {
                 res.set_header("Retry-After", retry_after);
@@ -108,6 +116,39 @@ CompletionParams make_params() {
 }
 
 } // namespace
+
+TEST(OpenAIProviderAsync, CancelTokenAbortsLocalProviderSocket) {
+    MockServer mock;
+    mock.hold.store(true, std::memory_order_release);
+    auto provider = llm::OpenAIProvider::create(make_config(mock));
+    auto params = make_params();
+    auto token = std::make_shared<neograph::graph::CancelToken>();
+    params.cancel_token = token;
+
+    asio::io_context io;
+    std::promise<bool> finished;
+    auto result = finished.get_future();
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        try {
+            token->bind_executor(co_await asio::this_coro::executor);
+            (void)co_await provider->complete_async(params);
+            finished.set_value(false);
+        } catch (...) {
+            finished.set_value(true);
+        }
+    }, asio::bind_cancellation_slot(token->slot(), asio::detached));
+    std::thread runner([&] { io.run(); });
+    for (int i = 0; i < 200 && mock.request_count.load() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_EQ(mock.request_count.load(), 1);
+    token->cancel();
+    ASSERT_EQ(result.wait_for(std::chrono::milliseconds(500)),
+              std::future_status::ready);
+    EXPECT_TRUE(result.get());
+    mock.hold.store(false, std::memory_order_release);
+    runner.join();
+}
 
 TEST(OpenAIProviderAsync, CompleteAsyncReturnsParsedCompletion) {
     MockServer mock;

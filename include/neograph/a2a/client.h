@@ -23,6 +23,9 @@
 
 #include <chrono>
 #include <functional>
+#include <memory>
+#include <atomic>
+#include <mutex>
 #include <string>
 
 namespace neograph::a2a {
@@ -30,8 +33,14 @@ namespace neograph::a2a {
 /**
  * @brief A2A client — call a remote agent over JSON-RPC + HTTP.
  *
- * Thread-safe: every public method acquires its own ephemeral HTTP
- * connection; no shared in-flight state. Reuses
+ * Thread-safe for concurrent use of one instance. `base_url` is immutable;
+ * `set_timeout` is synchronized and each request snapshots the timeout before
+ * network I/O, so a timeout update cannot race or alter an in-flight request.
+ * JSON-RPC request IDs are process-local atomic counters. Agent-card cache
+ * initialization and `force` refreshes are single-flight and synchronized;
+ * waiting callers receive a copy, and no network I/O occurs under the state
+ * lock. Stream callbacks still run on the network thread and must provide
+ * their own synchronization for shared application state. Reuses
  * neograph::async::async_post for transport.
  *
  * @code
@@ -48,7 +57,7 @@ class NEOGRAPH_API A2AClient {
     explicit A2AClient(std::string base_url);
 
     /// Override the default 30 s request timeout.
-    void set_timeout(std::chrono::seconds t) { timeout_ = t; }
+    void set_timeout(std::chrono::seconds t);
 
     /**
      * @brief GET /.well-known/agent-card.json.
@@ -133,11 +142,16 @@ class NEOGRAPH_API A2AClient {
   private:
     std::string base_url_;
     std::chrono::seconds timeout_ = std::chrono::seconds(30);
-    int request_id_ = 0;
+    std::atomic<int> request_id_{0};
+
+    mutable std::shared_ptr<std::mutex> state_mutex_ = std::make_shared<std::mutex>();
+    bool card_loading_ = false;
 
     /// Cached agent card (populated by fetch_agent_card).
     AgentCard cached_card_;
     bool      card_loaded_ = false;
+
+    std::chrono::seconds request_timeout() const;
 };
 
 } // namespace neograph::a2a

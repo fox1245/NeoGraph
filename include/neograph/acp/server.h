@@ -237,7 +237,9 @@ class NEOGRAPH_API ACPServer {
 
     /// Where session/update notifications go. Default: dropped on the
     /// floor (test-friendly). When run() is driving, the sink is set to
-    /// write to the output stream automatically.
+    /// write to the output stream automatically. A sink retained by a
+    /// shared_ptr-owned server must capture that server weakly to avoid an
+    /// ownership cycle.
     void set_notification_sink(NotificationSink sink);
 
     /// Signal a running run() loop to exit at the next message boundary.

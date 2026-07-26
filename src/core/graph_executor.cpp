@@ -211,9 +211,18 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
     const bool cache_eligible =
         node_cache_ && !cb && node_cache_->is_enabled(node_name);
     std::string cache_state_hash;
+    std::string cache_scope_key;
     if (cache_eligible) {
         cache_state_hash = hash_state_for_cache(state.serialize());
-        if (auto cached = node_cache_->lookup(node_name, cache_state_hash);
+        const auto policy = node_cache_->policy_for(node_name);
+        if (policy.scope == CacheScope::Execution) {
+            cache_scope_key = "execution:" + std::to_string(ctx.cache_execution_id);
+        } else if (policy.context_key) {
+            cache_scope_key = "reusable:" + policy.context_key(ctx);
+        } else {
+            cache_scope_key = "reusable";
+        }
+        if (auto cached = node_cache_->lookup(node_name, cache_state_hash, cache_scope_key);
             cached) {
             co_return std::move(*cached);
         }
@@ -327,7 +336,7 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
                 }
             }
             if (cache_eligible) {
-                node_cache_->store(node_name, cache_state_hash, nr);
+                node_cache_->store(node_name, cache_state_hash, cache_scope_key, nr);
             }
             co_return std::move(nr);
         }

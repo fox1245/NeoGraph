@@ -457,6 +457,17 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
         std::thread worker(
             [this, req = std::move(req), id, task_cancel, reservation,
              resume_pending]() mutable {
+                bool response_attempted = false;
+                auto cleanup = [&] {
+                    reservation->release_session();
+                    std::lock_guard lk(sessions_mu);
+                    auto it = active_cancel_tokens.find(req.session_id);
+                    if (it != active_cancel_tokens.end()
+                        && it->second == task_cancel) {
+                        active_cancel_tokens.erase(it);
+                    }
+                };
+
                 try {
                     auto& a = *adapter;
 
@@ -563,23 +574,16 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                     // The graph and all session-state updates are complete.
                     // Admit the next turn before publishing this response so a
                     // reentrant/fast client cannot observe a stale busy state.
-                    reservation->release_session();
-                    {
-                        std::lock_guard lk(sessions_mu);
-                        auto it = active_cancel_tokens.find(req.session_id);
-                        if (it != active_cancel_tokens.end()
-                            && it->second == task_cancel) {
-                            active_cancel_tokens.erase(it);
-                        }
-                    }
+                    cleanup();
+                    response_attempted = true;
                     emit(jsonrpc_result(std::move(rj), id));
                 } catch (const std::exception& e) {
-                    reservation->release_session();
-                    emit_internal_error(
+                    cleanup();
+                    if (!response_attempted) emit_internal_error(
                         id, "ACP prompt worker failed: ", e.what());
                 } catch (...) {
-                    reservation->release_session();
-                    emit_internal_error(
+                    cleanup();
+                    if (!response_attempted) emit_internal_error(
                         id, "ACP prompt worker failed: unknown exception");
                 }
                 // The captured reservation is the last owner after dispatch

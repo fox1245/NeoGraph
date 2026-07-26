@@ -388,3 +388,97 @@ TEST(MultiSendRouting, MixedMultiSendRejectsBatchBeforeValidSiblingRuns) {
     }
     EXPECT_EQ(0, worker_calls->load(std::memory_order_relaxed));
 }
+
+TEST(MultiSendRouting, UnknownSendReportsSameDiagnosticThroughStream) {
+    NodeFactory::instance().register_type("__rt_planner_unknown_stream",
+        [](const std::string&, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<SendTargetPlannerNode>(
+                std::vector<std::string>{"missing_stream_worker"});
+        });
+
+    json def = {
+        {"name", "unknown_stream_send"},
+        {"channels", json::object()},
+        {"nodes", {{"planner", {{"type", "__rt_planner_unknown_stream"}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "planner"}}})}
+    };
+
+    auto engine = GraphEngine::compile(def, NodeContext{});
+    RunConfig rc;
+    rc.stream_mode = StreamMode::EVENTS | StreamMode::DEBUG;
+
+    int event_count = 0;
+    try {
+        engine->run_stream(rc, [&](const GraphEvent&) { ++event_count; });
+        FAIL() << "streaming run accepted an unknown Send target";
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        EXPECT_NE(std::string::npos, message.find("planner"));
+        EXPECT_NE(std::string::npos, message.find("missing_stream_worker"));
+        EXPECT_NE(std::string::npos, message.find("Send invocation index 0"));
+    }
+    EXPECT_GT(event_count, 0)
+        << "regression must exercise run_stream, not just run";
+}
+
+TEST(MultiSendRouting, ResumeAfterInvalidSendDoesNotRecordInvalidTargetCompletion) {
+    NodeFactory::instance().register_type("__rt_setup_invalid_send",
+        [](const std::string&, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<BridgeNode>();
+        });
+    NodeFactory::instance().register_type("__rt_planner_unknown_resume",
+        [](const std::string&, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<SendTargetPlannerNode>(
+                std::vector<std::string>{"missing_resume_worker"});
+        });
+
+    json def = {
+        {"name", "unknown_resume_send"},
+        {"channels", {{"bridged", {{"reducer", "overwrite"}}}}},
+        {"nodes", {
+            {"setup", {{"type", "__rt_setup_invalid_send"}}},
+            {"planner", {{"type", "__rt_planner_unknown_resume"}}}
+        }},
+        {"edges", json::array({
+            {{"from", "__start__"}, {"to", "setup"}},
+            {{"from", "setup"}, {"to", "planner"}}
+        })}
+    };
+
+    auto store = std::make_shared<InMemoryCheckpointStore>();
+    auto engine = GraphEngine::compile(def, NodeContext{}, store);
+    RunConfig rc;
+    rc.thread_id = "invalid-send-resume";
+
+    EXPECT_THROW(engine->run(rc), std::runtime_error);
+
+    auto cp = store->load_latest(rc.thread_id);
+    ASSERT_TRUE(cp.has_value());
+    EXPECT_EQ(cp->current_node, "setup");
+
+    auto pending = store->get_writes(rc.thread_id, cp->id);
+    ASSERT_EQ(pending.size(), 1u)
+        << "only the planner result may be pending; no invalid Send target "
+           "task may be recorded as completed";
+    EXPECT_EQ(pending[0].node_name, "planner");
+    EXPECT_EQ(pending[0].sends.size(), 1u);
+    EXPECT_EQ(pending[0].sends[0]["target_node"], "missing_resume_worker");
+
+    try {
+        engine->resume(rc.thread_id);
+        FAIL() << "resume accepted an unknown Send target";
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        EXPECT_NE(std::string::npos, message.find("planner"));
+        EXPECT_NE(std::string::npos, message.find("missing_resume_worker"));
+        EXPECT_NE(std::string::npos, message.find("Send invocation index 0"));
+    }
+
+    pending = store->get_writes(rc.thread_id, cp->id);
+    ASSERT_EQ(pending.size(), 1u)
+        << "resume must not add a completed pending write for the invalid target";
+    EXPECT_EQ(pending[0].node_name, "planner");
+}
