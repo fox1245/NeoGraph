@@ -10,7 +10,11 @@
 
 #include <gtest/gtest.h>
 #include <neograph/a2a/client.h>
+#include <neograph/a2a/a2a_caller_node.h>
 #include <neograph/a2a/harness_backend.h>
+#include <neograph/async/run_sync.h>
+#include <neograph/graph/run_context.h>
+#include <neograph/graph/state.h>
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
@@ -38,6 +42,7 @@ struct MockA2AServer {
     std::atomic<int>           card_count{0};
     std::mutex                 observed_mutex;
     std::vector<int>           request_ids;
+    std::vector<std::string>  message_ids;
     std::string                last_method;
     json                       last_params;
     std::string                last_card_request_path;
@@ -106,6 +111,8 @@ struct MockA2AServer {
             {
                 std::lock_guard<std::mutex> lock(observed_mutex);
                 request_ids.push_back(id);
+                if (parsed.contains("params") && parsed["params"].contains("message"))
+                    message_ids.push_back(parsed["params"]["message"].value("messageId", std::string()));
             }
 
             json envelope;
@@ -222,6 +229,53 @@ TEST(A2AClient, ConcurrentCallsHaveUniqueRequestIdsWhileTimeoutChanges) {
     std::set<int> ids(srv.request_ids.begin(), srv.request_ids.end());
     EXPECT_EQ(srv.request_ids.size(), static_cast<std::size_t>(callers));
     EXPECT_EQ(ids.size(), srv.request_ids.size());
+}
+
+TEST(A2ACallerNode, RepeatedCallsUseUniqueCallScopedMessageIds) {
+    MockA2AServer srv;
+    auto client = std::make_shared<A2AClient>(srv.url());
+    A2ACallerNode node("caller", client);
+    neograph::graph::GraphState state;
+    state.init_channel("prompt", neograph::graph::ReducerType::OVERWRITE,
+        [](const json&, const json& incoming) { return incoming; });
+    state.write("prompt", "hello");
+    neograph::graph::RunContext ctx;
+
+    for (int i = 0; i < 8; ++i)
+        (void)neograph::async::run_sync(node.run({state, ctx}));
+
+    std::lock_guard<std::mutex> lock(srv.observed_mutex);
+    std::set<std::string> ids(srv.message_ids.begin(), srv.message_ids.end());
+    EXPECT_EQ(srv.message_ids.size(), 8u);
+    EXPECT_EQ(ids.size(), srv.message_ids.size());
+    for (const auto& id : srv.message_ids) {
+        EXPECT_EQ(id.rfind("ng-a2a-call-", 0), 0u);
+        EXPECT_EQ(id.find("0x"), std::string::npos);
+    }
+}
+
+TEST(A2ACallerNode, ConcurrentCallsUseUniqueCallScopedMessageIds) {
+    MockA2AServer srv;
+    auto client = std::make_shared<A2AClient>(srv.url());
+    A2ACallerNode node("caller", client);
+    neograph::graph::GraphState state;
+    state.init_channel("prompt", neograph::graph::ReducerType::OVERWRITE,
+        [](const json&, const json& incoming) { return incoming; });
+    state.write("prompt", "hello");
+    neograph::graph::RunContext ctx;
+    constexpr int callers = 32;
+    std::vector<std::future<void>> futures;
+    for (int i = 0; i < callers; ++i) {
+        futures.push_back(std::async(std::launch::async, [&] {
+            (void)neograph::async::run_sync(node.run({state, ctx}));
+        }));
+    }
+    for (auto& future : futures) future.get();
+
+    std::lock_guard<std::mutex> lock(srv.observed_mutex);
+    std::set<std::string> ids(srv.message_ids.begin(), srv.message_ids.end());
+    EXPECT_EQ(srv.message_ids.size(), static_cast<std::size_t>(callers));
+    EXPECT_EQ(ids.size(), srv.message_ids.size());
 }
 
 TEST(A2AClient, SendMessageUsesCanonicalMethodName) {
