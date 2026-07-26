@@ -11,6 +11,7 @@
 #include <neograph/types.h>
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -39,6 +40,10 @@ struct RunContext {
 
     /// Mirrors RunConfig::thread_id.
     std::string thread_id;
+
+    /// Engine-assigned identity for this run or resume call. Used only for
+    /// execution-local cache isolation; it is not derived from user data.
+    std::uint64_t cache_execution_id = 0;
 
     /// Current super-step index.
     int step = 0;

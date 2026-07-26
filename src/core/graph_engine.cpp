@@ -16,6 +16,7 @@
 #include <asio/use_awaitable.hpp>
 
 #include <stdexcept>
+#include <utility>
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -816,6 +817,8 @@ GraphEngine::execute_graph_async(const RunConfig& config,
     ctx.trace_id     = metadata.trace_id;
     ctx.thread_id    = config.thread_id;
     ctx.stream_mode  = stream_mode;
+    ctx.cache_execution_id = next_cache_execution_id_.fetch_add(
+        1, std::memory_order_relaxed);
     ctx.store = resources && resources->store ? *resources->store : store_;
     // issue #94 — the human's answer, readable by any node. Left empty on a
     // fresh run, which is how a node distinguishes "nobody has answered yet"
@@ -1176,6 +1179,13 @@ GraphEngine::execute_graph_async(const RunConfig& config,
     }
 
     co_return result;
+}
+
+void GraphEngine::set_node_cache_enabled(const std::string& node_name,
+                                         bool enabled,
+                                         CacheKeyPolicy policy) {
+    node_cache_.set_policy(node_name, std::move(policy));
+    node_cache_.set_enabled(node_name, enabled);
 }
 
 } // namespace neograph::graph

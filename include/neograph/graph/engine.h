@@ -781,13 +781,20 @@ public:
      * @brief Enable or disable per-node result caching.
      *
      * When enabled for a node, the executor hashes the input state and
-     * looks up `(node_name, hash)` in the engine's NodeCache. On hit,
+     * looks up an execution-local `(node_name, scope, hash)` key in the
+     * engine's NodeCache. On hit,
      * the cached NodeResult is replayed without invoking the node — no
      * LLM call, no tool execution. On miss, the node runs and the
      * result is stored.
      *
      * Cache is OFF by default. Only opt in for nodes that are pure
      * (deterministic, no external side effects, no time dependence).
+     * The default CacheScope::Execution never reuses a result across
+     * `run()` or `resume()` calls, so it cannot cross tenant, Store,
+     * ToolGate, provider/model, or resume boundaries. Pass
+     * CacheScope::Reusable only for a node proven independent of all such
+     * context, optionally with a CacheKeyPolicy context key that declares
+     * stable, non-secret context partitions.
      * Streaming runs (`run_stream`) bypass the cache for the affected
      * nodes because cached hits cannot replay LLM_TOKEN events.
      *
@@ -795,6 +802,11 @@ public:
      * @param enabled   True to enable caching; false to disable.
      */
     void set_node_cache_enabled(const std::string& node_name, bool enabled);
+
+    /// Enable or disable caching with an explicit identity policy.
+    void set_node_cache_enabled(const std::string& node_name,
+                                bool enabled,
+                                CacheKeyPolicy policy);
 
     /**
      * @brief Drop all cached entries (per-node enable state preserved).
@@ -918,6 +930,7 @@ private:
     /// Stored by value so the engine owns it; NodeExecutor holds a
     /// non-owning pointer threaded through set_worker_count() rebuilds.
     NodeCache node_cache_;
+    std::atomic<std::uint64_t> next_cache_execution_id_{1};
 
     /// Inflight-run counter. Incremented at the top of
     /// execute_graph_async and decremented at coroutine completion

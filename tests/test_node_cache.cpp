@@ -79,11 +79,31 @@ TEST(NodeCache, DisabledByDefault) {
     EXPECT_EQ(engine->node_cache().miss_count(), 0u);
 }
 
+TEST(NodeCache, DefaultScopePartitionsTenants) {
+    auto counter = std::make_shared<std::atomic<int>>(0);
+    auto engine  = build_engine_with_node(counter);
+    engine->set_node_cache_enabled("work", true);
+
+    RunConfig cfg;
+    cfg.input = json::object();
+    cfg.max_steps = 5;
+    cfg.thread_id = "tenant-a";
+    engine->run(cfg);
+    cfg.thread_id = "tenant-b";
+    engine->run(cfg);
+
+    EXPECT_EQ(counter->load(), 2);
+    EXPECT_EQ(engine->node_cache().hit_count(), 0u);
+    EXPECT_EQ(engine->node_cache().miss_count(), 2u);
+    EXPECT_EQ(engine->node_cache().size(), 2u);
+}
+
 TEST(NodeCache, EnabledNodeReplaysCachedResult) {
     auto counter = std::make_shared<std::atomic<int>>(0);
     auto engine  = build_engine_with_node(counter);
 
-    engine->set_node_cache_enabled("work", true);
+    engine->set_node_cache_enabled(
+        "work", true, CacheKeyPolicy{CacheScope::Reusable, {}});
 
     RunConfig cfg;
     cfg.thread_id = "t1";
@@ -171,4 +191,25 @@ TEST(NodeCache, DifferentInputsProduceDifferentEntries) {
     // Different seed inputs → different state hashes → two misses.
     EXPECT_EQ(counter->load(), 2);
     EXPECT_EQ(engine->node_cache().size(), 2u);
+}
+TEST(NodeCache, ReusableScopePartitionsDeclaredContext) {
+    auto counter = std::make_shared<std::atomic<int>>(0);
+    auto engine  = build_engine_with_node(counter);
+    engine->set_node_cache_enabled(
+        "work", true, CacheKeyPolicy{
+            CacheScope::Reusable,
+            [](const RunContext& ctx) { return ctx.thread_id; }});
+
+    RunConfig cfg;
+    cfg.input = json::object();
+    cfg.max_steps = 5;
+    cfg.thread_id = "tenant-a";
+    engine->run(cfg);
+    engine->run(cfg);
+    cfg.thread_id = "tenant-b";
+    engine->run(cfg);
+
+    EXPECT_EQ(counter->load(), 2);
+    EXPECT_EQ(engine->node_cache().hit_count(), 1u);
+    EXPECT_EQ(engine->node_cache().miss_count(), 2u);
 }

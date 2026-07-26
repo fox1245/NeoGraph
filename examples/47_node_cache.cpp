@@ -1,8 +1,8 @@
 // NeoGraph Example 42: Per-node result cache (NodeCache)
 //
-// Demonstrates GraphEngine::set_node_cache_enabled — replays a node's
-// outcome when the input state hash is unchanged. Useful for expensive
-// pure nodes (embedding, deterministic LLM, heavy compute).
+// Demonstrates GraphEngine::set_node_cache_enabled with an explicit reusable
+// scope. Default caching is execution-local; use CacheScope::Reusable only for
+// a node proved independent of all RunContext values.
 //
 // We instrument a counter node so we can prove the cache short-circuits
 // the second run; hit_count must be 1, miss_count must be 1.
@@ -57,7 +57,9 @@ int main() {
 
     NodeContext ctx;
     auto        engine =
-        GraphEngine::build(def, EngineConfig{.node_context = ctx, .cached_nodes = {"expensive"}});
+        GraphEngine::build(def, EngineConfig{.node_context = ctx});
+    engine->set_node_cache_enabled(
+        "expensive", true, CacheKeyPolicy{CacheScope::Reusable, {}});
 
     // First run — miss.
     RunConfig cfg;
