@@ -754,10 +754,16 @@ TEST(ACPServer, CancelAbortsInflightPrompt) {
     neograph::json cancel = {{"jsonrpc", "2.0"}, {"method", "session/cancel"},
                               {"params", {{"sessionId", sid}}}};
     server.handle_message(cancel);
+    server.handle_message(cancel);
     auto response = cap.wait_for_response(1, std::chrono::milliseconds(500));
     ASSERT_TRUE(response.contains("result")) << response.dump();
     EXPECT_EQ(response["result"].value("stopReason", std::string()), "cancelled");
     EXPECT_FALSE(probe->completed.load(std::memory_order_acquire));
+    int response_count = 0;
+    for (const auto& env : cap.envs) {
+        if (env.value("id", 0) == 1 && env.contains("result")) ++response_count;
+    }
+    EXPECT_EQ(response_count, 1);
 }
 
 TEST(ACPServer, UnknownMethodReturnsMethodNotFound) {
