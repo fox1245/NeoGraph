@@ -1154,23 +1154,26 @@ TEST(ACPServer, NodeCallsBackToEditorViaFsRead) {
     neograph::json info = {{"name", "acp-bidir"}, {"version", "0.0.1"}};
     auto server = std::make_shared<ACPServer>(engine, info);
     server->attach_client(client);
+    auto weak_server = std::weak_ptr<ACPServer>(server);
 
     // Stub editor. The sink does double duty: capture envelopes for
     // assertions AND respond to outbound fs/read_text_file requests by
     // feeding a synthetic response back through handle_message.
     CapturingSink cap;
     auto cap_sink = cap.as_sink();
-    server->set_notification_sink([&, cap_sink, server](const neograph::json& env) {
+    server->set_notification_sink([&, cap_sink, weak_server](const neograph::json& env) {
         cap_sink(env);
         if (env.value("method", std::string()) == "fs/read_text_file"
             && env.contains("id")) {
             auto reply_id = env["id"];
-            std::thread([server, reply_id]() {
+            std::thread([weak_server, reply_id]() {
                 neograph::json reply;
                 reply["jsonrpc"] = "2.0";
                 reply["id"]      = reply_id;
                 reply["result"]  = {{"content", "void main(){}\n"}};
-                server->handle_message(reply);
+                if (auto server = weak_server.lock()) {
+                    server->handle_message(reply);
+                }
             }).detach();
         }
     });
@@ -1285,20 +1288,23 @@ make_gated_server(std::shared_ptr<ACPClient> client,
     neograph::json info = {{"name", "acp-gate"}, {"version", "0.0.1"}};
     auto server = std::make_shared<ACPServer>(engine, info);
     server->attach_client(client);
+    auto weak_server = std::weak_ptr<ACPServer>(server);
 
     auto cap_sink = cap.as_sink();
-    server->set_notification_sink([cap_sink, server, reply_for](const neograph::json& env) {
+    server->set_notification_sink([cap_sink, weak_server, reply_for](const neograph::json& env) {
         cap_sink(env);
         if (env.value("method", std::string()) == "session/request_permission"
             && env.contains("id")) {
             auto reply_id = env["id"];
             auto outcome  = reply_for(env);
-            std::thread([server, reply_id, outcome]() {
+            std::thread([weak_server, reply_id, outcome]() {
                 neograph::json reply;
                 reply["jsonrpc"] = "2.0";
                 reply["id"]      = reply_id;
                 reply["result"]  = outcome;
-                server->handle_message(reply);
+                if (auto server = weak_server.lock()) {
+                    server->handle_message(reply);
+                }
             }).detach();
         }
     });
@@ -1447,11 +1453,12 @@ TEST(ACPServer, FsWriteTextFileRoundTrip) {
     neograph::json info = {{"name", "acp-write-test"}, {"version", "0.0.1"}};
     auto server = std::make_shared<ACPServer>(engine, info);
     server->attach_client(client);
+    auto weak_server = std::weak_ptr<ACPServer>(server);
 
     CapturingSink cap;
     auto cap_sink = cap.as_sink();
     std::string seen_path, seen_body;
-    server->set_notification_sink([&, cap_sink, server](const neograph::json& env) {
+    server->set_notification_sink([&, cap_sink, weak_server](const neograph::json& env) {
         cap_sink(env);
         if (env.value("method", std::string()) == "fs/write_text_file"
             && env.contains("id")) {
@@ -1460,12 +1467,14 @@ TEST(ACPServer, FsWriteTextFileRoundTrip) {
             seen_path = p.value("path", std::string());
             seen_body = p.value("content", std::string());
             auto reply_id = env["id"];
-            std::thread([server, reply_id]() {
+            std::thread([weak_server, reply_id]() {
                 neograph::json reply;
                 reply["jsonrpc"] = "2.0";
                 reply["id"]      = reply_id;
                 reply["result"]  = neograph::json::object();
-                server->handle_message(reply);
+                if (auto server = weak_server.lock()) {
+                    server->handle_message(reply);
+                }
             }).detach();
         }
     });
