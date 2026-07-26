@@ -297,9 +297,12 @@ TEST(RequestOptions, TimeoutTriggers) {
             worker = std::thread([this]{ io.run(); });
         }
         ~StallingServer() {
-            asio::error_code ec;
-            acc.close(ec);
-            io.stop();
+            // The acceptor belongs to the I/O thread. Closing it there lets
+            // the pending accept finish before the thread is joined.
+            asio::post(io, [this] {
+                asio::error_code ec;
+                acc.close(ec);
+            });
             if (worker.joinable()) worker.join();
         }
         asio::awaitable<void> loop() {
@@ -367,9 +370,12 @@ TEST(RequestOptions, PoolTimeoutTriggers) {
             worker = std::thread([this]{ io.run(); });
         }
         ~StallingServer() {
-            asio::error_code ec;
-            acc.close(ec);
-            io.stop();
+            // The acceptor belongs to the I/O thread. Closing it there lets
+            // the pending accept finish before the thread is joined.
+            asio::post(io, [this] {
+                asio::error_code ec;
+                acc.close(ec);
+            });
             if (worker.joinable()) worker.join();
         }
         asio::awaitable<void> loop() {
