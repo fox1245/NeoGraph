@@ -73,6 +73,7 @@ resolution:
     - tests/test_async_http_stream.cpp
     - tests/test_async_conn_pool.cpp
     - tests/test_async_ws_loopback.cpp
+    - benchmarks/bench_async_http.cpp
   compatibility:
     - Public function signatures and ConnPool/WsClient object layouts are unchanged.
     - Timeout, redirect, pooling, SSE chunk, and WebSocket wire behavior are unchanged.
@@ -92,7 +93,14 @@ resolution:
     values, so the fix adds no copy per hop or retry. The 2026-07-26 delayed
     cancellation regression exercises the streaming timeout race and confirms
     the callback capture stays alive while the stored awaitable is pending,
-    releases after the timeout completes, and receives no late chunks.
+    releases after the timeout completes, and receives no late chunks. The
+    reproducible ownership_construct benchmark in bench_async_http isolates
+    API-entry awaitable construction/destruction from networking. On this host
+    with 200000 constructions, short-body API-entry cost measured 207.5 ns/op
+    for GET, 223.3 ns/op for POST, 244.1 ns/op for streaming POST, and
+    246.3 ns/op for ConnPool POST. A 65536-byte POST body measured 18135.7 ns/op,
+    demonstrating that large-body copies scale with payload size while no
+    redirect/retry loop adds additional copies.
 
 verification:
   targeted:
@@ -114,6 +122,16 @@ verification:
       ./build-issue199-202-asan/tests/neograph_tests
       --gtest_filter=AsyncHttpOwnership.*:WsLoopback.DelayedOperationsOwnEndpointAndPayloads
     result: "7 passed, 0 failed"
+  ownership_construct_benchmark:
+    configuration: >-
+      Release; NEOGRAPH_BUILD_BENCHMARKS=ON; optional service backends disabled.
+    command: >-
+      ./build-issue199-bench/bench_async_http --mode ownership_construct
+      --ownership-api {post,get,stream,pool} --concur 200000 --rounds 1
+    result: >-
+      post body_bytes=32: 223.3 ns/op; post body_bytes=65536: 18135.7 ns/op;
+      get body_bytes=32: 207.5 ns/op; stream body_bytes=32: 244.1 ns/op;
+      pool body_bytes=32: 246.3 ns/op.
   behavior_matrix:
     command: >-
       ./build/tests/neograph_tests
