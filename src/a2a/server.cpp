@@ -456,7 +456,16 @@ Task A2AServer::Impl::run_graph(
         if (run_it != active_runs.end()
             && run_it->second.generation == generation
             && run_it->second.cancel_token == task_cancel) {
-            tasks[task_id] = result;
+            // The task-map lock is the terminal-state linearization point.
+            // A tasks/cancel that commits first must not be overwritten by a
+            // graph completion that was already preparing its response.
+            auto task_it = tasks.find(task_id);
+            if (task_it != tasks.end()
+                && task_it->second.status.state == TaskState::Canceled) {
+                result = task_it->second;
+            } else {
+                tasks[task_id] = result;
+            }
             touch_task_unlocked(task_id);
             active_runs.erase(run_it);
         }

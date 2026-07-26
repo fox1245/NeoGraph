@@ -503,7 +503,13 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                         graph_error = "unknown exception";
                     }
 
-                    if (graph_failed) {
+                    if (task_cancel->is_cancelled()) {
+                        stop = StopReason::Cancelled;
+                    }
+
+                    // Cancellation wins a concurrent graph failure so the client
+                    // observes one terminal cancelled response, not an error update.
+                    if (graph_failed && stop != StopReason::Cancelled) {
                         // ACP's StopReason vocabulary has no generic error
                         // value. Preserve the existing protocol shape:
                         // diagnostic update, then a normal end_turn response.
@@ -518,14 +524,16 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                     } else {
                         {
                             std::lock_guard lk(sessions_mu);
-                            if (run_result.interrupted) {
+                            if (stop != StopReason::Cancelled && run_result.interrupted) {
                                 interrupted_sessions.insert(req.session_id);
                             } else {
                                 interrupted_sessions.erase(req.session_id);
                             }
                         }
-                        if (task_cancel->is_cancelled()) {
-                            stop = StopReason::Cancelled;
+                        if (stop == StopReason::Cancelled) {
+                            // Cancellation has no final agent content. Emit only
+                            // the terminal prompt response below, never an empty
+                            // session/update followed by a second terminal signal.
                         } else if (run_result.interrupted) {
                             const auto reason = run_result.interrupt_value.value(
                                 "reason", run_result.interrupt_value.value(
@@ -653,6 +661,10 @@ ACPServer::~ACPServer() {
     // (see handle_session_prompt) so we don't join them; we wait on
     // inflight_count via workers_cv until every worker has decremented
     // and cleared its single-flight session.
+    // Detached workers may finish while this destructor drains. Drop their
+    // late notifications instead of invoking a sink owned by the caller.
+    std::atomic_store_explicit(
+        &impl_->sink_, std::shared_ptr<NotificationSink>{}, std::memory_order_release);
     impl_->stop_flag.store(true, std::memory_order_release);
     std::vector<std::shared_ptr<neograph::graph::CancelToken>> active_tokens;
     {

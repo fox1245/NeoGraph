@@ -176,8 +176,11 @@ asio::awaitable<NodeOutput> ToolDispatchNode::run(NodeInput in) {
     gctx.resume_value = in.ctx.resume_value;
     gctx.thread_id    = in.ctx.thread_id;
     gctx.step         = in.ctx.step;
+    ToolExecutionContext execution;
+    execution.cancel_token = in.ctx.cancel_token;
     auto tool_msgs = co_await dispatch_tool_calls(
-        assistant_msg->tool_calls, tools_, in.ctx.tool_gate, std::move(gctx));
+        assistant_msg->tool_calls, tools_, in.ctx.tool_gate, std::move(gctx),
+        std::move(execution));
 
     json results = json::array();
     for (const auto& m : tool_msgs) {

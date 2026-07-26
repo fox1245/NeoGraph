@@ -26,16 +26,21 @@ using neograph::graph::NodeInput;
 using neograph::graph::NodeOutput;
 
 A2ACallerNode::A2ACallerNode(std::string name,
-                             std::shared_ptr<A2AClient> client,
-                             std::string input_key,
-                             std::string output_key)
+                              std::shared_ptr<A2AClient> client,
+                              std::string input_key,
+                              std::string output_key,
+                              MessageIdFactory message_id_factory)
     : name_(std::move(name)),
       client_(std::move(client)),
       input_key_(std::move(input_key)),
-      output_key_(std::move(output_key)) {
+      output_key_(std::move(output_key)),
+      message_id_factory_(std::move(message_id_factory)) {
     if (!client_) {
         throw std::invalid_argument(
             "A2ACallerNode '" + name_ + "': client must not be null");
+    }
+    if (!message_id_factory_) {
+        message_id_factory_ = fresh_caller_message_id;
     }
 }
 
@@ -52,7 +57,11 @@ asio::awaitable<NodeOutput> A2ACallerNode::run(NodeInput in) {
     auto context_id_val = in.state.get(output_key_ + "_context_id");
 
     MessageSendParams params;
-    params.message.message_id = fresh_caller_message_id();
+    params.message.message_id = message_id_factory_();
+    if (params.message.message_id.empty()) {
+        throw std::runtime_error(
+            "A2ACallerNode '" + name_ + "': message ID factory returned empty ID");
+    }
     params.message.role = Role::User;
     params.message.parts.push_back(Part::text_part(std::move(prompt)));
     if (task_id_val.is_string())    params.message.task_id    = task_id_val.get<std::string>();

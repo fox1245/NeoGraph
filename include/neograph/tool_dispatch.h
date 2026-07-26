@@ -158,6 +158,8 @@ using ToolGate =
  *        call before **any** tool runs — see below. Default-constructed (empty)
  *        means no gating, and the behaviour is bit-for-bit what it was before.
  * @param gctx What the gate is told about the run.
+ * @param execution Per-invocation context. The graph path supplies its
+ *        cancellation token; standalone Agent calls retain the empty default.
  *
  * @throws NodeInterrupt when the gate returns Interrupt for any call. On the
  *         graph path the engine catches it, checkpoints, and hands the caller a
@@ -176,6 +178,7 @@ using ToolGate =
  */
 NEOGRAPH_API asio::awaitable<std::vector<ChatMessage>>
 dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
-                    ToolGate gate = {}, ToolGateContext gctx = {});
+                    ToolGate gate = {}, ToolGateContext gctx = {},
+                    ToolExecutionContext execution = {});
 
 }  // namespace neograph

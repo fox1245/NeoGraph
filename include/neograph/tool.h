@@ -12,9 +12,40 @@
 
 #include <asio/awaitable.hpp>
 
+#include <memory>
 #include <string>
 
+namespace neograph::graph {
+class CancelToken;
+}
+
 namespace neograph {
+
+/**
+ * @brief Per-invocation context for a cooperative asynchronous tool.
+ *
+ * Existing `Tool::execute_async(arguments)` overrides remain valid. Tools that
+ * need to stop in-flight work can also implement `ContextualAsyncTool` and
+ * poll or propagate `cancel_token` to their transport.
+ */
+struct ToolExecutionContext {
+    std::shared_ptr<graph::CancelToken> cancel_token;
+};
+
+/**
+ * @brief Optional async Tool extension that receives per-invocation context.
+ *
+ * This intentionally lives outside `Tool` so adding cooperative cancellation
+ * does not change the frozen `Tool` vtable. A tool that needs to observe a
+ * cancellation request should inherit both `Tool` and `ContextualAsyncTool`.
+ */
+class NEOGRAPH_API ContextualAsyncTool {
+  public:
+    virtual ~ContextualAsyncTool() = default;
+
+    virtual asio::awaitable<std::string> execute_async(
+        const json& arguments, ToolExecutionContext context) = 0;
+};
 
 /**
  * @brief Abstract base class for tools that agents can call.

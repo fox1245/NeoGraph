@@ -18,6 +18,7 @@
 #include <neograph/a2a/client.h>
 #include <neograph/graph/node.h>
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -34,10 +35,15 @@ namespace neograph::a2a {
  */
 class NEOGRAPH_API A2ACallerNode : public neograph::graph::GraphNode {
   public:
+    /// Returns one message ID per outbound A2A call. Custom factories must be
+    /// thread-safe when the node is used by concurrent graph branches.
+    using MessageIdFactory = std::function<std::string()>;
+
     A2ACallerNode(std::string name,
-                  std::shared_ptr<A2AClient> client,
-                  std::string input_key  = "prompt",
-                  std::string output_key = "response");
+                   std::shared_ptr<A2AClient> client,
+                   std::string input_key  = "prompt",
+                   std::string output_key = "response",
+                   MessageIdFactory message_id_factory = {});
 
     /// v0.4 PR 9a: unified ``run`` — reads ``input_key`` from state,
     /// forwards to the remote A2A agent, writes the response (and
@@ -53,6 +59,7 @@ class NEOGRAPH_API A2ACallerNode : public neograph::graph::GraphNode {
     std::shared_ptr<A2AClient> client_;
     std::string                input_key_;
     std::string                output_key_;
+    MessageIdFactory           message_id_factory_;
 };
 
 } // namespace neograph::a2a
