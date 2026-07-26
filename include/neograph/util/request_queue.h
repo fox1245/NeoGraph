@@ -20,6 +20,7 @@
 #include <condition_variable>
 #include <exception>
 #include <stdexcept>
+#include <utility>
 
 namespace neograph::util {
 
@@ -98,22 +99,239 @@ public:
     struct Stats {
         size_t pending;         ///< Tasks waiting in the queue.
         size_t active;          ///< Tasks currently being executed.
-        size_t completed;       ///< Total tasks finished.
-        size_t rejected;        ///< Tasks rejected due to backpressure (queue full).
+        size_t completed;       ///< Total tasks settled, including close cancellation.
+        size_t rejected;        ///< Tasks rejected during admission.
         size_t num_workers;     ///< Number of worker threads.
         size_t max_queue_size;  ///< Maximum queue capacity.
     };
 
+private:
+    struct State {
+        explicit State(size_t max_queue_size)
+            : max_queue_size_(max_queue_size) {}
+
+        template<typename F>
+        std::pair<bool, std::future<void>> submit(F&& task) {
+            std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+            if (!running_.load(std::memory_order_acquire)) {
+                rejected_.fetch_add(1, std::memory_order_relaxed);
+                return {false, std::future<void>()};
+            }
+            if (!try_reserve_pending_slot()) {
+                rejected_.fetch_add(1, std::memory_order_relaxed);
+                return {false, std::future<void>()};
+            }
+
+            auto result = detail::enqueue_reserved_task(
+                queue_, pending_, rejected_,
+                [this, t = std::forward<F>(task)]() mutable {
+                    if (!claim_task_start()) {
+                        throw std::runtime_error("RequestQueue is closed");
+                    }
+                    t();
+                });
+            if (result.first) cv_.notify_one();
+            return result;
+        }
+
+        void close() {
+            const bool caller_is_worker = current_worker_ == this;
+            const auto caller_id = std::this_thread::get_id();
+            {
+                std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+                if (close_started_) {
+                    if (caller_is_worker) return;
+                    cv_.wait(lock, [this] { return close_complete_; });
+                    return;
+                }
+
+                close_started_ = true;
+                worker_initiated_close_ = caller_is_worker;
+                running_.store(false, std::memory_order_release);
+            }
+            cv_.notify_all();
+
+            if (caller_is_worker) {
+                // A worker cannot join itself. Detach only that thread, then
+                // wait for every other claimed callback before the facade can
+                // be destroyed. State remains alive through the detached
+                // worker until it exits and marks shutdown complete.
+                for (auto& worker : workers_) {
+                    if (!worker.joinable()) continue;
+                    if (worker.get_id() == caller_id) {
+                        worker.detach();
+                    } else {
+                        worker.join();
+                    }
+                }
+                cancel_pending_tasks();
+                {
+                    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+                    cancellation_complete_ = true;
+                }
+                return;
+            }
+
+            for (auto& worker : workers_) {
+                if (worker.joinable()) worker.join();
+            }
+            cancel_pending_tasks();
+            {
+                std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+                cancellation_complete_ = true;
+                close_complete_ = true;
+            }
+            cv_.notify_all();
+        }
+
+        bool is_closed() const noexcept {
+            return !running_.load(std::memory_order_acquire);
+        }
+
+        Stats stats() const {
+            return {
+                pending_.load(std::memory_order_relaxed),
+                active_.load(std::memory_order_relaxed),
+                completed_.load(std::memory_order_relaxed),
+                rejected_.load(std::memory_order_relaxed),
+                workers_.size(),
+                max_queue_size_
+            };
+        }
+
+        void run_worker() {
+            current_worker_ = this;
+            worker_loop();
+            worker_exited();
+            current_worker_ = nullptr;
+        }
+
+        std::mutex lifecycle_mutex_;
+        std::condition_variable cv_;
+        std::vector<std::thread> workers_;
+        std::atomic<bool> running_{true};
+        std::atomic<size_t> pending_{0};
+        std::atomic<size_t> active_{0};
+        std::atomic<size_t> completed_{0};
+        std::atomic<size_t> rejected_{0};
+        size_t max_queue_size_;
+        size_t workers_alive_{0};
+        bool close_started_{false};
+        bool close_complete_{false};
+        bool cancellation_complete_{false};
+        bool worker_initiated_close_{false};
+        inline static thread_local State* current_worker_ = nullptr;
+
+    private:
+        bool try_reserve_pending_slot() {
+            size_t pending = pending_.load(std::memory_order_relaxed);
+            while (pending < max_queue_size_) {
+                if (pending_.compare_exchange_weak(
+                        pending, pending + 1,
+                        std::memory_order_acq_rel,
+                        std::memory_order_relaxed)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        bool claim_task_start() {
+            std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+            return running_.load(std::memory_order_acquire);
+        }
+
+        void worker_loop() {
+            std::function<void()> task;
+            while (running_.load(std::memory_order_acquire)) {
+                if (queue_.try_dequeue(task)) {
+                    pending_.fetch_sub(1, std::memory_order_acq_rel);
+                    execute_task(task);
+                } else {
+                    // No busy-spin — sleep until notified by submit().
+                    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+                    cv_.wait_for(lock, std::chrono::milliseconds(50), [this] {
+                        return !running_.load(std::memory_order_acquire)
+                            || queue_.size_approx() > 0;
+                    });
+                }
+            }
+        }
+
+        void worker_exited() {
+            bool finalize_worker_close = false;
+            {
+                std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+                --workers_alive_;
+                finalize_worker_close = close_started_
+                    && worker_initiated_close_
+                    && !close_complete_
+                    && workers_alive_ == 0;
+            }
+            if (!finalize_worker_close) return;
+
+            bool cancel_pending = false;
+            {
+                std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+                cancel_pending = !cancellation_complete_;
+            }
+            if (cancel_pending) cancel_pending_tasks();
+            {
+                std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+                cancellation_complete_ = true;
+                close_complete_ = true;
+            }
+            cv_.notify_all();
+        }
+
+        void cancel_pending_tasks() {
+            std::function<void()> task;
+            while (queue_.try_dequeue(task)) {
+                pending_.fetch_sub(1, std::memory_order_acq_rel);
+                try {
+                    task();
+                } catch (...) {
+                    // The task wrapper owns its promise and reports errors.
+                }
+                completed_.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
+        void execute_task(std::function<void()>& task) {
+            active_.fetch_add(1, std::memory_order_relaxed);
+            try {
+                task();
+            } catch (...) {
+                // A task wrapper should already complete its promise, but a
+                // malformed task must not strand accounting or kill a worker.
+            }
+            active_.fetch_sub(1, std::memory_order_relaxed);
+            completed_.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        moodycamel::ConcurrentQueue<std::function<void()>> queue_;
+    };
+
+public:
     /**
      * @brief Construct a request queue with a worker thread pool.
      * @param num_workers Number of worker threads to spawn (default: 128).
      * @param max_queue_size Maximum number of pending tasks before backpressure (default: 10000).
+     * @throws std::invalid_argument if num_workers is zero.
      */
     RequestQueue(size_t num_workers = 128, size_t max_queue_size = 10000)
-        : max_queue_size_(max_queue_size)
+        : state_(std::make_shared<State>(max_queue_size))
     {
-        for (size_t i = 0; i < num_workers; ++i) {
-            workers_.emplace_back([this] { worker_loop(); });
+        if (num_workers == 0) {
+            throw std::invalid_argument("RequestQueue requires at least one worker");
+        }
+        try {
+            for (size_t i = 0; i < num_workers; ++i) {
+                start_worker();
+            }
+        } catch (...) {
+            state_->close();
+            throw;
         }
         // No banner on stdout — library code shouldn't pollute the
         // host process's stdout (breaks scripts that parse it). If
@@ -121,13 +339,9 @@ public:
         // instead of std::cout.
     }
 
-    /// Destructor: stops all workers and waits for them to finish.
+    /// Destructor: applies the same cancel-on-close policy as close().
     ~RequestQueue() {
-        running_ = false;
-        cv_.notify_all();
-        for (auto& w : workers_) {
-            if (w.joinable()) w.join();
-        }
+        close();
     }
 
     RequestQueue(const RequestQueue&) = delete;
@@ -147,19 +361,31 @@ public:
      * @return A pair of {accepted, future}: accepted is true if the task
      *         was enqueued; future can be waited on for completion.
      *         Capacity rejection returns an invalid future; enqueue failure
-     *         returns a valid future that propagates the failure.
+     *         returns a valid future that propagates the failure. Closure
+     *         rejection returns an invalid future.
      */
     template<typename F>
     std::pair<bool, std::future<void>> submit(F&& task) {
-        if (!try_reserve_pending_slot()) {
-            rejected_.fetch_add(1, std::memory_order_relaxed);
-            return {false, std::future<void>()};
-        }
+        return state_->submit(std::forward<F>(task));
+    }
 
-        auto result = detail::enqueue_reserved_task(
-            queue_, pending_, rejected_, std::forward<F>(task));
-        if (result.first) cv_.notify_one();
-        return result;
+    /**
+     * @brief Stop accepting work, cancel queued tasks, and wait for workers.
+     *
+     * The first caller transitions the queue to closed. Work a worker claimed
+     * before that transition may finish; all unclaimed work completes its
+     * future with `std::runtime_error("RequestQueue is closed")`. Concurrent
+     * and repeated external callers wait for that same shutdown to complete.
+     * A task may call close() to initiate shutdown, but cannot wait for itself.
+     */
+    void close() {
+        auto state = state_;
+        state->close();
+    }
+
+    /// True once close() has started rejecting new work.
+    bool is_closed() const noexcept {
+        return state_->is_closed();
     }
 
     /**
@@ -167,66 +393,26 @@ public:
      * @return Stats snapshot with pending, active, completed, and rejected counts.
      */
     Stats stats() const {
-        return {
-            pending_.load(std::memory_order_relaxed),
-            active_.load(std::memory_order_relaxed),
-            completed_.load(std::memory_order_relaxed),
-            rejected_.load(std::memory_order_relaxed),
-            workers_.size(),
-            max_queue_size_
-        };
+        return state_->stats();
     }
 
 private:
-    bool try_reserve_pending_slot() {
-        size_t pending = pending_.load(std::memory_order_relaxed);
-        while (pending < max_queue_size_) {
-            if (pending_.compare_exchange_weak(
-                    pending, pending + 1,
-                    std::memory_order_acq_rel,
-                    std::memory_order_relaxed)) {
-                return true;
-            }
+    void start_worker() {
+        {
+            std::lock_guard<std::mutex> lock(state_->lifecycle_mutex_);
+            ++state_->workers_alive_;
         }
-        return false;
-    }
-
-    void worker_loop() {
-        std::function<void()> task;
-        while (running_.load(std::memory_order_relaxed)) {
-            if (queue_.try_dequeue(task)) {
-                pending_.fetch_sub(1, std::memory_order_acq_rel);
-                active_.fetch_add(1, std::memory_order_relaxed);
-                try {
-                    task();
-                } catch (...) {
-                    // A task wrapper should already complete its promise, but
-                    // a malformed task must not strand accounting or kill the
-                    // worker thread.
-                }
-                active_.fetch_sub(1, std::memory_order_relaxed);
-                completed_.fetch_add(1, std::memory_order_relaxed);
-            } else {
-                // No busy-spin — sleep until notified by submit()
-                std::unique_lock<std::mutex> lock(cv_mutex_);
-                cv_.wait_for(lock, std::chrono::milliseconds(50), [this] {
-                    return !running_.load(std::memory_order_relaxed)
-                        || queue_.size_approx() > 0;
-                });
-            }
+        try {
+            auto state = state_;
+            state_->workers_.emplace_back([state] { state->run_worker(); });
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(state_->lifecycle_mutex_);
+            --state_->workers_alive_;
+            throw;
         }
     }
 
-    moodycamel::ConcurrentQueue<std::function<void()>> queue_;
-    std::vector<std::thread> workers_;
-    std::mutex cv_mutex_;
-    std::condition_variable cv_;
-    std::atomic<bool> running_{true};
-    std::atomic<size_t> pending_{0};
-    std::atomic<size_t> active_{0};
-    std::atomic<size_t> completed_{0};
-    std::atomic<size_t> rejected_{0};
-    size_t max_queue_size_;
+    std::shared_ptr<State> state_;
 };
 
 } // namespace neograph::util

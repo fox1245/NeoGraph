@@ -174,6 +174,14 @@ returns `{false, invalid_future}` for ordinary backpressure; an internal
 enqueue failure instead returns `{false, valid_future}`, and that future
 throws `std::runtime_error` when observed.
 
+Construct the queue with at least one worker. `close()` is idempotent: it
+rejects later submissions, waits for workers, lets a callable already claimed
+by a worker finish, and completes all unclaimed futures with
+`std::runtime_error("RequestQueue is closed")`. A callable may invoke `close()`
+itself to initiate shutdown, but that worker returns rather than waiting for
+itself. The destructor uses the same close path, so accepted futures are never
+silently stranded during teardown.
+
 ## Rules for safe concurrent use
 
 - Configuration mutators (`set_retry_policy`, `set_checkpoint_store`,
