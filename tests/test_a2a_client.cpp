@@ -42,7 +42,7 @@ struct MockA2AServer {
     std::atomic<int>           card_count{0};
     std::mutex                 observed_mutex;
     std::vector<int>           request_ids;
-    std::vector<std::string>  message_ids;
+    std::vector<std::string>   message_ids;
     std::string                last_method;
     json                       last_params;
     std::string                last_card_request_path;
@@ -229,6 +229,53 @@ TEST(A2AClient, ConcurrentCallsHaveUniqueRequestIdsWhileTimeoutChanges) {
     std::set<int> ids(srv.request_ids.begin(), srv.request_ids.end());
     EXPECT_EQ(srv.request_ids.size(), static_cast<std::size_t>(callers));
     EXPECT_EQ(ids.size(), srv.request_ids.size());
+}
+
+TEST(A2AClient, ConcurrentSendAndGetUseUniqueRequestIds) {
+    MockA2AServer srv;
+    A2AClient client(srv.url());
+    constexpr int callers = 16;
+    std::atomic<bool> start{false};
+    std::vector<std::future<void>> futures;
+    futures.reserve(callers * 2);
+
+    for (int i = 0; i < callers; ++i) {
+        futures.push_back(std::async(std::launch::async, [&] {
+            while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+            (void)client.send_message_sync("send");
+        }));
+        futures.push_back(std::async(std::launch::async, [&] {
+            while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+            (void)client.get_task("task-concurrent");
+        }));
+    }
+    start.store(true, std::memory_order_release);
+    for (auto& future : futures) future.get();
+
+    std::lock_guard<std::mutex> lock(srv.observed_mutex);
+    std::set<int> ids(srv.request_ids.begin(), srv.request_ids.end());
+    EXPECT_EQ(srv.request_ids.size(), static_cast<std::size_t>(callers * 2));
+    EXPECT_EQ(ids.size(), srv.request_ids.size());
+}
+
+TEST(A2AClient, ConcurrentForcedCardRefreshesAreSerialized) {
+    MockA2AServer srv;
+    A2AClient client(srv.url());
+    (void)client.fetch_agent_card();
+    constexpr int callers = 8;
+    std::atomic<bool> start{false};
+    std::vector<std::future<AgentCard>> futures;
+    futures.reserve(callers);
+
+    for (int i = 0; i < callers; ++i) {
+        futures.push_back(std::async(std::launch::async, [&] {
+            while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+            return client.fetch_agent_card(true);
+        }));
+    }
+    start.store(true, std::memory_order_release);
+    for (auto& future : futures) EXPECT_EQ(future.get().name, "mock-agent");
+    EXPECT_EQ(srv.card_count.load(), callers + 1);
 }
 
 TEST(A2ACallerNode, RepeatedCallsUseUniqueCallScopedMessageIds) {

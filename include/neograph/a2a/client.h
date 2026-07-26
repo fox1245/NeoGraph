@@ -33,8 +33,14 @@ namespace neograph::a2a {
 /**
  * @brief A2A client — call a remote agent over JSON-RPC + HTTP.
  *
- * Thread-safe: every public method acquires its own ephemeral HTTP
- * connection; no shared in-flight state. Reuses
+ * Thread-safe for concurrent use of one instance. `base_url` is immutable;
+ * `set_timeout` is synchronized and each request snapshots the timeout before
+ * network I/O, so a timeout update cannot race or alter an in-flight request.
+ * JSON-RPC request IDs are process-local atomic counters. Agent-card cache
+ * initialization and `force` refreshes are single-flight and synchronized;
+ * waiting callers receive a copy, and no network I/O occurs under the state
+ * lock. Stream callbacks still run on the network thread and must provide
+ * their own synchronization for shared application state. Reuses
  * neograph::async::async_post for transport.
  *
  * @code
