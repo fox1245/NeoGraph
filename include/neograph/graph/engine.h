@@ -78,7 +78,9 @@ struct EngineConfig {
     /// Fan-out worker count. One preserves the historical no-pool fast path.
     std::size_t worker_count = 1;
 
-    /// Pure nodes whose result cache should be enabled at construction time.
+    /// Pure, context-independent nodes whose results may be reused across
+    /// executions. This is an explicit CacheScope::Reusable opt-in; use the
+    /// two-argument set_node_cache_enabled() API for execution-local caching.
     std::set<std::string> cached_nodes;
 };
 

@@ -217,7 +217,8 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
     engine->tool_gate_           = std::move(config.tool_gate);
     engine->owned_tools_         = std::move(resources.tools).release();
     for (const auto& node_name : config.cached_nodes) {
-        engine->node_cache_.set_enabled(node_name, true);
+        engine->set_node_cache_enabled(
+            node_name, true, CacheKeyPolicy{CacheScope::Reusable, {}});
     }
 
     // Signal-based dispatch — see Scheduler. A node becomes ready in
