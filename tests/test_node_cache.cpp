@@ -273,3 +273,20 @@ TEST(NodeCache, LegacyEnableResetsReusablePolicy) {
     EXPECT_EQ(counter->load(), 2);
     EXPECT_EQ(engine->node_cache().hit_count(), 0u);
 }
+TEST(NodeCache, DefaultScopePartitionsAutoResume) {
+    auto counter = std::make_shared<std::atomic<int>>(0);
+    auto engine = build_engine_with_node(counter);
+    engine->set_node_cache_enabled("work", true);
+
+    RunConfig cfg;
+    cfg.thread_id = "resume-thread";
+    cfg.input = json::object();
+    cfg.max_steps = 5;
+    engine->run(cfg);
+    cfg.resume_if_exists = true;
+    engine->run(cfg);
+
+    EXPECT_EQ(counter->load(), 2);
+    EXPECT_EQ(engine->node_cache().hit_count(), 0u);
+    EXPECT_EQ(engine->node_cache().miss_count(), 2u);
+}
