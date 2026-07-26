@@ -348,12 +348,10 @@ Task A2AServer::Impl::run_graph(
     const std::string& context_id,
     std::function<void(const TaskStatusUpdateEvent&)> on_event) {
 
-    auto user_text = extract_user_text(inbound);
     auto& a = *adapter;
 
     neograph::graph::RunConfig cfg;
     cfg.thread_id = task_id;
-    cfg.input     = a.build_initial_state(user_text);
 
     std::shared_ptr<neograph::graph::CancelToken> task_cancel;
     std::uint64_t generation = 0;
@@ -383,6 +381,9 @@ Task A2AServer::Impl::run_graph(
 
     Task result;
     try {
+        // Reserve the generation before adapter work so tasks/cancel can
+        // signal this run even while input preparation is still in progress.
+        cfg.input = a.build_initial_state(extract_user_text(inbound));
         auto rr = engine->run(cfg);
         if (task_cancel->is_cancelled()) {
             result = build_failure_task(task_id, context_id, "(canceled)");

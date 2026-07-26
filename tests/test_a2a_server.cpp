@@ -350,6 +350,20 @@ TEST(A2AServer, CancelTaskAbortsInflightGraphAndIsIdempotent) {
     EXPECT_LT(std::chrono::steady_clock::now() - start, 500ms);
 }
 
+TEST(A2AServer, CancelUnknownBeforeStartIsDeterministic) {
+    LiveServer srv;
+    A2AClient client(srv.url());
+    EXPECT_THROW({
+        try {
+            (void)client.cancel_task("not-started");
+        } catch (const std::runtime_error& e) {
+            EXPECT_NE(std::string(e.what()).find("Task not found"),
+                      std::string::npos);
+            throw;
+        }
+    }, std::runtime_error);
+}
+
 TEST(A2AServer, MethodNotFoundReturnsCorrectCode) {
     LiveServer srv;
     A2AClient client(srv.url());
