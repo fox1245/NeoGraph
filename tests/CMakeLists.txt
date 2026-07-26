@@ -113,6 +113,10 @@ if(NEOGRAPH_BUILD_A2A)
     )
 endif()
 
+if(NEOGRAPH_BUILD_UTIL)
+    target_sources(neograph_tests PRIVATE test_request_queue.cpp)
+endif()
+
 if(NEOGRAPH_BUILD_ACP)
     target_sources(neograph_tests PRIVATE
         test_acp_types.cpp
@@ -180,6 +184,10 @@ endif()
 
 if(NEOGRAPH_BUILD_ACP)
     target_link_libraries(neograph_tests PRIVATE neograph::acp)
+endif()
+
+if(NEOGRAPH_BUILD_UTIL)
+    target_link_libraries(neograph_tests PRIVATE neograph::util)
 endif()
 
 if(NEOGRAPH_BUILD_POSTGRES)

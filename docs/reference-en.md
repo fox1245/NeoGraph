@@ -3065,8 +3065,9 @@ public:
     RequestQueue(const RequestQueue&) = delete;
     RequestQueue& operator=(const RequestQueue&) = delete;
 
-    // Submit a task. Returns {accepted, future}.
-    // If the queue is full, returns {false, invalid_future}.
+    // Submit a task. Concurrent callers cannot exceed max_queue_size.
+    // A full queue returns {false, invalid_future}; an internal enqueue
+    // failure returns {false, valid_future}, which throws on get().
     template<typename F>
     std::pair<bool, std::future<void>> submit(F&& task);
 
@@ -3082,7 +3083,7 @@ public:
 
 | Method | Description |
 |--------|-------------|
-| `submit(task)` | Enqueues a callable. Returns a pair: `first` is `true` if accepted (or `false` if the queue is full -- backpressure), `second` is a `std::future<void>` that resolves when the task completes or propagates exceptions |
+| `submit(task)` | Atomically reserves pending capacity, then enqueues a callable. Returns a pair: `first` is `true` if accepted. A full queue returns `false` with an invalid future; an internal enqueue failure returns `false` with a valid future that propagates the error. Accepted futures resolve when the task completes or propagates task exceptions. |
 | `stats()` | Returns a snapshot of current queue statistics |
 
 The queue uses `moodycamel::ConcurrentQueue` internally for lock-free enqueue/dequeue

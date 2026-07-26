@@ -168,7 +168,11 @@ log("pending={} active={} completed={} rejected={}",
 `RunResult` via a shared output slot (as above) or a per-task
 `std::promise<RunResult>`. The queue is backed by
 `moodycamel::ConcurrentQueue` (lock-free) and workers park on a
-condvar when idle — no busy-spin.
+condvar when idle — no busy-spin. Admission atomically reserves a pending
+slot, so concurrent callers cannot exceed `max_queue_size`. A full queue
+returns `{false, invalid_future}` for ordinary backpressure; an internal
+enqueue failure instead returns `{false, valid_future}`, and that future
+throws `std::runtime_error` when observed.
 
 ## Rules for safe concurrent use
 
