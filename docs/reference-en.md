@@ -3052,12 +3052,13 @@ public:
     struct Stats {
         size_t pending;        // Tasks waiting in queue
         size_t active;         // Tasks currently executing
-        size_t completed;      // Total completed tasks
-        size_t rejected;       // Tasks rejected due to full queue
+        size_t completed;      // Total settled tasks, including cancellation
+        size_t rejected;       // Tasks rejected during admission
         size_t num_workers;    // Number of worker threads
         size_t max_queue_size; // Maximum queue capacity
     };
 
+    // num_workers must be greater than zero.
     RequestQueue(size_t num_workers = 128, size_t max_queue_size = 10000);
     ~RequestQueue();
 
@@ -3071,6 +3072,10 @@ public:
     template<typename F>
     std::pair<bool, std::future<void>> submit(F&& task);
 
+    // Idempotently reject new work, cancel queued tasks, and wait for workers.
+    void close();
+    bool is_closed() const noexcept;
+
     // Get current queue statistics
     Stats stats() const;
 };
@@ -3078,12 +3083,14 @@ public:
 
 | Constructor Parameter | Type | Default | Description |
 |-----------------------|------|---------|-------------|
-| `num_workers` | `size_t` | `128` | Number of worker threads in the pool |
+| `num_workers` | `size_t` | `128` | Number of worker threads in the pool; zero throws `std::invalid_argument` |
 | `max_queue_size` | `size_t` | `10000` | Maximum number of pending tasks. Tasks beyond this limit are rejected |
 
 | Method | Description |
 |--------|-------------|
-| `submit(task)` | Atomically reserves pending capacity, then enqueues a callable. Returns a pair: `first` is `true` if accepted. A full queue returns `false` with an invalid future; an internal enqueue failure returns `false` with a valid future that propagates the error. Accepted futures resolve when the task completes or propagates task exceptions. |
+| `submit(task)` | Atomically reserves pending capacity, then enqueues a callable. Returns a pair: `first` is `true` if accepted. A full or closed queue returns `false` with an invalid future; an internal enqueue failure returns `false` with a valid future that propagates the error. Accepted futures resolve when the task completes or propagates task exceptions. |
+| `close()` | Idempotently rejects new work. An external caller waits for all workers to finish shutdown, then unclaimed work completes with `std::runtime_error("RequestQueue is closed")`. A callable claimed by a worker before closure may finish. A callable may invoke `close()` to initiate shutdown, but cannot wait for itself. |
+| `is_closed()` | Reports whether `close()` has begun rejecting new work. |
 | `stats()` | Returns a snapshot of current queue statistics |
 
 The queue uses `moodycamel::ConcurrentQueue` internally for lock-free enqueue/dequeue
