@@ -26,11 +26,16 @@
 #include <neograph/graph/engine.h>
 
 #include <functional>
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
 
 namespace neograph::a2a {
+
+#ifdef NEOGRAPH_A2A_TESTING
+namespace test { class A2AServerTestAccess; }
+#endif
 
 /**
  * @brief Adapt a NeoGraph run to the A2A request/response shape.
@@ -121,8 +126,22 @@ class NEOGRAPH_API A2AServer {
     int port() const;
 
   private:
+#ifdef NEOGRAPH_A2A_TESTING
+    friend class test::A2AServerTestAccess;
+#endif
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace neograph::a2a
+
+#ifdef NEOGRAPH_A2A_TESTING
+namespace neograph::a2a::test {
+
+class A2AServerTestAccess {
+  public:
+    static void set_max_inflight_runs(A2AServer& server, std::size_t cap);
+};
+
+}  // namespace neograph::a2a::test
+#endif

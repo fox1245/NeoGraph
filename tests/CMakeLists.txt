@@ -106,6 +106,7 @@ if(NEOGRAPH_BUILD_MCP_CLIENT AND NEOGRAPH_BUILD_MCP_SERVER)
 endif()
 
 if(NEOGRAPH_BUILD_A2A)
+    target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_A2A_TESTING)
     target_sources(neograph_tests PRIVATE
         test_a2a_types.cpp
         test_a2a_client.cpp

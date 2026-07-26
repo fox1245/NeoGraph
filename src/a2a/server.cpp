@@ -304,6 +304,14 @@ struct A2AServer::Impl {
                              httplib::Response& res);
 };
 
+#ifdef NEOGRAPH_A2A_TESTING
+void test::A2AServerTestAccess::set_max_inflight_runs(
+    A2AServer& server, std::size_t cap) {
+    std::lock_guard lk(server.impl_->tasks_mu);
+    server.impl_->max_inflight_runs = cap;
+}
+#endif
+
 void A2AServer::Impl::register_routes() {
     svr.Get("/.well-known/agent-card.json",
             [this](const httplib::Request&, httplib::Response& res) {
@@ -374,45 +382,39 @@ Task A2AServer::Impl::run_graph(
     cfg.thread_id = task_id;
 
     std::shared_ptr<neograph::graph::CancelToken> task_cancel;
+    std::optional<Task> rejected;
     std::uint64_t generation = 0;
     {
         std::lock_guard lk(tasks_mu);
         if (active_runs.contains(task_id)) {
-            auto rejected = build_rejected_task(
+            rejected = build_rejected_task(
                 task_id, context_id, "task_id is already running");
-            if (on_event) {
-                TaskStatusUpdateEvent ev;
-                ev.task_id = task_id;
-                ev.context_id = context_id;
-                ev.status = rejected.status;
-                ev.final = true;
-                on_event(ev);
-            }
-            return rejected;
-        }
-        if (active_runs.size() >= max_inflight_runs) {
-            auto rejected = build_rejected_task(
+        } else if (active_runs.size() >= max_inflight_runs) {
+            rejected = build_rejected_task(
                 task_id, context_id, "A2A server is at its in-flight task limit");
-            if (on_event) {
-                TaskStatusUpdateEvent ev;
-                ev.task_id = task_id;
-                ev.context_id = context_id;
-                ev.status = rejected.status;
-                ev.final = true;
-                on_event(ev);
-            }
-            return rejected;
+        } else {
+            Task working;
+            working.id             = task_id;
+            working.context_id     = context_id;
+            working.status.state   = TaskState::Working;
+            tasks[task_id]         = working;
+            task_cancel = std::make_shared<neograph::graph::CancelToken>();
+            generation = next_generation++;
+            active_runs[task_id] = ActiveRun{task_cancel, generation};
+            touch_task_unlocked(task_id);
+            evict_lru_unlocked();
         }
-        Task working;
-        working.id            = task_id;
-        working.context_id    = context_id;
-        working.status.state  = TaskState::Working;
-        tasks[task_id]        = working;
-        task_cancel = std::make_shared<neograph::graph::CancelToken>();
-        generation = next_generation++;
-        active_runs[task_id] = ActiveRun{task_cancel, generation};
-        touch_task_unlocked(task_id);
-        evict_lru_unlocked();
+    }
+    if (rejected) {
+        if (on_event) {
+            TaskStatusUpdateEvent ev;
+            ev.task_id = task_id;
+            ev.context_id = context_id;
+            ev.status = rejected->status;
+            ev.final = true;
+            on_event(ev);
+        }
+        return *rejected;
     }
     cfg.cancel_token = task_cancel;
 

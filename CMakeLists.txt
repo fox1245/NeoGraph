@@ -1520,6 +1520,10 @@ if(NEOGRAPH_BUILD_TESTS)
     set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
 
+    if(NEOGRAPH_BUILD_A2A)
+        target_compile_definitions(neograph_a2a PRIVATE NEOGRAPH_A2A_TESTING)
+    endif()
+
     if(NEOGRAPH_BUILD_ACP)
         target_compile_definitions(neograph_acp PRIVATE NEOGRAPH_ACP_TESTING)
     endif()
