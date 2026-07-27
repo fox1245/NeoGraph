@@ -40,6 +40,11 @@ TEST(SchemaExport, DocumentShape) {
     EXPECT_EQ(doc.value("$schema", ""),
               "https://json-schema.org/draft/2020-12/schema");
 
+    ASSERT_TRUE(doc.contains("compiler_validation_keywords"));
+    EXPECT_TRUE(array_has(doc["compiler_validation_keywords"], "required"));
+    EXPECT_TRUE(array_has(doc["compiler_validation_keywords"], "type"));
+    EXPECT_TRUE(array_has(doc["compiler_validation_keywords"], "enum"));
+
     ASSERT_TRUE(doc.contains("topology"));
     const auto& topo = doc["topology"];
     EXPECT_EQ(topo.value("type", ""), "object");

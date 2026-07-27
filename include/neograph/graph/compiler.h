@@ -184,7 +184,11 @@ public:
      * This makes the v0.1.0–v0.1.7 "silently dropped block" regression
      * class structurally impossible: deleting a parsing step deletes
      * its consumption mark, and any document using that feature fails
-     * loudly instead of degrading silently.
+     * loudly instead of degrading silently. Registered node config schemas
+     * additionally enforce NeoGraph's declared `required`, `type`, and `enum`
+     * subset before a node factory runs. Diagnostics use stable JSON paths;
+     * other JSON Schema keywords remain descriptive unless documented
+     * separately.
      *
      * Annotation namespace: keys starting with `_` or `x-` (e.g.
      * `_comment`, `x-studio-pos`) are never consumed, never errors,

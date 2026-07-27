@@ -2,7 +2,7 @@ spec:
   id: issue-209-schema-keyword-validation
   issue: 209
   parent: 187
-  status: proposed
+  status: accepted-local
   priority: P1
   kind: compiler-correctness
   depends_on: []
@@ -19,11 +19,14 @@ contract:
   supported_subset: [required, type, enum]
   diagnostics:
     - Aggregate deterministic violations instead of first-error exit.
-    - Include source coordinate, node name/type, keyword, expected, and actual.
+    - Include a stable JSON path, node name/type, keyword, expected, and actual.
+    - Remap to an elaborator source coordinate only when a source map is available.
   invariants:
     - Built-in and custom node schemas use the same validator.
     - Exported schema and compiler claim exactly the same supported subset.
-    - Unsupported schema keywords are explicit, not silently enforced partially.
+    - properties is traversed only to reach the supported value keywords.
+    - Existing annotations and unsupported structural keywords remain documented but unenforced.
+    - Core graph compilation does not depend on the MCP component.
 
 red_tests:
   - id: required-missing
@@ -36,8 +39,9 @@ red_tests:
     assertion: "Several violations are returned in stable order."
 
 implementation:
-  - Define a small value-level schema validator independent of NodeFactory parsing.
-  - Run it before node construction for strict documents.
+  - Define a small deterministic value-level validator in the graph compiler layer.
+  - Validate the node config after removing graph-structural type and barrier keys.
+  - Run it before node construction only for strict documents.
   - Extend corpus, mutation, and schema-evolution tests.
 
 acceptance:
