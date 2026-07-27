@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=f2f219b4b5c913d0969a37ca02b44d437dde4dcc74c6475cc9f9c52944c99597 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=18fbe81b3233d4da002abe8e6b268f65168347f28e27740eed56dfb2ce58900f -->
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
 
 # 문제 해결
@@ -205,9 +205,11 @@ print(result.execution_trace)
 1. **`__start__`에서 누락된 가장자리.** 모든 그래프에는 최소한 하나가 필요합니다.
 `{"from": ng.START_NODE, "to": "..."}` 가장자리.
 2. **조건부가 `routes` 맵에 없는 값을 반환했습니다.**
-조건의 반환 값이 어떤 키와도 일치하지 않으면 엔진이 다음을 수행합니다.
-사전순으로 마지막 항목을 대체용으로 사용합니다. 그것이 다음에 매핑된다면
-`__end__`, 자동으로 종료됩니다. 항상 기본 분기를 포함합니다.
+조건의 반환값이 어떤 키와도 일치하지 않으면 열린 조건 또는 반환값 계약이
+없는 조건은 명시적인 `"default"` route를 사용합니다. 이 route가 `__end__`를
+가리키면 정상 종료됩니다. `"default"`가 없으면 source node, 조건 이름,
+반환 label이 포함된 오류가 납니다. 닫힌 조건은 선언하지 않은 label을 항상
+거부합니다.
 3. **`max_steps=0` 또는 `max_steps=1`** — 실행이 천장에 도달했습니다.
 즉시. 기본값은 25입니다. ReAct 루프에는 일반적으로 10개 이상이 필요합니다.
 

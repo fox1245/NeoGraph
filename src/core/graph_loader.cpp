@@ -396,7 +396,7 @@ json NodeFactory::export_schema() const {
                         "to": { "type": "string" },
                         "type": { "type": "string", "enum": ["conditional"] },
                         "condition": { "type": "string", "description": "Condition name (see 'conditions'); makes this a branch." },
-                        "routes": { "type": "object", "additionalProperties": { "type": "string" }, "description": "route key -> target node name." }
+                        "routes": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Route key -> target node name. The reserved 'default' key handles unknown outputs from open conditions; without it, an unknown label is a runtime error." }
                     },
                     "required": ["from"]
                 }
@@ -409,7 +409,7 @@ json NodeFactory::export_schema() const {
                     "properties": {
                         "from": { "type": "string" },
                         "condition": { "type": "string", "description": "Condition name (see 'conditions')." },
-                        "routes": { "type": "object", "additionalProperties": { "type": "string" }, "description": "route key -> target node name." }
+                        "routes": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Route key -> target node name. The reserved 'default' key handles unknown outputs from open conditions; without it, an unknown label is a runtime error." }
                     },
                     "required": ["from", "condition"]
                 }
@@ -463,6 +463,8 @@ json NodeFactory::export_schema() const {
     json doc;
     doc["neograph_version"] = NEOGRAPH_VERSION_STR;
     doc["$schema"]          = "https://json-schema.org/draft/2020-12/schema";
+    doc["compiler_validation_keywords"] =
+        json::array({"required", "type", "enum"});
     doc["topology"]         = json::parse(kTopologySchema);
     doc["node_types"]       = std::move(node_types);
     doc["node_effects"]     = std::move(node_effects);

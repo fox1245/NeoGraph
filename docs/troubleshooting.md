@@ -203,9 +203,11 @@ The graph routed to `__end__` immediately. Most common causes:
 1. **Missing edge from `__start__`.** Every graph needs at least one
    `{"from": ng.START_NODE, "to": "..."}` edge.
 2. **Conditional returned a value not in the `routes` map.** When the
-   condition's return value doesn't match any key, the engine takes
-   the lexicographically-last entry as a fallback. If that maps to
-   `__end__`, you exit silently. Always include a default branch.
+   condition's return value doesn't match any key, an open or unspecified
+   condition uses the explicit `"default"` route. If that maps to `__end__`,
+   you exit normally. Without `"default"`, routing throws an error containing
+   the source node, condition, and returned label. Closed conditions always
+   reject labels outside their declared set.
 3. **`max_steps=0` or `max_steps=1`** — the run hit the ceiling
    immediately. Default is 25; ReAct loops typically need 10+.
 

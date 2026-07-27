@@ -2,6 +2,8 @@
 #include <neograph/graph/registry.h>
 #include <neograph/graph/validator.h>
 
+#include "routing_policy.h"
+
 #include <algorithm>
 #include <map>
 #include <queue>
@@ -25,9 +27,8 @@ struct Ctx {
     const TopologySpec& cg;
     const GraphRegistry&  registry;
     std::set<std::string> node_names;
-    // Static successor map: plain edges + every conditional route
-    // target. The scheduler's fallback route is always one of the
-    // declared routes, so this over-approximates nothing.
+    // Static successor map: plain edges + every user-declared conditional
+    // route target.
     std::map<std::string, std::set<std::string>> succ;
     std::vector<Diagnostic> out;
 
@@ -72,6 +73,7 @@ void check_references(Ctx& c) {
                     + ce.from + "'", json{{"from", ce.from}});
         }
         for (const auto& [key, target] : ce.routes) {
+            if (key == detail::kLegacyDefaultRoute) continue;
             if (target != kEnd && !c.is_node(target)) {
                 c.error("E3", path + ".routes." + key,
                         "route '" + key + "' targets unknown node '" + target + "'",
@@ -112,7 +114,7 @@ void build_successors(Ctx& c) {
     for (const auto& e : c.cg.edges) c.succ[e.from].insert(e.to);
     for (const auto& ce : c.cg.conditional_edges) {
         for (const auto& [key, target] : ce.routes) {
-            (void)key;
+            if (key == detail::kLegacyDefaultRoute) continue;
             c.succ[ce.from].insert(target);
         }
     }
@@ -253,10 +255,15 @@ void check_routes(Ctx& c) {
 
         const std::set<std::string> labels(spec->labels.begin(), spec->labels.end());
         std::set<std::string> keys;
-        for (const auto& [k, v] : ce.routes) { (void)v; keys.insert(k); }
+        for (const auto& [k, v] : ce.routes) {
+            (void)v;
+            if (k != detail::kLegacyDefaultRoute) keys.insert(k);
+        }
 
         std::set<std::string> dead, uncovered;
-        for (const auto& k : keys)   if (!labels.count(k)) dead.insert(k);
+        for (const auto& k : keys) {
+            if (!labels.count(k) && k != DEFAULT_ROUTE) dead.insert(k);
+        }
         for (const auto& l : labels) if (!keys.count(l))   uncovered.insert(l);
 
         if (!spec->open && !dead.empty()) {
@@ -268,17 +275,18 @@ void check_routes(Ctx& c) {
                     json{{"from", ce.from}, {"condition", ce.condition},
                          {"dead_keys", string_set_to_array(dead)}});
         }
-        if (!uncovered.empty()) {
-            const std::string fallback = ce.routes.rbegin()->first;
+        const bool has_default = keys.count(DEFAULT_ROUTE) > 0;
+        if (!uncovered.empty() && (!spec->open || !has_default)) {
             const std::string msg =
                 "label(s) " + string_set_to_array(uncovered).dump()
-                + " of condition '" + ce.condition + "' have no route — the "
-                "scheduler falls back to the lexicographically-last route ('"
-                + fallback + "' -> '" + ce.routes.rbegin()->second
-                + "'), which is order-dependent, not intent";
+                + " of condition '" + ce.condition + "' have no exact route — "
+                + (spec->open
+                    ? "unknown labels will fail at runtime; add an explicit "
+                      "'default' route to handle them"
+                    : "closed conditions must route every declared label");
             json witness = json{{"from", ce.from}, {"condition", ce.condition},
                                 {"uncovered", string_set_to_array(uncovered)},
-                                {"fallback_route", fallback}};
+                                {"has_default", has_default}};
             if (spec->open) {
                 c.warn("E10", path, msg, std::move(witness));
             } else {

@@ -115,9 +115,11 @@ public:
      *
      * If a conditional edge originates from `current`, the condition
      * is evaluated against `state` and the matching route is returned
-     * as a single-element vector. If the route key is missing from the
-     * routes map, the LAST entry (by map ordering) is used as a
-     * fallback — matching the pre-refactor engine behavior.
+     * as a single-element vector. An open condition with no exact match uses
+     * the reserved `default` route when present. Otherwise resolution throws
+     * with the source node, condition, and returned label. Closed conditions
+     * always throw when their implementation returns an undeclared label.
+     * Schema-v0 graphs retain their historical fallback target internally.
      *
      * Otherwise, every regular edge with `from == current` contributes
      * its `to` to the result. If no edge matches at all, `{END_NODE}`
@@ -145,9 +147,9 @@ public:
      *   1. If any StepRouting carries a `command_goto`, that node wins —
      *      ALL regular edge routing from this super-step is discarded.
      *      When multiple Commands fire in the same super-step the LAST
-     *      iteration's value wins (matching the engine's historical
-     *      last-writer-wins behavior under parallel dispatch; note this
-     *      is intrinsically non-deterministic under Taskflow).
+     *      iteration's value wins. Parallel branch completion order is not a
+     *      stable routing contract, so graphs should not emit competing
+     *      Commands in one super-step.
      *   2. Otherwise, union `resolve_next_nodes(n, state)` for every n
      *      in `routings`. Any `END_NODE` occurrence trips `hit_end` and
      *      is excluded from `ready`.
@@ -211,10 +213,10 @@ public:
      * decisions) can use the 2-arg overload, which ignores
      * `barrier_specs_` entirely — there's no memory to gate against.
      *
-     * Note: under the current implementation barrier state is
-     * **per-run and in-memory only** — a checkpoint/resume round trip
-     * drops all partial signals. See module docs for the follow-up
-     * schema-versioned persistence plan.
+     * GraphEngine stores this state in checkpoint schema v2. A checkpoint or
+     * interrupt/resume round trip therefore preserves partial signals; the
+     * barrier clears only after all required upstreams have arrived and it
+     * fires.
      */
     NextStepPlan plan_next_step(const std::vector<StepRouting>& routings,
                                 const GraphState& state,

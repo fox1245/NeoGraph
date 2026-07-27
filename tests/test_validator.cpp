@@ -76,6 +76,10 @@ void ensure_vtypes_registered() {
         "vcond_binary",
         [](const GraphState&) -> std::string { return "yes"; },
         ConditionSpec{{"no", "yes"}, /*open=*/false});
+    ConditionRegistry::instance().register_condition(
+        "vcond_literal_default",
+        [](const GraphState&) -> std::string { return "default"; },
+        ConditionSpec{{"default"}, /*open=*/false});
 }
 
 ValidationReport validate_def(const json& def) {
@@ -285,6 +289,36 @@ TEST(Validator, E10_OpenConditionUncoveredKnownLabelWarns) {
     EXPECT_EQ(e10[0]->severity, "warning");
     EXPECT_EQ(e10[0]->witness["uncovered"][0].get<std::string>(), "default");
     EXPECT_FALSE(r.has_errors());
+}
+
+TEST(Validator, E10_OpenConditionExplicitDefaultCoversUnknownLabels) {
+    auto def = two_node_base();
+    def["conditional_edges"] = json::array({
+        {{"from", "a"}, {"condition", "route_channel"},
+         {"routes", {{"x", "b"}, {"default", "__end__"}}}} });
+    auto r = validate_def(def);
+    EXPECT_TRUE(by_code(r, "E10").empty()) << r.summary();
+}
+
+TEST(Validator, E10_ClosedConditionDefaultDoesNotReplaceDeclaredCoverage) {
+    auto def = two_node_base();
+    def["conditional_edges"] = json::array({
+        {{"from", "a"}, {"condition", "vcond_binary"},
+         {"routes", {{"yes", "b"}, {"default", "__end__"}}}} });
+    auto r = validate_def(def);
+    auto e10 = by_code(r, "E10");
+    ASSERT_EQ(e10.size(), 1u) << r.summary();
+    EXPECT_EQ(e10[0]->severity, "error");
+    EXPECT_EQ(e10[0]->witness["uncovered"][0].get<std::string>(), "no");
+}
+
+TEST(Validator, E10_DefaultCanBeADeclaredClosedConditionLabel) {
+    auto def = two_node_base();
+    def["conditional_edges"] = json::array({
+        {{"from", "a"}, {"condition", "vcond_literal_default"},
+         {"routes", {{"default", "__end__"}}}} });
+    auto r = validate_def(def);
+    EXPECT_TRUE(by_code(r, "E10").empty()) << r.summary();
 }
 
 TEST(Validator, E10_ExactCoverageIsClean) {

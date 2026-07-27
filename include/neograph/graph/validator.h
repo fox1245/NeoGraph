@@ -5,9 +5,8 @@
  * GraphValidator is the pass layer between parsing (GraphCompiler, M1:
  * every key consumed) and execution (GraphEngine): it checks what the
  * *graph* means, not what the JSON says — dangling references,
- * unreachable nodes, barriers that can never fire, conditional routes
- * that fall into the scheduler's arbitrary lexicographically-last
- * fallback, channel effect violations.
+ * unreachable nodes, barriers that can never fire, incomplete conditional
+ * routes, and channel effect violations.
  *
  * Severity philosophy (checker soundness over coverage): a diagnostic
  * is an ERROR only when the construct can never be right under the
@@ -108,12 +107,11 @@ public:
      *        barrier — double-activation risk when arrival supersteps
      *        differ (warning; XOR-merges are legitimate).
      *  - E10 route completeness against declared ConditionSpecs:
-     *        closed conditions must map exactly their label set (dead
-     *        route keys / uncovered labels are errors — an uncovered
-     *        label falls into the scheduler's lexicographically-last
-     *        fallback, an arbitrary target). Open conditions warn on
-     *        uncovered known labels. An EMPTY route map is always an
-     *        error: dispatch would dereference rend() (UB). Conditions
+     *        closed conditions must map every declared label (dead route
+     *        keys / uncovered labels are errors). The reserved `default`
+     *        route does not replace closed-label coverage. Open conditions
+     *        warn on uncovered known labels unless an explicit `default`
+     *        handles them. An EMPTY route map is always an error. Conditions
      *        without a declared spec are skipped.
      *  - E11 no path to __end__ (warning), honoring the scheduler's
      *        implicit rule that a node with no outgoing edges routes

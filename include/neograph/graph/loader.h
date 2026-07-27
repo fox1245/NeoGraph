@@ -105,11 +105,11 @@ private:
  * @brief Declared output-label contract of a condition function.
  *
  * Backs static route-completeness checking (GraphValidator E10): a
- * conditional edge over a *closed* condition must map exactly the
- * declared labels — an unmapped label would fall into the scheduler's
- * lexicographically-last-route fallback (an arbitrary target), and a
- * route key outside the label set is dead. Conditions registered
- * without a spec are skipped by the validator.
+ * conditional edge over a *closed* condition must map every declared label;
+ * an unmapped label is an error and a route key outside the label set is dead.
+ * The reserved `default` key is allowed as a defensive route but does not
+ * replace closed-label coverage. Conditions registered without a spec are
+ * skipped by the validator.
  */
 struct ConditionSpec {
     /// Labels the condition is known to return ("known" for open specs,

@@ -1,5 +1,5 @@
-// Pure unit tests for the Scheduler — routing rules in isolation, no
-// GraphEngine, no real nodes, no Taskflow. The point of extracting
+// Pure unit tests for the Scheduler — routing rules in isolation, with no
+// GraphEngine, real nodes, or execution runtime. The point of extracting
 // Scheduler from GraphEngine was that today's class of bug (XOR/AND
 // conflation, dropped siblings, Command vs edge override) is a pure
 // routing question that doesn't need node execution to verify; these
@@ -21,6 +21,15 @@ void register_cond_once(const std::string& name, ConditionFn fn) {
     static std::set<std::string> done;
     if (done.insert(name).second) {
         ConditionRegistry::instance().register_condition(name, std::move(fn));
+    }
+}
+
+void register_cond_once(const std::string& name, ConditionFn fn,
+                        ConditionSpec spec) {
+    static std::set<std::string> done;
+    if (done.insert(name).second) {
+        ConditionRegistry::instance().register_condition(
+            name, std::move(fn), std::move(spec));
     }
 }
 
@@ -80,25 +89,89 @@ TEST(SchedulerResolve, ConditionalEdgePicksMatchingRoute) {
     EXPECT_EQ(slow[0], "careful_path");
 }
 
-TEST(SchedulerResolve, ConditionalFallsBackToLastRouteOnMismatch) {
+TEST(SchedulerResolve, ConditionalUsesExplicitDefaultOnMismatch) {
     register_cond_once("route_by_mode_fb",
         [](const GraphState& s) { return s.get("mode").get<std::string>(); });
 
     std::vector<Edge> edges;
     std::vector<ConditionalEdge> cedges = {{
         "decider", "route_by_mode_fb",
-        {{"fast", "quick"}, {"slow", "careful"}, {"zzz_default", "fallback"}}
+        {{"fast", "quick"}, {"slow", "careful"}, {"default", "fallback"}}
     }};
     Scheduler sch(edges, cedges);
 
-    // "nonsense" doesn't match any route key; we expect the LAST entry
-    // (by std::map ordering = lexicographic) — here "zzz_default" —
-    // so the route target is "fallback". This is the documented
-    // contract (last-map-entry fallback) carried over from the engine.
+    // "nonsense" does not match an exact route, so the reserved explicit
+    // default is selected without depending on std::map ordering.
     GraphState s_nonsense; fill_route(s_nonsense, "mode", "nonsense");
     auto out = sch.resolve_next_nodes("decider", s_nonsense);
     ASSERT_EQ(out.size(), 1u);
     EXPECT_EQ(out[0], "fallback");
+}
+
+TEST(SchedulerResolve, ConditionalMismatchWithoutDefaultFailsClosed) {
+    register_cond_once("route_by_mode_error",
+        [](const GraphState& s) { return s.get("mode").get<std::string>(); });
+
+    std::vector<Edge> edges;
+    std::vector<ConditionalEdge> cedges = {{
+        "decider", "route_by_mode_error",
+        {{"fast", "quick"}, {"slow", "careful"}}
+    }};
+    Scheduler sch(edges, cedges);
+    GraphState state;
+    fill_route(state, "mode", "nonsense");
+
+    try {
+        (void)sch.resolve_next_nodes("decider", state);
+        FAIL() << "unknown condition labels must not choose a route by map order";
+    } catch (const std::runtime_error& e) {
+        const std::string message = e.what();
+        EXPECT_NE(message.find("decider"), std::string::npos) << message;
+        EXPECT_NE(message.find("route_by_mode_error"), std::string::npos) << message;
+        EXPECT_NE(message.find("nonsense"), std::string::npos) << message;
+        EXPECT_NE(message.find("default"), std::string::npos) << message;
+    }
+}
+
+TEST(SchedulerResolve, ClosedConditionRejectsUnknownLabelEvenWithDefault) {
+    register_cond_once("closed_route_by_mode",
+        [](const GraphState& s) { return s.get("mode").get<std::string>(); },
+        ConditionSpec{{"fast", "slow"}, /*open=*/false});
+
+    std::vector<Edge> edges;
+    std::vector<ConditionalEdge> cedges = {{
+        "decider", "closed_route_by_mode",
+        {{"fast", "quick"}, {"slow", "careful"}, {"default", "fallback"}}
+    }};
+    Scheduler sch(edges, cedges);
+    GraphState state;
+    fill_route(state, "mode", "nonsense");
+
+    EXPECT_THROW(sch.resolve_next_nodes("decider", state), std::runtime_error);
+
+    GraphState reserved_name;
+    fill_route(reserved_name, "mode", "default");
+    EXPECT_THROW(sch.resolve_next_nodes("decider", reserved_name),
+                 std::runtime_error)
+        << "the reserved route is usable as an exact closed-condition label "
+           "only when the ConditionSpec declares it";
+}
+
+TEST(SchedulerResolve, ClosedConditionCanDeclareDefaultAsExactLabel) {
+    register_cond_once("closed_literal_default",
+        [](const GraphState& s) { return s.get("mode").get<std::string>(); },
+        ConditionSpec{{"default"}, /*open=*/false});
+
+    std::vector<Edge> edges;
+    std::vector<ConditionalEdge> cedges = {{
+        "decider", "closed_literal_default", {{"default", "declared_target"}}
+    }};
+    Scheduler sch(edges, cedges);
+    GraphState state;
+    fill_route(state, "mode", "default");
+
+    EXPECT_EQ(sch.resolve_next_nodes("decider", state),
+              std::vector<std::string>{"declared_target"});
 }
 
 // -------------------------------------------------------------------------
@@ -197,10 +270,9 @@ TEST(SchedulerPlan, CommandGotoToEndTerminates) {
 }
 
 TEST(SchedulerPlan, MultipleCommandGotosLastWins) {
-    // Preserves existing engine semantics: parallel Taskflow order is
-    // already non-deterministic, so whichever iteration runs LAST in
-    // the aggregation loop wins. We assert the rule itself (not the
-    // order), to lock it in as intentional.
+    // Preserves existing engine semantics: whichever iteration appears LAST
+    // in the aggregation input wins. We assert that rule itself, not any
+    // parallel branch completion order.
     std::vector<Edge> edges;
     std::vector<ConditionalEdge> cedges;
     Scheduler sch(edges, cedges);

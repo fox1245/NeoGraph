@@ -209,8 +209,9 @@ private:
  * @brief Dynamic fan-out request (map-reduce pattern).
  *
  * A node can return Send objects to dispatch the same (or different) node
- * multiple times with different inputs. All Send targets execute in parallel
- * via Taskflow.
+ * multiple times with different inputs. Send targets are joined as one Asio
+ * parallel group; CPU work uses multiple threads only when the caller or engine
+ * supplies a multi-threaded executor.
  *
  * ## Isolation semantics
  *
@@ -337,6 +338,10 @@ struct ConditionalEdge {
     std::string condition;                           ///< Condition function name in ConditionRegistry.
     std::map<std::string, std::string> routes;       ///< Mapping of condition result to destination node.
 };
+
+/// Reserved route key selected when an open/unspecified condition returns no
+/// exact match. Omitting it makes an unknown label a runtime error.
+constexpr const char* DEFAULT_ROUTE = "default";
 
 /**
  * @brief Dependency injection context passed to nodes during construction.

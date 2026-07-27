@@ -386,9 +386,11 @@ struct RefModel {
             }
             if (ce) {
                 auto it = ce->routes.find(route_value);
-                succ.push_back(it != ce->routes.end()
-                                   ? it->second
-                                   : ce->routes.rbegin()->second);
+                if (it != ce->routes.end()) {
+                    succ.push_back(it->second);
+                } else {
+                    succ.push_back(ce->routes.at(DEFAULT_ROUTE));
+                }
             } else {
                 for (const auto& e : edges) {
                     if (e.from == r.node_name) succ.push_back(e.to);
@@ -437,8 +439,8 @@ TEST(PbtDifferential, SchedulerMatchesReferenceModel) {
         std::sort(actual_start.begin(), actual_start.end());
         EXPECT_EQ(actual_start, ref_start) << "seed " << seed;
 
-        // Random route values each super-step, junk value included so
-        // the lexicographically-last fallback path is exercised too.
+        // Random route values each super-step, junk included so the explicit
+        // default route is exercised too.
         std::vector<std::string> route_pool = {"default", "k0", "k1", "zzz_junk"};
         auto ready = actual_start;
         for (int step = 0; step < 12 && !ready.empty(); ++step) {

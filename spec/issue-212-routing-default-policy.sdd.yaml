@@ -2,7 +2,7 @@ spec:
   id: issue-212-routing-default-policy
   issue: 212
   parent: 187
-  status: proposed
+  status: accepted-local
   priority: P1
   kind: control-flow-contract
   depends_on: [209]
@@ -17,7 +17,10 @@ problem:
 
 contract:
   closed_conditions: "All declared labels must be covered; unknown output is an error."
-  open_conditions: "Graph declares an explicit default target or fail policy."
+  open_conditions: "Strict graphs declare default in routes or fail on an unknown label."
+  legacy_conditions: >-
+    Unversioned graphs retain the old last-route fallback through an internal
+    compatibility marker added after translation validation.
   invariants:
     - Route map ordering never affects behavior.
     - Diagnostics identify source node, condition, returned label, and known labels.
@@ -32,10 +35,12 @@ red_tests:
     assertion: "Missing labels fail strict compilation."
 
 implementation:
-  - Extend graph schema and compiled edge representation with explicit policy.
-  - Remove scheduler last-route fallback.
-  - Provide an upgrader rule only when old intent can be inferred explicitly.
+  - Reserve default as the explicit fallback route key for open or undeclared conditions.
+  - Make Scheduler use exact match, then default when allowed, then fail with context.
+  - Add the old last-route target as an internal compatibility marker only while linking legacy graphs.
+  - Do not change ConditionalEdge object layout before the ABI policy is established.
 
 acceptance:
   - Unknown labels follow only declared error/default behavior.
+  - Existing unversioned graphs retain their documented fallback during migration.
   - Scheduler, validator, schema export, corpus, and migration tests pass.

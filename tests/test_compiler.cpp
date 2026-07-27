@@ -245,7 +245,7 @@ TEST(GraphCompiler, ConditionalEdgeViaConditionField) {
     ASSERT_EQ(cg.conditional_edges.size(), 1u);
     EXPECT_EQ(cg.conditional_edges[0].from, "router");
     EXPECT_EQ(cg.conditional_edges[0].condition, "state.topic");
-    EXPECT_EQ(cg.conditional_edges[0].routes.size(), 2u);
+    EXPECT_EQ(cg.to_json()["conditional_edges"][0]["routes"].size(), 2u);
     EXPECT_EQ(cg.conditional_edges[0].routes.at("ai"), "ai_node");
     EXPECT_EQ(cg.conditional_edges[0].routes.at("ml"), "ml_node");
 }

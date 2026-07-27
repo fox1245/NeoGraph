@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=f2f219b4b5c913d0969a37ca02b44d437dde4dcc74c6475cc9f9c52944c99597 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=18fbe81b3233d4da002abe8e6b268f65168347f28e27740eed56dfb2ce58900f -->
 # 故障排除
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -168,8 +168,7 @@ print(result.execution_trace)
 
 1. **缺少边缘`__start__`.** 每个图至少需要一个
 `{"from": ng.START_NODE, "to": "..."}`边缘。
-2. **条件返回的值不在`routes`地图。** 当
-条件的返回值与任何键都不匹配，引擎将按字典顺序排列的最后一个条目作为后备。如果这映射到`__end__`，你默默退出。始终包含默认分支。
+2. **条件返回的值不在`routes`映射中。** 当返回值与任何键都不匹配时，开放条件或未声明输出契约的条件会使用显式`"default"`路由。若它指向`__end__`，图会正常结束。没有`"default"`时，错误信息会包含 source node、条件名和返回的 label。封闭条件一定拒绝声明范围外的 label。
 3. **`max_steps=0`或者`max_steps=1`** — 运行达到了上限
 立即地。默认为 25；ReAct循环通常需要 10 个以上。
 
