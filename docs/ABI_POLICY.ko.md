@@ -1,6 +1,7 @@
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ko source_sha256=ebe5405e9700e0c4c0991888dcc3b913812786782c7cae1825d9b34584a91483 -->
 # 바이너리 호환성 정책
 
-**언어:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
+**Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
 
 이 정책은 설치된 NeoGraph 정적·공유 라이브러리를 사용하는 C++ 프로그램에
 적용됩니다. Python wheel은 확장 모듈과 맞는 라이브러리를 한 묶음으로

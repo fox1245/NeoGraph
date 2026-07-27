@@ -1,6 +1,7 @@
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=ebe5405e9700e0c4c0991888dcc3b913812786782c7cae1825d9b34584a91483 -->
 # バイナリ互換性ポリシー
 
-**言語:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
+**Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
 
 このポリシーは、インストール済みの NeoGraph 静的・共有ライブラリを使う
 C++ コンシューマーに適用されます。Python wheel は対応する拡張と

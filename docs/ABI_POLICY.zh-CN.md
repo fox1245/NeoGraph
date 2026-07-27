@@ -1,6 +1,7 @@
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=ebe5405e9700e0c4c0991888dcc3b913812786782c7cae1825d9b34584a91483 -->
 # 二进制兼容性策略
 
-**语言:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
+**Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
 
 本策略适用于使用已安装 NeoGraph 静态或共享库的 C++ 程序。Python wheel
 会把匹配的扩展和库作为一个整体发布，不得单独替换 wheel 内的库。
