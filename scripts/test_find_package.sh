@@ -46,7 +46,9 @@ version=$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)"
 [[ -n "$version" ]] || { echo "failed to read project version" >&2; exit 1; }
 major=${version%%.*}
 
-platform_cmake_args=()
+# Keep this non-empty: macOS ships Bash 3.2, where expanding an empty array
+# under `set -u` raises "unbound variable".
+platform_cmake_args=(-DNEOGRAPH_INSTALL_HEADERS=ON)
 consumer_exe="$work/consumer/consumer"
 case "$platform" in
     MINGW*|MSYS*|CYGWIN*)
