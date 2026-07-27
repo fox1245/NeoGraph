@@ -354,14 +354,13 @@ caps=[net]  (net cap):    {"socket": "SOCKET_CREATED"}         # capability gran
 
 ## 진화 — 밈적(다윈주의 + 라마르크주의)
 
-오프라인 `the_beast.cpp`는volution.h의 `evolve()`를 실행하지만 해당 경로는
-`evaluate()`는 **게이트 전용**입니다. compiles/validates는 돌연변이이며 이를 호출합니다.
-"비용 0" — 하네스를 *실행*하거나 출력을 채점하지 않습니다. 그래서 체력은
-평평하고 아무것도 오르지 않습니다(가장 좋은 개인이 씨앗을 남깁니다).
+오프라인 `the_beast.cpp`는 의도적으로 `run_evaluation=false`를 사용하므로
+구조적 유효성만으로 선택합니다. 일반 evolution API는 작업을 실행하고 기대한
+채널 값과 정확히 비교해 점수를 매길 수도 있습니다.
 
-[`the_beast_evolve.cpp`](the_beast_evolve.cpp)는 누락된 레이어를 제공합니다.
-**하네스를 실행하고 실제 출력을 평가하는 실제 피트니스**,
-그런 다음 밈적 루프를 구동합니다.
+[`the_beast_evolve.cpp`](the_beast_evolve.cpp)는 대신 연속적인 거리 지표를
+사용합니다. 따라서 근접한 결과가 일반 채점기의 단일 출력 불일치 등급에
+머무르지 않고 숫자 목표를 향해 개선될 수 있습니다.
 
 - **작업**(실제 작업, 결과 점수 - 구조적 프록시 아님):
 목표 숫자를 계산하는 ARITHMETIC PIPELINE를 조립합니다. 5개 작전

@@ -8,7 +8,7 @@
  *      and a deterministic seed, returns a mutated core, or nullopt when
  *      the mutation cannot be applied to the given graph.
  *   2. **Task + Scorer** — a fixed-input → expected-output contract, with
- *      a scoring function that evaluates a CompiledGraph against it.
+ *      a scoring function that executes a CompiledGraph against it.
  *   3. **Selection loop** — given N mutations per generation, compile-gate
  *      each (zero-cost), run evaluation on survivors, keep top K.
  *
@@ -111,15 +111,21 @@ struct NEOGRAPH_API Task {
     json reference_core;
     /// Input state to feed into the graph.
     json input;
-    /// Expected output state (channel values after execution).
+    /// Expected channel values after execution. Evaluation compares each key
+    /// here with the same named RunResult channel using exact JSON equality.
+    /// Extra output channels, channel versions, global_version, engine metadata,
+    /// and flat convenience projections are ignored.
     json expected_output;
-    /// Expected number of super-steps (approx).
+    /// Expected number of super-steps. Zero disables the step-cost component.
+    /// Behavioral evaluation uses GraphEngine's standard 50-step safety limit.
     int expected_super_steps = 0;
 };
 
 /// Score of a single graph run against a task.
 struct NEOGRAPH_API Score {
-    /// 0.0 = perfect, higher = worse. Negative means invalid/unrunnable.
+    /// 0.0 = perfect, higher = worse. Correct output has cost in [0, 1];
+    /// output mismatches have cost >= 2. Negative means invalid/unrunnable and
+    /// is always ranked behind non-negative scores by evolve().
     double cost = -1.0;
     /// Human-readable summary.
     std::string summary;
@@ -151,7 +157,8 @@ struct NEOGRAPH_API EvolutionConfig {
     /// Seed for deterministic reproducibility.
     uint64_t seed = 42;
     /// When true, runs the evaluation (requires GraphEngine). When false,
-    /// only the compile gate is applied (dry-run for operator testing).
+    /// only the compile gate is applied: Score::executed and Score::correct
+    /// remain false because dry-run makes no behavioral claim.
     bool run_evaluation = false;
 };
 
@@ -180,6 +187,9 @@ struct NEOGRAPH_API EvolutionResult {
     /// Compile-gate statistics.
     int total_offspring = 0;
     int compile_passed = 0;
+    /// Candidates whose execution completed and produced a comparable output.
+    /// Output mismatches count as completed executions; cancellation, timeout,
+    /// interruption, and other execution failures do not.
     int execute_passed = 0;
 };
 

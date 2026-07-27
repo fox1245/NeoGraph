@@ -1202,9 +1202,9 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             target_link_libraries(cookbook_the_beast_script PRIVATE
                 neograph::core neograph::llm cppdotenv)
 
-            # Memetic evolution: REAL fitness (executes the harness) + Darwinian
-            # mutation/selection + optional Lamarckian LLM injection. Supplies
-            # the fitness layer evolution.h's gate-only evaluate() lacks.
+            # Memetic evolution: continuous numeric fitness + Darwinian
+            # mutation/selection + optional Lamarckian LLM injection. Unlike
+            # evolution.h's exact-output scorer, near misses receive gradients.
             add_executable(cookbook_the_beast_evolve
                 examples/cookbook/the-beast/the_beast_evolve.cpp)
             target_link_libraries(cookbook_the_beast_evolve PRIVATE
