@@ -435,7 +435,10 @@ TEST(SchemaProviderStreamAsyncOuterIo,
     io.reset();
 
     auto destroyed = std::async(std::launch::async, [&] { provider.reset(); });
-    if (destroyed.wait_for(std::chrono::seconds(1)) !=
+    // Windows CI runs the full suite at high parallelism and can take just
+    // over one second to schedule the shutdown path. Keep this well below the
+    // provider's 10-second read timeout so a missing socket abort still fails.
+    if (destroyed.wait_for(std::chrono::seconds(5)) !=
         std::future_status::ready) {
         {
             std::lock_guard lock(mock.mutex);
