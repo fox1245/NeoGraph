@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=6780e2507de2b228368944012cc9ad6c04e504aced4b69b172f87ef51e90ff69 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=b39068ee8e2c2a525841913e920f7115f35ecbb40d153c6d2cc7866510bfca37 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -906,8 +906,31 @@ public:
 | `name` | `std::string` | 親グラフ内のノード名 |
 | `subgraph` | `std::shared_ptr<GraphEngine>` | コンパイル済みの子グラフエンジン |
 | `input_map` | `std::map<std::string, std::string>` | `parent_channel -> child_channel` の対応付け。親から読み、子の入力へ書き込みます |
-| `output_map` | `std::map<std::string, std::string>` | `child_channel -> parent_channel` の対応付け。子の結果から読み、親へ書き込みます |
+| `output_map` | `std::map<std::string, std::string>` | `child_channel -> parent_channel` の対応付け。子が生成した write delta のチャネル名を変更して親へ転送します |
 マップが空の場合、チャネルは名前でマッピングされます (identity mapping)。
+
+入力マッピングは親の現在のチャネル値を子の入力へコピーします。出力マッピングは
+意図的に異なり、子の最終シリアライズ状態を新しい reducer 入力として扱わず、子が
+生成した順序で `ChannelWrite` delta を転送して各 write の `Mode` を保持します。
+そのため、継承した append/custom 値が二重に適用されません。出力マッピングは
+snapshot replacement を推論しません。マッピング先の親値を置き換える場合、子は
+`ChannelWrite::Mode::Overwrite` を明示的に送出する必要があります。
+
+#### ランタイムコンテキストの伝播
+
+`SubgraphNode` はエンジン境界で子の実行コンテキストを派生させます。公開
+`RunContext` のレイアウトは変更しません。
+
+| コンテキスト値 | 子での意味 |
+|---------------|-----------------|
+| `cancel_token` | 子操作用トークンを作成するため、親のキャンセルはすべての子と孫へ届きます。 |
+| `usage`, `deadline`, `trace_id`, `stream_mode` | 継承します。`deadline` と `trace_id` は `RunMetadata` 由来で、子は親の stream mode を広げられません。 |
+| `thread_id` | 親 thread ID が空でなければ、親 ID、subgraph ノード名、super-step、invocation identity から決定的に派生します。そのため sibling `Send` 呼び出しは別々の checkpoint identity を得ます。親 thread ID が空なら子もスコープなしとなり checkpointing は無効です。 |
+| `step` | 子実行にローカルで、子 checkpoint または 0 から始まります。 |
+| `store` | 親 Store があれば継承し、なければ子エンジンに設定された Store を維持します。 |
+| Tool policy | 親 `ToolGate` が子の gate より先に実行されます。子は許可された呼び出しをさらに制限または rewrite できますが、親の deny/interrupt は回避できません。 |
+| Checkpoint backend and resume value | 親 backend があれば継承し、なければ子の backend を維持します。親 resume は派生した子 checkpoint identity が存在する場合のみ子 checkpoint を resume し、null でない resume value を転送します。Checkpoint routing は公開 `RunContext` フィールドではなく内部実装です。 |
+
 ---
 ## 7. GraphEngine
 **ヘッダー:** `<neograph/graph/engine.h>`
@@ -962,18 +985,22 @@ struct RunConfig {
 | `usage` | `std::shared_ptr<UsageAccumulator>` | `nullptr` | 任意のトークン集計器。省略時はエンジンが作成し、実行中の集計器を `in.ctx.usage` として公開します |
 | `resume_if_exists` | `bool` | `false` | `true` かつ `thread_id` のチェックポイントが存在する場合、`input` を適用する前にそこから初期化します (複数ターンのチャット形状) |
 ### RunContext (v0.4 PR 1、`NodeInput.ctx` 経由でノードに公開)
-エンジンが実行ごとに運ぶディスパッチメタデータです。`RunConfig`、エンジンの Store、指定がなければ新しく作成される使用量アキュムレーター、任意の再開値から構築されます。ノードは `run(NodeInput) -> NodeOutput` のオーバーライド内で `in.ctx` 経由で利用します。
+エンジンが実行ごとに運ぶディスパッチメタデータです。`RunConfig`（未指定時は新しい
+usage accumulator を作成）、`RunMetadata`、有効な Store、任意の resume value
+から構築されます。ノードは `run(NodeInput) -> NodeOutput` のオーバーライド内で
+`in.ctx` 経由で利用します。
 ```cpp
 struct RunContext {
     std::shared_ptr<CancelToken>  cancel_token;
     std::shared_ptr<UsageAccumulator> usage;
-    std::optional<std::chrono::steady_clock::time_point> deadline; // reserved
-    std::string                   trace_id;     // reserved
+    std::optional<std::chrono::steady_clock::time_point> deadline;
+    std::string                   trace_id;
     std::string                   thread_id;
     int                           step;
     StreamMode                    stream_mode;
     std::optional<json>           resume_value;
     std::shared_ptr<Store>        store;
+    ToolGate                      tool_gate;
 };
 ```
 
@@ -981,13 +1008,14 @@ struct RunContext {
 |-------|-------------|
 | `cancel_token` | 実行中のトークン。`provider.complete(params)` に渡すと、キャンセル時に LLM HTTP ソケットを中断できます。独自ループでは `is_cancelled()` をポーリングします |
 | `usage` | エンジンが値を入れる共有トークン集計先 |
-| `deadline` | 予約済み (まだ `RunConfig.deadline` フィールドはありません) |
-| `trace_id` | OTel 連携用に予約済み |
+| `deadline` | C++ `RunMetadata` から渡される任意の絶対 deadline |
+| `trace_id` | C++ `RunMetadata` から渡される任意の trace correlator |
 | `thread_id` | `RunConfig.thread_id` を反映します |
 | `step` | 現在のスーパーステップ番号。反復ごとに更新されます |
 | `stream_mode` | `RunConfig.stream_mode` を反映します |
 | `resume_value` | `GraphEngine::resume()` に渡された値。新規実行では空です |
 | `store` | エンジンに設定された Store。未設定の場合は `nullptr` |
+| `tool_gate` | 継承された親ポリシーを含む、この invocation の有効なポリシー |
 ### CancelToken
 呼び出し側とエンジンで共有する協調的なキャンセル基本単位です。`std::make_shared<CancelToken>()` で作成し、`RunConfig.cancel_token` に渡して、
 実行中のスレッドから `cancel()` を呼ぶと実行を中断できます。
@@ -1334,9 +1362,15 @@ std::vector<Checkpoint> get_state_history(const std::string& thread_id,
 void update_state(const std::string& thread_id,
                   const json& channel_writes,
                   const std::string& as_node = "");
+
+void update_state_writes(const std::string& thread_id,
+                         const std::vector<ChannelWrite>& channel_writes,
+                         const std::string& as_node = "");
 ```
 
-チャネル書き込みを適用してスレッドの状態を手動更新し、更新済み状態で新しいチェックポイントを作成します。
+チャネル write を適用してスレッド状態を手動更新します。JSON object 形式はチャネル名ごとに
+reducer write を適用します。`ChannelWrite` vector 形式は write 順序と明示的な overwrite
+mode を保持します。どちらも更新済み状態で新しい checkpoint を作成します。
 | パラメーター | 型 | 説明 |
 |-----------|------|-------------|
 | `thread_id` | `std::string` | 対象スレッド |
@@ -2541,12 +2575,13 @@ public:
     struct Stats {
         size_t pending;        // Tasks waiting in queue
         size_t active;         // Tasks currently executing
-        size_t completed;      // Total completed tasks
-        size_t rejected;       // Tasks rejected due to full queue
+        size_t completed;      // Total settled tasks, including cancellation
+        size_t rejected;       // Tasks rejected during admission
         size_t num_workers;    // Number of worker threads
         size_t max_queue_size; // Maximum queue capacity
     };
 
+    // num_workers must be greater than zero.
     RequestQueue(size_t num_workers = 128, size_t max_queue_size = 10000);
     ~RequestQueue();
 
@@ -2554,10 +2589,15 @@ public:
     RequestQueue(const RequestQueue&) = delete;
     RequestQueue& operator=(const RequestQueue&) = delete;
 
-    // Submit a task. Returns {accepted, future}.
-    // If the queue is full, returns {false, invalid_future}.
+    // Submit a task. Concurrent callers cannot exceed max_queue_size.
+    // A full queue returns {false, invalid_future}; an internal enqueue
+    // failure returns {false, valid_future}, which throws on get().
     template<typename F>
     std::pair<bool, std::future<void>> submit(F&& task);
+
+    // Idempotently reject new work, cancel queued tasks, and wait for workers.
+    void close();
+    bool is_closed() const noexcept;
 
     // Get current queue statistics
     Stats stats() const;
@@ -2566,11 +2606,13 @@ public:
 
 | コンストラクターパラメーター | 型 | デフォルト | 説明 |
 |-----------------------|------|---------|-------------|
-| `num_workers` | `size_t` | `128` | プール内のワーカースレッド数 |
+| `num_workers` | `size_t` | `128` | プール内のワーカースレッド数。0 は `std::invalid_argument` を送出 |
 | `max_queue_size` | `size_t` | `10000` | 保留できるタスクの最大数。超過分は拒否 |
 | メソッド | 説明 |
 |--------|-------------|
-| `submit(task)` | 呼び出し可能オブジェクトをキューへ追加。受理時は `first=true`、満杯時は `false` (バックプレッシャー)。`second` は完了時に解決する、または例外を伝播する `std::future<void>` |
+| `submit(task)` | pending capacity を原子的に予約してから callable を enqueue します。受理時は `first=true`。満杯または閉じたキューは invalid future と `false` を返し、内部 enqueue 失敗はエラーを伝播する valid future と `false` を返します。受理済み future は完了時に解決するかタスク例外を伝播します。 |
+| `close()` | 新しい作業を冪等に拒否します。外部呼び出しは全 worker の終了を待ち、未取得作業は `std::runtime_error("RequestQueue is closed")` で完了します。取得済み callable は完了できます。callable 自身が `close()` を呼んで終了を開始できますが、自分自身は待ちません。 |
+| `is_closed()` | `close()` が新しい作業の拒否を開始したか報告します。 |
 | `stats()` | 現在のキュー統計のスナップショットを返す |
 キュー内部ではロックフリーの enqueue/dequeue に `moodycamel::ConcurrentQueue` を使い、
 条件変数でアイドル状態のワーカーを起こします。

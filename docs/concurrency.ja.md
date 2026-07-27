@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concurrency.md locale=ja source_sha256=fe3657f31d0895edf67431f7c6135b418f6677d2d4b8cc90699617f5ab343df8 -->
+<!-- neograph-i18n: source=docs/concurrency.md locale=ja source_sha256=53d5843f1b9147b72df94827ed3d1463c1a60be53f9edff281267ba5b82653f8 -->
 # 同時実行性と非同期性
 
 **Languages:** [English](concurrency.md) | [한국어](concurrency.ko.md) | [日本語](concurrency.ja.md) | [简体中文](concurrency.zh-CN.md)
@@ -165,11 +165,21 @@ log("pending={} active={} completed={} rejected={}",
     s.pending, s.active, s.completed, s.rejected);
 ```
 
-`submit()` は `{accepted, std::future<void>}` を返します: をキャプチャします。
-`RunResult` (上記のような共有出力スロット経由) またはタスクごと
-`std::promise<RunResult>`。キューを支えているのは、
-`moodycamel::ConcurrentQueue` (ロックフリー) と作業員が駐車する
-アイドル時の condvar — ビジースピンなし。
+`submit()` は `{accepted, std::future<void>}` を返します。`RunResult` は共有出力
+スロット（上記）またはタスクごとの `std::promise<RunResult>` で受け渡せます。
+キューはロックフリーの `moodycamel::ConcurrentQueue` を使用し、アイドル中の
+ワーカーは condvar で待機するため busy-spin しません。admission は pending
+スロットを原子的に予約するため、同時呼び出しでも `max_queue_size` を超えません。
+満杯による通常の backpressure は `{false, invalid_future}` を返します。内部の
+enqueue 失敗は代わりに `{false, valid_future}` を返し、その future を監視すると
+`std::runtime_error` が送出されます。
+
+キューは 1 つ以上のワーカーで構築してください。`close()` は冪等で、以後の投入を
+拒否し、ワーカーの終了を待ち、すでにワーカーが取得した callable は完了させ、未取得の
+future はすべて `std::runtime_error("RequestQueue is closed")` で完了させます。
+callable 自身が `close()` を呼んで終了を開始することもできますが、そのワーカーは
+自分自身を待たずに戻ります。デストラクターも同じ close 経路を使うため、teardown 中に
+受理済み future が暗黙に取り残されることはありません。
 
 ## 安全な同時使用のためのルール
 
