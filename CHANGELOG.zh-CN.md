@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=a81bf50a40ca06d6835e7187d9a5d57988df557b58296cc6b5a81e25cdf93a1d -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=4e86912fb25a078badb50fae46fb0f72e28ab1862d4c067cc88e792574a889cb -->
 # 更新日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -22,6 +22,14 @@ NeoGraph 的所有显著变更均记录于本文件。
 
 ### 变更
 
+- **C++ ABI 与 SOVERSION 策略（issue #194）。** 所有公开
+  `neograph_*` 二进制库现在都带有项目 `VERSION` 和主版本
+  `SOVERSION`，安装后的共享库会从自身目录解析同级依赖。v1 之前使用 ABI
+  代次 0，但可以公布强制重新构建边界。包含 bounded `NodeCache` 的版本改变了
+  `NodeCache` 和 `EngineConfig` 的公开对象布局，因此所有基于 `0.11.1` 或
+  更早版本构建的 C++ 使用者都必须重新构建。1.0 将 ABI 代次改为 1，并冻结
+  v1 布局。CI 现在构建并运行隔离的静态和共享安装使用者，并检查 ELF/Mach-O
+  加载器元数据。详见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)。
 - **`GraphNode::run(input)` 迁移指南完成。** Python `GraphNode` 基类不再
   引用已删除的 `execute*` 方法；当缺少 `run(input)` 时，会引发包含迁移
   文档路径的 `NotImplementedError`。C++/Python 参考文档、异步/流式指南

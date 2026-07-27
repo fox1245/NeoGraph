@@ -667,12 +667,30 @@ jobs:
   # nothing but that prefix. It is the only thing standing between us and that
   # gap reopening.
   install-consumable:
-    runs-on: ubuntu-latest
+    name: install-consumable (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-static
+            os: ubuntu-latest
+            args: ""
+          - name: linux-shared
+            os: ubuntu-latest
+            args: --shared
+          - name: macos-shared
+            os: macos-latest
+            args: --shared
+          - name: windows-shared
+            os: windows-2022
+            args: --shared
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install build dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -684,5 +702,23 @@ jobs:
             libcurl4-openssl-dev \
             pkg-config
 
+      - name: Install build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install cmake libpq openssl@3 sqlite curl
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix libpq):$(brew --prefix openssl@3)" >> $GITHUB_ENV
+
+      - name: Install build dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install openssl -y --no-progress
+          $ssl = Get-ChildItem "C:\Program Files\OpenSSL*" -Directory |
+                 Select-Object -First 1 -ExpandProperty FullName
+          if (-not $ssl) { throw "OpenSSL install directory not found" }
+          "OPENSSL_ROOT_DIR=$ssl" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+
       - name: find_package(NeoGraph) from a clean install prefix
-        run: ./scripts/test_find_package.sh
+        shell: bash
+        run: ./scripts/test_find_package.sh ${{ matrix.args }}

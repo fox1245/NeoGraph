@@ -13,9 +13,9 @@
 #     neograph/__init__.py
 #     neograph/llm.py
 #     neograph/_neograph.cpython-*-linux-gnu.so       (binding)
-#     neograph/libneograph_core.so                    (engine)
-#     neograph/libneograph_async.so
-#     neograph/libneograph_llm.so                     (when LLM enabled)
+#     neograph_engine/libneograph_core.so.0            (engine ABI name)
+#     neograph_engine/libneograph_async.so.0
+#     neograph_engine/libneograph_llm.so.0             (when LLM enabled)
 #
 # RPATH on _neograph.so is `$ORIGIN` so the binding finds its sibling
 # engine .so files inside the wheel without LD_LIBRARY_PATH.

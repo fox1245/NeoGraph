@@ -9,6 +9,13 @@ project(neograph_consumer LANGUAGES CXX)
 
 find_package(NeoGraph CONFIG REQUIRED)
 
+if(DEFINED NEOGRAPH_EXPECTED_ABI_SOVERSION
+   AND NOT NEOGRAPH_ABI_SOVERSION STREQUAL NEOGRAPH_EXPECTED_ABI_SOVERSION)
+    message(FATAL_ERROR
+        "NeoGraph ABI generation mismatch: package reports "
+        "${NEOGRAPH_ABI_SOVERSION}, expected ${NEOGRAPH_EXPECTED_ABI_SOVERSION}")
+endif()
+
 add_executable(consumer main.cpp)
 target_link_libraries(consumer PRIVATE neograph::core)
 if(TARGET neograph::mcp_sqlite)

@@ -210,7 +210,8 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # (examples, tests, downstream agents) need to find the .so at runtime.
 # `$ORIGIN`-relative RPATHs make the build-tree binaries self-contained
 # (they look for libneograph_*.so beside themselves) and downstream
-# installers can decide their own INSTALL_RPATH.
+# installs use a sibling-relative INSTALL_RPATH so transitive neograph_*
+# dependencies remain loadable from the same lib directory.
 set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
 if(UNIX AND NOT APPLE)
     set(CMAKE_BUILD_RPATH "$ORIGIN")
@@ -863,6 +864,40 @@ if(NEOGRAPH_BUILD_UTIL)
 
     add_library(neograph::util ALIAS neograph_util)
 endif()
+
+# Shared-library ABI policy: pre-v1 releases intentionally share ABI generation
+# 0 and may announce mandatory rebuild boundaries. Version 1.0 starts the stable
+# generation 1 contract. CMake ignores these naming properties for static
+# archives and applies the platform-appropriate convention to shared libraries.
+set(_NEOGRAPH_VERSIONED_LIBRARY_TARGETS
+    neograph_core
+    neograph_async
+    neograph_postgres
+    neograph_sqlite
+    neograph_llm
+    neograph_mcp_types
+    neograph_mcp
+    neograph_mcp_server
+    neograph_mcp_sqlite
+    neograph_mcp_http_server
+    neograph_a2a
+    neograph_acp
+    neograph_grpc)
+if(UNIX AND NOT APPLE)
+    set(_NEOGRAPH_LIBRARY_INSTALL_RPATH "$ORIGIN")
+elseif(APPLE)
+    set(_NEOGRAPH_LIBRARY_INSTALL_RPATH "@loader_path")
+endif()
+foreach(_target IN LISTS _NEOGRAPH_VERSIONED_LIBRARY_TARGETS)
+    if(TARGET ${_target})
+        set_target_properties(${_target} PROPERTIES
+            VERSION ${PROJECT_VERSION}
+            SOVERSION ${PROJECT_VERSION_MAJOR}
+            INSTALL_RPATH "${_NEOGRAPH_LIBRARY_INSTALL_RPATH}")
+    endif()
+endforeach()
+unset(_NEOGRAPH_VERSIONED_LIBRARY_TARGETS)
+unset(_NEOGRAPH_LIBRARY_INSTALL_RPATH)
 
 # ===========================================================================
 # Installable Harness MCP host. Kept opt-in so library-only and wheel builds do
@@ -1739,7 +1774,7 @@ if(NEOGRAPH_BUILD_PYBIND)
     # neograph_postgres ships when libpq was found at engine-build
     # time. The binding's PostgresCheckpointStore class hard-links
     # against it (bindings/python/CMakeLists.txt:91), so the wheel
-    # must carry libneograph_postgres.{so,dylib,dll} as a sibling
+    # must carry the libneograph_postgres platform loader file as a sibling
     # alongside the binding — otherwise auditwheel/delocate fail
     # with "required library libneograph_postgres.* could not be
     # located" during repair.
@@ -1749,7 +1784,7 @@ if(NEOGRAPH_BUILD_PYBIND)
     # neograph_sqlite ships when SQLite is built (default ON). The
     # binding's SqliteCheckpointStore class hard-links against it
     # (bindings/python/CMakeLists.txt), so the wheel must carry
-    # libneograph_sqlite.{so,dylib,dll} as a sibling alongside the
+    # libneograph_sqlite platform loader file as a sibling alongside the
     # binding — otherwise auditwheel/delocate fail with "required
     # library libneograph_sqlite.* could not be located" during repair.
     if(TARGET neograph_sqlite)
@@ -1757,7 +1792,7 @@ if(NEOGRAPH_BUILD_PYBIND)
     endif()
     # neograph_mcp ships when MCP is built — which, since #95, the wheel does.
     # bindings/python/src/bind_mcp.cpp links against it, so the wheel must carry
-    # libneograph_mcp.{so,dylib,dll} next to the binding. Miss this and the
+    # libneograph_mcp platform loader file next to the binding. Miss this and the
     # wheel builds fine and then dies in repair on all four platforms with
     # "Cannot repair wheel, because required library libneograph_mcp.so could
     # not be located" — which is exactly what flipping NEOGRAPH_BUILD_MCP=ON in
@@ -1768,14 +1803,14 @@ if(NEOGRAPH_BUILD_PYBIND)
     endif()
     # neograph_a2a ships when A2A is built. Same reasoning as above:
     # bindings/python/src/bind_a2a.cpp links against it (added in
-    # v0.2.1), so the wheel must carry libneograph_a2a.{so,dylib,dll}
+    # v0.2.1), so the wheel must carry the libneograph_a2a loader file
     # next to the binding or auditwheel/delocate refuses to repair.
     if(TARGET neograph_a2a)
         list(APPEND NEOGRAPH_PYBIND_LIBS neograph_a2a)
     endif()
 
     # Set INSTALL_RPATH so the bundled libs find each other via
-    # `$ORIGIN` (libneograph_llm.so → libneograph_core.so etc.).
+    # `$ORIGIN` (libneograph_llm.so.0 → libneograph_core.so.0 etc.).
     # Build-tree RPATH is set globally above (CMAKE_BUILD_RPATH);
     # this is the parallel for the installed wheel layout.
     if(UNIX AND NOT APPLE)
@@ -1789,8 +1824,23 @@ if(NEOGRAPH_BUILD_PYBIND)
             INSTALL_RPATH_USE_LINK_PATH TRUE)
     endforeach()
 
-    install(TARGETS ${NEOGRAPH_PYBIND_LIBS}
-            LIBRARY DESTINATION neograph_engine
-            RUNTIME DESTINATION neograph_engine
-            ARCHIVE DESTINATION neograph_engine)
+    # A wheel archive cannot preserve CMake's shared-library symlink chain.
+    # Installing TARGETS here would therefore store the same bytes three times
+    # (`.so`, `.so.0`, `.so.0.11.1`). Bundle one real file under the loader name
+    # recorded in DT_NEEDED / LC_LOAD_DYLIB instead. System installs above keep
+    # the normal full-version + SOVERSION + linker-name chain.
+    foreach(_lib IN LISTS NEOGRAPH_PYBIND_LIBS)
+        if(WIN32)
+            install(FILES "$<TARGET_FILE:${_lib}>"
+                DESTINATION neograph_engine)
+        elseif(APPLE)
+            install(FILES "$<TARGET_FILE:${_lib}>"
+                DESTINATION neograph_engine
+                RENAME "lib${_lib}.${PROJECT_VERSION_MAJOR}.dylib")
+        else()
+            install(FILES "$<TARGET_FILE:${_lib}>"
+                DESTINATION neograph_engine
+                RENAME "lib${_lib}.so.${PROJECT_VERSION_MAJOR}")
+        endif()
+    endforeach()
 endif()

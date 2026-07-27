@@ -21,6 +21,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **C++ ABI and SOVERSION policy (issue #194).** Every compiled public
+  `neograph_*` library now carries the project `VERSION` and major
+  `SOVERSION`; installed shared libraries resolve sibling dependencies from
+  their own directory. Pre-v1 releases use ABI generation 0 but may declare
+  mandatory rebuild boundaries. All C++ consumers built against `0.11.1` or
+  earlier must rebuild for the release containing bounded `NodeCache`, because
+  `NodeCache` and `EngineConfig` public layouts changed. Version 1.0 changes the
+  ABI generation to 1 and freezes the supported v1 layouts. CI now builds and
+  runs isolated static and shared installed consumers and checks ELF/Mach-O
+  loader metadata. See [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md).
 - **`GraphNode::run(input)` migration guide complete.** Python `GraphNode` base class
   no longer references deleted `execute*` methods; when `run(input)` is missing it
   raises a `NotImplementedError` containing the migration documentation path.

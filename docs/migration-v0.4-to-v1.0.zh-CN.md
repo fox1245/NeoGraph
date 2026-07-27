@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=zh-CN source_sha256=f63fe99a9d0380a2de9284c52a5f775630d9e9416e53d0071a81873d1feb1462 -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=zh-CN source_sha256=36f934aaee91b3681ee9fc75420af0dfdb05bde31c855a01258794c489291c25 -->
 # 迁移指南：旧的 8 个虚函数 → `run(NodeInput)`（v0.4.x → v0.9+）
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
@@ -501,3 +501,20 @@ engine->set_worker_count_auto();   // ← add this line
 ```
 
 详见 ROADMAP_v1.md 性能部分的测量数据（单独添加）。
+
+---
+
+# 迁移 4：C++ ABI 与强制重新构建
+
+NeoGraph 现在为所有公开二进制库设置项目 `VERSION` 和主版本
+`SOVERSION`。v1 之前都使用 ABI 代次 0，但不保证各 `0.x` 版本之间的
+二进制兼容性。changelog 公布边界时，必须重新构建所有 C++ 使用者。特别是
+从 `0.11.1` 或更早版本升级到包含 bounded `NodeCache` 的版本时，
+`NodeCache` 和 `EngineConfig` 对象布局已经改变，因此必须重新构建。
+
+上面的 Provider 迁移不会改变现有 `Provider` vtable。未来的
+`CheckpointStore` 异步迁移也必须遵守同一策略；v1 之后应优先增加独立能力
+接口和适配器，而不是修改稳定布局。
+
+平台库名称、已知边界和 CI 验证方法请参阅
+[二进制兼容性策略](ABI_POLICY.md)。

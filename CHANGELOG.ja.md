@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=a81bf50a40ca06d6835e7187d9a5d57988df557b58296cc6b5a81e25cdf93a1d -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=4e86912fb25a078badb50fae46fb0f72e28ab1862d4c067cc88e792574a889cb -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -22,6 +22,16 @@ NeoGraph の全注目すべき変更を本ファイルに文書化します。
 
 ### 変更
 
+- **C++ ABI と SOVERSION ポリシー (issue #194)。** 全ての公開
+  `neograph_*` バイナリライブラリにプロジェクト `VERSION` とメジャー
+  `SOVERSION` を設定し、インストール済み共有ライブラリは同じディレクトリの
+  依存ライブラリを解決します。v1 前は ABI 世代 0 ですが、必須再ビルド
+  境界を告知できます。bounded `NodeCache` を含むリリースでは
+  `NodeCache` と `EngineConfig` の公開レイアウトが変わるため、`0.11.1`
+  以下でビルドした全 C++ コンシューマーの再ビルドが必要です。1.0 は ABI
+  世代を 1 に変更して v1 レイアウトを固定します。CI は隔離した静的・共有
+  インストールコンシューマーを実行し、ELF/Mach-O メタデータも検査します。
+  詳細は [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) を参照してください。
 - **`GraphNode::run(input)` 移行ガイド完了。** Python `GraphNode` 基底クラスは
   削除された `execute*` メソッドを参照しなくなり、`run(input)` がない場合は
   移行ドキュメントパスを含む `NotImplementedError` を発生させます。
