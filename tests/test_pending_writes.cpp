@@ -160,9 +160,9 @@ TEST_F(PendingWritesTest, PartialFailureRecordsPendingWrites) {
     // 1 (planner) + 4 (successful sends: 0, 1, 3, 4) = 5
     EXPECT_EQ(pending, 5u);
 
-    // Counter: executor ran for idx 0,1,2,3,4 exactly once each.
-    // (Taskflow fans out all five even though idx=2 throws; the failure
-    // only stops the super-step from committing.)
+    // Counter: executor ran for idx 0,1,2,3,4 exactly once each. This preserves
+    // the historical fan-out contract: all five branches finish even though
+    // idx=2 throws; the failure only stops the super-step from committing.
     EXPECT_EQ(exec_counter.load(), 5);
 }
 

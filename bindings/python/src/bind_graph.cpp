@@ -1032,14 +1032,23 @@ void init_graph(py::module_& m) {
             "external state changes the cached results would no "
             "longer reflect.")
 
+        .def("set_node_cache_max_entries",
+             &GraphEngine::set_node_cache_max_entries,
+             py::arg("max_entries"),
+             "Set the global cache entry bound. Zero preserves unbounded "
+             "behavior. Lowering the value evicts least-recently-used "
+             "entries immediately.")
+
         .def("node_cache_stats", [](const GraphEngine& self) {
             const auto& nc = self.node_cache();
             py::dict d;
             d["size"]   = nc.size();
             d["hits"]   = nc.hit_count();
             d["misses"] = nc.miss_count();
+            d["evictions"] = nc.eviction_count();
+            d["max_entries"] = nc.max_entries();
             return d;
-        }, "Return a dict with current cache size, hit count, miss count.")
+        }, "Return cache size, hits, misses, evictions, and entry bound.")
 
         .def("set_checkpoint_store",
             [](py::object self, py::object store_obj) {

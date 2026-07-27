@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ko source_sha256=f63fe99a9d0380a2de9284c52a5f775630d9e9416e53d0071a81873d1feb1462 -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ko source_sha256=36f934aaee91b3681ee9fc75420af0dfdb05bde31c855a01258794c489291c25 -->
 # 이전 안내: 기존 8 가상 함수 → `run(NodeInput)` (v0.4.x → v0.9+)
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
@@ -450,3 +450,23 @@ engine->set_worker_count_auto();   // ← add this line
 ```
 
 상세 측정은 ROADMAP_v1.md 성능 섹션 참조 (별도 추가).
+
+---
+
+# 이전 4: C++ ABI와 필수 재빌드
+
+이제 NeoGraph는 모든 공개 바이너리 라이브러리에 프로젝트 `VERSION`과 주
+버전 `SOVERSION`을 설정합니다. v1 이전 릴리스는 모두 ABI 세대 0을 쓰지만,
+`0.x` 사이의 바이너리 호환성을 보장하지는 않습니다. 변경 기록에서 경계를
+공지한 릴리스로 올릴 때는 모든 C++ 프로그램을 다시 빌드해야 합니다. 특히
+`0.11.1` 이하에서 bounded `NodeCache`가 들어간 릴리스로 올릴 때는
+`NodeCache`와 `EngineConfig` 객체 배치가 바뀌었으므로 재빌드가 필수입니다.
+
+앞의 Provider 이전은 기존 `Provider` vtable을 바꾸지 않습니다. Provider
+바이너리는 릴리스 전체에 공지된 재빌드 경계만 따르면 됩니다. 앞으로 진행할
+`CheckpointStore` 비동기 이전도 같은 정책을 따라야 합니다. v1 전 vtable
+변경은 재빌드 경계를 공지해야 하고, v1 뒤에는 안정된 객체 배치를 바꾸지 말고
+별도 기능 인터페이스와 어댑터를 더하는 방식을 우선합니다.
+
+플랫폼별 라이브러리 이름, 알려진 재빌드 경계, CI 검증 방법은
+[바이너리 호환성 정책](ABI_POLICY.md)을 참고하세요.

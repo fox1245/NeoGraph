@@ -1,9 +1,10 @@
 // Engine-overhead benchmark for NeoGraph.
 //
-// Two workloads, both with NO sleep / NO I/O so the number reflects
+// Three workloads, all with NO sleep / NO I/O so the number reflects
 // dispatch + state + checkpoint-disabled overhead, not simulated work:
 //
-//   * seq  — 3-node chain, each increments a counter channel.
+//   * seq       — 3-node coroutine chain, each increments a counter channel.
+//   * seq_sync  — the same chain implemented with SyncGraphNode.
 //   * par  — fan-out 5 workers + summarizer. Each worker appends
 //            its index; summarizer counts.
 //
@@ -42,6 +43,19 @@ private:
     std::string n_;
 };
 
+class SyncIncNode : public SyncGraphNode {
+public:
+    explicit SyncIncNode(std::string n) : SyncGraphNode(std::move(n)) {}
+
+protected:
+    NodeOutput run_sync(NodeInput in) override {
+        int cur = 0;
+        auto v = in.state.get("counter");
+        if (v.is_number()) cur = v.get<int>();
+        return NodeOutput{{ChannelWrite{"counter", json(cur + 1)}}};
+    }
+};
+
 // ── Parallel workload: 5 workers + summarizer ────────────────────────
 
 class WorkerNode : public GraphNode {
@@ -75,6 +89,10 @@ static void register_types() {
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<IncNode>(name);
         });
+    NodeFactory::instance().register_type("sync_inc",
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<SyncIncNode>(name);
+        });
     NodeFactory::instance().register_type("worker",
         [](const std::string& name, const json& cfg, const NodeContext&) {
             return std::make_unique<WorkerNode>(name, cfg.value("idx", 0));
@@ -85,14 +103,14 @@ static void register_types() {
         });
 }
 
-static json seq_graph() {
+static json seq_graph(const char* name = "seq", const char* node_type = "inc") {
     return {
-        {"name", "seq"},
+        {"name", name},
         {"channels", {{"counter", {{"reducer", "overwrite"}}}}},
         {"nodes", {
-            {"a", {{"type", "inc"}}},
-            {"b", {{"type", "inc"}}},
-            {"c", {{"type", "inc"}}}
+            {"a", {{"type", node_type}}},
+            {"b", {{"type", node_type}}},
+            {"c", {{"type", node_type}}}
         }},
         {"edges", json::array({
             {{"from", "__start__"}, {"to", "a"}},
@@ -192,15 +210,19 @@ int main(int argc, char** argv) {
 
     register_types();
 
-    // Warm-up so first iteration doesn't pay type-system init costs.
-    auto warm = GraphEngine::compile(seq_graph(), NodeContext{});
-    for (int i = 0; i < 10; ++i) (void)warm->run(RunConfig{});
-
     // --- Sequential ---
     auto seq_engine = GraphEngine::compile(seq_graph(), NodeContext{});
+    for (int i = 0; i < 10; ++i) (void)seq_engine->run(RunConfig{});
     auto seq = bench(seq_engine.get(), seq_iters);
     std::cout << "seq\t" << seq_iters << "\t" << seq.total_ms
               << "\t" << seq.per_iter_us << "\n";
+
+    auto sync_engine = GraphEngine::compile(
+        seq_graph("seq_sync", "sync_inc"), NodeContext{});
+    for (int i = 0; i < 10; ++i) (void)sync_engine->run(RunConfig{});
+    auto seq_sync = bench(sync_engine.get(), seq_iters);
+    std::cout << "seq_sync\t" << seq_iters << "\t" << seq_sync.total_ms
+              << "\t" << seq_sync.per_iter_us << "\n";
 
     // --- Parallel ---
     auto par_engine = GraphEngine::compile(par_graph(), NodeContext{});

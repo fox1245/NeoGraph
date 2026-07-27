@@ -8,6 +8,8 @@
 #include <atomic>
 #include <memory>
 #include <string>
+#include <thread>
+#include <vector>
 
 using namespace neograph;
 using namespace neograph::graph;
@@ -71,6 +73,161 @@ std::unique_ptr<GraphEngine> build_engine_with_node(
 }
 
 } // namespace
+
+namespace {
+
+NodeResult cache_result(int value) {
+    return NodeResult{{ChannelWrite{"out", json(value)}}};
+}
+
+int cached_value(const std::optional<NodeResult>& result) {
+    return result->writes[0].value.get<int>();
+}
+
+} // namespace
+
+TEST(NodeCache, ZeroCapacityPreservesUnboundedBehavior) {
+    NodeCache cache;
+    cache.set_enabled("node", true);
+    cache.set_max_entries(0);
+
+    for (int i = 0; i < 100; ++i) {
+        cache.store("node", std::to_string(i), cache_result(i));
+    }
+
+    EXPECT_EQ(cache.size(), 100u);
+    EXPECT_EQ(cache.max_entries(), 0u);
+    EXPECT_EQ(cache.eviction_count(), 0u);
+}
+
+TEST(NodeCache, BoundedCacheEvictsLeastRecentlyUsedEntry) {
+    NodeCache cache;
+    cache.set_enabled("node", true);
+    cache.set_max_entries(2);
+    cache.store("node", "a", cache_result(1));
+    cache.store("node", "b", cache_result(2));
+    ASSERT_TRUE(cache.lookup("node", "a"));  // b is now least-recently used
+    cache.store("node", "c", cache_result(3));
+
+    EXPECT_EQ(cache.size(), 2u);
+    EXPECT_EQ(cache.eviction_count(), 1u);
+    EXPECT_FALSE(cache.lookup("node", "b"));
+    EXPECT_EQ(cached_value(cache.lookup("node", "a")), 1);
+    EXPECT_EQ(cached_value(cache.lookup("node", "c")), 3);
+}
+
+TEST(NodeCache, OverwriteRefreshesRecencyWithoutCountingEviction) {
+    NodeCache cache;
+    cache.set_enabled("node", true);
+    cache.set_max_entries(2);
+    cache.store("node", "a", cache_result(1));
+    cache.store("node", "b", cache_result(2));
+    cache.store("node", "a", cache_result(10));
+    EXPECT_EQ(cache.eviction_count(), 0u);
+
+    cache.store("node", "c", cache_result(3));
+    EXPECT_FALSE(cache.lookup("node", "b"));
+    EXPECT_EQ(cached_value(cache.lookup("node", "a")), 10);
+    EXPECT_EQ(cache.eviction_count(), 1u);
+}
+
+TEST(NodeCache, LoweringCapacityEvictsImmediatelyWithStableTieBreak) {
+    NodeCache cache;
+    cache.set_enabled("node", true);
+    cache.store("node", "c", cache_result(3));
+    cache.store("node", "a", cache_result(1));
+    cache.store("node", "b", cache_result(2));
+
+    cache.set_max_entries(2);
+    EXPECT_EQ(cache.size(), 2u);
+    EXPECT_FALSE(cache.lookup("node", "a"));
+    EXPECT_EQ(cache.eviction_count(), 1u);
+
+    cache.set_max_entries(1);
+    EXPECT_EQ(cache.size(), 1u);
+    EXPECT_FALSE(cache.lookup("node", "b"));
+    EXPECT_EQ(cached_value(cache.lookup("node", "c")), 3);
+    EXPECT_EQ(cache.eviction_count(), 2u);
+}
+
+TEST(NodeCache, ClearDoesNotCountAsEvictionAndPreservesCapacity) {
+    NodeCache cache;
+    cache.set_enabled("node", true);
+    cache.set_max_entries(2);
+    cache.store("node", "a", cache_result(1));
+    cache.store("node", "b", cache_result(2));
+    cache.clear();
+
+    EXPECT_EQ(cache.size(), 0u);
+    EXPECT_EQ(cache.max_entries(), 2u);
+    EXPECT_EQ(cache.eviction_count(), 0u);
+}
+
+TEST(NodeCache, DiverseInputStressRemainsCountBounded) {
+    NodeCache cache;
+    cache.set_enabled("node", true);
+    cache.set_max_entries(64);
+
+    for (int i = 0; i < 10000; ++i) {
+        cache.store("node", std::to_string(i), cache_result(i));
+    }
+
+    EXPECT_EQ(cache.size(), 64u);
+    EXPECT_EQ(cache.eviction_count(), 10000u - 64u);
+}
+
+TEST(NodeCache, ConcurrentLookupInsertAndEvictionRemainBounded) {
+    NodeCache cache;
+    cache.set_enabled("node", true);
+    cache.set_max_entries(32);
+
+    std::vector<std::thread> workers;
+    for (int worker = 0; worker < 8; ++worker) {
+        workers.emplace_back([&cache, worker] {
+            for (int i = 0; i < 2000; ++i) {
+                const auto key = std::to_string(worker) + ":" + std::to_string(i);
+                cache.store("node", key, cache_result(i));
+                (void)cache.lookup("node", key);
+                (void)cache.lookup("node", std::to_string((i + 7) % 64));
+            }
+        });
+    }
+    for (auto& worker : workers) worker.join();
+
+    EXPECT_LE(cache.size(), 32u);
+    EXPECT_GT(cache.eviction_count(), 0u);
+}
+
+TEST(NodeCache, ConcurrentCapacityChangesRemainRaceFreeAndApplyImmediately) {
+    NodeCache cache;
+    cache.set_enabled("node", true);
+    cache.set_max_entries(32);
+
+    std::atomic<bool> start{false};
+    std::vector<std::thread> workers;
+    for (int worker = 0; worker < 4; ++worker) {
+        workers.emplace_back([&cache, &start, worker] {
+            while (!start.load(std::memory_order_acquire)) {}
+            for (int i = 0; i < 1000; ++i) {
+                const auto key = std::to_string(worker) + ":" + std::to_string(i);
+                cache.store("node", key, cache_result(i));
+                (void)cache.lookup("node", key);
+            }
+        });
+    }
+    std::thread reconfigure([&cache, &start] {
+        start.store(true, std::memory_order_release);
+        for (int i = 0; i < 500; ++i) {
+            cache.set_max_entries(1u + static_cast<std::size_t>(i % 32));
+        }
+    });
+    for (auto& worker : workers) worker.join();
+    reconfigure.join();
+
+    cache.set_max_entries(16);
+    EXPECT_LE(cache.size(), 16u);
+    EXPECT_GT(cache.eviction_count(), 0u);
+}
 
 TEST(NodeCache, DisabledByDefault) {
     auto counter = std::make_shared<std::atomic<int>>(0);

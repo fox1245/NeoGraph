@@ -43,6 +43,24 @@ void ensure_types_registered() {
             return std::make_unique<StrictNoopNode>(name);
         },
         json::parse(R"({"type":"object","properties":{"knob":{"type":"string"}}})"));
+    NodeFactory::instance().register_type(
+        "snoop_validated",
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<StrictNoopNode>(name);
+        },
+        json::parse(R"({
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer"},
+                "mode": {"type": "string", "enum": ["fast", "safe"]},
+                "options": {
+                    "type": "object",
+                    "properties": {"enabled": {"type": "boolean"}},
+                    "required": ["enabled"]
+                }
+            },
+            "required": ["count", "mode"]
+        })"));
 }
 
 // The yyjson wrapper has no erase() — rebuild minus one key.
@@ -108,6 +126,61 @@ TEST(StrictCompiler, BuiltinIntentClassifierConfigTypoIsError) {
                           {"routes", json::array({"x"})},
                           {"promt", "classify"}};   // typo of "prompt"
     expect_strict_error(def, {"nodes.ic", "promt"});
+}
+
+TEST(StrictCompiler, MissingRequiredNodeConfigIsError) {
+    auto def = minimal_strict();
+    def["nodes"]["ic"] = {{"type", "intent_classifier"},
+                           {"prompt", "classify"}};
+    expect_strict_error(def, {"nodes.ic", "required", "routes"});
+}
+
+TEST(StrictCompiler, WrongNodeConfigTypeIsError) {
+    auto def = minimal_strict();
+    def["nodes"]["v"] = {{"type", "snoop_validated"},
+                          {"count", "many"},
+                          {"mode", "fast"}};
+    expect_strict_error(def, {"nodes.v.count", "type", "integer", "string"});
+}
+
+TEST(StrictCompiler, NodeConfigEnumMismatchIsError) {
+    auto def = minimal_strict();
+    def["nodes"]["v"] = {{"type", "snoop_validated"},
+                          {"count", 3},
+                          {"mode", "turbo"}};
+    expect_strict_error(def, {"nodes.v.mode", "enum", "fast", "safe", "turbo"});
+}
+
+TEST(StrictCompiler, NestedSchemaKeywordsAreValidated) {
+    auto def = minimal_strict();
+    def["nodes"]["v"] = {{"type", "snoop_validated"},
+                          {"count", 3},
+                          {"mode", "safe"},
+                          {"options", json::object()}};
+    expect_strict_error(def, {"nodes.v.options", "required", "enabled"});
+}
+
+TEST(StrictCompiler, SchemaViolationsAreAggregatedInStablePathOrder) {
+    ensure_types_registered();
+    auto def = minimal_strict();
+    def["nodes"]["v"] = {{"type", "snoop_validated"},
+                          {"mode", "turbo"},
+                          {"options", {{"enabled", 1}}}};
+
+    try {
+        GraphCompiler::compile(def, NodeContext{});
+        FAIL() << "expected strict schema validation to reject the document";
+    } catch (const std::runtime_error& e) {
+        const std::string msg = e.what();
+        const auto count_pos = msg.find("nodes.v: keyword 'required'");
+        const auto mode_pos = msg.find("nodes.v.mode: keyword 'enum'");
+        const auto option_pos = msg.find("nodes.v.options.enabled: keyword 'type'");
+        ASSERT_NE(count_pos, std::string::npos) << msg;
+        ASSERT_NE(mode_pos, std::string::npos) << msg;
+        ASSERT_NE(option_pos, std::string::npos) << msg;
+        EXPECT_LT(count_pos, mode_pos);
+        EXPECT_LT(mode_pos, option_pos);
+    }
 }
 
 TEST(StrictCompiler, PermissiveCustomTypeConfigAllowed) {
@@ -209,6 +282,47 @@ TEST(LenientCompiler, EmptyBarrierStillDropped) {
                                   {"barrier", {{"wait_for", json::array()}}}}}}}};
     auto cg = GraphCompiler::compile(def, NodeContext{});
     EXPECT_TRUE(cg.barrier_specs.empty());
+}
+
+TEST(LenientCompiler, InvalidDeclaredNodeSchemaStillUsesLegacyFactoryBehavior) {
+    ensure_types_registered();
+    json def = {{"nodes", {{"v", {{"type", "snoop_validated"},
+                                    {"count", "many"},
+                                    {"mode", "turbo"}}}}}};
+    EXPECT_NO_THROW(GraphCompiler::compile(def, NodeContext{}));
+}
+
+TEST(LenientCompiler, ConditionalMismatchKeepsHistoricalLastRouteFallback) {
+    ensure_types_registered();
+    auto def = minimal_strict();
+    def = without_key(def, "schema_version");
+    def["conditional_edges"] = json::array({
+        {{"from", "a"}, {"condition", "route_channel"},
+         {"routes", {{"fast", "a"}, {"zzz_default", "__end__"}}}} });
+
+    auto cg = GraphCompiler::compile(def, NodeContext{});
+    Scheduler scheduler(cg.edges, cg.conditional_edges);
+    GraphState state;
+    state.init_channel("__route__", ReducerType::OVERWRITE, nullptr,
+                       json("unknown"));
+    EXPECT_EQ(scheduler.resolve_next_nodes("a", state),
+              std::vector<std::string>{"__end__"});
+    const auto emitted = cg.to_json();
+    EXPECT_EQ(emitted["conditional_edges"][0]["routes"],
+              def["conditional_edges"][0]["routes"]);
+    EXPECT_NO_THROW(GraphCompiler::verify_roundtrip(def, cg));
+}
+
+TEST(StrictCompiler, ConditionalExplicitDefaultSurvivesRoundTrip) {
+    ensure_types_registered();
+    auto def = minimal_strict();
+    def["conditional_edges"] = json::array({
+        {{"from", "a"}, {"condition", "route_channel"},
+         {"routes", {{"fast", "a"}, {"default", "__end__"}}}} });
+
+    auto cg = GraphCompiler::compile(def, NodeContext{});
+    EXPECT_EQ(cg.conditional_edges[0].routes.at("default"), "__end__");
+    EXPECT_NO_THROW(GraphCompiler::verify_roundtrip(def, cg));
 }
 
 // =========================================================================

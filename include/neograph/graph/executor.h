@@ -33,9 +33,10 @@
  * NodeExecutor instance are safe iff the underlying GraphNode
  * subclasses are safe.
  *
- * 3.0 removed the sync `run_one`/`run_parallel`/`run_sends` twins and
- * their process-wide Taskflow executor; sync callers drive the async
- * peers via GraphEngine's thread_pool (see engine.cpp).
+ * 3.0 removed the sync `run_one`/`run_parallel`/`run_sends` twins and the
+ * former process-wide executor. Sync callers drive the Asio coroutine peers
+ * inline by default or through GraphEngine's opt-in thread_pool (see
+ * graph_engine.cpp).
  */
 #pragma once
 

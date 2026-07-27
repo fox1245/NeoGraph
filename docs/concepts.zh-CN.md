@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=d464b5809d02624a3016c2ae8a6de8ff7d7073fda09ddbd842e3989d7394d498 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=0972b9d4c384152233869c6375839d3a0469e17124fb375a7352ed453ce486ae -->
 # NeoGraph 核心概念——叙事指南
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -189,14 +189,9 @@ Python 在 `input.ctx` 上暴露 `cancel_token`、`thread_id`、`step`、`stream
 
 你也可以返回裸 `list[ChannelWrite]`当你不需要的时候`Send`或者`Command`— 绑定将其提升到`NodeResult`自动地。
 
->**从 v0.3.x 迁移：** 8 虚拟链 (`execute`,
-> `execute_async`, `execute_full`, `execute_full_async`,
-> `execute_stream`, `execute_stream_async`, `execute_full_stream`,
-> `execute_full_stream_async`) 在 v0.4.x 中已弃用并在
->v0.9.0 在 v1 准备期间移除。将其替换为单个
-> `run(input)`覆盖；从中读取状态`input.state`, 发出令牌
->通过`input.stream_cb`当非 None 时，从以下位置读取取消标记
-> `input.ctx.cancel_token`。
+>**从 v0.3.x 迁移：** 已移除的 v0.4 之前多入口节点 API 只有一种替代方式：
+>覆盖 `run(input)`。从 `input.state` 读取状态，非 None 时通过
+>`input.stream_cb` 发出令牌，并从 `input.ctx.cancel_token` 读取取消令牌。
 
 注册类型，以便JSON loader 可以实例化它：
 
@@ -302,8 +297,8 @@ ng.ConditionRegistry.register_condition("is_long", is_long)
 
 ```python
 class Planner(ng.GraphNode):
-    def execute_full(self, state):
-        topics = decide_topics(state)                  # e.g. 5 strings
+    def run(self, input):
+        topics = decide_topics(input.state)            # e.g. 5 strings
         return ng.NodeResult(
             writes=[],
             sends=[ng.Send("researcher", {"topic": t}) for t in topics],
@@ -353,8 +348,8 @@ engine.set_worker_count_auto()       # hardware_concurrency()
 
 ```python
 class Evaluator(ng.GraphNode):
-    def execute_full(self, state):
-        if score(state) >= 0.8:
+    def run(self, input):
+        if score(input.state) >= 0.8:
             return ng.NodeResult(
                 writes=[],
                 command=ng.Command(
@@ -367,7 +362,7 @@ class Evaluator(ng.GraphNode):
                 writes=[],
                 command=ng.Command(
                     goto_node="planner",                  # loop back
-                    updates=[ng.ChannelWrite("retries",  state.get("retries", 0) + 1)],
+                    updates=[ng.ChannelWrite("retries",  input.state.get("retries", 0) + 1)],
                 ),
             )
 ```
@@ -585,7 +580,7 @@ Python 绑定不会公开这些属性。使用`result.output`, `result.interrupt
 
 ### “execution_trace 仅显示起始节点”
 
-路由失败到`__end__`。很可能你的起始节点缺少边，或者你的条件返回的值不在`routes`映射（在这种情况下，引擎将按字典顺序排列的最后一条路线作为后备 - 意外因素）。
+路由结果变成了`__end__`。请检查起始节点是否缺少边，或条件是否返回了`routes`中不存在的值，而显式的`"default"`路由又指向`__end__`。严格图不再按 map 顺序选择路由：开放条件或未声明输出契约的条件会使用显式`"default"`；若未声明该路由，则错误信息会包含 source node、条件名和返回的 label。封闭条件返回声明范围外的 label 时也一定报错。
 
 ---
 

@@ -2,6 +2,8 @@
 #include <neograph/graph/node.h>
 #include <neograph/graph/registry.h>
 
+#include "routing_policy.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <vector>
@@ -22,6 +24,139 @@ constexpr int kSupportedSchemaVersion = 1;
 // flags them, and canon() strips them before equivalence comparison.
 bool is_annotation_key(const std::string& k) {
     return (!k.empty() && k[0] == '_') || k.rfind("x-", 0) == 0;
+}
+
+std::string json_type_name(const json& value) {
+    if (value.is_null()) return "null";
+    if (value.is_boolean()) return "boolean";
+    if (value.is_number_integer() || value.is_number_unsigned()) return "integer";
+    if (value.is_number()) return "number";
+    if (value.is_string()) return "string";
+    if (value.is_array()) return "array";
+    if (value.is_object()) return "object";
+    return "unknown";
+}
+
+bool schema_type_matches(const json& value, const std::string& type) {
+    if (type == "null") return value.is_null();
+    if (type == "boolean") return value.is_boolean();
+    if (type == "integer") {
+        return value.is_number_integer() || value.is_number_unsigned();
+    }
+    if (type == "number") return value.is_number();
+    if (type == "string") return value.is_string();
+    if (type == "array") return value.is_array();
+    if (type == "object") return value.is_object();
+    return false;
+}
+
+std::vector<std::string> declared_schema_types(const json& type_keyword) {
+    std::vector<std::string> types;
+    if (type_keyword.is_string()) {
+        types.push_back(type_keyword.get<std::string>());
+    } else if (type_keyword.is_array()) {
+        for (const auto& type : type_keyword) {
+            if (type.is_string()) types.push_back(type.get<std::string>());
+        }
+    }
+    std::sort(types.begin(), types.end());
+    types.erase(std::unique(types.begin(), types.end()), types.end());
+    return types;
+}
+
+std::string join_types(const std::vector<std::string>& types) {
+    std::string out;
+    for (std::size_t i = 0; i < types.size(); ++i) {
+        if (i) out += " or ";
+        out += types[i];
+    }
+    return out;
+}
+
+// NeoGraph intentionally enforces only required/type/enum from registered node
+// schemas. `properties` is traversed to reach those keywords; descriptions,
+// defaults, items, oneOf, and other JSON Schema features remain annotations.
+void validate_node_config_schema(const json& value,
+                                 const json& schema,
+                                 const std::string& path,
+                                 const std::string& node_type,
+                                 std::vector<std::string>& errors) {
+    if (!schema.is_object()) return;
+    const std::string type_suffix = " [node type '" + node_type + "']";
+
+    if (schema.contains("type")) {
+        const auto types = declared_schema_types(schema["type"]);
+        bool matched = false;
+        for (const auto& type : types) {
+            if (schema_type_matches(value, type)) {
+                matched = true;
+                break;
+            }
+        }
+        if (types.empty()) {
+            errors.push_back(path + ": keyword 'type' must be a string or array of "
+                             "strings" + type_suffix);
+        } else if (!matched) {
+            errors.push_back(path + ": keyword 'type' expected " + join_types(types)
+                             + ", got " + json_type_name(value) + type_suffix);
+        }
+    }
+
+    if (schema.contains("enum")) {
+        const auto& choices = schema["enum"];
+        if (!choices.is_array()) {
+            errors.push_back(path + ": keyword 'enum' must be an array" + type_suffix);
+        } else {
+            bool matched = false;
+            for (const auto& choice : choices) {
+                if (choice == value) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) {
+                errors.push_back(path + ": keyword 'enum' expected one of "
+                                 + choices.dump() + ", got " + value.dump()
+                                 + type_suffix);
+            }
+        }
+    }
+
+    if (!value.is_object()) return;
+
+    if (schema.contains("required")) {
+        const auto& required = schema["required"];
+        if (!required.is_array()) {
+            errors.push_back(path + ": keyword 'required' must be an array"
+                             + type_suffix);
+        } else {
+            std::vector<std::string> names;
+            for (const auto& name : required) {
+                if (name.is_string()) names.push_back(name.get<std::string>());
+            }
+            std::sort(names.begin(), names.end());
+            names.erase(std::unique(names.begin(), names.end()), names.end());
+            for (const auto& name : names) {
+                if (!value.contains(name)) {
+                    errors.push_back(path + ": keyword 'required' missing property '"
+                                     + name + "'" + type_suffix);
+                }
+            }
+        }
+    }
+
+    if (!schema.contains("properties") || !schema["properties"].is_object()) return;
+    std::vector<std::string> property_names;
+    for (const auto& [name, property_schema] : schema["properties"].items()) {
+        (void)property_schema;
+        property_names.push_back(name);
+    }
+    std::sort(property_names.begin(), property_names.end());
+    for (const auto& name : property_names) {
+        if (!value.contains(name)) continue;
+        validate_node_config_schema(value[name], schema["properties"][name],
+                                    path + "." + name, node_type, errors);
+    }
 }
 
 // Consumed-key accounting: every object the compiler owns gets a
@@ -284,6 +419,15 @@ TopologySpec GraphCompiler::parse(const json& definition,
             // cookbook's custom nodes carry free-form config).
             if (strict) {
                 const json schema = registry.config_schema(type);
+                json config = json::object();
+                for (const auto& [key, value] : node_def.items()) {
+                    if (key != "type" && key != "barrier" && !is_annotation_key(key)) {
+                        config[key] = value;
+                    }
+                }
+                validate_node_config_schema(config, schema, "nodes." + name,
+                                            type, errors);
+
                 bool open = !schema.contains("properties");
                 if (schema.contains("additionalProperties")) {
                     const auto& ap = schema["additionalProperties"];
@@ -425,6 +569,13 @@ CompiledGraph GraphCompiler::link(TopologySpec topology,
     cg.interrupt_after   = std::move(topology.interrupt_after);
     cg.retry_policy      = std::move(topology.retry_policy);
     cg.schema_version    = topology.schema_version;
+    if (cg.schema_version == 0) {
+        for (auto& edge : cg.conditional_edges) {
+            if (edge.routes.empty()) continue;
+            const std::string historical_target = edge.routes.rbegin()->second;
+            edge.routes[detail::kLegacyDefaultRoute] = historical_target;
+        }
+    }
     for (const auto& [name, node_def] : topology.node_defs) {
         const auto type = node_def.value("type", "");
         cg.nodes[name] = registry.create(type, name, node_def, default_context);
@@ -492,7 +643,9 @@ json TopologySpec::to_json() const {
             e["condition"] = ce.condition;
             if (!ce.routes.empty()) {
                 json routes = json::object();
-                for (const auto& [k, v] : ce.routes) routes[k] = v;
+                for (const auto& [k, v] : ce.routes) {
+                    if (k != detail::kLegacyDefaultRoute) routes[k] = v;
+                }
                 e["routes"] = std::move(routes);
             }
             arr.push_back(std::move(e));

@@ -313,6 +313,48 @@ TEST(Upgrade, LegacyDocumentUpgradesToEquivalentIR) {
     EXPECT_EQ(GraphCompiler::upgrade_to_latest(up), up);
 }
 
+TEST(Upgrade, ExplicitDefaultRouteBecomesStrictFallback) {
+    ensure_etypes();
+    json legacy = {
+        {"nodes", {{"a", {{"type", "enoop"}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "a"}}})},
+        {"conditional_edges", json::array({
+            {{"from", "a"}, {"condition", "route_channel"},
+             {"routes", {{"default", "__end__"}, {"fast", "a"}}}}
+        })},
+    };
+
+    auto upgraded = GraphCompiler::upgrade_to_latest(legacy);
+    auto cg = GraphCompiler::compile(upgraded, NodeContext{});
+    Scheduler scheduler(cg.edges, cg.conditional_edges);
+    GraphState state;
+    state.init_channel("__route__", ReducerType::OVERWRITE, nullptr,
+                       json("unknown"));
+    EXPECT_EQ(scheduler.resolve_next_nodes("a", state),
+              std::vector<std::string>{"__end__"});
+}
+
+TEST(Upgrade, DoesNotPromoteAccidentalLegacyLastRouteToDefault) {
+    ensure_etypes();
+    json legacy = {
+        {"nodes", {{"a", {{"type", "enoop"}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "a"}}})},
+        {"conditional_edges", json::array({
+            {{"from", "a"}, {"condition", "route_channel"},
+             {"routes", {{"fast", "a"}, {"zzz_fallback", "__end__"}}}}
+        })},
+    };
+
+    auto upgraded = GraphCompiler::upgrade_to_latest(legacy);
+    EXPECT_FALSE(upgraded["conditional_edges"][0]["routes"].contains("default"));
+    auto cg = GraphCompiler::compile(upgraded, NodeContext{});
+    Scheduler scheduler(cg.edges, cg.conditional_edges);
+    GraphState state;
+    state.init_channel("__route__", ReducerType::OVERWRITE, nullptr,
+                       json("unknown"));
+    EXPECT_THROW(scheduler.resolve_next_nodes("a", state), std::runtime_error);
+}
+
 TEST(Upgrade, CorpusUpgradesLosslessly) {
     // Every corpus fixture stripped to legacy form, upgraded, and both
     // compiled — IR must match (fixture set from M3, all built-ins).

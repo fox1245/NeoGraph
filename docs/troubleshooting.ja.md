@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ja source_sha256=f2f219b4b5c913d0969a37ca02b44d437dde4dcc74c6475cc9f9c52944c99597 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ja source_sha256=18fbe81b3233d4da002abe8e6b268f65168347f28e27740eed56dfb2ce58900f -->
 # トラブルシューティング
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -204,9 +204,10 @@ print(result.execution_trace)
 1. **`__start__` のエッジがありません。** すべてのグラフには少なくとも 1 つは必要です
    `{"from": ng.START_NODE, "to": "..."}`エッジ。
 2. **条件付きで `routes` マップにない値が返されました。**
-   条件の戻り値がどのキーにも一致しない場合、エンジンは
-   辞書編集上の最後のエントリをフォールバックとして使用します。それが以下にマッピングされる場合
-   `__end__`、あなたは静かに終了します。常にデフォルトのブランチを含めます。
+   条件の戻り値がどのキーにも一致しない場合、open または出力契約のない
+   条件は明示的な `"default"` ルートを使います。それが `__end__` を指すと
+   正常終了します。`"default"` がなければ source node、条件名、返された
+   label を含むエラーになります。closed 条件は宣言外の label を必ず拒否します。
 3. **`max_steps=0` または `max_steps=1`** — ランは天井に達しました
    すぐに。デフォルトは 25 です。 ReAct ループには通常 10 以上が必要です。
 

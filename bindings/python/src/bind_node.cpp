@@ -358,11 +358,9 @@ public:
     //
     // The Python user's class MUST define `run(self, input)` returning
     // a list of ChannelWrite (or NodeResult / NodeOutput with optional
-    // Command / Send fields). The legacy 8-virtual chain
-    // (`execute` / `execute_full` / `execute_stream` / ...) was
-    // deprecated in v0.4 and removed in v1.0 (9b–9e). Python code
-    // still defining only one of the legacy methods will hit the base
-    // class's actionable NotImplementedError
+    // Command / Send fields). The removed pre-v1 multi-entry dispatch
+    // surface is not consulted. Python code still defining only an obsolete
+    // node method will hit the base class's actionable NotImplementedError
     // here — see docs/migration-v0.4-to-v1.0.md for the rewrite.
     //
     // Cancel propagation is now first-class: the user's run() body

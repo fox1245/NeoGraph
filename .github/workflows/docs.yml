@@ -22,6 +22,7 @@ on:
       - '**.md'
       - 'docs/i18n-manifest.json'
       - 'scripts/check_docs_i18n.py'
+      - 'scripts/check_runtime_doc_claims.py'
       - 'examples/**.cpp'
 
   workflow_dispatch:
@@ -43,6 +44,9 @@ jobs:
 
       - name: Check documentation locale inventory
         run: python3 scripts/check_docs_i18n.py
+
+      - name: Check live runtime documentation claims
+        run: python3 scripts/check_runtime_doc_claims.py
 
       - name: Install Doxygen & Graphviz
         run: sudo apt-get update && sudo apt-get install -y doxygen graphviz

@@ -207,13 +207,9 @@ You can also return a bare `list[ChannelWrite]` when you don't need
 `Send` or `Command` — the binding lifts it into a `NodeResult`
 automatically.
 
-> **Migrating from v0.3.x:** the 8-virtual chain (`execute`,
-> `execute_async`, `execute_full`, `execute_full_async`,
-> `execute_stream`, `execute_stream_async`, `execute_full_stream`,
-> `execute_full_stream_async`) was deprecated in v0.4.x and removed in
-> v0.9.0 during v1 preparation. Replace it with a single
-> `run(input)` override; read state from `input.state`, emit tokens
-> via `input.stream_cb` when non-None, read the cancel token from
+> **Migrating from v0.3.x:** the removed pre-v0.4 multi-entry node API has one
+> replacement: override `run(input)`. Read state from `input.state`, emit tokens
+> through `input.stream_cb` when non-None, and read the cancel token from
 > `input.ctx.cancel_token`.
 
 Register the type so the JSON loader can instantiate it:
@@ -333,8 +329,8 @@ researcher invocations.
 
 ```python
 class Planner(ng.GraphNode):
-    def execute_full(self, state):
-        topics = decide_topics(state)                  # e.g. 5 strings
+    def run(self, input):
+        topics = decide_topics(input.state)            # e.g. 5 strings
         return ng.NodeResult(
             writes=[],
             sends=[ng.Send("researcher", {"topic": t}) for t in topics],
@@ -400,8 +396,8 @@ same return value. It bypasses the regular outgoing edges.
 
 ```python
 class Evaluator(ng.GraphNode):
-    def execute_full(self, state):
-        if score(state) >= 0.8:
+    def run(self, input):
+        if score(input.state) >= 0.8:
             return ng.NodeResult(
                 writes=[],
                 command=ng.Command(
@@ -414,7 +410,7 @@ class Evaluator(ng.GraphNode):
                 writes=[],
                 command=ng.Command(
                     goto_node="planner",                  # loop back
-                    updates=[ng.ChannelWrite("retries",  state.get("retries", 0) + 1)],
+                    updates=[ng.ChannelWrite("retries",  input.state.get("retries", 0) + 1)],
                 ),
             )
 ```
@@ -686,8 +682,11 @@ older wheels, only form B works.
 
 Routing fell through to `__end__`. Most likely a missing edge from
 your start node, or your conditional returned a value not in the
-`routes` map (in which case the engine takes the
-lexicographically-last route as a fallback — surprise factor).
+`routes` map and an explicit `"default"` route points to `__end__`.
+Strict graphs no longer choose a route by map ordering: an open or
+unspecified condition uses `"default"` when declared, otherwise the
+engine throws with the source node, condition, and returned label. A
+closed condition always throws if it returns outside its declared labels.
 
 ---
 

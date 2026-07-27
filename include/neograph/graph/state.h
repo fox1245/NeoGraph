@@ -3,8 +3,9 @@
  * @brief Thread-safe mutable graph state management.
  *
  * GraphState manages all state channels used during graph execution.
- * All read/write operations are thread-safe using a shared mutex,
- * supporting concurrent node execution via Taskflow.
+ * All read/write operations are thread-safe using a shared mutex, supporting
+ * concurrent node execution on the caller's Asio executor or the engine's
+ * opt-in worker pool.
  */
 #pragma once
 

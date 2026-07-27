@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=d464b5809d02624a3016c2ae8a6de8ff7d7073fda09ddbd842e3989d7394d498 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=0972b9d4c384152233869c6375839d3a0469e17124fb375a7352ed453ce486ae -->
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
 
 # NeoGraph 핵심 개념 - 서술형 가이드
@@ -212,14 +212,10 @@ Python은 `input.ctx`에서 `cancel_token`, `thread_id`, `step`, `stream_mode`,
 `Send` 또는 `Command` - 바인딩이 `NodeResult`로 들어갑니다.
 자동으로.
 
-> **v0.3.x에서 마이그레이션:** 8개 가상 체인(`execute`,
-> `execute_async`, `execute_full`, `execute_full_async`,
-> `execute_stream`, `execute_stream_async`, `execute_full_stream`,
-> `execute_full_stream_async`)는 v0.4.x에서 더 이상 사용되지 않으며 다음에서 제거되었습니다.
-> v1 준비 중 v0.9.0. 싱글로 교체하세요
-> `run(input)` 재정의; `input.state`에서 상태를 읽고 토큰을 내보냅니다.
-> None이 아닌 경우 `input.stream_cb`를 통해 취소 토큰을 읽습니다.
-> `input.ctx.cancel_token`.
+> **v0.3.x에서 마이그레이션:** 제거된 v0.4 이전 다중 진입점 노드 API의 유일한
+> 대체는 `run(input)` 재정의입니다. `input.state`에서 상태를 읽고, None이 아닐 때
+> `input.stream_cb`를 통해 토큰을 내보내며, `input.ctx.cancel_token`에서
+> 취소 토큰을 읽습니다.
 
 JSON 로더가 인스턴스화할 수 있도록 유형을 등록합니다.
 
@@ -340,8 +336,8 @@ ng.ConditionRegistry.register_condition("is_long", is_long)
 
 ```python
 class Planner(ng.GraphNode):
-    def execute_full(self, state):
-        topics = decide_topics(state)                  # e.g. 5 strings
+    def run(self, input):
+        topics = decide_topics(input.state)            # e.g. 5 strings
         return ng.NodeResult(
             writes=[],
             sends=[ng.Send("researcher", {"topic": t}) for t in topics],
@@ -408,8 +404,8 @@ engine.set_worker_count_auto()       # hardware_concurrency()
 
 ```python
 class Evaluator(ng.GraphNode):
-    def execute_full(self, state):
-        if score(state) >= 0.8:
+    def run(self, input):
+        if score(input.state) >= 0.8:
             return ng.NodeResult(
                 writes=[],
                 command=ng.Command(
@@ -422,7 +418,7 @@ class Evaluator(ng.GraphNode):
                 writes=[],
                 command=ng.Command(
                     goto_node="planner",                  # loop back
-                    updates=[ng.ChannelWrite("retries",  state.get("retries", 0) + 1)],
+                    updates=[ng.ChannelWrite("retries",  input.state.get("retries", 0) + 1)],
                 ),
             )
 ```
@@ -695,10 +691,12 @@ C++의 `ReducerRegistry::register_reducer`(아직 Python 후크 없음).
 
 ### "execution_trace는 시작 노드만 표시합니다"
 
-라우팅은 `__end__`로 이루어졌습니다. 가장자리가 누락되었을 가능성이 높습니다.
-시작 노드 또는 조건이
-`routes` 맵(이 경우 엔진은
-대체 수단으로 사전식 마지막 경로 — 놀라운 요소).
+라우팅 결과가 `__end__`가 되었습니다. 시작 노드에서 나가는 edge가 없거나,
+조건이 `routes`에 없는 값을 반환했고 명시적인 `"default"` route가
+`__end__`를 가리키는지 확인하세요. 엄격 그래프는 map 순서로 route를 고르지
+않습니다. 열린 조건 또는 반환값 계약이 없는 조건은 `"default"`가 있으면
+이를 사용하고, 없으면 source node, 조건 이름, 반환 label을 담은 오류를 냅니다.
+닫힌 조건이 선언한 label 밖의 값을 반환해도 항상 오류가 납니다.
 
 ---
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=b39068ee8e2c2a525841913e920f7115f35ecbb40d153c6d2cc7866510bfca37 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=8c9b9a18538183a30c122066a3466eb05b81a6c21d6ac906f7bf3f68a0dd09a2 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -22,14 +22,14 @@
 **モジュール一覧:**
 | モジュール | 名前空間 | 説明 | ツアー | Doxygen |
 |--------|-----------|-------------|------|---------|
-| Core | `neograph` | 基礎型、Provider / Tool インターフェース | [§1–§3](#1-foundation-types) | [リンク](https://fox1245.github.io/NeoGraph/namespaceneograph.html) |
-| Graph | `neograph::graph` | グラフエンジン、ノード、状態、チェックポイント、Store | [§4–§11](#4-graph-types) | [リンク](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1graph.html) |
-| LLM | `neograph::llm` | LLM プロバイダー実装と Agent | [§12](#12-llm-module) | [リンク](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1llm.html) |
-| MCP | `neograph::mcp` | Model Context Protocol クライアント | [§13](#13-mcp-module) | [リンク](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1mcp.html) |
-| Util | `neograph::util` | 並行処理ユーティリティ | [§14](#14-util-module) | [リンク](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1util.html) |
-| **A2A** | `neograph::a2a` | Agent-to-Agent JSON-RPC ブリッジ (クライアント + サーバー + ストリーミング) | _Doxygen のみ_ | [リンク](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1a2a.html) |
-| **ACP** | `neograph::acp` | Agent Client Protocol — stdio 上のエディター↔エージェント双方向 RPC | _Doxygen のみ_ | [リンク](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1acp.html) |
-| **Async** | `neograph::async` | Asio の HTTP/SSE/WS ヘルパー、ConnPool、run_sync | _Doxygen のみ_ | [リンク](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1async.html) |
+| Core | `neograph` | 基礎型、Provider / Tool インターフェース | [§1–§3](#1-foundation-types) | [Provider](https://fox1245.github.io/NeoGraph/classneograph_1_1Provider.html) |
+| Graph | `neograph::graph` | グラフエンジン、ノード、状態、チェックポイント、Store | [§4–§11](#4-graph-types) | [GraphEngine](https://fox1245.github.io/NeoGraph/classneograph_1_1graph_1_1GraphEngine.html) |
+| LLM | `neograph::llm` | LLM プロバイダー実装と Agent | [§12](#12-llm-module) | [Agent](https://fox1245.github.io/NeoGraph/classneograph_1_1llm_1_1Agent.html) |
+| MCP | `neograph::mcp` | Model Context Protocol クライアント | [§13](#13-mcp-module) | [MCPClient](https://fox1245.github.io/NeoGraph/classneograph_1_1mcp_1_1MCPClient.html) |
+| Util | `neograph::util` | 並行処理ユーティリティ | [§14](#14-util-module) | [RequestQueue](https://fox1245.github.io/NeoGraph/classneograph_1_1util_1_1RequestQueue.html) |
+| **A2A** | `neograph::a2a` | Agent-to-Agent JSON-RPC ブリッジ (クライアント + サーバー + ストリーミング) | _Doxygen のみ_ | [A2AClient](https://fox1245.github.io/NeoGraph/classneograph_1_1a2a_1_1A2AClient.html) |
+| **ACP** | `neograph::acp` | Agent Client Protocol — stdio 上のエディター↔エージェント双方向 RPC | _Doxygen のみ_ | [ACPServer](https://fox1245.github.io/NeoGraph/classneograph_1_1acp_1_1ACPServer.html) |
+| **Async** | `neograph::async` | Asio の HTTP/SSE/WS ヘルパー、ConnPool、run_sync | _Doxygen のみ_ | [WsClient](https://fox1245.github.io/NeoGraph/classneograph_1_1async_1_1WsClient.html) |
 3 つの「_Doxygen-only_」行は、最近の監査とプロトコルブリッジ作業で新たに追加されたモジュールです。完全なヘッダーが
 `include/neograph/{a2a,acp,async}/` の下にあり、ctest のテストスイートで使用されています。ただし、専用のナラティブ節の作成は
 Doxygen を参照する方針にして保留しています。規模が大きく、
@@ -820,14 +820,10 @@ public:
 };
 ```
 
-> **レガシーチェーン (v1 準備中の v0.9.0 で削除)。** v0.4 より前のコードでは、
-> `execute` / `execute_async` / `execute_full` のいずれかをオーバーライドしていました。
-> `execute_full_async` / `execute_stream` / `execute_stream_async` /
-> `execute_full_stream` / `execute_full_stream_async` のいずれかを選ぶと、
-> `Command` / `Send` が暗黙に失われたり、イベントループが停止したり、
-> 無限再帰したりしました。この継ぎ目を `run()` が集約します。8 つの
-> レガシー仮想メソッドは `GraphNode` のメンバーではなくなりました。サブクラスは
-> 古いリリースから移行する際に `run(NodeInput)` を実装する必要があります。
+> **移行上の注意。** `GraphNode` のノードエントリポイントは
+> `run(NodeInput)` の 1 つです。これは `Command` と `Send` を保持し、
+> 非同期およびストリーミング実行に参加するため、サブクラスが実装する
+> オーバーライドです。
 ### LLMCallNode
 現在の会話状態で LLM を呼び出します。`"messages"` チャネルを読み、プロバイダーへ補完リクエストを送り、
 assistant の応答をチャネルへ書き戻します。`run_stream` / `run_stream_async` で開始した場合は
@@ -845,10 +841,8 @@ public:
 |-----------------------|-------------|
 | `name` | ノード名 |
 | `ctx` | LLM provider、tools、model、instructions を提供するノードコンテキスト |
-(LLMCallNode は v0.4.0 (PR 9a / commit `d1070dc`) 以降 `run(NodeInput)` を直接オーバーライドします。
-レガシー 8 仮想メソッドのチェーンはホットパス上にありません。
-同じことが `ToolDispatchNode`、
-`IntentClassifierNode`、`SubgraphNode` にも当てはまります。)
+(LLMCallNode、`ToolDispatchNode`、`IntentClassifierNode`、`SubgraphNode` は
+すべて同じ `run(NodeInput)` 契約を実装します。)
 ### ToolDispatchNode
 直近の assistant メッセージからツール呼び出しをディスパッチします。`"messages"` チャネルから保留中のツール呼び出しを読み、各ツールを実行して、ツール結果メッセージを書き戻します。
 ```cpp
@@ -2903,8 +2897,8 @@ Streamable HTTP 上の JSON-RPC 2.0 です。`A2AClient` はリモートエー�
 `v0.3` / `v1` のメソッド名を二重にディスパッチします。
 commit `bc675a1` を参照してください。ストリーミングには (client 側) `SseFrameSplitter` と
 (server 側) httplib chunked を使います。caller node は A2A 呼び出しをグラフノードとして組み込みます。
-**完全なリファレンス:**
-[Doxygen `namespaceneograph_1_1a2a`](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1a2a.html).
+
+**完全なリファレンス:** [Doxygen クラス一覧](https://fox1245.github.io/NeoGraph/annotated.html)を名前空間ごとに閲覧できます。
 ### `neograph::acp` — Agent Client Protocol
 **ヘッダー:** `<neograph/acp/{server,types}.h>`
 stdio 上の改行区切り JSON によるエディター↔エージェント JSON-RPC です (Zed、
@@ -2913,7 +2907,8 @@ Gemini CLI、Neovim CodeCompanion)。双方向で、client→agent
 (`fs/{read,write}_text_file`、`session/request_permission`) を遅延バインドされた `ACPClient` 経由で扱います。
 `ACPServer::handle_message` はワーカースレッド上でプロンプトを非同期ディスパッチし、
 `max_inflight_prompts=32`、セッションごとの single-flight、`-32000` のバックプレッシャーで上限を設けます。
-**完全なリファレンス:** [Doxygen `namespaceneograph_1_1acp`](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1acp.html)。
+
+**完全なリファレンス:** [Doxygen クラス一覧](https://fox1245.github.io/NeoGraph/annotated.html)を名前空間ごとに閲覧できます。
 ### `neograph::async` — HTTP/SSE/WS ヘルパー
 **ヘッダー:** `<neograph/async/{conn_pool,http_client,sse_parser,ws_client,curl_h2_pool,run_sync}.h>`
 コルーチンベースの HTTP/1.1 クライアント + ConnPool です。安全なメソッドだけの stale-idle retry を備え、
@@ -2922,8 +2917,8 @@ OpenAI/Claude ストリーミングには `SseEventParser`、
 OpenAI Responses WebSocket には `WsClient`、libcurl には
 Cloudflare 前段のエンドポイントで HTTP/2 + 多重化を行う `CurlH2Pool`、
 エンジンのデフォルトで awaitable と同期を橋渡しする `run_sync` を使います。
-**完全なリファレンス:**
-[Doxygen `namespaceneograph_1_1async`](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1async.html).
+
+**完全なリファレンス:** [Doxygen クラス一覧](https://fox1245.github.io/NeoGraph/annotated.html)を名前空間ごとに閲覧できます。
 ### 永続チェックポイントバックエンド
 **ヘッダー:** `<neograph/graph/postgres_checkpoint.h>`、
 `<neograph/graph/sqlite_checkpoint.h>`

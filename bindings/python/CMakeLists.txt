@@ -5,9 +5,9 @@
 # layout under the build dir:
 #
 #   build/
-#     libneograph_core.so          ← engine, from root CMakeLists
-#     libneograph_llm.so
-#     libneograph_async.so
+#     libneograph_core.so.0        ← engine ABI name, from root CMakeLists
+#     libneograph_llm.so.0
+#     libneograph_async.so.0
 #     ...
 #     neograph_engine/             ← Python package (this target)
 #       __init__.py                ← copied from source tree at configure
@@ -154,7 +154,7 @@ set_target_properties(_neograph PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${_NEOGRAPH_PY_PKG_DIR}"
 )
 
-# RPATH on the binding so it finds libneograph_core.so (and friends).
+# RPATH on the binding so it finds libneograph_core.so.0 (and friends).
 #
 # Build tree: the engine .so files live one level up from the binding
 # (`build/libneograph_*.so` vs `build/neograph_engine/_neograph.so`), so the

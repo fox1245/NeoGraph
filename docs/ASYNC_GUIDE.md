@@ -281,7 +281,7 @@ GraphEngine::run_async(const RunConfig& config) {
 `GraphNode::run(NodeInput)` executes once per dispatch. Emit events only when
 `in.stream_cb` is non-null, and return the same `NodeOutput` regardless of
 whether the caller used a streaming engine entry point. The legacy
-`execute_full_stream_async` double-execution fallback no longer exists.
+The obsolete double-execution fallback no longer exists.
 
 ### 4.5 MCP stdio single-session concurrency
 

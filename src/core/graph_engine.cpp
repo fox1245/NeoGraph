@@ -216,6 +216,7 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
     engine->store_               = std::move(config.store);
     engine->tool_gate_           = std::move(config.tool_gate);
     engine->owned_tools_         = std::move(resources.tools).release();
+    engine->node_cache_.set_max_entries(config.node_cache_max_entries);
     for (const auto& node_name : config.cached_nodes) {
         engine->set_node_cache_enabled(
             node_name, true, CacheKeyPolicy{CacheScope::Reusable, {}});
@@ -348,6 +349,10 @@ void GraphEngine::set_node_cache_enabled(const std::string& node_name,
 
 void GraphEngine::clear_node_cache() {
     node_cache_.clear();
+}
+
+void GraphEngine::set_node_cache_max_entries(std::size_t max_entries) {
+    node_cache_.set_max_entries(max_entries);
 }
 
 RetryPolicy GraphEngine::get_retry_policy(const std::string& node_name) const {

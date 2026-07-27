@@ -21,5 +21,6 @@ include(CMakeFindDependencyMacro)
 include("${CMAKE_CURRENT_LIST_DIR}/NeoGraphTargets.cmake")
 
 set(NEOGRAPH_COMPONENTS_BUILT "@NEOGRAPH_COMPONENTS_BUILT@")
+set(NEOGRAPH_ABI_SOVERSION "@PROJECT_VERSION_MAJOR@")
 
 check_required_components(NeoGraph)

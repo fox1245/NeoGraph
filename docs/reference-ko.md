@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=b39068ee8e2c2a525841913e920f7115f35ecbb40d153c6d2cc7866510bfca37 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=8c9b9a18538183a30c122066a3466eb05b81a6c21d6ac906f7bf3f68a0dd09a2 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -28,14 +28,14 @@ HEAD 기준이며 `include/neograph/`를 대조해 확인했다. 다만 다음 �
 
 | 모듈 | 네임스페이스 | 설명 | 투어 | Doxygen |
 |--------|-----------|-------------|------|---------|
-| 핵심 | `neograph` | 기초 타입, Provider와 Tool 인터페이스 | [§1–§3](#1-foundation-types) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph.html) |
-| 그래프 | `neograph::graph` | 그래프 엔진, 노드, 상태, 체크포인트, 저장소 | [§4–§11](#4-graph-types) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1graph.html) |
-| LLM | `neograph::llm` | LLM 제공자 구현과 Agent | [§12](#12-llm-module) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1llm.html) |
-| MCP | `neograph::mcp` | Model Context Protocol 클라이언트 | [§13](#13-mcp-module) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1mcp.html) |
-| 유틸리티 | `neograph::util` | 동시성 유틸리티 | [§14](#14-util-module) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1util.html) |
-| **A2A** | `neograph::a2a` | 에이전트 간 JSON-RPC 브리지(클라이언트 + 서버 + 스트리밍) | _Doxygen 전용_ | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1a2a.html) |
-| **ACP** | `neograph::acp` | Agent Client Protocol — stdio 기반 편집기↔에이전트 양방향 RPC | _Doxygen 전용_ | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1acp.html) |
-| **Async** | `neograph::async` | Asio HTTP/SSE/WS 도우미, ConnPool, run_sync | _Doxygen 전용_ | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1async.html) |
+| 핵심 | `neograph` | 기초 타입, Provider와 Tool 인터페이스 | [§1–§3](#1-foundation-types) | [Provider](https://fox1245.github.io/NeoGraph/classneograph_1_1Provider.html) |
+| 그래프 | `neograph::graph` | 그래프 엔진, 노드, 상태, 체크포인트, 저장소 | [§4–§11](#4-graph-types) | [GraphEngine](https://fox1245.github.io/NeoGraph/classneograph_1_1graph_1_1GraphEngine.html) |
+| LLM | `neograph::llm` | LLM 제공자 구현과 Agent | [§12](#12-llm-module) | [Agent](https://fox1245.github.io/NeoGraph/classneograph_1_1llm_1_1Agent.html) |
+| MCP | `neograph::mcp` | Model Context Protocol 클라이언트 | [§13](#13-mcp-module) | [MCPClient](https://fox1245.github.io/NeoGraph/classneograph_1_1mcp_1_1MCPClient.html) |
+| 유틸리티 | `neograph::util` | 동시성 유틸리티 | [§14](#14-util-module) | [RequestQueue](https://fox1245.github.io/NeoGraph/classneograph_1_1util_1_1RequestQueue.html) |
+| **A2A** | `neograph::a2a` | 에이전트 간 JSON-RPC 브리지(클라이언트 + 서버 + 스트리밍) | _Doxygen 전용_ | [A2AClient](https://fox1245.github.io/NeoGraph/classneograph_1_1a2a_1_1A2AClient.html) |
+| **ACP** | `neograph::acp` | Agent Client Protocol — stdio 기반 편집기↔에이전트 양방향 RPC | _Doxygen 전용_ | [ACPServer](https://fox1245.github.io/NeoGraph/classneograph_1_1acp_1_1ACPServer.html) |
+| **Async** | `neograph::async` | Asio HTTP/SSE/WS 도우미, ConnPool, run_sync | _Doxygen 전용_ | [WsClient](https://fox1245.github.io/NeoGraph/classneograph_1_1async_1_1WsClient.html) |
 
 The three "_Doxygen 전용_" rows are net-new modules added across
 recent audit and protocol-bridge work. They have full headers under
@@ -986,14 +986,9 @@ public:
 };
 ```
 
-> **Legacy chain (removed in v0.9.0 during v1 preparation).** Pre-v0.4
-> code overrode one of `execute` / `execute_async` / `execute_full` /
-> `execute_full_async` / `execute_stream` / `execute_stream_async` /
-> `execute_full_stream` / `execute_full_stream_async`. Picking the
-> wrong one silently dropped `Command` / `Send`, froze the event loop,
-> or infinite-recursed — that's the seam `run()` collapses. The 8
-> legacy virtuals are no longer members of `GraphNode`; subclasses
-> migrating from an older release must implement `run(NodeInput)`.
+> **마이그레이션 참고.** `GraphNode`에는 하나의 노드 진입점만 있습니다:
+> `run(NodeInput)`. 이는 `Command`와 `Send`를 보존하고 비동기 및 스트리밍 실행에
+> 참여하며, 서브클래스가 구현해야 하는 오버라이드입니다.
 
 ### LLMCallNode
 
@@ -1016,10 +1011,8 @@ public:
 | `name` | Node name |
 | `ctx` | Node context providing the LLM provider, tools, model, and instructions |
 
-(LLMCallNode overrides `run(NodeInput)` directly as of v0.4.0
-(PR 9a / commit `d1070dc`) — legacy 8-virtual chain is no longer
-on its hot path. The same applies to `ToolDispatchNode`,
-`IntentClassifierNode`, and `SubgraphNode`.)
+(LLMCallNode, `ToolDispatchNode`, `IntentClassifierNode`, and `SubgraphNode`
+all implement the same `run(NodeInput)` contract.)
 
 ### ToolDispatchNode
 
@@ -3407,8 +3400,9 @@ NeoGraph `GraphEngine` into an A2A endpoint via
 `GraphAgentAdapter`. Dual `v0.3` / `v1` method-name dispatch —
 see commit `bc675a1`. Streaming uses `SseFrameSplitter` (client)
 and httplib chunked (server). Caller node embeds an A2A call as
-a graph node. **Full reference:**
-[Doxygen `namespaceneograph_1_1a2a`](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1a2a.html).
+a graph node.
+
+**전체 참조:** [Doxygen 클래스 목록](https://fox1245.github.io/NeoGraph/annotated.html)에서 네임스페이스별로 볼 수 있습니다.
 
 ### `neograph::acp` — Agent Client Protocol
 
@@ -3419,8 +3413,9 @@ Gemini CLI, Neovim CodeCompanion). Bidirectional: client→agent
 (`fs/{read,write}_text_file`, `session/request_permission`) via
 late-bound `ACPClient`. `ACPServer::handle_message` async-dispatches
 prompts on a worker thread, capped at `max_inflight_prompts=32`
-with per-session single-flight + `-32000` backpressure. **Full
-reference:** [Doxygen `namespaceneograph_1_1acp`](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1acp.html).
+with per-session single-flight + `-32000` backpressure.
+
+**전체 참조:** [Doxygen 클래스 목록](https://fox1245.github.io/NeoGraph/annotated.html)에서 네임스페이스별로 볼 수 있습니다.
 
 ### `neograph::async` — HTTP/SSE/WS helpers
 
@@ -3431,8 +3426,9 @@ silently double-apply); `SseEventParser` for OpenAI/Claude
 streaming; `WsClient` for OpenAI Responses WebSocket; libcurl
 `CurlH2Pool` for HTTP/2 + multiplexing on Cloudflare-fronted
 endpoints; `run_sync` for awaitable→sync bridges in the engine
-defaults. **Full reference:**
-[Doxygen `namespaceneograph_1_1async`](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1async.html).
+defaults.
+
+**전체 참조:** [Doxygen 클래스 목록](https://fox1245.github.io/NeoGraph/annotated.html)에서 네임스페이스별로 볼 수 있습니다.
 
 ### Persistent checkpoint backends
 

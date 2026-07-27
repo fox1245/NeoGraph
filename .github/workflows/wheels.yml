@@ -30,6 +30,7 @@ on:
   pull_request:
     paths:
       - 'pyproject.toml'
+      - 'CMakeLists.txt'
       - 'bindings/python/**'
       - '.github/workflows/wheels.yml'
 

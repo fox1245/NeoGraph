@@ -3,6 +3,8 @@
 #include <neograph/graph/scheduler.h>
 #include <neograph/graph/state.h>
 
+#include "routing_policy.h"
+
 #include <algorithm>
 #include <set>
 #include <stdexcept>
@@ -31,13 +33,47 @@ std::vector<std::string> Scheduler::resolve_next_nodes(
             auto cond_fn = registry_ ? registry_->condition(ce.condition)
                                      : ConditionRegistry::instance().get(ce.condition);
             auto result  = cond_fn(state);
-            auto it = ce.routes.find(result);
-            if (it != ce.routes.end()) return {it->second};
-            // Fallback: last map entry. Documented contract matches the
-            // pre-refactor engine — callers relied on this for default
-            // routes keyed like {"foo": ..., "default": ...} where the
-            // lexicographically-last key was the fallback.
-            return {ce.routes.rbegin()->second};
+            auto spec = registry_ ? registry_->condition_spec(ce.condition)
+                                  : ConditionRegistry::instance().condition_spec(
+                                        ce.condition);
+            const bool outside_closed_contract = spec && !spec->open
+                && std::find(spec->labels.begin(), spec->labels.end(), result)
+                    == spec->labels.end();
+            if (!outside_closed_contract) {
+                auto it = ce.routes.find(result);
+                if (it != ce.routes.end()) return {it->second};
+            }
+
+            // Schema-v0 graphs keep their historical target through a hidden
+            // compiler marker. New graphs never receive this marker.
+            auto legacy = ce.routes.find(detail::kLegacyDefaultRoute);
+            if (legacy != ce.routes.end()) return {legacy->second};
+
+            // A closed condition has an exhaustive output contract. If its
+            // implementation violates that contract, fail instead of hiding
+            // the error behind a default route.
+            auto fallback = ce.routes.find(DEFAULT_ROUTE);
+            if (!outside_closed_contract && fallback != ce.routes.end()
+                && (!spec || spec->open)) {
+                return {fallback->second};
+            }
+
+            std::string keys;
+            for (const auto& [key, target] : ce.routes) {
+                (void)target;
+                if (key == detail::kLegacyDefaultRoute) continue;
+                if (!keys.empty()) keys += ", ";
+                keys += "'" + key + "'";
+            }
+            throw std::runtime_error(
+                "Conditional routing failed at source node '" + current
+                + "': condition '" + ce.condition + "' returned label '"
+                + result + "', "
+                + (outside_closed_contract
+                    ? "which is outside the condition's declared closed label set"
+                    : "which has no exact route; add an explicit 'default' route "
+                      "to handle unknown labels")
+                + ". Declared route keys: [" + keys + "]");
         }
     }
 
@@ -76,8 +112,8 @@ static NextStepPlan plan_impl(
     NextStepPlan plan;
 
     // Pass 1: Command.goto override — preempts everything, including
-    // barriers. Last-writer-wins under parallel dispatch (Taskflow
-    // result ordering is already non-deterministic there).
+    // barriers. Last-writer-wins follows the supplied routing order; callers
+    // must not rely on parallel branch completion order as a stable contract.
     std::optional<std::string> command_goto;
     for (const auto& r : routings) {
         if (r.command_goto) command_goto = r.command_goto;

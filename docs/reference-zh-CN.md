@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=b39068ee8e2c2a525841913e920f7115f35ecbb40d153c6d2cc7866510bfca37 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=8c9b9a18538183a30c122066a3466eb05b81a6c21d6ac906f7bf3f68a0dd09a2 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -24,14 +24,14 @@
 
 | 模块 | 命名空间 | 描述 | 导览 | Doxygen |
 |--------|-----------|-------------|------|---------|
-| Core | `neograph` | 基础类型、Provider 和 Tool 接口 | [§1–§3](#1-foundation-types) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph.html) |
-| Graph | `neograph::graph` | 图引擎、节点、状态、检查点、存储 | [§4–§11](#4-graph-types) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1graph.html) |
-| LLM | `neograph::llm` | LLM Provider 实现和 Agent | [§12](#12-llm-module) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1llm.html) |
-| MCP | `neograph::mcp` | 模型上下文协议客户端 | [§13](#13-mcp-module) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1mcp.html) |
-| Util | `neograph::util` | 并发工具 | [§14](#14-util-module) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1util.html) |
-| **A2A** | `neograph::a2a` | Agent 到 Agent JSON-RPC 桥接（客户端 + 服务器 + 流式） | _仅 Doxygen_ | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1a2a.html) |
-| **ACP** | `neograph::acp` | Agent 客户端协议 — 编辑器↔agent 通过 stdio 的双向 RPC | _仅 Doxygen_ | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1acp.html) |
-| **Async** | `neograph::async` | Asio HTTP/SSE/WS 辅助类、ConnPool、run_sync | _仅 Doxygen_ | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1async.html) |
+| Core | `neograph` | 基础类型、Provider 和 Tool 接口 | [§1–§3](#1-foundation-types) | [Provider](https://fox1245.github.io/NeoGraph/classneograph_1_1Provider.html) |
+| Graph | `neograph::graph` | 图引擎、节点、状态、检查点、存储 | [§4–§11](#4-graph-types) | [GraphEngine](https://fox1245.github.io/NeoGraph/classneograph_1_1graph_1_1GraphEngine.html) |
+| LLM | `neograph::llm` | LLM Provider 实现和 Agent | [§12](#12-llm-module) | [Agent](https://fox1245.github.io/NeoGraph/classneograph_1_1llm_1_1Agent.html) |
+| MCP | `neograph::mcp` | 模型上下文协议客户端 | [§13](#13-mcp-module) | [MCPClient](https://fox1245.github.io/NeoGraph/classneograph_1_1mcp_1_1MCPClient.html) |
+| Util | `neograph::util` | 并发工具 | [§14](#14-util-module) | [RequestQueue](https://fox1245.github.io/NeoGraph/classneograph_1_1util_1_1RequestQueue.html) |
+| **A2A** | `neograph::a2a` | Agent 到 Agent JSON-RPC 桥接（客户端 + 服务器 + 流式） | _仅 Doxygen_ | [A2AClient](https://fox1245.github.io/NeoGraph/classneograph_1_1a2a_1_1A2AClient.html) |
+| **ACP** | `neograph::acp` | Agent 客户端协议 — 编辑器↔agent 通过 stdio 的双向 RPC | _仅 Doxygen_ | [ACPServer](https://fox1245.github.io/NeoGraph/classneograph_1_1acp_1_1ACPServer.html) |
+| **Async** | `neograph::async` | Asio HTTP/SSE/WS 辅助类、ConnPool、run_sync | _仅 Doxygen_ | [WsClient](https://fox1245.github.io/NeoGraph/classneograph_1_1async_1_1WsClient.html) |
 
 三行"_仅 Doxygen_"是在最近的审计和协议桥接工作中添加的全新模块。它们在
 `include/neograph/{a2a,acp,async}/` 下有完整头文件，并由 ctest 套件实践，
@@ -965,13 +965,9 @@ public:
 };
 ```
 
-> **旧链（在 v0.9.0 v1 准备期间已移除）。** v0.4 之前的代码重写
-> `execute` / `execute_async` / `execute_full` / `execute_full_async` /
-> `execute_stream` / `execute_stream_async` / `execute_full_stream` /
-> `execute_full_stream_async` 中的一个。选错了会静默丢弃 `Command` /
-> `Send`、冻结事件循环或无限递归 — 这正是 `run()` 折叠掉的接缝。8 个旧
-> 虚函数不再是 `GraphNode` 的成员；从旧版本迁移的子类必须实现
-> `run(NodeInput)`。
+> **迁移说明。** `GraphNode` 只有一个节点入口点：`run(NodeInput)`。
+> 它保留 `Command` 和 `Send`，参与异步和流式执行，并且是子类必须实现的
+> 重写。
 
 ### LLMCallNode
 
@@ -993,9 +989,8 @@ public:
 | `name` | 节点名称 |
 | `ctx` | 提供 LLM provider、工具、模型和指令的 NodeContext |
 
-（LLMCallNode 从 v0.4.0（PR 9a / 提交 `d1070dc`）起直接重写
-`run(NodeInput)` — 旧的 8 虚函数链不再在其热路径上。同样适用于
-`ToolDispatchNode`、`IntentClassifierNode` 和 `SubgraphNode`。）
+（LLMCallNode、`ToolDispatchNode`、`IntentClassifierNode` 和 `SubgraphNode`
+都实现相同的 `run(NodeInput)` 契约。）
 
 ### ToolDispatchNode
 
@@ -3338,8 +3333,9 @@ agent（`message/send`、`tasks/get`、`tasks/cancel`、AgentCard
 `GraphAgentAdapter` 将 NeoGraph `GraphEngine` 适配为 A2A 端点。支持
 `v0.3` / `v1` 双版本方法名分发，参见提交 `bc675a1`。流式传输使用
 `SseFrameSplitter`（客户端）和 httplib 分块传输（服务器）。调用者节点
-将 A2A 调用嵌入为图节点。**完整参考：**
-[Doxygen `namespaceneograph_1_1a2a`](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1a2a.html).
+将 A2A 调用嵌入为图节点。
+
+**完整参考：** [Doxygen 类列表](https://fox1245.github.io/NeoGraph/annotated.html)可按命名空间浏览。
 
 ### `neograph::acp` — Agent 客户端协议
 
@@ -3349,7 +3345,9 @@ Gemini CLI、Neovim CodeCompanion）。双向通信包括：client→agent
 （`initialize`、`session/{new,prompt,cancel}`）以及通过延迟绑定的 `ACPClient`
 实现的 agent→client（`fs/{read,write}_text_file`、`session/request_permission`）。
 `ACPServer::handle_message` 在工作线程上异步分发提示，`max_inflight_prompts=32`
-为上限，并按会话执行单飞控制 + `-32000` 背压。**完整参考：** [Doxygen `namespaceneograph_1_1acp`](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1acp.html).
+为上限，并按会话执行单飞控制 + `-32000` 背压。
+
+**完整参考：** [Doxygen 类列表](https://fox1245.github.io/NeoGraph/annotated.html)可按命名空间浏览。
 
 ### `neograph::async` — HTTP/SSE/WS 辅助工具
 
@@ -3358,8 +3356,9 @@ Gemini CLI、Neovim CodeCompanion）。双向通信包括：client→agent
 （RFC 7231 §4.2.2；POST 等方法重新抛出异常，不会静默重复应用）；
 `SseEventParser` 用于 OpenAI/Claude 流式传输；`WsClient` 用于 OpenAI Responses
 WebSocket；libcurl `CurlH2Pool` 用于 HTTP/2 + 多路复用及 Cloudflare 前端
-端点；`run_sync` 用于引擎默认设置中的 awaitable→sync 桥接。**完整参考：**
-[Doxygen `namespaceneograph_1_1async`](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1async.html).
+端点；`run_sync` 用于引擎默认设置中的 awaitable→sync 桥接。
+
+**完整参考：** [Doxygen 类列表](https://fox1245.github.io/NeoGraph/annotated.html)可按命名空间浏览。
 
 ### 持久化检查点后端
 

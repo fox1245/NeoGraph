@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=d464b5809d02624a3016c2ae8a6de8ff7d7073fda09ddbd842e3989d7394d498 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=0972b9d4c384152233869c6375839d3a0469e17124fb375a7352ed453ce486ae -->
 # NeoGraph のコアコンセプト — ナラティブガイド
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -211,14 +211,11 @@ Python は `input.ctx` で `cancel_token`、`thread_id`、`step`、`stream_mode`
 `Send` または `Command` — バインディングにより `NodeResult` に持ち上げられます。
 自動的に。
 
-> **v0.3.x からの移行:** 8 仮想チェーン (`execute`、
-> `execute_async`、`execute_full`、`execute_full_async`、
-> `execute_stream`、`execute_stream_async`、`execute_full_stream`、
-> `execute_full_stream_async`) は v0.4.x で非推奨となり、 で削除されました。
-> v1 準備中の v0.9.0。シングルに交換します
-> `run(input)` オーバーライド。 `input.state` から状態を読み取り、トークンを発行します
-> None 以外の場合は、`input.stream_cb` 経由でキャンセル トークンを読み取ります。
-> `input.ctx.cancel_token`。
+> **v0.3.x からの移行:** 削除された v0.4 より前の複数エントリポイントの
+> ノード API は、`run(input)` をオーバーライドする形に移行します。
+> `input.state` から状態を読み取り、None 以外の場合は
+> `input.stream_cb` 経由でトークンを発行し、
+> `input.ctx.cancel_token` からキャンセル トークンを読み取ります。
 
 JSON ローダーがインスタンス化できるように型を登録します。
 
@@ -339,8 +336,8 @@ ng.ConditionRegistry.register_condition("is_long", is_long)
 
 ```python
 class Planner(ng.GraphNode):
-    def execute_full(self, state):
-        topics = decide_topics(state)                  # e.g. 5 strings
+    def run(self, input):
+        topics = decide_topics(input.state)            # e.g. 5 strings
         return ng.NodeResult(
             writes=[],
             sends=[ng.Send("researcher", {"topic": t}) for t in topics],
@@ -407,8 +404,8 @@ engine.set_worker_count_auto()       # hardware_concurrency()
 
 ```python
 class Evaluator(ng.GraphNode):
-    def execute_full(self, state):
-        if score(state) >= 0.8:
+    def run(self, input):
+        if score(input.state) >= 0.8:
             return ng.NodeResult(
                 writes=[],
                 command=ng.Command(
@@ -421,7 +418,7 @@ class Evaluator(ng.GraphNode):
                 writes=[],
                 command=ng.Command(
                     goto_node="planner",                  # loop back
-                    updates=[ng.ChannelWrite("retries",  state.get("retries", 0) + 1)],
+                    updates=[ng.ChannelWrite("retries",  input.state.get("retries", 0) + 1)],
                 ),
             )
 ```
@@ -694,10 +691,12 @@ C++ の `ReducerRegistry::register_reducer` (Python フックはまだありま�
 
 ### 「execution_trace は開始ノードのみを表示します」
 
-ルーティングは `__end__` に失敗しました。おそらくエッジが欠落している可能性があります
-開始ノード、または条件式がフィールドにない値を返しました。
-`routes` マップ (この場合、エンジンは
-辞書順に最後のルートをフォールバックとして使用する — 意外な要因)。
+ルーティング結果が `__end__` になりました。開始ノードからのエッジがないか、
+条件が `routes` にない値を返し、明示的な `"default"` ルートが
+`__end__` を指していないか確認してください。厳格なグラフでは map の順序で
+ルートを選びません。open または出力契約のない条件は `"default"` があれば
+それを使い、なければ source node、条件名、返された label を含むエラーに
+なります。closed 条件が宣言外の label を返した場合も必ずエラーになります。
 
 ---
 

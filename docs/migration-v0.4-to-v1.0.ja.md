@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ja source_sha256=f63fe99a9d0380a2de9284c52a5f775630d9e9416e53d0071a81873d1feb1462 -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ja source_sha256=36f934aaee91b3681ee9fc75420af0dfdb05bde31c855a01258794c489291c25 -->
 # 移行ガイド: レガシー 8 仮想メソッド → `run(NodeInput)` (v0.4.x → v0.9+)
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
@@ -522,3 +522,21 @@ engine->set_worker_count_auto();   // ← add this line
 ```
 
 詳細な測定については ROADMAP_v1.md の perf セクションを参照 (別途追加)。
+
+---
+
+# 移行 4: C++ ABI と必須再ビルド
+
+NeoGraph は全ての公開バイナリライブラリにプロジェクト `VERSION` と
+メジャー `SOVERSION` を設定します。v1 前は ABI 世代 0 ですが、`0.x`
+間のバイナリ互換性は保証されません。changelog が境界を告知した場合は
+全ての C++ コンシューマーを再ビルドしてください。特に `0.11.1` 以下から
+bounded `NodeCache` を含むリリースへの更新では、`NodeCache` と
+`EngineConfig` のオブジェクトレイアウト変更により再ビルドが必須です。
+
+前述の Provider 移行は既存 `Provider` vtable を変更しません。将来の
+`CheckpointStore` 非同期移行も同じポリシーに従い、v1 後は安定した
+レイアウトの変更より別の capability interface と adapter を優先します。
+
+プラットフォーム別の名前、既知の境界、CI 検証については
+[バイナリ互換性ポリシー](ABI_POLICY.md)を参照してください。

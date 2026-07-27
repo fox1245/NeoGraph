@@ -523,3 +523,24 @@ engine->set_worker_count_auto();   // ← add this line
 ```
 
 See ROADMAP_v1.md perf section for detailed measurements (separate addition).
+
+---
+
+# Migration 4: C++ ABI and Mandatory Rebuilds
+
+NeoGraph now assigns every compiled public library the project `VERSION` and
+major `SOVERSION`. All pre-v1 releases use ABI generation 0, but `0.x` binary
+compatibility is not guaranteed. Rebuild every C++ consumer when the changelog
+announces a boundary. In particular, moving from `0.11.1` or earlier to the
+release containing bounded `NodeCache` requires a rebuild because `NodeCache`
+and `EngineConfig` object layouts changed.
+
+The Provider migration above does **not** change the established `Provider`
+vtable. Existing Provider binaries remain subject only to the release-wide
+boundaries. The planned `CheckpointStore` async migration must follow the same
+policy: any pre-v1 vtable change requires an announced rebuild, while v1 and
+later should add separate capability interfaces and adapters instead of
+changing the stable layout.
+
+See [Binary Compatibility Policy](ABI_POLICY.md) for platform library names,
+all known rebuild boundaries, and CI verification.

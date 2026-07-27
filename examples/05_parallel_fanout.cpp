@@ -74,12 +74,10 @@ public:
         co_return out;
     }
 
-    // Note: v0.4 unified `run()` replaces the old 8-virtual cross-product.
-    // The previous version of this node overrode `execute_full_stream_async`
-    // to avoid double-running its already-async body; with `run(NodeInput)`
-    // that's no longer needed — engine dispatches `run()` exactly once per
-    // super-step regardless of stream mode (the stream_cb just lives in
-    // `in.stream_cb`, which we don't use here).
+    // Note: `run()` replaces the old multi-entry dispatch surface. This
+    // already-async node needs no special streaming entry: the engine
+    // dispatches `run()` exactly once per super-step regardless of stream mode
+    // (the stream_cb just lives in `in.stream_cb`, which we don't use here).
 
     std::string get_name() const override { return name_; }
 };

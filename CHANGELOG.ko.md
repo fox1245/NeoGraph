@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=a81bf50a40ca06d6835e7187d9a5d57988df557b58296cc6b5a81e25cdf93a1d -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=4e86912fb25a078badb50fae46fb0f72e28ab1862d4c067cc88e792574a889cb -->
 # 변경 기록
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -17,6 +17,16 @@ NeoGraph의 주목할 만한 모든 변경 사항을 이 파일에 기록한다.
 
 ### 변경
 
+- **C++ ABI 및 SOVERSION 정책 (이슈 #194).** 이제 모든 공개
+  `neograph_*` 바이너리 라이브러리에 프로젝트 `VERSION`과 주 버전
+  `SOVERSION`이 들어가며, 설치된 공유 라이브러리는 자기 디렉터리에서 형제
+  의존성을 찾는다. v1 이전 릴리스는 ABI 세대 0을 쓰지만 필수 재빌드 경계를
+  공지할 수 있다. bounded `NodeCache`가 들어간 릴리스에서는 `NodeCache`와
+  `EngineConfig` 공개 객체 배치가 바뀌므로 `0.11.1` 이하로 빌드한 모든 C++
+  프로그램을 다시 빌드해야 한다. 1.0은 ABI 세대를 1로 바꾸고 v1 배치를
+  확정한다. CI는 격리된 정적·공유 설치 소비 프로그램을 빌드·실행하고
+  ELF/Mach-O 로더 정보도 검사한다. 자세한 내용은
+  [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)를 참고한다.
 - **`GraphNode::run(input)` 이전 안내 완성.** Python `GraphNode` 기본 클래스가 더 이상 삭제된 `execute*` 메서드를 참조하지 않으며, `run(input)`이 없으면 이전 문서 경로가 포함된 `NotImplementedError`를 발생시킨다. C++/Python 참조, 비동기/스트리밍 안내, 예제 README가 실제 v0.9.0 단일 진입점에 맞춰졌다. 이전 절차는 C++ 및 Python 예제와 함께 [`docs/migration-v0.4-to-v1.0.md`](docs/migration-v0.4-to-v1.0.md)에 문서화되었다.
 - **Provider API 영구 호환성 정책 (이슈 #5).** `Provider::complete()`, `complete_async()`, `complete_stream()`, `complete_stream_async()`, 그리고 콜백 기반 `invoke()`의 제거 계획이 철회되고 `[[deprecated]]` 경고가 제거되었다. 기존 API는 계속 호환성 및 보안 수정을 받는다. 새 Provider 구현과 직접 호출자는 각각 `CompletionProvider::do_invoke()`와 `invoke_request(CompletionRequest)` 사용을 권장하며, 모든 새 기능을 기존 API로 백포트하는 것은 보장되지 않는다. 공개 시그니처, 가상 함수 순서, 객체 크기, vtable은 변경되지 않는다.
 

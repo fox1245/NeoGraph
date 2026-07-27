@@ -1,5 +1,9 @@
-<!-- neograph-i18n: source=docs/ASYNC_STAGE3_DESIGN.md locale=ja source_sha256=504932a9848ba52c794d9ac51f4b7b599605bab11e2e679c4a2d11fd7f9d43e2 -->
+<!-- neograph-i18n: source=docs/ASYNC_STAGE3_DESIGN.md locale=ja source_sha256=8fdd608254fb2607289f13a59d7badf7ae1c4fdc843589df101c684e1ba1b88b -->
 # Stage 3 — asio ベース完全非同期リファクタ設計
+
+> **履歴上の設計記録。** この文書は 2026-04-19 時点で提案された Stage 3
+> リファクタリングを記録したものです。現在の API ドキュメントではないため、
+> 現在の動作は [API narrative tour](reference-en.md) とインストール済みヘッダーを参照してください。
 
 **Languages:** [English](ASYNC_STAGE3_DESIGN.md) | [한국어](ASYNC_STAGE3_DESIGN.ko.md) | [日本語](ASYNC_STAGE3_DESIGN.ja.md) | [简体中文](ASYNC_STAGE3_DESIGN.zh-CN.md)
 

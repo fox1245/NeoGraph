@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=ja source_sha256=867535aebac0ee2f3fd44ffbb7b05c6f71b27535a3417f62efdd74cdc9aa14cf -->
+<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=ja source_sha256=42ecb573fd2ab6fe94a978425fd0016579262109ded26afa124e3f8649fa9ab5 -->
 # NeoGraph 非同期ガイド
 
 **Languages:** [English](ASYNC_GUIDE.md) | [한국어](ASYNC_GUIDE.ko.md) | [日本語](ASYNC_GUIDE.ja.md) | [简体中文](ASYNC_GUIDE.zh-CN.md)
@@ -280,7 +280,7 @@ GraphEngine::run_async(const RunConfig& config) {
 `GraphNode::run(NodeInput)` はディスパッチごとに 1 回実行されます。
 `in.stream_cb` が非 null の場合のみイベントを送出し、呼出元がストリーミング
 エンジンエントリポイントを使用したかどうかに関わらず同じ `NodeOutput` を返します。
-レガシーな `execute_full_stream_async` の二重実行フォールバックはもはや存在しません。
+旧来の二重実行フォールバックはもはや存在しません。
 
 ### 4.5 MCP stdio 単一セッションの並行性
 
