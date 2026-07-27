@@ -49,7 +49,31 @@ def test_cache_off_by_default():
     e.run(cfg1)
     e.run(cfg2)
     assert node.calls == 2
-    assert e.node_cache_stats() == {"size": 0, "hits": 0, "misses": 0}
+    assert e.node_cache_stats() == {
+        "size": 0,
+        "hits": 0,
+        "misses": 0,
+        "evictions": 0,
+        "max_entries": 0,
+    }
+
+
+def test_capacity_and_eviction_metrics_are_exposed():
+    e, node = _build()
+    e.set_node_cache_max_entries(2)
+    e.set_node_cache_enabled("work", True)
+
+    for tid in ("a", "b", "c"):
+        e.run(ng.RunConfig(thread_id=tid, input={}, max_steps=5))
+
+    assert node.calls == 3
+    assert e.node_cache_stats() == {
+        "size": 2,
+        "hits": 0,
+        "misses": 3,
+        "evictions": 1,
+        "max_entries": 2,
+    }
 
 
 def test_enable_caches_identical_runs():

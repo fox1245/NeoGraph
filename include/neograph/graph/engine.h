@@ -83,6 +83,9 @@ struct EngineConfig {
     /// executions. This is an explicit CacheScope::Reusable opt-in; use the
     /// two-argument set_node_cache_enabled() API for execution-local caching.
     std::set<std::string> cached_nodes;
+
+    /// Global NodeCache entry bound. Zero preserves unbounded behavior.
+    std::size_t node_cache_max_entries = 0;
 };
 
 /**
@@ -815,6 +818,10 @@ public:
      * @brief Drop all cached entries (per-node enable state preserved).
      */
     void clear_node_cache();
+
+    /// Set the global NodeCache entry bound. Zero means unbounded. Safe during
+    /// active runs; lowering the value may evict entries immediately.
+    void set_node_cache_max_entries(std::size_t max_entries);
 
     /// @brief Borrow the engine's NodeCache for stats inspection.
     const NodeCache& node_cache() const { return node_cache_; }

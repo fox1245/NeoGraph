@@ -2,7 +2,7 @@ spec:
   id: issue-211-cache-bounds
   issue: 211
   parent: 187
-  status: proposed
+  status: accepted-local
   priority: P2
   kind: resource-control
   depends_on: [210]
@@ -18,9 +18,9 @@ problem:
 contract:
   defaults: "Disabled cache keeps the existing allocation-free fast path."
   controls:
-    - Configurable maximum entries or measured memory budget.
-    - Deterministic documented eviction, initially LRU unless evidence rejects it.
-    - Optional TTL only if monotonic-clock behavior is testable.
+    - max_entries equal to zero preserves the current unbounded behavior.
+    - A positive max_entries uses deterministic least-recently-used eviction.
+    - Byte budgets and TTL are explicitly out of scope for the first implementation.
   observability: [hits, misses, entries, evictions]
 
 red_tests:
@@ -37,6 +37,7 @@ implementation:
   - Add policy/config without affecting disabled engines.
   - Make accounting and eviction atomic under the selected synchronization model.
   - Expose metrics without leaking cache key payloads.
+  - Ship the public NodeCache layout change only with the pre-v1 ABI policy from issue 194.
 
 acceptance:
   - Capacity and eviction tests pass under TSan.

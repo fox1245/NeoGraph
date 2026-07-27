@@ -304,6 +304,30 @@ TEST(EngineConfigTest, EnablesNodeCacheAtConstructionTime) {
     EXPECT_EQ(CountingNode::calls.load(), 1);
 }
 
+TEST(EngineConfigTest, AppliesNodeCacheCapacityBeforeFirstRun) {
+    register_node("engine_config_bounded_cache",
+                  [](const std::string&, const json&, const NodeContext&) {
+                      return std::make_unique<CountingNode>();
+                  });
+    CountingNode::calls = 0;
+
+    EngineConfig config;
+    config.cached_nodes.insert("work");
+    config.node_cache_max_entries = 1;
+    auto engine = GraphEngine::build(
+        one_node_graph("engine_config_bounded_cache"), std::move(config));
+
+    RunConfig first;
+    first.input = {{"input", 7}};
+    RunConfig second;
+    second.input = {{"input", 8}};
+    EXPECT_EQ(engine->run(first).channel<int>("output"), 7);
+    EXPECT_EQ(engine->run(second).channel<int>("output"), 8);
+    EXPECT_EQ(engine->node_cache().size(), 1u);
+    EXPECT_EQ(engine->node_cache().eviction_count(), 1u);
+    EXPECT_EQ(engine->node_cache().max_entries(), 1u);
+}
+
 TEST(CompiledGraphLinkTest, ConsumesCompiledGraphWithoutRunningFactoriesAgain) {
     link_factory_calls = 0;
     register_node("compiled_graph_link", [](const std::string&, const json&, const NodeContext&) {

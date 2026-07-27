@@ -8,6 +8,7 @@
 #include <neograph/graph/types.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -57,7 +58,10 @@ struct CacheKeyPolicy {
  * Reusable caching is an explicit policy decision. Cache
  * values are full `NodeResult`s (writes + Command + Sends), so a
  * cached hit replays the original outcome without re-running the
- * node. Hit / miss counters are exposed for tests + observability.
+ * node. Hit / miss / eviction counters are exposed for observability.
+ * `max_entries == 0` preserves the historical unbounded behavior. A positive
+ * limit evicts the least-recently-used entry; ties are broken by the encoded
+ * cache key so serial operation is deterministic.
  *
  * Only safe for pure nodes — deterministic, no external side effects,
  * no time-dependent behavior. Streaming nodes are skipped because
@@ -107,6 +111,13 @@ public:
     /// Drop all cached entries (per-node enable/disable state preserved).
     void clear();
 
+    /// Set the global entry bound. Zero means unbounded. Lowering the limit
+    /// evicts least-recently-used entries immediately.
+    void set_max_entries(std::size_t max_entries);
+
+    /// Configured global entry bound. Zero means unbounded.
+    std::size_t max_entries() const;
+
     /// Number of entries currently held.
     std::size_t size() const;
 
@@ -115,18 +126,29 @@ public:
     /// Lifetime miss count (incremented on lookup that returns nullopt
     /// for an enabled node).
     std::size_t miss_count() const;
+    /// Lifetime capacity-eviction count. clear() and overwrite do not count.
+    std::size_t eviction_count() const;
 
 private:
+    struct CacheEntry {
+        NodeResult result;
+        std::uint64_t last_used = 0;
+    };
+
     static std::string make_key(const std::string& node_name,
-                                const std::string& state_hash,
-                                const std::string& scope_key);
+                                 const std::string& state_hash,
+                                 const std::string& scope_key);
+    void evict_one_locked();
 
     mutable std::mutex mu_;
     std::set<std::string> enabled_nodes_;
     std::unordered_map<std::string, CacheKeyPolicy> policies_;
-    std::unordered_map<std::string, NodeResult> entries_;
+    mutable std::unordered_map<std::string, CacheEntry> entries_;
     mutable std::size_t hits_   = 0;
     mutable std::size_t misses_ = 0;
+    std::size_t max_entries_ = 0;
+    std::size_t evictions_ = 0;
+    mutable std::uint64_t access_sequence_ = 0;
 };
 
 /// Stable hash over the JSON state used as the cache-key suffix.
