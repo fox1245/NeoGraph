@@ -139,9 +139,9 @@ TEST(MultiSendEvents, SingleSendEmitsWorkerEvents) {
     EXPECT_EQ(1, log.count(GraphEvent::Type::NODE_END,   "worker"));
 }
 
-// The bug: with fanout=3 the Taskflow multi-Send path bypassed event
-// emission entirely, so "worker" never appeared in NODE_START /
-// NODE_END — even though it executed 3 times.
+// Historical regression: with fanout=3 the former Taskflow multi-Send path
+// bypassed event emission entirely, so "worker" never appeared in NODE_START /
+// NODE_END even though it executed 3 times.
 TEST(MultiSendEvents, MultiSendEmitsPerInvocationEvents) {
     auto engine = compile_fanout_graph(3);
     EventLog log;

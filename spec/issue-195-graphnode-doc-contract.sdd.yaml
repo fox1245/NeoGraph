@@ -2,7 +2,7 @@ spec:
   id: issue-195-graphnode-doc-contract
   issue: 195
   parent: 187
-  status: proposed
+  status: accepted-local
   priority: P0
   kind: documentation-correctness
   depends_on: []
@@ -19,7 +19,7 @@ problem:
 scope:
   in:
     - Public headers and Doxygen comments.
-    - English and Korean references and concepts guide.
+    - Every maintained locale of the references and concepts guide.
     - Python diagnostics, dead helpers, and test descriptions.
   out:
     - Another GraphNode dispatch redesign.
@@ -29,7 +29,7 @@ red_tests:
   - id: documented-minimal-node
     assertion: "The documented custom node compiles and runs unchanged."
   - id: stale-symbol-scan
-    assertion: "Legacy names appear only in approved historical files."
+    assertion: "GraphNode legacy names appear only in approved historical files or Tool APIs."
 
 implementation:
   - Replace false fallback prose with the current pure run contract.
@@ -38,5 +38,6 @@ implementation:
 
 acceptance:
   - No active documentation tells users to override removed methods.
-  - Documentation snippets are compiled or executed in CI.
+  - Historical design and migration records are explicitly labeled and preserved.
+  - Doxygen and the documentation locale inventory pass.
   - Custom-node C++ and Python suites pass.

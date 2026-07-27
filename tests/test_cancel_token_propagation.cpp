@@ -1,7 +1,8 @@
 // v0.3.1: TODO_v0.3.md item #7 — verify CancelToken propagates into
 // every fan-out worker (run_parallel_async + run_sends_async).
 //
-// v0.3.0 wired the token through GraphState → PyGraphNode::execute_full_async
+// Historical v0.3.0 path wired the token through GraphState →
+// PyGraphNode::execute_full_async
 // for the single-node path. Static parallel fan-out shares the parent
 // state by reference so it inherits the token automatically. Send-driven
 // dynamic fan-out, however, builds an *isolated* GraphState per worker

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=zh-CN source_sha256=867535aebac0ee2f3fd44ffbb7b05c6f71b27535a3417f62efdd74cdc9aa14cf -->
+<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=zh-CN source_sha256=42ecb573fd2ab6fe94a978425fd0016579262109ded26afa124e3f8649fa9ab5 -->
 # NeoGraph 异步指南
 
 **Languages:** [English](ASYNC_GUIDE.md) | [한국어](ASYNC_GUIDE.ko.md) | [日本語](ASYNC_GUIDE.ja.md) | [简体中文](ASYNC_GUIDE.zh-CN.md)
@@ -267,7 +267,7 @@ GraphEngine::run_async(const RunConfig& config) {
 
 `GraphNode::run(NodeInput)` 每次分发执行一次。仅在 `in.stream_cb` 非空时
 发送事件，无论调用者是否使用流式引擎入口点，都返回相同的 `NodeOutput`。
-旧的 `execute_full_stream_async` 双重执行回退已不存在。
+旧的双重执行回退路径已不存在。
 
 ### 4.5 MCP stdio 单会话并发
 

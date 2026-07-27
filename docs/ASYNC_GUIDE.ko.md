@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=ko source_sha256=867535aebac0ee2f3fd44ffbb7b05c6f71b27535a3417f62efdd74cdc9aa14cf -->
+<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=ko source_sha256=42ecb573fd2ab6fe94a978425fd0016579262109ded26afa124e3f8649fa9ab5 -->
 # NeoGraph 비동기 안내
 
 **Languages:** [English](ASYNC_GUIDE.md) | [한국어](ASYNC_GUIDE.ko.md) | [日本語](ASYNC_GUIDE.ja.md) | [简体中文](ASYNC_GUIDE.zh-CN.md)
@@ -239,7 +239,7 @@ GraphEngine::run_async(const RunConfig& config) {
 
 ### 4.4 사용자 정의 노드에서 스트리밍
 
-`GraphNode::run(NodeInput)`은 디스패치당 한 번 실행된다. `in.stream_cb`가 null이 아닐 때만 이벤트를 방출하고, 호출자가 스트리밍 엔진 진입점을 사용했는지와 관계없이 동일한 `NodeOutput`을 반환한다. 기존 `execute_full_stream_async` 이중 실행 대체 경로는 더 이상 존재하지 않는다.
+`GraphNode::run(NodeInput)`은 디스패치당 한 번 실행된다. `in.stream_cb`가 null이 아닐 때만 이벤트를 방출하고, 호출자가 스트리밍 엔진 진입점을 사용했는지와 관계없이 동일한 `NodeOutput`을 반환한다. 이전 이중 실행 대체 경로는 더 이상 존재하지 않는다.
 
 ### 4.5 MCP stdio 단일 세션 동시성
 

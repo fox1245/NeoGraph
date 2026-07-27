@@ -1,5 +1,9 @@
-<!-- neograph-i18n: source=docs/ASYNC_STAGE3_DESIGN.md locale=zh-CN source_sha256=504932a9848ba52c794d9ac51f4b7b599605bab11e2e679c4a2d11fd7f9d43e2 -->
+<!-- neograph-i18n: source=docs/ASYNC_STAGE3_DESIGN.md locale=zh-CN source_sha256=8fdd608254fb2607289f13a59d7badf7ae1c4fdc843589df101c684e1ba1b88b -->
 # 第三阶段 — 基于 asio 的完整异步重构设计
+
+> **历史设计记录。** 本文记录 2026-04-19 提出的第三阶段重构方案，
+> 并非当前 API 文档。当前行为请参阅 [API narrative tour](reference-en.md)
+> 和已安装的头文件。
 
 **Languages:** [English](ASYNC_STAGE3_DESIGN.md) | [한국어](ASYNC_STAGE3_DESIGN.ko.md) | [日本語](ASYNC_STAGE3_DESIGN.ja.md) | [简体中文](ASYNC_STAGE3_DESIGN.zh-CN.md)
 

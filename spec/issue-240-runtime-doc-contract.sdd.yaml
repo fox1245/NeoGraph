@@ -1,0 +1,38 @@
+spec:
+  id: issue-240-runtime-doc-contract
+  issue: 240
+  parent: 187
+  status: accepted-local
+  priority: P1
+  kind: documentation-correctness
+  depends_on: [195]
+
+problem:
+  statement: >-
+    Active runtime comments still attribute graph execution to removed Taskflow
+    code and incorrectly say partial barrier signals are not checkpointed.
+  evidence:
+    - "include/neograph/graph/state.h:5-8"
+    - "include/neograph/graph/types.h:211-213"
+    - "include/neograph/graph/scheduler.h:144-150,209-217"
+    - "src/core/scheduler.cpp:78-80"
+    - "tests/test_barrier_persistence.cpp:173-183"
+
+scope:
+  in:
+    - Active public headers, implementation comments, and regression-test prose.
+    - A repository check that separates live runtime claims from historical records.
+  out:
+    - Historical changelogs, migration records, and explicitly historical designs.
+    - Scheduler or checkpoint behavior changes.
+
+red_tests:
+  - id: stale-runtime-claim-scan
+    assertion: "Active source and test comments contain no current-runtime Taskflow claim."
+  - id: barrier-doc-contract
+    assertion: "Scheduler comments say partial barrier state survives checkpoint/resume."
+
+acceptance:
+  - Public runtime documentation describes the Asio coroutine path and opt-in worker pool.
+  - Historical Taskflow evidence remains intact and clearly historical.
+  - Doxygen and the documentation locale inventory pass.

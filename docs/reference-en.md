@@ -29,14 +29,14 @@ shape map onto `include/neograph/`.
 
 | Module | Namespace | Description | Tour | Doxygen |
 |--------|-----------|-------------|------|---------|
-| Core | `neograph` | Foundation types, Provider and Tool interfaces | [§1–§3](#1-foundation-types) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph.html) |
-| Graph | `neograph::graph` | Graph engine, nodes, state, checkpointing, store | [§4–§11](#4-graph-types) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1graph.html) |
-| LLM | `neograph::llm` | LLM provider implementations and Agent | [§12](#12-llm-module) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1llm.html) |
-| MCP | `neograph::mcp` | Model Context Protocol client | [§13](#13-mcp-module) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1mcp.html) |
-| Util | `neograph::util` | Concurrency utilities | [§14](#14-util-module) | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1util.html) |
-| **A2A** | `neograph::a2a` | Agent-to-Agent JSON-RPC bridge (client + server + streaming) | _Doxygen-only_ | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1a2a.html) |
-| **ACP** | `neograph::acp` | Agent Client Protocol — editor↔agent bidirectional RPC over stdio | _Doxygen-only_ | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1acp.html) |
-| **Async** | `neograph::async` | Asio HTTP/SSE/WS helpers, ConnPool, run_sync | _Doxygen-only_ | [link](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1async.html) |
+| Core | `neograph` | Foundation types, Provider and Tool interfaces | [§1–§3](#1-foundation-types) | [Provider](https://fox1245.github.io/NeoGraph/classneograph_1_1Provider.html) |
+| Graph | `neograph::graph` | Graph engine, nodes, state, checkpointing, store | [§4–§11](#4-graph-types) | [GraphEngine](https://fox1245.github.io/NeoGraph/classneograph_1_1graph_1_1GraphEngine.html) |
+| LLM | `neograph::llm` | LLM provider implementations and Agent | [§12](#12-llm-module) | [Agent](https://fox1245.github.io/NeoGraph/classneograph_1_1llm_1_1Agent.html) |
+| MCP | `neograph::mcp` | Model Context Protocol client | [§13](#13-mcp-module) | [MCPClient](https://fox1245.github.io/NeoGraph/classneograph_1_1mcp_1_1MCPClient.html) |
+| Util | `neograph::util` | Concurrency utilities | [§14](#14-util-module) | [RequestQueue](https://fox1245.github.io/NeoGraph/classneograph_1_1util_1_1RequestQueue.html) |
+| **A2A** | `neograph::a2a` | Agent-to-Agent JSON-RPC bridge (client + server + streaming) | _Doxygen-only_ | [A2AClient](https://fox1245.github.io/NeoGraph/classneograph_1_1a2a_1_1A2AClient.html) |
+| **ACP** | `neograph::acp` | Agent Client Protocol — editor↔agent bidirectional RPC over stdio | _Doxygen-only_ | [ACPServer](https://fox1245.github.io/NeoGraph/classneograph_1_1acp_1_1ACPServer.html) |
+| **Async** | `neograph::async` | Asio HTTP/SSE/WS helpers, ConnPool, run_sync | _Doxygen-only_ | [WsClient](https://fox1245.github.io/NeoGraph/classneograph_1_1async_1_1WsClient.html) |
 
 The three "_Doxygen-only_" rows are net-new modules added across
 recent audit and protocol-bridge work. They have full headers under
@@ -987,14 +987,9 @@ public:
 };
 ```
 
-> **Legacy chain (removed in v0.9.0 during v1 preparation).** Pre-v0.4
-> code overrode one of `execute` / `execute_async` / `execute_full` /
-> `execute_full_async` / `execute_stream` / `execute_stream_async` /
-> `execute_full_stream` / `execute_full_stream_async`. Picking the
-> wrong one silently dropped `Command` / `Send`, froze the event loop,
-> or infinite-recursed — that's the seam `run()` collapses. The 8
-> legacy virtuals are no longer members of `GraphNode`; subclasses
-> migrating from an older release must implement `run(NodeInput)`.
+> **Migration note.** `GraphNode` has one node entry point:
+> `run(NodeInput)`. It preserves `Command` and `Send`, participates in async and
+> streaming execution, and is the override subclasses must implement.
 
 ### LLMCallNode
 
@@ -1017,10 +1012,8 @@ public:
 | `name` | Node name |
 | `ctx` | Node context providing the LLM provider, tools, model, and instructions |
 
-(LLMCallNode overrides `run(NodeInput)` directly as of v0.4.0
-(PR 9a / commit `d1070dc`) — legacy 8-virtual chain is no longer
-on its hot path. The same applies to `ToolDispatchNode`,
-`IntentClassifierNode`, and `SubgraphNode`.)
+(LLMCallNode, `ToolDispatchNode`, `IntentClassifierNode`, and `SubgraphNode`
+all implement the same `run(NodeInput)` contract.)
 
 ### ToolDispatchNode
 
@@ -3411,8 +3404,9 @@ NeoGraph `GraphEngine` into an A2A endpoint via
 `GraphAgentAdapter`. Dual `v0.3` / `v1` method-name dispatch —
 see commit `bc675a1`. Streaming uses `SseFrameSplitter` (client)
 and httplib chunked (server). Caller node embeds an A2A call as
-a graph node. **Full reference:**
-[Doxygen `namespaceneograph_1_1a2a`](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1a2a.html).
+a graph node.
+
+**Full reference:** [Doxygen class list](https://fox1245.github.io/NeoGraph/annotated.html), grouped by namespace.
 
 ### `neograph::acp` — Agent Client Protocol
 
@@ -3423,8 +3417,9 @@ Gemini CLI, Neovim CodeCompanion). Bidirectional: client→agent
 (`fs/{read,write}_text_file`, `session/request_permission`) via
 late-bound `ACPClient`. `ACPServer::handle_message` async-dispatches
 prompts on a worker thread, capped at `max_inflight_prompts=32`
-with per-session single-flight + `-32000` backpressure. **Full
-reference:** [Doxygen `namespaceneograph_1_1acp`](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1acp.html).
+with per-session single-flight + `-32000` backpressure.
+
+**Full reference:** [Doxygen class list](https://fox1245.github.io/NeoGraph/annotated.html), grouped by namespace.
 
 ### `neograph::async` — HTTP/SSE/WS helpers
 
@@ -3435,8 +3430,9 @@ silently double-apply); `SseEventParser` for OpenAI/Claude
 streaming; `WsClient` for OpenAI Responses WebSocket; libcurl
 `CurlH2Pool` for HTTP/2 + multiplexing on Cloudflare-fronted
 endpoints; `run_sync` for awaitable→sync bridges in the engine
-defaults. **Full reference:**
-[Doxygen `namespaceneograph_1_1async`](https://fox1245.github.io/NeoGraph/namespaceneograph_1_1async.html).
+defaults.
+
+**Full reference:** [Doxygen class list](https://fox1245.github.io/NeoGraph/annotated.html), grouped by namespace.
 
 ### Persistent checkpoint backends
 

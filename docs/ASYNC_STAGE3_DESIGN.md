@@ -1,5 +1,9 @@
 # Stage 3 — asio-based Full Async Refactor Design
 
+> **Historical design record.** This document captures the proposed Stage 3
+> refactor from 2026-04-19. It is not current API documentation; use the
+> [API narrative tour](reference-en.md) and installed headers for current behavior.
+
 **Languages:** [English](ASYNC_STAGE3_DESIGN.md) | [한국어](ASYNC_STAGE3_DESIGN.ko.md) | [日本語](ASYNC_STAGE3_DESIGN.ja.md) | [简体中文](ASYNC_STAGE3_DESIGN.zh-CN.md)
 
 Written: 2026-04-19 (feat/async-api)

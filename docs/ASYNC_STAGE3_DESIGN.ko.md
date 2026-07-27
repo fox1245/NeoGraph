@@ -1,5 +1,9 @@
-<!-- neograph-i18n: source=docs/ASYNC_STAGE3_DESIGN.md locale=ko source_sha256=504932a9848ba52c794d9ac51f4b7b599605bab11e2e679c4a2d11fd7f9d43e2 -->
+<!-- neograph-i18n: source=docs/ASYNC_STAGE3_DESIGN.md locale=ko source_sha256=8fdd608254fb2607289f13a59d7badf7ae1c4fdc843589df101c684e1ba1b88b -->
 # Stage 3 — asio 기반 전체 비동기 재설계
+
+> **역사적 설계 기록.** 이 문서는 2026-04-19에 제안된 Stage 3 리팩터링을
+> 기록합니다. 현재 API 문서가 아니며, 현재 동작은
+> [API narrative tour](reference-en.md)와 설치된 헤더를 사용하세요.
 
 **Languages:** [English](ASYNC_STAGE3_DESIGN.md) | [한국어](ASYNC_STAGE3_DESIGN.ko.md) | [日本語](ASYNC_STAGE3_DESIGN.ja.md) | [简体中文](ASYNC_STAGE3_DESIGN.zh-CN.md)
 

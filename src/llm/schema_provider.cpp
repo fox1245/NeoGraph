@@ -462,8 +462,8 @@ std::pair<std::string, std::string> SchemaProvider::parse_data_url(const std::st
 }
 
 std::string SchemaProvider::generate_tool_call_id() {
-    // thread_local so concurrent fan-out calls (parallel Sends calling
-    // complete() from Taskflow workers) don't race on the PRNG state.
+    // thread_local so concurrent fan-out calls on Asio worker threads don't
+    // race on the PRNG state.
     thread_local std::mt19937 gen(static_cast<unsigned>(
         std::chrono::steady_clock::now().time_since_epoch().count()
         ^ reinterpret_cast<std::uintptr_t>(&gen)));
