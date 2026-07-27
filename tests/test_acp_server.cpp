@@ -1106,16 +1106,9 @@ TEST(ACPServer, CancelAfterTerminalCommitCannotReachLaterPrompt) {
     ASSERT_EQ(response_ready.wait_for(std::chrono::seconds(1)),
               std::future_status::ready);
 
-    // A new prompt cannot start until the prior terminal response leaves the
-    // sink. That prevents a late cancel for prompt #1 from reaching prompt #2.
-    server.handle_message(make_request(2, "session/prompt",
-        {{"sessionId", sid}, {"prompt", prompt("too early")}}));
-    auto rejected = cap.wait_for_response(2, std::chrono::seconds(1));
-    ASSERT_TRUE(rejected.contains("error")) << rejected.dump();
-    EXPECT_EQ(rejected["error"].value("code", 0), -32000);
-
     // The first response has committed its terminal state but is still blocked
-    // in the sink. This cancel is stale, not pre-cancel for a later prompt.
+    // in the sink. With no newer prompt active, this cancel is stale rather
+    // than a pre-cancel for a later turn.
     server.handle_message({{"jsonrpc", "2.0"}, {"method", "session/cancel"},
                            {"params", {{"sessionId", sid}}}});
     release_response.set_value();
@@ -1124,9 +1117,9 @@ TEST(ACPServer, CancelAfterTerminalCommitCannotReachLaterPrompt) {
     ASSERT_TRUE(first.contains("result")) << first.dump();
     EXPECT_EQ(first["result"].value("stopReason", std::string()), "end_turn");
 
-    server.handle_message(make_request(3, "session/prompt",
+    server.handle_message(make_request(2, "session/prompt",
         {{"sessionId", sid}, {"prompt", prompt("second")}}));
-    auto second = cap.wait_for_response(3, std::chrono::seconds(1));
+    auto second = cap.wait_for_response(2, std::chrono::seconds(1));
     ASSERT_TRUE(second.contains("result")) << second.dump();
     EXPECT_EQ(second["result"].value("stopReason", std::string()), "end_turn");
 }

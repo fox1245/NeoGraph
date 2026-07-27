@@ -607,15 +607,18 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                     commit_terminal(
                         stop, !graph_failed && run_result.interrupted);
 
+                    // The terminal state is now committed and the old cancel
+                    // token is no longer reachable. Admit the next turn before
+                    // publishing the response so a client awakened by the sink
+                    // cannot observe a stale single-flight reservation.
+                    reservation->release_session();
+
                     PromptResponse resp;
                     resp.stop_reason = stop;
                     neograph::json rj;
                     to_json(rj, resp);
                     response_attempted = true;
                     emit(jsonrpc_result(std::move(rj), id));
-                    // Keep the session single-flight until the final response
-                    // has left the sink. A reentrant prompt otherwise could
-                    // make a late cancel for this turn target the next one.
                     cleanup();
                 } catch (const std::exception& e) {
                     cleanup();
