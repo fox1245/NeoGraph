@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ko source_sha256=5ec95b54abb4ec639a30a3eb4da6cf300fffa1e34c0afc2679b9ecf7272c4709 -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ko source_sha256=f63fe99a9d0380a2de9284c52a5f775630d9e9416e53d0071a81873d1feb1462 -->
 # 이전 안내: 기존 8 가상 함수 → `run(NodeInput)` (v0.4.x → v0.9+)
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)

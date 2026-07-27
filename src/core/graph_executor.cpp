@@ -79,6 +79,17 @@ private:
     detail::ScopedRunContextRuntime runtime_scope_;
 };
 
+void apply_node_result(GraphState& state,
+                       const NodeResult& result,
+                       const RunContext& context) {
+    state.apply_writes(result.writes);
+    detail::append_applied_writes(context, result.writes);
+    if (result.command) {
+        state.apply_writes(result.command->updates);
+        detail::append_applied_writes(context, result.command->updates);
+    }
+}
+
 } // namespace
 
 // =========================================================================
@@ -450,7 +461,7 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
         co_await coord.save_super_step_async(state,
             node_name, next_nodes,
             CheckpointPhase::NodeInterrupt, step, parent_cp_id,
-            barrier_state);
+            barrier_state, detail::checkpoint_metadata_for(ctx));
         // The executor is the only layer that knows the graph's name for
         // this node — the node body does not.
         interrupt->set_node(node_name);
@@ -458,10 +469,7 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
     }
 
     auto& nr = *ok_result;
-    state.apply_writes(nr.writes);
-    if (nr.command) {
-        state.apply_writes(nr.command->updates);
-    }
+    apply_node_result(state, nr, ctx);
 
     trace.push_back(node_name);
     co_return std::move(nr);
@@ -527,15 +535,14 @@ NodeExecutor::run_parallel_async(
                 co_await coord.save_super_step_async(state,
                     node_name, next_nodes,
                     CheckpointPhase::NodeInterrupt, step, parent_cp_id,
-                    barrier_state);
+                    barrier_state, detail::checkpoint_metadata_for(ctx));
                 interrupt->set_node(node_name);
                 throw *interrupt;
             }
             co_await coord.record_pending_write_async(
                 parent_cp_id, task_id, task_id, node_name, nr, step);
         }
-        state.apply_writes(nr.writes);
-        if (nr.command) state.apply_writes(nr.command->updates);
+        apply_node_result(state, nr, ctx);
         trace.push_back(node_name);
         std::vector<NodeResult> result;
         result.push_back(std::move(nr));
@@ -649,7 +656,7 @@ NodeExecutor::run_parallel_async(
             co_await coord.save_super_step_async(state,
                 first_exception_node, next_nodes,
                 CheckpointPhase::NodeInterrupt, step, parent_cp_id,
-                barrier_state);
+                barrier_state, detail::checkpoint_metadata_for(ctx));
             // Drop the worker eptr and throw a fresh NodeInterrupt —
             // see comment above the loop. The fresh exception is
             // wholly owned by the current (main) thread.
@@ -664,10 +671,7 @@ NodeExecutor::run_parallel_async(
     std::vector<NodeResult> step_results;
     step_results.reserve(ready.size());
     for (std::size_t i = 0; i < ready.size(); ++i) {
-        state.apply_writes(values[i].writes);
-        if (values[i].command) {
-            state.apply_writes(values[i].command->updates);
-        }
+        apply_node_result(state, values[i], ctx);
         step_results.push_back(std::move(values[i]));
         trace.push_back(ready[i]);
     }
@@ -748,8 +752,7 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
             co_await coord.record_pending_write_async(parent_cp_id,
                 task_id, task_id, s.target_node, nr, step);
         }
-        state.apply_writes(nr.writes);
-        if (nr.command) state.apply_writes(nr.command->updates);
+        apply_node_result(state, nr, ctx);
         trace.push_back(s.target_node + "[send]");
 
         StepRouting r;
@@ -841,8 +844,7 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
     // flow into the next super-step's routing decision.
     routings.reserve(sends.size());
     for (std::size_t si = 0; si < sends.size(); ++si) {
-        state.apply_writes(values[si].writes);
-        if (values[si].command) state.apply_writes(values[si].command->updates);
+        apply_node_result(state, values[si], ctx);
         trace.push_back(sends[si].target_node + "[send]");
 
         StepRouting r;

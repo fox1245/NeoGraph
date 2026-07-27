@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=6780e2507de2b228368944012cc9ad6c04e504aced4b69b172f87ef51e90ff69 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=b39068ee8e2c2a525841913e920f7115f35ecbb40d153c6d2cc7866510bfca37 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -1063,9 +1063,29 @@ public:
 | `name` | `std::string` | 父图中的节点名称 |
 | `subgraph` | `std::shared_ptr<GraphEngine>` | 编译后的子图引擎 |
 | `input_map` | `std::map<std::string, std::string>` | `parent_channel -> child_channel` 映射。从父读取，写入子输入 |
-| `output_map` | `std::map<std::string, std::string>` | `child_channel -> parent_channel` 映射。从子结果读取，写入父 |
+| `output_map` | `std::map<std::string, std::string>` | `child_channel -> parent_channel` 映射。重命名子图生成的 write delta 并转发到父图 |
 
 如果映射为空，通道按名称映射（恒等映射）。
+
+输入映射会把父图当前的通道值复制到子图输入。输出映射有意采用不同语义：它不会把
+子图最终序列化状态当作新的 reducer 输入，而是按生成顺序转发子图的
+`ChannelWrite` delta，并保留每个 write 的 `Mode`。因此，继承的 append/custom
+值不会被重复应用。输出映射不会推断 snapshot replacement；若要替换映射后的父值，
+子图必须显式发出 `ChannelWrite::Mode::Overwrite`。
+
+#### 运行时上下文传播
+
+`SubgraphNode` 在引擎边界派生子执行上下文，不改变公开 `RunContext` 的布局。
+
+| 上下文值 | 子图语义 |
+|---------------|-----------------|
+| `cancel_token` | 创建子操作 token，因此父取消会到达所有子图和孙图。 |
+| `usage`, `deadline`, `trace_id`, `stream_mode` | 继承。`deadline` 和 `trace_id` 来自 `RunMetadata`；子图不能扩大父图的 stream mode。 |
+| `thread_id` | 父 thread ID 非空时，根据父 ID、subgraph 节点名、super-step 和 invocation identity 确定性派生。因此 sibling `Send` 调用获得不同的 checkpoint identity。空父 thread ID 会让子图保持无作用域并禁用 checkpointing。 |
+| `step` | 子执行本地值，从子 checkpoint 或 0 开始。 |
+| `store` | 存在父 Store 时继承，否则保留子引擎配置的 Store。 |
+| Tool policy | 父 `ToolGate` 先于子 gate 运行。子图可以进一步限制或 rewrite 已允许的调用，但不能绕过父 deny/interrupt。 |
+| Checkpoint backend and resume value | 存在父 backend 时继承，否则保留子 backend。只有派生的子 checkpoint identity 存在时，父 resume 才会 resume 对应子 checkpoint，并转发非 null resume value。Checkpoint routing 是内部实现，不是公开 `RunContext` 字段。 |
 
 ---
 
@@ -1132,21 +1152,22 @@ struct RunConfig {
 
 ### RunContext（v0.4 PR 1，通过 `NodeInput.ctx` 暴露给节点）
 
-引擎传递的每次运行分发元数据。由 `RunConfig` 构造（当未提供时带有新的
-用法累加器）、引擎的 Store 和可选的恢复值。节点在 `run(NodeInput) ->
-NodeOutput` 重写中通过 `in.ctx` 消费它。
+引擎传递的每次运行分发元数据。由 `RunConfig`（未提供时创建新的 usage
+累加器）、`RunMetadata`、有效 Store 和可选 resume value 构造。节点在
+`run(NodeInput) -> NodeOutput` 重写中通过 `in.ctx` 使用它。
 
 ```cpp
 struct RunContext {
     std::shared_ptr<CancelToken>  cancel_token;
     std::shared_ptr<UsageAccumulator> usage;
-    std::optional<std::chrono::steady_clock::time_point> deadline; // reserved
-    std::string                   trace_id;     // reserved
+    std::optional<std::chrono::steady_clock::time_point> deadline;
+    std::string                   trace_id;
     std::string                   thread_id;
     int                           step;
     StreamMode                    stream_mode;
     std::optional<json>           resume_value;
     std::shared_ptr<Store>        store;
+    ToolGate                      tool_gate;
 };
 ```
 
@@ -1154,13 +1175,14 @@ struct RunContext {
 |-------|-------------|
 | `cancel_token` | 活跃 token。传递给 `provider.complete(params)`，使 LLM HTTP 套接字在取消时中止，或轮询 `is_cancelled()` 用于自己的循环 |
 | `usage` | 引擎填充的共享 token-记账接收器 |
-| `deadline` | 保留（尚无 `RunConfig.deadline` 字段） |
-| `trace_id` | 为 OTel 集成保留 |
+| `deadline` | 来自 C++ `RunMetadata` 的可选绝对 deadline |
+| `trace_id` | 来自 C++ `RunMetadata` 的可选 trace correlator |
 | `thread_id` | `RunConfig.thread_id` 的镜像 |
 | `step` | 当前超级步骤索引，每次迭代更新 |
 | `stream_mode` | `RunConfig.stream_mode` 的镜像 |
 | `resume_value` | 提供给 `GraphEngine::resume()` 的值，或在新运行时为空 |
 | `store` | 安装在引擎上的 Store，或在未配置时为 `nullptr` |
+| `tool_gate` | 此 invocation 的有效策略，包括继承的父策略 |
 
 ### CancelToken
 
@@ -1543,9 +1565,15 @@ std::vector<Checkpoint> get_state_history(const std::string& thread_id,
 void update_state(const std::string& thread_id,
                   const json& channel_writes,
                   const std::string& as_node = "");
+
+void update_state_writes(const std::string& thread_id,
+                         const std::vector<ChannelWrite>& channel_writes,
+                         const std::string& as_node = "");
 ```
 
-通过应用通道写入手动更新线程的状态。使用更新后的状态创建新的检查点。
+通过应用通道 write 手动更新线程状态。JSON object 形式按通道名应用 reducer write。
+`ChannelWrite` vector 形式保留 write 顺序和显式 overwrite mode。两种形式都会使用
+更新后的状态创建新 checkpoint。
 
 | 参数 | 类型 | 描述 |
 |-----------|------|-------------|
@@ -2952,12 +2980,13 @@ public:
     struct Stats {
         size_t pending;        // Tasks waiting in queue
         size_t active;         // Tasks currently executing
-        size_t completed;      // Total completed tasks
-        size_t rejected;       // Tasks rejected due to full queue
+        size_t completed;      // Total settled tasks, including cancellation
+        size_t rejected;       // Tasks rejected during admission
         size_t num_workers;    // Number of worker threads
         size_t max_queue_size; // Maximum queue capacity
     };
 
+    // num_workers must be greater than zero.
     RequestQueue(size_t num_workers = 128, size_t max_queue_size = 10000);
     ~RequestQueue();
 
@@ -2965,10 +2994,15 @@ public:
     RequestQueue(const RequestQueue&) = delete;
     RequestQueue& operator=(const RequestQueue&) = delete;
 
-    // Submit a task. Returns {accepted, future}.
-    // If the queue is full, returns {false, invalid_future}.
+    // Submit a task. Concurrent callers cannot exceed max_queue_size.
+    // A full queue returns {false, invalid_future}; an internal enqueue
+    // failure returns {false, valid_future}, which throws on get().
     template<typename F>
     std::pair<bool, std::future<void>> submit(F&& task);
+
+    // Idempotently reject new work, cancel queued tasks, and wait for workers.
+    void close();
+    bool is_closed() const noexcept;
 
     // Get current queue statistics
     Stats stats() const;
@@ -2977,12 +3011,14 @@ public:
 
 | Constructor 参数 | 类型 | 默认值 | 描述 |
 |-----------------------|------|---------|-------------|
-| `num_workers` | `size_t` | `128` | 工作线程池中的线程数 |
+| `num_workers` | `size_t` | `128` | 工作线程池中的线程数；0 会抛出 `std::invalid_argument` |
 | `max_queue_size` | `size_t` | `10000` | 待处理任务的最大数量。超过该上限的任务会被拒绝 |
 
 | 方法 | 描述 |
 |--------|-------------|
-| `submit(task)` | 将可调用对象入队。返回一对值：接受时 `first` 为 `true`（队列已满、发生背压时为 `false`），任务完成或传播异常时 `second` 对应的 `std::future<void>` 会就绪 |
+| `submit(task)` | 原子预留 pending capacity 后将 callable 入队。接受时 `first` 为 `true`。已满或已关闭的队列返回 `false` 和 invalid future；内部 enqueue 失败返回 `false` 和可传播错误的 valid future。已接受的 future 在任务完成时就绪或传播任务异常。 |
+| `close()` | 幂等地拒绝新工作。外部调用者等待所有 worker 退出，未领取的工作以 `std::runtime_error("RequestQueue is closed")` 完成。已领取 callable 可完成。callable 可以调用 `close()` 发起关闭，但不会等待自身。 |
+| `is_closed()` | 报告 `close()` 是否已开始拒绝新工作。 |
 | `stats()` | 返回当前队列统计信息的快照 |
 
 队列内部使用 `moodycamel::ConcurrentQueue` 实现无锁入队/出队，

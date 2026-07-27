@@ -1,5 +1,7 @@
 #include <neograph/graph/coordinator.h>
 #include <neograph/graph/state.h>
+
+#include "channel_write_codec.h"
 #include <chrono>
 
 namespace neograph::graph {
@@ -12,56 +14,18 @@ namespace {
 // NodeResult and the on-store PendingWrite record; moved here because
 // only the coordinator drives both directions now.
 
-// A write's mode has to survive this round trip, or a replayed Overwrite comes
-// back as a Reduce and the resumed run reconstructs a different state than the
-// original — silently (#91).
-//
-// The field is emitted only when it is not the default, so a graph that never
-// overwrites produces byte-identical records to the pre-#91 format, and a
-// checkpoint written before this existed reads back as Reduce. Same shape as the
-// v1 -> v2 barrier_state addition.
-inline json serialize_writes(const std::vector<ChannelWrite>& writes) {
-    json arr = json::array();
-    for (const auto& w : writes) {
-        json item{{"channel", w.channel}, {"value", w.value}};
-        if (w.mode == ChannelWrite::Mode::Overwrite) {
-            item["mode"] = "overwrite";
-        }
-        arr.push_back(std::move(item));
-    }
-    return arr;
-}
-inline std::vector<ChannelWrite> deserialize_writes(const json& arr) {
-    std::vector<ChannelWrite> out;
-    if (!arr.is_array()) return out;
-    out.reserve(arr.size());
-    for (const auto& item : arr) {
-        ChannelWrite w{
-            item.value("channel", std::string{}),
-            item.contains("value") ? item["value"] : json()
-        };
-        // Absent, unknown, or "reduce" -> Reduce. An older engine reading a
-        // record it does not understand must not silently invent an Overwrite.
-        if (item.value("mode", std::string{}) == "overwrite") {
-            w.mode = ChannelWrite::Mode::Overwrite;
-        }
-        out.push_back(std::move(w));
-    }
-    return out;
-}
-
 inline json serialize_command(const std::optional<Command>& cmd) {
     if (!cmd) return json();
     return {
         {"goto_node", cmd->goto_node},
-        {"updates",   serialize_writes(cmd->updates)}
+        {"updates",   detail::serialize_channel_writes(cmd->updates)}
     };
 }
 inline std::optional<Command> deserialize_command(const json& j) {
     if (j.is_null() || !j.is_object()) return std::nullopt;
     Command c;
     c.goto_node = j.value("goto_node", std::string{});
-    c.updates   = deserialize_writes(j.value("updates", json::array()));
+    c.updates   = detail::deserialize_channel_writes(j.value("updates", json::array()));
     return c;
 }
 
@@ -94,7 +58,7 @@ inline PendingWrite make_pending_write(const std::string& task_id,
     pw.task_id   = task_id;
     pw.task_path = task_path;
     pw.node_name = node_name;
-    pw.writes    = serialize_writes(nr.writes);
+    pw.writes    = detail::serialize_channel_writes(nr.writes);
     pw.command   = serialize_command(nr.command);
     pw.sends     = serialize_sends(nr.sends);
     pw.step      = step;
@@ -105,7 +69,7 @@ inline PendingWrite make_pending_write(const std::string& task_id,
 
 inline NodeResult pending_to_node_result(const PendingWrite& pw) {
     NodeResult nr;
-    nr.writes  = deserialize_writes(pw.writes);
+    nr.writes  = detail::deserialize_channel_writes(pw.writes);
     nr.command = deserialize_command(pw.command);
     nr.sends   = deserialize_sends(pw.sends);
     return nr;
@@ -239,6 +203,22 @@ CheckpointCoordinator::save_super_step_async(
     const std::string& parent_id,
     const BarrierState& barrier_state) const {
 
+    co_return co_await save_super_step_async(
+        state, current_node, next_nodes, phase, step, parent_id,
+        barrier_state, json());
+}
+
+asio::awaitable<std::string>
+CheckpointCoordinator::save_super_step_async(
+    const GraphState& state,
+    const std::string& current_node,
+    const std::vector<std::string>& next_nodes,
+    CheckpointPhase phase,
+    int step,
+    const std::string& parent_id,
+    const BarrierState& barrier_state,
+    const json& metadata) const {
+
     if (!enabled()) co_return std::string{};
 
     Checkpoint cp;
@@ -250,6 +230,7 @@ CheckpointCoordinator::save_super_step_async(
     cp.next_nodes      = next_nodes;
     cp.interrupt_phase = phase;
     cp.barrier_state   = barrier_state;
+    cp.metadata        = metadata;
     cp.step            = step;
     cp.timestamp       = now_ms();
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=b40776921ea20e60f80d2d186f1cee9ac1c3eb8c53e7fe2bdd85ed6782f83064 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=60b0675d8856a38a51c9eaa809e78f39c236d2c2977b14b62d69bc8ccb7fb217 -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)

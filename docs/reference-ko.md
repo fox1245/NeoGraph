@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=6780e2507de2b228368944012cc9ad6c04e504aced4b69b172f87ef51e90ff69 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=b39068ee8e2c2a525841913e920f7115f35ecbb40d153c6d2cc7866510bfca37 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -1089,9 +1089,31 @@ public:
 | `name` | `std::string` | Node name in the parent graph |
 | `subgraph` | `std::shared_ptr<GraphEngine>` | The compiled child graph engine |
 | `input_map` | `std::map<std::string, std::string>` | `parent_channel -> child_channel` mapping. Read from parent, write to child input |
-| `output_map` | `std::map<std::string, std::string>` | `child_channel -> parent_channel` mapping. Read from child result, write to parent |
+| `output_map` | `std::map<std::string, std::string>` | `child_channel -> parent_channel` 매핑. 자식이 생성한 write delta의 채널명을 바꿔 부모로 전달 |
 
-If the maps are empty, channels are mapped by name (identity mapping).
+맵이 비어 있으면 채널 이름을 그대로 사용하는 identity mapping이 적용됩니다.
+
+입력 매핑은 부모의 현재 채널 값을 자식 입력으로 복사합니다. 출력 매핑은 의도적으로
+다르게 동작합니다. 자식의 최종 직렬화 상태를 새 reducer 입력으로 취급하지 않고, 자식이
+생성한 순서대로 `ChannelWrite` delta를 전달하며 각 write의 `Mode`를 보존합니다. 따라서
+상속된 append/custom 값이 두 번 적용되지 않습니다. 출력 매핑은 snapshot replacement를
+추론하지 않습니다. 매핑된 부모 값을 교체하려면 자식이 명시적으로
+`ChannelWrite::Mode::Overwrite`를 내보내야 합니다.
+
+#### 런타임 컨텍스트 전파
+
+`SubgraphNode`는 엔진 경계에서 자식 실행 컨텍스트를 파생합니다. 공개 `RunContext`
+레이아웃은 변경하지 않습니다.
+
+| 컨텍스트 값 | 자식 의미 |
+|---------------|-----------------|
+| `cancel_token` | 하위 작업 토큰을 생성하므로 부모 취소가 모든 자식과 손자에 도달합니다. |
+| `usage`, `deadline`, `trace_id`, `stream_mode` | 상속됩니다. `deadline`과 `trace_id`는 `RunMetadata`에서 오며, 자식은 부모의 stream mode를 넓힐 수 없습니다. |
+| `thread_id` | 부모 thread ID가 비어 있지 않으면 부모 ID, subgraph 노드명, super-step, invocation identity에서 결정적으로 파생합니다. 따라서 sibling `Send` 호출은 서로 다른 checkpoint identity를 받습니다. 빈 부모 thread ID는 자식도 scope 없이 유지해 checkpointing을 비활성화합니다. |
+| `step` | 자식 실행에 로컬이며 자식 checkpoint 또는 0에서 시작합니다. |
+| `store` | 부모 Store가 있으면 상속하고, 없으면 자식 엔진에 설정된 Store를 유지합니다. |
+| Tool policy | 부모 `ToolGate`가 자식 gate보다 먼저 실행됩니다. 자식은 허용된 호출을 더 제한하거나 rewrite할 수 있지만 부모 deny/interrupt를 우회할 수 없습니다. |
+| Checkpoint backend and resume value | 부모 backend가 있으면 상속하고, 없으면 자식 backend를 유지합니다. 부모 resume은 파생된 자식 checkpoint identity가 존재할 때만 해당 자식 checkpoint를 resume하며 null이 아닌 resume value를 전달합니다. Checkpoint routing은 공개 `RunContext` 필드가 아니라 내부 구현입니다. |
 
 ---
 
@@ -1160,22 +1182,22 @@ struct RunConfig {
 
 ### RunContext (v0.4 PR 1, exposed to nodes via `NodeInput.ctx`)
 
-Per-run dispatch metadata threaded by the engine. Constructed from `RunConfig`
-(with a new usage accumulator when none was supplied), the engine's Store,
-and an optional resume value. Nodes consume it inside a
-`run(NodeInput) -> NodeOutput` override via `in.ctx`.
+엔진이 전달하는 실행별 dispatch metadata입니다. `RunConfig`(미지정 시 새 usage
+accumulator 포함), `RunMetadata`, 유효 Store, 선택적 resume value로 구성합니다.
+노드는 `run(NodeInput) -> NodeOutput` override 안에서 `in.ctx`로 사용합니다.
 
 ```cpp
 struct RunContext {
     std::shared_ptr<CancelToken>  cancel_token;
     std::shared_ptr<UsageAccumulator> usage;
-    std::optional<std::chrono::steady_clock::time_point> deadline; // reserved
-    std::string                   trace_id;     // reserved
+    std::optional<std::chrono::steady_clock::time_point> deadline;
+    std::string                   trace_id;
     std::string                   thread_id;
     int                           step;
     StreamMode                    stream_mode;
     std::optional<json>           resume_value;
     std::shared_ptr<Store>        store;
+    ToolGate                      tool_gate;
 };
 ```
 
@@ -1183,13 +1205,14 @@ struct RunContext {
 |-------|-------------|
 | `cancel_token` | The active token. Pass to `provider.complete(params)` so an LLM HTTP socket aborts on cancel, or poll `is_cancelled()` for your own loops |
 | `usage` | Shared token-accounting sink populated by the engine |
-| `deadline` | Reserved (no `RunConfig.deadline` field yet) |
-| `trace_id` | Reserved for OTel integration |
+| `deadline` | C++ `RunMetadata`의 선택적 절대 deadline |
+| `trace_id` | C++ `RunMetadata`의 선택적 trace correlator |
 | `thread_id` | Mirror of `RunConfig.thread_id` |
 | `step` | Current super-step index, updated each iteration |
 | `stream_mode` | Mirror of `RunConfig.stream_mode` |
 | `resume_value` | Value supplied to `GraphEngine::resume()`, or empty on a fresh run |
 | `store` | Store installed on the engine, or `nullptr` when none is configured |
+| `tool_gate` | 상속된 부모 정책을 포함해 이 invocation에 적용되는 유효 정책 |
 
 ### CancelToken
 
@@ -1584,10 +1607,15 @@ Returns the checkpoint history for a thread, ordered by timestamp (newest first)
 void update_state(const std::string& thread_id,
                   const json& channel_writes,
                   const std::string& as_node = "");
+
+void update_state_writes(const std::string& thread_id,
+                         const std::vector<ChannelWrite>& channel_writes,
+                         const std::string& as_node = "");
 ```
 
-Manually updates the state for a thread by applying channel writes. Creates a new
-checkpoint with the updated state.
+채널 write를 적용해 thread 상태를 수동으로 갱신합니다. JSON object 형식은 채널명별
+reducer write를 적용합니다. `ChannelWrite` vector 형식은 write 순서와 명시적 overwrite
+mode를 보존합니다. 두 형식 모두 갱신된 상태로 새 checkpoint를 생성합니다.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -3028,12 +3056,13 @@ public:
     struct Stats {
         size_t pending;        // Tasks waiting in queue
         size_t active;         // Tasks currently executing
-        size_t completed;      // Total completed tasks
-        size_t rejected;       // Tasks rejected due to full queue
+        size_t completed;      // Total settled tasks, including cancellation
+        size_t rejected;       // Tasks rejected during admission
         size_t num_workers;    // Number of worker threads
         size_t max_queue_size; // Maximum queue capacity
     };
 
+    // num_workers must be greater than zero.
     RequestQueue(size_t num_workers = 128, size_t max_queue_size = 10000);
     ~RequestQueue();
 
@@ -3041,10 +3070,15 @@ public:
     RequestQueue(const RequestQueue&) = delete;
     RequestQueue& operator=(const RequestQueue&) = delete;
 
-    // Submit a task. Returns {accepted, future}.
-    // If the queue is full, returns {false, invalid_future}.
+    // Submit a task. Concurrent callers cannot exceed max_queue_size.
+    // A full queue returns {false, invalid_future}; an internal enqueue
+    // failure returns {false, valid_future}, which throws on get().
     template<typename F>
     std::pair<bool, std::future<void>> submit(F&& task);
+
+    // Idempotently reject new work, cancel queued tasks, and wait for workers.
+    void close();
+    bool is_closed() const noexcept;
 
     // Get current queue statistics
     Stats stats() const;
@@ -3053,12 +3087,14 @@ public:
 
 | Constructor Parameter | Type | Default | Description |
 |-----------------------|------|---------|-------------|
-| `num_workers` | `size_t` | `128` | Number of worker threads in the pool |
+| `num_workers` | `size_t` | `128` | Worker thread 수. 0이면 `std::invalid_argument` 발생 |
 | `max_queue_size` | `size_t` | `10000` | Maximum number of pending tasks. Tasks beyond this limit are rejected |
 
 | Method | Description |
 |--------|-------------|
-| `submit(task)` | Enqueues a callable. Returns a pair: `first` is `true` if accepted (or `false` if the queue is full -- backpressure), `second` is a `std::future<void>` that resolves when the task completes or propagates exceptions |
+| `submit(task)` | pending capacity를 원자적으로 예약한 뒤 callable을 enqueue합니다. 수락되면 `first`가 `true`입니다. 가득 찼거나 닫힌 큐는 invalid future와 함께 `false`를 반환하고, 내부 enqueue 실패는 오류를 전파하는 valid future와 함께 `false`를 반환합니다. 수락된 future는 작업 완료 시 resolve되거나 작업 예외를 전파합니다. |
+| `close()` | 멱등적으로 새 작업을 거부합니다. 외부 호출자는 모든 worker 종료를 기다리고, 가져가지 않은 작업은 `std::runtime_error("RequestQueue is closed")`로 완료됩니다. 이미 가져간 callable은 완료할 수 있습니다. callable이 `close()`를 호출해 종료를 시작할 수 있지만 자기 자신을 기다리지는 않습니다. |
+| `is_closed()` | `close()`가 새 작업 거부를 시작했는지 보고합니다. |
 | `stats()` | Returns a snapshot of current queue statistics |
 
 The queue uses `moodycamel::ConcurrentQueue` internally for lock-free enqueue/dequeue

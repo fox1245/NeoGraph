@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concurrency.md locale=zh-CN source_sha256=fe3657f31d0895edf67431f7c6135b418f6677d2d4b8cc90699617f5ab343df8 -->
+<!-- neograph-i18n: source=docs/concurrency.md locale=zh-CN source_sha256=53d5843f1b9147b72df94827ed3d1463c1a60be53f9edff281267ba5b82653f8 -->
 # 并发与异步
 
 **Languages:** [English](concurrency.md) | [한국어](concurrency.ko.md) | [日本語](concurrency.ja.md) | [简体中文](concurrency.zh-CN.md)
@@ -125,7 +125,18 @@ log("pending={} active={} completed={} rejected={}",
     s.pending, s.active, s.completed, s.rejected);
 ```
 
-`submit()`返回`{accepted, std::future<void>}`: 捕获`RunResult`通过共享输出槽（如上所述）或每个任务`std::promise<RunResult>`。队列底层使用`moodycamel::ConcurrentQueue`（无锁）并且工作器在闲置时在 condvar 上休眠 - 无忙旋转。
+`submit()` 返回 `{accepted, std::future<void>}`。可以通过共享输出槽（如上）或每任务
+`std::promise<RunResult>` 传递 `RunResult`。队列底层使用无锁
+`moodycamel::ConcurrentQueue`，空闲工作线程在 condvar 上等待，因此不会 busy-spin。
+admission 会原子地预留 pending 槽位，所以并发调用者无法超过 `max_queue_size`。
+队列已满时，普通背压返回 `{false, invalid_future}`；内部 enqueue 失败则返回
+`{false, valid_future}`，观察该 future 时会抛出 `std::runtime_error`。
+
+构造队列时至少要有一个工作线程。`close()` 是幂等的：它拒绝后续提交、等待工作线程
+退出、允许已经被工作线程领取的 callable 完成，并以
+`std::runtime_error("RequestQueue is closed")` 完成所有尚未领取的 future。callable
+本身可以调用 `close()` 发起关闭，但该工作线程会直接返回而不会等待自身。析构函数使用
+同一 close 路径，因此 teardown 期间不会静默遗留已接受的 future。
 
 ## 安全并发使用规则
 

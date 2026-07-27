@@ -254,8 +254,11 @@ private:
 /**
  * @brief Node that runs a compiled GraphEngine as a single node (hierarchical composition).
  *
- * Enables the Supervisor pattern and nested workflows. Channels are
- * mapped between parent and child graphs via input_map and output_map.
+ * Enables the Supervisor pattern and nested workflows. Input mappings seed the
+ * child from the parent's current channel values. Output mappings forward only
+ * child-produced ChannelWrite deltas, in execution order and with Mode intact;
+ * they never feed the child's final state snapshot through the parent reducer.
+ * An explicit child Mode::Overwrite is the snapshot-replacement operation.
  *
  * Runtime context is deliberately derived at the engine boundary rather than
  * stored in additional public RunContext fields: cancellation reaches a child
@@ -283,7 +286,8 @@ public:
      * @param name Unique node name within the parent graph.
      * @param subgraph Compiled GraphEngine to run as a sub-workflow.
      * @param input_map Mapping of parent_channel -> child_channel for input.
-     * @param output_map Mapping of child_channel -> parent_channel for output.
+     * @param output_map Mapping of child_channel -> parent_channel for ordered
+     *                   child write deltas. Empty means identity mapping.
      */
     SubgraphNode(const std::string& name,
                  std::shared_ptr<GraphEngine> subgraph,
@@ -306,7 +310,8 @@ private:
     std::map<std::string, std::string> output_map_;
 
     json build_subgraph_input(const GraphState& state) const;
-    std::vector<ChannelWrite> extract_output(const json& subgraph_output) const;
+    std::vector<ChannelWrite> map_output_writes(
+        const std::vector<ChannelWrite>& child_writes) const;
 };
 
 } // namespace neograph::graph
