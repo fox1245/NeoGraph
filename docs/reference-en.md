@@ -1090,9 +1090,17 @@ public:
 | `name` | `std::string` | Node name in the parent graph |
 | `subgraph` | `std::shared_ptr<GraphEngine>` | The compiled child graph engine |
 | `input_map` | `std::map<std::string, std::string>` | `parent_channel -> child_channel` mapping. Read from parent, write to child input |
-| `output_map` | `std::map<std::string, std::string>` | `child_channel -> parent_channel` mapping. Read from child result, write to parent |
+| `output_map` | `std::map<std::string, std::string>` | `child_channel -> parent_channel` mapping. Rename and forward child-produced write deltas to the parent |
 
 If the maps are empty, channels are mapped by name (identity mapping).
+
+Input mapping copies the parent's current channel values into the child's input.
+Output mapping is deliberately different: it forwards the child's ordered
+`ChannelWrite` deltas, preserving each write's `Mode`, rather than treating the
+child's final serialized state as a new reducer input. Consequently inherited
+append/custom values are not applied twice. Output mapping does not infer
+snapshot replacement; a child must emit `ChannelWrite::Mode::Overwrite` when it
+intends to replace the mapped parent value.
 
 #### Runtime-context propagation
 

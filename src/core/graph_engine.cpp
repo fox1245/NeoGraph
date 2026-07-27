@@ -717,7 +717,7 @@ asio::awaitable<RunResult> GraphEngine::resume_async_with_runtime(
         config, cb, cp_opt->next_nodes, &resume_value, metadata, &resources);
 }
 
-asio::awaitable<RunResult> GraphEngine::run_subgraph_async(
+asio::awaitable<GraphEngine::SubgraphRunResult> GraphEngine::run_subgraph_async(
     RunConfig config,
     const RunContext& parent,
     GraphStreamCallback cb) {
@@ -734,22 +734,29 @@ asio::awaitable<RunResult> GraphEngine::run_subgraph_async(
         resources.store = parent.store;
     }
     resources.parent_tool_gate = parent.tool_gate;
+    auto journal = std::make_shared<detail::SubgraphWriteJournal>();
+    resources.subgraph_write_journal = journal;
 
     if (parent_runtime && parent_runtime->is_resume && resources.checkpoint_store) {
         auto checkpoint = co_await (*resources.checkpoint_store)->load_latest_async(
             config.thread_id);
         if (checkpoint) {
+            detail::restore_subgraph_write_journal(*checkpoint, journal);
             const json resume_value = parent.resume_value
                 ? *parent.resume_value
                 : json();
-            co_return co_await resume_async_with_runtime(
+            auto result = co_await resume_async_with_runtime(
                 std::move(config), resume_value, std::move(cb),
                 std::move(metadata), std::move(resources));
+            co_return SubgraphRunResult{
+                std::move(result), std::move(journal->writes)};
         }
     }
 
-    co_return co_await run_async_with_runtime(
+    auto result = co_await run_async_with_runtime(
         std::move(config), std::move(cb), std::move(metadata), std::move(resources));
+    co_return SubgraphRunResult{
+        std::move(result), std::move(journal->writes)};
 }
 
 // =========================================================================
@@ -834,6 +841,9 @@ GraphEngine::execute_graph_async(const RunConfig& config,
 
     auto runtime = std::make_shared<detail::RunContextRuntime>();
     runtime->checkpoint_store = checkpoint_store;
+    if (resources) {
+        runtime->subgraph_write_journal = resources->subgraph_write_journal;
+    }
     runtime->is_resume = is_resume;
     detail::ScopedRunContextRuntime runtime_scope(ctx, std::move(runtime));
 
@@ -934,7 +944,7 @@ GraphEngine::execute_graph_async(const RunConfig& config,
                     auto cp_id = co_await coord.save_super_step_async(state,
                         node_name, ready,
                         CheckpointPhase::Before, step, last_checkpoint_id,
-                        barrier_state);
+                        barrier_state, detail::checkpoint_metadata_for(ctx));
 
                     RunResult result;
                     result.usage = ctx.usage->snapshot();   // #88
@@ -1070,7 +1080,8 @@ GraphEngine::execute_graph_async(const RunConfig& config,
 
                 auto cp_id = co_await coord.save_super_step_async(state,
                     node_name, nexts, CheckpointPhase::After, step,
-                    last_checkpoint_id, barrier_state);
+                    last_checkpoint_id, barrier_state,
+                    detail::checkpoint_metadata_for(ctx));
 
                 RunResult result;
                 result.usage = ctx.usage->snapshot();   // #88
@@ -1154,7 +1165,8 @@ GraphEngine::execute_graph_async(const RunConfig& config,
                 : trace.back();
             auto cp_id = co_await coord.save_super_step_async(state,
                 trace_tag, next_nodes_for_cp, CheckpointPhase::Completed,
-                step, parent_cp_id, barrier_state);
+                step, parent_cp_id, barrier_state,
+                detail::checkpoint_metadata_for(ctx));
             last_checkpoint_id = cp_id;
 
             co_await coord.clear_pending_writes_async(parent_cp_id);

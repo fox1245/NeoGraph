@@ -43,6 +43,7 @@
 namespace neograph::graph {
 
 class ValidatedTopology;
+namespace detail { struct SubgraphWriteJournal; }
 
 /**
  * @brief Construction-time configuration for a GraphEngine.
@@ -827,10 +828,16 @@ public:
 private:
     friend class SubgraphNode;
 
+    struct SubgraphRunResult {
+        RunResult result;
+        std::vector<ChannelWrite> writes;
+    };
+
     struct RuntimeResources {
         std::optional<std::shared_ptr<CheckpointStore>> checkpoint_store;
         std::optional<std::shared_ptr<Store>> store;
         std::optional<ToolGate> parent_tool_gate;
+        std::shared_ptr<detail::SubgraphWriteJournal> subgraph_write_journal;
     };
 
     GraphEngine() = default;
@@ -865,7 +872,7 @@ private:
         RunMetadata metadata,
         RuntimeResources resources);
 
-    asio::awaitable<RunResult> run_subgraph_async(
+    asio::awaitable<SubgraphRunResult> run_subgraph_async(
         RunConfig config,
         const RunContext& parent,
         GraphStreamCallback cb);

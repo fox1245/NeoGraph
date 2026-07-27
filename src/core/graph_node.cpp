@@ -313,29 +313,21 @@ json SubgraphNode::build_subgraph_input(const GraphState& state) const {
     return input;
 }
 
-std::vector<ChannelWrite> SubgraphNode::extract_output(
-    const json& subgraph_output) const {
-
+std::vector<ChannelWrite> SubgraphNode::map_output_writes(
+    const std::vector<ChannelWrite>& child_writes) const {
     std::vector<ChannelWrite> writes;
-
-    if (!subgraph_output.contains("channels")) return writes;
-    const auto& channels = subgraph_output["channels"];
-
-    if (output_map_.empty()) {
-        // Default: write all child channels back to parent (same name)
-        for (const auto& [ch_name, ch_data] : channels.items()) {
-            if (ch_data.contains("value")) {
-                writes.push_back(ChannelWrite{ch_name, ch_data["value"]});
-            }
+    writes.reserve(child_writes.size());
+    for (const auto& child_write : child_writes) {
+        auto parent_channel = child_write.channel;
+        if (!output_map_.empty()) {
+            const auto mapped = output_map_.find(child_write.channel);
+            if (mapped == output_map_.end()) continue;
+            parent_channel = mapped->second;
         }
-    } else {
-        for (const auto& [child_ch, parent_ch] : output_map_) {
-            if (channels.contains(child_ch) && channels[child_ch].contains("value")) {
-                writes.push_back(ChannelWrite{parent_ch, channels[child_ch]["value"]});
-            }
-        }
+        auto parent_write = child_write;
+        parent_write.channel = std::move(parent_channel);
+        writes.push_back(std::move(parent_write));
     }
-
     return writes;
 }
 
@@ -350,38 +342,38 @@ asio::awaitable<NodeOutput> SubgraphNode::run(NodeInput in) {
     // to a subgraph reports zero tokens — which reads as "this run was free".
     config.usage        = in.ctx.usage;
 
-    json subgraph_output;
+    std::vector<ChannelWrite> child_writes;
     if (in.stream_cb) {
         // Forward the parent's stream sink so subgraph events (LLM
         // tokens, node enter/exit, etc.) surface at the parent
         // graph's caller without buffering.
         auto result = co_await subgraph_->run_subgraph_async(
             std::move(config), in.ctx, *in.stream_cb);
-        if (result.interrupted) {
-            const auto reason = result.interrupt_value.value(
+        if (result.result.interrupted) {
+            const auto reason = result.result.interrupt_value.value(
                 "reason", "subgraph interrupted");
-            if (result.interrupt_value.contains("value")) {
-                throw NodeInterrupt(reason, result.interrupt_value["value"]);
+            if (result.result.interrupt_value.contains("value")) {
+                throw NodeInterrupt(reason, result.result.interrupt_value["value"]);
             }
             throw NodeInterrupt(reason);
         }
-        subgraph_output = std::move(result.output);
+        child_writes = std::move(result.writes);
     } else {
         auto result = co_await subgraph_->run_subgraph_async(
             std::move(config), in.ctx, nullptr);
-        if (result.interrupted) {
-            const auto reason = result.interrupt_value.value(
+        if (result.result.interrupted) {
+            const auto reason = result.result.interrupt_value.value(
                 "reason", "subgraph interrupted");
-            if (result.interrupt_value.contains("value")) {
-                throw NodeInterrupt(reason, result.interrupt_value["value"]);
+            if (result.result.interrupt_value.contains("value")) {
+                throw NodeInterrupt(reason, result.result.interrupt_value["value"]);
             }
             throw NodeInterrupt(reason);
         }
-        subgraph_output = std::move(result.output);
+        child_writes = std::move(result.writes);
     }
 
     NodeOutput out;
-    out.writes = extract_output(subgraph_output);
+    out.writes = map_output_writes(child_writes);
     co_return out;
 }
 

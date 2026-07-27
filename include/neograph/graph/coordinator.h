@@ -150,6 +150,18 @@ public:
         const std::string& parent_id,
         const BarrierState& barrier_state) const;
 
+    /// Internal extension used by subgraph execution to persist its cumulative
+    /// write journal without changing CheckpointCoordinator's object layout.
+    asio::awaitable<std::string> save_super_step_async(
+        const GraphState& state,
+        const std::string& current_node,
+        const std::vector<std::string>& next_nodes,
+        CheckpointPhase phase,
+        int step,
+        const std::string& parent_id,
+        const BarrierState& barrier_state,
+        const json& metadata) const;
+
     asio::awaitable<void> record_pending_write_async(
         const std::string& parent_cp_id,
         const std::string& task_id,

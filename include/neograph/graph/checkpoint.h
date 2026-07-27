@@ -47,7 +47,11 @@ namespace neograph::graph {
 // Absent means Reduce, so a v2 blob loads unchanged — same tolerant shape as the
 // v1 -> v2 barrier_state addition. Nothing rejects an older version on read; the
 // number records what the writer was capable of.
-constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
+// v4 (#235): child checkpoints may carry the cumulative subgraph write journal
+// in metadata. Standalone checkpoints remain readable as before; resuming a
+// captured subgraph from an older checkpoint fails explicitly because an
+// arbitrary custom reducer cannot reconstruct its historical deltas.
+constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 4;
 
 /// Phase at which a Checkpoint was produced. Drives resume semantics —
 /// `Before` means "re-enter before the target node runs", `After` /

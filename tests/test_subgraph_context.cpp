@@ -447,6 +447,11 @@ TEST(SubgraphContext, ParentResumeResumesInterruptedGrandchild) {
     EXPECT_EQ(gate_calls.load(), 3);
     EXPECT_EQ(seed_calls.load(), 1)
         << "a fresh grandchild run would execute the seed node twice";
+    const auto messages = resumed.channel<json>("messages");
+    ASSERT_EQ(messages.size(), 3u);
+    EXPECT_EQ(messages[0].value("role", std::string{}), "user");
+    EXPECT_EQ(messages[1].value("role", std::string{}), "assistant");
+    EXPECT_EQ(messages[2].value("role", std::string{}), "tool");
 }
 
 TEST(SubgraphContext, SendSiblingsReceiveDistinctCheckpointIdentities) {

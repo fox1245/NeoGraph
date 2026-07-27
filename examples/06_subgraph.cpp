@@ -91,7 +91,9 @@ int main() {
                         {{"from", "tools"}, {"to", "llm"}}
                     })}
                 }}
-                // input_map/output_map omitted → auto-mapped by same-name channels
+                // input_map/output_map omitted -> identity mapping. Parent values
+                // seed the child once; only child-produced ChannelWrite deltas
+                // return, in order and with each write mode preserved.
             }}
         }},
         {"edges", neograph::json::array({
