@@ -15,6 +15,7 @@
 
 #include <asio/awaitable.hpp>
 #include <asio/buffer.hpp>
+#include <asio/multiple_exceptions.hpp>
 #include <asio/read.hpp>
 #include <asio/read_until.hpp>
 #include <asio/streambuf.hpp>
@@ -25,6 +26,7 @@
 #include <cctype>
 #include <charconv>
 #include <cstddef>
+#include <exception>
 #include <functional>
 #include <istream>
 #include <iterator>
@@ -37,6 +39,17 @@
 namespace neograph::async::detail {
 
 enum class ConnDirective { keep_alive, close };
+
+// `awaitable_operators::operator||` reports concurrent cancellation of the
+// exchange and its timeout timer as multiple_exceptions. Preserve the original
+// socket error so callers can recognize operation_aborted.
+[[noreturn]] inline void rethrow_first_exception(
+    const asio::multiple_exceptions& error) {
+    if (auto first = error.first_exception()) {
+        std::rethrow_exception(first);
+    }
+    throw std::runtime_error("Asio multiple_exceptions has no cause");
+}
 
 inline std::string build_request(
     std::string_view host,

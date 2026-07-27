@@ -7,13 +7,18 @@
 // phase, and lives off the ctest default path.
 
 #include <neograph/async/ws_client.h>
+#include <neograph/graph/cancel.h>
 
+#include <asio/bind_cancellation_slot.hpp>
 #include <asio/buffer.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
+#include <asio/error.hpp>
 #include <asio/io_context.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/read.hpp>
+#include <asio/system_error.hpp>
+#include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 #include <asio/use_future.hpp>
 #include <asio/write.hpp>
@@ -58,7 +63,8 @@ asio::awaitable<void> serve_one(asio::ip::tcp::socket sock) {
     }
     auto head = buf.substr(0, hdr_end);
     if (head.rfind("GET / HTTP/1.1\r\n", 0) != 0 &&
-        head.rfind("GET /owned HTTP/1.1\r\n", 0) != 0) {
+        head.rfind("GET /owned HTTP/1.1\r\n", 0) != 0 &&
+        head.rfind("GET /hold HTTP/1.1\r\n", 0) != 0) {
         const std::string bad =
             "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
         co_await asio::async_write(sock, asio::buffer(bad), asio::use_awaitable);
@@ -227,6 +233,61 @@ TEST_F(WsLoopback, LargeBinaryEcho) {
     auto echoed = fut.get();
     EXPECT_EQ(echoed.size(), big.size());
     EXPECT_EQ(echoed, big);
+}
+
+TEST_F(WsLoopback, CancellationAbortsHeldReceive) {
+    asio::io_context client_ioc;
+    const std::string port = std::to_string(port_);
+    auto token = std::make_shared<neograph::graph::CancelToken>();
+    std::promise<void> receive_entered;
+    auto entered = receive_entered.get_future();
+    std::promise<asio::error_code> completion;
+    auto result = completion.get_future();
+
+    asio::co_spawn(
+        client_ioc,
+        [&]() -> asio::awaitable<void> {
+            try {
+                auto ex = co_await asio::this_coro::executor;
+                auto operation = token->fork();
+                operation->bind_executor(ex);
+                auto ws = co_await ws_connect(
+                    ex, "127.0.0.1", port, "/hold", {}, /*tls=*/false);
+                auto wait_for_message = [&]() -> asio::awaitable<WsMessage> {
+                    receive_entered.set_value();
+                    co_return co_await ws->recv();
+                };
+                (void)co_await asio::co_spawn(
+                    ex, wait_for_message(),
+                    asio::bind_cancellation_slot(
+                        operation->slot(), asio::use_awaitable));
+                completion.set_value(asio::error::fault);
+            } catch (const asio::system_error& error) {
+                completion.set_value(error.code());
+            } catch (...) {
+                completion.set_value(asio::error::fault);
+            }
+        },
+        asio::detached);
+    std::thread runner([&] { client_ioc.run(); });
+
+    if (entered.wait_for(1s) != std::future_status::ready) {
+        token->cancel();
+        client_ioc.stop();
+        runner.join();
+        ADD_FAILURE() << "WebSocket receive did not begin";
+        return;
+    }
+
+    token->cancel();
+    if (result.wait_for(1s) != std::future_status::ready) {
+        client_ioc.stop();
+        runner.join();
+        ADD_FAILURE() << "WebSocket cancellation did not abort recv";
+        return;
+    }
+    EXPECT_EQ(result.get(), asio::error::operation_aborted);
+    runner.join();
 }
 
 TEST_F(WsLoopback, DelayedOperationsOwnEndpointAndPayloads) {

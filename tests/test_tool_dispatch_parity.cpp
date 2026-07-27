@@ -21,12 +21,16 @@
 #include <neograph/neograph.h>
 #include <neograph/llm/agent.h>
 #include <neograph/async/run_sync.h>
+#include <neograph/graph/cancel.h>
 
 #include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <exception>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <thread>
@@ -75,6 +79,46 @@ public:
 
 private:
     std::string name_;
+};
+
+struct ToolCancelProbe {
+    std::atomic<bool> entered{false};
+    std::atomic<bool> cancelled{false};
+};
+
+class ContextAwareCancelTool : public Tool, public ContextualAsyncTool {
+public:
+    explicit ContextAwareCancelTool(std::shared_ptr<ToolCancelProbe> probe)
+        : probe_(std::move(probe)) {}
+
+    ChatTool get_definition() const override {
+        return {"cancel", "waits for cancellation",
+                json{{"type", "object"}, {"properties", json::object()}}};
+    }
+
+    std::string execute(const json&) override {
+        throw std::logic_error("context-aware async overload was not used");
+    }
+
+    asio::awaitable<std::string> execute_async(
+        const json&, ToolExecutionContext execution) override {
+        if (!execution.cancel_token) {
+            throw std::logic_error("missing tool cancellation token");
+        }
+        probe_->entered.store(true, std::memory_order_release);
+        auto timer = asio::steady_timer(co_await asio::this_coro::executor);
+        while (!execution.cancel_token->is_cancelled()) {
+            timer.expires_after(1ms);
+            co_await timer.async_wait(asio::use_awaitable);
+        }
+        probe_->cancelled.store(true, std::memory_order_release);
+        throw CancelledException("context-aware tool observed cancellation");
+    }
+
+    std::string get_name() const override { return "cancel"; }
+
+private:
+    std::shared_ptr<ToolCancelProbe> probe_;
 };
 
 // An assistant message asking for all three tools in one turn.
@@ -148,6 +192,48 @@ TEST(ToolDispatchParity, AsyncToolsOverlapOnToolNode) {
     auto elapsed = timed([&] { drive(node, state); });
     EXPECT_LT(elapsed, 2 * kToolDelay)
         << "ToolNode did not overlap async tools";
+}
+
+TEST(ToolDispatchParity, CancellationReachesContextAwareTool) {
+    auto probe = std::make_shared<ToolCancelProbe>();
+    ContextAwareCancelTool tool(probe);
+    NodeContext node_context;
+    node_context.tools = {&tool};
+    ToolDispatchNode node("tools", node_context);
+
+    GraphState state;
+    seed(state, {assistant_calling({"cancel"})});
+    auto token = std::make_shared<CancelToken>();
+    std::promise<std::exception_ptr> completion;
+    auto done = completion.get_future();
+    std::thread runner([&] {
+        try {
+            RunContext context;
+            context.cancel_token = token;
+            (void)neograph::async::run_sync(node.run(NodeInput{state, context, nullptr}));
+            completion.set_value(nullptr);
+        } catch (...) {
+            completion.set_value(std::current_exception());
+        }
+    });
+
+    for (int i = 0; i < 200 && !probe->entered.load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_TRUE(probe->entered.load(std::memory_order_acquire));
+    token->cancel();
+    const auto status = done.wait_for(500ms);
+    EXPECT_EQ(status, std::future_status::ready);
+    if (status != std::future_status::ready) {
+        runner.join();
+        return;
+    }
+    const auto error = done.get();
+    runner.join();
+
+    EXPECT_TRUE(probe->cancelled.load(std::memory_order_acquire));
+    ASSERT_NE(error, nullptr);
+    EXPECT_THROW(std::rethrow_exception(error), CancelledException);
 }
 
 // Claim 2b. RED (#87). The same three async tools through Agent run serially,

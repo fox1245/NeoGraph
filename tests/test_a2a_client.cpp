@@ -301,6 +301,31 @@ TEST(A2ACallerNode, RepeatedCallsUseUniqueCallScopedMessageIds) {
     }
 }
 
+TEST(A2ACallerNode, UsesInjectedMessageIdFactory) {
+    MockA2AServer srv;
+    auto client = std::make_shared<A2AClient>(srv.url());
+    std::atomic<unsigned int> next_id{0};
+    A2ACallerNode node(
+        "caller", client, "prompt", "response",
+        [&next_id] {
+            return "fixture-message-" + std::to_string(
+                next_id.fetch_add(1, std::memory_order_relaxed));
+        });
+    neograph::graph::GraphState state;
+    state.init_channel("prompt", neograph::graph::ReducerType::OVERWRITE,
+        [](const json&, const json& incoming) { return incoming; });
+    state.write("prompt", "hello");
+    neograph::graph::RunContext ctx;
+
+    (void)neograph::async::run_sync(node.run({state, ctx}));
+    (void)neograph::async::run_sync(node.run({state, ctx}));
+
+    std::lock_guard<std::mutex> lock(srv.observed_mutex);
+    ASSERT_EQ(srv.message_ids.size(), 2u);
+    EXPECT_EQ(srv.message_ids[0], "fixture-message-0");
+    EXPECT_EQ(srv.message_ids[1], "fixture-message-1");
+}
+
 TEST(A2ACallerNode, ConcurrentCallsUseUniqueCallScopedMessageIds) {
     MockA2AServer srv;
     auto client = std::make_shared<A2AClient>(srv.url());

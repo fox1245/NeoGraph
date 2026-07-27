@@ -39,6 +39,7 @@ add_executable(neograph_tests
     test_multi_send_events.cpp
     test_multi_send_routing.cpp
     test_schema_provider_concurrent.cpp
+    test_schema_provider_async.cpp
     test_schema_provider_stream_usage.cpp
     test_schema_provider_responses_stream.cpp
     test_schema_provider_stop_reason.cpp
@@ -156,6 +157,8 @@ endif()
 
 if(NOT NEOGRAPH_USE_LIBCURL)
     target_sources(neograph_tests PRIVATE test_provider_constructor_exception_safety.cpp)
+else()
+    target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_LIBCURL)
 endif()
 
 target_link_libraries(neograph_tests PRIVATE

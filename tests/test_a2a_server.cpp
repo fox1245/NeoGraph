@@ -115,6 +115,19 @@ class BlockingAdapter final : public GraphAgentAdapter {
     }
 };
 
+class CompletionBlockingAdapter final : public GraphAgentAdapter {
+  public:
+    std::promise<void> output_ready;
+    std::shared_future<void> release;
+
+    std::optional<Artifact> build_output_artifact(
+        const neograph::json&, const std::string&) const override {
+        const_cast<CompletionBlockingAdapter*>(this)->output_ready.set_value();
+        release.wait();
+        return std::nullopt;
+    }
+};
+
 struct OverlapProbe {
     std::atomic<int> active{0};
     std::atomic<int> max_active{0};
@@ -224,6 +237,64 @@ class ProviderNode final : public GraphNode {
     std::shared_ptr<DependencyProbe> probe_;
 };
 
+struct ToolDispatchProbe {
+    std::atomic<bool> entered{false};
+    std::atomic<bool> cancelled{false};
+};
+
+class CancellableDispatchTool final : public Tool, public ContextualAsyncTool {
+  public:
+    explicit CancellableDispatchTool(std::shared_ptr<ToolDispatchProbe> probe)
+        : probe_(std::move(probe)) {}
+
+    ChatTool get_definition() const override {
+        return {"cancel_tool", "waits for cancellation", json::object()};
+    }
+
+    std::string execute(const json&) override {
+        throw std::logic_error("context-aware tool overload was not used");
+    }
+
+    asio::awaitable<std::string> execute_async(
+        const json&, ToolExecutionContext execution) override {
+        if (!execution.cancel_token) {
+            throw std::logic_error("missing tool cancellation token");
+        }
+        probe_->entered.store(true, std::memory_order_release);
+        while (!execution.cancel_token->is_cancelled()) {
+            std::this_thread::sleep_for(1ms);
+        }
+        probe_->cancelled.store(true, std::memory_order_release);
+        throw neograph::graph::CancelledException("tool observed cancellation");
+        co_return "";
+    }
+
+    std::string get_name() const override { return "cancel_tool"; }
+
+  private:
+    std::shared_ptr<ToolDispatchProbe> probe_;
+};
+
+class ToolCallSeedNode final : public GraphNode {
+  public:
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        json assistant = {
+            {"role", "assistant"},
+            {"content", ""},
+            {"tool_calls", json::array({{
+                {"id", "cancel-tool-call"},
+                {"name", "cancel_tool"},
+                {"arguments", "{}"},
+            }})},
+        };
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"messages", json::array({assistant})});
+        co_return out;
+    }
+
+    std::string get_name() const override { return "seed"; }
+};
+
 std::shared_ptr<GraphEngine> build_provider_engine(
     const std::shared_ptr<neograph::Provider>& provider,
     const std::shared_ptr<DependencyProbe>& probe) {
@@ -242,6 +313,29 @@ std::shared_ptr<GraphEngine> build_provider_engine(
         })},
     };
     return std::shared_ptr<GraphEngine>(GraphEngine::compile(def, NodeContext{}));
+}
+
+std::shared_ptr<GraphEngine> build_tool_dispatch_engine(Tool* tool) {
+    NodeFactory::instance().register_type("a2a_tool_call_seed",
+        [](const std::string&, const neograph::json&, const NodeContext&) {
+            return std::make_unique<ToolCallSeedNode>();
+        });
+    neograph::json def = {
+        {"name", "a2a-tool-dispatch"},
+        {"channels", {{"messages", {{"reducer", "append"}}}}},
+        {"nodes", {
+            {"seed", {{"type", "a2a_tool_call_seed"}}},
+            {"tools", {{"type", "tool_dispatch"}}},
+        }},
+        {"edges", neograph::json::array({
+            neograph::json{{"from", "__start__"}, {"to", "seed"}},
+            neograph::json{{"from", "seed"}, {"to", "tools"}},
+            neograph::json{{"from", "tools"}, {"to", "__end__"}},
+        })},
+    };
+    NodeContext ctx;
+    ctx.tools = {tool};
+    return std::shared_ptr<GraphEngine>(GraphEngine::compile(def, ctx));
 }
 
 std::shared_ptr<GraphEngine> build_echo_engine() {
@@ -579,6 +673,50 @@ TEST(A2AServer, CancelBeforeGraphStartStopsBeforeNodeRuns) {
     server.stop();
 }
 
+TEST(A2AServer, CancelWinsIfCompletionHasNotPublishedTerminalState) {
+    auto adapter = std::make_shared<CompletionBlockingAdapter>();
+    std::promise<void> release;
+    adapter->release = release.get_future().share();
+    A2AServer server(build_echo_engine(), build_card(0), adapter);
+    ASSERT_TRUE(server.start_async("127.0.0.1", 0));
+    const std::string url = "http://127.0.0.1:" + std::to_string(server.port());
+    const std::string task_id = "a2a-cancel-before-commit";
+
+    std::promise<Task> completion;
+    auto done = completion.get_future();
+    std::thread runner([&] {
+        try {
+            completion.set_value(A2AClient(url).send_message_sync("complete", task_id));
+        } catch (...) {
+            completion.set_exception(std::current_exception());
+        }
+    });
+
+    auto output_ready = adapter->output_ready.get_future();
+    if (output_ready.wait_for(500ms) != std::future_status::ready) {
+        release.set_value();
+        runner.join();
+        server.stop();
+        FAIL() << "completion did not reach its pre-commit barrier";
+        return;
+    }
+
+    A2AClient canceller(url);
+    EXPECT_EQ(canceller.cancel_task(task_id).status.state, TaskState::Canceled);
+    release.set_value();
+    const auto completion_status = done.wait_for(500ms);
+    EXPECT_EQ(completion_status, std::future_status::ready);
+    if (completion_status != std::future_status::ready) {
+        runner.join();
+        server.stop();
+        return;
+    }
+    EXPECT_EQ(done.get().status.state, TaskState::Canceled);
+    EXPECT_EQ(A2AClient(url).get_task(task_id).status.state, TaskState::Canceled);
+    runner.join();
+    server.stop();
+}
+
 TEST(A2AServer, CancelAfterCompletionDoesNotChangeTask) {
     LiveServer srv;
     A2AClient client(srv.url());
@@ -731,6 +869,35 @@ TEST(A2AServer, CancelReachesCooperativeProviderFixture) {
     ASSERT_EQ(done.wait_for(500ms), std::future_status::ready);
     EXPECT_EQ(done.get().status.state, TaskState::Canceled);
     EXPECT_TRUE(probe->provider_cancelled.load());
+    runner.join();
+    server.stop();
+}
+
+TEST(A2AServer, CancelReachesToolDispatchTool) {
+    auto probe = std::make_shared<ToolDispatchProbe>();
+    auto tool = std::make_shared<CancellableDispatchTool>(probe);
+    A2AServer server(build_tool_dispatch_engine(tool.get()), build_card(0));
+    ASSERT_TRUE(server.start_async("127.0.0.1", 0));
+    const std::string url = "http://127.0.0.1:" + std::to_string(server.port());
+    const std::string task_id = "a2a-tool-dispatch-cancel";
+    std::promise<Task> completion;
+    auto done = completion.get_future();
+    std::thread runner([&] {
+        try {
+            completion.set_value(A2AClient(url).send_message_sync("tool", task_id));
+        } catch (...) {
+            completion.set_exception(std::current_exception());
+        }
+    });
+
+    for (int i = 0; i < 200 && !probe->entered.load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(5ms);
+    }
+    ASSERT_TRUE(probe->entered.load(std::memory_order_acquire));
+    EXPECT_EQ(A2AClient(url).cancel_task(task_id).status.state, TaskState::Canceled);
+    ASSERT_EQ(done.wait_for(500ms), std::future_status::ready);
+    EXPECT_EQ(done.get().status.state, TaskState::Canceled);
+    EXPECT_TRUE(probe->cancelled.load(std::memory_order_acquire));
     runner.join();
     server.stop();
 }

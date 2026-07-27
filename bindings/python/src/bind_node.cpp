@@ -29,6 +29,7 @@
 #include "opaque_types.h"
 
 #include <neograph/graph/engine.h>
+#include <neograph/graph/cancel.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
 #include <neograph/graph/state.h>
@@ -208,7 +209,8 @@ asio::thread_pool& async_tool_pool() {
 // `unique_ptr<Tool>` ownership while Python keeps its shared_ptr. Forwards
 // everything, and — the point — forwards `execute_async` to the real tool, so a
 // tool that genuinely suspends still does (issue #95).
-class SharedToolRef final : public neograph::Tool {
+class SharedToolRef final : public neograph::Tool,
+                            public neograph::ContextualAsyncTool {
 public:
     explicit SharedToolRef(std::shared_ptr<neograph::Tool> tool)
         : tool_(std::move(tool)) {}
@@ -226,6 +228,21 @@ public:
     // reference the caller keeps alive across the await either way.
     asio::awaitable<std::string> execute_async(const json& arguments) override {
         return tool_->execute_async(arguments);
+    }
+
+    asio::awaitable<std::string> execute_async(
+        const json& arguments, neograph::ToolExecutionContext execution) override {
+        if (auto* contextual = dynamic_cast<neograph::ContextualAsyncTool*>(tool_.get())) {
+            co_return co_await contextual->execute_async(arguments, std::move(execution));
+        }
+        if (execution.cancel_token) {
+            execution.cancel_token->throw_if_cancelled("before tool execution");
+        }
+        auto result = co_await tool_->execute_async(arguments);
+        if (execution.cancel_token) {
+            execution.cancel_token->throw_if_cancelled("after tool execution");
+        }
+        co_return result;
     }
 
     std::string get_name() const override { return tool_->get_name(); }

@@ -257,15 +257,19 @@ asio::awaitable<HttpResponse> async_post_once_timed(
     using asio::experimental::awaitable_operators::operator||;
     asio::steady_timer timer(ex);
     timer.expires_after(timeout);
-    auto res = co_await (
-        async_post_once(ex, std::move(host), std::move(port), std::move(path),
-                        std::move(body), std::move(headers), tls)
-        || timer.async_wait(asio::use_awaitable));
-    if (res.index() == 1) {
-        throw asio::system_error(asio::error::timed_out,
-                                 "async_post: per-hop timeout");
+    try {
+        auto res = co_await (
+            async_post_once(ex, std::move(host), std::move(port), std::move(path),
+                            std::move(body), std::move(headers), tls)
+            || timer.async_wait(asio::use_awaitable));
+        if (res.index() == 1) {
+            throw asio::system_error(asio::error::timed_out,
+                                     "async_post: per-hop timeout");
+        }
+        co_return std::get<0>(std::move(res));
+    } catch (const asio::multiple_exceptions& error) {
+        detail::rethrow_first_exception(error);
     }
-    co_return std::get<0>(std::move(res));
 }
 
 asio::awaitable<HttpStreamResponse> async_post_stream_once_timed(
@@ -284,16 +288,20 @@ asio::awaitable<HttpStreamResponse> async_post_stream_once_timed(
     using asio::experimental::awaitable_operators::operator||;
     asio::steady_timer timer(ex);
     timer.expires_after(timeout);
-    auto res = co_await (
-        async_post_stream_once(ex, std::move(host), std::move(port),
-                               std::move(path), std::move(body),
-                               std::move(headers), tls, std::move(on_chunk))
-        || timer.async_wait(asio::use_awaitable));
-    if (res.index() == 1) {
-        throw asio::system_error(asio::error::timed_out,
-                                 "async_post_stream: per-hop timeout");
+    try {
+        auto res = co_await (
+            async_post_stream_once(ex, std::move(host), std::move(port),
+                                   std::move(path), std::move(body),
+                                   std::move(headers), tls, std::move(on_chunk))
+            || timer.async_wait(asio::use_awaitable));
+        if (res.index() == 1) {
+            throw asio::system_error(asio::error::timed_out,
+                                     "async_post_stream: per-hop timeout");
+        }
+        co_return std::get<0>(std::move(res));
+    } catch (const asio::multiple_exceptions& error) {
+        detail::rethrow_first_exception(error);
     }
-    co_return std::get<0>(std::move(res));
 }
 
 }  // namespace
@@ -420,15 +428,19 @@ asio::awaitable<HttpResponse> async_get_once_timed(
     using asio::experimental::awaitable_operators::operator||;
     asio::steady_timer timer(ex);
     timer.expires_after(timeout);
-    auto res = co_await (
-        async_get_once(ex, std::move(host), std::move(port), std::move(path),
-                       std::move(headers), tls)
-        || timer.async_wait(asio::use_awaitable));
-    if (res.index() == 1) {
-        throw asio::system_error(asio::error::timed_out,
-                                 "async_get: per-hop timeout");
+    try {
+        auto res = co_await (
+            async_get_once(ex, std::move(host), std::move(port), std::move(path),
+                           std::move(headers), tls)
+            || timer.async_wait(asio::use_awaitable));
+        if (res.index() == 1) {
+            throw asio::system_error(asio::error::timed_out,
+                                     "async_get: per-hop timeout");
+        }
+        co_return std::get<0>(std::move(res));
+    } catch (const asio::multiple_exceptions& error) {
+        detail::rethrow_first_exception(error);
     }
-    co_return std::get<0>(std::move(res));
 }
 
 static asio::awaitable<HttpResponse> async_get_owned(

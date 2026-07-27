@@ -44,12 +44,16 @@ asio::awaitable<HttpResponse> CurlH2Pool::async_post(
 
 #include <curl/curl.h>
 
+#include <asio/associated_cancellation_slot.hpp>
 #include <asio/post.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 #include <asio/async_result.hpp>
+#include <asio/error.hpp>
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <condition_variable>
 #include <cstdlib>
 #include <deque>
@@ -57,7 +61,9 @@ asio::awaitable<HttpResponse> CurlH2Pool::async_post(
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -65,10 +71,31 @@ namespace neograph::async {
 
 namespace {
 
-// Per-request state owned by the worker until completion. The handler
-// is a type-erased `void(HttpResponse, std::exception_ptr)` callable;
-// we store it as a std::function so async_initiate can capture our
-// asio handler with whatever wrappers it brings.
+struct RequestControl {
+    std::atomic<bool> cancelled{false};
+};
+
+// Cancellation callbacks run on the caller's executor while curl's multi
+// handle belongs exclusively to the worker. Serialize wakeup against pool
+// teardown so a late callback never reaches a cleaned-up CURLM handle.
+struct MultiWakeup {
+    std::mutex mutex;
+    CURLM* multi = nullptr;
+
+    void wake() noexcept {
+        std::lock_guard lock(mutex);
+        if (multi) (void)curl_multi_wakeup(multi);
+    }
+
+    void clear() noexcept {
+        std::lock_guard lock(mutex);
+        multi = nullptr;
+    }
+};
+
+// Per-request state owned by the worker until completion. The handler keeps
+// Asio's error-code completion convention while preserving the pool's legacy
+// status-0 response for ordinary libcurl transport failures.
 struct Pending {
     std::string url;
     std::string body;
@@ -76,7 +103,8 @@ struct Pending {
     long timeout_seconds = 0;
 
     asio::any_io_executor caller_ex;
-    std::function<void(HttpResponse, std::exception_ptr)> on_done;
+    std::function<void(asio::error_code, HttpResponse, std::exception_ptr)> on_done;
+    std::shared_ptr<RequestControl> control = std::make_shared<RequestControl>();
 
     // Filled by the worker as the request runs.
     std::string resp_body;
@@ -114,6 +142,15 @@ std::size_t header_line_cb(char* p, std::size_t s, std::size_t n, void* up) {
     return s * n;
 }
 
+int xferinfo_cb(void* up,
+                curl_off_t,
+                curl_off_t,
+                curl_off_t,
+                curl_off_t) {
+    auto* st = static_cast<Pending*>(up);
+    return st->control->cancelled.load(std::memory_order_acquire) ? 1 : 0;
+}
+
 } // namespace
 
 struct CurlH2Pool::Impl {
@@ -125,6 +162,33 @@ struct CurlH2Pool::Impl {
     std::deque<std::unique_ptr<Pending>>  queue;          // submitted, not yet on multi
     std::vector<std::unique_ptr<Pending>> active;         // owns while in-flight on multi
     std::atomic<bool>                     stop{false};
+    std::shared_ptr<MultiWakeup>          wakeup = std::make_shared<MultiWakeup>();
+
+    void complete(std::unique_ptr<Pending> p,
+                  asio::error_code ec = {},
+                  HttpResponse response = {},
+                  std::exception_ptr err = {}) {
+        auto on_done = std::move(p->on_done);
+        auto caller_ex = std::move(p->caller_ex);
+        asio::post(caller_ex,
+            [ec, response = std::move(response), err = std::move(err),
+             on_done = std::move(on_done)]() mutable {
+                on_done(ec, std::move(response), std::move(err));
+            });
+    }
+
+    void cancel_active() {
+        std::vector<CURL*> cancelled;
+        cancelled.reserve(active.size());
+        for (const auto& p : active) {
+            if (p->control->cancelled.load(std::memory_order_acquire)) {
+                cancelled.push_back(p->easy);
+            }
+        }
+        for (auto* easy : cancelled) {
+            finish(easy, CURLE_ABORTED_BY_CALLBACK);
+        }
+    }
 
     void worker_loop() {
         // 1.62+ default; explicit so older runtimes also multiplex.
@@ -163,9 +227,16 @@ struct CurlH2Pool::Impl {
                 setup_and_add(std::move(p));
             }
 
+            // A cancellation callback only sets a per-request flag and wakes
+            // this worker. Removing the easy handle here keeps all curl_multi
+            // mutation on its owner thread.
+            cancel_active();
+
             int still_running = 0;
             CURLMcode rc = curl_multi_perform(multi, &still_running);
             if (rc != CURLM_OK) break;
+
+            cancel_active();
 
             // Long-ish poll — woken immediately by curl_multi_wakeup
             // from the submission path or by socket activity.
@@ -195,40 +266,26 @@ struct CurlH2Pool::Impl {
             stranded.swap(queue);
         }
         for (auto& p : stranded) {
-            auto on_done   = std::move(p->on_done);
-            auto caller_ex = std::move(p->caller_ex);
-            asio::post(caller_ex, [on_done = std::move(on_done)]() mutable {
-                on_done(HttpResponse{},
-                        std::make_exception_ptr(std::runtime_error(
-                            "CurlH2Pool destroyed before request was started")));
-            });
+            complete(std::move(p), asio::error::operation_aborted);
         }
         for (auto& p : active) {
             curl_multi_remove_handle(multi, p->easy);
-            // Move the handler off so it doesn't run under our lock.
-            auto on_done   = std::move(p->on_done);
-            auto caller_ex = std::move(p->caller_ex);
-            asio::post(caller_ex, [on_done = std::move(on_done)]() mutable {
-                on_done(HttpResponse{},
-                        std::make_exception_ptr(std::runtime_error(
-                            "CurlH2Pool destroyed before request completed")));
-            });
             curl_slist_free_all(p->curl_hdrs);
             curl_easy_cleanup(p->easy);
+            complete(std::move(p), asio::error::operation_aborted);
         }
         active.clear();
     }
 
     void setup_and_add(std::unique_ptr<Pending> p) {
+        if (p->control->cancelled.load(std::memory_order_acquire)) {
+            complete(std::move(p), asio::error::operation_aborted);
+            return;
+        }
         p->easy = curl_easy_init();
         if (!p->easy) {
-            auto on_done   = std::move(p->on_done);
-            auto caller_ex = std::move(p->caller_ex);
-            asio::post(caller_ex, [on_done = std::move(on_done)]() mutable {
-                on_done(HttpResponse{},
-                        std::make_exception_ptr(std::runtime_error(
-                            "curl_easy_init failed")));
-            });
+            complete(std::move(p), {}, {},
+                std::make_exception_ptr(std::runtime_error("curl_easy_init failed")));
             return;
         }
 
@@ -247,6 +304,9 @@ struct CurlH2Pool::Impl {
         curl_easy_setopt(p->easy, CURLOPT_WRITEDATA,      p.get());
         curl_easy_setopt(p->easy, CURLOPT_HEADERFUNCTION, header_line_cb);
         curl_easy_setopt(p->easy, CURLOPT_HEADERDATA,     p.get());
+        curl_easy_setopt(p->easy, CURLOPT_NOPROGRESS,      0L);
+        curl_easy_setopt(p->easy, CURLOPT_XFERINFOFUNCTION, xferinfo_cb);
+        curl_easy_setopt(p->easy, CURLOPT_XFERINFODATA,    p.get());
         curl_easy_setopt(p->easy, CURLOPT_HTTP_VERSION,   CURL_HTTP_VERSION_2TLS);
         // DIAG: PIPEWAIT=1 makes a request wait for an in-flight TLS handshake
         // to complete so it can multiplex onto the same conn. PIPEWAIT=0 lets
@@ -281,9 +341,13 @@ struct CurlH2Pool::Impl {
 
         curl_multi_remove_handle(multi, easy);
 
+        const bool cancelled =
+            p->control->cancelled.load(std::memory_order_acquire) ||
+            code == CURLE_ABORTED_BY_CALLBACK;
+
         HttpResponse r;
         std::exception_ptr err;
-        if (code == CURLE_OK) {
+        if (!cancelled && code == CURLE_OK) {
             curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &p->status);
             r.status  = static_cast<int>(p->status);
             r.headers = std::move(p->resp_headers);
@@ -302,21 +366,16 @@ struct CurlH2Pool::Impl {
                     r.location = v;
                 }
             }
-        } else {
+        } else if (!cancelled) {
             err = std::make_exception_ptr(std::runtime_error(
                 std::string("libcurl: ") + curl_easy_strerror(code)));
         }
 
-        auto on_done   = std::move(p->on_done);
-        auto caller_ex = std::move(p->caller_ex);
-        asio::post(caller_ex,
-            [r = std::move(r), err = std::move(err),
-             on_done = std::move(on_done)]() mutable {
-                on_done(std::move(r), std::move(err));
-            });
-
         curl_slist_free_all(p->curl_hdrs);
         curl_easy_cleanup(easy);
+        complete(std::move(p),
+                 cancelled ? asio::error::operation_aborted : asio::error_code{},
+                 std::move(r), std::move(err));
     }
 };
 
@@ -325,14 +384,21 @@ CurlH2Pool::CurlH2Pool() : impl_(std::make_unique<Impl>()) {
     std::call_once(global_init_once, []{ curl_global_init(CURL_GLOBAL_DEFAULT); });
     impl_->multi = curl_multi_init();
     if (!impl_->multi) throw std::runtime_error("curl_multi_init failed");
+    {
+        std::lock_guard lock(impl_->wakeup->mutex);
+        impl_->wakeup->multi = impl_->multi;
+    }
     impl_->worker = std::thread([this]{ impl_->worker_loop(); });
 }
 
 CurlH2Pool::~CurlH2Pool() {
     impl_->stop.store(true, std::memory_order_release);
-    if (impl_->multi) curl_multi_wakeup(impl_->multi);
+    impl_->wakeup->wake();
     if (impl_->worker.joinable()) impl_->worker.join();
-    if (impl_->multi) curl_multi_cleanup(impl_->multi);
+    if (impl_->multi) {
+        impl_->wakeup->clear();
+        curl_multi_cleanup(impl_->multi);
+    }
 }
 
 asio::awaitable<HttpResponse> CurlH2Pool::async_post(
@@ -344,7 +410,7 @@ asio::awaitable<HttpResponse> CurlH2Pool::async_post(
     auto ex = co_await asio::this_coro::executor;
 
     co_return co_await asio::async_initiate<
-        decltype(asio::use_awaitable), void(HttpResponse)>(
+        decltype(asio::use_awaitable), void(asio::error_code, HttpResponse)>(
         [this, ex,
          url = std::move(url),
          body = std::move(body),
@@ -352,8 +418,9 @@ asio::awaitable<HttpResponse> CurlH2Pool::async_post(
          opts](auto handler) mutable {
             // Wrap the asio handler so the worker can call it without
             // touching asio types at the C/lock-protected layer.
-            // Exceptions are tunneled out via the inner shared_ptr +
-            // post-scheduled re-throw.
+             // Non-cancellation failures become the pool's historical
+             // status-0 response; cancellation preserves Asio's
+             // operation_aborted error for graph-level propagation.
             auto p = std::make_unique<Pending>();
             p->url     = std::move(url);
             p->body    = std::move(body);
@@ -363,24 +430,43 @@ asio::awaitable<HttpResponse> CurlH2Pool::async_post(
                       opts.timeout).count()
                 : 0;
             p->caller_ex = ex;
+            auto slot = asio::get_associated_cancellation_slot(handler);
             // asio completion handlers are move-only; wrap into a
             // shared_ptr so std::function (used in Pending::on_done)
             // can hold it.
             auto h_sp = std::make_shared<std::decay_t<decltype(handler)>>(
                 std::move(handler));
-            p->on_done = [h_sp](HttpResponse r, std::exception_ptr err) {
+            p->on_done = [h_sp](asio::error_code ec,
+                                HttpResponse r,
+                                std::exception_ptr err) {
+                if (ec) {
+                    std::move(*h_sp)(ec, HttpResponse{});
+                    return;
+                }
                 if (err) {
                     try { std::rethrow_exception(err); }
                     catch (const std::exception& e) {
                         HttpResponse e_resp;
                         e_resp.status = 0;
                         e_resp.body   = std::string("CurlH2Pool error: ") + e.what();
-                        std::move(*h_sp)(std::move(e_resp));
+                        std::move(*h_sp)(asio::error_code{}, std::move(e_resp));
                         return;
                     }
                 }
-                std::move(*h_sp)(std::move(r));
+                std::move(*h_sp)(asio::error_code{}, std::move(r));
             };
+
+            if (slot.is_connected()) {
+                auto control = p->control;
+                auto wakeup = impl_->wakeup;
+                slot.assign([control = std::move(control),
+                             wakeup = std::move(wakeup)](
+                                asio::cancellation_type_t type) {
+                    if (!type) return;
+                    control->cancelled.store(true, std::memory_order_release);
+                    wakeup->wake();
+                });
+            }
 
             {
                 std::lock_guard<std::mutex> lock(impl_->mu);
@@ -390,7 +476,7 @@ asio::awaitable<HttpResponse> CurlH2Pool::async_post(
             // — the submission must not wait the poll-timeout window
             // (was 100ms; even after raising it to 500ms, latency-
             // sensitive callers depend on this nudge).
-            curl_multi_wakeup(impl_->multi);
+            impl_->wakeup->wake();
         },
         asio::use_awaitable);
 }

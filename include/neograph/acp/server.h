@@ -239,19 +239,24 @@ class NEOGRAPH_API ACPServer {
     /// floor (test-friendly). When run() is driving, the sink is set to
     /// write to the output stream automatically. A sink retained by a
     /// shared_ptr-owned server must capture that server weakly to avoid an
-    /// ownership cycle.
+    /// ownership cycle. Objects captured by reference must outlive the server
+    /// (or clear the sink before they are destroyed); the server drops late
+    /// worker notifications once its destructor begins.
     void set_notification_sink(NotificationSink sink);
 
     /// Signal a running run() loop to exit at the next message boundary.
     ///
-    /// **Cancellation semantics**: ACP `session/cancel` flips a flag
-    /// that the server consults *after* `engine->run()` naturally
-    /// returns — it does NOT preempt an in-flight graph turn. The
-    /// session/prompt response will carry `StopReason::Cancelled` if
-    /// the flag was set by the time the graph finished, but a
-    /// long-running LLM call inside a node still completes in full.
-    /// Wire cancel into your nodes (or set a tight `max_steps` on
-    /// `RunConfig`) for shorter cancel latency.
+    /// **Cancellation semantics**: ACP `session/cancel` signals the
+    /// prompt's `CancelToken`, so engine checkpoints and cancellation-aware
+    /// providers/tools stop cooperatively. A node that neither polls its token
+    /// nor awaits a cancellation-aware operation still runs to its next engine
+    /// checkpoint. The terminal session/prompt response then carries
+    /// `StopReason::Cancelled`.
+    ///
+    /// A cancel received after `session/new` but before the first prompt is
+    /// consumed by that prompt. Once a terminal response has committed, a
+    /// cancel with no active prompt is ignored as stale: ACP does not include a
+    /// prompt/request id that could safely associate it with a future turn.
     ///
     /// **Destructor semantics**: ~ACPServer joins all in-flight
     /// session/prompt worker threads before returning. Each worker

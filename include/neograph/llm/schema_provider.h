@@ -38,6 +38,7 @@
 #include <string>
 #include <thread>
 #include <map>
+#include <vector>
 
 namespace neograph::async { class ConnPool; class CurlH2Pool; }
 
@@ -174,6 +175,7 @@ class NEOGRAPH_API SchemaProvider : public Provider {
 
   private:
     explicit SchemaProvider(Config config, json schema);
+    struct StreamCancelControl;
 
     // --- Strategies (internal) ---
     enum class SystemPromptStrategy { IN_MESSAGES, TOP_LEVEL, TOP_LEVEL_PARTS };
@@ -399,6 +401,14 @@ class NEOGRAPH_API SchemaProvider : public Provider {
     asio::awaitable<ChatCompletion>
     complete_stream_ws_responses(const CompletionParams& params,
                                  const StreamCallback& on_chunk);
+
+    /// Blocking HTTP/SSE implementation shared by the synchronous API and the
+    /// async bridge. The bridge supplies a control object so cancellation can
+    /// interrupt cpp-httplib's active socket from its caller executor.
+    ChatCompletion complete_stream_http(
+        const CompletionParams& params,
+        const StreamCallback& on_chunk,
+        const std::shared_ptr<StreamCancelControl>& cancel_control);
 
     ChatMessage parse_response(const json& resp_json) const;
     ChatCompletion::Usage parse_usage(const json& resp_json) const;

@@ -5,8 +5,10 @@
 #include <neograph/async/http_client.h>
 #include <neograph/async/run_sync.h>
 #include <neograph/async/ws_client.h>
+#include <neograph/graph/cancel.h>
 #include <builtin_schemas.h>
 
+#include <asio/bind_cancellation_slot.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/dispatch.hpp>
 #include <asio/io_context.hpp>
@@ -21,7 +23,9 @@
 #include <asio/this_coro.hpp>
 
 #include <charconv>
+#include <condition_variable>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <sstream>
 #include <fstream>
@@ -30,6 +34,76 @@
 #include <algorithm>
 
 namespace neograph::llm {
+
+struct SchemaProvider::StreamCancelControl {
+    void attach(httplib::Client& target) {
+        bool stop_now = false;
+        {
+            std::lock_guard lock(mutex);
+            client = &target;
+            if (cancelled) {
+                ++stops_in_flight;
+                stop_now = true;
+            }
+        }
+        if (stop_now) {
+            stop_target(target);
+        }
+    }
+
+    void detach(httplib::Client& target) {
+        std::unique_lock lock(mutex);
+        if (client != &target) return;
+        client = nullptr;
+        stops_done.wait(lock, [this] { return stops_in_flight == 0; });
+    }
+
+    void cancel() {
+        httplib::Client* target = nullptr;
+        {
+            std::lock_guard lock(mutex);
+            if (cancelled) return;
+            cancelled = true;
+            if (client) {
+                target = client;
+                ++stops_in_flight;
+            }
+        }
+        if (target) {
+            // cpp-httplib v0.41.0 documents Client::stop() as its thread-safe
+            // active-request abort path (vendored deps/httplib.h:14564).
+            stop_target(*target);
+        }
+    }
+
+    bool is_cancelled() const {
+        std::lock_guard lock(mutex);
+        return cancelled;
+    }
+
+  private:
+    void stop_target(httplib::Client& target) {
+        try {
+            target.stop();
+        } catch (...) {
+            finish_stop();
+            throw;
+        }
+        finish_stop();
+    }
+
+    void finish_stop() {
+        std::lock_guard lock(mutex);
+        --stops_in_flight;
+        if (stops_in_flight == 0) stops_done.notify_all();
+    }
+
+    mutable std::mutex mutex;
+    std::condition_variable stops_done;
+    httplib::Client* client = nullptr;
+    std::size_t stops_in_flight = 0;
+    bool cancelled = false;
+};
 
 // ============================================================================
 // Construction / Factory
@@ -78,8 +152,7 @@ SchemaProvider::SchemaProvider(Config config, json schema)
 SchemaProvider::~SchemaProvider()
 {
     // Order: drop the work guards so each io_context.run() can return,
-    // stop the io_contexts (cancels in-flight ops), then join the
-    // worker threads.
+    // stop the io_contexts, then join the worker threads.
     if (http_work_) http_work_.reset();
     if (bridge_work_) bridge_work_.reset();
     if (http_io_) http_io_->stop();
@@ -1288,26 +1361,44 @@ SchemaProvider::complete_async(const CompletionParams& params)
     //     1-3 concurrent inflight pattern.
     //   * libcurl (HTTP/2 + multiplexing + Cloudflare-friendly): for
     //     wide-fan-out workloads against WAF-protected endpoints.
-    async::HttpResponse res;
+    std::optional<asio::awaitable<async::HttpResponse>> request;
     if (curl_pool_) {
         std::string url = (endpoint.tls ? "https://" : "http://") + endpoint.host
                         + (endpoint.port == "443" || endpoint.port == "80"
                             ? "" : ":" + endpoint.port)
                         + endpoint_path;
-        res = co_await curl_pool_->async_post(
-            std::move(url),
-            body_str,
-            std::move(headers),
-            opts);
+        request.emplace(curl_pool_->async_post(
+            std::move(url), std::move(body_str), std::move(headers), opts));
     } else {
-        res = co_await conn_pool_->async_post(
+        request.emplace(conn_pool_->async_post(
             endpoint.host,
             endpoint.port,
             endpoint_path,
-            body_str,
+            std::move(body_str),
             std::move(headers),
             endpoint.tls,
-            opts);
+            opts));
+    }
+
+    // ConnPool and CurlH2Pool both inherit this operation-local slot. The
+    // child token prevents concurrent provider calls from replacing each
+    // other's single Asio cancellation slot.
+    auto executor = co_await asio::this_coro::executor;
+    auto operation = params.cancel_token
+        ? params.cancel_token->fork()
+        : std::shared_ptr<neograph::graph::CancelToken>{};
+    if (operation) {
+        operation->bind_executor(executor);
+        operation->throw_if_cancelled("SchemaProvider completion entry");
+    }
+    async::HttpResponse res;
+    if (operation) {
+        res = co_await asio::co_spawn(
+            executor, std::move(*request),
+            asio::bind_cancellation_slot(
+                operation->slot(), asio::use_awaitable));
+    } else {
+        res = co_await std::move(*request);
     }
 
     if (res.status != 200) {
@@ -1364,7 +1455,21 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
                 "SchemaProvider: use_websocket is only supported for "
                 "the openai-responses schema (got: " + provider_name_ + ")");
         }
-        return async::run_sync(complete_stream_ws_responses(params, on_chunk));
+        return async::run_sync(
+            complete_stream_ws_responses(params, on_chunk),
+            params.cancel_token ? params.cancel_token.get() : nullptr);
+    }
+
+    return complete_stream_http(params, on_chunk, {});
+}
+
+ChatCompletion SchemaProvider::complete_stream_http(
+    const CompletionParams& params,
+    const StreamCallback& on_chunk,
+    const std::shared_ptr<StreamCancelControl>& cancel_control)
+{
+    if (params.cancel_token) {
+        params.cancel_token->throw_if_cancelled("SchemaProvider stream entry");
     }
 
     // See complete() for the locking rationale. Same pattern: build the
@@ -1398,6 +1503,19 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
     }
 
     httplib::Client cli(host);
+    if (cancel_control) cancel_control->attach(cli);
+    struct DetachClient {
+        std::shared_ptr<StreamCancelControl> control;
+        httplib::Client& client;
+        ~DetachClient() {
+            if (control) control->detach(client);
+        }
+    } detach_client{cancel_control, cli};
+
+    if ((cancel_control && cancel_control->is_cancelled()) ||
+        (params.cancel_token && params.cancel_token->is_cancelled())) {
+        throw neograph::graph::CancelledException("SchemaProvider stream entry");
+    }
     cli.set_read_timeout(user_config_.timeout_seconds, 0);
     cli.set_connection_timeout(10, 0);
 
@@ -1429,10 +1547,18 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
     auto res = cli.Post(
         endpoint, headers, body_str, "application/json",
         [&](const char* data, size_t len) -> bool {
+            if ((cancel_control && cancel_control->is_cancelled()) ||
+                (params.cancel_token && params.cancel_token->is_cancelled())) {
+                return false;
+            }
             line_buffer.append(data, len);
 
             size_t pos;
             while ((pos = line_buffer.find('\n')) != std::string::npos) {
+                if ((cancel_control && cancel_control->is_cancelled()) ||
+                    (params.cancel_token && params.cancel_token->is_cancelled())) {
+                    return false;
+                }
                 std::string line = line_buffer.substr(0, pos);
                 line_buffer.erase(0, pos + 1);
 
@@ -1686,6 +1812,10 @@ ChatCompletion SchemaProvider::complete_stream(const CompletionParams& params,
         }
     );
 
+    if ((cancel_control && cancel_control->is_cancelled()) ||
+        (params.cancel_token && params.cancel_token->is_cancelled())) {
+        throw neograph::graph::CancelledException("SchemaProvider stream aborted");
+    }
     if (!res) {
         throw std::runtime_error("HTTP request failed: " + httplib::to_string(res.error()));
     }
@@ -1719,11 +1849,25 @@ asio::awaitable<ChatCompletion>
 SchemaProvider::complete_stream_async(const CompletionParams& params,
                                       const StreamCallback& on_chunk)
 {
+    auto exec = co_await asio::this_coro::executor;
+
     // Native fast path for the WebSocket Responses transport: it's
     // already an async-native co_await, so we drop the bridge thread
     // + nested run_sync entirely. Fixes issue #4 for the WS branch.
     if (user_config_.use_websocket && provider_name_ == "openai-responses") {
-        co_return co_await complete_stream_ws_responses(params, on_chunk);
+        if (!params.cancel_token) {
+            co_return co_await complete_stream_ws_responses(params, on_chunk);
+        }
+
+        auto operation = params.cancel_token->fork();
+        operation->bind_executor(exec);
+        operation->throw_if_cancelled("SchemaProvider WebSocket stream entry");
+        auto operation_params = params;
+        operation_params.cancel_token = operation;
+        co_return co_await asio::co_spawn(
+            exec,
+            complete_stream_ws_responses(operation_params, on_chunk),
+            asio::bind_cancellation_slot(operation->slot(), asio::use_awaitable));
     }
 
     // HTTP/SSE branch (issue #16): dispatch the synchronous
@@ -1745,8 +1889,23 @@ SchemaProvider::complete_stream_async(const CompletionParams& params,
     // coroutine drains queued tokens on its own executor, preserving
     // the callback-thread invariant without letting late bridge work
     // retain or use an executor whose io_context may be gone.
-    auto exec = co_await asio::this_coro::executor;
     auto bridge_exec = bridge_io_->get_executor();
+
+    auto cancel_control = std::make_shared<StreamCancelControl>();
+    auto operation = params.cancel_token
+        ? params.cancel_token->fork()
+        : std::shared_ptr<neograph::graph::CancelToken>{};
+    auto operation_params = params;
+    if (operation) {
+        operation->bind_executor(exec);
+        operation->throw_if_cancelled("SchemaProvider HTTP stream entry");
+        operation_params.cancel_token = operation;
+        operation->slot().assign(
+            [cancel_control](asio::cancellation_type_t type) {
+                if (!type) return;
+                cancel_control->cancel();
+            });
+    }
 
     struct Shared {
         std::mutex mutex;
@@ -1775,11 +1934,13 @@ SchemaProvider::complete_stream_async(const CompletionParams& params,
     // params copied by value so the bridge thread's work item doesn't
     // outlive the caller's stack-allocated CompletionParams.
     asio::dispatch(bridge_exec,
-        [this, params, wrapped, shared]() mutable {
+        [this, params = std::move(operation_params), wrapped, shared,
+         cancel_control]() mutable {
             std::optional<ChatCompletion> result;
             std::exception_ptr err;
             try {
-                result = this->complete_stream(params, wrapped);
+                result = this->complete_stream_http(
+                    params, wrapped, cancel_control);
             } catch (...) {
                 err = std::current_exception();
             }
@@ -1793,6 +1954,10 @@ SchemaProvider::complete_stream_async(const CompletionParams& params,
 
     asio::steady_timer poll(exec);
     for (;;) {
+        if (operation && operation->is_cancelled()) {
+            cancel_control->cancel();
+            operation->throw_if_cancelled("SchemaProvider HTTP stream aborted");
+        }
         std::vector<std::string> chunks;
         std::optional<ChatCompletion> result;
         std::exception_ptr err;
@@ -1811,6 +1976,10 @@ SchemaProvider::complete_stream_async(const CompletionParams& params,
             for (const auto& chunk : chunks) on_chunk(chunk);
         }
         if (finished) {
+            if (operation && operation->is_cancelled()) {
+                cancel_control->cancel();
+                operation->throw_if_cancelled("SchemaProvider HTTP stream aborted");
+            }
             if (err) std::rethrow_exception(err);
             co_return std::move(*result);
         }

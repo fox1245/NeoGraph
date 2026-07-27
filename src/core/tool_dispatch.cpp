@@ -1,4 +1,5 @@
 #include <neograph/tool_dispatch.h>
+#include <neograph/graph/cancel.h>
 #include <neograph/graph/types.h>   // NodeInterrupt — the gate's Interrupt verdict
 
 #include <asio/co_spawn.hpp>
@@ -15,9 +16,16 @@ namespace neograph {
 
 asio::awaitable<std::vector<ChatMessage>>
 dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
-                    ToolGate gate, ToolGateContext gctx) {
+                    ToolGate gate, ToolGateContext gctx,
+                    ToolExecutionContext execution) {
     std::vector<ChatMessage> results;
     if (calls.empty()) co_return results;
+
+    auto throw_if_cancelled = [&execution](const char* detail) {
+        if (execution.cancel_token) {
+            execution.cancel_token->throw_if_cancelled(detail);
+        }
+    };
 
     // ── Phase 1: decide, while nothing has happened yet (issue #89) ────────
     //
@@ -35,6 +43,7 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
     if (gate) {
         decisions.reserve(calls.size());
         for (const auto& tc : calls) {
+            throw_if_cancelled("before tool gate");
             decisions.push_back(co_await gate(tc, gctx));
         }
         for (const auto& d : decisions) {
@@ -53,8 +62,13 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
     // every failure mode (unknown tool, bad arguments, throwing tool) into the
     // returned message so a worker never propagates an exception into the
     // parallel group.
-    auto worker = [tools](ToolCall tc, std::optional<ToolDecision> decision)
+    throw_if_cancelled("before tool dispatch");
+
+    auto worker = [tools, execution](ToolCall tc, std::optional<ToolDecision> decision)
             -> asio::awaitable<ChatMessage> {
+        if (execution.cancel_token) {
+            execution.cancel_token->throw_if_cancelled("before tool execution");
+        }
         ChatMessage tool_msg;
         tool_msg.role         = "tool";
         tool_msg.tool_call_id = tc.id;
@@ -82,7 +96,24 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
             json args = (decision && decision->args)
                             ? *decision->args
                             : json::parse(tc.arguments);
-            tool_msg.content = co_await (*it)->execute_async(args);
+            if (auto* contextual = dynamic_cast<ContextualAsyncTool*>(*it)) {
+                tool_msg.content = co_await contextual->execute_async(args, execution);
+            } else {
+                tool_msg.content = co_await (*it)->execute_async(args);
+            }
+            if (execution.cancel_token) {
+                execution.cancel_token->throw_if_cancelled("after tool execution");
+            }
+        } catch (const graph::CancelledException&) {
+            // Cancellation is graph control flow, not a tool result that the
+            // model should consume before the run terminates.
+            throw;
+        } catch (const asio::system_error& error) {
+            if (execution.cancel_token && execution.cancel_token->is_cancelled()
+                && error.code() == asio::error::operation_aborted) {
+                throw graph::CancelledException("tool operation aborted");
+            }
+            tool_msg.content = std::string(R"({"error": ")") + error.what() + "\"}";
         } catch (const std::exception& e) {
             tool_msg.content = std::string(R"({"error": ")") + e.what() + "\"}";
         }
@@ -130,6 +161,14 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
             m.tool_name    = calls[i].name;
             try {
                 std::rethrow_exception(excs[i]);
+            } catch (const graph::CancelledException&) {
+                throw;
+            } catch (const asio::system_error& error) {
+                if (execution.cancel_token && execution.cancel_token->is_cancelled()
+                    && error.code() == asio::error::operation_aborted) {
+                    throw graph::CancelledException("tool operation aborted");
+                }
+                m.content = std::string(R"({"error": ")") + error.what() + "\"}";
             } catch (const std::exception& e) {
                 m.content = std::string(R"({"error": ")") + e.what() + "\"}";
             } catch (...) {
