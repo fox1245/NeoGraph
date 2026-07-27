@@ -253,6 +253,11 @@ class NEOGRAPH_API ACPServer {
     /// checkpoint. The terminal session/prompt response then carries
     /// `StopReason::Cancelled`.
     ///
+    /// A cancel received after `session/new` but before the first prompt is
+    /// consumed by that prompt. Once a terminal response has committed, a
+    /// cancel with no active prompt is ignored as stale: ACP does not include a
+    /// prompt/request id that could safely associate it with a future turn.
+    ///
     /// **Destructor semantics**: ~ACPServer joins all in-flight
     /// session/prompt worker threads before returning. Each worker
     /// blocks until its `engine->run()` completes, so destroying the

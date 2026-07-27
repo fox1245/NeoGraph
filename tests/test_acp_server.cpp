@@ -1032,6 +1032,105 @@ TEST(ACPServer, CancelReachesToolDispatchAndEmitsOneTerminalResponse) {
     EXPECT_EQ(responses, 1);
 }
 
+TEST(ACPServer, CancelDuringFinalUpdateWinsTerminalResponse) {
+    CapturingSink cap;
+    auto server = make_server();
+    auto cap_sink = cap.as_sink();
+    std::promise<void> update_entered;
+    auto update_ready = update_entered.get_future();
+    std::promise<void> release_update;
+    auto release = release_update.get_future().share();
+    std::atomic<bool> blocked{false};
+    server.set_notification_sink([&](const neograph::json& env) {
+        if (env.value("method", std::string()) == "session/update" &&
+            !blocked.exchange(true, std::memory_order_acq_rel)) {
+            update_entered.set_value();
+            release.wait();
+        }
+        cap_sink(env);
+    });
+
+    const std::string sid = "acp-cancel-during-final-update";
+    server.handle_message(make_request(1, "session/prompt",
+        {{"sessionId", sid}, {"prompt", neograph::json::array({
+            neograph::json{{"type", "text"}, {"text", "done"}}})}}));
+    ASSERT_EQ(update_ready.wait_for(std::chrono::seconds(1)),
+              std::future_status::ready);
+
+    server.handle_message({{"jsonrpc", "2.0"}, {"method", "session/cancel"},
+                           {"params", {{"sessionId", sid}}}});
+    release_update.set_value();
+
+    auto response = cap.wait_for_response(1, std::chrono::seconds(1));
+    ASSERT_TRUE(response.contains("result")) << response.dump();
+    EXPECT_EQ(response["result"].value("stopReason", std::string()), "cancelled");
+    EXPECT_EQ(cap.notifications_for("session/update").size(), 1u);
+
+    std::lock_guard lock(cap.mu);
+    int responses = 0;
+    for (const auto& env : cap.envs) {
+        if (!env.contains("method") && env.value("id", 0) == 1 &&
+            env.contains("result")) {
+            ++responses;
+        }
+    }
+    EXPECT_EQ(responses, 1);
+}
+
+TEST(ACPServer, CancelAfterTerminalCommitCannotReachLaterPrompt) {
+    CapturingSink cap;
+    auto server = make_server();
+    auto cap_sink = cap.as_sink();
+    std::promise<void> response_entered;
+    auto response_ready = response_entered.get_future();
+    std::promise<void> release_response;
+    auto release = release_response.get_future().share();
+    std::atomic<bool> blocked{false};
+    server.set_notification_sink([&](const neograph::json& env) {
+        if (!env.contains("method") && env.value("id", 0) == 1 &&
+            env.contains("result") &&
+            !blocked.exchange(true, std::memory_order_acq_rel)) {
+            response_entered.set_value();
+            release.wait();
+        }
+        cap_sink(env);
+    });
+
+    const std::string sid = "acp-cancel-after-terminal-commit";
+    auto prompt = [](const char* text) {
+        return neograph::json::array({
+            neograph::json{{"type", "text"}, {"text", text}}});
+    };
+    server.handle_message(make_request(1, "session/prompt",
+        {{"sessionId", sid}, {"prompt", prompt("first")}}));
+    ASSERT_EQ(response_ready.wait_for(std::chrono::seconds(1)),
+              std::future_status::ready);
+
+    // A new prompt cannot start until the prior terminal response leaves the
+    // sink. That prevents a late cancel for prompt #1 from reaching prompt #2.
+    server.handle_message(make_request(2, "session/prompt",
+        {{"sessionId", sid}, {"prompt", prompt("too early")}}));
+    auto rejected = cap.wait_for_response(2, std::chrono::seconds(1));
+    ASSERT_TRUE(rejected.contains("error")) << rejected.dump();
+    EXPECT_EQ(rejected["error"].value("code", 0), -32000);
+
+    // The first response has committed its terminal state but is still blocked
+    // in the sink. This cancel is stale, not pre-cancel for a later prompt.
+    server.handle_message({{"jsonrpc", "2.0"}, {"method", "session/cancel"},
+                           {"params", {{"sessionId", sid}}}});
+    release_response.set_value();
+
+    auto first = cap.wait_for_response(1, std::chrono::seconds(1));
+    ASSERT_TRUE(first.contains("result")) << first.dump();
+    EXPECT_EQ(first["result"].value("stopReason", std::string()), "end_turn");
+
+    server.handle_message(make_request(3, "session/prompt",
+        {{"sessionId", sid}, {"prompt", prompt("second")}}));
+    auto second = cap.wait_for_response(3, std::chrono::seconds(1));
+    ASSERT_TRUE(second.contains("result")) << second.dump();
+    EXPECT_EQ(second["result"].value("stopReason", std::string()), "end_turn");
+}
+
 TEST(ACPServer, CancelAndDestructorDrainWithoutDuplicateResponse) {
     auto probe = std::make_shared<CancelProbe>();
     CapturingSink cap;
