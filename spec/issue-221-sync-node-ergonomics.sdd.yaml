@@ -2,7 +2,7 @@ spec:
   id: issue-221-sync-node-ergonomics
   issue: 221
   parent: 187
-  status: design-required
+  status: accepted-local
   priority: P2
   kind: additive-api
   depends_on: [195]
@@ -20,9 +20,12 @@ constraints:
   - Blocking I/O is not disguised as asynchronous work.
 
 candidate_shapes:
-  - "SyncGraphNode adapter with one synchronous body method and final run lift."
-  - "NodeFactory callable wrapper from NodeInputView to NodeOutput."
-  - "Free make_node helper owning a callable."
+  selected: >-
+    SyncGraphNode derives from GraphNode, implements run(NodeInput) final, and
+    forwards exactly once to a pure synchronous run_sync(NodeInput) method.
+  rejected:
+    - "Callable factory: requires extra ownership and naming policy for no demonstrated benefit."
+    - "Free make_node helper: hides the concrete node type and complicates registration examples."
 
 red_tests:
   - id: minimal-sync-node

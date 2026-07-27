@@ -141,6 +141,48 @@ public:
 };
 
 /**
+ * @brief Adapter for CPU-light synchronous custom nodes.
+ *
+ * Subclasses implement only `run_sync(NodeInput) -> NodeOutput`; this adapter
+ * lifts that result into the one canonical `GraphNode::run` coroutine exactly
+ * once. `NodeInput` is forwarded unchanged, so state, RunContext, and the
+ * optional stream sink remain available. The returned `NodeOutput` preserves
+ * channel-write modes, Command, and Send values without reconstruction.
+ *
+ * `run_sync` executes inline on the graph's current executor. It is intended
+ * for short computations and state transformations. Do not perform blocking
+ * network/file I/O, sleeps, or other waits here: those stall the graph loop.
+ * Derive directly from `GraphNode` and `co_await` an asynchronous dependency
+ * for such work.
+ *
+ * @code
+ * class NormalizeNode : public SyncGraphNode {
+ * public:
+ *     NormalizeNode() : SyncGraphNode("normalize") {}
+ * protected:
+ *     NodeOutput run_sync(NodeInput in) override {
+ *         return NodeOutput{{ChannelWrite{
+ *             "text", normalize(in.state.get("text").get<std::string>())}}};
+ *     }
+ * };
+ * @endcode
+ */
+class NEOGRAPH_API SyncGraphNode : public GraphNode {
+public:
+    explicit SyncGraphNode(std::string name);
+    ~SyncGraphNode() override;
+
+    asio::awaitable<NodeOutput> run(NodeInput in) final;
+    std::string get_name() const final;
+
+protected:
+    virtual NodeOutput run_sync(NodeInput in) = 0;
+
+private:
+    std::string name_;
+};
+
+/**
  * @brief Node that makes LLM completion calls.
  *
  * Reads the "messages" channel, builds completion parameters,

@@ -52,6 +52,18 @@ std::string child_thread_id(const RunContext& parent, std::string_view node_name
 // (LLMCallNode, ToolDispatchNode, IntentClassifierNode, SubgraphNode).
 // Their `run()` overrides live in their own sections below.
 
+SyncGraphNode::SyncGraphNode(std::string name) : name_(std::move(name)) {}
+
+SyncGraphNode::~SyncGraphNode() = default;
+
+asio::awaitable<NodeOutput> SyncGraphNode::run(NodeInput in) {
+    co_return run_sync(in);
+}
+
+std::string SyncGraphNode::get_name() const {
+    return name_;
+}
+
 // =========================================================================
 // LLMCallNode
 // =========================================================================

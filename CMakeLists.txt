@@ -1426,6 +1426,10 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         endif()
     endif()
 
+    # Example 61: SyncGraphNode needs only neograph::core.
+    add_executable(example_sync_node examples/61_sync_node.cpp)
+    target_link_libraries(example_sync_node PRIVATE neograph::core)
+
     # Reusable MCP server smoke target. It has no LLM or client dependency and
     # is the same stdio binary used by Inspector and host interoperability tests.
     if(NEOGRAPH_BUILD_MCP_SERVER)

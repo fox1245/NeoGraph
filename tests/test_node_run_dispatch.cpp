@@ -15,6 +15,7 @@
 #include <neograph/graph/engine.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
+#include <neograph/async/run_sync.h>
 
 #include <atomic>
 #include <memory>
@@ -73,6 +74,71 @@ private:
     std::shared_ptr<RunObs> obs_;
 };
 
+struct SyncRunObs {
+    int invocations = 0;
+    std::string thread_id;
+    StreamMode stream_mode = StreamMode::ALL;
+    bool had_store = false;
+    bool had_cb = false;
+};
+
+class FullSyncNode : public SyncGraphNode {
+public:
+    FullSyncNode(std::string name, std::shared_ptr<SyncRunObs> obs)
+        : SyncGraphNode(std::move(name)), obs_(std::move(obs)) {}
+
+protected:
+    NodeOutput run_sync(NodeInput in) override {
+        ++obs_->invocations;
+        obs_->thread_id = in.ctx.thread_id;
+        obs_->stream_mode = in.ctx.stream_mode;
+        obs_->had_store = static_cast<bool>(in.ctx.store);
+        obs_->had_cb = in.stream_cb != nullptr;
+        if (in.stream_cb) {
+            (*in.stream_cb)(GraphEvent{
+                GraphEvent::Type::LLM_TOKEN, get_name(), json("sync-token")});
+        }
+
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{
+            "result", json("sync"), ChannelWrite::Mode::Overwrite});
+        out.command = Command{"next", {ChannelWrite{"status", json("ok")}}};
+        out.sends.push_back(Send{"worker", json{{"item", 1}}});
+        return out;
+    }
+
+private:
+    std::shared_ptr<SyncRunObs> obs_;
+};
+
+struct EnginePathObs {
+    int worker_invocations = 0;
+    int next_invocations = 0;
+    int worker_item = -1;
+};
+
+class EngineMarkerNode : public GraphNode {
+public:
+    EngineMarkerNode(std::string name, std::shared_ptr<EnginePathObs> obs)
+        : name_(std::move(name)), obs_(std::move(obs)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        if (name_ == "worker") {
+            ++obs_->worker_invocations;
+            obs_->worker_item = in.state.get("item").get<int>();
+        } else if (name_ == "next") {
+            ++obs_->next_invocations;
+        }
+        co_return NodeOutput{{ChannelWrite{"trace", json(name_)}}};
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+    std::shared_ptr<EnginePathObs> obs_;
+};
+
 // Compile a one-node graph driven by ``factory_type``. The caller
 // pre-registers the factory; this helper just builds the JSON and
 // compiles it.
@@ -89,6 +155,98 @@ std::unique_ptr<GraphEngine> make_one_node_engine(
 }
 
 } // namespace
+
+static_assert(std::is_abstract_v<SyncGraphNode>);
+static_assert(std::is_base_of_v<GraphNode, SyncGraphNode>);
+
+TEST(SyncGraphNodeTest, SuccessfulUncachedDispatchForwardsFullInputAndOutputOnce) {
+    auto obs = std::make_shared<SyncRunObs>();
+    FullSyncNode node("sync-worker", obs);
+    GraphState state;
+    RunContext ctx;
+    ctx.thread_id = "sync-thread";
+    ctx.stream_mode = StreamMode::TOKENS;
+    ctx.store = std::make_shared<InMemoryStore>();
+    std::vector<std::string> tokens;
+    GraphStreamCallback cb = [&tokens](const GraphEvent& event) {
+        if (event.type == GraphEvent::Type::LLM_TOKEN) {
+            tokens.push_back(event.data.get<std::string>());
+        }
+    };
+
+    auto out = neograph::async::run_sync(
+        node.run(NodeInput{state, ctx, &cb}));
+
+    EXPECT_EQ(node.get_name(), "sync-worker");
+    EXPECT_EQ(obs->invocations, 1);
+    EXPECT_EQ(obs->thread_id, "sync-thread");
+    EXPECT_EQ(obs->stream_mode, StreamMode::TOKENS);
+    EXPECT_TRUE(obs->had_store);
+    EXPECT_TRUE(obs->had_cb);
+    EXPECT_EQ(tokens, std::vector<std::string>{"sync-token"});
+    ASSERT_EQ(out.writes.size(), 1u);
+    EXPECT_EQ(out.writes[0].mode, ChannelWrite::Mode::Overwrite);
+    ASSERT_TRUE(out.command);
+    EXPECT_EQ(out.command->goto_node, "next");
+    ASSERT_EQ(out.sends.size(), 1u);
+    EXPECT_EQ(out.sends[0].target_node, "worker");
+}
+
+TEST(SyncGraphNodeTest, EngineAppliesWritesCommandAndSend) {
+    auto sync_obs = std::make_shared<SyncRunObs>();
+    auto path_obs = std::make_shared<EnginePathObs>();
+    NodeFactory::instance().register_type(
+        "test_run_dispatch:full_sync",
+        [sync_obs](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<FullSyncNode>(name, sync_obs);
+        });
+    NodeFactory::instance().register_type(
+        "test_run_dispatch:engine_marker",
+        [path_obs](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<EngineMarkerNode>(name, path_obs);
+        });
+
+    json def = {
+        {"name", "sync_engine_path"},
+        {"channels",
+         {{"result", {{"reducer", "overwrite"}}},
+          {"status", {{"reducer", "overwrite"}}},
+          {"item", {{"reducer", "overwrite"}}},
+          {"trace", {{"reducer", "append"}}}}},
+        {"nodes",
+         {{"planner", {{"type", "test_run_dispatch:full_sync"}}},
+          {"worker", {{"type", "test_run_dispatch:engine_marker"}}},
+          {"next", {{"type", "test_run_dispatch:engine_marker"}}}}},
+        {"edges",
+         {{{"from", "__start__"}, {"to", "planner"}},
+          {{"from", "planner"}, {"to", "__end__"}},
+          {{"from", "next"}, {"to", "__end__"}}}},
+    };
+
+    auto engine = GraphEngine::compile(def, NodeContext{});
+    std::vector<std::string> tokens;
+    GraphStreamCallback cb = [&tokens](const GraphEvent& event) {
+        if (event.type == GraphEvent::Type::LLM_TOKEN) {
+            tokens.push_back(event.data.get<std::string>());
+        }
+    };
+    RunConfig cfg;
+    cfg.thread_id = "sync-engine-path";
+    cfg.stream_mode = StreamMode::TOKENS;
+    auto result = engine->run_stream(cfg, cb);
+
+    EXPECT_EQ(sync_obs->invocations, 1);
+    EXPECT_EQ(sync_obs->thread_id, "sync-engine-path");
+    EXPECT_TRUE(sync_obs->had_cb);
+    EXPECT_EQ(tokens, std::vector<std::string>{"sync-token"});
+    EXPECT_EQ(path_obs->worker_invocations, 1);
+    EXPECT_EQ(path_obs->worker_item, 1);
+    EXPECT_EQ(path_obs->next_invocations, 1);
+    EXPECT_EQ(result.channel<std::string>("result"), "sync");
+    EXPECT_EQ(result.channel<std::string>("status"), "ok");
+    EXPECT_EQ(result.output["channels"]["trace"]["value"],
+              json::array({"worker", "next"}));
+}
 
 TEST(NodeRunDispatch, OverrideRunReceivesEngineThreadedContext) {
     auto obs = std::make_shared<RunObs>();
