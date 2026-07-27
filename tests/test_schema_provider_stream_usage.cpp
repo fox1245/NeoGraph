@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 #include <neograph/llm/schema_provider.h>
 
+#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
 
 #include <atomic>

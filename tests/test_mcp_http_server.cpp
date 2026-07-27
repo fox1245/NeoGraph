@@ -5,6 +5,7 @@
 #include <neograph/mcp/client.h>
 #endif
 
+#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
 
 #include <atomic>

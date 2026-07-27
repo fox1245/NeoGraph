@@ -366,11 +366,6 @@ class NEOGRAPH_API SchemaProvider : public Provider {
     std::unique_ptr<asio::io_context> bridge_io_;
     std::optional<asio::executor_work_guard<asio::io_context::executor_type>> bridge_work_;
     std::thread bridge_thread_;
-    // The bridge thread can block inside httplib::Client::Post. Keep each
-    // queued/active stream control reachable so destruction can abort it before
-    // joining that thread.
-    std::mutex stream_cancel_mu_;
-    std::vector<std::shared_ptr<StreamCancelControl>> stream_cancel_controls_;
     // libcurl-backed HTTP/2 pool with multiplexing. Default transport
     // for SchemaProvider — passes Cloudflare/anti-bot WAFs (it IS curl)
     // and gives us native HTTP/2 stream multiplexing for parallel

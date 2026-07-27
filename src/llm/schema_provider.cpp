@@ -151,17 +151,8 @@ SchemaProvider::SchemaProvider(Config config, json schema)
 
 SchemaProvider::~SchemaProvider()
 {
-    std::vector<std::shared_ptr<StreamCancelControl>> active_streams;
-    {
-        std::lock_guard lock(stream_cancel_mu_);
-        active_streams = stream_cancel_controls_;
-    }
-    for (const auto& control : active_streams) control->cancel();
-
     // Order: drop the work guards so each io_context.run() can return,
-    // stop the io_contexts, then join the worker threads. HTTP/SSE needs the
-    // explicit control cancellation above because io_context::stop cannot
-    // interrupt a blocking cpp-httplib request on the bridge thread.
+    // stop the io_contexts, then join the worker threads.
     if (http_work_) http_work_.reset();
     if (bridge_work_) bridge_work_.reset();
     if (http_io_) http_io_->stop();
@@ -1901,10 +1892,6 @@ SchemaProvider::complete_stream_async(const CompletionParams& params,
     auto bridge_exec = bridge_io_->get_executor();
 
     auto cancel_control = std::make_shared<StreamCancelControl>();
-    {
-        std::lock_guard lock(stream_cancel_mu_);
-        stream_cancel_controls_.push_back(cancel_control);
-    }
     auto operation = params.cancel_token
         ? params.cancel_token->fork()
         : std::shared_ptr<neograph::graph::CancelToken>{};
@@ -1956,16 +1943,6 @@ SchemaProvider::complete_stream_async(const CompletionParams& params,
                     params, wrapped, cancel_control);
             } catch (...) {
                 err = std::current_exception();
-            }
-            {
-                std::lock_guard lock(stream_cancel_mu_);
-                auto it = std::find(
-                    stream_cancel_controls_.begin(),
-                    stream_cancel_controls_.end(),
-                    cancel_control);
-                if (it != stream_cancel_controls_.end()) {
-                    stream_cancel_controls_.erase(it);
-                }
             }
             {
                 std::lock_guard lock(shared->mutex);

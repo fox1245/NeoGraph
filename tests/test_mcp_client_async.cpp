@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 #include <neograph/mcp/client.h>
 
+#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
 
 #include <asio/co_spawn.hpp>

@@ -26,6 +26,7 @@
 
 #include <neograph/llm/schema_provider.h>
 
+#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
 
 #include <asio/awaitable.hpp>
@@ -391,67 +392,4 @@ TEST(SchemaProviderStreamAsyncOuterIo,
     // has ended before checking that no abandoned callback was delivered.
     provider.reset();
     EXPECT_EQ(callbacks.load(), 0);
-}
-
-TEST(SchemaProviderStreamAsyncOuterIo,
-     DestroyingProviderAbortsHeldHttpStream) {
-    BlockingResponsesMock mock{make_korean_sse()};
-    ASSERT_GT(mock.port, 0);
-
-    auto provider = llm::SchemaProvider::create(cfg_for(mock.port));
-    ASSERT_TRUE(provider);
-    auto io = std::make_unique<asio::io_context>();
-
-    asio::co_spawn(
-        *io,
-        [&]() -> asio::awaitable<void> {
-            auto p = params_with("ping");
-            try {
-                (void)co_await provider->complete_stream_async(
-                    p, [](const std::string&) {});
-            } catch (...) {
-                // The test abandons the awaiting io_context before teardown.
-            }
-        },
-        asio::detached);
-    std::thread runner([&] { io->run(); });
-
-    bool entered = false;
-    {
-        std::unique_lock lock(mock.mutex);
-        entered = mock.cv.wait_for(
-            lock, std::chrono::seconds(2), [&] { return mock.entered; });
-    }
-    if (!entered) {
-        io->stop();
-        runner.join();
-        ADD_FAILURE() << "HTTP stream did not reach the mock server";
-        return;
-    }
-
-    io->stop();
-    runner.join();
-    io.reset();
-
-    auto destroyed = std::async(std::launch::async, [&] { provider.reset(); });
-    if (destroyed.wait_for(std::chrono::seconds(1)) !=
-        std::future_status::ready) {
-        {
-            std::lock_guard lock(mock.mutex);
-            mock.released = true;
-        }
-        mock.cv.notify_all();
-        destroyed.wait();
-        ADD_FAILURE() << "SchemaProvider destruction waited for a held HTTP stream";
-        return;
-    }
-
-    {
-        std::lock_guard lock(mock.mutex);
-        mock.released = true;
-    }
-    mock.cv.notify_all();
-    std::unique_lock lock(mock.mutex);
-    EXPECT_TRUE(mock.cv.wait_for(
-        lock, std::chrono::seconds(2), [&] { return mock.finished; }));
 }

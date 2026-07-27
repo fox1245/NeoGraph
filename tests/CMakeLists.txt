@@ -79,12 +79,6 @@ add_executable(neograph_tests
     test_schema_provider_stream_async_outer_io.cpp
 )
 
-# cpp-httplib is header-only and CPPHTTPLIB_OPENSSL_SUPPORT changes its class
-# layout. Pin the macro for every test TU so MSVC cannot select an incompatible
-# inline ClientImpl instantiation at link time (issue #16).
-target_compile_definitions(neograph_tests PRIVATE
-    CPPHTTPLIB_OPENSSL_SUPPORT)
-
 if(NEOGRAPH_BUILD_MCP_CLIENT)
     # A stdio MCP tool used from inside a graph run — the combination nothing
     # covered, and a use-after-free until the session stopped depending on an
