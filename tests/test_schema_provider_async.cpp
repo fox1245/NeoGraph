@@ -15,7 +15,6 @@
 #include <asio/system_error.hpp>
 #include <asio/this_coro.hpp>
 
-#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
 
 #include <atomic>

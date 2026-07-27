@@ -12,7 +12,6 @@
 #include <neograph/async/http_client.h>
 #include <neograph/async/run_sync.h>
 
-#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
 
 #include <asio/awaitable.hpp>

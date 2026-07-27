@@ -17,7 +17,6 @@
 #include <neograph/graph/cancel.h>
 #include <future>
 
-#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
 
 #include <asio/io_context.hpp>

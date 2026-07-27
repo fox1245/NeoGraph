@@ -26,7 +26,6 @@
 
 #include <neograph/llm/schema_provider.h>
 
-#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
 
 #include <asio/awaitable.hpp>
@@ -435,10 +434,7 @@ TEST(SchemaProviderStreamAsyncOuterIo,
     io.reset();
 
     auto destroyed = std::async(std::launch::async, [&] { provider.reset(); });
-    // Windows CI runs the full suite at high parallelism and can take just
-    // over one second to schedule the shutdown path. Keep this well below the
-    // provider's 10-second read timeout so a missing socket abort still fails.
-    if (destroyed.wait_for(std::chrono::seconds(5)) !=
+    if (destroyed.wait_for(std::chrono::seconds(1)) !=
         std::future_status::ready) {
         {
             std::lock_guard lock(mock.mutex);
