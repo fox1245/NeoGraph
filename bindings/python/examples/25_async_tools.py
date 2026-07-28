@@ -44,6 +44,7 @@ N = 3
 
 def _definition(names):
     return {
+        "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
         "name": "async_tools_demo",
         "channels": {"messages": {"reducer": "append"}},
         "nodes": {"model": {"type": "at_model"}, "tools": {"type": "tool_dispatch"}},

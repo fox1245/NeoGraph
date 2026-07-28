@@ -25,6 +25,7 @@ if which == "neograph":
             f"n{i}", (lambda ch: (lambda name, cfg, ctx: PyNode(name, ch)))("v"))
 
     graph = {
+        "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
         "name": "chain", "channels": {"v": {"reducer": "overwrite"}},
         "nodes": {f"s{i}": {"type": f"n{i}"} for i in range(5)},
         "edges": ([{"from": "__start__", "to": "s0"}]

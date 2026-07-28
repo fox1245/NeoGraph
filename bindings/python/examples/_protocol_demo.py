@@ -45,6 +45,7 @@ def make_adapter(checkpoint_store=None, input_builder=None):
         type_name, lambda name, config, ctx: EchoNode(name)
     )
     definition = {
+        "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
         "name": "protocol_demo",
         "channels": {"messages": {"reducer": "append"}},
         "nodes": {"echo": {"type": type_name}},

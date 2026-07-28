@@ -89,6 +89,7 @@ int main() {
 
     // Graph definition
     neograph::json definition = {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "intent_router"},
         {"channels", {
             {"messages",  {{"reducer", "append"}}},

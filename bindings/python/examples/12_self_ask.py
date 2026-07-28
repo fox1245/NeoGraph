@@ -129,6 +129,7 @@ ng.NodeFactory.register_type(
 
 
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "self_ask",
     "channels": {
         "question":     {"reducer": "overwrite"},

@@ -224,6 +224,23 @@ def test_the_validator_exists():
     assert hasattr(ng, "ValidationReport")
 
 
+def test_legacy_topology_upgrade_is_lossless_and_strict():
+    legacy = {
+        "name": "legacy",
+        "conditionnal_edges": [],
+        "x-upgraded-conditionnal_edges": "existing-annotation",
+        "nodes": {},
+    }
+
+    upgraded = ng.upgrade_topology(legacy)
+
+    assert ng.TOPOLOGY_SCHEMA_VERSION == 1
+    assert upgraded["schema_version"] == ng.TOPOLOGY_SCHEMA_VERSION
+    assert upgraded["x-upgraded-conditionnal_edges"] == "existing-annotation"
+    assert upgraded["x-upgraded-conditionnal_edges-2"] == []
+    assert not ng.validate(upgraded).has_errors()
+
+
 def test_a_good_graph_has_no_errors():
     definition = {
         "name": "fine",

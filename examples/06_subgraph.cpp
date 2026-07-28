@@ -67,6 +67,7 @@ int main() {
 
     // JSON-based graph definition — subgraph included inline
     neograph::json definition = {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "supervisor_graph"},
         {"channels", {
             {"messages", {{"reducer", "append"}}}

@@ -49,6 +49,7 @@ int main(int argc, char** argv) {
 
     // --- Graph: ReAct with interrupt_before tools ---
     neograph::json definition = {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "mcp_hitl"},
         {"channels", {{"messages", {{"reducer", "append"}}}}},
         {"nodes", {

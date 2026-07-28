@@ -42,6 +42,7 @@ using namespace neograph::graph;
 
 static json topology_simple() {
     return {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "simple"},
         {"channels", {{"messages", {{"reducer", "append"}}}}},
         {"nodes", {{"respond", {{"type", "llm_call"}}}}},
@@ -54,6 +55,7 @@ static json topology_simple() {
 
 static json topology_reflexive() {
     return {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "reflexive"},
         {"channels", {{"messages", {{"reducer", "append"}}}}},
         {"nodes", {
@@ -97,6 +99,7 @@ public:
 
 static json topology_fanout() {
     return {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "fanout"},
         {"channels", {{"messages", {{"reducer", "append"}}}}},
         {"nodes", {

@@ -104,6 +104,7 @@ ng.NodeFactory.register_type(
 # ── Initial agent definition ────────────────────────────────────────
 
 INITIAL_AGENT: dict[str, Any] = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "evolving_chat_v1",
     "_version": 1,
     "channels": {
@@ -136,6 +137,8 @@ def validate_agent(defn: dict) -> tuple[bool, str]:
         return False, "not an object"
     if "name" not in defn:
         return False, "missing 'name'"
+    if defn.get("schema_version") != ng.TOPOLOGY_SCHEMA_VERSION:
+        return False, "must keep current 'schema_version'"
 
     nodes = defn.get("nodes") or {}
     if not isinstance(nodes, dict) or not nodes:
@@ -178,6 +181,7 @@ def validate_agent(defn: dict) -> tuple[bool, str]:
 # is rejected before compile.
 
 def propose_new_agent(current: dict, conversation: list[dict], provider) -> tuple[dict, str]:
+    current_schema = current.get("schema_version")
     convo = "\n".join(
         f"[{m.get('role','?')}] {m.get('content','')[:200]}"
         for m in conversation[-20:]
@@ -190,6 +194,7 @@ style.
 
 Hard rules — violating any rejects your output:
   - Output ONLY a JSON object — no prose, no markdown fences.
+  - Keep top-level "schema_version" exactly {current_schema!r}.
   - Only "prompted_chat" node type is registered.
   - Keep the "messages" channel with reducer "append".
   - Keep the "__graph_meta__" channel with reducer "append".
@@ -233,6 +238,10 @@ Return the revised graph JSON."""
         proposed = json.loads(raw)
     except json.JSONDecodeError as e:
         raise RuntimeError(f"evolver returned non-JSON: {e}; raw[:300]: {raw[:300]!r}")
+    if proposed.get("schema_version") != current_schema:
+        raise RuntimeError(
+            "evolver changed or omitted schema_version: "
+            f"expected {current_schema!r}, got {proposed.get('schema_version')!r}")
 
     reason = proposed.pop("_reason", None) or "evolved from conversation"
     return proposed, reason

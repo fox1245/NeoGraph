@@ -52,6 +52,7 @@ ng.NodeFactory.register_type(
     lambda name, config, ctx, _n=node: _n)
 
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "cache_demo",
     "channels": {
         "topic":  {"reducer": "overwrite"},

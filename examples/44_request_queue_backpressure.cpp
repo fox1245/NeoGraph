@@ -61,6 +61,7 @@ public:
 
 static json work_graph() {
     return {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "single_work"},
         {"channels", {{"result", {{"reducer", "overwrite"}}}}},
         {"nodes",    {{"work",   {{"type", "work"}}}}},

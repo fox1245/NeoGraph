@@ -69,6 +69,7 @@ std::shared_ptr<GraphEngine> build_demo_engine() {
             return std::make_unique<UppercaseNode>(n);
         });
     neograph::json def = {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "uppercase-acp-agent"},
         {"channels", {
             {"prompt",   {{"reducer", "overwrite"}}},

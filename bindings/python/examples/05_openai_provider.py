@@ -23,6 +23,7 @@ provider = openai_provider()  # exits cleanly if no key
 # provider, writes the assistant message back. No subclassing needed
 # for the common case.
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "openai_oneshot",
     "channels": {"messages": {"reducer": "append"}},
     "nodes": {"llm": {"type": "llm_call"}},

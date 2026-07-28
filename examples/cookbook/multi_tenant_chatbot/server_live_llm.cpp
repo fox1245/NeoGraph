@@ -55,6 +55,7 @@ using clk = std::chrono::steady_clock;
 
 static json topology_simple() {
     return {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "simple"},
         {"channels", {{"messages", {{"reducer", "append"}}}}},
         {"nodes", {
@@ -70,6 +71,7 @@ static json topology_simple() {
 static json topology_reflexive() {
     // draft → critique → final. 진짜 LLM 이라 3 API call/요청.
     return {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "reflexive"},
         {"channels", {{"messages", {{"reducer", "append"}}}}},
         {"nodes", {
@@ -90,6 +92,7 @@ static json topology_fanout() {
     // 3 perspective 병렬 — 진짜 LLM 이라 3 동시 API call/요청.
     // merge 는 mock 그대로 (deterministic, LLM 불필요).
     return {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "fanout"},
         {"channels", {{"messages", {{"reducer", "append"}}}}},
         {"nodes", {

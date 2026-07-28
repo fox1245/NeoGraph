@@ -43,6 +43,7 @@ int main() {
         });
 
     json def = {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "cache_demo"},
         {"channels", {
             {"x", {{"reducer", "overwrite"}}},

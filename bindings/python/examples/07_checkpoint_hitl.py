@@ -92,6 +92,7 @@ ng.NodeFactory.register_type(
 #   then we inspect — and if approved, run stage 2: just the dispatch.
 
 stage1_def = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "stage1_propose",
     "channels": {"messages": {"reducer": "append"}},
     "nodes": {"llm": {"type": "fake_llm"}},
@@ -102,6 +103,7 @@ stage1_def = {
 }
 
 stage2_def = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "stage2_execute",
     "channels": {"messages": {"reducer": "append"}},
     "nodes": {"dispatch": {"type": "tool_dispatch"}},

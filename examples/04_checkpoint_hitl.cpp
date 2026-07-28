@@ -75,6 +75,7 @@ int main() {
 
     // Define graph via JSON — interrupt before the tools node
     neograph::json definition = {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "order_workflow"},
         {"channels", {
             {"messages", {{"reducer", "append"}}}

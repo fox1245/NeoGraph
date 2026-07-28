@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=60b0675d8856a38a51c9eaa809e78f39c236d2c2977b14b62d69bc8ccb7fb217 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=75569d457cedc380413c9de3526d7a4db73790213b5ac9613182126fe9f4933c -->
 # Python バインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -25,6 +25,7 @@ def greet(state):
         [{"role": "assistant", "content": f"Hello, {state.get('name')}!"}])]
 
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "demo",
     "channels": {"name":     {"reducer": "overwrite"},
                  "messages": {"reducer": "append"}},
@@ -59,6 +60,7 @@ ctx = ng.NodeContext(
 )
 
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "react",
     "channels": {"messages": {"reducer": "append"}},
     "nodes":    {"llm": {"type": "llm_call"}, "dispatch": {"type": "tool_dispatch"}},

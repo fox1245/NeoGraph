@@ -75,6 +75,7 @@ provider = openai_provider()
 # as a built-in). The conditional edge from `llm` routes back into
 # `dispatch` when the LLM emitted a tool call, otherwise it ends.
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "react_agent",
     "channels": {"messages": {"reducer": "append"}},
     "nodes": {

@@ -126,6 +126,7 @@ ng.NodeFactory.register_type(
 
 
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "multi_agent_debate",
     "channels": {
         "topic":     {"reducer": "overwrite"},

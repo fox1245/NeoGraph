@@ -109,6 +109,7 @@ int main(int argc, char** argv) {
         });
 
     neograph::json definition = {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "a2a_demo"},
         {"channels", {
             {"prompt",            {{"reducer", "overwrite"}}},

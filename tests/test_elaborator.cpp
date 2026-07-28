@@ -308,9 +308,39 @@ TEST(Upgrade, LegacyDocumentUpgradesToEquivalentIR) {
     EXPECT_TRUE(up["retry_policy"].contains("x-upgraded-max_retry"));
     EXPECT_TRUE(up["channels"]["c"].contains("x-upgraded-initail"));
     EXPECT_FALSE(up["nodes"]["a"].contains("barrier"));
+    EXPECT_EQ(up["nodes"]["a"]["x-upgraded-barrier"],
+              legacy["nodes"]["a"]["barrier"]);
 
     // Already-current documents pass through unchanged.
     EXPECT_EQ(GraphCompiler::upgrade_to_latest(up), up);
+}
+
+TEST(Upgrade, QuarantinePreservesExistingAnnotationsOnNameCollision) {
+    ensure_etypes();
+    json legacy = {
+        {"conditionnal_edges", json::array()},
+        {"x-upgraded-conditionnal_edges", "existing-top-level-annotation"},
+        {"channels", {{"c", {{"reducer", "append"},
+                               {"initail", 1},
+                               {"x-upgraded-initail", "existing-channel-annotation"}}}}},
+        {"nodes", {{"a", {{"type", "enoop"},
+                            {"barrier", {{"wait_for", json::array()}}},
+                            {"x-upgraded-barrier", "existing-node-annotation"}}}}},
+    };
+
+    const json up = GraphCompiler::upgrade_to_latest(legacy);
+
+    EXPECT_EQ(up["x-upgraded-conditionnal_edges"],
+              "existing-top-level-annotation");
+    EXPECT_EQ(up["x-upgraded-conditionnal_edges-2"], json::array());
+    EXPECT_EQ(up["channels"]["c"]["x-upgraded-initail"],
+              "existing-channel-annotation");
+    EXPECT_EQ(up["channels"]["c"]["x-upgraded-initail-2"], 1);
+    EXPECT_EQ(up["nodes"]["a"]["x-upgraded-barrier"],
+              "existing-node-annotation");
+    EXPECT_EQ(up["nodes"]["a"]["x-upgraded-barrier-2"],
+              legacy["nodes"]["a"]["barrier"]);
+    EXPECT_NO_THROW(GraphCompiler::compile(up, NodeContext{}));
 }
 
 TEST(Upgrade, ExplicitDefaultRouteBecomesStrictFallback) {

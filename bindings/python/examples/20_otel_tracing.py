@@ -60,6 +60,7 @@ for tn, fac in [("step_a", StepA), ("step_b", StepB), ("step_c", StepC)]:
         lambda name, config, ctx, _f=fac: _f(name))
 
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "otel_demo",
     "channels": {"trail": {"reducer": "append"}},
     "nodes": {

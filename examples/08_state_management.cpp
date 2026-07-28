@@ -78,6 +78,7 @@ int main() {
     // 2-node graph: llm → reviewer (interrupt before reviewer)
     // The user reviews the LLM response, then the reviewer does final confirmation
     neograph::json definition = {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "state_demo"},
         {"channels", {{"messages", {{"reducer", "append"}}}}},
         {"nodes", {

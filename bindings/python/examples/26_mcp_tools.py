@@ -130,6 +130,7 @@ class PretendModel(ng.GraphNode):
 
 
 DEFINITION = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "mcp_demo",
     "channels": {"messages": {"reducer": "append"}},
     "nodes": {"model": {"type": "mcp_model"}, "tools": {"type": "tool_dispatch"}},

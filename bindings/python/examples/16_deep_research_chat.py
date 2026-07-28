@@ -239,6 +239,7 @@ for type_name, factory in [
 
 
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "deep_research_chat",
     "channels": {
         "messages":          {"reducer": "append"},

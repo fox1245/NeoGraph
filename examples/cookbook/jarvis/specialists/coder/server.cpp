@@ -270,6 +270,7 @@ int main(int argc, char** argv) {
 
     // 그래프 정의: persona → summary_enforcer 2단계
     json def = {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "coder-specialist"},
         {"channels", {
             {"prompt",   {{"reducer", "overwrite"}}},

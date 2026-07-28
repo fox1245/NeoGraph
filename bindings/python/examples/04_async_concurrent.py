@@ -34,6 +34,7 @@ ng.NodeFactory.register_type(
 )
 
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "async_demo",
     "channels": {
         "seed":    {"reducer": "overwrite"},

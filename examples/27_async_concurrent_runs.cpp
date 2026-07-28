@@ -61,6 +61,7 @@ public:
 
 static neograph::json one_step_graph(const std::string& node_name) {
     return {
+        {"schema_version", ng::TOPOLOGY_SCHEMA_VERSION},
         {"name", "single_work"},
         {"channels", {
             {"messages", {{"reducer", "append"}}},

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=zh-CN source_sha256=11e68f6a872b8ae6ddcc70f8b1cb6a883e34d9e14d1da05358c48d47d56bf2d1 -->
+<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=zh-CN source_sha256=8b62b237339d4244bee698f93443c1598e9ae55b631399b33d036606bab39d52 -->
 # NeoGraph C++ API 参考 {#mainpage}
 
 **Languages:** [English](doxygen-mainpage.md) | [한국어](doxygen-mainpage.ko.md) | [日本語](doxygen-mainpage.ja.md) | [简体中文](doxygen-mainpage.zh-CN.md)
@@ -49,6 +49,7 @@ using namespace neograph::graph;
 
 int main() {
     json definition = {
+        {"schema_version", TOPOLOGY_SCHEMA_VERSION},
         {"channels", {{"messages", {{"reducer", "append"}}}}},
         {"nodes",    {{"echo",     {{"type", "llm_call"}}}}},
         {"edges",    json::array({

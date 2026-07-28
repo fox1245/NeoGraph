@@ -1,5 +1,6 @@
 {
   "name": "jarvis",
+  "schema_version": 1,
   "_comment": [
     "자비스 메인 그래프. 음성 입력 한 턴이 들어와서 음성 출력 한 턴이 나가는 단위.",
     "voice_in / whisper_stt / supertonic_tts / mcp_dispatch / a2a_delegate 는 main.cpp 에서",

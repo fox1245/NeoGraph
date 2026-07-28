@@ -71,11 +71,13 @@ from ._neograph import (
 
     # Pre-flight checks on a graph definition (#97)
     validate,
+    upgrade_topology,
     ValidationReport,
     Diagnostic,
 
     # Versioning
     __version__,
+    TOPOLOGY_SCHEMA_VERSION,
 
     # Provider surface
     Provider,
@@ -528,6 +530,7 @@ __all__ = [
     "InMemoryStore",
     "StoreItem",
     "validate",
+    "upgrade_topology",
     "ValidationReport",
     "Diagnostic",
     "RateLimitError",
@@ -550,6 +553,7 @@ __all__ = [
     # Postgres/SqliteCheckpointStore appended dynamically below when present.
     "StreamMode",
     "GraphEvent",
+    "TOPOLOGY_SCHEMA_VERSION",
     "START_NODE",
     "END_NODE",
 ]

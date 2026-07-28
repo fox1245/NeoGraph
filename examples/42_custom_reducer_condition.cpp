@@ -124,6 +124,7 @@ int main() {
     // the registry name is misspelled, build() throws — try changing
     // "sum" to "summ" below to see the failure mode.
     json def = {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "custom_reducer_demo"},
         {"channels", {
             {"score",   {{"reducer", "sum"}}},

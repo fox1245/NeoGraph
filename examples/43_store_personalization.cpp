@@ -111,6 +111,7 @@ public:
 
 static json make_graph() {
     return json{
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "personalized"},
         {"channels", {
             {"user_id",      {{"reducer", "overwrite"}}},
