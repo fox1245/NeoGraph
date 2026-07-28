@@ -96,6 +96,7 @@ int main(int argc, char** argv) {
     cfg.survivors_per_gen = 3;
     cfg.max_generations = 3;
     cfg.seed = 42;
+    cfg.run_evaluation = true;
 
     auto result = evolve(elab.core, task, cfg);
     auto output = to_json(result);
@@ -103,5 +104,5 @@ int main(int argc, char** argv) {
     output["seed_name"] = seed_doc.value("name", "");
 
     std::cout << output.dump(2) << "\n";
-    return result.compile_passed > 0 ? 0 : 1;
+    return result.compile_passed > 0 && result.best.score.correct ? 0 : 1;
 }

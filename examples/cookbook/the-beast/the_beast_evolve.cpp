@@ -1,10 +1,8 @@
 // NeoGraph Cookbook — "The Beast", EVOLVE (memetic, real-task fitness)
 // =================================================================
-// evolution.h's evaluate() is gate-only: it compiles/validates a mutant
-// and calls it "cost 0" — it never RUNS the harness or scores its output.
-// So fitness is flat and nothing climbs.
-//
-// This supplies a REAL, output-scored fitness and drives a memetic loop.
+// evolution.h supplies deterministic exact-output task scoring. This example
+// uses a custom continuous distance metric instead, so near misses can climb
+// toward the numeric target rather than receiving one flat mismatch cost.
 //
 // The task (a genuine one, not a structural proxy): assemble an ARITHMETIC
 // PIPELINE that computes a target number. Five operation nodes exist —

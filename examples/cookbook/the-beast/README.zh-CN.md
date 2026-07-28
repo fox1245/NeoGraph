@@ -343,14 +343,11 @@ caps=[net]  (net cap):    {"socket": "SOCKET_CREATED"}         # capability gran
 
 ## 进化——模因（达尔文+拉马克）
 
-离线的`the_beast.cpp`运行evolution.h的`evolve()`，但是该路径的
-`evaluate()`是**仅门**：它编译/验证突变体并调用它
-“成本 0”——它从不*运行*执行框架或对其输出进行评分。所以适应度就是
-平坦且没有任何攀爬（最好的个体保留种子）。
+离线的 `the_beast.cpp` 有意设置 `run_evaluation=false`，因此只按结构有效性
+进行选择。通用 evolution API 也可以执行任务，并将输出与预期通道值进行精确比较。
 
-[`the_beast_evolve.cpp`](the_beast_evolve.cpp) 提供缺失的层：
-**真正的适应度，执行执行框架并对其实际输出进行评分**，
-然后驱动模因循环。
+[`the_beast_evolve.cpp`](the_beast_evolve.cpp) 则使用连续距离指标，使接近目标的
+结果能够继续改进，而不是都落入通用评分器的同一个输出不匹配类别。
 
 - **任务**（真正的任务，输出评分 - 不是结构代理）：
   组装一个计算目标数字的算术管道。五操作
