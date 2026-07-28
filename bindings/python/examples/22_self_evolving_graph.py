@@ -175,6 +175,7 @@ def propose_new_graph(current_graph: dict, last_reply: str,
       - may NOT introduce node types other than ``prompted_llm``
       - returns strict JSON only
     """
+    current_schema = current_graph.get("schema_version")
     instructions = f"""You are a graph-rewriter. Given a NeoGraph
 definition (JSON) and the failure mode of its last run, output a
 REVISED graph that fixes the failure.
@@ -182,6 +183,7 @@ REVISED graph that fixes the failure.
 Hard rules:
   - Output ONLY a JSON object — no prose, no markdown fences.
   - Keep the same top-level "name" field.
+  - Keep top-level "schema_version" exactly {current_schema!r}.
   - Only "prompted_llm" node type is registered. Do not invent others.
   - The graph must reach END_NODE from START_NODE.
   - You may modify any node's "config.system_prompt" or
@@ -227,15 +229,21 @@ Return the revised graph JSON now."""
         raw = raw.strip()
 
     try:
-        return json.loads(raw)
+        proposed = json.loads(raw)
     except json.JSONDecodeError as e:
         raise RuntimeError(
             f"self-modifier returned non-JSON: {e}. raw: {raw[:400]!r}")
+    if proposed.get("schema_version") != current_schema:
+        raise RuntimeError(
+            "self-modifier changed or omitted schema_version: "
+            f"expected {current_schema!r}, got {proposed.get('schema_version')!r}")
+    return proposed
 
 
 # ── Driver ──────────────────────────────────────────────────────────
 
 INITIAL_GRAPH: dict[str, Any] = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "person_profile",
     "channels": {
         "seed":      {"reducer": "overwrite"},

@@ -86,6 +86,7 @@ int main() {
     ctx.instructions = "Echo user turn count.";
 
     json definition = {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "chatbot"},
         {"channels", {{"messages", {{"reducer", "append"}}}}},
         {"nodes",    {{"llm",       {{"type", "llm_call"}}}}},

@@ -34,6 +34,7 @@ ng.NodeFactory.register_type(
 
 # Compile a 1-node graph: __start__ → doubler → __end__
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "minimal",
     "channels": {
         "seed":    {"reducer": "overwrite"},

@@ -49,6 +49,7 @@ ng.NodeFactory.register_type(
     lambda name, config, ctx: TokenEmitter(name))
 
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "streaming_demo",
     "channels": {"messages": {"reducer": "append"}},
     "nodes":    {"emit":     {"type": "token_emitter"}},

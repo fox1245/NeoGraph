@@ -58,6 +58,7 @@ int main() {
         });
 
     json def = {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "slow_chain"},
         {"channels", {{"counter", {{"reducer", "overwrite"}}}}},
         {"nodes", {

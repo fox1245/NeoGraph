@@ -173,6 +173,7 @@ def main() -> int:
 
     # Single-step graph; the agentic loop is hidden inside complete().
     graph_def = {
+        "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
         "name": "byo-openai-agentic",
         "channels": {"messages": {"reducer": "append"}},
         "nodes":    {"agent": {"type": "llm_call"}},

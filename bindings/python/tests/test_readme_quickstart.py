@@ -39,6 +39,7 @@ def test_readme_five_second_demo_runs_and_produces_documented_output():
         ]
 
     definition = {
+        "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
         "name": "demo",
         "channels": {
             "name": {"reducer": "overwrite"},
@@ -111,6 +112,7 @@ def offline_react_graph():
     ctx = ng.NodeContext(tools=[CalcTool()])
 
     definition = {
+        "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
         "name": "react",
         "channels": {"messages": {"reducer": "append"}},
         "nodes": {
@@ -193,6 +195,7 @@ def test_runresult_documented_attributes_exist():
         return []
 
     definition = {
+        "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
         "name": "n",
         "channels": {"x": {"reducer": "overwrite"}},
         "nodes": {"noop": {"type": "noop"}},
@@ -249,6 +252,7 @@ def test_documented_reducers_compile(reducer_name):
 
     initial = [] if reducer_name == "append" else 0
     definition = {
+        "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
         "name": "r",
         "channels": {"ch": {"reducer": reducer_name}},
         "nodes": {"noop": {"type": "noop"}},
@@ -270,6 +274,7 @@ def test_undocumented_reducer_raises_clearly():
         return []
 
     definition = {
+        "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
         "name": "r",
         "channels": {"ch": {"reducer": "last_value"}},  # not registered
         "nodes": {"noop": {"type": "noop"}},

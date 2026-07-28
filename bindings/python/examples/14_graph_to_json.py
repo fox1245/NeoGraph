@@ -54,6 +54,7 @@ ng.NodeFactory.register_type(
 
 # Build the definition the same way you would in any other example.
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "doubler_graph",
     "channels": {
         "seed":    {"reducer": "overwrite"},

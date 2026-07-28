@@ -60,6 +60,7 @@ ng.NodeFactory.register_type(
 )
 
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "fanout_demo",
     "channels": {
         "item":    {"reducer": "overwrite"},

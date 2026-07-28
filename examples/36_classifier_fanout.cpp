@@ -214,6 +214,7 @@ int main(int argc, char** argv) {
         });
 
     json definition = {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "classifier_fanout"},
         {"channels", {
             {"text",     {{"reducer", "overwrite"}}},

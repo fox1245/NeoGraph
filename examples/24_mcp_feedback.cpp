@@ -77,6 +77,7 @@ int main(int argc, char** argv) {
         neograph::llm::OpenAIProvider::create(cfg);
 
     neograph::json definition = {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "feedback_loop"},
         {"channels", {{"messages", {{"reducer", "append"}}}}},
         {"nodes", {

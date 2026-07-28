@@ -46,6 +46,7 @@ ng.NodeFactory.register_type(
 )
 
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "counter",
     "channels": {"count": {"reducer": "overwrite"}},
     "nodes": {"i": {"type": "incr"}},

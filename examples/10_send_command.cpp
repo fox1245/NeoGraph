@@ -173,6 +173,7 @@ int main() {
     // Graph definition
     // planner → (dynamic researcher execution via Send) → evaluator → branching via Command
     json definition = {
+        {"schema_version", TOPOLOGY_SCHEMA_VERSION},
         {"name", "research_agent"},
         {"channels", {
             {"query",       {{"reducer", "overwrite"}}},

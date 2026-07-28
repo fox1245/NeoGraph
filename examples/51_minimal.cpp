@@ -43,6 +43,7 @@ int main() {
 
     // (1) 그래프 정의 — 채널 1, 노드 1, 엣지 2 (start→upper→end).
     json def = {
+        {"schema_version", TOPOLOGY_SCHEMA_VERSION},
         {"name", "minimal"},
         {"channels", {{"text", {{"reducer", "overwrite"}}}}},
         {"nodes",    {{"upper", {{"type", "upper"}}}}},

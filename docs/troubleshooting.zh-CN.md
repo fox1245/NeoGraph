@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=18fbe81b3233d4da002abe8e6b268f65168347f28e27740eed56dfb2ce58900f -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=6d6541f3291390674910938c7a45100ea84f62b1b7f7dd4e864afee8507ca154 -->
 # 故障排除
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -594,6 +594,19 @@ NeoGraph自己的 .cpp 文件都一致地定义了宏。仅当下游 TU 也拉�
 (3-精氨酸`register_type`）在封闭世界中进行检查；添加`"additionalProperties": true`到模式以选择退出类型。
 - 要退回到历史宽松的解析，请删除
 `schema_version`— 然后再次忽略未知的键，并且往返不匹配仅在 stderr 上发出警告。新文件应保持严格。
+
+### 兼容性时间线
+
+- 所有 `0.x` 版本都让缺失 `schema_version` 或版本为 0 的文档继续使用宽松兼容
+  路径；`0.x` 更新不会悄悄把它们重新解释为严格文档。
+- 新定义、内置图工厂和持续维护的示例声明当前版本
+  （`TOPOLOGY_SCHEMA_VERSION`，当前为 `1`）。
+- 计划中的 `1.0.0` 边界会用迁移诊断拒绝缺失版本或版本为 0 的输入，而不是
+  静默改变其路由或解析语义。
+- C++ 输入使用 `GraphCompiler::upgrade_to_latest()`，Python 输入使用
+  `ng.upgrade_topology()`。被旧版忽略的数据会保存在避免名称冲突的
+  `x-upgraded-*` 注释中。对于 DSL 源，请重新运行 elaborator，以便同时重新生成
+  lockfile 和 source map。
 
 ---
 

@@ -43,6 +43,7 @@ int main() {
 
     // Two-node chain — a → b.
     json def = {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "checkpoint_demo"},
         {"channels", {
             {"counter", {{"reducer", "overwrite"}}},

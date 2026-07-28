@@ -61,6 +61,7 @@ different agent (see [`docs/concepts.md`](docs/concepts.md)):
 
 ```json
 {
+  "schema_version": 1,
   "channels": { "messages": {"reducer": "append"}, "__route__": {"reducer": "overwrite"} },
   "nodes": {
     "planner":    {"type": "llm_call"},
@@ -193,6 +194,7 @@ pip install neograph-engine
 import neograph_engine as ng
 
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "demo",
     "channels": {"messages": {"reducer": "append"}},
     "nodes":    {"llm": {"type": "llm_call"}},

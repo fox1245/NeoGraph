@@ -233,6 +233,7 @@ std::shared_ptr<GraphEngine> build_engine(std::shared_ptr<Provider> provider,
         });
 
     json def = {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "researcher-agent"},
         {"channels", {
             {"prompt",   {{"reducer", "overwrite"}}},

@@ -196,6 +196,7 @@ int main() {
             });
 
         json def = {
+            {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
             {"name", "payment_graph"},
             {"channels", {
                 {"amount", {{"reducer", "overwrite"}}},
@@ -251,6 +252,7 @@ int main() {
             });
 
         json def = {
+            {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
             {"name", "retry_graph"},
             {"channels", {{"api_result", {{"reducer", "overwrite"}}}}},
             {"nodes", {{"unstable_api", {{"type", "unstable_api"}}}}},
@@ -283,6 +285,7 @@ int main() {
     section("3. StreamMode — VALUES + UPDATES mode");
     {
         json def = {
+            {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
             {"name", "stream_demo"},
             {"channels", {
                 {"amount", {{"reducer", "overwrite"}}},
@@ -357,6 +360,7 @@ int main() {
             });
 
         json def = {
+            {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
             {"name", "command_graph"},
             {"channels", {
                 {"score",     {{"reducer", "overwrite"}}},
@@ -444,6 +448,7 @@ int main() {
 
         // Connect Store to GraphEngine
         json def = {
+            {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
             {"name", "store_demo"},
             {"channels", {
                 {"amount", {{"reducer", "overwrite"}}},

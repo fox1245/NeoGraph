@@ -1259,6 +1259,7 @@ std::unique_ptr<GraphEngine> create_deep_research_graph(
     }
 
     json definition = {
+        {"schema_version", TOPOLOGY_SCHEMA_VERSION},
         {"name", "deep_research_agent"},
         {"channels", channels},
         {"nodes", nodes},

@@ -208,6 +208,7 @@ int main() {
         owned_tools.push_back(std::make_unique<CalculatorTool>());
         // Standard 2-node ReAct loop: llm → (has_tool_calls?) → tools → llm.
         neograph::json definition = {
+            {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
             {"name", "react_async_streaming"},
             {"channels", {{"messages", {{"reducer", "append"}}}}},
             {"nodes", {

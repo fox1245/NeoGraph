@@ -839,6 +839,20 @@ something, and the message lists exactly what.
   `schema_version` — unknown keys are then ignored again and round-trip
   mismatches only warn on stderr. New documents should stay strict.
 
+### Compatibility timeline
+
+- Every `0.x` release keeps absent or zero `schema_version` documents on the
+  lenient compatibility path. No `0.x` update will silently reinterpret them as
+  strict documents.
+- New definitions, built-in graph factories, and maintained examples declare
+  the current version (`TOPOLOGY_SCHEMA_VERSION`, currently `1`).
+- The planned `1.0.0` boundary rejects absent or zero versions with a migration
+  diagnostic instead of silently changing their routing or parsing semantics.
+- Upgrade C++ input with `GraphCompiler::upgrade_to_latest()` or Python input
+  with `ng.upgrade_topology()`. Ignored legacy data is retained under collision-
+  safe `x-upgraded-*` annotations. For DSL sources, re-run the elaborator so the
+  lockfile and source map are regenerated together.
+
 ---
 
 ## Reporting a bug

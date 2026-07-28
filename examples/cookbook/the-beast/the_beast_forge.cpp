@@ -44,6 +44,11 @@ namespace ng = neograph::graph;
 // ---- three coherence gates (unchanged across the whole cookbook) ----
 struct Verdict { bool ok = false; std::string gate, report; json core; };
 Verdict forge_gate(const json& dsl, const ng::NodeContext& ctx) {
+    if (!dsl.contains("schema_version")
+        || !dsl["schema_version"].is_number_integer()
+        || dsl["schema_version"].get<int>() != ng::TOPOLOGY_SCHEMA_VERSION) {
+        return {false, "schema", "schema_version must match TOPOLOGY_SCHEMA_VERSION", {}};
+    }
     json core;
     try { core = ng::Elaborator::elaborate(dsl).core; }
     catch (const std::exception& e) { return {false, "elaborate", e.what(), {}}; }
@@ -184,7 +189,7 @@ int main(int argc, char** argv) {
     std::vector<neograph::ChatMessage> hconvo = {
         {"system",
          "You author a NeoGraph agent harness — a graph TOPOLOGY in JSON. Output ONLY "
-         "one JSON object. Build a ReAct tool-calling agent: schema_version 1; channels "
+         "one JSON object. Build a ReAct tool-calling agent: \"schema_version\": 1; channels "
          "{\"messages\":{\"reducer\":\"append\"}}; a node \"agent\" of type \"llm_call\" and "
          "a node \"tools\" of type \"tool_dispatch\"; edges __start__->agent, a conditional "
          "edge {\"from\":\"agent\",\"condition\":\"has_tool_calls\",\"routes\":{\"true\":"

@@ -12,9 +12,10 @@ std::unique_ptr<GraphEngine> create_react_graph(
     //   __start__ -> llm -> (has_tool_calls ? tools : __end__)
     //                         tools -> llm  (loop back)
     json definition = {
+        {"schema_version", TOPOLOGY_SCHEMA_VERSION},
         {"name", "react_agent"},
         {"channels", {
-            {"messages", {{"type", "list"}, {"reducer", "append"}}}
+            {"messages", {{"reducer", "append"}}}
         }},
         {"nodes", {
             {"llm",   {{"type", "llm_call"}}},

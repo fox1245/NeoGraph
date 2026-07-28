@@ -77,6 +77,11 @@ json channel_of(const json& serialized, const std::string& name) {
 struct Verdict { bool ok = false; std::string gate, report; json core; };
 
 Verdict forge(const json& dsl, const ng::NodeContext& ctx) {
+    if (!dsl.contains("schema_version")
+        || !dsl["schema_version"].is_number_integer()
+        || dsl["schema_version"].get<int>() != ng::TOPOLOGY_SCHEMA_VERSION) {
+        return {false, "schema", "schema_version must match TOPOLOGY_SCHEMA_VERSION", {}};
+    }
     json core;
     try { core = ng::Elaborator::elaborate(dsl).core; }
     catch (const std::exception& e) { return {false, "elaborate", e.what(), {}}; }

@@ -12,12 +12,6 @@ namespace neograph::graph {
 
 namespace {
 
-// Highest schema_version this compiler understands. Documents declaring
-// a higher version were written for a newer engine — refusing them is
-// the whole point of carrying the field (silent reinterpretation of a
-// newer document is worse than an error).
-constexpr int kSupportedSchemaVersion = 1;
-
 // Keys starting with '_' or 'x-' are annotations: for humans
 // (`_comment`, used across the cookbook corpus) and external tooling
 // (`x-studio-pos`). The engine never consumes them, strict mode never
@@ -302,11 +296,11 @@ TopologySpec GraphCompiler::parse(const json& definition,
                 + sv.dump());
         }
         topology.schema_version = sv.get<int>();
-        if (topology.schema_version > kSupportedSchemaVersion) {
+        if (topology.schema_version > TOPOLOGY_SCHEMA_VERSION) {
             throw std::runtime_error(
                 "topology schema_version " + std::to_string(topology.schema_version)
                 + " is newer than this engine supports (max "
-                + std::to_string(kSupportedSchemaVersion)
+                + std::to_string(TOPOLOGY_SCHEMA_VERSION)
                 + "). Upgrade NeoGraph or re-export the topology.");
         }
     }
@@ -857,25 +851,38 @@ json GraphCompiler::canon(const json& definition) {
 json GraphCompiler::upgrade_to_latest(const json& definition) {
     if (definition.contains("schema_version")
         && definition["schema_version"].is_number_integer()
-        && definition["schema_version"].get<int>() >= kSupportedSchemaVersion) {
+        && definition["schema_version"].get<int>() >= TOPOLOGY_SCHEMA_VERSION) {
         return definition;   // already current
     }
+
+    auto quarantine_name = [](const json& source, const json& output,
+                              const std::string& key) {
+        const std::string base = "x-upgraded-" + key;
+        std::string candidate = base;
+        for (int suffix = 2;
+             source.contains(candidate) || output.contains(candidate);
+             ++suffix) {
+            candidate = base + "-" + std::to_string(suffix);
+        }
+        return candidate;
+    };
 
     // Rebuild an object keeping `consumed` keys, renaming everything
     // else (except annotations) into the x- namespace — data preserved,
     // strict mode satisfied, semantics identical to the lenient parser
     // that ignored those keys.
-    auto quarantine = [](const json& obj, const std::set<std::string>& consumed) {
+    auto quarantine = [&](const json& obj,
+                          const std::set<std::string>& consumed) {
         json out = json::object();
         for (const auto& [k, v] : obj.items()) {
             if (consumed.count(k) || is_annotation_key(k)) out[k] = v;
-            else out["x-upgraded-" + k] = v;
+            else out[quarantine_name(obj, out, k)] = v;
         }
         return out;
     };
 
     json up = json::object();
-    up["schema_version"] = kSupportedSchemaVersion;
+    up["schema_version"] = TOPOLOGY_SCHEMA_VERSION;
 
     static const std::set<std::string> top_keys = {
         "name", "channels", "nodes", "edges", "conditional_edges",
@@ -884,7 +891,7 @@ json GraphCompiler::upgrade_to_latest(const json& definition) {
     for (const auto& [k, v] : definition.items()) {
         if (k == "schema_version") continue;   // re-stamped above
         if (!top_keys.count(k) && !is_annotation_key(k)) {
-            up["x-upgraded-" + k] = v;
+            up[quarantine_name(definition, up, k)] = v;
             continue;
         }
         if (k == "channels" && v.is_object()) {
@@ -927,6 +934,7 @@ json GraphCompiler::upgrade_to_latest(const json& definition) {
                         for (const auto& [nk, nv] : node.items()) {
                             if (nk != "barrier") cleaned[nk] = nv;
                         }
+                        cleaned[quarantine_name(node, cleaned, "barrier")] = b;
                         node = std::move(cleaned);
                     }
                 }

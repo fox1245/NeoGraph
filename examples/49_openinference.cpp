@@ -184,6 +184,7 @@ int main() {
         });
 
     json def = {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "obs_demo"},
         {"channels", {{"reply", {{"reducer", "overwrite"}}}}},
         {"nodes", {{"talk", {{"type", "talk"}}}}},

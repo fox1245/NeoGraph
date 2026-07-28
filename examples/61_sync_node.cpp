@@ -34,6 +34,7 @@ int main() {
         });
 
     json def = {
+        {"schema_version", TOPOLOGY_SCHEMA_VERSION},
         {"name", "sync_node"},
         {"channels", {{"text", {{"reducer", "overwrite"}}}}},
         {"nodes", {{"upper", {{"type", "upper"}}}}},

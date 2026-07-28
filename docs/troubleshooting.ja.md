@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ja source_sha256=18fbe81b3233d4da002abe8e6b268f65168347f28e27740eed56dfb2ce58900f -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ja source_sha256=6d6541f3291390674910938c7a45100ea84f62b1b7f7dd4e864afee8507ca154 -->
 # トラブルシューティング
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -838,6 +838,19 @@ JSON は入力と一致しなくなりました: コンパイラーが失われ�
 - 過去の寛大な解析に戻すには、次のコマンドを削除します。
   `schema_version` — 未知のキーは再度無視され、ラウンドトリップされます。
   不一致がある場合は標準エラー出力でのみ警告されます。新しい文書は厳格であるべきです。
+
+### 互換性タイムライン
+
+- すべての `0.x` リリースでは、`schema_version` がない文書または 0 の文書を
+  寛容な互換パスに維持します。`0.x` 更新で暗黙に厳格文書へ再解釈しません。
+- 新しい定義、組み込みグラフファクトリー、保守対象の例は現在のバージョン
+  (`TOPOLOGY_SCHEMA_VERSION`、現在は `1`) を宣言します。
+- 予定されている `1.0.0` 境界では、バージョンがない入力または 0 の入力の
+  ルーティングや解析の意味を暗黙に変えず、移行診断とともに拒否します。
+- C++ 入力は `GraphCompiler::upgrade_to_latest()`、Python 入力は
+  `ng.upgrade_topology()` で更新します。無視されていたレガシーデータは衝突を
+  避ける `x-upgraded-*` 注釈として保持されます。DSL ソースは elaborator を
+  再実行し、lockfile と source map を一緒に再生成してください。
 
 ---
 

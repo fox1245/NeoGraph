@@ -120,6 +120,7 @@ public:
 // =========================================================================
 static json make_graph() {
     return {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "plan_and_executor"},
         {"channels", {
             {"query",    {{"reducer", "overwrite"}}},

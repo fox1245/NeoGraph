@@ -52,6 +52,7 @@ using namespace neograph::graph;
 
 int main() {
     json definition = {
+        {"schema_version", TOPOLOGY_SCHEMA_VERSION},
         {"channels", {{"messages", {{"reducer", "append"}}}}},
         {"nodes",    {{"echo",     {{"type", "llm_call"}}}}},
         {"edges",    json::array({

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ko source_sha256=f6016fba6c70ae3d33be9ea2b574a25b9ea984822aa371dd940da43b3b0d19dd -->
+<!-- neograph-i18n: source=README.md locale=ko source_sha256=1ea76dcf312e4041ee0762b42945377e996661562c6ea90a4ccb9b35b586bdab -->
 <p align="center">
   <h1 align="center">NeoGraph</h1>
   <p align="center">
@@ -58,6 +58,7 @@ auto result = engine->run(config);
 
 ```json
 {
+  "schema_version": 1,
   "channels": { "messages": {"reducer": "append"}, "__route__": {"reducer": "overwrite"} },
   "nodes": {
     "planner":    {"type": "llm_call"},
@@ -172,6 +173,7 @@ pip install neograph-engine
 import neograph_engine as ng
 
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "demo",
     "channels": {"messages": {"reducer": "append"}},
     "nodes":    {"llm": {"type": "llm_call"}},

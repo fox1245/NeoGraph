@@ -158,6 +158,7 @@ int main(int argc, char** argv) {
         });
 
     json definition = {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "mcp_fanout"},
         {"channels", {
             {"plan",       {{"reducer", "overwrite"}}},

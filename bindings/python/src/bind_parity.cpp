@@ -66,6 +66,8 @@ public:
 void init_parity(py::module_& m) {
     using namespace neograph::graph;
 
+    m.attr("TOPOLOGY_SCHEMA_VERSION") = py::int_(TOPOLOGY_SCHEMA_VERSION);
+
     // ── Store ────────────────────────────────────────────────────────────
     //
     // A checkpoint remembers one conversation. The Store remembers the user
@@ -204,6 +206,15 @@ void init_parity(py::module_& m) {
         "    report = ng.validate(definition)\n"
         "    if report.has_errors():\n"
         "        print(report.summary())\n");
+
+    m.def("upgrade_topology",
+        [](py::object definition) {
+            return json_to_py(
+                GraphCompiler::upgrade_to_latest(py_to_json(definition)));
+        },
+        py::arg("definition"),
+        "Return a lossless strict-schema upgrade of a legacy graph definition."
+        " Ignored legacy fields are preserved as x-upgraded-* annotations.");
 }
 
 }  // namespace neograph::pybind

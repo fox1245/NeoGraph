@@ -111,6 +111,7 @@ class PretendModel(ng.GraphNode):
 
 
 DEFINITION = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "approval_gate",
     "channels": {"messages": {"reducer": "append"}},
     "nodes": {

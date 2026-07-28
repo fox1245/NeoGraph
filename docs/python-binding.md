@@ -24,6 +24,7 @@ def greet(state):
         [{"role": "assistant", "content": f"Hello, {state.get('name')}!"}])]
 
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "demo",
     "channels": {"name":     {"reducer": "overwrite"},
                  "messages": {"reducer": "append"}},
@@ -58,6 +59,7 @@ ctx = ng.NodeContext(
 )
 
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "react",
     "channels": {"messages": {"reducer": "append"}},
     "nodes":    {"llm": {"type": "llm_call"}, "dispatch": {"type": "tool_dispatch"}},

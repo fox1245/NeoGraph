@@ -87,6 +87,11 @@ std::vector<std::unique_ptr<neograph::Tool>> make_tools() {
 struct Verdict { bool ok = false; std::string gate, report; json core; };
 
 Verdict forge(const json& dsl, const ng::NodeContext& ctx) {
+    if (!dsl.contains("schema_version")
+        || !dsl["schema_version"].is_number_integer()
+        || dsl["schema_version"].get<int>() != ng::TOPOLOGY_SCHEMA_VERSION) {
+        return {false, "schema", "schema_version must match TOPOLOGY_SCHEMA_VERSION", {}};
+    }
     json core;
     try { core = ng::Elaborator::elaborate(dsl).core; }
     catch (const std::exception& e) { return {false, "elaborate", e.what(), {}}; }
@@ -152,7 +157,7 @@ int main(int argc, char** argv) {
         "(the loop). Conditional edge form: "
         "{ \"from\": \"agent\", \"condition\": \"has_tool_calls\", "
         "\"routes\": { \"true\": \"tools\", \"false\": \"__end__\" } }.\n"
-        "- schema_version: 1.\n\n"
+        "- \"schema_version\": 1.\n\n"
         "Tools available to the agent at runtime (for your awareness; you do not "
         "wire them individually — tool_dispatch handles all): " + catalog.dump() +
         "\n\nAny dangling node, missing route branch, or undeclared channel is "

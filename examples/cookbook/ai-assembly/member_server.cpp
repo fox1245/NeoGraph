@@ -147,6 +147,7 @@ int main(int argc, char** argv) {
         });
 
     json def = {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "member-" + persona_name},
         {"channels", {
             {"prompt",   {{"reducer", "overwrite"}}},

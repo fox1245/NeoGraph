@@ -69,6 +69,7 @@ ng.NodeFactory.register_type(
 
 
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "command_routing",
     "channels": {
         "value":     {"reducer": "overwrite"},

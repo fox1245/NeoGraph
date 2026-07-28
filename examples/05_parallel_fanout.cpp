@@ -130,6 +130,7 @@ int main() {
 
     // JSON-based graph definition
     neograph::json definition = {
+        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "parallel_research"},
         {"channels", {
             {"findings", {{"reducer", "append"}}},

@@ -112,6 +112,7 @@ ng.NodeFactory.register_type(
 # ends, `retry` loops back to actor. `route_channel` is a built-in
 # condition that just looks up the named channel value.
 definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "reflexion",
     "channels": {
         "task":       {"reducer": "overwrite"},
