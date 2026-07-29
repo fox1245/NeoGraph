@@ -1,7 +1,7 @@
 # Programmable Harness DSL and Control VM Architecture
 
-Status: Target Architecture Design (not yet implemented)
-Date: 2026-07-28
+Status: Target Architecture Design (not yet implemented; execution decision revised)
+Date: 2026-07-29
 Related Issues: #245, #250, #251, #252
 
 ## 1. Purpose
@@ -18,38 +18,46 @@ This document answers the following questions:
    dynamic interrupt be expressed safely in a declarative DSL?
 4. How is the claim of expressing all permitted topologies defined and verified?
 5. Which extension boundary lets developers add new topology concepts while
-   minimizing changes to the legacy scheduler, checkpoint, and Harness code?
+   retiring the legacy scheduler and keeping checkpoint and Harness invariants
+   in one durable kernel?
 
 This document is not user-facing documentation of currently supported features.
 It records design criteria and completeness contracts for future implementation.
 
 ## 2. Conclusion
 
-The Programmable Harness evolves into a **hybrid architecture that combines a
-typed metered control VM with a small durable kernel**.
+The Programmable Harness evolves into a **unified control-execution architecture
+that combines one typed metered Control VM with one small durable kernel**.
 
 - The existing strict core topology JSON is retained as the canonical
-  representation of a static graph and as a backward-compatible core mode.
-- Common high-level constructs are lowered deterministically to strict core
-  whenever possible.
-- Dynamic orchestration that is difficult to express directly in strict core is
-  lowered to typed control bytecode.
-- The static graph and the control VM do not have separate execution engines.
-  Both use the same durable transition kernel to handle task, state, event,
-  effect, and checkpoint.
+  analyzable representation of a static graph and as a backward-compatible
+  authoring and inspection mode. It is not a permanent second execution backend.
+- Every admitted program, including an existing strict-core graph, is lowered
+  deterministically to verified typed control bytecode before execution.
+- Every bundle carries a hashed semantic projection for validation,
+  visualization, provenance, and source-to-bytecode equivalence. A canonical
+  strict-core topology is included when the source has one.
+- The Control VM is the only control executor. It decides what transition to
+  propose but does not directly commit state, dispatch effects, or own recovery.
+- The durable kernel is the only owner of task, state, event, effect, budget,
+  journal, replay, and checkpoint invariants.
 - The long-term canonical executable artifact is not a single strict core
   document but a content-addressed **Program Bundle** that bundles the static
   topology, bytecode module, imports, schemas, and source map.
+- `GraphEngine` remains temporarily as the legacy behavior oracle and becomes a
+  compatibility facade over Program compilation and execution after cutover.
 
 ```text
 natural-language directive
   -> normalized directive contract
   -> high-level Program dialect
-  -> validate and deterministic lowering
-       -> strict core topology
-       -> typed control bytecode module
+  -> validate and deterministic semantic lowering
+       -> inspectable strict-core topology, when statically representable
+       -> verified typed control bytecode module for all executable control
   -> sealed Program Bundle
   -> immutable admission receipt
+  -> Control VM
+       -> proposed TransitionBatch
   -> durable transition kernel
        -> task scheduling
        -> state commit/checkpoint
@@ -64,12 +72,12 @@ cancellation, or a topology notion not yet named, it can be expressed as a
 program or library without repeatedly modifying the existing `Scheduler`,
 `GraphEngine`, and checkpoint backends.
 
-The VM does not eliminate all runtime changes. Features that alter kernel
-invariants such as new global fairness, transaction isolation, distributed
-commit, or event-time models require kernel and checkpoint protocol changes
-in any architecture. The hybrid architecture's purpose is to absorb common
-new concepts as bytecode libraries and compiler extensions, leaving only the
-cases that genuinely require a kernel change.
+The unified Control VM does not eliminate all runtime changes. Features that
+alter kernel invariants such as new global fairness, transaction isolation,
+distributed commit, or event-time models require kernel and checkpoint protocol
+changes in any architecture. The architecture's purpose is to absorb common new
+concepts as bytecode libraries and compiler extensions, leaving only the cases
+that genuinely require a kernel change.
 
 ### 2.1 Final Decision on Turing Completeness
 
@@ -169,9 +177,9 @@ and legacy-coupling re-examination:
 | Position | Strongest Argument | Final Conclusion |
 |---|---|---|
 | finite-control HIR | Only a total language keeps static analysis and durable migration stable | Adopted for normalization, elaboration, and per-step expressions |
-| metered bytecode | Expressing new topology as instructions and libraries minimizes legacy scheduler changes | Adopted as first-class control extension substrate |
-| evolved strict core | Generalizing existing graph cycles, state, and branches keeps a single runtime simple | Retained as static topology and durable kernel compatibility layer |
-| unrestricted VM-only | Handling all graphs and effects in one general-purpose VM | Rejected because it weakens static analysis, replay, migration, and capability boundaries |
+| metered bytecode | Expressing all executable control through one instruction model prevents permanent scheduler forks | Adopted as the sole admitted control-execution substrate |
+| evolved strict core | Existing topology carries valuable static analysis, visualization, and compatibility information | Retained as hashed semantic IR and graph-to-bytecode input, not as a permanent runtime |
+| unrestricted VM-owned runtime | Handling control, state commit, effects, and recovery inside one general-purpose VM | Rejected because it weakens replay, migration, capability boundaries, and crash safety |
 
 The points on which all lanes agreed were stronger:
 
@@ -185,34 +193,48 @@ The points on which all lanes agreed were stronger:
   mutation.
 - Resume, fork, and repair must not increase budget or authority.
 
-The final choice is **VM-first extensibility, not VM-only**. When a new concept
-can be expressed with existing kernel transitions, only a bytecode compiler or
-library is added. When a new concept changes state visibility, atomic commit,
-global scheduling, durability, or security invariants, it requires a kernel
-release and checkpoint migration. Not hiding this distinction is the key to
-long-term compatibility.
+The final choice is **VM-unified control execution, not VM-owned durability**.
+Every executable control path, including a static strict-core graph, eventually
+runs as verified bytecode in the same Control VM. When a new concept can be
+expressed with existing kernel transitions, only a bytecode compiler or library
+is added. When a new concept changes state visibility, atomic commit, global
+scheduling, durability, or security invariants, it requires a kernel release and
+checkpoint migration. Not hiding this boundary is the key to long-term
+compatibility.
+
+This decision deliberately separates two meanings of "hybrid":
+
+- **retained:** a Program Bundle may contain both inspectable topology IR and
+  executable bytecode
+- **rejected as the final state:** a graph scheduler and a Control VM remain as
+  two independently evolving execution engines
+
+The P3 adapter may temporarily run both implementations to prove observable
+equivalence. It has an explicit removal gate and must not become a permanent
+semantic compatibility profile.
 
 ### 2.5 Decision Matrix
 
-| Criterion | Evolve strict core only | General-purpose VM only | Hybrid control VM + durable kernel |
+| Criterion | Graph runtime only | VM owns control and durability | Unified Control VM + durable kernel |
 |---|---|---|---|
-| Add static graph notation | requires compiler/core schema work | usually a compiler/library change | compiler/lowering change only |
+| Add static graph notation | requires compiler/core schema work | usually a compiler/library change | topology and graph-to-bytecode lowering change |
 | Add a new orchestration combinator | often touches scheduler and checkpoints | library change if host API is sufficient | bytecode library change if kernel transition is sufficient |
-| Add global scheduling semantics | kernel change | VM host/runtime change | explicit kernel change |
-| Static topology analysis | strongest | weakest unless rebuilt in verifier metadata | strong for static core, conservative for bytecode |
-| Deterministic replay | clear but specialized state grows | possible, but VM must recreate command history and versioning | one kernel journal for both execution forms |
-| Checkpoint migration | schema grows per core feature | full VM state migration required | stable kernel state plus versioned VM continuation |
-| Capability enforcement | direct in compiler/runtime | unsafe unless every environment access is imported | sealed imports enforced by kernel |
+| Add global scheduling semantics | graph runtime change | VM host/runtime change | explicit kernel change |
+| Static topology analysis | strongest | weakest unless rebuilt in verifier metadata | preserved before lowering and committed in the bundle |
+| Deterministic replay | clear but specialized state grows | VM must recreate durable command history | one kernel journal for every control program |
+| Checkpoint migration | schema grows per core feature | VM owns an unsafe amount of durable state | stable kernel state plus versioned VM continuation |
+| Capability enforcement | direct in compiler/runtime | unsafe unless every environment access is imported | sealed imports admitted and enforced by the kernel |
 | Source-level debugging | direct graph visualization | poor without disassembly/source maps | graph view plus bytecode disassembly and unified provenance |
-| Legacy modification for ordinary future concepts | medium to high | low after a large initial rewrite | low after a bounded transition-protocol investment |
-| Risk of semantic forks | low | medium to high | controlled by keeping global invariants in kernel |
-| Initial implementation cost | lowest | highest | medium, staged behind existing behavior |
+| Legacy modification for ordinary future concepts | medium to high | low after a large initial rewrite | low after graph-to-bytecode cutover |
+| Risk of semantic forks | concentrated in one graph runtime | concentrated in one oversized VM runtime | controlled by one VM instruction model and one kernel |
+| Initial implementation cost | lowest | highest and riskiest | medium, staged behind existing behavior |
 
-The graph-only option is preferable when the feature set is stable and static
-analysis dominates extensibility. The VM-only option is preferable for an
-isolated compute sandbox with few durability requirements. NeoGraph requires
-both durable graph compatibility and open-ended orchestration extension, so the
-hybrid option best matches the stated objective.
+The graph-runtime-only option is preferable when the feature set is stable and
+static analysis dominates extensibility. A VM that also owns persistence and
+effects is preferable only for an isolated compute sandbox with few durability
+requirements. NeoGraph requires durable graph compatibility and open-ended
+orchestration extension without two control runtimes, so one Control VM above
+one durable kernel best matches the stated objective.
 
 ## 3. Current Compilation Pipeline
 
@@ -406,8 +428,8 @@ kernel:
 
 > Given a sealed kernel ABI `K` and an admitted module set `M`, every finite
 > program source that can be described using the transitions of `K` and the
-> pure/typed functions of `M` can be lowered deterministically to strict core
-> or verified control bytecode.
+> pure/typed functions of `M` can be lowered deterministically to verified
+> control bytecode, with a canonical topology projection wherever one exists.
 
 No architecture can be unconditionally complete for all future global
 semantics not yet defined. For example, a new transaction isolation level may
@@ -424,7 +446,7 @@ Completeness is divided into three kinds:
 | Completeness | Requirement |
 |---|---|
 | Topology completeness | Nodes, channels, edges, routes, barriers, cycles, interrupts, retries, and subgraphs are preserved in core without loss |
-| Control completeness | Source constructs are expressed in strict core or typed bytecode, and required kernel transitions and imports are fixed |
+| Control completeness | Every executable source construct is expressed in typed bytecode, any static topology projection is bound to it, and required kernel transitions and imports are fixed |
 | Behavior completeness | Primitive, bytecode, and kernel versions, implementation identity, schemas, effects, and control contract are fixed |
 | Authority completeness | Capabilities, providers, workspace, credential scope, and budget are not extended after admission |
 
@@ -436,7 +458,9 @@ properties are guarantees about program structure and execution authority.
 ### 7.1 What Is Included in the DSL and Artifact
 
 - Program Bundle schema version and manifest
-- strict-core topology component and digest
+- mandatory semantic projection and digest
+- strict-core topology component and digest when present, otherwise an explicit
+  canonical absence marker
 - typed bytecode module, format version, and content digest
 - bytecode import table and required kernel ABI
 - VM state schema and supported migration coordinates
@@ -519,7 +543,15 @@ executable identity:
   "manifest": {
     "program_id": "org.example.implement_and_verify",
     "kernel_abi": "neograph.transition.v1",
+    "source_semantics": "program-v1",
     "entry": "controller.main"
+  },
+  "semantic_projection": {
+    "format": "neograph-control-graph-v1",
+    "entry": "controller.main",
+    "nodes": [],
+    "edges": [],
+    "imports": []
   },
   "topology": {"schema_version": 1, "channels": {}, "nodes": {}, "edges": []},
   "control_modules": [
@@ -538,18 +570,28 @@ executable identity:
 }
 ```
 
-`topology` and `control_modules` are each optional, but a bundle with neither
-is not executable. An existing strict-core document must be mechanically
-wrappable as a version-1 bundle containing only the topology component. The
-bundle hash includes the manifest, topology, bytecode, imports, schemas,
-source map, and dependency root.
+`semantic_projection`, at least one admitted `control_module`, and an executable
+bytecode entry are required in the final profile. The projection is a canonical,
+conservative control graph that records entry points, possible control edges,
+sealed target sets, imports, and source coordinates; it must not claim that a
+dynamic edge is impossible unless the verifier can prove that claim. `topology`
+is additionally required when the source has a strict-core representation.
+
+An existing strict-core document must be mechanically compilable as a version-1
+bundle containing its canonical topology, semantic projection, and
+compiler-generated control bytecode. A topology-only P3 envelope is marked
+`migration_only: true`, has no executable bundle identity, and can run only in
+the frozen legacy oracle before cutover. It is not a final executable profile.
+The final bundle hash includes the manifest, semantic projection, topology,
+bytecode, imports, schemas, source map, and dependency root so inspected claims
+and executed behavior cannot drift independently.
 
 ### 8.2 One Durable Transition Kernel
 
-The target architecture does not implement a separate VM state commit,
-checkpoint, effect, and replay path. After the compatibility adapter in P3 is
-specified and implemented, both the static graph scheduler and the VM use the
-following abstract transition protocol:
+The target architecture does not implement either a separate graph execution
+runtime or a separate VM state commit, checkpoint, effect, and replay path.
+After graph-to-bytecode cutover, every admitted program executes in the Control
+VM and uses the following abstract transition protocol:
 
 | Kernel transition | Meaning |
 |---|---|
@@ -564,14 +606,16 @@ following abstract transition protocol:
 | `checkpoint.yield` | submit the VM continuation and pending transitions to a durable boundary |
 | `complete/fail` | terminate the invocation with a typed output or failure |
 
-One VM quantum or static graph super-step proposes a `TransitionBatch`. The
-kernel validates the entire batch for schema, authority, budget, conflict, and
-idempotency, then appends the journal and commits the state. It must not
-execute some transitions first and reject the remainder.
+One VM quantum proposes a `TransitionBatch`. For a strict-core source, the
+quantum executes compiler-generated bytecode whose source map points back to the
+topology node, edge, route, barrier, or reducer that produced it. The kernel
+validates the entire batch for schema, authority, budget, conflict, and
+idempotency, then appends the journal and commits the state. It must not execute
+some transitions first and reject the remainder.
 
 ```text
 event batch + checkpointed continuation
-  -> deterministic VM/static planner
+  -> deterministic Control VM
   -> proposed TransitionBatch
   -> validate authority/schema/budget/conflict
   -> append durable decision
@@ -589,6 +633,32 @@ The kernel alone owns the following invariants:
 - capability and effect mediation
 - run-wide budget accounting
 - tenant and resource isolation
+
+`GraphEngine` does not remain a second owner of these invariants. During
+migration it serves as a behavior oracle for equivalence fixtures. After
+cutover, its public construction and execution APIs delegate to Program Bundle
+compilation and the Control VM runtime. New scheduling, checkpoint, replay,
+cancellation, or effect semantics must not be added only to the legacy engine.
+
+The compatibility adapter has the following mandatory exit criteria:
+
+1. admission and lowering use the same sealed registry manifest, and admission
+   succeeds only when every referenced node, reducer, condition, dynamic-control
+   contract, and checkpoint shape has a verified lowering
+2. a machine-readable compatibility matrix classifies every legacy behavior as
+   `equivalent`, `versioned_change`, or `drain_only`; no behavior is unclassified
+3. property tests over the sealed registry plus the strict-core corpus prove
+   GraphEngine/VM equivalence for every `equivalent` class, including outputs,
+   transition order, interrupts, retry, checkpoints, and causal journal records
+4. every `versioned_change` requires an explicit source semantic profile and
+   migration diagnostic; no compiler silently changes observable behavior
+5. restart, resume, replay, and fork pass with kernel state plus a versioned VM
+   continuation for all VM-admitted classes
+6. existing legacy checkpoints are exactly converted or drained under the
+   resume-only policy below, and no resumable legacy checkpoint remains before
+   the legacy scheduler binary is removed
+7. Harness routes new runs through the VM profile by default; public
+   `GraphEngine` APIs compile to that profile and cannot start a legacy runtime
 
 ### 8.3 Normative Transition and Concurrency Semantics
 
@@ -615,10 +685,23 @@ map every current rule, including `Command.goto` precedence, signal fan-in,
 barriers, `Send`, pending-write replay, interrupts, and retry, to the transition
 protocol before equivalence is claimed.
 
-Existing topology-only bundles run under a pinned `legacy-graph-v1` execution
-profile until that mapping is complete. VM-spawned tasks use the uniform
-isolated-task semantics above. The compatibility profile is a migration tool,
-not an invitation to add new semantic profiles indefinitely.
+The final `program-v1` source semantics use the uniform rules in the table. A
+separate `graph-compat-v1` **lowering profile**, executed by the same VM and
+kernel, may preserve an existing strict-core behavior when that behavior can be
+expressed without weakening kernel invariants. For example, current
+`Command.goto` routing-order precedence is resolved inside generated compatibility
+bytecode so the kernel still receives at most one external route target. A
+single- or multi-`Send` shape is admitted for VM execution only after the
+compatibility matrix proves an exact lowering for its state-visibility contract;
+otherwise it is `drain_only` and cannot start as a new VM run.
+
+The pinned `legacy-graph-v1-runtime` profile names the old GraphEngine execution
+path, not the compatibility lowering profile. It is frozen except for correctness
+fixes required to drain existing runs, receives no new orchestration features,
+and cannot start new runs after VM cutover. `graph-compat-v1` may continue to
+compile old source semantics into new VM bytecode without retaining the old
+runtime. These distinct names prevent backward-compatible source semantics from
+becoming an excuse for a permanent second engine.
 
 ### 8.4 External Effect State Machine
 
@@ -861,6 +944,26 @@ migration must preserve their stable identities and cursors. An in-flight
 non-idempotent effect that cannot be mapped exactly is non-migratable and keeps
 the source run blocked for reconciliation.
 
+Legacy GraphEngine checkpoints require a separate cutover policy because they
+do not contain a VM continuation. Each checkpoint backend must inventory and
+classify every resumable record before VM cutover:
+
+- `convertible`: a pure, backend-tested converter maps scheduler state,
+  `next_nodes`, barriers, pending writes, interrupts, retries, and in-flight
+  identities to a sealed Program Bundle plus kernel state and VM continuation
+- `drain_only`: the frozen `legacy-graph-v1-runtime` may resume the exact old run
+  to completion, but it may not start, fork, replace, or attach new work
+- `blocked`: ambiguous effects or an unsupported checkpoint shape fail closed
+  and require operator reconciliation; they are never silently restarted
+
+New runs stop using the legacy runtime at the default VM cutover. The
+resume-only runtime remains isolated and version-pinned until every retained
+legacy checkpoint is converted, completed, expired under the documented
+retention policy, or explicitly tombstoned after operator approval. The legacy
+scheduler binary is removed only after a store-wide audit reports zero resumable
+legacy checkpoints. The public `GraphEngine` facade never routes new work to the
+resume-only runtime.
+
 ### 9.7 Example of a New Topology Concept
 
 A quorum join becomes a library function rather than a kernel opcode:
@@ -922,9 +1025,10 @@ Features not directly permitted in the DSL source:
 - direct checkpoint store access
 - ambient credential or tenant context access
 
-Simple constructs are lowered to strict core; general control constructs are
-lowered to typed bytecode. When both paths express the same semantics, a
-conformance test verifies observable equivalence.
+Simple constructs produce both strict-core topology and compiler-generated
+bytecode; general control constructs produce bytecode plus conservative topology
+metadata where useful. A conformance test verifies that generated bytecode
+preserves every semantic claim made by its topology projection.
 
 ### 9.9 Closed Switch
 
@@ -965,14 +1069,16 @@ flow:
         channel: findings
 ```
 
-With a static bound and target, this is lowered to a strict-core control node.
-When a runtime-dependent loop body, early break, cancellation, or nested spawn
-is required, it is lowered to control bytecode.
+With a static bound and target, this is represented as a strict-core control node
+and then lowered to control bytecode. When a runtime-dependent loop body, early
+break, cancellation, or nested spawn is required, it is lowered directly to
+control bytecode.
 
 ```text
 foreach DSL
   -> neograph_control_map core node
-  -> runtime Send[]
+  -> graph-to-bytecode lowering
+  -> task.spawn/event.next transitions
 ```
 
 The target is fixed as a sealed import. The payload, invocation count, event
@@ -1034,7 +1140,7 @@ regardless of the specific transport:
 ```text
 extension.manifest_v1
 extension.validate_v1(source_or_op) -> diagnostics
-extension.lower_v1(source_or_op) -> core topology or typed bytecode
+extension.lower_v1(source_or_op) -> topology projection + typed bytecode
 extension.migrate_state_v1(old_state) -> new_state
 extension.explain_v1(runtime_event) -> source provenance
 ```
@@ -1105,10 +1211,12 @@ If the runtime result falls outside this set, it fails before dispatch.
 
 When multiple parallel branches emit `Command.goto` simultaneously, the current
 scheduler uses last-writer-wins based on the supplied routing order. In a
-programmable profile, multiple identical targets are coalesced and multiple
+`program-v1` profile, multiple identical targets are coalesced and multiple
 distinct targets reject the entire transition batch before state commit. The
-legacy `last-writer-wins` behavior remains only in the pinned
-`legacy-graph-v1` compatibility profile and is included in P3 mapping tests.
+same-VM `graph-compat-v1` lowering preserves legacy routing-order precedence in
+generated bytecode and proposes only the selected target to the kernel. The
+old behavior remains in `legacy-graph-v1-runtime` only for resume-only checkpoint
+drain and is included in P3 oracle traces.
 
 Evidence: `src/core/scheduler.cpp:114-129`
 
@@ -1307,7 +1415,8 @@ Two authoring modes are provided.
 ```
 
 Core mode is a topology-complete escape hatch. It accepts all strict-core
-topology permitted by the sealed registry with near-identity lowering.
+topology permitted by the sealed registry, preserves canon-equivalent topology,
+and then applies deterministic graph-to-bytecode lowering for execution.
 
 ### 16.2 Program Mode
 
@@ -1315,14 +1424,19 @@ Program mode provides domain constructs such as `worker`, `switch`, `parallel`,
 `join`, `foreach`, `retry`, `accept`, `effect`, `await`, `child_call`,
 `module_use`, `stop`, and `fail`.
 
-The program-mode compiler selects the following lowering per construct:
+The program-mode compiler produces one executable bytecode program and one
+inspectable semantic projection:
 
-- constructs that are statically expressible are lowered to strict-core topology
+- constructs that are statically expressible are represented in strict-core
+  topology and lowered to equivalent typed bytecode
 - runtime-dependent loops, functions, event waits, and cancellations are lowered
-  to typed bytecode
+  directly to typed bytecode and conservatively represented in the required
+  semantic projection
 - heavy or effectful domain operations are lowered to sealed primitive imports
 
-The selection is a versioned lowering rule, not an internal compiler heuristic.
+The semantic projection, optional strict-core topology, and bytecode lowering
+are versioned rules, not internal compiler heuristics. Topology never selects a
+separate execution backend.
 The same source, compiler profile, and dependency set must produce a
 byte-identical Program Bundle. Users must be able to inspect the emitted
 topology, bytecode disassembly, import table, and source map.
@@ -1346,8 +1460,9 @@ The following invariants are added for Program Bundle compilation:
    identity.
 6. Every accepted directive clause ID must map to a node, edge, gate, policy,
    or diagnostic.
-7. The source map must connect directive spans, high-level constructs, core
-   JSON pointers, bytecode ranges, and module sources.
+7. The source map must connect directive spans, high-level constructs, semantic
+   projection IDs, bytecode ranges, and module sources. Core JSON pointers are
+   additionally required when a strict-core topology is present.
 8. Authority and effect declarations must not be hidden in annotation
    namespaces.
 9. After module linking, whole-program translation, semantic, and binding
@@ -1358,8 +1473,8 @@ The following invariants are added for Program Bundle compilation:
     module boundary.
 12. External task, effect, module, and capability targets must be sealed
     imports or opaque handles.
-13. When static graph and bytecode lowering support the same construct, an
-    observable equivalence fixture must exist.
+13. When a construct has a static topology projection, an observable equivalence
+    fixture must prove that its generated bytecode preserves that projection.
 14. Unknown bytecode format, opcode, import, or kernel ABI must fail closed at
     compile and resume.
 
@@ -1368,7 +1483,9 @@ The admission receipt includes at minimum:
 - source DSL hash
 - normalized directive hash
 - Program Bundle hash
-- strict-core component hash
+- semantic projection hash
+- strict-core component hash when present, otherwise its canonical absence
+  marker
 - bytecode module, format, and verifier profile hash
 - kernel ABI and fuel schedule version
 - compiler build and profile
@@ -1409,8 +1526,8 @@ or rejected in the schema.
 
 ### 18.3 Direct/Harness Execution Equivalence
 
-The same core using only deterministic primitives is executed through two
-paths:
+Before VM cutover, the same core using only deterministic primitives is executed
+through two oracle paths:
 
 ```text
 GraphEngine direct execution
@@ -1420,6 +1537,13 @@ Harness core-mode execution
 Channel results, selected routes, barrier behavior, and topology trace (aside
 from Harness instrumentation) must be identical.
 
+For VM cutover, only `equivalent` classes admitted under `graph-compat-v1` are
+required to match the pinned GraphEngine oracle exactly. A `versioned_change`
+does not satisfy equivalence: it requires explicit source migration or opt-in to
+`program-v1`, a compile diagnostic naming the changed behavior, and fixtures for
+the declared new transition sequence. `drain_only` cases never start as new VM
+runs.
+
 ### 18.4 Dynamic Control Escape Tests
 
 The following are verified to fail closed:
@@ -1428,7 +1552,9 @@ The following are verified to fail closed:
 - undeclared `Send` target
 - send count exceeded
 - invalid send payload
-- multiple distinct parallel `Command.goto` targets reject the full batch
+- under `program-v1`, multiple distinct parallel `Command.goto` targets reject
+  the full batch; under `graph-compat-v1`, generated bytecode deterministically
+  proposes only the legacy routing-order winner
 - child authority widened
 - child budget or fuel widened
 - unregistered dynamic primitive
@@ -1466,8 +1592,8 @@ An LLM-generated program is checked against the normalized directive contract.
 
 - typed bytecode branch, loop, and local state express a counter-machine
   fixture
-- the same fixture is compiled through both strict-core cycle and bytecode
-  paths; observable step prefixes are compared
+- the same fixture is executed through the pinned GraphEngine oracle and through
+  strict-core-to-bytecode lowering; observable step prefixes are compared
 - under finite fuel, execution stops exactly with `budget_exhausted`; fuel
   does not increase after resume or fork
 - undeclared imports, capabilities, and forged opaque handles are rejected
@@ -1520,9 +1646,9 @@ An LLM-generated program is checked against the normalized directive contract.
 
 - `race`, `await_all`, `quorum`, retry, and speculative branch are implemented
   as bytecode libraries
-- after the P3 adapter is complete, a diff gate confirms that adding the above
-  constructs requires no new feature-specific branches in the legacy scheduler
-  or checkpoint schemas
+- during migration, a diff gate confirms that adding the above constructs
+  requires no new feature-specific branches in the frozen legacy scheduler or
+  checkpoint schemas; after cutover, the scheduler is absent from Harness
 - loser cancellation, quorum impossibility, and parallel tie-breaking are
   verified with deterministic fixtures
 - kernel-level concepts such as global fairness and transaction isolation
@@ -1560,7 +1686,7 @@ An LLM-generated program is checked against the normalized directive contract.
 - fix topology, control, behavior, and authority completeness definitions
 - write strict-core topology corpus
 - add regression tests for current palette and admission mismatch
-- prepare direct GraphEngine versus Harness equivalence harness
+- prepare direct GraphEngine versus Control VM equivalence harness
 
 ### P1: Topology-Complete Core Mode
 
@@ -1578,18 +1704,25 @@ An LLM-generated program is checked against the normalized directive contract.
 - per-invocation tool attenuation
 - schema-compatible sequential and parallel worker composition
 
-### P3: Program Bundle and Transition Protocol
+### P3: Program Bundle, Transition Protocol, and Migration Boundary
 
-- version-1 Program Bundle schema wrapping existing strict-core artifacts
-- content hash, manifest, dependency root, and admission receipt
+- version-1 Program Bundle schema capable of binding semantic projection,
+  canonical topology, and future executable control bytecode
+- `migration_only` topology envelope, manifest, dependency root, and legacy
+  oracle trace identity; do not issue a final executable bundle hash or
+  admission receipt before bytecode exists
 - configured trust root, publisher/scope authorization, signature/attestation,
   and revocation/quarantine checks
-- internal adapter expressing static graph super-steps as `TransitionBatch`
+- transitional adapter recording current static graph super-steps as the
+  `TransitionBatch` equivalence oracle
 - task, event, effect, and handle identity with atomic batch validation
   contract
 - adapter equivalence test for current checkpoint and replay behavior
-- at this phase, the scheduler is not replaced; existing behavior is
-  encapsulated behind the protocol
+- freeze the legacy scheduler against new orchestration features
+- at this phase, the scheduler is not yet replaced; existing behavior is
+  encapsulated behind the protocol solely to support measured migration
+- define the compatibility matrix, legacy checkpoint inventory, and adapter
+  removal gate; execution of that gate begins only after P4 and P5 exist
 
 ### P4: Typed Control VM MVP
 
@@ -1597,6 +1730,13 @@ An LLM-generated program is checked against the normalized directive contract.
   disassembler
 - validator and verifier with machine-readable diagnostics
 - pure instruction interpreter
+- deterministic strict-core-to-bytecode lowering for nodes, edges, routes,
+  reducers, barriers, interrupts, retry, `Send`, and `Command.goto`
+- required semantic projection, topology-to-bytecode source maps, and canonical
+  equivalence fixtures
+- final executable Program Bundle assembly, digest, and admission receipt
+- registry-coupled lowering completeness check and machine-readable
+  `equivalent`/`versioned_change`/`drain_only` compatibility matrix
 - instruction, memory, and call-depth fuel with bounded quantum
 - PC, stack, local/memory, and remaining fuel checkpoint
 - no-effect counter-machine, loop, recursion, and cancellation responsiveness
@@ -1612,22 +1752,29 @@ An LLM-generated program is checked against the normalized directive contract.
 - transition-before-dispatch batch validation
 - dynamic decision journal, replay, and nondeterminism detection
 - `race`, `await_all`, `quorum`, retry, and speculative branch standard library
-- extension conformance gate that adds no feature-specific legacy scheduler or
-  checkpoint semantics after the P3 adapter
+- extension conformance gate that adds no feature-specific branch to the frozen
+  legacy scheduler during migration and no new kernel checkpoint semantics
+  after cutover
+- route new Harness runs through Control VM by default after the equivalence,
+  checkpoint, replay, and fork gates pass
+- convert `GraphEngine` execution APIs to compatibility facades that cannot
+  start the legacy runtime
+- keep the frozen legacy runtime resume-only until the store-wide checkpoint
+  inventory reaches zero, then remove it from Harness and distribution builds
 
 ### P6: High-Level Program Dialect
 
 - `worker`, `switch`, `parallel`, `join`, `foreach`, `race`, `quorum`, `retry`,
   `accept`, `effect`, `await`, `cancel_scope`, `stop`, `fail`
-- per-construct strict-core or bytecode lowering rule
+- per-construct topology projection and bytecode lowering rule
 - deterministic lowering and strict consumed-key accounting
 - directive-to-core and directive-to-bytecode source map
-- static graph versus VM observable equivalence fixtures
+- pinned GraphEngine oracle versus graph-to-bytecode VM equivalence fixtures
 
 ### P7: Module and Child Harness
 
 - immutable module coordinate and typed port
-- strict-core and bytecode mixed module private namespace linking
+- topology-bearing and bytecode-only module private namespace linking
 - exact extension and module hash pinning with metered, no-import bytecode state
   migration
 - whole-program validation
@@ -1668,16 +1815,33 @@ existing graph semantics.
 
 The first completion criterion for VM introduction is:
 
-> Existing static graph execution and a bytecode controller both emit the same
-> versioned `TransitionBatch` protocol. After the P3 adapter is complete, adding
-> a reference `quorum` library introduces no quorum-specific change to legacy
-> scheduler or checkpoint semantics while preserving deterministic replay,
-> cancellation, authority, and fuel accounting.
+> Every strict-core topology admitted as `equivalent` under `graph-compat-v1`
+> lowers to a verified bytecode controller whose execution emits the same
+> versioned `TransitionBatch` sequence and observable result as the pinned
+> GraphEngine oracle. Every `versioned_change` requires explicit migration to
+> `program-v1`. Adding a reference `quorum` library introduces no
+> quorum-specific change to the durable kernel or checkpoint semantics while
+> preserving deterministic replay, cancellation, authority, and fuel accounting.
+
+Here, "every admitted" is enforced mechanically rather than inferred from a
+finite fixture corpus. The sealed registry entry for every node, reducer,
+condition, and dynamic-control primitive must name a verified lowering and
+compatibility class. A strict-core document containing an unclassified or
+`drain_only` entry can still be parsed and diagnosed, but it is not admitted as
+a new VM run. A `versioned_change` entry is not admitted under
+`graph-compat-v1`; it may enter `program-v1` only after explicit source migration
+or opt-in. The corpus supplements this registry-wide contract with regression
+coverage; it does not stand in for lowering completeness.
 
 Before this gate is passed, the strict-core scheduler is not removed and
-existing topologies are not bulk-converted to bytecode. The document
-distinguishes between adding abstractions for the long-term architecture and
-wholesale replacement of the currently working runtime.
+existing topologies are not bulk-converted to bytecode. After the equivalence,
+checkpoint, replay, resume, and fork gates pass, Harness must route new runs
+through the Control VM and stop evolving the legacy scheduler. The public
+`GraphEngine` API then becomes a compatibility facade over Program Bundle
+compilation and execution. The old runtime remains available only to drain
+inventoried checkpoints and is removed after the zero-resumable-checkpoint gate.
+This staged replacement preserves the currently working runtime without
+allowing the migration adapter to become a permanent second engine.
 
 ## 21. Main Risks
 
@@ -1686,6 +1850,9 @@ wholesale replacement of the currently working runtime.
   nullifies static reachability, acceptance path, and authority analysis.
 - If the VM directly owns state commit, effects, or checkpoint, it becomes a
   second runtime, splitting replay and recovery semantics.
+- If the GraphEngine scheduler remains an independently evolving execution path
+  after VM cutover, every scheduling, retry, cancellation, checkpoint, and
+  replay change requires permanent cross-engine equivalence work.
 - Treating local outbox commit as exactly-once external execution can duplicate
   or lose effects across crash boundaries; unsupported outcomes must remain
   ambiguous until reconciliation.
