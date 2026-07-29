@@ -16,10 +16,14 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace neograph {
 class Provider;
+namespace graph {
+class GraphRegistry;
+}
 }
 
 namespace neograph::mcp {
@@ -141,6 +145,40 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+/**
+ * Immutable admission inputs shared by schema export, compile, and start.
+ *
+ * `registry` contains executable factories/functions. `manifest` is the
+ * machine-readable closed-world declaration that classifies those local
+ * entries. Programmable Harness admission never consults process-global
+ * fallback entries. Each manifest implementation_identity is a trusted
+ * embedding declaration and must change whenever its callable behavior
+ * changes.
+ */
+struct HarnessAdmissionProfile {
+    std::string                                id;
+    std::shared_ptr<const graph::GraphRegistry> registry;
+    json                                       manifest;
+};
+
+/** Current sealed compatibility profile for preset/dsl/core Harness sources. */
+NEOGRAPH_MCP_SERVER_API std::shared_ptr<const HarnessAdmissionProfile>
+make_default_harness_admission_profile();
+
+/**
+ * Owned construction resources kept beside HarnessServiceConfig so extending
+ * sealed admission does not change the existing public config layout.
+ */
+struct HarnessServiceResources {
+    explicit HarnessServiceResources(
+        std::shared_ptr<const HarnessAdmissionProfile> profile)
+        : admission_profile(std::move(profile)) {}
+
+    HarnessServiceResources() = delete;
+
+    std::shared_ptr<const HarnessAdmissionProfile> admission_profile;
+};
+
 struct HarnessServiceConfig {
     HarnessWorkerExecutor worker_executor;
     std::shared_ptr<graph::CheckpointStore> checkpoint_store;
@@ -162,6 +200,9 @@ class NEOGRAPH_MCP_SERVER_API HarnessService {
 public:
     explicit HarnessService(HarnessServiceConfig config = {});
     HarnessService(HarnessServiceConfig config, std::shared_ptr<HarnessJournal> journal);
+    HarnessService(HarnessServiceConfig               config,
+                   std::shared_ptr<HarnessJournal>    journal,
+                   HarnessServiceResources            resources);
     ~HarnessService();
 
     HarnessService(const HarnessService&) = delete;

@@ -582,4 +582,51 @@ json GraphRegistry::node_effects(const std::string& type) const {
     return it != node_effects_.end() ? it->second : json();
 }
 
+bool GraphRegistry::contains_reducer(const std::string& name) const noexcept {
+    return reducers_.count(name) != 0;
+}
+
+bool GraphRegistry::contains_condition(const std::string& name) const noexcept {
+    return conditions_.count(name) != 0;
+}
+
+bool GraphRegistry::contains_type(const std::string& type) const noexcept {
+    return node_factories_.count(type) != 0;
+}
+
+json GraphRegistry::export_schema() const {
+    // Reuse the topology grammar envelope, but replace every executable
+    // palette with this registry's local entries. Reading the global envelope
+    // here does not grant fallback authority: none of its registry entries
+    // survive in the returned document.
+    json doc = NodeFactory::instance().export_schema();
+
+    json node_types = json::object();
+    json node_effects = json::object();
+    for (const auto& [type, factory] : node_factories_) {
+        (void)factory;
+        auto schema = node_schemas_.find(type);
+        node_types[type] = schema != node_schemas_.end()
+                               ? schema->second
+                               : json::parse(
+                                     R"JSON({"type":"object","description":"No declared config schema; any object accepted."})JSON");
+        auto effects = node_effects_.find(type);
+        if (effects != node_effects_.end()) node_effects[type] = effects->second;
+    }
+
+    json condition_specs = json::object();
+    for (const auto& [name, spec] : condition_specs_) {
+        json labels = json::array();
+        for (const auto& label : spec.labels) labels.push_back(label);
+        condition_specs[name] = {{"labels", std::move(labels)}, {"open", spec.open}};
+    }
+
+    doc["node_types"]      = std::move(node_types);
+    doc["node_effects"]    = std::move(node_effects);
+    doc["reducers"]        = registry_names(reducers_);
+    doc["conditions"]      = registry_names(conditions_);
+    doc["condition_specs"] = std::move(condition_specs);
+    return doc;
+}
+
 } // namespace neograph::graph

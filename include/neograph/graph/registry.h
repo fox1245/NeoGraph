@@ -39,6 +39,19 @@ public:
     json                         config_schema(const std::string& type) const;
     json                         node_effects(const std::string& type) const;
 
+    /** Local-only membership used by sealed admission profiles. */
+    bool contains_reducer(const std::string& name) const noexcept;
+    bool contains_condition(const std::string& name) const noexcept;
+    bool contains_type(const std::string& type) const noexcept;
+
+    /**
+     * Export only entries owned by this registry.
+     *
+     * Unlike reducer()/condition()/create(), this never includes the legacy
+     * process-global fallback and is therefore suitable for a sealed palette.
+     */
+    json export_schema() const;
+
 private:
     std::unordered_map<std::string, ReducerFn>     reducers_;
     std::unordered_map<std::string, ConditionFn>   conditions_;

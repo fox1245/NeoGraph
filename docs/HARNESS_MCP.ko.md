@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=595f6a0223d5ebe0015f9bc087bc559feb06aaf98143cae0f4e0c365e669587f -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=a05267163c3ff3f5c1f457a8d3d813fca89df9f61ad3f339914131ea4fb817de -->
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
 
 # 네오그래프 하네스 MCP
@@ -17,6 +17,16 @@ NeoGraph Harness는 실행되기 전에 제한된 다중 작업자 워크플로�
 제공되는 사전 설정은 `fanout_judge`, `pr_review_panel`, `bug_triage` 및
 `research_synthesis`. 사전 설정은 일반적인 엄격한 핵심 그래프 아티팩트를 생성하므로
 동일한 진단 및 소스 맵이 사전 설정 및 DSL 요청에 적용됩니다.
+
+### 봉인된 승인 및 명시적 Core 모드
+
+`harness.mode`는 `preset`, `dsl` 또는 `core`를 허용합니다. `preset`과 `dsl`은 기존의 제한된 fanout/judge 호환성 계약을 유지합니다. `core`는 이미 엄격한 토폴로지(`schema_version: 1`)를 Elaborator를 거치지 않고 수락합니다. 이는 명시적으로 구성된 일반-Core 승인 프로파일을 위한 것입니다.
+
+스키마 내보내기, 컴파일 및 시작은 이제 동일한 불변의 `HarnessAdmissionProfile`을 사용합니다. 해당 범위가 지정된 `GraphRegistry` 및 매니페스트는 모든 사용 가능한 노드, 리듀서 및 조건을 구현, 로우어링 및 호환성 메타데이터와 함께 나열합니다. 프로세스 전역 레지스트리 항목은 이 팔레트의 일부가 아니며 Harness 승인에 의해 해결될 수 없습니다. 컴파일은 검증된 선언적 `TopologySpec`에서 중단되므로, 거부된 입력 구성은 `GraphNode`를 생성하지 않으며 작업자나 효과를 디스패치하지 않습니다. 보유된 아티팩트는 프로파일 ID와 지문을 바인딩합니다. 일치하지 않거나 이전 프로파일의 아티팩트는 재해석되는 대신 시작/재개 시 실패-폐쇄됩니다.
+
+C++ 임베더는 기본값이 아닌 프로파일을 생성 시 `HarnessServiceResources`를 통해 전달합니다. 이 추가 리소스 경계는 기존 `HarnessServiceConfig` 레이아웃을 보존합니다. 프로파일 지문은 매니페스트와 범위가 지정된 레지스트리의 내보낸 의미 투영을 포함합니다. 각 `implementation_identity`는 신뢰되는 선언이며 해당 호출 가능 동작이 변경될 때마다 함께 변경해야 합니다.
+
+이는 마이그레이션 기반 작업이며, Control VM 전환이 아닙니다. 현재 승인된 Harness 실행은 마이그레이션 전용 `precutover-graph-engine-v1` 소스 프로파일을 사용하며, 여전히 고정된 레거시 런타임/오라클인 `GraphEngine`을 통해 실행됩니다. 이 프로파일은 기본 VM 전환 전에 새 실행 승인을 중단해야 합니다. Program DSL, 바이트코드 인터프리터 또는 프로덕션 Durable Kernel을 주장하지 않습니다.
 
 ## 빌드 및 실행
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ja source_sha256=595f6a0223d5ebe0015f9bc087bc559feb06aaf98143cae0f4e0c365e669587f -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ja source_sha256=a05267163c3ff3f5c1f457a8d3d813fca89df9f61ad3f339914131ea4fb817de -->
 # NeoGraph ハーネス MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -16,6 +16,16 @@ NeoGraph Harness は、実行前に制限されたマルチワーカー ワー�
 出荷されたプリセットは、`fanout_judge`、`pr_review_panel`、`bug_triage`、および
 `research_synthesis`。プリセットは通常の厳密なコア グラフ アーティファクトを生成するため、
 同じ診断とソース マップがプリセット リクエストと DSL リクエストに適用されます。
+
+### 封印された admission と明示的な Core モード
+
+`harness.mode` は `preset`、`dsl`、または `core` を受け入れます。`preset` と `dsl` は既存の境界付き fanout/judge 互換性コントラクトを維持します。`core` は、Elaborator を通過させずに、すでに厳密なトポロジ（`schema_version: 1`）を受け入れます。これは明示的に構成された汎用 Core の admission プロファイルを意図しています。
+
+スキーマのエクスポート、コンパイル、および開始は、同じ不変の `HarnessAdmissionProfile` を消費するようになりました。そのスコープ付き `GraphRegistry` とマニフェストは、すべての利用可能なノード、リデューサー、および条件を、実装、ローワリング、および互換性メタデータとともにリストします。プロセス全体のレジストリエントリはこのパレットの一部ではなく、Harness admission によって解決できません。コンパイルは検証済みの宣言的 `TopologySpec` で停止するため、拒否された入力構造は `GraphNode` を構築せず、ワーカーやエフェクトをディスパッチしません。保持されたアーティファクトはプロファイル ID とフィンガープリントをバインドします。異なるプロファイルまたは以前のプロファイルのアーティファクトは、再解釈されるのではなく、開始/再開時にフェイルクローズされます。
+
+C++ の埋め込み側は、既定以外のプロファイルを構築時に `HarnessServiceResources` 経由で渡します。この追加のリソース境界により、既存の `HarnessServiceConfig` レイアウトは維持されます。プロファイルのフィンガープリントには、マニフェストとスコープ付きレジストリからエクスポートされた意味投影が含まれます。各 `implementation_identity` は信頼される宣言であり、対応する呼び出し可能な動作が変わるたびに更新する必要があります。
+
+これは移行の基礎作業であり、Control VM への切り替えではありません。現在受け入れられる Harness 実行は移行専用の `precutover-graph-engine-v1` ソースプロファイルを使用し、引き続き固定されたレガシーランタイム/オラクルである `GraphEngine` を通じて実行されます。このプロファイルは、既定の VM 切り替え前に新規実行の admission を停止する必要があります。Program DSL、バイトコードインタプリタ、または本番 Durable Kernel を主張しません。
 
 ## 構築して実行
 
