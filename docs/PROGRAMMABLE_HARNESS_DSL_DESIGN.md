@@ -695,6 +695,10 @@ single- or multi-`Send` shape is admitted for VM execution only after the
 compatibility matrix proves an exact lowering for its state-visibility contract;
 otherwise it is `drain_only` and cannot start as a new VM run.
 
+During migration, `precutover-graph-engine-v1` explicitly names the current
+new-run Harness path through `GraphEngine`. It is migration-only, does not claim
+VM equivalence, and must stop admitting new runs before default VM cutover.
+
 The pinned `legacy-graph-v1-runtime` profile names the old GraphEngine execution
 path, not the compatibility lowering profile. It is frozen except for correctness
 fixes required to drain existing runs, receives no new orchestration features,
@@ -702,6 +706,27 @@ and cannot start new runs after VM cutover. `graph-compat-v1` may continue to
 compile old source semantics into new VM bytecode without retaining the old
 runtime. These distinct names prevent backward-compatible source semantics from
 becoming an excuse for a permanent second engine.
+
+#### 8.3.1 Resolved VM Integration Decisions
+
+The first VM integration phase uses the following versioned decisions. Changing
+one of them requires a new Kernel ABI or source-semantics profile; an
+implementation detail must not silently redefine it.
+
+| Decision | Version-1 rule |
+|---|---|
+| snapshot and read-your-writes | A quantum receives one immutable versioned snapshot. Ordinary `state.read` observes only that snapshot. Pending writes may be observed only through an explicit proposal-local preview, unavailable to other quanta and never described as committed state. `graph-compat-v1` uses this preview for legacy post-write routing. |
+| reducer preview and commit | Preview calls a sealed, deterministic `reducer.preview-v1` Kernel service using the recorded logical task ID and transition index order. The reducer implementation/schema digest is pinned. Commit re-runs or verifies the same reducer computation against the current read versions; a mismatch or stale version rejects/conflicts the whole batch. Verified pure VM reducers may be added later only behind the same identity and translation-validation contract. |
+| conflict fuel | Instructions, allocation, and validation work already consumed remain debited after an optimistic-concurrency conflict. Unmaterialized task/effect capacity reservations are released, but the retry receives only the remaining fuel lease. The same logical event IDs and source continuation retry against an explicitly newer snapshot under pinned conflict-count and non-progress bounds. No cursor advances and no retry replenishes fuel. |
+| task/effect boundary | An existing `GraphNode` invocation is a durable task target. A pure node has an empty effect closure. A node that performs external I/O is VM-admissible only when every nested external operation is mediated by a declared `effect.request` adapter with stable identity and reconciliation. Coarse task retry identity never makes undeclared nested effects safe; such nodes are `versioned_change`, `drain_only`, or blocked. |
+| stream events | Control-relevant events, task/effect results, interrupts, terminal outcomes, and any value later consumed by bytecode are durable journal events. Token/progress callbacks are best-effort by default and are not replay promises. A profile may opt into durable chunks only with stable event IDs, declared payload policy, and journal commit; recorded replay then emits the recorded chunks and performs no live callback-producing work. Live callback objects never enter a bundle or continuation. |
+| public `GraphEngine` surface | Every public construction, execution, administration, and mutable-policy entry point is inventoried before cutover. Declarative construction and execution remain blocked from an `equivalent` claim until oracle fixtures pass. Live `CompiledGraph` injection and behavior-changing post-admission setters require descriptor-backed lowering or an explicit `versioned_change`; Kernel-owned administration uses explicit transactions and active-run race policy. |
+
+The machine-readable forms of these decisions are
+`spec/programmable-harness-kernel-abi-v1.schema.json`,
+`spec/programmable-harness-compatibility-matrix-v1.schema.json`, and
+`spec/programmable-harness-graph-engine-inventory-v1.json`. The schemas are
+admission contracts, not evidence that the VM or Durable Kernel already exists.
 
 ### 8.4 External Effect State Machine
 
@@ -1704,9 +1729,13 @@ An LLM-generated program is checked against the normalized directive contract.
 - per-invocation tool attenuation
 - schema-compatible sequential and parallel worker composition
 
-### P3: Program Bundle, Transition Protocol, and Migration Boundary
+### P3: Transition Protocol, Reference Kernel, and Migration Boundary
 
-- version-1 Program Bundle schema capable of binding semantic projection,
+- version-1 `QuantumInput`, `TransitionBatch`, continuation, provisional-handle,
+  and `CommitResult` canonical encodings
+- pure in-memory reference Kernel state machine for atomicity, conflict, cursor,
+  reservation, and fuel contract tests; it is not a production persistence path
+- migration-only Program Bundle envelope capable of binding semantic projection,
   canonical topology, and future executable control bytecode
 - `migration_only` topology envelope, manifest, dependency root, and legacy
   oracle trace identity; do not issue a final executable bundle hash or
@@ -1724,17 +1753,20 @@ An LLM-generated program is checked against the normalized directive contract.
 - define the compatibility matrix, legacy checkpoint inventory, and adapter
   removal gate; execution of that gate begins only after P4 and P5 exist
 
-### P4: Typed Control VM MVP
+### P4: Minimal Core-to-VM Vertical Slice
 
 - bytecode format, typed function and control flow, canonical encoder and
   disassembler
 - validator and verifier with machine-readable diagnostics
 - pure instruction interpreter
-- deterministic strict-core-to-bytecode lowering for nodes, edges, routes,
-  reducers, barriers, interrupts, retry, `Send`, and `Command.goto`
+- deterministic strict-core-to-bytecode lowering for a strict linear topology
+  with one or two sealed pure task targets and declared writes
+- minimal sealed `task.spawn`, task-result event, `state.write`, reducer preview,
+  `checkpoint.yield`, `complete`, and `fail` Kernel imports
 - required semantic projection, topology-to-bytecode source maps, and canonical
   equivalence fixtures
-- final executable Program Bundle assembly, digest, and admission receipt
+- final executable Program Bundle assembly, digest, and admission receipt only
+  after the minimal hostcalls and atomic commit path execute end to end
 - registry-coupled lowering completeness check and machine-readable
   `equivalent`/`versioned_change`/`drain_only` compatibility matrix
 - instruction, memory, and call-depth fuel with bounded quantum
@@ -1744,10 +1776,13 @@ An LLM-generated program is checked against the normalized directive contract.
 - the interpreter is first implemented in reference mode; JIT is a separate
   decision
 
-### P5: Durable Hostcall and Orchestration Library
+### P5: Static Expansion, Remaining Durable Hostcalls, and Orchestration Library
 
-- `state`, `task`, `event`, `timer`, `cancel`, `effect`, and `yield` sealed
-  imports
+- expand strict-Core lowering in oracle-proven order: reducers, fan-out,
+  conditional routes, cycles, barriers, subgraphs, retry, interrupt, `Send`, and
+  `Command.goto`
+- add remaining `event.subscribe/consume`, `task.cancel`, `timer.schedule`, and
+  `effect.request` sealed imports
 - opaque handle type and scope verification
 - transition-before-dispatch batch validation
 - dynamic decision journal, replay, and nondeterminism detection

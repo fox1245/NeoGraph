@@ -1,0 +1,919 @@
+# NeoGraph Programmable Harness Control VM integration specification.
+#
+# This file is the durable implementation record for connecting the current
+# strict-core/GraphEngine runtime to the target architecture in
+# docs/PROGRAMMABLE_HARNESS_DSL_DESIGN.md. The design document remains the
+# canonical target architecture; this specification fixes sequencing, evidence,
+# compatibility, and completion gates so a later session cannot skip them.
+
+spec:
+  id: programmable-harness-vm-integration
+  revision: 1
+  created: "2026-07-29"
+  owner: fox1245
+  status: proposed
+  priority: P0
+  kind: architecture-execution-plan
+  visibility: repository
+  methodology: [SDD, TDD, EDD]
+  related_issues: [245, 250, 251, 252]
+  related_specs: [216, 218, 220]
+  canonical_design: docs/PROGRAMMABLE_HARNESS_DSL_DESIGN.md
+
+authority:
+  rule: >-
+    The canonical design defines the target architecture. This specification
+    defines the implementation sequence and executable gates. If the two
+    documents conflict, implementation stops until both are deliberately
+    reconciled; neither source nor issue prose is silently preferred.
+  issue_gate:
+    status: reconciled
+    reconciled_at: "2026-07-29"
+    evidence:
+      - "GitHub issue #245 now distinguishes the total bounded Core frontend from verified typed metered Program bytecode."
+      - "GitHub issue #252 now records one Program Bundle, one Control VM, one Durable Kernel, finite fuel, and closed authority."
+    remaining_rule: >-
+      The live issue bodies and unchecked acceptance criteria remain
+      authoritative completion gates and must be reread before phase completion.
+
+context:
+  original_problem: >-
+    The current Harness dsl mode is only Elaborator sugar over strict-core JSON.
+    Its authoring expressiveness is narrower than the Core topology and cannot
+    naturally express runtime-dependent loops, waits, cancellation, nested
+    spawn, reusable orchestration libraries, or future topology concepts
+    without repeatedly extending Scheduler, GraphEngine, and checkpoint state.
+  decision: >-
+    Preserve total bounded authoring/elaboration, but introduce verified typed
+    metered control bytecode as the sole final control-execution substrate. Core
+    JSON remains canonical analyzable topology IR and a compatibility authoring
+    mode, not a permanent second execution backend.
+  integration_question: >-
+    Reuse the working compiler, GraphNode implementations, checkpoint behavior,
+    and GraphEngine semantics without creating a permanent GraphEngine-versus-VM
+    fork or silently changing existing observable behavior.
+
+observed_state:
+  verified_at_commit: 12a9e8d
+  strict_core:
+    status: available
+    evidence:
+      - "include/neograph/graph/compiler.h:5-13 separates parsing from live-node linking."
+      - "GraphCompiler::parse produces TopologySpec and strict schema_version 1 is supported."
+      - "Commit 394941e migrated recommended examples to strict topology documents."
+      - "Translation validation and GraphValidator coverage already exist."
+  harness_compilation:
+    status: partial
+    evidence:
+      - "src/mcp/harness.cpp:1959-2003 elaborates to Core, compiles, round-trips, validates, and binds."
+      - "src/mcp/harness.cpp:1429-1469 still permits only neograph_harness_worker and neograph_harness_judge."
+      - "The current binding requires every worker exactly once and exactly one judge."
+      - "The schema exports the process-global NodeFactory palette even though Harness rejects most of it."
+  harness_execution:
+    status: legacy_graph_engine
+    evidence:
+      - "src/mcp/harness.cpp:2131-2167 compiles GraphEngine and calls run or resume."
+      - "No Control VM, bytecode verifier, Program Bundle runtime, or Durable Kernel implementation exists."
+  registry:
+    status: local_overlay_with_global_fallback
+    evidence:
+      - "include/neograph/graph/registry.h:12-20 documents process-global fallback."
+      - "The current registry has no sealed manifest, implementation digest, lowering descriptor, or compatibility class."
+  topology_corpus:
+    status: partial
+    evidence:
+      - "tests/fixtures/topology_corpus and tests/test_corpus.cpp provide strict translation/validator fixtures."
+      - "The corpus is not yet the full VM equivalence corpus required by the canonical design."
+  roadmap_audit:
+    P0_completeness_contracts: partial
+    P1_topology_complete_core_mode: not_complete
+    P2_generic_worker_dataflow: not_started
+    P3_program_bundle_and_transition_boundary: not_started
+    P4_control_vm: not_started
+    P5_durable_hostcalls: not_started
+
+objective: >-
+  Make strict Core JSON and the new high-level Program DSL converge on one
+  verified bytecode and one Durable Kernel while retaining canonical topology,
+  source compatibility, current behavior evidence, exact checkpoint policy,
+  and public API migration diagnostics.
+
+success_definition:
+  - Every newly admitted executable program contains verified typed bytecode.
+  - Every executable Program Bundle contains a hashed semantic projection.
+  - Strict-core sources also retain canon-equivalent topology in the bundle.
+  - The Control VM proposes decisions but never directly commits state or dispatches effects.
+  - One Durable Kernel owns state visibility, identity, budgets, journal, replay, checkpoints, and recovery.
+  - Existing equivalent GraphEngine behavior is proven against a pinned oracle.
+  - Observable behavior changes are classified as versioned_change, never equivalent.
+  - Unsupported legacy behavior and checkpoints fail closed or drain under a frozen resume-only runtime.
+  - GraphEngine becomes a compatibility facade after cutover rather than a permanent second runtime.
+
+non_goals:
+  - Extend the existing Elaborator into a general-purpose or Turing-complete language.
+  - Embed arbitrary C++, Python, shell, callbacks, pointers, or live GraphNode objects in bytecode.
+  - Let the VM own durable commit, dispatch, checkpoint stores, recovery, or ambient authority.
+  - Replace GraphEngine before equivalence and checkpoint-drain gates pass.
+  - Run production requests through two control engines indefinitely.
+  - Claim that compiler validity proves model answer quality or workflow termination.
+  - Introduce JIT compilation before the reference interpreter and verifier contracts are proven.
+  - Perform an autonomous large-scale refactor; each phase must land as a bounded vertical change.
+
+architecture_invariants:
+  A1_one_control_executor:
+    statement: >-
+      After cutover, every newly admitted strict-core or Program source executes
+      through the same verified Control VM instruction model.
+    blocking: true
+  A2_vm_proposes_only:
+    statement: >-
+      The VM returns a TransitionBatch. It cannot mutate durable state, advance
+      event cursors, dispatch tasks/effects, or write checkpoints directly.
+    blocking: true
+  A3_one_durable_kernel:
+    statement: >-
+      The Kernel alone owns atomic state transitions, stable identities,
+      authority, budgets, journal, replay, checkpoints, dispatch, and recovery.
+    blocking: true
+  A4_projection_bound_to_execution:
+    statement: >-
+      Semantic projection, optional strict topology, bytecode, imports, source
+      map, schemas, compiler profile, and dependency root are hashed together.
+    blocking: true
+  A5_graph_engine_is_oracle_and_facade:
+    statement: >-
+      Before cutover GraphEngine is the pinned behavior oracle. After cutover
+      its supported public entry points compile and run the VM profile; the old
+      runtime is resume-only for inventoried checkpoints.
+    blocking: true
+  A6_compatibility_is_explicit:
+    statement: >-
+      Every legacy source/API/checkpoint behavior is equivalent,
+      versioned_change, drain_only, or blocked. No unclassified behavior starts
+      a new VM run.
+    blocking: true
+  A7_no_checkpoint_reinterpretation:
+    statement: >-
+      Legacy checkpoints are exactly converted, drained by their pinned runtime,
+      or blocked for reconciliation. They are never restarted or approximately
+      interpreted as new VM runs.
+    blocking: true
+  A8_global_semantics_stay_in_kernel:
+    statement: >-
+      Fairness, isolation, atomic commit, durability, tenant security, and
+      external-effect reconciliation are Kernel ABI concerns, not bytecode
+      libraries or per-module plugins.
+    blocking: true
+  A9_fuel_and_authority_do_not_grow:
+    statement: >-
+      Resume, retry, fork, replacement, repair, and child attachment never
+      replenish fuel or widen authority.
+    blocking: true
+  A10_fail_closed:
+    statement: >-
+      Unknown source keys, profiles, bytecode formats, opcodes, imports,
+      capabilities, registry entries, compatibility classes, and checkpoint
+      shapes produce machine-readable rejection before dispatch.
+    blocking: true
+
+decisions:
+  frontend_boundary:
+    current_core_sugar: >-
+      Existing Harness dsl/Elaborator remains a total bounded frontend that
+      produces strict Core. It is not expanded into the VM language.
+    new_program_frontend: >-
+      A separate Program parser/compiler owns functions, loops, recursion,
+      dynamic waits, spawn, cancellation, and orchestration libraries.
+    convergence: >-
+      Core and Program frontends both emit a semantic projection plus verified
+      bytecode. Core additionally emits canon-equivalent strict topology.
+  graph_lowering_boundary:
+    input: ValidatedTopology_or_TopologySpec_after_required_validation
+    forbidden_input: CompiledGraph_with_live_GraphNode_instances
+    rationale: >-
+      TopologySpec is the existing declarative boundary before factories create
+      process-local nodes. Lowering live nodes would make serialization,
+      reproducibility, implementation identity, and admission impossible.
+  existing_node_reuse:
+    decision: >-
+      Existing GraphNode implementations are reused behind sealed Kernel task
+      targets. The VM proposes task.spawn and later consumes a journaled result
+      event; it never calls GraphNode::run directly.
+    qualification: >-
+      A node is VM-admissible only when its registry entry fixes implementation
+      identity, schemas, effects, dynamic control contract, lowering, and
+      compatibility class. Ambient or undeclared behavior is not equivalent.
+  graph_engine_migration:
+    before_cutover: pinned_oracle_and_legacy_runtime
+    after_cutover: compatibility_facade_plus_resume_only_drain_runtime
+    prohibited: permanent_independently_evolving_execution_backend
+  harness_surface:
+    stable_tools: [schema, compile, start, get, resume, cancel]
+    modes:
+      preset: compatibility authoring profile
+      dsl: existing bounded Core sugar compatibility profile
+      core: explicit strict Core authoring profile
+      program: new high-level Program frontend
+    note: >-
+      Exact request spelling is versioned during implementation. The six MCP
+      operations remain stable unless an independently reviewed contract proves
+      that a change is necessary.
+
+source_semantics_profiles:
+  precutover-graph-engine-v1:
+    source: current preset, bounded dsl, or explicitly admitted strict Core
+    execution: current GraphEngine runtime during migration only
+    behavior: >-
+      Preserves current shipped Harness execution while sealed admission and
+      compatibility evidence are built. This profile is not VM equivalence and
+      must stop accepting new runs before default VM cutover.
+  graph-compat-v1:
+    source: strict Core or compatible existing dsl/preset output
+    execution: Control VM plus Durable Kernel
+    behavior: >-
+      Preserves only behaviors classified equivalent to the pinned GraphEngine
+      oracle. versioned_change and drain_only entries are rejected for new runs.
+  program-v1:
+    source: new Program DSL
+    execution: Control VM plus Durable Kernel
+    behavior: >-
+      Uses the new uniform Kernel transition semantics and may intentionally
+      differ from legacy graph behavior only through explicit versioned rules.
+  legacy-graph-v1-runtime:
+    source: existing persisted GraphEngine run only
+    execution: frozen old GraphEngine runtime
+    behavior: resume_only
+    restrictions:
+      - Cannot start a new run.
+      - Cannot fork, replace, attach new work, or receive new orchestration features.
+      - May receive correctness fixes required to drain exact existing state.
+
+target_pipeline:
+  core_source: |-
+    preset / bounded dsl / strict Core JSON
+      -> Elaborator when applicable
+      -> GraphCompiler::parse
+      -> semantic and binding validation against sealed registry
+      -> ValidatedTopology
+      -> GraphToControlLowerer
+      -> semantic projection + strict topology + bytecode + source map
+      -> sealed Program Bundle
+  program_source: |-
+    Program DSL
+      -> bounded parse / normalization / consumed-key validation
+      -> typed Program IR
+      -> whole-program semantic and authority validation
+      -> ProgramLowerer
+      -> semantic projection + optional strict topology + bytecode + source map
+      -> sealed Program Bundle
+  execution: |-
+    admitted Program Bundle + event batch + state snapshot + VM continuation
+      -> Control VM quantum
+      -> proposed TransitionBatch
+      -> Durable Kernel validation and atomic commit
+      -> durable task/effect outbox dispatch
+      -> journaled result events
+      -> next VM quantum or terminal result
+
+component_contracts:
+  sealed_registry:
+    owns:
+      - Node, reducer, condition, and primitive implementation identity.
+      - Config/input/output schemas and stable digests.
+      - Effect and capability closure.
+      - Dynamic goto/send/interrupt contracts.
+      - Strict-Core-to-bytecode lowering descriptor.
+      - Compatibility class and applicable interaction families.
+    rules:
+      - No process-global fallback in Programmable Harness admission.
+      - Registry is immutable after compile/admission.
+      - Schema export and admission consume the same registry manifest.
+      - Missing lowering or compatibility data rejects VM admission.
+
+  semantic_projection:
+    required: true
+    minimum_fields:
+      - format/version
+      - entry points
+      - semantic nodes and stable IDs
+      - possible control edges, including conservative dynamic sets
+      - sealed imports and target sets
+      - state reads/writes and effect/capability summary
+      - source coordinates
+    closed_world_gate: >-
+      Validation is bidirectional, not merely projection-to-bytecode. Every
+      executable basic block, external control edge, state write, hostcall,
+      import, and effect callsite must have a projection/source-map witness, and
+      the projection import/effect/write sets must equal conservative bytecode
+      analysis. Extra unprojected behavior rejects admission.
+
+  program_bundle:
+    final_executable_requires:
+      - manifest and source semantics profile
+      - semantic projection and digest
+      - canonical strict topology and digest when the source has one
+      - canonical absence marker otherwise
+      - at least one verified bytecode module and executable entry
+      - sealed import table and Kernel ABI version
+      - schemas, source map, compiler/verifier/fuel profile
+      - dependency and registry manifest roots
+    migration_envelope: >-
+      A topology-only pre-VM envelope is migration_only and has no final
+      executable identity or admission receipt. It can be used only by the
+      pinned legacy oracle before cutover.
+
+  bytecode_lowerer:
+    rules:
+      - Deterministic and bounded for the same source/profile/dependency set.
+      - Consumes validated declarative IR, never process-local runtime objects.
+      - Produces byte-identical canonical output for identical inputs.
+      - Emits source-map/projection witnesses for every executable range.
+      - Emits only sealed import indices, never runtime-computed external names.
+      - Fails on unclassified nodes, reducers, conditions, control shapes, or checkpoints.
+
+  control_vm:
+    owns:
+      - Typed pure control computation.
+      - Verified branch, call, loop, recursion, locals, and bounded memory semantics.
+      - Deterministic proposal construction from explicit inputs.
+      - Versioned continuation and instruction/memory/call-depth fuel consumption.
+    does_not_own:
+      - Durable state mutation or event cursor advancement.
+      - Task/effect dispatch.
+      - Checkpoint persistence or crash recovery.
+      - Capability authorization or tenant isolation.
+      - Stable durable identity allocation.
+
+  vm_quantum:
+    input:
+      - Exact bundle/module/verifier/fuel profile digests.
+      - Versioned immutable state snapshot or an explicit snapshot handle.
+      - Ordered event batch with stable event IDs.
+      - Versioned VM continuation.
+      - Kernel-issued budget/fuel lease and authority envelope.
+    output:
+      - Proposed TransitionBatch.
+      - Next VM continuation associated with that proposal.
+      - Deterministic fuel/resource consumption report.
+    read_rule: >-
+      Durable state reads are observations supplied to the quantum from a
+      versioned snapshot, not silently committed state.read mutations. If a
+      program needs a newer snapshot, it yields and resumes through the Kernel.
+
+  transition_batch:
+    minimum_transition_kinds:
+      - state.write
+      - task.spawn
+      - event.subscribe
+      - event.consume
+      - task.cancel
+      - timer.schedule
+      - effect.request
+      - checkpoint.yield
+      - complete
+      - fail
+    atomicity: >-
+      Schema, authority, budgets, read versions, conflicts, target closure,
+      idempotency, and handle scope are validated before any state, cursor,
+      dispatch, or external effect becomes visible.
+    provisional_handles: >-
+      A task/effect/subscription created in an uncommitted batch uses a
+      non-durable provisional handle derived from batch ID, transition index,
+      and kind. It may be referenced only inside that batch. Commit materializes
+      all such handles atomically into stable identities; rejection discards all
+      of them.
+
+  durable_kernel:
+    owns:
+      - Stable task, effect, event, subscription, timer, attempt, and run identity.
+      - Snapshot versions, reducer ordering, and atomic state visibility.
+      - Authority, capability/effect mediation, and tenant/resource isolation.
+      - Atomic run-wide budget reservation, debit, release, and transfer.
+      - Journal order, event cursors, replay, checkpoints, fork, and recovery.
+      - Durable outbox commit, lease, dispatch, result deduplication, and ambiguity.
+    commit_results:
+      committed: batch and continuation become durable; outbox may then dispatch
+      conflict: no state/cursor/task/effect transition becomes visible
+      rejected: machine-readable admission/validation diagnostics
+      blocked: prior ambiguous effect or operator reconciliation prevents progress
+    conflict_rule: >-
+      The same logical event IDs and source continuation are retried against an
+      explicitly newer snapshot. Retry count, non-progress detection, and fuel
+      accounting are pinned by profile. Fuel must never be silently replenished.
+
+  graph_node_task_adapter:
+    input: sealed_target_reference_plus_typed_input_plus_isolated_snapshot
+    output: journaled_typed_task_result_event
+    result_contains_when_declared:
+      - ordered ChannelWrite values and write modes
+      - Command.goto and Command updates
+      - Send requests and source identity
+      - interrupt/failure/retry classification
+      - usage/effect metadata permitted by policy
+    restrictions:
+      - Adapter execution cannot mutate parent durable state directly.
+      - Replay consumes the recorded result and does not re-run the node.
+      - Undeclared ambient Store, Provider, Tool, credential, or filesystem use is not VM-admissible.
+      - Coarse task idempotency is insufficient for undeclared nested non-idempotent effects.
+
+  graph_engine_oracle:
+    purpose: >-
+      Produce canonical observable traces from the pinned current runtime so the
+      lowerer, VM, and Kernel can be compared without interpreting current
+      behavior from prose.
+    trace_minimum:
+      - source artifact/profile/registry identity
+      - input state versions and visible values or approved hashes
+      - ready nodes and deterministic task identities
+      - ordered node results and writes
+      - reducer order and resulting candidate state
+      - selected routes, barriers, Command.goto, and Send behavior
+      - interrupts, retries, pending writes, checkpoints, and terminal outcome
+    restriction: >-
+      Oracle instrumentation must not become a second durable Kernel or a new
+      feature path. It records current behavior and is removed from new-run
+      execution after cutover.
+
+semantic_decisions_required_before_vm_code:
+  - id: state_read_and_read_your_writes
+    status: resolved
+    version: neograph.transition.v1
+    decision: >-
+      Ordinary state.read observes only the immutable quantum-start snapshot.
+      Pending writes are visible only through an explicit proposal-local preview
+      that is neither durable nor visible to other quanta. graph-compat-v1 uses
+      the preview for legacy post-write routing; the Kernel validates the same
+      reducer identity, order, result, and read versions before atomic commit.
+  - id: reducer_preview_and_commit
+    status: resolved
+    version: reducer.preview-v1
+    decision: >-
+      Version 1 uses a sealed deterministic Kernel preview service. Writes are
+      ordered by logical task ID and transition index, and the reducer
+      implementation/schema digest is pinned. Commit recomputes or verifies the
+      preview against current versions. A future verified pure VM reducer must
+      pass bidirectional translation validation under the same identity.
+  - id: conflict_fuel_accounting
+    status: resolved
+    version: conflict-fuel-v1
+    decision: >-
+      Consumed instruction, allocation, and validation fuel remains spent.
+      Unmaterialized task/effect capacity reservations are released. Retry uses
+      the same logical events and source continuation against an explicit newer
+      snapshot with only the remaining lease, bounded by pinned conflict-count
+      and non-progress limits. No cursor advances and no fuel is replenished.
+  - id: task_vs_effect_boundary
+    status: resolved
+    version: graph-node-task-v1
+    decision: >-
+      A GraphNode invocation is a durable task target. Pure nodes declare an
+      empty effect closure. Every nested external operation of an effectful node
+      must use a declared effect.request adapter with stable identity and
+      reconciliation. Undeclared ambient I/O is never equivalent and is
+      versioned_change, drain_only, or blocked by the compatibility matrix.
+  - id: stream_event_semantics
+    status: resolved
+    version: stream-events-v1
+    decision: >-
+      Control-relevant events and values consumed by bytecode are durable.
+      Token/progress callbacks are best-effort and non-replayable by default.
+      A durable-stream profile requires stable chunk IDs, payload policy, and
+      journal commit; recorded replay emits only recorded chunks and performs no
+      live external dispatch. Callback objects are never serialized.
+  - id: public_graph_engine_surface
+    status: resolved
+    version: graph-engine-migration-inventory-v1
+    decision: >-
+      The initial complete inventory is recorded in
+      spec/programmable-harness-graph-engine-inventory-v1.json. Declarative and
+      execution APIs remain unclassified and blocked for VM admission until
+      oracle evidence exists. Direct live CompiledGraph injection and
+      behavior-changing post-admission setters are explicit versioned changes
+      unless descriptor-backed lowering proves otherwise.
+
+contract_artifacts:
+  admission_profile_schema: spec/programmable-harness-admission-profile-v1.schema.json
+  kernel_abi_schema: spec/programmable-harness-kernel-abi-v1.schema.json
+  compatibility_matrix_schema: spec/programmable-harness-compatibility-matrix-v1.schema.json
+  graph_engine_inventory_schema: spec/programmable-harness-graph-engine-inventory-v1.schema.json
+  graph_engine_inventory: spec/programmable-harness-graph-engine-inventory-v1.json
+
+compatibility:
+  classifications:
+    equivalent: exact observable behavior and durable identities are proven
+    versioned_change: observable behavior changes under an explicit source profile and diagnostic
+    drain_only: existing persisted runs may resume only in the frozen legacy runtime
+    blocked: exact conversion or safe execution is impossible without operator reconciliation
+  observable_dimensions:
+    - final channels and versions
+    - ordered ChannelWrite modes and reducer results
+    - ready-set and route order
+    - barrier accumulation and reset
+    - Command.goto precedence
+    - single-Send and multi-Send state visibility
+    - interrupt phase, payload, and resume value
+    - retry attempt identity and timing profile
+    - pending-write replay and task skipping
+    - checkpoint shape, parentage, and fork behavior
+    - cancellation and completion race outcome
+    - stream events promised by the selected profile
+    - journal identity and external-effect dispatch count
+  classification_unit: >-
+    Compatibility is not proven only per primitive. The matrix includes
+    topology interaction families and lowering-rule hashes, such as
+    barrier+retry, multi-Send+Command.goto, interrupt+pending-writes, and
+    subgraph+Store/ToolGate. An untested combination defaults to unclassified
+    and is rejected for a new VM run.
+  matrix_required_fields:
+    - source semantics profile
+    - topology and interaction features
+    - registry and implementation manifest digests
+    - lowering rule/version digest
+    - compatibility classification
+    - oracle fixtures/property coverage
+    - checkpoint conversion/drain policy
+    - explicit migration diagnostic for non-equivalent behavior
+
+public_graph_engine_migration_inventory:
+  construction:
+    methods:
+      - build
+      - build_strict
+      - compile
+      - link(ValidatedTopology)
+      - link(CompiledGraph)
+    required_decision: >-
+      Declarative entry points may compile to Program Bundle. Direct
+      CompiledGraph input can contain live arbitrary GraphNode instances and is
+      not assumed serializable; it requires a descriptor-backed migration,
+      explicit versioned change, or rejection after the compatibility window.
+  execution:
+    methods: [run, run_async, run_stream, run_stream_async, resume, resume_async]
+    required_decision: Preserve result, cancellation, callback, and lifetime contracts or diagnose change.
+  administration:
+    methods: [get_state, get_state_history, update_state, update_state_writes, fork]
+    required_decision: Move semantics to Kernel-owned admin transactions with explicit active-run race policy.
+  mutable_policy:
+    methods:
+      - own_tools
+      - set_checkpoint_store
+      - set_store
+      - set_tool_gate
+      - set_retry_policy
+      - set_node_retry_policy
+      - set_worker_count
+      - set_worker_count_auto
+      - set_node_cache_enabled
+      - set_node_cache_max_entries
+    required_decision: >-
+      Define whether each setting is bundle semantics, admission/runtime binding,
+      Kernel deployment policy, or unsupported post-admission mutation. A setter
+      must not change behavior outside the artifact/admission identity.
+
+legacy_checkpoint_policy:
+  inventory_required:
+    - backend and schema version
+    - source graph/artifact digest
+    - registry, capability, policy, and implementation digests when recoverable
+    - next_nodes and barrier state
+    - pending writes, Command, and Send records
+    - interrupt/retry/attempt state
+    - in-flight task/effect identity and ambiguity
+    - retained journal/trace prefix identity
+  convertible:
+    requires: >-
+      A pure backend-tested converter binds the exact legacy artifact and oracle
+      trace to graph-compat-v1 lowering, Kernel state, and a versioned VM
+      continuation. Approximate reconstruction is forbidden.
+  drain_only:
+    requires: Exact old binary/profile and resume-only execution with no new work.
+  blocked:
+    requires: Operator-visible diagnostic and reconciliation/tombstone workflow.
+  removal_gate: >-
+    The legacy scheduler/runtime binary is removed only after a store-wide audit
+    reports zero resumable legacy checkpoints and every retained record is
+    converted, completed, expired by policy, or explicitly tombstoned.
+
+implementation_phases:
+  P0_contract_sync_and_red_tests:
+    goal: Close contract conflicts and establish falsifiable baselines.
+    work:
+      - Update #245 and #252 to the layered bounded-frontend/verified-bytecode contract.
+      - Patch canonical design sequencing so minimal Kernel hostcalls precede final executable VM admission.
+      - Resolve every item under semantic_decisions_required_before_vm_code.
+      - Define machine-readable compatibility matrix and public GraphEngine API inventory schemas.
+      - Expand strict Core fixtures to cover every current topology/control/checkpoint feature.
+      - Add red tests for Harness palette/admission mismatch and missing lowering classification.
+    exit_gate:
+      - No issue/design/spec contract conflict remains.
+      - Red tests fail for the expected missing behavior.
+      - No VM production implementation has begun before the ABI decisions are approved.
+
+  P1_topology_complete_harness_core:
+    goal: Make Harness Core admission match an explicit sealed profile.
+    work:
+      - >-
+        Inject scoped registry and admission profile through additive
+        HarnessServiceResources without changing the existing
+        HarnessServiceConfig layout.
+      - Separate fanout_judge worker/judge rules from general Core-mode admission.
+      - Reject process-global fallback for Programmable Harness profiles.
+      - Make schema palette derive from the same sealed registry used by compile/admission.
+      - Compile every admitted strict-core corpus fixture through Harness.
+      - Preserve current preset and dsl behavior through explicit compatibility profiles.
+    exit_gate:
+      - No schema-advertised primitive is rejected except with explicit unavailable reason.
+      - Unknown/unsealed primitives fail before GraphNode construction or dispatch.
+      - Core lockfile remains canon-equivalent to strict input.
+
+  P2_transition_and_kernel_contract:
+    goal: Define the stable boundary the VM executes against.
+    work:
+      - Define canonical QuantumInput, TransitionBatch, continuation, provisional handle, and CommitResult encodings.
+      - Define snapshot, reducer preview, conflict, cursor, reservation, and fuel semantics.
+      - Implement a pure/reference in-memory Kernel state machine for contract tests only.
+      - Add canonical encoding/hash golden fixtures and malformed/unknown-version rejection tests.
+    exit_gate:
+      - Unknown transition/import/version fails closed with zero dispatch.
+      - Batch rejection leaves state, cursor, outbox, and durable handles unchanged.
+      - Provisional handles materialize atomically or disappear entirely.
+
+  P3_graph_engine_oracle:
+    goal: Record current behavior without changing it.
+    work:
+      - Add opt-in canonical oracle tracing around existing GraphEngine super-steps.
+      - Pin source, registry, checkpoint, and execution profile identities.
+      - Capture output, transition ordering, routing, barrier, interrupt, retry, Send, and pending-write fixtures.
+      - Prove oracle instrumentation is behavior-neutral and disabled by default.
+    exit_gate:
+      - Existing result and checkpoint tests pass unchanged with tracing off.
+      - Tracing on produces stable golden records for deterministic fixtures.
+      - No new runtime feature depends on the oracle adapter.
+
+  P4_minimal_core_to_vm_vertical_slice:
+    goal: Execute one complete strict-Core program through the final architectural path.
+    initial_scope:
+      - Strict linear topology with start, one or two pure deterministic registered nodes, and end.
+      - Declared overwrite/reduce writes needed by the fixture.
+      - Empty external-effect closure and no dynamic control.
+      - Reference interpreter only.
+    work:
+      - Lower ValidatedTopology to minimal typed bytecode and semantic projection.
+      - Verify bytecode and projection/bytecode closed-world correspondence.
+      - Run task.spawn, result event, state.write, yield, and complete through the reference Kernel.
+      - Invoke existing pure GraphNode through the sealed task adapter.
+      - Compare Program Bundle, transitions, output, and trace against GraphEngine oracle.
+    exit_gate:
+      - Identical source/profile/dependencies produce byte-identical bundle bytes.
+      - GraphEngine and VM produce equivalent outputs and canonical transition sequence.
+      - Verifier/lowering/admission rejection produces zero node/effect dispatch.
+      - The VM performs no direct durable mutation or GraphNode invocation.
+
+  P5_static_topology_expansion:
+    goal: Cover the analyzable strict-Core scheduling surface.
+    order:
+      - channels and reducer ordering
+      - multiple static outgoing edges and fan-out
+      - closed/open conditional routes
+      - cycles and max-step/fuel outcome
+      - barrier fan-in and accumulation/reset
+      - inline subgraph and typed port mapping
+    exit_gate:
+      - Every covered interaction has oracle equivalence or explicit versioned classification.
+      - Static topology projection remains canon-equivalent and bound to bytecode.
+
+  P6_dynamic_control_and_durability:
+    goal: Cover runtime control, checkpoints, crash recovery, and effects.
+    order:
+      - retry and deterministic attempt identity
+      - interrupt before/after and dynamic interrupt/resume
+      - single Send
+      - multi-Send isolation and merge
+      - Command.goto precedence and conflict profile
+      - pending-write replay and partial fan-out failure
+      - VM continuation checkpoint/restart/replay/fork
+      - task/effect durable outbox, deduplication, and ambiguity reconciliation
+    exit_gate:
+      - Crash-boundary matrix passes for every durable transition/effect state.
+      - Replay performs zero live external dispatch and reproduces the same batch sequence.
+      - Unsupported legacy behavior is versioned_change, drain_only, or blocked.
+
+  P7_harness_vm_canary:
+    goal: Integrate the VM path without changing the default runtime prematurely.
+    work:
+      - Make compile return migration envelope or final Program Bundle according to phase/profile.
+      - Add explicit experimental graph-compat-v1 start selection.
+      - Persist exact bundle, registry, Kernel ABI, verifier, and continuation identities.
+      - Expose trace/artifact views without changing the six-tool MCP surface.
+      - Run deterministic canary fixtures through compile, start, get, restart, resume, replay, and fork.
+    exit_gate:
+      - Legacy remains default until all declared equivalence and durability gates pass.
+      - VM canary cannot fall back silently to GraphEngine.
+      - Running MCP server build identity is correlated to the tested checkout revision.
+
+  P8_program_dsl_and_generic_dataflow:
+    goal: Deliver the expressive authoring surface that motivated the VM.
+    work:
+      - Add separate Program parser/typed IR; do not expand Elaborator into this role.
+      - Add reusable worker invocation with typed input/output maps and tool attenuation.
+      - Add switch, parallel, join, foreach, retry, accept, effect, await, cancel_scope, stop, and fail.
+      - Lower static constructs to topology plus bytecode and dynamic constructs directly to bytecode plus conservative projection.
+      - Preserve directive/source-clause mapping and strict consumed-key diagnostics.
+    exit_gate:
+      - Program-only constructs execute through the same VM and Kernel as Core sources.
+      - No Program construct adds a feature-specific branch to the frozen legacy scheduler.
+      - Unknown/omitted source semantics fail before dispatch.
+
+  P9_default_cutover_and_checkpoint_drain:
+    goal: Make Control VM the default new-run path without losing existing runs.
+    work:
+      - Complete compatibility matrix across sealed registry and interaction families.
+      - Route new Harness runs and supported GraphEngine facades to graph-compat-v1/program-v1.
+      - Freeze legacy runtime against all non-drain features.
+      - Inventory every configured checkpoint backend and classify every resumable record.
+      - Convert, drain, block, expire, or operator-tombstone each record under explicit policy.
+    exit_gate:
+      - New GraphEngine/Harness runs cannot enter the legacy runtime.
+      - Existing supported public behavior is equivalent or has an explicit migration diagnostic.
+      - Zero resumable legacy checkpoints remain before binary removal.
+
+  P10_legacy_runtime_removal:
+    goal: Remove the permanent semantic fork only after evidence permits it.
+    work:
+      - Remove legacy scheduler/runtime from new Harness and distribution builds.
+      - Retain only compatibility source/API facades backed by Program Bundle and VM.
+      - Remove transitional oracle/dual-path code not needed for regression fixtures.
+      - Preserve archived compatibility fixtures and old-to-new checkpoint documentation.
+    exit_gate:
+      - Default, sanitizer, persistence, replay, packaging, binding, and platform gates pass.
+      - No production execution path commits durable state outside the Kernel.
+
+first_implementation_work_package:
+  name: topology_complete_core_and_transition_contract
+  rationale: >-
+    A VM cannot be judged correct until Harness admits the intended strict-Core
+    surface and current GraphEngine behavior is captured. An interpreter without
+    a Kernel ABI would encode accidental semantics and require a rewrite.
+  deliverables:
+    - Update issue/design contract blockers.
+    - Add scoped sealed Harness registry/profile and remove general worker/judge-only admission.
+    - Add missing strict-Core Harness corpus fixtures and expected red tests.
+    - Define canonical QuantumInput, TransitionBatch, provisional handle, and CommitResult schemas.
+    - Do not implement general loops, recursion, dynamic effects, or default VM routing yet.
+  not_in_scope:
+    - General Program DSL.
+    - Production persistent Kernel.
+    - Default runtime cutover.
+    - Legacy scheduler removal.
+
+red_tests:
+  admission:
+    - id: VM-A01-schema-palette-equals-admission
+      assertion: Every schema-advertised Harness primitive is admitted or explicitly unavailable.
+    - id: VM-A02-global-registry-fallback-blocked
+      assertion: Programmable profile cannot resolve a primitive from ambient process-global state.
+    - id: VM-A03-unclassified-lowering-rejected
+      assertion: A node/reducer/condition without lowering and compatibility metadata cannot start.
+    - id: VM-A04-no-dispatch-on-rejection
+      assertion: Compile, verifier, binding, or policy rejection dispatches zero tasks and effects.
+  translation:
+    - id: VM-T01-deterministic-bundle
+      assertion: Same source, profile, registry, and dependencies produce byte-identical bundle bytes.
+    - id: VM-T02-projection-closed-world
+      assertion: Extra bytecode hostcall/state write/effect absent from projection rejects admission.
+    - id: VM-T03-core-topology-preserved
+      assertion: Strict-Core topology remains canon-equivalent after bundle compilation.
+    - id: VM-T04-unknown-bytecode-fails-closed
+      assertion: Unknown format/opcode/import/Kernel ABI rejects compile and resume.
+  kernel:
+    - id: VM-K01-batch-rejection-is-atomic
+      assertion: Rejected batch changes no state, cursor, durable handle, outbox, or dispatch count.
+    - id: VM-K02-provisional-handle-atomicity
+      assertion: Same-batch references materialize together on commit and all disappear on rejection.
+    - id: VM-K03-conflict-replays-event-safely
+      assertion: Conflict advances no event cursor and retries the same logical event under bounded policy.
+    - id: VM-K04-parallel-budget-reservation
+      assertion: Parallel children cannot reserve the same remaining budget twice.
+  equivalence:
+    - id: VM-E01-linear-core-equivalence
+      assertion: GraphEngine and VM linear fixtures produce identical outputs and canonical transitions.
+    - id: VM-E02-interaction-matrix-default-deny
+      assertion: An unverified feature combination cannot be admitted as equivalent.
+    - id: VM-E03-command-goto-profile
+      assertion: graph-compat preserves oracle precedence; program-v1 uses its declared conflict rule.
+    - id: VM-E04-send-isolation-profile
+      assertion: Single and multi-Send state visibility match their classified contracts.
+  durability:
+    - id: VM-D01-continuation-roundtrip
+      assertion: PC/stack/locals/memory/handles/fuel round-trip and resume exactly after restart.
+    - id: VM-D02-replay-zero-live-effects
+      assertion: Recorded replay uses journaled task/effect results with zero external dispatch.
+    - id: VM-D03-legacy-checkpoint-default-deny
+      assertion: Unclassified legacy checkpoint cannot restart as a new VM run.
+    - id: VM-D04-ambiguous-effect-not-redispatched
+      assertion: Unreconciled non-idempotent effect blocks progress and is never automatically repeated.
+  facade:
+    - id: VM-F01-public-api-classified
+      assertion: Every public GraphEngine entry point has an explicit migration class and test.
+    - id: VM-F02-no-new-legacy-runs-after-cutover
+      assertion: GraphEngine and Harness new-run APIs cannot instantiate the old scheduler after cutover.
+
+verification:
+  per_change:
+    - Run the narrowest compiler/verifier/Kernel/oracle tests that can falsify the change.
+    - Run git diff --check.
+    - Run scripts/check_runtime_doc_claims.py for runtime status changes.
+    - Run scripts/check_docs_i18n.py --strict when the manifest owns changed public docs.
+  before_vm_canary:
+    - Fresh build directory; stale branch artifacts are forbidden.
+    - Compiler, strict compiler, validator, Harness service, scheduler, routing, checkpoint, replay, and MCP backend suites pass.
+    - ASan/UBSan pass for ownership and malformed bytecode paths.
+    - TSan plus targeted stress pass for Kernel commit, cancellation, and concurrent budget paths.
+  before_default_cutover:
+    - Complete available default ctest pass.
+    - Persistence restart/resume/fork/replay matrix across enabled backends.
+    - Crash injection around journal, checkpoint, outbox, dispatch, and result persistence boundaries.
+    - Shared-library, Python binding, install/find_package, and supported platform smoke tests.
+    - Harness MCP integration probe correlated to exact server/build/source revision.
+  evidence_rule: >-
+    A passing call to an already-running MCP server is not evidence for the
+    checked-out source unless server build identity is recorded and matched.
+
+acceptance:
+  contract:
+    - Canonical design, this spec, and GitHub issue contracts agree.
+    - All blocking semantic decisions have explicit versioned answers.
+  compilation:
+    - Both Core and Program sources produce required semantic projection and verified bytecode.
+    - Core sources preserve canon-equivalent strict topology.
+    - Projection and bytecode behavior are closed-world validated in both directions.
+  runtime:
+    - VM proposes only; Kernel commits and dispatches.
+    - Stable identities, budgets, journal, replay, checkpoints, and recovery have one owner.
+    - New orchestration libraries require no feature-specific legacy scheduler branch.
+  compatibility:
+    - Every admitted legacy class and interaction is proven equivalent.
+    - Every changed behavior is versioned_change with an explicit diagnostic and migration path.
+    - Every unsupported persisted run is drain_only or blocked, never silently restarted.
+  cutover:
+    - Harness and supported GraphEngine new runs use VM by default.
+    - Legacy runtime accepts resume-only work until the zero-checkpoint gate.
+    - Legacy scheduler/runtime removal occurs only after all gates and audits pass.
+
+failure_modes:
+  - id: FM1-interpreter-first
+    symptom: VM opcodes encode accidental GraphEngine semantics before Kernel ABI exists.
+    prevention: Complete P0-P2 before general interpreter implementation.
+  - id: FM2-elaborator-becomes-language
+    symptom: Existing sugar accumulates loops, effects, and runtime semantics.
+    prevention: Keep Elaborator total/bounded and add a separate Program frontend.
+  - id: FM3-vm-calls-nodes-directly
+    symptom: VM acquires ambient Provider/Tool/Store authority and bypasses durable task identity.
+    prevention: All native work goes through sealed Kernel task/effect targets.
+  - id: FM4-topology-and-bytecode-drift
+    symptom: Reviewable projection appears safe while bytecode contains extra effects or writes.
+    prevention: Closed-world projection/bytecode witness and one bundle hash.
+  - id: FM5-permanent-dual-runtime
+    symptom: Every fix must be implemented in GraphEngine and VM indefinitely.
+    prevention: Pinned oracle, explicit cutover, resume-only drain, and removal gate.
+  - id: FM6-primitive-only-equivalence
+    symptom: Individually equivalent features diverge when combined.
+    prevention: Interaction-family matrix and default-deny unverified combinations.
+  - id: FM7-checkpoint-approximation
+    symptom: Old runs restart from similar state but different control/effect identity.
+    prevention: Exact converter inputs or drain_only/blocked classification.
+  - id: FM8-facade-overclaim
+    symptom: Direct live CompiledGraph or mutable setters silently bypass Program Bundle identity.
+    prevention: Public API inventory and explicit migration classification before cutover.
+  - id: FM9-free-conflict-retries
+    symptom: OCC conflicts replenish fuel and permit unbounded retry denial of service.
+    prevention: Versioned conflict fuel policy and non-progress bound.
+  - id: FM10-early-default-switch
+    symptom: Production starts VM classes not covered by equivalence/recovery gates.
+    prevention: Experimental explicit profile until P9 exit criteria pass.
+
+progress:
+  last_audited: "2026-07-29"
+  P0_contract_sync_and_red_tests: in_progress_contracts_reconciled_schemas_added
+  P1_topology_complete_harness_core: in_progress_sealed_profile_and_core_path_added
+  P2_transition_and_kernel_contract: not_started
+  P3_graph_engine_oracle: not_started
+  P4_minimal_core_to_vm_vertical_slice: not_started
+  P5_static_topology_expansion: not_started
+  P6_dynamic_control_and_durability: not_started
+  P7_harness_vm_canary: not_started
+  P8_program_dsl_and_generic_dataflow: not_started
+  P9_default_cutover_and_checkpoint_drain: not_started
+  P10_legacy_runtime_removal: not_started
+  update_rule: >-
+    Every implementation commit that closes or partially closes a phase item
+    updates this progress block and records file/test evidence in the same
+    commit series. Future planning must audit these statuses against source
+    before citing them.
+
+change_control:
+  - Do not begin a large-scale refactor without explicit owner approval.
+  - Prefer the smallest vertical slice that exercises frontend, lowering, verifier, VM, Kernel, and evidence.
+  - New unknowns are added under semantic_decisions_required_before_vm_code or failure_modes; they are not kept only in chat.
+  - Unsupported acceptance criteria remain open and block phase completion.
+  - Before reporting completion, reread #245/#252 and every associated issue checklist.

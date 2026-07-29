@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=595f6a0223d5ebe0015f9bc087bc559feb06aaf98143cae0f4e0c365e669587f -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=a05267163c3ff3f5c1f457a8d3d813fca89df9f61ad3f339914131ea4fb817de -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -15,6 +15,16 @@ NeoGraph Harness 会在运行前编译一个有界的多工作器工作流。稳
 - `neograph_cancel` 协作取消排队、正在运行或等待中的工作流。
 
 随附的预设包括 `fanout_judge`、`pr_review_panel`、`bug_triage` 和 `research_synthesis`。预设会产生普通的 strict-core 图构件，因此相同的诊断和源映射同时适用于预设请求和 DSL 请求。
+
+### 封闭式准入与显式 Core 模式
+
+`harness.mode` 接受 `preset`、`dsl` 或 `core`。`preset` 和 `dsl` 保持现有的有界 fanout/judge 兼容性契约。`core` 接受已经是严格拓扑（`schema_version: 1`）的输入，而不经过 Elaborator；它适用于显式配置的通用 Core 准入配置文件。
+
+模式导出、编译和启动现在都使用同一个不可变的 `HarnessAdmissionProfile`。其作用域限定的 `GraphRegistry` 和清单会列出所有可用的节点、归约器和条件，连同实现、降级和兼容性元数据。进程全局的注册表条目不属于此调色板，也无法被 Harness 准入解析。编译会在经过验证的声明式 `TopologySpec` 处停止，因此被拒绝的输入结构不会构建 `GraphNode`，也不会派发任何工作器或效果。保留的构件会绑定配置文件 ID 和指纹；不匹配或属于早期配置文件的构件会在启动/恢复时失败关闭，而不是被重新解释。
+
+C++ 嵌入方在构造时通过 `HarnessServiceResources` 传入非默认配置文件。这个附加资源边界会保留现有的 `HarnessServiceConfig` 布局。配置文件指纹涵盖清单以及作用域注册表导出的语义投影。每个 `implementation_identity` 都是受信任的声明；对应的可调用行为发生变化时，必须同步更新它。
+
+这是迁移的基础准备工作，而非 Control VM 切换。当前获准的 Harness 运行使用仅限迁移期的 `precutover-graph-engine-v1` 源配置文件，并且仍通过固定的遗留运行时/预言机 `GraphEngine` 执行。该配置文件必须在默认 VM 切换前停止接纳新运行。它不声称拥有 Program DSL、字节码解释器或生产级 Durable Kernel。
 
 ## 构建并运行
 

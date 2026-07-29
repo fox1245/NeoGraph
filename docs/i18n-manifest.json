@@ -4,6 +4,7 @@
   "translation_locales": ["ko", "ja", "zh-CN"],
   "strict": true,
   "excluded": {
+    "docs/PROGRAMMABLE_HARNESS_DSL_DESIGN.md": "Canonical target architecture design remains English-only to avoid normative translation drift.",
     "THIRD_PARTY_LICENSES.md": "Legal notices remain in their authoritative original form.",
     "skills/neograph-harness-authoring/SKILL.md": "Agent execution contract, not user documentation."
   },

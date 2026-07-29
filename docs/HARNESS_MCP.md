@@ -16,6 +16,37 @@ The shipped presets are `fanout_judge`, `pr_review_panel`, `bug_triage`, and
 `research_synthesis`. Presets produce ordinary strict-core graph artifacts, so
 the same diagnostics and source maps apply to preset and DSL requests.
 
+### Sealed admission and explicit Core mode
+
+`harness.mode` accepts `preset`, `dsl`, or `core`. `preset` and `dsl` keep the
+existing bounded fanout/judge compatibility contract. `core` accepts an already
+strict topology (`schema_version: 1`) without passing it through the Elaborator;
+it is intended for an explicitly configured general-Core admission profile.
+
+Schema export, compile, and start now consume the same immutable
+`HarnessAdmissionProfile`. Its scoped `GraphRegistry` and manifest list every
+available node, reducer, and condition together with implementation, lowering,
+and compatibility metadata. Process-global registry entries are not part of
+this palette and cannot be resolved by Harness admission. Compile stops at
+validated declarative `TopologySpec`, so rejected input constructs no
+`GraphNode` and dispatches no worker or effect. Retained artifacts bind the
+profile ID and fingerprint; a different or pre-profile artifact fails closed at
+start/resume instead of being reinterpreted.
+
+C++ embedders pass a non-default profile through `HarnessServiceResources` at
+construction. This additive resource boundary preserves the existing
+`HarnessServiceConfig` layout. The profile fingerprint covers the manifest and
+the scoped registry's exported semantic projection. Each
+`implementation_identity` is a trusted declaration and must change whenever
+the corresponding callable behavior changes.
+
+This is migration groundwork, not the Control VM cutover. Current accepted
+Harness runs use the migration-only `precutover-graph-engine-v1` source profile
+and still execute through `GraphEngine`, which remains the pinned legacy
+runtime/oracle. This profile must stop admitting new runs before default VM
+cutover. No Program DSL, bytecode interpreter, or production Durable Kernel is
+claimed by this profile.
+
 ## Build And Run
 
 Build the local stdio server with the OpenAI-compatible provider adapter:
