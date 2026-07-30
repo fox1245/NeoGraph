@@ -1,0 +1,342 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/program-bundle-v1.schema.json",
+  "title": "NeoGraph ProgramBundle stored value v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "storage_schema_version",
+    "id",
+    "source_hash",
+    "canonical_program_hash",
+    "compiler_build_id",
+    "program_schema_version",
+    "registry_snapshot_fingerprint",
+    "module_dependency_merkle_root",
+    "input_contract",
+    "output_contract",
+    "orchestration_plan",
+    "core_compiled_plan_identities",
+    "capability_effect_closure",
+    "executable_registry_identities",
+    "declared_budget_requirements",
+    "source_map",
+    "diagnostics"
+  ],
+  "properties": {
+    "format": {
+      "const": "neograph-program-bundle"
+    },
+    "storage_schema_version": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "source_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "canonical_program_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "compiler_build_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "program_schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "registry_snapshot_fingerprint": {
+      "type": "string",
+      "minLength": 1
+    },
+    "module_dependency_merkle_root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "input_contract": {
+      "type": "object"
+    },
+    "output_contract": {
+      "type": "object"
+    },
+    "orchestration_plan": {
+      "type": "object"
+    },
+    "core_compiled_plan_identities": {
+      "type": "array"
+    },
+    "capability_effect_closure": {
+      "type": "object"
+    },
+    "executable_registry_identities": {
+      "type": "array"
+    },
+    "declared_budget_requirements": {
+      "type": "object"
+    },
+    "source_map": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "generated_pointer",
+          "authored"
+        ],
+        "properties": {
+          "generated_pointer": {
+            "type": "string",
+            "pattern": "^(|/.*)$"
+          },
+          "authored": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source_id",
+              "json_pointer",
+              "span"
+            ],
+            "properties": {
+              "source_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "json_pointer": {
+                "type": "string",
+                "pattern": "^(|/.*)$"
+              },
+              "span": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "byte_begin",
+                      "byte_end",
+                      "line_begin",
+                      "column_begin",
+                      "line_end",
+                      "column_end"
+                    ],
+                    "properties": {
+                      "byte_begin": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "byte_end": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "line_begin": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "column_begin": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "line_end": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "column_end": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "phase",
+          "code",
+          "severity",
+          "primary",
+          "message",
+          "witness",
+          "related"
+        ],
+        "properties": {
+          "phase": {
+            "enum": [
+              "source",
+              "schema",
+              "normalize",
+              "resolve",
+              "type_check",
+              "core_parse",
+              "core_validate",
+              "seal"
+            ]
+          },
+          "code": {
+            "type": "string",
+            "minLength": 1
+          },
+          "severity": {
+            "enum": [
+              "error",
+              "warning",
+              "note"
+            ]
+          },
+          "primary": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source_id",
+              "json_pointer",
+              "span"
+            ],
+            "properties": {
+              "source_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "json_pointer": {
+                "type": "string",
+                "pattern": "^(|/.*)$"
+              },
+              "span": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "byte_begin",
+                      "byte_end",
+                      "line_begin",
+                      "column_begin",
+                      "line_end",
+                      "column_end"
+                    ],
+                    "properties": {
+                      "byte_begin": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "byte_end": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "line_begin": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "column_begin": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "line_end": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "column_end": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "witness": {},
+          "related": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "source_id",
+                "json_pointer",
+                "span"
+              ],
+              "properties": {
+                "source_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "json_pointer": {
+                  "type": "string",
+                  "pattern": "^(|/.*)$"
+                },
+                "span": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "byte_begin",
+                        "byte_end",
+                        "line_begin",
+                        "column_begin",
+                        "line_end",
+                        "column_end"
+                      ],
+                      "properties": {
+                        "byte_begin": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "byte_end": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "line_begin": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "column_begin": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "line_end": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "column_end": {
+                          "type": "integer",
+                          "minimum": 1
+                        }
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

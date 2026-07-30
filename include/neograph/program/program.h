@@ -1,11 +1,14 @@
 /**
  * @file program/program.h
- * @brief Public entry point for the optional NeoGraph Program component.
+ * @brief Public entry point for immutable NeoGraph Program values.
  *
- * Program builds on the Core graph engine. Include this component header and
- * link neograph::program so later Program APIs can be adopted without changing
- * the consumer's component boundary.
+ * Program defines transport-neutral diagnostics, deeply owned source values,
+ * and immutable content-addressed bundle/version artifacts. It does not expose
+ * compiler, registry, runtime, store, or admission APIs.
  */
 #pragma once
 
-#include <neograph/graph/engine.h>
+#include <neograph/program/bundle.h>
+#include <neograph/program/diagnostic.h>
+#include <neograph/program/source.h>
+#include <neograph/program/version.h>

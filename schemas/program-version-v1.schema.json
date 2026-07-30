@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/program-version-v1.schema.json",
+  "title": "NeoGraph ProgramVersion stored value v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "storage_schema_version",
+    "id",
+    "bundle_id",
+    "admission_profile",
+    "policy_snapshot",
+    "dependency_receipts",
+    "ownership_scope",
+    "core_materialization_receipt"
+  ],
+  "properties": {
+    "format": {
+      "const": "neograph-program-version"
+    },
+    "storage_schema_version": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "bundle_id": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "admission_profile": {
+      "type": "object"
+    },
+    "policy_snapshot": {
+      "type": "object"
+    },
+    "dependency_receipts": {
+      "type": "array"
+    },
+    "ownership_scope": {
+      "type": "string",
+      "minLength": 1
+    },
+    "core_materialization_receipt": {
+      "type": "object"
+    }
+  }
+}

@@ -19,6 +19,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery now reports Program only when built; Core-only installs keep the
   existing `neograph::core` link interface.
 
+- **Immutable Program value model.** Added stable typed diagnostics, deeply
+  owned canonical-JSON and C++-builder `ProgramSource` inputs, immutable
+  content-addressed `ProgramBundle`/`ProgramVersion` values, canonical
+  serialization, SHA-256 algorithm-tagged identities, source maps, imports,
+  and strict versioned stored-value schemas. `neograph::program` is now a
+  compiled exported library while remaining dependent only on Core.
+
 - **SQLite Harness record store (issue #147 follow-up).** Added the optional
   `neograph::mcp_sqlite` target and `SqliteHarnessRecordStore` for WAL-backed,
   schema-versioned artifact/run persistence with immutable artifact and run-to-

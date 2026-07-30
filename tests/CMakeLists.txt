@@ -79,6 +79,13 @@ add_executable(neograph_tests
     test_openinference_cpp.cpp
     test_schema_provider_stream_async_outer_io.cpp
 )
+if(NEOGRAPH_BUILD_PROGRAM)
+    add_executable(neograph_program_tests test_program_values.cpp)
+    target_link_libraries(neograph_program_tests PRIVATE
+        neograph::program
+        GTest::gtest_main
+    )
+endif()
 
 if(NEOGRAPH_BUILD_MCP_CLIENT)
     # A stdio MCP tool used from inside a graph run — the combination nothing
@@ -210,6 +217,9 @@ if(NEOGRAPH_BUILD_SQLITE)
 endif()
 
 include(GoogleTest)
+if(TARGET neograph_program_tests)
+    gtest_discover_tests(neograph_program_tests)
+endif()
 
 if(NEOGRAPH_BUILD_POSTGRES)
     add_test(NAME PostgresCheckpointAbiTest.OldHeaderNewLibrary

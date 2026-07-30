@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=dabd05e9ec14a64205ebcccf63173710c88def189d84ec7f65b7dfc48494b103 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=cd70806dd167444dfe562dde5468e15c749d5633cf7baf12874f3d6184f99614 -->
 # 更新日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -18,6 +18,12 @@ NeoGraph 的所有显著变更均记录于本文件。
   `NEOGRAPH_BUILD_PROGRAM` 开关、导出的 `neograph::program` 目标以及
   `<neograph/program/program.h>` 入口。安装包仅在构建 Program 时报告该
   组件；仅 Core 安装会保持现有的 `neograph::core` 链接接口。
+
+- **不可变 Program 值模型。** 新增稳定的类型化诊断、深度拥有的 canonical
+  JSON/C++ 构建器 `ProgramSource` 输入、不可变的内容寻址
+  `ProgramBundle`/`ProgramVersion` 值、规范序列化、带 SHA-256 算法标签的
+  标识、源映射、import 以及严格的版本化存储值模式。`neograph::program`
+  现在是仅依赖 Core 的已编译导出库。
 
 - **SQLite Harness 记录存储（issue #147 后续）。** 新增了可选的
   `neograph::mcp_sqlite` 目标和 `SqliteHarnessRecordStore`，用于 WAL 支持、

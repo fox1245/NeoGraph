@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=dabd05e9ec14a64205ebcccf63173710c88def189d84ec7f65b7dfc48494b103 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=cd70806dd167444dfe562dde5468e15c749d5633cf7baf12874f3d6184f99614 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -20,6 +20,13 @@ NeoGraph の全注目すべき変更を本ファイルに文書化します。
   ポイントを追加しました。インストール済みパッケージのコンポーネント検出は
   Program をビルドした場合のみ報告し、Core 専用インストールは既存の
   `neograph::core` リンクインターフェースを維持します。
+
+- **不変 Program 値モデル。** 安定した型付き診断、深く所有される
+  canonical JSON/C++ ビルダーの `ProgramSource` 入力、不変でコンテンツ
+  アドレス可能な `ProgramBundle`/`ProgramVersion` 値、正規直列化、
+  SHA-256 アルゴリズムタグ付き識別子、ソースマップ、import、厳格な
+  バージョン付き保存値スキーマを追加しました。`neograph::program` は
+  Core のみに依存するコンパイル済みエクスポートライブラリになりました。
 
 - **SQLite Harness レコードストア (issue #147 フォローアップ)。** オプションの
   `neograph::mcp_sqlite` ターゲットと `SqliteHarnessRecordStore` を追加。WAL バック、

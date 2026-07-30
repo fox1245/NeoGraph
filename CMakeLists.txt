@@ -468,21 +468,27 @@ target_compile_features(neograph_core PUBLIC cxx_std_20)
 add_library(neograph::core ALIAS neograph_core)
 
 # ===========================================================================
-# neograph::program — optional Program orchestration layer
-#
-# PR2 establishes only the public component boundary. ProgramSource, compiler,
-# runtime, stores, and registries arrive in later independently reviewable PRs.
-# An INTERFACE target is intentional here: it exports the Core dependency
-# without inventing placeholder runtime symbols or an empty binary.
+# neograph::program — optional Program durable values
 # ===========================================================================
 if(NEOGRAPH_BUILD_PROGRAM)
-    add_library(neograph_program INTERFACE)
+    add_library(neograph_program
+        src/program/canonical_json.cpp
+        src/program/diagnostic.cpp
+        src/program/source.cpp
+        src/program/bundle.cpp
+        src/program/version.cpp
+    )
     target_include_directories(neograph_program
-        INTERFACE
+        PUBLIC
             $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
     )
-    target_link_libraries(neograph_program INTERFACE neograph_core)
+    target_compile_features(neograph_program PUBLIC cxx_std_20)
+    target_compile_definitions(neograph_program PRIVATE NEOGRAPH_BUILDING_PROGRAM)
+    if(NOT BUILD_SHARED_LIBS)
+        target_compile_definitions(neograph_program INTERFACE NEOGRAPH_STATIC_BUILD)
+    endif()
+    target_link_libraries(neograph_program PUBLIC neograph_core)
     add_library(neograph::program ALIAS neograph_program)
 endif()
 
@@ -891,6 +897,7 @@ endif()
 # archives and applies the platform-appropriate convention to shared libraries.
 set(_NEOGRAPH_VERSIONED_LIBRARY_TARGETS
     neograph_core
+    neograph_program
     neograph_async
     neograph_postgres
     neograph_sqlite
