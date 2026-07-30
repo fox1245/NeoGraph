@@ -11,7 +11,10 @@ public repository. `GraphEngine` remains the only
 application-node executor; the Control VM and separate Durable Kernel described
 below are not implementation targets. This document remains useful for its DSL,
 security, migration, and completeness analysis, but it is no longer
-authoritative where it conflicts with the v1 design.
+authoritative where it conflicts with the v1 design. Every conclusion,
+acceptance criterion, phase, “after cutover” statement, and future-tense
+requirement below is historical and cannot gate current implementation.
+
 ## 1. Purpose
 
 NeoGraph's core vision extends beyond models improvising from natural-language
@@ -32,7 +35,7 @@ This document answers the following questions:
 This document is not user-facing documentation of currently supported features.
 It records design criteria and completeness contracts for future implementation.
 
-## 2. Conclusion
+## 2. Historical conclusion
 
 The Programmable Harness evolves into a **unified control-execution architecture
 that combines one typed metered Control VM with one small durable kernel**.

@@ -1,6 +1,6 @@
 # NeoGraph v1 Redesign and Migration Plan
 
-Status: Proposed execution plan
+Status: Accepted execution plan
 Date: 2026-07-31
 Architecture: `V1_ARCHITECTURE.md`
 Implementation gates: maintained as private project controls
@@ -27,10 +27,16 @@ Agent Program contract.
 
 ### Verified baseline
 
-A fresh Release build at the audited commit completed. CTest reported zero
-failures across 845 registered tests; four live/external-service tests were
-skipped by their existing conditions. The ASan/UBSan run likewise reported
-zero failures with the same four conditional skips.
+The ordinary GNU 13.3 Release build at
+`24cbd86d80815b2c2b46aacb02cbf5a570503262` completed in the existing
+`build-v1-baseline` directory in `58.25 s`. CTest reported zero failures across
+951 registered tests in `6.35 s`; 34 tests were conditionally skipped: 31
+PostgreSQL-service tests, one live LLM cancellation test, and two live
+WebSocket-provider tests. The static installed-consumer flow
+`scripts/test_find_package.sh` also configured, built, installed, relocated, and
+ran its downstream `find_package(NeoGraph)` consumer in `85.44 s`. ASan/UBSan
+was deliberately not rerun in this ordinary-baseline wave, so a current
+candidate sanitizer run remains a release gate rather than an implied result.
 
 The local Core performance baseline was remeasured with
 `taskset -c 0 ./build-v1-baseline/bench_neograph 100000 5000 1 1`. After two
@@ -38,25 +44,72 @@ discarded warm-up process runs, ten Release process samples were retained:
 
 | Workload | Raw samples (us) | Median | Nearest-rank p95 | Population stddev |
 |---|---|---:|---:|---:|
-| `seq`: three incrementing nodes | `5.84083, 5.98021, 6.30862, 6.16142, 6.58091, 8.00288, 6.51198, 6.77576, 6.64864, 6.30510` | `6.41030 us` | `8.00288 us` | `0.57062 us` |
-| `par`: five-way fan-out plus join, `worker_count=1` | `13.1746, 14.3094, 15.6606, 13.5228, 14.1794, 15.3024, 14.9657, 15.1876, 16.2286, 14.4484` | `14.70705 us` | `16.2286 us` | `0.90167 us` |
+| `seq`: three incrementing nodes | `5.85155, 5.89490, 5.91027, 5.93758, 6.04154, 5.85096, 5.84122, 6.10376, 6.27868, 6.00706` | `5.923925 us` | `6.27868 us` | `0.132166 us` |
+| `par`: five-way fan-out plus join, `worker_count=1` | `13.6211, 13.2768, 13.2917, 13.2280, 14.0613, 13.4455, 13.4602, 13.2889, 13.7311, 13.6345` | `13.45285 us` | `14.0613 us` | `0.248471 us` |
 
 These are same-host comparison baselines, not portable release promises.
 
 ### Classic release cut
 
-`d80c316` is the candidate code baseline for one final pre-v1 **Classic**
-reference release after the bounded #188/#189/#190/#230 checks pass. Classic is
-not a second permanent product line or execution engine:
+`24cbd86d80815b2c2b46aacb02cbf5a570503262` is the current candidate code
+baseline for one final pre-v1 **Classic** reference release after the bounded
+#188/#189/#190/#230 checks pass. Any later source change requires re-running
+the applicable candidate gates. Classic is not a second permanent product line
+or execution engine:
 
-- first reconcile historical `v3.0.0` tags with the current `0.11.x` project
-  metadata and choose one release number under the repository release rules;
-- publish the exact compiler/platform/test/performance evidence above;
+- reconcile the historical `v2.0.0`/`v3.0.0` tags with the current `0.11.x`
+  project line in the release notes, then choose one new release number under
+  the repository release rules;
+- publish the exact compiler/platform/test/package/performance evidence above;
 - announce that v1 C++ consumers rebuild and stored Program formats migrate;
 - keep only severe correctness, security, data-loss, and build-break fixes on
   the Classic line while v1 is built;
 - do not backport Program, activation, child composition, or new DSL semantics
   to Classic.
+
+### Current Classic release readiness
+
+The product version has one authoritative literal:
+`pyproject.toml` declares `0.11.1`; top-level CMake parses that value into
+`PROJECT_VERSION`, the generated CMake package reports `0.11.1`, and the Python
+extension derives `__version__` from the same field. Public headers contain no
+independent product-version literal; the runtime schema stamp is injected from
+CMake. The changelogs correctly record `0.11.1` as the latest released version
+and retain subsequent work under `Unreleased`.
+
+The historical `v2.0.0` and `v3.0.0` tags (2026-04-22) predate the current
+pre-v1 line that restarted at `v0.1.0` (2026-04-26). They must remain immutable
+historical tags. The next Classic tag must therefore be a new version on the
+current line; `0.12.0` is the SemVer direction for the additive `Unreleased`
+content, but choosing it and dating the translated changelogs remains a human
+release-owner decision.
+
+Release status is **NO-GO** until every unchecked item is closed:
+
+- [x] GNU 13.3 Release build completes with hardening enabled.
+- [x] Registered CTest baseline: `951/951`, zero failures, 34 conditional
+  external-service skips enumerated above.
+- [x] Static installed `find_package` consumer builds and runs after prefix
+  relocation.
+- [x] CPU-pinned Core hot-path samples are retained and satisfy the
+  preregistered median/p95 ratios.
+- [ ] #188: run `benchmarks/dr_compare/mem_probe.py` from a checkout outside
+  `/root/Coding/NeoGraph` and retain the output; only the path-independent code
+  and `psutil` instructions are present locally.
+- [ ] #189: rebuild the corrected WASM smoke command with Emscripten and run the
+  Node/browser smoke; the source list and default-worker documentation are
+  present, but no retained current smoke result exists.
+- [ ] #190: run the worker-count-4 mock comparison once, then one low-cost live
+  provider sample when credentials are available, retaining model, transport,
+  call-count, and timing metadata.
+- [ ] #230: guard the async-only benchmark targets when
+  `NEOGRAPH_BUILD_ASYNC=OFF`, reproduce the Galaxy A34 result from one source
+  tree, and retain device-specific results in the repository.
+- [ ] Run the current candidate ASan/UBSan gate; do not reuse the earlier
+  845-test/four-skip sanitizer claim.
+- [ ] Human release owner chooses the new version, converts `Unreleased` in all
+  changelogs, confirms protected CI, and explicitly approves tag/PyPI/GitHub
+  publication.
 
 ## 2. Decision cut
 
@@ -107,7 +160,7 @@ against source, tests, and current documents.
 | #179 WSL2 baseline | **Done.** Fractional timing and worker-mode documentation exist. | Close as a platform record; do not promote its old numbers to a universal gate. | Performance / P0 |
 | #187 v1 API tracker | **Partial.** Many children landed, but shared invocation and remaining ownership/decomposition work are not complete. | Rewrite as the Core/Program/Protocol v1 umbrella; completion follows the focused items below. | Cross-cutting / P0-P8 |
 | #188 memory-probe portability | **Partial.** Checkout-relative path and `psutil` instructions landed. | Run once outside `/root/Coding/NeoGraph`, retain evidence, then close. | Release / P0 |
-| #189 WASM smoke sources | **Partial.** Missing Core sources and behavior checks landed; README still states the wrong default worker mode. | Correct the sentence, rebuild with Emscripten, run browser smoke, then close. | Docs/Release / P0 |
+| #189 WASM smoke sources | **Partial.** Missing Core sources, behavior checks, and corrected default-worker documentation landed. | Rebuild with Emscripten, run the Node/browser smoke, retain evidence, then close. | Docs/Release / P0 |
 | #190 dr_compare workers | **Partial.** Code and docs use worker count 4. | Run mock once; run one low-cost live-provider sample only when a key is available, then close with call metadata. | Performance / P0 |
 | #192 Provider dispatch | **Superseded.** ABI-safe `CompletionProvider::do_invoke` replaced the proposed `Provider::invoke` cutover. | Close as superseded; keep the old Provider vtable, require new implementations to use CompletionProvider. | Core/Release / P0 |
 | #193 checkpoint dispatch | **Partial.** New capability interfaces remove recursion for compliant backends, but legacy defaults still mutually recurse and sync-only stores still block async executors. | Add a nonblocking sync-store adapter, migrate internal callers, and retain regression tests for zero-override and sync-only implementations before closing. | State/Core / P1-P2 |

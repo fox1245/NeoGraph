@@ -1,6 +1,6 @@
 # NeoGraph v1 Core + Program Architecture
 
-Status: Proposed architecture decision
+Status: Accepted architecture decision
 Date: 2026-07-31
 Source baseline: `d80c316de1f3a10f0948477c3689a0b1b80d771b`
 Revisit trigger: a measured workload requires a second execution engine, or the
@@ -563,17 +563,17 @@ Rules:
 
 ## Performance contract
 
-Baseline Core hot path was remeasured from `d80c316` in a fresh GNU 13.3
-Release build. The command was CPU-pinned, each process ran the benchmark's hot
-loop, two process runs were discarded as warm-up, and ten process samples were
-retained:
+Baseline Core hot path was remeasured from
+`24cbd86d80815b2c2b46aacb02cbf5a570503262` in a GNU 13.3 Release build. The
+command was CPU-pinned, each process ran the benchmark's hot loop, two process
+runs were discarded as warm-up, and ten process samples were retained:
 
-- built-in `seq` workload (three incrementing nodes): median `6.4103 us`,
-  nearest-rank empirical p95 `8.00288 us`, population standard deviation
-  `0.5706 us`;
+- built-in `seq` workload (three incrementing nodes): median `5.923925 us`,
+  nearest-rank empirical p95 `6.27868 us`, population standard deviation
+  `0.132166 us`;
 - built-in `par` workload (five-way fan-out plus join, `worker_count=1`):
-  median `14.70705 us`, nearest-rank empirical p95 `16.2286 us`, population
-  standard deviation `0.90167 us`.
+  median `13.45285 us`, nearest-rank empirical p95 `14.0613 us`, population
+  standard deviation `0.248471 us`.
 
 These measurements are local WSL2 evidence, not cross-machine release promises.
 They establish the comparison protocol and show that Program must not tax

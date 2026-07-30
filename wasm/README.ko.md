@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=9126f4bfed65128d8b676e182ae6e0b13f5d544de24e73018ce2ba8d44fb8093 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=5d8c8917e27b2b522ff655a631f05e29701f0759b8f5bb9595f2db1d02089b92 -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 # NeoGraph WASM — 타당성 스파이크
@@ -72,10 +72,12 @@ em++ -std=c++20 -O3 -flto -fexceptions -pthread \
 
 `node wasm/smoke.js`로 실행합니다. 브라우저 플래그가 필요하지 않습니다.
 
-`compile()`는 기본값을 프로비저닝하므로 `-pthread`가 필요합니다.
-thread_pool의 크기는 `hardware_concurrency()`입니다. 단일 스레드 WASM는
-또한 가능합니다 — `-sPTHREAD_POOL_SIZE=0`를 전달하고 호출합니다.
-`run()` 이전에 `engine->set_worker_count(1)`.
+`compile()`의 기본값은 `worker_count=1`이므로 엔진 소유 스레드 풀을 만들지
+않습니다. 이 스모크 명령은 호출자가 `set_worker_count(N >= 2)`로 병렬 팬아웃을
+선택할 수 있도록 Emscripten 스레드 네 개를 계속 활성화하지만, 스모크 자체는
+단일 작업자 기본값을 사용합니다. 단일 스레드 빌드는
+`-sPTHREAD_POOL_SIZE=0`을 전달하면 되며 `set_worker_count(1)` 호출은 필요하지
+않습니다.
 
 ## 2단계 스케치
 
