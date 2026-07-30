@@ -679,12 +679,30 @@ jobs:
           - name: linux-shared
             os: ubuntu-latest
             args: --shared
+          - name: linux-core-static
+            os: ubuntu-latest
+            args: --core-only
+          - name: linux-core-shared
+            os: ubuntu-latest
+            args: --core-only --shared
+          - name: linux-program-static
+            os: ubuntu-latest
+            args: --program
+          - name: linux-program-shared
+            os: ubuntu-latest
+            args: --program --shared
           - name: macos-shared
             os: macos-latest
             args: --shared
+          - name: macos-program-shared
+            os: macos-latest
+            args: --program --shared
           - name: windows-shared
             os: windows-2022
             args: --shared
+          - name: windows-program-shared
+            os: windows-2022
+            args: --program --shared
 
     steps:
       - uses: actions/checkout@v4

@@ -207,6 +207,20 @@ if [[ "$component_mode" == "core" ]]; then
         > "$work/program-disabled-configure.log" 2>&1 \
         || { tail -20 "$work/program-disabled-configure.log"; fail "disabled Program component discovery"; }
     echo "   Program component correctly unavailable"
+
+    cmake -S "$repo_root/tests/integration/find_package_program" \
+        -B "$work/program-disabled-required-consumer" \
+        -DCMAKE_PREFIX_PATH="$prefix" \
+        -DNEOGRAPH_EXPECT_PROGRAM_COMPONENT=OFF \
+        -DNEOGRAPH_TEST_REQUIRED_PROGRAM_REJECTION=ON \
+        > "$work/program-disabled-required-configure.log" 2>&1 \
+        && fail "required disabled Program component lookup unexpectedly succeeded"
+    required_rejection_log=$(<"$work/program-disabled-required-configure.log")
+    if [[ "$required_rejection_log" != *"NeoGraph_FOUND to FALSE"* ]]; then
+        tail -20 "$work/program-disabled-required-configure.log"
+        fail "required Program rejection failed for an unrelated reason"
+    fi
+    echo "   required Program component lookup correctly rejected"
 fi
 
 if [[ "$shared" == "ON" ]]; then

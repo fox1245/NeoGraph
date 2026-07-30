@@ -3,9 +3,27 @@ cmake_minimum_required(VERSION 3.16)
 project(neograph_program_consumer LANGUAGES CXX)
 
 option(NEOGRAPH_EXPECT_PROGRAM_COMPONENT "Require installed Program component" ON)
+option(NEOGRAPH_TEST_REQUIRED_PROGRAM_REJECTION
+       "Require a disabled Program component and expect package rejection" OFF)
 if(NEOGRAPH_EXPECT_PROGRAM_COMPONENT)
     find_package(NeoGraph CONFIG REQUIRED COMPONENTS program)
 else()
+    # Package discovery must override ambient caller state even when Program is
+    # not requested, then do the same for optional and required lookups.
+    set(NeoGraph_program_FOUND TRUE)
+    find_package(NeoGraph CONFIG REQUIRED)
+    if(NeoGraph_program_FOUND)
+        message(FATAL_ERROR
+            "Disabled unrequested NeoGraph Program component retained caller state")
+    endif()
+
+    set(NeoGraph_program_FOUND TRUE)
+    if(NEOGRAPH_TEST_REQUIRED_PROGRAM_REJECTION)
+        find_package(NeoGraph CONFIG REQUIRED COMPONENTS program)
+        message(FATAL_ERROR
+            "Disabled NeoGraph Program component unexpectedly satisfied a required lookup")
+    endif()
+
     find_package(NeoGraph CONFIG REQUIRED OPTIONAL_COMPONENTS program)
     if(NeoGraph_program_FOUND
        OR TARGET neograph::program
