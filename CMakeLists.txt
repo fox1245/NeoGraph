@@ -1498,6 +1498,10 @@ option(NEOGRAPH_BUILD_BENCHMARKS "Build micro/load benchmark binaries" OFF)
 if(NEOGRAPH_BUILD_BENCHMARKS)
     add_executable(bench_neograph benchmarks/bench_neograph.cpp)
     target_link_libraries(bench_neograph PRIVATE neograph::core)
+    add_executable(bench_neograph_avx benchmarks/bench_neograph_avx.cpp)
+    target_link_libraries(bench_neograph_avx PRIVATE neograph::core)
+    target_compile_features(bench_neograph_avx PRIVATE cxx_std_20)
+
 
     # Checkpoint-store load benchmark — compares InMemory / SQLite /
     # Postgres under N×M synthetic save workload. Postgres is opt-in
