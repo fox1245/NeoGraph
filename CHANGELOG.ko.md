@@ -24,6 +24,11 @@ NeoGraph의 주목할 만한 모든 변경 사항을 이 파일에 기록한다.
   `ProgramBundle`/`ProgramVersion` 값, 정규 직렬화, SHA-256 알고리즘 태그
   식별자, 소스 맵, import, 엄격한 버전별 저장 값 스키마를 추가했다.
   `neograph::program`은 이제 Core에만 의존하는 컴파일된 내보내기 라이브러리다.
+  Bundle/version v1 프로젝션은 봉인된 Core 정의와 계획 식별자, 시맨틱 버전이
+  포함된 실행 항목 다이제스트, 계약, 클로저, 경계, 형식화된 승인/구체화 영수증을
+  필수로 요구한다. 식별자는 형식과 저장 버전을 포함하고 의미적 집합은 안정적으로
+  정렬된다. 진단은 잘못된 포인터, 역순 span, 알 수 없는 enum을 거부하며 정확한
+  파서 오프셋이 없으면 span을 비워 둔다.
 
 - **SQLite Harness 레코드 저장소 (이슈 #147 후속).** WAL 지원, 스키마 버전 관리가 된 아티팩트/실행 영속성과 변경 불가능한 아티팩트 및 실행-아티팩트 바인딩을 제공하는 선택적 `neograph::mcp_sqlite` 대상과 `SqliteHarnessRecordStore` 추가. Harness MCP 바이너리가 이제 `runs.db`에 레코드를 저장하며, 체크포인트는 `checkpoints.db`에 남는다.
 - **AMD OpenMP GPU 이관 개념 증명.** 같은 숫자 팬아웃 작업에서 직렬 CPU,

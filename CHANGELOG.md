@@ -25,6 +25,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   serialization, SHA-256 algorithm-tagged identities, source maps, imports,
   and strict versioned stored-value schemas. `neograph::program` is now a
   compiled exported library while remaining dependent only on Core.
+  Bundle/version v1 projections now require sealed Core definitions and plan
+  identities, semantic-versioned executable digests, contracts, closures,
+  bounds, and typed admission/materialization receipts. Their identities bind
+  the format and storage version, semantic sets use stable ordering, and
+  diagnostics reject invalid pointers, reversed spans, and unknown enums while
+  leaving parser spans absent when no exact offset is available.
 
 - **SQLite Harness record store (issue #147 follow-up).** Added the optional
   `neograph::mcp_sqlite` target and `SqliteHarnessRecordStore` for WAL-backed,

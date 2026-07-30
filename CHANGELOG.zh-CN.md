@@ -24,6 +24,10 @@ NeoGraph 的所有显著变更均记录于本文件。
   `ProgramBundle`/`ProgramVersion` 值、规范序列化、带 SHA-256 算法标签的
   标识、源映射、import 以及严格的版本化存储值模式。`neograph::program`
   现在是仅依赖 Core 的已编译导出库。
+  Bundle/version v1 投影现要求封存的 Core 定义与计划标识、带语义版本的可执行项
+  摘要、契约、闭包、边界以及类型化的准入/物化回执。标识会绑定格式和存储版本，
+  语义集合按稳定顺序规范化；诊断会拒绝无效指针、反向 span 和未知 enum，并在
+  无精确解析器偏移量时保持 span 为空。
 
 - **SQLite Harness 记录存储（issue #147 后续）。** 新增了可选的
   `neograph::mcp_sqlite` 目标和 `SqliteHarnessRecordStore`，用于 WAL 支持、

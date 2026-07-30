@@ -2,12 +2,18 @@
 
 #include "canonical_json.h"
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
+#include <set>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 
 namespace neograph::program {
 namespace {
+
+constexpr std::string_view BUNDLE_FORMAT = "neograph-program-bundle";
 
 std::string require_string(const json& value, std::string_view key) {
     const std::string owned_key(key);
@@ -17,12 +23,16 @@ std::string require_string(const json& value, std::string_view key) {
     return value[owned_key].get<std::string>();
 }
 
-std::uint32_t require_uint32(const json& value, std::string_view key) {
+std::uint64_t require_uint64(const json& value, std::string_view key) {
     const std::string owned_key(key);
     if (!value.contains(owned_key) || !value[owned_key].is_number_unsigned()) {
         throw std::invalid_argument("Program bundle field '" + owned_key + "' must be unsigned");
     }
-    const auto number = value[owned_key].get<unsigned long long>();
+    return value[owned_key].get<unsigned long long>();
+}
+
+std::uint32_t require_uint32(const json& value, std::string_view key) {
+    const auto number = require_uint64(value, key);
     if (number > std::numeric_limits<std::uint32_t>::max()) {
         throw std::invalid_argument("Program bundle integer exceeds uint32 range");
     }
@@ -37,42 +47,625 @@ json require_value(const json& value, std::string_view key) {
     return value[owned_key];
 }
 
-void validate_data(const ProgramBundleData& data) {
-    if (!detail::is_sha256_identity(data.source_hash)) {
-        throw std::invalid_argument("Program bundle source_hash must be a sha256 identity");
-    }
-    if (!detail::is_sha256_identity(data.canonical_program_hash)) {
-        throw std::invalid_argument(
-            "Program bundle canonical_program_hash must be a sha256 identity");
-    }
-    if (data.compiler_build_id.empty() || data.program_schema_version == 0 ||
-        data.registry_snapshot_fingerprint.empty() || data.module_dependency_merkle_root.empty()) {
-        throw std::invalid_argument("Program bundle requires all durable identity fields");
-    }
-    if (!data.input_contract.is_object() || !data.output_contract.is_object() ||
-        !data.orchestration_plan.is_object() || !data.core_compiled_plan_identities.is_array() ||
-        !data.capability_effect_closure.is_object() ||
-        !data.executable_registry_identities.is_array() ||
-        !data.declared_budget_requirements.is_object()) {
-        throw std::invalid_argument("Program bundle stored value fields have invalid JSON types");
+void require_object(const json& value, std::string_view name) {
+    if (!value.is_object()) {
+        throw std::invalid_argument(std::string(name) + " must be an object");
     }
 }
 
+void require_nonempty_utf8(std::string_view value, std::string_view name) {
+    if (value.empty()) throw std::invalid_argument(std::string(name) + " must not be empty");
+    detail::validate_utf8(value);
+}
+
+void require_sha256(std::string_view value, std::string_view name) {
+    if (!detail::is_sha256_identity(value)) {
+        throw std::invalid_argument(std::string(name) + " must be a sha256 identity");
+    }
+}
+
+bool is_ascii_digit(unsigned char value) noexcept {
+    return value >= '0' && value <= '9';
+}
+
+bool is_ascii_alphanumeric(unsigned char value) noexcept {
+    return is_ascii_digit(value) || (value >= 'A' && value <= 'Z') ||
+           (value >= 'a' && value <= 'z');
+}
+
+bool valid_numeric_identifier(std::string_view value) {
+    if (value.empty() || (value.size() > 1 && value.front() == '0')) return false;
+    return std::all_of(value.begin(), value.end(), is_ascii_digit);
+}
+
+bool valid_identifier_list(std::string_view value, bool reject_numeric_leading_zero) {
+    if (value.empty()) return false;
+    std::size_t begin = 0;
+    while (begin <= value.size()) {
+        const auto end = value.find('.', begin);
+        const auto part =
+            value.substr(begin, end == std::string_view::npos ? value.size() - begin : end - begin);
+        if (part.empty()) return false;
+        const auto valid_chars = std::all_of(part.begin(), part.end(), [](unsigned char c) {
+            return is_ascii_alphanumeric(c) || c == '-';
+        });
+        if (!valid_chars) return false;
+        if (reject_numeric_leading_zero && std::all_of(part.begin(), part.end(), is_ascii_digit) &&
+            part.size() > 1 && part.front() == '0') {
+            return false;
+        }
+        if (end == std::string_view::npos) break;
+        begin = end + 1;
+    }
+    return true;
+}
+
+bool is_semantic_version(std::string_view value) {
+    const auto build_pos = value.find('+');
+    if (build_pos != std::string_view::npos &&
+        value.find('+', build_pos + 1) != std::string_view::npos) {
+        return false;
+    }
+    const auto core_and_pre = value.substr(0, build_pos);
+    if (build_pos != std::string_view::npos &&
+        !valid_identifier_list(value.substr(build_pos + 1), false)) {
+        return false;
+    }
+    const auto pre_pos = core_and_pre.find('-');
+    const auto core    = core_and_pre.substr(0, pre_pos);
+    if (pre_pos != std::string_view::npos &&
+        !valid_identifier_list(core_and_pre.substr(pre_pos + 1), true)) {
+        return false;
+    }
+    const auto first_dot  = core.find('.');
+    const auto second_dot = first_dot == std::string_view::npos ? std::string_view::npos
+                                                                : core.find('.', first_dot + 1);
+    if (first_dot == std::string_view::npos || second_dot == std::string_view::npos ||
+        core.find('.', second_dot + 1) != std::string_view::npos) {
+        return false;
+    }
+    return valid_numeric_identifier(core.substr(0, first_dot)) &&
+           valid_numeric_identifier(core.substr(first_dot + 1, second_dot - first_dot - 1)) &&
+           valid_numeric_identifier(core.substr(second_dot + 1));
+}
+
+bool valid_executable_kind(ExecutableKind kind) noexcept {
+    switch (kind) {
+        case ExecutableKind::Node:
+        case ExecutableKind::Reducer:
+        case ExecutableKind::Condition:
+        case ExecutableKind::Provider:
+        case ExecutableKind::Tool:
+        case ExecutableKind::Import:
+            return true;
+    }
+    return false;
+}
+
+void validate_contract(const ContractRecord& contract, std::string_view name) {
+    if (contract.schema_version == 0 || !contract.schema.is_object()) {
+        throw std::invalid_argument(std::string(name) +
+                                    " requires a positive schema_version and object schema");
+    }
+}
+
+void validate_plan(const OrchestrationPlanRecord& plan) {
+    if (plan.schema_version == 0 || !plan.plan.is_object()) {
+        throw std::invalid_argument(
+            "Program orchestration plan requires a positive schema_version and object plan");
+    }
+}
+
+void require_unique_string_array(const json& value, std::string_view name, bool nonempty) {
+    if (!value.is_array() || (nonempty && value.empty())) {
+        throw std::invalid_argument(std::string(name) +
+                                    (nonempty ? " must be a nonempty array" : " must be an array"));
+    }
+    std::set<std::string> seen;
+    for (const auto& item : value) {
+        if (!item.is_string()) {
+            throw std::invalid_argument(std::string(name) + " entries must be strings");
+        }
+        const auto item_value = item.get<std::string>();
+        require_nonempty_utf8(item_value, name);
+        if (!seen.insert(item_value).second) {
+            throw std::invalid_argument(std::string(name) + " contains a duplicate");
+        }
+    }
+}
+
+void validate_routes(const json& value, std::string_view name) {
+    if (!value.is_object()) {
+        throw std::invalid_argument(std::string(name) + " must be an object");
+    }
+    for (const auto& [route, target] : value.items()) {
+        require_nonempty_utf8(route, name);
+        if (!target.is_string()) {
+            throw std::invalid_argument(std::string(name) + " targets must be strings");
+        }
+        require_nonempty_utf8(target.get<std::string>(), name);
+    }
+}
+
+void validate_core_edge(const json&      edge,
+                        std::string_view name,
+                        bool             conditional,
+                        bool             allow_inline_type) {
+    if (!edge.is_object()) {
+        throw std::invalid_argument(std::string(name) + " must be an object");
+    }
+    if (conditional) {
+        if (allow_inline_type) {
+            detail::reject_unknown_fields(edge, name, {"from", "condition", "routes", "type"});
+        } else {
+            detail::reject_unknown_fields(edge, name, {"from", "condition", "routes"});
+        }
+    } else {
+        detail::reject_unknown_fields(edge, name, {"from", "to"});
+    }
+    require_nonempty_utf8(require_string(edge, "from"), name);
+    if (conditional) {
+        require_nonempty_utf8(require_string(edge, "condition"), name);
+        if (edge.contains("type") &&
+            (!allow_inline_type || require_string(edge, "type") != "conditional")) {
+            throw std::invalid_argument(std::string(name) +
+                                        " type must be 'conditional' when present");
+        }
+        if (edge.contains("routes")) {
+            validate_routes(edge["routes"], std::string(name) + " routes");
+        }
+    } else {
+        require_nonempty_utf8(require_string(edge, "to"), name);
+    }
+}
+
+void validate_core_definition_v1(const json& definition) {
+    if (!definition.is_object()) {
+        throw std::invalid_argument("Sealed Core definition must be an object");
+    }
+    detail::reject_unknown_fields(
+        definition, "Sealed Core definition",
+        {"schema_version", "name", "channels", "nodes", "edges", "conditional_edges",
+         "interrupt_before", "interrupt_after", "retry_policy"});
+
+    if (!definition.contains("schema_version")) {
+        throw std::invalid_argument("Sealed Core definition requires v1 strict schema_version");
+    }
+    const auto& encoded_version = definition["schema_version"];
+    const bool  v1_version =
+        (encoded_version.is_number_unsigned() &&
+         encoded_version.get<unsigned long long>() ==
+             SealedCoreDefinition::STORAGE_SCHEMA_VERSION) ||
+        (encoded_version.is_number_integer() &&
+         encoded_version.get<long long>() == SealedCoreDefinition::STORAGE_SCHEMA_VERSION);
+    if (!v1_version) {
+        throw std::invalid_argument("Sealed Core definition requires v1 strict schema_version");
+    }
+    if (definition.contains("name")) {
+        require_nonempty_utf8(require_string(definition, "name"), "Sealed Core definition name");
+    }
+
+    if (definition.contains("channels")) {
+        const auto& channels = definition["channels"];
+        if (!channels.is_object()) {
+            throw std::invalid_argument("Sealed Core channels must be an object");
+        }
+        for (const auto& [name, channel] : channels.items()) {
+            require_nonempty_utf8(name, "Sealed Core channel name");
+            if (!channel.is_object()) {
+                throw std::invalid_argument("Sealed Core channel definition must be an object");
+            }
+            detail::reject_unknown_fields(channel, "Sealed Core channel", {"reducer", "initial"});
+            if (channel.contains("reducer")) {
+                require_nonempty_utf8(require_string(channel, "reducer"),
+                                      "Sealed Core channel reducer");
+            }
+        }
+    }
+
+    if (!definition.contains("nodes") || !definition["nodes"].is_object() ||
+        definition["nodes"].empty()) {
+        throw std::invalid_argument("Sealed Core definition requires a nonempty nodes object");
+    }
+    for (const auto& [name, node] : definition["nodes"].items()) {
+        require_nonempty_utf8(name, "Sealed Core node name");
+        if (!node.is_object()) {
+            throw std::invalid_argument("Sealed Core node definition must be an object");
+        }
+        require_nonempty_utf8(require_string(node, "type"), "Sealed Core node type");
+        for (const auto& [key, value] : node.items()) {
+            (void)value;
+            require_nonempty_utf8(key, "Sealed Core node field");
+        }
+        if (node.contains("barrier")) {
+            const auto& barrier = node["barrier"];
+            if (!barrier.is_object()) {
+                throw std::invalid_argument("Sealed Core node barrier must be an object");
+            }
+            detail::reject_unknown_fields(barrier, "Sealed Core node barrier", {"wait_for"});
+            if (!barrier.contains("wait_for")) {
+                throw std::invalid_argument("Sealed Core node barrier requires wait_for");
+            }
+            require_unique_string_array(barrier["wait_for"], "Sealed Core barrier wait_for", true);
+        }
+    }
+
+    if (definition.contains("edges")) {
+        const auto& edges = definition["edges"];
+        if (!edges.is_array()) {
+            throw std::invalid_argument("Sealed Core edges must be an array");
+        }
+        for (const auto& edge : edges) {
+            const bool conditional =
+                edge.is_object() &&
+                (edge.contains("condition") || (edge.contains("type") && edge["type"].is_string() &&
+                                                edge["type"].get<std::string>() == "conditional"));
+            validate_core_edge(edge, "Sealed Core edge", conditional, true);
+        }
+    }
+    if (definition.contains("conditional_edges")) {
+        const auto& edges = definition["conditional_edges"];
+        if (!edges.is_array()) {
+            throw std::invalid_argument("Sealed Core conditional_edges must be an array");
+        }
+        for (const auto& edge : edges) {
+            validate_core_edge(edge, "Sealed Core conditional edge", true, false);
+        }
+    }
+    if (definition.contains("interrupt_before")) {
+        require_unique_string_array(definition["interrupt_before"], "Sealed Core interrupt_before",
+                                    false);
+    }
+    if (definition.contains("interrupt_after")) {
+        require_unique_string_array(definition["interrupt_after"], "Sealed Core interrupt_after",
+                                    false);
+    }
+    if (definition.contains("retry_policy")) {
+        const auto& retry = definition["retry_policy"];
+        if (!retry.is_object()) {
+            throw std::invalid_argument("Sealed Core retry_policy must be an object");
+        }
+        detail::reject_unknown_fields(
+            retry, "Sealed Core retry_policy",
+            {"max_retries", "initial_delay_ms", "backoff_multiplier", "max_delay_ms"});
+        for (const auto key : {"max_retries", "initial_delay_ms", "max_delay_ms"}) {
+            if (!retry.contains(key)) continue;
+            const auto& item = retry[key];
+            const bool  valid =
+                (item.is_number_unsigned() &&
+                 item.get<unsigned long long>() <=
+                     static_cast<unsigned long long>(std::numeric_limits<int>::max())) ||
+                (item.is_number_integer() && item.get<long long>() >= 0 &&
+                 item.get<long long>() <= std::numeric_limits<int>::max());
+            if (!valid) {
+                throw std::invalid_argument(std::string("Sealed Core retry_policy ") + key +
+                                            " must be a nonnegative int32");
+            }
+        }
+        if (retry.contains("backoff_multiplier")) {
+            const auto& item = retry["backoff_multiplier"];
+            if (!item.is_number()) {
+                throw std::invalid_argument(
+                    "Sealed Core retry_policy backoff_multiplier must be a number");
+            }
+            const auto multiplier = item.get<double>();
+            if (!std::isfinite(multiplier) ||
+                multiplier < static_cast<double>(std::numeric_limits<float>::lowest()) ||
+                multiplier > static_cast<double>(std::numeric_limits<float>::max())) {
+                throw std::invalid_argument(
+                    "Sealed Core retry_policy backoff_multiplier exceeds float range");
+            }
+        }
+    }
+}
+
+void validate_sealed_definition(const SealedCoreDefinition& definition) {
+    require_nonempty_utf8(definition.name, "Sealed Core definition name");
+    require_sha256(definition.definition_hash, "Sealed Core definition hash");
+    validate_core_definition_v1(definition.definition);
+    if (definition.definition_hash != sealed_core_definition_hash(definition.definition)) {
+        throw std::invalid_argument(
+            "Sealed Core definition hash does not match its canonical definition");
+    }
+}
+
+void validate_core_plan(const CorePlanIdentity& plan) {
+    require_nonempty_utf8(plan.name, "Core plan name");
+    require_sha256(plan.compiled_plan_identity, "Core compiled plan identity");
+}
+
+void validate_executable(const ExecutableIdentity& identity) {
+    if (!valid_executable_kind(identity.kind)) {
+        throw std::invalid_argument("Executable identity has unknown kind");
+    }
+    require_nonempty_utf8(identity.name, "Executable identity name");
+    if (!is_semantic_version(identity.semantic_version)) {
+        throw std::invalid_argument("Executable identity semantic_version is invalid");
+    }
+    require_sha256(identity.implementation_digest, "Executable implementation digest");
+}
+
+void sort_unique_strings(std::vector<std::string>& values, std::string_view name) {
+    for (const auto& value : values)
+        require_nonempty_utf8(value, name);
+    std::sort(values.begin(), values.end());
+    if (std::adjacent_find(values.begin(), values.end()) != values.end()) {
+        throw std::invalid_argument(std::string(name) + " contains a duplicate");
+    }
+}
+
+void normalize_data(ProgramBundleData& data) {
+    require_sha256(data.source_hash, "Program bundle source_hash");
+    require_sha256(data.canonical_program_hash, "Program bundle canonical_program_hash");
+    require_nonempty_utf8(data.compiler_build_id, "Program bundle compiler_build_id");
+    if (data.program_schema_version == 0) {
+        throw std::invalid_argument("Program bundle program_schema_version must be positive");
+    }
+    require_sha256(data.registry_snapshot_fingerprint,
+                   "Program bundle registry_snapshot_fingerprint");
+    require_sha256(data.module_dependency_merkle_root,
+                   "Program bundle module_dependency_merkle_root");
+    validate_contract(data.input_contract, "Program input contract");
+    validate_contract(data.output_contract, "Program output contract");
+    validate_plan(data.orchestration_plan);
+
+    if (data.sealed_core_definitions.empty() || data.core_plan_identities.empty() ||
+        data.executable_registry_identities.empty() || data.declared_budget_requirements.empty()) {
+        throw std::invalid_argument("Program bundle requires Core, executable, and budget records");
+    }
+
+    for (const auto& definition : data.sealed_core_definitions)
+        validate_sealed_definition(definition);
+    std::sort(data.sealed_core_definitions.begin(), data.sealed_core_definitions.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs.name < rhs.name; });
+    if (std::adjacent_find(data.sealed_core_definitions.begin(), data.sealed_core_definitions.end(),
+                           [](const auto& lhs, const auto& rhs) { return lhs.name == rhs.name; }) !=
+        data.sealed_core_definitions.end()) {
+        throw std::invalid_argument(
+            "Program bundle contains duplicate sealed Core definition names");
+    }
+
+    for (const auto& plan : data.core_plan_identities)
+        validate_core_plan(plan);
+    std::sort(data.core_plan_identities.begin(), data.core_plan_identities.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs.name < rhs.name; });
+    if (std::adjacent_find(data.core_plan_identities.begin(), data.core_plan_identities.end(),
+                           [](const auto& lhs, const auto& rhs) { return lhs.name == rhs.name; }) !=
+        data.core_plan_identities.end()) {
+        throw std::invalid_argument("Program bundle contains duplicate Core plan names");
+    }
+    if (data.sealed_core_definitions.size() != data.core_plan_identities.size()) {
+        throw std::invalid_argument("Every sealed Core definition requires one plan identity");
+    }
+    for (std::size_t index = 0; index < data.sealed_core_definitions.size(); ++index) {
+        if (data.sealed_core_definitions[index].name != data.core_plan_identities[index].name) {
+            throw std::invalid_argument("Sealed Core definition and plan identity names differ");
+        }
+    }
+
+    for (const auto& identity : data.executable_registry_identities)
+        validate_executable(identity);
+    std::sort(data.executable_registry_identities.begin(),
+              data.executable_registry_identities.end(), [](const auto& lhs, const auto& rhs) {
+                  const auto lhs_kind = to_string(lhs.kind);
+                  const auto rhs_kind = to_string(rhs.kind);
+                  if (lhs_kind != rhs_kind) return lhs_kind < rhs_kind;
+                  return std::tie(lhs.name, lhs.semantic_version, lhs.implementation_digest) <
+                         std::tie(rhs.name, rhs.semantic_version, rhs.implementation_digest);
+              });
+    if (std::adjacent_find(data.executable_registry_identities.begin(),
+                           data.executable_registry_identities.end(),
+                           [](const auto& lhs, const auto& rhs) { return lhs == rhs; }) !=
+        data.executable_registry_identities.end()) {
+        throw std::invalid_argument("Program bundle contains duplicate executable identity keys");
+    }
+
+    sort_unique_strings(data.capability_effect_closure.capabilities, "Capability closure");
+    sort_unique_strings(data.capability_effect_closure.effects, "Effect closure");
+
+    for (const auto& requirement : data.declared_budget_requirements) {
+        require_nonempty_utf8(requirement.resource, "Budget resource");
+        if (requirement.maximum < requirement.minimum) {
+            throw std::invalid_argument("Budget requirement maximum precedes minimum");
+        }
+    }
+    std::sort(data.declared_budget_requirements.begin(), data.declared_budget_requirements.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs.resource < rhs.resource; });
+    if (std::adjacent_find(
+            data.declared_budget_requirements.begin(), data.declared_budget_requirements.end(),
+            [](const auto& lhs, const auto& rhs) { return lhs.resource == rhs.resource; }) !=
+        data.declared_budget_requirements.end()) {
+        throw std::invalid_argument("Program bundle contains duplicate budget resources");
+    }
+
+    for (const auto& mapping : data.source_map) {
+        detail::validate_json_pointer(mapping.generated_pointer);
+        json encoded;
+        to_json(encoded, mapping.authored);
+    }
+    std::sort(data.source_map.begin(), data.source_map.end(), [](const auto& lhs, const auto& rhs) {
+        return std::tie(lhs.generated_pointer, lhs.authored.source_id, lhs.authored.json_pointer) <
+               std::tie(rhs.generated_pointer, rhs.authored.source_id, rhs.authored.json_pointer);
+    });
+    if (std::adjacent_find(data.source_map.begin(), data.source_map.end(),
+                           [](const auto& lhs, const auto& rhs) {
+                               return lhs.generated_pointer == rhs.generated_pointer;
+                           }) != data.source_map.end()) {
+        throw std::invalid_argument("Program bundle contains duplicate source-map pointers");
+    }
+
+    for (const auto& diagnostic : data.diagnostics) {
+        json encoded;
+        to_json(encoded, diagnostic);
+    }
+}
+
+json encode_contract(const ContractRecord& contract) {
+    json value              = json::object();
+    value["schema_version"] = contract.schema_version;
+    value["schema"]         = contract.schema;
+    return value;
+}
+
+ContractRecord parse_contract(const json& value, std::string_view name) {
+    require_object(value, name);
+    detail::reject_unknown_fields(value, name, {"schema_version", "schema"});
+    ContractRecord result;
+    result.schema_version = require_uint32(value, "schema_version");
+    result.schema         = require_value(value, "schema");
+    validate_contract(result, name);
+    return result;
+}
+
+json encode_plan(const OrchestrationPlanRecord& plan) {
+    json value              = json::object();
+    value["schema_version"] = plan.schema_version;
+    value["plan"]           = plan.plan;
+    return value;
+}
+
+OrchestrationPlanRecord parse_plan(const json& value) {
+    require_object(value, "Program orchestration plan");
+    detail::reject_unknown_fields(value, "Program orchestration plan", {"schema_version", "plan"});
+    OrchestrationPlanRecord result;
+    result.schema_version = require_uint32(value, "schema_version");
+    result.plan           = require_value(value, "plan");
+    validate_plan(result);
+    return result;
+}
+
+json encode_sealed_definition(const SealedCoreDefinition& definition) {
+    json value               = json::object();
+    value["name"]            = definition.name;
+    value["definition_hash"] = definition.definition_hash;
+    value["definition"]      = definition.definition;
+    return value;
+}
+
+SealedCoreDefinition parse_sealed_definition(const json& value) {
+    require_object(value, "Sealed Core definition");
+    detail::reject_unknown_fields(value, "Sealed Core definition",
+                                  {"name", "definition_hash", "definition"});
+    SealedCoreDefinition result;
+    result.name            = require_string(value, "name");
+    result.definition_hash = require_string(value, "definition_hash");
+    result.definition      = require_value(value, "definition");
+    validate_sealed_definition(result);
+    return result;
+}
+
+json encode_core_plan(const CorePlanIdentity& plan) {
+    return json{{"name", plan.name}, {"compiled_plan_identity", plan.compiled_plan_identity}};
+}
+
+CorePlanIdentity parse_core_plan(const json& value) {
+    require_object(value, "Core plan identity");
+    detail::reject_unknown_fields(value, "Core plan identity", {"name", "compiled_plan_identity"});
+    CorePlanIdentity result{require_string(value, "name"),
+                            require_string(value, "compiled_plan_identity")};
+    validate_core_plan(result);
+    return result;
+}
+
+json encode_executable(const ExecutableIdentity& identity) {
+    validate_executable(identity);
+    return json{{"kind", std::string(to_string(identity.kind))},
+                {"name", identity.name},
+                {"semantic_version", identity.semantic_version},
+                {"implementation_digest", identity.implementation_digest}};
+}
+
+ExecutableIdentity parse_executable(const json& value) {
+    require_object(value, "Executable identity");
+    detail::reject_unknown_fields(value, "Executable identity",
+                                  {"kind", "name", "semantic_version", "implementation_digest"});
+    ExecutableIdentity result;
+    result.kind                  = executable_kind_from_string(require_string(value, "kind"));
+    result.name                  = require_string(value, "name");
+    result.semantic_version      = require_string(value, "semantic_version");
+    result.implementation_digest = require_string(value, "implementation_digest");
+    validate_executable(result);
+    return result;
+}
+
+json encode_closure(const CapabilityEffectClosure& closure) {
+    json capabilities = json::array();
+    for (const auto& capability : closure.capabilities)
+        capabilities.push_back(capability);
+    json effects = json::array();
+    for (const auto& effect : closure.effects)
+        effects.push_back(effect);
+    return json{{"capabilities", std::move(capabilities)}, {"effects", std::move(effects)}};
+}
+
+CapabilityEffectClosure parse_closure(const json& value) {
+    require_object(value, "Capability/effect closure");
+    detail::reject_unknown_fields(value, "Capability/effect closure", {"capabilities", "effects"});
+    const auto& capabilities = require_value(value, "capabilities");
+    const auto& effects      = require_value(value, "effects");
+    if (!capabilities.is_array() || !effects.is_array()) {
+        throw std::invalid_argument("Capability/effect closure fields must be arrays");
+    }
+    CapabilityEffectClosure result;
+    for (const auto& item : capabilities) {
+        if (!item.is_string()) throw std::invalid_argument("Capability must be a string");
+        result.capabilities.push_back(item.get<std::string>());
+    }
+    for (const auto& item : effects) {
+        if (!item.is_string()) throw std::invalid_argument("Effect must be a string");
+        result.effects.push_back(item.get<std::string>());
+    }
+    return result;
+}
+
+json encode_budget(const BudgetRequirement& requirement) {
+    return json{{"resource", requirement.resource},
+                {"minimum", requirement.minimum},
+                {"maximum", requirement.maximum}};
+}
+
+BudgetRequirement parse_budget(const json& value) {
+    require_object(value, "Budget requirement");
+    detail::reject_unknown_fields(value, "Budget requirement", {"resource", "minimum", "maximum"});
+    return BudgetRequirement{require_string(value, "resource"), require_uint64(value, "minimum"),
+                             require_uint64(value, "maximum")};
+}
+
 json bundle_body(const ProgramBundleData& data) {
-    json value                              = json::object();
-    value["source_hash"]                    = data.source_hash;
-    value["canonical_program_hash"]         = data.canonical_program_hash;
-    value["compiler_build_id"]              = data.compiler_build_id;
-    value["program_schema_version"]         = data.program_schema_version;
-    value["registry_snapshot_fingerprint"]  = data.registry_snapshot_fingerprint;
-    value["module_dependency_merkle_root"]  = data.module_dependency_merkle_root;
-    value["input_contract"]                 = data.input_contract;
-    value["output_contract"]                = data.output_contract;
-    value["orchestration_plan"]             = data.orchestration_plan;
-    value["core_compiled_plan_identities"]  = data.core_compiled_plan_identities;
-    value["capability_effect_closure"]      = data.capability_effect_closure;
-    value["executable_registry_identities"] = data.executable_registry_identities;
-    value["declared_budget_requirements"]   = data.declared_budget_requirements;
+    json value                             = json::object();
+    value["source_hash"]                   = data.source_hash;
+    value["canonical_program_hash"]        = data.canonical_program_hash;
+    value["compiler_build_id"]             = data.compiler_build_id;
+    value["program_schema_version"]        = data.program_schema_version;
+    value["registry_snapshot_fingerprint"] = data.registry_snapshot_fingerprint;
+    value["module_dependency_merkle_root"] = data.module_dependency_merkle_root;
+    value["input_contract"]                = encode_contract(data.input_contract);
+    value["output_contract"]               = encode_contract(data.output_contract);
+    value["orchestration_plan"]            = encode_plan(data.orchestration_plan);
+
+    json definitions = json::array();
+    for (const auto& definition : data.sealed_core_definitions) {
+        definitions.push_back(encode_sealed_definition(definition));
+    }
+    value["sealed_core_definitions"] = std::move(definitions);
+
+    json plans = json::array();
+    for (const auto& plan : data.core_plan_identities)
+        plans.push_back(encode_core_plan(plan));
+    value["core_plan_identities"]      = std::move(plans);
+    value["capability_effect_closure"] = encode_closure(data.capability_effect_closure);
+
+    json executable_identities = json::array();
+    for (const auto& identity : data.executable_registry_identities) {
+        executable_identities.push_back(encode_executable(identity));
+    }
+    value["executable_registry_identities"] = std::move(executable_identities);
+
+    json budgets = json::array();
+    for (const auto& requirement : data.declared_budget_requirements) {
+        budgets.push_back(encode_budget(requirement));
+    }
+    value["declared_budget_requirements"] = std::move(budgets);
 
     json source_map = json::array();
     for (const auto& entry : data.source_map) {
@@ -92,21 +685,50 @@ json bundle_body(const ProgramBundleData& data) {
     return value;
 }
 
+json bundle_identity_envelope(const ProgramBundleData& data) {
+    auto value                      = bundle_body(data);
+    value["format"]                 = std::string(BUNDLE_FORMAT);
+    value["storage_schema_version"] = ProgramBundle::STORAGE_SCHEMA_VERSION;
+    return value;
+}
+
+template <typename T, typename Parse>
+std::vector<T> parse_array(const json& value, std::string_view key, Parse parse) {
+    const auto& encoded = require_value(value, key);
+    if (!encoded.is_array()) {
+        throw std::invalid_argument("Program bundle field '" + std::string(key) +
+                                    "' must be an array");
+    }
+    std::vector<T> result;
+    result.reserve(encoded.size());
+    for (const auto& item : encoded)
+        result.push_back(parse(item));
+    return result;
+}
+
 ProgramBundleData parse_body(const json& value) {
     ProgramBundleData data;
-    data.source_hash                    = require_string(value, "source_hash");
-    data.canonical_program_hash         = require_string(value, "canonical_program_hash");
-    data.compiler_build_id              = require_string(value, "compiler_build_id");
-    data.program_schema_version         = require_uint32(value, "program_schema_version");
-    data.registry_snapshot_fingerprint  = require_string(value, "registry_snapshot_fingerprint");
-    data.module_dependency_merkle_root  = require_string(value, "module_dependency_merkle_root");
-    data.input_contract                 = require_value(value, "input_contract");
-    data.output_contract                = require_value(value, "output_contract");
-    data.orchestration_plan             = require_value(value, "orchestration_plan");
-    data.core_compiled_plan_identities  = require_value(value, "core_compiled_plan_identities");
-    data.capability_effect_closure      = require_value(value, "capability_effect_closure");
-    data.executable_registry_identities = require_value(value, "executable_registry_identities");
-    data.declared_budget_requirements   = require_value(value, "declared_budget_requirements");
+    data.source_hash                   = require_string(value, "source_hash");
+    data.canonical_program_hash        = require_string(value, "canonical_program_hash");
+    data.compiler_build_id             = require_string(value, "compiler_build_id");
+    data.program_schema_version        = require_uint32(value, "program_schema_version");
+    data.registry_snapshot_fingerprint = require_string(value, "registry_snapshot_fingerprint");
+    data.module_dependency_merkle_root = require_string(value, "module_dependency_merkle_root");
+    data.input_contract =
+        parse_contract(require_value(value, "input_contract"), "Program input contract");
+    data.output_contract =
+        parse_contract(require_value(value, "output_contract"), "Program output contract");
+    data.orchestration_plan      = parse_plan(require_value(value, "orchestration_plan"));
+    data.sealed_core_definitions = parse_array<SealedCoreDefinition>(
+        value, "sealed_core_definitions", parse_sealed_definition);
+    data.core_plan_identities =
+        parse_array<CorePlanIdentity>(value, "core_plan_identities", parse_core_plan);
+    data.capability_effect_closure =
+        parse_closure(require_value(value, "capability_effect_closure"));
+    data.executable_registry_identities =
+        parse_array<ExecutableIdentity>(value, "executable_registry_identities", parse_executable);
+    data.declared_budget_requirements =
+        parse_array<BudgetRequirement>(value, "declared_budget_requirements", parse_budget);
 
     const auto encoded_source_map = require_value(value, "source_map");
     if (!encoded_source_map.is_array()) {
@@ -127,11 +749,47 @@ ProgramBundleData parse_body(const json& value) {
         from_json(item, diagnostic);
         data.diagnostics.push_back(std::move(diagnostic));
     }
-    validate_data(data);
+    normalize_data(data);
     return data;
 }
 
 }  // namespace
+
+std::string_view to_string(ExecutableKind kind) noexcept {
+    switch (kind) {
+        case ExecutableKind::Node:
+            return "node";
+        case ExecutableKind::Reducer:
+            return "reducer";
+        case ExecutableKind::Condition:
+            return "condition";
+        case ExecutableKind::Provider:
+            return "provider";
+        case ExecutableKind::Tool:
+            return "tool";
+        case ExecutableKind::Import:
+            return "import";
+    }
+    return "unknown";
+}
+
+ExecutableKind executable_kind_from_string(std::string_view value) {
+    if (value == "node") return ExecutableKind::Node;
+    if (value == "reducer") return ExecutableKind::Reducer;
+    if (value == "condition") return ExecutableKind::Condition;
+    if (value == "provider") return ExecutableKind::Provider;
+    if (value == "tool") return ExecutableKind::Tool;
+    if (value == "import") return ExecutableKind::Import;
+    throw std::invalid_argument("Unknown Program executable kind: " + std::string(value));
+}
+
+std::string sealed_core_definition_hash(const json& definition) {
+    if (!definition.is_object()) {
+        throw std::invalid_argument("Sealed Core definition must be an object");
+    }
+    return detail::sha256_identity("sealed-core-definition/v1",
+                                   detail::canonical_json_bytes(definition));
+}
 
 struct ProgramBundle::Impl {
     ProgramBundleData data;
@@ -139,12 +797,13 @@ struct ProgramBundle::Impl {
 };
 
 ProgramBundle::ProgramBundle(ProgramBundleData data) {
-    validate_data(data);
+    ProgramBundleData owned(data);
+    normalize_data(owned);
     auto impl  = std::make_shared<Impl>();
-    impl->data = std::move(data);
-    impl->id   = detail::sha256_identity("program-bundle",
-                                         detail::canonical_json_bytes(bundle_body(impl->data)));
-    impl_      = std::move(impl);
+    impl->data = std::move(owned);
+    impl->id   = detail::sha256_identity(
+        "program-bundle", detail::canonical_json_bytes(bundle_identity_envelope(impl->data)));
+    impl_ = std::move(impl);
 }
 
 ProgramBundle::ProgramBundle(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
@@ -152,12 +811,12 @@ ProgramBundle::ProgramBundle(std::shared_ptr<const Impl> impl) : impl_(std::move
 ProgramBundle ProgramBundle::parse(std::string_view stored_bytes) {
     json value;
     try {
-        value = json::parse(std::string(stored_bytes));
+        value = detail::parse_json_strict(stored_bytes);
     } catch (const std::exception& error) {
         throw std::invalid_argument(std::string("Invalid stored ProgramBundle JSON: ") +
                                     error.what());
     }
-    if (!value.is_object() || require_string(value, "format") != "neograph-program-bundle") {
+    if (!value.is_object() || require_string(value, "format") != BUNDLE_FORMAT) {
         throw std::invalid_argument("Stored ProgramBundle has unknown format");
     }
     detail::reject_unknown_fields(
@@ -165,7 +824,7 @@ ProgramBundle ProgramBundle::parse(std::string_view stored_bytes) {
         {"format", "storage_schema_version", "id", "source_hash", "canonical_program_hash",
          "compiler_build_id", "program_schema_version", "registry_snapshot_fingerprint",
          "module_dependency_merkle_root", "input_contract", "output_contract", "orchestration_plan",
-         "core_compiled_plan_identities", "capability_effect_closure",
+         "sealed_core_definitions", "core_plan_identities", "capability_effect_closure",
          "executable_registry_identities", "declared_budget_requirements", "source_map",
          "diagnostics"});
     if (require_uint32(value, "storage_schema_version") != STORAGE_SCHEMA_VERSION) {
@@ -200,39 +859,41 @@ const std::string& ProgramBundle::registry_snapshot_fingerprint() const noexcept
 const std::string& ProgramBundle::module_dependency_merkle_root() const noexcept {
     return impl_->data.module_dependency_merkle_root;
 }
-json ProgramBundle::input_contract() const {
+ContractRecord ProgramBundle::input_contract() const {
     return impl_->data.input_contract;
 }
-json ProgramBundle::output_contract() const {
+ContractRecord ProgramBundle::output_contract() const {
     return impl_->data.output_contract;
 }
-json ProgramBundle::orchestration_plan() const {
+OrchestrationPlanRecord ProgramBundle::orchestration_plan() const {
     return impl_->data.orchestration_plan;
 }
-json ProgramBundle::core_compiled_plan_identities() const {
-    return impl_->data.core_compiled_plan_identities;
+std::vector<SealedCoreDefinition> ProgramBundle::sealed_core_definitions() const {
+    return impl_->data.sealed_core_definitions;
 }
-json ProgramBundle::capability_effect_closure() const {
+const std::vector<CorePlanIdentity>& ProgramBundle::core_plan_identities() const noexcept {
+    return impl_->data.core_plan_identities;
+}
+const CapabilityEffectClosure& ProgramBundle::capability_effect_closure() const noexcept {
     return impl_->data.capability_effect_closure;
 }
-json ProgramBundle::executable_registry_identities() const {
+const std::vector<ExecutableIdentity>& ProgramBundle::executable_registry_identities()
+    const noexcept {
     return impl_->data.executable_registry_identities;
 }
-json ProgramBundle::declared_budget_requirements() const {
+const std::vector<BudgetRequirement>& ProgramBundle::declared_budget_requirements() const noexcept {
     return impl_->data.declared_budget_requirements;
 }
 const std::vector<SourceMapEntry>& ProgramBundle::source_map() const noexcept {
     return impl_->data.source_map;
 }
-const std::vector<Diagnostic>& ProgramBundle::diagnostics() const noexcept {
+std::vector<Diagnostic> ProgramBundle::diagnostics() const {
     return impl_->data.diagnostics;
 }
 
 std::string ProgramBundle::serialize_canonical() const {
-    auto value                      = bundle_body(impl_->data);
-    value["format"]                 = "neograph-program-bundle";
-    value["storage_schema_version"] = STORAGE_SCHEMA_VERSION;
-    value["id"]                     = impl_->id;
+    auto value  = bundle_identity_envelope(impl_->data);
+    value["id"] = impl_->id;
     return detail::canonical_json_bytes(value);
 }
 

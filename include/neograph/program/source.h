@@ -60,9 +60,14 @@ public:
     json                               document() const;
     const std::vector<ImportRef>&      imports() const noexcept;
     const std::vector<SourceMapEntry>& source_map() const noexcept;
-    const std::string&                 source_hash() const noexcept;
-    const std::string&                 canonical_document() const noexcept;
-    std::string                        serialize_canonical() const;
+    /**
+     * Hashes the declared Program schema version and canonical authored document.
+     * Import identities are dependency metadata and are bound separately by a
+     * ProgramBundle's module dependency Merkle root.
+     */
+    const std::string& source_hash() const noexcept;
+    const std::string& canonical_document() const noexcept;
+    std::string        serialize_canonical() const;
 
 private:
     struct Impl;

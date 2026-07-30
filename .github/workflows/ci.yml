@@ -85,6 +85,7 @@ jobs:
             -DNEOGRAPH_BUILD_UTIL=ON \
             -DNEOGRAPH_BUILD_POSTGRES=ON \
             -DNEOGRAPH_BUILD_PYBIND=ON \
+            -DNEOGRAPH_BUILD_PROGRAM=ON \
             -DNEOGRAPH_BUILD_TESTS=ON \
             -DNEOGRAPH_BUILD_EXAMPLES=OFF
 
@@ -93,6 +94,9 @@ jobs:
 
       - name: ccache stats
         run: ccache --show-stats
+
+      - name: Run focused Program value tests
+        run: ./build/tests/neograph_program_tests
 
       - name: Install Python test dependencies
         run: python -m pip install -U pytest pydantic certifi

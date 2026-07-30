@@ -29,34 +29,22 @@ std::uint32_t require_uint32(const json& value, std::string_view key) {
     return static_cast<std::uint32_t>(number);
 }
 
-SourceSpan whole_source_span(std::string_view source) {
-    SourceSpan span;
-    span.byte_end = source.size();
-    for (const char c : source) {
-        if (c == '\n') {
-            ++span.line_end;
-            span.column_end = 1;
-        } else {
-            ++span.column_end;
-        }
-    }
-    return span;
-}
-
-[[noreturn]] void throw_source_error(std::string      source_id,
-                                     std::string      code,
-                                     std::string      message,
-                                     std::string_view text = {}) {
+[[noreturn]] void throw_source_error(std::string source_id, std::string code, std::string message) {
     Diagnostic diagnostic;
     diagnostic.phase                = CompilePhase::Source;
     diagnostic.code                 = std::move(code);
     diagnostic.severity             = DiagnosticSeverity::Error;
     diagnostic.primary.source_id    = std::move(source_id);
     diagnostic.primary.json_pointer = "";
-    diagnostic.primary.span         = whole_source_span(text);
-    diagnostic.message              = std::move(message);
-    diagnostic.witness              = json::object();
+    diagnostic.primary.span.reset();
+    diagnostic.message = std::move(message);
+    diagnostic.witness = json::object();
     throw ProgramDiagnosticError(std::move(diagnostic));
+}
+
+void validate_source_id(std::string_view source_id) {
+    if (source_id.empty()) throw std::invalid_argument("Program source_id must not be empty");
+    detail::validate_utf8(source_id);
 }
 
 void validate_common(std::string_view                   source_id,
@@ -64,8 +52,7 @@ void validate_common(std::string_view                   source_id,
                      const json&                        document,
                      const std::vector<ImportRef>&      imports,
                      const std::vector<SourceMapEntry>& source_map) {
-    if (source_id.empty()) throw std::invalid_argument("Program source_id must not be empty");
-    detail::validate_utf8(source_id);
+    validate_source_id(source_id);
     if (schema_version == 0) throw std::invalid_argument("Program schema version must be positive");
     if (!document.is_object())
         throw std::invalid_argument("Program source document must be an object");
@@ -97,11 +84,7 @@ void validate_common(std::string_view                   source_id,
         detail::validate_utf8(import_ref.content_identity);
     }
     for (const auto& mapping : source_map) {
-        if (!mapping.generated_pointer.empty() && mapping.generated_pointer.front() != '/') {
-            throw std::invalid_argument(
-                "Program source map generated_pointer must be RFC 6901 JSON Pointer");
-        }
-        detail::validate_utf8(mapping.generated_pointer);
+        detail::validate_json_pointer(mapping.generated_pointer);
         detail::validate_utf8(mapping.authored.source_id);
         detail::validate_utf8(mapping.authored.json_pointer);
         json coordinate;
@@ -165,10 +148,7 @@ void from_json(const json& value, ImportRef& import_ref) {
 }
 
 void to_json(json& value, const SourceMapEntry& entry) {
-    if (!entry.generated_pointer.empty() && entry.generated_pointer.front() != '/') {
-        throw std::invalid_argument(
-            "Program source map generated_pointer must be RFC 6901 JSON Pointer");
-    }
+    detail::validate_json_pointer(entry.generated_pointer);
     value                      = json::object();
     value["generated_pointer"] = entry.generated_pointer;
     json authored;
@@ -182,10 +162,7 @@ void from_json(const json& value, SourceMapEntry& entry) {
     detail::reject_unknown_fields(value, "Program source map entry",
                                   {"generated_pointer", "authored"});
     entry.generated_pointer = require_string(value, "generated_pointer");
-    if (!entry.generated_pointer.empty() && entry.generated_pointer.front() != '/') {
-        throw std::invalid_argument(
-            "Program source map generated_pointer must be RFC 6901 JSON Pointer");
-    }
+    detail::validate_json_pointer(entry.generated_pointer);
     if (!value.contains("authored")) {
         throw std::invalid_argument("Program source map entry requires authored coordinate");
     }
@@ -198,29 +175,28 @@ ProgramSource ProgramSource::from_canonical_json(std::string                 sou
                                                  std::string                 source_text,
                                                  std::vector<ImportRef>      imports,
                                                  std::vector<SourceMapEntry> source_map) {
+    validate_source_id(source_id);
     json document;
     try {
-        document = json::parse(source_text);
+        document = detail::parse_json_strict(source_text);
     } catch (const std::exception& error) {
-        throw_source_error(std::move(source_id), "P_SOURCE_JSON_PARSE", error.what(), source_text);
+        throw_source_error(std::move(source_id), "P_SOURCE_JSON_PARSE", error.what());
     }
     if (!document.is_object()) {
         throw_source_error(std::move(source_id), "P_SOURCE_ROOT_TYPE",
-                           "Program canonical source root must be an object", source_text);
+                           "Program canonical source root must be an object");
     }
 
     std::uint32_t schema_version = 1;
     if (document.contains("program_schema_version")) {
         if (!document["program_schema_version"].is_number_unsigned()) {
             throw_source_error(std::move(source_id), "P_SOURCE_SCHEMA_VERSION",
-                               "program_schema_version must be a positive unsigned integer",
-                               source_text);
+                               "program_schema_version must be a positive unsigned integer");
         }
         const auto value = document["program_schema_version"].get<unsigned long long>();
         if (value == 0 || value > std::numeric_limits<std::uint32_t>::max()) {
             throw_source_error(std::move(source_id), "P_SOURCE_SCHEMA_VERSION",
-                               "program_schema_version is outside the supported integer range",
-                               source_text);
+                               "program_schema_version is outside the supported integer range");
         }
         schema_version = static_cast<std::uint32_t>(value);
     }
@@ -228,7 +204,7 @@ ProgramSource ProgramSource::from_canonical_json(std::string                 sou
     try {
         validate_common(source_id, schema_version, document, imports, source_map);
     } catch (const std::exception& error) {
-        throw_source_error(std::move(source_id), "P_SOURCE_INVALID", error.what(), source_text);
+        throw_source_error(std::move(source_id), "P_SOURCE_INVALID", error.what());
     }
 
     auto impl                = std::make_shared<Impl>();
@@ -253,7 +229,7 @@ ProgramSource ProgramSource::from_cpp_builder(std::string                 source
     impl->kind               = SourceKind::CppBuilder;
     impl->schema_version     = schema_version;
     impl->source_id          = std::move(source_id);
-    impl->document           = std::move(document);
+    impl->document           = json(document);
     impl->imports            = std::move(imports);
     impl->source_map         = std::move(source_map);
     impl->canonical_document = detail::canonical_json_bytes(impl->document);
@@ -264,7 +240,7 @@ ProgramSource ProgramSource::from_cpp_builder(std::string                 source
 ProgramSource ProgramSource::parse(std::string_view stored_bytes) {
     json value;
     try {
-        value = json::parse(std::string(stored_bytes));
+        value = detail::parse_json_strict(stored_bytes);
     } catch (const std::exception& error) {
         throw std::invalid_argument(std::string("Invalid stored ProgramSource JSON: ") +
                                     error.what());

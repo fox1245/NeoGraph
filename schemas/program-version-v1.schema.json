@@ -16,35 +16,79 @@
     "core_materialization_receipt"
   ],
   "properties": {
-    "format": {
-      "const": "neograph-program-version"
-    },
-    "storage_schema_version": {
-      "const": 1
-    },
-    "id": {
-      "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$"
-    },
-    "bundle_id": {
-      "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$"
-    },
-    "admission_profile": {
-      "type": "object"
-    },
-    "policy_snapshot": {
-      "type": "object"
-    },
+    "format": { "const": "neograph-program-version" },
+    "storage_schema_version": { "const": 1 },
+    "id": { "$ref": "#/$defs/sha256" },
+    "bundle_id": { "$ref": "#/$defs/sha256" },
+    "admission_profile": { "$ref": "#/$defs/admissionProfileBinding" },
+    "policy_snapshot": { "$ref": "#/$defs/policySnapshotBinding" },
     "dependency_receipts": {
-      "type": "array"
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/dependencyReceipt" }
     },
-    "ownership_scope": {
+    "ownership_scope": { "$ref": "#/$defs/nonemptyString" },
+    "core_materialization_receipt": { "$ref": "#/$defs/coreMaterializationReceipt" }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "nonemptyString": {
       "type": "string",
       "minLength": 1
     },
-    "core_materialization_receipt": {
-      "type": "object"
+    "admissionProfileBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_id", "profile_fingerprint"],
+      "properties": {
+        "profile_id": { "$ref": "#/$defs/nonemptyString" },
+        "profile_fingerprint": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "policySnapshotBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["snapshot_id", "snapshot_fingerprint"],
+      "properties": {
+        "snapshot_id": { "$ref": "#/$defs/nonemptyString" },
+        "snapshot_fingerprint": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "dependencyReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dependency_id", "content_identity"],
+      "properties": {
+        "dependency_id": { "$ref": "#/$defs/nonemptyString" },
+        "content_identity": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "corePlanIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "compiled_plan_identity"],
+      "properties": {
+        "name": { "$ref": "#/$defs/nonemptyString" },
+        "compiled_plan_identity": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "coreMaterializationReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["compiler_build_id", "registry_snapshot_fingerprint", "plans"],
+      "properties": {
+        "compiler_build_id": { "$ref": "#/$defs/nonemptyString" },
+        "registry_snapshot_fingerprint": { "$ref": "#/$defs/sha256" },
+        "plans": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/corePlanIdentity" }
+        }
+      }
     }
   }
 }

@@ -10,16 +10,51 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace neograph::program {
 
+struct AdmissionProfileBinding {
+    std::string profile_id;
+    std::string profile_fingerprint;
+
+    bool operator==(const AdmissionProfileBinding&) const = default;
+};
+
+struct PolicySnapshotBinding {
+    std::string snapshot_id;
+    std::string snapshot_fingerprint;
+
+    bool operator==(const PolicySnapshotBinding&) const = default;
+};
+
+struct DependencyReceipt {
+    std::string dependency_id;
+    std::string content_identity;
+
+    bool operator==(const DependencyReceipt&) const = default;
+};
+
+struct CoreMaterializationReceipt {
+    std::string compiler_build_id;
+    std::string registry_snapshot_fingerprint;
+    /// Canonicalized by plan name.
+    std::vector<CorePlanIdentity> plans;
+
+    bool operator==(const CoreMaterializationReceipt&) const = default;
+};
+
+/**
+ * Mutable construction input. ProgramVersion sorts dependency receipts by
+ * dependency_id; materialization plans use their documented name ordering.
+ */
 struct ProgramVersionData {
-    std::string bundle_id;
-    json        admission_profile   = json::object();
-    json        policy_snapshot     = json::object();
-    json        dependency_receipts = json::array();
-    std::string ownership_scope;
-    json        core_materialization_receipt = json::object();
+    std::string                    bundle_id;
+    AdmissionProfileBinding        admission_profile;
+    PolicySnapshotBinding          policy_snapshot;
+    std::vector<DependencyReceipt> dependency_receipts;
+    std::string                    ownership_scope;
+    CoreMaterializationReceipt     core_materialization_receipt;
 };
 
 class NEOGRAPH_PROGRAM_API ProgramVersion {
@@ -29,14 +64,14 @@ public:
     explicit ProgramVersion(ProgramVersionData data);
     static ProgramVersion parse(std::string_view stored_bytes);
 
-    const std::string& id() const noexcept;
-    const std::string& bundle_id() const noexcept;
-    json               admission_profile() const;
-    json               policy_snapshot() const;
-    json               dependency_receipts() const;
-    const std::string& ownership_scope() const noexcept;
-    json               core_materialization_receipt() const;
-    std::string        serialize_canonical() const;
+    const std::string&                    id() const noexcept;
+    const std::string&                    bundle_id() const noexcept;
+    const AdmissionProfileBinding&        admission_profile() const noexcept;
+    const PolicySnapshotBinding&          policy_snapshot() const noexcept;
+    const std::vector<DependencyReceipt>& dependency_receipts() const noexcept;
+    const std::string&                    ownership_scope() const noexcept;
+    const CoreMaterializationReceipt&     core_materialization_receipt() const noexcept;
+    std::string                           serialize_canonical() const;
 
 private:
     struct Impl;

@@ -14,22 +14,89 @@
 
 namespace neograph::program {
 
+enum class ExecutableKind { Node, Reducer, Condition, Provider, Tool, Import };
+
+NEOGRAPH_PROGRAM_API std::string_view to_string(ExecutableKind kind) noexcept;
+NEOGRAPH_PROGRAM_API ExecutableKind   executable_kind_from_string(std::string_view value);
+
+struct ExecutableIdentity {
+    ExecutableKind kind = ExecutableKind::Node;
+    std::string    name;
+    std::string    semantic_version;
+    std::string    implementation_digest;
+
+    bool operator==(const ExecutableIdentity&) const = default;
+};
+
+struct ContractRecord {
+    std::uint32_t schema_version = 1;
+    json          schema         = json::object();
+};
+
+struct OrchestrationPlanRecord {
+    std::uint32_t schema_version = 1;
+    json          plan           = json::object();
+};
+
+struct SealedCoreDefinition {
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+
+    std::string name;
+    std::string definition_hash;
+    json        definition = json::object();
+};
+/**
+ * Returns the v1 content identity required by SealedCoreDefinition::definition_hash.
+ */
+NEOGRAPH_PROGRAM_API std::string sealed_core_definition_hash(const json& definition);
+
+struct CorePlanIdentity {
+    std::string name;
+    std::string compiled_plan_identity;
+
+    bool operator==(const CorePlanIdentity&) const = default;
+};
+
+struct CapabilityEffectClosure {
+    std::vector<std::string> capabilities;
+    std::vector<std::string> effects;
+
+    bool operator==(const CapabilityEffectClosure&) const = default;
+};
+
+struct BudgetRequirement {
+    std::string   resource;
+    std::uint64_t minimum = 0;
+    std::uint64_t maximum = 0;
+
+    bool operator==(const BudgetRequirement&) const = default;
+};
+
+/**
+ * Mutable construction input. ProgramBundle validates it, deep-copies JSON,
+ * and canonicalizes semantic sets before deriving its identity:
+ * definitions/plans by name, executables by
+ * (kind,name,semantic_version,implementation_digest), closure strings
+ * lexicographically, budgets by resource, and source maps by generated pointer.
+ * Diagnostics retain producer order.
+ */
 struct ProgramBundleData {
-    std::string                 source_hash;
-    std::string                 canonical_program_hash;
-    std::string                 compiler_build_id;
-    std::uint32_t               program_schema_version = 1;
-    std::string                 registry_snapshot_fingerprint;
-    std::string                 module_dependency_merkle_root;
-    json                        input_contract                 = json::object();
-    json                        output_contract                = json::object();
-    json                        orchestration_plan             = json::object();
-    json                        core_compiled_plan_identities  = json::array();
-    json                        capability_effect_closure      = json::object();
-    json                        executable_registry_identities = json::array();
-    json                        declared_budget_requirements   = json::object();
-    std::vector<SourceMapEntry> source_map;
-    std::vector<Diagnostic>     diagnostics;
+    std::string                       source_hash;
+    std::string                       canonical_program_hash;
+    std::string                       compiler_build_id;
+    std::uint32_t                     program_schema_version = 1;
+    std::string                       registry_snapshot_fingerprint;
+    std::string                       module_dependency_merkle_root;
+    ContractRecord                    input_contract;
+    ContractRecord                    output_contract;
+    OrchestrationPlanRecord           orchestration_plan;
+    std::vector<SealedCoreDefinition> sealed_core_definitions;
+    std::vector<CorePlanIdentity>     core_plan_identities;
+    CapabilityEffectClosure           capability_effect_closure;
+    std::vector<ExecutableIdentity>   executable_registry_identities;
+    std::vector<BudgetRequirement>    declared_budget_requirements;
+    std::vector<SourceMapEntry>       source_map;
+    std::vector<Diagnostic>           diagnostics;
 };
 
 class NEOGRAPH_PROGRAM_API ProgramBundle {
@@ -39,23 +106,24 @@ public:
     explicit ProgramBundle(ProgramBundleData data);
     static ProgramBundle parse(std::string_view stored_bytes);
 
-    const std::string&                 id() const noexcept;
-    const std::string&                 source_hash() const noexcept;
-    const std::string&                 canonical_program_hash() const noexcept;
-    const std::string&                 compiler_build_id() const noexcept;
-    std::uint32_t                      program_schema_version() const noexcept;
-    const std::string&                 registry_snapshot_fingerprint() const noexcept;
-    const std::string&                 module_dependency_merkle_root() const noexcept;
-    json                               input_contract() const;
-    json                               output_contract() const;
-    json                               orchestration_plan() const;
-    json                               core_compiled_plan_identities() const;
-    json                               capability_effect_closure() const;
-    json                               executable_registry_identities() const;
-    json                               declared_budget_requirements() const;
-    const std::vector<SourceMapEntry>& source_map() const noexcept;
-    const std::vector<Diagnostic>&     diagnostics() const noexcept;
-    std::string                        serialize_canonical() const;
+    const std::string&                     id() const noexcept;
+    const std::string&                     source_hash() const noexcept;
+    const std::string&                     canonical_program_hash() const noexcept;
+    const std::string&                     compiler_build_id() const noexcept;
+    std::uint32_t                          program_schema_version() const noexcept;
+    const std::string&                     registry_snapshot_fingerprint() const noexcept;
+    const std::string&                     module_dependency_merkle_root() const noexcept;
+    ContractRecord                         input_contract() const;
+    ContractRecord                         output_contract() const;
+    OrchestrationPlanRecord                orchestration_plan() const;
+    std::vector<SealedCoreDefinition>      sealed_core_definitions() const;
+    const std::vector<CorePlanIdentity>&   core_plan_identities() const noexcept;
+    const CapabilityEffectClosure&         capability_effect_closure() const noexcept;
+    const std::vector<ExecutableIdentity>& executable_registry_identities() const noexcept;
+    const std::vector<BudgetRequirement>&  declared_budget_requirements() const noexcept;
+    const std::vector<SourceMapEntry>&     source_map() const noexcept;
+    std::vector<Diagnostic>                diagnostics() const;
+    std::string                            serialize_canonical() const;
 
 private:
     struct Impl;

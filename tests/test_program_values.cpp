@@ -2,252 +2,552 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <string>
+#include <utility>
 
 namespace {
 
 using neograph::json;
 using namespace neograph::program;
 
+std::string sha(char digit) {
+    return "sha256:" + std::string(64, digit);
+}
+
+SourceCoordinate coordinate(std::string pointer = "/nodes/a") {
+    SourceCoordinate value;
+    value.source_id    = "source.json";
+    value.json_pointer = std::move(pointer);
+    value.span         = SourceSpan{1, 4, 1, 2, 1, 5};
+    return value;
+}
+
+Diagnostic diagnostic() {
+    Diagnostic value;
+    value.phase    = CompilePhase::CoreValidate;
+    value.code     = "P_CORE_INVALID";
+    value.severity = DiagnosticSeverity::Error;
+    value.primary  = coordinate("/nodes/a~1b/~0name");
+    value.message  = "invalid Core graph";
+    value.witness  = json{{"node", "a"}};
+    value.related.push_back(coordinate("/nodes/b"));
+    return value;
+}
+
+SealedCoreDefinition sealed_definition(std::string name, json definition) {
+    const auto definition_hash = sealed_core_definition_hash(definition);
+    return SealedCoreDefinition{std::move(name), definition_hash, std::move(definition)};
+}
+
+ProgramSource make_source() {
+    return ProgramSource::from_canonical_json(
+        "source.json", R"({"program_schema_version":1,"nodes":{},"edges":[]})");
+}
+
 ProgramBundleData make_bundle_data(const ProgramSource& source) {
     ProgramBundleData data;
-    data.source_hash                               = source.source_hash();
-    data.canonical_program_hash                    = source.source_hash();
-    data.compiler_build_id                         = "neograph-test-compiler/1";
-    data.program_schema_version                    = source.schema_version();
-    data.registry_snapshot_fingerprint             = "registry:test-snapshot";
-    data.module_dependency_merkle_root             = "modules:none";
-    data.input_contract                            = json::object();
-    data.input_contract["type"]                    = "object";
-    data.output_contract                           = json::object();
-    data.output_contract["type"]                   = "object";
-    data.orchestration_plan                        = json::object();
-    data.orchestration_plan["entry"]               = "start";
-    data.core_compiled_plan_identities             = json::array();
-    data.capability_effect_closure                 = json::object();
-    data.executable_registry_identities            = json::array();
-    data.declared_budget_requirements              = json::object();
-    data.declared_budget_requirements["max_steps"] = 10;
-
-    SourceMapEntry mapping;
-    mapping.generated_pointer     = "/steps/0";
-    mapping.authored.source_id    = source.source_id();
-    mapping.authored.json_pointer = "/steps/0";
-    mapping.authored.span         = SourceSpan{32, 46, 1, 33, 1, 47};
-    data.source_map.push_back(mapping);
-
-    Diagnostic diagnostic;
-    diagnostic.phase    = CompilePhase::Normalize;
-    diagnostic.code     = "P_TEST_NOTE";
-    diagnostic.severity = DiagnosticSeverity::Note;
-    diagnostic.primary  = mapping.authored;
-    diagnostic.message  = "normalized test program";
-    diagnostic.witness  = json::object();
-    data.diagnostics.push_back(std::move(diagnostic));
+    data.source_hash                   = source.source_hash();
+    data.canonical_program_hash        = sha('a');
+    data.compiler_build_id             = "compiler:test";
+    data.program_schema_version        = source.schema_version();
+    data.registry_snapshot_fingerprint = sha('b');
+    data.module_dependency_merkle_root = sha('c');
+    data.input_contract                = ContractRecord{1, json{{"type", "object"}}};
+    data.output_contract               = ContractRecord{1, json{{"type", "object"}}};
+    data.orchestration_plan            = OrchestrationPlanRecord{1, json{{"entry", "alpha"}}};
+    data.sealed_core_definitions       = {
+        sealed_definition("beta",
+                                json{{"schema_version", SealedCoreDefinition::STORAGE_SCHEMA_VERSION},
+                                     {"nodes", json{{"beta", json{{"type", "test-node"}}}}}}),
+        sealed_definition("alpha",
+                                json{{"schema_version", SealedCoreDefinition::STORAGE_SCHEMA_VERSION},
+                                     {"nodes", json{{"alpha", json{{"type", "test-node"}}}}}}),
+    };
+    data.core_plan_identities = {
+        CorePlanIdentity{"beta", sha('f')},
+        CorePlanIdentity{"alpha", sha('1')},
+    };
+    data.capability_effect_closure.capabilities = {"write", "read"};
+    data.capability_effect_closure.effects      = {"tool", "state"};
+    data.executable_registry_identities         = {
+        ExecutableIdentity{ExecutableKind::Tool, "zeta", "2.1.0-rc.1+build.7", sha('2')},
+        ExecutableIdentity{ExecutableKind::Node, "alpha", "1.0.0", sha('3')},
+    };
+    data.declared_budget_requirements = {
+        BudgetRequirement{"steps", 1, 100},
+        BudgetRequirement{"parallelism", 1, 4},
+    };
+    data.source_map = {
+        SourceMapEntry{"/nodes/b", coordinate("/authored/b")},
+        SourceMapEntry{"/nodes/a", coordinate("/authored/a")},
+    };
+    data.diagnostics = {diagnostic()};
     return data;
 }
 
-TEST(ProgramSourceTest, CanonicalAndBuilderInputsOwnEqualNormalizedContent) {
-    std::string authored =
-        R"({"steps":[{"name":"first","config":{"z":2,"a":1}}],"program_schema_version":1})";
-    auto raw = ProgramSource::from_canonical_json("source-a", authored);
-
-    json builder_document                      = json::object();
-    builder_document["program_schema_version"] = 1;
-    builder_document["steps"]                  = json::array();
-    json step                                  = json::object();
-    step["config"]                             = json::object();
-    step["config"]["a"]                        = 1;
-    step["config"]["z"]                        = 2;
-    step["name"]                               = "first";
-    builder_document["steps"].push_back(step);
-    auto builder = ProgramSource::from_cpp_builder("source-b", 1, builder_document);
-
-    authored.assign("destroyed");
-    builder_document["steps"] = json::array();
-
-    EXPECT_EQ(raw.source_hash(), builder.source_hash());
-    EXPECT_EQ(raw.canonical_document(), builder.canonical_document());
-    EXPECT_EQ(raw.document()["steps"].size(), 1U);
-    EXPECT_EQ(builder.document()["steps"].size(), 1U);
-    EXPECT_EQ(raw.kind(), SourceKind::CanonicalJson);
-    EXPECT_EQ(builder.kind(), SourceKind::CppBuilder);
+ProgramVersionData make_version_data(const ProgramBundle& bundle) {
+    ProgramVersionData data;
+    data.bundle_id           = bundle.id();
+    data.admission_profile   = AdmissionProfileBinding{"production", sha('4')};
+    data.policy_snapshot     = PolicySnapshotBinding{"policy-7", sha('5')};
+    data.dependency_receipts = {
+        DependencyReceipt{"module:zeta", sha('6')},
+        DependencyReceipt{"module:alpha", sha('7')},
+    };
+    data.ownership_scope              = "tenant:example";
+    data.core_materialization_receipt = CoreMaterializationReceipt{
+        "compiler:test",
+        sha('b'),
+        {CorePlanIdentity{"beta", sha('f')}, CorePlanIdentity{"alpha", sha('1')}}};
+    return data;
 }
 
-TEST(ProgramSourceTest, MalformedTextReportsStableDiagnosticAndCoordinate) {
+TEST(ProgramSourceTest, CanonicalIdentityIgnoresObjectKeyOrder) {
+    auto first = ProgramSource::from_canonical_json(
+        "source-a", R"({"program_schema_version":1,"nodes":{},"edges":[]})");
+    auto second = ProgramSource::from_canonical_json(
+        "source-b", R"({"edges":[],"nodes":{},"program_schema_version":1})");
+
+    EXPECT_EQ(first.source_hash(), second.source_hash());
+    EXPECT_EQ(first.canonical_document(), second.canonical_document());
+    EXPECT_EQ(first.kind(), SourceKind::CanonicalJson);
+}
+
+TEST(ProgramSourceTest, ParseFailureDoesNotFabricateSpanForUtf8Source) {
     try {
-        static_cast<void>(ProgramSource::from_canonical_json("broken-source", R"({"steps":[})"));
+        (void)ProgramSource::from_canonical_json("utf8-source", R"({"이름":"값",})");
         FAIL() << "expected ProgramDiagnosticError";
     } catch (const ProgramDiagnosticError& error) {
-        EXPECT_EQ(error.diagnostic().phase, CompilePhase::Source);
         EXPECT_EQ(error.diagnostic().code, "P_SOURCE_JSON_PARSE");
-        EXPECT_EQ(error.diagnostic().primary.source_id, "broken-source");
-        ASSERT_TRUE(error.diagnostic().primary.span.has_value());
-        EXPECT_GT(error.diagnostic().primary.span->byte_end, 0U);
+        EXPECT_EQ(error.diagnostic().primary.source_id, "utf8-source");
+
+        EXPECT_FALSE(error.diagnostic().primary.span.has_value());
     }
 }
 
-TEST(ProgramSourceTest, StoredRoundTripPreservesIdentityAndRejectsFutureSchema) {
-    auto       source = ProgramSource::from_canonical_json("round-trip",
-                                                           R"({"program_schema_version":1,"steps":[]})");
-    const auto bytes  = source.serialize_canonical();
-    const auto parsed = ProgramSource::parse(bytes);
+TEST(ProgramSourceTest, InvalidSourceIdIsRejectedBeforeParseDiagnostics) {
+    EXPECT_THROW((void)ProgramSource::from_canonical_json("", "{"), std::invalid_argument);
+    EXPECT_THROW(
+        (void)ProgramSource::from_canonical_json(std::string(1, static_cast<char>(0xff)), "{"),
+        std::invalid_argument);
+}
 
+TEST(ProgramSourceTest, StoredParserRejectsDuplicateObjectMembers) {
+    auto       stored = make_source().serialize_canonical();
+    const auto format = stored.find(R"("format":)");
+    ASSERT_NE(format, std::string::npos);
+    stored.insert(format, R"("format":"neograph-program-source",)");
+    EXPECT_THROW((void)ProgramSource::parse(stored), std::invalid_argument);
+
+    auto       escaped        = make_source().serialize_canonical();
+    const auto escaped_format = escaped.find(R"("format":)");
+    ASSERT_NE(escaped_format, std::string::npos);
+    escaped.insert(escaped_format, R"("\u0066ormat":"neograph-program-source",)");
+    EXPECT_THROW((void)ProgramSource::parse(escaped), std::invalid_argument);
+}
+
+TEST(ProgramSourceTest, CppBuilderDetachesProxyJsonInput) {
+    json owner = json{
+        {"document",
+         json{{"program_schema_version", 1}, {"nodes", json::object()}, {"edges", json::array()}}}};
+    auto       source      = ProgramSource::from_cpp_builder("proxy-source", 1, owner["document"]);
+    const auto source_hash = source.source_hash();
+    const auto canonical   = source.canonical_document();
+
+    owner["document"]["nodes"]["late"] = json::object();
+    EXPECT_EQ(source.source_hash(), source_hash);
+    EXPECT_EQ(source.canonical_document(), canonical);
+    EXPECT_FALSE(source.document()["nodes"].contains("late"));
+}
+
+TEST(ProgramDiagnosticTest, RoundTripsValidEscapedJsonPointers) {
+    auto value = diagnostic();
+    json encoded;
+    to_json(encoded, value);
+
+    Diagnostic decoded;
+    from_json(encoded, decoded);
+    json reencoded;
+    to_json(reencoded, decoded);
+    EXPECT_EQ(reencoded.dump(), encoded.dump());
+}
+
+TEST(ProgramDiagnosticTest, RejectsMalformedRfc6901PointersOnBothSurfaces) {
+    for (const std::string pointer : {"not-rooted", "/bad~", "/bad~2escape"}) {
+        auto invalid_coordinate = coordinate(pointer);
+        json encoded_coordinate;
+        EXPECT_THROW(to_json(encoded_coordinate, invalid_coordinate), std::invalid_argument);
+
+        auto source_map = SourceMapEntry{pointer, coordinate()};
+        json encoded_source_map;
+        EXPECT_THROW(to_json(encoded_source_map, source_map), std::invalid_argument);
+    }
+}
+
+TEST(ProgramDiagnosticTest, RejectsReversedSpanCoordinates) {
+    for (const SourceSpan span : {
+             SourceSpan{8, 7, 1, 1, 1, 2},
+             SourceSpan{0, 1, 3, 1, 2, 9},
+             SourceSpan{0, 1, 2, 9, 2, 8},
+         }) {
+        json encoded;
+        EXPECT_THROW(to_json(encoded, span), std::invalid_argument);
+    }
+}
+
+TEST(ProgramDiagnosticTest, ProducerRejectsUnknownEnums) {
+    auto invalid_phase  = diagnostic();
+    invalid_phase.phase = static_cast<CompilePhase>(255);
+    json encoded;
+    EXPECT_THROW(to_json(encoded, invalid_phase), std::invalid_argument);
+
+    auto invalid_severity     = diagnostic();
+    invalid_severity.severity = static_cast<DiagnosticSeverity>(255);
+    EXPECT_THROW(to_json(encoded, invalid_severity), std::invalid_argument);
+}
+
+TEST(ProgramBundleTest, RoundTripsClosedTypedRecords) {
+    const auto    source = make_source();
+    ProgramBundle bundle(make_bundle_data(source));
+    const auto    bytes  = bundle.serialize_canonical();
+    const auto    parsed = ProgramBundle::parse(bytes);
+
+    EXPECT_EQ(parsed.id(), bundle.id());
     EXPECT_EQ(parsed.serialize_canonical(), bytes);
-    EXPECT_EQ(parsed.source_hash(), source.source_hash());
-    EXPECT_EQ(source.source_hash(),
-              "sha256:8652eebe92b0dcd02b9faf63e59dd1f2"
-              "a9b2e6072efbe0e665a53a67f28781d5");
-    EXPECT_EQ(parsed.kind(), SourceKind::CanonicalJson);
-
-    auto future                      = json::parse(bytes);
-    future["storage_schema_version"] = 2;
-    EXPECT_THROW(ProgramSource::parse(future.dump()), std::invalid_argument);
-
-    auto unknown_field       = json::parse(bytes);
-    unknown_field["unknown"] = true;
-    EXPECT_THROW(ProgramSource::parse(unknown_field.dump()), std::invalid_argument);
+    EXPECT_EQ(parsed.input_contract().schema_version, 1U);
+    EXPECT_EQ(parsed.sealed_core_definitions().size(), 2U);
+    EXPECT_EQ(parsed.core_plan_identities().front().name, "alpha");
+    EXPECT_EQ(parsed.executable_registry_identities().front().name, "alpha");
+    EXPECT_EQ(parsed.declared_budget_requirements().front().resource, "parallelism");
+    ASSERT_EQ(parsed.diagnostics().size(), 1U);
+    EXPECT_EQ(parsed.diagnostics().front().code, bundle.diagnostics().front().code);
 }
 
-TEST(ProgramSourceTest, ImportsAndSourceMapSurviveStoredRoundTrip) {
-    json document                      = json::object();
-    document["program_schema_version"] = 1;
-    document["control"]                = json::object();
-    document["control"]["kind"]        = "if";
-    document["control"]["then"]        = json::array();
-    document["control"]["else"]        = json::array();
-    document["label"]                  = "한글 日本語 😀";
-
-    ImportRef      imported{"shared-library", "sha256:imported-content"};
-    SourceMapEntry mapping;
-    mapping.generated_pointer     = "/control";
-    mapping.authored.source_id    = "authored.neograph";
-    mapping.authored.json_pointer = "/flow/0";
-    mapping.authored.span         = SourceSpan{8, 24, 2, 1, 2, 17};
-
-    const auto source =
-        ProgramSource::from_cpp_builder("builder-source", 1, document, {imported}, {mapping});
-    const auto parsed = ProgramSource::parse(source.serialize_canonical());
-
-    ASSERT_EQ(parsed.imports().size(), 1U);
-    EXPECT_EQ(parsed.imports().front(), imported);
-    ASSERT_EQ(parsed.source_map().size(), 1U);
-    EXPECT_EQ(parsed.source_map().front(), mapping);
-    EXPECT_EQ(parsed.document()["control"]["kind"].get<std::string>(), "if");
-    EXPECT_EQ(parsed.document()["label"].get<std::string>(), "한글 日本語 😀");
-
-    auto unknown_nested                     = json::parse(source.serialize_canonical());
-    unknown_nested["imports"][0]["unknown"] = true;
-    EXPECT_THROW(ProgramSource::parse(unknown_nested.dump()), std::invalid_argument);
-
-    auto zero = ProgramSource::from_cpp_builder("identity-zero", 1, json::parse(R"({"bit":0})"));
-    auto one  = ProgramSource::from_cpp_builder("identity-one", 1, json::parse(R"({"bit":1})"));
-    EXPECT_NE(zero.source_hash(), one.source_hash());
-}
-
-TEST(ProgramSourceTest, BuilderRejectsSchemaConflictsAndInvalidUtf8) {
-    auto conflicting_document = json::parse(R"({"program_schema_version":2})");
-    EXPECT_THROW(ProgramSource::from_cpp_builder("schema-conflict", 1, conflicting_document),
-                 std::invalid_argument);
-
-    json invalid_utf8    = json::object();
-    invalid_utf8["text"] = std::string(1, static_cast<char>(0xff));
-    EXPECT_THROW(ProgramSource::from_cpp_builder("invalid-utf8", 1, std::move(invalid_utf8)),
-                 std::invalid_argument);
-}
-
-TEST(ProgramBundleTest, IdentityAndBytesAreCanonicalAndContentAddressed) {
-    auto source      = ProgramSource::from_canonical_json("bundle-source",
-                                                          R"({"program_schema_version":1,"steps":[]})");
-    auto first_data  = make_bundle_data(source);
-    auto second_data = make_bundle_data(source);
-
-    first_data.input_contract              = json::object();
-    first_data.input_contract["required"]  = json::array();
-    first_data.input_contract["type"]      = "object";
-    second_data.input_contract             = json::object();
-    second_data.input_contract["type"]     = "object";
-    second_data.input_contract["required"] = json::array();
+TEST(ProgramBundleTest, IdentityAndBytesIgnoreSetLikeInputOrder) {
+    const auto source      = make_source();
+    auto       first_data  = make_bundle_data(source);
+    auto       second_data = first_data;
+    std::reverse(second_data.sealed_core_definitions.begin(),
+                 second_data.sealed_core_definitions.end());
+    std::reverse(second_data.core_plan_identities.begin(), second_data.core_plan_identities.end());
+    std::reverse(second_data.capability_effect_closure.capabilities.begin(),
+                 second_data.capability_effect_closure.capabilities.end());
+    std::reverse(second_data.capability_effect_closure.effects.begin(),
+                 second_data.capability_effect_closure.effects.end());
+    std::reverse(second_data.executable_registry_identities.begin(),
+                 second_data.executable_registry_identities.end());
+    std::reverse(second_data.declared_budget_requirements.begin(),
+                 second_data.declared_budget_requirements.end());
+    std::reverse(second_data.source_map.begin(), second_data.source_map.end());
 
     ProgramBundle first(std::move(first_data));
     ProgramBundle second(std::move(second_data));
     EXPECT_EQ(first.id(), second.id());
     EXPECT_EQ(first.serialize_canonical(), second.serialize_canonical());
-    EXPECT_EQ(first.id().substr(0, 7), "sha256:");
+}
 
-    const auto parsed = ProgramBundle::parse(first.serialize_canonical());
+TEST(ProgramBundleTest, RejectsInvalidTypedRecordsAndNestedUnknownFields) {
+    const auto source                                               = make_source();
+    auto       invalid                                              = make_bundle_data(source);
+    invalid.executable_registry_identities.front().semantic_version = "01.0.0";
+    EXPECT_THROW((void)ProgramBundle(std::move(invalid)), std::invalid_argument);
+    auto invalid_kind                                        = make_bundle_data(source);
+    invalid_kind.executable_registry_identities.front().kind = static_cast<ExecutableKind>(255);
+    EXPECT_THROW((void)ProgramBundle(std::move(invalid_kind)), std::invalid_argument);
+
+    auto non_ascii_version = make_bundle_data(source);
+    non_ascii_version.executable_registry_identities.front().semantic_version = "1.0.0-\xc3\xa9";
+    EXPECT_THROW((void)ProgramBundle(std::move(non_ascii_version)), std::invalid_argument);
+
+    ProgramBundle valid(make_bundle_data(source));
+    auto          stored               = json::parse(valid.serialize_canonical());
+    stored["input_contract"]["future"] = true;
+    EXPECT_THROW((void)ProgramBundle::parse(stored.dump()), std::invalid_argument);
+}
+
+TEST(ProgramBundleTest, SupportsMultipleVersionsAndRejectsExactIdentityDuplicates) {
+    const auto source            = make_source();
+    auto       multiple_versions = make_bundle_data(source);
+    multiple_versions.executable_registry_identities.push_back(
+        ExecutableIdentity{ExecutableKind::Node, "alpha", "2.0.0", sha('4')});
+    multiple_versions.executable_registry_identities.push_back(
+        ExecutableIdentity{ExecutableKind::Node, "alpha", "1.0.0", sha('5')});
+    ProgramBundle accepted(std::move(multiple_versions));
+    EXPECT_EQ(accepted.executable_registry_identities().size(), 4U);
+
+    auto exact_duplicate = make_bundle_data(source);
+    exact_duplicate.executable_registry_identities.push_back(
+        exact_duplicate.executable_registry_identities.front());
+    EXPECT_THROW((void)ProgramBundle(std::move(exact_duplicate)), std::invalid_argument);
+}
+
+TEST(ProgramBundleTest, RejectsMismatchedSealedDefinitionHashes) {
+    const auto source                                       = make_source();
+    auto       data                                         = make_bundle_data(source);
+    data.sealed_core_definitions.front().definition["name"] = "tampered";
+    EXPECT_THROW((void)ProgramBundle(std::move(data)), std::invalid_argument);
+
+    auto  future_schema                            = make_bundle_data(source);
+    auto& future_definition                        = future_schema.sealed_core_definitions.front();
+    future_definition.definition["schema_version"] = 2;
+    future_definition.definition_hash = sealed_core_definition_hash(future_definition.definition);
+    EXPECT_THROW((void)ProgramBundle(std::move(future_schema)), std::invalid_argument);
+
+    auto  unknown_field                            = make_bundle_data(source);
+    auto& unknown_definition                       = unknown_field.sealed_core_definitions.front();
+    unknown_definition.definition["unknown_field"] = true;
+    unknown_definition.definition_hash = sealed_core_definition_hash(unknown_definition.definition);
+    EXPECT_THROW((void)ProgramBundle(std::move(unknown_field)), std::invalid_argument);
+
+    auto  unknown_nested                     = make_bundle_data(source);
+    auto& nested_definition                  = unknown_nested.sealed_core_definitions.front();
+    nested_definition.definition["channels"] = json{{"state", json{{"reducerr", "append"}}}};
+    nested_definition.definition_hash = sealed_core_definition_hash(nested_definition.definition);
+    EXPECT_THROW((void)ProgramBundle(std::move(unknown_nested)), std::invalid_argument);
+
+    for (const double multiplier : {1e300, -1e300}) {
+        auto  out_of_range            = make_bundle_data(source);
+        auto& out_of_range_definition = out_of_range.sealed_core_definitions.front();
+        out_of_range_definition.definition["retry_policy"] =
+            json{{"backoff_multiplier", multiplier}};
+        out_of_range_definition.definition_hash =
+            sealed_core_definition_hash(out_of_range_definition.definition);
+        EXPECT_THROW((void)ProgramBundle(std::move(out_of_range)), std::invalid_argument);
+    }
+
+    auto  nonfinite_definition = make_bundle_data(source);
+    auto& nonfinite            = nonfinite_definition.sealed_core_definitions.front();
+    nonfinite.definition["retry_policy"] =
+        json{{"backoff_multiplier", std::numeric_limits<double>::infinity()}};
+    nonfinite.definition_hash = sha('9');
+    EXPECT_THROW((void)ProgramBundle(std::move(nonfinite_definition)), std::invalid_argument);
+
+    auto  empty_node_field = make_bundle_data(source);
+    auto& empty_field      = empty_node_field.sealed_core_definitions.front();
+    empty_field.definition["nodes"]["node"]["type"] = "test-node";
+    empty_field.definition["nodes"]["node"][""]     = true;
+    empty_field.definition_hash = sealed_core_definition_hash(empty_field.definition);
+    EXPECT_THROW((void)ProgramBundle(std::move(empty_node_field)), std::invalid_argument);
+
+    ProgramBundle valid(make_bundle_data(source));
+    auto          stored = json::parse(valid.serialize_canonical());
+    stored["sealed_core_definitions"][0]["definition"]["name"] = "tampered";
+    EXPECT_THROW((void)ProgramBundle::parse(stored.dump()), std::invalid_argument);
+}
+
+TEST(ProgramBundleTest, StoredParserRejectsNestedDuplicateObjectMembers) {
+    auto              stored = ProgramBundle(make_bundle_data(make_source())).serialize_canonical();
+    const std::string marker = R"("input_contract":{)";
+    const auto        contract = stored.find(marker);
+    ASSERT_NE(contract, std::string::npos);
+    stored.insert(contract + marker.size(), R"("schema_version":1,)");
+    EXPECT_THROW((void)ProgramBundle::parse(stored), std::invalid_argument);
+}
+
+TEST(ProgramBundleTest, IdentityEnvelopeRejectsFormatStorageAndContentTampering) {
+    ProgramBundle bundle(make_bundle_data(make_source()));
+
+    auto wrong_format      = json::parse(bundle.serialize_canonical());
+    wrong_format["format"] = "future-program-bundle";
+    EXPECT_THROW((void)ProgramBundle::parse(wrong_format.dump()), std::invalid_argument);
+
+    auto wrong_storage                      = json::parse(bundle.serialize_canonical());
+    wrong_storage["storage_schema_version"] = 2;
+    EXPECT_THROW((void)ProgramBundle::parse(wrong_storage.dump()), std::invalid_argument);
+
+    auto wrong_content                 = json::parse(bundle.serialize_canonical());
+    wrong_content["compiler_build_id"] = "tampered";
+    EXPECT_THROW((void)ProgramBundle::parse(wrong_content.dump()), std::invalid_argument);
+}
+
+TEST(ProgramVersionTest, RoundTripsAndNormalizesReceiptOrder) {
+    ProgramBundle bundle(make_bundle_data(make_source()));
+    auto          first_data  = make_version_data(bundle);
+    auto          second_data = first_data;
+    std::reverse(second_data.dependency_receipts.begin(), second_data.dependency_receipts.end());
+    std::reverse(second_data.core_materialization_receipt.plans.begin(),
+                 second_data.core_materialization_receipt.plans.end());
+
+    ProgramVersion first(std::move(first_data));
+    ProgramVersion second(std::move(second_data));
+    EXPECT_EQ(first.id(), second.id());
+    EXPECT_EQ(first.serialize_canonical(), second.serialize_canonical());
+
+    const auto parsed = ProgramVersion::parse(first.serialize_canonical());
     EXPECT_EQ(parsed.id(), first.id());
-    EXPECT_EQ(parsed.source_map().front().authored.json_pointer, "/steps/0");
-    EXPECT_EQ(parsed.diagnostics().front().code, "P_TEST_NOTE");
-
-    auto changed_data                       = make_bundle_data(source);
-    changed_data.output_contract["changed"] = true;
-    ProgramBundle changed(std::move(changed_data));
-    EXPECT_NE(changed.id(), first.id());
+    EXPECT_EQ(parsed.dependency_receipts().front().dependency_id, "module:alpha");
+    EXPECT_EQ(parsed.core_materialization_receipt().plans.front().name, "alpha");
 }
 
-TEST(ProgramBundleTest, StoredBundleRejectsFutureSchemaAndTamperedIdentity) {
-    auto          source = ProgramSource::from_canonical_json("bundle-reject",
-                                                              R"({"program_schema_version":1,"steps":[]})");
-    ProgramBundle bundle(make_bundle_data(source));
+TEST(ProgramVersionTest, RejectsNestedUnknownFieldsAndIdentityEnvelopeTampering) {
+    ProgramBundle  bundle(make_bundle_data(make_source()));
+    ProgramVersion version(make_version_data(bundle));
 
-    auto future                      = json::parse(bundle.serialize_canonical());
-    future["storage_schema_version"] = 2;
-    EXPECT_THROW(ProgramBundle::parse(future.dump()), std::invalid_argument);
+    auto nested                           = json::parse(version.serialize_canonical());
+    nested["admission_profile"]["future"] = true;
+    EXPECT_THROW((void)ProgramVersion::parse(nested.dump()), std::invalid_argument);
 
-    auto tampered                 = json::parse(bundle.serialize_canonical());
-    tampered["compiler_build_id"] = "tampered";
-    EXPECT_THROW(ProgramBundle::parse(tampered.dump()), std::invalid_argument);
+    auto wrong_format      = json::parse(version.serialize_canonical());
+    wrong_format["format"] = "future-program-version";
+    EXPECT_THROW((void)ProgramVersion::parse(wrong_format.dump()), std::invalid_argument);
 
-    auto unknown_top       = json::parse(bundle.serialize_canonical());
-    unknown_top["unknown"] = true;
-    EXPECT_THROW(ProgramBundle::parse(unknown_top.dump()), std::invalid_argument);
+    auto wrong_storage                      = json::parse(version.serialize_canonical());
+    wrong_storage["storage_schema_version"] = 2;
+    EXPECT_THROW((void)ProgramVersion::parse(wrong_storage.dump()), std::invalid_argument);
 
-    auto unknown_nested                         = json::parse(bundle.serialize_canonical());
-    unknown_nested["diagnostics"][0]["unknown"] = true;
-    EXPECT_THROW(ProgramBundle::parse(unknown_nested.dump()), std::invalid_argument);
+    auto wrong_content               = json::parse(version.serialize_canonical());
+    wrong_content["ownership_scope"] = "tenant:tampered";
+    EXPECT_THROW((void)ProgramVersion::parse(wrong_content.dump()), std::invalid_argument);
 }
 
-TEST(ProgramVersionTest, StoredRoundTripIsImmutableAndContentAddressed) {
-    auto          source = ProgramSource::from_canonical_json("version-source",
-                                                              R"({"program_schema_version":1,"steps":[]})");
-    ProgramBundle bundle(make_bundle_data(source));
+TEST(ProgramVersionTest, StoredParserRejectsDuplicateObjectMembers) {
+    ProgramBundle     bundle(make_bundle_data(make_source()));
+    auto              stored  = ProgramVersion(make_version_data(bundle)).serialize_canonical();
+    const std::string marker  = R"("admission_profile":{)";
+    const auto        profile = stored.find(marker);
+    ASSERT_NE(profile, std::string::npos);
+    stored.insert(profile + marker.size(), R"("profile_id":"production",)");
+    EXPECT_THROW((void)ProgramVersion::parse(stored), std::invalid_argument);
+}
 
-    ProgramVersionData data;
-    data.bundle_id                            = bundle.id();
-    data.admission_profile                    = json::object();
-    data.admission_profile["profile"]         = "strict";
-    data.policy_snapshot                      = json::object();
-    data.policy_snapshot["network"]           = false;
-    data.dependency_receipts                  = json::array();
-    data.ownership_scope                      = "tenant:test";
-    data.core_materialization_receipt         = json::object();
-    data.core_materialization_receipt["plan"] = "core-plan:test";
+TEST(ProgramStoredValueTest, V1CanonicalBytesAndIdsMatchKnownVectors) {
+    ProgramBundleData bundle_data;
+    bundle_data.source_hash                    = make_source().source_hash();
+    bundle_data.canonical_program_hash         = sha('a');
+    bundle_data.compiler_build_id              = "vector-compiler";
+    bundle_data.program_schema_version         = 1;
+    bundle_data.registry_snapshot_fingerprint  = sha('b');
+    bundle_data.module_dependency_merkle_root  = sha('c');
+    bundle_data.input_contract                 = ContractRecord{1, json::object()};
+    bundle_data.output_contract                = ContractRecord{1, json::object()};
+    bundle_data.orchestration_plan             = OrchestrationPlanRecord{1, json::object()};
+    bundle_data.sealed_core_definitions        = {sealed_definition(
+        "main", json{{"schema_version", SealedCoreDefinition::STORAGE_SCHEMA_VERSION},
+                            {"nodes", json{{"main", json{{"type", "vector-node"}}}}}})};
+    bundle_data.core_plan_identities           = {CorePlanIdentity{"main", sha('d')}};
+    bundle_data.executable_registry_identities = {
+        ExecutableIdentity{ExecutableKind::Node, "main", "1.0.0", sha('e')}};
+    bundle_data.declared_budget_requirements = {BudgetRequirement{"steps", 0, 1}};
+    ProgramBundle bundle(std::move(bundle_data));
 
-    ProgramVersion version(data);
-    data.ownership_scope = "mutated";
-    EXPECT_EQ(version.ownership_scope(), "tenant:test");
-    EXPECT_EQ(version.id().substr(0, 7), "sha256:");
+    const std::string expected_bundle =
+        R"JSON({"canonical_program_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",)JSON"
+        R"JSON("capability_effect_closure":{"capabilities":[],"effects":[]},"compiler_build_id":"vector-compiler",")JSON"
+        R"JSON(core_plan_identities":[{"compiled_plan_identity":"sha256:ddddddddddddddddddddddddddddddddddddddddddd)JSON"
+        R"JSON(ddddddddddddddddddddd","name":"main"}],"declared_budget_requirements":[{"maximum":1,"minimum":0,"res)JSON"
+        R"JSON(ource":"steps"}],"diagnostics":[],"executable_registry_identities":[{"implementation_digest":"sha256)JSON"
+        R"JSON(:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","kind":"node","name":"main","sema)JSON"
+        R"JSON(ntic_version":"1.0.0"}],"format":"neograph-program-bundle","id":"sha256:9f22330702d0eed754f2b42fc4fa269d5083d0da42a5a7c69cc205c8a9ef2ebe","input_contra)JSON"
+        R"JSON(ct":{"schema":{},"schema_version":1},"module_dependency_merkle_root":"sha256:cccccccccccccccccccccccccccccccc)JSON"
+        R"JSON(cccccccccccccccccccccccccccccccc","orchestration_plan":{"plan":{},"schema_version":1},"output_contract":)JSON"
+        R"JSON({"schema":{},"schema_version":1},"program_schema_version":1,"registry_snapshot_fingerprint":"sha256:bbbbbb)JSON"
+        R"JSON(bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sealed_core_definitions":[{"definition":{"nodes":{"main":{"type":"vector-node"}},"schema_version":1},)JSON"
+        R"JSON("definition_hash":"sha256:322450017d0c7116b10d44ab43b62815f9423729ee240b0bb8f25cb6352208aa","name":"main"}],)JSON"
+        R"JSON("source_hash":"sha256:d0de8671b55a589345c561ca87b14a55755e8934e1c82fadb0ab9c934a313e3a","source_map")JSON"
+        R"JSON(:[],"storage_schema_version":1})JSON";
+    EXPECT_EQ(bundle.id(),
+              "sha256:9f22330702d0eed754f2b42fc4fa269d5083d0da42a5a7c69cc205c8a9ef2ebe");
+    EXPECT_EQ(bundle.serialize_canonical(), expected_bundle);
 
-    const auto bytes  = version.serialize_canonical();
-    const auto parsed = ProgramVersion::parse(bytes);
-    EXPECT_EQ(parsed.serialize_canonical(), bytes);
-    EXPECT_EQ(parsed.id(), version.id());
-    EXPECT_EQ(parsed.bundle_id(), bundle.id());
+    ProgramVersionData version_data;
+    version_data.bundle_id                    = bundle.id();
+    version_data.admission_profile            = AdmissionProfileBinding{"vector-profile", sha('1')};
+    version_data.policy_snapshot              = PolicySnapshotBinding{"vector-policy", sha('2')};
+    version_data.ownership_scope              = "tenant:vector";
+    version_data.core_materialization_receipt = CoreMaterializationReceipt{
+        "vector-compiler", sha('b'), {CorePlanIdentity{"main", sha('d')}}};
+    ProgramVersion version(std::move(version_data));
 
-    auto changed_data            = data;
-    changed_data.bundle_id       = bundle.id();
-    changed_data.ownership_scope = "tenant:other";
-    ProgramVersion changed(std::move(changed_data));
-    EXPECT_NE(changed.id(), version.id());
+    const std::string expected_version =
+        R"JSON({"admission_profile":{"profile_fingerprint":"sha256:111111111111111111111111111111111111111111111111)JSON"
+        R"JSON(1111111111111111","profile_id":"vector-profile"},"bundle_id":"sha256:9f22330702d0eed754f2b42fc4fa269d)JSON"
+        R"JSON(5083d0da42a5a7c69cc205c8a9ef2ebe","core_materialization_receipt":{"compiler_build_id":"vector-compi)JSON"
+        R"JSON(ler","plans":[{"compiled_plan_identity":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddd)JSON"
+        R"JSON(dddddddddddd","name":"main"}],"registry_snapshot_fingerprint":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)JSON"
+        R"JSON(bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"dependency_receipts":[],"format":"neograph-program-version","i)JSON"
+        R"JSON(d":"sha256:62e2302176ca152292b86859987a9270a17a270c225973b05398473f42b25075","ownership_scope":"tena)JSON"
+        R"JSON(nt:vector","policy_snapshot":{"snapshot_fingerprint":"sha256:222222222222222222222222222222222222222)JSON"
+        R"JSON(2222222222222222222222222","snapshot_id":"vector-policy"},"storage_schema_version":1})JSON";
+    EXPECT_EQ(version.id(),
+              "sha256:62e2302176ca152292b86859987a9270a17a270c225973b05398473f42b25075");
+    EXPECT_EQ(version.serialize_canonical(), expected_version);
+}
 
-    auto future                      = json::parse(bytes);
-    future["storage_schema_version"] = 2;
-    EXPECT_THROW(ProgramVersion::parse(future.dump()), std::invalid_argument);
+TEST(ProgramStoredValueTest, DeepCopiesCallerOwnedJson) {
+    auto source                = make_source();
+    auto data                  = make_bundle_data(source);
+    json input_schema          = json{{"type", "object"}};
+    data.input_contract.schema = input_schema;
+    ProgramBundle bundle(std::move(data));
+    input_schema["type"] = "array";
+    EXPECT_EQ(bundle.input_contract().schema["type"].get<std::string>(), "object");
 
-    auto unknown       = json::parse(bytes);
-    unknown["unknown"] = true;
-    EXPECT_THROW(ProgramVersion::parse(unknown.dump()), std::invalid_argument);
+    auto returned           = bundle.input_contract();
+    returned.schema["type"] = "integer";
+    EXPECT_EQ(bundle.input_contract().schema["type"].get<std::string>(), "object");
+}
+
+TEST(ProgramStoredValueTest, BundleDetachesProxyJsonAndJsonBearingAccessors) {
+    json owner = json{
+        {"schema", json{{"type", "object"}}},
+        {"plan", json{{"entry", "alpha"}}},
+        {"definition", json{{"schema_version", SealedCoreDefinition::STORAGE_SCHEMA_VERSION},
+                            {"nodes", json{{"owned", json{{"type", "test-node"}}}}}}},
+        {"witness", json{{"nested", json::object()}}},
+    };
+    auto data                                       = make_bundle_data(make_source());
+    data.input_contract.schema                      = owner["schema"];
+    data.orchestration_plan.plan                    = owner["plan"];
+    data.sealed_core_definitions.front().definition = owner["definition"];
+    data.sealed_core_definitions.front().definition_hash =
+        sealed_core_definition_hash(owner["definition"]);
+    data.diagnostics.front().witness = owner["witness"];
+    ProgramBundle bundle(std::move(data));
+    const auto    bundle_id = bundle.id();
+    const auto    bytes     = bundle.serialize_canonical();
+
+    owner["schema"]["type"]              = "array";
+    owner["plan"]["entry"]               = "late";
+    owner["definition"]["nodes"]["late"] = json::object();
+    owner["witness"]["nested"]["late"]   = true;
+    EXPECT_EQ(bundle.id(), bundle_id);
+    EXPECT_EQ(bundle.serialize_canonical(), bytes);
+
+    bundle.sealed_core_definitions().front().definition["nodes"]["external"] = json::object();
+    bundle.diagnostics().front().witness["nested"]["external"]               = true;
+    EXPECT_EQ(bundle.id(), bundle_id);
+    EXPECT_EQ(bundle.serialize_canonical(), bytes);
+}
+
+TEST(ProgramStoredValueTest, BundleDetachesDirectlyInitializedJsonProxies) {
+    json owner = json{
+        {"definition", json{{"schema_version", SealedCoreDefinition::STORAGE_SCHEMA_VERSION},
+                            {"nodes", json{{"alpha", json{{"type", "test-node"}}}}}}},
+        {"witness", json{{"nested", json::object()}}},
+    };
+    SealedCoreDefinition direct_definition{
+        "alpha", sealed_core_definition_hash(owner["definition"]), owner["definition"]};
+    Diagnostic direct_diagnostic{
+        CompilePhase::Seal, "P_PROXY", DiagnosticSeverity::Note, coordinate(""), "direct proxy",
+        owner["witness"],   {}};
+
+    auto data = make_bundle_data(make_source());
+    data.sealed_core_definitions.clear();
+    data.sealed_core_definitions.emplace_back(std::move(direct_definition));
+    data.core_plan_identities = {CorePlanIdentity{"alpha", sha('1')}};
+    data.diagnostics.clear();
+    data.diagnostics.emplace_back(std::move(direct_diagnostic));
+    ProgramBundle bundle(std::move(data));
+    const auto    bundle_id = bundle.id();
+    const auto    bytes     = bundle.serialize_canonical();
+
+    owner["definition"]["nodes"]["alpha"]["late"] = true;
+    owner["witness"]["nested"]["late"]            = true;
+    EXPECT_EQ(bundle.id(), bundle_id);
+    EXPECT_EQ(bundle.serialize_canonical(), bytes);
 }
 
 }  // namespace

@@ -184,6 +184,12 @@ void append_value(std::string& out, const json& value) {
         }
         std::sort(fields.begin(), fields.end(),
                   [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+        if (std::adjacent_find(fields.begin(), fields.end(), [](const auto& lhs, const auto& rhs) {
+                return lhs.first == rhs.first;
+            }) != fields.end()) {
+            throw std::invalid_argument(
+                "Program canonical JSON rejects duplicate object member names");
+        }
 
         out.push_back('{');
         bool first = true;
@@ -305,6 +311,12 @@ std::array<std::uint8_t, 32> sha256(std::string_view input) {
 
 }  // namespace
 
+json parse_json_strict(std::string_view bytes) {
+    auto value = json::parse(bytes);
+    (void)canonical_json_bytes(value);
+    return value;
+}
+
 std::string canonical_json_bytes(const json& value) {
     std::string result;
     append_value(result, value);
@@ -312,6 +324,19 @@ std::string canonical_json_bytes(const json& value) {
 }
 void validate_utf8(std::string_view value) {
     validate_utf8_impl(value);
+}
+void validate_json_pointer(std::string_view value) {
+    validate_utf8_impl(value);
+    if (value.empty()) return;
+    if (value.front() != '/') {
+        throw std::invalid_argument("JSON Pointer must be empty or start with '/'");
+    }
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        if (value[index] != '~') continue;
+        if (++index == value.size() || (value[index] != '0' && value[index] != '1')) {
+            throw std::invalid_argument("JSON Pointer contains an invalid escape");
+        }
+    }
 }
 void reject_unknown_fields(const json&                             value,
                            std::string_view                        object_name,

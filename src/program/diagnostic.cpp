@@ -42,8 +42,11 @@ std::uint32_t require_uint32(const json& value, std::string_view key) {
 }
 
 void validate_span(const SourceSpan& span) {
-    if (span.byte_end < span.byte_begin || span.line_begin == 0 || span.column_begin == 0 ||
-        span.line_end == 0 || span.column_end == 0) {
+    const bool line_column_reversed =
+        span.line_end < span.line_begin ||
+        (span.line_end == span.line_begin && span.column_end < span.column_begin);
+    if (span.byte_end < span.byte_begin || line_column_reversed || span.line_begin == 0 ||
+        span.column_begin == 0 || span.line_end == 0 || span.column_end == 0) {
         throw std::invalid_argument("Program source span is invalid");
     }
 }
@@ -52,10 +55,34 @@ void validate_coordinate(const SourceCoordinate& coordinate) {
     if (coordinate.source_id.empty()) {
         throw std::invalid_argument("Program source coordinate requires source_id");
     }
-    if (!coordinate.json_pointer.empty() && coordinate.json_pointer.front() != '/') {
-        throw std::invalid_argument("Program source coordinate requires RFC 6901 JSON Pointer");
-    }
+    detail::validate_utf8(coordinate.source_id);
+    detail::validate_json_pointer(coordinate.json_pointer);
     if (coordinate.span) validate_span(*coordinate.span);
+}
+
+bool valid_phase(CompilePhase phase) noexcept {
+    switch (phase) {
+        case CompilePhase::Source:
+        case CompilePhase::Schema:
+        case CompilePhase::Normalize:
+        case CompilePhase::Resolve:
+        case CompilePhase::TypeCheck:
+        case CompilePhase::CoreParse:
+        case CompilePhase::CoreValidate:
+        case CompilePhase::Seal:
+            return true;
+    }
+    return false;
+}
+
+bool valid_severity(DiagnosticSeverity severity) noexcept {
+    switch (severity) {
+        case DiagnosticSeverity::Error:
+        case DiagnosticSeverity::Warning:
+        case DiagnosticSeverity::Note:
+            return true;
+    }
+    return false;
 }
 
 }  // namespace
@@ -114,6 +141,7 @@ DiagnosticSeverity diagnostic_severity_from_string(std::string_view value) {
 }
 
 void to_json(json& value, const SourceSpan& span) {
+    validate_span(span);
     value                 = json::object();
     value["byte_begin"]   = span.byte_begin;
     value["byte_end"]     = span.byte_end;
@@ -173,6 +201,9 @@ void to_json(json& value, const Diagnostic& diagnostic) {
     if (diagnostic.code.empty() || diagnostic.message.empty()) {
         throw std::invalid_argument("Program diagnostic requires code and message");
     }
+    if (!valid_phase(diagnostic.phase) || !valid_severity(diagnostic.severity)) {
+        throw std::invalid_argument("Program diagnostic contains an unknown enum value");
+    }
     value             = json::object();
     value["phase"]    = std::string(to_string(diagnostic.phase));
     value["code"]     = diagnostic.code;
@@ -212,7 +243,7 @@ void from_json(const json& value, Diagnostic& diagnostic) {
         throw std::invalid_argument("Program diagnostic related field must be an array");
     }
     diagnostic.related.clear();
-    for (const auto item : value["related"]) {
+    for (const auto& item : value["related"]) {
         SourceCoordinate coordinate;
         from_json(item, coordinate);
         diagnostic.related.push_back(std::move(coordinate));
