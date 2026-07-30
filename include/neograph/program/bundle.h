@@ -14,7 +14,7 @@
 
 namespace neograph::program {
 
-enum class ExecutableKind { Node, Reducer, Condition, Provider, Tool, Import };
+enum class ExecutableKind { Node, Reducer, Condition, Provider, Tool, Imported };
 
 NEOGRAPH_PROGRAM_API std::string_view to_string(ExecutableKind kind) noexcept;
 NEOGRAPH_PROGRAM_API ExecutableKind   executable_kind_from_string(std::string_view value);

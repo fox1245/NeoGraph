@@ -32,7 +32,7 @@
     "source_hash": { "$ref": "#/$defs/sha256" },
     "canonical_program_hash": { "$ref": "#/$defs/sha256" },
     "compiler_build_id": { "$ref": "#/$defs/nonemptyString" },
-    "program_schema_version": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+    "program_schema_version": { "const": 1 },
     "registry_snapshot_fingerprint": { "$ref": "#/$defs/sha256" },
     "module_dependency_merkle_root": { "$ref": "#/$defs/sha256" },
     "input_contract": { "$ref": "#/$defs/contract" },
@@ -70,7 +70,15 @@
     },
     "diagnostics": {
       "type": "array",
-      "items": { "$ref": "#/$defs/diagnostic" }
+      "items": {
+        "allOf": [
+          { "$ref": "#/$defs/diagnostic" },
+          {
+            "properties": { "severity": { "enum": ["warning", "note"] } },
+            "required": ["severity"]
+          }
+        ]
+      }
     }
   },
   "$defs": {
@@ -272,7 +280,7 @@
       "additionalProperties": false,
       "required": ["kind", "name", "semantic_version", "implementation_digest"],
       "properties": {
-        "kind": { "enum": ["node", "reducer", "condition", "provider", "tool", "import"] },
+        "kind": { "enum": ["node", "reducer", "condition", "provider", "tool", "imported"] },
         "name": { "$ref": "#/$defs/nonemptyString" },
         "semantic_version": {
           "type": "string",

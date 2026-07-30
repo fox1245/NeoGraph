@@ -8,9 +8,18 @@ Example:
     python3 embed_schemas.py schemas/ build/generated/builtin_schemas.h
 """
 
-import os
-import sys
 import json
+import os
+import re
+import sys
+
+
+def cpp_identifier(name: str) -> str:
+    """Return a deterministic C++ identifier for an arbitrary schema filename."""
+    identifier = re.sub(r"[^0-9A-Za-z_]", "_", name)
+    if identifier and identifier[0].isdigit():
+        identifier = "_" + identifier
+    return "schema_" + identifier
 
 
 def escape_for_raw_string(content: str) -> str:
@@ -50,8 +59,11 @@ def main():
         out.write("#include <map>\n\n")
         out.write("namespace neograph::llm::builtin {\n\n")
 
+        identifiers = {name: cpp_identifier(name) for name in schemas}
+        if len(set(identifiers.values())) != len(identifiers):
+            raise ValueError("Schema filenames collide after C++ identifier normalization")
         for name, content in schemas.items():
-            var_name = f"schema_{name}"
+            var_name = identifiers[name]
             out.write(f'inline const char* {var_name} = R"(\n')
             out.write(content)
             out.write('\n)";\n\n')
@@ -59,8 +71,8 @@ def main():
         # Registry map
         out.write("inline const std::map<std::string, const char*>& schemas() {\n")
         out.write("    static const std::map<std::string, const char*> m = {\n")
-        for name in schemas:
-            out.write(f'        {{"{name}", schema_{name}}},\n')
+        for name, var_name in identifiers.items():
+            out.write(f'        {{"{name}", {var_name}}},\n')
         out.write("    };\n")
         out.write("    return m;\n")
         out.write("}\n\n")

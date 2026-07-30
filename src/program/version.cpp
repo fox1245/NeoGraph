@@ -64,11 +64,38 @@ void validate_core_plan(const CorePlanIdentity& plan) {
 
 void normalize_data(ProgramVersionData& data) {
     require_sha256(data.bundle_id, "Program version bundle_id");
-    require_nonempty_utf8(data.admission_profile.profile_id, "Admission profile id");
-    require_sha256(data.admission_profile.profile_fingerprint, "Admission profile fingerprint");
-    require_nonempty_utf8(data.policy_snapshot.snapshot_id, "Policy snapshot id");
-    require_sha256(data.policy_snapshot.snapshot_fingerprint, "Policy snapshot fingerprint");
+    if (data.policy_snapshot.admission_profile_fingerprint() !=
+        data.admission_profile.fingerprint()) {
+        throw std::invalid_argument("Program version policy does not bind the admission profile");
+    }
+    if (data.policy_snapshot.registry_fingerprint() !=
+        data.admission_profile.registry_fingerprint()) {
+        throw std::invalid_argument(
+            "Program version policy and admission profile bind different registries");
+    }
+    const auto effect_modes           = data.admission_profile.allowed_effect_modes();
+    const auto capabilities           = data.policy_snapshot.allowed_capabilities();
+    const bool profile_allows_trusted = std::find(effect_modes.begin(), effect_modes.end(),
+                                                  EffectMode::TrustedNative) != effect_modes.end();
+    const bool policy_grants_trusted  = std::find(capabilities.begin(), capabilities.end(),
+                                                  TRUSTED_NATIVE_CAPABILITY) != capabilities.end();
+    if (data.admission_profile.mode() == AdmissionMode::MultiTenant && policy_grants_trusted) {
+        throw std::invalid_argument(
+            "Program version MultiTenant policy grants neograph.native.trusted capability");
+    }
+    if (!profile_allows_trusted && policy_grants_trusted) {
+        throw std::invalid_argument(
+            "Program version policy grants neograph.native.trusted outside its admission profile");
+    }
+    if (profile_allows_trusted && !policy_grants_trusted) {
+        throw std::invalid_argument(
+            "Program version TrustedNative policy lacks neograph.native.trusted capability");
+    }
     require_nonempty_utf8(data.ownership_scope, "Program version ownership_scope");
+    if (data.ownership_scope != data.policy_snapshot.owner_scope()) {
+        throw std::invalid_argument(
+            "Program version ownership_scope does not match policy owner_scope");
+    }
 
     for (const auto& receipt : data.dependency_receipts) {
         require_nonempty_utf8(receipt.dependency_id, "Dependency receipt id");
@@ -89,6 +116,11 @@ void normalize_data(ProgramVersionData& data) {
                           "Core materialization compiler build id");
     require_sha256(materialization.registry_snapshot_fingerprint,
                    "Core materialization registry snapshot fingerprint");
+    if (materialization.registry_snapshot_fingerprint !=
+        data.admission_profile.registry_fingerprint()) {
+        throw std::invalid_argument(
+            "Program version materialization receipt binds a different registry");
+    }
     if (materialization.plans.empty()) {
         throw std::invalid_argument("Core materialization receipt requires at least one plan");
     }
@@ -103,30 +135,12 @@ void normalize_data(ProgramVersionData& data) {
     }
 }
 
-json encode_admission(const AdmissionProfileBinding& binding) {
-    return json{{"profile_id", binding.profile_id},
-                {"profile_fingerprint", binding.profile_fingerprint}};
+AdmissionProfile parse_admission(const json& value) {
+    return AdmissionProfile::parse(detail::canonical_json_bytes(value));
 }
 
-AdmissionProfileBinding parse_admission(const json& value) {
-    require_object(value, "Admission profile binding");
-    detail::reject_unknown_fields(value, "Admission profile binding",
-                                  {"profile_id", "profile_fingerprint"});
-    return AdmissionProfileBinding{require_string(value, "profile_id"),
-                                   require_string(value, "profile_fingerprint")};
-}
-
-json encode_policy(const PolicySnapshotBinding& binding) {
-    return json{{"snapshot_id", binding.snapshot_id},
-                {"snapshot_fingerprint", binding.snapshot_fingerprint}};
-}
-
-PolicySnapshotBinding parse_policy(const json& value) {
-    require_object(value, "Policy snapshot binding");
-    detail::reject_unknown_fields(value, "Policy snapshot binding",
-                                  {"snapshot_id", "snapshot_fingerprint"});
-    return PolicySnapshotBinding{require_string(value, "snapshot_id"),
-                                 require_string(value, "snapshot_fingerprint")};
+PolicySnapshot parse_policy(const json& value) {
+    return PolicySnapshot::parse(detail::canonical_json_bytes(value));
 }
 
 json encode_dependency(const DependencyReceipt& receipt) {
@@ -183,8 +197,8 @@ CoreMaterializationReceipt parse_materialization(const json& value) {
 json version_body(const ProgramVersionData& data) {
     json value                 = json::object();
     value["bundle_id"]         = data.bundle_id;
-    value["admission_profile"] = encode_admission(data.admission_profile);
-    value["policy_snapshot"]   = encode_policy(data.policy_snapshot);
+    value["admission_profile"] = data.admission_profile.manifest();
+    value["policy_snapshot"]   = data.policy_snapshot.manifest();
 
     json dependencies = json::array();
     for (const auto& receipt : data.dependency_receipts) {
@@ -205,22 +219,21 @@ json version_identity_envelope(const ProgramVersionData& data) {
 }
 
 ProgramVersionData parse_body(const json& value) {
-    ProgramVersionData data;
-    data.bundle_id         = require_string(value, "bundle_id");
-    data.admission_profile = parse_admission(require_value(value, "admission_profile"));
-    data.policy_snapshot   = parse_policy(require_value(value, "policy_snapshot"));
-
+    auto        admission    = parse_admission(require_value(value, "admission_profile"));
+    auto        policy       = parse_policy(require_value(value, "policy_snapshot"));
     const auto& dependencies = require_value(value, "dependency_receipts");
     if (!dependencies.is_array()) {
         throw std::invalid_argument("Program version dependency_receipts must be an array");
     }
-    data.dependency_receipts.reserve(dependencies.size());
+    std::vector<DependencyReceipt> parsed_dependencies;
+    parsed_dependencies.reserve(dependencies.size());
     for (const auto& receipt : dependencies) {
-        data.dependency_receipts.push_back(parse_dependency(receipt));
+        parsed_dependencies.push_back(parse_dependency(receipt));
     }
-    data.ownership_scope = require_string(value, "ownership_scope");
-    data.core_materialization_receipt =
-        parse_materialization(require_value(value, "core_materialization_receipt"));
+    ProgramVersionData data(
+        require_string(value, "bundle_id"), std::move(admission), std::move(policy),
+        std::move(parsed_dependencies), require_string(value, "ownership_scope"),
+        parse_materialization(require_value(value, "core_materialization_receipt")));
     normalize_data(data);
     return data;
 }
@@ -228,15 +241,16 @@ ProgramVersionData parse_body(const json& value) {
 }  // namespace
 
 struct ProgramVersion::Impl {
+    explicit Impl(ProgramVersionData value) : data(std::move(value)) {}
+
     ProgramVersionData data;
     std::string        id;
 };
 
 ProgramVersion::ProgramVersion(ProgramVersionData data) {
     normalize_data(data);
-    auto impl  = std::make_shared<Impl>();
-    impl->data = std::move(data);
-    impl->id   = detail::sha256_identity(
+    auto impl = std::make_shared<Impl>(std::move(data));
+    impl->id  = detail::sha256_identity(
         "program-version", detail::canonical_json_bytes(version_identity_envelope(impl->data)));
     impl_ = std::move(impl);
 }
@@ -275,10 +289,10 @@ const std::string& ProgramVersion::id() const noexcept {
 const std::string& ProgramVersion::bundle_id() const noexcept {
     return impl_->data.bundle_id;
 }
-const AdmissionProfileBinding& ProgramVersion::admission_profile() const noexcept {
+AdmissionProfile ProgramVersion::admission_profile() const {
     return impl_->data.admission_profile;
 }
-const PolicySnapshotBinding& ProgramVersion::policy_snapshot() const noexcept {
+PolicySnapshot ProgramVersion::policy_snapshot() const {
     return impl_->data.policy_snapshot;
 }
 const std::vector<DependencyReceipt>& ProgramVersion::dependency_receipts() const noexcept {

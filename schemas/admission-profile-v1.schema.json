@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/admission-profile-v1.schema.json",
+  "title": "NeoGraph AdmissionProfile stored value v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "storage_schema_version", "fingerprint", "id", "semantic_version", "registry_fingerprint", "mode", "max_program_schema_version", "allowed_source_kinds", "allowed_executables", "allowed_effect_modes"],
+  "properties": {
+    "format": { "const": "neograph-admission-profile" },
+    "storage_schema_version": { "const": 1 },
+    "fingerprint": { "$ref": "#/$defs/sha256" },
+    "id": { "$ref": "#/$defs/nonempty" },
+    "semantic_version": { "$ref": "#/$defs/semver" },
+    "registry_fingerprint": { "$ref": "#/$defs/sha256" },
+    "mode": { "enum": ["multi_tenant", "trusted_embedding"] },
+    "max_program_schema_version": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+    "allowed_source_kinds": {
+      "type": "array", "uniqueItems": true,
+      "items": { "enum": ["canonical_json", "cpp_builder"] }
+    },
+    "allowed_executables": {
+      "type": "array", "uniqueItems": true,
+      "items": { "$ref": "#/$defs/identity" }
+    },
+    "allowed_effect_modes": {
+      "type": "array", "uniqueItems": true,
+      "items": { "enum": ["brokered", "trusted_native"] }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "mode": { "const": "multi_tenant" } },
+        "required": ["mode"]
+      },
+      "then": {
+        "properties": {
+          "allowed_effect_modes": {
+            "not": { "contains": { "const": "trusted_native" } }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "nonempty": {
+      "type": "string",
+      "pattern": "^[^\\u0000-\\u0020\\u007F](?:[^\\u0000-\\u001F\\u007F]*[^\\u0000-\\u0020\\u007F])?$"
+    },
+    "semver": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$"
+    },
+    "identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "name", "semantic_version", "implementation_digest"],
+      "properties": {
+        "kind": { "enum": ["node", "reducer", "condition", "provider", "tool", "imported"] },
+        "name": { "$ref": "#/$defs/nonempty" },
+        "semantic_version": { "$ref": "#/$defs/semver" },
+        "implementation_digest": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

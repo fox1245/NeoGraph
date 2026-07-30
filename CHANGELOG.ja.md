@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=cd70806dd167444dfe562dde5468e15c749d5633cf7baf12874f3d6184f99614 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=f2880aa80b6972d92480cd2326c3e30415da12ba158d9cec878d05c116f65490 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -32,6 +32,14 @@ NeoGraph の全注目すべき変更を本ファイルに文書化します。
   具現化レシートを必須にしました。識別子は形式と保存バージョンを含み、意味的
   集合は安定順に正規化されます。診断は不正なポインター、逆順 span、不明 enum
   を拒否し、正確なパーサーオフセットがない場合は span を空のままにします。
+
+- **封印された Program アドミッションクロージャ。** ビルダー時の callable
+  取り込み、厳格な正規マニフェスト、ドメイン分離フィンガープリントを備えた
+  不変の `RegistrySnapshot`、`AdmissionProfile`、`PolicySnapshot` を追加し、
+  `ProgramVersion` でフィンガープリント間の整合性を fail-closed で検証します。
+  Core には Program 具現化用の明示的なローカル専用 parse/link/validate
+  エントリポイントを追加し、既存のローカル優先/グローバルフォールバック
+  オーバーロードは変更していません。
 
 - **SQLite Harness レコードストア (issue #147 フォローアップ)。** オプションの
   `neograph::mcp_sqlite` ターゲットと `SqliteHarnessRecordStore` を追加。WAL バック、

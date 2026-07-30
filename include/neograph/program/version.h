@@ -4,29 +4,17 @@
  */
 #pragma once
 
+#include <neograph/program/admission.h>
 #include <neograph/program/bundle.h>
 
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace neograph::program {
-
-struct AdmissionProfileBinding {
-    std::string profile_id;
-    std::string profile_fingerprint;
-
-    bool operator==(const AdmissionProfileBinding&) const = default;
-};
-
-struct PolicySnapshotBinding {
-    std::string snapshot_id;
-    std::string snapshot_fingerprint;
-
-    bool operator==(const PolicySnapshotBinding&) const = default;
-};
 
 struct DependencyReceipt {
     std::string dependency_id;
@@ -49,9 +37,22 @@ struct CoreMaterializationReceipt {
  * dependency_id; materialization plans use their documented name ordering.
  */
 struct ProgramVersionData {
+    ProgramVersionData(std::string                    bundle,
+                       AdmissionProfile               admission,
+                       PolicySnapshot                 policy,
+                       std::vector<DependencyReceipt> dependencies,
+                       std::string                    owner,
+                       CoreMaterializationReceipt     materialization)
+        : bundle_id(std::move(bundle)),
+          admission_profile(std::move(admission)),
+          policy_snapshot(std::move(policy)),
+          dependency_receipts(std::move(dependencies)),
+          ownership_scope(std::move(owner)),
+          core_materialization_receipt(std::move(materialization)) {}
+
     std::string                    bundle_id;
-    AdmissionProfileBinding        admission_profile;
-    PolicySnapshotBinding          policy_snapshot;
+    AdmissionProfile               admission_profile;
+    PolicySnapshot                 policy_snapshot;
     std::vector<DependencyReceipt> dependency_receipts;
     std::string                    ownership_scope;
     CoreMaterializationReceipt     core_materialization_receipt;
@@ -66,8 +67,8 @@ public:
 
     const std::string&                    id() const noexcept;
     const std::string&                    bundle_id() const noexcept;
-    const AdmissionProfileBinding&        admission_profile() const noexcept;
-    const PolicySnapshotBinding&          policy_snapshot() const noexcept;
+    AdmissionProfile                      admission_profile() const;
+    PolicySnapshot                        policy_snapshot() const;
     const std::vector<DependencyReceipt>& dependency_receipts() const noexcept;
     const std::string&                    ownership_scope() const noexcept;
     const CoreMaterializationReceipt&     core_materialization_receipt() const noexcept;

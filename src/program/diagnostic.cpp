@@ -238,7 +238,7 @@ void from_json(const json& value, Diagnostic& diagnostic) {
     if (!value.contains("witness")) {
         throw std::invalid_argument("Program diagnostic requires witness");
     }
-    diagnostic.witness = value["witness"];
+    diagnostic.witness = detail::owned_json_copy(value["witness"]);
     if (!value.contains("related") || !value["related"].is_array()) {
         throw std::invalid_argument("Program diagnostic related field must be an array");
     }
@@ -254,7 +254,9 @@ void from_json(const json& value, Diagnostic& diagnostic) {
 }
 
 ProgramDiagnosticError::ProgramDiagnosticError(Diagnostic diagnostic)
-    : std::runtime_error(diagnostic.message), diagnostic_(std::move(diagnostic)) {}
+    : std::runtime_error(diagnostic.message), diagnostic_(std::move(diagnostic)) {
+    diagnostic_.witness = detail::owned_json_copy(diagnostic_.witness);
+}
 
 const Diagnostic& ProgramDiagnosticError::diagnostic() const noexcept {
     return diagnostic_;

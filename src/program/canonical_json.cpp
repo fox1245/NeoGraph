@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -14,6 +15,158 @@
 
 namespace neograph::program::detail {
 namespace {
+
+constexpr std::size_t MAX_JSON_BYTES = 16u * 1024u * 1024u;
+constexpr std::size_t MAX_JSON_DEPTH = 256;
+
+void validate_json_text_limits(std::string_view bytes) {
+    if (bytes.size() > MAX_JSON_BYTES) {
+        throw std::invalid_argument("Program JSON exceeds the 16 MiB input limit");
+    }
+    std::size_t depth     = 0;
+    bool        in_string = false;
+    bool        escaped   = false;
+    for (const char value : bytes) {
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (value == '\\') {
+                escaped = true;
+            } else if (value == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (value == '"') {
+            in_string = true;
+        } else if (value == '{' || value == '[') {
+            if (++depth > MAX_JSON_DEPTH) {
+                throw std::invalid_argument("Program JSON exceeds the maximum nesting depth");
+            }
+        } else if ((value == '}' || value == ']') && depth != 0) {
+            --depth;
+        }
+    }
+}
+
+void validate_strict_tree(const json& value) {
+    if (value.is_object()) {
+        std::set<std::string> fields;
+        for (const auto& [field, child] : value.items()) {
+            if (!fields.insert(field).second) {
+                throw std::invalid_argument("Program JSON contains duplicate object field '" +
+                                            field + "'");
+            }
+            validate_strict_tree(child);
+        }
+    } else if (value.is_array()) {
+        for (const auto& child : value)
+            validate_strict_tree(child);
+    }
+}
+
+std::size_t checked_json_size(std::size_t current, std::size_t additional) {
+    if (additional > MAX_JSON_BYTES - current) {
+        throw std::invalid_argument("Program JSON exceeds the 16 MiB materialized limit");
+    }
+    return current + additional;
+}
+
+std::size_t escaped_json_string_size(std::string_view value) {
+    std::size_t size = 2;
+    for (const unsigned char byte : value) {
+        size = checked_json_size(size, byte < 0x20 ? 6 : ((byte == '"' || byte == '\\') ? 2 : 1));
+    }
+    return size;
+}
+
+std::size_t validate_json_value_limits(const json& value, std::size_t depth = 1) {
+    if (depth > MAX_JSON_DEPTH) {
+        throw std::invalid_argument("Program JSON exceeds the maximum nesting depth");
+    }
+    if (value.is_null()) return 4;
+    if (value.is_boolean()) return value.get<bool>() ? 4 : 5;
+    if (value.is_number()) return 32;
+    if (value.is_string()) return escaped_json_string_size(value.get<std::string>());
+
+    std::size_t size  = 2;
+    bool        first = true;
+    if (value.is_array()) {
+        for (const auto& child : value) {
+            if (!first) size = checked_json_size(size, 1);
+            first = false;
+            size  = checked_json_size(size, validate_json_value_limits(child, depth + 1));
+        }
+        return size;
+    }
+    if (value.is_object()) {
+        for (const auto& [field, child] : value.items()) {
+            if (!first) size = checked_json_size(size, 1);
+            first = false;
+            size  = checked_json_size(size, escaped_json_string_size(field));
+            size  = checked_json_size(size, 1);
+            size  = checked_json_size(size, validate_json_value_limits(child, depth + 1));
+        }
+        return size;
+    }
+    throw std::invalid_argument("Program JSON contains an unsupported value");
+}
+
+json owned_json_copy_impl(const json& value, std::size_t depth) {
+    if (depth > MAX_JSON_DEPTH) {
+        throw std::invalid_argument("Program JSON exceeds the maximum nesting depth");
+    }
+    if (value.is_null()) return nullptr;
+    if (value.is_boolean()) return value.get<bool>();
+    if (value.is_number_unsigned()) return value.get<unsigned long long>();
+    if (value.is_number_integer()) return value.get<long long>();
+    if (value.is_number_float()) return value.get<double>();
+    if (value.is_string()) return value.get<std::string>();
+    if (value.is_array()) {
+        json copy = json::array();
+        for (const auto& item : value)
+            copy.push_back(owned_json_copy_impl(item, depth + 1));
+        return copy;
+    }
+    if (value.is_object()) {
+        json copy = json::object();
+        for (const auto& [key, item] : value.items())
+            copy[key] = owned_json_copy_impl(item, depth + 1);
+        return copy;
+    }
+    throw std::invalid_argument("Program JSON contains an unsupported value");
+}
+
+constexpr bool ascii_digit(unsigned char value) noexcept {
+    return value >= '0' && value <= '9';
+}
+
+constexpr bool ascii_alnum(unsigned char value) noexcept {
+    return ascii_digit(value) || (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z');
+}
+
+bool valid_numeric_identifier(std::string_view value) {
+    if (value.empty() || (value.size() > 1 && value.front() == '0')) return false;
+    return std::all_of(value.begin(), value.end(), ascii_digit);
+}
+
+bool valid_identifier(std::string_view value, bool prerelease) {
+    if (value.empty()) return false;
+    const bool numeric = std::all_of(value.begin(), value.end(), ascii_digit);
+    if (prerelease && numeric && value.size() > 1 && value.front() == '0') return false;
+    return std::all_of(value.begin(), value.end(),
+                       [](unsigned char c) { return ascii_alnum(c) || c == '-'; });
+}
+
+bool valid_dot_identifiers(std::string_view value, bool prerelease) {
+    if (value.empty()) return false;
+    while (true) {
+        const auto dot = value.find('.');
+        if (!valid_identifier(value.substr(0, dot), prerelease)) return false;
+        if (dot == std::string_view::npos) return true;
+        value.remove_prefix(dot + 1);
+    }
+}
 
 std::size_t validated_utf8_sequence_length(std::string_view value, std::size_t index) {
     const auto byte_at = [&value](std::size_t offset) {
@@ -311,19 +464,65 @@ std::array<std::uint8_t, 32> sha256(std::string_view input) {
 
 }  // namespace
 
+bool is_semantic_version(std::string_view value) noexcept {
+    const auto plus = value.find('+');
+    if (plus != std::string_view::npos) {
+        if (!valid_dot_identifiers(value.substr(plus + 1), false)) return false;
+        value = value.substr(0, plus);
+    }
+    const auto dash = value.find('-');
+    if (dash != std::string_view::npos) {
+        if (!valid_dot_identifiers(value.substr(dash + 1), true)) return false;
+        value = value.substr(0, dash);
+    }
+    const auto first = value.find('.');
+    const auto second =
+        first == std::string_view::npos ? std::string_view::npos : value.find('.', first + 1);
+    if (first == std::string_view::npos || second == std::string_view::npos ||
+        value.find('.', second + 1) != std::string_view::npos) {
+        return false;
+    }
+    return valid_numeric_identifier(value.substr(0, first)) &&
+           valid_numeric_identifier(value.substr(first + 1, second - first - 1)) &&
+           valid_numeric_identifier(value.substr(second + 1));
+}
+
+json owned_json_copy(const json& value) {
+    (void)validate_json_value_limits(value);
+    validate_strict_tree(value);
+    return owned_json_copy_impl(value, 1);
+}
+
 json parse_json_strict(std::string_view bytes) {
+    validate_json_text_limits(bytes);
     auto value = json::parse(bytes);
+    validate_strict_tree(value);
     (void)canonical_json_bytes(value);
     return value;
 }
 
 std::string canonical_json_bytes(const json& value) {
+    (void)validate_json_value_limits(value);
     std::string result;
     append_value(result, value);
     return result;
 }
 void validate_utf8(std::string_view value) {
     validate_utf8_impl(value);
+}
+void validate_token(std::string_view value, std::string_view field) {
+    if (value.empty()) {
+        throw std::invalid_argument(std::string(field) + " must not be empty");
+    }
+    validate_utf8_impl(value);
+    const auto invalid_control = [](unsigned char byte) { return byte < 0x20 || byte == 0x7f; };
+    if (std::any_of(value.begin(), value.end(), invalid_control)) {
+        throw std::invalid_argument(std::string(field) + " must not contain control characters");
+    }
+    if (value.front() == ' ' || value.back() == ' ') {
+        throw std::invalid_argument(std::string(field) +
+                                    " must not have leading or trailing whitespace");
+    }
 }
 void validate_json_pointer(std::string_view value) {
     validate_utf8_impl(value);

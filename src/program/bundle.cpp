@@ -136,7 +136,7 @@ bool valid_executable_kind(ExecutableKind kind) noexcept {
         case ExecutableKind::Condition:
         case ExecutableKind::Provider:
         case ExecutableKind::Tool:
-        case ExecutableKind::Import:
+        case ExecutableKind::Imported:
             return true;
     }
     return false;
@@ -395,11 +395,20 @@ void sort_unique_strings(std::vector<std::string>& values, std::string_view name
 }
 
 void normalize_data(ProgramBundleData& data) {
+    data.input_contract.schema   = detail::owned_json_copy(data.input_contract.schema);
+    data.output_contract.schema  = detail::owned_json_copy(data.output_contract.schema);
+    data.orchestration_plan.plan = detail::owned_json_copy(data.orchestration_plan.plan);
+    for (auto& definition : data.sealed_core_definitions) {
+        definition.definition = detail::owned_json_copy(definition.definition);
+    }
+    for (auto& diagnostic : data.diagnostics) {
+        diagnostic.witness = detail::owned_json_copy(diagnostic.witness);
+    }
     require_sha256(data.source_hash, "Program bundle source_hash");
     require_sha256(data.canonical_program_hash, "Program bundle canonical_program_hash");
     require_nonempty_utf8(data.compiler_build_id, "Program bundle compiler_build_id");
-    if (data.program_schema_version == 0) {
-        throw std::invalid_argument("Program bundle program_schema_version must be positive");
+    if (data.program_schema_version != 1) {
+        throw std::invalid_argument("Program bundle program_schema_version is unsupported");
     }
     require_sha256(data.registry_snapshot_fingerprint,
                    "Program bundle registry_snapshot_fingerprint");
@@ -497,6 +506,10 @@ void normalize_data(ProgramBundleData& data) {
     for (const auto& diagnostic : data.diagnostics) {
         json encoded;
         to_json(encoded, diagnostic);
+        if (diagnostic.severity == DiagnosticSeverity::Error) {
+            throw std::invalid_argument(
+                "Successful Program bundle cannot contain error diagnostics");
+        }
     }
 }
 
@@ -767,8 +780,8 @@ std::string_view to_string(ExecutableKind kind) noexcept {
             return "provider";
         case ExecutableKind::Tool:
             return "tool";
-        case ExecutableKind::Import:
-            return "import";
+        case ExecutableKind::Imported:
+            return "imported";
     }
     return "unknown";
 }
@@ -779,7 +792,7 @@ ExecutableKind executable_kind_from_string(std::string_view value) {
     if (value == "condition") return ExecutableKind::Condition;
     if (value == "provider") return ExecutableKind::Provider;
     if (value == "tool") return ExecutableKind::Tool;
-    if (value == "import") return ExecutableKind::Import;
+    if (value == "imported") return ExecutableKind::Imported;
     throw std::invalid_argument("Unknown Program executable kind: " + std::string(value));
 }
 
@@ -860,16 +873,26 @@ const std::string& ProgramBundle::module_dependency_merkle_root() const noexcept
     return impl_->data.module_dependency_merkle_root;
 }
 ContractRecord ProgramBundle::input_contract() const {
-    return impl_->data.input_contract;
+    auto copy   = impl_->data.input_contract;
+    copy.schema = detail::owned_json_copy(copy.schema);
+    return copy;
 }
 ContractRecord ProgramBundle::output_contract() const {
-    return impl_->data.output_contract;
+    auto copy   = impl_->data.output_contract;
+    copy.schema = detail::owned_json_copy(copy.schema);
+    return copy;
 }
 OrchestrationPlanRecord ProgramBundle::orchestration_plan() const {
-    return impl_->data.orchestration_plan;
+    auto copy = impl_->data.orchestration_plan;
+    copy.plan = detail::owned_json_copy(copy.plan);
+    return copy;
 }
 std::vector<SealedCoreDefinition> ProgramBundle::sealed_core_definitions() const {
-    return impl_->data.sealed_core_definitions;
+    auto copy = impl_->data.sealed_core_definitions;
+    for (auto& definition : copy) {
+        definition.definition = detail::owned_json_copy(definition.definition);
+    }
+    return copy;
 }
 const std::vector<CorePlanIdentity>& ProgramBundle::core_plan_identities() const noexcept {
     return impl_->data.core_plan_identities;
@@ -888,7 +911,11 @@ const std::vector<SourceMapEntry>& ProgramBundle::source_map() const noexcept {
     return impl_->data.source_map;
 }
 std::vector<Diagnostic> ProgramBundle::diagnostics() const {
-    return impl_->data.diagnostics;
+    auto copy = impl_->data.diagnostics;
+    for (auto& diagnostic : copy) {
+        diagnostic.witness = detail::owned_json_copy(diagnostic.witness);
+    }
+    return copy;
 }
 
 std::string ProgramBundle::serialize_canonical() const {

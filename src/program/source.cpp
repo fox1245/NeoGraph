@@ -229,7 +229,7 @@ ProgramSource ProgramSource::from_cpp_builder(std::string                 source
     impl->kind               = SourceKind::CppBuilder;
     impl->schema_version     = schema_version;
     impl->source_id          = std::move(source_id);
-    impl->document           = json(document);
+    impl->document           = detail::owned_json_copy(document);
     impl->imports            = std::move(imports);
     impl->source_map         = std::move(source_map);
     impl->canonical_document = detail::canonical_json_bytes(impl->document);
@@ -302,7 +302,7 @@ const std::string& ProgramSource::source_id() const noexcept {
     return impl_->source_id;
 }
 json ProgramSource::document() const {
-    return impl_->document;
+    return detail::owned_json_copy(impl_->document);
 }
 const std::vector<ImportRef>& ProgramSource::imports() const noexcept {
     return impl_->imports;

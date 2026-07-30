@@ -26,6 +26,7 @@ add_executable(neograph_tests
     test_compiler.cpp
     test_compiler_strict.cpp
     test_validator.cpp
+    test_graph_registry_local.cpp
     test_pbt_roundtrip.cpp
     test_corpus.cpp
     test_elaborator.cpp
@@ -80,7 +81,14 @@ add_executable(neograph_tests
     test_schema_provider_stream_async_outer_io.cpp
 )
 if(NEOGRAPH_BUILD_PROGRAM)
-    add_executable(neograph_program_tests test_program_values.cpp)
+    add_executable(neograph_program_tests
+        test_program_values.cpp
+        test_program_registry.cpp
+        test_program_admission.cpp
+    )
+    target_include_directories(neograph_program_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/program
+    )
     target_link_libraries(neograph_program_tests PRIVATE
         neograph::program
         GTest::gtest_main

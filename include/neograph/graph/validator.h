@@ -22,6 +22,7 @@
 
 #include <neograph/api.h>
 #include <neograph/graph/compiler.h>
+
 #include <string>
 #include <utility>
 #include <vector>
@@ -79,7 +80,10 @@ public:
     static ValidationReport validate(const TopologySpec& topology);
 
     /// @brief Validate declarative topology with a local registry overlay.
-    static ValidationReport validate(const TopologySpec& topology,
+    static ValidationReport validate(const TopologySpec& topology, const GraphRegistry& registry);
+
+    /// @brief Validate topology references without process-global fallback.
+    static ValidationReport validate_local(const TopologySpec&  topology,
                                      const GraphRegistry& registry);
 
     /**
@@ -88,7 +92,10 @@ public:
     static ValidatedTopology require_valid(TopologySpec topology);
 
     /// @brief Validate and wrap using a local registry overlay.
-    static ValidatedTopology require_valid(TopologySpec topology,
+    static ValidatedTopology require_valid(TopologySpec topology, const GraphRegistry& registry);
+
+    /// @brief Validate and wrap without process-global fallback.
+    static ValidatedTopology require_valid_local(TopologySpec         topology,
                                            const GraphRegistry& registry);
 
     /**
@@ -137,6 +144,9 @@ public:
 
     /// @brief Validate using a local-first registry overlay.
     static ValidationReport validate(const CompiledGraph& cg, const GraphRegistry& registry);
+
+    /// @brief Validate a compiled graph without process-global fallback.
+    static ValidationReport validate_local(const CompiledGraph& cg, const GraphRegistry& registry);
 };
 
 } // namespace neograph::graph

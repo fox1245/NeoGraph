@@ -28,10 +28,10 @@ SourceCoordinate coordinate(std::string pointer = "/nodes/a") {
 Diagnostic diagnostic() {
     Diagnostic value;
     value.phase    = CompilePhase::CoreValidate;
-    value.code     = "P_CORE_INVALID";
-    value.severity = DiagnosticSeverity::Error;
+    value.code     = "P_CORE_WARNING";
+    value.severity = DiagnosticSeverity::Warning;
     value.primary  = coordinate("/nodes/a~1b/~0name");
-    value.message  = "invalid Core graph";
+    value.message  = "Core graph warning";
     value.witness  = json{{"node", "a"}};
     value.related.push_back(coordinate("/nodes/b"));
     return value;
@@ -88,21 +88,55 @@ ProgramBundleData make_bundle_data(const ProgramSource& source) {
     return data;
 }
 
+RegistrySnapshot make_registry_snapshot() {
+    RegistrySnapshotBuilder builder;
+    builder.add_reducer(
+        ExecutableManifest{{ExecutableKind::Reducer, "version-reducer", "1.0.0", sha('8')},
+                           EffectMode::Brokered,
+                           "attestation:test",
+                           {},
+                           {}},
+        [](const json&, const json& incoming) { return json(incoming); });
+    return std::move(builder).build();
+}
+
+AdmissionProfile make_admission_profile(const RegistrySnapshot& registry,
+                                        std::string             id = "production") {
+    AdmissionProfileBuilder builder;
+    builder.id(std::move(id))
+        .semantic_version("1.0.0")
+        .registry(registry)
+        .mode(AdmissionMode::MultiTenant)
+        .max_program_schema_version(1)
+        .allow_source_kind(SourceKind::CanonicalJson)
+        .allow_effect_mode(EffectMode::Brokered);
+    return std::move(builder).build();
+}
+
+PolicySnapshot make_policy_snapshot(const AdmissionProfile& admission,
+                                    std::string             id    = "policy-7",
+                                    std::string             owner = "tenant:example") {
+    PolicySnapshotBuilder builder;
+    builder.id(std::move(id))
+        .semantic_version("1.0.0")
+        .owner_scope(std::move(owner))
+        .admission_profile(admission)
+        .budget_ceiling(BudgetLimits{1, 1, 1, 1, 1, 1, 1, 1, 1});
+    return std::move(builder).build();
+}
+
 ProgramVersionData make_version_data(const ProgramBundle& bundle) {
-    ProgramVersionData data;
-    data.bundle_id           = bundle.id();
-    data.admission_profile   = AdmissionProfileBinding{"production", sha('4')};
-    data.policy_snapshot     = PolicySnapshotBinding{"policy-7", sha('5')};
-    data.dependency_receipts = {
-        DependencyReceipt{"module:zeta", sha('6')},
-        DependencyReceipt{"module:alpha", sha('7')},
-    };
-    data.ownership_scope              = "tenant:example";
-    data.core_materialization_receipt = CoreMaterializationReceipt{
-        "compiler:test",
-        sha('b'),
-        {CorePlanIdentity{"beta", sha('f')}, CorePlanIdentity{"alpha", sha('1')}}};
-    return data;
+    const auto registry  = make_registry_snapshot();
+    auto       admission = make_admission_profile(registry);
+    auto       policy    = make_policy_snapshot(admission);
+    return ProgramVersionData(
+        bundle.id(), admission, policy,
+        {DependencyReceipt{"module:zeta", sha('6')}, DependencyReceipt{"module:alpha", sha('7')}},
+        policy.owner_scope(),
+        CoreMaterializationReceipt{
+            "compiler:test",
+            registry.fingerprint(),
+            {CorePlanIdentity{"beta", sha('f')}, CorePlanIdentity{"alpha", sha('1')}}});
 }
 
 TEST(ProgramSourceTest, CanonicalIdentityIgnoresObjectKeyOrder) {
@@ -135,6 +169,15 @@ TEST(ProgramSourceTest, InvalidSourceIdIsRejectedBeforeParseDiagnostics) {
         std::invalid_argument);
 }
 
+TEST(ProgramSourceTest, RejectsNegativeAndOverflowingPersistedVersions) {
+    EXPECT_THROW((void)ProgramSource::from_canonical_json("negative-version",
+                                                          R"({"program_schema_version":-1})"),
+                 ProgramDiagnosticError);
+    EXPECT_THROW((void)ProgramSource::from_canonical_json(
+                     "overflowing-version", R"({"program_schema_version":4294967296})"),
+                 ProgramDiagnosticError);
+}
+
 TEST(ProgramSourceTest, StoredParserRejectsDuplicateObjectMembers) {
     auto       stored = make_source().serialize_canonical();
     const auto format = stored.find(R"("format":)");
@@ -149,6 +192,19 @@ TEST(ProgramSourceTest, StoredParserRejectsDuplicateObjectMembers) {
     EXPECT_THROW((void)ProgramSource::parse(escaped), std::invalid_argument);
 }
 
+TEST(ProgramSourceTest, StrictParserBoundsBytesAndNestingBeforeMaterialization) {
+    std::string deeply_nested(257, '[');
+    deeply_nested += '0';
+    deeply_nested.append(257, ']');
+    EXPECT_THROW((void)ProgramSource::from_canonical_json("deep-source", std::move(deeply_nested)),
+                 ProgramDiagnosticError);
+
+    std::string oversized = R"({"program_schema_version":1,"payload":")";
+    oversized.append(16u * 1024u * 1024u, 'x');
+    oversized += R"("})";
+    EXPECT_THROW((void)ProgramSource::from_canonical_json("large-source", std::move(oversized)),
+                 ProgramDiagnosticError);
+}
 TEST(ProgramSourceTest, CppBuilderDetachesProxyJsonInput) {
     json owner = json{
         {"document",
@@ -226,6 +282,12 @@ TEST(ProgramBundleTest, RoundTripsClosedTypedRecords) {
     EXPECT_EQ(parsed.diagnostics().front().code, bundle.diagnostics().front().code);
 }
 
+TEST(ProgramBundleTest, ImportedExecutableKindUsesOneCanonicalWireToken) {
+    EXPECT_EQ(to_string(ExecutableKind::Imported), "imported");
+    EXPECT_EQ(executable_kind_from_string("imported"), ExecutableKind::Imported);
+    EXPECT_THROW((void)executable_kind_from_string("import"), std::invalid_argument);
+}
+
 TEST(ProgramBundleTest, IdentityAndBytesIgnoreSetLikeInputOrder) {
     const auto source      = make_source();
     auto       first_data  = make_bundle_data(source);
@@ -266,6 +328,26 @@ TEST(ProgramBundleTest, RejectsInvalidTypedRecordsAndNestedUnknownFields) {
     auto          stored               = json::parse(valid.serialize_canonical());
     stored["input_contract"]["future"] = true;
     EXPECT_THROW((void)ProgramBundle::parse(stored.dump()), std::invalid_argument);
+}
+
+TEST(ProgramBundleTest, RejectsUnsupportedSourceSchemaAndErrorDiagnostics) {
+    const auto source = make_source();
+
+    auto unsupported_schema                   = make_bundle_data(source);
+    unsupported_schema.program_schema_version = 2;
+    EXPECT_THROW((void)ProgramBundle(std::move(unsupported_schema)), std::invalid_argument);
+
+    auto failed_compilation                         = make_bundle_data(source);
+    failed_compilation.diagnostics.front().severity = DiagnosticSeverity::Error;
+    EXPECT_THROW((void)ProgramBundle(std::move(failed_compilation)), std::invalid_argument);
+    ProgramBundle valid(make_bundle_data(source));
+    auto          negative_storage             = json::parse(valid.serialize_canonical());
+    negative_storage["storage_schema_version"] = -1;
+    EXPECT_THROW((void)ProgramBundle::parse(negative_storage.dump()), std::invalid_argument);
+
+    auto overflowing_schema = json::parse(valid.serialize_canonical());
+    overflowing_schema["input_contract"]["schema_version"] = 4294967296ULL;
+    EXPECT_THROW((void)ProgramBundle::parse(overflowing_schema.dump()), std::invalid_argument);
 }
 
 TEST(ProgramBundleTest, SupportsMultipleVersionsAndRejectsExactIdentityDuplicates) {
@@ -409,7 +491,7 @@ TEST(ProgramVersionTest, StoredParserRejectsDuplicateObjectMembers) {
     const std::string marker  = R"("admission_profile":{)";
     const auto        profile = stored.find(marker);
     ASSERT_NE(profile, std::string::npos);
-    stored.insert(profile + marker.size(), R"("profile_id":"production",)");
+    stored.insert(profile + marker.size(), R"("id":"production",)");
     EXPECT_THROW((void)ProgramVersion::parse(stored), std::invalid_argument);
 }
 
@@ -452,27 +534,19 @@ TEST(ProgramStoredValueTest, V1CanonicalBytesAndIdsMatchKnownVectors) {
               "sha256:9f22330702d0eed754f2b42fc4fa269d5083d0da42a5a7c69cc205c8a9ef2ebe");
     EXPECT_EQ(bundle.serialize_canonical(), expected_bundle);
 
-    ProgramVersionData version_data;
-    version_data.bundle_id                    = bundle.id();
-    version_data.admission_profile            = AdmissionProfileBinding{"vector-profile", sha('1')};
-    version_data.policy_snapshot              = PolicySnapshotBinding{"vector-policy", sha('2')};
-    version_data.ownership_scope              = "tenant:vector";
-    version_data.core_materialization_receipt = CoreMaterializationReceipt{
-        "vector-compiler", sha('b'), {CorePlanIdentity{"main", sha('d')}}};
+    const auto         registry  = make_registry_snapshot();
+    auto               admission = make_admission_profile(registry, "vector-profile");
+    auto               policy = make_policy_snapshot(admission, "vector-policy", "tenant:vector");
+    ProgramVersionData version_data(
+        bundle.id(), admission, policy, {}, policy.owner_scope(),
+        CoreMaterializationReceipt{
+            "vector-compiler", registry.fingerprint(), {CorePlanIdentity{"main", sha('d')}}});
     ProgramVersion version(std::move(version_data));
 
     const std::string expected_version =
-        R"JSON({"admission_profile":{"profile_fingerprint":"sha256:111111111111111111111111111111111111111111111111)JSON"
-        R"JSON(1111111111111111","profile_id":"vector-profile"},"bundle_id":"sha256:9f22330702d0eed754f2b42fc4fa269d)JSON"
-        R"JSON(5083d0da42a5a7c69cc205c8a9ef2ebe","core_materialization_receipt":{"compiler_build_id":"vector-compi)JSON"
-        R"JSON(ler","plans":[{"compiled_plan_identity":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddd)JSON"
-        R"JSON(dddddddddddd","name":"main"}],"registry_snapshot_fingerprint":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)JSON"
-        R"JSON(bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"dependency_receipts":[],"format":"neograph-program-version","i)JSON"
-        R"JSON(d":"sha256:62e2302176ca152292b86859987a9270a17a270c225973b05398473f42b25075","ownership_scope":"tena)JSON"
-        R"JSON(nt:vector","policy_snapshot":{"snapshot_fingerprint":"sha256:222222222222222222222222222222222222222)JSON"
-        R"JSON(2222222222222222222222222","snapshot_id":"vector-policy"},"storage_schema_version":1})JSON";
+        R"JSON({"admission_profile":{"allowed_effect_modes":["brokered"],"allowed_executables":[],"allowed_source_kinds":["canonical_json"],"fingerprint":"sha256:5d75f6009732444d1e6a24150af5031c6def8b6d77e6fac758ea77f7801ddfeb","format":"neograph-admission-profile","id":"vector-profile","max_program_schema_version":1,"mode":"multi_tenant","registry_fingerprint":"sha256:344ccd59eca88ce29d7e548acec3cfc24a441c5a81470ca6db7be45f1ea09c0b","semantic_version":"1.0.0","storage_schema_version":1},"bundle_id":"sha256:9f22330702d0eed754f2b42fc4fa269d5083d0da42a5a7c69cc205c8a9ef2ebe","core_materialization_receipt":{"compiler_build_id":"vector-compiler","plans":[{"compiled_plan_identity":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","name":"main"}],"registry_snapshot_fingerprint":"sha256:344ccd59eca88ce29d7e548acec3cfc24a441c5a81470ca6db7be45f1ea09c0b"},"dependency_receipts":[],"format":"neograph-program-version","id":"sha256:717c86a4f312df2b7fdcb59b35880380146f543f986be957653dd07d2040f9ed","ownership_scope":"tenant:vector","policy_snapshot":{"admission_profile_fingerprint":"sha256:5d75f6009732444d1e6a24150af5031c6def8b6d77e6fac758ea77f7801ddfeb","allowed_capabilities":[],"allowed_effects":[],"allowed_module_digests":[],"budget_ceiling":{"max_child_depth":1,"max_concurrency":1,"max_core_steps":1,"max_dynamic_compiles":1,"max_program_operations":1,"max_total_children":1,"model_tokens":1,"monetary_microunits":1,"wall_time_ms":1},"fingerprint":"sha256:763853a64ace13aea58aaa713a7ed8f01dc6104afa340516b7ddbb4cfa616923","format":"neograph-policy-snapshot","id":"vector-policy","owner_scope":"tenant:vector","registry_fingerprint":"sha256:344ccd59eca88ce29d7e548acec3cfc24a441c5a81470ca6db7be45f1ea09c0b","semantic_version":"1.0.0","storage_schema_version":1},"storage_schema_version":1})JSON";
     EXPECT_EQ(version.id(),
-              "sha256:62e2302176ca152292b86859987a9270a17a270c225973b05398473f42b25075");
+              "sha256:717c86a4f312df2b7fdcb59b35880380146f543f986be957653dd07d2040f9ed");
     EXPECT_EQ(version.serialize_canonical(), expected_version);
 }
 

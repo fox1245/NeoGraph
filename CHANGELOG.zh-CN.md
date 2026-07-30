@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=cd70806dd167444dfe562dde5468e15c749d5633cf7baf12874f3d6184f99614 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=f2880aa80b6972d92480cd2326c3e30415da12ba158d9cec878d05c116f65490 -->
 # 更新日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -28,6 +28,12 @@ NeoGraph 的所有显著变更均记录于本文件。
   摘要、契约、闭包、边界以及类型化的准入/物化回执。标识会绑定格式和存储版本，
   语义集合按稳定顺序规范化；诊断会拒绝无效指针、反向 span 和未知 enum，并在
   无精确解析器偏移量时保持 span 为空。
+
+- **封存的 Program 准入闭包。** 新增不可变的 `RegistrySnapshot`、
+  `AdmissionProfile` 和 `PolicySnapshot` 值，支持在构建器阶段捕获可调用对象、
+  严格的规范清单及域分离指纹；`ProgramVersion` 会以故障关闭方式校验跨对象
+  指纹一致性。Core 新增了用于 Program 物化的显式仅本地
+  parse/link/validate 入口，现有本地优先/全局回退重载保持不变。
 
 - **SQLite Harness 记录存储（issue #147 后续）。** 新增了可选的
   `neograph::mcp_sqlite` 目标和 `SqliteHarnessRecordStore`，用于 WAL 支持、

@@ -15,9 +15,10 @@
 #pragma once
 
 #include <neograph/api.h>
-#include <neograph/graph/types.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/scheduler.h>
+#include <neograph/graph/types.h>
+
 #include <map>
 #include <memory>
 #include <optional>
@@ -150,16 +151,23 @@ public:
     /// @brief Pure parse using a local-first registry for schema metadata.
     static TopologySpec parse(const json& definition, const GraphRegistry& registry);
 
+    /// @brief Pure parse that rejects every executable absent from the registry instance.
+    static TopologySpec parse_local(const json& definition, const GraphRegistry& registry);
+
     /**
      * @brief Instantiate runtime nodes from an already parsed topology.
      */
-    static CompiledGraph link(TopologySpec topology,
-                              const NodeContext& default_context);
+    static CompiledGraph link(TopologySpec topology, const NodeContext& default_context);
 
     /// @brief Instantiate nodes using a local-first registry overlay.
     static CompiledGraph link(TopologySpec topology,
                               const NodeContext& default_context,
                               const GraphRegistry& registry);
+
+    /// @brief Instantiate nodes exclusively through the registry instance.
+    static CompiledGraph link_local(TopologySpec         topology,
+                                    const NodeContext&   default_context,
+                                    const GraphRegistry& registry);
 
     /**
      * @brief Parse a JSON graph definition into a CompiledGraph.
@@ -202,8 +210,7 @@ public:
      * lenient behavior byte-for-byte. `schema_version` above the
      * engine's supported version (currently 1) is always an error.
      */
-    static CompiledGraph compile(const json& definition,
-                                 const NodeContext& default_context);
+    static CompiledGraph compile(const json& definition, const NodeContext& default_context);
 
     /**
      * @brief Compile with a local-first registry overlay.
@@ -216,6 +223,11 @@ public:
     static CompiledGraph compile(const json&          definition,
                                  const NodeContext&   default_context,
                                  const GraphRegistry& registry);
+
+    /// @brief Parse and link without process-global registry fallback.
+    static CompiledGraph compile_local(const json&          definition,
+                                       const NodeContext&   default_context,
+                                       const GraphRegistry& registry);
 
     /**
      * @brief Canonicalize a topology JSON document for equivalence
@@ -278,12 +290,10 @@ public:
      * one-shot warning to stderr when lenient (legacy documents keep
      * compiling, but silent drops become visible).
      */
-    static void verify_roundtrip(const json& definition,
-                                  const CompiledGraph& cg);
+    static void verify_roundtrip(const json& definition, const CompiledGraph& cg);
 
     /// @brief Translation validation before runtime node instantiation.
-    static void verify_roundtrip(const json& definition,
-                                 const TopologySpec& topology);
+    static void verify_roundtrip(const json& definition, const TopologySpec& topology);
 };
 
 } // namespace neograph::graph

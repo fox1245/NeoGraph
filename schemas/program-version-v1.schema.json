@@ -20,8 +20,8 @@
     "storage_schema_version": { "const": 1 },
     "id": { "$ref": "#/$defs/sha256" },
     "bundle_id": { "$ref": "#/$defs/sha256" },
-    "admission_profile": { "$ref": "#/$defs/admissionProfileBinding" },
-    "policy_snapshot": { "$ref": "#/$defs/policySnapshotBinding" },
+    "admission_profile": { "$ref": "admission-profile-v1.schema.json" },
+    "policy_snapshot": { "$ref": "policy-snapshot-v1.schema.json" },
     "dependency_receipts": {
       "type": "array",
       "uniqueItems": true,
@@ -30,6 +30,60 @@
     "ownership_scope": { "$ref": "#/$defs/nonemptyString" },
     "core_materialization_receipt": { "$ref": "#/$defs/coreMaterializationReceipt" }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "admission_profile": {
+            "properties": {
+              "allowed_effect_modes": { "contains": { "const": "trusted_native" } }
+            },
+            "required": ["allowed_effect_modes"]
+          }
+        },
+        "required": ["admission_profile"]
+      },
+      "then": {
+        "properties": {
+          "policy_snapshot": {
+            "properties": {
+              "allowed_capabilities": {
+                "contains": { "const": "neograph.native.trusted" }
+              }
+            },
+            "required": ["allowed_capabilities"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "admission_profile": {
+            "properties": {
+              "allowed_effect_modes": {
+                "not": { "contains": { "const": "trusted_native" } }
+              }
+            },
+            "required": ["allowed_effect_modes"]
+          }
+        },
+        "required": ["admission_profile"]
+      },
+      "then": {
+        "properties": {
+          "policy_snapshot": {
+            "properties": {
+              "allowed_capabilities": {
+                "not": { "contains": { "const": "neograph.native.trusted" } }
+              }
+            },
+            "required": ["allowed_capabilities"]
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "sha256": {
       "type": "string",
@@ -37,25 +91,7 @@
     },
     "nonemptyString": {
       "type": "string",
-      "minLength": 1
-    },
-    "admissionProfileBinding": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["profile_id", "profile_fingerprint"],
-      "properties": {
-        "profile_id": { "$ref": "#/$defs/nonemptyString" },
-        "profile_fingerprint": { "$ref": "#/$defs/sha256" }
-      }
-    },
-    "policySnapshotBinding": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["snapshot_id", "snapshot_fingerprint"],
-      "properties": {
-        "snapshot_id": { "$ref": "#/$defs/nonemptyString" },
-        "snapshot_fingerprint": { "$ref": "#/$defs/sha256" }
-      }
+      "pattern": "^[^\\u0000-\\u0020\\u007F](?:[^\\u0000-\\u001F\\u007F]*[^\\u0000-\\u0020\\u007F])?$"
     },
     "dependencyReceipt": {
       "type": "object",

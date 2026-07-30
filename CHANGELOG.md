@@ -32,6 +32,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   diagnostics reject invalid pointers, reversed spans, and unknown enums while
   leaving parser spans absent when no exact offset is available.
 
+- **Sealed Program admission closure.** Added immutable `RegistrySnapshot`,
+  `AdmissionProfile`, and `PolicySnapshot` values with builder-time callable
+  capture, strict canonical manifests, domain-separated fingerprints, and
+  fail-closed cross-fingerprint validation in `ProgramVersion`. Core now
+  exposes explicitly named local-only parse/link/validate entry points for
+  Program materialization; existing local-first/global-fallback overloads
+  remain unchanged.
+
 - **SQLite Harness record store (issue #147 follow-up).** Added the optional
   `neograph::mcp_sqlite` target and `SqliteHarnessRecordStore` for WAL-backed,
   schema-versioned artifact/run persistence with immutable artifact and run-to-

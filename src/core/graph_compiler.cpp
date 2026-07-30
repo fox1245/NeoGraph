@@ -88,11 +88,13 @@ void validate_node_config_schema(const json& value,
             }
         }
         if (types.empty()) {
-            errors.push_back(path + ": keyword 'type' must be a string or array of "
-                             "strings" + type_suffix);
+            errors.push_back(path +
+                             ": keyword 'type' must be a string or array of "
+                             "strings" +
+                             type_suffix);
         } else if (!matched) {
-            errors.push_back(path + ": keyword 'type' expected " + join_types(types)
-                             + ", got " + json_type_name(value) + type_suffix);
+            errors.push_back(path + ": keyword 'type' expected " + join_types(types) + ", got " +
+                             json_type_name(value) + type_suffix);
         }
     }
 
@@ -109,9 +111,8 @@ void validate_node_config_schema(const json& value,
                 }
             }
             if (!matched) {
-                errors.push_back(path + ": keyword 'enum' expected one of "
-                                 + choices.dump() + ", got " + value.dump()
-                                 + type_suffix);
+                errors.push_back(path + ": keyword 'enum' expected one of " + choices.dump() +
+                                 ", got " + value.dump() + type_suffix);
             }
         }
     }
@@ -121,8 +122,7 @@ void validate_node_config_schema(const json& value,
     if (schema.contains("required")) {
         const auto& required = schema["required"];
         if (!required.is_array()) {
-            errors.push_back(path + ": keyword 'required' must be an array"
-                             + type_suffix);
+            errors.push_back(path + ": keyword 'required' must be an array" + type_suffix);
         } else {
             std::vector<std::string> names;
             for (const auto& name : required) {
@@ -132,8 +132,8 @@ void validate_node_config_schema(const json& value,
             names.erase(std::unique(names.begin(), names.end()), names.end());
             for (const auto& name : names) {
                 if (!value.contains(name)) {
-                    errors.push_back(path + ": keyword 'required' missing property '"
-                                     + name + "'" + type_suffix);
+                    errors.push_back(path + ": keyword 'required' missing property '" + name + "'" +
+                                     type_suffix);
                 }
             }
         }
@@ -148,8 +148,8 @@ void validate_node_config_schema(const json& value,
     std::sort(property_names.begin(), property_names.end());
     for (const auto& name : property_names) {
         if (!value.contains(name)) continue;
-        validate_node_config_schema(value[name], schema["properties"][name],
-                                    path + "." + name, node_type, errors);
+        validate_node_config_schema(value[name], schema["properties"][name], path + "." + name,
+                                    node_type, errors);
     }
 }
 
@@ -187,15 +187,20 @@ json canon_backoff(const json& v) {
 json sort_keys(const json& v) {
     if (v.is_object()) {
         std::vector<std::string> keys;
-        for (const auto& [k, val] : v.items()) { (void)val; keys.push_back(k); }
+        for (const auto& [k, val] : v.items()) {
+            (void)val;
+            keys.push_back(k);
+        }
         std::sort(keys.begin(), keys.end());
         json out = json::object();
-        for (const auto& k : keys) out[k] = sort_keys(v[k]);
+        for (const auto& k : keys)
+            out[k] = sort_keys(v[k]);
         return out;
     }
     if (v.is_array()) {
         json out = json::array();
-        for (const auto& e : v) out.push_back(sort_keys(e));
+        for (const auto& e : v)
+            out.push_back(sort_keys(e));
         return out;
     }
     return v;
@@ -204,7 +209,8 @@ json sort_keys(const json& v) {
 // Human-readable structural mismatch report for translation-validation
 // failures (the wrapper has no json::diff). Phrased from the compiler's
 // point of view: input-only = lost, reemit-only = fabricated.
-void collect_mismatches(const json& declared, const json& compiled,
+void collect_mismatches(const json&               declared,
+                        const json&               compiled,
                         const std::string& path,
                         std::vector<std::string>& out) {
     constexpr size_t kMax = 8;
@@ -229,20 +235,17 @@ void collect_mismatches(const json& declared, const json& compiled,
     }
     if (declared.is_array() && compiled.is_array()) {
         if (declared.size() != compiled.size()) {
-            out.push_back(path + ": " + std::to_string(declared.size())
-                          + " element(s) declared, "
-                          + std::to_string(compiled.size()) + " compiled");
+            out.push_back(path + ": " + std::to_string(declared.size()) + " element(s) declared, " +
+                          std::to_string(compiled.size()) + " compiled");
             return;
         }
         for (size_t i = 0; i < declared.size(); ++i) {
             if (out.size() >= kMax) return;
-            collect_mismatches(declared[i], compiled[i],
-                               path + "[" + std::to_string(i) + "]", out);
+            collect_mismatches(declared[i], compiled[i], path + "[" + std::to_string(i) + "]", out);
         }
         return;
     }
-    out.push_back(path + ": declared " + declared.dump()
-                  + ", compiled " + compiled.dump());
+    out.push_back(path + ": declared " + declared.dump() + ", compiled " + compiled.dump());
 }
 
 // Normalize one conditional edge (either the legacy inline `edges`
@@ -265,8 +268,7 @@ json canon_conditional(const json& e) {
 
 } // namespace
 
-CompiledGraph GraphCompiler::compile(const json& definition,
-                                     const NodeContext& default_context) {
+CompiledGraph GraphCompiler::compile(const json& definition, const NodeContext& default_context) {
     return compile(definition, default_context, GraphRegistry::global());
 }
 
@@ -276,12 +278,17 @@ CompiledGraph GraphCompiler::compile(const json&          definition,
     return link(parse(definition, registry), default_context, registry);
 }
 
+CompiledGraph GraphCompiler::compile_local(const json&          definition,
+                                           const NodeContext&   default_context,
+                                           const GraphRegistry& registry) {
+    return link_local(parse_local(definition, registry), default_context, registry);
+}
+
 TopologySpec GraphCompiler::parse(const json& definition) {
     return parse(definition, GraphRegistry::global());
 }
 
-TopologySpec GraphCompiler::parse(const json& definition,
-                                  const GraphRegistry& registry) {
+TopologySpec GraphCompiler::parse(const json& definition, const GraphRegistry& registry) {
     TopologySpec topology;
     std::vector<std::string> errors;
     std::set<std::string> top_consumed;
@@ -292,16 +299,15 @@ TopologySpec GraphCompiler::parse(const json& definition,
         const auto& sv = definition["schema_version"];
         if (!sv.is_number_integer() || sv.get<int>() < 0) {
             throw std::runtime_error(
-                "topology 'schema_version' must be a non-negative integer, got: "
-                + sv.dump());
+                "topology 'schema_version' must be a non-negative integer, got: " + sv.dump());
         }
         topology.schema_version = sv.get<int>();
         if (topology.schema_version > TOPOLOGY_SCHEMA_VERSION) {
-            throw std::runtime_error(
-                "topology schema_version " + std::to_string(topology.schema_version)
-                + " is newer than this engine supports (max "
-                + std::to_string(TOPOLOGY_SCHEMA_VERSION)
-                + "). Upgrade NeoGraph or re-export the topology.");
+            throw std::runtime_error("topology schema_version " +
+                                     std::to_string(topology.schema_version) +
+                                     " is newer than this engine supports (max " +
+                                     std::to_string(TOPOLOGY_SCHEMA_VERSION) +
+                                     "). Upgrade NeoGraph or re-export the topology.");
         }
     }
     const bool strict = topology.schema_version >= 1;
@@ -319,9 +325,8 @@ TopologySpec GraphCompiler::parse(const json& definition,
                                : value.is_number() ? "number"
                                : value.is_bool()   ? "boolean"
                                                    : "null";
-            throw std::runtime_error(
-                "topology '$." + std::string(field) + "' must be an "
-                + expected + ", got " + actual);
+            throw std::runtime_error("topology '$." + std::string(field) + "' must be an " +
+                                     expected + ", got " + actual);
         }
     };
     require_container("channels", true);
@@ -357,8 +362,7 @@ TopologySpec GraphCompiler::parse(const json& definition,
                 cd.type = ReducerType::CUSTOM;
 
             if (strict) {
-                enforce_consumed(ch_def, ch_consumed,
-                                 "channels." + name, errors);
+                enforce_consumed(ch_def, ch_consumed, "channels." + name, errors);
             }
             topology.channel_defs.push_back(std::move(cd));
         }
@@ -393,15 +397,14 @@ TopologySpec GraphCompiler::parse(const json& definition,
                     // Historically an empty/missing wait_for was
                     // silently dropped — the node quietly lost its
                     // AND-join. Strict mode refuses instead.
-                    errors.push_back(
-                        "nodes." + name + ".barrier: 'wait_for' is missing or "
+                    errors.push_back("nodes." + name +
+                                     ".barrier: 'wait_for' is missing or "
                         "empty — the barrier would be silently dropped. "
                         "List the upstream nodes to wait for, or remove "
                         "the 'barrier' block.");
                 }
                 if (strict) {
-                    enforce_consumed(b, barrier_consumed,
-                                     "nodes." + name + ".barrier", errors);
+                    enforce_consumed(b, barrier_consumed, "nodes." + name + ".barrier", errors);
                 }
             }
 
@@ -419,8 +422,7 @@ TopologySpec GraphCompiler::parse(const json& definition,
                         config[key] = value;
                     }
                 }
-                validate_node_config_schema(config, schema, "nodes." + name,
-                                            type, errors);
+                validate_node_config_schema(config, schema, "nodes." + name, type, errors);
 
                 bool open = !schema.contains("properties");
                 if (schema.contains("additionalProperties")) {
@@ -432,11 +434,9 @@ TopologySpec GraphCompiler::parse(const json& definition,
                         (void)pv;
                         node_consumed.insert(pk);
                     }
-                    enforce_consumed(node_def, node_consumed,
-                                     "nodes." + name, errors);
+                    enforce_consumed(node_def, node_consumed, "nodes." + name, errors);
                 }
             }
-
         }
     }
 
@@ -447,8 +447,7 @@ TopologySpec GraphCompiler::parse(const json& definition,
     //      our README + Python examples). The compiler used to silently
     //      drop form 2, which made the documented Python ReAct example
     //      degenerate to a single LLM call with no tool dispatch.
-    auto parse_conditional = [&](const json& edge_def, const std::string& path,
-                                 bool inline_form) {
+    auto parse_conditional = [&](const json& edge_def, const std::string& path, bool inline_form) {
         ConditionalEdge ce;
         std::set<std::string> e_consumed = {"from", "condition", "routes"};
         if (inline_form) e_consumed.insert("type");
@@ -468,8 +467,8 @@ TopologySpec GraphCompiler::parse(const json& definition,
         size_t i = 0;
         for (const auto& edge_def : definition["edges"]) {
             const std::string path = "edges[" + std::to_string(i++) + "]";
-            bool is_conditional = edge_def.contains("condition")
-                               || edge_def.value("type", "") == "conditional";
+            bool              is_conditional =
+                edge_def.contains("condition") || edge_def.value("type", "") == "conditional";
 
             if (is_conditional) {
                 // NOTE: a 'to' on an inline conditional is NOT consumed
@@ -489,8 +488,7 @@ TopologySpec GraphCompiler::parse(const json& definition,
         top_consumed.insert("conditional_edges");
         size_t i = 0;
         for (const auto& edge_def : definition["conditional_edges"]) {
-            parse_conditional(edge_def,
-                              "conditional_edges[" + std::to_string(i++) + "]",
+            parse_conditional(edge_def, "conditional_edges[" + std::to_string(i++) + "]",
                               /*inline_form=*/false);
         }
     }
@@ -530,12 +528,13 @@ TopologySpec GraphCompiler::parse(const json& definition,
     if (strict) {
         enforce_consumed(definition, top_consumed, "$", errors);
         if (!errors.empty()) {
-            std::string msg =
-                "strict topology validation failed (schema_version "
-                + std::to_string(topology.schema_version) + "), "
-                + std::to_string(errors.size()) + " error(s):";
-            for (const auto& e : errors) msg += "\n  - " + e;
-            msg += "\nAnnotation keys ('_'/'x-' prefixes) are always allowed. "
+            std::string msg = "strict topology validation failed (schema_version " +
+                              std::to_string(topology.schema_version) + "), " +
+                              std::to_string(errors.size()) + " error(s):";
+            for (const auto& e : errors)
+                msg += "\n  - " + e;
+            msg +=
+                "\nAnnotation keys ('_'/'x-' prefixes) are always allowed. "
                    "Remove 'schema_version' to fall back to lenient parsing. "
                    "See docs/troubleshooting.md \"Strict topology validation\".";
             throw std::runtime_error(msg);
@@ -545,8 +544,41 @@ TopologySpec GraphCompiler::parse(const json& definition,
     return topology;
 }
 
-CompiledGraph GraphCompiler::link(TopologySpec topology,
-                                  const NodeContext& default_context) {
+TopologySpec GraphCompiler::parse_local(const json& definition, const GraphRegistry& registry) {
+    if (definition.contains("channels") && definition["channels"].is_object()) {
+        for (const auto& [name, channel] : definition["channels"].items()) {
+            (void)name;
+            if (!channel.is_object()) continue;
+            const auto reducer = channel.value("reducer", "overwrite");
+            (void)registry.local_reducer(reducer);
+        }
+    }
+    if (definition.contains("nodes") && definition["nodes"].is_object()) {
+        for (const auto& [name, node] : definition["nodes"].items()) {
+            (void)name;
+            if (!node.is_object()) continue;
+            const auto type = node.value("type", "");
+            (void)registry.local_config_schema(type);
+        }
+    }
+    const auto require_local_conditions = [&registry](const json& edges) {
+        if (!edges.is_array()) return;
+        for (const auto& edge : edges) {
+            if (!edge.is_object()) continue;
+            if (!edge.contains("condition")) continue;
+            const auto condition = edge.value("condition", "");
+            (void)registry.local_condition(condition);
+            (void)registry.local_condition_spec(condition);
+        }
+    };
+    if (definition.contains("edges")) require_local_conditions(definition["edges"]);
+    if (definition.contains("conditional_edges")) {
+        require_local_conditions(definition["conditional_edges"]);
+    }
+    return parse(definition, registry);
+}
+
+CompiledGraph GraphCompiler::link(TopologySpec topology, const NodeContext& default_context) {
     return link(std::move(topology), default_context, GraphRegistry::global());
 }
 
@@ -573,6 +605,39 @@ CompiledGraph GraphCompiler::link(TopologySpec topology,
     for (const auto& [name, node_def] : topology.node_defs) {
         const auto type = node_def.value("type", "");
         cg.nodes[name] = registry.create(type, name, node_def, default_context);
+
+        json stored = json::object();
+        for (const auto& [key, value] : node_def.items()) {
+            if (key != "barrier") stored[key] = value;
+        }
+        cg.node_defs[name] = std::move(stored);
+    }
+    return cg;
+}
+
+CompiledGraph GraphCompiler::link_local(TopologySpec         topology,
+                                        const NodeContext&   default_context,
+                                        const GraphRegistry& registry) {
+    CompiledGraph cg;
+    cg.name              = std::move(topology.name);
+    cg.channel_defs      = std::move(topology.channel_defs);
+    cg.edges             = std::move(topology.edges);
+    cg.conditional_edges = std::move(topology.conditional_edges);
+    cg.barrier_specs     = std::move(topology.barrier_specs);
+    cg.interrupt_before  = std::move(topology.interrupt_before);
+    cg.interrupt_after   = std::move(topology.interrupt_after);
+    cg.retry_policy      = std::move(topology.retry_policy);
+    cg.schema_version    = topology.schema_version;
+    if (cg.schema_version == 0) {
+        for (auto& edge : cg.conditional_edges) {
+            if (edge.routes.empty()) continue;
+            const std::string historical_target      = edge.routes.rbegin()->second;
+            edge.routes[detail::kLegacyDefaultRoute] = historical_target;
+        }
+    }
+    for (const auto& [name, node_def] : topology.node_defs) {
+        const auto type = node_def.value("type", "");
+        cg.nodes[name]  = registry.create_local(type, name, node_def, default_context);
 
         json stored = json::object();
         for (const auto& [key, value] : node_def.items()) {
@@ -613,7 +678,8 @@ json TopologySpec::to_json() const {
             auto bit = barrier_specs.find(nname);
             if (bit != barrier_specs.end()) {
                 json wait_for = json::array();
-                for (const auto& up : bit->second) wait_for.push_back(up);
+                for (const auto& up : bit->second)
+                    wait_for.push_back(up);
                 n["barrier"] = json{{"wait_for", std::move(wait_for)}};
             }
             nodes[nname] = std::move(n);
@@ -650,7 +716,8 @@ json TopologySpec::to_json() const {
     auto emit_set = [&](const char* key, const std::set<std::string>& s) {
         if (s.empty()) return;
         json arr = json::array();
-        for (const auto& n : s) arr.push_back(n);
+        for (const auto& n : s)
+            arr.push_back(n);
         j[key] = std::move(arr);
     };
     emit_set("interrupt_before", interrupt_before);
@@ -684,9 +751,9 @@ TopologySpec CompiledGraph::topology() const {
         auto node = result.node_defs.find(name);
         if (node == result.node_defs.end()) continue;
         json wait_for = json::array();
-        for (const auto& upstream : wait_for_set) wait_for.push_back(upstream);
-        node->second["barrier"] =
-            json{{"wait_for", std::move(wait_for)}};
+        for (const auto& upstream : wait_for_set)
+            wait_for.push_back(upstream);
+        node->second["barrier"] = json{{"wait_for", std::move(wait_for)}};
     }
     return result;
 }
@@ -702,8 +769,14 @@ json GraphCompiler::canon(const json& definition) {
     // TV compare is precisely how a key the compiler ignored becomes
     // visible. Owned keys are rebuilt in normalized form below.
     static const std::set<std::string> owned = {
-        "schema_version", "name", "channels", "nodes", "edges",
-        "conditional_edges", "interrupt_before", "interrupt_after",
+        "schema_version",
+        "name",
+        "channels",
+        "nodes",
+        "edges",
+        "conditional_edges",
+        "interrupt_before",
+        "interrupt_after",
         "retry_policy",
     };
     for (const auto& [k, v] : definition.items()) {
@@ -711,15 +784,14 @@ json GraphCompiler::canon(const json& definition) {
         out[k] = v;
     }
 
-    if (definition.contains("schema_version")
-        && definition["schema_version"].is_number_integer()
-        && definition["schema_version"].get<int>() > 0) {
+    if (definition.contains("schema_version") && definition["schema_version"].is_number_integer() &&
+        definition["schema_version"].get<int>() > 0) {
         out["schema_version"] = definition["schema_version"];
     }
     out["name"] = definition.value("name", "unnamed_graph");
 
-    if (definition.contains("channels") && definition["channels"].is_object()
-        && !definition["channels"].empty()) {
+    if (definition.contains("channels") && definition["channels"].is_object() &&
+        !definition["channels"].empty()) {
         json channels = json::object();
         for (const auto& [name, ch] : definition["channels"].items()) {
             json c = json::object();
@@ -735,8 +807,8 @@ json GraphCompiler::canon(const json& definition) {
         out["channels"] = std::move(channels);
     }
 
-    if (definition.contains("nodes") && definition["nodes"].is_object()
-        && !definition["nodes"].empty()) {
+    if (definition.contains("nodes") && definition["nodes"].is_object() &&
+        !definition["nodes"].empty()) {
         json nodes = json::object();
         for (const auto& [name, nd] : definition["nodes"].items()) {
             json n = json::object();
@@ -755,7 +827,8 @@ json GraphCompiler::canon(const json& definition) {
                         }
                     }
                     json arr = json::array();
-                    for (const auto& up : wait_for) arr.push_back(up);
+                    for (const auto& up : wait_for)
+                        arr.push_back(up);
                     json b = json::object();
                     if (v.is_object()) {
                         for (const auto& [bk, bv] : v.items()) {
@@ -780,8 +853,7 @@ json GraphCompiler::canon(const json& definition) {
     std::vector<json> plain, conditional;
     if (definition.contains("edges") && definition["edges"].is_array()) {
         for (const auto& e : definition["edges"]) {
-            bool is_conditional = e.contains("condition")
-                               || e.value("type", "") == "conditional";
+            bool is_conditional = e.contains("condition") || e.value("type", "") == "conditional";
             if (is_conditional) {
                 // sort_keys BEFORE the dump-based array sort: the
                 // comparator must see identical serializations for
@@ -797,8 +869,7 @@ json GraphCompiler::canon(const json& definition) {
             }
         }
     }
-    if (definition.contains("conditional_edges")
-        && definition["conditional_edges"].is_array()) {
+    if (definition.contains("conditional_edges") && definition["conditional_edges"].is_array()) {
         for (const auto& e : definition["conditional_edges"]) {
             conditional.push_back(sort_keys(canon_conditional(e)));
         }
@@ -808,7 +879,8 @@ json GraphCompiler::canon(const json& definition) {
     std::sort(conditional.begin(), conditional.end(), by_dump);
     auto to_array = [](const std::vector<json>& v) {
         json arr = json::array();
-        for (const auto& e : v) arr.push_back(e);
+        for (const auto& e : v)
+            arr.push_back(e);
         return arr;
     };
     if (!plain.empty())       out["edges"] = to_array(plain);
@@ -817,10 +889,12 @@ json GraphCompiler::canon(const json& definition) {
     auto canon_set = [&](const char* key) {
         if (!definition.contains(key) || !definition[key].is_array()) return;
         std::set<std::string> s;
-        for (const auto& n : definition[key]) s.insert(n.get<std::string>());
+        for (const auto& n : definition[key])
+            s.insert(n.get<std::string>());
         if (s.empty()) return;
         json arr = json::array();
-        for (const auto& n : s) arr.push_back(n);
+        for (const auto& n : s)
+            arr.push_back(n);
         out[key] = std::move(arr);
     };
     canon_set("interrupt_before");
@@ -836,9 +910,8 @@ json GraphCompiler::canon(const json& definition) {
         if (!p.contains("max_retries"))        p["max_retries"] = 0;
         if (!p.contains("initial_delay_ms"))   p["initial_delay_ms"] = 100;
         if (!p.contains("max_delay_ms"))       p["max_delay_ms"] = 5000;
-        p["backoff_multiplier"] = p.contains("backoff_multiplier")
-            ? canon_backoff(p["backoff_multiplier"])
-            : json(2.0f);
+        p["backoff_multiplier"] =
+            p.contains("backoff_multiplier") ? canon_backoff(p["backoff_multiplier"]) : json(2.0f);
         out["retry_policy"] = std::move(p);
     }
 
@@ -849,19 +922,15 @@ json GraphCompiler::canon(const json& definition) {
 }
 
 json GraphCompiler::upgrade_to_latest(const json& definition) {
-    if (definition.contains("schema_version")
-        && definition["schema_version"].is_number_integer()
-        && definition["schema_version"].get<int>() >= TOPOLOGY_SCHEMA_VERSION) {
+    if (definition.contains("schema_version") && definition["schema_version"].is_number_integer() &&
+        definition["schema_version"].get<int>() >= TOPOLOGY_SCHEMA_VERSION) {
         return definition;   // already current
     }
 
-    auto quarantine_name = [](const json& source, const json& output,
-                              const std::string& key) {
+    auto quarantine_name = [](const json& source, const json& output, const std::string& key) {
         const std::string base = "x-upgraded-" + key;
         std::string candidate = base;
-        for (int suffix = 2;
-             source.contains(candidate) || output.contains(candidate);
-             ++suffix) {
+        for (int suffix = 2; source.contains(candidate) || output.contains(candidate); ++suffix) {
             candidate = base + "-" + std::to_string(suffix);
         }
         return candidate;
@@ -871,12 +940,13 @@ json GraphCompiler::upgrade_to_latest(const json& definition) {
     // else (except annotations) into the x- namespace — data preserved,
     // strict mode satisfied, semantics identical to the lenient parser
     // that ignored those keys.
-    auto quarantine = [&](const json& obj,
-                          const std::set<std::string>& consumed) {
+    auto quarantine = [&](const json& obj, const std::set<std::string>& consumed) {
         json out = json::object();
         for (const auto& [k, v] : obj.items()) {
-            if (consumed.count(k) || is_annotation_key(k)) out[k] = v;
-            else out[quarantine_name(obj, out, k)] = v;
+            if (consumed.count(k) || is_annotation_key(k))
+                out[k] = v;
+            else
+                out[quarantine_name(obj, out, k)] = v;
         }
         return out;
     };
@@ -885,8 +955,14 @@ json GraphCompiler::upgrade_to_latest(const json& definition) {
     up["schema_version"] = TOPOLOGY_SCHEMA_VERSION;
 
     static const std::set<std::string> top_keys = {
-        "name", "channels", "nodes", "edges", "conditional_edges",
-        "interrupt_before", "interrupt_after", "retry_policy",
+        "name",
+        "channels",
+        "nodes",
+        "edges",
+        "conditional_edges",
+        "interrupt_before",
+        "interrupt_after",
+        "retry_policy",
     };
     for (const auto& [k, v] : definition.items()) {
         if (k == "schema_version") continue;   // re-stamped above
@@ -897,14 +973,16 @@ json GraphCompiler::upgrade_to_latest(const json& definition) {
         if (k == "channels" && v.is_object()) {
             json channels = json::object();
             for (const auto& [cn, cd] : v.items()) {
-                channels[cn] = cd.is_object()
-                    ? quarantine(cd, {"reducer", "initial"}) : cd;
+                channels[cn] = cd.is_object() ? quarantine(cd, {"reducer", "initial"}) : cd;
             }
             up["channels"] = std::move(channels);
         } else if (k == "nodes" && v.is_object()) {
             json nodes = json::object();
             for (const auto& [nn, nd] : v.items()) {
-                if (!nd.is_object()) { nodes[nn] = nd; continue; }
+                if (!nd.is_object()) {
+                    nodes[nn] = nd;
+                    continue;
+                }
                 // Node config keys are checked against the declared
                 // schema only when it is closed-world (mirrors strict
                 // compile) — permissive types keep their config as-is.
@@ -927,8 +1005,8 @@ json GraphCompiler::upgrade_to_latest(const json& definition) {
                 // the barrier — make that explicit.
                 if (node.contains("barrier")) {
                     const auto& b = node["barrier"];
-                    const bool empty = !b.is_object() || !b.contains("wait_for")
-                        || !b["wait_for"].is_array() || b["wait_for"].empty();
+                    const bool  empty = !b.is_object() || !b.contains("wait_for") ||
+                                       !b["wait_for"].is_array() || b["wait_for"].empty();
                     if (empty) {
                         json cleaned = json::object();
                         for (const auto& [nk, nv] : node.items()) {
@@ -944,24 +1022,24 @@ json GraphCompiler::upgrade_to_latest(const json& definition) {
         } else if (k == "edges" && v.is_array()) {
             json edges = json::array();
             for (const auto& e : v) {
-                if (!e.is_object()) { edges.push_back(e); continue; }
-                const bool cond = e.contains("condition")
-                               || e.value("type", "") == "conditional";
-                edges.push_back(cond
-                    ? quarantine(e, {"from", "condition", "routes", "type"})
+                if (!e.is_object()) {
+                    edges.push_back(e);
+                    continue;
+                }
+                const bool cond = e.contains("condition") || e.value("type", "") == "conditional";
+                edges.push_back(cond ? quarantine(e, {"from", "condition", "routes", "type"})
                     : quarantine(e, {"from", "to"}));
             }
             up["edges"] = std::move(edges);
         } else if (k == "conditional_edges" && v.is_array()) {
             json ces = json::array();
             for (const auto& e : v) {
-                ces.push_back(e.is_object()
-                    ? quarantine(e, {"from", "condition", "routes"}) : e);
+                ces.push_back(e.is_object() ? quarantine(e, {"from", "condition", "routes"}) : e);
             }
             up["conditional_edges"] = std::move(ces);
         } else if (k == "retry_policy" && v.is_object()) {
-            up["retry_policy"] = quarantine(v, {"max_retries", "initial_delay_ms",
-                                                "backoff_multiplier", "max_delay_ms"});
+            up["retry_policy"] = quarantine(
+                v, {"max_retries", "initial_delay_ms", "backoff_multiplier", "max_delay_ms"});
         } else {
             up[k] = v;
         }
@@ -969,13 +1047,11 @@ json GraphCompiler::upgrade_to_latest(const json& definition) {
     return up;
 }
 
-void GraphCompiler::verify_roundtrip(const json& definition,
-                                     const CompiledGraph& cg) {
+void GraphCompiler::verify_roundtrip(const json& definition, const CompiledGraph& cg) {
     verify_roundtrip(definition, cg.topology());
 }
 
-void GraphCompiler::verify_roundtrip(const json& definition,
-                                     const TopologySpec& topology) {
+void GraphCompiler::verify_roundtrip(const json& definition, const TopologySpec& topology) {
     const json a = canon(definition);
     const json b = canon(topology.to_json());
     if (a == b) return;
@@ -986,7 +1062,8 @@ void GraphCompiler::verify_roundtrip(const json& definition,
     std::string msg =
         "translation validation failed: compiled graph does not round-trip "
         "to its definition — the compiler dropped or rewired something:";
-    for (const auto& m : mismatches) msg += "\n  - " + m;
+    for (const auto& m : mismatches)
+        msg += "\n  - " + m;
 
     if (topology.schema_version >= 1) {
         throw std::runtime_error(msg);

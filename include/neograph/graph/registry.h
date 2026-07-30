@@ -39,6 +39,17 @@ public:
     json                         config_schema(const std::string& type) const;
     json                         node_effects(const std::string& type) const;
 
+    /** Exact local-only resolvers; never consult process-global registries. */
+    ReducerFn                    local_reducer(const std::string& name) const;
+    ConditionFn                  local_condition(const std::string& name) const;
+    std::optional<ConditionSpec> local_condition_spec(const std::string& name) const;
+    std::unique_ptr<GraphNode>   create_local(const std::string& type,
+                                              const std::string& name,
+                                              const json&        config,
+                                              const NodeContext& ctx) const;
+    json                         local_config_schema(const std::string& type) const;
+    json                         local_node_effects(const std::string& type) const;
+
     /** Local-only membership used by sealed admission profiles. */
     bool contains_reducer(const std::string& name) const noexcept;
     bool contains_condition(const std::string& name) const noexcept;

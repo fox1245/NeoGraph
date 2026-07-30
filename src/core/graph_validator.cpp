@@ -19,7 +19,8 @@ constexpr const char* kEnd   = "__end__";
 
 json string_set_to_array(const std::set<std::string>& s) {
     json arr = json::array();
-    for (const auto& v : s) arr.push_back(v);
+    for (const auto& v : s)
+        arr.push_back(v);
     return arr;
 }
 
@@ -33,12 +34,12 @@ struct Ctx {
     std::vector<Diagnostic> out;
 
     void error(std::string code, std::string path, std::string msg, json witness) {
-        out.push_back({std::move(code), "error", std::move(path),
-                       std::move(msg), std::move(witness)});
+        out.push_back(
+            {std::move(code), "error", std::move(path), std::move(msg), std::move(witness)});
     }
     void warn(std::string code, std::string path, std::string msg, json witness) {
-        out.push_back({std::move(code), "warning", std::move(path),
-                       std::move(msg), std::move(witness)});
+        out.push_back(
+            {std::move(code), "warning", std::move(path), std::move(msg), std::move(witness)});
     }
 
     bool is_node(const std::string& n) const { return node_names.count(n) > 0; }
@@ -69,8 +70,8 @@ void check_references(Ctx& c) {
     for (const auto& ce : c.cg.conditional_edges) {
         const std::string path = "conditional_edges[" + std::to_string(i++) + "]";
         if (!c.is_node(ce.from)) {
-            c.error("E3", path, "conditional edge 'from' references unknown node '"
-                    + ce.from + "'", json{{"from", ce.from}});
+            c.error("E3", path, "conditional edge 'from' references unknown node '" + ce.from + "'",
+                    json{{"from", ce.from}});
         }
         for (const auto& [key, target] : ce.routes) {
             if (key == detail::kLegacyDefaultRoute) continue;
@@ -84,8 +85,7 @@ void check_references(Ctx& c) {
     auto check_interrupts = [&](const char* which, const std::set<std::string>& s) {
         for (const auto& n : s) {
             if (!c.is_node(n)) {
-                c.error("E3", which, std::string(which)
-                        + " references unknown node '" + n + "'",
+                c.error("E3", which, std::string(which) + " references unknown node '" + n + "'",
                         json{{"node", n}});
             }
         }
@@ -97,12 +97,13 @@ void check_references(Ctx& c) {
         for (const auto& u : wait_for) {
             const std::string path = "nodes." + bnode + ".barrier";
             if (u == bnode) {
-                c.error("E3", path, "barrier waits for the node itself ('"
-                        + u + "') — it can never receive its own signal before firing",
+                c.error("E3", path,
+                        "barrier waits for the node itself ('" + u +
+                            "') — it can never receive its own signal before firing",
                         json{{"barrier", bnode}, {"waits_for", u}});
             } else if (!c.is_node(u)) {
-                c.error("E3", path, "barrier wait_for references unknown node '"
-                        + u + "'", json{{"barrier", bnode}, {"waits_for", u}});
+                c.error("E3", path, "barrier wait_for references unknown node '" + u + "'",
+                        json{{"barrier", bnode}, {"waits_for", u}});
             }
         }
     }
@@ -111,7 +112,8 @@ void check_references(Ctx& c) {
 // ---- successor map (shared by E7/E8/E11) --------------------------------
 
 void build_successors(Ctx& c) {
-    for (const auto& e : c.cg.edges) c.succ[e.from].insert(e.to);
+    for (const auto& e : c.cg.edges)
+        c.succ[e.from].insert(e.to);
     for (const auto& ce : c.cg.conditional_edges) {
         for (const auto& [key, target] : ce.routes) {
             if (key == detail::kLegacyDefaultRoute) continue;
@@ -128,7 +130,8 @@ std::set<std::string> reachable_from_start(const Ctx& c) {
     q.push(kStart);
     seen.insert(kStart);
     while (!q.empty()) {
-        auto cur = q.front(); q.pop();
+        auto cur = q.front();
+        q.pop();
         auto it = c.succ.find(cur);
         if (it == c.succ.end()) continue;
         for (const auto& nxt : it->second) {
@@ -145,9 +148,9 @@ void check_reachability(Ctx& c, const std::set<std::string>& reachable) {
     }
     if (!unreachable.empty()) {
         c.warn("E7", "$",
-               "node(s) unreachable from __start__ via static edges/routes: "
-               + string_set_to_array(unreachable).dump()
-               + " (only Command.goto / Send can reach them at runtime — "
+               "node(s) unreachable from __start__ via static edges/routes: " +
+                   string_set_to_array(unreachable).dump() +
+                   " (only Command.goto / Send can reach them at runtime — "
                "if none of your nodes emits those, this is dead topology)",
                json{{"unreachable", string_set_to_array(unreachable)}});
     }
@@ -174,10 +177,16 @@ void check_termination(Ctx& c, const std::set<std::string>& reachable) {
             if (!ok) {
                 auto it = c.succ.find(n);
                 for (const auto& s : it->second) {
-                    if (can_end.count(s)) { ok = true; break; }
+                    if (can_end.count(s)) {
+                        ok = true;
+                        break;
+                    }
                 }
+                }
+            if (ok) {
+                can_end.insert(n);
+                grew = true;
             }
-            if (ok) { can_end.insert(n); grew = true; }
         }
     }
     std::set<std::string> trapped;
@@ -186,9 +195,9 @@ void check_termination(Ctx& c, const std::set<std::string>& reachable) {
     }
     if (!trapped.empty()) {
         c.warn("E11", "$",
-               "node(s) with no static path to __end__ (cycle without exit): "
-               + string_set_to_array(trapped).dump()
-               + " (a Command.goto could still exit at runtime; otherwise "
+               "node(s) with no static path to __end__ (cycle without exit): " +
+                   string_set_to_array(trapped).dump() +
+                   " (a Command.goto could still exit at runtime; otherwise "
                "the run only stops at the recursion limit)",
                json{{"trapped", string_set_to_array(trapped)}});
     }
@@ -204,9 +213,9 @@ void check_barriers(Ctx& c) {
             const bool signals = it != c.succ.end() && it->second.count(bnode) > 0;
             if (!signals) {
                 c.error("E8", "nodes." + bnode + ".barrier",
-                        "barrier waits for '" + u + "', but '" + u
-                        + "' has no edge or conditional route into '" + bnode
-                        + "' — the AND-join can never be satisfied "
+                        "barrier waits for '" + u + "', but '" + u +
+                            "' has no edge or conditional route into '" + bnode +
+                            "' — the AND-join can never be satisfied "
                         "(Command.goto bypasses barrier accounting, so no "
                         "dynamic mechanism can rescue this)",
                         json{{"barrier", bnode}, {"waits_for", u}});
@@ -225,8 +234,8 @@ void check_fan_in(Ctx& c) {
     for (const auto& [node, sources] : plain_in) {
         if (sources.size() < 2 || c.cg.barrier_specs.count(node)) continue;
         c.warn("E9", "nodes." + node,
-               "'" + node + "' has " + std::to_string(sources.size())
-               + " plain in-edges and no barrier — if those sources can be "
+               "'" + node + "' has " + std::to_string(sources.size()) +
+                   " plain in-edges and no barrier — if those sources can be "
                "concurrently active (AND fan-out upstream), it fires once "
                "per arrival super-step instead of once; declare "
                "\"barrier\": {\"wait_for\": [...]} for AND-join, or ignore "
@@ -244,7 +253,8 @@ void check_routes(Ctx& c) {
 
         if (ce.routes.empty()) {
             c.error("E10", path,
-                    "conditional edge from '" + ce.from + "' has no routes — "
+                    "conditional edge from '" + ce.from +
+                        "' has no routes — "
                     "dispatch would dereference an empty route map (UB)",
                     json{{"from", ce.from}, {"condition", ce.condition}});
             continue;
@@ -264,27 +274,29 @@ void check_routes(Ctx& c) {
         for (const auto& k : keys) {
             if (!labels.count(k) && k != DEFAULT_ROUTE) dead.insert(k);
         }
-        for (const auto& l : labels) if (!keys.count(l))   uncovered.insert(l);
+        for (const auto& l : labels)
+            if (!keys.count(l)) uncovered.insert(l);
 
         if (!spec->open && !dead.empty()) {
             c.error("E10", path,
-                    "route key(s) " + string_set_to_array(dead).dump()
-                    + " can never be produced by condition '" + ce.condition
-                    + "' (declared labels: " + string_set_to_array(labels).dump()
-                    + ") — dead route",
-                    json{{"from", ce.from}, {"condition", ce.condition},
+                    "route key(s) " + string_set_to_array(dead).dump() +
+                        " can never be produced by condition '" + ce.condition +
+                        "' (declared labels: " + string_set_to_array(labels).dump() +
+                        ") — dead route",
+                    json{{"from", ce.from},
+                         {"condition", ce.condition},
                          {"dead_keys", string_set_to_array(dead)}});
         }
         const bool has_default = keys.count(DEFAULT_ROUTE) > 0;
         if (!uncovered.empty() && (!spec->open || !has_default)) {
             const std::string msg =
-                "label(s) " + string_set_to_array(uncovered).dump()
-                + " of condition '" + ce.condition + "' have no exact route — "
-                + (spec->open
-                    ? "unknown labels will fail at runtime; add an explicit "
+                "label(s) " + string_set_to_array(uncovered).dump() + " of condition '" +
+                ce.condition + "' have no exact route — " +
+                (spec->open ? "unknown labels will fail at runtime; add an explicit "
                       "'default' route to handle them"
                     : "closed conditions must route every declared label");
-            json witness = json{{"from", ce.from}, {"condition", ce.condition},
+            json witness = json{{"from", ce.from},
+                                {"condition", ce.condition},
                                 {"uncovered", string_set_to_array(uncovered)},
                                 {"has_default", has_default}};
             if (spec->open) {
@@ -309,9 +321,11 @@ void check_effects(Ctx& c) {
         if (eff.is_null() || !eff.is_object()) return;   // gate: skip family
         std::set<std::string> reads, writes;
         if (eff.contains("reads"))
-            for (const auto& ch : eff["reads"]) reads.insert(ch.get<std::string>());
+            for (const auto& ch : eff["reads"])
+                reads.insert(ch.get<std::string>());
         if (eff.contains("writes"))
-            for (const auto& ch : eff["writes"]) writes.insert(ch.get<std::string>());
+            for (const auto& ch : eff["writes"])
+                writes.insert(ch.get<std::string>());
         if (eff.contains("exports")) {
             for (const auto& ch : eff["exports"]) {
                 const auto name = ch.get<std::string>();
@@ -336,8 +350,8 @@ void check_effects(Ctx& c) {
             readers[ch].insert(n);
             if (!declared.count(ch)) {
                 c.warn("E4", "nodes." + n,
-                       "'" + n + "' (type " + c.node_type(n) + ") reads channel '"
-                       + ch + "' which is not declared — the read silently "
+                       "'" + n + "' (type " + c.node_type(n) + ") reads channel '" + ch +
+                           "' which is not declared — the read silently "
                        "yields null",
                        json{{"node", n}, {"channel", ch}});
             }
@@ -346,8 +360,8 @@ void check_effects(Ctx& c) {
             writers[ch].insert(n);
             if (!declared.count(ch)) {
                 c.error("E4", "nodes." + n,
-                        "'" + n + "' (type " + c.node_type(n) + ") writes channel '"
-                        + ch + "' which is not declared — the engine throws "
+                        "'" + n + "' (type " + c.node_type(n) + ") writes channel '" + ch +
+                            "' which is not declared — the engine throws "
                         "\"Write to unknown channel\" on every execution of "
                         "this node; declare it under \"channels\"",
                         json{{"node", n}, {"channel", ch}});
@@ -365,20 +379,19 @@ void check_effects(Ctx& c) {
         const bool engine_channel = ch.rfind("__", 0) == 0;
         if (!r && !w && !engine_channel) {
             c.warn("E6", "channels." + ch,
-                   "channel '" + ch + "' is declared but no node reads or "
+                   "channel '" + ch +
+                       "' is declared but no node reads or "
                    "writes it (dead channel)",
                    json{{"channel", ch}});
         } else if (!r && w && !engine_channel && !exported.count(ch)) {
-            c.warn("E6", "channels." + ch,
-                   "channel '" + ch + "' is written but never read",
-                   json{{"channel", ch},
-                        {"writers", string_set_to_array(writers[ch])}});
+            c.warn("E6", "channels." + ch, "channel '" + ch + "' is written but never read",
+                   json{{"channel", ch}, {"writers", string_set_to_array(writers[ch])}});
         } else if (r && !w && !has_initial.count(ch)) {
             c.warn("E6", "channels." + ch,
-                   "channel '" + ch + "' is read but never written and has "
+                   "channel '" + ch +
+                       "' is read but never written and has "
                    "no initial value — every read yields null",
-                   json{{"channel", ch},
-                        {"readers", string_set_to_array(readers[ch])}});
+                   json{{"channel", ch}, {"readers", string_set_to_array(readers[ch])}});
         }
     }
 
@@ -409,13 +422,14 @@ void check_effects(Ctx& c) {
             const std::string key = src + "/" + ch;
             if (!reported.insert(key).second) continue;
             c.warn("E5", "channels." + ch,
-                   "overwrite channel '" + ch + "' is written by "
-                   + std::to_string(ws.size()) + " concurrently-active nodes "
-                   + string_set_to_array(ws).dump() + " (fan-out siblings of '"
-                   + src + "') — last-writer-wins is nondeterministic under "
+                   "overwrite channel '" + ch + "' is written by " + std::to_string(ws.size()) +
+                       " concurrently-active nodes " + string_set_to_array(ws).dump() +
+                       " (fan-out siblings of '" + src +
+                       "') — last-writer-wins is nondeterministic under "
                    "parallel dispatch; use an append reducer or serialize "
                    "the writers",
-                   json{{"channel", ch}, {"fan_out_source", src},
+                   json{{"channel", ch},
+                        {"fan_out_source", src},
                         {"writers", string_set_to_array(ws)}});
         }
     }
@@ -432,13 +446,15 @@ bool ValidationReport::has_errors() const {
 
 std::vector<const Diagnostic*> ValidationReport::errors() const {
     std::vector<const Diagnostic*> v;
-    for (const auto& d : diagnostics) if (d.severity == "error") v.push_back(&d);
+    for (const auto& d : diagnostics)
+        if (d.severity == "error") v.push_back(&d);
     return v;
 }
 
 std::vector<const Diagnostic*> ValidationReport::warnings() const {
     std::vector<const Diagnostic*> v;
-    for (const auto& d : diagnostics) if (d.severity == "warning") v.push_back(&d);
+    for (const auto& d : diagnostics)
+        if (d.severity == "warning") v.push_back(&d);
     return v;
 }
 
@@ -457,6 +473,11 @@ ValidationReport GraphValidator::validate(const CompiledGraph& cg) {
 
 ValidationReport GraphValidator::validate(const CompiledGraph& cg, const GraphRegistry& registry) {
     return validate(cg.topology(), registry);
+}
+
+ValidationReport GraphValidator::validate_local(const CompiledGraph& cg,
+                                                const GraphRegistry& registry) {
+    return validate_local(cg.topology(), registry);
 }
 
 ValidationReport GraphValidator::validate(const TopologySpec& topology) {
@@ -484,6 +505,23 @@ ValidationReport GraphValidator::validate(const TopologySpec& topology,
     return ValidationReport{std::move(c.out)};
 }
 
+ValidationReport GraphValidator::validate_local(const TopologySpec&  topology,
+                                                const GraphRegistry& registry) {
+    for (const auto& channel : topology.channel_defs) {
+        (void)registry.local_reducer(channel.reducer_name);
+    }
+    for (const auto& [name, node_def] : topology.node_defs) {
+        (void)name;
+        const auto type = node_def.value("type", "");
+        (void)registry.local_node_effects(type);
+    }
+    for (const auto& edge : topology.conditional_edges) {
+        (void)registry.local_condition(edge.condition);
+        (void)registry.local_condition_spec(edge.condition);
+    }
+    return validate(topology, registry);
+}
+
 ValidatedTopology GraphValidator::require_valid(TopologySpec topology) {
     return require_valid(std::move(topology), GraphRegistry::global());
 }
@@ -492,10 +530,20 @@ ValidatedTopology GraphValidator::require_valid(TopologySpec topology,
                                                  const GraphRegistry& registry) {
     auto report = validate(topology, registry);
     if (report.has_errors()) {
-        throw std::runtime_error(
-            "graph validation failed (schema_version "
-            + std::to_string(topology.schema_version) + "):\n"
-            + report.summary());
+        throw std::runtime_error("graph validation failed (schema_version " +
+                                 std::to_string(topology.schema_version) + "):\n" +
+                                 report.summary());
+    }
+    return ValidatedTopology(std::move(topology), std::move(report));
+}
+
+ValidatedTopology GraphValidator::require_valid_local(TopologySpec         topology,
+                                                      const GraphRegistry& registry) {
+    auto report = validate_local(topology, registry);
+    if (report.has_errors()) {
+        throw std::runtime_error("graph validation failed (schema_version " +
+                                 std::to_string(topology.schema_version) + "):\n" +
+                                 report.summary());
     }
     return ValidatedTopology(std::move(topology), std::move(report));
 }
