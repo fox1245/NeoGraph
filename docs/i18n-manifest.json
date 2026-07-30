@@ -5,6 +5,8 @@
   "strict": true,
   "excluded": {
     "docs/PROGRAMMABLE_HARNESS_DSL_DESIGN.md": "Canonical target architecture design remains English-only to avoid normative translation drift.",
+    "docs/V1_ARCHITECTURE.md": "Pre-v1 normative architecture decision remains English-only until the public contract freezes at P8.",
+    "docs/V1_MIGRATION_PLAN.md": "Pre-v1 implementation sequence remains English-only until the public contract freezes at P8.",
     "THIRD_PARTY_LICENSES.md": "Legal notices remain in their authoritative original form.",
     "skills/neograph-harness-authoring/SKILL.md": "Agent execution contract, not user documentation."
   },
