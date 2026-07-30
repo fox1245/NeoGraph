@@ -1499,6 +1499,40 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
     add_executable(bench_neograph benchmarks/bench_neograph.cpp)
     target_link_libraries(bench_neograph PRIVATE neograph::core)
 
+    # OpenMP target-offload PoC. The target still builds without a device
+    # backend so the executable can report host fallback explicitly.
+    find_package(OpenMP QUIET COMPONENTS CXX)
+    set(NEOGRAPH_OPENMP_OFFLOAD_ARCH "" CACHE STRING
+        "GPU architecture for bench_openmp_offload (for example gfx1201)")
+    if(OpenMP_CXX_FOUND)
+        add_executable(bench_openmp_offload
+            benchmarks/bench_openmp_offload.cpp)
+        target_link_libraries(bench_openmp_offload PRIVATE OpenMP::OpenMP_CXX)
+        target_compile_features(bench_openmp_offload PRIVATE cxx_std_20)
+
+        if(NEOGRAPH_OPENMP_OFFLOAD_ARCH)
+            if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+                target_compile_options(bench_openmp_offload PRIVATE
+                    "--offload-arch=${NEOGRAPH_OPENMP_OFFLOAD_ARCH}")
+                target_link_options(bench_openmp_offload PRIVATE
+                    "-fopenmp"
+                    "--offload-arch=${NEOGRAPH_OPENMP_OFFLOAD_ARCH}")
+                message(STATUS
+                    "bench_openmp_offload device arch: "
+                    "${NEOGRAPH_OPENMP_OFFLOAD_ARCH}")
+            else()
+                message(WARNING
+                    "NEOGRAPH_OPENMP_OFFLOAD_ARCH is set, but "
+                    "${CMAKE_CXX_COMPILER_ID} does not support the "
+                    "Clang --offload-arch option; benchmark will use the "
+                    "compiler's configured OpenMP target behavior")
+            endif()
+        endif()
+    else()
+        message(STATUS
+            "OpenMP CXX not found; bench_openmp_offload will not be built")
+    endif()
+
     # Checkpoint-store load benchmark — compares InMemory / SQLite /
     # Postgres under N×M synthetic save workload. Postgres is opt-in
     # via NEOGRAPH_HAVE_POSTGRES so the binary still builds when the

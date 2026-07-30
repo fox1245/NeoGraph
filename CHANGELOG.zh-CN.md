@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=4e86912fb25a078badb50fae46fb0f72e28ab1862d4c067cc88e792574a889cb -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=9de7b7d962822369a007f67eaa873f442f663a4a467deb51f63196511770c04a -->
 # 更新日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -19,6 +19,13 @@ NeoGraph 的所有显著变更均记录于本文件。
   带模式版本的工件/运行持久化，具有不可变工件和运行到工件绑定。
   Harness MCP 二进制文件现在将记录存储在 `runs.db` 中，而检查点仍存储在
   `checkpoints.db` 中。
+- **AMD OpenMP GPU 卸载概念验证。** 新增可选的
+  `bench_openmp_offload` 基准，在相同数值扇出工作负载上比较串行 CPU、
+  OpenMP 自动线程、逐次映射 GPU 和 GPU 常驻数据四种模式。它分别报告真实
+  设备执行与主机回退、计算正确性、包含传输的延迟、仅内核延迟以及相对串行
+  CPU 的加速比。Radeon AI PRO R9700 可通过
+  `NEOGRAPH_OPENMP_OFFLOAD_ARCH=gfx1201` 启用 ROCm/Clang 设备镜像。
+
 
 ### 变更
 
