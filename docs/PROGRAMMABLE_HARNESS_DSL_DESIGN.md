@@ -1,9 +1,17 @@
 # Programmable Harness DSL and Control VM Architecture
 
-Status: Target Architecture Design (not yet implemented; execution decision revised)
+Status: Superseded architecture study; retained as design history
 Date: 2026-07-29
+Superseded: 2026-07-31
 Related Issues: #245, #250, #251, #252
 
+The v1 target is now the Core + Program architecture in
+`V1_ARCHITECTURE.md`. Internal execution gates are maintained outside the
+public repository. `GraphEngine` remains the only
+application-node executor; the Control VM and separate Durable Kernel described
+below are not implementation targets. This document remains useful for its DSL,
+security, migration, and completeness analysis, but it is no longer
+authoritative where it conflicts with the v1 design.
 ## 1. Purpose
 
 NeoGraph's core vision extends beyond models improvising from natural-language
@@ -722,11 +730,9 @@ implementation detail must not silently redefine it.
 | stream events | Control-relevant events, task/effect results, interrupts, terminal outcomes, and any value later consumed by bytecode are durable journal events. Token/progress callbacks are best-effort by default and are not replay promises. A profile may opt into durable chunks only with stable event IDs, declared payload policy, and journal commit; recorded replay then emits the recorded chunks and performs no live callback-producing work. Live callback objects never enter a bundle or continuation. |
 | public `GraphEngine` surface | Every public construction, execution, administration, and mutable-policy entry point is inventoried before cutover. Declarative construction and execution remain blocked from an `equivalent` claim until oracle fixtures pass. Live `CompiledGraph` injection and behavior-changing post-admission setters require descriptor-backed lowering or an explicit `versioned_change`; Kernel-owned administration uses explicit transactions and active-run race policy. |
 
-The machine-readable forms of these decisions are
-`spec/programmable-harness-kernel-abi-v1.schema.json`,
-`spec/programmable-harness-compatibility-matrix-v1.schema.json`, and
-`spec/programmable-harness-graph-engine-inventory-v1.json`. The schemas are
-admission contracts, not evidence that the VM or Durable Kernel already exists.
+The machine-readable forms of these decisions remain private project controls.
+They are admission contracts, not evidence that the VM or Durable Kernel
+already exists.
 
 ### 8.4 External Effect State Machine
 
