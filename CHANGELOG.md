@@ -18,6 +18,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   schema-versioned artifact/run persistence with immutable artifact and run-to-
   artifact bindings. The Harness MCP binary now stores records in `runs.db`,
   while checkpoints remain in `checkpoints.db`.
+- **AMD OpenMP target-offload proof of concept.** Added the opt-in
+  `bench_openmp_offload` benchmark, which compares serial CPU execution,
+  OpenMP auto-threading, per-iteration GPU mapping, and persistent GPU data on
+  the same numeric fan-out workload. It reports real-device versus host
+  fallback execution, correctness, transfer-inclusive latency, kernel-only
+  latency, and speedup. `NEOGRAPH_OPENMP_OFFLOAD_ARCH=gfx1201` enables the
+  ROCm/Clang device image for Radeon AI PRO R9700.
+
 
 ### Changed
 

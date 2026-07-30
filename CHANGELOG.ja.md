@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=4e86912fb25a078badb50fae46fb0f72e28ab1862d4c067cc88e792574a889cb -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=9de7b7d962822369a007f67eaa873f442f663a4a467deb51f63196511770c04a -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -19,6 +19,15 @@ NeoGraph の全注目すべき変更を本ファイルに文書化します。
   スキーマバージョン管理されたアーティファクト/実行の永続化で、不変のアーティファクトと
   実行-アーティファクトバインディングを提供。Harness MCP バイナリはレコードを
   `runs.db` に保存し、チェックポイントは `checkpoints.db` に残ります。
+- **AMD OpenMP GPU オフロードの概念実証。** 同じ数値ファンアウト処理で、
+  直列 CPU、OpenMP 自動スレッド化、反復ごとの GPU マッピング、GPU 上に
+  データを保持する実行を比較するオプションの `bench_openmp_offload`
+  ベンチマークを追加しました。実デバイス実行とホストフォールバック、
+  正確性、転送込みレイテンシ、カーネルのみのレイテンシ、直列 CPU 比の
+  高速化を個別に報告します。Radeon AI PRO R9700 では
+  `NEOGRAPH_OPENMP_OFFLOAD_ARCH=gfx1201` で ROCm/Clang デバイスイメージを
+  有効化します。
+
 
 ### 変更
 

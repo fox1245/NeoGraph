@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=4e86912fb25a078badb50fae46fb0f72e28ab1862d4c067cc88e792574a889cb -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=9de7b7d962822369a007f67eaa873f442f663a4a467deb51f63196511770c04a -->
 # 변경 기록
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -14,6 +14,14 @@ NeoGraph의 주목할 만한 모든 변경 사항을 이 파일에 기록한다.
 ### 추가
 
 - **SQLite Harness 레코드 저장소 (이슈 #147 후속).** WAL 지원, 스키마 버전 관리가 된 아티팩트/실행 영속성과 변경 불가능한 아티팩트 및 실행-아티팩트 바인딩을 제공하는 선택적 `neograph::mcp_sqlite` 대상과 `SqliteHarnessRecordStore` 추가. Harness MCP 바이너리가 이제 `runs.db`에 레코드를 저장하며, 체크포인트는 `checkpoints.db`에 남는다.
+- **AMD OpenMP GPU 이관 개념 증명.** 같은 숫자 팬아웃 작업에서 직렬 CPU,
+  OpenMP 자동 스레딩, 반복마다 데이터를 옮기는 GPU 실행, 데이터를 GPU에
+  유지하는 실행을 비교하는 선택적 `bench_openmp_offload` 벤치마크를 추가했다.
+  실제 GPU 실행과 호스트 대체 실행, 계산 정확성, 전송 포함 지연 시간,
+  커널만의 지연 시간, 직렬 CPU 대비 속도 향상을 각각 보고한다. Radeon AI PRO
+  R9700에서는 `NEOGRAPH_OPENMP_OFFLOAD_ARCH=gfx1201`로 ROCm/Clang 장치
+  이미지를 활성화한다.
+
 
 ### 변경
 
