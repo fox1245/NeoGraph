@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=9de7b7d962822369a007f67eaa873f442f663a4a467deb51f63196511770c04a -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=dabd05e9ec14a64205ebcccf63173710c88def189d84ec7f65b7dfc48494b103 -->
 # 변경 기록
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,12 @@ NeoGraph의 주목할 만한 모든 변경 사항을 이 파일에 기록한다.
 ## [Unreleased]
 
 ### 추가
+
+- **선택적 Program 컴포넌트 경계.** 선택형 `NEOGRAPH_BUILD_PROGRAM`
+  스위치, 내보내는 `neograph::program` 타깃, 그리고
+  `<neograph/program/program.h>` 진입점을 추가했다. 설치 패키지의 컴포넌트
+  탐색은 Program을 빌드했을 때만 이를 보고하며, Core 전용 설치는 기존
+  `neograph::core` 링크 인터페이스를 유지한다.
 
 - **SQLite Harness 레코드 저장소 (이슈 #147 후속).** WAL 지원, 스키마 버전 관리가 된 아티팩트/실행 영속성과 변경 불가능한 아티팩트 및 실행-아티팩트 바인딩을 제공하는 선택적 `neograph::mcp_sqlite` 대상과 `SqliteHarnessRecordStore` 추가. Harness MCP 바이너리가 이제 `runs.db`에 레코드를 저장하며, 체크포인트는 `checkpoints.db`에 남는다.
 - **AMD OpenMP GPU 이관 개념 증명.** 같은 숫자 팬아웃 작업에서 직렬 CPU,

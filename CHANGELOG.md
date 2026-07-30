@@ -13,6 +13,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Optional Program component boundary.** Added the opt-in
+  `NEOGRAPH_BUILD_PROGRAM` switch, exported `neograph::program` target, and
+  `<neograph/program/program.h>` entry point. Installed package component
+  discovery now reports Program only when built; Core-only installs keep the
+  existing `neograph::core` link interface.
+
 - **SQLite Harness record store (issue #147 follow-up).** Added the optional
   `neograph::mcp_sqlite` target and `SqliteHarnessRecordStore` for WAL-backed,
   schema-versioned artifact/run persistence with immutable artifact and run-to-

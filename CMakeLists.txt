@@ -110,6 +110,7 @@ endif()
 # **no OpenSSL** on the build host. With ASYNC=OFF the OpenSSL / libcurl
 # find_package() calls are skipped entirely (see line ~258).
 option(NEOGRAPH_BUILD_ASYNC    "Build neograph::async (asio::ssl HTTP/HTTPS/WS client)" ON)
+option(NEOGRAPH_BUILD_PROGRAM  "Build optional neograph::program component" OFF)
 option(NEOGRAPH_BUILD_LLM      "Build neograph::llm (LLM providers)"     ON)
 option(NEOGRAPH_BUILD_MCP      "Build MCP components (compatibility umbrella)" ON)
 set(_neograph_mcp_component_default ${NEOGRAPH_BUILD_MCP})
@@ -465,6 +466,25 @@ target_link_libraries(neograph_core
 target_compile_features(neograph_core PUBLIC cxx_std_20)
 
 add_library(neograph::core ALIAS neograph_core)
+
+# ===========================================================================
+# neograph::program — optional Program orchestration layer
+#
+# PR2 establishes only the public component boundary. ProgramSource, compiler,
+# runtime, stores, and registries arrive in later independently reviewable PRs.
+# An INTERFACE target is intentional here: it exports the Core dependency
+# without inventing placeholder runtime symbols or an empty binary.
+# ===========================================================================
+if(NEOGRAPH_BUILD_PROGRAM)
+    add_library(neograph_program INTERFACE)
+    target_include_directories(neograph_program
+        INTERFACE
+            $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+    )
+    target_link_libraries(neograph_program INTERFACE neograph_core)
+    add_library(neograph::program ALIAS neograph_program)
+endif()
 
 # ===========================================================================
 # neograph::async — asio-based async runtime (PoC stage)
@@ -1729,7 +1749,7 @@ if(NEOGRAPH_INSTALL_EXPORT)
         list(APPEND NEOGRAPH_EXPORT_TARGETS neograph_mcp_types)
     endif()
 
-    foreach(_comp async llm mcp mcp_server mcp_sqlite mcp_http_server a2a acp util postgres sqlite)
+    foreach(_comp program async llm mcp mcp_server mcp_sqlite mcp_http_server a2a acp util postgres sqlite)
         if(TARGET neograph_${_comp})
             list(APPEND NEOGRAPH_EXPORT_TARGETS neograph_${_comp})
             list(APPEND NEOGRAPH_COMPONENTS_BUILT ${_comp})

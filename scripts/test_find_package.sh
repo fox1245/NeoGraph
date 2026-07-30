@@ -12,7 +12,7 @@
 #   exit 1 — it cannot, at whichever of the four stages failed
 #
 # Shared mode also verifies the platform loader metadata and versioned links.
-# Usage: scripts/test_find_package.sh [--keep] [--shared]
+# Usage: scripts/test_find_package.sh [--keep] [--shared] [--core-only|--program]
 set -uo pipefail
 
 repo_root=$(git rev-parse --show-toplevel)
@@ -26,14 +26,41 @@ else
 fi
 keep=
 shared=OFF
+component_mode=default
 platform=$(uname -s)
 for arg in "$@"; do
     case "$arg" in
         --keep) keep=--keep ;;
         --shared) shared=ON ;;
+        --core-only) component_mode=core ;;
+        --program) component_mode=program ;;
         *) echo "unknown argument: $arg" >&2; exit 2 ;;
     esac
 done
+
+consumer_project="$repo_root/tests/integration/find_package"
+component_cmake_args=(-DNEOGRAPH_BUILD_PROGRAM=OFF)
+if [[ "$component_mode" != "default" ]]; then
+    component_cmake_args=(
+        -DNEOGRAPH_BUILD_ASYNC=OFF
+        -DNEOGRAPH_BUILD_LLM=OFF
+        -DNEOGRAPH_BUILD_MCP=OFF
+        -DNEOGRAPH_BUILD_MCP_HTTP_SERVER=OFF
+        -DNEOGRAPH_BUILD_A2A=OFF
+        -DNEOGRAPH_BUILD_ACP=OFF
+        -DNEOGRAPH_BUILD_UTIL=OFF
+        -DNEOGRAPH_BUILD_POSTGRES=OFF
+        -DNEOGRAPH_BUILD_SQLITE=OFF
+        -DNEOGRAPH_BUILD_GRPC=OFF
+        -DNEOGRAPH_BUILD_PYBIND=OFF
+        -DNEOGRAPH_BUILD_HARNESS_MCP_BINARY=OFF
+        -DNEOGRAPH_USE_LIBCURL=OFF
+        -DNEOGRAPH_BUILD_PROGRAM=OFF)
+fi
+if [[ "$component_mode" == "program" ]]; then
+    component_cmake_args[${#component_cmake_args[@]}-1]=-DNEOGRAPH_BUILD_PROGRAM=ON
+    consumer_project="$repo_root/tests/integration/find_package_program"
+fi
 
 cleanup() { [[ "$keep" == "--keep" ]] || rm -rf "$work"; }
 trap cleanup EXIT
@@ -158,6 +185,7 @@ cmake -S "$repo_root" -B "$work/build" \
     -DNEOGRAPH_BUILD_TESTS=OFF \
     -DNEOGRAPH_BUILD_EXAMPLES=OFF \
     "${platform_cmake_args[@]}" \
+    "${component_cmake_args[@]}" \
     > "$work/configure.log" 2>&1 || { tail -20 "$work/configure.log"; fail "engine configure"; }
 
 step "2/4 build + install engine"
@@ -170,13 +198,24 @@ find "$prefix" -name 'libneograph_*' -o -name 'neograph_*.lib' 2>/dev/null \
 echo "   package config:"
 find "$prefix" -name 'NeoGraphConfig.cmake' 2>/dev/null | sed 's|^|     |' || true
 
+if [[ "$component_mode" == "core" ]]; then
+    step "disabled Program component discovery"
+    cmake -S "$repo_root/tests/integration/find_package_program" \
+        -B "$work/program-disabled-consumer" \
+        -DCMAKE_PREFIX_PATH="$prefix" \
+        -DNEOGRAPH_EXPECT_PROGRAM_COMPONENT=OFF \
+        > "$work/program-disabled-configure.log" 2>&1 \
+        || { tail -20 "$work/program-disabled-configure.log"; fail "disabled Program component discovery"; }
+    echo "   Program component correctly unavailable"
+fi
+
 if [[ "$shared" == "ON" ]]; then
     step "shared-library loader metadata"
     check_shared_metadata
 fi
 
 step "3/4 configure consumer against the prefix"
-cmake -S "$repo_root/tests/integration/find_package" -B "$work/consumer" \
+cmake -S "$consumer_project" -B "$work/consumer" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_PREFIX_PATH="$prefix" \
     -DNEOGRAPH_EXPECTED_ABI_SOVERSION="$major" \

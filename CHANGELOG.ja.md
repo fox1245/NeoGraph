@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=9de7b7d962822369a007f67eaa873f442f663a4a467deb51f63196511770c04a -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=dabd05e9ec14a64205ebcccf63173710c88def189d84ec7f65b7dfc48494b103 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -13,6 +13,13 @@ NeoGraph の全注目すべき変更を本ファイルに文書化します。
 ## [Unreleased]
 
 ### 追加
+
+- **オプションの Program コンポーネント境界。** オプトインの
+  `NEOGRAPH_BUILD_PROGRAM` スイッチ、エクスポートされる
+  `neograph::program` ターゲット、`<neograph/program/program.h>` エントリ
+  ポイントを追加しました。インストール済みパッケージのコンポーネント検出は
+  Program をビルドした場合のみ報告し、Core 専用インストールは既存の
+  `neograph::core` リンクインターフェースを維持します。
 
 - **SQLite Harness レコードストア (issue #147 フォローアップ)。** オプションの
   `neograph::mcp_sqlite` ターゲットと `SqliteHarnessRecordStore` を追加。WAL バック、

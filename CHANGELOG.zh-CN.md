@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=9de7b7d962822369a007f67eaa873f442f663a4a467deb51f63196511770c04a -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=dabd05e9ec14a64205ebcccf63173710c88def189d84ec7f65b7dfc48494b103 -->
 # 更新日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -13,6 +13,11 @@ NeoGraph 的所有显著变更均记录于本文件。
 ## [未发布]
 
 ### 新增
+
+- **可选 Program 组件边界。** 新增了选择启用的
+  `NEOGRAPH_BUILD_PROGRAM` 开关、导出的 `neograph::program` 目标以及
+  `<neograph/program/program.h>` 入口。安装包仅在构建 Program 时报告该
+  组件；仅 Core 安装会保持现有的 `neograph::core` 链接接口。
 
 - **SQLite Harness 记录存储（issue #147 后续）。** 新增了可选的
   `neograph::mcp_sqlite` 目标和 `SqliteHarnessRecordStore`，用于 WAL 支持、
