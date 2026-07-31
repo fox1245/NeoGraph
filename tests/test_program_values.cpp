@@ -288,6 +288,61 @@ TEST(ProgramBundleTest, ImportedExecutableKindUsesOneCanonicalWireToken) {
     EXPECT_THROW((void)executable_kind_from_string("import"), std::invalid_argument);
 }
 
+TEST(CoreCompiledPlanIdentityTest, CanonicalizesClosureOrderAndMatchesKnownVector) {
+    const auto definition = sealed_definition(
+        "main", json{{"schema_version", SealedCoreDefinition::STORAGE_SCHEMA_VERSION},
+                     {"name", "main"},
+                     {"nodes", json{{"main", json{{"type", "vector-node"}}}}}});
+    std::vector<ExecutableIdentity> closure = {
+        ExecutableIdentity{ExecutableKind::Tool, "zeta", "2.1.0-rc.1+build.7", sha('2')},
+        ExecutableIdentity{ExecutableKind::Node, "alpha", "1.0.0", sha('3')},
+    };
+
+    const auto identity =
+        core_compiled_plan_identity(definition, "vector-compiler", sha('b'), closure);
+    EXPECT_EQ(identity, "sha256:c7da5b6de16628f74114adbad0f8bd55252b371dbfa80f69c822fcc7c2cae4c7");
+
+    std::reverse(closure.begin(), closure.end());
+    EXPECT_EQ(core_compiled_plan_identity(definition, "vector-compiler", sha('b'), closure),
+              identity);
+    EXPECT_NE(core_compiled_plan_identity(definition, "vector-compiler-next", sha('b'), closure),
+              identity);
+    EXPECT_NE(core_compiled_plan_identity(definition, "vector-compiler", sha('c'), closure),
+              identity);
+
+    auto changed_closure                          = closure;
+    changed_closure.front().implementation_digest = sha('4');
+    EXPECT_NE(core_compiled_plan_identity(definition, "vector-compiler", sha('b'), changed_closure),
+              identity);
+
+    auto changed_definition                                = definition;
+    changed_definition.definition["nodes"]["main"]["type"] = "other-node";
+    changed_definition.definition_hash = sealed_core_definition_hash(changed_definition.definition);
+    EXPECT_NE(core_compiled_plan_identity(changed_definition, "vector-compiler", sha('b'), closure),
+              identity);
+}
+
+TEST(CoreCompiledPlanIdentityTest, RejectsDuplicateOrAmbiguousExecutableClosure) {
+    const auto definition = sealed_definition(
+        "main", json{{"schema_version", SealedCoreDefinition::STORAGE_SCHEMA_VERSION},
+                     {"name", "main"},
+                     {"nodes", json{{"main", json{{"type", "vector-node"}}}}}});
+    const std::vector<ExecutableIdentity> ambiguous = {
+        ExecutableIdentity{ExecutableKind::Node, "alpha", "1.0.0", sha('3')},
+        ExecutableIdentity{ExecutableKind::Node, "alpha", "2.0.0", sha('4')},
+    };
+
+    EXPECT_THROW(
+        (void)core_compiled_plan_identity(definition, "vector-compiler", sha('b'), ambiguous),
+        std::invalid_argument);
+
+    auto exact_duplicate   = ambiguous;
+    exact_duplicate.back() = exact_duplicate.front();
+    EXPECT_THROW(
+        (void)core_compiled_plan_identity(definition, "vector-compiler", sha('b'), exact_duplicate),
+        std::invalid_argument);
+}
+
 TEST(ProgramBundleTest, IdentityAndBytesIgnoreSetLikeInputOrder) {
     const auto source      = make_source();
     auto       first_data  = make_bundle_data(source);
@@ -350,15 +405,13 @@ TEST(ProgramBundleTest, RejectsUnsupportedSourceSchemaAndErrorDiagnostics) {
     EXPECT_THROW((void)ProgramBundle::parse(overflowing_schema.dump()), std::invalid_argument);
 }
 
-TEST(ProgramBundleTest, SupportsMultipleVersionsAndRejectsExactIdentityDuplicates) {
-    const auto source            = make_source();
-    auto       multiple_versions = make_bundle_data(source);
-    multiple_versions.executable_registry_identities.push_back(
+TEST(ProgramBundleTest, RejectsDuplicateOrAmbiguousExecutableClosureIdentities) {
+    const auto source = make_source();
+
+    auto ambiguous = make_bundle_data(source);
+    ambiguous.executable_registry_identities.push_back(
         ExecutableIdentity{ExecutableKind::Node, "alpha", "2.0.0", sha('4')});
-    multiple_versions.executable_registry_identities.push_back(
-        ExecutableIdentity{ExecutableKind::Node, "alpha", "1.0.0", sha('5')});
-    ProgramBundle accepted(std::move(multiple_versions));
-    EXPECT_EQ(accepted.executable_registry_identities().size(), 4U);
+    EXPECT_THROW((void)ProgramBundle(std::move(ambiguous)), std::invalid_argument);
 
     auto exact_duplicate = make_bundle_data(source);
     exact_duplicate.executable_registry_identities.push_back(
@@ -366,11 +419,18 @@ TEST(ProgramBundleTest, SupportsMultipleVersionsAndRejectsExactIdentityDuplicate
     EXPECT_THROW((void)ProgramBundle(std::move(exact_duplicate)), std::invalid_argument);
 }
 
-TEST(ProgramBundleTest, RejectsMismatchedSealedDefinitionHashes) {
+TEST(ProgramBundleTest, RejectsMismatchedSealedDefinitions) {
     const auto source                                       = make_source();
     auto       data                                         = make_bundle_data(source);
     data.sealed_core_definitions.front().definition["name"] = "tampered";
     EXPECT_THROW((void)ProgramBundle(std::move(data)), std::invalid_argument);
+
+    auto  mismatched_name                    = make_bundle_data(source);
+    auto& mismatched_definition              = mismatched_name.sealed_core_definitions.front();
+    mismatched_definition.definition["name"] = "not-beta";
+    mismatched_definition.definition_hash =
+        sealed_core_definition_hash(mismatched_definition.definition);
+    EXPECT_THROW((void)ProgramBundle(std::move(mismatched_name)), std::invalid_argument);
 
     auto  future_schema                            = make_bundle_data(source);
     auto& future_definition                        = future_schema.sealed_core_definitions.front();

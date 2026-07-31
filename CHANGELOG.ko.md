@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=2019a958768e79633c822a6e4c5567068d0e7f11264e9bb3049ef4449d970178 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=eaa3336e9cba1d97c0384a12246f05262ba63fc3a218e40a0ecccc80c2ad93ec -->
 # 변경 기록
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -39,6 +39,16 @@ NeoGraph의 주목할 만한 모든 변경 사항을 이 파일에 기록한다.
   레지스트리 항목은 이제 전이적 승인 클로저를 위한 정확한 실행 가능 객체 의존성
   간선을 정규 형태로 기록하며, 로컬 전용 조건 검사는 프로세스 전역 레지스트리를
   조회하지 않고 레거시 키 기반 edge 문서까지 처리한다.
+
+- **단일 루트 `call_core` Program 컴파일러.** 닫힌 Program-v1 봉투만
+  받아 봉인 전에 로컬 전용 Core parse/round-trip/validation을 순수하게 수행하고,
+  RFC 6901 포인터와 소스 맵 귀속을 갖춘 집계형 진단을 내보내는
+  `ProgramCompiler`를 추가했다. 컴파일은 factory나 callable을 실행하지 않고
+  정규 Program, 레지스트리, 전이적 실행 항목 클로저, capability/effect,
+  import Merkle, 봉인 정의, Core 계획 식별자를 결정론적으로 도출한다.
+  작성 문서 스키마, 완전한 유한 예산 계약, zero-dispatch 거부 테스트,
+  정적·공유 설치 소비자 검증을 함께 제공한다. Core에는 전체형 parse/round-trip
+  및 로컬 validation 보고서를 추가했으며 기존 예외형 API 동작은 유지한다.
 
 - **SQLite Harness 레코드 저장소 (이슈 #147 후속).** WAL 지원, 스키마 버전 관리가 된 아티팩트/실행 영속성과 변경 불가능한 아티팩트 및 실행-아티팩트 바인딩을 제공하는 선택적 `neograph::mcp_sqlite` 대상과 `SqliteHarnessRecordStore` 추가. Harness MCP 바이너리가 이제 `runs.db`에 레코드를 저장하며, 체크포인트는 `checkpoints.db`에 남는다.
 - **AMD OpenMP GPU 이관 개념 증명.** 같은 숫자 팬아웃 작업에서 직렬 CPU,

@@ -1,0 +1,349 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fox1245.github.io/NeoGraph/spec/program-document-v1.schema.json",
+  "title": "NeoGraph Program Document v1",
+  "description": "Closed authored source contract for one call_core root. Cross-field requirements that JSON Schema cannot express portably (root.name equals root.definition.name and every budget maximum is at least its minimum) are enforced by ProgramCompiler.",
+  "type": "object",
+  "required": [
+    "program_schema_version",
+    "input_contract",
+    "output_contract",
+    "root",
+    "declared_budget_requirements"
+  ],
+  "properties": {
+    "program_schema_version": {"const": 1},
+    "input_contract": {"$ref": "#/$defs/contract"},
+    "output_contract": {"$ref": "#/$defs/contract"},
+    "root": {"$ref": "#/$defs/root"},
+    "declared_budget_requirements": {"$ref": "#/$defs/budget_requirements"}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "opaque_object": {
+      "type": "object",
+      "patternProperties": {
+        ".*": {}
+      },
+      "additionalProperties": false
+    },
+    "nonempty_string": {
+      "type": "string",
+      "minLength": 1
+    },
+    "string": {
+      "type": "string"
+    },
+    "uint64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "positive_uint64": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "contract": {
+      "type": "object",
+      "required": ["schema_version", "schema"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "schema": {"$ref": "#/$defs/opaque_object"}
+      },
+      "additionalProperties": false
+    },
+    "root": {
+      "type": "object",
+      "required": ["op", "name", "definition"],
+      "properties": {
+        "op": {"const": "call_core"},
+        "name": {"$ref": "#/$defs/nonempty_string"},
+        "definition": {"$ref": "#/$defs/core_definition"}
+      },
+      "additionalProperties": false
+    },
+    "core_definition": {
+      "$comment": "The root name and this Core name must be identical. Annotation keys beginning with '_' or 'x-' are accepted by the strict Core parser and removed by normalization.",
+      "type": "object",
+      "required": ["schema_version", "name", "nodes"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "name": {"$ref": "#/$defs/nonempty_string"},
+        "channels": {"$ref": "#/$defs/channel_map"},
+        "nodes": {"$ref": "#/$defs/node_map"},
+        "edges": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/edge"}
+        },
+        "conditional_edges": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/conditional_edge"}
+        },
+        "interrupt_before": {"$ref": "#/$defs/node_name_set"},
+        "interrupt_after": {"$ref": "#/$defs/node_name_set"},
+        "retry_policy": {"$ref": "#/$defs/retry_policy"}
+      },
+      "patternProperties": {
+        "^(?:_|x-)": {}
+      },
+      "additionalProperties": false
+    },
+    "channel_map": {
+      "type": "object",
+      "patternProperties": {
+        ".*": {"$ref": "#/$defs/channel"}
+      },
+      "additionalProperties": false
+    },
+    "channel": {
+      "type": "object",
+      "properties": {
+        "reducer": {"$ref": "#/$defs/string"},
+        "initial": {}
+      },
+      "patternProperties": {
+        "^(?:_|x-)": {}
+      },
+      "additionalProperties": false
+    },
+    "node_map": {
+      "type": "object",
+      "minProperties": 1,
+      "patternProperties": {
+        ".*": {"$ref": "#/$defs/node"}
+      },
+      "additionalProperties": false
+    },
+    "node": {
+      "$comment": "Properties other than the reserved type and barrier fields are an opaque, registry-schema-governed Core node configuration payload.",
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {"$ref": "#/$defs/string"},
+        "barrier": {"$ref": "#/$defs/barrier"}
+      },
+      "patternProperties": {
+        "^(?!type$|barrier$).+": {}
+      },
+      "additionalProperties": false
+    },
+    "barrier": {
+      "type": "object",
+      "required": ["wait_for"],
+      "properties": {
+        "wait_for": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/string"}
+        }
+      },
+      "patternProperties": {
+        "^(?:_|x-)": {}
+      },
+      "additionalProperties": false
+    },
+    "plain_edge": {
+      "type": "object",
+      "required": ["from", "to"],
+      "properties": {
+        "from": {"$ref": "#/$defs/string"},
+        "to": {"$ref": "#/$defs/string"}
+      },
+      "patternProperties": {
+        "^(?:_|x-)": {}
+      },
+      "additionalProperties": false
+    },
+    "inline_conditional_edge": {
+      "type": "object",
+      "required": ["from", "condition"],
+      "properties": {
+        "type": {"type": "string"},
+        "from": {"$ref": "#/$defs/string"},
+        "condition": {"$ref": "#/$defs/string"},
+        "routes": {"$ref": "#/$defs/routes"}
+      },
+      "patternProperties": {
+        "^(?:_|x-)": {}
+      },
+      "additionalProperties": false
+    },
+    "edge": {
+      "oneOf": [
+        {"$ref": "#/$defs/plain_edge"},
+        {"$ref": "#/$defs/inline_conditional_edge"}
+      ]
+    },
+    "conditional_edge": {
+      "type": "object",
+      "required": ["from", "condition"],
+      "properties": {
+        "from": {"$ref": "#/$defs/string"},
+        "condition": {"$ref": "#/$defs/string"},
+        "routes": {"$ref": "#/$defs/routes"}
+      },
+      "patternProperties": {
+        "^(?:_|x-)": {}
+      },
+      "additionalProperties": false
+    },
+    "routes": {
+      "type": "object",
+      "patternProperties": {
+        ".*": {"$ref": "#/$defs/string"}
+      },
+      "additionalProperties": false
+    },
+    "node_name_set": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/string"}
+    },
+    "retry_policy": {
+      "type": "object",
+      "properties": {
+        "max_retries": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "initial_delay_ms": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "backoff_multiplier": {"type": "number"},
+        "max_delay_ms": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      },
+      "patternProperties": {
+        "^(?:_|x-)": {}
+      },
+      "additionalProperties": false
+    },
+    "wall_time_budget": {
+      "type": "object",
+      "required": ["resource", "minimum", "maximum"],
+      "properties": {
+        "resource": {"const": "wall_time_ms"},
+        "minimum": {"$ref": "#/$defs/uint64"},
+        "maximum": {"$ref": "#/$defs/uint64"}
+      },
+      "additionalProperties": false
+    },
+    "model_tokens_budget": {
+      "type": "object",
+      "required": ["resource", "minimum", "maximum"],
+      "properties": {
+        "resource": {"const": "model_tokens"},
+        "minimum": {"$ref": "#/$defs/uint64"},
+        "maximum": {"$ref": "#/$defs/uint64"}
+      },
+      "additionalProperties": false
+    },
+    "monetary_budget": {
+      "type": "object",
+      "required": ["resource", "minimum", "maximum"],
+      "properties": {
+        "resource": {"const": "monetary_microunits"},
+        "minimum": {"$ref": "#/$defs/uint64"},
+        "maximum": {"$ref": "#/$defs/uint64"}
+      },
+      "additionalProperties": false
+    },
+    "concurrency_budget": {
+      "type": "object",
+      "required": ["resource", "minimum", "maximum"],
+      "properties": {
+        "resource": {"const": "max_concurrency"},
+        "minimum": {"$ref": "#/$defs/positive_uint64"},
+        "maximum": {"$ref": "#/$defs/positive_uint64"}
+      },
+      "additionalProperties": false
+    },
+    "program_operations_budget": {
+      "type": "object",
+      "required": ["resource", "minimum", "maximum"],
+      "properties": {
+        "resource": {"const": "max_program_operations"},
+        "minimum": {"const": 1},
+        "maximum": {"const": 1}
+      },
+      "additionalProperties": false
+    },
+    "core_steps_budget": {
+      "type": "object",
+      "required": ["resource", "minimum", "maximum"],
+      "properties": {
+        "resource": {"const": "max_core_steps"},
+        "minimum": {"$ref": "#/$defs/positive_uint64"},
+        "maximum": {"$ref": "#/$defs/positive_uint64"}
+      },
+      "additionalProperties": false
+    },
+    "dynamic_compiles_budget": {
+      "type": "object",
+      "required": ["resource", "minimum", "maximum"],
+      "properties": {
+        "resource": {"const": "max_dynamic_compiles"},
+        "minimum": {"const": 0},
+        "maximum": {"const": 0}
+      },
+      "additionalProperties": false
+    },
+    "child_depth_budget": {
+      "type": "object",
+      "required": ["resource", "minimum", "maximum"],
+      "properties": {
+        "resource": {"const": "max_child_depth"},
+        "minimum": {"const": 0},
+        "maximum": {"const": 0}
+      },
+      "additionalProperties": false
+    },
+    "total_children_budget": {
+      "type": "object",
+      "required": ["resource", "minimum", "maximum"],
+      "properties": {
+        "resource": {"const": "max_total_children"},
+        "minimum": {"const": 0},
+        "maximum": {"const": 0}
+      },
+      "additionalProperties": false
+    },
+    "budget_requirements": {
+      "$comment": "Each record additionally requires maximum >= minimum; ProgramCompiler enforces that relational invariant.",
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "uniqueItems": true,
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/wall_time_budget"},
+          {"$ref": "#/$defs/model_tokens_budget"},
+          {"$ref": "#/$defs/monetary_budget"},
+          {"$ref": "#/$defs/concurrency_budget"},
+          {"$ref": "#/$defs/program_operations_budget"},
+          {"$ref": "#/$defs/core_steps_budget"},
+          {"$ref": "#/$defs/dynamic_compiles_budget"},
+          {"$ref": "#/$defs/child_depth_budget"},
+          {"$ref": "#/$defs/total_children_budget"}
+        ]
+      },
+      "allOf": [
+        {"contains": {"properties": {"resource": {"const": "wall_time_ms"}}, "required": ["resource"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"resource": {"const": "model_tokens"}}, "required": ["resource"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"resource": {"const": "monetary_microunits"}}, "required": ["resource"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"resource": {"const": "max_concurrency"}}, "required": ["resource"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"resource": {"const": "max_program_operations"}}, "required": ["resource"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"resource": {"const": "max_core_steps"}}, "required": ["resource"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"resource": {"const": "max_dynamic_compiles"}}, "required": ["resource"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"resource": {"const": "max_child_depth"}}, "required": ["resource"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"resource": {"const": "max_total_children"}}, "required": ["resource"]}, "minContains": 1, "maxContains": 1}
+      ]
+    }
+  }
+}

@@ -43,6 +43,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   transitive admission closure, and local-only condition checks cover legacy
   keyed-edge documents without consulting process-global registries.
 
+- **Single-root `call_core` Program compiler.** Added `ProgramCompiler`, which
+  accepts only the closed Program-v1 envelope, performs pure local Core
+  parse/round-trip/validation before sealing, and emits aggregate typed
+  diagnostics with RFC 6901 pointers and source-map attribution. Compilation
+  derives the canonical Program, registry, transitive executable closure,
+  capability/effect, import Merkle, sealed-definition, and Core plan identities
+  without invoking factories or callables. The authored document schema,
+  complete finite budget contract, zero-dispatch rejection tests, and static
+  and shared installed-consumer coverage ship with the compiler. Core gained
+  additive total parse/round-trip and local validation reports while legacy
+  throwing APIs retain their existing behavior.
+
 - **SQLite Harness record store (issue #147 follow-up).** Added the optional
   `neograph::mcp_sqlite` target and `SqliteHarnessRecordStore` for WAL-backed,
   schema-versioned artifact/run persistence with immutable artifact and run-to-

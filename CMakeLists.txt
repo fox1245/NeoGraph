@@ -479,6 +479,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/version.cpp
         src/program/registry.cpp
         src/program/admission.cpp
+        src/program/compiler.cpp
     )
     target_include_directories(neograph_program
         PUBLIC

@@ -14,6 +14,10 @@ public:
                                                       std::string_view        name);
     static graph::TopologySpec       parse_local(const RegistrySnapshot& snapshot,
                                                  const json&             definition);
+    static graph::ParseReport        parse_local_report(const RegistrySnapshot& snapshot,
+                                                        const json&             definition);
+    static graph::RoundTripReport    verify_roundtrip_report(const json&                definition,
+                                                             const graph::TopologySpec& topology);
     static graph::ValidationReport   validate_local(const RegistrySnapshot&    snapshot,
                                                     const graph::TopologySpec& topology);
     static graph::CompiledGraph      link_local(const RegistrySnapshot&   snapshot,

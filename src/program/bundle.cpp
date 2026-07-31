@@ -363,6 +363,11 @@ void validate_sealed_definition(const SealedCoreDefinition& definition) {
     require_nonempty_utf8(definition.name, "Sealed Core definition name");
     require_sha256(definition.definition_hash, "Sealed Core definition hash");
     validate_core_definition_v1(definition.definition);
+    if (definition.definition.contains("name") &&
+        definition.definition["name"].get<std::string>() != definition.name) {
+        throw std::invalid_argument(
+            "Sealed Core definition name does not match its canonical definition");
+    }
     if (definition.definition_hash != sealed_core_definition_hash(definition.definition)) {
         throw std::invalid_argument(
             "Sealed Core definition hash does not match its canonical definition");
@@ -383,6 +388,13 @@ void validate_executable(const ExecutableIdentity& identity) {
         throw std::invalid_argument("Executable identity semantic_version is invalid");
     }
     require_sha256(identity.implementation_digest, "Executable implementation digest");
+}
+
+bool executable_identity_less(const ExecutableIdentity& lhs, const ExecutableIdentity& rhs) {
+    return std::tuple{to_string(lhs.kind), lhs.name, lhs.semantic_version,
+                      lhs.implementation_digest} < std::tuple{to_string(rhs.kind), rhs.name,
+                                                              rhs.semantic_version,
+                                                              rhs.implementation_digest};
 }
 
 void sort_unique_strings(std::vector<std::string>& values, std::string_view name) {
@@ -455,18 +467,14 @@ void normalize_data(ProgramBundleData& data) {
     for (const auto& identity : data.executable_registry_identities)
         validate_executable(identity);
     std::sort(data.executable_registry_identities.begin(),
-              data.executable_registry_identities.end(), [](const auto& lhs, const auto& rhs) {
-                  const auto lhs_kind = to_string(lhs.kind);
-                  const auto rhs_kind = to_string(rhs.kind);
-                  if (lhs_kind != rhs_kind) return lhs_kind < rhs_kind;
-                  return std::tie(lhs.name, lhs.semantic_version, lhs.implementation_digest) <
-                         std::tie(rhs.name, rhs.semantic_version, rhs.implementation_digest);
-              });
+              data.executable_registry_identities.end(), executable_identity_less);
     if (std::adjacent_find(data.executable_registry_identities.begin(),
                            data.executable_registry_identities.end(),
-                           [](const auto& lhs, const auto& rhs) { return lhs == rhs; }) !=
-        data.executable_registry_identities.end()) {
-        throw std::invalid_argument("Program bundle contains duplicate executable identity keys");
+                           [](const auto& lhs, const auto& rhs) {
+                               return lhs.kind == rhs.kind && lhs.name == rhs.name;
+                           }) != data.executable_registry_identities.end()) {
+        throw std::invalid_argument(
+            "Program bundle contains duplicate or ambiguous executable closure identities");
     }
 
     sort_unique_strings(data.capability_effect_closure.capabilities, "Capability closure");
@@ -802,6 +810,40 @@ std::string sealed_core_definition_hash(const json& definition) {
     }
     return detail::sha256_identity("sealed-core-definition/v1",
                                    detail::canonical_json_bytes(definition));
+}
+
+std::string core_compiled_plan_identity(const SealedCoreDefinition& definition,
+                                        std::string_view            compiler_build_id,
+                                        std::string_view            registry_snapshot_fingerprint,
+                                        const std::vector<ExecutableIdentity>& executable_closure) {
+    validate_sealed_definition(definition);
+    require_nonempty_utf8(compiler_build_id, "Core compiled-plan compiler_build_id");
+    require_sha256(registry_snapshot_fingerprint,
+                   "Core compiled-plan registry_snapshot_fingerprint");
+
+    auto sorted_closure = executable_closure;
+    for (const auto& identity : sorted_closure)
+        validate_executable(identity);
+    std::sort(sorted_closure.begin(), sorted_closure.end(), executable_identity_less);
+    if (std::adjacent_find(sorted_closure.begin(), sorted_closure.end(),
+                           [](const auto& lhs, const auto& rhs) {
+                               return lhs.kind == rhs.kind && lhs.name == rhs.name;
+                           }) != sorted_closure.end()) {
+        throw std::invalid_argument(
+            "Core compiled-plan executable closure contains duplicate or ambiguous identities");
+    }
+
+    json encoded_closure = json::array();
+    for (const auto& identity : sorted_closure)
+        encoded_closure.push_back(encode_executable(identity));
+
+    json envelope                             = json::object();
+    envelope["definition_hash"]               = definition.definition_hash;
+    envelope["definition"]                    = definition.definition;
+    envelope["compiler_build_id"]             = std::string(compiler_build_id);
+    envelope["registry_snapshot_fingerprint"] = std::string(registry_snapshot_fingerprint);
+    envelope["executable_closure"]            = std::move(encoded_closure);
+    return detail::sha256_identity("core-compiled-plan/v1", detail::canonical_json_bytes(envelope));
 }
 
 struct ProgramBundle::Impl {

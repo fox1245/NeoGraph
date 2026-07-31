@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=2019a958768e79633c822a6e4c5567068d0e7f11264e9bb3049ef4449d970178 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=eaa3336e9cba1d97c0384a12246f05262ba63fc3a218e40a0ecccc80c2ad93ec -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -43,6 +43,17 @@ NeoGraph の全注目すべき変更を本ファイルに文書化します。
   レジストリエントリは推移的な admission closure 用の正確な実行可能オブジェクト
   依存エッジを正規形で記録し、ローカル専用の条件検査はプロセスグローバル
   レジストリを参照せずにレガシーのキー付き edge 文書も処理します。
+
+- **単一ルート `call_core` Program コンパイラー。** 閉じた Program-v1
+  エンベロープのみを受理し、封印前にローカル専用 Core
+  parse/round-trip/validation を純粋に実行し、RFC 6901 ポインターと
+  ソースマップ帰属を持つ集約型診断を返す `ProgramCompiler` を追加しました。
+  factory や callable を実行せず、canonical Program、レジストリ、推移的な
+  実行項目クロージャ、capability/effect、import Merkle、封印定義、Core
+  プラン識別子を決定論的に導出します。作成文書スキーマ、完全な有限予算契約、
+  zero-dispatch 拒否テスト、静的・共有インストールコンシューマー検証も追加。
+  Core には total な parse/round-trip とローカル validation レポートを追加し、
+  既存の例外送出 API の動作は維持します。
 
 - **SQLite Harness レコードストア (issue #147 フォローアップ)。** オプションの
   `neograph::mcp_sqlite` ターゲットと `SqliteHarnessRecordStore` を追加。WAL バック、

@@ -17,11 +17,11 @@ std::string hash(char digit) {
 }
 
 ExecutableManifest manifest(ExecutableKind kind, std::string name, char digit) {
-    return ExecutableManifest{{kind, std::move(name), "1.0.0", hash(digit)},
-                              EffectMode::Brokered,
-                              "attestation:installed",
-                              {},
-                              {}};
+    ExecutableManifest result;
+    result.identity       = {kind, std::move(name), "1.0.0", hash(digit)};
+    result.effect_mode    = EffectMode::Brokered;
+    result.attestation_id = "attestation:installed";
+    return result;
 }
 
 class InstalledNode final : public neograph::graph::GraphNode {
@@ -31,6 +31,7 @@ public:
     asio::awaitable<neograph::graph::NodeOutput> run(neograph::graph::NodeInput) override {
         co_return neograph::graph::NodeOutput{};
     }
+
     std::string get_name() const override { return name_; }
 
 private:
@@ -46,7 +47,7 @@ RegistrySnapshot build_registry(bool reverse) {
                const neograph::graph::NodeContext&) {
                 return std::make_unique<InstalledNode>(name);
             },
-            neograph::json{{"type", "object"}},
+            neograph::json{{"type", "object"}, {"additionalProperties", false}},
             neograph::json{{"writes", neograph::json::array()}});
     };
     const auto add_reducer = [&] {
@@ -86,16 +87,83 @@ RegistrySnapshot build_registry(bool reverse) {
     return std::move(builder).build();
 }
 
+neograph::json program_document() {
+    const neograph::json definition{
+        {"schema_version", 1},
+        {"name", "main"},
+        {"channels", neograph::json{{"value", neograph::json{{"reducer", "installed-reducer"},
+                                                             {"initial", 0}}}}},
+        {"nodes", neograph::json{{"main", neograph::json{{"type", "installed-node"}}}}},
+        {"edges", neograph::json::array({neograph::json{{"from", "__start__"}, {"to", "main"}},
+                                         neograph::json{{"from", "main"}, {"to", "__end__"}}})},
+        {"conditional_edges", neograph::json::array()}};
+
+    return {
+        {"program_schema_version", 1},
+        {"input_contract",
+         neograph::json{{"schema_version", 1}, {"schema", neograph::json::object()}}},
+        {"output_contract",
+         neograph::json{{"schema_version", 1}, {"schema", neograph::json::object()}}},
+        {"root", neograph::json{{"op", "call_core"}, {"name", "main"}, {"definition", definition}}},
+        {"declared_budget_requirements",
+         neograph::json::array({
+             neograph::json{{"resource", "wall_time_ms"}, {"minimum", 1}, {"maximum", 60000}},
+             neograph::json{{"resource", "model_tokens"}, {"minimum", 0}, {"maximum", 10000}},
+             neograph::json{
+                 {"resource", "monetary_microunits"}, {"minimum", 0}, {"maximum", 1000000}},
+             neograph::json{{"resource", "max_concurrency"}, {"minimum", 1}, {"maximum", 1}},
+             neograph::json{{"resource", "max_program_operations"}, {"minimum", 1}, {"maximum", 1}},
+             neograph::json{{"resource", "max_core_steps"}, {"minimum", 1}, {"maximum", 100}},
+             neograph::json{{"resource", "max_dynamic_compiles"}, {"minimum", 0}, {"maximum", 0}},
+             neograph::json{{"resource", "max_child_depth"}, {"minimum", 0}, {"maximum", 0}},
+             neograph::json{{"resource", "max_total_children"}, {"minimum", 0}, {"maximum", 0}},
+         })},
+    };
+}
+
 }  // namespace
 
 int main() {
     using namespace neograph::program;
+
     const auto registry           = build_registry(false);
     const auto reordered_registry = build_registry(true);
     if (registry.fingerprint() != reordered_registry.fingerprint() ||
         registry.serialize_canonical() != reordered_registry.serialize_canonical()) {
         return EXIT_FAILURE;
     }
+
+    const auto compiled_source =
+        ProgramSource::from_cpp_builder("installed-compiler-consumer", 1, program_document());
+    ProgramCompiler compiler(registry, ProgramCompilerConfig{"installed-consumer/v1"});
+    ProgramCompiler reordered_compiler(reordered_registry,
+                                       ProgramCompilerConfig{"installed-consumer/v1"});
+    const auto      compiled_bundle        = compiler.compile(compiled_source);
+    const auto      reordered_bundle       = reordered_compiler.compile(compiled_source);
+    const auto      compiled_bytes         = compiled_bundle.serialize_canonical();
+    const auto      parsed_compiled_bundle = ProgramBundle::parse(compiled_bytes);
+
+    const bool compiler_deterministic =
+        compiler.registry_snapshot_fingerprint() == registry.fingerprint() &&
+        reordered_compiler.registry_snapshot_fingerprint() == registry.fingerprint() &&
+        compiled_bundle.id() == reordered_bundle.id() &&
+        compiled_bundle.canonical_program_hash() == reordered_bundle.canonical_program_hash() &&
+        compiled_bundle.core_plan_identities() == reordered_bundle.core_plan_identities() &&
+        compiled_bytes == reordered_bundle.serialize_canonical();
+    const bool compiler_round_trip =
+        parsed_compiled_bundle.id() == compiled_bundle.id() &&
+        parsed_compiled_bundle.canonical_program_hash() ==
+            compiled_bundle.canonical_program_hash() &&
+        parsed_compiled_bundle.registry_snapshot_fingerprint() ==
+            compiled_bundle.registry_snapshot_fingerprint() &&
+        parsed_compiled_bundle.core_plan_identities() == compiled_bundle.core_plan_identities() &&
+        parsed_compiled_bundle.serialize_canonical() == compiled_bytes;
+    const bool compiler_complete = !compiled_bundle.id().empty() &&
+                                   compiled_bundle.compiler_build_id() == "installed-consumer/v1" &&
+                                   compiled_bundle.sealed_core_definitions().size() == 1 &&
+                                   compiled_bundle.core_plan_identities().size() == 1 &&
+                                   compiled_bundle.executable_registry_identities().size() == 2 &&
+                                   compiled_bundle.declared_budget_requirements().size() == 9;
 
     AdmissionProfileBuilder admission_builder;
     admission_builder.id("installed-profile")
@@ -125,15 +193,15 @@ int main() {
     const SourceCoordinate authored{"installed-consumer", "/steps/0", span};
     const ImportRef        import{"module:installed", hash('9')};
     const SourceMapEntry   mapping{"/steps/0", authored};
-    auto                   source = ProgramSource::from_canonical_json(
+    auto                   stored_source = ProgramSource::from_canonical_json(
         "installed-consumer", R"({"program_schema_version":1,"steps":[]})", {import}, {mapping});
-    const auto source_round_trip = ProgramSource::parse(source.serialize_canonical());
+    const auto source_round_trip = ProgramSource::parse(stored_source.serialize_canonical());
 
     Diagnostic diagnostic;
     diagnostic.phase                = CompilePhase::Seal;
     diagnostic.code                 = "P_INSTALLED_CONSUMER";
     diagnostic.severity             = DiagnosticSeverity::Note;
-    diagnostic.primary.source_id    = source.source_id();
+    diagnostic.primary.source_id    = stored_source.source_id();
     diagnostic.primary.json_pointer = "";
     diagnostic.message              = "installed consumer diagnostic";
     diagnostic.witness              = neograph::json::object();
@@ -142,12 +210,10 @@ int main() {
     to_json(encoded_diagnostic, diagnostic);
     Diagnostic diagnostic_round_trip;
     from_json(encoded_diagnostic, diagnostic_round_trip);
-
     neograph::json encoded_import;
     to_json(encoded_import, import);
     ImportRef import_round_trip;
     from_json(encoded_import, import_round_trip);
-
     neograph::json encoded_mapping;
     to_json(encoded_mapping, mapping);
     SourceMapEntry mapping_round_trip;
@@ -155,51 +221,58 @@ int main() {
 
     const neograph::json core_definition{
         {"schema_version", SealedCoreDefinition::STORAGE_SCHEMA_VERSION},
+        {"name", "manual"},
         {"nodes", neograph::json{{"main", neograph::json{{"type", "installed-node"}}}}}};
+    const std::vector<ExecutableIdentity> executable_closure{
+        ExecutableIdentity{ExecutableKind::Reducer, "installed-reducer", "1.0.0", hash('2')}};
+    const SealedCoreDefinition sealed_definition{
+        "manual", sealed_core_definition_hash(core_definition), core_definition};
+    const CorePlanIdentity manual_plan{
+        "manual", core_compiled_plan_identity(sealed_definition, "installed-consumer-manual/v1",
+                                              registry.fingerprint(), executable_closure)};
 
     ProgramBundleData bundle_data;
-    bundle_data.source_hash                   = source.source_hash();
+    bundle_data.source_hash                   = stored_source.source_hash();
     bundle_data.canonical_program_hash        = hash('a');
-    bundle_data.compiler_build_id             = "installed-consumer";
+    bundle_data.compiler_build_id             = "installed-consumer-manual/v1";
     bundle_data.program_schema_version        = 1;
     bundle_data.registry_snapshot_fingerprint = registry.fingerprint();
     bundle_data.module_dependency_merkle_root = hash('c');
     bundle_data.input_contract                = ContractRecord{1, neograph::json::object()};
     bundle_data.output_contract               = ContractRecord{1, neograph::json::object()};
     bundle_data.orchestration_plan      = OrchestrationPlanRecord{1, neograph::json::object()};
-    bundle_data.sealed_core_definitions = {SealedCoreDefinition{
-        "main", sealed_core_definition_hash(core_definition), core_definition}};
-    bundle_data.core_plan_identities    = {CorePlanIdentity{"main", hash('e')}};
-    bundle_data.executable_registry_identities = {
-        ExecutableIdentity{ExecutableKind::Reducer, "installed-reducer", "1.0.0", hash('2')}};
-    bundle_data.declared_budget_requirements = {BudgetRequirement{"steps", 1, 10}};
+    bundle_data.sealed_core_definitions = {sealed_definition};
+    bundle_data.core_plan_identities    = {manual_plan};
+    bundle_data.executable_registry_identities = executable_closure;
+    bundle_data.declared_budget_requirements   = {BudgetRequirement{"steps", 1, 10}};
     bundle_data.capability_effect_closure =
         CapabilityEffectClosure{{"installed-capability"}, {"installed-effect"}};
     bundle_data.source_map  = {mapping};
     bundle_data.diagnostics = {diagnostic};
-    ProgramBundle bundle(std::move(bundle_data));
-    const auto    bundle_round_trip = ProgramBundle::parse(bundle.serialize_canonical());
+    ProgramBundle manual_bundle(std::move(bundle_data));
+    const auto    bundle_round_trip = ProgramBundle::parse(manual_bundle.serialize_canonical());
 
     ProgramVersionData version_data(
-        bundle.id(), admission, policy, {DependencyReceipt{"module:installed", hash('9')}},
+        manual_bundle.id(), admission, policy, {DependencyReceipt{"module:installed", hash('9')}},
         policy.owner_scope(),
-        CoreMaterializationReceipt{
-            "installed-consumer", registry.fingerprint(), {CorePlanIdentity{"main", hash('e')}}});
+        CoreMaterializationReceipt{"installed-consumer", registry.fingerprint(), {manual_plan}});
     ProgramVersion version(std::move(version_data));
     const auto     version_round_trip = ProgramVersion::parse(version.serialize_canonical());
-    const bool     enum_round_trips =
-        source_kind_from_string(to_string(source.kind())) == source.kind() &&
+
+    const bool enum_round_trips =
+        source_kind_from_string(to_string(stored_source.kind())) == stored_source.kind() &&
         compile_phase_from_string(to_string(diagnostic.phase)) == diagnostic.phase &&
         diagnostic_severity_from_string(to_string(diagnostic.severity)) == diagnostic.severity &&
         executable_kind_from_string(to_string(ExecutableKind::Imported)) ==
             ExecutableKind::Imported;
-    const bool ok =
-        source_round_trip.source_hash() == source.source_hash() &&
+    const bool prior_contracts =
+        source_round_trip.source_hash() == stored_source.source_hash() &&
         source_round_trip.imports().size() == 1 && source_round_trip.source_map().size() == 1 &&
         import_round_trip == import && mapping_round_trip == mapping &&
         diagnostic_round_trip.code == diagnostic.code &&
         diagnostic_round_trip.primary == diagnostic.primary &&
-        bundle_round_trip.id() == bundle.id() && bundle_round_trip.diagnostics().size() == 1 &&
+        bundle_round_trip.id() == manual_bundle.id() &&
+        bundle_round_trip.diagnostics().size() == 1 &&
         bundle_round_trip.diagnostics().front().code == diagnostic.code &&
         bundle_round_trip.capability_effect_closure().capabilities.size() == 1 &&
         admission_round_trip.fingerprint() == admission.fingerprint() &&
@@ -209,6 +282,13 @@ int main() {
         version_round_trip.admission_profile().fingerprint() == admission.fingerprint() &&
         version_round_trip.policy_snapshot().fingerprint() == policy.fingerprint() &&
         version_round_trip.dependency_receipts().size() == 1 && enum_round_trips;
-    std::cout << source.source_hash() << '\n' << bundle.id() << '\n' << version.id() << '\n';
-    return ok ? EXIT_SUCCESS : EXIT_FAILURE;
+
+    if (!compiler_deterministic || !compiler_round_trip || !compiler_complete || !prior_contracts) {
+        return EXIT_FAILURE;
+    }
+    std::cout << compiled_bundle.id() << '\n'
+              << compiled_bundle.canonical_program_hash() << '\n'
+              << compiled_bundle.core_plan_identities().front().compiled_plan_identity << '\n'
+              << version.id() << '\n';
+    return EXIT_SUCCESS;
 }

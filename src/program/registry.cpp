@@ -181,6 +181,15 @@ graph::TopologySpec detail::RegistrySnapshotAccess::parse_local(const RegistrySn
                                                                 const json& definition) {
     return graph::GraphCompiler::parse_local(definition, snapshot.impl_->registry);
 }
+graph::ParseReport detail::RegistrySnapshotAccess::parse_local_report(
+    const RegistrySnapshot& snapshot, const json& definition) {
+    return graph::GraphCompiler::parse_local_report(definition, snapshot.impl_->registry);
+}
+
+graph::RoundTripReport detail::RegistrySnapshotAccess::verify_roundtrip_report(
+    const json& definition, const graph::TopologySpec& topology) {
+    return graph::GraphCompiler::verify_roundtrip_report(definition, topology);
+}
 
 graph::ValidationReport detail::RegistrySnapshotAccess::validate_local(
     const RegistrySnapshot& snapshot, const graph::TopologySpec& topology) {

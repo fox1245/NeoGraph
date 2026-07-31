@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=2019a958768e79633c822a6e4c5567068d0e7f11264e9bb3049ef4449d970178 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eaa3336e9cba1d97c0384a12246f05262ba63fc3a218e40a0ecccc80c2ad93ec -->
 # 更新日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -36,6 +36,15 @@ NeoGraph 的所有显著变更均记录于本文件。
   parse/link/validate 入口，现有本地优先/全局回退重载保持不变。
   注册表条目现以规范形式记录精确的可执行对象依赖边，用于传递式准入闭包；
   仅本地条件检查也会覆盖旧版键值 edge 文档，且不会查询进程全局注册表。
+
+- **单根 `call_core` Program 编译器。** 新增 `ProgramCompiler`，仅接受封闭的
+  Program-v1 信封，在封存前纯执行仅本地 Core parse/round-trip/validation，
+  并输出带 RFC 6901 指针和源映射归属的聚合类型化诊断。编译过程不会调用
+  factory 或 callable，而是确定性派生 canonical Program、注册表、传递式
+  可执行项闭包、capability/effect、import Merkle、封存定义及 Core 计划标识。
+  同时提供创作文档模式、完整有限预算契约、zero-dispatch 拒绝测试，以及静态和
+  共享安装使用者验证。Core 新增 total parse/round-trip 和仅本地 validation
+  报告，同时保持现有抛异常 API 的行为不变。
 
 - **SQLite Harness 记录存储（issue #147 后续）。** 新增了可选的
   `neograph::mcp_sqlite` 目标和 `SqliteHarnessRecordStore`，用于 WAL 支持、

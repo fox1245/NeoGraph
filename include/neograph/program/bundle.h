@@ -49,6 +49,15 @@ struct SealedCoreDefinition {
  * Returns the v1 content identity required by SealedCoreDefinition::definition_hash.
  */
 NEOGRAPH_PROGRAM_API std::string sealed_core_definition_hash(const json& definition);
+/**
+ * Returns the deterministic Core compiled-plan identity for a sealed definition and the exact
+ * executable closure resolved from one compiler and registry snapshot.
+ */
+NEOGRAPH_PROGRAM_API std::string core_compiled_plan_identity(
+    const SealedCoreDefinition&            definition,
+    std::string_view                       compiler_build_id,
+    std::string_view                       registry_snapshot_fingerprint,
+    const std::vector<ExecutableIdentity>& executable_closure);
 
 struct CorePlanIdentity {
     std::string name;
@@ -76,8 +85,8 @@ struct BudgetRequirement {
  * Mutable construction input. ProgramBundle validates it, deep-copies JSON,
  * and canonicalizes semantic sets before deriving its identity:
  * definitions/plans by name, executables by
- * (kind,name,semantic_version,implementation_digest), closure strings
- * lexicographically, budgets by resource, and source maps by generated pointer.
+ * (kind,name,semantic_version,implementation_digest) with exactly one identity per (kind,name),
+ * closure strings lexicographically, budgets by resource, and source maps by generated pointer.
  * Diagnostics retain producer order.
  */
 struct ProgramBundleData {

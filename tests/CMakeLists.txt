@@ -85,6 +85,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         test_program_values.cpp
         test_program_registry.cpp
         test_program_admission.cpp
+        test_program_compiler.cpp
     )
     target_include_directories(neograph_program_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/src/program
