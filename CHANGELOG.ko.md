@@ -50,6 +50,18 @@ NeoGraph의 주목할 만한 모든 변경 사항을 이 파일에 기록한다.
   정적·공유 설치 소비자 검증을 함께 제공한다. Core에는 전체형 parse/round-trip
   및 로컬 validation 보고서를 추가했으며 기존 예외형 API 동작은 유지한다.
 
+- **고정된 Program 런타임 수직 슬라이스.** `ProgramCatalog`,
+  `EngineGenerationCache`, `ProgramRuntime`, 공유 `ProgramHandle`, 불변
+  `ProgramResult`, 형식화된 Program 이벤트 봉투, 인메모리 `ProgramStore`,
+  append-only CAS `ProgramJournal`을 추가했다. 승인은 구체화 전에 신뢰할 수
+  없는 번들 의미를 재계산하며, 각 시도는 하나의 불변 Core 세대를 고정하고 기존
+  `GraphEngine` 비동기 경로만 호출한다. 완료, 중단, 정확한 체크포인트 재개,
+  취소, 시간 초과, Core 단계 소진, 체크포인트 비호환, 실패를 비갱신 예산과
+  체크포인트 계보를 보존하는 형식화된 종료 상태로 매핑한다. Journal 커밋은
+  체크포인트/종료 이벤트 전달보다 먼저 이루어지고, 동시 재개는 CAS 승자 하나만
+  허용하며, Core 브로커가 생길 때까지 효과가 있거나 비어 있지 않은 스키마를
+  가진 Program을 거부한다.
+
 - **SQLite Harness 레코드 저장소 (이슈 #147 후속).** WAL 지원, 스키마 버전 관리가 된 아티팩트/실행 영속성과 변경 불가능한 아티팩트 및 실행-아티팩트 바인딩을 제공하는 선택적 `neograph::mcp_sqlite` 대상과 `SqliteHarnessRecordStore` 추가. Harness MCP 바이너리가 이제 `runs.db`에 레코드를 저장하며, 체크포인트는 `checkpoints.db`에 남는다.
 - **AMD OpenMP GPU 이관 개념 증명.** 같은 숫자 팬아웃 작업에서 직렬 CPU,
   OpenMP 자동 스레딩, 반복마다 데이터를 옮기는 GPU 실행, 데이터를 GPU에

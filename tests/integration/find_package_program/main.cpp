@@ -1,16 +1,24 @@
-#include <neograph/graph/node.h>
 #include <neograph/program/program.h>
 
+#include <asio/co_spawn.hpp>
+#include <asio/io_context.hpp>
+#include <asio/use_future.hpp>
+
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 namespace {
 
 using namespace neograph::program;
+std::atomic<unsigned> node_calls{0};
+std::atomic<unsigned> interrupt_calls{0};
 
 std::string hash(char digit) {
     return "sha256:" + std::string(64, digit);
@@ -29,6 +37,7 @@ public:
     explicit InstalledNode(std::string name) : name_(std::move(name)) {}
 
     asio::awaitable<neograph::graph::NodeOutput> run(neograph::graph::NodeInput) override {
+        ++node_calls;
         co_return neograph::graph::NodeOutput{};
     }
 
@@ -36,6 +45,31 @@ public:
 
 private:
     std::string name_;
+};
+
+class InstalledInterruptNode final : public neograph::graph::GraphNode {
+public:
+    explicit InstalledInterruptNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<neograph::graph::NodeOutput> run(neograph::graph::NodeInput input) override {
+        ++interrupt_calls;
+        if (!input.ctx.resume_value) {
+            throw neograph::graph::NodeInterrupt("installed approval");
+        }
+        co_return neograph::graph::NodeOutput{};
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+class CountingSink final : public ProgramEventSink {
+public:
+    void on_event(const ProgramEvent&) override { ++calls; }
+
+    std::atomic<unsigned> calls{0};
 };
 
 RegistrySnapshot build_registry(bool reverse) {
@@ -46,6 +80,16 @@ RegistrySnapshot build_registry(bool reverse) {
             [](const std::string& name, const neograph::json&,
                const neograph::graph::NodeContext&) {
                 return std::make_unique<InstalledNode>(name);
+            },
+            neograph::json{{"type", "object"}, {"additionalProperties", false}},
+            neograph::json{{"writes", neograph::json::array()}});
+    };
+    const auto add_interrupt = [&] {
+        builder.add_node(
+            manifest(ExecutableKind::Node, "installed-interrupt", '6'),
+            [](const std::string& name, const neograph::json&,
+               const neograph::graph::NodeContext&) {
+                return std::make_unique<InstalledInterruptNode>(name);
             },
             neograph::json{{"type", "object"}, {"additionalProperties", false}},
             neograph::json{{"writes", neograph::json::array()}});
@@ -76,9 +120,11 @@ RegistrySnapshot build_registry(bool reverse) {
         add_provider();
         add_condition();
         add_reducer();
+        add_interrupt();
         add_node();
     } else {
         add_node();
+        add_interrupt();
         add_reducer();
         add_condition();
         add_provider();
@@ -87,13 +133,13 @@ RegistrySnapshot build_registry(bool reverse) {
     return std::move(builder).build();
 }
 
-neograph::json program_document() {
+neograph::json program_document(std::string node_type = "installed-node") {
     const neograph::json definition{
         {"schema_version", 1},
         {"name", "main"},
         {"channels", neograph::json{{"value", neograph::json{{"reducer", "installed-reducer"},
                                                              {"initial", 0}}}}},
-        {"nodes", neograph::json{{"main", neograph::json{{"type", "installed-node"}}}}},
+        {"nodes", neograph::json{{"main", neograph::json{{"type", std::move(node_type)}}}}},
         {"edges", neograph::json::array({neograph::json{{"from", "__start__"}, {"to", "main"}},
                                          neograph::json{{"from", "main"}, {"to", "__end__"}}})},
         {"conditional_edges", neograph::json::array()}};
@@ -171,7 +217,12 @@ int main() {
         .registry(registry)
         .mode(AdmissionMode::MultiTenant)
         .max_program_schema_version(1)
+        .allow_source_kind(SourceKind::CppBuilder)
         .allow_source_kind(SourceKind::CanonicalJson)
+        .allow_executable(
+            ExecutableIdentity{ExecutableKind::Node, "installed-node", "1.0.0", hash('1')})
+        .allow_executable(
+            ExecutableIdentity{ExecutableKind::Node, "installed-interrupt", "1.0.0", hash('6')})
         .allow_executable(
             ExecutableIdentity{ExecutableKind::Reducer, "installed-reducer", "1.0.0", hash('2')})
         .allow_effect_mode(EffectMode::Brokered);
@@ -184,8 +235,7 @@ int main() {
         .owner_scope("installed-consumer")
         .admission_profile(admission)
         .allow_capability("installed-capability")
-        .allow_effect("installed-effect")
-        .budget_ceiling(BudgetLimits{100, 100, 100, 1, 100, 100, 1, 1, 1});
+        .budget_ceiling(BudgetLimits{60000, 10000, 1000000, 1, 1, 100, 1, 1, 1});
     const auto policy            = std::move(policy_builder).build();
     const auto policy_round_trip = PolicySnapshot::parse(policy.serialize_canonical());
 
@@ -232,6 +282,7 @@ int main() {
                                               registry.fingerprint(), executable_closure)};
 
     ProgramBundleData bundle_data;
+    bundle_data.source_kind                   = stored_source.kind();
     bundle_data.source_hash                   = stored_source.source_hash();
     bundle_data.canonical_program_hash        = hash('a');
     bundle_data.compiler_build_id             = "installed-consumer-manual/v1";
@@ -283,7 +334,70 @@ int main() {
         version_round_trip.policy_snapshot().fingerprint() == policy.fingerprint() &&
         version_round_trip.dependency_receipts().size() == 1 && enum_round_trips;
 
-    if (!compiler_deterministic || !compiler_round_trip || !compiler_complete || !prior_contracts) {
+    const auto interrupt_source = ProgramSource::from_cpp_builder(
+        "installed-runtime-interrupt", 1, program_document("installed-interrupt"));
+    const auto interrupt_bundle = compiler.compile(interrupt_source);
+    auto       program_store    = std::make_shared<InMemoryProgramStore>();
+    auto       engine_cache     = std::make_shared<EngineGenerationCache>();
+    auto       catalog          = std::make_shared<ProgramCatalog>(
+        CatalogConfig{program_store, registry, engine_cache, "installed-consumer/v1"});
+    const auto admitted = catalog->admit(
+        compiled_bundle, ProgramAdmission{"installed-consumer", admission, policy, {}});
+    const auto admitted_interrupt = catalog->admit(
+        interrupt_bundle, ProgramAdmission{"installed-consumer", admission, policy, {}});
+    auto            checkpoints = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
+    auto            journal     = std::make_shared<InMemoryProgramJournal>();
+    auto            sink        = std::make_shared<CountingSink>();
+    const RunBudget runtime_budget{1000, 1000, 1000, 1, 1, 100, 0, 0, 0};
+    bool            runtime_contract             = false;
+    unsigned        callbacks_before_destruction = 0;
+    {
+        ProgramRuntime runtime(RuntimeConfig{catalog, checkpoints, {}, journal, 2});
+        const auto     completed = runtime.run(
+            admitted,
+            ProgramInvocation{neograph::json::object(), runtime_budget, "installed-sync", sink});
+        const auto interrupted =
+            runtime
+                .start(admitted_interrupt,
+                       ProgramInvocation{neograph::json::object(), runtime_budget,
+                                         "installed-interrupt", sink})
+                .wait();
+
+        asio::io_context io;
+        auto             resumed_future = asio::co_spawn(
+            io,
+            runtime.resume_async(
+                interrupted.run_id(),
+                ProgramResume{neograph::json{{"decision", "approved"}}, "installed-resume", sink}),
+            asio::use_future);
+        io.run();
+        const auto resumed           = resumed_future.get();
+        const auto completed_journal = journal->latest(completed.run_id());
+        const auto resumed_journal   = journal->latest(resumed.run_id());
+
+        runtime_contract =
+            completed.status() == ProgramTerminalStatus::Completed &&
+            interrupted.status() == ProgramTerminalStatus::Interrupted &&
+            resumed.status() == ProgramTerminalStatus::Completed &&
+            completed.program_version_id() == admitted.id() &&
+            resumed.program_version_id() == admitted_interrupt.id() &&
+            completed.bundle_id() == compiled_bundle.id() &&
+            resumed.bundle_id() == interrupt_bundle.id() && completed.checkpoint().has_value() &&
+            interrupted.checkpoint().has_value() && resumed.checkpoint().has_value() &&
+            interrupted.checkpoint()->core_thread_id == resumed.checkpoint()->core_thread_id &&
+            completed_journal.has_value() &&
+            completed_journal->continuation.state == ContinuationState::Completed &&
+            resumed_journal.has_value() &&
+            resumed_journal->continuation.state == ContinuationState::Completed &&
+            resumed_journal->continuation.attempt == 2 && node_calls.load() == 1 &&
+            interrupt_calls.load() == 2;
+        callbacks_before_destruction = sink->calls.load();
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    runtime_contract = runtime_contract && sink->calls.load() == callbacks_before_destruction;
+
+    if (!compiler_deterministic || !compiler_round_trip || !compiler_complete || !prior_contracts ||
+        !runtime_contract) {
         return EXIT_FAILURE;
     }
     std::cout << compiled_bundle.id() << '\n'

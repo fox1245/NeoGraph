@@ -859,6 +859,7 @@ struct ProgramCompiler::Impl {
             auto       source_map   = generated_source_map(source, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();
             ProgramBundleData data;
+            data.source_kind                    = source.kind();
             data.source_hash                    = source.source_hash();
             data.canonical_program_hash         = program_hash;
             data.compiler_build_id              = config.compiler_build_id;

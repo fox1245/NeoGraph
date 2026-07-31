@@ -55,6 +55,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   additive total parse/round-trip and local validation reports while legacy
   throwing APIs retain their existing behavior.
 
+- **Pinned Program runtime vertical slice.** Added `ProgramCatalog`,
+  `EngineGenerationCache`, `ProgramRuntime`, shared `ProgramHandle`,
+  immutable `ProgramResult`, typed Program event envelopes, in-memory
+  `ProgramStore`, and an append-only CAS `ProgramJournal`. Admission recomputes
+  untrusted bundle semantics before materialization; each attempt pins one
+  immutable Core generation and invokes the existing `GraphEngine` async path.
+  Runtime execution now maps completion, interruption, exact-checkpoint resume,
+  cancellation, timeout, Core step exhaustion, checkpoint incompatibility, and
+  failures to typed terminal states while preserving nonrenewable budget and
+  checkpoint lineage. Journal commits precede checkpoint/terminal event
+  delivery, concurrent resume has one CAS winner, and the PR6 slice rejects
+  effectful or nonempty-schema Programs until the Core broker exists.
+
 - **SQLite Harness record store (issue #147 follow-up).** Added the optional
   `neograph::mcp_sqlite` target and `SqliteHarnessRecordStore` for WAL-backed,
   schema-versioned artifact/run persistence with immutable artifact and run-to-

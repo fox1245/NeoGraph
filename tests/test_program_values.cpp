@@ -49,6 +49,7 @@ ProgramSource make_source() {
 
 ProgramBundleData make_bundle_data(const ProgramSource& source) {
     ProgramBundleData data;
+    data.source_kind                   = source.kind();
     data.source_hash                   = source.source_hash();
     data.canonical_program_hash        = sha('a');
     data.compiler_build_id             = "compiler:test";
@@ -405,6 +406,30 @@ TEST(ProgramBundleTest, RejectsUnsupportedSourceSchemaAndErrorDiagnostics) {
     EXPECT_THROW((void)ProgramBundle::parse(overflowing_schema.dump()), std::invalid_argument);
 }
 
+TEST(ProgramBundleTest, SourceKindIsRequiredAndRoundTripsExactly) {
+    const auto cpp_source =
+        ProgramSource::from_cpp_builder("source.cpp", 1, make_source().document());
+    ProgramBundle cpp_bundle(make_bundle_data(cpp_source));
+    EXPECT_EQ(cpp_bundle.source_kind(), SourceKind::CppBuilder);
+    EXPECT_EQ(ProgramBundle::parse(cpp_bundle.serialize_canonical()).source_kind(),
+              SourceKind::CppBuilder);
+
+    auto omitted        = make_bundle_data(make_source());
+    omitted.source_kind = static_cast<SourceKind>(255);
+    EXPECT_THROW((void)ProgramBundle(std::move(omitted)), std::invalid_argument);
+
+    auto unknown           = json::parse(cpp_bundle.serialize_canonical());
+    unknown["source_kind"] = "future_source_kind";
+    EXPECT_THROW((void)ProgramBundle::parse(unknown.dump()), std::invalid_argument);
+
+    auto       missing = cpp_bundle.serialize_canonical();
+    const auto marker  = std::string(R"("source_kind":"cpp_builder",)");
+    const auto offset  = missing.find(marker);
+    ASSERT_NE(offset, std::string::npos);
+    missing.erase(offset, marker.size());
+    EXPECT_THROW((void)ProgramBundle::parse(missing), std::invalid_argument);
+}
+
 TEST(ProgramBundleTest, RejectsDuplicateOrAmbiguousExecutableClosureIdentities) {
     const auto source = make_source();
 
@@ -582,6 +607,7 @@ TEST(ProgramVersionTest, StoredParserRejectsDuplicateObjectMembers) {
 
 TEST(ProgramStoredValueTest, V1CanonicalBytesAndIdsMatchKnownVectors) {
     ProgramBundleData bundle_data;
+    bundle_data.source_kind                    = SourceKind::CanonicalJson;
     bundle_data.source_hash                    = make_source().source_hash();
     bundle_data.canonical_program_hash         = sha('a');
     bundle_data.compiler_build_id              = "vector-compiler";
@@ -607,16 +633,16 @@ TEST(ProgramStoredValueTest, V1CanonicalBytesAndIdsMatchKnownVectors) {
         R"JSON(ddddddddddddddddddddd","name":"main"}],"declared_budget_requirements":[{"maximum":1,"minimum":0,"res)JSON"
         R"JSON(ource":"steps"}],"diagnostics":[],"executable_registry_identities":[{"implementation_digest":"sha256)JSON"
         R"JSON(:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","kind":"node","name":"main","sema)JSON"
-        R"JSON(ntic_version":"1.0.0"}],"format":"neograph-program-bundle","id":"sha256:9f22330702d0eed754f2b42fc4fa269d5083d0da42a5a7c69cc205c8a9ef2ebe","input_contra)JSON"
+        R"JSON(ntic_version":"1.0.0"}],"format":"neograph-program-bundle","id":"sha256:536eb03dc23c6d4d3b12212e516efd5a24696073be7b8b6dc6041fe3f4cfa5d1","input_contra)JSON"
         R"JSON(ct":{"schema":{},"schema_version":1},"module_dependency_merkle_root":"sha256:cccccccccccccccccccccccccccccccc)JSON"
         R"JSON(cccccccccccccccccccccccccccccccc","orchestration_plan":{"plan":{},"schema_version":1},"output_contract":)JSON"
         R"JSON({"schema":{},"schema_version":1},"program_schema_version":1,"registry_snapshot_fingerprint":"sha256:bbbbbb)JSON"
         R"JSON(bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sealed_core_definitions":[{"definition":{"nodes":{"main":{"type":"vector-node"}},"schema_version":1},)JSON"
         R"JSON("definition_hash":"sha256:322450017d0c7116b10d44ab43b62815f9423729ee240b0bb8f25cb6352208aa","name":"main"}],)JSON"
-        R"JSON("source_hash":"sha256:d0de8671b55a589345c561ca87b14a55755e8934e1c82fadb0ab9c934a313e3a","source_map")JSON"
-        R"JSON(:[],"storage_schema_version":1})JSON";
+        R"JSON("source_hash":"sha256:d0de8671b55a589345c561ca87b14a55755e8934e1c82fadb0ab9c934a313e3a","source_kind")JSON"
+        R"JSON(:"canonical_json","source_map":[],"storage_schema_version":1})JSON";
     EXPECT_EQ(bundle.id(),
-              "sha256:9f22330702d0eed754f2b42fc4fa269d5083d0da42a5a7c69cc205c8a9ef2ebe");
+              "sha256:536eb03dc23c6d4d3b12212e516efd5a24696073be7b8b6dc6041fe3f4cfa5d1");
     EXPECT_EQ(bundle.serialize_canonical(), expected_bundle);
 
     const auto         registry  = make_registry_snapshot();
@@ -629,9 +655,9 @@ TEST(ProgramStoredValueTest, V1CanonicalBytesAndIdsMatchKnownVectors) {
     ProgramVersion version(std::move(version_data));
 
     const std::string expected_version =
-        R"JSON({"admission_profile":{"allowed_effect_modes":["brokered"],"allowed_executables":[],"allowed_source_kinds":["canonical_json"],"fingerprint":"sha256:fc9e0cb8678edc425f1dec30012cf2fbb8bce5fa7798e6063dae9c2ce3e277d4","format":"neograph-admission-profile","id":"vector-profile","max_program_schema_version":1,"mode":"multi_tenant","registry_fingerprint":"sha256:c685c33a3d9d439451423bd97791ab3bc6daa0e3aa623a38258cef18a6ae3e2d","semantic_version":"1.0.0","storage_schema_version":1},"bundle_id":"sha256:9f22330702d0eed754f2b42fc4fa269d5083d0da42a5a7c69cc205c8a9ef2ebe","core_materialization_receipt":{"compiler_build_id":"vector-compiler","plans":[{"compiled_plan_identity":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","name":"main"}],"registry_snapshot_fingerprint":"sha256:c685c33a3d9d439451423bd97791ab3bc6daa0e3aa623a38258cef18a6ae3e2d"},"dependency_receipts":[],"format":"neograph-program-version","id":"sha256:25ef13bae8657f9fae18c5f9b53032c4078ce48c9824f9df24de0aac6b3f6e29","ownership_scope":"tenant:vector","policy_snapshot":{"admission_profile_fingerprint":"sha256:fc9e0cb8678edc425f1dec30012cf2fbb8bce5fa7798e6063dae9c2ce3e277d4","allowed_capabilities":[],"allowed_effects":[],"allowed_module_digests":[],"budget_ceiling":{"max_child_depth":1,"max_concurrency":1,"max_core_steps":1,"max_dynamic_compiles":1,"max_program_operations":1,"max_total_children":1,"model_tokens":1,"monetary_microunits":1,"wall_time_ms":1},"fingerprint":"sha256:ffac3e7ab1a42f3eca91798340027ded3c19e0e93c56d4075723d9a3c805c1e2","format":"neograph-policy-snapshot","id":"vector-policy","owner_scope":"tenant:vector","registry_fingerprint":"sha256:c685c33a3d9d439451423bd97791ab3bc6daa0e3aa623a38258cef18a6ae3e2d","semantic_version":"1.0.0","storage_schema_version":1},"storage_schema_version":1})JSON";
+        R"JSON({"admission_profile":{"allowed_effect_modes":["brokered"],"allowed_executables":[],"allowed_source_kinds":["canonical_json"],"fingerprint":"sha256:fc9e0cb8678edc425f1dec30012cf2fbb8bce5fa7798e6063dae9c2ce3e277d4","format":"neograph-admission-profile","id":"vector-profile","max_program_schema_version":1,"mode":"multi_tenant","registry_fingerprint":"sha256:c685c33a3d9d439451423bd97791ab3bc6daa0e3aa623a38258cef18a6ae3e2d","semantic_version":"1.0.0","storage_schema_version":1},"bundle_id":"sha256:536eb03dc23c6d4d3b12212e516efd5a24696073be7b8b6dc6041fe3f4cfa5d1","core_materialization_receipt":{"compiler_build_id":"vector-compiler","plans":[{"compiled_plan_identity":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","name":"main"}],"registry_snapshot_fingerprint":"sha256:c685c33a3d9d439451423bd97791ab3bc6daa0e3aa623a38258cef18a6ae3e2d"},"dependency_receipts":[],"format":"neograph-program-version","id":"sha256:33e97162e89f9fdefa980c33f1a9652b2d2a623601acc5f54a53b09076175a17","ownership_scope":"tenant:vector","policy_snapshot":{"admission_profile_fingerprint":"sha256:fc9e0cb8678edc425f1dec30012cf2fbb8bce5fa7798e6063dae9c2ce3e277d4","allowed_capabilities":[],"allowed_effects":[],"allowed_module_digests":[],"budget_ceiling":{"max_child_depth":1,"max_concurrency":1,"max_core_steps":1,"max_dynamic_compiles":1,"max_program_operations":1,"max_total_children":1,"model_tokens":1,"monetary_microunits":1,"wall_time_ms":1},"fingerprint":"sha256:ffac3e7ab1a42f3eca91798340027ded3c19e0e93c56d4075723d9a3c805c1e2","format":"neograph-policy-snapshot","id":"vector-policy","owner_scope":"tenant:vector","registry_fingerprint":"sha256:c685c33a3d9d439451423bd97791ab3bc6daa0e3aa623a38258cef18a6ae3e2d","semantic_version":"1.0.0","storage_schema_version":1},"storage_schema_version":1})JSON";
     EXPECT_EQ(version.id(),
-              "sha256:25ef13bae8657f9fae18c5f9b53032c4078ce48c9824f9df24de0aac6b3f6e29");
+              "sha256:33e97162e89f9fdefa980c33f1a9652b2d2a623601acc5f54a53b09076175a17");
     EXPECT_EQ(version.serialize_canonical(), expected_version);
 }
 
@@ -707,6 +733,15 @@ TEST(ProgramStoredValueTest, BundleDetachesDirectlyInitializedJsonProxies) {
     owner["witness"]["nested"]["late"]            = true;
     EXPECT_EQ(bundle.id(), bundle_id);
     EXPECT_EQ(bundle.serialize_canonical(), bytes);
+}
+
+TEST(ProgramResultTest, DefaultValueIsCoherentAsioExceptionSentinel) {
+    ProgramResult result;
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    EXPECT_EQ(result.operation_id(), "root");
+    EXPECT_EQ(result.attempt(), 0U);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RESULT_EMPTY");
 }
 
 }  // namespace

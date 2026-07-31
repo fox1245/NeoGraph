@@ -9,10 +9,18 @@
  */
 #pragma once
 
+#include <neograph/graph/node.h>
 #include <neograph/program/admission.h>
 #include <neograph/program/bundle.h>
+#include <neograph/program/catalog.h>
 #include <neograph/program/compiler.h>
 #include <neograph/program/diagnostic.h>
+#include <neograph/program/event.h>
+#include <neograph/program/handle.h>
+#include <neograph/program/journal.h>
 #include <neograph/program/registry.h>
+#include <neograph/program/result.h>
+#include <neograph/program/runtime.h>
 #include <neograph/program/source.h>
+#include <neograph/program/store.h>
 #include <neograph/program/version.h>

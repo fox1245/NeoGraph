@@ -5,6 +5,8 @@
 #include <neograph/graph/validator.h>
 #include <neograph/program/registry.h>
 
+#include <memory>
+
 namespace neograph::program::detail {
 
 class RegistrySnapshotAccess {
@@ -12,6 +14,8 @@ public:
     static const ExecutableManifest& require_manifest(const RegistrySnapshot& snapshot,
                                                       ExecutableKind          kind,
                                                       std::string_view        name);
+    static std::shared_ptr<const graph::GraphRegistry> runtime_registry(
+        const RegistrySnapshot& snapshot);
     static graph::TopologySpec       parse_local(const RegistrySnapshot& snapshot,
                                                  const json&             definition);
     static graph::ParseReport        parse_local_report(const RegistrySnapshot& snapshot,

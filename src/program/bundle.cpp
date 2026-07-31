@@ -416,6 +416,10 @@ void normalize_data(ProgramBundleData& data) {
     for (auto& diagnostic : data.diagnostics) {
         diagnostic.witness = detail::owned_json_copy(diagnostic.witness);
     }
+    if (data.source_kind != SourceKind::CanonicalJson &&
+        data.source_kind != SourceKind::CppBuilder) {
+        throw std::invalid_argument("Program bundle source_kind is unknown");
+    }
     require_sha256(data.source_hash, "Program bundle source_hash");
     require_sha256(data.canonical_program_hash, "Program bundle canonical_program_hash");
     require_nonempty_utf8(data.compiler_build_id, "Program bundle compiler_build_id");
@@ -654,6 +658,7 @@ BudgetRequirement parse_budget(const json& value) {
 
 json bundle_body(const ProgramBundleData& data) {
     json value                             = json::object();
+    value["source_kind"]                   = std::string(to_string(data.source_kind));
     value["source_hash"]                   = data.source_hash;
     value["canonical_program_hash"]        = data.canonical_program_hash;
     value["compiler_build_id"]             = data.compiler_build_id;
@@ -729,6 +734,8 @@ std::vector<T> parse_array(const json& value, std::string_view key, Parse parse)
 
 ProgramBundleData parse_body(const json& value) {
     ProgramBundleData data;
+    data.source_kind                   =
+        source_kind_from_string(require_string(value, "source_kind"));
     data.source_hash                   = require_string(value, "source_hash");
     data.canonical_program_hash        = require_string(value, "canonical_program_hash");
     data.compiler_build_id             = require_string(value, "compiler_build_id");
@@ -876,10 +883,11 @@ ProgramBundle ProgramBundle::parse(std::string_view stored_bytes) {
     }
     detail::reject_unknown_fields(
         value, "Stored ProgramBundle",
-        {"format", "storage_schema_version", "id", "source_hash", "canonical_program_hash",
-         "compiler_build_id", "program_schema_version", "registry_snapshot_fingerprint",
-         "module_dependency_merkle_root", "input_contract", "output_contract", "orchestration_plan",
-         "sealed_core_definitions", "core_plan_identities", "capability_effect_closure",
+        {"format", "storage_schema_version", "id", "source_kind", "source_hash",
+         "canonical_program_hash", "compiler_build_id", "program_schema_version",
+         "registry_snapshot_fingerprint", "module_dependency_merkle_root", "input_contract",
+         "output_contract", "orchestration_plan", "sealed_core_definitions",
+         "core_plan_identities", "capability_effect_closure",
          "executable_registry_identities", "declared_budget_requirements", "source_map",
          "diagnostics"});
     if (require_uint32(value, "storage_schema_version") != STORAGE_SCHEMA_VERSION) {
@@ -895,6 +903,9 @@ ProgramBundle ProgramBundle::parse(std::string_view stored_bytes) {
 
 const std::string& ProgramBundle::id() const noexcept {
     return impl_->id;
+}
+SourceKind ProgramBundle::source_kind() const noexcept {
+    return impl_->data.source_kind;
 }
 const std::string& ProgramBundle::source_hash() const noexcept {
     return impl_->data.source_hash;

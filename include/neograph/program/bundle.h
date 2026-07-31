@@ -90,6 +90,8 @@ struct BudgetRequirement {
  * Diagnostics retain producer order.
  */
 struct ProgramBundleData {
+    SourceKind                        source_kind =
+        static_cast<SourceKind>(255);  ///< Required; invalid sentinel rejects omission.
     std::string                       source_hash;
     std::string                       canonical_program_hash;
     std::string                       compiler_build_id;
@@ -116,6 +118,7 @@ public:
     static ProgramBundle parse(std::string_view stored_bytes);
 
     const std::string&                     id() const noexcept;
+    SourceKind                             source_kind() const noexcept;
     const std::string&                     source_hash() const noexcept;
     const std::string&                     canonical_program_hash() const noexcept;
     const std::string&                     compiler_build_id() const noexcept;

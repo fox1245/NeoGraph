@@ -480,6 +480,13 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/registry.cpp
         src/program/admission.cpp
         src/program/compiler.cpp
+        src/program/result.cpp
+        src/program/store.cpp
+        src/program/journal.cpp
+        src/program/catalog.cpp
+        src/program/runtime.cpp
+        src/program/core_progress.cpp
+        src/program/run_attempt.cpp
     )
     target_include_directories(neograph_program
         PUBLIC
@@ -1528,6 +1535,10 @@ option(NEOGRAPH_BUILD_BENCHMARKS "Build micro/load benchmark binaries" OFF)
 if(NEOGRAPH_BUILD_BENCHMARKS)
     add_executable(bench_neograph benchmarks/bench_neograph.cpp)
     target_link_libraries(bench_neograph PRIVATE neograph::core)
+    if(NEOGRAPH_BUILD_PROGRAM)
+        add_executable(bench_program benchmarks/bench_program.cpp)
+        target_link_libraries(bench_program PRIVATE neograph::program)
+    endif()
 
     # OpenMP target-offload PoC. The target still builds without a device
     # backend so the executable can report host fallback explicitly.

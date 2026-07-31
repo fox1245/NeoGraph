@@ -8,6 +8,7 @@
     "format",
     "storage_schema_version",
     "id",
+    "source_kind",
     "source_hash",
     "canonical_program_hash",
     "compiler_build_id",
@@ -28,6 +29,7 @@
   "properties": {
     "format": { "const": "neograph-program-bundle" },
     "storage_schema_version": { "const": 1 },
+    "source_kind": { "enum": ["canonical_json", "cpp_builder"] },
     "id": { "$ref": "#/$defs/sha256" },
     "source_hash": { "$ref": "#/$defs/sha256" },
     "canonical_program_hash": { "$ref": "#/$defs/sha256" },

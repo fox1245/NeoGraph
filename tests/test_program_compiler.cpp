@@ -274,6 +274,7 @@ TEST(ProgramCompilerTest, CompilesOneRootAndRoundTripsBundle) {
 
     EXPECT_EQ(parsed.id(), bundle.id());
     EXPECT_EQ(parsed.program_schema_version(), 1U);
+    EXPECT_EQ(parsed.source_kind(), SourceKind::CppBuilder);
     EXPECT_EQ(parsed.registry_snapshot_fingerprint(), snapshot.fingerprint());
     ASSERT_EQ(parsed.sealed_core_definitions().size(), 1U);
     EXPECT_EQ(parsed.sealed_core_definitions()[0].name, "main");
@@ -289,6 +290,24 @@ TEST(ProgramCompilerTest, CompilesOneRootAndRoundTripsBundle) {
                   parsed.source_map().end());
     }
     expect_dispatch_counters_zero();
+}
+
+TEST(ProgramCompilerTest, SourceKindIsPreservedAndBoundIntoBundleIdentity) {
+    auto            snapshot = complete_snapshot();
+    ProgramCompiler compiler(snapshot, {"program-compiler-test/v1"});
+    const auto      document = program_document();
+    const auto      builder =
+        compiler.compile(ProgramSource::from_cpp_builder("builder", 1, document));
+    const auto canonical = compiler.compile(
+        ProgramSource::from_canonical_json("source.json", document.dump()));
+
+    EXPECT_EQ(builder.source_kind(), SourceKind::CppBuilder);
+    EXPECT_EQ(ProgramBundle::parse(builder.serialize_canonical()).source_kind(),
+              SourceKind::CppBuilder);
+    EXPECT_EQ(canonical.source_kind(), SourceKind::CanonicalJson);
+    EXPECT_EQ(ProgramBundle::parse(canonical.serialize_canonical()).source_kind(),
+              SourceKind::CanonicalJson);
+    EXPECT_NE(builder.id(), canonical.id());
 }
 
 TEST(ProgramCompilerTest, EquivalentKeyAndRegistrationOrderProduceSameBundle) {
@@ -803,6 +822,7 @@ TEST(ProgramCompilerTest, ParsedUntrustedBundleCannotBypassRecomputationContract
     ASSERT_EQ(recomputed, compiled.core_plan_identities()[0].compiled_plan_identity);
 
     ProgramBundleData forged;
+    forged.source_kind                    = compiled.source_kind();
     forged.source_hash                    = compiled.source_hash();
     forged.canonical_program_hash         = compiled.canonical_program_hash();
     forged.compiler_build_id              = compiled.compiler_build_id();

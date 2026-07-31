@@ -46,6 +46,17 @@ NeoGraph 的所有显著变更均记录于本文件。
   共享安装使用者验证。Core 新增 total parse/round-trip 和仅本地 validation
   报告，同时保持现有抛异常 API 的行为不变。
 
+- **固定 Program 运行时垂直切片。** 新增 `ProgramCatalog`、
+  `EngineGenerationCache`、`ProgramRuntime`、共享 `ProgramHandle`、不可变
+  `ProgramResult`、类型化 Program 事件信封、内存 `ProgramStore` 以及仅追加
+  CAS `ProgramJournal`。准入会在物化前重新计算不可信 bundle 的语义；每次
+  attempt 固定一个不可变 Core generation，并且只调用现有 `GraphEngine`
+  异步路径。完成、中断、精确 checkpoint 恢复、取消、超时、Core 步数耗尽、
+  checkpoint 不兼容和失败均映射为类型化终态，同时保留不可补充预算与
+  checkpoint 谱系。Journal 提交先于 checkpoint/terminal 事件交付；并发恢复
+  仅允许一个 CAS 胜者；在 Core broker 就绪前拒绝 effectful 或非空 schema
+  Program。
+
 - **SQLite Harness 记录存储（issue #147 后续）。** 新增了可选的
   `neograph::mcp_sqlite` 目标和 `SqliteHarnessRecordStore`，用于 WAL 支持、
   带模式版本的工件/运行持久化，具有不可变工件和运行到工件绑定。

@@ -55,6 +55,19 @@ NeoGraph の全注目すべき変更を本ファイルに文書化します。
   Core には total な parse/round-trip とローカル validation レポートを追加し、
   既存の例外送出 API の動作は維持します。
 
+- **固定 Program ランタイムの垂直スライス。** `ProgramCatalog`、
+  `EngineGenerationCache`、`ProgramRuntime`、共有 `ProgramHandle`、不変
+  `ProgramResult`、型付き Program イベントエンベロープ、インメモリ
+  `ProgramStore`、追記専用 CAS `ProgramJournal` を追加しました。Admission
+  は具現化前に未信頼バンドルの意味を再計算し、各 attempt は一つの不変 Core
+  generation を pin して既存の `GraphEngine` 非同期経路だけを呼び出します。
+  完了、中断、厳密な checkpoint resume、cancel、timeout、Core step 枯渇、
+  checkpoint 非互換、失敗を、非更新予算と checkpoint lineage を保つ型付き
+  terminal state に写像します。Journal commit は checkpoint/terminal
+  event 配信より先に行われ、同時 resume は一つの CAS 勝者だけを許可し、
+  Core broker が用意されるまで effectful または非空 schema の Program を
+  拒否します。
+
 - **SQLite Harness レコードストア (issue #147 フォローアップ)。** オプションの
   `neograph::mcp_sqlite` ターゲットと `SqliteHarnessRecordStore` を追加。WAL バック、
   スキーマバージョン管理されたアーティファクト/実行の永続化で、不変のアーティファクトと

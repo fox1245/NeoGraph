@@ -177,6 +177,11 @@ const ExecutableManifest& detail::RegistrySnapshotAccess::require_manifest(
     return manifest->manifest;
 }
 
+std::shared_ptr<const graph::GraphRegistry>
+detail::RegistrySnapshotAccess::runtime_registry(const RegistrySnapshot& snapshot) {
+    return {snapshot.impl_, &snapshot.impl_->registry};
+}
+
 graph::TopologySpec detail::RegistrySnapshotAccess::parse_local(const RegistrySnapshot& snapshot,
                                                                 const json& definition) {
     return graph::GraphCompiler::parse_local(definition, snapshot.impl_->registry);

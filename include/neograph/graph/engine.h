@@ -102,6 +102,18 @@ struct EngineResources {
 };
 
 /**
+ * @brief Optional persistence resources scoped to one run or resume call.
+ *
+ * Non-null members override the engine's configured persistence instance for
+ * this operation only. Tools, registries, nodes, and engine configuration are
+ * never changed.
+ */
+struct RunResources {
+    std::shared_ptr<CheckpointStore> checkpoint_store;
+    std::shared_ptr<Store> store;
+};
+
+/**
  * @brief Configuration for a graph execution run.
  */
 struct RunConfig {
@@ -553,6 +565,13 @@ public:
     asio::awaitable<RunResult> run_stream_async(
         RunConfig config, GraphStreamCallback cb, RunMetadata metadata);
 
+    /// Async streaming peer with per-operation persistence overrides.
+    asio::awaitable<RunResult> run_stream_async(
+        RunConfig config,
+        GraphStreamCallback cb,
+        RunMetadata metadata,
+        RunResources resources);
+
     /**
      * @brief Resume execution from a HITL interrupt.
      *
@@ -605,6 +624,29 @@ public:
                                              json                resume_value,
                                              GraphStreamCallback cb,
                                              RunMetadata          metadata);
+
+    /**
+     * @brief Resume from one exact checkpoint ID.
+     *
+     * The requested checkpoint must exist and belong to config.thread_id.
+     * This path never substitutes a newer checkpoint.
+     */
+    RunResult resume_from(
+        RunConfig config,
+        std::string checkpoint_id,
+        json resume_value = {},
+        GraphStreamCallback cb = {},
+        RunMetadata metadata = {},
+        RunResources resources = {});
+
+    /// Async exact-checkpoint resume. Every argument is owned by its coroutine.
+    asio::awaitable<RunResult> resume_from_async(
+        RunConfig config,
+        std::string checkpoint_id,
+        json resume_value = {},
+        GraphStreamCallback cb = {},
+        RunMetadata metadata = {},
+        RunResources resources = {});
 
     /// @brief Borrow the state-administration facade for this engine.
     GraphAdmin admin() noexcept;
@@ -861,10 +903,13 @@ private:
     void init_state(GraphState& state) const;
     void apply_input(GraphState& state, const json& input) const;
 
-    asio::awaitable<RunResult> resume_async_owned(
-        std::string thread_id,
+    asio::awaitable<RunResult> resume_execute_async(
+        RunConfig config,
         json resume_value,
-        GraphStreamCallback cb);
+        GraphStreamCallback cb,
+        RunMetadata metadata,
+        RuntimeResources resources,
+        std::optional<std::string> checkpoint_id);
 
     asio::awaitable<RunResult> run_async_with_runtime(
         RunConfig config,
@@ -877,7 +922,8 @@ private:
         json resume_value,
         GraphStreamCallback cb,
         RunMetadata metadata,
-        RuntimeResources resources);
+        RuntimeResources resources,
+        std::optional<std::string> checkpoint_id = std::nullopt);
 
     asio::awaitable<SubgraphRunResult> run_subgraph_async(
         RunConfig config,
@@ -892,7 +938,7 @@ private:
     asio::awaitable<RunResult> execute_graph_async(
         const RunConfig& config,
         const GraphStreamCallback& cb,
-        const std::vector<std::string>& resume_from = {},
+        std::optional<ResumeContext> resume_context = std::nullopt,
         const json* resume_value = nullptr,
         const RunMetadata& metadata = {},
         const RuntimeResources* resources = nullptr);
