@@ -132,9 +132,11 @@ generation to run or resume and consumes the resulting typed outcome and events.
 
 ### Adapters
 
-Harness MCP, HTTP, CLI, Python, A2A, and future language frontends are adapters.
-They translate their transport or language contract into the public Program API.
-They do not own separate compilation, admission, execution, or persistence
+Harness C++, MCP, HTTP, CLI, selected Python bindings, A2A, ACP, and gRPC are
+adapters. A2A, ACP, and MCP retain their protocol-owned JSON-RPC envelopes;
+NeoGraph does not create a second generic JSON-RPC execution API. Every adapter
+translates its transport or language contract into the public Program API. No
+adapter owns separate compilation, admission, execution, or persistence
 semantics.
 
 Adapter wire schemas are versioned independently. An adapter must preserve an
@@ -539,12 +541,12 @@ neograph::core
     ^
     |
 neograph::program
-    ^             ^
-    |             |
-neograph::program_sqlite   neograph::harness
-                              ^
-                              |
-                    MCP / HTTP / CLI adapters
+    ^             ^              ^
+    |             |              |
+program_sqlite  program_postgres  neograph::harness
+                                      ^
+                                      |
+                         MCP / HTTP / CLI / protocol adapters
 ```
 
 Rules:
@@ -552,7 +554,8 @@ Rules:
 - `NEOGRAPH_BUILD_PROGRAM=OFF` is supported and leaves the Core binary and public
   link interface unchanged.
 - `neograph::program` links Core, but Core never links Program.
-- SQLite/PostgreSQL Program stores are separate targets.
+- SQLite and PostgreSQL Program stores are separate optional targets and must
+  pass the same persistence contract suite before v1 when enabled.
 - Harness becomes a Program service, not the owner of Program semantics.
 - MCP client/server types remain transport components and do not leak into
   Program headers.
@@ -560,6 +563,14 @@ Rules:
 - Python bindings may expose Program when it adds NeoGraph-specific compile,
   checkpoint, activation, or lineage value; Python-standard alternatives remain
   preferred for generic JSON/schema manipulation.
+
+Dependency selection is not part of the Core/Program redesign. The preserved
+baseline is yyjson, cpp-httplib, standalone Asio, concurrentqueue, cppdotenv,
+SQLite3, libpq, and opt-in protobuf/gRPC and libcurl. Substituting any of these
+requires a separate architecture decision with performance, allocation,
+binary-size, compile-time, ABI, license, security, supported-platform, and
+static/shared installed-consumer evidence, plus removal of the replaced stack.
+Heavy optional dependencies remain default-off.
 
 ## Performance contract
 
@@ -693,8 +704,17 @@ The architecture is implemented only when all are true:
    allocations, and persistence growth meet preregistered budgets.
 9. Full available tests, ASan/UBSan, applicable TSan stress, persistence restart,
    replay, installed-consumer, and supported-platform builds pass.
-10. Public headers, CMake components, schemas, examples, MCP adapters, Python
-    binding decisions, changelog, and translated user documentation agree.
+10. Public headers, CMake components, schemas, changelog, and translated user
+    documentation agree; every existing example and cookbook entry has an
+    explicit Core, Program, protocol-adapter, historical, or removal
+    disposition, and every retained entry has build/run proof.
+11. MCP, HTTP, CLI, selected Python bindings, A2A, ACP, and gRPC have explicit
+    cutover dispositions; every supported surface passes the shared Program
+    conformance suite plus protocol-specific wire tests.
+12. SQLite and opt-in PostgreSQL Program stores pass one backend-neutral
+    restart, atomicity, owner-isolation, tamper, retention, and GC suite.
+13. The dependency baseline is unchanged, or each approved substitution has the
+    separate decision and evidence required by the package-boundary policy.
 
 ## Rejected alternatives
 

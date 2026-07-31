@@ -121,6 +121,11 @@ Release status is **NO-GO** until every unchecked item is closed:
   when they are internally coherent.
 - Immutable compilation before execution.
 - Explicit cancellation, retry, event, usage, checkpoint, and effect identity.
+- Preserve the current dependency choices during the redesign: yyjson for JSON,
+  cpp-httplib for HTTP, standalone Asio for async I/O, concurrentqueue for the
+  concurrent queue, cppdotenv for environment loading, SQLite3 and libpq for
+  storage, and opt-in protobuf/gRPC and libcurl where those components require
+  them.
 
 ### Add
 
@@ -252,7 +257,7 @@ CMake targets:
 | `neograph::core` | foundation only | Direct graph compile/execute/checkpoint |
 | `neograph::program` | Core | Program compile/orchestration, in-memory stores |
 | `neograph::program_sqlite` | Program + SQLite | Durable local Program data |
-| `neograph::program_postgres` | Program + PostgreSQL | Add only when the production tenant control plane requires it |
+| `neograph::program_postgres` | Program + PostgreSQL | Durable PostgreSQL Program data; optional target with v1 parity required when enabled |
 | `neograph::harness` | Program | Harness application/service, not architecture owner |
 | `neograph::mcp_server` | MCP types + selected service adapter | Transport |
 
@@ -280,6 +285,31 @@ headers; move files later in small mechanical commits.
 | Durable Kernel | existing Core state/checkpoint/store + Program journal | Split ownership by layer; no second engine object. |
 | SchemaProvider private strategy enums | request mapper + transport + parser + injected primitive registry | #241 contract before #242 extensibility. |
 | Python `llm::Agent` parity | Python GraphEngine/Program | Do not bind; expose Program abilities and generated artifacts where Python cannot reproduce lifecycle semantics. |
+
+### Adapter and protocol cutover matrix
+
+Every supported frontend must converge on the same public Program contract.
+JSON-RPC is a wire envelope used by existing protocols, not a new independent
+execution API.
+
+| Surface | v1 route | Required proof | Phase |
+|---|---|---|---|
+| Core C++ | direct `GraphEngine` | existing strict Core conformance and installed consumer | P1-P8 |
+| Program C++ | `ProgramCompiler`/`ProgramCatalog`/`ProgramRuntime` | canonical Program contract suite | P2-P8 |
+| Harness C++ | thin Program application/service | Harness behavior through Program with no Harness-only compiler/runtime | P2/P8 |
+| MCP, including its JSON-RPC envelope | MCP adapter to Program | wire compatibility plus Program conformance and unknown-code preservation | P2/P6/P8 |
+| HTTP | HTTP adapter to Program | request/lifecycle mapping, cancellation, streaming, and unknown-code preservation | P8 |
+| CLI | CLI adapter to Program | compile/run/resume/cancel lifecycle and stable process exit mapping | P8 |
+| Python | selected NeoGraph-specific Program bindings | cancellation/checkpoint/replay/activation/lineage parity; no generic JSON/schema duplication | P8 |
+| A2A, including JSON-RPC 2.0 | owned `RunInvocation` to Program/Core | A2A lifecycle and shared invocation conformance | PR8/P8 |
+| ACP, including JSON-RPC 2.0 | owned `RunInvocation` to Program/Core | ACP lifecycle and shared invocation conformance | PR8/P8 |
+| gRPC | owned `RunInvocation` to Program/Core | gRPC lifecycle, unary/streaming behavior, and shared invocation conformance with `NEOGRAPH_BUILD_GRPC=ON` | PR8/P8 |
+| Standalone generic JSON-RPC | no new public engine surface | prove A2A/ACP/MCP envelopes remain protocol-owned; add a generic surface only through a separate accepted product decision | P8 |
+
+An adapter is not migrated merely because it compiles. Its supported lifecycle,
+terminal states, diagnostics, cancellation, streaming, checkpoint/resume, and
+owner-scope behavior must pass the shared contract suite plus protocol-specific
+wire tests.
 
 ### Stored-data migration
 
@@ -358,13 +388,20 @@ branch. Full vocabulary completion, including `spawn`, is gated on P6.
 
 Deliverables:
 
-- ProgramCatalog lifecycle for admitted ProgramVersion records and owner-scoped ProgramStore;
+- ProgramCatalog lifecycle for admitted ProgramVersion records and owner-scoped
+  ProgramStore;
 - activation compare-and-swap, pinned admitted runs, rollback;
-- SQLite store, reference-aware GC, restart recovery;
-- PostgreSQL only after a real tenant deployment requires it.
+- SQLite and PostgreSQL ProgramStore/ProgramTransitionStore implementations,
+  reference-aware GC, and restart recovery;
+- one backend-neutral persistence contract suite covering atomic journal/effect
+  publication, owner isolation, reconnect, fork, corruption/tamper rejection,
+  retention, and GC against both backends. PostgreSQL remains an opt-in
+  component, but it is not deferred past v1 when `NEOGRAPH_BUILD_POSTGRES=ON`.
 
 Exit gate: two scopes activate different versions in one process; old runs stay
-pinned; new runs see atomic changes; no activation lookup occurs per Core step.
+pinned; new runs see atomic changes; no activation lookup occurs per Core step;
+and SQLite and PostgreSQL pass the same persistence contract suite across a real
+process restart.
 
 ### P5 — Migration, journal, and effect safety
 
@@ -412,15 +449,24 @@ credential can enter a tenant Program.
 Deliverables:
 
 - one Core C++ quickstart and one Program C++ quickstart;
+- a repository-tracked migration manifest classifying every existing example
+  and cookbook entry as Core-kept, Program-ported, protocol-adapter-ported,
+  historical-only, or removed with rationale;
+- build/run smoke proof for every retained example, including minimum runnable
+  coverage for SQLite, PostgreSQL, MCP, A2A, ACP, and gRPC where the component is
+  enabled;
 - selected Python Program/generated-artifact bindings based on actual ability;
-- MCP/HTTP/CLI/Python adapters share the same Program conformance suite;
+- MCP/HTTP/CLI/Python/A2A/ACP/gRPC adapters pass the matrix in Section 5 and the
+  same Program conformance suite;
 - migrate/remove compatibility setters, raw ownership, global admission fallback,
   old Harness compiler/runtime, ControlVm, and obsolete schemas;
 - exact import/convert/drain/block decision for retained data;
-- synchronized CMake exports, ABI policy, changelog, and translated user docs.
+- synchronized CMake exports, dependency policy, ABI policy, changelog, and
+  translated user docs.
 
-Exit gate: no duplicate public concept, no stale architecture claim, and the v1
-ABI/storage freeze passes installed-consumer and persistence gates.
+Exit gate: no duplicate public concept, no stale architecture claim, no
+unclassified retained example/cookbook, and the v1 ABI/storage/dependency freeze
+passes installed-consumer, adapter, example, and persistence gates.
 
 ## 7. Pull-request sequence
 
@@ -440,7 +486,7 @@ rows merely to reduce PR count.
 | 9 | Sequence/branch/loop/retry | reference semantics and budget accounting |
 | 10 | Parallel/race/await/cancel | teardown stress, loser cancellation, deterministic join rules |
 | 11 | ProgramVersion admission and activation in the in-memory catalog | concurrent CAS/admission/rollback tests |
-| 12 | SQLite Program store and GC | restart, retention references, corruption/tamper tests |
+| 12 | SQLite and PostgreSQL Program stores and GC; backend work may land as stacked review slices | shared restart, retention, owner-isolation, corruption/tamper, transaction-atomicity, and GC contract suite |
 | 13 | MigrationPlan + effect outbox and ProgramJournal hardening | crash matrix, semantic source preservation, effect identity |
 | 14 | Child Program and module receipts | authority/budget denial matrix, whole-link failures |
 | 15 | Tenant ownership | same-ID cross-scope and credential/cache/quota isolation |
@@ -540,6 +586,24 @@ large. Split at the layer boundary and prove equivalence first.
 - Verify exact version, registry, policy, budget, effect, and checkpoint lineage.
 - Corrupt/tamper every identity field and prove fail-closed behavior.
 
+### Dependency and packaging preservation
+
+The Core/Program redesign does not authorize dependency substitution. The
+baseline remains yyjson, cpp-httplib, standalone Asio, concurrentqueue,
+cppdotenv, SQLite3, libpq, and opt-in protobuf/gRPC and libcurl. A change to one
+of those choices requires a separate accepted decision with:
+
+- same-host performance and allocation evidence for affected hot paths;
+- binary-size, compile-time, ABI, license, security, and supported-platform
+  comparison;
+- static/shared installed-consumer and CMake export verification;
+- an explicit migration/removal plan proving no duplicate dependency stack
+  remains.
+
+No dependency replacement may be hidden inside a Program phase or protocol
+adapter PR. Ordinary component additions must preserve default-off gates for
+heavy optional dependencies.
+
 ### Performance
 
 Maintain separate measurements for:
@@ -567,6 +631,12 @@ Do not translate unstable internals phase by phase. Documentation tiers are:
 3. **User guides**: Core and Program quickstarts after P2/P3 semantics stabilize.
 4. **Migration guide and translations**: after P8 cutover names and behavior are
    fixed.
+
+The P8 example/cookbook manifest is a cutover gate, not an informal inventory.
+Every tracked entry must name its target layer, required optional components,
+build/run command, expected observable result, documentation links, and removal
+rationale when deleted. CI compiles every retained example under its supported
+component matrix; representative runnable examples are smoke-tested.
 
 Historical documents keep a visible superseded banner and link to the current
 decision. They are removed only when no issue, migration fixture, or retained
@@ -605,3 +675,11 @@ The redesign is complete only when:
 - Core and Program performance gates are reported with raw evidence;
 - no superseded VM/Kernel or Harness-only architecture is described as current;
 - the v1 C++ ABI and stored schemas are deliberately frozen.
+- SQLite and opt-in PostgreSQL Program persistence have backend-parity contract
+  proof;
+- MCP, HTTP, CLI, Python, A2A, ACP, and gRPC have explicit cutover dispositions
+  and supported surfaces pass shared Program conformance;
+- every existing example and cookbook entry is ported, retained with an explicit
+  Core/protocol role, archived as historical, or removed with rationale;
+- the dependency baseline is unchanged, or every approved substitution has the
+  separate evidence and migration record required by the dependency gate.
