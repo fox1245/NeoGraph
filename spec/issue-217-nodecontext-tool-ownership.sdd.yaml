@@ -1,0 +1,38 @@
+spec:
+  id: issue-217-nodecontext-tool-ownership
+  issue: 217
+  parent: 187
+  status: design-required
+  priority: P2
+  kind: ownership-api
+  depends_on: [194]
+
+problem:
+  statement: >-
+    NodeContext exposes raw Tool pointers while ownership may be transferred later,
+    making safe lifetime depend on call ordering and hidden owner storage.
+
+contract:
+  - Borrowed and owned tool input are distinguishable in types.
+  - A compiled engine cannot retain a dangling Tool pointer.
+  - C++, Python trampoline, and MCP-discovered tools share one lifetime model.
+  - Compile-time ownership transfer performs no per-dispatch ownership work.
+
+red_tests:
+  - id: temporary-tool-owner
+    assertion: "A tool supplied by the supported owning path survives graph lifetime."
+  - id: borrowed-expiry
+    assertion: "Unsafe borrowed lifetime cannot compile or fails before engine retention."
+  - id: replacement-release
+    assertion: "Replacing context tools releases only superseded ownership."
+  - id: cross-language-lifetime
+    assertion: "Python and MCP tool wrappers remain alive exactly as long as required."
+
+implementation_phases:
+  - Inventory aggregate initialization and ownership call sites.
+  - Choose shared ownership, unique transfer, or explicit borrowed view.
+  - Migrate compile boundary and bindings before deprecating old fields.
+
+acceptance:
+  - No raw pointer is retained without a statically visible owner contract.
+  - ASan, Python GC, MCP session, and concurrent tool tests pass.

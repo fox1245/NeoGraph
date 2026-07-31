@@ -1,0 +1,44 @@
+spec:
+  id: issue-208-request-queue-lifecycle
+  issue: 208
+  parent: 187
+  status: proposed
+  priority: P1
+  kind: lifecycle
+  depends_on: [207]
+
+problem:
+  statement: >-
+    RequestQueue accepts zero workers and shutdown may leave accepted queued
+    promises unresolved because no explicit drain-or-cancel contract exists.
+  evidence:
+    - "include/neograph/util/request_queue.h:52-71,129-146"
+
+decision:
+  required: "Select reject, drain, or cancel semantics for close and destruction."
+  recommended: >-
+    Reject zero workers, reject new work after close, and explicitly complete
+    every accepted task by execution or cancellation.
+
+invariants:
+  - Every accepted future reaches value, exception, or cancellation.
+  - close is idempotent.
+  - Submit racing close has one linearizable outcome.
+  - Destruction performs no callback into destroyed owner state.
+
+red_tests:
+  - id: zero-workers
+    assertion: "Construction rejects an unusable queue."
+  - id: queued-on-close
+    assertion: "Every queued future becomes ready under the chosen policy."
+  - id: submit-close-race
+    assertion: "No accepted task is lost and no rejected task runs."
+
+implementation:
+  - Add explicit lifecycle state and close operation.
+  - Coordinate worker exit with queue drain/cancel policy.
+  - Make destructor call only the defined idempotent close path.
+
+acceptance:
+  - No lifecycle test can wait indefinitely.
+  - ASan, TSan, and repeated teardown stress pass.

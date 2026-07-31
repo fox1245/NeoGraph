@@ -1,0 +1,105 @@
+spec:
+  id: issue-200-resume-async-ownership
+  issue: 200
+  parent: 187
+  status: completed
+  priority: P0
+  kind: memory-safety
+  depends_on: []
+
+problem:
+  statement: >-
+    resume_async still accepts caller-owned references even though a lazy
+    coroutine may not read them until after the caller scope is gone.
+  evidence:
+    - "include/neograph/graph/engine.h:500-504"
+    - "src/core/graph_engine.cpp:388-414"
+
+invariants:
+  - Thread ID, resume JSON, callback, and config needed after suspend are owned.
+  - Sync resume and Python behavior retain their current semantics.
+  - No coroutine frame holds a reference to a temporary public argument.
+
+red_tests:
+  - id: temporary-resume-input
+    assertion: "Temporary thread ID and JSON survive delayed co_spawn."
+  - id: callback-scope
+    assertion: "A stored resume awaitable cannot call a destroyed callback."
+  - id: resume-behavior-parity
+    assertion: "Owned-argument async and sync resume produce identical results."
+
+implementation:
+  - Make the public boundary own arguments before initial suspend.
+  - Audit internal helper references independently from public ownership.
+  - Update C++ and binding signatures and migration notes as needed.
+
+acceptance:
+  - Delayed-resume ASan tests pass.
+  - HITL, pending writes, barrier state, streaming, and Python resume tests pass.
+
+observed:
+  root_cause: >-
+    resume_async was itself a lazy coroutine with const-reference parameters.
+    Calling it created a frame that retained references to caller-owned thread
+    ID, JSON, and std::function storage, but its body did not read those values
+    until the awaitable was first resumed.
+  red_evidence:
+    - >-
+      ResumeAsyncSnapshotsThreadIdBeforeFirstResume failed with
+      "No checkpoint found for thread: different-thread-id" after the source
+      string was changed between awaitable creation and co_spawn.
+    - >-
+      The initial combined delayed-resume case threw std::bad_alloc after a
+      temporary thread ID expired before co_spawn, demonstrating ordinary
+      undefined behavior rather than a stable semantic failure.
+
+resolution:
+  design: >-
+    Preserve the public signature as a non-coroutine facade that copies all
+    three inputs synchronously, then return a private by-value coroutine.
+  changed_files:
+    - include/neograph/graph/engine.h
+    - src/core/graph_engine.cpp
+    - tests/test_graph_engine_async_api.cpp
+    - spec/issue-200-resume-async-ownership.sdd.yaml
+  compatibility:
+    - The public resume_async signature and GraphEngine object layout are unchanged.
+    - Sync resume still drives the same async implementation.
+    - Python's existing heap-pinned call path remains behaviorally unchanged.
+
+verification:
+  targeted:
+    command: >-
+      ./build/tests/neograph_tests
+      --gtest_filter=GraphEngineAsyncApi.*:DynamicInterrupt.*:PendingWritesTest.*:BarrierPersistence.*:MultiNodeResume.*
+    result: "28 passed, 0 failed"
+  sanitizer:
+    configuration: >-
+      Debug; -fsanitize=address,undefined; PostgreSQL OFF; SQLite OFF;
+      A2A/ACP/MCP ON; ASAN_OPTIONS detect_stack_use_after_return=1.
+    command: >-
+      ./build-asan/tests/neograph_tests
+      --gtest_filter=GraphEngineAsyncApi.ResumeAsync*
+    result: "4 passed, 0 failed"
+  cpp_full:
+    configuration: >-
+      Release; PostgreSQL/SQLite/A2A/ACP/MCP ON.
+    command: "ctest --test-dir build --output-on-failure -j2"
+    result: "608 passed, 30 skipped, 0 failed (638 discovered)"
+    skips: >-
+      27 PostgreSQL tests skipped because NEOGRAPH_TEST_POSTGRES_URL was unset;
+      one live cancellation test skipped because NEOGRAPH_LIVE_LLM and an
+      OpenAI key were not enabled; two live WebSocket tests skipped because
+      NEOGRAPH_LIVE_OPENAI was not enabled.
+  python_full:
+    configuration: >-
+      Release Python binding; PostgreSQL/SQLite/A2A/ACP ON; MCP OFF.
+    command: >-
+      PYTHONPATH=build_pybind:bindings/python python3 -m pytest
+      bindings/python/tests/ -q -rs
+    result: "149 passed, 6 skipped, 0 failed"
+    skips: >-
+      one MCP test skipped because MCP was compiled OFF; two live OpenAI tests
+      skipped because NEOGRAPH_LIVE_LLM and OPENAI_API_KEY were not enabled;
+      two Groq usage tests skipped because GROQ_API_KEY was unset; one Anthropic
+      usage test skipped because ANTHROPIC_API_KEY was unset.

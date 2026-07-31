@@ -1,0 +1,37 @@
+spec:
+  id: issue-218-engine-scoped-registries
+  issue: 218
+  parent: 187
+  status: design-required
+  priority: P2
+  kind: isolation-api
+  depends_on: [216]
+
+problem:
+  statement: >-
+    Process-wide registries allow unrelated engines, tenants, plugins, and tests
+    to replace each others node, reducer, and condition definitions.
+
+contract:
+  - Compilation receives an explicit registry set with stable lifetime.
+  - Built-ins are supplied by default without process-global mutation.
+  - Two engines may bind the same name to different implementations.
+  - Schema export reflects the registry set used for compilation.
+  - Concurrent registration/compilation behavior is explicit.
+
+red_tests:
+  - id: same-name-two-engines
+    assertion: "Each engine executes its own registration."
+  - id: test-isolation
+    assertion: "One Python or C++ test cannot alter a later engine by leakage."
+  - id: schema-export-scope
+    assertion: "Each registry exports only its selected extensions plus built-ins."
+
+implementation_phases:
+  - Introduce clonable/default registry values.
+  - Thread the registry through compiler and context construction.
+  - Preserve global convenience only as an explicit compatibility adapter.
+
+acceptance:
+  - Engine-scoped isolation tests pass under concurrency.
+  - Existing custom registration has a documented migration path.

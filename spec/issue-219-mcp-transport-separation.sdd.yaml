@@ -1,0 +1,41 @@
+spec:
+  id: issue-219-mcp-transport-separation
+  issue: 219
+  parent: 187
+  status: design-required
+  priority: P2
+  kind: architecture
+  depends_on: []
+
+problem:
+  statement: >-
+    MCP JSON-RPC/session behavior, tool adaptation, HTTP state, stdio process
+    lifetime, correlation, and concurrency are coupled across client code.
+
+functional_blocks:
+  - id: protocol-session
+    responsibility: "Initialize, negotiate capabilities, correlate RPC, and expose tools."
+  - id: http-transport
+    responsibility: "URL, headers, session ID, timeout, cancellation, and HTTP framing."
+  - id: stdio-transport
+    responsibility: "Process, pipes, framed writes, reader lifecycle, EOF, and shutdown."
+  - id: tool-adapter
+    responsibility: "Map discovered tools to NeoGraph Tool without transport knowledge."
+
+invariants:
+  - Protocol method names and result/error parsing have one implementation.
+  - Correlation IDs preserve concurrent calls on capable transports.
+  - Transport shutdown completes every in-flight call with value or error.
+  - Adding a transport does not modify graph tool dispatch.
+
+red_tests:
+  - id: transport-parity
+    assertion: "HTTP and stdio pass one protocol/session contract suite."
+  - id: concurrent-correlation
+    assertion: "Out-of-order responses reach the correct caller."
+  - id: shutdown-inflight
+    assertion: "EOF/cancel completes all waiters without UAF or hang."
+
+acceptance:
+  - HTTP and stdio ownership and lifecycle are independently testable.
+  - Existing MCP graph, Python, and concurrent stdio tests pass.
