@@ -351,6 +351,23 @@ TEST(CompilerDiagnostics, NodeSchemaBarrierAndEdgeFamiliesCarryWitnesses) {
     }
 }
 
+TEST(CompilerDiagnostics, RetryRangeWitnessPreservesUnsignedInput) {
+    ensure_types_registered();
+    auto def                           = minimal_strict();
+    def["retry_policy"]                = json::object();
+    def["retry_policy"]["max_retries"] = json::parse("18446744073709551615");
+    const auto report                  = GraphCompiler::parse_report(def, GraphRegistry::global());
+
+    ASSERT_TRUE(report.has_errors());
+    const auto diagnostic =
+        std::find_if(report.diagnostics.begin(), report.diagnostics.end(), [](const auto& value) {
+            return value.code == "GC_FIELD_VALUE" &&
+                   value.json_pointer == "/retry_policy/max_retries";
+        });
+    ASSERT_NE(diagnostic, report.diagnostics.end());
+    EXPECT_EQ(diagnostic->witness["actual"].dump(), "18446744073709551615");
+}
+
 TEST(CompilerDiagnostics, LocalReportReturnsAllGlobalOnlyRegistryMisses) {
     ensure_types_registered();
     auto def                 = minimal_strict();
@@ -376,6 +393,44 @@ TEST(CompilerDiagnostics, LocalReportReturnsAllGlobalOnlyRegistryMisses) {
     EXPECT_EQ(report.diagnostics[2].witness["name"].get<std::string>(), "route_channel");
 }
 
+TEST(CompilerDiagnostics, RoundTripReportIsTotalForMalformedAuthoredShapes) {
+    ensure_types_registered();
+    const auto topology = GraphCompiler::parse(minimal_strict());
+
+    std::vector<json> malformed;
+    {
+        auto value    = minimal_strict();
+        value["name"] = json::object();
+        malformed.push_back(std::move(value));
+    }
+    {
+        auto value                                  = minimal_strict();
+        value["retry_policy"]["backoff_multiplier"] = "not-a-number";
+        malformed.push_back(std::move(value));
+    }
+    {
+        auto value        = minimal_strict();
+        value["edges"][0] = json{{"from", json::array()}, {"to", "a"}};
+        malformed.push_back(std::move(value));
+    }
+    {
+        auto value                = minimal_strict();
+        value["interrupt_before"] = json::array({1});
+        malformed.push_back(std::move(value));
+    }
+    {
+        auto value                                 = minimal_strict();
+        value["nodes"]["a"]["barrier"]["wait_for"] = "not-an-array";
+        malformed.push_back(std::move(value));
+    }
+
+    for (const auto& value : malformed) {
+        RoundTripReport report;
+        EXPECT_NO_THROW(report = GraphCompiler::verify_roundtrip_report(value, topology));
+        EXPECT_TRUE(report.has_errors());
+    }
+}
+
 // =========================================================================
 // Lenient mode: historical behavior preserved byte-for-byte
 // =========================================================================
@@ -394,6 +449,23 @@ TEST(LenientCompiler, EmptyBarrierStillDropped) {
         {"nodes", {{"a", {{"type", "snoop"}, {"barrier", {{"wait_for", json::array()}}}}}}}};
     auto cg = GraphCompiler::compile(def, NodeContext{});
     EXPECT_TRUE(cg.barrier_specs.empty());
+}
+
+TEST(LenientCompiler, EmptyStringsAndNegativeRetryKeepHistoricalParseBehavior) {
+    ensure_types_registered();
+    auto def                = minimal_strict();
+    def                     = without_key(def, "schema_version");
+    def["name"]             = "";
+    def["nodes"]["a"][""]   = 1;
+    def["edges"][0]["from"] = "";
+    def["retry_policy"]     = json{{"max_retries", -1}};
+
+    const auto topology = GraphCompiler::parse(def);
+    EXPECT_EQ(topology.name, "");
+    EXPECT_TRUE(topology.node_defs.at("a").contains(""));
+    EXPECT_EQ(topology.edges.front().from, "");
+    ASSERT_TRUE(topology.retry_policy.has_value());
+    EXPECT_EQ(topology.retry_policy->max_retries, -1);
 }
 
 TEST(LenientCompiler, InvalidDeclaredNodeSchemaStillUsesLegacyFactoryBehavior) {

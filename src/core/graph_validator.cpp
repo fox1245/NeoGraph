@@ -41,6 +41,7 @@ std::string pointer_token(const std::string& value) {
 struct Ctx {
     const TopologySpec&   cg;
     const GraphRegistry&  registry;
+    bool                  local_only = false;
     std::set<std::string> node_names;
     // Static successor map: plain edges + every user-declared conditional
     // route target.
@@ -283,8 +284,11 @@ void check_routes(Ctx& c) {
             continue;
         }
 
-        auto spec = c.registry.condition_spec(ce.condition);
-        if (!spec) continue;  // no declared contract — skip
+        const auto spec = c.local_only ? (c.registry.contains_condition(ce.condition)
+                                              ? c.registry.local_condition_spec(ce.condition)
+                                              : std::optional<ConditionSpec>{})
+                                       : c.registry.condition_spec(ce.condition);
+        if (!spec) continue;  // no declared local/overlay contract — skip
 
         const std::set<std::string> labels(spec->labels.begin(), spec->labels.end());
         std::set<std::string>       keys;
@@ -340,7 +344,10 @@ void check_effects(Ctx& c) {
                           node_rw;  // node -> (reads, writes)
     std::set<std::string> exported;
     for (const auto& n : c.node_names) {
-        const json eff = c.registry.node_effects(c.node_type(n));
+        const json eff = c.local_only ? (c.registry.contains_type(c.node_type(n))
+                                             ? c.registry.local_node_effects(c.node_type(n))
+                                             : json())
+                                      : c.registry.node_effects(c.node_type(n));
         if (eff.is_null() || !eff.is_object()) return;  // gate: skip family
         std::set<std::string> reads, writes;
         if (eff.contains("reads"))
@@ -510,7 +517,7 @@ ValidationReport GraphValidator::validate(const TopologySpec& topology) {
 
 ValidationReport GraphValidator::validate(const TopologySpec&  topology,
                                           const GraphRegistry& registry) {
-    Ctx c{topology, registry, {}, {}, {}};
+    Ctx c{topology, registry, false, {}, {}, {}};
     for (const auto& [name, node_def] : topology.node_defs) {
         (void)node_def;
         c.node_names.insert(name);
@@ -531,7 +538,21 @@ ValidationReport GraphValidator::validate(const TopologySpec&  topology,
 
 ValidationReport GraphValidator::validate_local(const TopologySpec&  topology,
                                                 const GraphRegistry& registry) {
-    auto report = validate(topology, registry);
+    Ctx c{topology, registry, true, {}, {}, {}};
+    for (const auto& [name, node_def] : topology.node_defs) {
+        (void)node_def;
+        c.node_names.insert(name);
+    }
+    check_references(c);
+    build_successors(c);
+    const auto reachable = reachable_from_start(c);
+    check_reachability(c, reachable);
+    check_termination(c, reachable);
+    check_barriers(c);
+    check_fan_in(c);
+    check_routes(c);
+    check_effects(c);
+    ValidationReport report{std::move(c.out)};
     for (const auto& channel : topology.channel_defs) {
         if (!registry.contains_reducer(channel.reducer_name)) {
             report.diagnostics.push_back(

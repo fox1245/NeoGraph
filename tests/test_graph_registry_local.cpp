@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <stdexcept>
@@ -81,6 +82,21 @@ TEST(GraphRegistryLocalTest, LocalCompileUsesOnlyInstanceOwnedCallables) {
     EXPECT_EQ(calls.load(), 1);
 }
 
+TEST(GraphRegistryLocalTest, LenientLocalParsePreservesEmptyEndpointCompatibility) {
+    GraphRegistry local;
+    local.register_type("core-local-lenient-node", factory(), json{{"type", "object"}},
+                        json::object());
+    const json definition = {
+        {"nodes", json{{"work", json{{"type", "core-local-lenient-node"}}}}},
+        {"edges", json::array({json{{"from", ""}, {"to", "work"}}})},
+    };
+
+    const auto topology = GraphCompiler::parse_local(definition, local);
+    ASSERT_EQ(topology.edges.size(), 1U);
+    EXPECT_EQ(topology.edges.front().from, "");
+    EXPECT_EQ(topology.edges.front().to, "work");
+}
+
 TEST(GraphRegistryLocalTest, LocalParseRejectsGlobalOnlyNodeBeforeFactoryDispatch) {
     std::atomic<int> calls{0};
     NodeFactory::instance().register_type("core-global-parse-node", factory(&calls),
@@ -88,9 +104,9 @@ TEST(GraphRegistryLocalTest, LocalParseRejectsGlobalOnlyNodeBeforeFactoryDispatc
 
     GraphRegistry local;
     EXPECT_THROW((void)GraphCompiler::parse_local(node_definition("core-global-parse-node"), local),
-                 std::out_of_range);
+                 std::runtime_error);
     EXPECT_EQ(calls.load(), 0);
-    EXPECT_THROW((void)GraphCompiler::parse_local(node_definition(""), local), std::out_of_range);
+    EXPECT_THROW((void)GraphCompiler::parse_local(node_definition(""), local), std::runtime_error);
 }
 
 TEST(GraphRegistryLocalTest, LegacyKeyedConditionsCannotFallBackToProcessGlobalRegistry) {
@@ -108,8 +124,53 @@ TEST(GraphRegistryLocalTest, LegacyKeyedConditionsCannotFallBackToProcessGlobalR
                                        {"routes", json{{"go", "__end__"}}}}}}},
     };
 
-    EXPECT_THROW((void)GraphCompiler::parse_local(definition, local), std::out_of_range);
+    EXPECT_THROW((void)GraphCompiler::parse_local(definition, local), std::runtime_error);
     EXPECT_THROW((void)GraphCompiler::compile_local(definition, NodeContext{}, local),
-                 std::out_of_range);
+                 std::runtime_error);
     EXPECT_EQ(calls.load(), 0);
+}
+
+TEST(GraphRegistryLocalTest, LocalParseReportIgnoresGlobalOnlyNodeSchema) {
+    NodeFactory::instance().register_type(
+        "core-global-schema-node", factory(),
+        json{{"type", "object"},
+             {"required", json::array({"global-only-required"})},
+             {"properties", json{{"global-only-required", json{{"type", "string"}}}}},
+             {"additionalProperties", false}});
+
+    GraphRegistry local;
+    const auto    report =
+        GraphCompiler::parse_local_report(node_definition("core-global-schema-node"), local);
+
+    ASSERT_TRUE(report.has_errors());
+    ASSERT_EQ(report.diagnostics.size(), 1U);
+    EXPECT_EQ(report.diagnostics.front().code, "GC_REGISTRY_MISS");
+    EXPECT_EQ(report.diagnostics.front().json_pointer, "/nodes/work/type");
+}
+
+TEST(GraphRegistryLocalTest, LocalValidationIgnoresGlobalOnlyConditionAndNodeMetadata) {
+    NodeFactory::instance().register_type("core-global-effects-node", factory(),
+                                          json{{"type", "object"}},
+                                          json{{"writes", json::array({"undeclared"})}});
+    ConditionRegistry::instance().register_condition(
+        "core-global-spec-condition", [](const GraphState&) { return std::string("go"); },
+        ConditionSpec{{"go", "unrouted"}, false});
+
+    TopologySpec topology;
+    topology.schema_version    = 1;
+    topology.node_defs["work"] = json{{"type", "core-global-effects-node"}};
+    topology.edges.push_back({"__start__", "work"});
+    topology.conditional_edges.push_back(
+        {"work", "core-global-spec-condition", {{"go", "__end__"}}});
+
+    GraphRegistry local;
+    const auto    report = GraphValidator::validate_local(topology, local);
+
+    EXPECT_TRUE(report.has_errors());
+    EXPECT_TRUE(std::any_of(report.diagnostics.begin(), report.diagnostics.end(),
+                            [](const auto& diagnostic) { return diagnostic.code == "E12"; }));
+    EXPECT_FALSE(std::any_of(report.diagnostics.begin(), report.diagnostics.end(),
+                             [](const auto& diagnostic) {
+                                 return diagnostic.code == "E4" || diagnostic.code == "E10";
+                             }));
 }

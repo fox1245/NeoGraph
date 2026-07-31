@@ -54,6 +54,44 @@ std::string core_pointer(std::string_view pointer) {
     return std::string("/root/definition") + std::string(pointer);
 }
 
+bool is_inline_conditional(const json& edge) {
+    if (!edge.is_object()) return false;
+    if (edge.contains("condition")) return true;
+    return edge.contains("type") && edge["type"].is_string() &&
+           edge["type"].get<std::string>() == "conditional";
+}
+
+std::string authored_conditional_pointer(const json& definition, std::size_t normalized_index) {
+    std::size_t seen = 0;
+    if (definition.is_object() && definition.contains("edges") && definition["edges"].is_array()) {
+        std::size_t authored_index = 0;
+        for (const auto& edge : definition["edges"]) {
+            if (is_inline_conditional(edge)) {
+                if (seen == normalized_index) return "/edges/" + std::to_string(authored_index);
+                ++seen;
+            }
+            ++authored_index;
+        }
+    }
+    return "/conditional_edges/" + std::to_string(normalized_index - seen);
+}
+
+std::string authored_core_pointer(const json& definition, std::string_view normalized_pointer) {
+    constexpr std::string_view prefix = "/conditional_edges/";
+    if (!normalized_pointer.starts_with(prefix)) return core_pointer(normalized_pointer);
+    const auto  tail   = normalized_pointer.substr(prefix.size());
+    std::size_t digits = 0;
+    std::size_t index  = 0;
+    while (digits < tail.size() && tail[digits] >= '0' && tail[digits] <= '9') {
+        index = index * 10 + static_cast<std::size_t>(tail[digits] - '0');
+        ++digits;
+    }
+    if (digits == 0 || (digits < tail.size() && tail[digits] != '/'))
+        return core_pointer(normalized_pointer);
+    return core_pointer(authored_conditional_pointer(definition, index) +
+                        std::string(tail.substr(digits)));
+}
+
 bool is_ancestor_pointer(std::string_view ancestor, std::string_view pointer) {
     if (ancestor == pointer) return true;
     if (ancestor.empty()) return !pointer.empty() && pointer.front() == '/';
@@ -543,12 +581,13 @@ void add_roundtrip_diagnostics(const graph::RoundTripReport& report,
 }
 
 void add_validation_diagnostics(const graph::ValidationReport& report,
+                                const json&                    core_definition,
                                 DiagnosticAccumulator&         diagnostics) {
     for (const auto& core : report.diagnostics) {
         const auto severity =
             core.severity == "warning" ? DiagnosticSeverity::Warning : DiagnosticSeverity::Error;
         diagnostics.add(CompilePhase::CoreValidate, "P_CORE_" + core.code, severity,
-                        core_pointer(core.json_pointer), core.message,
+                        authored_core_pointer(core_definition, core.json_pointer), core.message,
                         with_core_code(core.witness, core.code));
     }
 }
@@ -559,7 +598,8 @@ struct DirectReference {
     std::string    pointer;
 };
 
-std::vector<DirectReference> direct_references(const graph::TopologySpec& topology) {
+std::vector<DirectReference> direct_references(const graph::TopologySpec& topology,
+                                               const json&                core_definition) {
     std::vector<DirectReference> references;
     for (const auto& [name, definition] : topology.node_defs) {
         references.push_back({ExecutableKind::Node, definition.at("type").get<std::string>(),
@@ -573,7 +613,7 @@ std::vector<DirectReference> direct_references(const graph::TopologySpec& topolo
     for (std::size_t index = 0; index < topology.conditional_edges.size(); ++index) {
         references.push_back(
             {ExecutableKind::Condition, topology.conditional_edges[index].condition,
-             "/root/definition/conditional_edges/" + std::to_string(index) + "/condition"});
+             core_pointer(authored_conditional_pointer(core_definition, index) + "/condition")});
     }
     std::sort(references.begin(), references.end(), [](const auto& lhs, const auto& rhs) {
         return std::tie(lhs.kind, lhs.name, lhs.pointer) <
@@ -589,6 +629,7 @@ struct ClosureResult {
 
 ClosureResult resolve_closure(const RegistrySnapshot&    registry,
                               const graph::TopologySpec& topology,
+                              const json&                core_definition,
                               DiagnosticAccumulator&     diagnostics) {
     struct Work {
         ExecutableIdentity                expected;
@@ -596,7 +637,7 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
         std::optional<ExecutableIdentity> required_by;
     };
     std::vector<Work> work;
-    for (const auto& reference : direct_references(topology)) {
+    for (const auto& reference : direct_references(topology, core_definition)) {
         try {
             const auto& manifest = detail::RegistrySnapshotAccess::require_manifest(
                 registry, reference.kind, reference.name);
@@ -799,9 +840,9 @@ struct ProgramCompiler::Impl {
             if (diagnostics.has_errors()) diagnostics.throw_error();
             const auto validation =
                 detail::RegistrySnapshotAccess::validate_local(registry, topology);
-            add_validation_diagnostics(validation, diagnostics);
+            add_validation_diagnostics(validation, parsed.core_definition, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();
-            auto closure = resolve_closure(registry, topology, diagnostics);
+            auto closure = resolve_closure(registry, topology, parsed.core_definition, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();
             auto                 sealed_json = topology.to_json();
             SealedCoreDefinition sealed{parsed.root_name, sealed_core_definition_hash(sealed_json),

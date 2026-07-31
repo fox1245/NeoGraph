@@ -5,6 +5,7 @@
 #include "routing_policy.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <limits>
@@ -384,11 +385,14 @@ TopologySpec GraphCompiler::parse(const json& definition, const GraphRegistry& r
     return std::move(*report.topology);
 }
 
-ParseReport GraphCompiler::parse_report(const json& definition, const GraphRegistry& registry) {
+static ParseReport parse_report_impl(const json&          definition,
+                                     const GraphRegistry& registry,
+                                     bool                 local_only) {
     ParseReport           report;
     TopologySpec          topology;
     auto&                 diagnostics = report.diagnostics;
     std::set<std::string> top_consumed;
+    bool                  strict = false;
 
     auto field_type = [&](std::string pointer, std::string display, std::string expected,
                           const json& actual) {
@@ -414,6 +418,11 @@ ParseReport GraphCompiler::parse_report(const json& definition, const GraphRegis
             return false;
         }
         output = value.get<std::string>();
+        if (strict && output.empty()) {
+            diagnostics.push_back({"GC_FIELD_VALUE", pointer, display + " must not be empty",
+                                   json{{"expected", "non-empty string"}, {"actual", output}}});
+            return false;
+        }
         return true;
     };
 
@@ -452,7 +461,7 @@ ParseReport GraphCompiler::parse_report(const json& definition, const GraphRegis
             return report;
         }
     }
-    const bool strict = topology.schema_version >= 1;
+    strict = topology.schema_version >= 1;
 
     auto container_ok = [&](const char* field, bool object, bool legacy_object_allowed = false) {
         if (!definition.contains(field)) return false;
@@ -474,15 +483,25 @@ ParseReport GraphCompiler::parse_report(const json& definition, const GraphRegis
     topology.name = "unnamed_graph";
     top_consumed.insert("name");
     if (definition.contains("name")) {
-        if (definition["name"].is_string())
+        if (definition["name"].is_string()) {
             topology.name = definition["name"].get<std::string>();
-        else
+            if (strict && topology.name.empty()) {
+                diagnostics.push_back(
+                    {"GC_FIELD_VALUE", "/name", "topology '$.name' must not be empty",
+                     json{{"expected", "non-empty string"}, {"actual", topology.name}}});
+            }
+        } else {
             field_type("/name", "topology '$.name'", "string", definition["name"]);
+        }
     }
 
     if (channels_ok) {
         for (const auto& [name, channel] : definition["channels"].items()) {
             const std::string pointer = "/channels/" + pointer_token(name);
+            if (strict && name.empty()) {
+                diagnostics.push_back({"GC_FIELD_VALUE", pointer, "channel name must not be empty",
+                                       json{{"expected", "non-empty string"}, {"actual", name}}});
+            }
             if (!channel.is_object()) {
                 field_type(pointer, "topology 'channels." + name + "'", "object", channel);
                 continue;
@@ -491,11 +510,18 @@ ParseReport GraphCompiler::parse_report(const json& definition, const GraphRegis
             parsed.name         = name;
             parsed.reducer_name = "overwrite";
             if (channel.contains("reducer")) {
-                if (channel["reducer"].is_string())
+                if (channel["reducer"].is_string()) {
                     parsed.reducer_name = channel["reducer"].get<std::string>();
-                else
+                    if (strict && parsed.reducer_name.empty()) {
+                        diagnostics.push_back({"GC_FIELD_VALUE", pointer + "/reducer",
+                                               "channels." + name + ".reducer must not be empty",
+                                               json{{"expected", "non-empty string"},
+                                                    {"actual", parsed.reducer_name}}});
+                    }
+                } else {
                     field_type(pointer + "/reducer", "channels." + name + ".reducer", "string",
                                channel["reducer"]);
+                }
             }
             parsed.has_initial   = channel.contains("initial");
             parsed.initial_value = parsed.has_initial ? channel["initial"] : json();
@@ -516,6 +542,10 @@ ParseReport GraphCompiler::parse_report(const json& definition, const GraphRegis
     if (nodes_ok) {
         for (const auto& [name, node] : definition["nodes"].items()) {
             const std::string pointer = "/nodes/" + pointer_token(name);
+            if (strict && name.empty()) {
+                diagnostics.push_back({"GC_FIELD_VALUE", pointer, "node name must not be empty",
+                                       json{{"expected", "non-empty string"}, {"actual", name}}});
+            }
             if (!node.is_object()) {
                 field_type(pointer, "topology 'nodes." + name + "'", "object", node);
                 continue;
@@ -543,6 +573,14 @@ ParseReport GraphCompiler::parse_report(const json& definition, const GraphRegis
                                 field_type(barrier_pointer + "/wait_for/" + std::to_string(index),
                                            "nodes." + name + ".barrier.wait_for", "string",
                                            upstream);
+                            } else if (strict && upstream.get<std::string>().empty()) {
+                                malformed = true;
+                                diagnostics.push_back(
+                                    {"GC_FIELD_VALUE",
+                                     barrier_pointer + "/wait_for/" + std::to_string(index),
+                                     "nodes." + name +
+                                         ".barrier.wait_for entries must not be empty",
+                                     json{{"expected", "non-empty string"}, {"actual", ""}}});
                             } else {
                                 wait_for.insert(upstream.get<std::string>());
                             }
@@ -577,12 +615,20 @@ ParseReport GraphCompiler::parse_report(const json& definition, const GraphRegis
             }
 
             if (strict && valid_type) {
-                const json schema = registry.config_schema(type);
+                const json schema = local_only && !registry.contains_type(type)
+                                        ? json{{"type", "object"}}
+                                        : (local_only ? registry.local_config_schema(type)
+                                                      : registry.config_schema(type));
                 json       config = json::object();
                 for (const auto& [key, value] : node.items()) {
-                    if (key != "type" && key != "barrier" && !is_annotation_key(key)) {
-                        config[key] = value;
+                    if (key == "type" || key == "barrier" || is_annotation_key(key)) continue;
+                    if (key.empty()) {
+                        diagnostics.push_back(
+                            {"GC_FIELD_VALUE", pointer + "/",
+                             "nodes." + name + " configuration keys must not be empty",
+                             json{{"expected", "non-empty string"}, {"actual", key}}});
                     }
+                    config[key] = value;
                 }
                 validate_node_config_schema(config, schema, "nodes." + name, pointer, type,
                                             diagnostics);
@@ -613,6 +659,15 @@ ParseReport GraphCompiler::parse_report(const json& definition, const GraphRegis
         ConditionalEdge       parsed;
         std::set<std::string> consumed = {"from", "condition", "routes"};
         if (inline_form) consumed.insert("type");
+        bool valid_type = true;
+        if (inline_form && edge.contains("type") && edge["type"].is_string() && strict &&
+            edge["type"].get<std::string>() != "conditional") {
+            diagnostics.push_back(
+                {"GC_FIELD_VALUE", pointer + "/type",
+                 path + ".type must equal 'conditional' when an inline edge has a condition",
+                 json{{"expected", "conditional"}, {"actual", edge["type"]}}});
+            valid_type = false;
+        }
         const bool valid_from = read_string(edge, "from", pointer + "/from", path, parsed.from);
         const bool valid_condition =
             read_string(edge, "condition", pointer + "/condition", path, parsed.condition);
@@ -624,9 +679,22 @@ ParseReport GraphCompiler::parse_report(const json& definition, const GraphRegis
                 valid_routes = false;
             } else {
                 for (const auto& [key, target] : edge["routes"].items()) {
+                    if (strict && key.empty()) {
+                        diagnostics.push_back(
+                            {"GC_FIELD_VALUE", pointer + "/routes/",
+                             path + ".routes key must not be empty",
+                             json{{"expected", "non-empty string"}, {"actual", key}}});
+                        valid_routes = false;
+                    }
                     if (!target.is_string()) {
                         field_type(pointer + "/routes/" + pointer_token(key),
                                    path + ".routes." + key, "string", target);
+                        valid_routes = false;
+                    } else if (strict && target.get<std::string>().empty()) {
+                        diagnostics.push_back(
+                            {"GC_FIELD_VALUE", pointer + "/routes/" + pointer_token(key),
+                             path + ".routes." + key + " must not be empty",
+                             json{{"expected", "non-empty string"}, {"actual", ""}}});
                         valid_routes = false;
                     } else {
                         parsed.routes[key] = target.get<std::string>();
@@ -635,7 +703,7 @@ ParseReport GraphCompiler::parse_report(const json& definition, const GraphRegis
             }
         }
         if (strict) enforce_consumed(edge, consumed, path, pointer, diagnostics);
-        if (valid_from && valid_condition && valid_routes) {
+        if (valid_type && valid_from && valid_condition && valid_routes) {
             topology.conditional_edges.push_back(std::move(parsed));
         }
     };
@@ -691,10 +759,15 @@ ParseReport GraphCompiler::parse_report(const json& definition, const GraphRegis
         }
         std::size_t index = 0;
         for (const auto& node : value) {
-            if (!node.is_string())
+            if (!node.is_string()) {
                 field_type(pointer + "/" + std::to_string(index), field, "string", node);
-            else
+            } else if (strict && node.get<std::string>().empty()) {
+                diagnostics.push_back({"GC_FIELD_VALUE", pointer + "/" + std::to_string(index),
+                                       std::string(field) + " entries must not be empty",
+                                       json{{"expected", "non-empty string"}, {"actual", ""}}});
+            } else {
                 output.insert(node.get<std::string>());
+            }
             ++index;
         }
     };
@@ -716,14 +789,32 @@ ParseReport GraphCompiler::parse_report(const json& definition, const GraphRegis
                                       "retry_policy." + std::string(field), "integer", value);
                     return fallback;
                 }
-                const auto parsed = value.get<std::int64_t>();
-                if (parsed < std::numeric_limits<int>::min() ||
-                    parsed > std::numeric_limits<int>::max()) {
-                    field_type("/retry_policy/" + std::string(field),
-                                      "retry_policy." + std::string(field), "integer in range", value);
-                    return fallback;
+                if (!strict) {
+                    const auto parsed = value.get<std::int64_t>();
+                    if (parsed < std::numeric_limits<int>::min() ||
+                        parsed > std::numeric_limits<int>::max()) {
+                        field_type("/retry_policy/" + std::string(field),
+                                          "retry_policy." + std::string(field), "integer in range", value);
+                        return fallback;
+                    }
+                    return static_cast<int>(parsed);
                 }
-                return static_cast<int>(parsed);
+                if (value.is_number_unsigned()) {
+                    const auto parsed = value.get<std::uint64_t>();
+                    if (parsed <= static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
+                        return static_cast<int>(parsed);
+                } else {
+                    const auto parsed = value.get<std::int64_t>();
+                    if (parsed >= 0 && parsed <= std::numeric_limits<int>::max())
+                        return static_cast<int>(parsed);
+                }
+                diagnostics.push_back(
+                    {"GC_FIELD_VALUE", "/retry_policy/" + std::string(field),
+                     "retry_policy." + std::string(field) + " must be a non-negative int32",
+                     json{{"minimum", 0},
+                                 {"maximum", std::numeric_limits<int>::max()},
+                                 {"actual", value}}});
+                return fallback;
             };
             policy.max_retries      = read_integer("max_retries", 0);
             policy.initial_delay_ms = read_integer("initial_delay_ms", 100);
@@ -734,8 +825,25 @@ ParseReport GraphCompiler::parse_report(const json& definition, const GraphRegis
                                "retry_policy.backoff_multiplier", "number",
                                retry["backoff_multiplier"]);
                 } else {
-                    policy.backoff_multiplier =
-                        static_cast<float>(retry["backoff_multiplier"].get<double>());
+                    const auto multiplier = retry["backoff_multiplier"].get<double>();
+                    if (!strict) {
+                        policy.backoff_multiplier = static_cast<float>(multiplier);
+                    } else if (!std::isfinite(multiplier) ||
+                               multiplier <
+                                   static_cast<double>(std::numeric_limits<float>::lowest()) ||
+                               multiplier >
+                                   static_cast<double>(std::numeric_limits<float>::max())) {
+                        diagnostics.push_back(
+                            {"GC_FIELD_VALUE", "/retry_policy/backoff_multiplier",
+                             "retry_policy.backoff_multiplier exceeds finite float range",
+                             json{{"minimum",
+                                   static_cast<double>(std::numeric_limits<float>::lowest())},
+                                  {"maximum",
+                                   static_cast<double>(std::numeric_limits<float>::max())},
+                                  {"actual", retry["backoff_multiplier"]}}});
+                    } else {
+                        policy.backoff_multiplier = static_cast<float>(multiplier);
+                    }
                 }
             }
             if (strict) {
@@ -753,34 +861,19 @@ ParseReport GraphCompiler::parse_report(const json& definition, const GraphRegis
     return report;
 }
 
+ParseReport GraphCompiler::parse_report(const json& definition, const GraphRegistry& registry) {
+    return parse_report_impl(definition, registry, false);
+}
+
 TopologySpec GraphCompiler::parse_local(const json& definition, const GraphRegistry& registry) {
-    if (definition.contains("channels") && definition["channels"].is_object()) {
-        for (const auto& [name, channel] : definition["channels"].items()) {
-            (void)name;
-            if (!channel.is_object()) continue;
-            const auto reducer = channel.value("reducer", "overwrite");
-            (void)registry.local_reducer(reducer);
-        }
-    }
-    if (definition.contains("nodes") && definition["nodes"].is_object()) {
-        for (const auto& [name, node] : definition["nodes"].items()) {
-            (void)name;
-            if (!node.is_object()) continue;
-            const auto type = node.value("type", "");
-            (void)registry.local_config_schema(type);
-        }
-    }
-    auto topology = parse(definition, registry);
-    for (const auto& edge : topology.conditional_edges) {
-        (void)registry.local_condition(edge.condition);
-        (void)registry.local_condition_spec(edge.condition);
-    }
-    return topology;
+    auto report = parse_local_report(definition, registry);
+    if (report.has_errors()) throw std::runtime_error(report.summary());
+    return std::move(*report.topology);
 }
 
 ParseReport GraphCompiler::parse_local_report(const json&          definition,
                                               const GraphRegistry& registry) {
-    auto report = parse_report(definition, registry);
+    auto report = parse_report_impl(definition, registry, true);
     if (!definition.is_object()) return report;
     if (definition.contains("channels") && definition["channels"].is_object()) {
         for (const auto& [name, channel] : definition["channels"].items()) {
@@ -813,20 +906,25 @@ ParseReport GraphCompiler::parse_local_report(const json&          definition,
         }
     }
     auto find_conditions = [&](const char* field) {
-        if (!definition.contains(field) || !definition[field].is_array()) return;
-        std::size_t index = 0;
-        for (const auto& edge : definition[field]) {
-            if (edge.is_object() && edge.contains("condition") && edge["condition"].is_string()) {
-                const auto condition = edge["condition"].get<std::string>();
-                if (!registry.contains_condition(condition)) {
-                    report.diagnostics.push_back(
-                        {"GC_REGISTRY_MISS",
-                         "/" + std::string(field) + "/" + std::to_string(index) + "/condition",
-                         "Local graph registry has no condition '" + condition + "'",
-                         json{{"kind", "condition"}, {"name", condition}}});
-                }
+        if (!definition.contains(field)) return;
+        const auto emit_missing = [&](const json& edge, const std::string& pointer) {
+            if (!edge.is_object() || !edge.contains("condition") || !edge["condition"].is_string())
+                return;
+            const auto condition = edge["condition"].get<std::string>();
+            if (!registry.contains_condition(condition)) {
+                report.diagnostics.push_back(
+                    {"GC_REGISTRY_MISS", pointer + "/condition",
+                     "Local graph registry has no condition '" + condition + "'",
+                     json{{"kind", "condition"}, {"name", condition}}});
             }
-            ++index;
+        };
+        if (definition[field].is_array()) {
+            std::size_t index = 0;
+            for (const auto& edge : definition[field])
+                emit_missing(edge, "/" + std::string(field) + "/" + std::to_string(index++));
+        } else if (definition[field].is_object()) {
+            for (const auto& [name, edge] : definition[field].items())
+                emit_missing(edge, "/" + std::string(field) + "/" + pointer_token(name));
         }
     };
     find_conditions("edges");
@@ -1324,9 +1422,22 @@ void GraphCompiler::verify_roundtrip(const json& definition, const TopologySpec&
 RoundTripReport GraphCompiler::verify_roundtrip_report(const json&         definition,
                                                        const TopologySpec& topology) {
     RoundTripReport report;
-    const json      declared = canon(definition);
-    const json      compiled = canon(topology.to_json());
-    collect_mismatches(declared, compiled, "", report.diagnostics);
+    try {
+        GraphRegistry structural_registry;
+        auto          structural = parse_report_impl(definition, structural_registry, true);
+        if (structural.has_errors()) {
+            report.diagnostics = std::move(structural.diagnostics);
+            return report;
+        }
+        const json declared = canon(definition);
+        const json compiled = canon(topology.to_json());
+        collect_mismatches(declared, compiled, "", report.diagnostics);
+    } catch (...) {
+        report.diagnostics.push_back(
+            {"GC_ROUNDTRIP_INPUT", "",
+             "Translation validation could not canonicalize the authored or compiled topology",
+             json{{"stage", "canonicalization"}}});
+    }
     return report;
 }
 

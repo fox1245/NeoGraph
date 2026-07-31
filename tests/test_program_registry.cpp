@@ -339,7 +339,7 @@ TEST(RegistrySnapshotTest, LocalCompilerRejectsEveryGlobalOnlyExecutableKind) {
     };
     EXPECT_THROW((void)neograph::program::detail::RegistrySnapshotAccess::parse_local(
                      empty_snapshot, node_definition),
-                 std::out_of_range);
+                 std::runtime_error);
     EXPECT_EQ(global_factory_calls.load(), 0);
 
     const json reducer_definition = {
@@ -351,7 +351,7 @@ TEST(RegistrySnapshotTest, LocalCompilerRejectsEveryGlobalOnlyExecutableKind) {
     };
     EXPECT_THROW((void)neograph::program::detail::RegistrySnapshotAccess::parse_local(
                      empty_snapshot, reducer_definition),
-                 std::out_of_range);
+                 std::runtime_error);
 
     RegistrySnapshotBuilder node_builder;
     node_builder.add_node(executable(ExecutableKind::Node, "pr4-local-node", "1.0.0", digest('2'),
@@ -368,7 +368,7 @@ TEST(RegistrySnapshotTest, LocalCompilerRejectsEveryGlobalOnlyExecutableKind) {
     };
     EXPECT_THROW((void)neograph::program::detail::RegistrySnapshotAccess::parse_local(
                      node_snapshot, condition_definition),
-                 std::out_of_range);
+                 std::runtime_error);
 }
 
 TEST(RegistrySnapshotTest, CopiedCallableSurvivesBuilderAndCallerMutation) {

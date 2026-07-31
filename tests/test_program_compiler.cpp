@@ -236,10 +236,17 @@ void ensure_global_poison_entries() {
     static const bool registered = [] {
         NodeFactory::instance().register_type("pr5-global-node", global_factory(),
                                               json{{"type", "object"}});
-        ReducerRegistry::instance().register_reducer(
-            "pr5-global-reducer", [](const json&, const json& incoming) { return json(incoming); });
+        ReducerRegistry::instance().register_reducer("pr5-global-reducer",
+                                                     [](const json&, const json& incoming) {
+                                                         ++reducer_body_calls;
+                                                         return json(incoming);
+                                                     });
         ConditionRegistry::instance().register_condition(
-            "pr5-global-condition", [](const GraphState&) { return std::string("done"); },
+            "pr5-global-condition",
+            [](const GraphState&) {
+                ++condition_body_calls;
+                return std::string("done");
+            },
             ConditionSpec{{"done"}, false});
         return true;
     }();
@@ -421,8 +428,8 @@ TEST(ProgramCompilerTest, RejectsMissingDuplicateAndInvalidBudgetClosure) {
 
     auto invalid = program_document();
     for (std::size_t index = 0; index < invalid["declared_budget_requirements"].size(); ++index) {
-        auto budget = invalid["declared_budget_requirements"][index];
-        if (budget["resource"] == "max_program_operations") budget["maximum"] = 2;
+        if (invalid["declared_budget_requirements"][index]["resource"] == "max_program_operations")
+            invalid["declared_budget_requirements"][index]["maximum"] = 2;
     }
     EXPECT_TRUE(contains_code(compile_errors(snapshot, std::move(invalid)), "P_BUDGET_INVALID"));
 }
@@ -503,6 +510,81 @@ TEST(ProgramCompilerTest, MapsCoreParseAndValidationDiagnosticsThroughEscapedSou
     ASSERT_NE(exact, exact_errors.end());
     ASSERT_TRUE(exact->primary.span.has_value());
     EXPECT_EQ(*exact->primary.span, exact_span);
+}
+
+TEST(ProgramCompilerTest, InlineConditionalValidationUsesAuthoredEdgePointer) {
+    auto snapshot                   = complete_snapshot();
+    auto definition                 = core_definition();
+    definition["edges"]             = json::array({json{{"from", "__start__"}, {"to", "work"}},
+                                                   json{{"type", "conditional"},
+                                                        {"from", "work"},
+                                                        {"condition", "local-condition"},
+                                                        {"routes", json{{"other", "__end__"}}}}});
+    definition["conditional_edges"] = json::array();
+
+    const SourceSpan     span{30, 50, 4, 1, 4, 21};
+    const SourceMapEntry mapping{"/root/definition/edges/1",
+                                 {"dsl:test", "/graph/inline-branch", span}};
+    const auto           errors =
+        compile_errors(snapshot, program_document(std::move(definition)), {}, {mapping});
+    const auto diagnostic = std::find_if(
+        errors.begin(), errors.end(), [](const auto& value) { return value.code == "P_CORE_E10"; });
+
+    ASSERT_NE(diagnostic, errors.end());
+    EXPECT_EQ(diagnostic->primary.source_id, "dsl:test");
+    EXPECT_EQ(diagnostic->primary.json_pointer, "/graph/inline-branch");
+    ASSERT_TRUE(diagnostic->primary.span.has_value());
+    EXPECT_EQ(*diagnostic->primary.span, span);
+}
+
+TEST(ProgramCompilerTest, RejectsInvalidInlineConditionalTypeWithoutDispatch) {
+    auto snapshot       = complete_snapshot();
+    auto definition     = core_definition();
+    definition["edges"] = json::array(
+        {json{{"from", "__start__"}, {"to", "work"}}, json{{"type", "branch"},
+                                                           {"from", "work"},
+                                                           {"condition", "local-condition"},
+                                                           {"routes", json{{"done", "__end__"}}}}});
+    definition["conditional_edges"] = json::array();
+
+    reset_dispatch_counters();
+    const auto errors = compile_errors(snapshot, program_document(std::move(definition)));
+    EXPECT_TRUE(contains_code(errors, "P_CORE_GC_FIELD_VALUE"));
+    EXPECT_FALSE(contains_code(errors, "P_COMPILER_INTERNAL"));
+    expect_dispatch_counters_zero();
+}
+
+TEST(ProgramCompilerTest, RejectsUnsealableCoreValuesAsTypedFieldDiagnostics) {
+    const auto        snapshot = complete_snapshot();
+    std::vector<json> documents;
+    {
+        auto document                               = program_document();
+        document["root"]["definition"]["nodes"][""] = json{{"type", "local-node"}};
+        documents.push_back(std::move(document));
+    }
+    {
+        auto document                                       = program_document();
+        document["root"]["definition"]["nodes"]["work"][""] = 1;
+        documents.push_back(std::move(document));
+    }
+    {
+        auto document                                  = program_document();
+        document["root"]["definition"]["retry_policy"] = json{{"max_retries", -1}};
+        documents.push_back(std::move(document));
+    }
+    {
+        auto document                                  = program_document();
+        document["root"]["definition"]["retry_policy"] = json{{"backoff_multiplier", 1.0e300}};
+        documents.push_back(std::move(document));
+    }
+
+    for (auto& document : documents) {
+        reset_dispatch_counters();
+        const auto errors = compile_errors(snapshot, std::move(document));
+        EXPECT_TRUE(contains_code(errors, "P_CORE_GC_FIELD_VALUE"));
+        EXPECT_FALSE(contains_code(errors, "P_COMPILER_INTERNAL"));
+        expect_dispatch_counters_zero();
+    }
 }
 
 TEST(ProgramCompilerTest, WarningsAreStoredAndErrorsPreventBundleConstruction) {
@@ -684,8 +766,8 @@ TEST(ProgramCompilerTest, EveryFailurePathLeavesDispatchCountersZero) {
         auto document = program_document();
         for (std::size_t index = 0; index < document["declared_budget_requirements"].size();
              ++index) {
-            auto budget = document["declared_budget_requirements"][index];
-            if (budget["resource"] == "max_child_depth") budget["maximum"] = 1;
+            if (document["declared_budget_requirements"][index]["resource"] == "max_child_depth")
+                document["declared_budget_requirements"][index]["maximum"] = 1;
         }
         return !compile_errors(snapshot, std::move(document)).empty();
     });
