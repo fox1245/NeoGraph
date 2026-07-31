@@ -1,0 +1,163 @@
+spec:
+  id: issue-199-async-http-ownership
+  issue: 199
+  parent: 187
+  status: completed
+  priority: P0
+  kind: memory-safety
+  depends_on: []
+
+problem:
+  statement: >-
+    Public HTTP coroutine APIs borrow string_view and request data, then copy
+    only after first resume. Deferred awaitables can outlive temporary inputs.
+  evidence:
+    - "include/neograph/async/http_client.h:99-120"
+    - "src/async/http_client.cpp:303-316"
+    - "src/async/conn_pool.cpp:273-284"
+
+invariants:
+  - Every value read after initial suspend is owned by the coroutine frame.
+  - Streaming callbacks and cancellation targets outlive all scheduled work.
+  - Ownership fixes do not introduce one copy per retry or redirect hop.
+
+red_tests:
+  - id: delayed-spawn-temporaries
+    assertion: "Temporary URL, body, and headers survive delayed co_spawn."
+  - id: stored-awaitable
+    assertion: "An awaitable created in one scope runs safely in another."
+  - id: stream-callback-lifetime
+    assertion: "Chunks never target a destroyed callback capture."
+
+implementation:
+  - Change public coroutine boundaries to take owned values where required.
+  - Move owned data into the coroutine frame at call construction.
+  - Audit redirects, retries, ConnPool, SSE, and WebSocket call chains.
+
+acceptance:
+  - ASan and delayed-resume regressions pass for every public HTTP entry point.
+  - Cancellation, headers, redirects, pooling, and streaming behavior are unchanged.
+  - Copy/allocation impact is measured.
+
+observed:
+  root_cause: >-
+    async_post, async_get, async_post_stream, ConnPool::async_post,
+    ws_connect, and the WsClient send methods were lazy coroutine functions
+    with string_view parameters. Their frames copied the views at call time but
+    did not copy the referenced bytes until first resume, so mutating or
+    destroying caller storage changed the eventual request or caused undefined
+    behavior.
+  red_evidence:
+    - >-
+      Before the fix, all four HTTP ownership regressions failed: POST and GET
+      observed the mutated path, streaming delivered the mutated-path response,
+      and ConnPool sent the mutated path.
+    - >-
+      The WebSocket delayed-send regression echoed truncated mutated text,
+      binary, and close-reason payloads instead of the values present when each
+      awaitable was created.
+
+resolution:
+  design: >-
+    Preserve every public signature as a non-coroutine facade. Each facade
+    synchronously constructs owned strings and moves them, along with already
+    by-value headers and callbacks, into a private by-value coroutine frame.
+  changed_files:
+    - include/neograph/async/http_client.h
+    - include/neograph/async/conn_pool.h
+    - include/neograph/async/ws_client.h
+    - src/async/http_client.cpp
+    - src/async/conn_pool.cpp
+    - src/async/ws_client.cpp
+    - tests/test_async_get.cpp
+    - tests/test_async_http_stream.cpp
+    - tests/test_async_conn_pool.cpp
+    - tests/test_async_ws_loopback.cpp
+    - benchmarks/bench_async_http.cpp
+  compatibility:
+    - Public function signatures and ConnPool/WsClient object layouts are unchanged.
+    - Timeout, redirect, pooling, SSE chunk, and WebSocket wire behavior are unchanged.
+    - Callback wrapper objects are owned; objects referenced by their captures remain caller-owned.
+  audit:
+    - CurlH2Pool was already safe because URL and body parameters are owned strings.
+    - SseEventParser::feed is synchronous and does not retain its string_view input.
+    - Internal string_view/reference helpers are immediately awaited by frames that own their sources.
+    - ConnPool and WsClient instances must still outlive operations invoked on them.
+  copy_cost: >-
+    Static allocation accounting adds exactly one string construction per
+    borrowed public string_view: at most four for POST/stream/pool calls, three
+    for GET/ws_connect, and one for each WebSocket send. SSO may avoid heap
+    allocation for short values. Header vectors and callback wrappers retain
+    their prior by-value copy behavior and are moved into the owned frame.
+    Redirect and stale-connection retry loops receive the same frame-owned
+    values, so the fix adds no copy per hop or retry. The 2026-07-26 delayed
+    cancellation regression exercises the streaming timeout race and confirms
+    the callback capture stays alive while the stored awaitable is pending,
+    releases after the timeout completes, and receives no late chunks. The
+    reproducible ownership_construct benchmark in bench_async_http isolates
+    API-entry awaitable construction/destruction from networking. On this host
+    with 200000 constructions, short-body API-entry cost measured 207.5 ns/op
+    for GET, 223.3 ns/op for POST, 244.1 ns/op for streaming POST, and
+    246.3 ns/op for ConnPool POST. A 65536-byte POST body measured 18135.7 ns/op,
+    demonstrating that large-body copies scale with payload size while no
+    redirect/retry loop adds additional copies.
+
+verification:
+  targeted:
+    command: >-
+      ./build/tests/neograph_tests
+      --gtest_filter=AsyncHttpOwnership.*:WsLoopback.DelayedOperationsOwnEndpointAndPayloads
+    result: "6 passed, 0 failed before the delayed streaming cancellation regression was added"
+  delayed_stream_cancel:
+    command: >-
+      ./build-issue199-202/tests/neograph_tests
+      --gtest_filter=AsyncHttpOwnership.*:WsLoopback.DelayedOperationsOwnEndpointAndPayloads
+    result: "7 passed, 0 failed"
+  delayed_stream_cancel_asan:
+    configuration: >-
+      Debug; -fsanitize=address,undefined; ASAN_OPTIONS
+      detect_stack_use_after_return=1.
+    command: >-
+      ASAN_OPTIONS=detect_stack_use_after_return=1
+      ./build-issue199-202-asan/tests/neograph_tests
+      --gtest_filter=AsyncHttpOwnership.*:WsLoopback.DelayedOperationsOwnEndpointAndPayloads
+    result: "7 passed, 0 failed"
+  ownership_construct_benchmark:
+    configuration: >-
+      Release; NEOGRAPH_BUILD_BENCHMARKS=ON; optional service backends disabled.
+    command: >-
+      ./build-issue199-bench/bench_async_http --mode ownership_construct
+      --ownership-api {post,get,stream,pool} --concur 200000 --rounds 1
+    result: >-
+      post body_bytes=32: 223.3 ns/op; post body_bytes=65536: 18135.7 ns/op;
+      get body_bytes=32: 207.5 ns/op; stream body_bytes=32: 244.1 ns/op;
+      pool body_bytes=32: 246.3 ns/op.
+  behavior_matrix:
+    command: >-
+      ./build/tests/neograph_tests
+      --gtest_filter=AsyncHttpOwnership.*:RequestOptions.*:HttpResponseHeaders.*:AsyncPostStream.*:AsyncPost.*:AsyncPostUnchanged.*:AsyncGet.*:ConnPool.*:WsLoopback.*:WsCodec.*
+    result: "37 passed, 0 failed before the explicit temporary-input case was added"
+  sanitizer:
+    configuration: >-
+      Debug; -fsanitize=address,undefined; ASAN_OPTIONS
+      detect_stack_use_after_return=1.
+    command: >-
+      ./build-asan/tests/neograph_tests
+      --gtest_filter=AsyncHttpOwnership.*:WsLoopback.DelayedOperationsOwnEndpointAndPayloads
+    result: "6 passed, 0 failed"
+  cpp_full:
+    configuration: "Release; PostgreSQL/SQLite/A2A/ACP/MCP ON."
+    command: "ctest --test-dir build --output-on-failure -j2"
+    result: "614 passed, 30 skipped, 0 failed (644 discovered)"
+    skips: >-
+      27 PostgreSQL tests skipped because NEOGRAPH_TEST_POSTGRES_URL was unset;
+      one live cancellation test skipped because NEOGRAPH_LIVE_LLM and an
+      OpenAI key were not enabled; two live WebSocket tests skipped because
+      NEOGRAPH_LIVE_OPENAI was not enabled.
+  python_full:
+    configuration: >-
+      Release Python binding; PostgreSQL/SQLite/A2A/ACP ON; MCP OFF.
+    command: >-
+      PYTHONPATH=build_pybind:bindings/python python3 -m pytest
+      bindings/python/tests/ -q -rs
+    result: "149 passed, 6 skipped, 0 failed"

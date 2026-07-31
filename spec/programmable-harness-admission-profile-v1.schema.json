@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fox1245.github.io/NeoGraph/spec/programmable-harness-admission-profile-v1.schema.json",
+  "title": "NeoGraph Harness Admission Profile v1",
+  "type": "object",
+  "required": [
+    "format",
+    "id",
+    "source_semantics_profile",
+    "allow_global_fallback",
+    "modes",
+    "nodes",
+    "reducers",
+    "conditions"
+  ],
+  "properties": {
+    "format": {"const": "neograph-harness-admission-profile-v1"},
+    "id": {"type": "string", "minLength": 1},
+    "source_semantics_profile": {
+      "enum": ["precutover-graph-engine-v1", "legacy-graph-v1-runtime", "graph-compat-v1", "program-v1"]
+    },
+    "allow_global_fallback": {"const": false},
+    "modes": {
+      "type": "object",
+      "propertyNames": {"enum": ["preset", "dsl", "core", "program"]},
+      "additionalProperties": {
+        "type": "object",
+        "required": ["binding_contract"],
+        "properties": {
+          "binding_contract": {
+            "enum": ["fanout_judge", "general_core", "program"]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "nodes": {"$ref": "#/$defs/entry_map"},
+    "reducers": {"$ref": "#/$defs/entry_map"},
+    "conditions": {"$ref": "#/$defs/entry_map"}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "entry_map": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/entry"}
+    },
+    "entry": {
+      "type": "object",
+      "required": ["availability"],
+      "properties": {
+        "availability": {"enum": ["available", "unavailable"]},
+        "implementation_identity": {"type": "string", "minLength": 1},
+        "lowering_descriptor": {
+          "type": "object",
+          "required": ["kind", "version"],
+          "properties": {
+            "kind": {
+              "enum": ["legacy_graph_engine", "graph_to_control", "program_to_control"]
+            },
+            "version": {"type": "integer", "minimum": 1}
+          },
+          "additionalProperties": true
+        },
+        "compatibility_class": {
+          "enum": ["unclassified", "equivalent", "versioned_change", "drain_only", "blocked"]
+        },
+        "unavailable_reason": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"availability": {"const": "available"}},
+            "required": ["availability"]
+          },
+          "then": {
+            "required": [
+              "implementation_identity",
+              "lowering_descriptor",
+              "compatibility_class"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {"availability": {"const": "unavailable"}},
+            "required": ["availability"]
+          },
+          "then": {"required": ["unavailable_reason"]}
+        }
+      ],
+      "additionalProperties": false
+    }
+  }
+}

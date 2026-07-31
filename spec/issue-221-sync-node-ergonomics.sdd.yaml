@@ -1,0 +1,47 @@
+spec:
+  id: issue-221-sync-node-ergonomics
+  issue: 221
+  parent: 187
+  status: accepted-local
+  priority: P2
+  kind: additive-api
+  depends_on: [195]
+
+problem:
+  statement: >-
+    The single coroutine GraphNode contract is correct but simple synchronous
+    nodes require avoidable coroutine syntax. Restoring a sync virtual would
+    recreate the dispatch ambiguity removed by the v1 work.
+
+constraints:
+  - GraphNode keeps one virtual run(NodeInput) entry.
+  - The helper is additive and non-virtual or implements run finally.
+  - Send, Command, RunContext, and optional stream sink remain available.
+  - Blocking I/O is not disguised as asynchronous work.
+
+candidate_shapes:
+  selected: >-
+    SyncGraphNode derives from GraphNode, implements run(NodeInput) final, and
+    forwards exactly once to a pure synchronous run_sync(NodeInput) method.
+  rejected:
+    - "Callable factory: requires extra ownership and naming policy for no demonstrated benefit."
+    - "Free make_node helper: hides the concrete node type and complicates registration examples."
+
+red_tests:
+  - id: minimal-sync-node
+    assertion: "A complete synchronous node needs no manual co_return boilerplate."
+  - id: full-output
+    assertion: "The helper emits writes, Send, and Command without loss."
+  - id: streaming-context
+    assertion: "The helper can inspect context and optional stream sink."
+  - id: no-recursion
+    assertion: "No sync/async fallback pair is introduced."
+
+measurement:
+  - Compare wrapper dispatch with a direct run override in the engine benchmark.
+  - Reject unexplained overhead above the established noise floor.
+
+acceptance:
+  - One concise C++ example demonstrates the selected helper.
+  - Canonical run dispatch and async-native nodes remain unchanged.
+  - Documentation warns that blocking I/O requires an async node or explicit pool.

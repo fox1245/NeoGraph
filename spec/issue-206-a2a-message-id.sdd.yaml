@@ -1,0 +1,37 @@
+spec:
+  id: issue-206-a2a-message-id
+  issue: 206
+  parent: 187
+  status: proposed
+  priority: P1
+  kind: protocol-correctness
+  depends_on: []
+
+problem:
+  statement: >-
+    A2ACallerNode derives message IDs from low object-address bits, so calls
+    repeat IDs and unrelated nodes may collide.
+  evidence:
+    - "src/a2a/a2a_caller_node.cpp:40-43"
+
+contract:
+  - Message identity is generated per call, not per object.
+  - Concurrent calls in one process do not collide.
+  - Production IDs expose no memory address information.
+  - Tests may inject a deterministic generator without changing production policy.
+
+red_tests:
+  - id: repeated-node-calls
+    assertion: "One node emits a different ID on every call."
+  - id: concurrent-callers
+    assertion: "A large concurrent set contains no duplicate."
+  - id: propagation
+    assertion: "The generated ID survives request and response history."
+
+implementation:
+  - Reuse the project UUID facility or a monotonic process-safe generator.
+  - Add an optional generator dependency only if deterministic tests require it.
+
+acceptance:
+  - No address-derived ID code remains.
+  - A2A caller and wire round-trip tests pass.

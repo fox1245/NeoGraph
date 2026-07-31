@@ -1,0 +1,232 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fox1245.github.io/NeoGraph/spec/programmable-harness-kernel-abi-v1.schema.json",
+  "title": "NeoGraph Programmable Harness Kernel ABI v1",
+  "description": "Canonical logical encodings for the reference contract. Canonical bytes are compact UTF-8 JSON with lexicographically ordered object keys, preserved array order, signed base-10 integers only, no insignificant whitespace, and absent fields distinct from null. Digests are SHA-256 over those bytes.",
+  "oneOf": [
+    {"$ref": "#/$defs/quantum_input"},
+    {"$ref": "#/$defs/transition_batch"},
+    {"$ref": "#/$defs/vm_continuation"},
+    {"$ref": "#/$defs/commit_result"}
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "nonnegative_int": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+    "fuel": {
+      "type": "object",
+      "required": ["instructions", "memory_bytes", "call_depth", "tasks", "effects"],
+      "properties": {
+        "instructions": {"$ref": "#/$defs/nonnegative_int"},
+        "memory_bytes": {"$ref": "#/$defs/nonnegative_int"},
+        "call_depth": {"$ref": "#/$defs/nonnegative_int"},
+        "tasks": {"$ref": "#/$defs/nonnegative_int"},
+        "effects": {"$ref": "#/$defs/nonnegative_int"}
+      },
+      "additionalProperties": false
+    },
+    "versioned_value": {
+      "type": "object",
+      "required": ["version", "value"],
+      "properties": {
+        "version": {"$ref": "#/$defs/nonnegative_int"},
+        "value": true
+      },
+      "additionalProperties": false
+    },
+    "snapshot": {
+      "type": "object",
+      "required": ["snapshot_id", "version", "channels"],
+      "properties": {
+        "snapshot_id": {"$ref": "#/$defs/id"},
+        "version": {"$ref": "#/$defs/nonnegative_int"},
+        "channels": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/versioned_value"}
+        }
+      },
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "required": ["event_id", "kind", "payload"],
+      "properties": {
+        "event_id": {"$ref": "#/$defs/id"},
+        "kind": {"type": "string", "minLength": 1},
+        "payload": true,
+        "causal_parent_id": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "authority": {
+      "type": "object",
+      "required": ["tenant_id", "run_id", "capability_manifest_digest", "resource_roots_digest"],
+      "properties": {
+        "tenant_id": {"$ref": "#/$defs/id"},
+        "run_id": {"$ref": "#/$defs/id"},
+        "capability_manifest_digest": {"$ref": "#/$defs/digest"},
+        "resource_roots_digest": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    },
+    "budget_lease": {
+      "type": "object",
+      "required": ["lease_id", "fuel", "max_conflicts", "conflicts_used", "authority"],
+      "properties": {
+        "lease_id": {"$ref": "#/$defs/id"},
+        "fuel": {"$ref": "#/$defs/fuel"},
+        "max_conflicts": {"$ref": "#/$defs/nonnegative_int"},
+        "conflicts_used": {"$ref": "#/$defs/nonnegative_int"},
+        "authority": {"$ref": "#/$defs/authority"}
+      },
+      "additionalProperties": false
+    },
+    "opaque_handle": {
+      "type": "object",
+      "required": ["kind", "scope", "id"],
+      "properties": {
+        "kind": {"enum": ["task", "effect", "subscription", "timer"]},
+        "scope": {
+          "type": "object",
+          "required": ["tenant_id", "run_id", "module_digest", "generation"],
+          "properties": {
+            "tenant_id": {"$ref": "#/$defs/id"},
+            "run_id": {"$ref": "#/$defs/id"},
+            "module_digest": {"$ref": "#/$defs/digest"},
+            "generation": {"$ref": "#/$defs/nonnegative_int"}
+          },
+          "additionalProperties": false
+        },
+        "id": {"$ref": "#/$defs/id"}
+      },
+      "additionalProperties": false
+    },
+    "provisional_handle": {
+      "type": "object",
+      "required": ["provisional", "batch_id", "transition_index", "kind"],
+      "properties": {
+        "provisional": {"const": true},
+        "batch_id": {"$ref": "#/$defs/id"},
+        "transition_index": {"$ref": "#/$defs/nonnegative_int"},
+        "kind": {"enum": ["task", "effect", "subscription", "timer"]}
+      },
+      "additionalProperties": false
+    },
+    "vm_continuation": {
+      "type": "object",
+      "required": ["kind", "format", "bundle_digest", "module_digest", "verifier_profile_digest", "fuel_profile_digest", "function", "pc", "call_stack", "locals", "value_stack", "memory", "handles", "remaining_fuel", "logical_clock"],
+      "properties": {
+        "kind": {"const": "vm_continuation"},
+        "format": {"const": "neograph-vm-continuation-v1"},
+        "bundle_digest": {"$ref": "#/$defs/digest"},
+        "module_digest": {"$ref": "#/$defs/digest"},
+        "verifier_profile_digest": {"$ref": "#/$defs/digest"},
+        "fuel_profile_digest": {"$ref": "#/$defs/digest"},
+        "function": {"$ref": "#/$defs/id"},
+        "pc": {"$ref": "#/$defs/nonnegative_int"},
+        "call_stack": {"type": "array", "items": true},
+        "locals": {"type": "array", "items": true},
+        "value_stack": {"type": "array", "items": true},
+        "memory": {"type": "string", "contentEncoding": "base64url"},
+        "handles": {"type": "array", "items": {"$ref": "#/$defs/opaque_handle"}},
+        "remaining_fuel": {"$ref": "#/$defs/fuel"},
+        "logical_clock": {"$ref": "#/$defs/nonnegative_int"}
+      },
+      "additionalProperties": false
+    },
+    "quantum_input": {
+      "type": "object",
+      "required": ["kind", "format", "kernel_abi", "bundle_digest", "module_digest", "verifier_profile_digest", "fuel_profile_digest", "snapshot", "events", "continuation", "lease"],
+      "properties": {
+        "kind": {"const": "quantum_input"},
+        "format": {"const": "neograph-quantum-input-v1"},
+        "kernel_abi": {"const": "neograph.transition.v1"},
+        "bundle_digest": {"$ref": "#/$defs/digest"},
+        "module_digest": {"$ref": "#/$defs/digest"},
+        "verifier_profile_digest": {"$ref": "#/$defs/digest"},
+        "fuel_profile_digest": {"$ref": "#/$defs/digest"},
+        "snapshot": {"$ref": "#/$defs/snapshot"},
+        "events": {"type": "array", "items": {"$ref": "#/$defs/event"}},
+        "continuation": {"$ref": "#/$defs/vm_continuation"},
+        "lease": {"$ref": "#/$defs/budget_lease"}
+      },
+      "additionalProperties": false
+    },
+    "transition_base": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {"kind": {"type": "string"}},
+      "additionalProperties": true
+    },
+    "transition": {
+      "oneOf": [
+        {"type": "object", "required": ["kind", "channel", "value", "mode", "read_version", "reducer_digest"], "properties": {"kind": {"const": "state.write"}, "channel": {"$ref": "#/$defs/id"}, "value": true, "mode": {"enum": ["overwrite", "reduce"]}, "read_version": {"$ref": "#/$defs/nonnegative_int"}, "reducer_digest": {"$ref": "#/$defs/digest"}}, "additionalProperties": false},
+        {"type": "object", "required": ["kind", "target", "input", "handle"], "properties": {"kind": {"const": "task.spawn"}, "target": {"$ref": "#/$defs/id"}, "input": true, "handle": {"$ref": "#/$defs/provisional_handle"}}, "additionalProperties": false},
+        {"type": "object", "required": ["kind", "event_kinds", "handles", "handle"], "properties": {"kind": {"const": "event.subscribe"}, "event_kinds": {"type": "array", "items": {"type": "string"}, "minItems": 1, "uniqueItems": true}, "handles": {"type": "array", "items": {"oneOf": [{"$ref": "#/$defs/opaque_handle"}, {"$ref": "#/$defs/provisional_handle"}]}}, "handle": {"$ref": "#/$defs/provisional_handle"}}, "additionalProperties": false},
+        {"type": "object", "required": ["kind", "subscription", "event_id"], "properties": {"kind": {"const": "event.consume"}, "subscription": {"oneOf": [{"$ref": "#/$defs/opaque_handle"}, {"$ref": "#/$defs/provisional_handle"}]}, "event_id": {"$ref": "#/$defs/id"}}, "additionalProperties": false},
+        {"type": "object", "required": ["kind", "target"], "properties": {"kind": {"const": "task.cancel"}, "target": {"oneOf": [{"$ref": "#/$defs/opaque_handle"}, {"$ref": "#/$defs/provisional_handle"}]}}, "additionalProperties": false},
+        {"type": "object", "required": ["kind", "logical_deadline", "handle"], "properties": {"kind": {"const": "timer.schedule"}, "logical_deadline": {"$ref": "#/$defs/nonnegative_int"}, "handle": {"$ref": "#/$defs/provisional_handle"}}, "additionalProperties": false},
+        {"type": "object", "required": ["kind", "capability", "operation", "payload", "idempotency_key", "handle"], "properties": {"kind": {"const": "effect.request"}, "capability": {"$ref": "#/$defs/id"}, "operation": {"$ref": "#/$defs/id"}, "payload": true, "idempotency_key": {"$ref": "#/$defs/id"}, "handle": {"$ref": "#/$defs/provisional_handle"}}, "additionalProperties": false},
+        {"type": "object", "required": ["kind"], "properties": {"kind": {"const": "checkpoint.yield"}}, "additionalProperties": false},
+        {"type": "object", "required": ["kind", "output"], "properties": {"kind": {"const": "complete"}, "output": true}, "additionalProperties": false},
+        {"type": "object", "required": ["kind", "code", "message"], "properties": {"kind": {"const": "fail"}, "code": {"$ref": "#/$defs/id"}, "message": {"type": "string"}, "details": true}, "additionalProperties": false}
+      ]
+    },
+    "transition_batch": {
+      "type": "object",
+      "required": ["kind", "format", "batch_id", "source_continuation_digest", "snapshot_id", "snapshot_version", "event_ids", "transitions", "next_continuation_digest", "consumption"],
+      "properties": {
+        "kind": {"const": "transition_batch"},
+        "format": {"const": "neograph-transition-batch-v1"},
+        "batch_id": {"$ref": "#/$defs/id"},
+        "source_continuation_digest": {"$ref": "#/$defs/digest"},
+        "snapshot_id": {"$ref": "#/$defs/id"},
+        "snapshot_version": {"$ref": "#/$defs/nonnegative_int"},
+        "event_ids": {"type": "array", "items": {"$ref": "#/$defs/id"}, "uniqueItems": true},
+        "transitions": {"type": "array", "items": {"$ref": "#/$defs/transition"}},
+        "next_continuation_digest": {"$ref": "#/$defs/digest"},
+        "consumption": {"$ref": "#/$defs/fuel"}
+      },
+      "additionalProperties": false
+    },
+    "diagnostic": {
+      "type": "object",
+      "required": ["code", "path", "message"],
+      "properties": {
+        "code": {"$ref": "#/$defs/id"},
+        "path": {"type": "string"},
+        "message": {"type": "string"},
+        "details": true
+      },
+      "additionalProperties": false
+    },
+    "commit_result": {
+      "type": "object",
+      "required": ["kind", "format", "status", "batch_id", "debited_fuel", "diagnostics"],
+      "properties": {
+        "kind": {"const": "commit_result"},
+        "format": {"const": "neograph-commit-result-v1"},
+        "status": {"enum": ["committed", "conflict", "rejected", "blocked"]},
+        "batch_id": {"$ref": "#/$defs/id"},
+        "committed_snapshot_id": {"type": ["string", "null"]},
+        "committed_continuation_digest": {"type": ["string", "null"], "pattern": "^(sha256:[0-9a-f]{64})?$"},
+        "materialized_handles": {"type": "array", "items": {"type": "object", "required": ["provisional", "durable"], "properties": {"provisional": {"$ref": "#/$defs/provisional_handle"}, "durable": {"$ref": "#/$defs/opaque_handle"}}, "additionalProperties": false}},
+        "retry_snapshot": {"oneOf": [{"$ref": "#/$defs/snapshot"}, {"type": "null"}]},
+        "retry_lease": {"oneOf": [{"$ref": "#/$defs/budget_lease"}, {"type": "null"}]},
+        "debited_fuel": {"$ref": "#/$defs/fuel"},
+        "diagnostics": {"type": "array", "items": {"$ref": "#/$defs/diagnostic"}}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "committed"}}, "required": ["status"]},
+          "then": {"required": ["committed_snapshot_id", "committed_continuation_digest", "materialized_handles"]}
+        },
+        {
+          "if": {"properties": {"status": {"const": "conflict"}}, "required": ["status"]},
+          "then": {"required": ["retry_snapshot", "retry_lease"]}
+        }
+      ],
+      "additionalProperties": false
+    }
+  }
+}

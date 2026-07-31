@@ -1,0 +1,42 @@
+spec:
+  id: issue-215-protocol-contract-tests
+  issue: 215
+  parent: 187
+  status: proposed
+  priority: P1
+  kind: test-infrastructure
+  depends_on: [214]
+
+objective: >-
+  Define a reusable graph-boundary conformance suite for every protocol host
+  while leaving wire-format and host-lifecycle tests protocol-specific.
+
+contract_cases:
+  - Identity maps to the expected RunConfig and checkpoint thread.
+  - Cancellation reaches an in-flight node, provider, and cooperative tool.
+  - GraphEvent order and terminal result are consistent.
+  - ToolGate, Store, usage, and nested execution policy propagate.
+  - Success, error, interrupt, max-steps, and cancellation remain distinct.
+  - Overload rejection does not start graph work.
+  - Host shutdown follows the protocol-specific declared policy.
+
+test_design:
+  fixtures:
+    - Deterministic blocking/cancellable node.
+    - Mock provider and side-effect-counting tool.
+    - In-memory checkpoint and Store.
+    - Event recorder with bounded sink behavior.
+  mutation_checks:
+    - Remove CancelToken wiring and require suite failure.
+    - Drop ToolGate propagation and require suite failure.
+    - Collapse cancel and error terminal states and require suite failure.
+
+implementation:
+  - Define a host test adapter only for fixture control, not production behavior.
+  - Run the same cases against A2A, ACP, gRPC, and mock host.
+  - Keep protocol payload assertions in existing protocol suites.
+
+acceptance:
+  - Every shipping protocol passes the shared suite offline.
+  - A deliberately broken host fails at least one targeted mutation check.
+  - Future protocol documentation names this suite as a release gate.

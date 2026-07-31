@@ -1,0 +1,49 @@
+spec:
+  id: issue-209-schema-keyword-validation
+  issue: 209
+  parent: 187
+  status: accepted-local
+  priority: P1
+  kind: compiler-correctness
+  depends_on: []
+
+problem:
+  statement: >-
+    Strict compilation uses node-schema properties for unknown-key checks but
+    does not enforce exported required, type, or enum constraints.
+  evidence:
+    - "src/core/graph_compiler.cpp:143-161,238-258"
+    - "src/core/graph_loader.cpp:220-235"
+
+contract:
+  supported_subset: [required, type, enum]
+  diagnostics:
+    - Aggregate deterministic violations instead of first-error exit.
+    - Include a stable JSON path, node name/type, keyword, expected, and actual.
+    - Remap to an elaborator source coordinate only when a source map is available.
+  invariants:
+    - Built-in and custom node schemas use the same validator.
+    - Exported schema and compiler claim exactly the same supported subset.
+    - properties is traversed only to reach the supported value keywords.
+    - Existing annotations and unsupported structural keywords remain documented but unenforced.
+    - Core graph compilation does not depend on the MCP component.
+
+red_tests:
+  - id: required-missing
+    assertion: "Missing intent_classifier routes fails strict compilation."
+  - id: wrong-type
+    assertion: "A property of the wrong JSON type fails at compile time."
+  - id: enum-mismatch
+    assertion: "Unknown enumerated value reports allowed values."
+  - id: multi-error-order
+    assertion: "Several violations are returned in stable order."
+
+implementation:
+  - Define a small deterministic value-level validator in the graph compiler layer.
+  - Validate the node config after removing graph-structural type and barrier keys.
+  - Run it before node construction only for strict documents.
+  - Extend corpus, mutation, and schema-evolution tests.
+
+acceptance:
+  - All supported keywords reject invalid documents before execution.
+  - Translation-validation and existing valid corpus remain green.

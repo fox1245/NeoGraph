@@ -1,0 +1,44 @@
+spec:
+  id: issue-211-cache-bounds
+  issue: 211
+  parent: 187
+  status: accepted-local
+  priority: P2
+  kind: resource-control
+  depends_on: [210]
+
+problem:
+  statement: >-
+    NodeCache retains every distinct key until clear and has no entry, memory,
+    or age bound for long-running services.
+  evidence:
+    - "src/core/node_cache.cpp:42-58"
+    - "include/neograph/graph/node_cache.h:69-78"
+
+contract:
+  defaults: "Disabled cache keeps the existing allocation-free fast path."
+  controls:
+    - max_entries equal to zero preserves the current unbounded behavior.
+    - A positive max_entries uses deterministic least-recently-used eviction.
+    - Byte budgets and TTL are explicitly out of scope for the first implementation.
+  observability: [hits, misses, entries, evictions]
+
+red_tests:
+  - id: entry-bound
+    assertion: "Inserting beyond capacity never exceeds the configured count."
+  - id: eviction-order
+    assertion: "Access order produces deterministic victim selection."
+  - id: concurrent-eviction
+    assertion: "Lookup and insert remain race-free under eviction."
+  - id: bounded-stress
+    assertion: "Resident cache state remains bounded across diverse inputs."
+
+implementation:
+  - Add policy/config without affecting disabled engines.
+  - Make accounting and eviction atomic under the selected synchronization model.
+  - Expose metrics without leaking cache key payloads.
+  - Ship the public NodeCache layout change only with the pre-v1 ABI policy from issue 194.
+
+acceptance:
+  - Capacity and eviction tests pass under TSan.
+  - Disabled and small-cache overhead is measured.

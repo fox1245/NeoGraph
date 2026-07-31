@@ -1,0 +1,105 @@
+# NeoGraph v1 public API and runtime-contract umbrella specification.
+spec:
+  id: issue-187-api-v1-tracker
+  issue: 187
+  revision: 1
+  created: "2026-07-25"
+  owner: fox1245
+  status: proposed
+  visibility: private-local-only
+  methodology: [SDD, TDD, EDD]
+
+objective: >-
+  Finish the v1 public extension contracts without losing any correctness,
+  ownership, protocol, or migration work discovered by the issue-187 audit.
+
+principles:
+  - One canonical virtual dispatch direction per extension point.
+  - Coroutine entry points own all data needed after call return.
+  - Missing implementations, capabilities, targets, and routes fail explicitly.
+  - Run identity, cancellation, Store, ToolGate, usage, tracing, and checkpoint
+    policy cross execution boundaries deliberately.
+  - Protocol hosts share graph invocation, not transport or session internals.
+  - Exported virtual changes require an explicit ABI and SOVERSION boundary.
+  - Each child issue lands and verifies independently; no umbrella mega-PR.
+
+workstreams:
+  public_contracts: [192, 193, 194, 195, 221]
+  p0_correctness: [196, 197, 198, 199, 200, 201, 203]
+  concurrency_and_failure: [202, 204, 205, 206, 207, 208]
+  schema_routing_cache: [209, 210, 211, 212, 213]
+  protocol_boundary: [214, 215]
+  long_term_decomposition: [216, 217, 218, 219, 220]
+
+child_specs:
+  192: spec/issue-192-provider-single-dispatch.sdd.yaml
+  193: spec/issue-193-checkpoint-async-contract.sdd.yaml
+  194: spec/issue-194-v1-abi-policy.sdd.yaml
+  195: spec/issue-195-graphnode-doc-contract.sdd.yaml
+  196: spec/issue-196-subgraph-context.sdd.yaml
+  197: spec/issue-197-a2a-cancellation.sdd.yaml
+  198: spec/issue-198-acp-cancellation.sdd.yaml
+  199: spec/issue-199-async-http-ownership.sdd.yaml
+  200: spec/issue-200-resume-async-ownership.sdd.yaml
+  201: spec/issue-201-python-update-mode.sdd.yaml
+  202: spec/issue-202-send-target-validation.sdd.yaml
+  203: spec/issue-203-store-structured-key.sdd.yaml
+  204: spec/issue-204-a2a-client-thread-safety.sdd.yaml
+  205: spec/issue-205-a2a-task-single-flight.sdd.yaml
+  206: spec/issue-206-a2a-message-id.sdd.yaml
+  207: spec/issue-207-request-queue-admission.sdd.yaml
+  208: spec/issue-208-request-queue-lifecycle.sdd.yaml
+  209: spec/issue-209-schema-keyword-validation.sdd.yaml
+  210: spec/issue-210-cache-context-identity.sdd.yaml
+  211: spec/issue-211-cache-bounds.sdd.yaml
+  212: spec/issue-212-routing-default-policy.sdd.yaml
+  213: spec/issue-213-strict-mode-migration.sdd.yaml
+  214: spec/issue-214-run-invocation-boundary.sdd.yaml
+  215: spec/issue-215-protocol-contract-tests.sdd.yaml
+  216: spec/issue-216-graph-engine-responsibilities.sdd.yaml
+  217: spec/issue-217-nodecontext-tool-ownership.sdd.yaml
+  218: spec/issue-218-engine-scoped-registries.sdd.yaml
+  219: spec/issue-219-mcp-transport-separation.sdd.yaml
+  220: spec/issue-220-schema-provider-decomposition.sdd.yaml
+  221: spec/issue-221-sync-node-ergonomics.sdd.yaml
+
+execution_order:
+  - phase: facts_and_release_boundary
+    issues: [195, 194]
+  - phase: independent_correctness
+    issues: [199, 200, 201, 202, 203, 207, 208]
+  - phase: canonical_extension_contracts
+    issues: [192, 193, 221]
+  - phase: context_and_protocol_runtime
+    issues: [196, 197, 198, 204, 205, 206]
+  - phase: explicit_policy
+    issues: [209, 210, 211, 212, 213]
+  - phase: shared_invocation_boundary
+    issues: [214, 215]
+  - phase: optional_decomposition
+    issues: [216, 217, 218, 219, 220]
+
+global_invariants:
+  - No public sync/async virtual pair mutually recurses by default.
+  - No accepted coroutine retains unowned request data past API return.
+  - Cancellation reaches in-flight graph, provider, and cooperative tool work.
+  - Nested execution cannot weaken the parent ToolGate or tenant boundary.
+  - Unknown dynamic control-flow input never becomes silent partial success.
+  - Existing lightweight and disabled-feature fast paths remain measurable.
+
+global_gates:
+  required:
+    - Fresh default C++ build and complete available ctest pass.
+    - Python binding build and complete available pytest pass.
+    - ASan, UBSan, TSan, and shared-library jobs pass for touched surfaces.
+    - Installed shared-library consumer smoke passes after ABI changes.
+    - Protocol contract suite passes for A2A, ACP, gRPC, and mock host.
+  performance:
+    baseline: "Record a fresh-worktree baseline before hot-path changes."
+    threshold: "No unexplained engine-overhead regression above 5 percent."
+
+completion:
+  - Every child issue is closed or rejected with a recorded reason.
+  - Every child spec has observed red evidence before implementation.
+  - Public docs describe only the final supported contracts.
+  - Migration and binary rebuild boundaries are explicit.

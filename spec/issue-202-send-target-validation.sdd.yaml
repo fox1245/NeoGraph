@@ -1,0 +1,100 @@
+spec:
+  id: issue-202-send-target-validation
+  issue: 202
+  parent: 187
+  status: implemented
+  priority: P1
+  kind: correctness
+  depends_on: []
+
+problem:
+  statement: >-
+    Dynamic Send silently returns an empty result for an unknown target while
+    normal node dispatch throws. A typo can therefore look like partial success.
+  evidence:
+    - "src/core/graph_executor.cpp:665-670,721-725"
+
+contract:
+  - Every Send target must resolve before its work is considered accepted.
+  - Single and multi-Send paths use the same error type and diagnostic fields.
+  - A mixed valid/invalid fan-out has deterministic pending-write semantics.
+  - Statically knowable targets are validated before execution when possible.
+
+red_tests:
+  - id: unknown-single-send
+    assertion: "Run fails with source and target names."
+  - id: mixed-multi-send
+    assertion: "Failure and successful-sibling replay behavior are deterministic."
+  - id: resume-after-invalid-send
+    assertion: "No invalid task is recorded as completed."
+
+implementation:
+  - Centralize Send target resolution before single/multi dispatch diverge.
+  - Reject the complete Send batch before any sibling can execute or record a
+    pending write.
+  - Preserve node exception and pending-write accounting.
+  - Surface the same diagnostic through streaming and Python.
+
+acceptance:
+  - Unknown Send never becomes silent success.
+  - Existing valid Send, retry, interrupt, and resume tests pass.
+
+observed:
+  current_send_representation: >-
+    Dynamic Send values are normally produced by GraphNode::run as runtime
+    NodeOutput data. The compiled graph JSON names node implementations and
+    topology but does not contain a generic statically enumerable Send target
+    field: GraphCompiler::parse consumes channels, nodes, edges,
+    conditional_edges, interrupt sets, and retry policy, but no Send-target key;
+    GraphNode exposes only run(NodeInput) -> awaitable<NodeOutput>; and Send is
+    just a NodeResult vector element with target_node/input/source_node. Generic
+    GraphEngine::compile therefore cannot soundly validate arbitrary dynamic
+    Send targets ahead of execution. The executor validates each complete
+    runtime Send batch before accepting any Send target task.
+  statically_knowable_cases: >-
+    Source search found one built-in statically knowable dynamic Send target:
+    SupervisorDispatchNode in deep_research_graph.cpp emits Send{"researcher", ...}.
+    That factory also constructs the "researcher" node in the same local node set;
+    the target string is now centralized as kResearcherNodeName and guarded before
+    compile so the only currently known static Send target is validated where
+    possible. No public graph-schema or GraphNode declaration surface exists for
+    user-defined dynamic Sends, so no broader compile-time validation can be
+    honestly claimed without adding a new API.
+
+resolution:
+  design: >-
+    NodeExecutor::run_sends_async validates every Send target against nodes_
+    before the single-Send and multi-Send branches diverge. A mixed batch is
+    rejected before any valid sibling executes or records a pending target-task
+    write. The same exception message includes the source node, unknown target,
+    and Send invocation index for run, run_stream, and resume paths.
+  changed_files:
+    - src/core/graph_executor.cpp
+    - src/core/deep_research_graph.cpp
+    - tests/test_multi_send_routing.cpp
+    - spec/issue-202-send-target-validation.sdd.yaml
+  verification:
+    command: >-
+      ./build-issue199-202/tests/neograph_tests
+      --gtest_filter=MultiSendRouting.UnknownSingleSendReportsTargetAndInvocation:MultiSendRouting.MixedMultiSendRejectsBatchBeforeValidSiblingRuns:MultiSendRouting.UnknownSendReportsSameDiagnosticThroughStream:MultiSendRouting.ResumeAfterInvalidSendDoesNotRecordInvalidTargetCompletion
+    result: "4 passed, 0 failed"
+  sanitizer_verification:
+    configuration: >-
+      Debug; -fsanitize=address,undefined; ASAN_OPTIONS
+      detect_stack_use_after_return=1.
+    command: >-
+      ASAN_OPTIONS=detect_stack_use_after_return=1
+      ./build-issue199-202-asan/tests/neograph_tests
+      --gtest_filter=DeepResearchHumanReview.*:MultiSendRouting.UnknownSingleSendReportsTargetAndInvocation:MultiSendRouting.MixedMultiSendRejectsBatchBeforeValidSiblingRuns:MultiSendRouting.UnknownSendReportsSameDiagnosticThroughStream:MultiSendRouting.ResumeAfterInvalidSendDoesNotRecordInvalidTargetCompletion
+    result: "6 passed, 0 failed"
+  static_send_target_validation:
+    source_evidence:
+      - "include/neograph/graph/types.h:237-243 defines Send as runtime data."
+      - "include/neograph/graph/node.h:95-134 exposes run(NodeInput) only."
+      - "src/core/graph_compiler.cpp:238-405 parses no generic Send target key."
+      - "src/core/deep_research_graph.cpp:437 emits the only hard-coded Send target found."
+      - "src/core/deep_research_graph.cpp:1213-1241 constructs and guards that target."
+    command: >-
+      ./build-issue199-202/tests/neograph_tests
+      --gtest_filter=DeepResearchHumanReview.*:MultiSendRouting.UnknownSingleSendReportsTargetAndInvocation:MultiSendRouting.MixedMultiSendRejectsBatchBeforeValidSiblingRuns:MultiSendRouting.UnknownSendReportsSameDiagnosticThroughStream:MultiSendRouting.ResumeAfterInvalidSendDoesNotRecordInvalidTargetCompletion
+    result: "6 passed, 0 failed"

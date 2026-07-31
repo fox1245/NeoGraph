@@ -1,0 +1,38 @@
+spec:
+  id: issue-207-request-queue-admission
+  issue: 207
+  parent: 187
+  status: proposed
+  priority: P1
+  kind: concurrency
+  depends_on: []
+
+problem:
+  statement: >-
+    RequestQueue checks capacity and increments pending separately, allowing
+    concurrent submitters to exceed the bound. Enqueue failure is ignored.
+  evidence:
+    - "include/neograph/util/request_queue.h:89-99"
+
+contract:
+  - Admission reserves capacity atomically before enqueue.
+  - Failed enqueue rolls back the reservation.
+  - Every rejected submission receives one stable error outcome.
+  - pending never exceeds configured capacity.
+
+red_tests:
+  - id: barriered-contention
+    assertion: "Simultaneous submitters admit no more than capacity."
+  - id: enqueue-failure
+    assertion: "Reservation rolls back and future becomes exceptional."
+  - id: pending-accounting
+    assertion: "Accepted plus completed accounting never underflows or leaks."
+
+implementation:
+  - Use a CAS reservation loop or one lock covering check and reservation.
+  - Handle enqueue return before exposing successful submission.
+  - Keep completion decrement exception-safe.
+
+acceptance:
+  - Contention stress and TSAN pass.
+  - Capacity and error behavior are documented.

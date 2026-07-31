@@ -1,0 +1,42 @@
+spec:
+  id: issue-196-subgraph-context
+  issue: 196
+  parent: 187
+  status: proposed
+  priority: P0
+  kind: correctness-security
+  depends_on: []
+
+problem:
+  statement: >-
+    SubgraphNode forwards input, cancellation, usage, and events but omits
+    parent execution identity, Store, ToolGate, trace, and checkpoint policy.
+  evidence:
+    - "src/core/graph_node.cpp:311-329"
+    - "include/neograph/graph/engine.h:126-227"
+
+contract:
+  identity: "Child IDs are deterministic, collision-free derivatives of parent context."
+  policy: "A child may narrow but never silently weaken parent ToolGate policy."
+  state: "Store and checkpoint inheritance/override precedence is explicit."
+  propagation: [cancel_token, usage, deadline, trace_id, stream_mode]
+
+red_tests:
+  - id: nested-tool-gate
+    assertion: "A parent-denied tool cannot execute inside a child graph."
+  - id: nested-store
+    assertion: "Child reads the intended parent Store namespace."
+  - id: sibling-checkpoint-isolation
+    assertion: "Sibling subgraphs cannot collide in checkpoint identity."
+  - id: multi-level-cancel
+    assertion: "Parent cancellation reaches a grandchild provider/tool."
+
+implementation:
+  - Define a child-run context derivation function before wiring fields.
+  - Pass policy through a supported engine execution boundary, not ad-hoc setters.
+  - Add one-level and multi-level contract tests.
+
+acceptance:
+  - All context fields have documented inherit, derive, override, or omit semantics.
+  - Nested policy cannot be weaker by accident.
+  - Checkpoint, HITL, Store, usage, trace, and cancellation tests pass.
