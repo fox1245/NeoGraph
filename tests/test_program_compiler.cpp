@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -164,6 +165,56 @@ RegistrySnapshot node_only_snapshot(std::string name   = "local-node",
     RegistrySnapshotBuilder builder;
     builder.add_node(executable(ExecutableKind::Node, std::move(name), '7'), quiet_factory(),
                      std::move(schema), json::object());
+    return std::move(builder).build();
+}
+
+ExecutableIdentity configured_provider() {
+    return {ExecutableKind::Provider, "configured-provider", "1.0.0", digest('8')};
+}
+
+ExecutableIdentity configured_tool(std::string name, char implementation) {
+    return {ExecutableKind::Tool, std::move(name), "1.0.0", digest(implementation)};
+}
+
+RegistrySnapshot config_requirement_snapshot() {
+    const auto provider = configured_provider();
+    const auto alpha    = configured_tool("configured-alpha", '9');
+    const auto beta     = configured_tool("configured-beta", 'a');
+    const ExecutableIdentity imported{
+        ExecutableKind::Imported, "configured-import", "1.0.0", alpha.implementation_digest};
+
+    RegistrySnapshotBuilder builder;
+    builder.add_provider(
+        executable(ExecutableKind::Provider, provider.name, '8'),
+        ProviderMetadata{json::object(), json::object()});
+    builder.add_tool(executable(ExecutableKind::Tool, alpha.name, '9'),
+                     ToolMetadata{json::object(), json::object()});
+    builder.add_tool(executable(ExecutableKind::Tool, beta.name, 'a'),
+                     ToolMetadata{json::object(), json::object()});
+    builder.add_imported(
+        executable(ExecutableKind::Imported, imported.name, '9'),
+        ImportedExecutableMetadata{"module:configured", imported.name, digest('b'), alpha});
+    builder.add_node(
+        executable(ExecutableKind::Node, "configured-node", '7'), local_factory(),
+        json{{"type", "object"}}, json::object(),
+        [provider, alpha, beta, imported](const json& config) {
+            std::vector<ExecutableIdentity> requirements;
+            if (config.value("provider_id", "") == provider.name) {
+                requirements.push_back(provider);
+            }
+            if (config.contains("tool_ids") && config["tool_ids"].is_array()) {
+                for (const auto& id : config["tool_ids"]) {
+                    if (id == alpha.name)
+                        requirements.push_back(alpha);
+                    else if (id == beta.name)
+                        requirements.push_back(beta);
+                }
+            }
+            if (config.value("import_id", "") == imported.name) {
+                requirements.push_back(imported);
+            }
+            return requirements;
+        });
     return std::move(builder).build();
 }
 
@@ -389,6 +440,128 @@ TEST(ProgramCompilerTest,
     EXPECT_NE(baseline.core_plan_identities()[0], dependency_variant.core_plan_identities()[0]);
     EXPECT_NE(baseline.executable_registry_identities(),
               dependency_variant.executable_registry_identities());
+}
+
+TEST(ProgramCompilerTest,
+     ConfigRequirementResolverSelectsExactProviderToolAndImportedClosureDeterministically) {
+    reset_dispatch_counters();
+    const auto snapshot = config_requirement_snapshot();
+    auto       selected = node_only_program("configured-node");
+    auto       config   = selected["root"]["definition"]["nodes"]["work"];
+    config["provider_id"] = "configured-provider";
+    config["tool_ids"]    = json::array(
+        {"configured-beta", "configured-alpha", "configured-beta"});
+    config["import_id"] = "configured-import";
+
+    ProgramCompiler compiler(snapshot, {"program-compiler-test/v1"});
+    const auto      bundle = compiler.compile(source_from(std::move(selected)));
+    const auto expected = std::vector<ExecutableIdentity>{
+        {ExecutableKind::Imported, "configured-import", "1.0.0", digest('9')},
+        {ExecutableKind::Node, "configured-node", "1.0.0", digest('7')},
+        configured_provider(),
+        configured_tool("configured-alpha", '9'),
+        configured_tool("configured-beta", 'a'),
+    };
+    EXPECT_EQ(bundle.executable_registry_identities(), expected);
+
+    auto alpha_only = node_only_program("configured-node");
+    auto alpha_config = alpha_only["root"]["definition"]["nodes"]["work"];
+    alpha_config["provider_id"] = "configured-provider";
+    alpha_config["tool_ids"]    = json::array({"configured-alpha"});
+    const auto alpha_bundle = compiler.compile(source_from(std::move(alpha_only)));
+    EXPECT_NE(alpha_bundle.executable_registry_identities(),
+              bundle.executable_registry_identities());
+    EXPECT_NE(alpha_bundle.core_plan_identities(), bundle.core_plan_identities());
+    expect_dispatch_counters_zero();
+}
+
+TEST(ProgramCompilerTest,
+     ConfigRequirementResolverRejectsUnsupportedMissingAndMismatchedExactIdentity) {
+    const auto compile_with = [](ExecutableIdentity returned, ExecutableIdentity registered) {
+        RegistrySnapshotBuilder builder;
+        builder.add_provider(
+            executable(ExecutableKind::Provider, registered.name,
+                       registered.implementation_digest.back()),
+            ProviderMetadata{json::object(), json::object()});
+        builder.add_node(executable(ExecutableKind::Node, "resolver-node", '7'), local_factory(),
+                         json{{"type", "object"}}, json::object(),
+                         [returned](const json&) {
+                             return std::vector<ExecutableIdentity>{returned};
+                         });
+        auto snapshot = std::move(builder).build();
+        return compile_errors(snapshot, node_only_program("resolver-node"));
+    };
+
+    reset_dispatch_counters();
+    const ExecutableIdentity registered{
+        ExecutableKind::Provider, "registered-provider", "1.0.0", digest('c')};
+    const ExecutableIdentity missing{
+        ExecutableKind::Provider, "missing-provider", "1.0.0", digest('d')};
+    const auto missing_errors = compile_with(missing, registered);
+    const auto missing_error =
+        std::find_if(missing_errors.begin(), missing_errors.end(), [](const auto& error) {
+            return error.code == "P_REGISTRY_DEPENDENCY_MISSING";
+        });
+    ASSERT_NE(missing_error, missing_errors.end());
+    EXPECT_EQ(missing_error->primary.json_pointer, "/root/definition/nodes/work");
+
+    auto mismatched = registered;
+    mismatched.implementation_digest = digest('d');
+    const auto mismatch_errors = compile_with(mismatched, registered);
+    const auto mismatch_error =
+        std::find_if(mismatch_errors.begin(), mismatch_errors.end(), [](const auto& error) {
+            return error.code == "P_REGISTRY_IDENTITY_MISMATCH";
+        });
+    ASSERT_NE(mismatch_error, mismatch_errors.end());
+    EXPECT_EQ(mismatch_error->primary.json_pointer, "/root/definition/nodes/work");
+
+    auto unsupported = registered;
+    unsupported.kind = ExecutableKind::Reducer;
+    EXPECT_TRUE(
+        contains_code(compile_with(unsupported, registered), "P_REGISTRY_REQUIREMENT_KIND"));
+    expect_dispatch_counters_zero();
+}
+
+TEST(ProgramCompilerTest, ConfigRequirementResolverExceptionIsPointerDiagnosticBeforeDispatch) {
+    RegistrySnapshotBuilder builder;
+    builder.add_node(
+        executable(ExecutableKind::Node, "throwing-resolver-node", '7'), local_factory(),
+        json{{"type", "object"}}, json::object(),
+        [](const json&) -> std::vector<ExecutableIdentity> {
+            throw std::runtime_error("resolver failure");
+        });
+    auto snapshot = std::move(builder).build();
+
+    reset_dispatch_counters();
+    const auto errors = compile_errors(snapshot, node_only_program("throwing-resolver-node"));
+    const auto resolver_error = std::find_if(errors.begin(), errors.end(), [](const auto& error) {
+        return error.code == "P_REGISTRY_REQUIREMENT_RESOLVER";
+    });
+    ASSERT_NE(resolver_error, errors.end());
+    EXPECT_EQ(resolver_error->primary.json_pointer, "/root/definition/nodes/work");
+    EXPECT_EQ(resolver_error->witness["exception"], "resolver failure");
+    expect_dispatch_counters_zero();
+}
+
+TEST(ProgramCompilerTest, SourceRequirementLookalikeFieldsCannotGrantExecutables) {
+    reset_dispatch_counters();
+    auto snapshot = node_only_snapshot("lookalike-node");
+    auto source   = node_only_program("lookalike-node");
+    auto config  = source["root"]["definition"]["nodes"]["work"];
+    config["provider_id"] = "source-provider";
+    config["tool_ids"]    = json::array({"source-tool"});
+    config["required_executables"] =
+        json::array({json{{"kind", "provider"},
+                          {"name", "source-provider"},
+                          {"semantic_version", "1.0.0"},
+                          {"implementation_digest", digest('e')}}});
+
+    ProgramCompiler compiler(snapshot, {"program-compiler-test/v1"});
+    const auto      bundle = compiler.compile(source_from(std::move(source)));
+    ASSERT_EQ(bundle.executable_registry_identities().size(), 1U);
+    EXPECT_EQ(bundle.executable_registry_identities().front().kind, ExecutableKind::Node);
+    EXPECT_EQ(bundle.executable_registry_identities().front().name, "lookalike-node");
+    expect_dispatch_counters_zero();
 }
 
 TEST(ProgramCompilerTest, RejectsUnknownProgramFieldsAndWrongNestedTypes) {

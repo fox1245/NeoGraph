@@ -88,6 +88,9 @@ if(NEOGRAPH_BUILD_PROGRAM)
         test_program_compiler.cpp
         test_program_catalog.cpp
         test_program_journal.cpp
+        test_program_pending.cpp
+        test_program_fork_replay.cpp
+        test_program_transition_store.cpp
         test_program_runtime.cpp
     )
     target_include_directories(neograph_program_tests PRIVATE
@@ -112,17 +115,25 @@ if(NEOGRAPH_BUILD_MCP_CLIENT)
 endif()
 
 if(NEOGRAPH_BUILD_MCP_SERVER)
+    target_sources(neograph_tests PRIVATE test_mcp_server.cpp)
+endif()
+
+if(TARGET neograph_harness)
     target_sources(neograph_tests PRIVATE
-        test_mcp_server.cpp
-        test_harness_service.cpp
+        test_harness_program_translator.cpp
+        test_harness_program_cutover.cpp
     )
+    target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_HARNESS)
+endif()
+if(TARGET neograph_mcp_sqlite)
+    target_sources(neograph_tests PRIVATE test_harness_program_store.cpp)
 endif()
 
 if(NEOGRAPH_BUILD_MCP_HTTP_SERVER)
     target_sources(neograph_tests PRIVATE test_mcp_http_server.cpp)
 endif()
 
-if(NEOGRAPH_BUILD_MCP_CLIENT AND NEOGRAPH_BUILD_MCP_SERVER)
+if(NEOGRAPH_BUILD_MCP_CLIENT AND TARGET neograph_harness)
     target_sources(neograph_tests PRIVATE test_harness_mcp_backend.cpp)
 endif()
 
@@ -198,6 +209,10 @@ if(NEOGRAPH_BUILD_MCP_SERVER)
     target_link_libraries(neograph_tests PRIVATE neograph::mcp_server)
 endif()
 
+if(TARGET neograph_harness)
+    target_link_libraries(neograph_tests PRIVATE neograph::harness)
+endif()
+
 if(NEOGRAPH_BUILD_MCP_HTTP_SERVER)
     target_link_libraries(neograph_tests PRIVATE neograph::mcp_http_server)
 endif()
@@ -223,7 +238,7 @@ endif()
 
 if(NEOGRAPH_BUILD_SQLITE)
     target_link_libraries(neograph_tests PRIVATE neograph::sqlite)
-    if(NEOGRAPH_BUILD_MCP_SERVER)
+    if(TARGET neograph_mcp_sqlite)
         target_link_libraries(neograph_tests PRIVATE neograph::mcp_sqlite SQLite::SQLite3)
     endif()
 endif()

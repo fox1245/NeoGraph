@@ -99,17 +99,38 @@ int main() {
     }
 
     neograph::mcp::HarnessProviderExecutorConfig executor_config;
-    executor_config.provider = std::move(provider);
+    executor_config.provider = provider;
     executor_config.model    = provider_config.default_model;
+
     neograph::mcp::HarnessServiceConfig harness_config;
-    harness_config.worker_executor =
+    neograph::mcp::HarnessProgramHostConfig host_config;
+    host_config.worker_executor =
         neograph::mcp::make_provider_harness_executor(std::move(executor_config));
+    host_config.compiler_build_id = "neograph-harness-example-v1";
+    host_config.provider_binding_identity = std::string(64, 'c');
+    host_config.snapshots.owner_scope = "neograph-harness-example";
+    const neograph::program::ExecutableIdentity provider_identity{
+        neograph::program::ExecutableKind::Provider, "harness.provider", "1.0.0",
+        std::string(64, 'd')};
+    host_config.snapshots.registry.provider = neograph::mcp::HarnessProviderRegistration{
+        {provider_identity, neograph::program::EffectMode::Brokered,
+         "neograph-harness-example-provider", {}, {}, {}},
+        {neograph::json{{"type", "object"}}, neograph::json{{"type", "object"}}}};
+    host_config.snapshots.allowed_module_digests = {
+        provider_identity.implementation_digest,
+        std::string(64, 'a'),
+        std::string(64, 'b')};
+    host_config.snapshots.budget_ceiling = {86400000, 100000000, 100000000,
+                                            64, 10000, 1000, 1000, 64, 10000};
+    host_config.checkpoints = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
+    host_config.state_store = std::make_shared<neograph::graph::InMemoryStore>();
+    harness_config.translation_defaults.provider = provider_identity;
 #ifdef NEOGRAPH_HARNESS_HAVE_SQLITE
     if (const auto state_dir = environment("NEOGRAPH_HARNESS_STATE_DIR"); !state_dir.empty()) {
         std::filesystem::create_directories(state_dir);
         harness_config.record_store =
             std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(state_dir + "/runs.db");
-        harness_config.checkpoint_store =
+        host_config.checkpoints =
             std::make_shared<neograph::graph::SqliteCheckpointStore>(state_dir + "/checkpoints.db");
         harness_config.enable_experimental_tasks =
             environment("NEOGRAPH_HARNESS_EXPERIMENTAL_TASKS") == "1";
@@ -120,6 +141,8 @@ int main() {
         return 2;
     }
 #endif
+    auto harness_resources =
+        neograph::mcp::make_harness_program_service_resources(host_config);
     neograph::mcp::MCPServerConfig server_config;
     server_config.server_info = {
         {"name", "neograph-harness"},
@@ -131,7 +154,8 @@ int main() {
 
     const auto transport = environment("NEOGRAPH_HARNESS_TRANSPORT");
     if (transport.empty() || transport == "stdio") {
-        neograph::mcp::HarnessService harness(std::move(harness_config));
+        neograph::mcp::HarnessService harness(std::move(harness_config), nullptr,
+                                               std::move(harness_resources));
         neograph::mcp::MCPServer      server(std::move(server_config));
         harness.register_tools(server);
         server.run();
@@ -172,8 +196,12 @@ int main() {
 
     try {
         neograph::mcp::MCPHttpServer server(
-            [harness_config, server_config](std::string_view) {
-                auto harness = std::make_shared<neograph::mcp::HarnessService>(harness_config);
+            [harness_config, server_config, host_config](std::string_view owner_scope) {
+                auto scoped_host = host_config;
+                scoped_host.snapshots.owner_scope = std::string(owner_scope);
+                auto harness = std::make_shared<neograph::mcp::HarnessService>(
+                    harness_config, nullptr,
+                    neograph::mcp::make_harness_program_service_resources(std::move(scoped_host)));
                 auto session = std::make_unique<neograph::mcp::MCPServer>(server_config);
                 harness->register_tools(*session);
                 return neograph::mcp::MCPHttpServerSession{std::move(session), std::move(harness)};

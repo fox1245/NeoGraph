@@ -16,6 +16,7 @@ struct PinnedCoreGeneration {
     std::shared_ptr<const graph::GraphRegistry> runtime_registry;
     std::string                                 core_name;
     std::string                                 compiled_plan_identity;
+    std::shared_ptr<Provider>                    provider;
     std::shared_ptr<graph::GraphEngine>         engine;
 };
 
@@ -29,6 +30,9 @@ class CatalogRuntimeAccess {
 public:
     static std::shared_ptr<const MaterializedProgram> pin(const ProgramCatalog& catalog,
                                                           const ProgramVersion& version);
+    static std::shared_ptr<const MaterializedProgram> pin_with_binding(
+        ProgramCatalog& catalog, std::string_view owner_scope, std::string_view version_id,
+        CatalogCapabilityBinding binding);
 };
 
 }  // namespace neograph::program::detail

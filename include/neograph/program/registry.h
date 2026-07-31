@@ -10,6 +10,7 @@
 #include <neograph/program/bundle.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -55,6 +56,19 @@ struct ImportedExecutableMetadata {
     std::string        dependency_digest;
     ExecutableIdentity target;
 };
+/**
+ * @brief Pure node-config to exact executable requirements callback.
+ * `node_config` is the exact sealed node-definition object passed to its
+ * factory, including `type`.
+ * The registry snapshot owns a copy, and the callback must deeply own all
+ * immutable selector data it captures; borrowed resolver state is invalid. It
+ * must be deterministic, must not dispatch or consult process-global state,
+ * and may return only Provider, Tool, or Imported identities. Callback state
+ * is deliberately absent from canonical serialization; its semantics are
+ * identified by the owning node's explicit implementation digest.
+ */
+using ExecutableRequirementResolver =
+    std::function<std::vector<ExecutableIdentity>(const json& node_config)>;
 
 class NEOGRAPH_PROGRAM_API RegistrySnapshot {
 public:
@@ -84,10 +98,11 @@ private:
  *
  * Node, reducer, and condition callables are copied into registry-owned
  * std::function wrappers. Their capture graphs remain trusted embedding state:
- * callers must keep captures valid and thread-safe, and any semantic change
- * requires a new implementation digest. Provider and tool entries contain
- * metadata only; no runtime instance, transport client, or borrowed registry is
- * retained.
+ * callers must keep borrowed captures valid and thread-safe. Requirement
+ * resolvers instead must deeply own immutable captures. Any callable semantic
+ * change requires a new implementation digest. Provider and tool entries
+ * contain metadata only; no runtime instance, transport client, or borrowed
+ * registry is retained.
  */
 class NEOGRAPH_PROGRAM_API RegistrySnapshotBuilder {
 public:
@@ -98,10 +113,12 @@ public:
     RegistrySnapshotBuilder& operator=(const RegistrySnapshotBuilder&) = delete;
     ~RegistrySnapshotBuilder();
 
-    RegistrySnapshotBuilder& add_node(ExecutableManifest   manifest,
-                                      graph::NodeFactoryFn factory,
-                                      json                 config_schema,
-                                      json                 effects);
+    RegistrySnapshotBuilder& add_node(
+        ExecutableManifest            manifest,
+        graph::NodeFactoryFn          factory,
+        json                          config_schema,
+        json                          effects,
+        ExecutableRequirementResolver requirement_resolver = {});
     RegistrySnapshotBuilder& add_reducer(ExecutableManifest manifest, graph::ReducerFn reducer);
     RegistrySnapshotBuilder& add_condition(ExecutableManifest                  manifest,
                                            graph::ConditionFn                  condition,

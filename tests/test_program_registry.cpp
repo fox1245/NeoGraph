@@ -125,6 +125,46 @@ TEST(RegistrySnapshotTest, DeclaredIdentityChangesAlterFingerprint) {
     EXPECT_NE(baseline.fingerprint(), make_snapshot("1.0.0", digest('2')).fingerprint());
 }
 
+TEST(RegistrySnapshotTest, RequirementResolverIsSnapshotOwnedAndExcludedFromCanonicalManifest) {
+    const auto provider =
+        ExecutableIdentity{ExecutableKind::Provider, "provider", "1.0.0", digest('4')};
+    const auto make_snapshot = [&](ExecutableRequirementResolver resolver,
+                                   char                          node_implementation) {
+        RegistrySnapshotBuilder builder;
+        builder.add_provider(
+            executable(ExecutableKind::Provider, provider.name, provider.semantic_version,
+                       provider.implementation_digest, "attestation:provider"),
+            ProviderMetadata{json::object(), json::object()});
+        builder.add_node(
+            executable(ExecutableKind::Node, "node", "1.0.0", digest(node_implementation),
+                       "attestation:node"),
+            factory(), json::object(), json::object(), std::move(resolver));
+        return std::move(builder).build();
+    };
+
+    ExecutableRequirementResolver resolver = [provider](const json& config) {
+        return config.value("enabled", false) ? std::vector<ExecutableIdentity>{provider}
+                                               : std::vector<ExecutableIdentity>{};
+    };
+    const auto owned = make_snapshot(resolver, '1');
+    resolver         = {};
+    EXPECT_EQ(detail::RegistrySnapshotAccess::resolve_node_requirements(
+                  owned, "node", json{{"enabled", true}}),
+              (std::vector<ExecutableIdentity>{provider}));
+
+    const auto different_callback =
+        make_snapshot([](const json&) { return std::vector<ExecutableIdentity>{}; }, '1');
+    EXPECT_EQ(owned.fingerprint(), different_callback.fingerprint());
+    EXPECT_EQ(owned.serialize_canonical(), different_callback.serialize_canonical());
+    EXPECT_NE(owned.fingerprint(),
+              make_snapshot([](const json&) { return std::vector<ExecutableIdentity>{}; }, '2')
+                  .fingerprint());
+    for (const auto& entry : owned.manifest()["entries"]) {
+        EXPECT_FALSE(entry.contains("requirement_resolver"));
+        EXPECT_FALSE(entry.contains("transport"));
+    }
+}
+
 TEST(RegistrySnapshotTest, ExactDependencyEdgesAreCanonicalAndFingerprintSensitive) {
     const auto tool = ExecutableIdentity{ExecutableKind::Tool, "tool", "1.0.0", digest('1')};
     const auto provider =

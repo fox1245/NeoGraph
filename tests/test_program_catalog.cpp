@@ -1,10 +1,14 @@
 #include <neograph/graph/node.h>
+#include <neograph/provider.h>
+#include <neograph/tool.h>
 #include <neograph/program/program.h>
 
 #include "catalog_access.h"
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -23,6 +27,10 @@ std::string digest(char value) {
 
 std::atomic<unsigned> factory_calls{0};
 std::atomic<unsigned> node_calls{0};
+std::atomic<unsigned> provider_calls{0};
+std::atomic<unsigned> tool_calls{0};
+std::atomic<unsigned> requirement_resolver_calls{0};
+std::atomic<unsigned> binder_calls{0};
 
 ExecutableManifest manifest(ExecutableKind kind, std::string name, char implementation) {
     return ExecutableManifest{{kind, std::move(name), "1.0.0", digest(implementation)},
@@ -48,6 +56,53 @@ private:
     std::string name_;
 };
 
+class CatalogProvider final : public neograph::Provider {
+public:
+    std::string get_name() const override { return "catalog-provider"; }
+    neograph::ChatCompletion complete(const neograph::CompletionParams&) override {
+        ++provider_calls;
+        return {};
+    }
+};
+
+class CatalogTool final : public neograph::Tool {
+public:
+    explicit CatalogTool(std::string name = "catalog-tool") : name_(std::move(name)) {}
+
+    neograph::ChatTool get_definition() const override {
+        return {name_, "catalog test tool", json{{"type", "object"}}};
+    }
+    std::string execute(const json&) override {
+        ++tool_calls;
+        return "ok";
+    }
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+class BoundCatalogNode final : public GraphNode {
+public:
+    BoundCatalogNode(std::string                         name,
+                     std::shared_ptr<neograph::Provider> provider,
+                     neograph::Tool*                     tool)
+        : name_(std::move(name)), provider_(std::move(provider)), tool_(tool) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        (void)provider_->complete({});
+        (void)tool_->execute(json::object());
+        co_return NodeOutput{};
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string                         name_;
+    std::shared_ptr<neograph::Provider> provider_;
+    neograph::Tool*                     tool_;
+};
+
 RegistrySnapshot registry(bool                     failing_factory = false,
                           std::vector<std::string> capabilities    = {},
                           std::vector<std::string> effects         = {}) {
@@ -68,12 +123,75 @@ RegistrySnapshot registry(bool                     failing_factory = false,
     return std::move(builder).build();
 }
 
-json requirements() {
+RegistrySnapshot bound_registry() {
+    RegistrySnapshotBuilder builder;
+    const auto provider = manifest(ExecutableKind::Provider, "catalog-provider", '3');
+    const auto tool     = manifest(ExecutableKind::Tool, "catalog-tool", '4');
+    builder.add_provider(provider, ProviderMetadata{json::object(), json::object()});
+    builder.add_tool(tool, ToolMetadata{json::object(), json::object()});
+    builder.add_node(
+        manifest(ExecutableKind::Node, "bound-catalog-node", '5'),
+        [](const std::string& name, const json&, const NodeContext& context) {
+            ++factory_calls;
+            if (!context.provider || context.tools.size() != 1) {
+                throw std::runtime_error("factory did not receive owned exact bindings");
+            }
+            return std::make_unique<BoundCatalogNode>(name, context.provider,
+                                                       context.tools.front());
+        },
+        json{{"type", "object"},
+             {"properties",
+              json{{"type", json{{"type", "string"}}},
+                   {"provider", json{{"type", "string"}}},
+                   {"tool_ids",
+                    json{{"type", "array"}, {"items", json{{"type", "string"}}}}}}},
+             {"additionalProperties", false}},
+        json::object(),
+        [provider = provider.identity, tool = tool.identity](const json& config) {
+            ++requirement_resolver_calls;
+            std::vector<ExecutableIdentity> result;
+            if (config.value("provider", std::string{}) == provider.name)
+                result.push_back(provider);
+            if (config.contains("tool_ids") && config["tool_ids"].is_array()) {
+                for (const auto& configured : config["tool_ids"]) {
+                    if (configured.is_string() &&
+                        configured.get<std::string>() == tool.name) {
+                        result.push_back(tool);
+                        break;
+                    }
+                }
+            }
+            return result;
+        });
+    builder.add_reducer(manifest(ExecutableKind::Reducer, "catalog-overwrite", '2'),
+                        [](const json&, const json& incoming) { return json(incoming); });
+    return std::move(builder).build();
+}
+
+CatalogCapabilityBinding make_binding(const std::vector<ExecutableIdentity>& requested,
+                                      char                                   route) {
+    CatalogCapabilityBinding binding;
+    std::vector<std::unique_ptr<neograph::Tool>> tools;
+    for (const auto& identity : requested) {
+        binding.receipts.push_back({identity, digest(route)});
+        if (identity.kind == ExecutableKind::Provider) {
+            binding.node_context.provider = std::make_shared<CatalogProvider>();
+        } else if (identity.kind == ExecutableKind::Tool) {
+            tools.push_back(std::make_unique<CatalogTool>());
+        }
+    }
+    binding.tools = neograph::ToolSet(std::move(tools));
+    return binding;
+}
+
+json requirements(std::uint64_t max_concurrency = 1) {
     return json::array({
         json{{"resource", "wall_time_ms"}, {"minimum", 1}, {"maximum", 1000}},
         json{{"resource", "model_tokens"}, {"minimum", 0}, {"maximum", 100}},
         json{{"resource", "monetary_microunits"}, {"minimum", 0}, {"maximum", 100}},
-        json{{"resource", "max_concurrency"}, {"minimum", 1}, {"maximum", 1}},
+        json{{"resource", "max_concurrency"},
+             {"minimum", 1},
+             {"maximum", max_concurrency}},
         json{{"resource", "max_program_operations"}, {"minimum", 1}, {"maximum", 1}},
         json{{"resource", "max_core_steps"}, {"minimum", 1}, {"maximum", 20}},
         json{{"resource", "max_dynamic_compiles"}, {"minimum", 0}, {"maximum", 0}},
@@ -98,6 +216,26 @@ json document() {
         {"root",
          json{{"op", "call_core"}, {"name", "main"}, {"definition", std::move(definition)}}},
         {"declared_budget_requirements", requirements()}};
+}
+
+json bound_document(std::uint64_t max_concurrency = 1) {
+    auto result = document();
+    result["root"]["definition"]["nodes"]["work"] =
+        json{{"type", "bound-catalog-node"},
+             {"provider", "catalog-provider"},
+             {"tool_ids", json::array({"catalog-tool"})}};
+    result["declared_budget_requirements"] = requirements(max_concurrency);
+    result["input_contract"]["schema"] =
+        json{{"type", "object"},
+             {"required", json::array({"task"})},
+             {"properties", json{{"task", json{{"type", "string"}}}}},
+             {"additionalProperties", false}};
+    result["output_contract"]["schema"] =
+        json{{"type", "object"},
+             {"required", json::array({"answer"})},
+             {"properties", json{{"answer", json{{"type", "string"}}}}},
+             {"additionalProperties", false}};
+    return result;
 }
 
 AdmissionProfile profile(const RegistrySnapshot& snapshot,
@@ -140,6 +278,13 @@ ProgramBundle compile(const RegistrySnapshot& snapshot) {
     return compiler.compile(ProgramSource::from_cpp_builder("test:catalog", 1, document()));
 }
 
+ProgramBundle compile_bound(const RegistrySnapshot& snapshot,
+                            std::uint64_t            max_concurrency = 1) {
+    ProgramCompiler compiler(snapshot, {"catalog-test/v1"});
+    return compiler.compile(ProgramSource::from_cpp_builder(
+        "test:catalog-bound", 1, bound_document(max_concurrency)));
+}
+
 ProgramBundleData copy_data(const ProgramBundle& bundle) {
     ProgramBundleData data;
     data.source_kind                    = bundle.source_kind();
@@ -175,11 +320,16 @@ struct CatalogFixture {
     std::shared_ptr<EngineGenerationCache> engines = std::make_shared<EngineGenerationCache>();
     ProgramCatalog                         catalog;
 
-    explicit CatalogFixture(RegistrySnapshot value)
+    explicit CatalogFixture(
+        RegistrySnapshot        value,
+        CatalogCapabilityBinder binder  = {},
+        std::size_t             workers = 1,
+        BudgetLimits ceiling = {1000, 100, 100, 1, 1, 20, 1, 1, 1})
         : snapshot(std::move(value)),
           admission(profile(snapshot)),
-          authorization(policy(admission)),
-          catalog(CatalogConfig{store, snapshot, engines, "catalog-test/v1"}) {}
+          authorization(policy(admission, ceiling)),
+          catalog(CatalogConfig{store, snapshot, engines, "catalog-test/v1", std::move(binder),
+                                workers}) {}
 
     ProgramAdmission request() const {
         return ProgramAdmission{"tenant:catalog", admission, authorization, {}};
@@ -279,41 +429,283 @@ TEST(ProgramCatalogTest, ProfileAndPolicyDenialsOccurBeforeFactory) {
     run_denial(true, true, true, {1000, 100, 100, 1, 1, 19, 1, 1, 1});
 }
 
-TEST(ProgramCatalogTest, RejectsCapabilityAndEffectClosureEvenWhenPolicyAllowsIt) {
+TEST(ProgramCatalogTest, BrokeredClosureAdmitsWhenPolicyAllows) {
     factory_calls.store(0);
     auto snapshot        = registry(false, {"catalog-capability"}, {"catalog-effect"});
     auto allowed_profile = profile(snapshot);
-    auto allowed_policy  = policy(allowed_profile, {1000, 100, 100, 1, 1, 20, 1, 1, 1}, true, true);
-    auto store           = std::make_shared<InMemoryProgramStore>();
+    auto allowed_policy =
+        policy(allowed_profile, {1000, 100, 100, 1, 1, 20, 1, 1, 1}, true, true);
+    auto store = std::make_shared<InMemoryProgramStore>();
     ProgramCatalog catalog(CatalogConfig{store, snapshot, std::make_shared<EngineGenerationCache>(),
                                          "catalog-test/v1"});
-    const auto     bundle = compile(snapshot);
+    const auto bundle = compile(snapshot);
 
-    try {
-        (void)catalog.admit(
-            bundle, ProgramAdmission{"tenant:catalog", allowed_profile, allowed_policy, {}});
-        FAIL() << "effectful closure was admitted";
-    } catch (const ProgramAdmissionError& error) {
-        EXPECT_TRUE(has_code(error, "P_ADMIT_RUNTIME_UNSUPPORTED"));
-    }
-    EXPECT_EQ(factory_calls.load(), 0U);
-    EXPECT_FALSE(store->get_bundle(bundle.id()).has_value());
+    const auto version = catalog.admit(
+        bundle, ProgramAdmission{"tenant:catalog", allowed_profile, allowed_policy, {}});
+
+    EXPECT_EQ(factory_calls.load(), 1U);
+    EXPECT_TRUE(store->get_version(version.id()).has_value());
 }
 
-TEST(ProgramCatalogTest, RejectsNonemptySchemasBeforeFactory) {
+TEST(ProgramCatalogTest, ConfigDerivedClosureBindsExactlyAndOwnedResourcesRun) {
     factory_calls.store(0);
-    CatalogFixture fixture(registry());
-    auto           data        = copy_data(compile(fixture.snapshot));
-    data.input_contract.schema = json{{"type", "object"}};
-    ProgramBundle unsupported(std::move(data));
+    provider_calls.store(0);
+    tool_calls.store(0);
+    binder_calls.store(0);
+    requirement_resolver_calls.store(0);
+    auto snapshot = bound_registry();
+    CatalogFixture fixture(
+        snapshot, [](const std::vector<ExecutableIdentity>& requested) {
+            ++binder_calls;
+            return make_binding(requested, '8');
+        });
+    const auto bundle         = compile_bound(snapshot);
+    const auto compile_calls  = requirement_resolver_calls.load();
+
+    const auto version = fixture.catalog.admit(bundle, fixture.request());
+
+    EXPECT_EQ(binder_calls.load(), 1U);
+    EXPECT_EQ(factory_calls.load(), 1U);
+    EXPECT_GT(requirement_resolver_calls.load(), compile_calls);
+    EXPECT_EQ(version.core_materialization_receipt().capability_bindings.size(), 2U);
+    EXPECT_EQ(version.core_materialization_receipt().capability_bindings,
+              ProgramVersion::parse(version.serialize_canonical())
+                  .core_materialization_receipt()
+                  .capability_bindings);
+    EXPECT_EQ(bundle.input_contract().schema["required"], json::array({"task"}));
+    EXPECT_EQ(bundle.output_contract().schema["required"], json::array({"answer"}));
+
+    auto pinned = neograph::program::detail::CatalogRuntimeAccess::pin(fixture.catalog, version);
+    RunConfig run;
+    run.thread_id = "catalog-owned-binding";
+    run.input      = json::object();
+    (void)pinned->root->engine->run(run);
+    EXPECT_EQ(provider_calls.load(), 1U);
+    EXPECT_EQ(tool_calls.load(), 1U);
+}
+
+TEST(ProgramCatalogTest, PolicyDenialSkipsCapabilityBinder) {
+    factory_calls.store(0);
+    binder_calls.store(0);
+    auto snapshot = bound_registry();
+    const auto bundle = compile_bound(snapshot);
+    auto denied_profile = profile(snapshot, true, false, true);
+    auto denied_policy  = policy(denied_profile);
+    ProgramCatalog catalog(CatalogConfig{
+        std::make_shared<InMemoryProgramStore>(), snapshot,
+        std::make_shared<EngineGenerationCache>(), "catalog-test/v1",
+        [](const std::vector<ExecutableIdentity>& requested) {
+            ++binder_calls;
+            return make_binding(requested, '9');
+        }});
+
+    EXPECT_THROW(
+        (void)catalog.admit(
+            bundle, ProgramAdmission{"tenant:catalog", denied_profile, denied_policy, {}}),
+        ProgramAdmissionError);
+    EXPECT_EQ(binder_calls.load(), 0U);
+    EXPECT_EQ(factory_calls.load(), 0U);
+}
+
+TEST(ProgramCatalogTest, InvalidBindingReceiptsRejectBeforeFactory) {
+    factory_calls.store(0);
+    binder_calls.store(0);
+    auto snapshot = bound_registry();
+    CatalogFixture fixture(
+        snapshot, [](const std::vector<ExecutableIdentity>& requested) {
+            ++binder_calls;
+            auto binding = make_binding(requested, 'a');
+            binding.receipts.pop_back();
+            return binding;
+        });
+    const auto bundle = compile_bound(snapshot);
 
     try {
-        (void)fixture.catalog.admit(unsupported, fixture.request());
-        FAIL() << "nonempty schema was admitted";
+        (void)fixture.catalog.admit(bundle, fixture.request());
+        FAIL() << "incomplete capability binding was admitted";
     } catch (const ProgramAdmissionError& error) {
-        EXPECT_TRUE(has_code(error, "P_ADMIT_SCHEMA_UNSUPPORTED"));
+        EXPECT_TRUE(has_code(error, "P_BINDING_COVERAGE"));
     }
+    EXPECT_EQ(binder_calls.load(), 1U);
     EXPECT_EQ(factory_calls.load(), 0U);
+}
+
+TEST(ProgramCatalogTest, ExtraDuplicateAndNonShaReceiptsRejectBeforeFactory) {
+    using Mutator = std::function<void(CatalogCapabilityBinding&)>;
+    const std::vector<Mutator> mutations{
+        [](CatalogCapabilityBinding& binding) {
+            binding.receipts.push_back(
+                CapabilityBindingReceipt{
+                    ExecutableIdentity{ExecutableKind::Tool, "extra-tool", "1.0.0", digest('1')},
+                    digest('2')});
+        },
+        [](CatalogCapabilityBinding& binding) {
+            binding.receipts.push_back(binding.receipts.front());
+        },
+        [](CatalogCapabilityBinding& binding) {
+            binding.receipts.front().binding_identity = "route:not-sha256";
+        },
+        [](CatalogCapabilityBinding& binding) {
+            binding.receipts.front().executable.implementation_digest = "implementation:not-sha";
+        },
+        [](CatalogCapabilityBinding& binding) {
+            std::vector<std::unique_ptr<neograph::Tool>> tools;
+            tools.push_back(std::make_unique<CatalogTool>("wrong-tool"));
+            binding.tools = neograph::ToolSet(std::move(tools));
+        }};
+
+    for (const auto& mutate : mutations) {
+        factory_calls.store(0);
+        auto snapshot      = bound_registry();
+        auto admission     = profile(snapshot);
+        auto authorization = policy(admission);
+        ProgramCatalog catalog(CatalogConfig{
+            std::make_shared<InMemoryProgramStore>(), snapshot,
+            std::make_shared<EngineGenerationCache>(), "catalog-test/v1",
+            [mutate](const std::vector<ExecutableIdentity>& requested) {
+                auto binding = make_binding(requested, 'a');
+                mutate(binding);
+                return binding;
+            }});
+        const auto bundle = compile_bound(snapshot);
+
+        EXPECT_THROW(
+            (void)catalog.admit(
+                bundle, ProgramAdmission{"tenant:catalog", admission, authorization, {}}),
+            ProgramAdmissionError);
+        EXPECT_EQ(factory_calls.load(), 0U);
+    }
+}
+
+TEST(ProgramCatalogTest, BindingReceiptRouteChangesVersionAndEngineGeneration) {
+    factory_calls.store(0);
+    auto snapshot      = bound_registry();
+    auto store         = std::make_shared<InMemoryProgramStore>();
+    auto engines       = std::make_shared<EngineGenerationCache>();
+    auto admission     = profile(snapshot);
+    auto authorization = policy(admission);
+    const auto bundle  = compile_bound(snapshot);
+    ProgramCatalog first(CatalogConfig{
+        store, snapshot, engines, "catalog-test/v1",
+        [](const std::vector<ExecutableIdentity>& requested) {
+            return make_binding(requested, 'b');
+        }});
+    ProgramCatalog second(CatalogConfig{
+        store, snapshot, engines, "catalog-test/v1",
+        [](const std::vector<ExecutableIdentity>& requested) {
+            return make_binding(requested, 'c');
+        }});
+
+    const auto first_version = first.admit(
+        bundle, ProgramAdmission{"tenant:catalog", admission, authorization, {}});
+    const auto second_version = second.admit(
+        bundle, ProgramAdmission{"tenant:catalog", admission, authorization, {}});
+
+    EXPECT_NE(first_version.id(), second_version.id());
+    EXPECT_NE(capability_binding_receipt_root(
+                  first_version.core_materialization_receipt().capability_bindings),
+              capability_binding_receipt_root(
+                  second_version.core_materialization_receipt().capability_bindings));
+    const auto first_materialized =
+        neograph::program::detail::CatalogRuntimeAccess::pin(first, first_version);
+    const auto second_materialized =
+        neograph::program::detail::CatalogRuntimeAccess::pin(second, second_version);
+    EXPECT_NE(first_materialized->root.get(), second_materialized->root.get());
+    EXPECT_EQ(factory_calls.load(), 2U);
+}
+
+TEST(ProgramCatalogTest, WorkerCountSeparatesOtherwiseIdenticalEngineGenerations) {
+    factory_calls.store(0);
+    auto snapshot      = bound_registry();
+    auto store         = std::make_shared<InMemoryProgramStore>();
+    auto engines       = std::make_shared<EngineGenerationCache>();
+    auto admission     = profile(snapshot);
+    auto authorization =
+        policy(admission, BudgetLimits{1000, 100, 100, 4, 1, 20, 1, 1, 1});
+    const auto bundle = compile_bound(snapshot, 4);
+    const auto binder = [](const std::vector<ExecutableIdentity>& requested) {
+        return make_binding(requested, '6');
+    };
+    ProgramCatalog serial(
+        CatalogConfig{store, snapshot, engines, "catalog-test/v1", binder, 1});
+    ProgramCatalog parallel(
+        CatalogConfig{store, snapshot, engines, "catalog-test/v1", binder, 4});
+
+    const auto serial_version = serial.admit(
+        bundle, ProgramAdmission{"tenant:catalog", admission, authorization, {}});
+    const auto parallel_version = parallel.admit(
+        bundle, ProgramAdmission{"tenant:catalog", admission, authorization, {}});
+
+    EXPECT_EQ(serial_version.id(), parallel_version.id());
+    const auto serial_materialized =
+        neograph::program::detail::CatalogRuntimeAccess::pin(serial, serial_version);
+    const auto parallel_materialized =
+        neograph::program::detail::CatalogRuntimeAccess::pin(parallel, parallel_version);
+    EXPECT_NE(serial_materialized->root.get(), parallel_materialized->root.get());
+    EXPECT_EQ(factory_calls.load(), 2U);
+}
+
+TEST(ProgramCatalogTest, ResolveVersionIsOwnerScopedAndRebindsExactStoredReceipt) {
+    auto snapshot = bound_registry();
+    auto store    = std::make_shared<InMemoryProgramStore>();
+    auto original_engines = std::make_shared<EngineGenerationCache>();
+    auto admission        = profile(snapshot);
+    auto authorization    = policy(admission);
+    const auto bundle     = compile_bound(snapshot);
+    ProgramCatalog original(CatalogConfig{
+        store, snapshot, original_engines, "catalog-test/v1",
+        [](const std::vector<ExecutableIdentity>& requested) {
+            return make_binding(requested, 'd');
+        }});
+    const auto stored = original.admit(
+        bundle, ProgramAdmission{"tenant:catalog", admission, authorization, {}});
+
+    factory_calls.store(0);
+    binder_calls.store(0);
+    ProgramCatalog recovered(CatalogConfig{
+        store, snapshot, std::make_shared<EngineGenerationCache>(), "catalog-test/v1",
+        [](const std::vector<ExecutableIdentity>& requested) {
+            ++binder_calls;
+            return make_binding(requested, 'd');
+        }});
+    EXPECT_FALSE(recovered.resolve_version("tenant:other", stored.id()).has_value());
+    EXPECT_EQ(binder_calls.load(), 0U);
+
+    const auto resolved = recovered.resolve_version("tenant:catalog", stored.id());
+    ASSERT_TRUE(resolved.has_value());
+    EXPECT_EQ(resolved->serialize_canonical(), stored.serialize_canonical());
+    EXPECT_EQ(binder_calls.load(), 1U);
+    EXPECT_EQ(factory_calls.load(), 1U);
+
+    std::vector<ExecutableIdentity> requested;
+    for (const auto& receipt : stored.core_materialization_receipt().capability_bindings)
+        requested.push_back(receipt.executable);
+    const auto factories_before = factory_calls.load();
+    try {
+        (void)recovered.resolve_version_with_binding("tenant:catalog", stored.id(),
+                                                     make_binding(requested, 'e'));
+        FAIL() << "recorded binding with a different receipt was accepted";
+    } catch (const ProgramAdmissionError& error) {
+        EXPECT_TRUE(has_code(error, "P_RESOLVE_BINDING"));
+    }
+    EXPECT_EQ(factory_calls.load(), factories_before);
+}
+
+TEST(ProgramCatalogTest, PositiveFiniteConcurrencyAboveOneIsAdmitted) {
+    factory_calls.store(0);
+    auto snapshot = bound_registry();
+    CatalogFixture fixture(
+        snapshot,
+        [](const std::vector<ExecutableIdentity>& requested) {
+            return make_binding(requested, 'f');
+        },
+        4, BudgetLimits{1000, 100, 100, 4, 1, 20, 1, 1, 1});
+    const auto bundle = compile_bound(snapshot, 4);
+
+    const auto version = fixture.catalog.admit(bundle, fixture.request());
+
+    EXPECT_FALSE(version.id().empty());
+    EXPECT_EQ(factory_calls.load(), 1U);
 }
 
 TEST(ProgramCatalogTest, FactoryFailurePublishesNeitherVersionNorBundle) {

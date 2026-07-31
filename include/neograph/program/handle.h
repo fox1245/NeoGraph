@@ -7,6 +7,7 @@
 #include <neograph/api.h>
 #include <neograph/program/event.h>
 #include <neograph/program/result.h>
+#include <neograph/program/run_record.h>
 
 #include <asio/awaitable.hpp>
 
@@ -21,6 +22,9 @@ namespace neograph::program {
 namespace detail {
 class RunControl;
 }
+class ProgramRuntime;
+struct ProgramResume;
+struct ProgramEffectResolution;
 
 class NEOGRAPH_PROGRAM_API ProgramHandle {
 public:
@@ -40,6 +44,10 @@ public:
     std::optional<ProgramResult>          try_result() const;
     std::vector<ProgramEvent>             events_after(std::uint64_t sequence) const;
     std::optional<CoreCheckpointIdentity> latest_checkpoint() const;
+    ProgramRunRecord                      snapshot() const;
+    ProgramHandle resume(ProgramRuntime& runtime, ProgramResume resume) const;
+    ProgramHandle reconcile(ProgramRuntime& runtime,
+                            ProgramEffectResolution resolution) const;
 
 private:
     explicit ProgramHandle(std::shared_ptr<detail::RunControl> control);

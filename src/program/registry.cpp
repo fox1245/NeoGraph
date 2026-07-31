@@ -93,8 +93,9 @@ void require_kind(const ExecutableManifest& manifest, ExecutableKind expected) {
 }
 
 struct SnapshotEntry {
-    ExecutableManifest manifest;
-    json               metadata;
+    ExecutableManifest            manifest;
+    json                          metadata;
+    ExecutableRequirementResolver requirement_resolver;
 };
 
 json encode_identity(const ExecutableIdentity& identity) {
@@ -177,6 +178,24 @@ const ExecutableManifest& detail::RegistrySnapshotAccess::require_manifest(
     return manifest->manifest;
 }
 
+std::vector<ExecutableIdentity> detail::RegistrySnapshotAccess::resolve_node_requirements(
+    const RegistrySnapshot& snapshot,
+    std::string_view        name,
+    const json&             node_config) {
+    const auto entry = std::find_if(
+        snapshot.impl_->entries.begin(), snapshot.impl_->entries.end(),
+        [name](const SnapshotEntry& candidate) {
+            return candidate.manifest.identity.kind == ExecutableKind::Node &&
+                   candidate.manifest.identity.name == name;
+        });
+    if (entry == snapshot.impl_->entries.end()) {
+        throw std::out_of_range("Node manifest is absent from the RegistrySnapshot");
+    }
+    if (!entry->requirement_resolver) return {};
+    const auto owned_config = detail::owned_json_copy(node_config);
+    return entry->requirement_resolver(owned_config);
+}
+
 std::shared_ptr<const graph::GraphRegistry>
 detail::RegistrySnapshotAccess::runtime_registry(const RegistrySnapshot& snapshot) {
     return {snapshot.impl_, &snapshot.impl_->registry};
@@ -221,10 +240,12 @@ RegistrySnapshotBuilder& RegistrySnapshotBuilder::operator=(RegistrySnapshotBuil
     default;
 RegistrySnapshotBuilder::~RegistrySnapshotBuilder() = default;
 
-RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_node(ExecutableManifest   manifest,
-                                                           graph::NodeFactoryFn factory,
-                                                           json                 config_schema,
-                                                           json                 effects) {
+RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_node(
+    ExecutableManifest            manifest,
+    graph::NodeFactoryFn          factory,
+    json                          config_schema,
+    json                          effects,
+    ExecutableRequirementResolver requirement_resolver) {
     require_kind(manifest, ExecutableKind::Node);
     validate_manifest(manifest);
     if (!factory) throw std::invalid_argument("Node factory must not be empty");
@@ -235,9 +256,11 @@ RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_node(ExecutableManifest   
     effects       = detail::owned_json_copy(effects);
     impl_->registry.register_type(manifest.identity.name, std::move(factory), config_schema,
                                   effects);
-    impl_->entries.push_back(SnapshotEntry{
-        std::move(manifest),
-        detail::owned_json_copy(json{{"config_schema", config_schema}, {"effects", effects}})});
+    impl_->entries.push_back(
+        SnapshotEntry{std::move(manifest),
+                      detail::owned_json_copy(
+                          json{{"config_schema", config_schema}, {"effects", effects}}),
+                      std::move(requirement_resolver)});
     return *this;
 }
 
@@ -247,7 +270,7 @@ RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_reducer(ExecutableManifest
     validate_manifest(manifest);
     if (!reducer) throw std::invalid_argument("Reducer callable must not be empty");
     impl_->registry.register_reducer(manifest.identity.name, std::move(reducer));
-    impl_->entries.push_back(SnapshotEntry{std::move(manifest), json::object()});
+    impl_->entries.push_back(SnapshotEntry{std::move(manifest), json::object(), {}});
     return *this;
 }
 
@@ -269,7 +292,8 @@ RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_condition(
         metadata["declared"] = false;
         impl_->registry.register_condition(manifest.identity.name, std::move(condition));
     }
-    impl_->entries.push_back(SnapshotEntry{std::move(manifest), detail::owned_json_copy(metadata)});
+    impl_->entries.push_back(
+        SnapshotEntry{std::move(manifest), detail::owned_json_copy(metadata), {}});
     return *this;
 }
 
@@ -280,10 +304,11 @@ RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_provider(ExecutableManifes
     if (!metadata.request_schema.is_object() || !metadata.response_schema.is_object()) {
         throw std::invalid_argument("Provider request_schema and response_schema must be objects");
     }
-    impl_->entries.push_back(SnapshotEntry{
-        std::move(manifest),
-        detail::owned_json_copy(json{{"request_schema", metadata.request_schema},
-                                     {"response_schema", metadata.response_schema}})});
+    impl_->entries.push_back(
+        SnapshotEntry{std::move(manifest),
+                      detail::owned_json_copy(json{{"request_schema", metadata.request_schema},
+                                                   {"response_schema", metadata.response_schema}}),
+                      {}});
     return *this;
 }
 
@@ -297,7 +322,8 @@ RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_tool(ExecutableManifest ma
     impl_->entries.push_back(
         SnapshotEntry{std::move(manifest),
                       detail::owned_json_copy(json{{"input_schema", metadata.input_schema},
-                                                   {"output_schema", metadata.output_schema}})});
+                                                   {"output_schema", metadata.output_schema}}),
+                      {}});
     return *this;
 }
 
@@ -325,12 +351,13 @@ RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_imported(
     manifest.required_executables = {metadata.target};
     normalize_dependencies(manifest);
     impl_->imported_targets.push_back({manifest.identity.name, metadata.target});
-    impl_->entries.push_back(SnapshotEntry{
-        std::move(manifest),
-        detail::owned_json_copy(json{{"module_id", metadata.module_id},
-                                     {"export_name", metadata.export_name},
-                                     {"dependency_digest", metadata.dependency_digest},
-                                     {"target", encode_identity(metadata.target)}})});
+    impl_->entries.push_back(
+        SnapshotEntry{std::move(manifest),
+                      detail::owned_json_copy(json{{"module_id", metadata.module_id},
+                                                   {"export_name", metadata.export_name},
+                                                   {"dependency_digest", metadata.dependency_digest},
+                                                   {"target", encode_identity(metadata.target)}}),
+                      {}});
     return *this;
 }
 

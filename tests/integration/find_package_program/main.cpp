@@ -346,7 +346,7 @@ int main() {
     const auto admitted_interrupt = catalog->admit(
         interrupt_bundle, ProgramAdmission{"installed-consumer", admission, policy, {}});
     auto            checkpoints = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
-    auto            journal     = std::make_shared<InMemoryProgramJournal>();
+    auto            journal     = std::make_shared<InMemoryProgramTransitionStore>();
     auto            sink        = std::make_shared<CountingSink>();
     const RunBudget runtime_budget{1000, 1000, 1000, 1, 1, 100, 0, 0, 0};
     bool            runtime_contract             = false;
@@ -354,11 +354,11 @@ int main() {
     {
         ProgramRuntime runtime(RuntimeConfig{catalog, checkpoints, {}, journal, 2});
         const auto     completed = runtime.run(
-            admitted,
+            "installed-consumer", admitted,
             ProgramInvocation{neograph::json::object(), runtime_budget, "installed-sync", sink});
         const auto interrupted =
             runtime
-                .start(admitted_interrupt,
+                .start("installed-consumer", admitted_interrupt,
                        ProgramInvocation{neograph::json::object(), runtime_budget,
                                          "installed-interrupt", sink})
                 .wait();
@@ -367,13 +367,14 @@ int main() {
         auto             resumed_future = asio::co_spawn(
             io,
             runtime.resume_async(
-                interrupted.run_id(),
-                ProgramResume{neograph::json{{"decision", "approved"}}, "installed-resume", sink}),
+                "installed-consumer", interrupted.run_id(),
+                ProgramResume{neograph::json{{"decision", "approved"}}, "installed-resume", sink,
+                              interrupted.interrupt().value().pending_input.value().call_id()}),
             asio::use_future);
         io.run();
         const auto resumed           = resumed_future.get();
-        const auto completed_journal = journal->latest(completed.run_id());
-        const auto resumed_journal   = journal->latest(resumed.run_id());
+        const auto completed_journal = journal->latest("installed-consumer", completed.run_id());
+        const auto resumed_journal   = journal->latest("installed-consumer", resumed.run_id());
 
         runtime_contract =
             completed.status() == ProgramTerminalStatus::Completed &&

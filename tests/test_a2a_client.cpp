@@ -156,6 +156,7 @@ TEST(A2AClient, FetchAgentCardReadsWellKnownPath) {
     EXPECT_EQ(card.preferred_transport, "JSONRPC");
 }
 
+#ifdef NEOGRAPH_TESTS_HAVE_HARNESS
 TEST(A2AClient, HarnessAdapterCallsConfiguredAgent) {
     MockA2AServer srv;
     auto client = std::make_shared<A2AClient>(srv.url());
@@ -172,6 +173,7 @@ TEST(A2AClient, HarnessAdapterCallsConfiguredAgent) {
     EXPECT_EQ(result["id"], "task-1");
     EXPECT_EQ(result["status"]["state"], "completed");
 }
+#endif
 
 TEST(A2AClient, FetchAgentCardCachesByDefault) {
     MockA2AServer srv;

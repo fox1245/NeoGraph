@@ -6,6 +6,7 @@
 
 #include <neograph/api.h>
 #include <neograph/mcp/harness.h>
+#include <neograph/mcp/harness_program_store.h>
 
 #include <chrono>
 #include <memory>
@@ -29,9 +30,11 @@ struct SqliteHarnessJournalConfig {
 };
 
 /** Local SQLite implementation of Harness snapshots and the causal journal. */
+class SqliteHarnessProgramTransitionStore;
 class NEOGRAPH_API SqliteHarnessRecordStore final : public HarnessRecordStore,
                                                     public HarnessJournal,
-                                                    public HarnessRetentionStore {
+                                                    public HarnessRetentionStore,
+                                                    public HarnessProgramAdapterStore {
 public:
     /// Open or create a store with a five-second SQLite busy timeout.
     explicit SqliteHarnessRecordStore(const std::string& db_path);
@@ -55,10 +58,15 @@ public:
                                     std::size_t        after_sequence = 0,
                                     std::size_t        limit = 1000) override;
     HarnessRetentionResult cleanup_retained(const HarnessRetentionPolicy& policy) override;
+    std::shared_ptr<program::ProgramTransitionStore>
+    bind_program_transitions(HarnessProgramArtifactRecord artifact) override;
+    std::optional<HarnessProgramRunRecord>
+    resolve_program_run(std::string_view owner_scope, std::string_view run_id) const override;
 
 private:
     struct Impl;
-    std::unique_ptr<Impl> impl_;
+    friend class SqliteHarnessProgramTransitionStore;
+    std::shared_ptr<Impl> impl_;
 };
 
 }  // namespace neograph::mcp

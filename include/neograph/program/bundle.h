@@ -33,6 +33,19 @@ struct ContractRecord {
     json          schema         = json::object();
 };
 
+/**
+ * Validate the Program-v1 JSON Schema subset retained by a contract.
+ *
+ * Supported assertion keywords are type, const, enum, required, properties,
+ * items, and additionalProperties. Other keywords are retained canonically as
+ * annotations and do not affect runtime validation.
+ */
+NEOGRAPH_PROGRAM_API void validate_contract_schema(
+    const ContractRecord& contract, std::string_view path = "$schema");
+NEOGRAPH_PROGRAM_API void validate_contract_value(
+    const json& value, const ContractRecord& contract,
+    std::string_view subject = "Program contract value", std::string_view path = "$");
+
 struct OrchestrationPlanRecord {
     std::uint32_t schema_version = 1;
     json          plan           = json::object();

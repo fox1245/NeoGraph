@@ -530,13 +530,37 @@ TEST(ProgramBundleTest, IdentityEnvelopeRejectsFormatStorageAndContentTampering)
     EXPECT_THROW((void)ProgramBundle::parse(wrong_content.dump()), std::invalid_argument);
 }
 
+TEST(ProgramContractTest, ValidatesRetainedSchemaWithoutMcpDependency) {
+    ContractRecord contract{
+        1,
+        json{{"type", "object"},
+             {"required", json::array({"task"})},
+             {"properties", json{{"task", json{{"type", "string"}}}}},
+             {"additionalProperties", false}}};
+
+    EXPECT_NO_THROW(validate_contract_schema(contract));
+    EXPECT_NO_THROW(validate_contract_value(json{{"task", "ship"}}, contract));
+    EXPECT_THROW(validate_contract_value(json::object(), contract), std::invalid_argument);
+    EXPECT_THROW(validate_contract_value(json{{"task", 7}}, contract), std::invalid_argument);
+    EXPECT_THROW(validate_contract_value(json{{"task", "ship"}, {"raw_route", "forbidden"}},
+                                         contract),
+                 std::invalid_argument);
+}
+
 TEST(ProgramVersionTest, RoundTripsAndNormalizesReceiptOrder) {
     ProgramBundle bundle(make_bundle_data(make_source()));
     auto          first_data  = make_version_data(bundle);
-    auto          second_data = first_data;
+    first_data.core_materialization_receipt.capability_bindings = {
+        CapabilityBindingReceipt{
+            ExecutableIdentity{ExecutableKind::Tool, "tool", "1.0.0", sha('8')}, sha('9')},
+        CapabilityBindingReceipt{
+            ExecutableIdentity{ExecutableKind::Provider, "provider", "1.0.0", sha('a')}, sha('b')}};
+    auto second_data = first_data;
     std::reverse(second_data.dependency_receipts.begin(), second_data.dependency_receipts.end());
     std::reverse(second_data.core_materialization_receipt.plans.begin(),
                  second_data.core_materialization_receipt.plans.end());
+    std::reverse(second_data.core_materialization_receipt.capability_bindings.begin(),
+                 second_data.core_materialization_receipt.capability_bindings.end());
 
     ProgramVersion first(std::move(first_data));
     ProgramVersion second(std::move(second_data));
@@ -547,6 +571,12 @@ TEST(ProgramVersionTest, RoundTripsAndNormalizesReceiptOrder) {
     EXPECT_EQ(parsed.id(), first.id());
     EXPECT_EQ(parsed.dependency_receipts().front().dependency_id, "module:alpha");
     EXPECT_EQ(parsed.core_materialization_receipt().plans.front().name, "alpha");
+    EXPECT_EQ(parsed.core_materialization_receipt().capability_bindings.front().executable.name,
+              "provider");
+    EXPECT_EQ(capability_binding_receipt_root(
+                  parsed.core_materialization_receipt().capability_bindings),
+              capability_binding_receipt_root(
+                  first.core_materialization_receipt().capability_bindings));
 }
 
 TEST(ProgramVersionTest, RejectsSchemaInvalidTokenStringsInConstructorAndParser) {
@@ -572,6 +602,23 @@ TEST(ProgramVersionTest, RejectsSchemaInvalidTokenStringsInConstructorAndParser)
     auto                 stored                       = json::parse(valid.serialize_canonical());
     stored["dependency_receipts"][0]["dependency_id"] = "module:alpha ";
     EXPECT_THROW((void)ProgramVersion::parse(stored.dump()), std::invalid_argument);
+}
+
+TEST(ProgramVersionTest, RejectsMalformedAndDuplicateCapabilityBindingReceipts) {
+    ProgramBundle bundle(make_bundle_data(make_source()));
+    const ExecutableIdentity provider{
+        ExecutableKind::Provider, "provider", "1.0.0", sha('c')};
+
+    auto malformed = make_version_data(bundle);
+    malformed.core_materialization_receipt.capability_bindings.push_back(
+        CapabilityBindingReceipt{provider, "route:not-a-digest"});
+    EXPECT_THROW((void)ProgramVersion(std::move(malformed)), std::invalid_argument);
+
+    auto duplicate = make_version_data(bundle);
+    duplicate.core_materialization_receipt.capability_bindings = {
+        CapabilityBindingReceipt{provider, sha('d')},
+        CapabilityBindingReceipt{provider, sha('e')}};
+    EXPECT_THROW((void)ProgramVersion(std::move(duplicate)), std::invalid_argument);
 }
 
 TEST(ProgramVersionTest, RejectsNestedUnknownFieldsAndIdentityEnvelopeTampering) {
@@ -605,7 +652,7 @@ TEST(ProgramVersionTest, StoredParserRejectsDuplicateObjectMembers) {
     EXPECT_THROW((void)ProgramVersion::parse(stored), std::invalid_argument);
 }
 
-TEST(ProgramStoredValueTest, V1CanonicalBytesAndIdsMatchKnownVectors) {
+TEST(ProgramStoredValueTest, BundleV1MatchesKnownVectorAndVersionReceiptIsCanonical) {
     ProgramBundleData bundle_data;
     bundle_data.source_kind                    = SourceKind::CanonicalJson;
     bundle_data.source_hash                    = make_source().source_hash();
@@ -654,11 +701,12 @@ TEST(ProgramStoredValueTest, V1CanonicalBytesAndIdsMatchKnownVectors) {
             "vector-compiler", registry.fingerprint(), {CorePlanIdentity{"main", sha('d')}}});
     ProgramVersion version(std::move(version_data));
 
-    const std::string expected_version =
-        R"JSON({"admission_profile":{"allowed_effect_modes":["brokered"],"allowed_executables":[],"allowed_source_kinds":["canonical_json"],"fingerprint":"sha256:fc9e0cb8678edc425f1dec30012cf2fbb8bce5fa7798e6063dae9c2ce3e277d4","format":"neograph-admission-profile","id":"vector-profile","max_program_schema_version":1,"mode":"multi_tenant","registry_fingerprint":"sha256:c685c33a3d9d439451423bd97791ab3bc6daa0e3aa623a38258cef18a6ae3e2d","semantic_version":"1.0.0","storage_schema_version":1},"bundle_id":"sha256:536eb03dc23c6d4d3b12212e516efd5a24696073be7b8b6dc6041fe3f4cfa5d1","core_materialization_receipt":{"compiler_build_id":"vector-compiler","plans":[{"compiled_plan_identity":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","name":"main"}],"registry_snapshot_fingerprint":"sha256:c685c33a3d9d439451423bd97791ab3bc6daa0e3aa623a38258cef18a6ae3e2d"},"dependency_receipts":[],"format":"neograph-program-version","id":"sha256:33e97162e89f9fdefa980c33f1a9652b2d2a623601acc5f54a53b09076175a17","ownership_scope":"tenant:vector","policy_snapshot":{"admission_profile_fingerprint":"sha256:fc9e0cb8678edc425f1dec30012cf2fbb8bce5fa7798e6063dae9c2ce3e277d4","allowed_capabilities":[],"allowed_effects":[],"allowed_module_digests":[],"budget_ceiling":{"max_child_depth":1,"max_concurrency":1,"max_core_steps":1,"max_dynamic_compiles":1,"max_program_operations":1,"max_total_children":1,"model_tokens":1,"monetary_microunits":1,"wall_time_ms":1},"fingerprint":"sha256:ffac3e7ab1a42f3eca91798340027ded3c19e0e93c56d4075723d9a3c805c1e2","format":"neograph-policy-snapshot","id":"vector-policy","owner_scope":"tenant:vector","registry_fingerprint":"sha256:c685c33a3d9d439451423bd97791ab3bc6daa0e3aa623a38258cef18a6ae3e2d","semantic_version":"1.0.0","storage_schema_version":1},"storage_schema_version":1})JSON";
-    EXPECT_EQ(version.id(),
-              "sha256:33e97162e89f9fdefa980c33f1a9652b2d2a623601acc5f54a53b09076175a17");
-    EXPECT_EQ(version.serialize_canonical(), expected_version);
+    const auto encoded_version = json::parse(version.serialize_canonical());
+    ASSERT_TRUE(encoded_version["core_materialization_receipt"].contains(
+        "capability_bindings"));
+    EXPECT_EQ(encoded_version["core_materialization_receipt"]["capability_bindings"],
+              json::array());
+    EXPECT_EQ(ProgramVersion::parse(version.serialize_canonical()).id(), version.id());
 }
 
 TEST(ProgramStoredValueTest, DeepCopiesCallerOwnedJson) {

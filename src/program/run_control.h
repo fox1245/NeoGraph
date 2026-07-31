@@ -4,6 +4,7 @@
 #include <neograph/program/event.h>
 #include <neograph/program/journal.h>
 #include <neograph/program/result.h>
+#include <neograph/program/transition_store.h>
 
 #include "catalog_access.h"
 #include <asio/any_io_executor.hpp>
@@ -42,24 +43,31 @@ struct RunOutcome {
 
 class RunControl final {
 public:
-    RunControl(std::string                                run_id,
+    RunControl(std::string                                owner_scope,
+               std::string                                run_id,
                std::uint64_t                              attempt,
                std::shared_ptr<const MaterializedProgram> materialized,
-               RunBudget                                  budget,
+               std::string                                binding_fingerprint,
+               ProgramPersistedInvocation                 invocation,
                std::string                                core_thread_id,
-               std::string                                trace_id,
+               std::uint64_t                              event_sequence,
                std::shared_ptr<ProgramEventSink>          sink,
                asio::any_io_executor                      deadline_executor,
                std::shared_ptr<graph::CheckpointStore>    checkpoints,
                std::shared_ptr<graph::Store>              state_store,
-               std::shared_ptr<ProgramJournal>            journal);
+               std::shared_ptr<ProgramTransitionStore>    transitions);
+    RunControl(ProgramRunRecord record,
+               std::shared_ptr<ProgramTransitionStore> transitions);
 
+    const std::string                                owner_scope;
     const std::string                                run_id;
     const std::string                                program_version_id;
     const std::string                                bundle_id;
+    const std::string                                binding_fingerprint;
     const std::string                                operation_id{"root"};
     const std::uint64_t                              attempt;
     const std::shared_ptr<const MaterializedProgram> materialized;
+    const ProgramPersistedInvocation                 persisted_invocation;
     const RunBudget                                  granted_budget;
     const std::chrono::steady_clock::time_point      started_at;
     const std::chrono::steady_clock::time_point      deadline;
@@ -69,13 +77,15 @@ public:
     const std::string                                trace_id;
     const std::shared_ptr<graph::CheckpointStore>    checkpoints;
     const std::shared_ptr<graph::Store>              state_store;
-    const std::shared_ptr<ProgramJournal>            journal;
+    const std::shared_ptr<ProgramTransitionStore>    transitions;
     const std::shared_ptr<graph::CancelToken>        cancel_token;
 
     bool              cancel(CancellationCause cause) noexcept;
     CancellationCause cancellation_cause() const noexcept;
     CancellationCause seal_terminal_cause() noexcept;
 
+    ProgramEvent stage_event(ProgramEventKind kind, ProgramEventPayload payload);
+    void         deliver_event(const ProgramEvent& event);
     void emit(ProgramEventKind kind, ProgramEventPayload payload);
     void complete(RunOutcome outcome) noexcept;
 
@@ -84,6 +94,7 @@ public:
     std::optional<ProgramResult>          try_result() const;
     std::vector<ProgramEvent>             events_after(std::uint64_t sequence) const;
     std::optional<CoreCheckpointIdentity> latest_checkpoint() const;
+    ProgramRunRecord                      snapshot() const;
 
 private:
     ProgramResult make_result(RunOutcome outcome) const;
@@ -103,6 +114,7 @@ private:
     std::uint64_t                         next_sequence_      = 1;
     CancellationCause                     cancellation_cause_ = CancellationCause::None;
     bool                                  terminal_decided_   = false;
+    bool                                  completion_claimed_ = false;
 };
 
 asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,

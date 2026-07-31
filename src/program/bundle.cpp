@@ -2,6 +2,7 @@
 
 #include "canonical_json.h"
 
+#include <array>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -781,7 +782,199 @@ ProgramBundleData parse_body(const json& value) {
     return data;
 }
 
+constexpr std::size_t kMaxContractSchemaDepth = 64;
+
+void check_contract_depth(std::size_t depth, std::string_view path) {
+    if (depth > kMaxContractSchemaDepth) {
+        throw std::invalid_argument("Program contract schema nesting exceeds 64 levels at " +
+                                    std::string(path));
+    }
+}
+
+bool contract_type_matches(const json& value, std::string_view type) {
+    if (type == "null") return value.is_null();
+    if (type == "boolean") return value.is_boolean();
+    if (type == "object") return value.is_object();
+    if (type == "array") return value.is_array();
+    if (type == "number") return value.is_number();
+    if (type == "integer") return value.is_number_integer();
+    if (type == "string") return value.is_string();
+    throw std::invalid_argument("Unsupported Program contract schema type: " +
+                                std::string(type));
+}
+
+void validate_contract_type_name(const json& type, std::string_view path) {
+    if (!type.is_string()) {
+        throw std::invalid_argument("Program contract schema type at " + std::string(path) +
+                                    " must contain strings");
+    }
+    static constexpr std::array<std::string_view, 7> supported = {
+        "null", "boolean", "object", "array", "number", "integer", "string"};
+    const auto name = type.get<std::string>();
+    if (std::find(supported.begin(), supported.end(), name) == supported.end()) {
+        throw std::invalid_argument("Unsupported Program contract schema type: " + name);
+    }
+}
+
+void validate_contract_schema_impl(const json& schema,
+                                   const std::string& path,
+                                   std::size_t        depth) {
+    check_contract_depth(depth, path);
+    if (!schema.is_object()) {
+        throw std::invalid_argument("Program contract schema at " + path + " must be an object");
+    }
+    if (schema.contains("type")) {
+        const auto& types = schema["type"];
+        if (types.is_string()) {
+            validate_contract_type_name(types, path);
+        } else if (types.is_array() && !types.empty()) {
+            for (const auto& type : types)
+                validate_contract_type_name(type, path);
+        } else {
+            throw std::invalid_argument("Program contract schema type at " + path +
+                                        " must be a string or nonempty array");
+        }
+    }
+    if (schema.contains("enum") && !schema["enum"].is_array()) {
+        throw std::invalid_argument("Program contract schema enum at " + path +
+                                    " must be an array");
+    }
+    if (schema.contains("required")) {
+        const auto& required = schema["required"];
+        if (!required.is_array()) {
+            throw std::invalid_argument("Program contract schema required at " + path +
+                                        " must be an array");
+        }
+        std::set<std::string> seen;
+        for (const auto& name : required) {
+            if (!name.is_string() || !seen.insert(name.get<std::string>()).second) {
+                throw std::invalid_argument("Program contract schema required at " + path +
+                                            " must contain unique strings");
+            }
+        }
+    }
+    if (schema.contains("properties")) {
+        const auto& properties = schema["properties"];
+        if (!properties.is_object()) {
+            throw std::invalid_argument("Program contract schema properties at " + path +
+                                        " must be an object");
+        }
+        for (auto it = properties.begin(); it != properties.end(); ++it) {
+            validate_contract_schema_impl(it.value(), path + "/properties/" + it.key(),
+                                          depth + 1);
+        }
+    }
+    if (schema.contains("items")) {
+        validate_contract_schema_impl(schema["items"], path + "/items", depth + 1);
+    }
+    if (schema.contains("additionalProperties")) {
+        const auto& additional = schema["additionalProperties"];
+        if (!additional.is_boolean() && !additional.is_object()) {
+            throw std::invalid_argument("Program contract schema additionalProperties at " +
+                                        path + " must be a boolean or object");
+        }
+        if (additional.is_object()) {
+            validate_contract_schema_impl(additional, path + "/additionalProperties", depth + 1);
+        }
+    }
+}
+
+void validate_contract_value_impl(const json&        value,
+                                  const json&        schema,
+                                  std::string_view   subject,
+                                  const std::string& path,
+                                  std::size_t        depth) {
+    check_contract_depth(depth, path);
+    if (schema.contains("const") && value != schema["const"]) {
+        throw std::invalid_argument(std::string(subject) + " at " + path +
+                                    " does not match const");
+    }
+    if (schema.contains("enum")) {
+        bool matched = false;
+        for (const auto& candidate : schema["enum"]) {
+            if (candidate == value) {
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) {
+            throw std::invalid_argument(std::string(subject) + " at " + path +
+                                        " is not in enum");
+        }
+    }
+    if (schema.contains("type")) {
+        const auto& types   = schema["type"];
+        bool        matched = false;
+        if (types.is_string()) {
+            matched = contract_type_matches(value, types.get<std::string>());
+        } else {
+            for (const auto& type : types) {
+                if (contract_type_matches(value, type.get<std::string>())) {
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if (!matched) {
+            throw std::invalid_argument(std::string(subject) + " at " + path +
+                                        " has the wrong JSON type");
+        }
+    }
+    if (value.is_object()) {
+        if (schema.contains("required")) {
+            for (const auto& name : schema["required"]) {
+                const auto property = name.get<std::string>();
+                if (!value.contains(property)) {
+                    throw std::invalid_argument(std::string(subject) + " at " + path +
+                                                " is missing required property " + property);
+                }
+            }
+        }
+        const auto properties = schema.value("properties", json::object());
+        for (auto it = properties.begin(); it != properties.end(); ++it) {
+            if (value.contains(it.key())) {
+                validate_contract_value_impl(value[it.key()], it.value(), subject,
+                                             path + "/" + it.key(), depth + 1);
+            }
+        }
+        if (schema.contains("additionalProperties")) {
+            const auto& additional = schema["additionalProperties"];
+            for (auto it = value.begin(); it != value.end(); ++it) {
+                if (properties.contains(it.key())) continue;
+                if (additional.is_boolean() && !additional.get<bool>()) {
+                    throw std::invalid_argument(std::string(subject) + " at " + path +
+                                                " has unexpected property " + it.key());
+                }
+                if (additional.is_object()) {
+                    validate_contract_value_impl(it.value(), additional, subject,
+                                                 path + "/" + it.key(), depth + 1);
+                }
+            }
+        }
+    }
+    if (value.is_array() && schema.contains("items")) {
+        for (std::size_t index = 0; index < value.size(); ++index) {
+            validate_contract_value_impl(value[index], schema["items"], subject,
+                                         path + "/" + std::to_string(index), depth + 1);
+        }
+    }
+}
 }  // namespace
+
+void validate_contract_schema(const ContractRecord& contract, std::string_view path) {
+    if (contract.schema_version != 1) {
+        throw std::invalid_argument("Program contract schema_version must be 1");
+    }
+    validate_contract_schema_impl(contract.schema, std::string(path), 0);
+}
+
+void validate_contract_value(const json&          value,
+                             const ContractRecord& contract,
+                             std::string_view      subject,
+                             std::string_view      path) {
+    validate_contract_schema(contract, path);
+    validate_contract_value_impl(value, contract.schema, subject, std::string(path), 0);
+}
 
 std::string_view to_string(ExecutableKind kind) noexcept {
     switch (kind) {

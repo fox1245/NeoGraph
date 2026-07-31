@@ -6,6 +6,7 @@
 #include <limits>
 #include <stdexcept>
 #include <utility>
+#include <tuple>
 
 namespace neograph::program {
 namespace {
@@ -59,6 +60,30 @@ void require_sha256(std::string_view value, std::string_view name) {
 void validate_core_plan(const CorePlanIdentity& plan) {
     require_token(plan.name, "Core materialization plan name");
     require_sha256(plan.compiled_plan_identity, "Core materialization plan identity");
+}
+
+bool executable_identity_less(const ExecutableIdentity& lhs, const ExecutableIdentity& rhs) {
+    return std::tuple{to_string(lhs.kind), lhs.name, lhs.semantic_version,
+                      lhs.implementation_digest} <
+           std::tuple{to_string(rhs.kind), rhs.name, rhs.semantic_version,
+                      rhs.implementation_digest};
+}
+
+void validate_capability_binding(const CapabilityBindingReceipt& receipt) {
+    if (receipt.executable.kind != ExecutableKind::Provider &&
+        receipt.executable.kind != ExecutableKind::Tool &&
+        receipt.executable.kind != ExecutableKind::Imported) {
+        throw std::invalid_argument(
+            "Capability binding receipt executable must be Provider, Tool, or Imported");
+    }
+    require_token(receipt.executable.name, "Capability binding executable name");
+    if (!detail::is_semantic_version(receipt.executable.semantic_version)) {
+        throw std::invalid_argument(
+            "Capability binding executable semantic version is not valid SemVer");
+    }
+    require_sha256(receipt.executable.implementation_digest,
+                   "Capability binding executable implementation digest");
+    require_sha256(receipt.binding_identity, "Capability binding identity");
 }
 
 void normalize_data(ProgramVersionData& data) {
@@ -131,6 +156,22 @@ void normalize_data(ProgramVersionData& data) {
         materialization.plans.end()) {
         throw std::invalid_argument("Core materialization receipt contains duplicate plan names");
     }
+    for (const auto& binding : materialization.capability_bindings)
+        validate_capability_binding(binding);
+    std::sort(materialization.capability_bindings.begin(),
+              materialization.capability_bindings.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return executable_identity_less(lhs.executable, rhs.executable);
+              });
+    if (std::adjacent_find(
+            materialization.capability_bindings.begin(),
+            materialization.capability_bindings.end(), [](const auto& lhs, const auto& rhs) {
+                return lhs.executable.kind == rhs.executable.kind &&
+                       lhs.executable.name == rhs.executable.name;
+            }) != materialization.capability_bindings.end()) {
+        throw std::invalid_argument(
+            "Core materialization receipt contains duplicate capability bindings");
+    }
 }
 
 AdmissionProfile parse_admission(const json& value) {
@@ -166,19 +207,55 @@ CorePlanIdentity parse_plan(const json& value) {
                             require_string(value, "compiled_plan_identity")};
 }
 
+json encode_executable(const ExecutableIdentity& identity) {
+    return json{{"kind", std::string(to_string(identity.kind))},
+                {"name", identity.name},
+                {"semantic_version", identity.semantic_version},
+                {"implementation_digest", identity.implementation_digest}};
+}
+
+ExecutableIdentity parse_executable(const json& value) {
+    require_object(value, "Capability binding executable");
+    detail::reject_unknown_fields(value, "Capability binding executable",
+                                  {"kind", "name", "semantic_version",
+                                   "implementation_digest"});
+    return ExecutableIdentity{executable_kind_from_string(require_string(value, "kind")),
+                              require_string(value, "name"),
+                              require_string(value, "semantic_version"),
+                              require_string(value, "implementation_digest")};
+}
+
+json encode_binding(const CapabilityBindingReceipt& receipt) {
+    return json{{"executable", encode_executable(receipt.executable)},
+                {"binding_identity", receipt.binding_identity}};
+}
+
+CapabilityBindingReceipt parse_binding(const json& value) {
+    require_object(value, "Capability binding receipt");
+    detail::reject_unknown_fields(value, "Capability binding receipt",
+                                  {"executable", "binding_identity"});
+    return CapabilityBindingReceipt{
+        parse_executable(require_value(value, "executable")),
+        require_string(value, "binding_identity")};
+}
 json encode_materialization(const CoreMaterializationReceipt& receipt) {
     json plans = json::array();
     for (const auto& plan : receipt.plans)
         plans.push_back(encode_plan(plan));
+    json bindings = json::array();
+    for (const auto& binding : receipt.capability_bindings)
+        bindings.push_back(encode_binding(binding));
     return json{{"compiler_build_id", receipt.compiler_build_id},
                 {"registry_snapshot_fingerprint", receipt.registry_snapshot_fingerprint},
-                {"plans", std::move(plans)}};
+                {"plans", std::move(plans)},
+                {"capability_bindings", std::move(bindings)}};
 }
 
 CoreMaterializationReceipt parse_materialization(const json& value) {
     require_object(value, "Core materialization receipt");
-    detail::reject_unknown_fields(value, "Core materialization receipt",
-                                  {"compiler_build_id", "registry_snapshot_fingerprint", "plans"});
+    detail::reject_unknown_fields(
+        value, "Core materialization receipt",
+        {"compiler_build_id", "registry_snapshot_fingerprint", "plans", "capability_bindings"});
     CoreMaterializationReceipt result;
     result.compiler_build_id             = require_string(value, "compiler_build_id");
     result.registry_snapshot_fingerprint = require_string(value, "registry_snapshot_fingerprint");
@@ -189,6 +266,13 @@ CoreMaterializationReceipt parse_materialization(const json& value) {
     result.plans.reserve(plans.size());
     for (const auto& plan : plans)
         result.plans.push_back(parse_plan(plan));
+    const auto& bindings = require_value(value, "capability_bindings");
+    if (!bindings.is_array()) {
+        throw std::invalid_argument("Core materialization capability_bindings must be an array");
+    }
+    result.capability_bindings.reserve(bindings.size());
+    for (const auto& binding : bindings)
+        result.capability_bindings.push_back(parse_binding(binding));
     return result;
 }
 
@@ -237,6 +321,26 @@ ProgramVersionData parse_body(const json& value) {
 }
 
 }  // namespace
+
+std::string capability_binding_receipt_root(
+    std::vector<CapabilityBindingReceipt> receipts) {
+    for (const auto& receipt : receipts)
+        validate_capability_binding(receipt);
+    std::sort(receipts.begin(), receipts.end(), [](const auto& lhs, const auto& rhs) {
+        return executable_identity_less(lhs.executable, rhs.executable);
+    });
+    if (std::adjacent_find(receipts.begin(), receipts.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.executable.kind == rhs.executable.kind &&
+                   lhs.executable.name == rhs.executable.name;
+        }) != receipts.end()) {
+        throw std::invalid_argument("Capability binding receipt root contains duplicates");
+    }
+    json canonical = json::array();
+    for (const auto& receipt : receipts)
+        canonical.push_back(encode_binding(receipt));
+    return detail::sha256_identity("program-capability-bindings/v1",
+                                   detail::canonical_json_bytes(canonical));
+}
 
 struct ProgramVersion::Impl {
     explicit Impl(ProgramVersionData value) : data(std::move(value)) {}

@@ -84,6 +84,36 @@ private:
     std::string name_;
 };
 
+class EffectInterruptNode final : public GraphNode {
+public:
+    explicit EffectInterruptNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        ++interrupt_calls;
+        if (!input.ctx.resume_value) {
+            throw NodeInterrupt(
+                "capability result required",
+                json{{"__neograph_program_pending_kind", "effect"},
+                     {"call_id", "call-effect-1"},
+                     {"result_schema", json{{"type", "object"}}},
+                     {"effect",
+                      json{{"effect_id", "effect-search-1"},
+                           {"idempotency", "supported"},
+                           {"tool", "search"},
+                           {"arguments", json{{"query", "neo"}}}}},
+                     {"expires_at_unix_ms", 4102444800000ULL}});
+        }
+        NodeOutput output;
+        output.writes.push_back(ChannelWrite{"value", input.ctx.resume_value->at("result")});
+        co_return output;
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
 class FailingNode final : public GraphNode {
 public:
     explicit FailingNode(std::string name) : name_(std::move(name)) {}
@@ -140,7 +170,7 @@ public:
 
     asio::awaitable<NodeOutput> run(NodeInput) override {
         ++scheduler_blocking_calls;
-        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        std::this_thread::sleep_for(std::chrono::seconds(1));
         co_return NodeOutput{};
     }
 
@@ -180,6 +210,12 @@ RegistrySnapshot runtime_registry() {
         },
         json{{"type", "object"}}, json::object());
     builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-effect-interrupt", 'a'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<EffectInterruptNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
         manifest(ExecutableKind::Node, "runtime-failing", '4'),
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<FailingNode>(name);
@@ -210,6 +246,8 @@ RegistrySnapshot runtime_registry() {
         },
         json{{"type", "object"}}, json::object());
     builder.add_reducer(manifest(ExecutableKind::Reducer, "runtime-overwrite", '3'),
+                        [](const json&, const json& incoming) { return json(incoming); });
+    builder.add_reducer(manifest(ExecutableKind::Reducer, "runtime-alternate", '9'),
                         [](const json&, const json& incoming) { return json(incoming); });
     return std::move(builder).build();
 }
@@ -301,19 +339,19 @@ json step_limited_program_document() {
 }
 
 struct AdmittedRuntime {
-    RegistrySnapshot                       registry;
-    AdmissionProfile                       profile;
-    PolicySnapshot                         policy;
-    std::shared_ptr<InMemoryProgramStore>  store;
-    std::shared_ptr<EngineGenerationCache> engines;
-    std::shared_ptr<ProgramCatalog>        catalog;
-    std::shared_ptr<CheckpointStore>       checkpoints;
-    std::shared_ptr<ProgramJournal>        journal;
-    std::unique_ptr<ProgramRuntime>        runtime;
+    RegistrySnapshot                        registry;
+    AdmissionProfile                        profile;
+    PolicySnapshot                          policy;
+    std::shared_ptr<InMemoryProgramStore>   store;
+    std::shared_ptr<EngineGenerationCache>  engines;
+    std::shared_ptr<ProgramCatalog>         catalog;
+    std::shared_ptr<CheckpointStore>        checkpoints;
+    std::shared_ptr<ProgramTransitionStore> journal;
+    std::unique_ptr<ProgramRuntime>         runtime;
 
-    explicit AdmittedRuntime(std::size_t                      scheduler_threads  = 1,
-                             std::shared_ptr<CheckpointStore> checkpoint_backend = {},
-                             std::shared_ptr<ProgramJournal>  journal_backend    = {})
+    explicit AdmittedRuntime(std::size_t                             scheduler_threads  = 1,
+                             std::shared_ptr<CheckpointStore>        checkpoint_backend = {},
+                             std::shared_ptr<ProgramTransitionStore> journal_backend    = {})
         : registry(runtime_registry()),
           profile(make_profile(registry)),
           policy(make_policy(profile)),
@@ -324,7 +362,7 @@ struct AdmittedRuntime {
           checkpoints(checkpoint_backend ? std::move(checkpoint_backend)
                                          : std::make_shared<InMemoryCheckpointStore>()),
           journal(journal_backend ? std::move(journal_backend)
-                                  : std::make_shared<InMemoryProgramJournal>()),
+                                  : std::make_shared<InMemoryProgramTransitionStore>()),
           runtime(std::make_unique<ProgramRuntime>(
               RuntimeConfig{catalog, checkpoints, {}, journal, scheduler_threads})) {}
 
@@ -371,10 +409,35 @@ struct AdmittedRuntime {
             throw std::runtime_error(message);
         }
     }
+
+    void recreate_catalog_and_runtime() {
+        runtime.reset();
+        catalog.reset();
+        engines = std::make_shared<EngineGenerationCache>();
+        catalog = std::make_shared<ProgramCatalog>(
+            CatalogConfig{store, registry, engines, "program-runtime-test/v1"});
+        runtime =
+            std::make_unique<ProgramRuntime>(RuntimeConfig{catalog, checkpoints, {}, journal, 1});
+    }
 };
 
 RunBudget grant() {
     return RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0};
+}
+std::string pending_call_id(const ProgramResult& result) {
+    const auto interrupt = result.interrupt();
+    if (!interrupt) throw std::invalid_argument("Program result is not interrupted");
+    if (interrupt->pending_input) return interrupt->pending_input->call_id();
+    if (interrupt->pending_effect) return interrupt->pending_effect->call_id();
+    throw std::invalid_argument("Interrupted Program result has no pending call");
+}
+
+ProgramResume resume_for(const ProgramResult&              result,
+                         json                              value,
+                         std::string                       trace_id,
+                         std::shared_ptr<ProgramEventSink> events = {}) {
+    return ProgramResume{std::move(value), std::move(trace_id), std::move(events),
+                         pending_call_id(result)};
 }
 
 class ThrowingSink final : public ProgramEventSink {
@@ -402,7 +465,7 @@ public:
 
 class JournalObservingSink final : public ProgramEventSink {
 public:
-    explicit JournalObservingSink(std::shared_ptr<ProgramJournal> journal)
+    explicit JournalObservingSink(std::shared_ptr<ProgramTransitionStore> journal)
         : journal_(std::move(journal)) {}
 
     void on_event(const ProgramEvent& event) override {
@@ -410,7 +473,7 @@ public:
             event.kind != ProgramEventKind::Terminal) {
             return;
         }
-        const auto latest    = journal_->latest(event.run_id);
+        const auto latest    = journal_->latest("tenant:runtime", event.run_id);
         const bool committed = latest &&
                                latest->continuation.state == ContinuationState::Completed &&
                                latest->core_checkpoint.has_value();
@@ -425,46 +488,76 @@ public:
     std::atomic<bool> terminal_observed_committed{false};
 
 private:
-    std::shared_ptr<ProgramJournal> journal_;
+    std::shared_ptr<ProgramTransitionStore> journal_;
 };
 
-class ConflictOnceJournal final : public ProgramJournal {
+class ConflictOnceJournal final : public ProgramTransitionStore {
 public:
-    std::optional<ProgramJournalRecord> latest(std::string_view run_id) const override {
-        return inner_.latest(run_id);
+    std::optional<ProgramRunRecord> load(std::string_view owner,
+                                         std::string_view run_id) const override {
+        return inner_.load(owner, run_id);
     }
-
-    JournalAppendResult compare_append(std::string_view     expected_previous_id,
-                                       ProgramJournalRecord record) override {
-        if (record.continuation.state != ContinuationState::Running && !injected_.exchange(true)) {
-            return JournalAppendResult::Conflict;
+    std::optional<ProgramJournalRecord> latest(std::string_view owner,
+                                               std::string_view run_id) const override {
+        return inner_.latest(owner, run_id);
+    }
+    std::vector<ProgramEvent> load_events(std::string_view owner,
+                                          std::string_view run_id,
+                                          std::uint64_t    sequence) const override {
+        return inner_.load_events(owner, run_id, sequence);
+    }
+    std::vector<ProgramEffectOutboxEntry> load_effects(std::string_view owner,
+                                                       std::string_view run_id,
+                                                       std::uint64_t    sequence) const override {
+        return inner_.load_effects(owner, run_id, sequence);
+    }
+    ProgramTransitionPublishResult compare_publish(
+        std::string_view             owner,
+        std::string_view             expected,
+        ProgramTransitionPublication publication) override {
+        if (publication.journal_record.continuation.state != ContinuationState::Running &&
+            !injected_.exchange(true)) {
+            return ProgramTransitionPublishResult::Conflict;
         }
-        return inner_.compare_append(expected_previous_id, std::move(record));
+        return inner_.compare_publish(owner, expected, std::move(publication));
     }
-
     bool injected() const noexcept { return injected_.load(); }
 
 private:
-    InMemoryProgramJournal inner_;
-    std::atomic<bool>      injected_{false};
+    InMemoryProgramTransitionStore inner_;
+    std::atomic<bool>              injected_{false};
 };
-class ThrowOnLatestJournal final : public ProgramJournal {
+class ThrowOnLatestJournal final : public ProgramTransitionStore {
 public:
-    std::optional<ProgramJournalRecord> latest(std::string_view) const override {
+    std::optional<ProgramRunRecord> load(std::string_view owner,
+                                         std::string_view run_id) const override {
+        return inner_.load(owner, run_id);
+    }
+    std::optional<ProgramJournalRecord> latest(std::string_view, std::string_view) const override {
         throw std::runtime_error("journal latest failed");
     }
-
-    JournalAppendResult compare_append(std::string_view     expected_previous_id,
-                                       ProgramJournalRecord record) override {
-        return inner_.compare_append(expected_previous_id, std::move(record));
+    std::vector<ProgramEvent> load_events(std::string_view owner,
+                                          std::string_view run_id,
+                                          std::uint64_t    sequence) const override {
+        return inner_.load_events(owner, run_id, sequence);
     }
-
+    std::vector<ProgramEffectOutboxEntry> load_effects(std::string_view owner,
+                                                       std::string_view run_id,
+                                                       std::uint64_t    sequence) const override {
+        return inner_.load_effects(owner, run_id, sequence);
+    }
+    ProgramTransitionPublishResult compare_publish(
+        std::string_view             owner,
+        std::string_view             expected,
+        ProgramTransitionPublication publication) override {
+        return inner_.compare_publish(owner, expected, std::move(publication));
+    }
     std::optional<ProgramJournalRecord> stored_latest(std::string_view run_id) const {
-        return inner_.latest(run_id);
+        return inner_.latest("tenant:runtime", run_id);
     }
 
 private:
-    InMemoryProgramJournal inner_;
+    InMemoryProgramTransitionStore inner_;
 };
 
 class AdversarialCheckpointStore final : public CheckpointStore {
@@ -484,6 +577,7 @@ public:
         mode_.store(mode);
         exact_loads_.store(0);
     }
+    std::uint32_t exact_loads() const noexcept { return exact_loads_.load(); }
 
     void save(const Checkpoint& checkpoint) override { inner_->save(checkpoint); }
 
@@ -631,8 +725,9 @@ TEST(ProgramRuntimeTest, CompletedRunPinsAdmittedIdentitiesAndPublishesOrderedEv
     AdmittedRuntime fixture;
     const auto      version = fixture.admit("runtime-completed");
 
-    auto handle = fixture.runtime->start(
-        version, ProgramInvocation{json::object(), grant(), "trace-completed", {}});
+    auto handle =
+        fixture.runtime->start("tenant:runtime", version,
+                               ProgramInvocation{json::object(), grant(), "trace-completed", {}});
     const auto result = handle.wait();
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
@@ -651,7 +746,7 @@ TEST(ProgramRuntimeTest, CompletedRunPinsAdmittedIdentitiesAndPublishesOrderedEv
     EXPECT_EQ(result.checkpoint()->core_generation_id,
               version.core_materialization_receipt().plans.front().compiled_plan_identity);
 
-    const auto journal = fixture.journal->latest(result.run_id());
+    const auto journal = fixture.journal->latest("tenant:runtime", result.run_id());
     ASSERT_TRUE(journal.has_value());
     EXPECT_EQ(journal->continuation.state, ContinuationState::Completed);
     EXPECT_EQ(journal->program_version_id, version.id());
@@ -679,17 +774,186 @@ TEST(ProgramRuntimeTest, CompletedRunPinsAdmittedIdentitiesAndPublishesOrderedEv
     }
 }
 
+TEST(ProgramRuntimeTest, RequestedRunIdIsUsedExactlyAndCollisionNeverDispatches) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto      version = fixture.admit("runtime-completed");
+
+    auto invocation             = ProgramInvocation{json::object(), grant(), "trace-requested", {}};
+    invocation.requested_run_id = "harness-run-exact";
+    const auto first = fixture.runtime->start("tenant:runtime", version, invocation).wait();
+    EXPECT_EQ(first.run_id(), "harness-run-exact");
+    EXPECT_EQ(completed_calls.load(), 1U);
+
+    EXPECT_THROW((void)fixture.runtime->start("tenant:runtime", version, std::move(invocation)),
+                 ProgramDiagnosticError);
+    EXPECT_EQ(completed_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, ReconnectTerminalAfterCatalogRecreationIsByteExactAndNonMutating) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto      version   = fixture.admit("runtime-completed");
+    const auto      completed = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-terminal-reconnect", {}});
+    const auto run_id = completed.run_id();
+    const auto record_bytes =
+        fixture.journal->load("tenant:runtime", run_id)->serialize_canonical();
+    const auto journal_before = fixture.journal->latest("tenant:runtime", run_id);
+    ASSERT_TRUE(journal_before.has_value());
+
+    fixture.recreate_catalog_and_runtime();
+    auto reconnected = fixture.runtime->reconnect("tenant:runtime", run_id);
+    EXPECT_EQ(reconnected.snapshot().serialize_canonical(), record_bytes);
+    EXPECT_EQ(reconnected.wait().serialize_canonical(), completed.serialize_canonical());
+    EXPECT_EQ(completed_calls.load(), 1U);
+    const auto journal_after = fixture.journal->latest("tenant:runtime", run_id);
+    ASSERT_TRUE(journal_after.has_value());
+    EXPECT_EQ(journal_after->id, journal_before->id);
+    EXPECT_EQ(journal_after->sequence, journal_before->sequence);
+
+    const auto diagnostic_code = [&](std::string_view owner, std::string_view candidate) {
+        try {
+            (void)fixture.runtime->reconnect(owner, candidate);
+        } catch (const ProgramDiagnosticError& error) {
+            return error.diagnostic().code;
+        }
+        return std::string{};
+    };
+    EXPECT_EQ(diagnostic_code("tenant:other", run_id),
+              diagnostic_code("tenant:other", "absent-run"));
+}
+
+TEST(ProgramRuntimeTest, ReconnectInterruptedResumesExactCheckpointOnceWithoutInputReplay) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto      version     = fixture.admit("runtime-interrupt");
+    const auto      interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{
+            json{{"original", "must-not-replay"}}, grant(), "trace-interrupted-reconnect", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    const auto run_id = interrupted.run_id();
+    const auto record_bytes =
+        fixture.journal->load("tenant:runtime", run_id)->serialize_canonical();
+    const auto journal_before = fixture.journal->latest("tenant:runtime", run_id);
+    ASSERT_TRUE(journal_before.has_value());
+
+    fixture.recreate_catalog_and_runtime();
+    auto reconnected = fixture.runtime->reconnect("tenant:runtime", run_id);
+    EXPECT_EQ(reconnected.wait().serialize_canonical(), interrupted.serialize_canonical());
+    EXPECT_EQ(reconnected.snapshot().serialize_canonical(), record_bytes);
+    const auto journal_after_reconnect = fixture.journal->latest("tenant:runtime", run_id);
+    ASSERT_TRUE(journal_after_reconnect.has_value());
+    EXPECT_EQ(journal_after_reconnect->id, journal_before->id);
+    EXPECT_EQ(interrupt_calls.load(), 1U);
+
+    const auto resumed =
+        fixture.runtime
+            ->resume("tenant:runtime", run_id,
+                     resume_for(interrupted, json{{"decision", "approved"}}, "trace-exact-resume"))
+            .wait();
+    EXPECT_EQ(resumed.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(resumed.output()["channels"]["value"]["value"], "approved");
+    EXPECT_EQ(interrupt_calls.load(), 2U);
+}
+
+TEST(ProgramRuntimeTest, TypedPendingEffectPublishesOnceAndResumesByExactCallIdentity) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto      version = fixture.admit("runtime-effect-interrupt");
+
+    const auto interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-effect-interrupt", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(interrupted.interrupt().has_value());
+    EXPECT_FALSE(interrupted.interrupt()->pending_input.has_value());
+    ASSERT_TRUE(interrupted.interrupt()->pending_effect.has_value());
+    const auto& pending = *interrupted.interrupt()->pending_effect;
+    EXPECT_EQ(pending.call_id(), "call-effect-1");
+    EXPECT_EQ(pending.payload()["effect"]["tool"], "search");
+    EXPECT_EQ(pending.state(), ProgramPendingState::Awaiting);
+
+    const auto effects =
+        fixture.journal->load_effects("tenant:runtime", interrupted.run_id());
+    ASSERT_EQ(effects.size(), 1U);
+    EXPECT_EQ(effects.front().sequence(), 1U);
+    EXPECT_EQ(effects.front().effect(), pending);
+
+    fixture.recreate_catalog_and_runtime();
+    const auto reconnected =
+        fixture.runtime->reconnect("tenant:runtime", interrupted.run_id()).wait();
+    EXPECT_EQ(reconnected.serialize_canonical(), interrupted.serialize_canonical());
+    EXPECT_EQ(fixture.journal->load_effects("tenant:runtime", interrupted.run_id()).size(), 1U);
+    EXPECT_EQ(interrupt_calls.load(), 1U);
+
+    try {
+        (void)fixture.runtime->resume(
+            "tenant:runtime", interrupted.run_id(),
+            ProgramResume{json{{"result", "unused"}}, "trace-wrong-effect", {}, "wrong-call"});
+        FAIL() << "wrong pending call identity was accepted";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_PENDING_ID_MISMATCH");
+    }
+    EXPECT_EQ(interrupt_calls.load(), 1U);
+
+    const auto resumed =
+        fixture.runtime
+            ->resume("tenant:runtime", interrupted.run_id(),
+                     resume_for(interrupted, json{{"result", "recorded"}}, "trace-effect-resume"))
+            .wait();
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(resumed.output()["channels"]["value"]["value"], "recorded");
+    EXPECT_EQ(interrupt_calls.load(), 2U);
+
+    const auto persisted = fixture.journal->load("tenant:runtime", interrupted.run_id());
+    ASSERT_TRUE(persisted.has_value());
+    ASSERT_TRUE(persisted->pending_effect().has_value());
+    EXPECT_EQ(persisted->pending_effect()->state(), ProgramPendingState::Consumed);
+    EXPECT_EQ(persisted->effect_sequence(), 1U);
+    EXPECT_EQ(fixture.journal->load_effects("tenant:runtime", interrupted.run_id()).size(), 1U);
+}
+
+TEST(ProgramRuntimeTest, CrossOwnerResumeIsNoOracleAndNeverReadsCheckpoint) {
+    interrupt_calls.store(0);
+    auto            checkpoint_store = std::make_shared<AdversarialCheckpointStore>();
+    AdmittedRuntime fixture(1, checkpoint_store);
+    const auto      version = fixture.admit("runtime-interrupt");
+    const auto      interrupted =
+        fixture.runtime->run("tenant:runtime", version,
+                             ProgramInvocation{json::object(), grant(), "trace-owner-scope", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    checkpoint_store->arm(AdversarialCheckpointStore::Mode::Normal);
+
+    const auto diagnostic_code = [&](std::string_view run_id) {
+        try {
+            (void)fixture.runtime->resume(
+                "tenant:other", run_id,
+                resume_for(interrupted, json{{"decision", "unused"}}, "trace-cross-owner"));
+        } catch (const ProgramDiagnosticError& error) {
+            return error.diagnostic().code;
+        }
+        return std::string{};
+    };
+    EXPECT_EQ(diagnostic_code(interrupted.run_id()), diagnostic_code("absent-run"));
+    EXPECT_EQ(checkpoint_store->exact_loads(), 0U);
+    EXPECT_EQ(interrupt_calls.load(), 1U);
+}
+
 TEST(ProgramRuntimeTest, RetriesOneSpuriousTerminalJournalConflict) {
     auto            journal = std::make_shared<ConflictOnceJournal>();
     AdmittedRuntime fixture(1, {}, journal);
     const auto      version = fixture.admit("runtime-completed");
 
-    const auto result = fixture.runtime->run(
-        version, ProgramInvocation{json::object(), grant(), "trace-cas-retry", {}});
+    const auto result =
+        fixture.runtime->run("tenant:runtime", version,
+                             ProgramInvocation{json::object(), grant(), "trace-cas-retry", {}});
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
     EXPECT_TRUE(journal->injected());
-    const auto latest = journal->latest(result.run_id());
+    const auto latest = journal->latest("tenant:runtime", result.run_id());
     ASSERT_TRUE(latest.has_value());
     EXPECT_EQ(latest->continuation.state, ContinuationState::Completed);
 }
@@ -700,7 +964,8 @@ TEST(ProgramRuntimeTest, JournalCommitPrecedesCheckpointAndTerminalEventDelivery
     auto            sink    = std::make_shared<JournalObservingSink>(fixture.journal);
 
     const auto result = fixture.runtime->run(
-        version, ProgramInvocation{json::object(), grant(), "trace-journal-order", sink});
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-journal-order", sink});
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
     EXPECT_TRUE(sink->checkpoint_observed_committed.load());
@@ -710,9 +975,10 @@ TEST(ProgramRuntimeTest, JournalCommitPrecedesCheckpointAndTerminalEventDelivery
 TEST(ProgramRuntimeTest, ProgramEnvelopePreservesDirectCoreBehavior) {
     completed_calls.store(0);
     AdmittedRuntime fixture;
-    const auto      version        = fixture.admit("runtime-completed");
-    auto            program_handle = fixture.runtime->start(
-        version, ProgramInvocation{json::object(), grant(), "trace-equivalence", {}});
+    const auto      version = fixture.admit("runtime-completed");
+    auto            program_handle =
+        fixture.runtime->start("tenant:runtime", version,
+                               ProgramInvocation{json::object(), grant(), "trace-equivalence", {}});
     const auto program_result = program_handle.wait();
 
     const auto definition = program_document("runtime-completed")["root"]["definition"];
@@ -777,11 +1043,13 @@ TEST(ProgramRuntimeTest, ProgramInterruptAndExactResumePreserveDirectCoreBehavio
     const auto      version = fixture.admit("runtime-interrupt");
 
     const auto program_interrupted = fixture.runtime->run(
-        version, ProgramInvocation{json::object(), grant(), "trace-program-interrupt", {}});
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-program-interrupt", {}});
     const auto program_resumed =
         fixture.runtime
-            ->resume(program_interrupted.run_id(),
-                     ProgramResume{json{{"decision", "approved"}}, "trace-program-resume", {}})
+            ->resume("tenant:runtime", program_interrupted.run_id(),
+                     resume_for(program_interrupted, json{{"decision", "approved"}},
+                                "trace-program-resume"))
             .wait();
 
     const auto definition = program_document("runtime-interrupt")["root"]["definition"];
@@ -840,15 +1108,15 @@ TEST(ProgramRuntimeTest, ExactResumeAtEndChargesNoAdditionalCoreStep) {
     const auto version                                = fixture.admit_document(std::move(document));
 
     const auto interrupted = fixture.runtime->run(
-        version, ProgramInvocation{json::object(), grant(), "trace-after", {}});
+        "tenant:runtime", version, ProgramInvocation{json::object(), grant(), "trace-after", {}});
     ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
     ASSERT_TRUE(interrupted.checkpoint().has_value());
     ASSERT_EQ(completed_calls.load(), 1U);
 
-    const auto resumed =
-        fixture.runtime
-            ->resume(interrupted.run_id(), ProgramResume{json::object(), "trace-after-resume", {}})
-            .wait();
+    const auto resumed = fixture.runtime
+                             ->resume("tenant:runtime", interrupted.run_id(),
+                                      resume_for(interrupted, json::object(), "trace-after-resume"))
+                             .wait();
 
     EXPECT_EQ(resumed.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(resumed.usage().core_steps, 0U);
@@ -878,24 +1146,25 @@ TEST(ProgramRuntimeTest, ExactResumeToInterruptBeforeChargesOnlyExecutedSteps) {
     auto       budget              = grant();
     budget.max_core_steps          = 3;
 
-    const auto first = fixture.runtime->run(
-        version, ProgramInvocation{json::object(), budget, "trace-sequence-1", {}});
+    const auto first =
+        fixture.runtime->run("tenant:runtime", version,
+                             ProgramInvocation{json::object(), budget, "trace-sequence-1", {}});
     ASSERT_EQ(first.status(), ProgramTerminalStatus::Interrupted);
     EXPECT_EQ(first.usage().core_steps, 1U);
     EXPECT_EQ(first.remaining_budget().max_core_steps, 2U);
 
-    const auto second =
-        fixture.runtime
-            ->resume(first.run_id(), ProgramResume{json::object(), "trace-sequence-2", {}})
-            .wait();
+    const auto second = fixture.runtime
+                            ->resume("tenant:runtime", first.run_id(),
+                                     resume_for(first, json::object(), "trace-sequence-2"))
+                            .wait();
     ASSERT_EQ(second.status(), ProgramTerminalStatus::Interrupted);
     EXPECT_EQ(second.usage().core_steps, 1U);
     EXPECT_EQ(second.remaining_budget().max_core_steps, 1U);
 
-    const auto third =
-        fixture.runtime
-            ->resume(second.run_id(), ProgramResume{json::object(), "trace-sequence-3", {}})
-            .wait();
+    const auto third = fixture.runtime
+                           ->resume("tenant:runtime", second.run_id(),
+                                    resume_for(second, json::object(), "trace-sequence-3"))
+                           .wait();
     EXPECT_EQ(third.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(third.usage().core_steps, 1U);
     EXPECT_EQ(third.remaining_budget().max_core_steps, 0U);
@@ -907,15 +1176,17 @@ TEST(ProgramRuntimeTest, InterruptAndAsyncResumeUseOnePublishedCheckpointAndOneD
     AdmittedRuntime fixture;
     const auto      version = fixture.admit("runtime-interrupt");
 
-    auto interrupted_handle = fixture.runtime->start(
-        version, ProgramInvocation{json::object(), grant(), "trace-interrupt", {}});
+    auto interrupted_handle =
+        fixture.runtime->start("tenant:runtime", version,
+                               ProgramInvocation{json::object(), grant(), "trace-interrupt", {}});
     const auto interrupted = interrupted_handle.wait();
     ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
     ASSERT_TRUE(interrupted.checkpoint().has_value());
     EXPECT_EQ(interrupt_calls.load(), 1U);
 
     const auto resumed = neograph::async::run_sync(fixture.runtime->resume_async(
-        interrupted.run_id(), ProgramResume{json{{"decision", "approved"}}, "trace-resume", {}}));
+        "tenant:runtime", interrupted.run_id(),
+        resume_for(interrupted, json{{"decision", "approved"}}, "trace-resume")));
 
     EXPECT_EQ(resumed.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(resumed.run_id(), interrupted.run_id());
@@ -941,7 +1212,7 @@ TEST(ProgramRuntimeTest, InterruptAndAsyncResumeUseOnePublishedCheckpointAndOneD
     EXPECT_LE(resumed_budget.max_child_depth, interrupted_budget.max_child_depth);
     EXPECT_LE(resumed_budget.max_total_children, interrupted_budget.max_total_children);
 
-    const auto journal = fixture.journal->latest(resumed.run_id());
+    const auto journal = fixture.journal->latest("tenant:runtime", resumed.run_id());
     ASSERT_TRUE(journal.has_value());
     EXPECT_EQ(journal->continuation.state, ContinuationState::Completed);
     EXPECT_EQ(journal->continuation.attempt, 2U);
@@ -953,7 +1224,7 @@ TEST(ProgramRuntimeTest, AsyncWaitFromTemporaryHandleRetainsRunControl) {
 
     auto pending =
         fixture.runtime
-            ->start(version,
+            ->start("tenant:runtime", version,
                     ProgramInvocation{json::object(), grant(), "trace-temporary-handle", {}})
             .wait_async();
     const auto result = neograph::async::run_sync(std::move(pending));
@@ -969,7 +1240,8 @@ TEST(ProgramRuntimeTest, RepeatedAsyncWaitNeverMissesConcurrentCompletion) {
     for (int iteration = 0; iteration < 2000; ++iteration) {
         auto pending =
             fixture.runtime
-                ->start(version, ProgramInvocation{json::object(), grant(), "trace-wait-race", {}})
+                ->start("tenant:runtime", version,
+                        ProgramInvocation{json::object(), grant(), "trace-wait-race", {}})
                 .wait_async();
         const auto result = neograph::async::run_sync(std::move(pending));
         ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << iteration;
@@ -979,9 +1251,10 @@ TEST(ProgramRuntimeTest, RepeatedAsyncWaitNeverMissesConcurrentCompletion) {
 TEST(ProgramRuntimeTest, ConcurrentResumeHasOneCasWinnerAndOneCoreDispatch) {
     interrupt_calls.store(0);
     AdmittedRuntime fixture;
-    const auto      version     = fixture.admit("runtime-interrupt");
-    const auto      interrupted = fixture.runtime->run(
-        version, ProgramInvocation{json::object(), grant(), "trace-race-start", {}});
+    const auto      version = fixture.admit("runtime-interrupt");
+    const auto      interrupted =
+        fixture.runtime->run("tenant:runtime", version,
+                             ProgramInvocation{json::object(), grant(), "trace-race-start", {}});
     ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
 
     std::barrier ready(3);
@@ -989,8 +1262,8 @@ TEST(ProgramRuntimeTest, ConcurrentResumeHasOneCasWinnerAndOneCoreDispatch) {
         ready.arrive_and_wait();
         try {
             auto handle = fixture.runtime->resume(
-                interrupted.run_id(),
-                ProgramResume{json{{"decision", std::move(decision)}}, "trace-race", {}});
+                "tenant:runtime", interrupted.run_id(),
+                resume_for(interrupted, json{{"decision", std::move(decision)}}, "trace-race"));
             return handle.wait().status() == ProgramTerminalStatus::Completed ? 1 : -1;
         } catch (const ProgramDiagnosticError& error) {
             return error.diagnostic().code == "P_RESUME_CONFLICT" ? 0 : -2;
@@ -1009,35 +1282,40 @@ TEST(ProgramRuntimeTest, ConcurrentResumeHasOneCasWinnerAndOneCoreDispatch) {
     EXPECT_NE(first_result, second_result);
     EXPECT_EQ(interrupt_calls.load(), 2U);
 
-    const auto latest = fixture.journal->latest(interrupted.run_id());
+    const auto latest = fixture.journal->latest("tenant:runtime", interrupted.run_id());
     ASSERT_TRUE(latest.has_value());
     EXPECT_EQ(latest->continuation.state, ContinuationState::Completed);
     EXPECT_EQ(latest->continuation.attempt, 2U);
 }
 
-TEST(ProgramRuntimeTest, EventSinkFailureIsTerminalAndMatchesJournal) {
+TEST(ProgramRuntimeTest, EventSinkFailureCannotRewriteAnAtomicallyCommittedTerminalTransition) {
     for (const auto fail_on : {ProgramEventKind::Started, ProgramEventKind::Core,
                                ProgramEventKind::CheckpointPublished, ProgramEventKind::Terminal}) {
         AdmittedRuntime fixture;
         const auto      version = fixture.admit("runtime-completed");
         auto            sink    = std::make_shared<ThrowingSink>(fail_on);
 
-        auto handle = fixture.runtime->start(
-            version, ProgramInvocation{json::object(), grant(), "trace-sink", sink});
+        auto handle =
+            fixture.runtime->start("tenant:runtime", version,
+                                   ProgramInvocation{json::object(), grant(), "trace-sink", sink});
         const auto result = handle.wait();
+        const bool pre_commit =
+            fail_on == ProgramEventKind::Started || fail_on == ProgramEventKind::Core;
 
-        EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
-        ASSERT_TRUE(result.failure().has_value());
-        EXPECT_EQ(result.failure()->code, "P_EVENT_SINK");
+        EXPECT_EQ(result.status(),
+                  pre_commit ? ProgramTerminalStatus::Failed : ProgramTerminalStatus::Completed);
+        EXPECT_EQ(result.failure().has_value(), pre_commit);
+        if (pre_commit) EXPECT_EQ(result.failure()->code, "P_EVENT_SINK");
         EXPECT_EQ(result.usage().program_operations, 1U);
         EXPECT_EQ(result.usage().core_steps, fail_on == ProgramEventKind::Started ? 0U : 1U);
         EXPECT_EQ(result.remaining_budget().max_program_operations, 0U);
         EXPECT_EQ(result.remaining_budget().max_core_steps,
                   fail_on == ProgramEventKind::Started ? 20U : 19U);
 
-        const auto latest = fixture.journal->latest(result.run_id());
+        const auto latest = fixture.journal->latest("tenant:runtime", result.run_id());
         ASSERT_TRUE(latest.has_value());
-        EXPECT_EQ(latest->continuation.state, ContinuationState::Failed);
+        EXPECT_EQ(latest->continuation.state,
+                  pre_commit ? ContinuationState::Failed : ContinuationState::Completed);
 
         const auto events   = handle.events_after(0);
         const auto terminal = std::find_if(
@@ -1062,16 +1340,17 @@ TEST(ProgramRuntimeTest, ResumeStartedSinkFailurePreservesPublishedCheckpointAnd
     AdmittedRuntime fixture;
     const auto      version     = fixture.admit("runtime-interrupt");
     const auto      interrupted = fixture.runtime->run(
-        version, ProgramInvocation{json::object(), grant(), "trace-resume-sink-start", {}});
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-resume-sink-start", {}});
     ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
     ASSERT_TRUE(interrupted.checkpoint().has_value());
     auto sink = std::make_shared<ThrowingSink>(ProgramEventKind::Started);
 
-    const auto failed =
-        fixture.runtime
-            ->resume(interrupted.run_id(),
-                     ProgramResume{json{{"decision", "unused"}}, "trace-resume-sink-failed", sink})
-            .wait();
+    const auto failed = fixture.runtime
+                            ->resume("tenant:runtime", interrupted.run_id(),
+                                     resume_for(interrupted, json{{"decision", "unused"}},
+                                                "trace-resume-sink-failed", sink))
+                            .wait();
 
     EXPECT_EQ(failed.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(failed.failure().has_value());
@@ -1079,7 +1358,7 @@ TEST(ProgramRuntimeTest, ResumeStartedSinkFailurePreservesPublishedCheckpointAnd
     ASSERT_TRUE(failed.checkpoint().has_value());
     EXPECT_EQ(failed.checkpoint()->checkpoint_id, interrupted.checkpoint()->checkpoint_id);
     EXPECT_EQ(interrupt_calls.load(), 1U);
-    const auto latest = fixture.journal->latest(failed.run_id());
+    const auto latest = fixture.journal->latest("tenant:runtime", failed.run_id());
     ASSERT_TRUE(latest.has_value());
     EXPECT_EQ(latest->continuation.state, ContinuationState::Failed);
     EXPECT_EQ(latest->continuation.attempt, 2U);
@@ -1087,30 +1366,34 @@ TEST(ProgramRuntimeTest, ResumeStartedSinkFailurePreservesPublishedCheckpointAnd
     EXPECT_EQ(latest->core_checkpoint->checkpoint_id, interrupted.checkpoint()->checkpoint_id);
 }
 
-TEST(ProgramRuntimeTest, InterruptedCheckpointSinkFailurePublishesFailedCorrection) {
+TEST(ProgramRuntimeTest, InterruptedCheckpointSinkFailurePreservesCommittedResumeState) {
     interrupt_calls.store(0);
     AdmittedRuntime fixture;
     const auto      version = fixture.admit("runtime-interrupt");
     auto            sink    = std::make_shared<ThrowingSink>(ProgramEventKind::CheckpointPublished);
 
-    const auto failed = fixture.runtime->run(
-        version, ProgramInvocation{json::object(), grant(), "trace-interrupt-sink", sink});
+    const auto interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-interrupt-sink", sink});
 
-    EXPECT_EQ(failed.status(), ProgramTerminalStatus::Failed);
-    ASSERT_TRUE(failed.failure().has_value());
-    EXPECT_EQ(failed.failure()->code, "P_EVENT_SINK");
-    ASSERT_TRUE(failed.checkpoint().has_value());
+    EXPECT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    EXPECT_FALSE(interrupted.failure().has_value());
+    ASSERT_TRUE(interrupted.checkpoint().has_value());
     EXPECT_EQ(interrupt_calls.load(), 1U);
-    const auto latest = fixture.journal->latest(failed.run_id());
+    const auto latest = fixture.journal->latest("tenant:runtime", interrupted.run_id());
     ASSERT_TRUE(latest.has_value());
-    EXPECT_EQ(latest->continuation.state, ContinuationState::Failed);
+    EXPECT_EQ(latest->continuation.state, ContinuationState::Interrupted);
     EXPECT_EQ(latest->continuation.attempt, 1U);
     ASSERT_TRUE(latest->core_checkpoint.has_value());
-    EXPECT_EQ(latest->core_checkpoint->checkpoint_id, failed.checkpoint()->checkpoint_id);
-    EXPECT_THROW(
-        (void)fixture.runtime->resume(
-            failed.run_id(), ProgramResume{json{{"decision", "unused"}}, "trace-no-resume", {}}),
-        ProgramDiagnosticError);
+    EXPECT_EQ(latest->core_checkpoint->checkpoint_id, interrupted.checkpoint()->checkpoint_id);
+
+    const auto resumed = fixture.runtime
+                             ->resume("tenant:runtime", interrupted.run_id(),
+                                      resume_for(interrupted, json{{"decision", "approved"}},
+                                                 "trace-resume-after-observer-failure"))
+                             .wait();
+    EXPECT_EQ(resumed.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(interrupt_calls.load(), 2U);
 }
 
 TEST(ProgramRuntimeTest, JournalLatestFailureIsContainedAsTerminalPublicationFailure) {
@@ -1119,7 +1402,8 @@ TEST(ProgramRuntimeTest, JournalLatestFailureIsContainedAsTerminalPublicationFai
     const auto      version = fixture.admit("runtime-completed");
 
     auto handle = fixture.runtime->start(
-        version, ProgramInvocation{json::object(), grant(), "trace-journal-read-failure", {}});
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-journal-read-failure", {}});
     const auto result = handle.wait();
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
@@ -1142,7 +1426,7 @@ TEST(ProgramRuntimeTest, ResumeUsesRequestedCheckpointWhenANewerOrphanExists) {
     AdmittedRuntime fixture;
     const auto      version     = fixture.admit("runtime-interrupt");
     const auto      interrupted = fixture.runtime->run(
-        version, ProgramInvocation{json::object(), grant(), "trace-orphan", {}});
+        "tenant:runtime", version, ProgramInvocation{json::object(), grant(), "trace-orphan", {}});
     ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
     ASSERT_TRUE(interrupted.checkpoint().has_value());
 
@@ -1156,8 +1440,8 @@ TEST(ProgramRuntimeTest, ResumeUsesRequestedCheckpointWhenANewerOrphanExists) {
 
     const auto resumed =
         fixture.runtime
-            ->resume(interrupted.run_id(),
-                     ProgramResume{json{{"decision", "exact"}}, "trace-orphan-resume", {}})
+            ->resume("tenant:runtime", interrupted.run_id(),
+                     resume_for(interrupted, json{{"decision", "exact"}}, "trace-orphan-resume"))
             .wait();
 
     EXPECT_EQ(resumed.status(), ProgramTerminalStatus::Completed);
@@ -1170,22 +1454,22 @@ TEST(ProgramRuntimeTest, MissingPublishedCheckpointIsTypedIncompatibleWithoutCor
     AdmittedRuntime fixture;
     const auto      version     = fixture.admit("runtime-interrupt");
     const auto      interrupted = fixture.runtime->run(
-        version, ProgramInvocation{json::object(), grant(), "trace-missing", {}});
+        "tenant:runtime", version, ProgramInvocation{json::object(), grant(), "trace-missing", {}});
     ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
     ASSERT_TRUE(interrupted.checkpoint().has_value());
     fixture.checkpoints->delete_thread(interrupted.checkpoint()->core_thread_id);
 
     const auto resumed =
         fixture.runtime
-            ->resume(interrupted.run_id(),
-                     ProgramResume{json{{"decision", "unused"}}, "trace-missing-resume", {}})
+            ->resume("tenant:runtime", interrupted.run_id(),
+                     resume_for(interrupted, json{{"decision", "unused"}}, "trace-missing-resume"))
             .wait();
 
     EXPECT_EQ(resumed.status(), ProgramTerminalStatus::CheckpointIncompatible);
     ASSERT_TRUE(resumed.failure().has_value());
     EXPECT_EQ(resumed.failure()->code, "P_CHECKPOINT_INCOMPATIBLE");
     EXPECT_EQ(interrupt_calls.load(), 1U);
-    const auto latest = fixture.journal->latest(resumed.run_id());
+    const auto latest = fixture.journal->latest("tenant:runtime", resumed.run_id());
     ASSERT_TRUE(latest.has_value());
     EXPECT_EQ(latest->continuation.state, ContinuationState::CheckpointIncompatible);
     EXPECT_EQ(latest->continuation.attempt, 2U);
@@ -1195,16 +1479,17 @@ TEST(ProgramRuntimeTest, MismatchedPublishedCheckpointIsTypedWithoutCoreDispatch
     interrupt_calls.store(0);
     auto            checkpoint_store = std::make_shared<AdversarialCheckpointStore>();
     AdmittedRuntime fixture(1, checkpoint_store);
-    const auto      version     = fixture.admit("runtime-interrupt");
-    const auto      interrupted = fixture.runtime->run(
-        version, ProgramInvocation{json::object(), grant(), "trace-mismatch", {}});
+    const auto      version = fixture.admit("runtime-interrupt");
+    const auto      interrupted =
+        fixture.runtime->run("tenant:runtime", version,
+                             ProgramInvocation{json::object(), grant(), "trace-mismatch", {}});
     ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
 
     checkpoint_store->arm(AdversarialCheckpointStore::Mode::WrongThread);
     const auto resumed =
         fixture.runtime
-            ->resume(interrupted.run_id(),
-                     ProgramResume{json{{"decision", "unused"}}, "trace-mismatch-resume", {}})
+            ->resume("tenant:runtime", interrupted.run_id(),
+                     resume_for(interrupted, json{{"decision", "unused"}}, "trace-mismatch-resume"))
             .wait();
 
     EXPECT_EQ(resumed.status(), ProgramTerminalStatus::CheckpointIncompatible);
@@ -1217,23 +1502,23 @@ TEST(ProgramRuntimeTest, CheckpointDeletedAfterPrecheckIsTypedWithoutCoreDispatc
     interrupt_calls.store(0);
     auto            checkpoint_store = std::make_shared<AdversarialCheckpointStore>();
     AdmittedRuntime fixture(1, checkpoint_store);
-    const auto      version = fixture.admit("runtime-interrupt");
-    const auto      interrupted =
-        fixture.runtime->run(version, ProgramInvocation{json::object(), grant(), "trace-race", {}});
+    const auto      version     = fixture.admit("runtime-interrupt");
+    const auto      interrupted = fixture.runtime->run(
+        "tenant:runtime", version, ProgramInvocation{json::object(), grant(), "trace-race", {}});
     ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
 
     checkpoint_store->arm(AdversarialCheckpointStore::Mode::MissingAfterFirstExactLoad);
     const auto resumed =
         fixture.runtime
-            ->resume(interrupted.run_id(),
-                     ProgramResume{json{{"decision", "unused"}}, "trace-race-resume", {}})
+            ->resume("tenant:runtime", interrupted.run_id(),
+                     resume_for(interrupted, json{{"decision", "unused"}}, "trace-race-resume"))
             .wait();
 
     EXPECT_EQ(resumed.status(), ProgramTerminalStatus::CheckpointIncompatible);
     ASSERT_TRUE(resumed.failure().has_value());
     EXPECT_EQ(resumed.failure()->code, "P_CHECKPOINT_INCOMPATIBLE");
     EXPECT_EQ(interrupt_calls.load(), 1U);
-    const auto latest = fixture.journal->latest(resumed.run_id());
+    const auto latest = fixture.journal->latest("tenant:runtime", resumed.run_id());
     ASSERT_TRUE(latest.has_value());
     EXPECT_EQ(latest->continuation.state, ContinuationState::CheckpointIncompatible);
 }
@@ -1246,17 +1531,17 @@ TEST(ProgramRuntimeTest, PostPrecheckIdentityChangesPreservePublishedCheckpoint)
         AdmittedRuntime fixture(1, checkpoint_store);
         const auto      version     = fixture.admit("runtime-interrupt");
         const auto      interrupted = fixture.runtime->run(
-            version, ProgramInvocation{json::object(), grant(), "trace-post-precheck", {}});
+            "tenant:runtime", version,
+            ProgramInvocation{json::object(), grant(), "trace-post-precheck", {}});
         ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
         ASSERT_TRUE(interrupted.checkpoint().has_value());
 
         checkpoint_store->arm(mode);
-        const auto resumed =
-            fixture.runtime
-                ->resume(
-                    interrupted.run_id(),
-                    ProgramResume{json{{"decision", "unused"}}, "trace-post-precheck-resume", {}})
-                .wait();
+        const auto resumed = fixture.runtime
+                                 ->resume("tenant:runtime", interrupted.run_id(),
+                                          resume_for(interrupted, json{{"decision", "unused"}},
+                                                     "trace-post-precheck-resume"))
+                                 .wait();
 
         EXPECT_EQ(resumed.status(), ProgramTerminalStatus::CheckpointIncompatible);
         ASSERT_TRUE(resumed.failure().has_value());
@@ -1267,7 +1552,7 @@ TEST(ProgramRuntimeTest, PostPrecheckIdentityChangesPreservePublishedCheckpoint)
         EXPECT_EQ(resumed.checkpoint()->checkpoint_schema_version,
                   interrupted.checkpoint()->checkpoint_schema_version);
         EXPECT_EQ(interrupt_calls.load(), 1U);
-        const auto latest = fixture.journal->latest(resumed.run_id());
+        const auto latest = fixture.journal->latest("tenant:runtime", resumed.run_id());
         ASSERT_TRUE(latest.has_value());
         EXPECT_EQ(latest->continuation.state, ContinuationState::CheckpointIncompatible);
         ASSERT_TRUE(latest->core_checkpoint.has_value());
@@ -1283,17 +1568,17 @@ TEST(ProgramRuntimeTest, CoreExactResumeRejectsIdentityChangedAtConsumingLoad) {
         AdmittedRuntime fixture(1, checkpoint_store);
         const auto      version     = fixture.admit("runtime-interrupt");
         const auto      interrupted = fixture.runtime->run(
-            version, ProgramInvocation{json::object(), grant(), "trace-core-identity", {}});
+            "tenant:runtime", version,
+            ProgramInvocation{json::object(), grant(), "trace-core-identity", {}});
         ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
         ASSERT_TRUE(interrupted.checkpoint().has_value());
 
         checkpoint_store->arm(mode);
-        const auto resumed =
-            fixture.runtime
-                ->resume(
-                    interrupted.run_id(),
-                    ProgramResume{json{{"decision", "unused"}}, "trace-core-identity-resume", {}})
-                .wait();
+        const auto resumed = fixture.runtime
+                                 ->resume("tenant:runtime", interrupted.run_id(),
+                                          resume_for(interrupted, json{{"decision", "unused"}},
+                                                     "trace-core-identity-resume"))
+                                 .wait();
 
         EXPECT_EQ(resumed.status(), ProgramTerminalStatus::CheckpointIncompatible);
         ASSERT_TRUE(resumed.failure().has_value());
@@ -1301,7 +1586,7 @@ TEST(ProgramRuntimeTest, CoreExactResumeRejectsIdentityChangedAtConsumingLoad) {
         ASSERT_TRUE(resumed.checkpoint().has_value());
         EXPECT_EQ(resumed.checkpoint()->checkpoint_id, interrupted.checkpoint()->checkpoint_id);
         EXPECT_EQ(interrupt_calls.load(), 1U);
-        const auto latest = fixture.journal->latest(resumed.run_id());
+        const auto latest = fixture.journal->latest("tenant:runtime", resumed.run_id());
         ASSERT_TRUE(latest.has_value());
         EXPECT_EQ(latest->continuation.state, ContinuationState::CheckpointIncompatible);
     }
@@ -1314,13 +1599,15 @@ TEST(ProgramRuntimeTest, FailedResumeUsesAttemptLocalCoreStepAccounting) {
     document["root"]["definition"]["interrupt_before"] = json::array({"work"});
     const auto version     = fixture.admit_document(std::move(document));
     const auto interrupted = fixture.runtime->run(
-        version, ProgramInvocation{json::object(), grant(), "trace-failure-before", {}});
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-failure-before", {}});
     ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
 
     checkpoint_store->arm(AdversarialCheckpointStore::Mode::MissingAfterCoreLoad);
     const auto resumed =
         fixture.runtime
-            ->resume(interrupted.run_id(), ProgramResume{json::object(), "trace-failure-after", {}})
+            ->resume("tenant:runtime", interrupted.run_id(),
+                     resume_for(interrupted, json::object(), "trace-failure-after"))
             .wait();
 
     EXPECT_EQ(resumed.status(), ProgramTerminalStatus::Failed);
@@ -1337,7 +1624,8 @@ TEST(ProgramRuntimeTest, FailedFanoutChargesOneCoreSuperstep) {
     const auto      version = fixture.admit_document(failing_fanout_program_document());
 
     const auto result = fixture.runtime->run(
-        version, ProgramInvocation{json::object(), grant(), "trace-failing-fanout", {}});
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-failing-fanout", {}});
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
@@ -1354,7 +1642,8 @@ TEST(ProgramRuntimeTest, FailedFanoutCountsLegalDoubleUnderscoreNodeNames) {
         fixture.admit_document(failing_fanout_program_document("__completed", "__failing"));
 
     const auto result = fixture.runtime->run(
-        version, ProgramInvocation{json::object(), grant(), "trace-prefixed-fanout", {}});
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-prefixed-fanout", {}});
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     EXPECT_EQ(completed_calls.load(), 1U);
@@ -1366,9 +1655,10 @@ TEST(ProgramRuntimeTest, FailedExactResumeIgnoresNewerOrphanForUsage) {
     AdmittedRuntime fixture;
     auto            document                           = program_document("runtime-failing");
     document["root"]["definition"]["interrupt_before"] = json::array({"work"});
-    const auto version     = fixture.admit_document(std::move(document));
-    const auto interrupted = fixture.runtime->run(
-        version, ProgramInvocation{json::object(), grant(), "trace-orphan-source", {}});
+    const auto version = fixture.admit_document(std::move(document));
+    const auto interrupted =
+        fixture.runtime->run("tenant:runtime", version,
+                             ProgramInvocation{json::object(), grant(), "trace-orphan-source", {}});
     ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
     ASSERT_TRUE(interrupted.checkpoint().has_value());
 
@@ -1379,10 +1669,11 @@ TEST(ProgramRuntimeTest, FailedExactResumeIgnoresNewerOrphanForUsage) {
     orphan->timestamp += 10;
     fixture.checkpoints->save(*orphan);
 
-    const auto resumed = fixture.runtime
-                             ->resume(interrupted.run_id(),
-                                      ProgramResume{json::object(), "trace-orphan-failure", {}})
-                             .wait();
+    const auto resumed =
+        fixture.runtime
+            ->resume("tenant:runtime", interrupted.run_id(),
+                     resume_for(interrupted, json::object(), "trace-orphan-failure"))
+            .wait();
 
     EXPECT_EQ(resumed.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(resumed.failure().has_value());
@@ -1397,14 +1688,14 @@ TEST(ProgramRuntimeTest, CoreFailureIsClassifiedWithNodeAndAttempt) {
     const auto      version = fixture.admit("runtime-failing");
 
     const auto result = fixture.runtime->run(
-        version, ProgramInvocation{json::object(), grant(), "trace-failure", {}});
+        "tenant:runtime", version, ProgramInvocation{json::object(), grant(), "trace-failure", {}});
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
     EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
     EXPECT_EQ(result.failure()->core_node, "work");
     EXPECT_EQ(result.failure()->attempts, 1U);
-    const auto latest = fixture.journal->latest(result.run_id());
+    const auto latest = fixture.journal->latest("tenant:runtime", result.run_id());
     ASSERT_TRUE(latest.has_value());
     EXPECT_EQ(result.usage().core_steps, 1U);
     EXPECT_EQ(result.remaining_budget().max_core_steps, 19U);
@@ -1419,14 +1710,15 @@ TEST(ProgramRuntimeTest, CoreStepLimitMapsToBudgetExhausted) {
     auto            budget  = grant();
     budget.max_core_steps   = 1;
 
-    const auto result = fixture.runtime->run(
-        version, ProgramInvocation{json::object(), budget, "trace-step-budget", {}});
+    const auto result =
+        fixture.runtime->run("tenant:runtime", version,
+                             ProgramInvocation{json::object(), budget, "trace-step-budget", {}});
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::BudgetExhausted);
     EXPECT_EQ(result.usage().core_steps, 1U);
     EXPECT_EQ(result.remaining_budget().max_core_steps, 0U);
     EXPECT_EQ(completed_calls.load(), 1U);
-    const auto journal = fixture.journal->latest(result.run_id());
+    const auto journal = fixture.journal->latest("tenant:runtime", result.run_id());
     ASSERT_TRUE(journal.has_value());
     EXPECT_EQ(journal->continuation.state, ContinuationState::BudgetExhausted);
 }
@@ -1440,7 +1732,8 @@ TEST(ProgramRuntimeTest, RejectsCoreStepBudgetThatCannotFitCoreRunConfig) {
 
     try {
         (void)fixture.runtime->start(
-            version, ProgramInvocation{json::object(), budget, "trace-overflow", {}});
+            "tenant:runtime", version,
+            ProgramInvocation{json::object(), budget, "trace-overflow", {}});
         FAIL() << "Expected ProgramDiagnosticError";
     } catch (const ProgramDiagnosticError& error) {
         EXPECT_EQ(error.diagnostic().code, "P_START_BUDGET");
@@ -1467,7 +1760,8 @@ TEST(ProgramRuntimeTest, RejectsWallTimeBudgetThatCannotFitTimerDuration) {
 
     try {
         (void)fixture.runtime->start(
-            version, ProgramInvocation{json::object(), budget, "trace-wall-overflow", {}});
+            "tenant:runtime", version,
+            ProgramInvocation{json::object(), budget, "trace-wall-overflow", {}});
         FAIL() << "Expected ProgramDiagnosticError";
     } catch (const ProgramDiagnosticError& error) {
         EXPECT_EQ(error.diagnostic().code, "P_START_BUDGET");
@@ -1481,9 +1775,9 @@ TEST(ProgramRuntimeTest, WallTimeBudgetCancelsCoreAndSkipsLaterNodes) {
     AdmittedRuntime fixture;
     const auto      version = fixture.admit("runtime-blocking");
     auto            budget  = grant();
-    budget.wall_time_ms     = 20;
+    budget.wall_time_ms     = 500;
     auto handle             = fixture.runtime->start(
-        version, ProgramInvocation{json::object(), budget, "trace-timeout", {}});
+        "tenant:runtime", version, ProgramInvocation{json::object(), budget, "trace-timeout", {}});
     const auto result = handle.wait();
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut);
@@ -1500,7 +1794,8 @@ TEST(ProgramRuntimeTest, ImmediateCancellationSuppressesAllLaterNodes) {
     AdmittedRuntime fixture;
     const auto      version = fixture.admit("runtime-blocking");
     auto            handle  = fixture.runtime->start(
-        version, ProgramInvocation{json::object(), grant(), "trace-cancel-immediate", {}});
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-cancel-immediate", {}});
 
     EXPECT_TRUE(handle.cancel());
     const auto result = handle.wait();
@@ -1516,7 +1811,7 @@ TEST(ProgramRuntimeTest, UserCancellationWinsAndSkipsLaterNodes) {
     AdmittedRuntime fixture;
     const auto      version = fixture.admit("runtime-blocking");
     auto            handle  = fixture.runtime->start(
-        version, ProgramInvocation{json::object(), grant(), "trace-cancel", {}});
+        "tenant:runtime", version, ProgramInvocation{json::object(), grant(), "trace-cancel", {}});
 
     for (int i = 0; i < 100 && blocking_calls.load() == 0; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -1537,9 +1832,9 @@ TEST(ProgramRuntimeTest, QueueWaitCountsAgainstWallTimeBudget) {
     const auto      queued_version  = fixture.admit("runtime-completed");
 
     auto blocker_budget         = grant();
-    blocker_budget.wall_time_ms = 1000;
+    blocker_budget.wall_time_ms = 5000;
     auto blocker                = fixture.runtime->start(
-        blocker_version,
+        "tenant:runtime", blocker_version,
         ProgramInvocation{json::object(), blocker_budget, "trace-queue-blocker", {}});
     for (int i = 0; i < 100 && scheduler_blocking_calls.load() == 0; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1548,8 +1843,9 @@ TEST(ProgramRuntimeTest, QueueWaitCountsAgainstWallTimeBudget) {
 
     auto queued_budget         = grant();
     queued_budget.wall_time_ms = 20;
-    const auto queued          = fixture.runtime->run(
-        queued_version, ProgramInvocation{json::object(), queued_budget, "trace-queued", {}});
+    const auto queued =
+        fixture.runtime->run("tenant:runtime", queued_version,
+                             ProgramInvocation{json::object(), queued_budget, "trace-queued", {}});
 
     EXPECT_EQ(queued.status(), ProgramTerminalStatus::TimedOut);
     ASSERT_TRUE(queued.failure().has_value());
@@ -1566,10 +1862,11 @@ TEST(ProgramRuntimeTest, WallTimeExpiresWhenSingleSchedulerThreadIsBlocked) {
     AdmittedRuntime fixture;
     const auto      version = fixture.admit("runtime-scheduler-blocking");
     auto            budget  = grant();
-    budget.wall_time_ms     = 20;
+    budget.wall_time_ms     = 500;
 
     const auto result = fixture.runtime->run(
-        version, ProgramInvocation{json::object(), budget, "trace-scheduler-blocked", {}});
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), budget, "trace-scheduler-blocked", {}});
 
     EXPECT_EQ(scheduler_blocking_calls.load(), 1U);
     EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut);
@@ -1586,8 +1883,9 @@ TEST(ProgramRuntimeTest, UserCancellationRemainsFirstCauseAfterTimeoutAttempts) 
     const auto      version = fixture.admit("runtime-stubborn");
     auto            budget  = grant();
     budget.wall_time_ms     = 30;
-    auto handle             = fixture.runtime->start(
-        version, ProgramInvocation{json::object(), budget, "trace-user-first", {}});
+    auto handle =
+        fixture.runtime->start("tenant:runtime", version,
+                               ProgramInvocation{json::object(), budget, "trace-user-first", {}});
 
     for (int i = 0; i < 100 && stubborn_calls.load() == 0; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1610,7 +1908,8 @@ TEST(ProgramRuntimeTest, TimeoutRemainsFirstCauseAfterUserCancellationAttempts) 
     auto            budget  = grant();
     budget.wall_time_ms     = 30;
     auto handle             = fixture.runtime->start(
-        version, ProgramInvocation{json::object(), budget, "trace-timeout-first", {}});
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), budget, "trace-timeout-first", {}});
 
     for (int i = 0; i < 100 && stubborn_calls.load() == 0; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1632,8 +1931,9 @@ TEST(ProgramRuntimeTest, HandleCopiesShareOneResultAndRuntimeTeardownDrainsWork)
     auto            sink = std::make_shared<CountingSink>();
     AdmittedRuntime fixture;
     const auto      version = fixture.admit("runtime-blocking");
-    auto            first   = fixture.runtime->start(
-        version, ProgramInvocation{json::object(), grant(), "trace-teardown", sink});
+    auto            first =
+        fixture.runtime->start("tenant:runtime", version,
+                               ProgramInvocation{json::object(), grant(), "trace-teardown", sink});
     auto second = first;
 
     for (int i = 0; i < 100 && blocking_calls.load() == 0; ++i) {
@@ -1658,8 +1958,9 @@ TEST(ProgramRuntimeTest, MoveAssignmentDrainsTheReplacedRuntime) {
     followup_calls.store(0);
     AdmittedRuntime fixture;
     const auto      version = fixture.admit("runtime-blocking");
-    auto            handle  = fixture.runtime->start(
-        version, ProgramInvocation{json::object(), grant(), "trace-move-assign", {}});
+    auto            handle =
+        fixture.runtime->start("tenant:runtime", version,
+                               ProgramInvocation{json::object(), grant(), "trace-move-assign", {}});
 
     for (int i = 0; i < 100 && blocking_calls.load() == 0; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -1683,16 +1984,144 @@ TEST(ProgramRuntimeTest, ConcurrentAttemptsShareConfiguredSchedulerWithoutCrossT
     handles.reserve(24);
     for (int i = 0; i < 24; ++i) {
         handles.push_back(fixture.runtime->start(
-            version, ProgramInvocation{
-                         json::object(), grant(), "trace-concurrent-" + std::to_string(i), {}}));
+            "tenant:runtime", version,
+            ProgramInvocation{
+                json::object(), grant(), "trace-concurrent-" + std::to_string(i), {}}));
     }
 
     for (auto& handle : handles) {
         const auto result = handle.wait();
         EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
-        const auto latest = fixture.journal->latest(result.run_id());
+        const auto latest = fixture.journal->latest("tenant:runtime", result.run_id());
         ASSERT_TRUE(latest.has_value());
         EXPECT_EQ(latest->continuation.state, ContinuationState::Completed);
     }
     EXPECT_EQ(completed_calls.load(), 24U);
+}
+
+TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersistsLineage) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto      version = fixture.admit("runtime-interrupt");
+    const auto      source =
+        fixture.runtime
+            ->start("tenant:runtime", version,
+                    ProgramInvocation{json::object(), grant(), "trace-fork-source", {}})
+            .wait();
+    ASSERT_EQ(source.status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(source.checkpoint().has_value());
+    ASSERT_EQ(interrupt_calls.load(), 1U);
+    const auto source_record = fixture.journal->load("tenant:runtime", source.run_id());
+    ASSERT_TRUE(source_record.has_value());
+    ASSERT_TRUE(source_record->pending_input().has_value());
+    const auto source_pending_id = source_record->pending_input()->call_id();
+
+    fixture.recreate_catalog_and_runtime();
+    ProgramInvocation invocation{
+        json::object(), source.remaining_budget(), "trace-fork-target", {}, "fork-target-run"};
+    const auto forked =
+        fixture.runtime
+            ->fork("tenant:runtime",
+                   ExactProgramCheckpointReference{source.run_id(),
+                                                   source.checkpoint()->checkpoint_id},
+                   version, std::move(invocation),
+                   ProgramResume{
+                       json{{"decision", "forked"}}, "trace-fork-resume", {}, source_pending_id})
+            .wait();
+
+    EXPECT_EQ(forked.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(forked.run_id(), "fork-target-run");
+    EXPECT_NE(forked.run_id(), source.run_id());
+    EXPECT_EQ(forked.output()["channels"]["value"]["value"], "forked");
+    ASSERT_TRUE(forked.checkpoint().has_value());
+    EXPECT_NE(forked.checkpoint()->checkpoint_id, source.checkpoint()->checkpoint_id);
+    EXPECT_EQ(interrupt_calls.load(), 2U);
+
+    const auto target_record = fixture.journal->load("tenant:runtime", forked.run_id());
+    ASSERT_TRUE(target_record.has_value());
+    ASSERT_TRUE(target_record->fork_receipt().has_value());
+    EXPECT_TRUE(target_record->fork_receipt()->compatible());
+    EXPECT_EQ(target_record->fork_source_run_id(), source.run_id());
+    EXPECT_EQ(target_record->fork_source_program_version_id(), version.id());
+    EXPECT_EQ(target_record->fork_source_checkpoint_id(), source.checkpoint()->checkpoint_id);
+
+    const auto source_after = fixture.runtime->reconnect("tenant:runtime", source.run_id()).wait();
+    EXPECT_EQ(source_after.status(), ProgramTerminalStatus::Interrupted);
+    EXPECT_EQ(source_after.checkpoint()->checkpoint_id, source.checkpoint()->checkpoint_id);
+}
+
+TEST(ProgramRuntimeTest, ForkMismatchesRejectBeforeTargetRunAndLeaveSourceUnchanged) {
+    interrupt_calls.store(0);
+    followup_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto      source_version = fixture.admit("runtime-interrupt");
+    const auto      source =
+        fixture.runtime
+            ->start("tenant:runtime", source_version,
+                    ProgramInvocation{json::object(), grant(), "trace-fork-reject-source", {}})
+            .wait();
+    ASSERT_EQ(source.status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(source.checkpoint().has_value());
+    const auto source_before = fixture.journal->load("tenant:runtime", source.run_id());
+    ASSERT_TRUE(source_before.has_value());
+
+    struct RejectionCase {
+        std::string            run_id;
+        ForkCompatibilityField field;
+        json                   document;
+    };
+    std::vector<RejectionCase> cases;
+    {
+        auto document = program_document("runtime-interrupt");
+        document["root"]["definition"]["channels"]["extra"] =
+            json{{"reducer", "runtime-overwrite"}, {"initial", nullptr}};
+        cases.push_back(
+            {"fork-reject-channel", ForkCompatibilityField::Channel, std::move(document)});
+    }
+    {
+        auto document = program_document("runtime-interrupt");
+        document["root"]["definition"]["channels"]["value"]["reducer"] = "runtime-alternate";
+        cases.push_back(
+            {"fork-reject-reducer", ForkCompatibilityField::Reducer, std::move(document)});
+    }
+    {
+        auto document                                       = program_document("runtime-interrupt");
+        document["root"]["definition"]["nodes"]["followup"] = json{{"type", "runtime-followup"}};
+        document["root"]["definition"]["edges"] =
+            json::array({json{{"from", "__start__"}, {"to", "work"}},
+                         json{{"from", "work"}, {"to", "followup"}},
+                         json{{"from", "followup"}, {"to", "__end__"}}});
+        cases.push_back({"fork-reject-continuation", ForkCompatibilityField::Continuation,
+                         std::move(document)});
+    }
+
+    for (auto& item : cases) {
+        const auto target = fixture.admit_document(std::move(item.document));
+        try {
+            (void)fixture.runtime->fork(
+                "tenant:runtime",
+                ExactProgramCheckpointReference{source.run_id(),
+                                                source.checkpoint()->checkpoint_id},
+                target,
+                ProgramInvocation{json::object(),
+                                  source.remaining_budget(),
+                                  "trace-fork-reject",
+                                  {},
+                                  item.run_id},
+                ProgramResume{
+                    json{{"decision", "must-not-dispatch"}}, "trace-fork-reject-resume", {}});
+            FAIL() << "incompatible fork unexpectedly created a target run";
+        } catch (const ProgramForkCompatibilityError& error) {
+            EXPECT_TRUE(
+                std::any_of(error.receipt().witnesses().begin(), error.receipt().witnesses().end(),
+                            [&](const auto& witness) { return witness.field == item.field; }));
+        }
+        EXPECT_FALSE(fixture.journal->load("tenant:runtime", item.run_id).has_value());
+        const auto source_now = fixture.journal->load("tenant:runtime", source.run_id());
+        ASSERT_TRUE(source_now.has_value());
+        EXPECT_EQ(source_now->id(), source_before->id());
+    }
+
+    EXPECT_EQ(interrupt_calls.load(), 1U);
+    EXPECT_EQ(followup_calls.load(), 0U);
 }

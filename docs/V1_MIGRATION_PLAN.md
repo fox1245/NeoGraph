@@ -447,6 +447,70 @@ rows merely to reduce PR count.
 | 16 | Host model/global MCP adapters | clean profile, process-tree cancel, no secret extraction, local-only guard |
 | 17 | SDK cleanup and v1 removal | all callers migrated, installed consumers, storage migration, docs |
 
+### PR7 implementation checkpoint — 2026-07-31
+
+PR7 is implemented as an end-of-day checkpoint but is **not merge-ready**. The
+current branch has cut Harness execution ownership over to Program and has
+focused regression proof for the following completed slices:
+
+- Harness request translation, Program compilation/admission, runtime start,
+  resume, cancel, reconnect, recorded replay, and compatible fork projection;
+- owner-scoped Program artifact/run lookup and reconnect snapshots;
+- typed pending input/effect persistence, exact-call reconciliation, TTL
+  handling, and one-winner resume compare-and-swap;
+- source-transition lookup and pending-value forwarding for cross-artifact
+  compatible forks;
+- recorded capability binding isolation from live bindings and host
+  configuration participation in binding/artifact identity;
+- Program journal/transition-store publication and the P2 Harness file/SQLite
+  adapters.
+
+Focused checks observed during this checkpoint include:
+
+- `ProgramRuntimeTest.TypedPendingEffectPublishesOnceAndResumesByExactCallIdentity`;
+- `HarnessProgramCutover.RecordedReplayUsesCapturedCallsWithoutLiveDispatch`;
+- `HarnessProgramCutover.ReconnectsInterruptedSqliteRunAndContinuesExactCheckpoint`;
+- `HarnessProgramCutover.ConcurrentSqliteReconnectResumeHasOneCasWinnerAndOneDispatch`;
+- `HarnessProgramCutover.CrossArtifactForkReadsSourceTransitionsAndForwardsPendingValue`;
+- `HarnessProgramCutover.HostConfigurationChangesBindingAndArtifactIdentity`.
+
+End-of-day validation rebuilt all configured targets successfully, then ran
+`ctest --test-dir build-program-pr3-full -j8 --output-on-failure`: 1,044 tests
+were discovered, three live/environment tests were skipped, and exactly three
+tests failed:
+
+- `HarnessProgramStoreTest.SqliteReopensExactOwnerBoundRunAndLegacyRowsStillWork`;
+- `HarnessProgramStoreTest.TwoSqliteInstancesHaveOneCasWinnerAndRollbackInvalidBatch`;
+- `HarnessProgramStoreTest.ReopenRejectsTamperAndMissingPublishedOutbox`.
+
+All three failures are in the durable Harness Program transition adapter and
+remain part of item 3 below. The checkpoint therefore records a reproducible
+failing boundary rather than claiming a green PR7 gate.
+
+The next session must close these items before PR7 review or merge:
+
+1. **Finite provider accounting.** Charge each provider/tool round against the
+   admitted Program budget, enforce the provider timeout and output-token
+   ceiling, and prove that a provider that keeps requesting tools terminates
+   through the Program cancellation/budget path.
+2. **Installable host identities.** Replace the example host's repeated-character
+   placeholder digests with deterministic SHA-256 identities derived from the
+   installed provider/tool implementation and non-secret host configuration;
+   retain tests proving configuration changes alter binding and artifact IDs.
+3. **Durable pending atomicity.** Add the crash gate for the Core checkpoint,
+   typed pending value, Program transition, and journal publication boundary in
+   both in-memory and SQLite-backed reconnect paths. No terminal/interrupted
+   state may become visible without the exact resumable checkpoint and pending
+   identity.
+4. **Harness conformance migration.** Restore the complete applicable legacy
+   Harness matrix through the Program path: preset/DSL/core, file and SQLite
+   stores, cancel, reconnect, recorded replay, fork, tamper rejection, pending
+   input/effect reconciliation, owner isolation, and all six MCP callbacks.
+5. **Final gates.** Run the focused PR7 contract suite, the complete Program and
+   Harness suites, sanitizer builds, static/shared installed consumers, package
+   checks, and the independent PR7 reviewer. Record any environment-specific
+   gaps explicitly; do not treat this checkpoint commit as PR7 approval.
+
 A PR that changes both the Core execution mechanism and Program semantics is too
 large. Split at the layer boundary and prove equivalence first.
 

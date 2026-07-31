@@ -181,6 +181,89 @@ void cancel_deadline_timer(const asio::any_io_executor&        executor,
     });
 }
 
+constexpr std::string_view PROGRAM_PENDING_KIND_FIELD = "__neograph_program_pending_kind";
+
+ProgramInterrupt decode_core_interrupt(const RunControl& control, const graph::RunResult& result) {
+    const auto generic = [&] {
+        ProgramPendingInputData pending;
+        pending.operation_id         = control.operation_id;
+        pending.call_id              = control.run_id + ":" + control.operation_id + ":" +
+                          std::to_string(control.attempt);
+        pending.kind                 = ProgramPendingInputKind::Input;
+        pending.result_schema        = json::object();
+        pending.payload              = result.interrupt_value;
+        pending.core_node            = result.interrupt_node;
+        pending.core_interrupt_value = result.interrupt_value;
+        return ProgramInterrupt{result.interrupt_node, result.interrupt_value,
+                                ProgramPendingInput(std::move(pending)), std::nullopt};
+    };
+
+    if (!result.interrupt_value.is_object() ||
+        !result.interrupt_value.contains("value") ||
+        !result.interrupt_value.at("value").is_object()) {
+        return generic();
+    }
+    auto pending_payload = result.interrupt_value.at("value");
+    if (!pending_payload.contains(std::string(PROGRAM_PENDING_KIND_FIELD)) ||
+        !pending_payload.at(std::string(PROGRAM_PENDING_KIND_FIELD)).is_string() ||
+        !pending_payload.contains("call_id") || !pending_payload.at("call_id").is_string() ||
+        !pending_payload.contains("result_schema") ||
+        !pending_payload.at("result_schema").is_object()) {
+        return generic();
+    }
+
+    const auto kind = pending_payload.at(std::string(PROGRAM_PENDING_KIND_FIELD))
+                          .get<std::string>();
+    const auto expiry = [&]() -> std::optional<std::uint64_t> {
+        if (!pending_payload.contains("expires_at_unix_ms")) return std::nullopt;
+        const auto& value = pending_payload.at("expires_at_unix_ms");
+        if (!value.is_number_unsigned()) {
+            throw std::invalid_argument(
+                "Typed Program pending expires_at_unix_ms must be unsigned");
+        }
+        return value.get<std::uint64_t>();
+    }();
+
+    if (kind == "effect") {
+        if (!pending_payload.contains("effect") || !pending_payload.at("effect").is_object()) {
+            throw std::invalid_argument("Typed Program pending effect descriptor is missing");
+        }
+        const auto& effect = pending_payload.at("effect");
+        ProgramPendingEffectData pending;
+        pending.operation_id         = control.operation_id;
+        pending.call_id              = pending_payload.at("call_id").get<std::string>();
+        pending.effect_id            = effect.at("effect_id").get<std::string>();
+        pending.result_schema        = pending_payload.at("result_schema");
+        pending.payload              = pending_payload;
+        pending.expires_at_unix_ms   = expiry;
+        pending.effect_mode          = EffectMode::Brokered;
+        pending.idempotency          =
+            effect.value("idempotency", "unsupported") == "supported"
+                ? ProgramEffectIdempotency::Idempotent
+                : ProgramEffectIdempotency::NonIdempotent;
+        pending.core_node            = result.interrupt_node;
+        pending.core_interrupt_value = result.interrupt_value;
+        return ProgramInterrupt{result.interrupt_node, result.interrupt_value, std::nullopt,
+                                ProgramPendingEffect(std::move(pending))};
+    }
+    if (kind != "input" && kind != "capability_result") {
+        throw std::invalid_argument("Unknown typed Program pending kind");
+    }
+    ProgramPendingInputData pending;
+    pending.operation_id         = control.operation_id;
+    pending.call_id              = pending_payload.at("call_id").get<std::string>();
+    pending.kind                 = kind == "capability_result"
+                                       ? ProgramPendingInputKind::CapabilityResult
+                                       : ProgramPendingInputKind::Input;
+    pending.result_schema        = pending_payload.at("result_schema");
+    pending.payload              = pending_payload;
+    pending.expires_at_unix_ms   = expiry;
+    pending.core_node            = result.interrupt_node;
+    pending.core_interrupt_value = result.interrupt_value;
+    return ProgramInterrupt{result.interrupt_node, result.interrupt_value,
+                            ProgramPendingInput(std::move(pending)), std::nullopt};
+}
+
 }  // namespace
 
 asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
@@ -282,15 +365,27 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             }
         } else if (core_status == graph::RunStatus::Interrupted) {
             outcome.status    = ProgramTerminalStatus::Interrupted;
-            outcome.interrupt = ProgramInterrupt{core_result.interrupt_node,
-                                                 std::move(core_result.interrupt_value)};
+            outcome.interrupt = decode_core_interrupt(*control, core_result);
         } else if (core_status == graph::RunStatus::StepLimit ||
                    outcome.usage.core_steps > control->granted_budget.max_core_steps ||
                    outcome.usage.model_tokens > control->granted_budget.model_tokens ||
                    outcome.usage.wall_time_ms > control->granted_budget.wall_time_ms) {
             outcome.status = ProgramTerminalStatus::BudgetExhausted;
         } else {
-            outcome.status = ProgramTerminalStatus::Completed;
+            try {
+                validate_contract_value(outcome.output,
+                                        control->materialized->bundle.output_contract());
+                outcome.status = ProgramTerminalStatus::Completed;
+            } catch (const std::exception& error) {
+                outcome.status  = ProgramTerminalStatus::Failed;
+                outcome.failure = ProgramFailure{
+                    "P_OUTPUT_CONTRACT",
+                    "Program output violates its admitted contract",
+                    "root",
+                    "",
+                    0,
+                    json{{"detail", error.what()}}};
+            }
         }
     } catch (const EventSinkError& error) {
         outcome                    = failed_outcome(control, "P_EVENT_SINK", error.what());

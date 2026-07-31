@@ -46,6 +46,20 @@ bool identity_less(const ExecutableIdentity& lhs, const ExecutableIdentity& rhs)
                                                               rhs.implementation_digest};
 }
 
+std::string escape_pointer_segment(std::string_view segment) {
+    std::string result;
+    result.reserve(segment.size());
+    for (const char value : segment) {
+        if (value == '~')
+            result += "~0";
+        else if (value == '/')
+            result += "~1";
+        else
+            result.push_back(value);
+    }
+    return result;
+}
+
 class AdmissionDiagnostics {
 public:
     explicit AdmissionDiagnostics(std::string source_id) : source_id_(std::move(source_id)) {}
@@ -81,6 +95,135 @@ private:
     std::string             source_id_;
     std::vector<Diagnostic> diagnostics_;
 };
+
+std::vector<ExecutableIdentity> runtime_binding_identities(
+    const std::vector<ExecutableIdentity>& closure) {
+    std::vector<ExecutableIdentity> result;
+    for (const auto& identity : closure) {
+        if (identity.kind == ExecutableKind::Provider ||
+            identity.kind == ExecutableKind::Tool ||
+            identity.kind == ExecutableKind::Imported) {
+            result.push_back(identity);
+        }
+    }
+    std::sort(result.begin(), result.end(), identity_less);
+    return result;
+}
+
+
+void validate_capability_binding(const std::vector<ExecutableIdentity>& requested,
+                                 CatalogCapabilityBinding&              binding,
+                                 AdmissionDiagnostics&                  diagnostics) {
+    for (std::size_t index = 0; index < binding.receipts.size(); ++index) {
+        const auto& receipt = binding.receipts[index];
+        try {
+            if (receipt.executable.kind != ExecutableKind::Provider &&
+                receipt.executable.kind != ExecutableKind::Tool &&
+                receipt.executable.kind != ExecutableKind::Imported) {
+                throw std::invalid_argument(
+                    "executable kind must be Provider, Tool, or Imported");
+            }
+            detail::validate_token(receipt.executable.name, "Capability executable name");
+            if (!detail::is_semantic_version(receipt.executable.semantic_version)) {
+                throw std::invalid_argument("executable semantic version is not valid SemVer");
+            }
+            if (!detail::is_sha256_identity(receipt.executable.implementation_digest)) {
+                throw std::invalid_argument("executable implementation identity is not sha256");
+            }
+        } catch (const std::exception& error) {
+            diagnostics.add("P_BINDING_IDENTITY",
+                            "/capability_bindings/" + std::to_string(index) + "/executable",
+                            "Capability binding executable identity is malformed",
+                            json{{"error", error.what()}});
+        }
+    }
+    std::sort(binding.receipts.begin(), binding.receipts.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return identity_less(lhs.executable, rhs.executable);
+              });
+
+    for (std::size_t index = 0; index < binding.receipts.size(); ++index) {
+        const auto& receipt = binding.receipts[index];
+        if (!detail::is_sha256_identity(receipt.binding_identity)) {
+            diagnostics.add(
+                "P_BINDING_IDENTITY", "/capability_bindings/" + std::to_string(index),
+                "Capability binding identity must be a sha256 identity",
+                json{{"executable", identity_json(receipt.executable)},
+                     {"binding_identity", receipt.binding_identity}});
+        }
+        if (index > 0 &&
+            binding.receipts[index - 1].executable.kind == receipt.executable.kind &&
+            binding.receipts[index - 1].executable.name == receipt.executable.name) {
+            diagnostics.add("P_BINDING_DUPLICATE",
+                            "/capability_bindings/" + std::to_string(index),
+                            "Capability binding contains a duplicate executable identity",
+                            identity_json(receipt.executable));
+        }
+    }
+
+    std::vector<ExecutableIdentity> bound;
+    bound.reserve(binding.receipts.size());
+    for (const auto& receipt : binding.receipts)
+        bound.push_back(receipt.executable);
+    if (bound != requested) {
+        json expected = json::array();
+        json actual   = json::array();
+        for (const auto& identity : requested)
+            expected.push_back(identity_json(identity));
+        for (const auto& identity : bound)
+            actual.push_back(identity_json(identity));
+        diagnostics.add("P_BINDING_COVERAGE", "/capability_bindings",
+                        "Capability binding must cover every runtime executable exactly once",
+                        json{{"expected", std::move(expected)}, {"actual", std::move(actual)}});
+    }
+
+    const auto provider_count = static_cast<std::size_t>(
+        std::count_if(requested.begin(), requested.end(), [](const auto& identity) {
+            return identity.kind == ExecutableKind::Provider;
+        }));
+    std::vector<std::string> expected_tool_names;
+    for (const auto& identity : requested) {
+        if (identity.kind == ExecutableKind::Tool) expected_tool_names.push_back(identity.name);
+    }
+    const auto tool_count = expected_tool_names.size();
+    if (provider_count > 1) {
+        diagnostics.add("P_BINDING_PROVIDER", "/capability_bindings",
+                        "NodeContext can bind at most one exact Provider",
+                        json{{"provider_count", provider_count}});
+    } else if ((provider_count == 1) != static_cast<bool>(binding.node_context.provider)) {
+        diagnostics.add("P_BINDING_PROVIDER", "/capability_bindings",
+                        "Owned Provider presence does not match the exact closure",
+                        json{{"provider_count", provider_count},
+                             {"provider_bound", static_cast<bool>(binding.node_context.provider)}});
+    }
+    if (binding.tools.size() != tool_count) {
+        diagnostics.add("P_BINDING_TOOL", "/capability_bindings",
+                        "Owned Tool count does not match the exact closure",
+                        json{{"expected", tool_count}, {"actual", binding.tools.size()}});
+    }
+    std::vector<std::string> bound_tool_names;
+    try {
+        for (const auto* tool : binding.tools.view()) {
+            bound_tool_names.push_back(tool->get_name());
+        }
+        std::sort(bound_tool_names.begin(), bound_tool_names.end());
+        std::sort(expected_tool_names.begin(), expected_tool_names.end());
+        if (bound_tool_names != expected_tool_names) {
+            diagnostics.add("P_BINDING_TOOL", "/capability_bindings",
+                            "Owned Tool names do not match the exact Tool closure",
+                            json{{"expected", expected_tool_names}, {"actual", bound_tool_names}});
+        }
+    } catch (const std::exception& error) {
+        diagnostics.add("P_BINDING_TOOL", "/capability_bindings",
+                        "Owned Tool identity inspection failed",
+                        json{{"error", error.what()}});
+    } catch (...) {
+        diagnostics.add("P_BINDING_TOOL", "/capability_bindings",
+                        "Owned Tool identity inspection failed with a non-standard exception");
+    }
+
+    binding.node_context.tools = binding.tools.view();
+}
 
 bool contains_source_kind(const std::vector<SourceKind>& values, SourceKind wanted) {
     return std::find(values.begin(), values.end(), wanted) != values.end();
@@ -181,6 +324,53 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
                 "Referenced executable is absent from the Catalog registry",
                 json{{"kind", std::string(to_string(reference.kind))}, {"name", reference.name}},
                 CompilePhase::Resolve);
+        }
+    }
+    for (const auto& [node_name, definition] : topology.node_defs) {
+        const auto type = definition.at("type").get<std::string>();
+        const auto pointer = "/sealed_core_definitions/0/definition/nodes/" +
+                             escape_pointer_segment(node_name);
+        const ExecutableManifest* node_manifest = nullptr;
+        try {
+            node_manifest = &detail::RegistrySnapshotAccess::require_manifest(
+                registry, ExecutableKind::Node, type);
+        } catch (const std::out_of_range&) {
+            continue;
+        }
+
+        std::vector<ExecutableIdentity> requirements;
+        try {
+            requirements = detail::RegistrySnapshotAccess::resolve_node_requirements(
+                registry, type, definition);
+        } catch (const std::exception& error) {
+            diagnostics.add("P_REGISTRY_REQUIREMENT_RESOLVER", pointer,
+                            "Node executable requirement resolution failed",
+                            json{{"node_type", type}, {"exception", error.what()}},
+                            CompilePhase::Resolve);
+            continue;
+        } catch (...) {
+            diagnostics.add(
+                "P_REGISTRY_REQUIREMENT_RESOLVER", pointer,
+                "Node executable requirement resolution failed",
+                json{{"node_type", type}, {"exception", "non-standard exception"}},
+                CompilePhase::Resolve);
+            continue;
+        }
+        std::sort(requirements.begin(), requirements.end(), identity_less);
+        requirements.erase(std::unique(requirements.begin(), requirements.end()),
+                           requirements.end());
+        for (const auto& requirement : requirements) {
+            if (requirement.kind != ExecutableKind::Provider &&
+                requirement.kind != ExecutableKind::Tool &&
+                requirement.kind != ExecutableKind::Imported) {
+                diagnostics.add(
+                    "P_REGISTRY_REQUIREMENT_KIND", pointer,
+                    "Node config resolver returned an unsupported executable kind",
+                    json{{"node_type", type}, {"requirement", identity_json(requirement)}},
+                    CompilePhase::Resolve);
+                continue;
+            }
+            work.push_back({requirement, pointer, node_manifest->identity});
         }
     }
 
@@ -403,12 +593,15 @@ struct EngineGenerationCache::Impl {
         std::string compiled_plan_identity;
         std::string registry_fingerprint;
         std::string compiler_build_id;
+        std::string capability_binding_root;
+        std::size_t worker_count = 1;
 
         bool operator<(const Key& other) const noexcept {
             return std::tie(bundle_id, core_name, compiled_plan_identity, registry_fingerprint,
-                            compiler_build_id) <
+                            compiler_build_id, capability_binding_root, worker_count) <
                    std::tie(other.bundle_id, other.core_name, other.compiled_plan_identity,
-                            other.registry_fingerprint, other.compiler_build_id);
+                            other.registry_fingerprint, other.compiler_build_id,
+                            other.capability_binding_root, other.worker_count);
         }
     };
 
@@ -426,16 +619,22 @@ struct ProgramCatalog::Impl {
     Impl(std::shared_ptr<ProgramStore>          store,
          RegistrySnapshot                       registry_snapshot,
          std::shared_ptr<EngineGenerationCache> engine_cache,
-         std::string                            build_id)
+         std::string                            build_id,
+         CatalogCapabilityBinder                binder,
+         std::size_t                            workers)
         : program_store(std::move(store)),
           registry(std::move(registry_snapshot)),
           engines(std::move(engine_cache)),
-          compiler_build_id(std::move(build_id)) {}
+          compiler_build_id(std::move(build_id)),
+          capability_binder(std::move(binder)),
+          worker_count(workers) {}
 
     std::shared_ptr<ProgramStore>          program_store;
     RegistrySnapshot                       registry;
     std::shared_ptr<EngineGenerationCache> engines;
     std::string                            compiler_build_id;
+    CatalogCapabilityBinder                capability_binder;
+    std::size_t                            worker_count = 1;
 
     mutable std::mutex mutex;
     std::unordered_map<std::string, std::shared_ptr<const detail::MaterializedProgram>>
@@ -450,6 +649,9 @@ ProgramCatalog::ProgramCatalog(CatalogConfig config) {
         throw std::invalid_argument("CatalogConfig requires an EngineGenerationCache");
     }
     detail::validate_token(config.compiler_build_id, "Catalog compiler_build_id");
+    if (config.worker_count == 0) {
+        throw std::invalid_argument("CatalogConfig worker_count must be positive");
+    }
 
     {
         std::lock_guard lock(config.engines->impl_->mutex);
@@ -461,8 +663,10 @@ ProgramCatalog::ProgramCatalog(CatalogConfig config) {
         config.engines->impl_->scope = wanted;
     }
 
-    impl_ = std::make_unique<Impl>(std::move(config.program_store), std::move(config.registry),
-                                   std::move(config.engines), std::move(config.compiler_build_id));
+    impl_ = std::make_unique<Impl>(
+        std::move(config.program_store), std::move(config.registry), std::move(config.engines),
+        std::move(config.compiler_build_id), std::move(config.capability_binder),
+        config.worker_count);
 }
 
 ProgramCatalog::ProgramCatalog(ProgramCatalog&&) noexcept            = default;
@@ -471,6 +675,16 @@ ProgramCatalog::~ProgramCatalog()                                    = default;
 
 ProgramVersion ProgramCatalog::admit(const ProgramBundle& input_bundle,
                                      ProgramAdmission     admission) {
+    return materialize(input_bundle, std::move(admission), std::nullopt, nullptr, true);
+}
+
+ProgramVersion ProgramCatalog::materialize(
+    const ProgramBundle&                    input_bundle,
+    ProgramAdmission                        admission,
+    std::optional<CatalogCapabilityBinding> supplied_binding,
+    const ProgramVersion*                   expected_version,
+    bool                                    publish,
+    std::shared_ptr<const detail::MaterializedProgram>* isolated_materialization) {
     ProgramBundle bundle = [&]() {
         try {
             return ProgramBundle::parse(input_bundle.serialize_canonical());
@@ -562,17 +776,33 @@ ProgramVersion ProgramCatalog::admit(const ProgramBundle& input_bundle,
 
     const auto input_contract  = bundle.input_contract();
     const auto output_contract = bundle.output_contract();
-    if (input_contract.schema_version != 1 || output_contract.schema_version != 1 ||
-        input_contract.schema != json::object() || output_contract.schema != json::object()) {
-        diagnostics.add("P_ADMIT_SCHEMA_UNSUPPORTED", "/input_contract",
-                        "PR6 supports only schema-version-1 empty input and output contracts",
-                        json{{"input_schema_version", input_contract.schema_version},
-                             {"output_schema_version", output_contract.schema_version},
-                             {"input_schema", input_contract.schema},
-                             {"output_schema", output_contract.schema}});
+    try {
+        validate_contract_schema(input_contract, "/input_contract/schema");
+    } catch (const std::exception& error) {
+        diagnostics.add("P_ADMIT_SCHEMA_UNSUPPORTED", "/input_contract/schema",
+                        "Program input contract schema is invalid or unsupported",
+                        json{{"error", error.what()}});
+    }
+    try {
+        validate_contract_schema(output_contract, "/output_contract/schema");
+    } catch (const std::exception& error) {
+        diagnostics.add("P_ADMIT_SCHEMA_UNSUPPORTED", "/output_contract/schema",
+                        "Program output contract schema is invalid or unsupported",
+                        json{{"error", error.what()}});
     }
 
     validate_budgets(bundle, admission.policy, diagnostics);
+    const auto concurrency = std::find_if(
+        bundle.declared_budget_requirements().begin(),
+        bundle.declared_budget_requirements().end(),
+        [](const auto& requirement) { return requirement.resource == "max_concurrency"; });
+    if (concurrency != bundle.declared_budget_requirements().end() &&
+        impl_->worker_count > concurrency->maximum) {
+        diagnostics.add("P_ADMIT_POLICY", "/declared_budget_requirements",
+                        "Catalog worker_count exceeds the admitted concurrency bound",
+                        json{{"worker_count", impl_->worker_count},
+                             {"max_concurrency", concurrency->maximum}});
+    }
 
     const auto                         definitions = bundle.sealed_core_definitions();
     const auto                         plan        = bundle.orchestration_plan();
@@ -659,17 +889,11 @@ ProgramVersion ProgramCatalog::admit(const ProgramBundle& input_bundle,
         const auto profile_modes       = admission.profile.allowed_effect_modes();
         const auto policy_capabilities = admission.policy.allowed_capabilities();
         const auto policy_effects      = admission.policy.allowed_effects();
-        bool       runtime_unsupported = false;
         for (const auto& identity : closure->identities) {
             if (!contains_identity(profile_executables, identity)) {
                 diagnostics.add("P_ADMIT_POLICY", "/executable_registry_identities",
                                 "Exact executable identity is denied by the admission profile",
                                 identity_json(identity));
-            }
-            if (identity.kind == ExecutableKind::Provider ||
-                identity.kind == ExecutableKind::Tool ||
-                identity.kind == ExecutableKind::Imported) {
-                runtime_unsupported = true;
             }
         }
         for (const auto mode : closure->modes) {
@@ -678,7 +902,6 @@ ProgramVersion ProgramCatalog::admit(const ProgramBundle& input_bundle,
                                 "Executable effect mode is denied by the admission profile",
                                 json{{"effect_mode", std::string(to_string(mode))}});
             }
-            if (mode == EffectMode::TrustedNative) runtime_unsupported = true;
         }
         for (const auto& capability : closure->closure.capabilities) {
             if (!contains_string(policy_capabilities, capability)) {
@@ -693,13 +916,6 @@ ProgramVersion ProgramCatalog::admit(const ProgramBundle& input_bundle,
                                 "Required effect is denied by the policy snapshot",
                                 json{{"effect", effect}});
             }
-        }
-        if (!closure->closure.capabilities.empty() || !closure->closure.effects.empty()) {
-            runtime_unsupported = true;
-        }
-        if (runtime_unsupported) {
-            diagnostics.add("P_ADMIT_RUNTIME_UNSUPPORTED", "/capability_effect_closure",
-                            "PR6 materializes only pure local node/reducer/condition closures");
         }
     }
 
@@ -718,8 +934,38 @@ ProgramVersion ProgramCatalog::admit(const ProgramBundle& input_bundle,
 
     if (!diagnostics.empty()) diagnostics.throw_error();
 
-    CoreMaterializationReceipt receipt{
-        impl_->compiler_build_id, registry_fingerprint, {*recomputed_plan}};
+    const auto requested_bindings = runtime_binding_identities(closure->identities);
+    CatalogCapabilityBinding binding;
+    const bool isolate_binding = supplied_binding.has_value();
+    if (supplied_binding) {
+        binding = std::move(*supplied_binding);
+        validate_capability_binding(requested_bindings, binding, diagnostics);
+    } else if (!requested_bindings.empty()) {
+        if (!impl_->capability_binder) {
+            diagnostics.add("P_BINDING_MISSING", "/capability_bindings",
+                            "Catalog has no capability binder for the runtime-bound closure");
+        } else {
+            try {
+                binding = impl_->capability_binder(requested_bindings);
+                validate_capability_binding(requested_bindings, binding, diagnostics);
+            } catch (const ProgramAdmissionError&) {
+                throw;
+            } catch (const std::exception& error) {
+                diagnostics.add("P_BINDING_FACTORY", "/capability_bindings",
+                                "Catalog capability binder failed",
+                                json{{"error", error.what()}});
+            } catch (...) {
+                diagnostics.add("P_BINDING_FACTORY", "/capability_bindings",
+                                "Catalog capability binder failed with a non-standard exception");
+            }
+        }
+    }
+    if (!diagnostics.empty()) diagnostics.throw_error();
+
+    CoreMaterializationReceipt receipt{impl_->compiler_build_id,
+                                           registry_fingerprint,
+                                           {*recomputed_plan},
+                                           binding.receipts};
     ProgramVersion version = [&]() {
         try {
             return ProgramVersion(
@@ -733,10 +979,19 @@ ProgramVersion ProgramCatalog::admit(const ProgramBundle& input_bundle,
             invalid.throw_error();
         }
     }();
+    if (expected_version &&
+        expected_version->serialize_canonical() != version.serialize_canonical()) {
+        AdmissionDiagnostics mismatch(bundle.id());
+        mismatch.add("P_RESOLVE_BINDING", "/core_materialization_receipt",
+                     "Stored ProgramVersion does not match the current exact materialization",
+                     json{{"stored_version_id", expected_version->id()},
+                          {"resolved_version_id", version.id()}});
+        mismatch.throw_error();
+    }
 
     std::lock_guard catalog_lock(impl_->mutex);
     const auto      existing = impl_->materialized.find(version.id());
-    if (existing != impl_->materialized.end()) {
+    if (!isolate_binding && existing != impl_->materialized.end()) {
         if (existing->second->version.serialize_canonical() != version.serialize_canonical() ||
             existing->second->bundle.serialize_canonical() != bundle.serialize_canonical()) {
             AdmissionDiagnostics collision(bundle.id());
@@ -747,20 +1002,22 @@ ProgramVersion ProgramCatalog::admit(const ProgramBundle& input_bundle,
         return existing->second->version;
     }
 
-    EngineGenerationCache::Impl::Key                    key{bundle.id(), recomputed_plan->name,
-                                         recomputed_plan->compiled_plan_identity,
-                                         registry_fingerprint, impl_->compiler_build_id};
+    const auto binding_root =
+        capability_binding_receipt_root(version.core_materialization_receipt().capability_bindings);
+    EngineGenerationCache::Impl::Key key{
+        bundle.id(), recomputed_plan->name, recomputed_plan->compiled_plan_identity,
+        registry_fingerprint, impl_->compiler_build_id, binding_root, impl_->worker_count};
     auto&                                               cache = *impl_->engines->impl_;
     std::lock_guard                                     cache_lock(cache.mutex);
     auto                                                cached = cache.generations.find(key);
     std::shared_ptr<const detail::PinnedCoreGeneration> generation;
     bool                                                inserted_generation = false;
-    if (cached != cache.generations.end()) {
+    if (!isolate_binding && cached != cache.generations.end()) {
         generation = cached->second;
     } else {
         try {
-            graph::NodeContext context;
-            auto               compiled =
+            graph::NodeContext context = std::move(binding.node_context);
+            auto compiled =
                 detail::RegistrySnapshotAccess::link_local(impl_->registry, *topology, context);
 
             AdmissionDiagnostics linked(bundle.id());
@@ -783,21 +1040,26 @@ ProgramVersion ProgramCatalog::admit(const ProgramBundle& input_bundle,
                 linked.throw_error();
             }
 
+            auto provider = context.provider;
             auto runtime_registry =
                 detail::RegistrySnapshotAccess::runtime_registry(impl_->registry);
             graph::EngineConfig config;
-            config.worker_count = 1;
+            config.worker_count = impl_->worker_count;
             graph::EngineResources resources;
             resources.registry = runtime_registry;
+            resources.tools    = std::move(binding.tools);
             auto unique_engine = graph::GraphEngine::link(std::move(compiled), std::move(config),
                                                           std::move(resources));
             std::shared_ptr<graph::GraphEngine> engine(std::move(unique_engine));
             generation =
                 std::make_shared<detail::PinnedCoreGeneration>(detail::PinnedCoreGeneration{
                     impl_->registry, std::move(runtime_registry), recomputed_plan->name,
-                    recomputed_plan->compiled_plan_identity, std::move(engine)});
-            cache.generations.emplace(key, generation);
-            inserted_generation = true;
+                    recomputed_plan->compiled_plan_identity, std::move(provider),
+                    std::move(engine)});
+            if (!isolate_binding) {
+                cache.generations.emplace(key, generation);
+                inserted_generation = true;
+            }
         } catch (const ProgramAdmissionError&) {
             throw;
         } catch (const std::exception& error) {
@@ -811,27 +1073,103 @@ ProgramVersion ProgramCatalog::admit(const ProgramBundle& input_bundle,
 
     auto materialized = std::make_shared<detail::MaterializedProgram>(
         detail::MaterializedProgram{bundle, version, generation});
-    impl_->materialized.emplace(version.id(), materialized);
-    try {
-        impl_->program_store->publish_admitted(bundle, version);
-    } catch (const std::exception& error) {
-        impl_->materialized.erase(version.id());
-        if (inserted_generation) cache.generations.erase(key);
-        AdmissionDiagnostics publication(bundle.id());
-        publication.add("P_ADMIT_BINDING", "/id",
-                        "Atomic ProgramStore publication rejected the admitted tuple",
-                        json{{"error", error.what()}});
-        publication.throw_error();
-    } catch (...) {
-        impl_->materialized.erase(version.id());
-        if (inserted_generation) cache.generations.erase(key);
-        AdmissionDiagnostics publication(bundle.id());
-        publication.add("P_ADMIT_BINDING", "/id",
-                        "Atomic ProgramStore publication failed with a non-standard exception");
-        publication.throw_error();
+    if (isolate_binding) {
+        if (isolated_materialization) *isolated_materialization = materialized;
+    } else {
+        impl_->materialized.emplace(version.id(), materialized);
+    }
+    if (publish) {
+        try {
+            impl_->program_store->publish_admitted(bundle, version);
+        } catch (const std::exception& error) {
+            impl_->materialized.erase(version.id());
+            if (inserted_generation) cache.generations.erase(key);
+            AdmissionDiagnostics publication(bundle.id());
+            publication.add("P_ADMIT_BINDING", "/id",
+                            "Atomic ProgramStore publication rejected the admitted tuple",
+                            json{{"error", error.what()}});
+            publication.throw_error();
+        } catch (...) {
+            impl_->materialized.erase(version.id());
+            if (inserted_generation) cache.generations.erase(key);
+            AdmissionDiagnostics publication(bundle.id());
+            publication.add(
+                "P_ADMIT_BINDING", "/id",
+                "Atomic ProgramStore publication failed with a non-standard exception");
+            publication.throw_error();
+        }
     }
     return version;
 }
+std::optional<ProgramVersion> ProgramCatalog::resolve_version(
+    std::string_view owner_scope, std::string_view id) {
+    return resolve_version_impl(owner_scope, id, std::nullopt);
+}
+
+std::optional<ProgramVersion> ProgramCatalog::resolve_version_with_binding(
+    std::string_view owner_scope, std::string_view id, CatalogCapabilityBinding binding) {
+    return resolve_version_impl(owner_scope, id, std::move(binding));
+}
+
+std::optional<ProgramVersion> ProgramCatalog::resolve_version_impl(
+    std::string_view owner_scope,
+    std::string_view id,
+    std::optional<CatalogCapabilityBinding> supplied_binding,
+    std::shared_ptr<const detail::MaterializedProgram>* isolated_materialization) {
+    detail::validate_token(owner_scope, "Program resolve owner_scope");
+    const auto stored_value = impl_->program_store->get_version(id);
+    if (!stored_value) return std::nullopt;
+
+    ProgramVersion stored = [&]() {
+        try {
+            return ProgramVersion::parse(stored_value->serialize_canonical());
+        } catch (const std::exception& error) {
+            AdmissionDiagnostics diagnostics("catalog");
+            diagnostics.add("P_RESOLVE_STORE", "/program_version_id",
+                            "Stored ProgramVersion failed canonical verification",
+                            json{{"error", error.what()}});
+            diagnostics.throw_error();
+        }
+    }();
+    if (stored.ownership_scope() != owner_scope) return std::nullopt;
+
+    const auto bundle_value = impl_->program_store->get_bundle(stored.bundle_id());
+    if (!bundle_value) {
+        AdmissionDiagnostics diagnostics(stored.id());
+        diagnostics.add("P_RESOLVE_STORE", "/bundle_id",
+                        "Stored ProgramVersion references a missing ProgramBundle",
+                        json{{"bundle_id", stored.bundle_id()}});
+        diagnostics.throw_error();
+    }
+    ProgramBundle bundle = [&]() {
+        try {
+            return ProgramBundle::parse(bundle_value->serialize_canonical());
+        } catch (const std::exception& error) {
+            AdmissionDiagnostics diagnostics(stored.id());
+            diagnostics.add("P_RESOLVE_STORE", "/bundle_id",
+                            "Stored ProgramBundle failed canonical verification",
+                            json{{"error", error.what()}});
+            diagnostics.throw_error();
+        }
+    }();
+    if (!supplied_binding) {
+        std::lock_guard lock(impl_->mutex);
+        const auto known = impl_->materialized.find(stored.id());
+        if (known != impl_->materialized.end() &&
+            known->second->version.serialize_canonical() == stored.serialize_canonical() &&
+            known->second->bundle.serialize_canonical() == bundle.serialize_canonical()) {
+            return known->second->version;
+        }
+    }
+
+    ProgramAdmission admission{stored.ownership_scope(),
+                               stored.admission_profile(),
+                               stored.policy_snapshot(),
+                               stored.dependency_receipts()};
+    return materialize(bundle, std::move(admission), std::move(supplied_binding), &stored, false,
+                       isolated_materialization);
+}
+
 
 std::optional<ProgramVersion> ProgramCatalog::find_version(std::string_view id) const {
     std::lock_guard lock(impl_->mutex);
@@ -860,6 +1198,19 @@ std::shared_ptr<const detail::MaterializedProgram> detail::CatalogRuntimeAccess:
         throw ProgramDiagnosticError(start_not_admitted(version.id()));
     }
     return found->second;
+}
+std::shared_ptr<const detail::MaterializedProgram>
+detail::CatalogRuntimeAccess::pin_with_binding(ProgramCatalog&            catalog,
+                                               std::string_view           owner_scope,
+                                               std::string_view           version_id,
+                                               CatalogCapabilityBinding   binding) {
+    std::shared_ptr<const detail::MaterializedProgram> isolated;
+    const auto resolved = catalog.resolve_version_impl(
+        owner_scope, version_id, std::move(binding), &isolated);
+    if (!resolved || !isolated || isolated->version.id() != version_id) {
+        throw ProgramDiagnosticError(start_not_admitted(version_id));
+    }
+    return isolated;
 }
 
 }  // namespace neograph::program

@@ -481,8 +481,14 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/admission.cpp
         src/program/compiler.cpp
         src/program/result.cpp
+        src/program/event.cpp
+        src/program/pending.cpp
+        src/program/fork.cpp
+        src/program/replay.cpp
         src/program/store.cpp
         src/program/journal.cpp
+        src/program/run_record.cpp
+        src/program/transition_store.cpp
         src/program/catalog.cpp
         src/program/runtime.cpp
         src/program/core_progress.cpp
@@ -686,7 +692,6 @@ endif()
 if(NEOGRAPH_BUILD_MCP_CLIENT)
     add_library(neograph_mcp
         src/mcp/client.cpp
-        src/mcp/harness_mcp_backend.cpp
     )
 
     target_include_directories(neograph_mcp
@@ -707,9 +712,6 @@ endif()
 if(NEOGRAPH_BUILD_MCP_SERVER)
     add_library(neograph_mcp_server
         src/mcp/server.cpp
-        src/mcp/harness.cpp
-        src/mcp/harness_journal.cpp
-        src/mcp/harness_provider.cpp
     )
     target_include_directories(neograph_mcp_server
         PUBLIC
@@ -723,8 +725,43 @@ if(NEOGRAPH_BUILD_MCP_SERVER)
     )
     add_library(neograph::mcp_server ALIAS neograph_mcp_server)
 endif()
+if(NEOGRAPH_BUILD_MCP_SERVER AND NEOGRAPH_BUILD_PROGRAM)
+    add_library(neograph_harness
+        src/mcp/harness.cpp
+        src/mcp/harness_file_store.cpp
+        src/mcp/harness_journal.cpp
+        src/mcp/harness_provider.cpp
+        src/mcp/harness_program_translator.cpp
+        src/mcp/harness_program_store.cpp
+        src/mcp/harness_program_host.cpp
+    )
+    if(NEOGRAPH_BUILD_MCP_CLIENT)
+        target_sources(neograph_harness PRIVATE src/mcp/harness_mcp_backend.cpp)
+    endif()
+    if(NEOGRAPH_BUILD_A2A)
+        target_sources(neograph_harness PRIVATE src/a2a/harness_backend.cpp)
+    endif()
+    target_include_directories(neograph_harness
+        PUBLIC
+            $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+    )
+    target_compile_definitions(neograph_harness PRIVATE
+        NEOGRAPH_BUILDING_LIBRARY NEOGRAPH_BUILDING_HARNESS)
+    target_link_libraries(neograph_harness
+        PUBLIC neograph_program neograph_mcp_server
+    )
+    if(NEOGRAPH_BUILD_MCP_CLIENT)
+        target_link_libraries(neograph_harness PUBLIC neograph_mcp)
+    endif()
+    if(NEOGRAPH_BUILD_A2A)
+        target_link_libraries(neograph_harness PUBLIC neograph_a2a)
+    endif()
+    add_library(neograph::harness ALIAS neograph_harness)
+endif()
 
-if(NEOGRAPH_BUILD_MCP_SERVER AND NEOGRAPH_BUILD_SQLITE)
+
+if(TARGET neograph_harness AND NEOGRAPH_BUILD_SQLITE)
     add_library(neograph_mcp_sqlite
         src/mcp/sqlite_harness_store.cpp
     )
@@ -735,7 +772,7 @@ if(NEOGRAPH_BUILD_MCP_SERVER AND NEOGRAPH_BUILD_SQLITE)
     )
     target_compile_definitions(neograph_mcp_sqlite PRIVATE NEOGRAPH_BUILDING_LIBRARY)
     target_link_libraries(neograph_mcp_sqlite
-        PUBLIC  neograph_mcp_server
+        PUBLIC neograph_harness
         PRIVATE SQLite::SQLite3
     )
     add_library(neograph::mcp_sqlite ALIAS neograph_mcp_sqlite)
@@ -773,7 +810,6 @@ if(NEOGRAPH_BUILD_A2A)
         src/a2a/client.cpp
         src/a2a/server.cpp
         src/a2a/a2a_caller_node.cpp
-        src/a2a/harness_backend.cpp
     )
 
     target_include_directories(neograph_a2a
@@ -790,6 +826,11 @@ if(NEOGRAPH_BUILD_A2A)
 
     add_library(neograph::a2a ALIAS neograph_a2a)
 endif()
+if(TARGET neograph_harness AND NEOGRAPH_BUILD_A2A)
+    target_sources(neograph_harness PRIVATE src/a2a/harness_backend.cpp)
+    target_link_libraries(neograph_harness PUBLIC neograph_a2a)
+endif()
+
 
 # ===========================================================================
 # neograph::acp — Agent Client Protocol server (JSON-RPC over stdio)
@@ -915,6 +956,7 @@ set(_NEOGRAPH_VERSIONED_LIBRARY_TARGETS
     neograph_mcp_types
     neograph_mcp
     neograph_mcp_server
+    neograph_harness
     neograph_mcp_sqlite
     neograph_mcp_http_server
     neograph_a2a
@@ -941,16 +983,17 @@ unset(_NEOGRAPH_LIBRARY_INSTALL_RPATH)
 # not silently gain an executable or provider/runtime dependencies.
 # ===========================================================================
 if(NEOGRAPH_BUILD_HARNESS_MCP_BINARY)
-    if(NOT NEOGRAPH_BUILD_MCP_SERVER OR NOT NEOGRAPH_BUILD_LLM)
+    if(NOT TARGET neograph_harness OR NOT NEOGRAPH_BUILD_LLM)
         message(FATAL_ERROR
             "NEOGRAPH_BUILD_HARNESS_MCP_BINARY=ON requires "
-            "NEOGRAPH_BUILD_MCP_SERVER=ON and NEOGRAPH_BUILD_LLM=ON")
+            "NEOGRAPH_BUILD_PROGRAM=ON, NEOGRAPH_BUILD_MCP_SERVER=ON, and "
+            "NEOGRAPH_BUILD_LLM=ON")
     endif()
     add_executable(neograph_harness_mcp examples/60_harness_mcp_server.cpp)
     set_target_properties(neograph_harness_mcp PROPERTIES
         OUTPUT_NAME neograph-harness-mcp)
     target_link_libraries(neograph_harness_mcp PRIVATE
-        neograph::mcp_server neograph::llm)
+        neograph::harness neograph::llm)
     if(NEOGRAPH_BUILD_SQLITE)
         target_link_libraries(neograph_harness_mcp PRIVATE
             neograph::sqlite neograph::mcp_sqlite)
@@ -1507,11 +1550,11 @@ if(NEOGRAPH_BUILD_EXAMPLES)
     if(NEOGRAPH_BUILD_MCP_SERVER)
         add_executable(example_mcp_server examples/59_mcp_server.cpp)
         target_link_libraries(example_mcp_server PRIVATE neograph::mcp_server)
-        if(NEOGRAPH_BUILD_LLM)
+        if(NEOGRAPH_BUILD_LLM AND TARGET neograph_harness)
             add_executable(example_harness_mcp_server
                 examples/60_harness_mcp_server.cpp)
             target_link_libraries(example_harness_mcp_server PRIVATE
-                neograph::mcp_server neograph::llm)
+                neograph::harness neograph::llm)
             if(NEOGRAPH_BUILD_SQLITE)
                 target_link_libraries(example_harness_mcp_server PRIVATE
                     neograph::sqlite neograph::mcp_sqlite)
@@ -1770,7 +1813,7 @@ if(NEOGRAPH_INSTALL_EXPORT)
         list(APPEND NEOGRAPH_EXPORT_TARGETS neograph_mcp_types)
     endif()
 
-    foreach(_comp program async llm mcp mcp_server mcp_sqlite mcp_http_server a2a acp util postgres sqlite)
+    foreach(_comp program async llm mcp mcp_server harness mcp_sqlite mcp_http_server a2a acp util postgres sqlite)
         if(TARGET neograph_${_comp})
             list(APPEND NEOGRAPH_EXPORT_TARGETS neograph_${_comp})
             list(APPEND NEOGRAPH_COMPONENTS_BUILT ${_comp})

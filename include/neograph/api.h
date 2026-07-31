@@ -61,6 +61,22 @@
 #else
 #define NEOGRAPH_MCP_SERVER_API
 #endif
+
+// Harness declarations are owned by the top-level neograph_harness adapter.
+#if defined(NEOGRAPH_STATIC_BUILD)
+#define NEOGRAPH_HARNESS_API
+#elif defined(_WIN32) || defined(__CYGWIN__)
+#if defined(NEOGRAPH_BUILDING_HARNESS)
+#define NEOGRAPH_HARNESS_API __declspec(dllexport)
+#else
+#define NEOGRAPH_HARNESS_API __declspec(dllimport)
+#endif
+#elif defined(__GNUC__) && __GNUC__ >= 4
+#define NEOGRAPH_HARNESS_API __attribute__((visibility("default")))
+#else
+#define NEOGRAPH_HARNESS_API
+#endif
+
 // Program value declarations are owned by neograph_program. A distinct macro
 // prevents Windows consumers from importing them from neograph_core.
 #if defined(NEOGRAPH_STATIC_BUILD)

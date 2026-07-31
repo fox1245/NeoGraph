@@ -181,6 +181,7 @@ bool checkpoint_required(const ProgramJournalRecord& record) noexcept {
     if (record.continuation.state == ContinuationState::Interrupted ||
         record.continuation.state == ContinuationState::Completed ||
         record.continuation.state == ContinuationState::BudgetExhausted ||
+        record.continuation.state == ContinuationState::AmbiguousEffect ||
         record.continuation.state == ContinuationState::CheckpointIncompatible) {
         return true;
     }
@@ -196,6 +197,7 @@ bool is_known_state(ContinuationState state) noexcept {
         case ContinuationState::BudgetExhausted:
         case ContinuationState::TimedOut:
         case ContinuationState::Failed:
+        case ContinuationState::AmbiguousEffect:
         case ContinuationState::CheckpointIncompatible:
             return true;
     }
@@ -217,10 +219,9 @@ void validate_record_body(const ProgramJournalRecord& record) {
             throw std::invalid_argument(
                 "First Program journal record must have an empty previous_id");
         }
-        if (record.continuation.state != ContinuationState::Running ||
-            record.continuation.attempt != 1 || record.core_checkpoint.has_value()) {
+        if (record.continuation.state != ContinuationState::Running) {
             throw std::invalid_argument(
-                "First Program journal record must start attempt 1 Running without a checkpoint");
+                "First Program journal record must start Running");
         }
     } else {
         require_sha256(record.previous_id, "Program journal previous_id");
@@ -279,8 +280,8 @@ void validate_sealed_record(const ProgramJournalRecord& record) {
     }
 }
 
-bool valid_transition(const ProgramJournalRecord& previous,
-                      const ProgramJournalRecord& next) noexcept {
+bool valid_transition_impl(const ProgramJournalRecord& previous,
+                           const ProgramJournalRecord& next) noexcept {
     if (previous.sequence == std::numeric_limits<std::uint64_t>::max() ||
         next.previous_id != previous.id || next.sequence != previous.sequence + 1 ||
         next.run_id != previous.run_id || next.program_version_id != previous.program_version_id ||
@@ -301,7 +302,8 @@ bool valid_transition(const ProgramJournalRecord& previous,
                next.continuation.attempt == previous.continuation.attempt;
     }
     if (previous.continuation.state == ContinuationState::Interrupted) {
-        if (next.continuation.state == ContinuationState::Failed) {
+        if (next.continuation.state == ContinuationState::Failed ||
+            next.continuation.state == ContinuationState::Cancelled) {
             return next.continuation.attempt == previous.continuation.attempt &&
                    previous.core_checkpoint && next.core_checkpoint &&
                    same_checkpoint(*previous.core_checkpoint, *next.core_checkpoint);
@@ -313,6 +315,20 @@ bool valid_transition(const ProgramJournalRecord& previous,
             return false;
         }
         return same_checkpoint(*previous.core_checkpoint, *next.core_checkpoint);
+    }
+    if (previous.continuation.state == ContinuationState::AmbiguousEffect) {
+        if (!previous.core_checkpoint || !next.core_checkpoint ||
+            !same_checkpoint(*previous.core_checkpoint, *next.core_checkpoint)) {
+            return false;
+        }
+        if (next.continuation.state == ContinuationState::AmbiguousEffect ||
+            next.continuation.state == ContinuationState::Failed) {
+            return next.continuation.attempt == previous.continuation.attempt;
+        }
+        return next.continuation.state == ContinuationState::Running &&
+               previous.continuation.attempt !=
+                   std::numeric_limits<std::uint64_t>::max() &&
+               next.continuation.attempt == previous.continuation.attempt + 1;
     }
     if (next.continuation.state != ContinuationState::Failed ||
         next.continuation.attempt != previous.continuation.attempt ||
@@ -344,6 +360,8 @@ std::string_view to_string(ContinuationState state) noexcept {
             return "timed_out";
         case ContinuationState::Failed:
             return "failed";
+        case ContinuationState::AmbiguousEffect:
+            return "ambiguous_effect";
         case ContinuationState::CheckpointIncompatible:
             return "checkpoint_incompatible";
     }
@@ -358,8 +376,14 @@ ContinuationState continuation_state_from_string(std::string_view value) {
     if (value == "budget_exhausted") return ContinuationState::BudgetExhausted;
     if (value == "timed_out") return ContinuationState::TimedOut;
     if (value == "failed") return ContinuationState::Failed;
+    if (value == "ambiguous_effect") return ContinuationState::AmbiguousEffect;
     if (value == "checkpoint_incompatible") return ContinuationState::CheckpointIncompatible;
     throw std::invalid_argument("Unknown Program continuation state: " + std::string(value));
+}
+
+bool is_valid_program_journal_transition(const ProgramJournalRecord& previous,
+                                         const ProgramJournalRecord& next) noexcept {
+    return valid_transition_impl(previous, next);
 }
 
 ProgramJournalRecord ProgramJournalRecord::create(ProgramJournalRecordData data) {
@@ -484,7 +508,9 @@ JournalAppendResult InMemoryProgramJournal::compare_append(std::string_view expe
             return JournalAppendResult::Conflict;
         }
         const auto& previous = impl_->records_by_id.at(latest->second).record;
-        if (!valid_transition(previous, record)) return JournalAppendResult::Conflict;
+        if (!is_valid_program_journal_transition(previous, record)) {
+            return JournalAppendResult::Conflict;
+        }
     }
 
     const auto id                    = record.id;

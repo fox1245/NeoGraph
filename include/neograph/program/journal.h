@@ -22,6 +22,7 @@ enum class ContinuationState : std::uint8_t {
     BudgetExhausted,
     TimedOut,
     Failed,
+    AmbiguousEffect,
     CheckpointIncompatible,
 };
 
@@ -95,6 +96,11 @@ public:
     virtual JournalAppendResult compare_append(std::string_view     expected_previous_id,
                                                ProgramJournalRecord record) = 0;
 };
+
+/** Shared transition predicate used by atomic Program publication backends. */
+NEOGRAPH_PROGRAM_API bool
+is_valid_program_journal_transition(const ProgramJournalRecord& previous,
+                                    const ProgramJournalRecord& next) noexcept;
 
 class NEOGRAPH_PROGRAM_API InMemoryProgramJournal final : public ProgramJournal {
 public:

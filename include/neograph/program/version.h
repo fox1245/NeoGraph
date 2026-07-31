@@ -23,11 +23,23 @@ struct DependencyReceipt {
     bool operator==(const DependencyReceipt&) const = default;
 };
 
+struct CapabilityBindingReceipt {
+    ExecutableIdentity executable;
+    std::string        binding_identity;
+
+    bool operator==(const CapabilityBindingReceipt&) const = default;
+};
+
+NEOGRAPH_PROGRAM_API std::string capability_binding_receipt_root(
+    std::vector<CapabilityBindingReceipt> receipts);
+
 struct CoreMaterializationReceipt {
     std::string compiler_build_id;
     std::string registry_snapshot_fingerprint;
     /// Canonicalized by plan name.
     std::vector<CorePlanIdentity> plans;
+    /// Canonicalized by exact executable identity.
+    std::vector<CapabilityBindingReceipt> capability_bindings;
 
     bool operator==(const CoreMaterializationReceipt&) const = default;
 };

@@ -344,8 +344,17 @@ void validate_contract(const json&            document,
         add_required(diagnostics, pointer, "schema");
     } else if (!value["schema"].is_object()) {
         add_type(diagnostics, child_pointer(pointer, "schema"), "object", value["schema"]);
-    } else
+    } else {
         output.schema = detail::owned_json_copy(value["schema"]);
+        try {
+            validate_contract_schema(output, child_pointer(pointer, "schema"));
+        } catch (const std::exception& error) {
+            diagnostics.add(CompilePhase::Schema, "P_CONTRACT_SCHEMA",
+                            DiagnosticSeverity::Error, child_pointer(pointer, "schema"),
+                            "Program contract uses an invalid or unsupported schema",
+                            json{{"error", error.what()}});
+        }
+    }
 }
 
 void validate_root(const json&            document,
@@ -648,6 +657,52 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
                 reference.pointer,
                 "Referenced executable is absent from the local RegistrySnapshot",
                 json{{"kind", std::string(to_string(reference.kind))}, {"name", reference.name}});
+        }
+    }
+    for (const auto& [node_name, definition] : topology.node_defs) {
+        const auto type = definition.at("type").get<std::string>();
+        const auto pointer =
+            "/root/definition/nodes/" + escape_pointer_segment(node_name);
+        const ExecutableManifest* node_manifest = nullptr;
+        try {
+            node_manifest = &detail::RegistrySnapshotAccess::require_manifest(
+                registry, ExecutableKind::Node, type);
+        } catch (const std::out_of_range&) {
+            continue;
+        }
+
+        std::vector<ExecutableIdentity> requirements;
+        try {
+            requirements = detail::RegistrySnapshotAccess::resolve_node_requirements(
+                registry, type, definition);
+        } catch (const std::exception& error) {
+            diagnostics.add(CompilePhase::Resolve, "P_REGISTRY_REQUIREMENT_RESOLVER",
+                            DiagnosticSeverity::Error, pointer,
+                            "Node executable requirement resolution failed",
+                            json{{"node_type", type}, {"exception", error.what()}});
+            continue;
+        } catch (...) {
+            diagnostics.add(CompilePhase::Resolve, "P_REGISTRY_REQUIREMENT_RESOLVER",
+                            DiagnosticSeverity::Error, pointer,
+                            "Node executable requirement resolution failed",
+                            json{{"node_type", type}, {"exception", "non-standard exception"}});
+            continue;
+        }
+        std::sort(requirements.begin(), requirements.end(), identity_less);
+        requirements.erase(std::unique(requirements.begin(), requirements.end()),
+                           requirements.end());
+        for (const auto& requirement : requirements) {
+            if (requirement.kind != ExecutableKind::Provider &&
+                requirement.kind != ExecutableKind::Tool &&
+                requirement.kind != ExecutableKind::Imported) {
+                diagnostics.add(
+                    CompilePhase::Resolve, "P_REGISTRY_REQUIREMENT_KIND",
+                    DiagnosticSeverity::Error, pointer,
+                    "Node config resolver returned an unsupported executable kind",
+                    json{{"node_type", type}, {"requirement", identity_json(requirement)}});
+                continue;
+            }
+            work.push_back({requirement, pointer, node_manifest->identity});
         }
     }
     if (diagnostics.has_errors()) return {};

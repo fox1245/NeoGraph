@@ -6,11 +6,13 @@
 
 #include <neograph/api.h>
 #include <neograph/json.h>
+#include <neograph/program/pending.h>
 
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace neograph::program {
@@ -30,16 +32,22 @@ enum class ProgramTerminalStatus : std::uint8_t {
     CheckpointIncompatible,
 };
 
+NEOGRAPH_PROGRAM_API std::string_view to_string(ProgramTerminalStatus status) noexcept;
+NEOGRAPH_PROGRAM_API ProgramTerminalStatus
+program_terminal_status_from_string(std::string_view value);
+
 struct RunBudget {
-    std::uint64_t wall_time_ms;
-    std::uint64_t model_tokens;
-    std::uint64_t monetary_microunits;
-    std::uint32_t max_concurrency;
-    std::uint64_t max_program_operations;
-    std::uint64_t max_core_steps;
-    std::uint64_t max_dynamic_compiles;
-    std::uint32_t max_child_depth;
-    std::uint64_t max_total_children;
+    std::uint64_t wall_time_ms           = 0;
+    std::uint64_t model_tokens           = 0;
+    std::uint64_t monetary_microunits    = 0;
+    std::uint32_t max_concurrency        = 0;
+    std::uint64_t max_program_operations = 0;
+    std::uint64_t max_core_steps         = 0;
+    std::uint64_t max_dynamic_compiles   = 0;
+    std::uint32_t max_child_depth        = 0;
+    std::uint64_t max_total_children     = 0;
+
+    bool operator==(const RunBudget&) const = default;
 };
 
 struct ProgramUsage {
@@ -49,6 +57,8 @@ struct ProgramUsage {
     std::uint64_t program_operations  = 0;
     std::uint64_t core_steps          = 0;
     std::uint32_t peak_concurrency    = 0;
+
+    bool operator==(const ProgramUsage&) const = default;
 };
 
 struct CoreCheckpointIdentity {
@@ -57,6 +67,8 @@ struct CoreCheckpointIdentity {
     std::string   core_thread_id;
     std::string   checkpoint_id;
     std::uint32_t checkpoint_schema_version;
+
+    bool operator==(const CoreCheckpointIdentity&) const = default;
 };
 
 struct ProgramFailure {
@@ -66,11 +78,32 @@ struct ProgramFailure {
     std::string   core_node;
     std::uint32_t attempts = 0;
     json          witness;
+
+    bool operator==(const ProgramFailure&) const = default;
 };
 
 struct ProgramInterrupt {
     std::string core_node;
     json        value;
+    std::optional<ProgramPendingInput>  pending_input;
+    std::optional<ProgramPendingEffect> pending_effect;
+
+};
+
+struct ProgramResultData {
+    ProgramTerminalStatus                 status = ProgramTerminalStatus::Failed;
+    std::string                           run_id;
+    std::string                           program_version_id;
+    std::string                           bundle_id;
+    std::string                           operation_id = "root";
+    std::uint64_t                         attempt      = 0;
+    json                                  output       = json::object();
+    ProgramUsage                          usage;
+    RunBudget                             remaining_budget;
+    std::optional<CoreCheckpointIdentity> checkpoint;
+    std::optional<ProgramInterrupt>       interrupt;
+    std::optional<ProgramFailure>         failure;
+    std::vector<std::string>              execution_trace;
 };
 
 class NEOGRAPH_PROGRAM_API ProgramResult {
@@ -83,6 +116,10 @@ public:
      * Normal Runtime completion never returns this value.
      */
     ProgramResult();
+    static ProgramResult create(ProgramResultData data);
+    static ProgramResult parse(std::string_view stored_bytes);
+    std::string          serialize_canonical() const;
+    const std::string&   id() const noexcept;
     ProgramTerminalStatus                 status() const noexcept;
     const std::string&                    run_id() const noexcept;
     const std::string&                    program_version_id() const noexcept;
@@ -98,21 +135,7 @@ public:
     std::vector<std::string>              execution_trace() const;
 
 private:
-    struct ConstructionData {
-        ProgramTerminalStatus                 status;
-        std::string                           run_id;
-        std::string                           program_version_id;
-        std::string                           bundle_id;
-        std::string                           operation_id;
-        std::uint64_t                         attempt;
-        json                                  output;
-        ProgramUsage                          usage;
-        RunBudget                             remaining_budget;
-        std::optional<CoreCheckpointIdentity> checkpoint;
-        std::optional<ProgramInterrupt>       interrupt;
-        std::optional<ProgramFailure>         failure;
-        std::vector<std::string>              execution_trace;
-    };
+    using ConstructionData = ProgramResultData;
 
     struct Impl;
     explicit ProgramResult(ConstructionData data);

@@ -1,0 +1,112 @@
+/**
+ * @file program/transition_store.h
+ * @brief Atomic owner-scoped Program transition publication.
+ */
+#pragma once
+
+#include <neograph/api.h>
+#include <neograph/program/event.h>
+#include <neograph/program/run_record.h>
+
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace neograph::program {
+
+class NEOGRAPH_PROGRAM_API ProgramEffectOutboxEntry {
+public:
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+
+    ProgramEffectOutboxEntry(std::uint64_t sequence, ProgramPendingEffect effect);
+    static ProgramEffectOutboxEntry parse(std::string_view stored_bytes);
+
+    std::uint64_t sequence() const noexcept;
+    const ProgramPendingEffect& effect() const noexcept;
+    const std::string& id() const noexcept;
+    std::string serialize_canonical() const;
+
+private:
+    struct Impl;
+    explicit ProgramEffectOutboxEntry(std::shared_ptr<const Impl> impl);
+    std::shared_ptr<const Impl> impl_;
+};
+
+struct NEOGRAPH_PROGRAM_API ProgramTransitionPublication {
+    ProgramRunRecord                      run_record;
+    ProgramJournalRecord                  journal_record;
+    std::vector<ProgramEvent>              events;
+    std::vector<ProgramEffectOutboxEntry>  effects;
+
+    static ProgramTransitionPublication parse(std::string_view stored_bytes);
+    std::string serialize_canonical() const;
+};
+
+enum class ProgramTransitionPublishResult : std::uint8_t {
+    Published,
+    AlreadyPresent,
+    Conflict,
+};
+
+class NEOGRAPH_PROGRAM_API ProgramTransitionStore {
+public:
+    virtual ~ProgramTransitionStore() = default;
+
+    /** Wrong-owner lookups are indistinguishable from absence. */
+    virtual std::optional<ProgramRunRecord> load(std::string_view owner_scope,
+                                                  std::string_view run_id) const = 0;
+    virtual std::optional<ProgramJournalRecord> latest(std::string_view owner_scope,
+                                                        std::string_view run_id) const = 0;
+    virtual std::vector<ProgramEvent> load_events(std::string_view owner_scope,
+                                                   std::string_view run_id,
+                                                   std::uint64_t after_sequence = 0) const = 0;
+    virtual std::vector<ProgramEffectOutboxEntry>
+    load_effects(std::string_view owner_scope,
+                 std::string_view run_id,
+                 std::uint64_t after_sequence = 0) const = 0;
+
+    /**
+     * Atomically publishes the run snapshot, journal head, events, and effect outbox.
+     * A throw has the strong exception guarantee. An exact retry is AlreadyPresent.
+     */
+    virtual ProgramTransitionPublishResult
+    compare_publish(std::string_view owner_scope,
+                    std::string_view expected_journal_head,
+                    ProgramTransitionPublication publication) = 0;
+};
+
+class NEOGRAPH_PROGRAM_API InMemoryProgramTransitionStore final
+    : public ProgramTransitionStore {
+public:
+    InMemoryProgramTransitionStore();
+    ~InMemoryProgramTransitionStore() override;
+    InMemoryProgramTransitionStore(InMemoryProgramTransitionStore&&) noexcept;
+    InMemoryProgramTransitionStore& operator=(InMemoryProgramTransitionStore&&) noexcept;
+    InMemoryProgramTransitionStore(const InMemoryProgramTransitionStore&) = delete;
+    InMemoryProgramTransitionStore& operator=(const InMemoryProgramTransitionStore&) = delete;
+
+    std::optional<ProgramRunRecord> load(std::string_view owner_scope,
+                                          std::string_view run_id) const override;
+    std::optional<ProgramJournalRecord> latest(std::string_view owner_scope,
+                                                std::string_view run_id) const override;
+    std::vector<ProgramEvent> load_events(std::string_view owner_scope,
+                                           std::string_view run_id,
+                                           std::uint64_t after_sequence = 0) const override;
+    std::vector<ProgramEffectOutboxEntry>
+    load_effects(std::string_view owner_scope,
+                 std::string_view run_id,
+                 std::uint64_t after_sequence = 0) const override;
+    ProgramTransitionPublishResult
+    compare_publish(std::string_view owner_scope,
+                    std::string_view expected_journal_head,
+                    ProgramTransitionPublication publication) override;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace neograph::program

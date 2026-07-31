@@ -14,6 +14,10 @@ public:
     static const ExecutableManifest& require_manifest(const RegistrySnapshot& snapshot,
                                                       ExecutableKind          kind,
                                                       std::string_view        name);
+    static std::vector<ExecutableIdentity> resolve_node_requirements(
+        const RegistrySnapshot& snapshot,
+        std::string_view        name,
+        const json&             node_config);
     static std::shared_ptr<const graph::GraphRegistry> runtime_registry(
         const RegistrySnapshot& snapshot);
     static graph::TopologySpec       parse_local(const RegistrySnapshot& snapshot,

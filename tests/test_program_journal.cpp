@@ -262,3 +262,64 @@ TEST(ProgramJournalTest, InterruptedEventFailureCompetesAtomicallyWithResume) {
     ASSERT_TRUE(latest->core_checkpoint.has_value());
     EXPECT_EQ(latest->core_checkpoint->checkpoint_id, interrupted.core_checkpoint->checkpoint_id);
 }
+
+TEST(ProgramJournalTest, AmbiguousEffectReconciliationPreservesExactCheckpoint) {
+    InMemoryProgramJournal journal;
+    const auto start = start_record();
+    const auto ambiguous =
+        terminal_record(start, ContinuationState::AmbiguousEffect, 20);
+    ASSERT_EQ(journal.compare_append({}, start), JournalAppendResult::Appended);
+    ASSERT_EQ(journal.compare_append(start.id, ambiguous),
+              JournalAppendResult::Appended);
+
+    const auto unknown = ProgramJournalRecord::create(ProgramJournalRecordData{
+        ambiguous.id,
+        ambiguous.run_id,
+        ambiguous.program_version_id,
+        ambiguous.bundle_id,
+        3,
+        ProgramContinuation{"root", ContinuationState::AmbiguousEffect, 1},
+        ambiguous.remaining_budget,
+        empty_budget(),
+        ambiguous.core_checkpoint,
+        30});
+    ASSERT_EQ(journal.compare_append(ambiguous.id, unknown),
+              JournalAppendResult::Appended);
+
+    const auto resumed = ProgramJournalRecord::create(ProgramJournalRecordData{
+        unknown.id,
+        unknown.run_id,
+        unknown.program_version_id,
+        unknown.bundle_id,
+        4,
+        ProgramContinuation{"root", ContinuationState::Running, 2},
+        unknown.remaining_budget,
+        unknown.remaining_budget,
+        unknown.core_checkpoint,
+        40});
+    EXPECT_EQ(journal.compare_append(unknown.id, resumed),
+              JournalAppendResult::Appended);
+}
+
+TEST(ProgramJournalTest, InterruptedPendingCancellationIsValid) {
+    InMemoryProgramJournal journal;
+    const auto start = start_record();
+    const auto interrupted =
+        terminal_record(start, ContinuationState::Interrupted, 20);
+    ASSERT_EQ(journal.compare_append({}, start), JournalAppendResult::Appended);
+    ASSERT_EQ(journal.compare_append(start.id, interrupted),
+              JournalAppendResult::Appended);
+    const auto cancelled = ProgramJournalRecord::create(ProgramJournalRecordData{
+        interrupted.id,
+        interrupted.run_id,
+        interrupted.program_version_id,
+        interrupted.bundle_id,
+        3,
+        ProgramContinuation{"root", ContinuationState::Cancelled, 1},
+        interrupted.remaining_budget,
+        empty_budget(),
+        interrupted.core_checkpoint,
+        30});
+    EXPECT_EQ(journal.compare_append(interrupted.id, cancelled),
+              JournalAppendResult::Appended);
+}

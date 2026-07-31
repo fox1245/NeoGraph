@@ -22,12 +22,12 @@ def cpp_identifier(name: str) -> str:
     return "schema_" + identifier
 
 
-def escape_for_raw_string(content: str) -> str:
-    """Check if content is safe for R\"(...)\" raw string literal."""
-    if ')\"' in content:
-        # Use a delimiter to avoid ambiguity
-        return None
-    return content
+def raw_string_delimiter(content: str) -> str:
+    """Return a C++ raw-string delimiter absent from the schema content."""
+    for candidate in (f"NG{index:X}" for index in range(1_000_000)):
+        if f'){candidate}"' not in content:
+            return candidate
+    raise ValueError("Unable to choose a collision-free C++ raw-string delimiter")
 
 
 def main():
@@ -64,9 +64,10 @@ def main():
             raise ValueError("Schema filenames collide after C++ identifier normalization")
         for name, content in schemas.items():
             var_name = identifiers[name]
-            out.write(f'inline const char* {var_name} = R"(\n')
+            delimiter = raw_string_delimiter(content)
+            out.write(f'inline const char* {var_name} = R"{delimiter}(\n')
             out.write(content)
-            out.write('\n)";\n\n')
+            out.write(f'\n){delimiter}";\n\n')
 
         # Registry map
         out.write("inline const std::map<std::string, const char*>& schemas() {\n")

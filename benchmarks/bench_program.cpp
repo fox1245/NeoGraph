@@ -185,15 +185,17 @@ int main(int argc, char** argv) {
         std::make_shared<ProgramCatalog>(CatalogConfig{store, registry, cache, "bench-program/v1"});
     const auto version =
         catalog->admit(bundle, ProgramAdmission{"bench-program", profile, policy, {}});
-    auto            checkpoints = std::make_shared<InMemoryCheckpointStore>();
-    auto            journal     = std::make_shared<InMemoryProgramJournal>();
-    ProgramRuntime  runtime(RuntimeConfig{catalog, checkpoints, {}, journal, 1});
+    auto           checkpoints = std::make_shared<InMemoryCheckpointStore>();
+    auto           transitions = std::make_shared<InMemoryProgramTransitionStore>();
+    ProgramRuntime runtime(RuntimeConfig{catalog, checkpoints, {}, transitions, 1});
     const RunBudget budget{10000, 0, 0, 1, 1, 20, 0, 0, 0};
 
     for (int index = 0; index < 10; ++index) {
         (void)core->run(RunConfig{});
         const auto result = runtime.run(
-            version, ProgramInvocation{json::object(), budget, "bench-program-warmup", {}});
+            "bench-program",
+            version,
+            ProgramInvocation{json::object(), budget, "bench-program-warmup", {}});
         if (result.status() != ProgramTerminalStatus::Completed) {
             throw std::runtime_error("Program warm-up did not complete");
         }
@@ -201,8 +203,10 @@ int main(int argc, char** argv) {
 
     const auto direct  = measure(iterations, [&] { (void)core->run(RunConfig{}); });
     const auto wrapped = measure(iterations, [&] {
-        const auto result =
-            runtime.run(version, ProgramInvocation{json::object(), budget, "bench-program", {}});
+        const auto result = runtime.run(
+            "bench-program",
+            version,
+            ProgramInvocation{json::object(), budget, "bench-program", {}});
         if (result.status() != ProgramTerminalStatus::Completed) {
             throw std::runtime_error("Program benchmark run did not complete");
         }
