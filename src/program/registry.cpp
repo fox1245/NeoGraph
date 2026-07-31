@@ -5,6 +5,7 @@
 #include "registry_access.h"
 
 #include <algorithm>
+#include <iterator>
 #include <stdexcept>
 #include <tuple>
 #include <unordered_set>
@@ -44,6 +45,35 @@ void validate_identity(const ExecutableIdentity& identity) {
     }
     require_digest(identity.implementation_digest, "Executable implementation_digest");
 }
+bool identity_less(const ExecutableIdentity& lhs, const ExecutableIdentity& rhs) {
+    return std::tuple{to_string(lhs.kind), lhs.name, lhs.semantic_version,
+                      lhs.implementation_digest} < std::tuple{to_string(rhs.kind), rhs.name,
+                                                              rhs.semantic_version,
+                                                              rhs.implementation_digest};
+}
+
+void normalize_dependencies(ExecutableManifest& manifest) {
+    for (const auto& dependency : manifest.required_executables) {
+        validate_identity(dependency);
+        if (dependency == manifest.identity) {
+            throw std::invalid_argument("Executable manifest cannot depend on itself");
+        }
+    }
+    std::sort(manifest.required_executables.begin(), manifest.required_executables.end(),
+              identity_less);
+    const auto duplicate_name = std::adjacent_find(
+        manifest.required_executables.begin(), manifest.required_executables.end(),
+        [](const ExecutableIdentity& lhs, const ExecutableIdentity& rhs) {
+            return lhs.kind == rhs.kind && lhs.name == rhs.name;
+        });
+    if (duplicate_name != manifest.required_executables.end()) {
+        if (*duplicate_name == *std::next(duplicate_name)) {
+            throw std::invalid_argument("required_executables contains a duplicate identity");
+        }
+        throw std::invalid_argument(
+            "required_executables contains ambiguous identities for one executable");
+    }
+}
 
 void validate_manifest(ExecutableManifest& manifest) {
     if (to_string(manifest.effect_mode) == "unknown") {
@@ -53,6 +83,7 @@ void validate_manifest(ExecutableManifest& manifest) {
     require_nonempty(manifest.attestation_id, "Executable attestation_id");
     normalize_strings(manifest.required_capabilities, "required_capabilities");
     normalize_strings(manifest.declared_effects, "declared_effects");
+    normalize_dependencies(manifest);
 }
 
 void require_kind(const ExecutableManifest& manifest, ExecutableKind expected) {
@@ -80,7 +111,11 @@ json encode_manifest(const SnapshotEntry& entry) {
     value["attestation_id"]        = manifest.attestation_id;
     value["required_capabilities"] = manifest.required_capabilities;
     value["declared_effects"]      = manifest.declared_effects;
-    value["metadata"]              = detail::owned_json_copy(entry.metadata);
+    json dependencies              = json::array();
+    for (const auto& dependency : manifest.required_executables)
+        dependencies.push_back(encode_identity(dependency));
+    value["required_executables"] = std::move(dependencies);
+    value["metadata"]             = detail::owned_json_copy(entry.metadata);
     return value;
 }
 
@@ -268,6 +303,13 @@ RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_imported(
         metadata.target.implementation_digest != manifest.identity.implementation_digest) {
         throw std::invalid_argument("Imported manifest identity does not match its exact target");
     }
+    if (!manifest.required_executables.empty() &&
+        (manifest.required_executables.size() != 1 ||
+         manifest.required_executables.front() != metadata.target)) {
+        throw std::invalid_argument("Imported executable may depend only on its exact target");
+    }
+    manifest.required_executables = {metadata.target};
+    normalize_dependencies(manifest);
     impl_->imported_targets.push_back({manifest.identity.name, metadata.target});
     impl_->entries.push_back(SnapshotEntry{
         std::move(manifest),
@@ -317,6 +359,19 @@ RegistrySnapshot RegistrySnapshotBuilder::build() && {
         alias->manifest.required_capabilities = local->manifest.required_capabilities;
         alias->manifest.declared_effects      = local->manifest.declared_effects;
         validate_manifest(alias->manifest);
+    }
+    for (const auto& entry : impl_->entries) {
+        for (const auto& dependency : entry.manifest.required_executables) {
+            const auto local = std::find_if(impl_->entries.begin(), impl_->entries.end(),
+                                            [&dependency](const SnapshotEntry& candidate) {
+                                                return candidate.manifest.identity == dependency;
+                                            });
+            if (local == impl_->entries.end()) {
+                throw std::invalid_argument(
+                    "Required executable is absent or has a mismatched exact identity: " +
+                    dependency.name);
+            }
+        }
     }
 
     json entries = json::array();

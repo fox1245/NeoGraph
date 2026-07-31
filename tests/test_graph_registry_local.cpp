@@ -92,3 +92,24 @@ TEST(GraphRegistryLocalTest, LocalParseRejectsGlobalOnlyNodeBeforeFactoryDispatc
     EXPECT_EQ(calls.load(), 0);
     EXPECT_THROW((void)GraphCompiler::parse_local(node_definition(""), local), std::out_of_range);
 }
+
+TEST(GraphRegistryLocalTest, LegacyKeyedConditionsCannotFallBackToProcessGlobalRegistry) {
+    std::atomic<int> calls{0};
+    ConditionRegistry::instance().register_condition(
+        "core-global-keyed-condition", [](const GraphState&) { return std::string("go"); });
+
+    GraphRegistry local;
+    local.register_type("core-local-keyed-node", factory(&calls), json{{"type", "object"}},
+                        json::object());
+    const json definition = {
+        {"nodes", json{{"work", json{{"type", "core-local-keyed-node"}}}}},
+        {"edges", json{{"branch", json{{"from", "work"},
+                                       {"condition", "core-global-keyed-condition"},
+                                       {"routes", json{{"go", "__end__"}}}}}}},
+    };
+
+    EXPECT_THROW((void)GraphCompiler::parse_local(definition, local), std::out_of_range);
+    EXPECT_THROW((void)GraphCompiler::compile_local(definition, NodeContext{}, local),
+                 std::out_of_range);
+    EXPECT_EQ(calls.load(), 0);
+}

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=f2880aa80b6972d92480cd2326c3e30415da12ba158d9cec878d05c116f65490 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=2019a958768e79633c822a6e4c5567068d0e7f11264e9bb3049ef4449d970178 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -40,6 +40,9 @@ NeoGraph の全注目すべき変更を本ファイルに文書化します。
   Core には Program 具現化用の明示的なローカル専用 parse/link/validate
   エントリポイントを追加し、既存のローカル優先/グローバルフォールバック
   オーバーロードは変更していません。
+  レジストリエントリは推移的な admission closure 用の正確な実行可能オブジェクト
+  依存エッジを正規形で記録し、ローカル専用の条件検査はプロセスグローバル
+  レジストリを参照せずにレガシーのキー付き edge 文書も処理します。
 
 - **SQLite Harness レコードストア (issue #147 フォローアップ)。** オプションの
   `neograph::mcp_sqlite` ターゲットと `SqliteHarnessRecordStore` を追加。WAL バック、

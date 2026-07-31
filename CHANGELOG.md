@@ -39,6 +39,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exposes explicitly named local-only parse/link/validate entry points for
   Program materialization; existing local-first/global-fallback overloads
   remain unchanged.
+  Registry entries now record canonical exact executable dependency edges for
+  transitive admission closure, and local-only condition checks cover legacy
+  keyed-edge documents without consulting process-global registries.
 
 - **SQLite Harness record store (issue #147 follow-up).** Added the optional
   `neograph::mcp_sqlite` target and `SqliteHarnessRecordStore` for WAL-backed,

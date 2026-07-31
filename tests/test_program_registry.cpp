@@ -5,6 +5,7 @@
 #include "registry_access.h"
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <stdexcept>
@@ -21,20 +22,22 @@ std::string digest(char value) {
     return "sha256:" + std::string(64, value);
 }
 
-ExecutableManifest executable(ExecutableKind           kind,
-                              std::string              name,
-                              std::string              version,
-                              std::string              implementation_digest,
-                              std::string              attestation,
-                              EffectMode               effect_mode  = EffectMode::Brokered,
-                              std::vector<std::string> capabilities = {},
-                              std::vector<std::string> effects      = {}) {
+ExecutableManifest executable(ExecutableKind                  kind,
+                              std::string                     name,
+                              std::string                     version,
+                              std::string                     implementation_digest,
+                              std::string                     attestation,
+                              EffectMode                      effect_mode  = EffectMode::Brokered,
+                              std::vector<std::string>        capabilities = {},
+                              std::vector<std::string>        effects      = {},
+                              std::vector<ExecutableIdentity> required_executables = {}) {
     return ExecutableManifest{
         {kind, std::move(name), std::move(version), std::move(implementation_digest)},
         effect_mode,
         std::move(attestation),
         std::move(capabilities),
-        std::move(effects)};
+        std::move(effects),
+        std::move(required_executables)};
 }
 
 class SnapshotNode final : public GraphNode {
@@ -120,6 +123,98 @@ TEST(RegistrySnapshotTest, DeclaredIdentityChangesAlterFingerprint) {
     const auto baseline = make_snapshot("1.0.0", digest('1'));
     EXPECT_NE(baseline.fingerprint(), make_snapshot("1.0.1", digest('1')).fingerprint());
     EXPECT_NE(baseline.fingerprint(), make_snapshot("1.0.0", digest('2')).fingerprint());
+}
+
+TEST(RegistrySnapshotTest, ExactDependencyEdgesAreCanonicalAndFingerprintSensitive) {
+    const auto tool = ExecutableIdentity{ExecutableKind::Tool, "tool", "1.0.0", digest('1')};
+    const auto provider =
+        ExecutableIdentity{ExecutableKind::Provider, "provider", "1.0.0", digest('2')};
+    const auto alternate =
+        ExecutableIdentity{ExecutableKind::Provider, "alternate", "1.0.0", digest('3')};
+
+    const auto make_snapshot = [&](bool reverse_dependencies, bool use_alternate) {
+        RegistrySnapshotBuilder builder;
+        builder.add_tool(executable(ExecutableKind::Tool, tool.name, tool.semantic_version,
+                                    tool.implementation_digest, "attestation:tool"),
+                         ToolMetadata{json::object(), json::object()});
+        builder.add_provider(
+            executable(ExecutableKind::Provider, provider.name, provider.semantic_version,
+                       provider.implementation_digest, "attestation:provider", EffectMode::Brokered,
+                       {}, {}, {tool}),
+            ProviderMetadata{json::object(), json::object()});
+        builder.add_provider(
+            executable(ExecutableKind::Provider, alternate.name, alternate.semantic_version,
+                       alternate.implementation_digest, "attestation:alternate"),
+            ProviderMetadata{json::object(), json::object()});
+        std::vector<ExecutableIdentity> dependencies =
+            use_alternate ? std::vector<ExecutableIdentity>{alternate, tool}
+                          : std::vector<ExecutableIdentity>{provider, tool};
+        if (reverse_dependencies) std::reverse(dependencies.begin(), dependencies.end());
+        builder.add_node(
+            executable(ExecutableKind::Node, "node", "1.0.0", digest('4'), "attestation:node",
+                       EffectMode::Brokered, {}, {}, std::move(dependencies)),
+            factory(), json::object(), json::object());
+        return std::move(builder).build();
+    };
+
+    const auto first  = make_snapshot(false, false);
+    const auto second = make_snapshot(true, false);
+    EXPECT_EQ(first.fingerprint(), second.fingerprint());
+    EXPECT_EQ(first.serialize_canonical(), second.serialize_canonical());
+    ASSERT_TRUE(first.find(ExecutableKind::Node, "node").has_value());
+    EXPECT_EQ(first.find(ExecutableKind::Node, "node")->required_executables,
+              (std::vector<ExecutableIdentity>{provider, tool}));
+    EXPECT_NE(first.fingerprint(), make_snapshot(false, true).fingerprint());
+}
+
+TEST(RegistrySnapshotTest, RejectsInvalidExactDependencyEdges) {
+    const auto provider =
+        ExecutableIdentity{ExecutableKind::Provider, "provider", "1.0.0", digest('1')};
+
+    RegistrySnapshotBuilder missing;
+    missing.add_reducer(executable(ExecutableKind::Reducer, "reducer", "1.0.0", digest('2'),
+                                   "attestation:reducer", EffectMode::Brokered, {}, {}, {provider}),
+                        [](const json&, const json& value) { return json(value); });
+    EXPECT_THROW((void)std::move(missing).build(), std::invalid_argument);
+
+    RegistrySnapshotBuilder mismatched;
+    mismatched.add_provider(
+        executable(ExecutableKind::Provider, provider.name, provider.semantic_version, digest('3'),
+                   "attestation:provider"),
+        ProviderMetadata{json::object(), json::object()});
+    mismatched.add_reducer(
+        executable(ExecutableKind::Reducer, "reducer", "1.0.0", digest('2'), "attestation:reducer",
+                   EffectMode::Brokered, {}, {}, {provider}),
+        [](const json&, const json& value) { return json(value); });
+    EXPECT_THROW((void)std::move(mismatched).build(), std::invalid_argument);
+
+    RegistrySnapshotBuilder duplicate;
+    EXPECT_THROW(
+        duplicate.add_reducer(
+            executable(ExecutableKind::Reducer, "reducer", "1.0.0", digest('2'),
+                       "attestation:reducer", EffectMode::Brokered, {}, {}, {provider, provider}),
+            [](const json&, const json& value) { return json(value); }),
+        std::invalid_argument);
+
+    auto ambiguous             = provider;
+    ambiguous.semantic_version = "2.0.0";
+    RegistrySnapshotBuilder ambiguous_builder;
+    EXPECT_THROW(
+        ambiguous_builder.add_reducer(
+            executable(ExecutableKind::Reducer, "reducer", "1.0.0", digest('2'),
+                       "attestation:reducer", EffectMode::Brokered, {}, {}, {provider, ambiguous}),
+            [](const json&, const json& value) { return json(value); }),
+        std::invalid_argument);
+
+    const auto unrelated =
+        ExecutableIdentity{ExecutableKind::Tool, "unrelated", "1.0.0", digest('3')};
+    RegistrySnapshotBuilder imported_extra;
+    EXPECT_THROW(imported_extra.add_imported(
+                     executable(ExecutableKind::Imported, "export", provider.semantic_version,
+                                provider.implementation_digest, "attestation:import",
+                                EffectMode::Brokered, {}, {}, {provider, unrelated}),
+                     ImportedExecutableMetadata{"module", "export", digest('4'), provider}),
+                 std::invalid_argument);
 }
 
 TEST(RegistrySnapshotTest, RejectsDuplicateNamesAndInvalidTrustedNativeMetadata) {

@@ -464,6 +464,31 @@ TEST(ProgramVersionTest, RoundTripsAndNormalizesReceiptOrder) {
     EXPECT_EQ(parsed.core_materialization_receipt().plans.front().name, "alpha");
 }
 
+TEST(ProgramVersionTest, RejectsSchemaInvalidTokenStringsInConstructorAndParser) {
+    ProgramBundle bundle(make_bundle_data(make_source()));
+
+    auto padded_dependency                                      = make_version_data(bundle);
+    padded_dependency.dependency_receipts.front().dependency_id = " module:zeta";
+    EXPECT_THROW((void)ProgramVersion(std::move(padded_dependency)), std::invalid_argument);
+
+    auto controlled_compiler                                           = make_version_data(bundle);
+    controlled_compiler.core_materialization_receipt.compiler_build_id = "compiler\nbuild";
+    EXPECT_THROW((void)ProgramVersion(std::move(controlled_compiler)), std::invalid_argument);
+
+    auto padded_plan                                            = make_version_data(bundle);
+    padded_plan.core_materialization_receipt.plans.front().name = "beta ";
+    EXPECT_THROW((void)ProgramVersion(std::move(padded_plan)), std::invalid_argument);
+
+    auto padded_scope            = make_version_data(bundle);
+    padded_scope.ownership_scope = " tenant:example";
+    EXPECT_THROW((void)ProgramVersion(std::move(padded_scope)), std::invalid_argument);
+
+    const ProgramVersion valid(make_version_data(bundle));
+    auto                 stored                       = json::parse(valid.serialize_canonical());
+    stored["dependency_receipts"][0]["dependency_id"] = "module:alpha ";
+    EXPECT_THROW((void)ProgramVersion::parse(stored.dump()), std::invalid_argument);
+}
+
 TEST(ProgramVersionTest, RejectsNestedUnknownFieldsAndIdentityEnvelopeTampering) {
     ProgramBundle  bundle(make_bundle_data(make_source()));
     ProgramVersion version(make_version_data(bundle));
@@ -544,9 +569,9 @@ TEST(ProgramStoredValueTest, V1CanonicalBytesAndIdsMatchKnownVectors) {
     ProgramVersion version(std::move(version_data));
 
     const std::string expected_version =
-        R"JSON({"admission_profile":{"allowed_effect_modes":["brokered"],"allowed_executables":[],"allowed_source_kinds":["canonical_json"],"fingerprint":"sha256:5d75f6009732444d1e6a24150af5031c6def8b6d77e6fac758ea77f7801ddfeb","format":"neograph-admission-profile","id":"vector-profile","max_program_schema_version":1,"mode":"multi_tenant","registry_fingerprint":"sha256:344ccd59eca88ce29d7e548acec3cfc24a441c5a81470ca6db7be45f1ea09c0b","semantic_version":"1.0.0","storage_schema_version":1},"bundle_id":"sha256:9f22330702d0eed754f2b42fc4fa269d5083d0da42a5a7c69cc205c8a9ef2ebe","core_materialization_receipt":{"compiler_build_id":"vector-compiler","plans":[{"compiled_plan_identity":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","name":"main"}],"registry_snapshot_fingerprint":"sha256:344ccd59eca88ce29d7e548acec3cfc24a441c5a81470ca6db7be45f1ea09c0b"},"dependency_receipts":[],"format":"neograph-program-version","id":"sha256:717c86a4f312df2b7fdcb59b35880380146f543f986be957653dd07d2040f9ed","ownership_scope":"tenant:vector","policy_snapshot":{"admission_profile_fingerprint":"sha256:5d75f6009732444d1e6a24150af5031c6def8b6d77e6fac758ea77f7801ddfeb","allowed_capabilities":[],"allowed_effects":[],"allowed_module_digests":[],"budget_ceiling":{"max_child_depth":1,"max_concurrency":1,"max_core_steps":1,"max_dynamic_compiles":1,"max_program_operations":1,"max_total_children":1,"model_tokens":1,"monetary_microunits":1,"wall_time_ms":1},"fingerprint":"sha256:763853a64ace13aea58aaa713a7ed8f01dc6104afa340516b7ddbb4cfa616923","format":"neograph-policy-snapshot","id":"vector-policy","owner_scope":"tenant:vector","registry_fingerprint":"sha256:344ccd59eca88ce29d7e548acec3cfc24a441c5a81470ca6db7be45f1ea09c0b","semantic_version":"1.0.0","storage_schema_version":1},"storage_schema_version":1})JSON";
+        R"JSON({"admission_profile":{"allowed_effect_modes":["brokered"],"allowed_executables":[],"allowed_source_kinds":["canonical_json"],"fingerprint":"sha256:fc9e0cb8678edc425f1dec30012cf2fbb8bce5fa7798e6063dae9c2ce3e277d4","format":"neograph-admission-profile","id":"vector-profile","max_program_schema_version":1,"mode":"multi_tenant","registry_fingerprint":"sha256:c685c33a3d9d439451423bd97791ab3bc6daa0e3aa623a38258cef18a6ae3e2d","semantic_version":"1.0.0","storage_schema_version":1},"bundle_id":"sha256:9f22330702d0eed754f2b42fc4fa269d5083d0da42a5a7c69cc205c8a9ef2ebe","core_materialization_receipt":{"compiler_build_id":"vector-compiler","plans":[{"compiled_plan_identity":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","name":"main"}],"registry_snapshot_fingerprint":"sha256:c685c33a3d9d439451423bd97791ab3bc6daa0e3aa623a38258cef18a6ae3e2d"},"dependency_receipts":[],"format":"neograph-program-version","id":"sha256:25ef13bae8657f9fae18c5f9b53032c4078ce48c9824f9df24de0aac6b3f6e29","ownership_scope":"tenant:vector","policy_snapshot":{"admission_profile_fingerprint":"sha256:fc9e0cb8678edc425f1dec30012cf2fbb8bce5fa7798e6063dae9c2ce3e277d4","allowed_capabilities":[],"allowed_effects":[],"allowed_module_digests":[],"budget_ceiling":{"max_child_depth":1,"max_concurrency":1,"max_core_steps":1,"max_dynamic_compiles":1,"max_program_operations":1,"max_total_children":1,"model_tokens":1,"monetary_microunits":1,"wall_time_ms":1},"fingerprint":"sha256:ffac3e7ab1a42f3eca91798340027ded3c19e0e93c56d4075723d9a3c805c1e2","format":"neograph-policy-snapshot","id":"vector-policy","owner_scope":"tenant:vector","registry_fingerprint":"sha256:c685c33a3d9d439451423bd97791ab3bc6daa0e3aa623a38258cef18a6ae3e2d","semantic_version":"1.0.0","storage_schema_version":1},"storage_schema_version":1})JSON";
     EXPECT_EQ(version.id(),
-              "sha256:717c86a4f312df2b7fdcb59b35880380146f543f986be957653dd07d2040f9ed");
+              "sha256:25ef13bae8657f9fae18c5f9b53032c4078ce48c9824f9df24de0aac6b3f6e29");
     EXPECT_EQ(version.serialize_canonical(), expected_version);
 }
 

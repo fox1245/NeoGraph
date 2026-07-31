@@ -44,7 +44,7 @@
     "entry": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "name", "semantic_version", "implementation_digest", "effect_mode", "attestation_id", "required_capabilities", "declared_effects", "metadata"],
+      "required": ["kind", "name", "semantic_version", "implementation_digest", "effect_mode", "attestation_id", "required_capabilities", "declared_effects", "required_executables", "metadata"],
       "properties": {
         "kind": { "enum": ["node", "reducer", "condition", "provider", "tool", "imported"] },
         "name": { "$ref": "#/$defs/nonempty" },
@@ -54,6 +54,11 @@
         "attestation_id": { "$ref": "#/$defs/nonempty" },
         "required_capabilities": { "$ref": "#/$defs/stringSet" },
         "declared_effects": { "$ref": "#/$defs/stringSet" },
+        "required_executables": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/identity" }
+        },
         "metadata": { "type": "object" }
       },
       "allOf": [

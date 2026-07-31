@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=f2880aa80b6972d92480cd2326c3e30415da12ba158d9cec878d05c116f65490 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=2019a958768e79633c822a6e4c5567068d0e7f11264e9bb3049ef4449d970178 -->
 # 更新日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -34,6 +34,8 @@ NeoGraph 的所有显著变更均记录于本文件。
   严格的规范清单及域分离指纹；`ProgramVersion` 会以故障关闭方式校验跨对象
   指纹一致性。Core 新增了用于 Program 物化的显式仅本地
   parse/link/validate 入口，现有本地优先/全局回退重载保持不变。
+  注册表条目现以规范形式记录精确的可执行对象依赖边，用于传递式准入闭包；
+  仅本地条件检查也会覆盖旧版键值 edge 文档，且不会查询进程全局注册表。
 
 - **SQLite Harness 记录存储（issue #147 后续）。** 新增了可选的
   `neograph::mcp_sqlite` 目标和 `SqliteHarnessRecordStore`，用于 WAL 支持、

@@ -46,9 +46,8 @@ void require_object(const json& value, std::string_view name) {
     }
 }
 
-void require_nonempty_utf8(std::string_view value, std::string_view name) {
-    if (value.empty()) throw std::invalid_argument(std::string(name) + " must not be empty");
-    detail::validate_utf8(value);
+void require_token(std::string_view value, std::string_view name) {
+    detail::validate_token(value, name);
 }
 
 void require_sha256(std::string_view value, std::string_view name) {
@@ -58,7 +57,7 @@ void require_sha256(std::string_view value, std::string_view name) {
 }
 
 void validate_core_plan(const CorePlanIdentity& plan) {
-    require_nonempty_utf8(plan.name, "Core materialization plan name");
+    require_token(plan.name, "Core materialization plan name");
     require_sha256(plan.compiled_plan_identity, "Core materialization plan identity");
 }
 
@@ -91,14 +90,14 @@ void normalize_data(ProgramVersionData& data) {
         throw std::invalid_argument(
             "Program version TrustedNative policy lacks neograph.native.trusted capability");
     }
-    require_nonempty_utf8(data.ownership_scope, "Program version ownership_scope");
+    require_token(data.ownership_scope, "Program version ownership_scope");
     if (data.ownership_scope != data.policy_snapshot.owner_scope()) {
         throw std::invalid_argument(
             "Program version ownership_scope does not match policy owner_scope");
     }
 
     for (const auto& receipt : data.dependency_receipts) {
-        require_nonempty_utf8(receipt.dependency_id, "Dependency receipt id");
+        require_token(receipt.dependency_id, "Dependency receipt id");
         require_sha256(receipt.content_identity, "Dependency content identity");
     }
     std::sort(
@@ -112,8 +111,7 @@ void normalize_data(ProgramVersionData& data) {
     }
 
     auto& materialization = data.core_materialization_receipt;
-    require_nonempty_utf8(materialization.compiler_build_id,
-                          "Core materialization compiler build id");
+    require_token(materialization.compiler_build_id, "Core materialization compiler build id");
     require_sha256(materialization.registry_snapshot_fingerprint,
                    "Core materialization registry snapshot fingerprint");
     if (materialization.registry_snapshot_fingerprint !=

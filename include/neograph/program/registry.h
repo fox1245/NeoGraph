@@ -31,11 +31,12 @@ NEOGRAPH_PROGRAM_API std::string_view to_string(EffectMode mode) noexcept;
 NEOGRAPH_PROGRAM_API EffectMode       effect_mode_from_string(std::string_view value);
 
 struct ExecutableManifest {
-    ExecutableIdentity       identity;
-    EffectMode               effect_mode = EffectMode::Brokered;
-    std::string              attestation_id;  // host declaration id; not a signature
-    std::vector<std::string> required_capabilities;
-    std::vector<std::string> declared_effects;
+    ExecutableIdentity              identity;
+    EffectMode                      effect_mode = EffectMode::Brokered;
+    std::string                     attestation_id;  // host declaration id; not a signature
+    std::vector<std::string>        required_capabilities;
+    std::vector<std::string>        declared_effects;
+    std::vector<ExecutableIdentity> required_executables;
 };
 
 struct ProviderMetadata {
