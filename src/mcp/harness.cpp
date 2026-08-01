@@ -104,13 +104,16 @@ program::ProgramEffectReconciliation parse_reconciliation(std::string_view value
     if (value == "unknown") return program::ProgramEffectReconciliation::Unknown;
     throw std::invalid_argument("unsupported Harness effect reconciliation");
 }
-std::string alias(const program::ProgramBundle&              bundle,
-                  std::string                                policy,
-                  const HarnessCapabilityBindingRequest& bindings) {
+std::string alias(const program::ProgramBundle&                    bundle,
+                  std::string                                      policy,
+                  const HarnessCapabilityBindingRequest&           bindings,
+                  std::string_view                                 artifact_binding_identity) {
     auto bundle_id = bundle.id();
     auto binding_id = program::detail::sha256_identity(
         "harness-artifact-binding/v1",
-        program::detail::canonical_json_bytes(bindings_json(bindings)));
+        program::detail::canonical_json_bytes(
+            {{"requested_bindings", bindings_json(bindings)},
+             {"host_binding_identity", artifact_binding_identity}}));
     std::replace(bundle_id.begin(), bundle_id.end(), ':', '-');
     std::replace(policy.begin(), policy.end(), ':', '-');
     std::replace(binding_id.begin(), binding_id.end(), ':', '-');
@@ -399,6 +402,32 @@ CallToolResult mcp_result(json value, std::string message) {
     result.structured_content = std::move(value);
     return result;
 }
+json harness_preset_contracts() {
+    return {
+        {"fanout_judge",
+         {{"mode", "preset"}, {"core_name", "harness_fanout_judge"},
+          {"description", "Run bounded workers and aggregate their findings."}}},
+        {"pr_review_panel",
+         {{"mode", "preset"}, {"core_name", "harness_pr_review_panel"},
+          {"description", "Run a read-only review panel with evidence requirements."}}},
+        {"bug_triage",
+         {{"mode", "preset"}, {"core_name", "harness_bug_triage"},
+          {"description", "Run bounded workers for reproducible bug triage."}}},
+        {"research_synthesis",
+         {{"mode", "preset"}, {"core_name", "harness_research_synthesis"},
+          {"description", "Run bounded research workers and synthesize evidence."}}},
+    };
+}
+
+json harness_preset_names() {
+    return json::array(
+        {"fanout_judge", "pr_review_panel", "bug_triage", "research_synthesis"});
+}
+
+json harness_admission_schema(const HarnessProgramSnapshots& snapshots) {
+    return snapshots.admission_profile.manifest();
+}
+
 json compile_schema() {
     return json::parse(
         R"JSON({"type":"object","required":["ok","diagnostics","artifacts"],"properties":{"ok":{"type":"boolean"},"artifact_id":{"type":"string"},"diagnostics":{"type":"array"},"artifacts":{"type":"object"}},"additionalProperties":true})JSON");
@@ -498,7 +527,9 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             auto t  = HarnessRequestTranslator::translate(request, resources.snapshots.registry,
                                                           config.translation_defaults);
             auto b  = resources.compiler->compile(t.source);
-            auto id = alias(b, resources.snapshots.policy.fingerprint(), t.bindings);
+            auto id =
+                alias(b, resources.snapshots.policy.fingerprint(), t.bindings,
+                      resources.artifact_binding_identity);
             auto p  = t.wire.legacy_projection;
             auto source_map        = source_map_json(t.source.source_map());
             p["program_bindings"]  = bindings_json(t.bindings);
@@ -579,6 +610,9 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
     }
     json start(const json& a) {
         if (!a.is_object()) throw std::invalid_argument("start arguments must be object");
+        if (std::dynamic_pointer_cast<FileHarnessRecordStore>(config.record_store))
+            throw std::invalid_argument(
+                "FileHarnessRecordStore cannot start Program runs; use SQLite");
         std::string                                             artifact_id;
         std::string                                             mode = "live";
         std::optional<program::ExactProgramCheckpointReference> fork_source;
@@ -813,8 +847,53 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
         auto call = a.at("call_id").get<std::string>();
         auto x    = run(id);
         if (!x) throw std::invalid_argument("unknown Harness run: " + id);
-        auto handle = retained_handle(x);
-        auto next   = [&]() -> program::ProgramHandle {
+        std::unique_lock run_lock(*x->guard);
+        auto            handle = x->handle;
+        const auto      before = handle.snapshot();
+        bool       duplicate = false;
+        const auto now = static_cast<std::uint64_t>(now_ms());
+        if (a.contains("resolution")) {
+            if (const auto pending = before.pending_effect()) {
+                const auto resolution =
+                    parse_reconciliation(a.at("resolution").get<std::string>());
+                const auto update = [&] {
+                    if (before.continuation().state == program::ContinuationState::Interrupted &&
+                        resolution == program::ProgramEffectReconciliation::Unknown &&
+                        !a.contains("result")) {
+                        if (pending->call_id() != call)
+                            return pending->reconcile(call, pending->effect_id(), resolution,
+                                                       std::nullopt, now);
+                        return pending->mark_outcome_unknown(now);
+                    }
+                    return pending->reconcile(
+                        call, pending->effect_id(), resolution,
+                        a.contains("result") ? std::optional<json>{a.at("result")} : std::nullopt,
+                        now);
+                }();
+                duplicate = update.disposition == program::ProgramPendingDisposition::Duplicate;
+            }
+        } else if (a.contains("result")) {
+            if (const auto pending = before.pending_input()) {
+                duplicate = pending->submit(call, a.at("result"), now).disposition ==
+                            program::ProgramPendingDisposition::Duplicate;
+            } else if (const auto pending = before.pending_effect()) {
+                duplicate = pending->submit(call, pending->effect_id(), a.at("result"), now)
+                                .disposition == program::ProgramPendingDisposition::Duplicate;
+            }
+        }
+        if (duplicate) {
+            run_lock.unlock();
+            return {{"accepted", true},
+                    {"duplicate", true},
+                    {"run_id", id},
+                    {"call_id", call},
+                    {"status", snapshot(x).at("status")}};
+        }
+        const auto before_journal = before.journal_head();
+        const auto before_events  = before.event_sequence();
+        const auto before_effects = before.effect_sequence();
+
+        auto next = [&]() -> program::ProgramHandle {
             if (a.contains("resolution")) {
                 program::ProgramEffectResolution value;
                 value.pending_id = call;
@@ -831,12 +910,14 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             value.pending_id = call;
             return handle.resume(*x->runtime, std::move(value));
         }();
-        {
-            std::lock_guard lock(*x->guard);
-            x->handle = std::move(next);
-        }
+        const auto after = next.snapshot();
+        duplicate = duplicate || (before_journal == after.journal_head() &&
+                                  before_events == after.event_sequence() &&
+                                  before_effects == after.effect_sequence());
+        if (!duplicate) x->handle = std::move(next);
+        run_lock.unlock();
         return {{"accepted", true},
-                {"duplicate", false},
+                {"duplicate", duplicate},
                 {"run_id", id},
                 {"call_id", call},
                 {"status", snapshot(x).at("status")}};
@@ -866,7 +947,9 @@ json HarnessService::schema() const {
             {"request_schema", harness_program_request_schema()},
             {"output_schema", harness_program_output_schema()},
             {"node_palette", impl_->resources.snapshots.registry.manifest()},
-            {"presets", json::array({"review", "triage", "research"})},
+            {"admission_profile", harness_admission_schema(impl_->resources.snapshots)},
+            {"presets", harness_preset_names()},
+            {"preset_contracts", harness_preset_contracts()},
             {"capabilities",
              {{"compile", true},
               {"run", true},
@@ -956,7 +1039,10 @@ void HarnessService::register_tools(MCPServer& server) {
                                {"request_schema", harness_program_request_schema()},
                                {"output_schema", harness_program_output_schema()},
                                {"node_palette", a->resources.snapshots.registry.manifest()},
-                               {"presets", json::array({"review", "triage", "research"})}},
+                               {"admission_profile",
+                                harness_admission_schema(a->resources.snapshots)},
+                               {"presets", harness_preset_names()},
+                               {"preset_contracts", harness_preset_contracts()}},
                               "NeoGraph Harness Program schema");
         });
     server.register_tool(tool_definition("neograph_compile", "Compile Harness",

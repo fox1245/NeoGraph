@@ -12,6 +12,7 @@
 #include <asio/strand.hpp>
 #include <asio/system_executor.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -79,6 +80,8 @@ public:
     const std::shared_ptr<graph::Store>              state_store;
     const std::shared_ptr<ProgramTransitionStore>    transitions;
     const std::shared_ptr<graph::CancelToken>        cancel_token;
+    const std::shared_ptr<std::atomic_bool>          budget_exhausted =
+        std::make_shared<std::atomic_bool>(false);
 
     bool              cancel(CancellationCause cause) noexcept;
     CancellationCause cancellation_cause() const noexcept;

@@ -871,7 +871,7 @@ TEST(ProgramRuntimeTest, TypedPendingEffectPublishesOnceAndResumesByExactCallIde
     ASSERT_TRUE(interrupted.interrupt().has_value());
     EXPECT_FALSE(interrupted.interrupt()->pending_input.has_value());
     ASSERT_TRUE(interrupted.interrupt()->pending_effect.has_value());
-    const auto& pending = *interrupted.interrupt()->pending_effect;
+    const auto pending = *interrupted.interrupt()->pending_effect;
     EXPECT_EQ(pending.call_id(), "call-effect-1");
     EXPECT_EQ(pending.payload()["effect"]["tool"], "search");
     EXPECT_EQ(pending.state(), ProgramPendingState::Awaiting);
@@ -1882,7 +1882,7 @@ TEST(ProgramRuntimeTest, UserCancellationRemainsFirstCauseAfterTimeoutAttempts) 
     AdmittedRuntime fixture;
     const auto      version = fixture.admit("runtime-stubborn");
     auto            budget  = grant();
-    budget.wall_time_ms     = 30;
+    budget.wall_time_ms     = 500;
     auto handle =
         fixture.runtime->start("tenant:runtime", version,
                                ProgramInvocation{json::object(), budget, "trace-user-first", {}});

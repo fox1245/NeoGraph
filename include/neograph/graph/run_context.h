@@ -10,6 +10,7 @@
 #include <neograph/tool_dispatch.h>
 #include <neograph/types.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -31,6 +32,14 @@ struct RunContext {
 
     /// Shared token accounting sink for this run and its subgraphs.
     std::shared_ptr<UsageAccumulator> usage;
+
+    /// Program-supplied token ceiling and terminal signal. Zero/null leave generic Core runs unchanged.
+    std::uint64_t                     model_token_budget = 0;
+    std::shared_ptr<std::atomic_bool> budget_exhausted;
+    /// Durable Program run identity used by host-brokered journal effects.
+    std::string run_id;
+    /// Shared sibling-cancellation scope for budget-aware nodes.
+    std::shared_ptr<CancelToken> budget_cancel_token;
 
     /// Absolute monotonic-clock deadline supplied through RunMetadata, when set.
     std::optional<std::chrono::steady_clock::time_point> deadline;

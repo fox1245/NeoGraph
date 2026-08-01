@@ -143,6 +143,11 @@ struct RunConfig {
     /// Whatever ends up here is what ``RunResult::usage`` reports.
     std::shared_ptr<UsageAccumulator> usage;
 
+    /// Optional hard model-token ceiling enforced by budget-aware nodes.
+    std::uint64_t model_token_budget = 0;
+    /// Set by a node that crossed model_token_budget so the enclosing runtime can classify it.
+    std::shared_ptr<std::atomic_bool> budget_exhausted;
+
     /**
      * @brief Auto-resume from latest checkpoint for ``thread_id`` (v0.3.1+).
      *
@@ -184,6 +189,10 @@ struct RunConfig {
 struct RunMetadata {
     std::optional<std::chrono::steady_clock::time_point> deadline;
     std::string trace_id;
+    /// Durable Program run identity copied into RunContext for host journaling.
+    std::string run_id;
+    /// Shared sibling-cancellation scope for budget-aware nodes.
+    std::shared_ptr<CancelToken> budget_cancel_token;
 };
 
 /// @brief Normal, paused, or step-limited outcome of a successful run call.

@@ -5,9 +5,11 @@
 #include <neograph/program/replay.h>
 #include <neograph/provider.h>
 #include <neograph/tool.h>
+#include "harness_journal_internal.h"
 #include "../program/canonical_json.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <deque>
 #include <mutex>
 #include <stdexcept>
@@ -15,13 +17,36 @@
 namespace neograph::mcp {
 namespace {
 
+bool is_secret_host_key(std::string_view key) {
+    return key == "api_key" || key == "authorization" || key == "auth" ||
+           key == "bearer_token" || key == "credential" || key == "cookie" ||
+           key == "password" || key == "private_key" || key == "refresh_token" ||
+           key == "secret" || key == "session" || key == "session_id" ||
+           key == "token";
+}
+
+json non_secret_host_configuration(const json& value) {
+    if (value.is_array()) {
+        json result = json::array();
+        for (const auto& child : value) result.push_back(non_secret_host_configuration(child));
+        return result;
+    }
+    if (!value.is_object()) return value;
+    json result = json::object();
+    for (const auto& [key, child] : value.items()) {
+        if (!is_secret_host_key(key))
+            result[key] = non_secret_host_configuration(child);
+    }
+    return result;
+}
+
 std::string configured_binding_identity(std::string_view route_identity,
                                         const json&      host_configuration) {
     return program::detail::sha256_identity(
-        "harness-capability-binding/v1",
+        "harness-capability-binding/v2",
         program::detail::canonical_json_bytes(
             {{"route_identity", route_identity},
-             {"host_configuration", host_configuration}}));
+             {"host_configuration", non_secret_host_configuration(host_configuration)}}));
 }
 
 class HarnessBoundProvider final : public Provider {
@@ -159,6 +184,25 @@ public:
         call.policy = {{"evidence_required", config_.value("evidence_required", json::array())},
                        {"read_only", config_.value("read_only", false)}};
         call.resume_value = in.ctx.resume_value;
+        call.run_id       = in.ctx.run_id;
+        call.usage        = in.ctx.usage;
+        call.model_token_budget = in.ctx.model_token_budget;
+        call.budget_exhausted   = in.ctx.budget_exhausted;
+        const auto provider_timeout_ms = config_.at("provider_timeout_ms").get<std::uint64_t>();
+        const auto max_output_tokens = config_.at("max_output_tokens").get<std::uint64_t>();
+        const auto input_token_ceiling =
+            config_.at("input_token_ceiling").get<std::uint64_t>();
+        const auto max_tool_rounds =
+            config_.at("max_provider_tool_rounds").get<std::uint64_t>();
+        if (provider_timeout_ms == 0 || provider_timeout_ms % 1000 != 0 ||
+            max_output_tokens == 0 || input_token_ceiling == 0 || max_tool_rounds == 0) {
+            throw std::invalid_argument("Harness worker has invalid sealed provider limits");
+        }
+        call.worker["_harness_provider_budget"] = {
+            {"provider_timeout_seconds", provider_timeout_ms / 1000},
+            {"max_output_tokens", max_output_tokens},
+            {"input_token_ceiling", input_token_ceiling},
+        };
         for (const auto& id : config_.at("tool_ids")) {
             const auto found = provider_->tools().find(id.get<std::string>());
             if (found == provider_->tools().end())
@@ -166,10 +210,21 @@ public:
             call.tool_catalog.push_back(found->second);
         }
         json recorded_calls = json::array();
+        auto worker_cancel =
+            (call.model_token_budget != 0 && in.ctx.budget_cancel_token)
+                ? in.ctx.budget_cancel_token
+                : (in.ctx.cancel_token ? in.ctx.cancel_token->fork()
+                                        : std::make_shared<graph::CancelToken>());
         const auto attempts = config_.at("max_retries").get<std::size_t>() + 1;
         for (std::size_t attempt = 1; attempt <= attempts; ++attempt) {
-            call.attempt  = attempt;
-            auto response = provider_->executor()(call, in.ctx.cancel_token);
+            call.attempt = attempt;
+            detail::HarnessJournalContext journal_context;
+            journal_context.run_id    = call.run_id;
+            journal_context.node_id   = get_name();
+            journal_context.worker_id = call.worker.at("worker_id").get<std::string>();
+            journal_context.attempt   = attempt;
+            detail::ScopedHarnessJournalContext journal_scope(std::move(journal_context));
+            auto response = provider_->executor()(call, worker_cancel);
             recorded_calls.push_back(recorded_call(call, response));
             if (response.kind == HarnessWorkerResponseKind::AWAITING_TOOL_RESULTS ||
                 response.kind == HarnessWorkerResponseKind::INPUT_REQUIRED) {
@@ -203,9 +258,14 @@ public:
                 }
             } else {
                 call.repair_feedback = response.message;
-                if (response.kind == HarnessWorkerResponseKind::CANCELLED)
-                    throw graph::CancelledException(
-                        response.message.empty() ? "Harness worker cancelled" : response.message);
+                if (response.kind == HarnessWorkerResponseKind::CANCELLED) {
+                    if (!call.budget_exhausted ||
+                        !call.budget_exhausted->load(std::memory_order_acquire))
+                        throw graph::CancelledException(
+                            response.message.empty() ? "Harness worker cancelled"
+                                                     : response.message);
+                    break;
+                }
             }
         }
         co_return graph::NodeOutput{{graph::ChannelWrite{
@@ -260,14 +320,29 @@ public:
     }
 };
 
-program::ExecutableIdentity identity(program::ExecutableKind kind, std::string name, char digest) {
-    return {kind, std::move(name), "1.0.0", "sha256:" + std::string(64, digest)};
+program::ExecutableIdentity installed_node_identity(program::ExecutableKind kind,
+                                                    std::string            name,
+                                                    std::string_view       component,
+                                                    std::string_view       compiler_build_id) {
+    const json descriptor = {
+        {"component", component},
+        {"compiler_build_id", compiler_build_id},
+        {"kind", std::string(program::to_string(kind))},
+        {"name", name},
+        {"semantic_version", "1.0.0"},
+    };
+    return {kind, std::move(name), "1.0.0",
+            program::detail::sha256_identity(
+                "neograph-harness-installed-node/v1",
+                program::detail::canonical_json_bytes(descriptor))};
 }
 
-HarnessNodeRegistration worker_registration() {
+HarnessNodeRegistration worker_registration(std::string_view compiler_build_id) {
     HarnessNodeRegistration r;
     r.manifest = {
-        identity(program::ExecutableKind::Node, std::string(HARNESS_WORKER_NODE_TYPE), 'a'),
+        installed_node_identity(program::ExecutableKind::Node,
+                                std::string(HARNESS_WORKER_NODE_TYPE), "worker-node/v1",
+                                compiler_build_id),
         program::EffectMode::Brokered,
         "neograph-harness-worker-v1",
         {},
@@ -278,8 +353,8 @@ HarnessNodeRegistration worker_registration() {
         {"required",
          json::array({"worker_id", "instructions", "tool_ids", "tool_descriptions",
                       "output_schema", "provider_timeout_ms", "max_output_tokens",
-                      "max_retries", "max_provider_tool_rounds", "evidence_required",
-                      "read_only"})},
+                      "input_token_ceiling", "max_retries", "max_provider_tool_rounds",
+                      "evidence_required", "read_only"})},
         {"properties",
          {{"worker_id", {{"type", "string"}}},
           {"instructions", {{"type", "string"}}},
@@ -288,6 +363,7 @@ HarnessNodeRegistration worker_registration() {
           {"output_schema", {{"type", "object"}}},
           {"provider_timeout_ms", {{"type", "integer"}}},
           {"max_output_tokens", {{"type", "integer"}}},
+          {"input_token_ceiling", {{"type", "integer"}}},
           {"max_retries", {{"type", "integer"}}},
           {"max_provider_tool_rounds", {{"type", "integer"}}},
           {"evidence_required", {{"type", "array"}, {"items", {{"type", "string"}}}}},
@@ -304,10 +380,12 @@ HarnessNodeRegistration worker_registration() {
     return r;
 }
 
-HarnessNodeRegistration judge_registration() {
+HarnessNodeRegistration judge_registration(std::string_view compiler_build_id) {
     HarnessNodeRegistration r;
     r.manifest = {
-        identity(program::ExecutableKind::Node, std::string(HARNESS_JUDGE_NODE_TYPE), 'b'),
+        installed_node_identity(program::ExecutableKind::Node,
+                                std::string(HARNESS_JUDGE_NODE_TYPE), "judge-node/v1",
+                                compiler_build_id),
         program::EffectMode::Brokered,
         "neograph-harness-judge-v1",
         {},
@@ -441,11 +519,19 @@ program::RecordedBindingSet make_recorded_binding(
 HarnessServiceResources make_harness_program_service_resources(HarnessProgramHostConfig config) {
     if (!config.worker_executor || !config.checkpoints || !config.state_store ||
         (!config.snapshots.registry.tools.empty() && !config.capability_executor) ||
-        config.compiler_build_id.empty() || config.snapshots.owner_scope.empty())
+        config.compiler_build_id.empty() || config.provider_binding_identity.empty() ||
+        config.snapshots.owner_scope.empty() || !config.provider_host_configuration.is_object())
         throw std::invalid_argument("incomplete Harness Program host config");
 
-    config.snapshots.registry.worker = worker_registration();
-    config.snapshots.registry.judge  = judge_registration();
+    config.snapshots.registry.worker = worker_registration(config.compiler_build_id);
+    config.snapshots.registry.judge  = judge_registration(config.compiler_build_id);
+    std::map<std::string, json> tool_metadata;
+    for (const auto& registration : config.snapshots.registry.tools) {
+        tool_metadata.emplace(
+            registration.manifest.identity.name,
+            json{{"input_schema", registration.metadata.input_schema},
+                 {"output_schema", registration.metadata.output_schema}});
+    }
     auto snapshots                   = build_harness_program_snapshots(std::move(config.snapshots));
     auto engines =
         config.engines ? config.engines : std::make_shared<program::EngineGenerationCache>();
@@ -454,25 +540,40 @@ HarnessServiceResources make_harness_program_service_resources(HarnessProgramHos
     auto worker_executor           = std::move(config.worker_executor);
     auto capability_executor       = std::move(config.capability_executor);
     auto provider_binding_identity = std::move(config.provider_binding_identity);
+    auto provider_host_configuration = std::move(config.provider_host_configuration);
+    auto artifact_binding_identity =
+        configured_binding_identity(provider_binding_identity, provider_host_configuration);
     auto tool_binding_identities   = std::move(config.tool_binding_identities);
     auto registry                  = snapshots.registry;
     auto compiler_build_id         = std::move(config.compiler_build_id);
-    auto catalog_factory           = [registry, engines, compiler_build_id, worker_executor,
-                            capability_executor, provider_binding_identity,
-                            tool_binding_identities](
+    auto catalog_factory =
+        [registry, engines, compiler_build_id, worker_executor, capability_executor,
+         provider_binding_identity, provider_host_configuration, tool_binding_identities,
+         tool_metadata](
                                std::shared_ptr<program::ProgramStore> store,
                                const HarnessCapabilityBindingRequest& requested) {
         program::CatalogConfig cc{std::move(store), registry, engines, compiler_build_id, {}, 1};
-        cc.capability_binder = [requested, worker_executor, capability_executor,
-                                provider_binding_identity, tool_binding_identities](
-                                   const std::vector<program::ExecutableIdentity>& closure) {
-            program::CatalogCapabilityBinding  result;
-            std::map<std::string, json>        tool_configs;
-            std::vector<std::unique_ptr<Tool>> tools;
-            for (const auto& binding : requested.tools)
-                tool_configs.emplace(binding.host_configuration.at("id").get<std::string>(),
-                                     binding.host_configuration);
-            json provider_configuration = {{"tools", json::object()}};
+        cc.capability_binder =
+            [requested, worker_executor, capability_executor, provider_binding_identity,
+             provider_host_configuration, tool_binding_identities, tool_metadata](
+                const std::vector<program::ExecutableIdentity>& closure) {
+                program::CatalogCapabilityBinding  result;
+                std::map<std::string, json>       tool_configs;
+                std::vector<std::unique_ptr<Tool>> tools;
+                for (const auto& binding : requested.tools) {
+                    const auto id       = binding.host_configuration.at("id").get<std::string>();
+                    const auto metadata = tool_metadata.find(id);
+                    if (metadata == tool_metadata.end())
+                        throw std::invalid_argument("missing exact Harness Tool metadata");
+                    auto provider_configuration = binding.host_configuration;
+                    provider_configuration["input_schema"] =
+                        metadata->second.at("input_schema");
+                    provider_configuration["output_schema"] =
+                        metadata->second.at("output_schema");
+                    tool_configs.emplace(id, std::move(provider_configuration));
+                }
+            json provider_configuration = provider_host_configuration;
+            provider_configuration["tools"] = json::object();
             for (const auto& [id, definition] : tool_configs)
                 provider_configuration["tools"][id] = definition;
             for (const auto& executable : closure) {
@@ -531,7 +632,7 @@ HarnessServiceResources make_harness_program_service_resources(HarnessProgramHos
     auto owner_scope = snapshots.policy.owner_scope();
     return {std::move(snapshots), std::move(compiler), std::move(catalog_factory),
             std::move(runtime_factory), std::move(recorded_binding_factory),
-            std::move(owner_scope)};
+            std::move(owner_scope), std::move(artifact_binding_identity)};
 }
 
 }  // namespace neograph::mcp

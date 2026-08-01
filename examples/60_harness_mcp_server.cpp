@@ -98,6 +98,15 @@ int main() {
         provider = neograph::llm::OpenAIProvider::create_shared(provider_config);
     }
 
+    constexpr const char* kProviderBindingIdentity =
+        "sha256:7df70a8b692b53148480c9eb019db87cac5c2c7e1c53a351ff628651ab219c14";
+    constexpr const char* kProviderImplementationDigest =
+        "sha256:67ac4b0f2d57b2ca169623008f2fad2ff4ed726e05eb570a36f69fa4edad7847";
+    constexpr const char* kSupportModuleDigest =
+        "sha256:a328e0824ca6438669e42ee0bb8c42634cc9613d66240cdd649c36b3b279030d";
+    constexpr const char* kToolingModuleDigest =
+        "sha256:aa8500648d5b30cecb1ef06dcf2eb861b126928de6715ff54bbe7857105b285f";
+
     neograph::mcp::HarnessProviderExecutorConfig executor_config;
     executor_config.provider = provider;
     executor_config.model    = provider_config.default_model;
@@ -106,20 +115,25 @@ int main() {
     neograph::mcp::HarnessProgramHostConfig host_config;
     host_config.worker_executor =
         neograph::mcp::make_provider_harness_executor(std::move(executor_config));
-    host_config.compiler_build_id = "neograph-harness-example-v1";
-    host_config.provider_binding_identity = std::string(64, 'c');
+    host_config.compiler_build_id        = "neograph-harness-example-v1";
+    host_config.provider_binding_identity = kProviderBindingIdentity;
+    host_config.provider_host_configuration = {
+        {"base_url", provider_config.base_url},
+        {"model", provider_config.default_model},
+        {"provider", provider->get_name()},
+    };
     host_config.snapshots.owner_scope = "neograph-harness-example";
     const neograph::program::ExecutableIdentity provider_identity{
         neograph::program::ExecutableKind::Provider, "harness.provider", "1.0.0",
-        std::string(64, 'd')};
+        std::string(kProviderImplementationDigest)};
     host_config.snapshots.registry.provider = neograph::mcp::HarnessProviderRegistration{
         {provider_identity, neograph::program::EffectMode::Brokered,
          "neograph-harness-example-provider", {}, {}, {}},
         {neograph::json{{"type", "object"}}, neograph::json{{"type", "object"}}}};
     host_config.snapshots.allowed_module_digests = {
         provider_identity.implementation_digest,
-        std::string(64, 'a'),
-        std::string(64, 'b')};
+        kSupportModuleDigest,
+        kToolingModuleDigest};
     host_config.snapshots.budget_ceiling = {86400000, 100000000, 100000000,
                                             64, 10000, 1000, 1000, 64, 10000};
     host_config.checkpoints = std::make_shared<neograph::graph::InMemoryCheckpointStore>();

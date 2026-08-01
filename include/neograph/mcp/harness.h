@@ -13,11 +13,14 @@
 #include <neograph/program/runtime.h>
 #include <neograph/program/store.h>
 #include <neograph/graph/store.h>
+#include <neograph/types.h>
 #include <neograph/tool_set.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <functional>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <map>
@@ -57,6 +60,12 @@ struct HarnessWorkerCall {
     std::size_t attempt = 1;
     std::string repair_feedback;
     std::optional<json> resume_value;
+    /// Program-scoped accounting and cancellation budget supplied by the host node.
+    /// Durable Program run identity for effect journaling and pending records.
+    std::string run_id;
+    std::shared_ptr<UsageAccumulator> usage;
+    std::uint64_t                     model_token_budget = 0;
+    std::shared_ptr<std::atomic_bool> budget_exhausted;
 };
 
 /** Typed worker response; failure classes never masquerade as valid output. */
@@ -163,6 +172,8 @@ struct HarnessProgramHostConfig {
     std::shared_ptr<program::EngineGenerationCache> engines;
     std::string                              compiler_build_id;
     std::string                              provider_binding_identity;
+    /// Non-secret installed Provider route settings bound into Program receipts.
+    json                                     provider_host_configuration = json::object();
     std::map<std::string, std::string>       tool_binding_identities;
     std::size_t                              scheduler_threads = 1;
 };
@@ -195,6 +206,8 @@ struct HarnessServiceResources {
     HarnessProgramRuntimeFactory              make_program_runtime;
     HarnessRecordedBindingFactory             make_recorded_binding;
     std::string                               owner_scope;
+    /// Host configuration identity that makes an artifact safe to reconnect.
+    std::string                               artifact_binding_identity;
 };
 
 struct HarnessServiceConfig {

@@ -843,8 +843,10 @@ asio::awaitable<GraphEngine::SubgraphRunResult> GraphEngine::run_subgraph_async(
     const RunContext& parent,
     GraphStreamCallback cb) {
     RunMetadata metadata;
-    metadata.deadline = parent.deadline;
-    metadata.trace_id = parent.trace_id;
+    metadata.deadline            = parent.deadline;
+    metadata.trace_id            = parent.trace_id;
+    metadata.run_id              = parent.run_id;
+    metadata.budget_cancel_token = parent.budget_cancel_token;
 
     RuntimeResources resources;
     auto parent_runtime = detail::runtime_for(parent);
@@ -944,6 +946,14 @@ GraphEngine::execute_graph_async(
     // node bodies never have to check.
     ctx.usage        = config.usage ? config.usage
                                      : std::make_shared<UsageAccumulator>();
+    ctx.model_token_budget = config.model_token_budget;
+    ctx.budget_exhausted   = config.budget_exhausted;
+    ctx.run_id             = metadata.run_id;
+    ctx.budget_cancel_token =
+        metadata.budget_cancel_token
+            ? metadata.budget_cancel_token
+            : (ctx.cancel_token ? ctx.cancel_token->fork()
+                                 : std::make_shared<CancelToken>());
     ctx.deadline     = metadata.deadline;
     ctx.trace_id     = metadata.trace_id;
     ctx.thread_id    = config.thread_id;
@@ -1032,17 +1042,33 @@ GraphEngine::execute_graph_async(
 
     std::vector<std::string> trace;
     bool hit_end = false;
-
     std::vector<Send> pending_sends;
-
     for (int step = start_step; step < config.max_steps + start_step; ++step) {
         ctx.step = step;
-        // v0.3: cooperative cancel checkpoint. Polled at the super-step
-        // boundary so any future node work is suppressed; in-flight
-        // HTTP work inside the just-finished step is aborted via the
-        // operation child's asio cancellation_signal bound by run_async /
-        // run_stream_async (or the sync bridge for blocking entry points).
-        // Both layers are needed to close the cost-leak gap from v0.2.3.
+        // A budget-aware node cancels the shared sibling scope, not the
+        // operation token that owns this graph. Finish the current
+        // super-step, persist its exact state, and return a step-limit
+        // result so the Program layer can publish a durable terminal record.
+        if (ctx.budget_exhausted &&
+            ctx.budget_exhausted->load(std::memory_order_acquire)) {
+            if (coord.enabled()) {
+                const std::string trace_tag =
+                    trace.empty() ? (std::string("__budget__") + std::to_string(step))
+                                  : trace.back();
+                const std::string parent_cp_id = last_checkpoint_id;
+                last_checkpoint_id = co_await coord.save_super_step_async(
+                    state, trace_tag, ready, CheckpointPhase::Completed, step,
+                    parent_cp_id, barrier_state, detail::checkpoint_metadata_for(ctx));
+                co_await coord.clear_pending_writes_async(parent_cp_id);
+            }
+            RunResult result;
+            result.usage = ctx.usage->snapshot();
+            result.output = state.serialize();
+            if (!ready.empty()) result.output["_neograph"] = json{{"max_steps_exhausted", true}};
+            result.checkpoint_id = last_checkpoint_id;
+            result.execution_trace = std::move(trace);
+            co_return result;
+        }
         if (ctx.cancel_token) {
             ctx.cancel_token->throw_if_cancelled(
                 "step " + std::to_string(step));

@@ -25,6 +25,9 @@
 #include <neograph/llm/agent.h>
 
 #include <memory>
+#include <atomic>
+#include <limits>
+
 #include <string>
 
 using namespace neograph;
@@ -155,6 +158,84 @@ TEST(UsageAccounting, SubgraphUsageRollsUpIntoTheParent) {
 
     EXPECT_EQ(result.usage.total_tokens, 15)
         << "the subgraph's tokens did not reach the parent run";
+}
+
+// Budget controls are execution-scoped state and must survive the separate
+// RunConfig that SubgraphNode creates for a child engine.
+TEST(UsageAccounting, SubgraphPropagatesProgramBudgetContext) {
+    auto budget = std::make_shared<std::atomic_bool>(false);
+    auto seen_tokens = std::make_shared<std::atomic<std::uint64_t>>(0);
+    auto saw_same_budget = std::make_shared<std::atomic_bool>(false);
+    NodeFactory::instance().register_type(
+        "usage_budget_probe_2026",
+        [budget, seen_tokens, saw_same_budget](const std::string& name, const json&,
+                                                const NodeContext&) {
+            class BudgetProbeNode final : public GraphNode {
+            public:
+                BudgetProbeNode(std::string name, std::shared_ptr<std::atomic_bool> expected_budget,
+                                std::shared_ptr<std::atomic<std::uint64_t>> seen_tokens,
+                                std::shared_ptr<std::atomic_bool> saw_same_budget)
+                    : name_(std::move(name)),
+                      expected_budget_(std::move(expected_budget)),
+                      seen_tokens_(std::move(seen_tokens)),
+                      saw_same_budget_(std::move(saw_same_budget)) {}
+
+                asio::awaitable<NodeOutput> run(NodeInput in) override {
+                    seen_tokens_->store(in.ctx.model_token_budget, std::memory_order_relaxed);
+                    saw_same_budget_->store(in.ctx.budget_exhausted == expected_budget_,
+                                            std::memory_order_relaxed);
+                    co_return NodeOutput{};
+                }
+
+                std::string get_name() const override { return name_; }
+
+            private:
+                std::string name_;
+                std::shared_ptr<std::atomic_bool> expected_budget_;
+                std::shared_ptr<std::atomic<std::uint64_t>> seen_tokens_;
+                std::shared_ptr<std::atomic_bool> saw_same_budget_;
+            };
+            return std::make_unique<BudgetProbeNode>(
+                name, std::move(budget), std::move(seen_tokens), std::move(saw_same_budget));
+        });
+
+    const json inner = {
+        {"name", "budget_inner"},
+        {"channels", json::object()},
+        {"nodes", {{"probe", {{"type", "usage_budget_probe_2026"}}}}},
+        {"edges", json::array({
+                      {{"from", "__start__"}, {"to", "probe"}},
+                      {{"from", "probe"}, {"to", "__end__"}}
+                  })}};
+    const json outer = {
+        {"name", "budget_outer"},
+        {"channels", json::object()},
+        {"nodes", {{"child", {{"type", "subgraph"}, {"definition", inner}}}}},
+        {"edges", json::array({
+                      {{"from", "__start__"}, {"to", "child"}},
+                      {{"from", "child"}, {"to", "__end__"}}
+                  })}};
+    auto engine = GraphEngine::compile(outer, NodeContext{});
+
+    RunConfig config;
+    config.model_token_budget = 123;
+    config.budget_exhausted = budget;
+    ASSERT_NO_THROW(engine->run(config));
+    EXPECT_EQ(seen_tokens->load(std::memory_order_relaxed), 123U);
+    EXPECT_TRUE(saw_same_budget->load(std::memory_order_relaxed));
+}
+
+TEST(UsageAccounting, WideTotalSurvivesPublicIntCounterOverflow) {
+    UsageAccumulator usage;
+    ChatCompletion::Usage first;
+    first.total_tokens = std::numeric_limits<int>::max();
+    usage.add(first);
+    ChatCompletion::Usage second;
+    second.total_tokens = 1;
+    usage.add(second);
+
+    EXPECT_EQ(usage.total_tokens_wide(),
+              static_cast<long long>(std::numeric_limits<int>::max()) + 1);
 }
 
 // The other way to drive an LLM. Agent is not a graph run and has no

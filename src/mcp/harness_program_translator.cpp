@@ -1,6 +1,7 @@
 #include <neograph/graph/elaborator.h>
 #include <neograph/mcp/harness_program_translator.h>
 #include <neograph/mcp/json_schema.h>
+#include "../program/canonical_json.h"
 
 #include <algorithm>
 #include <array>
@@ -85,6 +86,7 @@ void validate_defaults(const HarnessTranslationDefaults& defaults) {
         defaults.provider_timeout_seconds > 600 || defaults.max_output_tokens == 0 ||
         defaults.max_output_tokens > 128000 || defaults.input_token_ceiling_per_round == 0 ||
         defaults.input_token_ceiling_per_round == std::numeric_limits<std::uint64_t>::max() ||
+        defaults.max_provider_tool_rounds == 0 || defaults.max_provider_tool_rounds > 64 ||
         defaults.max_provider_tool_rounds == std::numeric_limits<std::uint32_t>::max() ||
         defaults.monetary_microunits == 0 ||
         defaults.monetary_microunits == std::numeric_limits<std::uint64_t>::max() ||
@@ -214,6 +216,7 @@ struct EffectiveLimits {
     std::uint32_t max_worker_retries;
     std::uint64_t provider_timeout_seconds;
     std::uint64_t max_output_tokens;
+    std::uint64_t input_token_ceiling_per_round;
 };
 
 EffectiveLimits effective_limits(const json& request, const HarnessTranslationDefaults& defaults) {
@@ -228,6 +231,7 @@ EffectiveLimits effective_limits(const json& request, const HarnessTranslationDe
                          defaults.provider_timeout_seconds),
         effective_budget(request, "max_output_tokens", defaults.max_output_tokens, 1,
                          defaults.max_output_tokens),
+        defaults.input_token_ceiling_per_round,
     };
 }
 
@@ -273,6 +277,7 @@ json sealed_worker(const json&                               worker,
         {"output_schema", worker.at("output_schema")},
         {"provider_timeout_ms", checked_mul(provider_timeout, 1000, "/workers")},
         {"max_output_tokens", output_tokens},
+        {"input_token_ceiling", limits.input_token_ceiling_per_round},
         {"max_retries", limits.max_worker_retries},
         {"max_provider_tool_rounds", defaults.max_provider_tool_rounds},
         {"evidence_required", policy.value("evidence_required", json::array())},
@@ -463,9 +468,12 @@ json budget_records(const program::RunBudget& budget) {
     return result;
 }
 
-program::ExecutableManifest builtin_reducer_manifest(std::string name, char digest) {
-    return {{program::ExecutableKind::Reducer, std::move(name), "1.0.0",
-             "sha256:" + std::string(64, digest)},
+program::ExecutableManifest builtin_reducer_manifest(std::string name) {
+    const auto identity = program::detail::sha256_identity(
+        "neograph-harness-installed-reducer/v1",
+        program::detail::canonical_json_bytes(
+            {{"component", "harness-reducer/v1"}, {"name", name}, {"semantic_version", "1.0.0"}}));
+    return {{program::ExecutableKind::Reducer, std::move(name), "1.0.0", identity},
             program::EffectMode::Brokered,
             "neograph:harness:reducer-v1",
             {},
@@ -743,9 +751,9 @@ HarnessProgramSnapshots build_harness_program_snapshots(HarnessProgramSnapshotCo
     builder.add_node(
         std::move(config.registry.judge.manifest), std::move(config.registry.judge.factory),
         std::move(config.registry.judge.config_schema), std::move(config.registry.judge.effects));
-    builder.add_reducer(builtin_reducer_manifest("overwrite", '1'),
+    builder.add_reducer(builtin_reducer_manifest("overwrite"),
                         [](const json&, const json& incoming) { return json(incoming); });
-    builder.add_reducer(builtin_reducer_manifest("append", '2'),
+    builder.add_reducer(builtin_reducer_manifest("append"),
                         [](const json& current, const json& incoming) {
                             json result = current.is_array() ? current : json::array();
                             if (incoming.is_array()) {

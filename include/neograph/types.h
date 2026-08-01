@@ -100,6 +100,38 @@ public:
             ? u.total_tokens
             : static_cast<long long>(u.prompt_tokens) + u.completion_tokens;
 
+        // Include ordinary charges in the same atomic ledger used by
+        // reservations so concurrent dispatch cannot race a hard ceiling.
+        committed_.fetch_add(total, std::memory_order_acq_rel);
+        prompt_.fetch_add(u.prompt_tokens, std::memory_order_relaxed);
+        completion_.fetch_add(u.completion_tokens, std::memory_order_relaxed);
+        total_.fetch_add(total, std::memory_order_relaxed);
+    }
+
+    /// Reserve tokens before dispatching a bounded provider request.
+    bool try_reserve(long long tokens, long long ceiling) noexcept {
+        if (tokens <= 0 || ceiling <= 0) return false;
+        auto committed = committed_.load(std::memory_order_acquire);
+        while (committed <= ceiling && tokens <= ceiling - committed) {
+            if (committed_.compare_exchange_weak(
+                    committed, committed + tokens, std::memory_order_acq_rel,
+                    std::memory_order_acquire))
+                return true;
+        }
+        return false;
+    }
+
+    /// Release a reservation when a provider request is not dispatched.
+    void release_reservation(long long tokens) noexcept {
+        if (tokens > 0) committed_.fetch_sub(tokens, std::memory_order_acq_rel);
+    }
+
+    /// Replace a reservation with the provider's actual usage.
+    void settle_reservation(long long reserved, const ChatCompletion::Usage& u) noexcept {
+        const long long total = u.total_tokens != 0
+            ? u.total_tokens
+            : static_cast<long long>(u.prompt_tokens) + u.completion_tokens;
+        committed_.fetch_add(total - reserved, std::memory_order_acq_rel);
         prompt_.fetch_add(u.prompt_tokens, std::memory_order_relaxed);
         completion_.fetch_add(u.completion_tokens, std::memory_order_relaxed);
         total_.fetch_add(total, std::memory_order_relaxed);
@@ -114,11 +146,16 @@ public:
         u.total_tokens      = static_cast<int>(total_.load(std::memory_order_relaxed));
         return u;
     }
+    /// Read the wide running total for hard budget comparisons.
+    long long total_tokens_wide() const noexcept {
+        return total_.load(std::memory_order_relaxed);
+    }
 
 private:
     std::atomic<long long> prompt_{0};
     std::atomic<long long> completion_{0};
     std::atomic<long long> total_{0};
+    std::atomic<long long> committed_{0};
 };
 
 // --- ADL serialization: ChatMessage/ToolCall <-> json ---

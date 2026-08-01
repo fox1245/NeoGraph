@@ -1,6 +1,7 @@
 #include <neograph/mcp/harness.h>
 #include <neograph/mcp/harness_program_store.h>
 #include <neograph/mcp/sqlite_harness_store.h>
+#include <neograph/graph/checkpoint.h>
 #include <neograph/program/registry.h>
 
 #include <gtest/gtest.h>
@@ -26,9 +27,8 @@ std::string digest(char value) {
 
 struct TempDb {
     TempDb() {
-        static std::atomic_uint64_t sequence{0};
         path = std::filesystem::temp_directory_path() /
-               ("neograph-harness-program-" + std::to_string(++sequence) + ".sqlite");
+               ("neograph-harness-program-" + graph::Checkpoint::generate_id() + ".sqlite");
     }
     ~TempDb() {
         std::error_code ignored;

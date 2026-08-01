@@ -1165,12 +1165,23 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
             "P_REPLAY_EVIDENCE_REQUIRED",
             "Recorded replay continuation requires the exact owned evidence binding");
     }
+    auto pending_input  = previous->pending_input();
+    auto pending_effect = previous->pending_effect();
     if (previous->continuation().state != ContinuationState::Interrupted ||
         !previous->exact_checkpoint()) {
+        const bool duplicate_input =
+            pending_input && pending_input->state() == ProgramPendingState::Consumed &&
+            pending_input->call_id() == resume_value.pending_id &&
+            pending_input->consumed_result() &&
+            *pending_input->consumed_result() == resume_value.value;
+        const bool duplicate_effect =
+            pending_effect && pending_effect->state() == ProgramPendingState::Consumed &&
+            pending_effect->call_id() == resume_value.pending_id &&
+            pending_effect->reconciled_result() &&
+            *pending_effect->reconciled_result() == resume_value.value;
+        if (duplicate_input || duplicate_effect) return reconnect(owner_scope, run_id);
         throw_runtime_diagnostic("P_RESUME_STATE", "Only an interrupted Program run may resume");
     }
-    auto                      pending_input       = previous->pending_input();
-    auto                      pending_effect      = previous->pending_effect();
     const auto                transition_time     = static_cast<std::uint64_t>(now_ms());
     ProgramPendingDisposition pending_disposition = ProgramPendingDisposition::Applied;
     std::string               pending_code;

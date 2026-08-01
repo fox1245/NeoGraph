@@ -312,9 +312,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         config.stream_mode  = graph::StreamMode::ALL;
         config.cancel_token = control->cancel_token;
         config.usage        = usage;
+        config.model_token_budget = control->granted_budget.model_tokens;
+        config.budget_exhausted   = control->budget_exhausted;
 
         graph::RunMetadata metadata;
         metadata.deadline = deadline;
+        metadata.run_id = control->run_id;
         metadata.trace_id = control->trace_id;
         graph::RunResources        resources{control->checkpoints, control->state_store};
         graph::GraphStreamCallback callback = [control,
@@ -450,6 +453,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
         apply_terminal_cause(outcome, terminal_cause_at_deadline(control, deadline),
                              "Unknown Core failure");
+    }
+
+    if (control->budget_exhausted->load(std::memory_order_acquire)) {
+        outcome.status = ProgramTerminalStatus::BudgetExhausted;
+        outcome.failure.reset();
     }
 
     if (!outcome.checkpoint && checkpoint_id) {

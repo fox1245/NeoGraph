@@ -15,6 +15,7 @@
 #include <memory>
 #include <mutex>
 #include <random>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -123,10 +124,11 @@ std::string host_call_id() {
     out << "hcall_" << std::hex << nonce << '_' << sequence.fetch_add(1, std::memory_order_relaxed);
     return out.str();
 }
-
-json effect_descriptor(const json& executor, const std::string& call_id) {
+json effect_descriptor(const json& executor, const std::string& call_id,
+                       std::string_view run_id) {
     if (!executor.contains("effect")) return json();
-    const auto effect_namespace = detail::current_harness_run_id();
+    const auto effect_namespace =
+        run_id.empty() ? detail::current_harness_run_id() : std::string(run_id);
     if (effect_namespace.empty()) {
         throw std::runtime_error("Harness host-brokered effect is missing its run namespace");
     }
@@ -187,9 +189,25 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
 
     return [config = std::move(config)](const HarnessWorkerCall&                   call,
                                         const std::shared_ptr<graph::CancelToken>& cancel) {
+        if (call.model_token_budget != 0 && !call.usage) {
+            return HarnessWorkerResponse::tool_error(
+                "bounded Harness provider execution requires a UsageAccumulator");
+        }
         std::map<std::string, json> catalog;
         for (const auto& tool : call.tool_catalog) {
             catalog[tool["id"].get<std::string>()] = tool;
+        }
+
+        std::size_t max_tool_rounds = config.max_tool_rounds;
+        if (call.worker.contains("max_provider_tool_rounds")) {
+            const auto& declared = call.worker.at("max_provider_tool_rounds");
+            if (!declared.is_number_unsigned() || declared.get<std::uint64_t>() == 0) {
+                return HarnessWorkerResponse::tool_error(
+                    "worker max_provider_tool_rounds must be a positive unsigned integer");
+            }
+            max_tool_rounds =
+                std::min(config.max_tool_rounds, static_cast<std::size_t>(
+                                                declared.get<std::uint64_t>()));
         }
 
         CompletionParams params;
@@ -199,6 +217,20 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
         const int provider_timeout = budget.value("provider_timeout_seconds", 0);
         const int max_output_tokens = budget.value("max_output_tokens", -1);
         params.max_tokens = max_output_tokens;
+        const auto input_token_ceiling =
+            budget.value("input_token_ceiling", std::uint64_t{0});
+        const auto saturating_add = [](std::uint64_t lhs, std::uint64_t rhs) {
+            const auto maximum = static_cast<std::uint64_t>(
+                std::numeric_limits<long long>::max());
+            return lhs > maximum - std::min(rhs, maximum) ? maximum
+                                                            : lhs + rhs;
+        };
+        const auto request_token_reservation = saturating_add(
+            input_token_ceiling,
+            max_output_tokens > 0 ? static_cast<std::uint64_t>(max_output_tokens) : 0);
+        const auto reservation_ceiling = std::min<std::uint64_t>(
+            call.model_token_budget,
+            static_cast<std::uint64_t>(std::numeric_limits<long long>::max()));
         params.cancel_token = cancel->fork();
         params.tools = chat_tools(call.tool_catalog);
         ChatMessage initial;
@@ -206,7 +238,25 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
         initial.content = worker_prompt(call);
         params.messages.push_back(std::move(initial));
 
-        for (std::size_t round = 0; round < config.max_tool_rounds; ++round) {
+        std::size_t provider_round = 0, tool_rounds = 0;
+        const auto model_budget_reached = [&] {
+            if (!call.usage || call.model_token_budget == 0) return false;
+            const auto total_tokens = call.usage->total_tokens_wide();
+            return total_tokens >= 0 &&
+                   static_cast<std::uint64_t>(total_tokens) >= call.model_token_budget;
+        };
+        while (true) {
+            const bool budget_reached = model_budget_reached();
+            if ((call.budget_exhausted &&
+                 call.budget_exhausted->load(std::memory_order_acquire)) ||
+                budget_reached) {
+                if (budget_reached && call.budget_exhausted)
+                    call.budget_exhausted->store(true, std::memory_order_release);
+                cancel->cancel();
+                return HarnessWorkerResponse::cancelled(
+                    "Program model-token budget exhausted before provider call");
+            }
+            ++provider_round;
             cancel->throw_if_cancelled("before provider Harness completion");
             ChatCompletion completion;
             const auto provider_correlation = detail::journal_correlation_id("provider");
@@ -219,9 +269,36 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                  {"model", params.model},
                  {"provider_timeout_seconds",
                   provider_timeout == 0 ? json(nullptr) : json(provider_timeout)},
-                 {"round", round + 1},
+                 {"round", provider_round},
                  {"tool_count", params.tools.size()}},
                 provider_correlation);
+            long long reserved_tokens = 0;
+            const auto release_reservation = [&] {
+                if (reserved_tokens != 0) {
+                    call.usage->release_reservation(reserved_tokens);
+                    reserved_tokens = 0;
+                }
+            };
+            if (call.model_token_budget != 0) {
+                if (request_token_reservation == 0) {
+                    return HarnessWorkerResponse::tool_error(
+                        "bounded Harness provider request has no token reservation");
+                }
+                reserved_tokens = static_cast<long long>(request_token_reservation);
+                if (!call.usage->try_reserve(
+                        reserved_tokens, static_cast<long long>(reservation_ceiling))) {
+                    if (call.budget_exhausted)
+                        call.budget_exhausted->store(true, std::memory_order_release);
+                    cancel->cancel();
+                    detail::append_current_harness_journal_event(
+                        "provider.call.budget_exhausted",
+                        {{"model_token_budget", call.model_token_budget},
+                         {"model_tokens_reserved", reserved_tokens}},
+                        provider_correlation);
+                    return HarnessWorkerResponse::cancelled(
+                        "Program model-token budget exhausted before provider dispatch");
+                }
+            }
             std::unique_ptr<ProviderDeadline> deadline;
             if (provider_timeout > 0) {
                 deadline = std::make_unique<ProviderDeadline>(params.cancel_token, provider_timeout);
@@ -240,6 +317,7 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                               .count()},
                          {"outcome", "timeout"}},
                         provider_correlation);
+                    release_reservation();
                     return HarnessWorkerResponse::timeout("provider request exceeded its timeout");
                 }
             } catch (const graph::CancelledException&) {
@@ -253,8 +331,10 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                      {"outcome", timed_out ? "timeout" : "cancelled"}},
                     provider_correlation);
                 if (timed_out) {
+                    release_reservation();
                     return HarnessWorkerResponse::timeout("provider request exceeded its timeout");
                 }
+                release_reservation();
                 return HarnessWorkerResponse::cancelled();
             } catch (const asio::system_error& error) {
                 const bool timed_out = error.code() == asio::error::timed_out ||
@@ -268,7 +348,11 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                      {"error", error.what()},
                      {"outcome", timed_out ? "timeout" : "error"}},
                     provider_correlation);
-                if (timed_out) return HarnessWorkerResponse::timeout(error.what());
+                if (timed_out) {
+                    release_reservation();
+                    return HarnessWorkerResponse::timeout(error.what());
+                }
+                release_reservation();
                 return HarnessWorkerResponse::tool_error(error.what());
             } catch (const std::exception& error) {
                 if (deadline_expired()) {
@@ -281,6 +365,7 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                          {"error", error.what()},
                          {"outcome", "timeout"}},
                         provider_correlation);
+                    release_reservation();
                     return HarnessWorkerResponse::timeout("provider request exceeded its timeout");
                 }
                 detail::append_current_harness_journal_event(
@@ -292,6 +377,7 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                      {"error", error.what()},
                      {"outcome", "error"}},
                     provider_correlation);
+                release_reservation();
                 return HarnessWorkerResponse::tool_error(error.what());
             }
             detail::append_current_harness_journal_event(
@@ -308,6 +394,36 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                    {"prompt_tokens", completion.usage.prompt_tokens},
                    {"total_tokens", completion.usage.total_tokens}}}},
                 provider_correlation);
+            if (call.usage) {
+                if (reserved_tokens != 0) {
+                    call.usage->settle_reservation(reserved_tokens, completion.usage);
+                    reserved_tokens = 0;
+                } else {
+                    call.usage->add(completion.usage);
+                }
+                const auto total_tokens = call.usage->total_tokens_wide();
+                const bool budget_overrun =
+                    total_tokens >= 0 &&
+                    static_cast<std::uint64_t>(total_tokens) > call.model_token_budget;
+                const bool tool_call_needs_more_budget =
+                    !completion.message.tool_calls.empty() && total_tokens >= 0 &&
+                    static_cast<std::uint64_t>(total_tokens) == call.model_token_budget;
+                if (call.model_token_budget != 0 &&
+                    (budget_overrun || tool_call_needs_more_budget)) {
+                    if (call.budget_exhausted)
+                        call.budget_exhausted->store(true, std::memory_order_release);
+                    params.cancel_token->cancel();
+                    cancel->cancel();
+                    detail::append_current_harness_journal_event(
+                        "provider.call.budget_exhausted",
+                        {{"model_token_budget", call.model_token_budget},
+                         {"model_tokens_used", total_tokens}},
+                        provider_correlation);
+                    return HarnessWorkerResponse::cancelled(
+                        "Program model-token budget exhausted during provider call");
+                }
+            }
+
 
             if (completion.message.tool_calls.empty()) {
                 if (completion.message.content.empty()) {
@@ -319,6 +435,25 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                     return HarnessWorkerResponse::parse_error(error.what());
                 }
             }
+
+            if (tool_rounds >= max_tool_rounds) {
+                if (call.budget_exhausted) {
+                    call.budget_exhausted->store(true, std::memory_order_release);
+                    params.cancel_token->cancel();
+                    cancel->cancel();
+                    detail::append_current_harness_journal_event(
+                        "provider.tool_round_budget_exhausted",
+                        {{"max_provider_tool_rounds", max_tool_rounds},
+                         {"provider_round", provider_round},
+                         {"tool_rounds", tool_rounds}},
+                        provider_correlation);
+                    return HarnessWorkerResponse::cancelled(
+                        "Program provider/tool-round budget exhausted");
+                }
+                return HarnessWorkerResponse::tool_error(
+                    "provider exhausted max_tool_rounds without a final result");
+            }
+            ++tool_rounds;
 
             params.messages.push_back(completion.message);
             for (const auto& tool_call : completion.message.tool_calls) {
@@ -343,7 +478,8 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                             {"result_schema",
                              tool_it->second.value("output_schema", json::object())},
                         };
-                        if (const auto effect = effect_descriptor(executor, call_id); !effect.is_null()) {
+                        if (const auto effect = effect_descriptor(executor, call_id, call.run_id);
+                            !effect.is_null()) {
                             pending["effect"] = effect;
                         }
                         detail::append_current_harness_journal_event(
@@ -416,8 +552,6 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                 }
             }
         }
-        return HarnessWorkerResponse::tool_error(
-            "provider exhausted max_tool_rounds without a final result");
     };
 }
 
