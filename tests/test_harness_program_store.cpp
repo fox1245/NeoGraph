@@ -16,6 +16,12 @@
 #include <string>
 #include <string_view>
 
+#include <cstdlib>
+#if defined(__linux__)
+#include <sys/wait.h>
+#endif
+
+
 namespace {
 using namespace neograph;
 using namespace neograph::mcp;
@@ -193,6 +199,77 @@ ProgramTransitionPublication initial_publication(const Fixture& fixture,
         {}};
 }
 
+ProgramPendingEffect pending_effect() {
+    ProgramPendingEffectData data;
+    data.operation_id         = "root";
+    data.call_id              = "effect-call";
+    data.effect_id            = "effect-one";
+    data.result_schema        = json{{"type", "object"}, {"additionalProperties", true}};
+    data.payload              = json{{"kind", "publish"}};
+    data.expires_at_unix_ms   = 5000;
+    data.effect_mode          = EffectMode::Brokered;
+    data.idempotency          = ProgramEffectIdempotency::NonIdempotent;
+    data.core_node            = "main";
+    data.core_interrupt_value = json{{"value", "effect"}};
+    return ProgramPendingEffect(std::move(data));
+}
+
+ProgramTransitionPublication publication_with_effect(
+    const Fixture& fixture, const ProgramTransitionPublication& initial) {
+    auto pending = pending_effect();
+    const CoreCheckpointIdentity checkpoint{"main", digest('5'), "core-thread", "checkpoint-one",
+                                            graph::CHECKPOINT_SCHEMA_VERSION};
+    auto journal = ProgramJournalRecord::create({initial.journal_record.id,
+                                                 initial.run_record.run_id(),
+                                                 fixture.version_value.id(),
+                                                 fixture.bundle_value.id(),
+                                                 2,
+                                                 {"root", ContinuationState::Interrupted, 1},
+                                                 budget(),
+                                                 {},
+                                                 checkpoint,
+                                                 10});
+
+    ProgramResultData result_data;
+    result_data.status             = ProgramTerminalStatus::Interrupted;
+    result_data.run_id             = initial.run_record.run_id();
+    result_data.program_version_id = fixture.version_value.id();
+    result_data.bundle_id          = fixture.bundle_value.id();
+    result_data.attempt            = 1;
+    result_data.output             = json::object();
+    result_data.remaining_budget   = budget();
+    result_data.checkpoint         = checkpoint;
+    result_data.interrupt = ProgramInterrupt{pending.core_node(), pending.core_interrupt_value(),
+                                              std::nullopt, pending};
+
+    ProgramRunRecordData data;
+    data.owner_scope         = fixture.policy_value.owner_scope();
+    data.run_id              = initial.run_record.run_id();
+    data.program_version_id  = fixture.version_value.id();
+    data.bundle_id           = fixture.bundle_value.id();
+    data.binding_fingerprint = initial.run_record.binding_fingerprint();
+    data.invocation          = initial.run_record.invocation();
+    data.continuation        = journal.continuation;
+    data.remaining_budget    = journal.remaining_budget;
+    data.exact_checkpoint    = checkpoint;
+    data.pending_effect      = pending;
+    data.terminal_result     = ProgramResult::create(std::move(result_data));
+    data.journal_head        = journal.id;
+    data.event_sequence      = 2;
+    data.effect_sequence     = 1;
+    data.created_at_ms       = initial.run_record.created_at_ms();
+    data.updated_at_ms       = 10;
+
+    auto publication           = initial;
+    publication.run_record     = ProgramRunRecord::create(std::move(data));
+    publication.journal_record = std::move(journal);
+    publication.events = {event(fixture, initial.run_record.run_id(), 2,
+                                 ProgramEventKind::Terminal,
+                                 ProgramTerminalEvent{ProgramTerminalStatus::Interrupted}, 10)};
+    publication.effects.emplace_back(1, std::move(pending));
+    return publication;
+}
+
 ProgramTransitionPublication terminal_publication(const Fixture&                      fixture,
                                                   const ProgramTransitionPublication& initial,
                                                   ProgramTerminalStatus               status,
@@ -357,6 +434,144 @@ TEST(HarnessProgramStoreTest, SqliteReopensExactOwnerBoundRunAndLegacyRowsStillW
         EXPECT_EQ(store->list_events("legacy-run").size(), 1U);
     }
 }
+TEST(HarnessProgramStoreTest, SqliteReopenSurvivesNewProcessExec) {
+#if !defined(__linux__)
+    GTEST_SKIP() << "The exec-based SQLite restart proof is Linux-only";
+#else
+    if (const auto* child_db = std::getenv("NEOGRAPH_SQLITE_REOPEN_DB")) {
+        Fixture fixture;
+        auto    store = std::make_shared<SqliteHarnessRecordStore>(child_db);
+        auto    capability = require_harness_program_adapter_store(store);
+        const auto resolved =
+            capability->resolve_program_run(fixture.artifact.owner_scope(), "run-exec");
+        ASSERT_TRUE(resolved);
+        EXPECT_EQ(resolved->run_record().run_id(), "run-exec");
+        auto transitions = capability->bind_program_transitions(fixture.artifact);
+        ASSERT_TRUE(transitions->load(fixture.artifact.owner_scope(), "run-exec"));
+        EXPECT_EQ(transitions->load_events(fixture.artifact.owner_scope(), "run-exec").size(), 1U);
+        return;
+    }
+
+    TempDb  db;
+    Fixture fixture;
+    auto    initial = initial_publication(fixture, "run-exec");
+    {
+        auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+        auto transitions = persist_and_bind(store, fixture);
+        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+                  ProgramTransitionPublishResult::Published);
+    }
+
+    const auto quote_shell = [](std::string value) {
+        std::string quoted = "'";
+        for (const char character : value) {
+            if (character == '\'') quoted += "'\\''";
+            else quoted += character;
+        }
+        quoted += '\'';
+        return quoted;
+    };
+    const auto executable = std::filesystem::read_symlink("/proc/self/exe").string();
+
+    const auto command =
+        "/usr/bin/env NEOGRAPH_SQLITE_REOPEN_DB=" + quote_shell(db.path.string()) +
+        " NEOGRAPH_SQLITE_REOPEN_CHILD=1 " + quote_shell(executable) + " "
+        "--gtest_color=no "
+        "--gtest_filter=HarnessProgramStoreTest.SqliteReopenSurvivesNewProcessExec";
+    EXPECT_EQ(std::system(command.c_str()), 0);
+#endif
+}
+
+TEST(HarnessProgramStoreTest, SqliteCrashDuringTransitionReopensWithCommittedPrefix) {
+#if !defined(__linux__)
+    GTEST_SKIP() << "The SIGKILL SQLite crash proof is Linux-only";
+#else
+    if (const auto* child_db = std::getenv("NEOGRAPH_SQLITE_CRASH_DB")) {
+        Fixture fixture;
+        auto    store = std::make_shared<SqliteHarnessRecordStore>(child_db);
+        auto    transitions = persist_and_bind(store, fixture);
+        const auto initial = initial_publication(fixture, "run-crash");
+        auto terminal = terminal_publication(
+            fixture, initial, ProgramTerminalStatus::Completed, ContinuationState::Completed, 20);
+        store->crash_next_program_transition_for_testing(
+            SqliteHarnessProgramFaultPoint::AfterEventWrite);
+        const auto before = transitions->load(fixture.artifact.owner_scope(), "run-crash");
+        ASSERT_TRUE(before);
+        ASSERT_EQ(before->journal_head(), initial.journal_record.id);
+        const auto result = transitions->compare_publish(
+            fixture.artifact.owner_scope(), initial.journal_record.id, std::move(terminal));
+        ASSERT_EQ(result, ProgramTransitionPublishResult::Published);
+        FAIL() << "SIGKILL crash hook returned";
+    }
+
+    TempDb  db;
+    Fixture fixture;
+    const auto initial = initial_publication(fixture, "run-crash");
+    {
+        auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+        auto transitions = persist_and_bind(store, fixture);
+        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+                  ProgramTransitionPublishResult::Published);
+    }
+
+    const auto quote_shell = [](std::string value) {
+        std::string quoted = "'";
+        for (const char character : value) {
+            if (character == '\'') quoted += "'\\''";
+            else quoted += character;
+        }
+        quoted += '\'';
+        return quoted;
+    };
+    const auto executable = std::filesystem::read_symlink("/proc/self/exe").string();
+    const auto command =
+        "/usr/bin/env NEOGRAPH_SQLITE_CRASH_DB=" + quote_shell(db.path.string()) + " " +
+        quote_shell(executable) + " --gtest_color=no "
+        "--gtest_filter=HarnessProgramStoreTest.SqliteCrashDuringTransitionReopensWithCommittedPrefix";
+    const int status = std::system(command.c_str());
+    ASSERT_NE(status, -1);
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 128 + SIGKILL);
+
+    auto reopened = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+    auto transitions = persist_and_bind(reopened, fixture);
+    const auto latest = transitions->latest(fixture.artifact.owner_scope(), "run-crash");
+    ASSERT_TRUE(latest);
+    EXPECT_EQ(latest->id, initial.journal_record.id);
+    EXPECT_FALSE(transitions->load(fixture.artifact.owner_scope(), "run-crash")
+                     ->terminal_result());
+    EXPECT_EQ(transitions->load_events(fixture.artifact.owner_scope(), "run-crash").size(), 1U);
+
+    EXPECT_EQ(transitions->compare_publish(
+                  fixture.artifact.owner_scope(), initial.journal_record.id,
+                  terminal_publication(fixture, initial, ProgramTerminalStatus::Completed,
+                                       ContinuationState::Completed, 20)),
+              ProgramTransitionPublishResult::Published);
+    ASSERT_TRUE(transitions->load(fixture.artifact.owner_scope(), "run-crash")->terminal_result());
+#endif
+}
+
+TEST(HarnessProgramStoreTest, SqliteProgramTransitionsEnforceOwnerScope) {
+    TempDb  db;
+    Fixture fixture;
+    auto    store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+    auto    transitions = persist_and_bind(store, fixture);
+    auto    initial     = initial_publication(fixture);
+
+    ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+              ProgramTransitionPublishResult::Published);
+
+    // A run ID is only meaningful inside its admitted owner scope. Wrong-owner
+    // reads must be indistinguishable from absence, and publication must not
+    // cross the owner boundary.
+    EXPECT_FALSE(transitions->load("tenant-other", "run-one").has_value());
+    EXPECT_FALSE(transitions->latest("tenant-other", "run-one").has_value());
+    EXPECT_TRUE(transitions->load_events("tenant-other", "run-one").empty());
+    EXPECT_TRUE(transitions->load_effects("tenant-other", "run-one").empty());
+    EXPECT_EQ(transitions->compare_publish("tenant-other", {}, initial),
+              ProgramTransitionPublishResult::Conflict);
+}
+
 
 TEST(HarnessProgramStoreTest, TwoSqliteInstancesHaveOneCasWinnerAndRollbackInvalidBatch) {
     TempDb  db;
@@ -413,6 +628,59 @@ TEST(HarnessProgramStoreTest, TwoSqliteInstancesHaveOneCasWinnerAndRollbackInval
     ASSERT_TRUE(run->terminal_result());
     EXPECT_EQ(transitions->load_events(fixture.artifact.owner_scope(), "run-one").size(), 2U);
     EXPECT_EQ(transitions->latest(fixture.artifact.owner_scope(), "run-one")->sequence, 2U);
+}
+
+TEST(HarnessProgramStoreTest, SqlitePublicationFaultsRollbackAllRowsAcrossReconnect) {
+    Fixture fixture;
+    const auto points = {
+        SqliteHarnessProgramFaultPoint::AfterBegin,
+        SqliteHarnessProgramFaultPoint::AfterRunWrite,
+        SqliteHarnessProgramFaultPoint::AfterJournalWrite,
+        SqliteHarnessProgramFaultPoint::AfterEventWrite,
+        SqliteHarnessProgramFaultPoint::AfterEffectWrite,
+        SqliteHarnessProgramFaultPoint::BeforeCommit,
+    };
+
+    for (const auto point : points) {
+        TempDb db;
+        auto   store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+        auto transitions = persist_and_bind(store, fixture);
+        auto initial     = initial_publication(fixture, "run-effect");
+        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+                  ProgramTransitionPublishResult::Published);
+        auto publication = publication_with_effect(fixture, initial);
+        store->fail_next_program_transition_for_testing(point);
+
+        EXPECT_THROW(
+            (void)transitions->compare_publish(fixture.artifact.owner_scope(),
+                                                initial.journal_record.id, publication),
+            std::runtime_error);
+
+        transitions.reset();
+        store.reset();
+        auto reopened = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+        auto recovered =
+            require_harness_program_adapter_store(reopened)->bind_program_transitions(
+                fixture.artifact);
+        EXPECT_TRUE(recovered->load(fixture.artifact.owner_scope(), "run-effect"));
+        EXPECT_EQ(recovered->latest(fixture.artifact.owner_scope(), "run-effect")->id,
+                  initial.journal_record.id);
+        EXPECT_EQ(recovered->load_events(fixture.artifact.owner_scope(), "run-effect").size(), 1U);
+        EXPECT_TRUE(recovered->load_effects(fixture.artifact.owner_scope(), "run-effect").empty());
+
+        EXPECT_EQ(
+            recovered->compare_publish(fixture.artifact.owner_scope(),
+                                       initial.journal_record.id, publication),
+            ProgramTransitionPublishResult::Published);
+        EXPECT_EQ(recovered->load_events(fixture.artifact.owner_scope(), "run-effect").size(), 2U);
+        EXPECT_EQ(recovered->load_effects(fixture.artifact.owner_scope(), "run-effect").size(), 1U);
+        EXPECT_EQ(
+            recovered->compare_publish(fixture.artifact.owner_scope(),
+                                       initial.journal_record.id, publication),
+            ProgramTransitionPublishResult::AlreadyPresent);
+        EXPECT_EQ(recovered->load_events(fixture.artifact.owner_scope(), "run-effect").size(), 2U);
+        EXPECT_EQ(recovered->load_effects(fixture.artifact.owner_scope(), "run-effect").size(), 1U);
+    }
 }
 
 TEST(HarnessProgramStoreTest, ReopenRejectsTamperAndMissingPublishedOutbox) {

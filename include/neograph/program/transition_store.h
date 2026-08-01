@@ -51,6 +51,16 @@ enum class ProgramTransitionPublishResult : std::uint8_t {
     Conflict,
 };
 
+/// One-shot in-memory publication faults used to exercise the strong
+/// exception guarantee at each staged publication boundary.
+enum class ProgramTransitionFaultPoint : std::uint8_t {
+    AfterRunSnapshot,
+    AfterJournalSnapshot,
+    AfterEventSnapshot,
+    AfterEffectSnapshot,
+    BeforeCommit,
+};
+
 class NEOGRAPH_PROGRAM_API ProgramTransitionStore {
 public:
     virtual ~ProgramTransitionStore() = default;
@@ -103,6 +113,9 @@ public:
     compare_publish(std::string_view owner_scope,
                     std::string_view expected_journal_head,
                     ProgramTransitionPublication publication) override;
+
+    /// Fail the next publication at a staged boundary; test-only hook.
+    void fail_next_publication_for_testing(ProgramTransitionFaultPoint point);
 
 private:
     struct Impl;

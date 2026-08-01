@@ -8,6 +8,9 @@
 #include <neograph/mcp/sqlite_harness_store.h>
 #endif
 
+#include <asio/error.hpp>
+#include <asio/system_error.hpp>
+
 #include <gtest/gtest.h>
 
 #include <atomic>
@@ -54,8 +57,19 @@ public:
             std::unique_lock lock(mutex_);
             index = started_++;
             ready_.notify_all();
-            if (wait_for_two_)
-                ready_.wait(lock, [this] { return started_ == 2; });
+            if (wait_for_two_) {
+                const bool both_started =
+                    ready_.wait_for(lock, 2s, [this, &params] {
+                        return started_ >= 2 ||
+                               (params.cancel_token && params.cancel_token->is_cancelled());
+                    });
+                if (!both_started || started_ < 2) {
+                    if (params.cancel_token && params.cancel_token->is_cancelled())
+                        throw neograph::graph::CancelledException("sibling budget cancellation");
+                    throw std::runtime_error(
+                        "concurrent budget provider did not reach two callers");
+                }
+            }
         }
         if (index == 0) {
             neograph::ChatCompletion completion;
@@ -79,9 +93,57 @@ public:
 
 private:
     std::mutex              mutex_;
+
     std::condition_variable ready_;
     bool                    wait_for_two_ = true;
     int                     started_ = 0;
+};
+class ThrowOnceProvider final : public neograph::Provider {
+public:
+    std::atomic<unsigned> calls{0};
+
+    neograph::ChatCompletion complete(const neograph::CompletionParams&) override {
+        if (calls.fetch_add(1, std::memory_order_relaxed) == 0)
+            throw std::runtime_error("transient provider failure");
+        neograph::ChatCompletion completion;
+        completion.message.role    = "assistant";
+        completion.message.content = "{}";
+        completion.usage           = {0, 0, 0};
+        return completion;
+    }
+
+    std::string get_name() const override { return "throw-once-provider"; }
+};
+class TimeoutProvider final : public neograph::Provider {
+public:
+    std::atomic<unsigned> calls{0};
+
+    neograph::ChatCompletion complete(const neograph::CompletionParams& params) override {
+        calls.fetch_add(1, std::memory_order_relaxed);
+        while (!params.cancel_token->is_cancelled()) std::this_thread::sleep_for(1ms);
+        throw neograph::graph::CancelledException("provider timeout");
+    }
+
+    std::string get_name() const override { return "timeout-provider"; }
+};
+
+class ParentCancelsThenAsioErrorProvider final : public neograph::Provider {
+public:
+    explicit ParentCancelsThenAsioErrorProvider(
+        std::shared_ptr<neograph::graph::CancelToken> parent)
+        : parent_(std::move(parent)) {}
+
+    neograph::ChatCompletion complete(const neograph::CompletionParams&) override {
+        parent_->cancel();
+        throw asio::system_error(asio::error::make_error_code(asio::error::timed_out));
+    }
+
+    std::string get_name() const override {
+        return "parent-cancels-then-asio-error-provider";
+    }
+
+private:
+    std::shared_ptr<neograph::graph::CancelToken> parent_;
 };
 
 json request() {
@@ -277,33 +339,123 @@ TEST(HarnessProgramCutover, ProviderTokenBudgetCancelsRepeatedToolRequests) {
     EXPECT_EQ(provider->max_tokens.front(), 1);
 }
 
-TEST(HarnessProgramCutover, ProviderBudgetCancellationFansOutToConcurrentWorkers) {
-    auto provider = std::make_shared<ConcurrentBudgetProvider>();
+
+TEST(HarnessProgramCutover, ProviderExceptionReleasesTokenReservation) {
+    auto provider = std::make_shared<ThrowOnceProvider>();
     neograph::mcp::HarnessProviderExecutorConfig provider_config;
     provider_config.provider        = provider;
-    provider_config.max_tool_rounds = 8;
+    provider_config.max_tool_rounds = 1;
     auto executor = neograph::mcp::make_provider_harness_executor(std::move(provider_config));
 
     neograph::mcp::HarnessWorkerCall call;
-    call.task = {{"objective", "budget probe"}, {"acceptance", json::array()}};
-    call.worker = {{"worker_id", "budget-worker"},
+    call.task   = {{"objective", "retry budget"}, {"acceptance", json::array()}};
+    call.worker = {{"worker_id", "retry-worker"},
                    {"instructions", "return JSON"},
                    {"output_schema", {{"type", "object"}}},
                    {"_harness_provider_budget", {{"max_output_tokens", 1}}}};
-    call.usage = std::make_shared<neograph::UsageAccumulator>();
+    call.usage              = std::make_shared<neograph::UsageAccumulator>();
     call.model_token_budget = 1;
-    call.budget_exhausted = std::make_shared<std::atomic_bool>(false);
-    auto cancel = std::make_shared<neograph::graph::CancelToken>();
+    call.budget_exhausted   = std::make_shared<std::atomic_bool>(false);
+    auto cancel             = std::make_shared<neograph::graph::CancelToken>();
 
-    auto first = std::async(std::launch::async, [&] { return executor(call, cancel); });
-    auto second = std::async(std::launch::async, [&] { return executor(call, cancel); });
-    const auto first_response = first.get();
-    const auto second_response = second.get();
+    const auto failed = executor(call, cancel);
+    EXPECT_EQ(failed.kind, neograph::mcp::HarnessWorkerResponseKind::TOOL_ERROR);
+    EXPECT_EQ(call.usage->total_tokens_wide(), 0);
+    EXPECT_FALSE(cancel->is_cancelled());
 
-    EXPECT_EQ(first_response.kind, neograph::mcp::HarnessWorkerResponseKind::CANCELLED);
-    EXPECT_EQ(second_response.kind, neograph::mcp::HarnessWorkerResponseKind::CANCELLED);
-    EXPECT_TRUE(cancel->is_cancelled());
-    EXPECT_TRUE(call.budget_exhausted->load(std::memory_order_acquire));
+    const auto retried = executor(call, cancel);
+    EXPECT_EQ(retried.kind, neograph::mcp::HarnessWorkerResponseKind::VALUE);
+
+    const auto zero_usage_retry = executor(call, cancel);
+    EXPECT_EQ(zero_usage_retry.kind, neograph::mcp::HarnessWorkerResponseKind::VALUE);
+    EXPECT_EQ(provider->calls.load(std::memory_order_relaxed), 3U);
+    EXPECT_EQ(call.usage->total_tokens_wide(), 0);
+}
+
+TEST(HarnessProgramCutover, ProviderTimeoutReleasesTokenReservation) {
+    auto provider = std::make_shared<TimeoutProvider>();
+    neograph::mcp::HarnessProviderExecutorConfig provider_config;
+    provider_config.provider        = provider;
+    provider_config.max_tool_rounds = 1;
+    auto executor = neograph::mcp::make_provider_harness_executor(std::move(provider_config));
+
+    neograph::mcp::HarnessWorkerCall call;
+    call.task   = {{"objective", "timeout budget"}, {"acceptance", json::array()}};
+    call.worker = {{"worker_id", "timeout-worker"},
+                   {"instructions", "wait for cancellation"},
+                   {"output_schema", {{"type", "object"}}},
+                   {"_harness_provider_budget",
+                    {{"max_output_tokens", 1}, {"provider_timeout_seconds", 1}}}};
+    call.usage              = std::make_shared<neograph::UsageAccumulator>();
+    call.model_token_budget = 1;
+    call.budget_exhausted   = std::make_shared<std::atomic_bool>(false);
+    auto cancel             = std::make_shared<neograph::graph::CancelToken>();
+
+    const auto timed_out = executor(call, cancel);
+    EXPECT_EQ(timed_out.kind, neograph::mcp::HarnessWorkerResponseKind::TIMEOUT);
+    EXPECT_EQ(provider->calls.load(std::memory_order_relaxed), 1U);
+    EXPECT_EQ(call.usage->total_tokens_wide(), 0);
+    EXPECT_FALSE(cancel->is_cancelled());
+}
+
+TEST(HarnessProgramCutover, ProviderCancellationWinsOverTransportTimeoutCode) {
+    auto parent = std::make_shared<neograph::graph::CancelToken>();
+    neograph::mcp::HarnessProviderExecutorConfig provider_config;
+    provider_config.provider =
+        std::make_shared<ParentCancelsThenAsioErrorProvider>(parent);
+    auto executor =
+        neograph::mcp::make_provider_harness_executor(std::move(provider_config));
+
+    neograph::mcp::HarnessWorkerCall call;
+    call.task   = {{"objective", "cancellation precedence"}};
+    call.worker = {{"worker_id", "cancel-worker"},
+                   {"instructions", "return JSON"},
+                   {"output_schema", {{"type", "object"}}}};
+
+    const auto response = executor(call, parent);
+    EXPECT_EQ(response.kind, neograph::mcp::HarnessWorkerResponseKind::CANCELLED);
+    EXPECT_TRUE(parent->is_cancelled());
+}
+TEST(HarnessProgramCutover, ProviderBudgetCancellationFansOutToConcurrentWorkers) {
+    for (int attempt = 0; attempt != 32; ++attempt) {
+        auto provider = std::make_shared<ConcurrentBudgetProvider>();
+        neograph::mcp::HarnessProviderExecutorConfig provider_config;
+        provider_config.provider        = provider;
+        provider_config.max_tool_rounds = 8;
+        auto executor =
+            neograph::mcp::make_provider_harness_executor(std::move(provider_config));
+
+        neograph::mcp::HarnessWorkerCall call;
+        call.task = {{"objective", "budget probe"}, {"acceptance", json::array()}};
+        call.worker = {{"worker_id", "budget-worker"},
+                       {"instructions", "return JSON"},
+                       {"output_schema", {{"type", "object"}}},
+                       {"_harness_provider_budget", {{"max_output_tokens", 1}}}};
+        call.usage            = std::make_shared<neograph::UsageAccumulator>();
+        call.model_token_budget = 2;
+        call.budget_exhausted = std::make_shared<std::atomic_bool>(false);
+        auto cancel           = std::make_shared<neograph::graph::CancelToken>();
+
+        auto first  = std::async(std::launch::async, [&] { return executor(call, cancel); });
+        auto second = std::async(std::launch::async, [&] { return executor(call, cancel); });
+        const auto first_status  = first.wait_for(2s);
+        const auto second_status = second.wait_for(2s);
+        if (first_status != std::future_status::ready ||
+            second_status != std::future_status::ready) {
+            cancel->cancel();
+        }
+        ASSERT_EQ(first_status, std::future_status::ready) << "attempt " << attempt;
+        ASSERT_EQ(second_status, std::future_status::ready) << "attempt " << attempt;
+        const auto first_response  = first.get();
+        const auto second_response = second.get();
+
+        EXPECT_EQ(first_response.kind, neograph::mcp::HarnessWorkerResponseKind::CANCELLED);
+        EXPECT_EQ(second_response.kind, neograph::mcp::HarnessWorkerResponseKind::CANCELLED);
+        EXPECT_EQ(provider->started(), 2);
+        EXPECT_TRUE(cancel->is_cancelled());
+        EXPECT_TRUE(call.budget_exhausted->load(std::memory_order_acquire));
+        EXPECT_EQ(call.usage->total_tokens_wide(), 20);
+    }
 }
 
 TEST(HarnessProgramCutover, ProgramBudgetCancellationStopsWorkerGraph) {
@@ -623,22 +775,22 @@ TEST(HarnessProgramCutover, CancelDelegatesToProgramHandle) {
 TEST(HarnessProgramCutover, SixCallbacksOwnAdapterPastServiceLifetime) {
     std::atomic<int> worker_calls{0};
     HarnessFixture   fixture([&](const neograph::mcp::HarnessWorkerCall&,
-                               const std::shared_ptr<neograph::graph::CancelToken>&) {
+                               const std::shared_ptr<neograph::graph::CancelToken>& cancel) {
         if (worker_calls.fetch_add(1, std::memory_order_relaxed) == 0) {
             return neograph::mcp::HarnessWorkerResponse::input_required(
                 {{"call_id", "mcp-input-1"},
                  {"result_schema", {{"type", "object"}}},
                  {"payload", {{"question", "approve?"}}}});
         }
-        return neograph::mcp::HarnessWorkerResponse::success(
-            {{"status", "ok"}, {"findings", json::array()}});
+        while (!cancel->is_cancelled()) std::this_thread::sleep_for(1ms);
+        return neograph::mcp::HarnessWorkerResponse::cancelled("resumed worker cancelled");
     });
     neograph::mcp::MCPServerConfig server_config;
     server_config.server_info = {{"name", "harness-test"}, {"version", "1"}};
-    neograph::mcp::MCPServer server(server_config);
     std::mutex response_mutex;
     std::condition_variable response_cv;
     std::map<int, json> responses;
+    neograph::mcp::MCPServer server(server_config);
     server.set_response_sink([&](const json& response) {
         if (!response.is_object() || !response.contains("id") ||
             !response.at("id").is_number_integer())
@@ -719,9 +871,28 @@ TEST(HarnessProgramCutover, SixCallbacksOwnAdapterPastServiceLifetime) {
     ASSERT_TRUE(resumed.contains("result")) << resumed.dump();
     EXPECT_TRUE(resumed.at("result").at("structuredContent").at("accepted").get<bool>());
 
+    const auto dispatch_deadline = std::chrono::steady_clock::now() + 1s;
+    while (worker_calls.load(std::memory_order_acquire) < 2 &&
+           std::chrono::steady_clock::now() < dispatch_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    ASSERT_EQ(worker_calls.load(std::memory_order_acquire), 2);
+
     const auto cancelled = call_tool(208, "neograph_cancel", {{"run_id", run_id}});
     ASSERT_TRUE(cancelled.contains("result")) << cancelled.dump();
-    EXPECT_TRUE(cancelled.at("result").at("structuredContent").contains("cancelled"));
+    const auto cancelled_value = cancelled.at("result").at("structuredContent");
+    ASSERT_TRUE(cancelled_value.at("cancelled").get<bool>()) << cancelled.dump();
+
+    json terminal = json::object();
+    for (int poll = 0; poll != 200; ++poll) {
+        terminal = call_tool(209 + poll, "neograph_get", {{"run_id", run_id}});
+        ASSERT_TRUE(terminal.contains("result")) << terminal.dump();
+        if (terminal.at("result").at("structuredContent").at("status") == "cancelled")
+            break;
+        std::this_thread::sleep_for(5ms);
+    }
+    ASSERT_EQ(terminal.at("result").at("structuredContent").at("status"), "cancelled")
+        << terminal.dump();
 }
 
 TEST(HarnessProgramCutover, HostToolConfigurationChangesBindingAndArtifactIdentity) {

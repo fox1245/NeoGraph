@@ -215,6 +215,7 @@ struct InMemoryProgramTransitionStore::Impl {
     };
     mutable std::mutex                                                mutex;
     std::map<std::string, std::shared_ptr<const Stored>, std::less<>> runs;
+    std::optional<ProgramTransitionFaultPoint>                        fault;
 };
 InMemoryProgramTransitionStore::InMemoryProgramTransitionStore()
     : impl_(std::make_unique<Impl>()) {}
@@ -223,6 +224,12 @@ InMemoryProgramTransitionStore::InMemoryProgramTransitionStore(
     InMemoryProgramTransitionStore&&) noexcept = default;
 InMemoryProgramTransitionStore& InMemoryProgramTransitionStore::operator=(
     InMemoryProgramTransitionStore&&) noexcept = default;
+
+void InMemoryProgramTransitionStore::fail_next_publication_for_testing(
+    ProgramTransitionFaultPoint point) {
+    std::lock_guard lock(impl_->mutex);
+    impl_->fault = point;
+}
 std::optional<ProgramRunRecord> InMemoryProgramTransitionStore::load(std::string_view o,
                                                                      std::string_view r) const {
     if (o.empty() || r.empty()) return std::nullopt;
@@ -333,17 +340,31 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
         }
     }
 
-    std::vector<ProgramEvent>             events;
+    const auto maybe_fail = [&](ProgramTransitionFaultPoint point) {
+        if (impl_->fault && *impl_->fault == point) {
+            impl_->fault.reset();
+            throw std::runtime_error("injected in-memory Program transition failure");
+        }
+    };
+    auto staged_run = publication.run_record;
+    maybe_fail(ProgramTransitionFaultPoint::AfterRunSnapshot);
+    auto staged_journal = publication.journal_record;
+    maybe_fail(ProgramTransitionFaultPoint::AfterJournalSnapshot);
+
+    std::vector<ProgramEvent>            events;
     std::vector<ProgramEffectOutboxEntry> effects;
     if (current != impl_->runs.end()) {
         events  = current->second->events;
         effects = current->second->effects;
     }
     events.insert(events.end(), publication.events.begin(), publication.events.end());
+    maybe_fail(ProgramTransitionFaultPoint::AfterEventSnapshot);
     effects.insert(effects.end(), publication.effects.begin(), publication.effects.end());
+    maybe_fail(ProgramTransitionFaultPoint::AfterEffectSnapshot);
     auto candidate = std::make_shared<const Impl::Stored>(
-        Impl::Stored{std::move(publication.run_record), std::move(publication.journal_record),
-                     std::move(events), std::move(effects), std::move(publication_bytes)});
+        Impl::Stored{std::move(staged_run), std::move(staged_journal), std::move(events),
+                     std::move(effects), std::move(publication_bytes)});
+    maybe_fail(ProgramTransitionFaultPoint::BeforeCommit);
     if (current == impl_->runs.end()) {
         impl_->runs.emplace(std::move(storage_key), std::move(candidate));
     } else {

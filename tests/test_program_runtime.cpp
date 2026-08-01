@@ -151,11 +151,16 @@ class StubbornNode final : public GraphNode {
 public:
     explicit StubbornNode(std::string name) : name_(std::move(name)) {}
 
-    asio::awaitable<NodeOutput> run(NodeInput) override {
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
         ++stubborn_calls;
+        // Simulate a late sibling/provider budget signal. The enclosing
+        // runtime must preserve an earlier user/timeout cancellation cause.
+        if (input.ctx.budget_exhausted) {
+            input.ctx.budget_exhausted->store(true, std::memory_order_release);
+        }
         auto timer = asio::steady_timer(co_await asio::this_coro::executor);
         timer.expires_after(std::chrono::milliseconds(100));
-        co_await  timer.async_wait(asio::use_awaitable);
+        co_await timer.async_wait(asio::use_awaitable);
         co_return NodeOutput{};
     }
 

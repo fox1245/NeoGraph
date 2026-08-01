@@ -143,6 +143,11 @@ RunOutcome failed_outcome(const std::shared_ptr<RunControl>& control,
                                      std::move(core_node), attempts,           json::object()};
     return outcome;
 }
+std::uint64_t model_tokens(const std::shared_ptr<UsageAccumulator>& usage) noexcept {
+    const auto total = usage->total_tokens_wide();
+    return total <= 0 ? 0 : static_cast<std::uint64_t>(total);
+}
+
 
 bool apply_terminal_cause(RunOutcome& outcome, CancellationCause cause, std::string_view message) {
     if (cause == CancellationCause::None) return false;
@@ -341,9 +346,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.output             = std::move(core_result.output);
         outcome.execution_trace    = std::move(core_result.execution_trace);
         outcome.usage.wall_time_ms = elapsed_ms(started_at);
-        const auto token_usage     = usage->snapshot();
-        outcome.usage.model_tokens =
-            token_usage.total_tokens < 0 ? 0 : static_cast<std::uint64_t>(token_usage.total_tokens);
+        outcome.usage.model_tokens = model_tokens(usage);
         outcome.usage.program_operations = control->attempt == 1 ? 1 : 0;
         outcome.usage.core_steps =
             executed_core_steps(*control, core_result.checkpoint_id, checkpoint_id, core_status);
@@ -393,9 +396,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     } catch (const EventSinkError& error) {
         outcome                    = failed_outcome(control, "P_EVENT_SINK", error.what());
         outcome.usage.wall_time_ms = elapsed_ms(started_at);
-        const auto token_usage     = usage->snapshot();
-        outcome.usage.model_tokens =
-            token_usage.total_tokens < 0 ? 0 : static_cast<std::uint64_t>(token_usage.total_tokens);
+        outcome.usage.model_tokens = model_tokens(usage);
         outcome.usage.program_operations = control->attempt == 1 ? 1 : 0;
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = 1;
@@ -403,9 +404,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         apply_terminal_cause(outcome, terminal_cause_at_deadline(control, deadline), error.what());
     } catch (const graph::CancelledException& error) {
         outcome.usage.wall_time_ms = elapsed_ms(started_at);
-        const auto token_usage     = usage->snapshot();
-        outcome.usage.model_tokens =
-            token_usage.total_tokens < 0 ? 0 : static_cast<std::uint64_t>(token_usage.total_tokens);
+        outcome.usage.model_tokens = model_tokens(usage);
         outcome.usage.program_operations = control->attempt == 1 ? 1 : 0;
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = 1;
@@ -417,9 +416,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", error.what(), error.node_name(),
                                  static_cast<std::uint32_t>(error.attempts()));
         outcome.usage.wall_time_ms = elapsed_ms(started_at);
-        const auto token_usage     = usage->snapshot();
-        outcome.usage.model_tokens =
-            token_usage.total_tokens < 0 ? 0 : static_cast<std::uint64_t>(token_usage.total_tokens);
+        outcome.usage.model_tokens = model_tokens(usage);
         outcome.usage.program_operations = control->attempt == 1 ? 1 : 0;
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = 1;
@@ -428,10 +425,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     } catch (const std::exception& error) {
         outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", error.what());
         outcome.usage.wall_time_ms = elapsed_ms(started_at);
-        const auto token_usage     = usage->snapshot();
-        outcome.usage.model_tokens =
-            token_usage.total_tokens < 0 ? 0 : static_cast<std::uint64_t>(token_usage.total_tokens);
         outcome.usage.program_operations = control->attempt == 1 ? 1 : 0;
+        outcome.usage.model_tokens = model_tokens(usage);
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = 1;
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
@@ -444,10 +439,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     } catch (...) {
         outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", "Unknown Core failure");
         outcome.usage.wall_time_ms = elapsed_ms(started_at);
-        const auto token_usage     = usage->snapshot();
-        outcome.usage.model_tokens =
-            token_usage.total_tokens < 0 ? 0 : static_cast<std::uint64_t>(token_usage.total_tokens);
         outcome.usage.program_operations = control->attempt == 1 ? 1 : 0;
+        outcome.usage.model_tokens = model_tokens(usage);
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = 1;
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
@@ -455,7 +448,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                              "Unknown Core failure");
     }
 
-    if (control->budget_exhausted->load(std::memory_order_acquire)) {
+    if (control->budget_exhausted->load(std::memory_order_acquire) &&
+        control->cancellation_cause() == CancellationCause::None) {
         outcome.status = ProgramTerminalStatus::BudgetExhausted;
         outcome.failure.reset();
     }

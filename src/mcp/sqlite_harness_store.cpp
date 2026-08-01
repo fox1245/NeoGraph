@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <csignal>
+#include <cstdlib>
 #include <limits>
 #include <mutex>
 #include <set>
@@ -384,6 +386,8 @@ CREATE TABLE IF NOT EXISTS neograph_harness_program_effects (
 
     static constexpr std::string_view sqlite_transaction_reference =
         "https://www.sqlite.org/lang_transaction.html (fetched 2026-07-31)";
+    std::optional<SqliteHarnessProgramFaultPoint> program_fault;
+    std::optional<SqliteHarnessProgramFaultPoint> program_crash;
 };
 
 class SqliteHarnessProgramTransitionStore final : public program::ProgramTransitionStore {
@@ -538,6 +542,7 @@ public:
         std::lock_guard lock(impl_->mutex);
         impl_->exec("BEGIN IMMEDIATE;");
         try {
+            maybe_fail(SqliteHarnessProgramFaultPoint::AfterBegin);
             const auto persisted_artifact = load_artifact_locked(artifact_.artifact_id());
             if (!persisted_artifact ||
                 persisted_artifact->serialize().dump() != artifact_.serialize().dump()) {
@@ -725,14 +730,19 @@ public:
                     return program::ProgramTransitionPublishResult::Conflict;
                 }
             }
+            maybe_fail(SqliteHarnessProgramFaultPoint::AfterRunWrite);
 
             insert_journal(storage_run_id, owner_scope, publication.journal_record);
+            maybe_fail(SqliteHarnessProgramFaultPoint::AfterJournalWrite);
             for (const auto& event : publication.events) {
                 insert_event(storage_run_id, owner_scope, event);
             }
+            maybe_fail(SqliteHarnessProgramFaultPoint::AfterEventWrite);
             for (const auto& effect : publication.effects) {
                 insert_effect(storage_run_id, owner_scope, effect);
             }
+            maybe_fail(SqliteHarnessProgramFaultPoint::AfterEffectWrite);
+            maybe_fail(SqliteHarnessProgramFaultPoint::BeforeCommit);
             impl_->exec("COMMIT;");
             return program::ProgramTransitionPublishResult::Published;
         } catch (...) {
@@ -744,6 +754,18 @@ public:
     }
 
 private:
+    void maybe_fail(SqliteHarnessProgramFaultPoint point) {
+        if (impl_->program_crash && *impl_->program_crash == point) {
+            impl_->program_crash.reset();
+            std::raise(SIGKILL);
+            std::abort();
+        }
+        if (impl_->program_fault && *impl_->program_fault == point) {
+            impl_->program_fault.reset();
+            throw std::runtime_error("injected SQLite Program transition failure");
+        }
+    }
+
     std::optional<HarnessProgramArtifactRecord> load_artifact_locked(
         const std::string& artifact_id) const {
         Statement query(impl_->db,
@@ -934,6 +956,20 @@ SqliteHarnessRecordStore::SqliteHarnessRecordStore(const std::string&         db
     : impl_(std::make_shared<Impl>(db_path, busy_timeout, std::move(journal_config))) {}
 
 SqliteHarnessRecordStore::~SqliteHarnessRecordStore() = default;
+
+#ifdef NEOGRAPH_TESTING
+void SqliteHarnessRecordStore::fail_next_program_transition_for_testing(
+    SqliteHarnessProgramFaultPoint point) {
+    std::lock_guard lock(impl_->mutex);
+    impl_->program_fault = point;
+}
+
+void SqliteHarnessRecordStore::crash_next_program_transition_for_testing(
+    SqliteHarnessProgramFaultPoint point) {
+    std::lock_guard lock(impl_->mutex);
+    impl_->program_crash = point;
+}
+#endif
 
 void SqliteHarnessRecordStore::save_artifact(const std::string& artifact_id, const json& record) {
     validate_id(artifact_id);

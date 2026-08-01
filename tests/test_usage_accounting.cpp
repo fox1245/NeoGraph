@@ -26,6 +26,9 @@
 
 #include <memory>
 #include <atomic>
+#include <barrier>
+#include <thread>
+#include <vector>
 #include <limits>
 
 #include <string>
@@ -236,6 +239,77 @@ TEST(UsageAccounting, WideTotalSurvivesPublicIntCounterOverflow) {
 
     EXPECT_EQ(usage.total_tokens_wide(),
               static_cast<long long>(std::numeric_limits<int>::max()) + 1);
+}
+
+TEST(UsageAccounting, InvalidUsageCannotReduceCommittedBudget) {
+    UsageAccumulator usage;
+    usage.add(ChatCompletion::Usage{-7, -3, -1});
+    EXPECT_EQ(usage.total_tokens_wide(), 0);
+
+    // A provider total smaller than its components must not under-report.
+    usage.add(ChatCompletion::Usage{4, 6, 1});
+    EXPECT_EQ(usage.total_tokens_wide(), 10);
+    ASSERT_TRUE(usage.try_reserve(2, 12));
+
+    // Releasing more than the outstanding reservation is a no-op past zero;
+    // it must not create negative committed usage that bypasses the ceiling.
+    usage.release_reservation(100);
+    EXPECT_FALSE(usage.try_reserve(1, 10));
+
+    ASSERT_TRUE(usage.try_reserve(2, 12));
+    usage.settle_reservation(2, ChatCompletion::Usage{-1, -1, -1});
+    EXPECT_FALSE(usage.try_reserve(1, 10));
+}
+TEST(UsageAccounting, SettlingOneReservationPreservesSiblingReservation) {
+    UsageAccumulator usage;
+    ASSERT_TRUE(usage.try_reserve(4, 10));
+    ASSERT_TRUE(usage.try_reserve(3, 10));
+
+    usage.settle_reservation(4, ChatCompletion::Usage{0, 8, 8});
+
+    // Actual usage (8) plus the still-in-flight sibling (3) is 11.
+    EXPECT_FALSE(usage.try_reserve(1, 11));
+    ASSERT_TRUE(usage.try_reserve(1, 12));
+    usage.release_reservation(100);
+}
+
+TEST(UsageAccounting, ConcurrentReservationsRespectTheAdmittedCeiling) {
+    UsageAccumulator usage;
+    constexpr long long ceiling = 100;
+    constexpr int        workers = 16;
+    std::barrier         ready(workers + 1);
+    std::atomic<int>     accepted{0};
+    std::vector<std::thread> threads;
+    threads.reserve(workers);
+
+    for (int i = 0; i != workers; ++i) {
+        threads.emplace_back([&] {
+            ready.arrive_and_wait();
+            if (usage.try_reserve(20, ceiling)) {
+                accepted.fetch_add(1, std::memory_order_relaxed);
+                usage.settle_reservation(20, ChatCompletion::Usage{0, 20, 20});
+            }
+        });
+    }
+    ready.arrive_and_wait();
+    for (auto& thread : threads) thread.join();
+
+    EXPECT_LE(accepted.load(std::memory_order_relaxed), ceiling / 20);
+    EXPECT_EQ(usage.total_tokens_wide(),
+              static_cast<long long>(accepted.load(std::memory_order_relaxed)) * 20);
+    EXPECT_LE(usage.total_tokens_wide(), ceiling);
+}
+
+TEST(UsageAccounting, PublicSnapshotClampsWideTotals) {
+    UsageAccumulator usage;
+    ChatCompletion::Usage maxed;
+    maxed.total_tokens = std::numeric_limits<int>::max();
+    usage.add(maxed);
+    usage.add(maxed);
+
+    EXPECT_EQ(usage.total_tokens_wide(),
+              2LL * static_cast<long long>(std::numeric_limits<int>::max()));
+    EXPECT_EQ(usage.snapshot().total_tokens, std::numeric_limits<int>::max());
 }
 
 // The other way to drive an LLM. Agent is not a graph run and has no

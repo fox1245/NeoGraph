@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <barrier>
 #include <future>
 #include <string>
@@ -68,6 +69,64 @@ ProgramTransitionPublication terminal_publication(const ProgramTransitionPublica
     return {ProgramRunRecord::create(std::move(data)), journal,
             {event(2, ProgramEventKind::Terminal, ProgramTerminalEvent{status}, time)}, {}};
 }
+
+ProgramPendingEffect pending_effect() {
+    ProgramPendingEffectData data;
+    data.operation_id         = "root";
+    data.call_id              = "effect-call";
+    data.effect_id            = "effect-one";
+    data.result_schema        = {{"type", "object"}, {"additionalProperties", true}};
+    data.payload              = {{"kind", "publish"}};
+    data.expires_at_unix_ms   = 5000;
+    data.effect_mode          = EffectMode::Brokered;
+    data.idempotency          = ProgramEffectIdempotency::NonIdempotent;
+    data.core_node            = "main";
+    data.core_interrupt_value = {{"value", "effect"}};
+    return ProgramPendingEffect(std::move(data));
+}
+
+ProgramTransitionPublication interrupted_effect_publication(
+    const ProgramTransitionPublication& start) {
+    auto pending = pending_effect();
+    const auto cp = checkpoint();
+    auto journal = ProgramJournalRecord::create(
+        {start.journal_record.id, "run-1", digest('1'), digest('2'), 2,
+         {"root", ContinuationState::Interrupted, 1}, budget(), {}, cp, 20});
+    ProgramResultData result_data;
+    result_data.status             = ProgramTerminalStatus::Interrupted;
+    result_data.run_id             = "run-1";
+    result_data.program_version_id = digest('1');
+    result_data.bundle_id          = digest('2');
+    result_data.attempt            = 1;
+    result_data.output             = json::object();
+    result_data.remaining_budget   = budget();
+    result_data.checkpoint         = cp;
+    result_data.interrupt =
+        ProgramInterrupt{"main", pending.core_interrupt_value(), std::nullopt, pending};
+
+    ProgramRunRecordData data;
+    data.owner_scope         = "owner-a";
+    data.run_id              = "run-1";
+    data.program_version_id  = digest('1');
+    data.bundle_id           = digest('2');
+    data.binding_fingerprint = digest('3');
+    data.invocation          = start.run_record.invocation();
+    data.continuation        = journal.continuation;
+    data.remaining_budget    = journal.remaining_budget;
+    data.exact_checkpoint    = cp;
+    data.pending_effect      = pending;
+    data.terminal_result     = ProgramResult::create(std::move(result_data));
+    data.journal_head        = journal.id;
+    data.event_sequence      = 2;
+    data.effect_sequence     = 1;
+    data.created_at_ms       = start.run_record.created_at_ms();
+    data.updated_at_ms       = 20;
+    return {ProgramRunRecord::create(std::move(data)),
+            journal,
+            {event(2, ProgramEventKind::Terminal,
+                   ProgramTerminalEvent{ProgramTerminalStatus::Interrupted})},
+            {{1, std::move(pending)}}};
+}
 } // namespace
 
 TEST(ProgramTransitionStoreTest, CanonicalValuesRejectTamper) {
@@ -127,6 +186,42 @@ TEST(ProgramTransitionStoreTest, ExactTerminalRetryIsAlreadyPresent) {
     EXPECT_EQ(store.compare_publish(
                   "owner-a", start.journal_record.id, terminal),
               ProgramTransitionPublishResult::AlreadyPresent);
+}
+
+TEST(ProgramTransitionStoreTest, FaultAtEachPublishBoundaryPreservesCommittedState) {
+    const std::array faults{
+        ProgramTransitionFaultPoint::AfterRunSnapshot,
+        ProgramTransitionFaultPoint::AfterJournalSnapshot,
+        ProgramTransitionFaultPoint::AfterEventSnapshot,
+        ProgramTransitionFaultPoint::AfterEffectSnapshot,
+        ProgramTransitionFaultPoint::BeforeCommit,
+    };
+
+    for (const auto fault : faults) {
+        InMemoryProgramTransitionStore store;
+        auto start = start_publication();
+        ASSERT_EQ(store.compare_publish("owner-a", {}, start),
+                  ProgramTransitionPublishResult::Published);
+        auto terminal = terminal_publication(start, ProgramTerminalStatus::Completed,
+                                             ContinuationState::Completed);
+        store.fail_next_publication_for_testing(fault);
+        EXPECT_THROW(
+            store.compare_publish("owner-a", start.journal_record.id, std::move(terminal)),
+            std::runtime_error);
+
+        const auto latest = store.latest("owner-a", "run-1");
+        ASSERT_TRUE(latest);
+        EXPECT_EQ(latest->id, start.journal_record.id);
+        EXPECT_FALSE(store.load("owner-a", "run-1")->terminal_result());
+        EXPECT_EQ(store.load_events("owner-a", "run-1").size(), 1u);
+        EXPECT_TRUE(store.load_effects("owner-a", "run-1").empty());
+
+        EXPECT_EQ(store.compare_publish(
+                      "owner-a", start.journal_record.id,
+                      terminal_publication(start, ProgramTerminalStatus::Completed,
+                                           ContinuationState::Completed)),
+                  ProgramTransitionPublishResult::Published);
+    }
 }
 
 TEST(ProgramTransitionStoreTest, ConcurrentCasHasOneWinner) {

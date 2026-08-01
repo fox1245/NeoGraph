@@ -7,6 +7,7 @@
 #include <asio/error.hpp>
 #include <asio/system_error.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -145,14 +146,22 @@ json effect_descriptor(const json& executor, const std::string& call_id,
 
 class ProviderDeadline {
 public:
-    ProviderDeadline(std::shared_ptr<graph::CancelToken> cancel, int timeout_seconds)
-        : cancel_(std::move(cancel)) {
+    ProviderDeadline(std::shared_ptr<graph::CancelToken> parent,
+                     std::shared_ptr<graph::CancelToken> child,
+                     int                              timeout_seconds)
+        : parent_(std::move(parent)), child_(std::move(child)) {
         timer_ = std::thread([this, timeout_seconds] {
             std::unique_lock lock(mutex_);
             if (!cv_.wait_for(lock, std::chrono::seconds(timeout_seconds),
                               [this] { return finished_; })) {
-                expired_.store(true, std::memory_order_release);
-                cancel_->cancel();
+                // This is the deadline's linearization point. If the parent
+                // was already cancelled, preserve that earlier cause even if
+                // the provider delays unwinding until after the timer fires.
+                const auto cause = parent_->is_cancelled()
+                                       ? ProviderCancellationCause::Parent
+                                       : ProviderCancellationCause::Timeout;
+                cause_.store(cause, std::memory_order_release);
+                child_->cancel();
             }
         });
     }
@@ -166,15 +175,55 @@ public:
         timer_.join();
     }
 
-    bool expired() const { return expired_.load(std::memory_order_acquire); }
+    bool timeout_won() const noexcept {
+        return cause_.load(std::memory_order_acquire) ==
+               ProviderCancellationCause::Timeout;
+    }
 
 private:
-    std::shared_ptr<graph::CancelToken> cancel_;
-    std::atomic<bool> expired_{false};
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    bool finished_ = false;
-    std::thread timer_;
+    enum class ProviderCancellationCause : std::uint8_t {
+        None,
+        Parent,
+        Timeout,
+    };
+
+    std::shared_ptr<graph::CancelToken> parent_;
+    std::shared_ptr<graph::CancelToken> child_;
+    std::atomic<ProviderCancellationCause> cause_{ProviderCancellationCause::None};
+    std::mutex                          mutex_;
+    std::condition_variable             cv_;
+    bool                                finished_ = false;
+    std::thread                         timer_;
+};
+
+class TokenReservation {
+public:
+    explicit TokenReservation(std::shared_ptr<UsageAccumulator> usage)
+        : usage_(std::move(usage)) {}
+
+    ~TokenReservation() { release(); }
+
+    void hold(long long tokens) noexcept { held_ = std::max(0LL, tokens); }
+
+    void release() noexcept {
+        if (held_ == 0) return;
+        if (usage_) usage_->release_reservation(held_);
+        held_ = 0;
+    }
+
+    void settle(const ChatCompletion::Usage& usage) noexcept {
+        if (!usage_) return;
+        if (held_ != 0) {
+            usage_->settle_reservation(held_, usage);
+            held_ = 0;
+        } else {
+            usage_->add(usage);
+        }
+    }
+
+private:
+    std::shared_ptr<UsageAccumulator> usage_;
+    long long                         held_ = 0;
 };
 
 } // namespace
@@ -231,7 +280,6 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
         const auto reservation_ceiling = std::min<std::uint64_t>(
             call.model_token_budget,
             static_cast<std::uint64_t>(std::numeric_limits<long long>::max()));
-        params.cancel_token = cancel->fork();
         params.tools = chat_tools(call.tool_catalog);
         ChatMessage initial;
         initial.role = "user";
@@ -258,6 +306,10 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
             }
             ++provider_round;
             cancel->throw_if_cancelled("before provider Harness completion");
+            // Each provider completion gets a fresh child scope. A previous
+            // round's deadline must not cancel a later round after a slow
+            // capability call or host-brokered pause.
+            params.cancel_token = cancel->fork();
             ChatCompletion completion;
             const auto provider_correlation = detail::journal_correlation_id("provider");
             const auto provider_started = std::chrono::steady_clock::now();
@@ -272,19 +324,13 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                  {"round", provider_round},
                  {"tool_count", params.tools.size()}},
                 provider_correlation);
-            long long reserved_tokens = 0;
-            const auto release_reservation = [&] {
-                if (reserved_tokens != 0) {
-                    call.usage->release_reservation(reserved_tokens);
-                    reserved_tokens = 0;
-                }
-            };
+            TokenReservation reservation(call.usage);
             if (call.model_token_budget != 0) {
                 if (request_token_reservation == 0) {
                     return HarnessWorkerResponse::tool_error(
                         "bounded Harness provider request has no token reservation");
                 }
-                reserved_tokens = static_cast<long long>(request_token_reservation);
+                const auto reserved_tokens = static_cast<long long>(request_token_reservation);
                 if (!call.usage->try_reserve(
                         reserved_tokens, static_cast<long long>(reservation_ceiling))) {
                     if (call.budget_exhausted)
@@ -298,13 +344,18 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                     return HarnessWorkerResponse::cancelled(
                         "Program model-token budget exhausted before provider dispatch");
                 }
+                reservation.hold(reserved_tokens);
             }
             std::unique_ptr<ProviderDeadline> deadline;
             if (provider_timeout > 0) {
-                deadline = std::make_unique<ProviderDeadline>(params.cancel_token, provider_timeout);
+                deadline = std::make_unique<ProviderDeadline>(
+                    cancel, params.cancel_token, provider_timeout);
             }
             const auto deadline_expired = [&deadline] {
-                return deadline && deadline->expired();
+                return deadline && deadline->timeout_won();
+            };
+            const auto parent_cancelled = [&] {
+                return cancel->is_cancelled() && !deadline_expired();
             };
             try {
                 completion = config.provider->complete(params);
@@ -317,9 +368,32 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                               .count()},
                          {"outcome", "timeout"}},
                         provider_correlation);
-                    release_reservation();
+                    reservation.release();
                     return HarnessWorkerResponse::timeout("provider request exceeded its timeout");
                 }
+                if (parent_cancelled()) {
+                    detail::append_current_harness_journal_event(
+                        "provider.call.completed",
+                        {{"duration_ms",
+                          std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - provider_started)
+                              .count()},
+                         {"outcome", "cancelled"}},
+                        provider_correlation);
+                    reservation.release();
+                    return HarnessWorkerResponse::cancelled(
+                        "provider request cancelled before completion was accepted");
+                }
+                if (call.budget_exhausted &&
+                    call.budget_exhausted->load(std::memory_order_acquire)) {
+                    cancel->cancel();
+                    reservation.release();
+                    return HarnessWorkerResponse::cancelled(
+                        "Program model-token budget exhausted during provider call");
+                }
+                // The deadline is per provider completion, not capability
+                // execution. Join its timer before running tools.
+                deadline.reset();
             } catch (const graph::CancelledException&) {
                 const bool timed_out = deadline_expired();
                 detail::append_current_harness_journal_event(
@@ -330,15 +404,19 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                           .count()},
                      {"outcome", timed_out ? "timeout" : "cancelled"}},
                     provider_correlation);
-                if (timed_out) {
-                    release_reservation();
+                const bool timed_out_after_event = deadline_expired();
+                const bool cancelled_after_event = parent_cancelled();
+                reservation.release();
+                if (cancelled_after_event)
+                    return HarnessWorkerResponse::cancelled();
+                if (timed_out_after_event)
                     return HarnessWorkerResponse::timeout("provider request exceeded its timeout");
-                }
-                release_reservation();
                 return HarnessWorkerResponse::cancelled();
             } catch (const asio::system_error& error) {
-                const bool timed_out = error.code() == asio::error::timed_out ||
-                                       deadline_expired();
+                const bool timed_out = deadline_expired() ||
+                                       error.code() == asio::error::timed_out;
+                const bool cancelled = parent_cancelled();
+                const auto outcome = cancelled ? "cancelled" : timed_out ? "timeout" : "error";
                 detail::append_current_harness_journal_event(
                     "provider.call.completed",
                     {{"duration_ms",
@@ -346,28 +424,21 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                           std::chrono::steady_clock::now() - provider_started)
                           .count()},
                      {"error", error.what()},
-                     {"outcome", timed_out ? "timeout" : "error"}},
+                     {"outcome", outcome}},
                     provider_correlation);
-                if (timed_out) {
-                    release_reservation();
+                const bool timed_out_after_event = deadline_expired() ||
+                                                   error.code() == asio::error::timed_out;
+                const bool cancelled_after_event = parent_cancelled();
+                reservation.release();
+                if (cancelled_after_event)
+                    return HarnessWorkerResponse::cancelled(error.what());
+                if (timed_out_after_event)
                     return HarnessWorkerResponse::timeout(error.what());
-                }
-                release_reservation();
                 return HarnessWorkerResponse::tool_error(error.what());
             } catch (const std::exception& error) {
-                if (deadline_expired()) {
-                    detail::append_current_harness_journal_event(
-                        "provider.call.completed",
-                        {{"duration_ms",
-                          std::chrono::duration_cast<std::chrono::milliseconds>(
-                              std::chrono::steady_clock::now() - provider_started)
-                              .count()},
-                         {"error", error.what()},
-                         {"outcome", "timeout"}},
-                        provider_correlation);
-                    release_reservation();
-                    return HarnessWorkerResponse::timeout("provider request exceeded its timeout");
-                }
+                const bool timed_out = deadline_expired();
+                const bool cancelled = parent_cancelled();
+                const auto outcome = cancelled ? "cancelled" : timed_out ? "timeout" : "error";
                 detail::append_current_harness_journal_event(
                     "provider.call.completed",
                     {{"duration_ms",
@@ -375,37 +446,29 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                           std::chrono::steady_clock::now() - provider_started)
                           .count()},
                      {"error", error.what()},
-                     {"outcome", "error"}},
+                     {"outcome", outcome}},
                     provider_correlation);
-                release_reservation();
+                const bool timed_out_after_event = deadline_expired();
+                const bool cancelled_after_event = parent_cancelled();
+                reservation.release();
+                if (cancelled_after_event)
+                    return HarnessWorkerResponse::cancelled(error.what());
+                if (timed_out_after_event)
+                    return HarnessWorkerResponse::timeout("provider request exceeded its timeout");
                 return HarnessWorkerResponse::tool_error(error.what());
             }
-            detail::append_current_harness_journal_event(
-                "provider.call.completed",
-                {{"content", completion.message.content},
-                 {"duration_ms",
-                  std::chrono::duration_cast<std::chrono::milliseconds>(
-                      std::chrono::steady_clock::now() - provider_started)
-                      .count()},
-                 {"outcome", completion.message.tool_calls.empty() ? "content" : "tool_calls"},
-                 {"tool_call_count", completion.message.tool_calls.size()},
-                 {"usage",
-                  {{"completion_tokens", completion.usage.completion_tokens},
-                   {"prompt_tokens", completion.usage.prompt_tokens},
-                   {"total_tokens", completion.usage.total_tokens}}}},
-                provider_correlation);
+            bool      budget_overrun               = false;
+            bool      tool_call_needs_more_budget = false;
+            long long total_tokens                 = 0;
             if (call.usage) {
-                if (reserved_tokens != 0) {
-                    call.usage->settle_reservation(reserved_tokens, completion.usage);
-                    reserved_tokens = 0;
-                } else {
-                    call.usage->add(completion.usage);
-                }
-                const auto total_tokens = call.usage->total_tokens_wide();
-                const bool budget_overrun =
+                // Settle before any journal append: journal failure must not
+                // return actual provider usage to the reservation pool.
+                reservation.settle(completion.usage);
+                total_tokens = call.usage->total_tokens_wide();
+                budget_overrun =
                     total_tokens >= 0 &&
                     static_cast<std::uint64_t>(total_tokens) > call.model_token_budget;
-                const bool tool_call_needs_more_budget =
+                tool_call_needs_more_budget =
                     !completion.message.tool_calls.empty() && total_tokens >= 0 &&
                     static_cast<std::uint64_t>(total_tokens) == call.model_token_budget;
                 if (call.model_token_budget != 0 &&
@@ -414,16 +477,42 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                         call.budget_exhausted->store(true, std::memory_order_release);
                     params.cancel_token->cancel();
                     cancel->cancel();
-                    detail::append_current_harness_journal_event(
-                        "provider.call.budget_exhausted",
-                        {{"model_token_budget", call.model_token_budget},
-                         {"model_tokens_used", total_tokens}},
-                        provider_correlation);
-                    return HarnessWorkerResponse::cancelled(
-                        "Program model-token budget exhausted during provider call");
                 }
             }
-
+            const bool cancelled_before_completion_event = cancel->is_cancelled();
+            const auto completion_outcome =
+                cancelled_before_completion_event
+                    ? "cancelled"
+                    : completion.message.tool_calls.empty() ? "content" : "tool_calls";
+            detail::append_current_harness_journal_event(
+                "provider.call.completed",
+                {{"content", completion.message.content},
+                 {"duration_ms",
+                  std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - provider_started)
+                      .count()},
+                 {"outcome", completion_outcome},
+                 {"tool_call_count", completion.message.tool_calls.size()},
+                 {"usage",
+                  {{"completion_tokens", completion.usage.completion_tokens},
+                   {"prompt_tokens", completion.usage.prompt_tokens},
+                   {"total_tokens", completion.usage.total_tokens}}}},
+                provider_correlation);
+            const bool cancelled_after_completion_event = cancel->is_cancelled();
+            if (call.model_token_budget != 0 &&
+                (budget_overrun || tool_call_needs_more_budget)) {
+                detail::append_current_harness_journal_event(
+                    "provider.call.budget_exhausted",
+                    {{"model_token_budget", call.model_token_budget},
+                     {"model_tokens_used", total_tokens}},
+                    provider_correlation);
+                return HarnessWorkerResponse::cancelled(
+                    "Program model-token budget exhausted during provider call");
+            }
+            if (cancelled_before_completion_event || cancelled_after_completion_event) {
+                return HarnessWorkerResponse::cancelled(
+                    "provider request cancelled before tool dispatch");
+            }
 
             if (completion.message.tool_calls.empty()) {
                 if (completion.message.content.empty()) {
@@ -457,6 +546,10 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
 
             params.messages.push_back(completion.message);
             for (const auto& tool_call : completion.message.tool_calls) {
+                if (cancel->is_cancelled()) {
+                    return HarnessWorkerResponse::cancelled(
+                        "provider request cancelled before capability dispatch");
+                }
                 auto tool_it = catalog.find(tool_call.name);
                 if (tool_it == catalog.end()) {
                     return HarnessWorkerResponse::tool_error(
@@ -469,6 +562,10 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                     arguments           = enforce_path_policy(call, tool_it->second, arguments);
                     const auto executor = tool_it->second.value("executor", json::object());
                     if (executor.value("kind", "") == "host_brokered") {
+                        if (cancel->is_cancelled()) {
+                            return HarnessWorkerResponse::cancelled(
+                                "provider request cancelled before host dispatch");
+                        }
                         const auto call_id = host_call_id();
                         json pending = {
                             {"call_id", call_id},
@@ -490,6 +587,10 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                              {"provider_call_id", tool_call.id},
                              {"tool_id", tool_call.name}},
                             call_id);
+                        if (cancel->is_cancelled()) {
+                            return HarnessWorkerResponse::cancelled(
+                                "provider request cancelled before host result wait");
+                        }
                         if (executor.value("interaction", "tool_result") == "input") {
                             return HarnessWorkerResponse::input_required(std::move(pending));
                         }
@@ -525,10 +626,27 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                                   .count()},
                              {"error", error.what()},
                              {"executor_kind", executor.value("kind", "builtin")},
-                             {"outcome", "error"},
+                             {"outcome", cancel->is_cancelled() ? "cancelled" : "error"},
                              {"tool_id", tool_call.name}},
                             capability_correlation);
+                        if (cancel->is_cancelled()) {
+                            return HarnessWorkerResponse::cancelled(error.what());
+                        }
                         throw;
+                    }
+                    if (cancel->is_cancelled()) {
+                        detail::append_current_harness_journal_event(
+                            "capability.call.completed",
+                            {{"duration_ms",
+                              std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now() - capability_started)
+                                  .count()},
+                             {"executor_kind", executor.value("kind", "builtin")},
+                             {"outcome", "cancelled"},
+                             {"tool_id", tool_call.name}},
+                            capability_correlation);
+                        return HarnessWorkerResponse::cancelled(
+                            "provider request cancelled during capability dispatch");
                     }
                     detail::append_current_harness_journal_event(
                         "capability.call.completed",
@@ -548,9 +666,14 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                     message.content = result.dump();
                     params.messages.push_back(std::move(message));
                 } catch (const std::exception& error) {
+                    if (cancel->is_cancelled())
+                        return HarnessWorkerResponse::cancelled(error.what());
                     return HarnessWorkerResponse::tool_error(error.what());
                 }
             }
+            continue;
+
+
         }
     };
 }

@@ -127,6 +127,7 @@ if(TARGET neograph_harness)
 endif()
 if(TARGET neograph_mcp_sqlite)
     target_sources(neograph_tests PRIVATE test_harness_program_store.cpp)
+    target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTING)
 endif()
 
 if(NEOGRAPH_BUILD_MCP_HTTP_SERVER)

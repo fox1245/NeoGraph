@@ -771,6 +771,9 @@ if(TARGET neograph_harness AND NEOGRAPH_BUILD_SQLITE)
             $<INSTALL_INTERFACE:include>
     )
     target_compile_definitions(neograph_mcp_sqlite PRIVATE NEOGRAPH_BUILDING_LIBRARY)
+    if(NEOGRAPH_BUILD_TESTS)
+        target_compile_definitions(neograph_mcp_sqlite PRIVATE NEOGRAPH_TESTING)
+    endif()
     target_link_libraries(neograph_mcp_sqlite
         PUBLIC neograph_harness
         PRIVATE SQLite::SQLite3

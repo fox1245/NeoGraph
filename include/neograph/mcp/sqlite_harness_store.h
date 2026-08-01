@@ -9,7 +9,9 @@
 #include <neograph/mcp/harness_program_store.h>
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -27,6 +29,22 @@ struct SqliteHarnessJournalConfig {
         "api_key", "authorization", "content", "messages", "output",
         "password", "result", "secret", "token",
     };
+};
+
+/**
+ * @brief One-shot failure points for durable Program transition tests.
+ *
+ * These hooks are intentionally test-only in name and semantics. They let a
+ * test abort a transaction after each durable row family is written and then
+ * verify that reconnecting observes the previous complete publication.
+ */
+enum class SqliteHarnessProgramFaultPoint : std::uint8_t {
+    AfterBegin,
+    AfterRunWrite,
+    AfterJournalWrite,
+    AfterEventWrite,
+    AfterEffectWrite,
+    BeforeCommit,
 };
 
 /** Local SQLite implementation of Harness snapshots and the causal journal. */
@@ -60,6 +78,14 @@ public:
     HarnessRetentionResult cleanup_retained(const HarnessRetentionPolicy& policy) override;
     std::shared_ptr<program::ProgramTransitionStore>
     bind_program_transitions(HarnessProgramArtifactRecord artifact) override;
+
+#ifdef NEOGRAPH_TESTING
+    /// Fail one subsequent Program transition at the requested transaction point.
+    void fail_next_program_transition_for_testing(SqliteHarnessProgramFaultPoint point);
+    /// Crash the current process once at the requested transition point.
+    /// This is test-only and is used to prove reconnect recovery after SIGKILL.
+    void crash_next_program_transition_for_testing(SqliteHarnessProgramFaultPoint point);
+#endif
     std::optional<HarnessProgramRunRecord>
     resolve_program_run(std::string_view owner_scope, std::string_view run_id) const override;
 
