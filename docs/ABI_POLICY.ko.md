@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ko source_sha256=ebe5405e9700e0c4c0991888dcc3b913812786782c7cae1825d9b34584a91483 -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ko source_sha256=4094661c9776532f38c3ad525754adea0810191a9739de2f72b224c5ba23c38a -->
 # 바이너리 호환성 정책
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
