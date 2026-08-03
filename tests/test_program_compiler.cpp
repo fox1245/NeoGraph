@@ -588,11 +588,36 @@ TEST(ProgramCompilerTest, RejectsUnknownProgramFieldsAndWrongNestedTypes) {
     EXPECT_TRUE(contains_code(wrong_errors, "P_SCHEMA_TYPE"));
 }
 
-TEST(ProgramCompilerTest, RejectsNonCallCoreMultipleRootAndNameMismatch) {
-    auto snapshot          = complete_snapshot();
-    auto non_core          = program_document();
-    non_core["root"]["op"] = "sequence";
-    EXPECT_TRUE(contains_code(compile_errors(snapshot, std::move(non_core)), "P_ROOT_OPERATION"));
+TEST(ProgramCompilerTest, AcceptsSequenceRootAndRejectsMalformedRootPlans) {
+    auto snapshot = complete_snapshot();
+    auto sequence = program_document();
+    sequence["root"]["op"] = "sequence";
+    sequence["root"]["children"] = json::array({
+        json{{"op", "call_core"}},
+        json{{"op", "emit"}, {"value", json{{"kind", "done"}}}},
+        json{{"op", "return"}, {"value", json{{"ok", true}}}},
+    });
+    std::optional<ProgramBundle> sequence_bundle;
+    try {
+        sequence_bundle = ProgramCompiler(snapshot, {"program-compiler-test/v1"})
+                              .compile(source_from(std::move(sequence)));
+    } catch (const ProgramCompileError& error) {
+        for (const auto& diagnostic : error.diagnostics()) {
+            ADD_FAILURE() << diagnostic.code << " " << diagnostic.primary.json_pointer << " "
+                          << diagnostic.message << " witness=" << diagnostic.witness.dump();
+        }
+        return;
+    }
+    ASSERT_TRUE(sequence_bundle.has_value());
+    ASSERT_EQ(sequence_bundle->orchestration_plan().plan["root"], "root");
+    ASSERT_EQ(sequence_bundle->orchestration_plan().plan["operations"].size(), 4U);
+    EXPECT_EQ(sequence_bundle->orchestration_plan().plan["operations"][0]["op"], "call_core");
+    EXPECT_EQ(sequence_bundle->orchestration_plan().plan["operations"][1]["op"], "emit");
+    EXPECT_EQ(sequence_bundle->orchestration_plan().plan["operations"][2]["op"], "return");
+    auto malformed = program_document();
+    malformed["root"]["op"] = "sequence";
+    const auto malformed_errors = compile_errors(snapshot, std::move(malformed));
+    EXPECT_TRUE(contains_code(malformed_errors, "P_SCHEMA_REQUIRED"));
 
     auto multiple    = program_document();
     multiple["root"] = json::array({multiple["root"], multiple["root"]});
@@ -620,8 +645,10 @@ TEST(ProgramCompilerTest, RejectsMissingDuplicateAndInvalidBudgetClosure) {
 
     auto invalid = program_document();
     for (std::size_t index = 0; index < invalid["declared_budget_requirements"].size(); ++index) {
-        if (invalid["declared_budget_requirements"][index]["resource"] == "max_program_operations")
-            invalid["declared_budget_requirements"][index]["maximum"] = 2;
+        if (invalid["declared_budget_requirements"][index]["resource"] == "max_program_operations") {
+            invalid["declared_budget_requirements"][index]["minimum"] = 2;
+            invalid["declared_budget_requirements"][index]["maximum"] = 1;
+        }
     }
     EXPECT_TRUE(contains_code(compile_errors(snapshot, std::move(invalid)), "P_BUDGET_INVALID"));
 }

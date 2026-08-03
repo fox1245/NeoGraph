@@ -114,6 +114,11 @@ json ep(const ProgramEvent& e) {
                 return eg(*payload);
             }
             break;
+        case ProgramEventKind::Emit:
+            if (const auto* payload = std::get_if<ProgramEmitEvent>(&e.payload)) {
+                return json{{"operation_id", payload->operation_id}, {"value", payload->value}};
+            }
+            break;
         case ProgramEventKind::CheckpointPublished:
             if (const auto* payload =
                     std::get_if<ProgramCheckpointEvent>(&e.payload)) {
@@ -140,6 +145,9 @@ ProgramEventPayload dp(ProgramEventKind kind, const json& v) {
             return ProgramStartedEvent{db(v)};
         case ProgramEventKind::Core:
             return dg(v);
+        case ProgramEventKind::Emit:
+            detail::reject_unknown_fields(v, "Program emit event", {"operation_id", "value"});
+            return ProgramEmitEvent{rs(v, "operation_id"), rv(v, "value")};
         case ProgramEventKind::CheckpointPublished:
             detail::reject_unknown_fields(
                 v, "Program checkpoint event",
@@ -159,6 +167,8 @@ void val(const ProgramEvent& e) {
          std::holds_alternative<ProgramStartedEvent>(e.payload)) ||
         (e.kind == ProgramEventKind::Core &&
          std::holds_alternative<graph::TypedGraphEvent>(e.payload)) ||
+        (e.kind == ProgramEventKind::Emit &&
+         std::holds_alternative<ProgramEmitEvent>(e.payload)) ||
         (e.kind == ProgramEventKind::CheckpointPublished &&
          std::holds_alternative<ProgramCheckpointEvent>(e.payload)) ||
         (e.kind == ProgramEventKind::Terminal &&
@@ -173,6 +183,11 @@ void val(const ProgramEvent& e) {
     detail::validate_token(e.run_id, "Program event run_id");
     detail::validate_token(e.operation_id, "Program event operation_id");
     detail::validate_token(e.core_run_id, "Program event core_run_id");
+    if (e.kind == ProgramEventKind::Emit) {
+        const auto* payload = std::get_if<ProgramEmitEvent>(&e.payload);
+        if (!payload) throw std::invalid_argument("Program emit payload missing");
+        detail::validate_token(payload->operation_id, "Program emit operation_id");
+    }
     if (!e.trace_id.empty()) {
         detail::validate_token(e.trace_id, "Program event trace_id");
     }
@@ -208,5 +223,5 @@ std::string hash(const ProgramEvent& e) {
     return detail::sha256_identity(
         "program-event/v1", detail::canonical_json_bytes(body(e)));
 }
-}std::string_view to_string(ProgramEventKind k)noexcept{switch(k){case ProgramEventKind::Started:return"started";case ProgramEventKind::Core:return"core";case ProgramEventKind::CheckpointPublished:return"checkpoint_published";case ProgramEventKind::Terminal:return"terminal";}return"unknown";}ProgramEventKind program_event_kind_from_string(std::string_view v){if(v=="started")return ProgramEventKind::Started;if(v=="core")return ProgramEventKind::Core;if(v=="checkpoint_published")return ProgramEventKind::CheckpointPublished;if(v=="terminal")return ProgramEventKind::Terminal;throw std::invalid_argument("Unknown Program event kind");}
+}std::string_view to_string(ProgramEventKind k)noexcept{switch(k){case ProgramEventKind::Started:return"started";case ProgramEventKind::Core:return"core";case ProgramEventKind::Emit:return"emit";case ProgramEventKind::CheckpointPublished:return"checkpoint_published";case ProgramEventKind::Terminal:return"terminal";}return"unknown";}ProgramEventKind program_event_kind_from_string(std::string_view v){if(v=="started")return ProgramEventKind::Started;if(v=="core")return ProgramEventKind::Core;if(v=="emit")return ProgramEventKind::Emit;if(v=="checkpoint_published")return ProgramEventKind::CheckpointPublished;if(v=="terminal")return ProgramEventKind::Terminal;throw std::invalid_argument("Unknown Program event kind");}
 ProgramEvent ProgramEvent::create(ProgramEvent e){val(e);auto h=hash(e);if(!e.id.empty()&&e.id!=h)throw std::invalid_argument("Program event id mismatch");e.id=h;return e;}ProgramEvent ProgramEvent::parse(std::string_view bytes){auto v=detail::parse_json_strict(bytes);if(!v.is_object()||rs(v,"format")!=FORMAT)throw std::invalid_argument("Stored ProgramEvent format invalid");detail::reject_unknown_fields(v,"Stored ProgramEvent",{"format","storage_schema_version","id","sequence","timestamp_ms","run_id","program_version_id","bundle_id","operation_id","core_generation_id","core_run_id","trace_id","attempt","kind","payload"});if(r32(v,"storage_schema_version")!=STORAGE_SCHEMA_VERSION)throw std::invalid_argument("Stored ProgramEvent schema unsupported");ProgramEvent e;e.id=rs(v,"id");e.sequence=ru(v,"sequence");e.timestamp_ms=ri(v,"timestamp_ms");e.run_id=rs(v,"run_id");e.program_version_id=rs(v,"program_version_id");e.bundle_id=rs(v,"bundle_id");e.operation_id=rs(v,"operation_id");e.core_generation_id=rs(v,"core_generation_id");e.core_run_id=rs(v,"core_run_id");e.trace_id=rs(v,"trace_id");e.attempt=ru(v,"attempt");e.kind=program_event_kind_from_string(rs(v,"kind"));e.payload=dp(e.kind,rv(v,"payload"));return create(std::move(e));}std::string ProgramEvent::serialize_canonical()const{val(*this);if(id!=hash(*this))throw std::invalid_argument("Program event id mismatch");auto v=body(*this);v["id"]=id;return detail::canonical_json_bytes(v);} }

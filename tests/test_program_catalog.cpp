@@ -2,6 +2,12 @@
 #include <neograph/provider.h>
 #include <neograph/tool.h>
 #include <neograph/program/program.h>
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+#include <neograph/program/sqlite_store.h>
+#endif
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+#include <filesystem>
+#endif
 
 #include "catalog_access.h"
 #include <gtest/gtest.h>
@@ -760,3 +766,107 @@ TEST(ProgramCatalogTest, CallerFabricatedVersionCannotBePinned) {
         (void)neograph::program::detail::CatalogRuntimeAccess::pin(fixture.catalog, fabricated),
         ProgramDiagnosticError);
 }
+
+
+TEST(ProgramCatalogTest, ActivationCompareAndSwapAndRetentionAreOwnerScoped) {
+    CatalogFixture fixture(registry());
+    const auto     bundle = compile(fixture.snapshot);
+    const auto     first  = fixture.catalog.admit(bundle, fixture.request());
+
+    PolicySnapshotBuilder policy_builder;
+    policy_builder.id("catalog-policy-next")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:catalog")
+        .admission_profile(fixture.admission)
+        .budget_ceiling(BudgetLimits{1000, 100, 100, 1, 1, 20, 1, 1, 1});
+    const auto next_policy = std::move(policy_builder).build();
+    const auto second =
+        fixture.catalog.admit(bundle, ProgramAdmission{"tenant:catalog", fixture.admission,
+                                                        next_policy, {}});
+
+    EXPECT_EQ(fixture.catalog.activate("tenant:catalog", first.id(), 0),
+              ProgramActivationResult::Activated);
+    const auto activation = fixture.catalog.activation("tenant:catalog");
+    ASSERT_TRUE(activation.has_value());
+    EXPECT_EQ(activation->generation(), 1U);
+    EXPECT_EQ(activation->active_version_id(), first.id());
+
+    EXPECT_EQ(fixture.catalog.activate("tenant:catalog", second.id(), 0),
+              ProgramActivationResult::Conflict);
+    EXPECT_EQ(fixture.catalog.activate("tenant:catalog", second.id(), 1),
+              ProgramActivationResult::Activated);
+    EXPECT_EQ(fixture.catalog.activate("tenant:catalog", second.id(), 2),
+              ProgramActivationResult::AlreadyPresent);
+
+    const auto report = fixture.catalog.collect_retention("tenant:catalog", {});
+    EXPECT_EQ(report.versions_removed, 1U);
+    EXPECT_FALSE(fixture.store->get_version(first.id()).has_value());
+    EXPECT_TRUE(fixture.store->get_version(second.id()).has_value());
+    EXPECT_TRUE(fixture.store->get_bundle(bundle.id()).has_value());
+}
+
+TEST(ProgramCatalogTest, MigrationPlanRecordsCompatibilityProofAndRoundTrips) {
+    CatalogFixture fixture(registry());
+    const auto     bundle = compile(fixture.snapshot);
+    const auto     first  = fixture.catalog.admit(bundle, fixture.request());
+
+    PolicySnapshotBuilder policy_builder;
+    policy_builder.id("catalog-policy-migration")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:catalog")
+        .admission_profile(fixture.admission)
+        .budget_ceiling(BudgetLimits{1000, 100, 100, 1, 1, 20, 1, 1, 1});
+    const auto target_policy = std::move(policy_builder).build();
+    const auto target =
+        fixture.catalog.admit(bundle, ProgramAdmission{"tenant:catalog", fixture.admission,
+                                                        target_policy, {}});
+
+    const auto plan = fixture.catalog.plan_migration("tenant:catalog", first.id(), target.id());
+    EXPECT_TRUE(plan.is_compatible());
+    EXPECT_TRUE(plan.blockers().empty());
+    EXPECT_EQ(MigrationPlan::parse(plan.serialize_canonical()).id(), plan.id());
+
+    const auto explicit_plan = MigrationPlan::create(
+        MigrationPlanData{first.id(), target.id(), "tenant:catalog",
+                          MigrationCompatibility::CompilerMismatch, {"compiler_build_id"}});
+    EXPECT_FALSE(explicit_plan.is_compatible());
+    EXPECT_EQ(explicit_plan.blockers(), std::vector<std::string>{"compiler_build_id"});
+}
+
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+TEST(ProgramCatalogTest, SQLiteProgramStoreReopensActivationAndRetention) {
+    static std::atomic<unsigned> sequence{0};
+    const auto path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-program-store-" + std::to_string(sequence.fetch_add(1)) + ".db"))
+            .string();
+    std::filesystem::remove(path);
+
+    CatalogFixture fixture(registry());
+    const auto bundle = compile(fixture.snapshot);
+    const auto version = fixture.catalog.admit(bundle, fixture.request());
+
+    {
+        SQLiteProgramStore store(path);
+        store.publish_admitted(bundle, version);
+        EXPECT_EQ(store.compare_activate("tenant:catalog", 0, version.id(),
+                                         version.policy_snapshot().fingerprint()),
+                  ProgramActivationResult::Activated);
+    }
+    {
+        SQLiteProgramStore store(path);
+        ASSERT_TRUE(store.get_bundle(bundle.id()).has_value());
+        ASSERT_TRUE(store.get_version(version.id()).has_value());
+        const auto activation = store.get_activation("tenant:catalog");
+        ASSERT_TRUE(activation.has_value());
+        EXPECT_EQ(activation->generation(), 1U);
+        EXPECT_EQ(activation->active_version_id(), version.id());
+        EXPECT_EQ(store.compare_activate("tenant:catalog", 0, version.id(),
+                                         version.policy_snapshot().fingerprint()),
+                  ProgramActivationResult::Conflict);
+        EXPECT_EQ(store.collect_garbage("tenant:catalog", {}).versions_removed, 0U);
+    }
+
+    std::filesystem::remove(path);
+}
+#endif

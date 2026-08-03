@@ -19,6 +19,7 @@ namespace neograph::program {
 enum class ProgramEventKind : std::uint8_t {
     Started,
     Core,
+    Emit,
     CheckpointPublished,
     Terminal,
 };
@@ -29,6 +30,12 @@ NEOGRAPH_PROGRAM_API ProgramEventKind program_event_kind_from_string(std::string
 struct ProgramStartedEvent {
     RunBudget budget;
     bool operator==(const ProgramStartedEvent&) const = default;
+};
+
+struct ProgramEmitEvent {
+    std::string operation_id;
+    json        value;
+    bool operator==(const ProgramEmitEvent&) const = default;
 };
 
 struct ProgramCheckpointEvent {
@@ -43,6 +50,7 @@ struct ProgramTerminalEvent {
 
 using ProgramEventPayload = std::variant<ProgramStartedEvent,
                                          graph::TypedGraphEvent,
+                                         ProgramEmitEvent,
                                          ProgramCheckpointEvent,
                                          ProgramTerminalEvent>;
 

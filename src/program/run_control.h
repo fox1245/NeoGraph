@@ -65,7 +65,7 @@ public:
     const std::string                                program_version_id;
     const std::string                                bundle_id;
     const std::string                                binding_fingerprint;
-    const std::string                                operation_id{"root"};
+    std::string                                       operation_id{"root"};
     const std::uint64_t                              attempt;
     const std::shared_ptr<const MaterializedProgram> materialized;
     const ProgramPersistedInvocation                 persisted_invocation;

@@ -1,4 +1,3 @@
-#include <neograph/program/diagnostic.h>
 #include <neograph/program/runtime.h>
 
 #include "canonical_json.h"
@@ -157,14 +156,15 @@ void validate_invocation(const detail::MaterializedProgram& materialized,
     constexpr auto max_safe_wall_time_ms =
         static_cast<std::uint64_t>(std::numeric_limits<std::chrono::milliseconds::rep>::max()) / 2;
     if (budget.wall_time_ms == 0 || budget.wall_time_ms > max_safe_wall_time_ms ||
-        budget.max_concurrency != 1 || budget.max_program_operations != 1 ||
+        budget.max_concurrency == 0 || budget.max_program_operations == 0 ||
         budget.max_core_steps == 0 ||
         budget.max_core_steps > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
-        budget.max_dynamic_compiles != 0 || budget.max_child_depth != 0 ||
-        budget.max_total_children != 0) {
-        throw_runtime_diagnostic("P_START_BUDGET",
-                                 "PR6 requires positive wall/Core limits, one "
-                                 "operation/concurrency slot, and no dynamic or child budget");
+        budget.max_dynamic_compiles != 0 ||
+        ((budget.max_child_depth == 0) != (budget.max_total_children == 0))) {
+        throw_runtime_diagnostic(
+            "P_START_BUDGET",
+            "Program requires positive wall/Core/operation/concurrency limits and "
+            "does not permit dynamic compilation or an unpaired child budget");
     }
 
     const auto ceiling = materialized.version.policy_snapshot().budget_ceiling();
@@ -597,6 +597,31 @@ ProgramResult RunControl::make_result(RunOutcome outcome) const {
         std::move(outcome.execution_trace)});
 }
 
+void ensure_terminal_checkpoint(const RunControl& control, RunOutcome& outcome) {
+    if (outcome.checkpoint || !control.checkpoints || !control.materialized) return;
+
+    graph::Checkpoint checkpoint;
+    checkpoint.id               = graph::Checkpoint::generate_id();
+    checkpoint.thread_id        = control.core_thread_id;
+    checkpoint.channel_values   = outcome.output.is_null() ? json::object() : outcome.output;
+    checkpoint.channel_versions = json::object();
+    checkpoint.parent_id        = {};
+    checkpoint.current_node     = {};
+    checkpoint.next_nodes       = {};
+    checkpoint.interrupt_phase  = graph::CheckpointPhase::Completed;
+    checkpoint.metadata         = json{{"neograph_program", "terminal"}};
+    checkpoint.step             = 0;
+    checkpoint.timestamp        = now_ms();
+    checkpoint.schema_version   = graph::CHECKPOINT_SCHEMA_VERSION;
+    control.checkpoints->save(checkpoint);
+    outcome.checkpoint = CoreCheckpointIdentity{
+        control.materialized->root->core_name,
+        control.materialized->root->compiled_plan_identity,
+        control.core_thread_id,
+        checkpoint.id,
+        checkpoint.schema_version};
+}
+
 void RunControl::complete(RunOutcome outcome) noexcept {
     try {
         {
@@ -605,6 +630,7 @@ void RunControl::complete(RunOutcome outcome) noexcept {
             completion_claimed_ = true;
             terminal_decided_   = true;
         }
+        ensure_terminal_checkpoint(*this, outcome);
 
         std::vector<ProgramEvent> terminal_events;
         if (outcome.checkpoint) {

@@ -4,9 +4,9 @@
  */
 #pragma once
 
+#include <neograph/program/activation.h>
 #include <neograph/program/admission.h>
-#include <neograph/program/version.h>
-#include <neograph/graph/types.h>
+#include <neograph/program/migration.h>
 #include <neograph/tool_set.h>
 
 #include <functional>
@@ -106,6 +106,20 @@ public:
                                                   std::string_view id);
     std::optional<ProgramVersion> resolve_version_with_binding(
         std::string_view owner_scope, std::string_view id, CatalogCapabilityBinding binding);
+
+    /** Build a side-effect-free compatibility proof for a version transition. */
+    MigrationPlan plan_migration(std::string_view owner_scope,
+                                 std::string_view source_version_id,
+                                 std::string_view target_version_id) const;
+    /** Materialize and preflight a version before publishing its activation pointer. */
+    ProgramActivationResult activate(std::string_view owner_scope,
+                                     std::string_view version_id,
+                                     std::uint64_t expected_generation);
+    std::optional<ProgramActivation>
+    activation(std::string_view owner_scope) const;
+    ProgramRetentionReport collect_retention(
+        std::string_view owner_scope,
+        const std::vector<std::string>& pinned_version_ids);
 
 private:
     ProgramVersion materialize(

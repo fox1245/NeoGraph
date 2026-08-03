@@ -16,7 +16,10 @@
 #include <grpcpp/server_builder.h>
 
 #include <mutex>
+#include <atomic>
+#include <chrono>
 #include <stdexcept>
+#include <thread>
 #include <string>
 #include <unordered_map>
 
@@ -35,14 +38,47 @@ public:
         : ctx_(std::move(ctx)),
           default_def_(std::move(default_graph_json)) {}
 
-    ::grpc::Status RunGraph(::grpc::ServerContext* /*sctx*/,
+    ::grpc::Status RunGraph(::grpc::ServerContext* sctx,
                             const pb::RunGraphRequest* req,
                             pb::RunGraphResponse* resp) override {
+        std::shared_ptr<CancelToken> token;
+        std::atomic_bool finished{false};
+        std::thread cancel_watcher;
+        auto stop_watcher = [&] {
+            finished.store(true, std::memory_order_release);
+            if (cancel_watcher.joinable()) cancel_watcher.join();
+        };
         try {
             auto engine = get_engine(req->graph_def_json());
             RunConfig cfg = build_config(*req);
-            auto r = engine->run(cfg);
+            token = std::make_shared<CancelToken>();
+            cfg.cancel_token = token;
+            cancel_watcher = std::thread([sctx, token, &finished] {
+                while (!finished.load(std::memory_order_acquire)
+                       && !sctx->IsCancelled()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                if (sctx->IsCancelled()) token->cancel();
+            });
 
+            RunInvocationRequest request;
+            request.config = std::move(cfg);
+            RunInvocation invocation(engine, std::move(request));
+            auto outcome = invocation.run();
+            stop_watcher();
+            if (outcome.cancelled()) {
+                resp->set_error("cancelled");
+                return ::grpc::Status(::grpc::StatusCode::CANCELLED,
+                                      "graph invocation cancelled");
+            }
+            if (!outcome.succeeded() || !outcome.run_result) {
+                resp->set_error(outcome.error.empty()
+                                    ? "graph invocation failed"
+                                    : outcome.error);
+                return ::grpc::Status::OK;
+            }
+
+            const auto& r = *outcome.run_result;
             resp->set_output_json(r.output.dump());
             resp->set_interrupted(r.interrupted);
             resp->set_interrupt_node(r.interrupt_node);
@@ -52,6 +88,7 @@ public:
             for (const auto& n : r.execution_trace)
                 resp->add_execution_trace(n);
         } catch (const std::exception& e) {
+            stop_watcher();
             // Engine-side failure surfaces in the payload, not as a
             // transport error — caller distinguishes "graph threw"
             // from "gRPC broke".
@@ -61,14 +98,25 @@ public:
     }
 
     ::grpc::Status RunGraphStream(
-            ::grpc::ServerContext* /*sctx*/,
+            ::grpc::ServerContext* sctx,
             const pb::RunGraphRequest* req,
             ::grpc::ServerWriter<pb::GraphEvent>* writer) override {
+        std::shared_ptr<CancelToken> token;
+        std::atomic_bool finished{false};
+        std::thread cancel_watcher;
+        auto stop_watcher = [&] {
+            finished.store(true, std::memory_order_release);
+            if (cancel_watcher.joinable()) cancel_watcher.join();
+        };
         try {
             auto engine = get_engine(req->graph_def_json());
             RunConfig cfg = build_config(*req);
+            token = std::make_shared<CancelToken>();
+            cfg.cancel_token = token;
 
-            auto r = engine->run_stream(cfg, [&](const GraphEvent& ev) {
+            RunInvocationRequest request;
+            request.config = std::move(cfg);
+            request.on_event = [writer, token](const GraphEvent& ev) {
                 pb::GraphEvent out;
                 out.set_node(ev.node_name);
                 switch (ev.type) {
@@ -86,9 +134,36 @@ public:
                         out.set_kind(pb::GraphEvent::DEBUG); break;
                 }
                 out.set_payload_json(ev.data.dump());
-                writer->Write(out);
+                if (!writer->Write(out)) token->cancel();
+            };
+
+            cancel_watcher = std::thread([sctx, token, &finished] {
+                while (!finished.load(std::memory_order_acquire)
+                       && !sctx->IsCancelled()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                if (sctx->IsCancelled()) token->cancel();
             });
 
+            RunInvocation invocation(engine, std::move(request));
+            auto outcome = invocation.run();
+            stop_watcher();
+            if (outcome.cancelled()) {
+                return ::grpc::Status(::grpc::StatusCode::CANCELLED,
+                                      "graph invocation cancelled");
+            }
+            if (!outcome.succeeded() || !outcome.run_result) {
+                pb::GraphEvent err;
+                err.set_kind(pb::GraphEvent::DEBUG);
+                err.set_payload_json(neograph::json{
+                    {"error", outcome.error.empty()
+                                  ? "graph invocation failed"
+                                  : outcome.error}}.dump());
+                writer->Write(err);
+                return ::grpc::Status::OK;
+            }
+
+            const auto& r = *outcome.run_result;
             pb::GraphEvent fin;
             fin.set_kind(pb::GraphEvent::FINAL);
             neograph::json f = {
@@ -100,8 +175,11 @@ public:
                 {"max_steps_exhausted", r.max_steps_exhausted()},
             };
             fin.set_payload_json(f.dump());
-            writer->Write(fin);
+            if (!writer->Write(fin))
+                return ::grpc::Status(::grpc::StatusCode::CANCELLED,
+                                      "gRPC stream closed by client");
         } catch (const std::exception& e) {
+            stop_watcher();
             pb::GraphEvent err;
             err.set_kind(pb::GraphEvent::DEBUG);
             err.set_payload_json(

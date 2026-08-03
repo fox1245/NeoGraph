@@ -391,7 +391,7 @@ struct AdmittedRuntime {
             .semantic_version("1.0.0")
             .owner_scope("tenant:runtime")
             .admission_profile(profile)
-            .budget_ceiling(BudgetLimits{10000, 1000, 1000, 1, 1, 20, 1, 1, 1});
+            .budget_ceiling(BudgetLimits{10000, 1000, 1000, 4, 32, 20, 4, 4, 32});
         return std::move(builder).build();
     }
 
@@ -402,9 +402,19 @@ struct AdmittedRuntime {
     ProgramVersion admit_document(json document) {
         ProgramCompiler compiler(registry, {"program-runtime-test/v1"});
         auto source = ProgramSource::from_cpp_builder("test:runtime", 1, std::move(document));
-        auto bundle = compiler.compile(source);
+        std::optional<ProgramBundle> bundle;
         try {
-            return catalog->admit(bundle, ProgramAdmission{"tenant:runtime", profile, policy, {}});
+            bundle = compiler.compile(source);
+        } catch (const ProgramCompileError& error) {
+            std::string message = error.what();
+            for (const auto& diagnostic : error.diagnostics()) {
+                message += "\n" + diagnostic.code + " " + diagnostic.primary.json_pointer + ": " +
+                           diagnostic.message + " " + diagnostic.witness.dump();
+            }
+            throw std::runtime_error(message);
+        }
+        try {
+            return catalog->admit(*bundle, ProgramAdmission{"tenant:runtime", profile, policy, {}});
         } catch (const ProgramAdmissionError& error) {
             std::string message = error.what();
             for (const auto& diagnostic : error.diagnostics()) {
@@ -2129,4 +2139,224 @@ TEST(ProgramRuntimeTest, ForkMismatchesRejectBeforeTargetRunAndLeaveSourceUnchan
 
     EXPECT_EQ(interrupt_calls.load(), 1U);
     EXPECT_EQ(followup_calls.load(), 0U);
+}
+
+json orchestration_document(json root, std::string node_type = "runtime-completed") {
+    auto document = program_document(std::move(node_type));
+    root["name"] = "main";
+    root["definition"] = std::move(document["root"]["definition"]);
+    document["declared_budget_requirements"][3]["maximum"] = 4;
+    document["declared_budget_requirements"][4]["maximum"] = 32;
+    document["root"] = std::move(root);
+    return document;
+}
+
+json orchestration_document() {
+    return orchestration_document(
+        json{{"op", "sequence"},
+             {"children",
+              json::array({json{{"op", "call_core"}},
+                           json{{"op", "emit"}, {"value", json{{"kind", "core_done"}}}},
+                           json{{"op", "return"}, {"value", json{{"ok", true}}}}})}});
+}
+
+ProgramResult run_orchestration(AdmittedRuntime& fixture, json document, json input = json::object(),
+                                std::string trace_id = "trace-orchestration") {
+    const auto version = fixture.admit_document(std::move(document));
+    return fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{std::move(input),
+                           RunBudget{10000, 1000, 1000, 4, 32, 20, 0, 0, 0},
+                           std::move(trace_id), {}});
+}
+
+TEST(ProgramRuntimeTest, BranchSelectsWithoutDispatchingTheUnselectedCore) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto result = run_orchestration(
+        fixture,
+        orchestration_document(
+            json{{"op", "branch"},
+                 {"condition", json{{"path", "/route"}, {"equals", "then"}}},
+                 {"then", json{{"op", "call_core"}}},
+                 {"else", json{{"op", "return"}, {"value", json{{"selected", "else"}}}}}}),
+        json{{"route", "else"}}, "trace-branch");
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output(), json({{"selected", "else"}}));
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, BoundedLoopReportsBudgetExhaustionAfterTheLastAllowedIteration) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto result = run_orchestration(
+        fixture,
+        orchestration_document(
+            json{{"op", "loop"},
+                 {"condition", json{{"path", "/never"}, {"exists", false}}},
+                 {"max_iterations", 2},
+                 {"body", json{{"op", "call_core"}}}}),
+        json::object(), "trace-loop");
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::BudgetExhausted);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_LOOP_BOUND");
+    EXPECT_EQ(completed_calls.load(), 2U);
+}
+
+TEST(ProgramRuntimeTest, RetryRetriesCoreFailuresAndPreservesFailureClassification) {
+    AdmittedRuntime fixture;
+    const auto result = run_orchestration(
+        fixture, orchestration_document(json{{"op", "retry"},
+                                             {"max_attempts", 2},
+                                             {"body", json{{"op", "call_core"}}}},
+                                        "runtime-failing"),
+        json::object(), "trace-retry");
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+}
+
+TEST(ProgramRuntimeTest, ParallelJoinsAllBranchesInPlanOrder) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2);
+    const json first{{"op", "sequence"},
+                     {"children",
+                      json::array({json{{"op", "call_core"}},
+                                   json{{"op", "return"},
+                                        {"value", json{{"branch", 1}}}}})}};
+    const json second{{"op", "return"}, {"value", json{{"branch", 2}}}};
+    const auto result =
+        run_orchestration(fixture,
+                          orchestration_document(
+                              json{{"op", "parallel"},
+                                   {"branches", json::array({first, second})}}),
+                          json::object(), "trace-parallel");
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output(), json::array({json{{"branch", 1}}, json{{"branch", 2}}}));
+    EXPECT_EQ(completed_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, RaceReturnsTheFirstCompletedBranchAndCancelsTheLoser) {
+    AdmittedRuntime fixture(2);
+    const json first{{"op", "sequence"},
+                     {"children",
+                      json::array({json{{"op", "call_core"}},
+                                   json{{"op", "return"},
+                                        {"value", json{{"branch", 1}}}}})}};
+    const json second{{"op", "return"}, {"value", json{{"branch", 2}}}};
+    const auto result =
+        run_orchestration(fixture,
+                          orchestration_document(
+                              json{{"op", "race"},
+                                   {"branches", json::array({first, second})}}),
+                          json::object(), "trace-race");
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output(), json({{"branch", 2}}));
+}
+
+TEST(ProgramRuntimeTest, QuorumStopsAfterRequiredSuccesses) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto result = run_orchestration(
+        fixture,
+        orchestration_document(
+            json{{"op", "quorum"},
+                 {"branches", json::array({json{{"op", "return"}, {"value", 1}},
+                                            json{{"op", "return"}, {"value", 2}},
+                                            json{{"op", "call_core"}}})},
+                 {"min_success", 2}}),
+        json::object(), "trace-quorum");
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output(), json::array({1, 2}));
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, MapEvaluatesEveryItemAndCollectsOutputs) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto result = run_orchestration(
+        fixture,
+        orchestration_document(
+            json{{"op", "map"},
+                 {"items", json::array({1, 2})},
+                 {"body", json{{"op", "sequence"},
+                               {"children", json::array({json{{"op", "call_core"}},
+                                                         json{{"op", "return"},
+                                                              {"value", json{{"mapped", true}}}}})}}}}),
+        json::object(), "trace-map");
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output(), json::array({json{{"mapped", true}}, json{{"mapped", true}}}));
+    EXPECT_EQ(completed_calls.load(), 2U);
+}
+
+TEST(ProgramRuntimeTest, AwaitTimeoutCancelsTheChildOperation) {
+    AdmittedRuntime fixture(2);
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = run_orchestration(
+        fixture, orchestration_document(json{{"op", "await"},
+                                             {"timeout_ms", 10},
+                                             {"body", json{{"op", "call_core"}}}},
+                                        "runtime-blocking"),
+        json::object(), "trace-await");
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_AWAIT_TIMEOUT");
+    EXPECT_LT(std::chrono::duration_cast<std::chrono::seconds>(
+                  std::chrono::steady_clock::now() - started)
+                  .count(),
+              2);
+}
+
+TEST(ProgramRuntimeTest, ExplicitCancelStopsTheFollowingOperation) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto result = run_orchestration(
+        fixture,
+        orchestration_document(
+            json{{"op", "sequence"},
+                 {"children", json::array({json{{"op", "cancel"}},
+                                            json{{"op", "call_core"}}})}}),
+        json::object(), "trace-cancel");
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, ExplicitCheckpointPublishesCheckpointEventAfterCore) {
+    auto sink = std::make_shared<CountingSink>();
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit_document(
+        orchestration_document(json{{"op", "checkpoint"},
+                                    {"body", json{{"op", "call_core"}}}}));
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(),
+                           RunBudget{10000, 1000, 1000, 4, 32, 20, 0, 0, 0},
+                           "trace-checkpoint", sink});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_TRUE(result.checkpoint().has_value());
+    EXPECT_GE(sink->calls.load(), 1U);
+}
+TEST(ProgramRuntimeTest, SequenceEmitAndReturnHaveDeterministicTraceAndOutput) {
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit_document(orchestration_document());
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 4, 32, 20, 0, 0, 0},
+                           "trace-orchestration", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output(), json({{"ok", true}}));
+    EXPECT_EQ(result.execution_trace(), std::vector<std::string>({"work"}));
+    EXPECT_EQ(result.usage().program_operations, 4U);
 }

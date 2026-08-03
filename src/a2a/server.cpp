@@ -1,5 +1,5 @@
 #include <neograph/a2a/server.h>
-
+#include <neograph/graph/invocation.h>
 #include <neograph/graph/types.h>
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
@@ -432,18 +432,23 @@ Task A2AServer::Impl::run_graph(
         // Reserve the generation before adapter work so tasks/cancel can
         // signal this run even while input preparation is still in progress.
         cfg.input = a.build_initial_state(extract_user_text(inbound));
-        auto rr = engine->run(cfg);
-        if (task_cancel->is_cancelled()) {
+        neograph::graph::RunInvocationRequest request;
+        request.config = std::move(cfg);
+        neograph::graph::RunInvocation invocation(engine, std::move(request));
+        const auto outcome = invocation.run();
+        if (outcome.cancelled()) {
             result = build_failure_task(task_id, context_id, "(canceled)");
             result.status.state = TaskState::Canceled;
+        } else if (!outcome.run_result) {
+            result = build_failure_task(
+                task_id, context_id,
+                std::string("graph run failed: ") + outcome.error);
         } else {
+            const auto& rr = *outcome.run_result;
             auto agent_text = extract_agent_text(rr.output, a.output_channel());
             result = build_response_task(task_id, context_id, agent_text,
                                          a.build_output_artifact(rr.output, task_id));
         }
-    } catch (const neograph::graph::CancelledException&) {
-        result = build_failure_task(task_id, context_id, "(canceled)");
-        result.status.state = TaskState::Canceled;
     } catch (const std::exception& e) {
         result = build_failure_task(
             task_id, context_id,

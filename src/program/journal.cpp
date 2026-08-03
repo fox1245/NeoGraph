@@ -178,14 +178,8 @@ ProgramContinuation parse_continuation(const json& value) {
 }
 
 bool checkpoint_required(const ProgramJournalRecord& record) noexcept {
-    if (record.continuation.state == ContinuationState::Interrupted ||
-        record.continuation.state == ContinuationState::Completed ||
-        record.continuation.state == ContinuationState::BudgetExhausted ||
-        record.continuation.state == ContinuationState::AmbiguousEffect ||
-        record.continuation.state == ContinuationState::CheckpointIncompatible) {
-        return true;
-    }
-    return record.continuation.state == ContinuationState::Running && record.sequence > 1;
+    if (record.continuation.state != ContinuationState::Running) return true;
+    return record.sequence > 1;
 }
 
 bool is_known_state(ContinuationState state) noexcept {

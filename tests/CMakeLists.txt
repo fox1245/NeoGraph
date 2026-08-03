@@ -79,6 +79,7 @@ add_executable(neograph_tests
     test_concurrent_stress.cpp
     test_openinference_cpp.cpp
     test_schema_provider_stream_async_outer_io.cpp
+    test_graph_invocation.cpp
 )
 if(NEOGRAPH_BUILD_PROGRAM)
     add_executable(neograph_program_tests
@@ -100,6 +101,14 @@ if(NEOGRAPH_BUILD_PROGRAM)
         neograph::program
         GTest::gtest_main
     )
+    if(TARGET neograph_program_sqlite)
+        target_compile_definitions(neograph_program_tests PRIVATE
+            NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+        )
+        target_link_libraries(neograph_program_tests PRIVATE
+            neograph::program_sqlite
+        )
+    endif()
 endif()
 
 if(NEOGRAPH_BUILD_MCP_CLIENT)
@@ -195,12 +204,27 @@ endif()
 
 target_link_libraries(neograph_tests PRIVATE
     neograph::core
-    neograph::llm
-    neograph::async
-    httplib OpenSSL::SSL OpenSSL::Crypto
-    cppdotenv
     GTest::gtest_main
 )
+
+# Keep the core and Program test targets buildable in the minimal dependency
+# configuration.  The corresponding source files are already compile-gated
+# where a component-specific API is used; a test target must not manufacture a
+# link dependency on an optional library that was intentionally disabled.
+foreach(_neograph_test_component IN ITEMS llm async mcp mcp_server harness mcp_http_server a2a acp util postgres)
+    if(TARGET neograph::${_neograph_test_component})
+        target_link_libraries(neograph_tests PRIVATE neograph::${_neograph_test_component})
+    endif()
+endforeach()
+if(TARGET httplib)
+    target_link_libraries(neograph_tests PRIVATE httplib)
+endif()
+if(TARGET cppdotenv)
+    target_link_libraries(neograph_tests PRIVATE cppdotenv)
+endif()
+if(TARGET OpenSSL::SSL)
+    target_link_libraries(neograph_tests PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
 
 if(NEOGRAPH_BUILD_MCP_CLIENT)
     target_link_libraries(neograph_tests PRIVATE neograph::mcp)

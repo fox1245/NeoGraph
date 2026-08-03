@@ -27,6 +27,7 @@
 #include <neograph/graph/channel_key.h>
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/engine.h>
+#include <neograph/graph/invocation.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
 #include <neograph/graph/react_graph.h>

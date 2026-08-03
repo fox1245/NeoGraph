@@ -370,17 +370,26 @@ void validate_root(const json&            document,
         add_type(diagnostics, pointer, "object", root);
         return;
     }
-    add_unknown_fields(diagnostics, root, pointer, {"op", "name", "definition"});
+    add_unknown_fields(diagnostics, root, pointer,
+                       {"op", "name", "definition", "children", "condition", "then", "else",
+                        "body", "max_iterations", "max_attempts", "branches", "min_success",
+                        "items", "timeout_ms", "scope", "reason", "value"});
     if (!root.contains("op")) {
-        diagnostics.add(CompilePhase::Normalize, "P_ROOT_OPERATION", DiagnosticSeverity::Error,
-                        "/root/op", "Program-v1 requires one call_core root",
-                        json{{"required", "call_core"}});
+        add_required(diagnostics, pointer, "op");
     } else if (!root["op"].is_string()) {
         add_type(diagnostics, "/root/op", "string", root["op"]);
-    } else if (root["op"].get<std::string>() != "call_core") {
-        diagnostics.add(CompilePhase::Normalize, "P_ROOT_OPERATION", DiagnosticSeverity::Error,
-                        "/root/op", "Program-v1 root operation must be call_core",
-                        json{{"required", "call_core"}, {"actual", root["op"]}});
+    } else {
+        const auto op = root["op"].get<std::string>();
+        static constexpr std::array<std::string_view, 15> operations = {
+            "call_core", "sequence", "branch", "loop", "retry",
+            "parallel", "race", "quorum", "map", "spawn",
+            "await", "emit", "checkpoint", "cancel", "return"};
+        if (std::find(operations.begin(), operations.end(), op) == operations.end()) {
+            diagnostics.add(CompilePhase::Normalize, "P_PLAN_OPERATION",
+                            DiagnosticSeverity::Error, "/root/op",
+                            "Program-v1 root operation is not supported",
+                            json{{"operation", op}});
+        }
     }
     if (!root.contains("name")) {
         diagnostics.add(CompilePhase::Normalize, "P_ROOT_NAME", DiagnosticSeverity::Error,
@@ -440,8 +449,369 @@ void validate_root(const json&            document,
     } else if (definition["nodes"].empty()) {
         diagnostics.add(CompilePhase::Normalize, "P_ROOT_OPERATION", DiagnosticSeverity::Error,
                         "/root/definition/nodes",
-                        "A call_core root requires at least one Core node", json::object());
+                        "A call_core operation requires at least one Core node", json::object());
     }
+}
+void validate_condition(const json& value,
+                        std::string_view pointer,
+                        DiagnosticAccumulator& diagnostics) {
+    if (!value.is_object()) {
+        add_type(diagnostics, pointer, "object", value);
+        return;
+    }
+    add_unknown_fields(diagnostics, value, pointer,
+                       {"path", "equals", "not_equals", "exists", "all", "any", "not"});
+    std::size_t alternatives = 0;
+    for (const auto field : {"equals", "not_equals", "exists", "all", "any", "not"}) {
+        if (value.contains(field)) ++alternatives;
+    }
+    if (value.contains("path") &&
+        (!value["path"].is_string() || value["path"].get<std::string>().empty())) {
+        add_type(diagnostics, child_pointer(pointer, "path"), "nonempty string",
+                 value["path"]);
+    }
+    if (alternatives != 1) {
+        diagnostics.add(CompilePhase::Normalize, "P_PLAN_CONDITION", DiagnosticSeverity::Error,
+                        std::string(pointer),
+                        "A Program condition requires exactly one predicate",
+                        json{{"predicates", alternatives}});
+        return;
+    }
+    if ((value.contains("equals") || value.contains("not_equals") ||
+         value.contains("exists")) &&
+        !value.contains("path")) {
+        add_required(diagnostics, pointer, "path");
+    }
+    if (value.contains("exists") && !value["exists"].is_boolean())
+        add_type(diagnostics, child_pointer(pointer, "exists"), "boolean", value["exists"]);
+    if (value.contains("all") || value.contains("any")) {
+        const auto field = value.contains("all") ? "all" : "any";
+        const auto& list = value[field];
+        if (!list.is_array() || list.empty()) {
+            add_type(diagnostics, child_pointer(pointer, field), "nonempty array", list);
+        } else {
+            for (std::size_t index = 0; index < list.size(); ++index)
+                validate_condition(list[index],
+                                   child_pointer(child_pointer(pointer, field),
+                                                 std::to_string(index)),
+                                   diagnostics);
+        }
+    }
+    if (value.contains("not")) validate_condition(value["not"],
+                                                   child_pointer(pointer, "not"),
+                                                   diagnostics);
+}
+
+std::string lower_operation(const json& authored,
+                            std::string        operation_id,
+                            std::string_view   pointer,
+                            std::string_view   root_name,
+                            bool               is_root,
+                            std::vector<json>& operations,
+                            DiagnosticAccumulator& diagnostics) {
+    if (!authored.is_object()) {
+        add_type(diagnostics, pointer, "object", authored);
+        return operation_id;
+    }
+    if (!authored.contains("op")) {
+        add_required(diagnostics, pointer, "op");
+        return operation_id;
+    }
+    if (!authored["op"].is_string()) {
+        add_type(diagnostics, child_pointer(pointer, "op"), "string", authored["op"]);
+        return operation_id;
+    }
+
+    const auto op = authored["op"].get<std::string>();
+    const auto allowed = [&](std::initializer_list<std::string_view> fields) {
+        add_unknown_fields(diagnostics, authored, pointer, fields);
+    };
+    json lowered{{"id", operation_id}, {"op", op}, {"source_pointer", std::string(pointer)}};
+    const auto child = [&](const json& value, std::string_view field, std::size_t index) {
+        const auto child_id = operation_id + "." + std::to_string(index);
+        return lower_operation(value, child_id, child_pointer(pointer, field) + "/" +
+                                               std::to_string(index),
+                               root_name, false, operations, diagnostics);
+    };
+    const auto required_object = [&](std::string_view field) -> std::optional<json> {
+        const auto field_pointer = child_pointer(pointer, field);
+        const auto key = std::string(field);
+        if (!authored.contains(key)) {
+            add_required(diagnostics, pointer, field);
+            return std::nullopt;
+        }
+        const auto value = authored[key];
+        if (!value.is_object()) {
+            add_type(diagnostics, field_pointer, "object", value);
+            return std::nullopt;
+        }
+        return value;
+    };
+    const auto optional_string = [&](std::string_view field) {
+        const auto key = std::string(field);
+        if (!authored.contains(key)) return;
+        if (!authored[key].is_string() || authored[key].get<std::string>().empty())
+            add_type(diagnostics, child_pointer(pointer, field), "nonempty string", authored[key]);
+        else
+            lowered[key] = authored[key].get<std::string>();
+    };
+    const auto optional_bound = [&](std::string_view field, std::uint64_t maximum) {
+        const auto key = std::string(field);
+        if (!authored.contains(key)) return;
+        const auto value = unsigned_integer(authored[key]);
+        if (!value || *value == 0 || *value > maximum) {
+            diagnostics.add(CompilePhase::Normalize, "P_PLAN_BOUND", DiagnosticSeverity::Error,
+                            child_pointer(pointer, field),
+                            "Program operation bound is outside its supported range",
+                            json{{"maximum", maximum}});
+        } else {
+            lowered[key] = *value;
+        }
+    };
+
+    if (op == "call_core") {
+        if (is_root)
+            allowed({"op", "name", "definition"});
+        else
+            allowed({"op", "core"});
+        if (authored.contains("core") &&
+            (!authored["core"].is_string() ||
+             authored["core"].get<std::string>() != root_name)) {
+            diagnostics.add(CompilePhase::Normalize, "P_PLAN_CORE", DiagnosticSeverity::Error,
+                            child_pointer(pointer, "core"),
+                            "Every call_core operation must reference the sealed root Core",
+                            json{{"required", std::string(root_name)}});
+        }
+        lowered["core"] = std::string(root_name);
+    } else if (op == "sequence") {
+        if (is_root)
+            allowed({"op", "name", "definition", "children"});
+        else
+            allowed({"op", "children"});
+        if (!authored.contains("children") || !authored["children"].is_array() ||
+            authored["children"].empty()) {
+            if (!authored.contains("children"))
+                add_required(diagnostics, pointer, "children");
+            else
+                add_type(diagnostics, child_pointer(pointer, "children"), "nonempty array",
+                         authored["children"]);
+        } else {
+            json ids = json::array();
+            for (std::size_t index = 0; index < authored["children"].size(); ++index)
+                ids.push_back(child(authored["children"][index], "children", index));
+            lowered["children"] = std::move(ids);
+        }
+    } else if (op == "branch") {
+        if (is_root)
+            allowed({"op", "name", "definition", "condition", "then", "else"});
+        else
+            allowed({"op", "condition", "then", "else"});
+        if (!authored.contains("condition"))
+            add_required(diagnostics, pointer, "condition");
+        else {
+            validate_condition(authored["condition"], child_pointer(pointer, "condition"),
+                               diagnostics);
+            lowered["condition"] = detail::owned_json_copy(authored["condition"]);
+        }
+        const auto then_value = required_object("then");
+        if (then_value) lowered["then"] = child(*then_value, "then", 0);
+        if (authored.contains("else")) {
+            const auto else_value = required_object("else");
+            if (else_value) lowered["else"] = child(*else_value, "else", 1);
+        }
+    } else if (op == "loop") {
+        if (is_root)
+            allowed({"op", "name", "definition", "condition", "body", "max_iterations"});
+        else
+            allowed({"op", "condition", "body", "max_iterations"});
+        if (!authored.contains("condition"))
+            add_required(diagnostics, pointer, "condition");
+        else {
+            validate_condition(authored["condition"], child_pointer(pointer, "condition"),
+                               diagnostics);
+            lowered["condition"] = detail::owned_json_copy(authored["condition"]);
+        }
+        const auto body = required_object("body");
+        if (body) lowered["body"] = child(*body, "body", 0);
+        if (!authored.contains("max_iterations")) {
+            add_required(diagnostics, pointer, "max_iterations");
+        } else if (const auto maximum = unsigned_integer(authored["max_iterations"]);
+                   !maximum || *maximum == 0 || *maximum > 1000000) {
+            diagnostics.add(CompilePhase::Normalize, "P_PLAN_BOUND", DiagnosticSeverity::Error,
+                            child_pointer(pointer, "max_iterations"),
+                            "Program loop bound must be in the range 1..1000000",
+                            json::object());
+        } else {
+            lowered["max_iterations"] = *maximum;
+        }
+    } else if (op == "retry") {
+        if (is_root)
+            allowed({"op", "name", "definition", "body", "max_attempts"});
+        else
+            allowed({"op", "body", "max_attempts"});
+        const auto body = required_object("body");
+        if (body) lowered["body"] = child(*body, "body", 0);
+        if (!authored.contains("max_attempts")) {
+            add_required(diagnostics, pointer, "max_attempts");
+        } else if (const auto maximum = unsigned_integer(authored["max_attempts"]);
+                   !maximum || *maximum == 0 || *maximum > 1000000) {
+            diagnostics.add(CompilePhase::Normalize, "P_PLAN_BOUND", DiagnosticSeverity::Error,
+                            child_pointer(pointer, "max_attempts"),
+                            "Program retry bound must be in the range 1..1000000",
+                            json::object());
+        } else {
+            lowered["max_attempts"] = *maximum;
+        }
+    } else if (op == "parallel" || op == "race") {
+        if (is_root)
+            allowed({"op", "name", "definition", "branches"});
+        else
+            allowed({"op", "branches"});
+        if (!authored.contains("branches") || !authored["branches"].is_array() ||
+            authored["branches"].size() < 2) {
+            if (!authored.contains("branches"))
+                add_required(diagnostics, pointer, "branches");
+            else
+                add_type(diagnostics, child_pointer(pointer, "branches"), "array with two entries",
+                         authored["branches"]);
+        } else {
+            json ids = json::array();
+            for (std::size_t index = 0; index < authored["branches"].size(); ++index)
+                ids.push_back(child(authored["branches"][index], "branches", index));
+            lowered["branches"] = std::move(ids);
+        }
+    } else if (op == "quorum") {
+        if (is_root)
+            allowed({"op", "name", "definition", "branches", "min_success"});
+        else
+            allowed({"op", "branches", "min_success"});
+        if (!authored.contains("branches") || !authored["branches"].is_array() ||
+            authored["branches"].size() < 2) {
+            if (!authored.contains("branches"))
+                add_required(diagnostics, pointer, "branches");
+            else
+                add_type(diagnostics, child_pointer(pointer, "branches"),
+                         "array with two entries", authored["branches"]);
+        } else {
+            json ids = json::array();
+            for (std::size_t index = 0; index < authored["branches"].size(); ++index)
+                ids.push_back(child(authored["branches"][index], "branches", index));
+            lowered["branches"] = std::move(ids);
+            if (!authored.contains("min_success")) {
+                add_required(diagnostics, pointer, "min_success");
+            } else if (const auto minimum = unsigned_integer(authored["min_success"]);
+                       !minimum || *minimum == 0 || *minimum > authored["branches"].size()) {
+                diagnostics.add(CompilePhase::Normalize, "P_PLAN_QUORUM", DiagnosticSeverity::Error,
+                                child_pointer(pointer, "min_success"),
+                                "Program quorum min_success must be within its branch count",
+                                json{{"branch_count", authored["branches"].size()}});
+            } else {
+                lowered["min_success"] = *minimum;
+            }
+        }
+    } else if (op == "map") {
+        if (is_root)
+            allowed({"op", "name", "definition", "items", "body"});
+        else
+            allowed({"op", "items", "body"});
+        if (!authored.contains("items") || !authored["items"].is_array() ||
+            authored["items"].empty() || authored["items"].size() > 1000000) {
+            if (!authored.contains("items"))
+                add_required(diagnostics, pointer, "items");
+            else
+                add_type(diagnostics, child_pointer(pointer, "items"),
+                         "nonempty array with at most 1000000 entries", authored["items"]);
+        } else {
+            lowered["items"] = detail::owned_json_copy(authored["items"]);
+        }
+        const auto body = required_object("body");
+        if (body) lowered["body"] = child(*body, "body", 0);
+    } else if (op == "spawn") {
+        if (is_root)
+            allowed({"op", "name", "definition", "body"});
+        else
+            allowed({"op", "body"});
+        const auto body = required_object("body");
+        if (body) lowered["body"] = child(*body, "body", 0);
+    } else if (op == "await") {
+        if (is_root)
+            allowed({"op", "name", "definition", "body", "timeout_ms"});
+        else
+            allowed({"op", "body", "timeout_ms"});
+        const auto body = required_object("body");
+        if (body) lowered["body"] = child(*body, "body", 0);
+        optional_bound("timeout_ms", 24ULL * 60ULL * 60ULL * 1000ULL);
+    } else if (op == "checkpoint") {
+        if (is_root)
+            allowed({"op", "name", "definition", "body"});
+        else
+            allowed({"op", "body"});
+        if (authored.contains("body")) {
+            const auto body = required_object("body");
+            if (body) lowered["body"] = child(*body, "body", 0);
+        }
+    } else if (op == "cancel") {
+        if (is_root)
+            allowed({"op", "name", "definition", "scope", "reason"});
+        else
+            allowed({"op", "scope", "reason"});
+        optional_string("scope");
+        optional_string("reason");
+    } else if (op == "emit" || op == "return") {
+        if (is_root)
+            allowed({"op", "name", "definition", "value"});
+        else
+            allowed({"op", "value"});
+        if (!authored.contains("value"))
+            add_required(diagnostics, pointer, "value");
+        else
+            lowered["value"] = detail::owned_json_copy(authored["value"]);
+    } else {
+        diagnostics.add(CompilePhase::Normalize, "P_PLAN_OPERATION", DiagnosticSeverity::Error,
+                        child_pointer(pointer, "op"),
+                        "Program operation is not supported",
+                        json{{"operation", op}});
+    }
+    operations.push_back(std::move(lowered));
+    return operation_id;
+}
+
+OrchestrationPlanRecord lower_plan(const json& root,
+                                   std::string_view root_name,
+                                   DiagnosticAccumulator& diagnostics) {
+    std::vector<json> operations;
+    lower_operation(root, "root", "/root", root_name, true, operations, diagnostics);
+    bool has_core = false;
+    for (const auto& operation : operations)
+        if (operation.value("op", "") == "call_core") has_core = true;
+    if (!has_core) {
+        diagnostics.add(CompilePhase::Normalize, "P_PLAN_CORE", DiagnosticSeverity::Error,
+                        "/root", "A Program plan must contain at least one call_core operation",
+                        json::object());
+    }
+    json operation_array = json::array();
+    for (auto& operation : operations) operation_array.push_back(std::move(operation));
+    json plan = json::object();
+    plan["root"] = "root";
+    plan["operations"] = std::move(operation_array);
+    return OrchestrationPlanRecord{1, std::move(plan)};
+}
+
+
+bool contains_operation(const json& value, std::string_view wanted) {
+    if (value.is_object()) {
+        if (value.contains("op") && value["op"].is_string() &&
+            value["op"].get<std::string>() == wanted)
+            return true;
+        for (const auto& [key, child] : value.items()) {
+            (void)key;
+            if (contains_operation(child, wanted)) return true;
+        }
+    } else if (value.is_array()) {
+        for (const auto& child : value)
+            if (contains_operation(child, wanted)) return true;
+    }
+    return false;
 }
 
 void validate_budgets(const json&            document,
@@ -459,6 +829,8 @@ void validate_budgets(const json&            document,
         add_type(diagnostics, pointer, "array", values);
         return;
     }
+    const bool has_spawn =
+        document.contains("root") && contains_operation(document["root"], "spawn");
     std::map<std::string, std::size_t> seen;
     for (std::size_t index = 0; index < values.size(); ++index) {
         const auto  item_pointer = child_pointer(pointer, std::to_string(index));
@@ -516,17 +888,19 @@ void validate_budgets(const json&            document,
             continue;
         }
         bool structural_valid = true;
-        if (resource == "max_program_operations")
-            structural_valid = *minimum == 1 && *maximum == 1;
-        else if (resource == "max_concurrency" || resource == "max_core_steps")
+        if (resource == "max_program_operations" || resource == "max_concurrency" ||
+            resource == "max_core_steps") {
             structural_valid = *minimum >= 1;
-        else if (resource == "max_dynamic_compiles" || resource == "max_child_depth" ||
-                 resource == "max_total_children")
+        } else if (resource == "max_dynamic_compiles") {
             structural_valid = *minimum == 0 && *maximum == 0;
+        } else if (resource == "max_child_depth" || resource == "max_total_children") {
+            structural_valid = has_spawn ? *minimum >= 1
+                                         : (*minimum == 0 && *maximum == 0);
+        }
         if (!structural_valid) {
             diagnostics.add(
                 CompilePhase::Normalize, "P_BUDGET_INVALID", DiagnosticSeverity::Error,
-                item_pointer, "Budget record violates the single-root Program-v1 structural floor",
+                item_pointer, "Budget record violates the Program-v1 structural floor",
                 json{{"resource", resource}, {"minimum", *minimum}, {"maximum", *maximum}});
             continue;
         }
@@ -904,11 +1278,8 @@ struct ProgramCompiler::Impl {
                                         std::move(sealed_json)};
             const auto           compiled_plan = core_compiled_plan_identity(
                 sealed, config.compiler_build_id, registry.fingerprint(), closure.identities);
-            OrchestrationPlanRecord orchestration{
-                1, json{{"root", "root"},
-                        {"operations",
-                         json::array({json{
-                             {"id", "root"}, {"op", "call_core"}, {"core", parsed.root_name}}})}}};
+            auto orchestration = lower_plan(document.at("root"), parsed.root_name, diagnostics);
+            if (diagnostics.has_errors()) diagnostics.throw_error();
             const auto program_hash = canonical_program_hash(parsed, orchestration, sealed);
             const auto merkle_root  = import_merkle_root(source, diagnostics);
             auto       source_map   = generated_source_map(source, diagnostics);

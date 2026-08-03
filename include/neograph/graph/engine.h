@@ -111,6 +111,8 @@ struct EngineResources {
 struct RunResources {
     std::shared_ptr<CheckpointStore> checkpoint_store;
     std::shared_ptr<Store> store;
+    /// Optional invocation-scoped gate composed before the engine gate.
+    std::optional<ToolGate> tool_gate;
 };
 
 /**
@@ -256,10 +258,8 @@ struct RunResult {
     /// member so adding this query does not change RunResult's binary layout.
     inline bool max_steps_exhausted() const noexcept {
         if (!output.is_object()) return false;
-        auto* metadata = yyjson_mut_obj_get(output.raw_val(), "_neograph");
-        if (!yyjson_mut_is_obj(metadata)) return false;
-        auto* marker = yyjson_mut_obj_get(metadata, "max_steps_exhausted");
-        return yyjson_mut_is_bool(marker) && yyjson_mut_get_bool(marker);
+        const auto metadata = output["_neograph"];
+        return metadata.is_object() && metadata.value("max_steps_exhausted", false);
     }
 
     /// @brief Return a typed outcome without changing the legacy result layout.
@@ -628,11 +628,19 @@ public:
                                              json                resume_value = json(),
                                              GraphStreamCallback cb           = nullptr);
 
-    /// Async resume peer with metadata for this new execution attempt.
+    /// Async resume peer with caller-supplied execution metadata.
     asio::awaitable<RunResult> resume_async(RunConfig           config,
                                              json                resume_value,
                                              GraphStreamCallback cb,
                                              RunMetadata          metadata);
+
+    /// Async resume peer with metadata and invocation-scoped resources.
+    asio::awaitable<RunResult> resume_async(RunConfig           config,
+                                             json                resume_value,
+                                             GraphStreamCallback cb,
+                                             RunMetadata          metadata,
+                                             RunResources        resources);
+
 
     /**
      * @brief Resume from one exact checkpoint ID.

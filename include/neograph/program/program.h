@@ -19,7 +19,9 @@
 #include <neograph/program/fork.h>
 #include <neograph/program/handle.h>
 #include <neograph/program/journal.h>
+#include <neograph/program/migration.h>
 #include <neograph/program/pending.h>
+#include <neograph/program/module.h>
 #include <neograph/program/replay.h>
 #include <neograph/program/registry.h>
 #include <neograph/program/run_record.h>
@@ -28,4 +30,5 @@
 #include <neograph/program/source.h>
 #include <neograph/program/store.h>
 #include <neograph/program/transition_store.h>
+#include <neograph/program/sqlite_transition_store.h>
 #include <neograph/program/version.h>

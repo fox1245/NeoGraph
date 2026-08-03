@@ -407,6 +407,7 @@ add_custom_target(generate_schemas DEPENDS ${GENERATED_DIR}/builtin_schemas.h)
 add_library(neograph_core
     src/core/json.cpp
     src/core/cancel.cpp
+    src/core/graph_invocation.cpp
     src/core/provider.cpp
     src/core/completion_provider.cpp
     src/core/tool.cpp
@@ -476,6 +477,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/diagnostic.cpp
         src/program/source.cpp
         src/program/bundle.cpp
+        src/program/module.cpp
         src/program/version.cpp
         src/program/registry.cpp
         src/program/admission.cpp
@@ -486,6 +488,8 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/fork.cpp
         src/program/replay.cpp
         src/program/store.cpp
+        src/program/activation.cpp
+        src/program/migration.cpp
         src/program/journal.cpp
         src/program/run_record.cpp
         src/program/transition_store.cpp
@@ -506,6 +510,46 @@ if(NEOGRAPH_BUILD_PROGRAM)
     endif()
     target_link_libraries(neograph_program PUBLIC neograph_core)
     add_library(neograph::program ALIAS neograph_program)
+
+    # Persistent Program lifecycle adapter. Kept separate from the core
+    # SQLite checkpoint target so consumers can opt into the dependency.
+    if(NEOGRAPH_BUILD_SQLITE)
+        add_library(neograph_program_sqlite
+            src/program/sqlite_store.cpp
+            src/program/sqlite_transition_store.cpp
+        )
+        target_include_directories(neograph_program_sqlite
+            PUBLIC
+                $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+                $<INSTALL_INTERFACE:include>
+        )
+        target_compile_features(neograph_program_sqlite PUBLIC cxx_std_20)
+        target_compile_definitions(neograph_program_sqlite PRIVATE NEOGRAPH_BUILDING_PROGRAM)
+        target_link_libraries(neograph_program_sqlite
+            PUBLIC neograph_program
+            PRIVATE SQLite::SQLite3
+        )
+        add_library(neograph::program_sqlite ALIAS neograph_program_sqlite)
+    endif()
+    # PostgreSQL-backed Program lifecycle adapter. It shares libpq with the
+    # checkpoint adapter but keeps Program persistence as a separate target.
+    if(NEOGRAPH_BUILD_POSTGRES)
+        add_library(neograph_program_postgres
+            src/program/postgres_store.cpp
+        )
+        target_include_directories(neograph_program_postgres
+            PUBLIC
+                $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+                $<INSTALL_INTERFACE:include>
+        )
+        target_compile_features(neograph_program_postgres PUBLIC cxx_std_20)
+        target_compile_definitions(neograph_program_postgres PRIVATE NEOGRAPH_BUILDING_PROGRAM)
+        target_link_libraries(neograph_program_postgres
+            PUBLIC neograph_program
+            PRIVATE PostgreSQL::PostgreSQL
+        )
+        add_library(neograph::program_postgres ALIAS neograph_program_postgres)
+    endif()
 endif()
 
 # ===========================================================================
@@ -952,6 +996,8 @@ endif()
 set(_NEOGRAPH_VERSIONED_LIBRARY_TARGETS
     neograph_core
     neograph_program
+    neograph_program_postgres
+    neograph_program_sqlite
     neograph_async
     neograph_postgres
     neograph_sqlite
@@ -1815,8 +1861,7 @@ if(NEOGRAPH_INSTALL_EXPORT)
     if(TARGET neograph_mcp_types)
         list(APPEND NEOGRAPH_EXPORT_TARGETS neograph_mcp_types)
     endif()
-
-    foreach(_comp program async llm mcp mcp_server harness mcp_sqlite mcp_http_server a2a acp util postgres sqlite)
+    foreach(_comp program program_sqlite program_postgres async llm mcp mcp_server harness mcp_sqlite mcp_http_server a2a acp util postgres sqlite)
         if(TARGET neograph_${_comp})
             list(APPEND NEOGRAPH_EXPORT_TARGETS neograph_${_comp})
             list(APPEND NEOGRAPH_COMPONENTS_BUILT ${_comp})
@@ -1849,10 +1894,10 @@ if(NEOGRAPH_INSTALL_EXPORT)
     if(TARGET neograph_async OR TARGET neograph_llm OR TARGET neograph_mcp_http_server)
         string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "\nfind_dependency(OpenSSL)")
     endif()
-    if(TARGET neograph_postgres)
+    if(TARGET neograph_postgres OR TARGET neograph_program_postgres)
         string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "\nfind_dependency(PostgreSQL)")
     endif()
-    if(TARGET neograph_sqlite)
+    if(TARGET neograph_sqlite OR TARGET neograph_program_sqlite)
         string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "\nfind_dependency(SQLite3)")
     endif()
     if(NEOGRAPH_USE_LIBCURL AND CURL_FOUND)

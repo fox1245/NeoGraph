@@ -1,0 +1,157 @@
+/**
+ * @file program/module.h
+ * @brief Immutable, owner-scoped Program modules and bounded child composition.
+ */
+#pragma once
+
+#include <neograph/program/admission.h>
+#include <neograph/program/version.h>
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace neograph::program {
+
+enum class ModuleLifecycle : std::uint8_t {
+    Active,
+    Deprecated,
+    Quarantined,
+    Revoked,
+};
+
+NEOGRAPH_PROGRAM_API std::string_view to_string(ModuleLifecycle state) noexcept;
+NEOGRAPH_PROGRAM_API ModuleLifecycle module_lifecycle_from_string(std::string_view value);
+
+/** Exact immutable address of a reusable module. */
+struct ModuleCoordinate {
+    std::string namespace_name;
+    std::string name;
+    std::string semantic_version;
+    std::string content_identity;
+
+    bool operator==(const ModuleCoordinate&) const = default;
+    std::string qualified_name() const;
+};
+
+/** Typed child port. The contract is checked before a child can be dispatched. */
+struct ModulePort {
+    std::string    name;
+    ContractRecord contract;
+
+    bool operator==(const ModulePort&) const = default;
+};
+
+/** Child authority and budget are a strict attenuation of the parent module. */
+struct ChildProgramDescriptor {
+    std::string              name;
+    std::string              program_version_id;
+    std::vector<ModulePort>  inputs;
+    std::vector<ModulePort>  outputs;
+    std::vector<std::string> required_capabilities;
+    std::vector<std::string> required_effects;
+    BudgetLimits             budget;
+
+    bool operator==(const ChildProgramDescriptor&) const = default;
+};
+
+struct ProgramModuleData {
+    std::string                    owner_scope;
+    ModuleCoordinate               coordinate;
+    std::string                    attestation_id;
+    ModuleLifecycle                lifecycle = ModuleLifecycle::Active;
+    std::vector<ModuleCoordinate>  dependencies;
+    std::vector<ChildProgramDescriptor> children;
+    std::vector<std::string>       allowed_capabilities;
+    std::vector<std::string>       declared_effects;
+};
+
+/**
+ * Immutable module metadata. Lifecycle state is operational metadata and is
+ * deliberately excluded from the content identity, so revocation cannot
+ * manufacture a new dependency identity.
+ */
+class NEOGRAPH_PROGRAM_API ProgramModule final {
+public:
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+
+    static ProgramModule create(ProgramModuleData data);
+    static ProgramModule parse(std::string_view stored_bytes);
+
+    const std::string& owner_scope() const noexcept;
+    const ModuleCoordinate& coordinate() const noexcept;
+    const std::string& attestation_id() const noexcept;
+    ModuleLifecycle lifecycle() const noexcept;
+    const std::vector<ModuleCoordinate>& dependencies() const noexcept;
+    const std::vector<ChildProgramDescriptor>& children() const noexcept;
+    const std::vector<std::string>& allowed_capabilities() const noexcept;
+    const std::vector<std::string>& declared_effects() const noexcept;
+    const std::string& id() const noexcept;
+    std::string serialize_canonical() const;
+
+private:
+    struct Impl;
+    explicit ProgramModule(std::shared_ptr<const Impl> impl);
+    static ProgramModule with_lifecycle(const ProgramModule& module, ModuleLifecycle lifecycle);
+
+    std::shared_ptr<const Impl> impl_;
+    friend class InMemoryModuleStore;
+};
+
+/** Result of resolving one module and its complete pinned dependency closure. */
+struct ModuleResolution {
+    ModuleCoordinate              root;
+    std::vector<ProgramModule>    modules;
+    std::vector<DependencyReceipt> receipts;
+
+    std::string dependency_merkle_root() const;
+    std::vector<ImportRef> imports() const;
+};
+
+class NEOGRAPH_PROGRAM_API ModuleStore {
+public:
+    virtual ~ModuleStore() = default;
+    virtual void publish(const ProgramModule& module) = 0;
+    virtual std::optional<ProgramModule> get(std::string_view content_identity) const = 0;
+    virtual void set_lifecycle(std::string_view content_identity, ModuleLifecycle lifecycle) = 0;
+};
+
+/** Small durable-boundary-compatible store used by the in-process resolver. */
+class NEOGRAPH_PROGRAM_API InMemoryModuleStore final : public ModuleStore {
+public:
+    InMemoryModuleStore();
+    InMemoryModuleStore(InMemoryModuleStore&&) noexcept;
+    InMemoryModuleStore& operator=(InMemoryModuleStore&&) noexcept;
+    InMemoryModuleStore(const InMemoryModuleStore&) = delete;
+    InMemoryModuleStore& operator=(const InMemoryModuleStore&) = delete;
+    ~InMemoryModuleStore() override;
+
+    void publish(const ProgramModule& module) override;
+    std::optional<ProgramModule> get(std::string_view content_identity) const override;
+    void set_lifecycle(std::string_view content_identity, ModuleLifecycle lifecycle) override;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+/**
+ * Resolves exact, pinned modules. Missing, cyclic, owner-mismatched,
+ * unapproved, quarantined, and revoked dependencies fail closed.
+ */
+class NEOGRAPH_PROGRAM_API ModuleResolver final {
+public:
+    explicit ModuleResolver(std::shared_ptr<const ModuleStore> store);
+
+    ModuleResolution resolve(const ModuleCoordinate& root,
+                             const PolicySnapshot& policy) const;
+
+private:
+    std::shared_ptr<const ModuleStore> store_;
+};
+
+}  // namespace neograph::program

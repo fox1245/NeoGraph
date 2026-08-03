@@ -651,6 +651,9 @@ GraphEngine::run_stream_async(RunConfig config,
     if (resources.store) {
         runtime_resources.store = std::move(resources.store);
     }
+    if (resources.tool_gate) {
+        runtime_resources.parent_tool_gate = std::move(resources.tool_gate);
+    }
     co_return co_await run_async_with_runtime(
         std::move(config), std::move(cb), std::move(metadata),
         std::move(runtime_resources));
@@ -704,6 +707,28 @@ asio::awaitable<RunResult> GraphEngine::resume_async(
         std::move(metadata), {});
 }
 
+asio::awaitable<RunResult> GraphEngine::resume_async(
+    RunConfig config,
+    json resume_value,
+    GraphStreamCallback cb,
+    RunMetadata metadata,
+    RunResources resources) {
+    RuntimeResources runtime_resources;
+    if (resources.checkpoint_store) {
+        runtime_resources.checkpoint_store =
+            std::move(resources.checkpoint_store);
+    }
+    if (resources.store) {
+        runtime_resources.store = std::move(resources.store);
+    }
+    if (resources.tool_gate) {
+        runtime_resources.parent_tool_gate = std::move(resources.tool_gate);
+    }
+    co_return co_await resume_async_with_runtime(
+        std::move(config), std::move(resume_value), std::move(cb),
+        std::move(metadata), std::move(runtime_resources));
+}
+
 RunResult GraphEngine::resume_from(
     RunConfig config,
     std::string checkpoint_id,
@@ -735,6 +760,9 @@ asio::awaitable<RunResult> GraphEngine::resume_from_async(
     }
     if (resources.store) {
         runtime_resources.store = std::move(resources.store);
+    }
+    if (resources.tool_gate) {
+        runtime_resources.parent_tool_gate = std::move(resources.tool_gate);
     }
     co_return co_await resume_async_with_runtime(
         std::move(config), std::move(resume_value), std::move(cb),

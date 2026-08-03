@@ -1,9 +1,11 @@
 #include <neograph/program/transition_store.h>
-
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+#include <neograph/program/sqlite_transition_store.h>
+#endif
 #include <gtest/gtest.h>
-
-#include <array>
+#include <atomic>
 #include <barrier>
+#include <filesystem>
 #include <future>
 #include <string>
 
@@ -257,6 +259,45 @@ TEST(ProgramTransitionStoreTest, TerminalResultCannotPublishWithoutTerminalOutbo
     EXPECT_EQ(store.compare_publish("owner-a", start.journal_record.id, terminal),
               ProgramTransitionPublishResult::Conflict);
     auto visible = store.load("owner-a", "run-1");
+
     ASSERT_TRUE(visible); EXPECT_FALSE(visible->terminal_result());
     EXPECT_EQ(store.load_events("owner-a", "run-1").size(), 1U);
 }
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+TEST(ProgramTransitionStoreTest, SQLiteReopensAtomicPublicationAndOwnerIsolation) {
+    static std::atomic<unsigned> sequence{0};
+    const auto path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-program-transition-" + std::to_string(sequence.fetch_add(1)) + ".db"))
+            .string();
+    std::filesystem::remove(path);
+
+    {
+        SQLiteProgramTransitionStore store(path);
+        const auto start = start_publication();
+        ASSERT_EQ(store.compare_publish("owner-a", {}, start),
+                  ProgramTransitionPublishResult::Published);
+
+        const auto terminal = terminal_publication(
+            start, ProgramTerminalStatus::Completed, ContinuationState::Completed);
+        ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, terminal),
+                  ProgramTransitionPublishResult::Published);
+        EXPECT_EQ(store.compare_publish("owner-a", start.journal_record.id, terminal),
+                  ProgramTransitionPublishResult::AlreadyPresent);
+        EXPECT_EQ(store.load_events("owner-a", "run-1").size(), 2U);
+        EXPECT_TRUE(store.load("owner-b", "run-1") == std::nullopt);
+    }
+
+    {
+        SQLiteProgramTransitionStore store(path);
+        const auto run = store.load("owner-a", "run-1");
+        ASSERT_TRUE(run.has_value());
+        ASSERT_TRUE(run->terminal_result().has_value());
+        EXPECT_EQ(run->terminal_result()->status(), ProgramTerminalStatus::Completed);
+        ASSERT_TRUE(store.latest("owner-a", "run-1").has_value());
+        EXPECT_EQ(store.load_events("owner-a", "run-1", 1).size(), 1U);
+    }
+
+    std::filesystem::remove(path);
+}
+#endif

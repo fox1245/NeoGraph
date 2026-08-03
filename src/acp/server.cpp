@@ -1,6 +1,7 @@
 #include <neograph/acp/server.h>
 
 #include <neograph/graph/types.h>
+#include <neograph/graph/invocation.h>
 
 #include <atomic>
 #include <chrono>
@@ -515,20 +516,35 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                     std::string graph_error;
                     neograph::graph::RunResult run_result;
 
+                    if (!resume_pending) {
+                        cfg.input =
+                            a.build_initial_state(req.prompt, req.session_id);
+                    }
+                    neograph::graph::RunInvocationRequest invocation_request;
+                    invocation_request.config = std::move(cfg);
+                    invocation_request.metadata.run_id = req.session_id;
+                    neograph::graph::RunInvocation invocation(
+                        engine, std::move(invocation_request));
+
                     try {
-                        if (resume_pending) {
-                            run_result = engine->resume(
-                                cfg, neograph::json(a.extract_user_text(req.prompt)));
+                        auto outcome = resume_pending
+                            ? invocation.resume(neograph::json(
+                                  a.extract_user_text(req.prompt)))
+                            : invocation.run();
+                        if (outcome.cancelled()) {
+                            stop = StopReason::Cancelled;
+                        } else if (!outcome.succeeded() || !outcome.run_result) {
+                            graph_failed = true;
+                            graph_error = outcome.error.empty()
+                                ? "graph invocation failed"
+                                : outcome.error;
                         } else {
-                            cfg.input = a.build_initial_state(
-                                req.prompt, req.session_id);
-                            run_result = engine->run(cfg);
+                            run_result = std::move(*outcome.run_result);
+                            if (!run_result.interrupted) {
+                                agent_text =
+                                    a.extract_agent_text(run_result.output);
+                            }
                         }
-                        if (!run_result.interrupted) {
-                            agent_text = a.extract_agent_text(run_result.output);
-                        }
-                    } catch (const neograph::graph::CancelledException&) {
-                        stop = StopReason::Cancelled;
                     } catch (const std::exception& e) {
                         graph_failed = true;
                         graph_error = e.what();

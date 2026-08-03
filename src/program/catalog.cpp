@@ -7,7 +7,6 @@
 #include "catalog_access.h"
 #include "registry_access.h"
 
-#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <map>
@@ -16,6 +15,7 @@
 #include <optional>
 #include <set>
 #include <stdexcept>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -470,6 +470,171 @@ std::string recompute_program_hash(const ProgramBundle&           bundle,
         {"declared_budget_requirements", std::move(budgets)}};
     return detail::sha256_identity("canonical-program/v1", detail::canonical_json_bytes(semantic));
 }
+bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
+                              std::string_view               core_name,
+                              json&                          witness) {
+    if (plan.schema_version != 1 || !plan.plan.is_object() ||
+        !plan.plan.contains("root") || !plan.plan["root"].is_string() ||
+        !plan.plan.contains("operations") || !plan.plan["operations"].is_array()) {
+        witness = json{{"reason", "plan envelope is malformed"}};
+        return false;
+    }
+
+    const auto root = plan.plan["root"].get<std::string>();
+    std::map<std::string, json> operations;
+    const auto fail = [&](std::string reason, std::string id = {},
+                          std::string field = {}) {
+        witness = json{{"reason", std::move(reason)}};
+        if (!id.empty()) witness["id"] = std::move(id);
+        if (!field.empty()) witness["field"] = std::move(field);
+        return false;
+    };
+    const auto reference = [&](const json& operation, std::string_view field,
+                              const std::string& id) {
+        const auto key = std::string(field);
+        if (!operation.contains(key) || !operation[key].is_string()) {
+            return fail("operation reference is missing or malformed", id, key);
+        }
+        const auto target = operation[key].get<std::string>();
+        if (!operations.contains(target))
+            return fail("operation reference is dangling", id, key);
+        return true;
+    };
+    const auto references = [&](const json& operation, std::string_view field,
+                                const std::string& id, std::size_t minimum) {
+        const auto key = std::string(field);
+        if (!operation.contains(key) || !operation[key].is_array() ||
+            operation[key].size() < minimum) {
+            return fail("operation reference list is missing or too short", id, key);
+        }
+        for (const auto& child : operation[key]) {
+            if (!child.is_string() || !operations.contains(child.get<std::string>()))
+                return fail("operation reference list contains a dangling entry", id, key);
+        }
+        return true;
+    };
+    const auto positive_bound = [&](const json& operation, std::string_view field,
+                                    const std::string& id) {
+        const auto key = std::string(field);
+        if (!operation.contains(key) || !operation[key].is_number_unsigned() ||
+            operation[key].get<std::uint64_t>() == 0)
+            return fail("operation bound is missing or non-positive", id, key);
+        return true;
+    };
+
+    for (const auto& operation : plan.plan["operations"]) {
+        if (!operation.is_object() || !operation.contains("id") ||
+            !operation["id"].is_string() || !operation.contains("op") ||
+            !operation["op"].is_string()) {
+            return fail("operation envelope is malformed");
+        }
+        const auto id = operation["id"].get<std::string>();
+        if (id.empty() || !operations.emplace(id, operation).second)
+            return fail("operation id is empty or duplicated", id);
+    }
+
+    bool has_core = false;
+    for (const auto& [id, operation] : operations) {
+        const auto op = operation["op"].get<std::string>();
+        if (op != "call_core" && op != "sequence" && op != "branch" && op != "loop" &&
+            op != "retry" && op != "parallel" && op != "race" && op != "quorum" &&
+            op != "map" && op != "spawn" && op != "await" && op != "emit" &&
+            op != "checkpoint" && op != "cancel" && op != "return") {
+            return fail("unknown operation", id, "op");
+        }
+        if (op == "call_core") {
+            if (!operation.contains("core") || !operation["core"].is_string() ||
+                operation["core"].get<std::string>() != core_name)
+                return fail("call_core does not bind the sealed Core", id, "core");
+            has_core = true;
+        } else if (op == "sequence") {
+            if (!references(operation, "children", id, 1)) return false;
+        } else if (op == "branch") {
+            if (!operation.contains("condition") || !operation["condition"].is_object())
+                return fail("branch condition is missing or malformed", id, "condition");
+            if (!reference(operation, "then", id)) return false;
+            if (operation.contains("else") && !reference(operation, "else", id)) return false;
+        } else if (op == "loop") {
+            if (!operation.contains("condition") || !operation["condition"].is_object())
+                return fail("loop condition is missing or malformed", id, "condition");
+            if (!reference(operation, "body", id) ||
+                !positive_bound(operation, "max_iterations", id))
+                return false;
+        } else if (op == "retry") {
+            if (!reference(operation, "body", id) ||
+                !positive_bound(operation, "max_attempts", id))
+                return false;
+        } else if (op == "parallel") {
+            if (!references(operation, "branches", id, 2)) return false;
+        } else if (op == "race") {
+            if (!references(operation, "branches", id, 2) ||
+                operation["branches"].size() != 2)
+                return fail("race currently requires exactly two branches", id, "branches");
+        } else if (op == "quorum") {
+            if (!references(operation, "branches", id, 2)) return false;
+            if (!positive_bound(operation, "min_success", id) ||
+                operation["min_success"].get<std::uint64_t>() > operation["branches"].size())
+                return fail("quorum success bound exceeds its branch count", id, "min_success");
+        } else if (op == "map") {
+            if (!operation.contains("items") || !operation["items"].is_array() ||
+                operation["items"].empty())
+                return fail("map items are missing or empty", id, "items");
+            if (!reference(operation, "body", id)) return false;
+        } else if (op == "spawn" || op == "await") {
+            if (!reference(operation, "body", id)) return false;
+        } else if (op == "checkpoint") {
+            if (operation.contains("body") && !reference(operation, "body", id)) return false;
+        } else if (op == "emit" || op == "return") {
+            if (!operation.contains("value"))
+                return fail("value operation has no value", id, "value");
+        }
+    }
+    std::set<std::string, std::less<>> active;
+    std::set<std::string, std::less<>> visited;
+    bool reachable_core = false;
+    std::function<bool(const std::string&)> visit = [&](const std::string& id) {
+        if (active.contains(id)) return fail("operation graph contains a cycle", id);
+        if (!visited.insert(id).second) return true;
+        active.insert(id);
+        const auto& operation = operations.at(id);
+        const auto  op = operation["op"].get<std::string>();
+        if (op == "call_core") {
+            reachable_core = true;
+        } else {
+            const auto visit_one = [&](const json& value) {
+                return value.is_string() && visit(value.get<std::string>());
+            };
+            const auto visit_many = [&](const json& values) {
+                if (!values.is_array()) return false;
+                for (const auto& value : values)
+                    if (!visit_one(value)) return false;
+                return true;
+            };
+            bool valid = true;
+            if (op == "sequence" || op == "parallel" || op == "race" ||
+                op == "quorum") {
+                valid = visit_many(operation.at(op == "sequence" ? "children" : "branches"));
+            } else if (op == "branch") {
+                valid = visit_one(operation.at("then"));
+                if (valid && operation.contains("else")) valid = visit_one(operation.at("else"));
+            } else if (op == "loop" || op == "retry" || op == "map" ||
+                       op == "spawn" || op == "await") {
+                valid = visit_one(operation.at("body"));
+            } else if (op == "checkpoint" && operation.contains("body")) {
+                valid = visit_one(operation.at("body"));
+            }
+            if (!valid) return false;
+        }
+        active.erase(id);
+        return true;
+    };
+    if (!operations.contains(root) || !visit(root))
+        return fail("operation graph is not a finite rooted DAG", root, "root");
+    if (!reachable_core) return fail("rooted operation graph contains no call_core");
+    if (visited.size() != operations.size())
+        return fail("operation graph contains unreachable operations");
+    return true;
+}
 
 std::uint64_t policy_ceiling(std::string_view resource, const BudgetLimits& limits) {
     if (resource == "wall_time_ms") return limits.wall_time_ms;
@@ -502,17 +667,18 @@ void validate_budgets(const ProgramBundle&  bundle,
         }
         const auto& budget     = *found->second;
         bool        structural = true;
-        if (resource == "max_program_operations") {
-            structural = budget.minimum == 1 && budget.maximum == 1;
-        } else if (resource == "max_concurrency" || resource == "max_core_steps") {
+        if (resource == "max_program_operations" || resource == "max_concurrency" ||
+            resource == "max_core_steps") {
             structural = budget.minimum >= 1;
-        } else if (resource == "max_dynamic_compiles" || resource == "max_child_depth" ||
-                   resource == "max_total_children") {
+        } else if (resource == "max_dynamic_compiles") {
             structural = budget.minimum == 0 && budget.maximum == 0;
+        } else if (resource == "max_child_depth" || resource == "max_total_children") {
+            structural = (budget.minimum == 0 && budget.maximum == 0) ||
+                         (budget.minimum >= 1 && budget.maximum >= budget.minimum);
         }
         if (!structural) {
             diagnostics.add("P_ADMIT_SEMANTIC_MISMATCH", "/declared_budget_requirements",
-                            "Budget record violates the one-operation Program-v1 closure",
+                            "Budget record violates the Program-v1 structural floor",
                             json{{"resource", budget.resource},
                                  {"minimum", budget.minimum},
                                  {"maximum", budget.maximum}});
@@ -532,7 +698,30 @@ void validate_budgets(const ProgramBundle&  bundle,
                         json{{"actual_count", by_resource.size()},
                              {"required_count", kBudgetResources.size()}});
     }
+
+    const auto plan = bundle.orchestration_plan();
+    bool       has_spawn = false;
+    if (plan.plan.is_object() && plan.plan.contains("operations") &&
+        plan.plan["operations"].is_array()) {
+        for (const auto& operation : plan.plan["operations"]) {
+            if (operation.is_object() && operation.value("op", "") == "spawn") {
+                has_spawn = true;
+                break;
+            }
+        }
+    }
+    if (has_spawn) {
+        const auto depth = by_resource.find("max_child_depth");
+        const auto total = by_resource.find("max_total_children");
+        if (depth == by_resource.end() || total == by_resource.end() ||
+            depth->second->maximum == 0 || total->second->maximum == 0) {
+            diagnostics.add(
+                "P_ADMIT_POLICY", "/declared_budget_requirements",
+                "A Program containing spawn must admit positive child depth and child-count budgets");
+        }
+    }
 }
+
 
 void map_core_parse_diagnostics(const graph::ParseReport& report,
                                 AdmissionDiagnostics&     diagnostics) {
@@ -856,15 +1045,11 @@ ProgramVersion ProgramCatalog::materialize(
                             json{{"error", error.what()}});
         }
 
-        const json expected_plan{
-            {"root", "root"},
-            {"operations",
-             json::array({json{{"id", "root"}, {"op", "call_core"}, {"core", definition.name}}})}};
-        if (plan.schema_version != 1 || detail::canonical_json_bytes(plan.plan) !=
-                                            detail::canonical_json_bytes(expected_plan)) {
+        json plan_witness;
+        if (!valid_orchestration_plan(plan, definition.name, plan_witness)) {
             diagnostics.add("P_ADMIT_SEMANTIC_MISMATCH", "/orchestration_plan",
-                            "Bundle does not contain the canonical one-call_core plan",
-                            json{{"expected", expected_plan}, {"actual", plan.plan}});
+                            "Bundle orchestration plan is malformed or unbound",
+                            std::move(plan_witness));
         }
         const auto recomputed_program_hash = recompute_program_hash(bundle, plan, definition);
         if (recomputed_program_hash != bundle.canonical_program_hash()) {
@@ -1101,6 +1286,47 @@ ProgramVersion ProgramCatalog::materialize(
     }
     return version;
 }
+MigrationPlan ProgramCatalog::plan_migration(std::string_view owner_scope,
+                                             std::string_view source_version_id,
+                                             std::string_view target_version_id) const {
+    detail::validate_token(owner_scope, "Program migration owner_scope");
+    const auto source = impl_->program_store->get_version(source_version_id);
+    const auto target = impl_->program_store->get_version(target_version_id);
+    if (!source || !target)
+        throw std::invalid_argument("Program migration references an unpublished version");
+    if (source->ownership_scope() != owner_scope || target->ownership_scope() != owner_scope)
+        throw std::invalid_argument("Program migration crosses an owner scope boundary");
+    return MigrationPlan::between(*source, *target);
+}
+ProgramActivationResult ProgramCatalog::activate(std::string_view owner_scope,
+                                                 std::string_view version_id,
+                                                 std::uint64_t expected_generation) {
+    const auto version = resolve_version(owner_scope, version_id);
+    if (!version)
+        throw std::invalid_argument("Program activation references an unknown owner-scoped version");
+    return impl_->program_store->compare_activate(owner_scope, expected_generation, version->id(),
+                                                  version->policy_snapshot().fingerprint());
+}
+
+std::optional<ProgramActivation>
+ProgramCatalog::activation(std::string_view owner_scope) const {
+    detail::validate_token(owner_scope, "Program activation owner_scope");
+    return impl_->program_store->get_activation(owner_scope);
+}
+
+ProgramRetentionReport ProgramCatalog::collect_retention(
+    std::string_view owner_scope,
+    const std::vector<std::string>& pinned_version_ids) {
+    detail::validate_token(owner_scope, "Program retention owner_scope");
+    for (const auto& id : pinned_version_ids) {
+        const auto version = impl_->program_store->get_version(id);
+        if (!version || version->ownership_scope() != owner_scope)
+            throw std::invalid_argument("Program retention pin crosses an owner scope boundary");
+    }
+    return impl_->program_store->collect_garbage(owner_scope, pinned_version_ids);
+}
+
+
 std::optional<ProgramVersion> ProgramCatalog::resolve_version(
     std::string_view owner_scope, std::string_view id) {
     return resolve_version_impl(owner_scope, id, std::nullopt);
