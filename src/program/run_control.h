@@ -25,7 +25,14 @@
 
 namespace neograph::program::detail {
 
-enum class CancellationCause : std::uint8_t { None, User, Timeout, RuntimeShutdown, EventSink };
+enum class CancellationCause : std::uint8_t {
+    None,
+    User,
+    Timeout,
+    RuntimeShutdown,
+    EventSink,
+    ParentTerminal,
+};
 class EventSinkError final : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -86,11 +93,12 @@ public:
     bool              cancel(CancellationCause cause) noexcept;
     CancellationCause cancellation_cause() const noexcept;
     CancellationCause seal_terminal_cause() noexcept;
+    void              attach_child(const std::shared_ptr<RunControl>& child) noexcept;
 
     ProgramEvent stage_event(ProgramEventKind kind, ProgramEventPayload payload);
     void         deliver_event(const ProgramEvent& event);
-    void emit(ProgramEventKind kind, ProgramEventPayload payload);
-    void complete(RunOutcome outcome) noexcept;
+    void         emit(ProgramEventKind kind, ProgramEventPayload payload);
+    void         complete(RunOutcome outcome) noexcept;
 
     ProgramResult                         wait() const;
     asio::awaitable<ProgramResult>        wait_async() const;
@@ -98,10 +106,14 @@ public:
     std::vector<ProgramEvent>             events_after(std::uint64_t sequence) const;
     std::optional<CoreCheckpointIdentity> latest_checkpoint() const;
     ProgramRunRecord                      snapshot() const;
+    void              cancel_children(CancellationCause cause) noexcept;
 
-private:
     ProgramResult make_result(RunOutcome outcome) const;
     ProgramEvent  make_event(ProgramEventKind kind, ProgramEventPayload payload);
+    ProgramEvent  preview_event(std::uint64_t sequence,
+                                ProgramEventKind kind,
+                                ProgramEventPayload payload) const;
+    void          adopt_published_event(ProgramEvent event);
 
     struct AsyncWaiter {
         std::weak_ptr<asio::steady_timer> timer;
@@ -118,6 +130,7 @@ private:
     CancellationCause                     cancellation_cause_ = CancellationCause::None;
     bool                                  terminal_decided_   = false;
     bool                                  completion_claimed_ = false;
+    std::vector<std::weak_ptr<RunControl>> children_;
 };
 
 asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,

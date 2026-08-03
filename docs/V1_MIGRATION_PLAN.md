@@ -138,7 +138,9 @@ Release status is **NO-GO** until every unchecked item is closed:
 
 ### Retire
 
-- sole Control VM and separate Durable Kernel as the target architecture;
+- a separate public sole Control VM and Durable Kernel execution architecture;
+- any interpretation that removes durable control-plane responsibilities from
+  Program when independently recoverable child Programs are enabled;
 - Harness-only ownership of Program semantics;
 - process-global executable lookup for admitted Programs;
 - raw borrowed tool ownership on the standard v1 construction path;
@@ -281,8 +283,8 @@ headers; move files later in small mechanical commits.
 | `HarnessWorkerCall` | Program `call_core` bindings/capability invocation | Do not put transport fields in Program types. Preserve legacy aggregate only until adapter migration completes. |
 | direct A2A/ACP/gRPC `GraphEngine` calls | owned `RunInvocation` capability | Shared contract suite; protocol lifecycle remains protocol-specific. |
 | proposed `GraphProgramVersion` | `ProgramVersion` | One name only. |
-| Control VM bytecode | typed immutable Program plan | No bytecode encoder/decoder/JIT in default architecture. |
-| Durable Kernel | existing Core state/checkpoint/store + Program journal | Split ownership by layer; no second engine object. |
+| Control VM bytecode | typed immutable Program plan | No bytecode encoder/decoder/JIT in the default architecture. |
+| Durable Kernel | Program-owned transition/journal/checkpoint/effect state plus an internal durable child dispatcher | Keep one public Program API and one Core node executor; do not add a public second engine. |
 | SchemaProvider private strategy enums | request mapper + transport + parser + injected primitive registry | #241 contract before #242 extensibility. |
 | Python `llm::Agent` parity | Python GraphEngine/Program | Do not bind; expose Program abilities and generated artifacts where Python cannot reproduce lifecycle semantics. |
 
@@ -301,7 +303,7 @@ execution API.
 | HTTP | HTTP adapter to Program | request/lifecycle mapping, cancellation, streaming, and unknown-code preservation | P8 |
 | CLI | CLI adapter to Program | compile/run/resume/cancel lifecycle and stable process exit mapping | P8 |
 | Python | selected NeoGraph-specific Program bindings | cancellation/checkpoint/replay/activation/lineage parity; no generic JSON/schema duplication | P8 |
-| A2A, including JSON-RPC 2.0 | owned `RunInvocation` to Program/Core | A2A lifecycle and shared invocation conformance | PR8/P8 |
+| A2A, including JSON-RPC 2.0 | A2A adapter to Program `RunInvocation` plus explicit remote collaboration links | A2A lifecycle, cross-owner consent, task/artifact correlation, streaming, cancellation, restart, and shared invocation conformance | PR8/P8 |
 | ACP, including JSON-RPC 2.0 | owned `RunInvocation` to Program/Core | ACP lifecycle and shared invocation conformance | PR8/P8 |
 | gRPC | owned `RunInvocation` to Program/Core | gRPC lifecycle, unary/streaming behavior, and shared invocation conformance with `NEOGRAPH_BUILD_GRPC=ON` | PR8/P8 |
 | Standalone generic JSON-RPC | no new public engine surface | prove A2A/ACP/MCP envelopes remain protocol-owned; add a generic surface only through a separate accepted product decision | P8 |
@@ -310,6 +312,121 @@ An adapter is not migrated merely because it compiles. Its supported lifecycle,
 terminal states, diagnostics, cancellation, streaming, checkpoint/resume, and
 owner-scope behavior must pass the shared contract suite plus protocol-specific
 wire tests.
+
+
+### Remote collaboration contract
+
+The v1 A2A surface is also the network path for collaboration between two
+independently operated NeoGraph runtimes. This includes the case where two
+users' agents cooperate on one task while retaining separate owner scopes.
+
+The remote path must not introduce a second execution engine:
+
+```text
+User A Program -> A2A adapter -> User B Program
+      |                              |
+ local Program store             local Program store
+```
+
+Each side keeps its own immutable Program version, run record, budget ledger,
+capability policy, journal, and terminal publication. A collaboration link
+explicitly binds the two sides and limits:
+
+- the owner scopes and authenticated agent identities;
+- the permitted message kinds and artifact contracts;
+- the capabilities/effects that may be requested or exposed;
+- expiry, cancellation, retry, and acknowledgement rights;
+- A2A task/context IDs to local Program run and correlation IDs.
+
+Same-runtime collaboration may use a typed Program port or mailbox. The
+identical logical envelope must also be serializable through A2A for separate
+processes, hosts, or users. A2A retries and task snapshots are transport
+evidence; the local Program transition store remains authoritative. A duplicate
+or ambiguous non-idempotent effect must be reconciled through Program effect
+state, never inferred from a successful HTTP response alone.
+
+The first remote collaboration conformance scenario is a two-user
+pair-programming task: user A's coordinator delegates a bounded subtask to
+user B's executor, receives progress and structured artifacts, sends a
+correction or clarification, and completes or cancels the collaboration
+without exposing either user's unrelated tools, credentials, or history.
+
+This is a target contract. The existing A2A GraphEngine-facing server and
+in-memory task store remain compatibility surfaces until the PR8/P8 adapter
+cutover and restart gates close.
+
+### Cross-repository rebase gate
+
+The [NeoProtocol](https://github.com/fox1245/NeoProtocol) and
+[NeoCode](https://github.com/fox1245/NeoCode) repositories are historical
+integration/reference snapshots, not current NeoGraph v1 consumers. NeoCode's
+recorded harness specification pins an older NeoGraph commit and a local
+JSON-lines-over-stdio sidecar. NeoProtocol's federated ACP reference names the
+historical `neograph::acp` surface. Neither repository may claim current
+compatibility until its adapter has been rebased onto the current Program
+contract.
+
+The migration order is:
+
+1. Freeze `ProgramVersion`, `RunInvocation`, `CollaborationLink`, message,
+   artifact, cancellation, and idempotency contracts.
+2. Make NeoCode a thin adapter over current Program lifecycle operations;
+   preserve session, workspace, tool, permission, and harness ownership in
+   NeoCode.
+3. Rebase NeoProtocol's Task Offer, ACP, WebRTC, and workspace adapters onto
+   the same invocation and collaboration contracts; keep signaling and wire
+   framing protocol-owned.
+4. Add explicit protocol, schema, and NeoGraph contract-revision metadata and
+   reject incompatible combinations before admission or execution.
+5. Prove two-runtime owner isolation, restart/retry behavior, artifact
+   correlation, cancellation, and duplicate-dispatch handling before enabling
+   cross-host transport.
+
+Historical bundles and sidecar records are classified as exact-import,
+converted, drain-only, or blocked. They are never silently treated as
+current `ProgramVersion` values. Issue #7 records this cross-repository gate;
+Issue #6 remains the remote collaboration behavior contract.
+
+### Contract-driven multi-model implementation flow
+
+Issue #8 records the cross-cutting Harness contract for using a frontier
+planner, a lower-cost implementation worker, and an independent verifier
+without weakening the Program/Core boundary. This is an orchestration and
+evidence flow, not a second execution engine.
+
+The migration order is:
+
+1. Add a typed manifest containing `assumptions`, `requirements`, `non_goals`,
+   `acceptance`, `fixed_test_vectors`, `independent_oracles`, `risk_register`,
+   and bounded `retry_policy`.
+2. Enforce the manifest lifecycle
+   `proposed -> reviewed -> frozen`; only frozen manifests may select a worker.
+3. Give the worker only the frozen contract and scoped workspace context. A
+   worker may report a missing premise or contract gap, but may not rewrite
+   acceptance identifiers, expected values, scope, permissions, or retry
+   limits.
+4. Run deterministic build/test commands and independent/reference checks
+   outside the worker's self-report.
+5. Bind every evidence record to the manifest hash, Program/version identity,
+   workspace revision, command, toolchain, and artifact hash.
+6. Publish only when every required acceptance identifier has evidence and no
+   blocking diagnostic remains. Otherwise terminate as `blocked` or `failed`.
+7. Use an explicit human decision gate for subjective or oracle-deficient
+   work; never convert a candidate and its narrative into automatic
+   correctness.
+
+The expected product effect is reduced senior-engineer toil in context recovery,
+repetitive edits, known-check reruns, and regression archaeology. Senior
+ownership remains mandatory for premises, ambiguous trade-offs, and release
+approval. A frontier planner is not a truth oracle: an invalid premise can
+still yield a coherent but wrong implementation.
+
+Exit gate: one conformance fixture demonstrates
+`planner -> reviewed/frozen manifest -> worker -> independent verification ->
+publication`, plus the fail-closed path for missing evidence or a failed
+independent check. The fixture must preserve manifest, evidence lineage,
+terminal status, and recovery behavior, and must execute through the existing
+typed Program/Core dispatch path without a generic bytecode VM.
 
 ### Stored-data migration
 
@@ -384,6 +501,28 @@ Exit gate: one reference Agent Program uses every P3 primitive, every failure ha
 a stable terminal/diagnostic class, and GraphEngine gains no Program-specific
 branch. Full vocabulary completion, including `spawn`, is gated on P6.
 
+### Execution implementation invariant
+
+The Program control semantics must not be implemented as a second generic
+bytecode VM by default. The compiler/runtime path is:
+
+```text
+admitted source -> typed immutable plan -> direct scheduler dispatch
+```
+
+The plan may provide VM-like control semantics, but it does not require a
+bytecode encoder/decoder, stack machine, JIT, or a second Core execution
+boundary. Inline operations stay in memory; durable child publication,
+`await`/join, checkpoint, and external-effect publication pay persistence cost
+only at their semantic boundaries.
+
+This is a performance and correctness contract, not permission to drop
+durability. A typed direct-dispatch implementation must retain stable
+diagnostics, source coordinates, cancellation, budgets, and replay identity.
+The narrow historical VM comparison is evidence for measurement, not a
+portable performance promise. Any future generic interpreter requires a new
+measured architecture decision.
+
 ### P4 — Versions, activation, and durable stores
 
 Deliverables:
@@ -424,11 +563,22 @@ Deliverables:
   attenuation, and lineage;
 - immutable verified module coordinates, dependencies, receipts, whole-Program
   compile, quarantine/revocation;
+- durable `spawn` publication through the Program API, durable parent/child
+  `await`/join state, cancellation propagation, duplicate-dispatch handling,
+  and restart recovery;
 - MCP transport split, SchemaProvider mapper/transport/parser split;
 - generated artifacts/LRO contract, then injectable SchemaProvider primitives.
 
+`spawn` is not an independently recoverable sub-agent until its child run,
+parent relationship, budget reservation, lifecycle, and dispatch outcome
+survive a process restart. An in-memory child link is only an optimization.
+No adapter may introduce a parallel Control VM/Durable Kernel API to bypass
+this contract.
+
 Exit gate: a Program composes and runs a verified child module, replay shows the
-whole lineage, and independently valid but incompatible modules fail link.
+whole lineage, independently valid but incompatible modules fail link, and a
+crash/restart at the child publication/dispatch boundary produces neither a
+lost child nor an untracked duplicate.
 
 ### P7 — Tenant and host capability boundary
 
@@ -440,6 +590,9 @@ Deliverables:
 - safe authenticated host-model adapter;
 - hardened local global-MCP adoption with explicit trust and no credential
   extraction; disabled by default in multi-tenant mode.
+- explicit cross-owner collaboration links with authenticated consent,
+  artifact/capability allowlists, expiry, cancellation rights, and zero
+  ambient credential or history sharing;
 
 Exit gate: same-public-ID cross-tenant matrix has zero leakage; no ambient host
 credential can enter a tenant Program.
@@ -458,6 +611,10 @@ Deliverables:
 - selected Python Program/generated-artifact bindings based on actual ability;
 - MCP/HTTP/CLI/Python/A2A/ACP/gRPC adapters pass the matrix in Section 5 and the
   same Program conformance suite;
+- two independently owned Program runtimes complete the pair-programming
+  conformance scenario through A2A, including progress/artifact exchange,
+  correction, cancellation, retry, restart, duplicate dispatch handling, and
+  owner-isolation assertions;
 - migrate/remove compatibility setters, raw ownership, global admission fallback,
   old Harness compiler/runtime, ControlVm, and obsolete schemas;
 - exact import/convert/drain/block decision for retained data;

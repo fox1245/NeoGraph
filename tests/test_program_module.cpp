@@ -151,6 +151,60 @@ TEST(ProgramModuleTest, RejectsChildOwnerOutsideParentScope) {
                                    fixture.version), std::invalid_argument);
 }
 
+TEST(ProgramModuleTest, ResolverRejectsCrossScopeAndUnapprovedCapabilities) {
+    auto fixture = make_fixture();
+    auto store   = std::make_shared<InMemoryModuleStore>();
+    store->publish(fixture.parent);
+
+    PolicySnapshotBuilder owner_policy_builder;
+    owner_policy_builder.id("resolver-owner-policy")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:other")
+        .admission_profile(make_admission(make_registry()))
+        .allow_module_digest(fixture.parent.id())
+        .allow_capability("read")
+        .allow_effect("tool")
+        .budget_ceiling(BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1});
+    const auto owner_policy = std::move(owner_policy_builder).build();
+
+    EXPECT_THROW(ModuleResolver(store).resolve(fixture.parent.coordinate(), owner_policy),
+                 std::invalid_argument);
+
+    PolicySnapshotBuilder capability_policy_builder;
+    capability_policy_builder.id("resolver-capability-policy")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:module")
+        .admission_profile(make_admission(make_registry()))
+        .allow_module_digest(fixture.parent.id())
+        .allow_effect("tool")
+        .budget_ceiling(BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1});
+    const auto capability_policy = std::move(capability_policy_builder).build();
+
+    EXPECT_THROW(ModuleResolver(store).resolve(fixture.parent.coordinate(), capability_policy),
+                 std::invalid_argument);
+}
+
+TEST(ProgramModuleTest, ResolverRejectsQuarantinedModuleEvenWithPinnedIdentity) {
+    auto fixture = make_fixture();
+    auto store   = std::make_shared<InMemoryModuleStore>();
+    store->publish(fixture.parent);
+    store->set_lifecycle(fixture.parent.id(), ModuleLifecycle::Quarantined);
+
+    PolicySnapshotBuilder builder;
+    builder.id("resolver-lifecycle-policy")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:module")
+        .admission_profile(make_admission(make_registry()))
+        .allow_module_digest(fixture.parent.id())
+        .allow_capability("read")
+        .allow_effect("tool")
+        .budget_ceiling(BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1});
+    const auto policy = std::move(builder).build();
+
+    EXPECT_THROW(ModuleResolver(store).resolve(fixture.parent.coordinate(), policy),
+                 std::invalid_argument);
+}
+
 TEST(ProgramModuleTest, RejectsDescriptorVersionSubstitution) {
     auto fixture = make_fixture();
     auto forged = fixture.version;

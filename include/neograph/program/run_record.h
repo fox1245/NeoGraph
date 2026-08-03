@@ -10,6 +10,7 @@
 #include <neograph/program/pending.h>
 #include <neograph/program/result.h>
 
+#include <vector>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -22,8 +23,31 @@ struct ProgramPersistedInvocation {
     json        input = json::object();
     RunBudget   granted_budget;
     std::string trace_id;
+    std::string parent_run_id;
+    std::uint32_t child_depth = 0;
 
     bool operator==(const ProgramPersistedInvocation&) const = default;
+};
+
+enum class ProgramChildState : std::uint8_t {
+    Publishing,
+    Dispatched,
+    Completed,
+    Cancelled,
+    Failed,
+};
+
+NEOGRAPH_PROGRAM_API std::string_view to_string(ProgramChildState state) noexcept;
+NEOGRAPH_PROGRAM_API ProgramChildState program_child_state_from_string(std::string_view value);
+
+struct ProgramChildRecord {
+    std::string                child_run_id;
+    std::string                link_id;
+    std::string                link_receipt;
+    ProgramPersistedInvocation invocation;
+    ProgramChildState          state = ProgramChildState::Publishing;
+
+    bool operator==(const ProgramChildRecord&) const = default;
 };
 
 struct ProgramRunRecordData {
@@ -40,6 +64,7 @@ struct ProgramRunRecordData {
     std::optional<ProgramPendingEffect>    pending_effect;
     std::optional<ProgramResult>           terminal_result;
     std::optional<ForkCompatibilityReceipt> fork_receipt;
+    std::vector<ProgramChildRecord>           children;
     std::string                           journal_head;
     std::optional<std::string>              fork_source_run_id;
     std::optional<std::string>              fork_source_program_version_id;
@@ -71,6 +96,7 @@ public:
     std::optional<ProgramPendingInput> pending_input() const;
     std::optional<ProgramPendingEffect> pending_effect() const;
     std::optional<ProgramResult> terminal_result() const;
+    std::vector<ProgramChildRecord> children() const;
     std::optional<ForkCompatibilityReceipt> fork_receipt() const;
     const std::string& journal_head() const noexcept;
     std::uint64_t event_sequence() const noexcept;

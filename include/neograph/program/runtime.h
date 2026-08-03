@@ -10,6 +10,7 @@
 #include <neograph/program/catalog.h>
 #include <neograph/program/fork.h>
 #include <neograph/program/handle.h>
+#include <neograph/program/module.h>
 #include <neograph/program/pending.h>
 #include <neograph/program/replay.h>
 #include <neograph/program/transition_store.h>
@@ -23,13 +24,14 @@
 #include <string_view>
 
 namespace neograph::program {
-
 struct ProgramInvocation {
     json                              input;
     RunBudget                         budget;
     std::string                       trace_id;
     std::shared_ptr<ProgramEventSink> events;
     std::string                       requested_run_id;
+    std::string                       parent_run_id;
+    std::uint32_t                     child_depth = 0;
 };
 
 struct ProgramResume {
@@ -64,9 +66,20 @@ public:
     ProgramRuntime& operator=(const ProgramRuntime&) = delete;
     ~ProgramRuntime();
 
-    ProgramHandle start(std::string_view         owner_scope,
-                        const ProgramVersion&    version,
-                        ProgramInvocation        invocation);
+    ProgramHandle start(std::string_view      owner_scope,
+                        const ProgramVersion& version,
+                        ProgramInvocation     invocation);
+
+    /**
+     * Start an admitted child through an immutable ModuleLinkReceipt. The
+     * parent-child attachment is durably published before the child dispatch;
+     * retries use the persisted child identity and are idempotent.
+     */
+    ProgramHandle start_child(std::string_view         owner_scope,
+                              const ProgramHandle&     parent,
+                              const ModuleLinkReceipt& link,
+                              const ProgramVersion&    version,
+                              ProgramInvocation        invocation);
     ProgramHandle reconnect(std::string_view owner_scope, std::string_view run_id);
     ProgramHandle resume(std::string_view owner_scope,
                          std::string_view run_id,

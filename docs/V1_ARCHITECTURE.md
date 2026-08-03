@@ -18,7 +18,9 @@ NeoGraph v1 has two public layers and one execution engine:
    orchestration into immutable, versioned plans that invoke pinned Core graph
    generations.
 3. **GraphEngine remains the only node-execution engine.** Program does not add
-   a bytecode VM, a second node scheduler, or a separate durable kernel.
+   a bytecode VM or a second executor for Core/application nodes. Durable child
+   orchestration, when enabled, remains Program-owned and must not become a
+   second node engine or a public `ControlVm`/`DurableKernel` API.
 
 The architectural boundary is therefore:
 
@@ -47,6 +49,172 @@ C++ builder / JSON / model-authored source
  checkpoint / store / provider / tool / events
 ```
 
+### Durable child execution contract
+
+The terms `ControlVm` and `Durable Kernel` describe rejected *separate public
+execution-engine designs*, not responsibilities that disappear. The default
+contract is:
+
+- `ProgramCompiler` emits a typed immutable orchestration plan;
+  `ProgramRuntime` schedules that plan; and `GraphEngine` remains the only
+  executor of Core/application nodes.
+- Inline plan composition may execute inside one Program run. It is an
+  optimization for bounded local orchestration and is not a durable
+  sub-agent.
+- A durable `spawn` creates a separately admitted and pinned child Program
+  run through `ProgramRuntime` and returns a `ProgramHandle`. It must not be
+  implemented as recursive execution of the child body inside the parent's
+  `RunControl`.
+- Parent/child identity, budget reservation and attenuation, lifecycle,
+  `await`/join state, cancellation, retry/resume, and lineage are durable
+  Program state. In-memory weak links and caches may accelerate this path but
+  are never its source of truth.
+- The publication/dispatch boundary is crash-safe and idempotent. Unknown
+  non-idempotent external effects use the Program effect outbox and explicit
+  reconciliation rather than an implicit retry.
+- Any durable child supervisor or worker dispatcher is an internal Program
+  component behind the existing public Program API. Adapters must not gain a
+  second `ControlVm`/`DurableKernel` execution surface or select different
+  semantics.
+
+`ProgramRuntime::start_child()` is the public foundation for this contract.
+Until the child lifecycle and restart gates close, an admitted DSL `spawn`
+must be treated as inline orchestration rather than being advertised as an
+independently recoverable sub-agent.
+
+### Remote collaborative agent network
+
+A2A is not only a compatibility transport for one remote agent. It is also the
+network boundary for collaboration between independently operated NeoGraph
+runtimes, including agents owned by different users.
+
+The collaboration contract has one semantic surface and two transport paths:
+
+```text
+same owner / same runtime  -> typed Program port or in-process mailbox
+different process / owner  -> A2A adapter over the network
+```
+
+Both paths carry the same logical message contract. The transport may differ,
+but compilation, admission, budget, capability, lifecycle, cancellation,
+replay, and terminal-state semantics remain Program semantics.
+
+A task-specific coordinator may therefore compile and admit a bounded group of
+Programs such as:
+
+- a **supervisor** that observes progress, evidence, policy violations, and
+  declared failure signals;
+- an **executor** that owns the task-specific Core graphs, tools, and effects;
+- an optional **reviewer** that checks artifacts and requests a bounded
+  correction or retry.
+
+The coordinator may spawn same-owner children through the durable child
+contract. A remote collaborator owned by another user is not implicitly a child
+under the caller's owner scope. It requires an explicit collaboration
+invitation/link that records both owner scopes, the permitted capabilities and
+artifacts, expiry, cancellation rights, and the correlation between local
+Program runs and the remote A2A task.
+
+Every collaboration message must be attributable and idempotent. Its logical
+envelope includes:
+
+```text
+collaboration_link_id, sender_owner_scope, receiver_owner_scope,
+sender_run_id, receiver_run_id, a2a_task_id, a2a_context_id,
+message_id, correlation_id, sequence, kind, idempotency_key, payload/artifacts
+```
+
+The local `ProgramTransitionStore` remains the source of truth for each
+runtime. A2A retries, acknowledgements, task snapshots, and stream events are
+transport evidence; they do not replace local Program journal or terminal
+publication. Unknown remote terminal or diagnostic codes must remain explicit
+unknown values and must never be converted to success.
+
+Remote collaboration is therefore a valid reason for a meaningful A2A network
+path, but not for a second node executor or a second public VM. The A2A server
+and client are adapters around the Program contract. A same-host pair may use a
+typed mailbox for the low-latency path and use the identical envelope through
+A2A when the pair is moved to separate processes or hosts. Metrics must
+separate network, queue, Program scheduling, Core execution, provider, and
+artifact-publication time.
+
+The current A2A GraphEngine-facing server and in-memory task store are
+compatibility surfaces. The v1 cutover must map remote `message/send`,
+`tasks/get`, cancellation, streaming, and artifacts to Program lifecycle
+operations without leaking credentials, ambient host state, or unadmitted
+capabilities across the collaboration link.
+
+This network collaboration contract is a target architecture, not a claim
+that durable cross-owner links or restart-safe remote dispatch are already
+implemented.
+
+### Cross-repository compatibility and rebase boundary
+
+The [NeoProtocol](https://github.com/fox1245/NeoProtocol) and
+[NeoCode](https://github.com/fox1245/NeoCode) repositories are historical
+integration/reference snapshots, not current NeoGraph v1 compatibility
+guarantees. NeoCode's recorded harness contract pins an older NeoGraph commit
+and a local JSON-lines-over-stdio sidecar. NeoProtocol's federated ACP
+reference likewise names the historical `neograph::acp` surface. Those
+integrations must be rebased after the current Program contract is frozen;
+compiling an old adapter is not compatibility evidence.
+
+The ownership boundary remains:
+
+- NeoGraph owns ProgramVersion, RunInvocation, admission, budgets,
+  capabilities, lifecycle, journal, checkpoint/recovery, effect
+  reconciliation, and owner isolation.
+- NeoCode owns the user-facing session, workspace, tool, permission, and
+  harness surfaces.
+- NeoProtocol owns wire envelopes, capability/consent exchange, signaling,
+  and remote collaboration transport.
+
+The rebase sequence is deliberately one-way:
+
+1. Freeze the ProgramVersion, RunInvocation, CollaborationLink, message,
+   artifact, cancellation, and idempotency contracts.
+2. Replace NeoCode's historical sidecar assumptions with a thin adapter to
+   current Program lifecycle operations.
+3. Rebase NeoProtocol's Task Offer, ACP, WebRTC, and workspace adapters onto
+   the same invocation and collaboration contracts.
+4. Add explicit protocol, schema, and NeoGraph contract-revision metadata;
+   reject incompatible combinations before execution.
+5. Run the two-runtime owner-isolation and restart/retry conformance scenario
+   before enabling cross-host transport.
+
+Old pinned bundles and sidecar records receive an explicit exact-import,
+converted, drain-only, or rejected classification. They must never be
+silently accepted as current Program versions. Issue #7 tracks this
+cross-repository rebase gate.
+
+### Execution strategy: VM semantics without a general-purpose VM
+
+Program retains the control semantics normally associated with a Control VM,
+but the default implementation does not encode/decode a bytecode program or
+cross a second generic VM/Core boundary.
+
+- Admission lowers source into a typed immutable plan with stable operation
+  identifiers, typed references, and statically known continuation edges.
+- `ProgramRuntime` directly dispatches those plan operations through its
+  scheduler/coroutine machinery. This is VM-like execution semantics without
+  a separate bytecode interpreter, stack machine, or JIT.
+- Inline sequence/branch/loop work stays on the fast in-memory path and does
+  not perform a durable commit for every operation.
+- Durable child `spawn`, `await`/join, checkpoint, and external-effect
+  publication persist only at their semantic durability boundaries. The
+  persistence and recovery cost of those boundaries is mandatory and must
+  not be hidden in a performance claim.
+- A future workload that requires arbitrary dynamic code, unbounded topology
+  mutation, or a generic sandboxed interpreter reopens this decision only with
+  a measured correctness and performance gate. It does not silently create a
+  second adapter-specific runtime.
+
+The current implementation is not evidence that the specialized dispatch
+optimization is complete: admitted operation tags are still evaluated from
+the stored plan at runtime. Any replacement with typed direct dispatch must
+preserve diagnostics, source coordinates, cancellation, budgets, and replay
+identity before it can be accepted as a performance change.
+
 Program is optional. A user who only needs a static graph links
 `neograph::core`, builds a `GraphEngine`, and pays no Program dependency,
 allocation, activation lookup, or branch on the run hot path.
@@ -67,6 +235,56 @@ This contract separates two claims:
   effects, and budgets fit an authorized immutable policy snapshot;
 - neither compiler nor admission can prove that a model answer is factually
   correct. Behavioral evaluation and evidence gates remain runtime concerns.
+
+### Contract-driven multi-model implementation
+
+NeoGraph and NeoCode may use different model roles for one implementation
+request, but the roles must share one immutable contract rather than an
+implicit conversation. A frontier model may propose and review the contract;
+it is not an execution authority or a correctness oracle. A lower-cost
+implementation worker may perform the bounded code changes; it is not allowed
+to redefine the task while implementing it.
+
+The planner output is a typed manifest with these required semantic sections:
+
+- `assumptions`: premises that must be true for the plan to be valid;
+- `requirements`: observable behavior that must be delivered;
+- `non_goals`: explicit scope exclusions;
+- `acceptance`: stable identifiers, expected outcomes, and required evidence;
+- `fixed_test_vectors`: values or fixtures that the worker cannot rewrite;
+- `independent_oracles`: reference implementations, standards, hidden fixtures,
+  or human decisions that do not derive their expected result from the worker;
+- `risk_register`: known uncertainty, contradiction, and escalation points;
+- `retry_policy`: bounded attempts, time, cost, and failure escalation.
+
+The manifest lifecycle is `proposed -> reviewed -> frozen`. Only a frozen
+manifest may select implementation work. Review must check premise completeness,
+requirement consistency, acceptance observability, and whether every required
+element has an oracle or an explicit human gate. The implementation worker
+receives the frozen manifest and scoped workspace context. It may report a
+contract gap, but it must not change requirements, expected values, permissions,
+scope, retry limits, or completion status.
+
+Verification is a separate authority from the worker's self-report. The
+deterministic runner executes the declared build and test commands, and
+independent or reference-based checks are used where available. Evidence is
+valid only when bound to the manifest hash, Program/version identity, workspace
+revision, command, toolchain, and artifact hash. Missing acceptance evidence,
+unresolved blocking diagnostics, failed independent checks, or exhausted
+budgets produce `blocked` or `failed`, never `completed`.
+
+This flow is intended to reduce senior-engineer toil—context recovery,
+repetitive patching, known-check reruns, and regression archaeology—while
+keeping premise decisions, ambiguous trade-offs, and release approval under
+senior control. It does not promise perfect software: a wrong premise can
+still produce a perfectly implemented wrong result. Subjective work therefore
+ends at a human decision gate with candidates and evidence rather than a false
+automatic correctness claim.
+
+This is a Harness/Program orchestration contract over the existing typed
+dispatch path. It does not introduce a second execution engine, generic
+bytecode VM, or permission-escalation path. Issue #8 records the implementation
+and conformance gate for this contract.
 
 ## Goals
 
@@ -715,6 +933,13 @@ The architecture is implemented only when all are true:
     restart, atomicity, owner-isolation, tamper, retention, and GC suite.
 13. The dependency baseline is unchanged, or each approved substitution has the
     separate decision and evidence required by the package-boundary policy.
+14. Two independently owned Program runtimes can collaborate through the A2A
+   adapter with explicit consent, owner isolation, task/artifact correlation,
+   cancellation semantics, restart-safe duplicate handling, and no capability
+   leakage.
+15. NeoCode and NeoProtocol consumers declare a current NeoGraph Program
+   contract revision and pass the legacy-integration rebase/conformance gate
+   before claiming v1 compatibility.
 
 ## Rejected alternatives
 

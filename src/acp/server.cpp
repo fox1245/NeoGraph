@@ -516,17 +516,17 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                     std::string graph_error;
                     neograph::graph::RunResult run_result;
 
-                    if (!resume_pending) {
-                        cfg.input =
-                            a.build_initial_state(req.prompt, req.session_id);
-                    }
-                    neograph::graph::RunInvocationRequest invocation_request;
-                    invocation_request.config = std::move(cfg);
-                    invocation_request.metadata.run_id = req.session_id;
-                    neograph::graph::RunInvocation invocation(
-                        engine, std::move(invocation_request));
-
                     try {
+                        if (!resume_pending) {
+                            cfg.input =
+                                a.build_initial_state(req.prompt, req.session_id);
+                        }
+                        neograph::graph::RunInvocationRequest invocation_request;
+                        invocation_request.config = std::move(cfg);
+                        invocation_request.metadata.run_id = req.session_id;
+                        neograph::graph::RunInvocation invocation(
+                            engine, std::move(invocation_request));
+
                         auto outcome = resume_pending
                             ? invocation.resume(neograph::json(
                                   a.extract_user_text(req.prompt)))

@@ -1,9 +1,9 @@
 #include <neograph/neograph.h>
 
 #include <gtest/gtest.h>
-
+#include <algorithm>
 #include <memory>
-#include <string>
+#include <vector>
 
 using namespace neograph;
 using namespace neograph::graph;
@@ -54,9 +54,15 @@ std::shared_ptr<GraphEngine> make_engine() {
 }
 
 TEST_F(RunInvocationTest, RunsThroughOwnedBoundaryAndClassifiesResult) {
+    std::vector<GraphEvent::Type> events;
     RunInvocationRequest request;
     request.config.thread_id = "invocation-complete";
     request.config.input = json{{"message", "hello"}};
+    request.metadata.run_id = "durable-invocation";
+    request.metadata.trace_id = "trace-invocation";
+    request.on_event = [&events](const GraphEvent& event) {
+        events.push_back(event.type);
+    };
 
     RunInvocation invocation(make_engine(), std::move(request));
     auto result = invocation.run();
@@ -66,6 +72,10 @@ TEST_F(RunInvocationTest, RunsThroughOwnedBoundaryAndClassifiesResult) {
     EXPECT_EQ(result.run_result->output["channels"]["result"]["value"],
               "completed");
     EXPECT_EQ(invocation.cancel_token()->is_cancelled(), false);
+    ASSERT_GE(events.size(), 4U);
+    EXPECT_EQ(events.front(), GraphEvent::Type::NODE_START);
+    EXPECT_NE(std::find(events.begin(), events.end(), GraphEvent::Type::NODE_END),
+              events.end());
 }
 
 TEST_F(RunInvocationTest, PreCancelledTokenProducesCancelledOutcome) {

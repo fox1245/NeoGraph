@@ -178,8 +178,11 @@ ProgramContinuation parse_continuation(const json& value) {
 }
 
 bool checkpoint_required(const ProgramJournalRecord& record) noexcept {
-    if (record.continuation.state != ContinuationState::Running) return true;
-    return record.sequence > 1;
+    // The initial running record may describe metadata-only work before Core
+    // has produced a checkpoint. A resumed attempt must always identify the
+    // exact checkpoint from which Core will continue.
+    return record.continuation.state != ContinuationState::Running ||
+           record.continuation.attempt > 1;
 }
 
 bool is_known_state(ContinuationState state) noexcept {
@@ -292,8 +295,15 @@ bool valid_transition_impl(const ProgramJournalRecord& previous,
     }
 
     if (previous.continuation.state == ContinuationState::Running) {
-        return next.continuation.state != ContinuationState::Running &&
-               next.continuation.attempt == previous.continuation.attempt;
+        if (next.continuation.attempt != previous.continuation.attempt) return false;
+        if (next.continuation.state == ContinuationState::Running) {
+            if (previous.core_checkpoint.has_value() != next.core_checkpoint.has_value()) {
+                return false;
+            }
+            return !previous.core_checkpoint ||
+                   same_checkpoint(*previous.core_checkpoint, *next.core_checkpoint);
+        }
+        return true;
     }
     if (previous.continuation.state == ContinuationState::Interrupted) {
         if (next.continuation.state == ContinuationState::Failed ||

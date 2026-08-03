@@ -89,6 +89,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         test_program_compiler.cpp
         test_program_catalog.cpp
         test_program_module.cpp
+        test_program_contract.cpp
         test_program_journal.cpp
         test_program_pending.cpp
         test_program_fork_replay.cpp
@@ -152,6 +153,7 @@ if(NEOGRAPH_BUILD_A2A)
     target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_A2A_TESTING)
     target_sources(neograph_tests PRIVATE
         test_a2a_types.cpp
+        test_a2a_collaboration.cpp
         test_a2a_client.cpp
         test_a2a_server.cpp
     )
@@ -165,6 +167,23 @@ if(NEOGRAPH_BUILD_ACP)
     target_sources(neograph_tests PRIVATE
         test_acp_types.cpp
         test_acp_server.cpp
+    )
+endif()
+
+# Keep the protocol-neutral invocation and ACP adapter contract independently
+# buildable.  The aggregate neograph_tests target also contains HTTP/schema
+# tests that require OpenSSL headers; ACP itself depends only on Core and must
+# retain a runnable build gate in minimal dependency environments.
+if(NEOGRAPH_BUILD_ACP)
+    add_executable(neograph_acp_tests
+        test_graph_invocation.cpp
+        test_acp_types.cpp
+        test_acp_server.cpp
+    )
+    target_link_libraries(neograph_acp_tests PRIVATE
+        neograph::core
+        neograph::acp
+        GTest::gtest_main
     )
 endif()
 
@@ -272,6 +291,9 @@ endif()
 include(GoogleTest)
 if(TARGET neograph_program_tests)
     gtest_discover_tests(neograph_program_tests)
+endif()
+if(TARGET neograph_acp_tests)
+    gtest_discover_tests(neograph_acp_tests)
 endif()
 
 if(NEOGRAPH_BUILD_POSTGRES)

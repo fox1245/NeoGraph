@@ -316,9 +316,8 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
              !publishes_terminal_event)) {
             return ProgramTransitionPublishResult::Conflict;
         }
-        if (publication.events.empty() && publication.effects.empty()) {
-            return ProgramTransitionPublishResult::Conflict;
-        }
+        // A publication may update durable run metadata (such as a child
+        // relationship) without advancing the event or effect streams.
         if (old.journal.id != expected || publication.journal_record.previous_id != expected ||
             !is_valid_program_journal_transition(old.journal, publication.journal_record) ||
             publication.run_record.created_at_ms() != old.run.created_at_ms() ||

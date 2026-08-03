@@ -474,6 +474,7 @@ add_library(neograph::core ALIAS neograph_core)
 if(NEOGRAPH_BUILD_PROGRAM)
     add_library(neograph_program
         src/program/canonical_json.cpp
+        src/program/contract.cpp
         src/program/diagnostic.cpp
         src/program/source.cpp
         src/program/bundle.cpp
@@ -854,9 +855,9 @@ endif()
 if(NEOGRAPH_BUILD_A2A)
     add_library(neograph_a2a
         src/a2a/types.cpp
+        src/a2a/collaboration.cpp
         src/a2a/client.cpp
         src/a2a/server.cpp
-        src/a2a/a2a_caller_node.cpp
     )
 
     target_include_directories(neograph_a2a
