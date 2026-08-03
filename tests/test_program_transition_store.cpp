@@ -169,6 +169,37 @@ ProgramTransitionPublication interrupted_effect_publication(
                    ProgramTerminalEvent{ProgramTerminalStatus::Interrupted})},
             {{1, std::move(pending)}}};
 }
+ForkCompatibilityReceipt compatible_fork_receipt() {
+    return ForkCompatibilityReceipt(ForkCompatibilityReceiptData{
+        "owner-a", "run-1", digest('6'), "checkpoint-1", digest('1'),
+        ForkCompatibilityStatus::Compatible, {}});
+}
+
+void attach_fork_receipt(ProgramTransitionPublication& publication) {
+    const auto run = publication.run_record;
+    ProgramRunRecordData data;
+    data.owner_scope = run.owner_scope();
+    data.run_id = run.run_id();
+    data.program_version_id = run.program_version_id();
+    data.bundle_id = run.bundle_id();
+    data.binding_fingerprint = run.binding_fingerprint();
+    data.invocation = run.invocation();
+    data.continuation = run.continuation();
+    data.remaining_budget = run.remaining_budget();
+    data.exact_checkpoint = run.exact_checkpoint();
+    data.pending_input = run.pending_input();
+    data.pending_effect = run.pending_effect();
+    data.terminal_result = run.terminal_result();
+    data.fork_receipt = compatible_fork_receipt();
+    data.children = run.children();
+    data.journal_head = run.journal_head();
+    data.recorded_binding_set_fingerprint = run.recorded_binding_set_fingerprint();
+    data.event_sequence = run.event_sequence();
+    data.effect_sequence = run.effect_sequence();
+    data.created_at_ms = run.created_at_ms();
+    data.updated_at_ms = run.updated_at_ms();
+    publication.run_record = ProgramRunRecord::create(std::move(data));
+}
 } // namespace
 
 TEST(ProgramTransitionStoreTest, CanonicalValuesRejectTamper) {
@@ -200,6 +231,7 @@ TEST(ProgramTransitionStoreTest, FirstPublishRetryAndOwnerIsolation) {
 TEST(ProgramTransitionStoreTest, MigrationPublicationIsDurableAndInheritedAcrossReplay) {
     InMemoryProgramTransitionStore store;
     auto publication = start_publication();
+    attach_fork_receipt(publication);
     publication.migration_plan = MigrationPlan::create(
         MigrationPlanData{digest('6'), digest('1'), "owner-a",
                           MigrationCompatibility::ForkCompatible, {}, {}, {}});

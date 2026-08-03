@@ -103,9 +103,12 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
     std::uint64_t previous_sequence = 0;
     for (const auto& event : publication.events) {
         (void)event.serialize_canonical();
+        const bool snapshot_operation =
+            event.kind == ProgramEventKind::Started ||
+            event.kind == ProgramEventKind::Terminal;
         if (event.run_id != run.run_id() || event.program_version_id != run.program_version_id() ||
             event.bundle_id != run.bundle_id() ||
-            event.operation_id != run.continuation().operation_id ||
+            (snapshot_operation && event.operation_id != run.continuation().operation_id) ||
             event.attempt != run.continuation().attempt || event.sequence <= previous_sequence) {
             throw std::invalid_argument("Program event does not bind snapshot");
         }
@@ -125,7 +128,7 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
     for (const auto& effect : publication.effects) {
         (void)effect.serialize_canonical();
         if (effect.sequence() <= previous_sequence ||
-            effect.effect().operation_id() != run.continuation().operation_id) {
+            effect.effect().operation_id().empty()) {
             throw std::invalid_argument("Program effect does not bind snapshot");
         }
         previous_sequence = effect.sequence();
@@ -143,10 +146,12 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
     if (publication.migration_plan) {
         const auto& plan = *publication.migration_plan;
         const auto fork = run.fork_receipt();
-        if (plan.owner_scope() != owner || plan.target_version_id() != run.program_version_id() ||
+        if (!fork || plan.owner_scope() != owner ||
+            plan.target_version_id() != run.program_version_id() ||
             !plan.is_compatible() ||
-            (fork && plan.source_version_id() != fork->source_program_version_id())) {
-            throw std::invalid_argument("Program migration publication does not bind an eligible target");
+            plan.source_version_id() != fork->source_program_version_id()) {
+            throw std::invalid_argument(
+                "Program migration publication requires a compatible fork receipt");
         }
         (void)plan.serialize_canonical();
     }

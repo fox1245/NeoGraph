@@ -458,11 +458,11 @@ ForkCompatibilityReceipt check_exact_fork_compatibility(ExactForkCompatibilityFa
         const bool has_checkpoint_value = facts.loaded_checkpoint.channel_values.is_object() &&
                                           facts.loaded_checkpoint.channel_values.contains(name);
         const bool has_checkpoint_version = facts.loaded_checkpoint.channel_versions.is_object() &&
-                                            facts.loaded_checkpoint.channel_versions.contains(name);
+                                          facts.loaded_checkpoint.channel_versions.contains(name);
         if (has_checkpoint_value != has_checkpoint_version) {
             add_witness(witnesses, ForkCompatibilityField::Channel, name,
                         json{{"checkpoint_value", has_checkpoint_value},
-                             {"checkpoint_version", has_checkpoint_value}},
+                             {"checkpoint_version", has_checkpoint_version}},
                         json{{"checkpoint_value", has_checkpoint_value},
                              {"checkpoint_version", has_checkpoint_version}});
         }

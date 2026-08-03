@@ -17,6 +17,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -67,6 +68,9 @@ public:
     RunControl(ProgramRunRecord record,
                std::shared_ptr<ProgramTransitionStore> transitions);
 
+    using CompletionCallback = std::function<void(const ProgramResult&)>;
+    void set_completion_callback(CompletionCallback callback) noexcept;
+
     const std::string                                owner_scope;
     const std::string                                run_id;
     const std::string                                program_version_id;
@@ -96,9 +100,22 @@ public:
     void              attach_child(const std::shared_ptr<RunControl>& child) noexcept;
 
     ProgramEvent stage_event(ProgramEventKind kind, ProgramEventPayload payload);
+    ProgramEvent stage_event(std::string_view operation_id,
+                             ProgramEventKind kind,
+                             ProgramEventPayload payload);
     void         deliver_event(const ProgramEvent& event);
     void         emit(ProgramEventKind kind, ProgramEventPayload payload);
+    void         emit(std::string_view operation_id,
+                      ProgramEventKind kind,
+                      ProgramEventPayload payload);
     void         complete(RunOutcome outcome) noexcept;
+    ProgramEvent make_event(std::string_view operation_id,
+                            ProgramEventKind kind,
+                            ProgramEventPayload payload);
+    ProgramEvent preview_event(std::uint64_t sequence,
+                               std::string_view operation_id,
+                               ProgramEventKind kind,
+                               ProgramEventPayload payload) const;
 
     ProgramResult                         wait() const;
     asio::awaitable<ProgramResult>        wait_async() const;
@@ -126,6 +143,7 @@ public:
     std::optional<CoreCheckpointIdentity> latest_checkpoint_;
     mutable std::vector<AsyncWaiter>      waiters_;
     std::shared_ptr<ProgramEventSink>     sink_;
+    CompletionCallback                    completion_callback_;
     std::uint64_t                         next_sequence_      = 1;
     CancellationCause                     cancellation_cause_ = CancellationCause::None;
     bool                                  terminal_decided_   = false;

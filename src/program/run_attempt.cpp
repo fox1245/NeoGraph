@@ -348,11 +348,13 @@ asio::awaitable<void> cancel_after_timer(
 
 constexpr std::string_view PROGRAM_PENDING_KIND_FIELD = "__neograph_program_pending_kind";
 
-ProgramInterrupt decode_core_interrupt(const RunControl& control, const graph::RunResult& result) {
+ProgramInterrupt decode_core_interrupt(const RunControl&      control,
+                                       std::string_view       operation_id,
+                                       const graph::RunResult& result) {
     const auto generic = [&] {
         ProgramPendingInputData pending;
-        pending.operation_id         = control.operation_id;
-        pending.call_id              = control.run_id + ":" + control.operation_id + ":" +
+        pending.operation_id = std::string(operation_id);
+        pending.call_id      = control.run_id + ":" + std::string(operation_id) + ":" +
                           std::to_string(control.attempt);
         pending.kind                 = ProgramPendingInputKind::Input;
         pending.result_schema        = json::object();
@@ -395,7 +397,7 @@ ProgramInterrupt decode_core_interrupt(const RunControl& control, const graph::R
         }
         const auto& effect = pending_payload.at("effect");
         ProgramPendingEffectData pending;
-        pending.operation_id         = control.operation_id;
+        pending.operation_id         = std::string(operation_id);
         pending.call_id              = pending_payload.at("call_id").get<std::string>();
         pending.effect_id            = effect.at("effect_id").get<std::string>();
         pending.result_schema        = pending_payload.at("result_schema");
@@ -415,7 +417,7 @@ ProgramInterrupt decode_core_interrupt(const RunControl& control, const graph::R
         throw std::invalid_argument("Unknown typed Program pending kind");
     }
     ProgramPendingInputData pending;
-    pending.operation_id         = control.operation_id;
+    pending.operation_id         = std::string(operation_id);
     pending.call_id              = pending_payload.at("call_id").get<std::string>();
     pending.kind                 = kind == "capability_result"
                                        ? ProgramPendingInputKind::CapabilityResult
@@ -524,7 +526,6 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             std::string thread_id,
                             std::shared_ptr<graph::CancelToken> operation_token)
             -> asio::awaitable<CoreInvocation> {
-            (void)operation_id;
             graph::RunConfig config;
             config.thread_id = thread_id;
             config.input = resume ? json::object() : core_input;
@@ -544,11 +545,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             metadata.trace_id = control->trace_id;
             graph::RunResources resources{control->checkpoints, control->state_store};
             graph::GraphStreamCallback callback =
-                [control, core_progress](const graph::GraphEvent& event) {
+                [control, core_progress, operation_id](const graph::GraphEvent& event) {
                     core_progress->observe(event);
-                    control->emit(ProgramEventKind::Core, graph::to_typed_event(event));
+                    control->emit(operation_id, ProgramEventKind::Core,
+                                  graph::to_typed_event(event));
                 };
-
             graph::RunResult result;
             if (resume) {
                 result = co_await control->materialized->root->engine->resume_from_async(
@@ -630,7 +631,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
                 if (core_status == graph::RunStatus::Interrupted) {
                     result.status = ProgramTerminalStatus::Interrupted;
-                    result.interrupt = decode_core_interrupt(*control, invocation.result);
+                    result.interrupt =
+                        decode_core_interrupt(*control, operation_id, invocation.result);
                 } else if (core_status == graph::RunStatus::StepLimit) {
                     result.status = ProgramTerminalStatus::BudgetExhausted;
                     result.failure = ProgramFailure{
@@ -996,6 +998,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     PlanExecution result = std::move(body);
                     if (const auto checkpoint = root_checkpoint()) {
                         auto event = control->stage_event(
+                            operation_id,
                             ProgramEventKind::CheckpointPublished,
                             ProgramCheckpointEvent{*checkpoint});
                         control->deliver_event(event);
@@ -1006,15 +1009,15 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 result.output = std::move(state);
                 if (const auto checkpoint = root_checkpoint()) {
                     auto event = control->stage_event(
+                        operation_id,
                         ProgramEventKind::CheckpointPublished,
                         ProgramCheckpointEvent{*checkpoint});
                     control->deliver_event(event);
                 }
                 co_return result;
             }
-
             if (op == ProgramOperationKind::Emit) {
-                control->emit(ProgramEventKind::Emit,
+                control->emit(operation_id, ProgramEventKind::Emit,
                               ProgramEmitEvent{operation_id, operation.value()});
                 PlanExecution result;
                 result.output = std::move(state);
@@ -1071,6 +1074,15 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 outcome.failure = ProgramFailure{
                     "P_OUTPUT_CONTRACT", "Program output violates its admitted contract",
                     root_id, "", 0, json{{"detail", error.what()}}};
+            }
+        }
+        if (outcome.failure) {
+            auto& witness = outcome.failure->witness;
+            if (!witness.is_object()) witness = json::object();
+            if (!witness.contains("source_pointer")) {
+                const auto found = operations.find(outcome.failure->operation_id);
+                if (found != operations.end() && !found->second.source_pointer().empty())
+                    witness["source_pointer"] = found->second.source_pointer();
             }
         }
     } catch (const EventSinkError& error) {

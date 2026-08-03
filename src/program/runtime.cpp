@@ -343,10 +343,44 @@ std::optional<ProgramChildRecord> find_child(const ProgramRunRecord& record,
     if (found == children.end()) return std::nullopt;
     return *found;
 }
-
 bool same_child_metadata(const ProgramChildRecord& lhs, const ProgramChildRecord& rhs) {
     return lhs.child_run_id == rhs.child_run_id && lhs.link_id == rhs.link_id &&
            lhs.link_receipt == rhs.link_receipt && lhs.invocation == rhs.invocation;
+}
+
+bool valid_child_state_transition(ProgramChildState previous, ProgramChildState next) {
+    if (previous == next) return true;
+    if (previous == ProgramChildState::Publishing &&
+        (next == ProgramChildState::Dispatched || next == ProgramChildState::Completed ||
+         next == ProgramChildState::Cancelled || next == ProgramChildState::Failed))
+        return true;
+    if (previous == ProgramChildState::Dispatched &&
+        (next == ProgramChildState::Completed || next == ProgramChildState::Cancelled ||
+         next == ProgramChildState::Failed))
+        return true;
+    return false;
+}
+
+ProgramChildState child_state_for_result(ProgramTerminalStatus status) {
+    switch (status) {
+        case ProgramTerminalStatus::Completed:
+            return ProgramChildState::Completed;
+        case ProgramTerminalStatus::Cancelled:
+            return ProgramChildState::Cancelled;
+        default:
+            return ProgramChildState::Failed;
+    }
+}
+
+std::vector<ProgramChildRecord> terminal_children(
+    const std::vector<ProgramChildRecord>& children) {
+    auto result = children;
+    for (auto& child : result) {
+        if (child.state == ProgramChildState::Publishing ||
+            child.state == ProgramChildState::Dispatched)
+            child.state = ProgramChildState::Cancelled;
+    }
+    return result;
 }
 
 struct ChildRecordPublication {
@@ -355,7 +389,7 @@ struct ChildRecordPublication {
 };
 
 ChildRecordPublication publish_child_record(const std::shared_ptr<detail::RunControl>& parent,
-                                            ProgramChildRecord child) {
+                                             ProgramChildRecord child) {
     for (int attempt = 0; attempt < 5; ++attempt) {
         const auto previous = parent->transitions->load(parent->owner_scope, parent->run_id);
         if (!previous) return {};
@@ -367,15 +401,20 @@ ChildRecordPublication publish_child_record(const std::shared_ptr<detail::RunCon
                     "Durable child identity is already bound to different metadata",
                     json{{"child_run_id", child.child_run_id}});
             }
-            if (existing->state == child.state ||
-                (child.state == ProgramChildState::Publishing &&
-                 existing->state != ProgramChildState::Publishing) ||
-                (child.state == ProgramChildState::Dispatched &&
-                 existing->state != ProgramChildState::Publishing)) {
+            if (existing->state == child.state) {
                 return {ProgramTransitionPublishResult::AlreadyPresent, previous};
             }
+            if (!valid_child_state_transition(existing->state, child.state)) {
+                throw_runtime_diagnostic(
+                    "P_CHILD_CONFLICT",
+                    "Durable child state transition is not monotonic",
+                    json{{"child_run_id", child.child_run_id},
+                         {"from", std::string(to_string(existing->state))},
+                         {"to", std::string(to_string(child.state))}});
+            }
+            const auto next_state = child.state;
             child = *existing;
-            child.state = ProgramChildState::Dispatched;
+            child.state = next_state;
         }
         if (previous->continuation().state != ContinuationState::Running) return {};
         const auto previous_journal =
@@ -430,14 +469,29 @@ ChildRecordPublication publish_child_record(const std::shared_ptr<detail::RunCon
             ProgramRunRecord::create(std::move(data)), std::move(journal), {}, {}};
         const auto result = parent->transitions->compare_publish(
             parent->owner_scope, previous->journal_head(), std::move(publication));
-        if (result == ProgramTransitionPublishResult::Published) {
-            return {result, parent->transitions->load(parent->owner_scope, parent->run_id)};
-        }
-        if (result == ProgramTransitionPublishResult::AlreadyPresent) {
+        if (result == ProgramTransitionPublishResult::Published ||
+            result == ProgramTransitionPublishResult::AlreadyPresent) {
             return {result, parent->transitions->load(parent->owner_scope, parent->run_id)};
         }
     }
     return {};
+}
+
+void publish_child_completion(const std::weak_ptr<detail::RunControl>& parent,
+                              std::string_view                         child_run_id,
+                              ProgramChildState                        state) noexcept {
+    try {
+        const auto control = parent.lock();
+        if (!control) return;
+        const auto record = control->transitions->load(control->owner_scope, control->run_id);
+        if (!record) return;
+        const auto existing = find_child(*record, child_run_id);
+        if (!existing || existing->state == state) return;
+        auto update = *existing;
+        update.state = state;
+        (void)publish_child_record(control, std::move(update));
+    } catch (...) {
+    }
 }
 ProgramJournalRecord initial_record(
     const detail::RunControl&             control,
@@ -560,7 +614,7 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
             data.bundle_id           = control.bundle_id;
             data.binding_fingerprint = previous->binding_fingerprint();
             data.invocation          = previous->invocation();
-            data.children            = previous->children();
+            data.children            = terminal_children(previous->children());
             data.continuation        = journal.continuation;
             data.remaining_budget    = result.remaining_budget();
             data.exact_checkpoint    = result.checkpoint();
@@ -674,6 +728,10 @@ RunControl::RunControl(ProgramRunRecord                        record,
       next_sequence_(record.event_sequence() + 1),
       terminal_decided_(result_.has_value()),
       completion_claimed_(result_.has_value()) {}
+void RunControl::set_completion_callback(CompletionCallback callback) noexcept {
+    std::lock_guard lock(mutex_);
+    completion_callback_ = std::move(callback);
+}
 
 
 void RunControl::cancel_children(CancellationCause cause) noexcept {
@@ -759,7 +817,7 @@ bool RunControl::cancel(CancellationCause cause) noexcept {
                 data.bundle_id                      = bundle_id;
                 data.binding_fingerprint            = previous->binding_fingerprint();
                 data.invocation                     = previous->invocation();
-                data.children                    = previous->children();
+                data.children                    = terminal_children(previous->children());
                 data.continuation                   = journal.continuation;
                 data.remaining_budget               = previous->remaining_budget();
                 data.exact_checkpoint               = previous->exact_checkpoint();
@@ -786,6 +844,9 @@ bool RunControl::cancel(CancellationCause cause) noexcept {
                 if (published != ProgramTransitionPublishResult::Published) {
                     return false;
                 }
+                ProgramResult     callback_result = cancelled_result;
+                CompletionCallback callback;
+                std::vector<AsyncWaiter> waiters;
                 {
                     std::lock_guard lock(mutex_);
                     cancellation_cause_ = cause;
@@ -793,9 +854,23 @@ bool RunControl::cancel(CancellationCause cause) noexcept {
                     completion_claimed_ = true;
                     result_             = std::move(cancelled_result);
                     events_.push_back(std::move(terminal));
+                    callback = completion_callback_;
+                    waiters.swap(waiters_);
+                    cv_.notify_all();
                 }
                 cancel_token->cancel();
                 cancel_children(cause);
+                asio::dispatch(waiter_strand, [waiters = std::move(waiters)] {
+                    for (const auto& waiter : waiters) {
+                        if (auto timer = waiter.timer.lock()) timer->cancel();
+                    }
+                });
+                if (callback) {
+                    try {
+                        callback(callback_result);
+                    } catch (...) {
+                    }
+                }
                 return true;
             }
         }
@@ -825,11 +900,24 @@ CancellationCause RunControl::seal_terminal_cause() noexcept {
 }
 
 ProgramEvent RunControl::make_event(ProgramEventKind kind, ProgramEventPayload payload) {
-    return preview_event(next_sequence_++, kind, std::move(payload));
+    return make_event(operation_id, kind, std::move(payload));
+}
+
+ProgramEvent RunControl::make_event(std::string_view       event_operation_id,
+                                   ProgramEventKind        kind,
+                                   ProgramEventPayload     payload) {
+    return preview_event(next_sequence_++, event_operation_id, kind, std::move(payload));
 }
 
 ProgramEvent RunControl::preview_event(std::uint64_t       sequence,
                                        ProgramEventKind     kind,
+                                       ProgramEventPayload payload) const {
+    return preview_event(sequence, operation_id, kind, std::move(payload));
+}
+
+ProgramEvent RunControl::preview_event(std::uint64_t       sequence,
+                                       std::string_view    event_operation_id,
+                                       ProgramEventKind    kind,
                                        ProgramEventPayload payload) const {
     if (!materialized)
         throw std::runtime_error("Cannot create a live Program event without materialization");
@@ -839,7 +927,7 @@ ProgramEvent RunControl::preview_event(std::uint64_t       sequence,
     event.run_id             = run_id;
     event.program_version_id = program_version_id;
     event.bundle_id          = bundle_id;
-    event.operation_id       = operation_id;
+    event.operation_id       = std::string(event_operation_id);
     event.core_generation_id = materialized->root->compiled_plan_identity;
     event.core_run_id        = core_thread_id;
     event.trace_id           = trace_id;
@@ -865,8 +953,14 @@ void RunControl::adopt_published_event(ProgramEvent event) {
 }
 
 ProgramEvent RunControl::stage_event(ProgramEventKind kind, ProgramEventPayload payload) {
+    return stage_event(operation_id, kind, std::move(payload));
+}
+
+ProgramEvent RunControl::stage_event(std::string_view       event_operation_id,
+                                     ProgramEventKind        kind,
+                                     ProgramEventPayload     payload) {
     std::lock_guard lock(mutex_);
-    auto            event = make_event(kind, std::move(payload));
+    auto            event = make_event(event_operation_id, kind, std::move(payload));
     events_.push_back(event);
     return event;
 }
@@ -898,9 +992,17 @@ void RunControl::deliver_event(const ProgramEvent& event) {
 }
 
 void RunControl::emit(ProgramEventKind kind, ProgramEventPayload payload) {
-    const auto event = stage_event(kind, std::move(payload));
+    emit(operation_id, kind, std::move(payload));
+}
+
+void RunControl::emit(std::string_view       event_operation_id,
+                      ProgramEventKind        kind,
+                      ProgramEventPayload     payload) {
+    const auto event = stage_event(event_operation_id, kind, std::move(payload));
     deliver_event(event);
 }
+
+
 
 ProgramResult RunControl::make_result(RunOutcome outcome) const {
     return ProgramResult(ProgramResult::ConstructionData{
@@ -1000,10 +1102,13 @@ void RunControl::complete(RunOutcome outcome) noexcept {
             sink_.reset();
         }
 
+        ProgramResult     callback_result = result;
+        CompletionCallback callback;
         std::vector<AsyncWaiter> waiters;
         {
             std::lock_guard lock(mutex_);
             result_ = std::move(result);
+            callback = completion_callback_;
             waiters.swap(waiters_);
             cv_.notify_all();
         }
@@ -1012,6 +1117,12 @@ void RunControl::complete(RunOutcome outcome) noexcept {
                 if (auto timer = waiter.timer.lock()) timer->cancel();
             }
         });
+        if (callback) {
+            try {
+                callback(callback_result);
+            } catch (...) {
+            }
+        }
     } catch (...) {
         std::terminate();
     }
@@ -1452,6 +1563,12 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
             std::move(persisted), core_thread_id, 0, std::move(invocation.events),
             impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
             impl_->config.state_store, impl_->config.transitions);
+        const auto parent_control = std::weak_ptr<detail::RunControl>(parent.control_);
+        control->set_completion_callback(
+            [parent_control, child_run_id = run_id](const ProgramResult& result) {
+                publish_child_completion(parent_control, child_run_id,
+                                         child_state_for_result(result.status()));
+            });
         const auto started =
             control->stage_event(ProgramEventKind::Started, ProgramStartedEvent{invocation.budget});
         const auto published = control->transitions->compare_publish(
@@ -1740,14 +1857,57 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
     if (!record) {
         throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program run was not found");
     }
-    if (record->continuation().state == ContinuationState::Running && !record->exact_checkpoint()) {
-        throw_runtime_diagnostic(
-            "P_RUN_RECOVERY_BLOCKED",
-            "Running Program has no atomically published checkpoint and cannot be restarted");
+    const auto state = record->continuation().state;
+    if (state == ContinuationState::Running) {
+        const auto checkpoint = record->exact_checkpoint();
+        if (!checkpoint) {
+            throw_runtime_diagnostic(
+                "P_RUN_RECOVERY_BLOCKED",
+                "Running Program has no atomically published checkpoint and cannot be restarted");
+        }
+        const auto version =
+            impl_->config.catalog->resolve_version(owner_scope, record->program_version_id());
+        if (!version) {
+            throw_runtime_diagnostic("P_VERSION_NOT_FOUND",
+                                     "Program version required for recovery was not found");
+        }
+        auto pinned = detail::CatalogRuntimeAccess::pin(*impl_->config.catalog, *version);
+        const auto binding_fingerprint = capability_binding_receipt_root(
+            version->core_materialization_receipt().capability_bindings);
+        if (pinned->bundle.id() != record->bundle_id() ||
+            binding_fingerprint != record->binding_fingerprint() ||
+            pinned->root->compiled_plan_identity != checkpoint->core_generation_id ||
+            pinned->root->core_name != checkpoint->core_name) {
+            throw_runtime_diagnostic("P_CHECKPOINT_INCOMPATIBLE",
+                                     "Running Program recovery identity is incompatible");
+        }
+        const auto stored_checkpoint =
+            impl_->config.checkpoints->load_by_id(checkpoint->checkpoint_id);
+        if (!stored_checkpoint || stored_checkpoint->thread_id != checkpoint->core_thread_id ||
+            stored_checkpoint->schema_version != checkpoint->checkpoint_schema_version ||
+            stored_checkpoint->schema_version != graph::CHECKPOINT_SCHEMA_VERSION) {
+            throw_runtime_diagnostic("P_CHECKPOINT_INCOMPATIBLE",
+                                     "Running Program recovery checkpoint is absent or invalid");
+        }
+        ProgramPersistedInvocation invocation{
+            record->invocation().input,
+            record->remaining_budget(),
+            record->invocation().trace_id,
+            record->invocation().parent_run_id,
+            record->invocation().child_depth};
+        auto control = std::make_shared<detail::RunControl>(
+            std::string(owner_scope), std::string(run_id), record->continuation().attempt,
+            std::move(pinned), record->binding_fingerprint(), std::move(invocation),
+            checkpoint->core_thread_id, record->event_sequence(),
+            std::shared_ptr<ProgramEventSink>{},
+            impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
+            impl_->config.state_store, impl_->config.transitions);
+        impl_->register_control(control);
+        spawn_run_attempt(impl_->pool, control, record->invocation().input,
+                          checkpoint->checkpoint_id);
+        return ProgramHandle(std::move(control));
     }
-    const auto state           = record->continuation().state;
-    const bool requires_result = state != ContinuationState::Running &&
-                                 state != ContinuationState::Interrupted &&
+    const bool requires_result = state != ContinuationState::Interrupted &&
                                  state != ContinuationState::AmbiguousEffect;
     if (requires_result && !record->terminal_result()) {
         throw_runtime_diagnostic("P_RUN_INVALID", "Stored terminal Program run is incomplete");
@@ -1855,7 +2015,7 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         expired_data.bundle_id                      = previous->bundle_id();
         expired_data.binding_fingerprint            = previous->binding_fingerprint();
         expired_data.invocation                     = previous->invocation();
-        expired_data.children                     = previous->children();
+        expired_data.children                     = terminal_children(previous->children());
         expired_data.continuation                   = journal.continuation;
         expired_data.remaining_budget               = previous->remaining_budget();
         expired_data.exact_checkpoint               = checkpoint;

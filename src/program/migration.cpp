@@ -20,8 +20,7 @@ std::string required_string(const json& value, std::string_view name) {
 
 MigrationCompatibility compatibility_from_string(std::string_view value) {
     if (value == "new_runs_only") return MigrationCompatibility::NewRunsOnly;
-    if (value == "fork_compatible" || value == "compatible")
-        return MigrationCompatibility::ForkCompatible;
+    if (value == "fork_compatible") return MigrationCompatibility::ForkCompatible;
     if (value == "drain_only") return MigrationCompatibility::DrainOnly;
     if (value == "operator_reconciliation") return MigrationCompatibility::OperatorReconciliation;
     if (value == "blocked") return MigrationCompatibility::Blocked;
@@ -176,8 +175,10 @@ bool MigrationMapping::operator==(const MigrationMapping& other) const {
 }
 
 MigrationPlan MigrationPlan::create(MigrationPlanData data) {
-    detail::validate_token(data.source_version_id, "Migration source version id");
-    detail::validate_token(data.target_version_id, "Migration target version id");
+    if (!detail::is_sha256_identity(data.source_version_id) ||
+        !detail::is_sha256_identity(data.target_version_id)) {
+        throw std::invalid_argument("Migration version ids must be sha256 identities");
+    }
     detail::validate_token(data.owner_scope, "Migration owner scope");
     for (const auto& blocker : data.blockers)
         detail::validate_token(blocker, "Migration blocker");
@@ -222,13 +223,18 @@ MigrationPlan MigrationPlan::between(const ProgramVersion& source, const Program
     add_mapping(data, MigrationDimension::Cancellation, "preserve_cancellation_identity", source.id(), target.id());
     add_mapping(data, MigrationDimension::Interrupt, "preserve_interrupt_projection", source.id(), target.id());
     add_mapping(data, MigrationDimension::Budget, "target_ceiling_must_cover_source", budget_json(source.policy_snapshot().budget_ceiling()), budget_json(target.policy_snapshot().budget_ceiling()));
-    add_mapping(data, MigrationDimension::Authority, "exact_capability_effect_and_module_authority",
-                json{{"capabilities", string_set(source.policy_snapshot().allowed_capabilities())},
-                     {"effects", string_set(source.policy_snapshot().allowed_effects())},
-                     {"modules", string_set(source.policy_snapshot().allowed_module_digests())}},
-                json{{"capabilities", string_set(target.policy_snapshot().allowed_capabilities())},
-                     {"effects", string_set(target.policy_snapshot().allowed_effects())},
-                     {"modules", string_set(target.policy_snapshot().allowed_module_digests())}});
+    add_mapping(
+        data, MigrationDimension::Authority, "exact_admission_profile_and_authority",
+        json{{"admission_profile_fingerprint",
+              source.policy_snapshot().admission_profile_fingerprint()},
+             {"capabilities", string_set(source.policy_snapshot().allowed_capabilities())},
+             {"effects", string_set(source.policy_snapshot().allowed_effects())},
+             {"modules", string_set(source.policy_snapshot().allowed_module_digests())}},
+        json{{"admission_profile_fingerprint",
+              target.policy_snapshot().admission_profile_fingerprint()},
+             {"capabilities", string_set(target.policy_snapshot().allowed_capabilities())},
+             {"effects", string_set(target.policy_snapshot().allowed_effects())},
+             {"modules", string_set(target.policy_snapshot().allowed_module_digests())}});
     add_mapping(data, MigrationDimension::Checkpoint, "exact_core_materialization_identity", source.core_materialization_receipt().registry_snapshot_fingerprint, target.core_materialization_receipt().registry_snapshot_fingerprint);
     add_mapping(data, MigrationDimension::Journal, "publish_plan_with_fork_head", source.id(), target.id());
     add_mapping(data, MigrationDimension::Effects, "stable_outbox_identity_and_no_redispatch", source.id(), target.id());
@@ -239,6 +245,12 @@ MigrationPlan MigrationPlan::between(const ProgramVersion& source, const Program
         add_blocker(MigrationDimension::Authority, "ownership_scope",
                     "Migration cannot cross an owner scope boundary", source.ownership_scope(),
                     target.ownership_scope());
+    } else if (source.policy_snapshot().admission_profile_fingerprint() !=
+               target.policy_snapshot().admission_profile_fingerprint()) {
+        add_blocker(MigrationDimension::Authority, "admission_profile_fingerprint",
+                    "Migration changes the admitted policy profile",
+                    source.policy_snapshot().admission_profile_fingerprint(),
+                    target.policy_snapshot().admission_profile_fingerprint());
     } else if (source.core_materialization_receipt().compiler_build_id !=
                target.core_materialization_receipt().compiler_build_id) {
         add_blocker(MigrationDimension::Caches, "compiler_build_id",
