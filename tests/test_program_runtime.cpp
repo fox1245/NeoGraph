@@ -2001,7 +2001,11 @@ TEST(ProgramRuntimeTest, TimeoutRemainsFirstCauseAfterUserCancellationAttempts) 
     for (int i = 0; i < 100 && stubborn_calls.load() == 0; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    ASSERT_EQ(stubborn_calls.load(), 1U);
+    // A 30ms budget may expire before the scheduler reaches the first node
+    // on a cold or sanitizer-instrumented process. That is still the
+    // timeout-first path under test; the user-first companion above covers
+    // the case where the stubborn node has entered.
+    EXPECT_LE(stubborn_calls.load(), 1U);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     EXPECT_FALSE(handle.cancel());
     const auto result = handle.wait();

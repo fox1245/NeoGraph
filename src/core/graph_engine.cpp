@@ -592,12 +592,19 @@ asio::awaitable<RunResult> GraphEngine::run_async_with_runtime(
     auto executor = co_await asio::this_coro::executor;
     operation->bind_executor(executor);
     operation->throw_if_cancelled("run_async entry");
+
+    // ``operation`` is the token exposed through RunContext. Keep the
+    // wrapper's co_spawn on a separate child signal: an async node is allowed
+    // to bind operation->slot() for its own timer/socket, and Asio cancellation
+    // slots have only one mutable handler.
+    auto execution = operation->fork();
+    execution->bind_executor(executor);
     try {
         co_return co_await asio::co_spawn(
             executor,
             execute_graph_async(config, cb, {}, nullptr, metadata, &resources),
             asio::bind_cancellation_slot(
-                operation->slot(), asio::use_awaitable));
+                execution->slot(), asio::use_awaitable));
     } catch (const asio::system_error& error) {
         if (operation->is_cancelled() &&
             error.code() == asio::error::operation_aborted) {
@@ -791,6 +798,12 @@ asio::awaitable<RunResult> GraphEngine::resume_async_with_runtime(
     auto executor = co_await asio::this_coro::executor;
     operation->bind_executor(executor);
     operation->throw_if_cancelled("resume_async entry");
+
+    // Keep the RunContext token and the resume wrapper's co_spawn on
+    // independent cancellation signals; nested node consumers may bind the
+    // former without replacing the latter's awaitable handler.
+    auto execution = operation->fork();
+    execution->bind_executor(executor);
     try {
         co_return co_await asio::co_spawn(
             executor,
@@ -799,7 +812,7 @@ asio::awaitable<RunResult> GraphEngine::resume_async_with_runtime(
                 std::move(metadata), std::move(resources),
                 std::move(checkpoint_id)),
             asio::bind_cancellation_slot(
-                operation->slot(), asio::use_awaitable));
+                execution->slot(), asio::use_awaitable));
     } catch (const asio::system_error& error) {
         if (operation->is_cancelled() &&
             error.code() == asio::error::operation_aborted) {

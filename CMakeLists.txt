@@ -859,6 +859,7 @@ if(NEOGRAPH_BUILD_A2A)
         src/a2a/collaboration.cpp
         src/a2a/client.cpp
         src/a2a/server.cpp
+        src/a2a/a2a_caller_node.cpp
     )
 
     if(NEOGRAPH_BUILD_PROGRAM)

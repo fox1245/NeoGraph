@@ -44,11 +44,12 @@ namespace neograph::async {
 
 namespace detail {
 
-// Drive an engine operation using the exact child token already forked by the
-// GraphEngine entry point. The public run_sync(awaitable, CancelToken*) path
-// below intentionally forks because its raw token is a caller-owned parent;
-// using it here would create a grandchild and make RunContext's token differ
-// from the slot bound to the operation's co_spawn.
+// Drive an engine operation with two cancellation scopes. The operation token
+// is exposed through RunContext to node/provider code; the private execution
+// child is reserved for the wrapper's co_spawn. Asio cancellation signals have
+// one mutable slot, so binding both layers to the same token lets a nested
+// consumer replace the wrapper handler and can leave its awaitable frame
+// clearing freed slot state during teardown.
 template <typename T>
 T run_sync_operation(
     asio::awaitable<T> aw,
@@ -71,14 +72,19 @@ T run_sync_operation(
     };
 
     if (operation) {
+        // Keep the token visible to the operation's direct consumers while
+        // reserving a distinct signal for the wrapper's awaitable frame.
         operation->bind_executor(io.get_executor());
+        auto execution = operation->fork();
+        execution->bind_executor(io.get_executor());
         asio::co_spawn(
             io, body(),
-            asio::bind_cancellation_slot(operation->slot(), asio::detached));
+            asio::bind_cancellation_slot(execution->slot(), asio::detached));
+        io.run();
     } else {
         asio::co_spawn(io, body(), asio::detached);
+        io.run();
     }
-    io.run();
 
     if (err) {
         if (operation && operation->is_cancelled()) {
@@ -95,7 +101,8 @@ T run_sync_operation(
         std::rethrow_exception(err);
     }
     if (!result && operation && operation->is_cancelled()) {
-        throw neograph::graph::CancelledException("run_sync operation aborted before entry");
+        throw neograph::graph::CancelledException(
+            "run_sync operation aborted before entry");
     }
     return std::move(*result);
 }
