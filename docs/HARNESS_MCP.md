@@ -40,12 +40,15 @@ the scoped registry's exported semantic projection. Each
 `implementation_identity` is a trusted declaration and must change whenever
 the corresponding callable behavior changes.
 
-This is migration groundwork, not the Control VM cutover. Current accepted
-Harness runs use the migration-only `precutover-graph-engine-v1` source profile
-and still execute through `GraphEngine`, which remains the pinned legacy
-runtime/oracle. This profile must stop admitting new runs before default VM
-cutover. No Program DSL, bytecode interpreter, or production Durable Kernel is
-claimed by this profile.
+This is the current Program-backed Harness adapter, not a Control VM cutover.
+Accepted Harness requests translate to `ProgramSource`, compile through
+`ProgramCompiler`, admit through `ProgramCatalog`, and execute through
+`ProgramRuntime`; `GraphEngine` remains the only node executor. The historical
+`precutover-graph-engine-v1` profile and its VM/bytecode/Durable Kernel claims
+are retained only in the explicitly superseded design records
+`docs/PROGRAMMABLE_HARNESS_DSL_DESIGN.md` and
+`spec/programmable-harness-vm-integration.sdd.yaml`. No public `ControlVm`,
+bytecode interpreter, or second executor is implied by the compatibility API.
 
 ## Build And Run
 

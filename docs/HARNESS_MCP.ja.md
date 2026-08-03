@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ja source_sha256=a05267163c3ff3f5c1f457a8d3d813fca89df9f61ad3f339914131ea4fb817de -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ja source_sha256=382e859c1b79dac9eb6c7ac0e655c92a0b470d641c2721e3b1eb181183dea23e -->
 # NeoGraph ハーネス MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -25,7 +25,7 @@ NeoGraph Harness は、実行前に制限されたマルチワーカー ワー�
 
 C++ の埋め込み側は、既定以外のプロファイルを構築時に `HarnessServiceResources` 経由で渡します。この追加のリソース境界により、既存の `HarnessServiceConfig` レイアウトは維持されます。プロファイルのフィンガープリントには、マニフェストとスコープ付きレジストリからエクスポートされた意味投影が含まれます。各 `implementation_identity` は信頼される宣言であり、対応する呼び出し可能な動作が変わるたびに更新する必要があります。
 
-これは移行の基礎作業であり、Control VM への切り替えではありません。現在受け入れられる Harness 実行は移行専用の `precutover-graph-engine-v1` ソースプロファイルを使用し、引き続き固定されたレガシーランタイム/オラクルである `GraphEngine` を通じて実行されます。このプロファイルは、既定の VM 切り替え前に新規実行の admission を停止する必要があります。Program DSL、バイトコードインタプリタ、または本番 Durable Kernel を主張しません。
+これは現在の Program ベース Harness アダプターであり、Control VM への切り替えではありません。受け入れられた Harness リクエストは `ProgramSource` に変換され、`ProgramCompiler` でコンパイルされ、`ProgramCatalog` で admission されて `ProgramRuntime` から実行されます。`GraphEngine` は引き続き唯一のノード実行エンジンです。歴史的な `precutover-graph-engine-v1` プロファイルと VM/バイトコード/Durable Kernel の主張は、明示的に superseded とされた設計記録にだけ残ります。互換性 API は公開 `ControlVm`、バイトコードインタープリター、または第二の実行エンジンを意味しません。
 
 ## 構築して実行
 

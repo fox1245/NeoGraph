@@ -1,7 +1,9 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=84f4a33c9b43debfe5aadb78576b253b74978b01999c1bfd1c398115a1254b5f -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=b38723d49825be5864da3e487bb598e327050e455c01e93cc3d22f838f91396d -->
 # C++ API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
+P8 切换清单：[`spec/neograph-example-disposition-v1.json`](../spec/neograph-example-disposition-v1.json)。
 
 五十六个可运行的 C++ 程序，覆盖 NeoGraph 引擎表面。
 每个示例都是此目录中的单个文件（有一个 Docker-Compose 例外，
@@ -41,6 +43,8 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 | 首选 | 你会学到什么 |
 |---|---|
+| [`62_core_quickstart.cpp`](62_core_quickstart.cpp) | **Core 快速入门** — 使用已安装的 `neograph::core` 目标、一个严格图和一个类型化通道。不需要可选组件或 API key。 |
+| [`63_program_quickstart.cpp`](63_program_quickstart.cpp) | **Program 快速入门** — 使用已安装的 `neograph::program` 目标编译、接纳并运行一个 `call_core` Program。需要 `-DNEOGRAPH_BUILD_PROGRAM=ON`。 |
 | [`51_minimal.cpp`](51_minimal.cpp) | 最小可工作程序 — 构建、运行、读取 `result.channel<T>("name")`。不需要 API key。 |
 | [`02_custom_graph.cpp`](02_custom_graph.cpp) | 构建 JSON 图定义并运行它。不需要 API key。 |
 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | 使用 `make_parallel_group` 的异步扇出。不需要 API key。 |

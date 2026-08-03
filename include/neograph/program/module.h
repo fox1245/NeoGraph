@@ -5,6 +5,7 @@
 #pragma once
 
 #include <neograph/program/admission.h>
+#include <neograph/program/coordinate.h>
 #include <neograph/program/version.h>
 
 #include <cstdint>
@@ -26,17 +27,6 @@ enum class ModuleLifecycle : std::uint8_t {
 
 NEOGRAPH_PROGRAM_API std::string_view to_string(ModuleLifecycle state) noexcept;
 NEOGRAPH_PROGRAM_API ModuleLifecycle module_lifecycle_from_string(std::string_view value);
-
-/** Exact immutable address of a reusable module. */
-struct ModuleCoordinate {
-    std::string namespace_name;
-    std::string name;
-    std::string semantic_version;
-    std::string content_identity;
-
-    bool operator==(const ModuleCoordinate&) const = default;
-    std::string qualified_name() const;
-};
 
 /** Typed child port. The contract is checked before a child can be dispatched. */
 struct ModulePort {
@@ -110,7 +100,34 @@ struct ModuleResolution {
 
     std::string dependency_merkle_root() const;
     std::vector<ImportRef> imports() const;
+    std::vector<ModuleCoordinate> coordinates() const;
 };
+
+/** A child version and its immutable bundle, paired before dispatch. */
+struct ChildProgramBinding {
+    std::string   child_name;
+    ProgramBundle bundle;
+    ProgramVersion version;
+};
+
+/** Complete pre-dispatch composition proof for one parent Program. */
+struct ProgramComposition {
+    ProgramModule parent;
+    ModuleResolution resolution;
+    std::vector<ChildProgramBinding> children;
+};
+
+/**
+ * Validate the whole composed Program before any GraphEngine materialization.
+ * This checks the module closure, all typed ports, exact child versions,
+ * authority/effect attenuation, bounded child budgets, and duplicate names or
+ * identities. It does not execute a child or create another executor.
+ */
+NEOGRAPH_PROGRAM_API void validate_program_composition(
+    const ProgramBundle& parent_bundle, const ProgramComposition& composition);
+
+/** Validate a resolver-produced closure, including its pinned graph and receipts. */
+NEOGRAPH_PROGRAM_API void validate_module_resolution(const ModuleResolution& resolution);
 
 /**
  * Immutable proof that one child descriptor was linked to one exact admitted
@@ -176,6 +193,14 @@ public:
     virtual ~ModuleStore() = default;
     virtual void publish(const ProgramModule& module) = 0;
     virtual std::optional<ProgramModule> get(std::string_view content_identity) const = 0;
+    /** Wrong-owner module lookups are indistinguishable from absence. */
+    virtual std::optional<ProgramModule> get(std::string_view owner_scope,
+                                             std::string_view content_identity) const {
+        if (owner_scope.empty()) return std::nullopt;
+        const auto module = get(content_identity);
+        if (!module || module->owner_scope() != owner_scope) return std::nullopt;
+        return module;
+    }
     virtual void set_lifecycle(std::string_view content_identity, ModuleLifecycle lifecycle) = 0;
 };
 
@@ -191,6 +216,8 @@ public:
 
     void publish(const ProgramModule& module) override;
     std::optional<ProgramModule> get(std::string_view content_identity) const override;
+    std::optional<ProgramModule> get(std::string_view owner_scope,
+                                     std::string_view content_identity) const override;
     void set_lifecycle(std::string_view content_identity, ModuleLifecycle lifecycle) override;
 
 private:

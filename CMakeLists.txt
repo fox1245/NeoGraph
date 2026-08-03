@@ -483,6 +483,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/registry.cpp
         src/program/admission.cpp
         src/program/compiler.cpp
+        src/program/plan.cpp
         src/program/result.cpp
         src/program/event.cpp
         src/program/pending.cpp
@@ -860,6 +861,12 @@ if(NEOGRAPH_BUILD_A2A)
         src/a2a/server.cpp
     )
 
+    if(NEOGRAPH_BUILD_PROGRAM)
+        target_sources(neograph_a2a PRIVATE src/a2a/program_adapter.cpp)
+        target_compile_features(neograph_a2a PUBLIC cxx_std_20)
+        target_compile_definitions(neograph_a2a PUBLIC NEOGRAPH_A2A_PROGRAM)
+    endif()
+
     target_include_directories(neograph_a2a
         PUBLIC
             $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
@@ -871,6 +878,9 @@ if(NEOGRAPH_BUILD_A2A)
         PUBLIC  neograph_core
         PRIVATE neograph_async httplib OpenSSL::SSL OpenSSL::Crypto
     )
+    if(NEOGRAPH_BUILD_PROGRAM)
+        target_link_libraries(neograph_a2a PUBLIC neograph_program)
+    endif()
 
     add_library(neograph::a2a ALIAS neograph_a2a)
 endif()
@@ -1064,6 +1074,17 @@ endif()
 # Examples
 # ===========================================================================
 if(NEOGRAPH_BUILD_EXAMPLES)
+    # P8 public SDK quickstarts.  Keep the Core example outside the LLM gate so
+    # a minimal Core-only build remains a valid first build; Program is opt-in
+    # and follows the existing NEOGRAPH_BUILD_PROGRAM boundary.
+    add_executable(example_core_quickstart examples/62_core_quickstart.cpp)
+    target_link_libraries(example_core_quickstart PRIVATE neograph::core)
+
+    if(NEOGRAPH_BUILD_PROGRAM)
+        add_executable(example_program_quickstart examples/63_program_quickstart.cpp)
+        target_link_libraries(example_program_quickstart PRIVATE neograph::program)
+    endif()
+
     if(NEOGRAPH_BUILD_LLM)
         add_executable(example_react_agent examples/01_react_agent.cpp)
         target_link_libraries(example_react_agent PRIVATE neograph::core neograph::llm cppdotenv)
@@ -1737,6 +1758,22 @@ if(NEOGRAPH_BUILD_TESTS)
 
     enable_testing()
     add_subdirectory(tests)
+
+    # Focused P8 smoke tests only; the full example matrix remains opt-in and
+    # is not pulled into CTest.  Targets are absent when examples or Program
+    # are disabled, so each smoke follows the same existing build options.
+    if(TARGET example_core_quickstart)
+        add_test(NAME Quickstart.Core COMMAND example_core_quickstart)
+        set_tests_properties(Quickstart.Core PROPERTIES
+            LABELS "quickstart;p8"
+            PASS_REGULAR_EXPRESSION "HELLO")
+    endif()
+    if(TARGET example_program_quickstart)
+        add_test(NAME Quickstart.Program COMMAND example_program_quickstart)
+        set_tests_properties(Quickstart.Program PROPERTIES
+            LABELS "quickstart;p8"
+            PASS_REGULAR_EXPRESSION "1")
+    endif()
 endif()
 
 # Fuzz targets — libFuzzer-driven, Clang only. Separate flag so

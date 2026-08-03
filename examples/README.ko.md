@@ -1,5 +1,7 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=84f4a33c9b43debfe5aadb78576b253b74978b01999c1bfd1c398115a1254b5f -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=b38723d49825be5864da3e487bb598e327050e455c01e93cc3d22f838f91396d -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
+P8 cutover inventory: [`spec/neograph-example-disposition-v1.json`](../spec/neograph-example-disposition-v1.json).
 
 # C++ API 예제
 
@@ -44,6 +46,8 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 |첫 번째|당신이 배우는 것|
 |---|---|
+|[`62_core_quickstart.cpp`](62_core_quickstart.cpp)|**Core 빠른 시작** — 설치된 `neograph::core` 대상, 엄격한 그래프 하나, 타입 채널 하나. 선택적 컴포넌트와 API 키가 필요하지 않습니다.|
+|[`63_program_quickstart.cpp`](63_program_quickstart.cpp)|**Program 빠른 시작** — 설치된 `neograph::program` 대상으로 `call_core` Program을 컴파일, 승인, 실행합니다. `-DNEOGRAPH_BUILD_PROGRAM=ON`이 필요합니다.|
 |[`51_minimal.cpp`](51_minimal.cpp)|가장 작은 작업 프로그램 — `result.channel<T>("name")`를 빌드하고, 실행하고, 읽습니다. API 키가 없습니다.|
 |[`02_custom_graph.cpp`](02_custom_graph.cpp)|JSON 그래프 정의를 빌드하고 실행합니다. API 키가 없습니다.|
 |[`05_parallel_fanout.cpp`](05_parallel_fanout.cpp)|`make_parallel_group`를 사용한 비동기 팬아웃. API 키가 없습니다.|

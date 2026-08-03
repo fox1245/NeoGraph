@@ -628,6 +628,60 @@ TEST(ProgramCompilerTest, AcceptsSequenceRootAndRejectsMalformedRootPlans) {
     EXPECT_TRUE(contains_code(compile_errors(snapshot, std::move(mismatch)), "P_ROOT_NAME"));
 }
 
+TEST(ProgramCompilerTest, SealsLoweredOperationsAsTypedImmutablePlanNodes) {
+    auto snapshot = complete_snapshot();
+    auto document = program_document();
+    auto root = json{{"op", "sequence"},
+                     {"name", "main"},
+                     {"definition", document["root"]["definition"]}};
+    root["children"] = json::array(
+        {json{{"op", "call_core"}},
+         json{{"op", "branch"},
+              {"condition", json{{"path", "/route"}, {"equals", "ok"}}},
+              {"then", json{{"op", "return"}, {"value", 1}}},
+              {"else", json{{"op", "return"}, {"value", 0}}}}});
+    document["root"] = std::move(root);
+
+    const auto bundle = ProgramCompiler(snapshot, {"program-compiler-test/v1"})
+                            .compile(source_from(std::move(document)));
+    const auto& plan = bundle.typed_orchestration_plan();
+    EXPECT_EQ(plan.schema_version(), ProgramPlan::SCHEMA_VERSION);
+    EXPECT_EQ(plan.root_id(), "root");
+    EXPECT_EQ(plan.root().operation(), ProgramOperationKind::Sequence);
+    EXPECT_EQ(plan.root().source_pointer(), "/root");
+    ASSERT_EQ(plan.root().children().size(), 2U);
+    EXPECT_EQ(plan.root().children()[0], "root.0");
+    ASSERT_NE(plan.find("root.1"), nullptr);
+    EXPECT_EQ(plan.find("root.1")->operation(), ProgramOperationKind::Branch);
+    EXPECT_EQ(plan.find("root.1")->then_id(), std::optional<std::string>("root.1.0"));
+    EXPECT_EQ(plan.find("root.1")->else_id(), std::optional<std::string>("root.1.1"));
+    EXPECT_EQ(detail::canonical_json_bytes(plan.to_json()),
+              detail::canonical_json_bytes(bundle.orchestration_plan().plan));
+}
+
+TEST(ProgramCompilerTest, TypedPlanRejectsDanglingAndUnknownOperationFields) {
+    auto unknown = json{{"root", "root"}, {"operations", json::array()}};
+    unknown["operations"].push_back(
+        json{{"id", "root"}, {"op", "return"}, {"value", true}, {"unexpected", 1}});
+    EXPECT_THROW((void)ProgramPlan::from_json(unknown), std::invalid_argument);
+
+    auto dangling = json{{"root", "root"}, {"operations", json::array()}};
+    dangling["operations"].push_back(
+        json{{"id", "root"}, {"op", "sequence"}, {"children", json::array({"missing"})}});
+    EXPECT_THROW((void)ProgramPlan::from_json(dangling), std::invalid_argument);
+
+    auto bad_condition = json{{"root", "root"}, {"operations", json::array()}};
+    bad_condition["operations"] = json::array(
+        {json{{"id", "return"}, {"op", "return"}, {"source_pointer", "/root/then"},
+              {"value", true}},
+         json{{"id", "root"},
+              {"op", "branch"},
+              {"source_pointer", "/root"},
+              {"condition", json{{"path", "route"}, {"equals", true}}},
+              {"then", "return"}}});
+    EXPECT_THROW((void)ProgramPlan::from_json(bad_condition), std::invalid_argument);
+}
+
 TEST(ProgramCompilerTest, RejectsMissingDuplicateAndInvalidBudgetClosure) {
     auto snapshot        = complete_snapshot();
     auto missing         = program_document();
@@ -900,6 +954,32 @@ TEST(ProgramCompilerTest, ImportMerkleRootIsOrderIndependentAndRejectsDuplicateS
     EXPECT_TRUE(contains_code(
         compile_errors(snapshot, program_document(), {{"a", digest('a')}, {"a", digest('b')}}),
         "P_IMPORT_CONFLICT"));
+}
+
+TEST(ProgramCompilerTest, VerifiedModuleResolutionCarriesCoordinatesIntoBundle) {
+    auto snapshot = complete_snapshot();
+    ProgramCompiler compiler(snapshot, {"program-compiler-test/v1"});
+
+    ProgramModuleData module_data;
+    module_data.owner_scope    = "tenant:compiler";
+    module_data.coordinate     = ModuleCoordinate{"test", "verified", "1.0.0", ""};
+    module_data.attestation_id = "attestation:test";
+    const auto module = ProgramModule::create(std::move(module_data));
+
+    ModuleResolution resolution;
+    resolution.root = module.coordinate();
+    resolution.modules.push_back(module);
+    resolution.receipts.push_back({module.coordinate().qualified_name(), module.id()});
+    const auto source = source_from(
+        program_document(), {{module.coordinate().qualified_name(), module.id()}});
+
+    const auto bundle = compiler.compile(source, resolution);
+    ASSERT_EQ(bundle.module_coordinates(), std::vector<ModuleCoordinate>{module.coordinate()});
+    EXPECT_EQ(ProgramBundle::parse(bundle.serialize_canonical()).module_coordinates(),
+              bundle.module_coordinates());
+
+    auto unpinned = source_from(program_document(), {{"test:other@1.0.0", digest('f')}});
+    EXPECT_THROW((void)compiler.compile(unpinned, resolution), ProgramCompileError);
 }
 
 TEST(ProgramCompilerTest, CompilesOneRootWithoutRuntimeObjectsOrCallableDispatch) {

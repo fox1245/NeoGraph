@@ -37,6 +37,11 @@
     "program_schema_version": { "const": 1 },
     "registry_snapshot_fingerprint": { "$ref": "#/$defs/sha256" },
     "module_dependency_merkle_root": { "$ref": "#/$defs/sha256" },
+    "module_coordinates": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/moduleCoordinate" }
+    },
     "input_contract": { "$ref": "#/$defs/contract" },
     "output_contract": { "$ref": "#/$defs/contract" },
     "orchestration_plan": { "$ref": "#/$defs/orchestrationPlan" },
@@ -91,6 +96,20 @@
     "nonemptyString": {
       "type": "string",
       "minLength": 1
+    },
+    "moduleCoordinate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespace", "name", "semantic_version", "content_identity"],
+      "properties": {
+        "namespace": { "$ref": "#/$defs/nonemptyString" },
+        "name": { "$ref": "#/$defs/nonemptyString" },
+        "semantic_version": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+        },
+        "content_identity": { "$ref": "#/$defs/sha256" }
+      }
     },
     "jsonPointer": {
       "type": "string",

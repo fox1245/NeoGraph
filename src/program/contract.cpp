@@ -760,6 +760,7 @@ ContractVerification ContractRun::verify(std::string_view program_version_id,
             continue;
         }
         bool passed = false;
+        bool failed = false;
         for (const auto& evidence : impl_->evidence) {
             if (evidence.kind == ContractEvidenceKind::WorkerReport ||
                 evidence.acceptance_id != acceptance.id ||
@@ -770,17 +771,21 @@ ContractVerification ContractRun::verify(std::string_view program_version_id,
             }
             if (evidence.passed) {
                 passed = true;
-                break;
+                continue;
             }
+            failed = true;
             result.failed_evidence_ids.push_back(evidence.evidence_id);
         }
-        if (!passed) {
+        // A later positive claim cannot erase an independently observed
+        // failure for the same gate. Publication is deliberately fail-closed.
+        if (!passed || failed) {
             result.missing_acceptance_ids.push_back(acceptance.id);
         }
     }
 
     for (const auto& oracle : spec.independent_oracles) {
         bool passed = false;
+        bool failed = false;
         for (const auto& evidence : impl_->evidence) {
             if (evidence.kind != ContractEvidenceKind::IndependentOracle ||
                 evidence.manifest_hash != impl_->manifest.content_hash() ||
@@ -794,11 +799,12 @@ ContractVerification ContractRun::verify(std::string_view program_version_id,
             }
             if (evidence.passed) {
                 passed = true;
-                break;
+                continue;
             }
+            failed = true;
             result.failed_evidence_ids.push_back(evidence.evidence_id);
         }
-        if (!passed) {
+        if (!passed || failed) {
             result.blocking_diagnostics.push_back("missing-independent-oracle:" + oracle);
         }
     }

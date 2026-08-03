@@ -1,5 +1,9 @@
 #include <neograph/a2a/collaboration.h>
 
+#ifdef NEOGRAPH_A2A_PROGRAM
+#include <neograph/program/program.h>
+#endif
+
 #include <gtest/gtest.h>
 
 #include <string>
@@ -47,6 +51,44 @@ CollaborationEnvelope make_envelope(const CollaborationLink& link,
                                                                           "application/json",
                                                                           42}});
 }
+
+#ifdef NEOGRAPH_A2A_PROGRAM
+std::string digest(char value) {
+    return "sha256:" + std::string(64, value);
+}
+
+neograph::program::ProgramVersion make_program_version() {
+    using namespace neograph::program;
+    RegistrySnapshotBuilder registry_builder;
+    registry_builder.add_reducer(
+        ExecutableManifest{{ExecutableKind::Reducer, "a2a-reducer", "1.0.0", digest('1')},
+                           EffectMode::Brokered, "attestation:a2a", {}, {}},
+        [](const json&, const json& incoming) { return json(incoming); });
+    auto registry = std::move(registry_builder).build();
+
+    AdmissionProfileBuilder admission_builder;
+    admission_builder.id("a2a-profile")
+        .semantic_version("1.0.0")
+        .registry(registry)
+        .mode(AdmissionMode::MultiTenant)
+        .max_program_schema_version(1)
+        .allow_source_kind(SourceKind::CanonicalJson)
+        .allow_effect_mode(EffectMode::Brokered);
+    auto admission = std::move(admission_builder).build();
+
+    PolicySnapshotBuilder policy_builder;
+    policy_builder.id("a2a-policy")
+        .semantic_version("1.0.0")
+        .owner_scope("owner-b")
+        .admission_profile(admission)
+        .budget_ceiling(BudgetLimits{1000, 1000, 1000, 1, 1, 20, 1, 1, 1});
+    auto policy = std::move(policy_builder).build();
+    return ProgramVersion(ProgramVersionData{
+        digest('2'), admission, policy, {}, "owner-b",
+        CoreMaterializationReceipt{"a2a-tests", registry.fingerprint(),
+                                   {CorePlanIdentity{"main", digest('3')}}, {}}});
+}
+#endif
 
 TEST(A2ACollaboration, ConsentFreezesOwnerAndCapabilityBoundary) {
     const auto proposed = make_link();
@@ -125,5 +167,36 @@ TEST(A2ACollaboration, MailboxJournalReopensWithoutLosingCorrelation) {
     EXPECT_EQ(reopened.submit(make_envelope(accepted, 3, "correction", "idem-3")),
               CollaborationSubmitResult::Accepted);
 }
+
+#ifdef NEOGRAPH_A2A_PROGRAM
+TEST(A2ACollaboration, MailboxRetainsTypedProgramRequestAcrossReconnect) {
+    const auto accepted = make_link().accept("executor-b", "consent-secret");
+    auto version = make_program_version();
+    CollaborationMailbox receiver("owner-b", "executor-b");
+    receiver.accept_link(accepted, "consent-secret");
+
+    auto envelope = CollaborationEnvelope::bind_program(make_envelope(accepted), version);
+    neograph::program::ProgramInvocation invocation;
+    invocation.input = json{{"prompt", "typed"}};
+    invocation.budget = neograph::program::RunBudget{1000, 1000, 1000, 1, 1, 20, 0, 0, 0};
+    invocation.trace_id = "a2a:run-b";
+    invocation.requested_run_id = "run-b";
+
+    EXPECT_EQ(receiver.submit_program(envelope, version, invocation),
+              CollaborationSubmitResult::Accepted);
+    EXPECT_TRUE(receiver.permits_artifact("link-1", "artifact-1"));
+    EXPECT_FALSE(receiver.permits_artifact("link-1", "unlisted"));
+    auto reopened = CollaborationMailbox::parse(receiver.serialize_canonical());
+    const auto request = reopened.get_program_request("idem-1");
+    ASSERT_TRUE(request.has_value());
+    ASSERT_TRUE(request->version);
+    ASSERT_TRUE(request->invocation);
+    EXPECT_EQ(request->version->id(), version.id());
+    EXPECT_EQ(request->invocation->requested_run_id, "run-b");
+    EXPECT_EQ(request->invocation->input, invocation.input);
+    EXPECT_EQ(reopened.submit(envelope, version, invocation),
+              CollaborationSubmitResult::Duplicate);
+}
+#endif
 
 }  // namespace

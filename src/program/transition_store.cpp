@@ -2,6 +2,7 @@
 
 #include "canonical_json.h"
 
+#include <algorithm>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -14,6 +15,40 @@ constexpr std::string_view EFFECT_FORMAT      = "neograph-program-effect-outbox-
 bool is_final(ContinuationState state) noexcept {
     return state != ContinuationState::Running && state != ContinuationState::Interrupted &&
            state != ContinuationState::AmbiguousEffect;
+}
+
+bool same_child_metadata(const ProgramChildRecord& lhs, const ProgramChildRecord& rhs) {
+    return lhs.child_run_id == rhs.child_run_id && lhs.link_id == rhs.link_id &&
+           lhs.link_receipt == rhs.link_receipt && lhs.invocation == rhs.invocation;
+}
+
+bool valid_child_state_transition(ProgramChildState previous, ProgramChildState next) noexcept {
+    if (previous == next) return true;
+    if (previous == ProgramChildState::Publishing &&
+        (next == ProgramChildState::Dispatched || next == ProgramChildState::Completed ||
+         next == ProgramChildState::Cancelled || next == ProgramChildState::Failed))
+        return true;
+    if (previous == ProgramChildState::Dispatched &&
+        (next == ProgramChildState::Completed || next == ProgramChildState::Cancelled ||
+         next == ProgramChildState::Failed))
+        return true;
+    return false;
+}
+
+bool valid_children_transition(const ProgramRunRecord& previous,
+                               const ProgramRunRecord& next) {
+    const auto previous_children = previous.children();
+    const auto next_children     = next.children();
+    for (const auto& child : previous_children) {
+        const auto found = std::find_if(next_children.begin(), next_children.end(),
+                                        [&](const auto& value) {
+                                            return value.child_run_id == child.child_run_id;
+                                        });
+        if (found == next_children.end() || !same_child_metadata(child, *found) ||
+            !valid_child_state_transition(child.state, found->state))
+            return false;
+    }
+    return true;
 }
 
 std::string rs(const json& v, std::string_view key) {
@@ -105,6 +140,16 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
             run.terminal_result()->status()) {
         throw std::invalid_argument("Terminal event/result mismatch");
     }
+    if (publication.migration_plan) {
+        const auto& plan = *publication.migration_plan;
+        const auto fork = run.fork_receipt();
+        if (plan.owner_scope() != owner || plan.target_version_id() != run.program_version_id() ||
+            !plan.is_compatible() ||
+            (fork && plan.source_version_id() != fork->source_program_version_id())) {
+            throw std::invalid_argument("Program migration publication does not bind an eligible target");
+        }
+        (void)plan.serialize_canonical();
+    }
 }
 json pub_body(const ProgramTransitionPublication& p) {
     json events = json::array(), effects = json::array();
@@ -117,7 +162,10 @@ json pub_body(const ProgramTransitionPublication& p) {
             {"run_record", nested(p.run_record.serialize_canonical())},
             {"journal_record", nested(p.journal_record.serialize_canonical())},
             {"events", std::move(events)},
-            {"effects", std::move(effects)}};
+            {"effects", std::move(effects)},
+            {"migration_plan", p.migration_plan
+                                    ? nested(p.migration_plan->serialize_canonical())
+                                    : json(nullptr)}};
 }
 }  // namespace
 struct ProgramEffectOutboxEntry::Impl {
@@ -184,7 +232,8 @@ ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_vie
         throw std::invalid_argument("Stored Program publication has unknown format");
     detail::reject_unknown_fields(
         v, "Stored Program publication",
-        {"format", "storage_schema_version", "run_record", "journal_record", "events", "effects"});
+        {"format", "storage_schema_version", "run_record", "journal_record", "events", "effects",
+         "migration_plan"});
     if (r32(v, "storage_schema_version") != 1)
         throw std::invalid_argument("Stored Program publication schema unsupported");
     auto run = ProgramRunRecord::parse(detail::canonical_json_bytes(rv(v, "run_record")));
@@ -200,8 +249,13 @@ ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_vie
     if (!fx.is_array()) throw std::invalid_argument("Program effects must be array");
     for (const auto& e : fx)
         effects.push_back(ProgramEffectOutboxEntry::parse(detail::canonical_json_bytes(e)));
+    std::optional<MigrationPlan> migration_plan;
+    if (v.contains("migration_plan")) {
+        const auto& plan = rv(v, "migration_plan");
+        if (!plan.is_null()) migration_plan = MigrationPlan::parse(detail::canonical_json_bytes(plan));
+    }
     ProgramTransitionPublication out{std::move(run), std::move(journal), std::move(events),
-                                     std::move(effects)};
+                                     std::move(effects), std::move(migration_plan)};
     validate_pub(out, out.run_record.owner_scope());
     return out;
 }
@@ -211,6 +265,7 @@ struct InMemoryProgramTransitionStore::Impl {
         ProgramJournalRecord                  journal;
         std::vector<ProgramEvent>             events;
         std::vector<ProgramEffectOutboxEntry> effects;
+        std::optional<MigrationPlan>          migration_plan;
         std::string                           bytes;
     };
     mutable std::mutex                                                mutex;
@@ -267,6 +322,14 @@ std::vector<ProgramEffectOutboxEntry> InMemoryProgramTransitionStore::load_effec
         if (e.sequence() > a) x.push_back(e);
     return x;
 }
+std::optional<MigrationPlan> InMemoryProgramTransitionStore::load_migration_plan(
+    std::string_view o, std::string_view r) const {
+    if (o.empty() || r.empty()) return std::nullopt;
+    std::lock_guard l(impl_->mutex);
+    auto            i = impl_->runs.find(key(o, r));
+    if (i == impl_->runs.end()) return std::nullopt;
+    return i->second->migration_plan;
+}
 ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
     std::string_view owner, std::string_view expected, ProgramTransitionPublication publication) {
     std::string publication_bytes;
@@ -287,6 +350,12 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
         return expected == publication.journal_record.previous_id
                    ? ProgramTransitionPublishResult::AlreadyPresent
                    : ProgramTransitionPublishResult::Conflict;
+    }
+
+    if (current != impl_->runs.end() && publication.migration_plan) {
+        const auto& old_plan = current->second->migration_plan;
+        if (!old_plan || old_plan->id() != publication.migration_plan->id())
+            return ProgramTransitionPublishResult::Conflict;
     }
 
     const auto new_terminal = publication.run_record.terminal_result();
@@ -327,6 +396,7 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
             publication.run_record.recorded_binding_set_fingerprint() !=
                 old.run.recorded_binding_set_fingerprint() ||
             publication.run_record.invocation() != old.run.invocation() ||
+            !valid_children_transition(old.run, publication.run_record) ||
             publication.run_record.event_sequence() !=
                 old.run.event_sequence() + publication.events.size() ||
             publication.run_record.effect_sequence() !=
@@ -362,7 +432,11 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
     maybe_fail(ProgramTransitionFaultPoint::AfterEffectSnapshot);
     auto candidate = std::make_shared<const Impl::Stored>(
         Impl::Stored{std::move(staged_run), std::move(staged_journal), std::move(events),
-                     std::move(effects), std::move(publication_bytes)});
+                     std::move(effects),
+                     current == impl_->runs.end()
+                         ? publication.migration_plan
+                         : current->second->migration_plan,
+                     std::move(publication_bytes)});
     maybe_fail(ProgramTransitionFaultPoint::BeforeCommit);
     if (current == impl_->runs.end()) {
         impl_->runs.emplace(std::move(storage_key), std::move(candidate));

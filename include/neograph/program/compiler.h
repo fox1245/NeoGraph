@@ -5,6 +5,7 @@
 #pragma once
 
 #include <neograph/program/bundle.h>
+#include <neograph/program/module.h>
 #include <neograph/program/registry.h>
 
 #include <cstdint>
@@ -45,6 +46,9 @@ public:
     const std::string& compiler_build_id() const noexcept;
     const std::string& registry_snapshot_fingerprint() const noexcept;
     ProgramBundle      compile(const ProgramSource& source) const;
+    /** Compile only when the source imports exactly one verified module closure. */
+    ProgramBundle      compile(const ProgramSource& source,
+                                const ModuleResolution& resolution) const;
 
 private:
     struct Impl;

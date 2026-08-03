@@ -105,6 +105,31 @@ std::optional<ProgramVersion> InMemoryProgramStore::get_version(std::string_view
     return found->second.value;
 }
 
+std::optional<ProgramVersion>
+InMemoryProgramStore::get_version(std::string_view owner_scope, std::string_view id) const {
+    if (owner_scope.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    const auto      found = impl_->versions.find(id);
+    if (found == impl_->versions.end() || found->second.value.ownership_scope() != owner_scope)
+        return std::nullopt;
+    return found->second.value;
+}
+
+std::optional<ProgramBundle>
+InMemoryProgramStore::get_bundle(std::string_view owner_scope, std::string_view id) const {
+    if (owner_scope.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    const auto bundle = impl_->bundles.find(id);
+    if (bundle == impl_->bundles.end()) return std::nullopt;
+    for (const auto& [version_id, stored] : impl_->versions) {
+        (void)version_id;
+        if (stored.value.ownership_scope() == owner_scope &&
+            stored.value.bundle_id() == id)
+            return bundle->second.value;
+    }
+    return std::nullopt;
+}
+
 std::optional<ProgramActivation>
 InMemoryProgramStore::get_activation(std::string_view owner_scope) const {
     std::lock_guard lock(impl_->mutex);
@@ -118,12 +143,16 @@ ProgramActivationResult InMemoryProgramStore::compare_activate(
     std::uint64_t expected_generation,
     std::string_view version_id,
     std::string_view policy_snapshot_hash) {
+    if (owner_scope.empty())
+        throw std::invalid_argument("Program activation owner scope must not be empty");
     std::lock_guard lock(impl_->mutex);
     const auto version = impl_->versions.find(version_id);
     if (version == impl_->versions.end())
         throw std::invalid_argument("Cannot activate an unpublished Program version");
     if (version->second.value.ownership_scope() != owner_scope)
         throw std::invalid_argument("Program activation owner scope does not match the version");
+    if (version->second.value.policy_snapshot().fingerprint() != policy_snapshot_hash)
+        throw std::invalid_argument("Program activation policy hash does not match the version");
 
     const auto current = impl_->activations.find(owner_scope);
     const auto generation =
@@ -148,6 +177,8 @@ ProgramActivationResult InMemoryProgramStore::compare_activate(
 
 std::vector<ProgramVersion>
 InMemoryProgramStore::list_versions(std::string_view owner_scope) const {
+    if (owner_scope.empty())
+        throw std::invalid_argument("Program version owner scope must not be empty");
     std::lock_guard lock(impl_->mutex);
     std::vector<ProgramVersion> result;
     for (const auto& [id, stored] : impl_->versions)
@@ -158,7 +189,16 @@ InMemoryProgramStore::list_versions(std::string_view owner_scope) const {
 ProgramRetentionReport InMemoryProgramStore::collect_garbage(
     std::string_view owner_scope,
     const std::vector<std::string>& pinned_version_ids) {
+    if (owner_scope.empty())
+        throw std::invalid_argument("Program retention owner scope must not be empty");
     std::lock_guard lock(impl_->mutex);
+    for (const auto& pinned_id : pinned_version_ids) {
+        const auto pinned = impl_->versions.find(pinned_id);
+        if (pinned == impl_->versions.end())
+            throw std::invalid_argument("Program retention pin references an unpublished version");
+        if (pinned->second.value.ownership_scope() != owner_scope)
+            throw std::invalid_argument("Program retention pin crosses an owner scope boundary");
+    }
     std::set<std::string, std::less<>> keep(pinned_version_ids.begin(), pinned_version_ids.end());
     const auto active = impl_->activations.find(owner_scope);
     if (active != impl_->activations.end()) keep.insert(active->second.value.active_version_id());

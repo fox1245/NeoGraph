@@ -72,6 +72,46 @@ ProgramTransitionPublication terminal_publication(const ProgramTransitionPublica
             {event(2, ProgramEventKind::Terminal, ProgramTerminalEvent{status}, time)}, {}};
 }
 
+ProgramTransitionPublication child_metadata_publication(
+    const ProgramTransitionPublication& start,
+    ProgramChildState                    state = ProgramChildState::Publishing,
+    std::int64_t                         time  = 20,
+    std::string                          trace = "child-trace") {
+    const auto child = ProgramChildRecord{
+        "child-run-1",
+        digest('7'),
+        "link-receipt",
+        ProgramPersistedInvocation{{{"child", true}}, budget(), std::move(trace), "run-1", 1},
+        state};
+    auto journal = ProgramJournalRecord::create(
+        {start.journal_record.id,
+         "run-1",
+         digest('1'),
+         digest('2'),
+         start.journal_record.sequence + 1,
+         {"root", ContinuationState::Running, 1},
+         budget(),
+         budget(),
+         std::nullopt,
+         time});
+    auto data = ProgramRunRecordData{};
+    data.owner_scope         = "owner-a";
+    data.run_id              = "run-1";
+    data.program_version_id  = digest('1');
+    data.bundle_id           = digest('2');
+    data.binding_fingerprint = digest('3');
+    data.invocation          = start.run_record.invocation();
+    data.continuation        = journal.continuation;
+    data.remaining_budget    = journal.remaining_budget;
+    data.children            = {child};
+    data.journal_head        = journal.id;
+    data.event_sequence      = start.run_record.event_sequence();
+    data.effect_sequence     = start.run_record.effect_sequence();
+    data.created_at_ms        = start.run_record.created_at_ms();
+    data.updated_at_ms        = time;
+    return {ProgramRunRecord::create(std::move(data)), std::move(journal), {}, {}};
+}
+
 ProgramPendingEffect pending_effect() {
     ProgramPendingEffectData data;
     data.operation_id         = "root";
@@ -155,6 +195,24 @@ TEST(ProgramTransitionStoreTest, FirstPublishRetryAndOwnerIsolation) {
     EXPECT_FALSE(store.load("owner-b", "run-1"));
     EXPECT_FALSE(store.latest("owner-b", "run-1"));
     EXPECT_TRUE(store.load_events("owner-b", "run-1").empty());
+}
+
+TEST(ProgramTransitionStoreTest, MigrationPublicationIsDurableAndInheritedAcrossReplay) {
+    InMemoryProgramTransitionStore store;
+    auto publication = start_publication();
+    publication.migration_plan = MigrationPlan::create(
+        MigrationPlanData{digest('6'), digest('1'), "owner-a",
+                          MigrationCompatibility::ForkCompatible, {}, {}, {}});
+    ASSERT_EQ(store.compare_publish("owner-a", {}, publication),
+              ProgramTransitionPublishResult::Published);
+    const auto stored = store.load_migration_plan("owner-a", "run-1");
+    ASSERT_TRUE(stored.has_value());
+    EXPECT_EQ(stored->id(), publication.migration_plan->id());
+
+    const auto bytes = publication.serialize_canonical();
+    const auto reparsed = ProgramTransitionPublication::parse(bytes);
+    ASSERT_TRUE(reparsed.migration_plan.has_value());
+    EXPECT_EQ(reparsed.migration_plan->id(), publication.migration_plan->id());
 }
 
 TEST(ProgramTransitionStoreTest, ConflictingCasAndInvalidPublicationRollBack) {
@@ -263,6 +321,28 @@ TEST(ProgramTransitionStoreTest, TerminalResultCannotPublishWithoutTerminalOutbo
     ASSERT_TRUE(visible); EXPECT_FALSE(visible->terminal_result());
     EXPECT_EQ(store.load_events("owner-a", "run-1").size(), 1U);
 }
+
+TEST(ProgramTransitionStoreTest, ChildMetadataPublicationIsIdempotentAndConflictDetecting) {
+    InMemoryProgramTransitionStore store;
+    const auto start = start_publication();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, start),
+              ProgramTransitionPublishResult::Published);
+
+    const auto publishing = child_metadata_publication(start);
+    ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, publishing),
+              ProgramTransitionPublishResult::Published);
+    EXPECT_EQ(store.compare_publish("owner-a", start.journal_record.id, publishing),
+              ProgramTransitionPublishResult::AlreadyPresent);
+    ASSERT_TRUE(store.load("owner-a", "run-1").has_value());
+    ASSERT_EQ(store.load("owner-a", "run-1")->children().size(), 1U);
+
+    const auto conflicting =
+        child_metadata_publication(publishing, ProgramChildState::Publishing, 21,
+                                   "different-child-trace");
+    EXPECT_EQ(store.compare_publish("owner-a", publishing.journal_record.id, conflicting),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(store.latest("owner-a", "run-1")->id, publishing.journal_record.id);
+}
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 TEST(ProgramTransitionStoreTest, SQLiteReopensAtomicPublicationAndOwnerIsolation) {
     static std::atomic<unsigned> sequence{0};
@@ -298,6 +378,36 @@ TEST(ProgramTransitionStoreTest, SQLiteReopensAtomicPublicationAndOwnerIsolation
         EXPECT_EQ(store.load_events("owner-a", "run-1", 1).size(), 1U);
     }
 
+    std::filesystem::remove(path);
+}
+
+TEST(ProgramTransitionStoreTest, SQLiteChildMetadataPublicationSurvivesReopen) {
+    static std::atomic<unsigned> sequence{0};
+    const auto path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-program-child-transition-" + std::to_string(sequence.fetch_add(1)) + ".db"))
+            .string();
+    std::filesystem::remove(path);
+
+    const auto start = start_publication();
+    const auto child = child_metadata_publication(start);
+    {
+        SQLiteProgramTransitionStore store(path);
+        ASSERT_EQ(store.compare_publish("owner-a", {}, start),
+                  ProgramTransitionPublishResult::Published);
+        ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, child),
+                  ProgramTransitionPublishResult::Published);
+        EXPECT_EQ(store.compare_publish("owner-a", start.journal_record.id, child),
+                  ProgramTransitionPublishResult::AlreadyPresent);
+    }
+    {
+        SQLiteProgramTransitionStore store(path);
+        const auto run = store.load("owner-a", "run-1");
+        ASSERT_TRUE(run.has_value());
+        ASSERT_EQ(run->children().size(), 1U);
+        EXPECT_EQ(run->children().front().child_run_id, "child-run-1");
+        EXPECT_EQ(store.latest("owner-a", "run-1")->id, child.journal_record.id);
+    }
     std::filesystem::remove(path);
 }
 #endif

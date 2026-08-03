@@ -1576,7 +1576,6 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
     auto source_pinned = detail::CatalogRuntimeAccess::pin(*impl_->config.catalog, *source_version);
     auto target_pinned =
         detail::CatalogRuntimeAccess::pin(*impl_->config.catalog, *resolved_target);
-
     const auto checkpoint_identity = *source_record->exact_checkpoint();
     const auto loaded_checkpoint =
         impl_->config.checkpoints->load_by_id(checkpoint_identity.checkpoint_id);
@@ -1609,6 +1608,19 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
         throw ProgramForkCompatibilityError(std::move(receipt));
     }
 
+    // Core shape compatibility is only one part of the P5 contract.  Prove
+    // the immutable version transition before cloning any checkpoint or
+    // mutating either transition store.
+    const auto migration_plan = MigrationPlan::between(*source_version, *resolved_target);
+    if (!migration_plan.is_compatible()) {
+        throw_runtime_diagnostic(
+            "P_FORK_MIGRATION_INCOMPATIBLE",
+            "Program fork migration plan is not compatible",
+            json{{"migration_plan_id", migration_plan.id()},
+                 {"compatibility", std::string(to_string(migration_plan.compatibility()))},
+                 {"blockers", migration_plan.blockers()}});
+    }
+
     const auto remaining = source_record->remaining_budget();
     const auto requested = invocation.budget;
     const bool budget_within_source =
@@ -1633,6 +1645,11 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
         throw_runtime_diagnostic("P_START_INPUT_CONTRACT",
                                  "Program invocation input violates its admitted contract",
                                  json{{"detail", error.what()}});
+    }
+    if (!budget_leq(invocation.budget,
+                   target_pinned->version.policy_snapshot().budget_ceiling())) {
+        throw_runtime_diagnostic("P_FORK_BUDGET",
+                                 "Fork continuation budget exceeds target authority ceiling");
     }
     auto       fork_pending_input  = source_record->pending_input();
     auto       fork_pending_effect = source_record->pending_effect();
@@ -1685,10 +1702,12 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
         impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions);
     const auto started =
         control->stage_event(ProgramEventKind::Started, ProgramStartedEvent{invocation.budget});
-    const auto published = control->transitions->compare_publish(
-        owner_scope, "",
-        initial_publication(*control, started, target_checkpoint, receipt, std::nullopt,
-                            std::move(fork_pending_input), std::move(fork_pending_effect)));
+    auto publication = initial_publication(
+        *control, started, target_checkpoint, receipt, std::nullopt,
+        std::move(fork_pending_input), std::move(fork_pending_effect));
+    publication.migration_plan = migration_plan;
+    const auto published =
+        control->transitions->compare_publish(owner_scope, "", std::move(publication));
     if (published != ProgramTransitionPublishResult::Published) {
         throw_runtime_diagnostic("P_RUN_CONFLICT", "Requested Program run id is unavailable");
     }

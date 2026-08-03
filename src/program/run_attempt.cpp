@@ -13,6 +13,7 @@
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -473,28 +474,16 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             }
         }
 
-        const auto plan_record = control->materialized->bundle.orchestration_plan();
-        if (plan_record.schema_version != 1 || !plan_record.plan.is_object() ||
-            !plan_record.plan.contains("root") ||
-            !plan_record.plan["root"].is_string() ||
-            !plan_record.plan.contains("operations") ||
-            !plan_record.plan["operations"].is_array()) {
-            throw_runtime_diagnostic("P_RUNTIME_PLAN", "Admitted Program plan is malformed");
-        }
-        std::map<std::string, json> operations;
-        for (const auto& operation : plan_record.plan["operations"]) {
-            if (!operation.is_object() || !operation.contains("id") ||
-                !operation["id"].is_string() || !operation.contains("op") ||
-                !operation["op"].is_string()) {
-                throw_runtime_diagnostic("P_RUNTIME_PLAN",
-                                         "Admitted Program operation is malformed");
-            }
-            const auto id = operation["id"].get<std::string>();
-            if (!operations.emplace(id, operation).second)
+        const auto& typed_plan = control->materialized->bundle.typed_orchestration_plan();
+        if (typed_plan.schema_version() != ProgramPlan::SCHEMA_VERSION)
+            throw_runtime_diagnostic("P_RUNTIME_PLAN", "Admitted Program plan schema is unsupported");
+        std::map<std::string, ProgramPlanNode> operations;
+        for (const auto& node : typed_plan.nodes()) {
+            if (!operations.emplace(node.id(), node).second)
                 throw_runtime_diagnostic("P_RUNTIME_PLAN", "Admitted Program operation id is duplicated",
-                                         json{{"operation_id", id}});
+                                         json{{"operation_id", node.id()}});
         }
-        const auto root_id = plan_record.plan["root"].get<std::string>();
+        const auto root_id = typed_plan.root_id();
         if (!operations.contains(root_id))
             throw_runtime_diagnostic("P_RUNTIME_PLAN", "Admitted Program root operation is missing");
 
@@ -590,19 +579,19 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                          "Program operation reference is dangling",
                                          json{{"operation_id", operation_id}});
             }
-            const auto operation = found->second;
-            const auto op = operation["op"].get<std::string>();
+            const auto& operation = found->second;
+            const auto op = operation.operation();
             if (operation_token->is_cancelled()) {
                 co_return plan_failure(ProgramTerminalStatus::Cancelled,
                                        "P_RUNTIME_CANCELLED",
                                        "Program operation cancelled before dispatch",
                                        operation_id);
             }
-            if (op != "call_core") {
+            if (op != ProgramOperationKind::CallCore) {
                 if (auto failure = charge_operation(operation_id))
                     co_return std::move(*failure);
             }
-            if (op == "call_core") {
+            if (op == ProgramOperationKind::CallCore) {
                 std::optional<std::string> resume;
                 {
                     std::lock_guard lock(plan_mutex);
@@ -650,12 +639,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
                 co_return result;
             }
-            if (op == "sequence") {
+            if (op == ProgramOperationKind::Sequence) {
                 PlanExecution result;
                 result.output = std::move(state);
-                for (const auto& child : operation["children"]) {
+                for (const auto& child : operation.children()) {
                     auto child_result =
-                        co_await execute(child.get<std::string>(), result.output, thread_id,
+                        co_await execute(child, result.output, thread_id,
                                          child_depth, operation_token);
                     append_trace(result, std::move(child_result));
                     if (result.status != ProgramTerminalStatus::Completed || result.returned)
@@ -664,35 +653,36 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 co_return result;
             }
 
-            if (op == "branch") {
-                const auto selected =
-                    condition_matches(state, operation["condition"]) ? "then" : "else";
-                if (!operation.contains(selected)) {
+            if (op == ProgramOperationKind::Branch) {
+                const auto selected = condition_matches(state, operation.condition())
+                                          ? operation.then_id()
+                                          : operation.else_id();
+                if (!selected) {
                     PlanExecution result;
                     result.output = std::move(state);
                     co_return result;
                 }
-                co_return co_await execute(operation[selected].get<std::string>(),
+                co_return co_await execute(*selected,
                                            std::move(state), std::move(thread_id), child_depth,
                                            operation_token);
             }
 
-            if (op == "loop") {
+            if (op == ProgramOperationKind::Loop) {
                 PlanExecution result;
                 result.output = std::move(state);
-                const auto maximum = operation["max_iterations"].get<std::uint64_t>();
+                const auto maximum = *operation.max_iterations();
                 for (std::uint64_t iteration = 0;
                      iteration < maximum &&
-                     condition_matches(result.output, operation["condition"]);
+                     condition_matches(result.output, operation.condition());
                      ++iteration) {
-                    auto body = co_await execute(operation["body"].get<std::string>(),
+                    auto body = co_await execute(*operation.body(),
                                                  result.output, thread_id, child_depth,
                                                  operation_token);
                     append_trace(result, std::move(body));
                     if (result.status != ProgramTerminalStatus::Completed || result.returned)
                         co_return result;
                 }
-                if (condition_matches(result.output, operation["condition"])) {
+                if (condition_matches(result.output, operation.condition())) {
                     result = plan_failure(ProgramTerminalStatus::BudgetExhausted,
                                           "P_LOOP_BOUND", "Program loop bound exhausted",
                                           operation_id);
@@ -700,13 +690,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 co_return result;
             }
 
-            if (op == "retry") {
-                const auto maximum = operation["max_attempts"].get<std::uint64_t>();
+            if (op == ProgramOperationKind::Retry) {
+                const auto maximum = *operation.max_attempts();
                 std::optional<PlanExecution> last_result;
                 for (std::uint64_t attempt = 0; attempt < maximum; ++attempt) {
                     try {
                         auto attempt_result = co_await execute(
-                            operation["body"].get<std::string>(), state, thread_id, child_depth,
+                            *operation.body(), state, thread_id, child_depth,
                             operation_token);
                         if (attempt_result.status == ProgramTerminalStatus::Completed)
                             co_return attempt_result;
@@ -716,8 +706,25 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             attempt_result.status == ProgramTerminalStatus::BudgetExhausted)
                             co_return attempt_result;
                         last_result = std::move(attempt_result);
-                    } catch (...) {
-                        if (attempt + 1 == maximum) throw;
+                    } catch (const graph::CancelledException&) {
+                        throw;
+                    } catch (const graph::NodeExecutionError& error) {
+                        if (attempt + 1 == maximum) {
+                            auto terminal = plan_failure(
+                                ProgramTerminalStatus::Failed, "P_RUNTIME_CORE_FAILURE",
+                                error.what(), operation_id);
+                            terminal.failure->core_node = error.node_name();
+                            terminal.failure->attempts = static_cast<std::uint32_t>(attempt + 1);
+                            co_return terminal;
+                        }
+                    } catch (const std::exception& error) {
+                        if (attempt + 1 == maximum) {
+                            auto terminal = plan_failure(
+                                ProgramTerminalStatus::Failed, "P_RUNTIME_CORE_FAILURE",
+                                error.what(), operation_id);
+                            terminal.failure->attempts = static_cast<std::uint32_t>(attempt + 1);
+                            co_return terminal;
+                        }
                     }
                 }
                 if (last_result) co_return std::move(*last_result);
@@ -725,8 +732,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                        "Program retry operation had no attempts", operation_id);
             }
 
-            if (op == "parallel") {
-                const auto branches = operation["branches"];
+            if (op == ProgramOperationKind::Parallel) {
+                const auto& branches = operation.branches();
                 if (branches.size() > control->granted_budget.max_concurrency)
                     co_return plan_failure(
                         ProgramTerminalStatus::BudgetExhausted, "P_CONCURRENCY_BUDGET",
@@ -748,7 +755,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 parallel->timer = std::make_shared<asio::steady_timer>(executor);
                 parallel->timer->expires_at((asio::steady_timer::time_point::max)());
                 for (std::size_t index = 0; index < branches.size(); ++index) {
-                    const auto branch_id = branches[index].get<std::string>();
+                    const auto& branch_id = branches[index];
                     const auto branch_thread =
                         index == 0 ? control->core_thread_id
                                    : operation_thread_id(*control, branch_id);
@@ -804,33 +811,84 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 co_return result;
             }
 
-            if (op == "race") {
-                const auto branches = operation["branches"];
+            if (op == ProgramOperationKind::Race) {
+                const auto& branches = operation.branches();
                 if (branches.size() != 2)
                     co_return plan_failure(ProgramTerminalStatus::Failed, "P_RACE_ARITY",
                                            "Program race currently requires exactly two branches",
                                            operation_id);
 
-                const auto first = branches[0].get<std::string>();
-                const auto second = branches[1].get<std::string>();
-                auto winner = co_await (
-                    execute(first, state, control->core_thread_id, child_depth,
-                            operation_token->fork()) ||
-                    execute(second, state, operation_thread_id(*control, second), child_depth,
-                            operation_token->fork()));
-                if (winner.index() == 0) co_return std::move(std::get<0>(winner));
-                co_return std::move(std::get<1>(winner));
+                const auto& first = branches[0];
+                const auto& second = branches[1];
+                // A race winner is the first completion; if both branches become
+                // ready in one scheduler turn, declaration order is the tie break.
+                // Wait for the losing coroutine to observe cancellation before this
+                // operation returns, so no detached branch outlives the run handle.
+                struct RaceState {
+                    std::mutex                                      mutex;
+                    std::array<std::optional<PlanExecution>, 2>    results;
+                    std::array<std::exception_ptr, 2>              errors;
+                    std::vector<std::shared_ptr<graph::CancelToken>> tokens;
+                    std::optional<std::size_t>                      winner;
+                    std::size_t                                     completed = 0;
+                    std::shared_ptr<asio::steady_timer>             timer;
+                };
+                const auto executor = co_await asio::this_coro::executor;
+                auto race = std::make_shared<RaceState>();
+                race->timer = std::make_shared<asio::steady_timer>(executor);
+                race->timer->expires_at((asio::steady_timer::time_point::max)());
+                race->tokens.push_back(operation_token->fork());
+                race->tokens.push_back(operation_token->fork());
+                const std::array<std::string, 2> ids{first, second};
+                for (std::size_t index = 0; index < ids.size(); ++index) {
+                    const auto branch_thread =
+                        index == 0 ? control->core_thread_id
+                                   : operation_thread_id(*control, ids[index]);
+                    asio::co_spawn(
+                        executor,
+                        execute(ids[index], state, branch_thread, child_depth, race->tokens[index]),
+                        [race, index](std::exception_ptr error, PlanExecution result) {
+                            bool cancel_loser = false;
+                            bool all_done = false;
+                            {
+                                std::lock_guard lock(race->mutex);
+                                race->errors[index] = error;
+                                if (!error) race->results[index] = std::move(result);
+                                ++race->completed;
+                                if (!race->winner) {
+                                    race->winner = index;
+                                    cancel_loser = true;
+                                }
+                                all_done = race->completed == race->tokens.size();
+                            }
+                            if (cancel_loser) {
+                                for (std::size_t sibling = 0; sibling < race->tokens.size(); ++sibling)
+                                    if (sibling != index) race->tokens[sibling]->cancel();
+                            }
+                            if (all_done) race->timer->cancel();
+                        });
+                }
+                asio::error_code wait_error;
+                co_await race->timer->async_wait(
+                    asio::redirect_error(asio::use_awaitable, wait_error));
+                if (!race->winner)
+                    throw_runtime_diagnostic("P_RUNTIME_RACE", "Race completed without a winner");
+                const auto index = *race->winner;
+                if (race->errors[index]) std::rethrow_exception(race->errors[index]);
+                if (!race->results[index])
+                    throw_runtime_diagnostic("P_RUNTIME_RACE", "Race winner has no result");
+                co_return std::move(*race->results[index]);
             }
-            if (op == "quorum") {
-                const auto branches = operation["branches"];
-                const auto required = operation["min_success"].get<std::uint64_t>();
+            if (op == ProgramOperationKind::Quorum) {
+                const auto& branches = operation.branches();
+                const auto required = *operation.min_success();
                 PlanExecution result;
                 result.output = json::array();
                 std::uint64_t successes = 0;
                 for (std::size_t index = 0; index < branches.size(); ++index) {
                     auto branch_result = co_await execute(
-                        branches[index].get<std::string>(), state,
-                        operation_thread_id(*control, branches[index].get<std::string>()),
+                        branches[index], state,
+                        operation_thread_id(*control, branches[index]),
                         child_depth, operation_token);
                     const bool completed =
                         branch_result.status == ProgramTerminalStatus::Completed;
@@ -849,11 +907,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                        operation_id);
             }
 
-            if (op == "map") {
+            if (op == ProgramOperationKind::Map) {
                 PlanExecution result;
                 result.output = json::array();
-                for (const auto& item : operation["items"]) {
-                    auto mapped = co_await execute(operation["body"].get<std::string>(), item,
+                for (const auto& item : operation.items()) {
+                    auto mapped = co_await execute(*operation.body(), item,
                                                    operation_thread_id(*control, operation_id),
                                                    child_depth, operation_token);
                     result.execution_trace.insert(
@@ -872,7 +930,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 co_return result;
             }
 
-            if (op == "spawn") {
+            if (op == ProgramOperationKind::Spawn) {
                 if (child_depth >= control->granted_budget.max_child_depth)
                     co_return plan_failure(
                         ProgramTerminalStatus::BudgetExhausted, "P_CHILD_BUDGET",
@@ -888,30 +946,36 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         ProgramTerminalStatus::BudgetExhausted, "P_CHILD_BUDGET",
                         "Program child budget exhausted", operation_id);
                 auto child_token = operation_token->fork();
-                co_return co_await execute(operation["body"].get<std::string>(),
+                co_return co_await execute(*operation.body(),
                                            std::move(state),
                                            operation_thread_id(*control, operation_id),
                                            child_depth + 1, std::move(child_token));
             }
 
-            if (op == "cancel") {
+            if (op == ProgramOperationKind::Cancel) {
                 control->cancel(CancellationCause::User);
                 PlanExecution result;
                 result.status = ProgramTerminalStatus::Cancelled;
                 result.output = std::move(state);
+                result.failure = ProgramFailure{
+                    "P_RUNTIME_CANCELLED",
+                    operation.reason().value_or("Program cancelled by plan"),
+                    operation_id,
+                    "",
+                    0,
+                    json{{"scope", operation.scope().value_or("run")}}};
                 co_return result;
             }
 
-            if (op == "await") {
-                const auto child_id = operation["body"].get<std::string>();
-                if (!operation.contains("timeout_ms")) {
+            if (op == ProgramOperationKind::Await) {
+                const auto child_id = *operation.body();
+                if (!operation.timeout_ms()) {
                     co_return co_await execute(child_id, std::move(state),
                                                std::move(thread_id), child_depth, operation_token);
                 }
                 const auto executor = co_await asio::this_coro::executor;
                 auto timeout = std::make_shared<asio::steady_timer>(executor);
-                timeout->expires_after(std::chrono::milliseconds(
-                    operation["timeout_ms"].get<std::uint64_t>()));
+                timeout->expires_after(std::chrono::milliseconds(*operation.timeout_ms()));
                 auto child_token = operation_token->fork();
                 auto timeout_operation = cancel_after_timer(timeout, child_token);
                 auto winner = co_await (
@@ -923,9 +987,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 co_return plan_failure(ProgramTerminalStatus::TimedOut, "P_AWAIT_TIMEOUT",
                                        "Program await operation timed out", operation_id);
             }
-            if (op == "checkpoint") {
-                if (operation.contains("body")) {
-                    auto body = co_await execute(operation["body"].get<std::string>(),
+            if (op == ProgramOperationKind::Checkpoint) {
+                if (operation.body()) {
+                    auto body = co_await execute(*operation.body(),
                                                  state, thread_id, child_depth, operation_token);
                     if (body.status != ProgramTerminalStatus::Completed) co_return body;
                     state = std::move(body.output);
@@ -949,23 +1013,23 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 co_return result;
             }
 
-            if (op == "emit") {
+            if (op == ProgramOperationKind::Emit) {
                 control->emit(ProgramEventKind::Emit,
-                              ProgramEmitEvent{operation_id, operation["value"]});
+                              ProgramEmitEvent{operation_id, operation.value()});
                 PlanExecution result;
                 result.output = std::move(state);
                 co_return result;
             }
 
-            if (op == "return") {
+            if (op == ProgramOperationKind::Return) {
                 PlanExecution result;
-                result.output = operation["value"];
+                result.output = operation.value();
                 result.returned = true;
                 co_return result;
             }
 
             throw_runtime_diagnostic("P_RUNTIME_PLAN", "Admitted Program operation is unsupported",
-                                     json{{"operation", op}});
+                                     json{{"operation", std::string(to_string(op))}});
         };
 
         auto plan_result =
@@ -982,7 +1046,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.remaining_budget = settle_budget(control->granted_budget, outcome.usage);
         outcome.checkpoint = last_root_checkpoint;
 
-        if (apply_terminal_cause(outcome, terminal_cause, "Program attempt was cancelled")) {
+        const auto cancellation_message =
+            plan_result.failure && !plan_result.failure->message.empty()
+                ? plan_result.failure->message
+                : std::string("Program attempt was cancelled");
+        if (apply_terminal_cause(outcome, terminal_cause, cancellation_message)) {
         } else if (plan_result.status != ProgramTerminalStatus::Completed) {
             outcome.status = plan_result.status;
             outcome.interrupt = std::move(plan_result.interrupt);

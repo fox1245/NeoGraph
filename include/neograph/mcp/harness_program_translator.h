@@ -3,6 +3,7 @@
 #include <neograph/api.h>
 #include <neograph/graph/loader.h>
 #include <neograph/program/admission.h>
+#include <neograph/program/contract.h>
 #include <neograph/program/runtime.h>
 
 #include <cstdint>
@@ -48,6 +49,7 @@ struct HarnessWireReceipt {
     std::string              source_id;
     std::string              mode;
     std::string              preset;
+    std::string              workspace_revision;
     std::vector<std::string> worker_ids;
     std::vector<std::string> tool_ids;
     json                     legacy_projection;
@@ -69,6 +71,7 @@ struct HarnessTranslation {
     program::ProgramInvocation         invocation;
     HarnessWireReceipt                 wire;
     HarnessCapabilityBindingRequest    bindings;
+    std::optional<program::ContractManifest> contract;
 };
 
 class NEOGRAPH_HARNESS_API HarnessRequestTranslator final {

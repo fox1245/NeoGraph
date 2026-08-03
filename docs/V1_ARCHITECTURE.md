@@ -185,7 +185,15 @@ The rebase sequence is deliberately one-way:
 Old pinned bundles and sidecar records receive an explicit exact-import,
 converted, drain-only, or rejected classification. They must never be
 silently accepted as current Program versions. Issue #7 tracks this
-cross-repository rebase gate.
+cross-repository rebase gate. The machine-readable declaration in
+`spec/cross-repository-compatibility-v1.json` records the comparison between
+the current `ProgramVersion`, `RunInvocation`, and A2A collaboration surfaces
+and those historical references. Its metadata check is intentionally
+fail-closed: NeoCode and NeoProtocol remain `historical_only` until a consumer
+declares every current contract revision and verified conformance evidence;
+changing a label alone cannot make a consumer current. Run the focused check
+with `python3 scripts/check_cross_repository_compatibility.py` (also wired as
+`CrossRepositoryCompatibility.Metadata` when tests are enabled).
 
 ### Execution strategy: VM semantics without a general-purpose VM
 
@@ -382,13 +390,22 @@ The Program compiler lowers authoring sugar to a small orchestration plan:
 - `return`: produce the Program output.
 
 `map`, `retry`, `quorum`, reviewer/fixer loops, and other conveniences are
-compiler expansions over this vocabulary. They do not add feature-specific
-branches to Core or ProgramRuntime.
+compiler expansions or bounded compatibility sugar over this vocabulary. They
+do not add feature-specific branches to Core or GraphEngine.
 
 This plan is not bytecode. It is a typed, immutable orchestration graph whose
 nodes retain source coordinates and directly reference compiled Core generations
 or other Program nodes. ProgramRuntime schedules that graph; GraphEngine remains
 the only executor of application nodes.
+
+The current P3 slice directly schedules `sequence`, `branch`, `return`, bounded
+`loop`/`retry`, `parallel`, `race`, `cancel`, `await`, `emit`, and `checkpoint`.
+`map` and `quorum` remain compatibility sugar with bounded direct scheduling.
+`spawn` is intentionally not a durable child-program primitive yet: its admitted
+vocabulary and budget checks remain for existing child-link tests, while the
+durable `ProgramRuntime::start_child`/`await` lifecycle is the P6 boundary. No
+new plan operation is silently treated as a no-op; malformed operations fail
+admission with a typed-plan diagnostic.
 
 ProgramRuntime is therefore an intentional second **scheduling domain**, but not
 a second node executor. It owns readiness and joins for Program operations,
@@ -897,9 +914,12 @@ methods are migration inputs, not parallel permanent architectures.
 - Existing MCP method names may remain as transport compatibility during the
   pre-v1 window, but their implementation delegates to Program. No second
   Harness-only compiler/runtime remains after cutover.
-- The historical `ControlVm` and VM integration schemas are archived or removed
-  once the Program vertical slice proves equivalent behavior and the canonical
-  documents are updated.
+- The historical `ControlVm` and VM integration schemas are now retained only
+  as explicitly superseded records (`docs/PROGRAMMABLE_HARNESS_DSL_DESIGN.md`,
+  `spec/programmable-harness-vm-integration.sdd.yaml`, and
+  `spec/programmable-harness-graph-engine-inventory-v1.json`). They are not
+  public APIs or current execution claims; live compatibility APIs remain
+  available until their separately announced rebuild boundary.
 
 ## Acceptance gates
 
@@ -925,7 +945,10 @@ The architecture is implemented only when all are true:
 10. Public headers, CMake components, schemas, changelog, and translated user
     documentation agree; every existing example and cookbook entry has an
     explicit Core, Program, protocol-adapter, historical, or removal
-    disposition, and every retained entry has build/run proof.
+    disposition. The machine-readable disposition and proof inventory is
+    `spec/neograph-example-disposition-v1.json`; entries marked
+    `pending-component-smoke` are explicit remaining P8 work, not current
+    compatibility claims.
 11. MCP, HTTP, CLI, selected Python bindings, A2A, ACP, and gRPC have explicit
     cutover dispositions; every supported surface passes the shared Program
     conformance suite plus protocol-specific wire tests.

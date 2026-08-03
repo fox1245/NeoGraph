@@ -107,6 +107,8 @@ std::string worker_prompt(const HarnessWorkerCall& call) {
         {"instructions", call.worker.value("instructions", "")},
         {"output_schema", call.worker["output_schema"]},
     };
+    if (call.task.contains("contract_manifest"))
+        contract["frozen_contract"] = call.task.at("contract_manifest");
     if (!call.repair_feedback.empty()) {
         contract["repair_feedback"] = call.repair_feedback;
     }

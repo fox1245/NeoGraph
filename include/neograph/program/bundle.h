@@ -5,9 +5,12 @@
 #pragma once
 
 #include <neograph/program/source.h>
+#include <neograph/program/coordinate.h>
+#include <neograph/program/plan.h>
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -111,6 +114,8 @@ struct ProgramBundleData {
     std::uint32_t                     program_schema_version = 1;
     std::string                       registry_snapshot_fingerprint;
     std::string                       module_dependency_merkle_root;
+    /** Exact module coordinates represented by the dependency receipts. */
+    std::vector<ModuleCoordinate>     module_coordinates;
     ContractRecord                    input_contract;
     ContractRecord                    output_contract;
     OrchestrationPlanRecord           orchestration_plan;
@@ -138,9 +143,12 @@ public:
     std::uint32_t                          program_schema_version() const noexcept;
     const std::string&                     registry_snapshot_fingerprint() const noexcept;
     const std::string&                     module_dependency_merkle_root() const noexcept;
+    const std::vector<ModuleCoordinate>&   module_coordinates() const noexcept;
     ContractRecord                         input_contract() const;
     ContractRecord                         output_contract() const;
     OrchestrationPlanRecord                orchestration_plan() const;
+    /** Read-only typed view used by the direct Program scheduler. */
+    const ProgramPlan&                      typed_orchestration_plan() const;
     std::vector<SealedCoreDefinition>      sealed_core_definitions() const;
     const std::vector<CorePlanIdentity>&   core_plan_identities() const noexcept;
     const CapabilityEffectClosure&         capability_effect_closure() const noexcept;

@@ -2,6 +2,7 @@
 
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -126,6 +127,40 @@ bool same_fork(const ProgramRunRecord& old_run, const ProgramRunRecord& new_run)
            (!old_receipt || old_receipt->id() == new_receipt->id());
 }
 
+bool same_child_metadata(const ProgramChildRecord& lhs, const ProgramChildRecord& rhs) {
+    return lhs.child_run_id == rhs.child_run_id && lhs.link_id == rhs.link_id &&
+           lhs.link_receipt == rhs.link_receipt && lhs.invocation == rhs.invocation;
+}
+
+bool valid_child_state_transition(ProgramChildState previous, ProgramChildState next) noexcept {
+    if (previous == next) return true;
+    if (previous == ProgramChildState::Publishing &&
+        (next == ProgramChildState::Dispatched || next == ProgramChildState::Completed ||
+         next == ProgramChildState::Cancelled || next == ProgramChildState::Failed))
+        return true;
+    if (previous == ProgramChildState::Dispatched &&
+        (next == ProgramChildState::Completed || next == ProgramChildState::Cancelled ||
+         next == ProgramChildState::Failed))
+        return true;
+    return false;
+}
+
+bool valid_children_transition(const ProgramRunRecord& previous,
+                               const ProgramRunRecord& next) {
+    const auto previous_children = previous.children();
+    const auto next_children     = next.children();
+    for (const auto& child : previous_children) {
+        const auto found = std::find_if(next_children.begin(), next_children.end(),
+                                        [&](const auto& value) {
+                                            return value.child_run_id == child.child_run_id;
+                                        });
+        if (found == next_children.end() || !same_child_metadata(child, *found) ||
+            !valid_child_state_transition(child.state, found->state))
+            return false;
+    }
+    return true;
+}
+
 bool valid_initial_publication(const ProgramTransitionPublication& publication) {
     const auto& journal = publication.journal_record;
     const auto  terminal = publication.run_record.terminal_result();
@@ -154,8 +189,7 @@ bool valid_increment(const ProgramTransitionPublication& old_publication,
 
     if ((old_terminal && is_final(old_run.continuation().state) && !new_terminal) ||
         (new_terminal && (!old_terminal || old_terminal->id() != new_terminal->id()) &&
-         !terminal_event) ||
-        (next_publication.events.empty() && next_publication.effects.empty())) {
+         !terminal_event)) {
         return false;
     }
     if (old_journal.id != expected_journal_head || next_journal.previous_id != expected_journal_head ||
@@ -166,6 +200,7 @@ bool valid_increment(const ProgramTransitionPublication& old_publication,
         !same_fork(old_run, next_run) ||
         next_run.recorded_binding_set_fingerprint() != old_run.recorded_binding_set_fingerprint() ||
         next_run.invocation() != old_run.invocation() ||
+        !valid_children_transition(old_run, next_run) ||
         next_run.event_sequence() != old_run.event_sequence() + next_publication.events.size() ||
         next_run.effect_sequence() != old_run.effect_sequence() + next_publication.effects.size()) {
         return false;
@@ -175,6 +210,10 @@ bool valid_increment(const ProgramTransitionPublication& old_publication,
         return false;
     if (!next_publication.effects.empty() &&
         next_publication.effects.front().sequence() != old_run.effect_sequence() + 1)
+        return false;
+    if (next_publication.migration_plan &&
+        (!old_publication.migration_plan ||
+         next_publication.migration_plan->id() != old_publication.migration_plan->id()))
         return false;
     return true;
 }
@@ -186,7 +225,7 @@ ProgramTransitionPublication merged_publication(const StoredPublication& old_pub
     auto effects = old_publication.publication.effects;
     effects.insert(effects.end(), next.effects.begin(), next.effects.end());
     return {std::move(next.run_record), std::move(next.journal_record), std::move(events),
-            std::move(effects)};
+            std::move(effects), old_publication.publication.migration_plan};
 }
 
 }  // namespace
@@ -269,6 +308,14 @@ std::vector<ProgramEffectOutboxEntry> SQLiteProgramTransitionStore::load_effects
     for (const auto& effect : publication->publication.effects)
         if (effect.sequence() > after_sequence) result.push_back(effect);
     return result;
+}
+
+std::optional<MigrationPlan> SQLiteProgramTransitionStore::load_migration_plan(
+    std::string_view owner_scope, std::string_view run_id) const {
+    std::lock_guard lock(impl_->mutex);
+    const auto publication = load_publication(impl_->db, owner_scope, run_id);
+    if (!publication) return std::nullopt;
+    return publication->publication.migration_plan;
 }
 
 ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish(

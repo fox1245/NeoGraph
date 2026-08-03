@@ -1,10 +1,15 @@
 #include <neograph/a2a/collaboration.h>
 
+#ifdef NEOGRAPH_A2A_PROGRAM
+#include <neograph/program/runtime.h>
+#endif
+
 #include <array>
 #include <bit>
 #include <cstdint>
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <set>
 #include <stdexcept>
 #include <unordered_map>
@@ -284,6 +289,7 @@ json envelope_to_json(const CollaborationEnvelope& envelope) {
                 {"receiver_agent_id", envelope.receiver_agent_id},
                 {"sender_program_run_id", envelope.sender_program_run_id},
                 {"receiver_program_run_id", envelope.receiver_program_run_id},
+                {"program_version_id", envelope.program_version_id},
                 {"a2a_task_id", envelope.a2a_task_id},
                 {"a2a_context_id", envelope.a2a_context_id},
                 {"message_id", envelope.message_id},
@@ -339,6 +345,9 @@ CollaborationEnvelope envelope_from_json(const json& value) {
     envelope.receiver_agent_id = required_string(value, "receiver_agent_id");
     envelope.sender_program_run_id = required_string(value, "sender_program_run_id");
     envelope.receiver_program_run_id = required_string(value, "receiver_program_run_id");
+    if (value.contains("program_version_id")) {
+        envelope.program_version_id = required_string(value, "program_version_id");
+    }
     envelope.a2a_task_id = required_string(value, "a2a_task_id");
     envelope.a2a_context_id = required_string(value, "a2a_context_id");
     envelope.message_id = required_string(value, "message_id");
@@ -358,15 +367,89 @@ CollaborationEnvelope envelope_from_json(const json& value) {
 }
 
 json record_to_json(const CollaborationRecord& record) {
+#ifdef NEOGRAPH_A2A_PROGRAM
+    json program_request = nullptr;
+    if (record.program_request) {
+        if (!record.program_request->version || !record.program_request->invocation) {
+            throw std::invalid_argument("Collaboration Program request is incomplete");
+        }
+        const auto& invocation = *record.program_request->invocation;
+        program_request = json{
+            {"version", json::parse(record.program_request->version->serialize_canonical())},
+            {"invocation", json{{"input", invocation.input},
+                                 {"wall_time_ms", invocation.budget.wall_time_ms},
+                                 {"model_tokens", invocation.budget.model_tokens},
+                                 {"monetary_microunits", invocation.budget.monetary_microunits},
+                                 {"max_concurrency", invocation.budget.max_concurrency},
+                                 {"max_program_operations", invocation.budget.max_program_operations},
+                                 {"max_core_steps", invocation.budget.max_core_steps},
+                                 {"max_dynamic_compiles", invocation.budget.max_dynamic_compiles},
+                                 {"max_child_depth", invocation.budget.max_child_depth},
+                                 {"max_total_children", invocation.budget.max_total_children},
+                                 {"trace_id", invocation.trace_id},
+                                 {"requested_run_id", invocation.requested_run_id},
+                                 {"parent_run_id", invocation.parent_run_id},
+                                 {"child_depth", invocation.child_depth}}}};
+    }
+    return json{{"envelope", envelope_to_json(record.envelope)},
+                {"state", std::string(to_string(record.state))},
+                {"diagnostic", record.diagnostic},
+                {"program_request", std::move(program_request)}};
+#else
     return json{{"envelope", envelope_to_json(record.envelope)},
                 {"state", std::string(to_string(record.state))},
                 {"diagnostic", record.diagnostic}};
+#endif
 }
 
 CollaborationRecord record_from_json(const json& value) {
-    return CollaborationRecord{envelope_from_json(required_object(value, "envelope")),
-                               collaboration_record_state_from_string(required_string(value, "state")),
-                               required_string(value, "diagnostic")};
+    CollaborationRecord result{envelope_from_json(required_object(value, "envelope")),
+                                collaboration_record_state_from_string(required_string(value, "state")),
+                                required_string(value, "diagnostic")};
+#ifdef NEOGRAPH_A2A_PROGRAM
+    if (value.contains("program_request") && !value["program_request"].is_null()) {
+        const auto request = required_object(value, "program_request");
+        const auto version = program::ProgramVersion::parse(
+            required_object(request, "version").dump());
+        if (!result.envelope.program_version_id.empty() &&
+            result.envelope.program_version_id != version.id()) {
+            throw std::invalid_argument("Collaboration ProgramVersion identity mismatch");
+        }
+        const auto invocation_json = required_object(request, "invocation");
+        auto required_u64 = [&](std::string_view field) {
+            return required_unsigned(invocation_json, field);
+        };
+        auto required_u32 = [&](std::string_view field) {
+            const auto value_u64 = required_u64(field);
+            if (value_u64 > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::invalid_argument("Collaboration Program invocation integer exceeds uint32 range");
+            }
+            return static_cast<std::uint32_t>(value_u64);
+        };
+        program::ProgramInvocation invocation;
+        if (!invocation_json.contains("input")) {
+            throw std::invalid_argument("Collaboration Program invocation input is required");
+        }
+        invocation.input = invocation_json["input"];
+        invocation.budget.wall_time_ms = required_u64("wall_time_ms");
+        invocation.budget.model_tokens = required_u64("model_tokens");
+        invocation.budget.monetary_microunits = required_u64("monetary_microunits");
+        invocation.budget.max_concurrency = required_u32("max_concurrency");
+        invocation.budget.max_program_operations = required_u64("max_program_operations");
+        invocation.budget.max_core_steps = required_u64("max_core_steps");
+        invocation.budget.max_dynamic_compiles = required_u64("max_dynamic_compiles");
+        invocation.budget.max_child_depth = required_u32("max_child_depth");
+        invocation.budget.max_total_children = required_u64("max_total_children");
+        invocation.trace_id = required_string(invocation_json, "trace_id");
+        invocation.requested_run_id = required_string(invocation_json, "requested_run_id");
+        invocation.parent_run_id = required_string(invocation_json, "parent_run_id");
+        invocation.child_depth = required_u32("child_depth");
+        result.program_request = CollaborationRecord::ProgramRequest{
+            std::make_shared<const program::ProgramVersion>(version),
+            std::make_shared<const program::ProgramInvocation>(std::move(invocation))};
+    }
+#endif
+    return result;
 }
 
 }  // namespace
@@ -535,6 +618,7 @@ CollaborationEnvelope CollaborationEnvelope::create(
                                    link.spec().receiver_agent_id,
                                    std::move(sender_program_run_id),
                                    std::move(receiver_program_run_id),
+                                   {},
                                    std::move(a2a_task_id),
                                    std::move(a2a_context_id),
                                    std::move(message_id),
@@ -552,6 +636,20 @@ CollaborationEnvelope CollaborationEnvelope::create(
     }
     return envelope;
 }
+
+#ifdef NEOGRAPH_A2A_PROGRAM
+CollaborationEnvelope CollaborationEnvelope::bind_program(
+    const CollaborationEnvelope& envelope, const program::ProgramVersion& version) {
+    if (version.ownership_scope() != envelope.receiver_owner_scope) {
+        throw std::invalid_argument(
+            "Collaboration ProgramVersion owner does not match receiver owner scope");
+    }
+    auto bound = envelope;
+    bound.program_version_id = version.id();
+    validate_envelope_shape(bound);
+    return bound;
+}
+#endif
 
 CollaborationEnvelope CollaborationEnvelope::parse(std::string_view stored_bytes) {
     return envelope_from_json(json::parse(stored_bytes));
@@ -587,6 +685,9 @@ Message collaboration_to_message(const CollaborationEnvelope& envelope) {
                             {"link_id", envelope.link_id},
                             {"correlation_id", envelope.correlation_id},
                             {"idempotency_key", envelope.idempotency_key}};
+    if (!envelope.program_version_id.empty()) {
+        message.metadata["program_version_id"] = envelope.program_version_id;
+    }
     return message;
 }
 
@@ -758,6 +859,102 @@ CollaborationSubmitResult CollaborationMailbox::submit(CollaborationEnvelope env
     return CollaborationSubmitResult::Accepted;
 }
 
+#ifdef NEOGRAPH_A2A_PROGRAM
+CollaborationSubmitResult CollaborationMailbox::submit_program(
+    CollaborationEnvelope envelope,
+    program::ProgramVersion version,
+    program::ProgramInvocation invocation) {
+    if (version.ownership_scope() != envelope.receiver_owner_scope ||
+        envelope.receiver_owner_scope != owner_scope() ||
+        envelope.receiver_agent_id != agent_id()) {
+        return CollaborationSubmitResult::Rejected;
+    }
+    if (!envelope.program_version_id.empty() &&
+        envelope.program_version_id != version.id()) {
+        return CollaborationSubmitResult::Conflict;
+    }
+    if (envelope.receiver_program_run_id.empty() ||
+        invocation.requested_run_id != envelope.receiver_program_run_id) {
+        return CollaborationSubmitResult::Rejected;
+    }
+    if (!invocation.parent_run_id.empty() || invocation.child_depth != 0) {
+        return CollaborationSubmitResult::Rejected;
+    }
+    // ProgramRuntime enforces the admitted policy and executable closure. The
+    // mailbox adds the narrower collaboration attenuation: a linked request
+    // cannot carry a version whose policy grants capabilities/effects outside
+    // the link's explicit allowlists.
+    std::lock_guard lock(impl_->mutex);
+    const auto link_it = impl_->links.find(envelope.link_id);
+    if (link_it == impl_->links.end() || link_it->second.state() != CollaborationLinkState::Accepted ||
+        link_it->second.is_expired(now_unix_ms()) ||
+        envelope.receiver_owner_scope != owner_scope() ||
+        envelope.receiver_agent_id != agent_id() ||
+        envelope.sender_owner_scope != link_it->second.spec().sender_owner_scope ||
+        envelope.sender_agent_id != link_it->second.spec().sender_agent_id) {
+        return CollaborationSubmitResult::Rejected;
+    }
+    for (const auto& capability : version.policy_snapshot().allowed_capabilities()) {
+        if (!link_it->second.permits_capability(capability)) return CollaborationSubmitResult::Rejected;
+    }
+    for (const auto& effect : version.policy_snapshot().allowed_effects()) {
+        if (!link_it->second.permits_effect(effect)) return CollaborationSubmitResult::Rejected;
+    }
+    for (const auto& artifact : envelope.artifacts) {
+        if (!link_it->second.permits_artifact(artifact.artifact_identity)) {
+            return CollaborationSubmitResult::Rejected;
+        }
+    }
+    envelope.program_version_id = version.id();
+    validate_envelope_shape(envelope);
+    const auto existing = impl_->records.find(envelope.idempotency_key);
+    if (existing != impl_->records.end()) {
+        if (existing->second.envelope.content_hash() != envelope.content_hash()) {
+            return CollaborationSubmitResult::Conflict;
+        }
+        if (!existing->second.program_request ||
+            !existing->second.program_request->version ||
+            !existing->second.program_request->invocation ||
+            existing->second.program_request->version->id() != version.id() ||
+            existing->second.program_request->invocation->input != invocation.input ||
+            existing->second.program_request->invocation->budget != invocation.budget ||
+            existing->second.program_request->invocation->trace_id != invocation.trace_id ||
+            existing->second.program_request->invocation->requested_run_id !=
+                invocation.requested_run_id) {
+            return CollaborationSubmitResult::Conflict;
+        }
+        return CollaborationSubmitResult::Duplicate;
+    }
+    const auto highest = impl_->highest_sequence[envelope.correlation_id];
+    if (envelope.sequence != highest + 1) return CollaborationSubmitResult::Rejected;
+    impl_->highest_sequence[envelope.correlation_id] = envelope.sequence;
+    CollaborationRecord record{std::move(envelope),
+                                CollaborationRecordState::Accepted,
+                                {},
+                                CollaborationRecord::ProgramRequest{
+                                    std::make_shared<const program::ProgramVersion>(std::move(version)),
+                                    std::make_shared<const program::ProgramInvocation>(
+                                        std::move(invocation))}};
+    impl_->records.emplace(record.envelope.idempotency_key, std::move(record));
+    return CollaborationSubmitResult::Accepted;
+}
+
+CollaborationSubmitResult CollaborationMailbox::submit(
+    CollaborationEnvelope envelope,
+    program::ProgramVersion version,
+    program::ProgramInvocation invocation) {
+    return submit_program(std::move(envelope), std::move(version), std::move(invocation));
+}
+
+std::optional<CollaborationRecord::ProgramRequest>
+CollaborationMailbox::get_program_request(std::string_view idempotency_key) const {
+    std::lock_guard lock(impl_->mutex);
+    const auto it = impl_->records.find(std::string(idempotency_key));
+    if (it == impl_->records.end() || !it->second.program_request) return std::nullopt;
+    return it->second.program_request;
+}
+#endif
+
 bool CollaborationMailbox::acknowledge(std::string_view idempotency_key) {
     std::lock_guard lock(impl_->mutex);
     const auto it = impl_->records.find(std::string(idempotency_key));
@@ -805,6 +1002,13 @@ std::vector<CollaborationRecord> CollaborationMailbox::snapshot() const {
         return lhs.envelope.sequence < rhs.envelope.sequence;
     });
     return result;
+}
+
+bool CollaborationMailbox::permits_artifact(std::string_view link_id,
+                                             std::string_view artifact_identity) const {
+    std::lock_guard lock(impl_->mutex);
+    const auto it = impl_->links.find(std::string(link_id));
+    return it != impl_->links.end() && it->second.permits_artifact(artifact_identity);
 }
 
 std::string CollaborationMailbox::serialize_canonical() const {

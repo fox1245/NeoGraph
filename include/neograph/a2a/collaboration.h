@@ -21,6 +21,13 @@
 #include <string_view>
 #include <vector>
 
+#ifdef NEOGRAPH_A2A_PROGRAM
+namespace neograph::program {
+class ProgramVersion;
+struct ProgramInvocation;
+}  // namespace program
+#endif
+
 namespace neograph::a2a {
 
 enum class CollaborationLinkState : std::uint8_t {
@@ -104,6 +111,8 @@ struct NEOGRAPH_API CollaborationEnvelope {
     std::string receiver_agent_id;
     std::string sender_program_run_id;
     std::string receiver_program_run_id;
+    /// Optional admitted ProgramVersion identity. Legacy envelopes leave this empty.
+    std::string program_version_id;
     std::string a2a_task_id;
     std::string a2a_context_id;
     std::string message_id;
@@ -126,6 +135,14 @@ struct NEOGRAPH_API CollaborationEnvelope {
                                          std::string idempotency_key,
                                          json payload = json::object(),
                                          std::vector<CollaborationArtifactReference> artifacts = {});
+
+#ifdef NEOGRAPH_A2A_PROGRAM
+    /// Attach one exact admitted ProgramVersion identity to a collaboration request.
+    /// The version bytes remain in the receiver's ProgramCatalog; this identity is
+    /// carried so a reconnect cannot silently substitute another version.
+    static CollaborationEnvelope bind_program(const CollaborationEnvelope& envelope,
+                                              const program::ProgramVersion& version);
+#endif
 
     static CollaborationEnvelope parse(std::string_view stored_bytes);
     std::string serialize_canonical() const;
@@ -152,6 +169,16 @@ struct NEOGRAPH_API CollaborationRecord {
     CollaborationEnvelope envelope;
     CollaborationRecordState state = CollaborationRecordState::Accepted;
     std::string diagnostic;
+#ifdef NEOGRAPH_A2A_PROGRAM
+    /// Optional typed request retained alongside the durable envelope. The
+    /// canonical mailbox bytes contain the ProgramVersion and invocation, so a
+    /// cold reopen does not fall back to a GraphEngine-only task identity.
+    struct ProgramRequest {
+        std::shared_ptr<const program::ProgramVersion> version;
+        std::shared_ptr<const program::ProgramInvocation> invocation;
+    };
+    std::optional<ProgramRequest> program_request;
+#endif
 };
 
 enum class CollaborationSubmitResult : std::uint8_t {
@@ -189,6 +216,17 @@ public:
     void revoke_link(std::string_view link_id, std::string actor_agent_id);
 
     CollaborationSubmitResult submit(CollaborationEnvelope envelope);
+#ifdef NEOGRAPH_A2A_PROGRAM
+    CollaborationSubmitResult submit_program(CollaborationEnvelope envelope,
+                                              program::ProgramVersion version,
+                                              program::ProgramInvocation invocation);
+    /// Typed overload matching the legacy submit() naming convention.
+    CollaborationSubmitResult submit(CollaborationEnvelope envelope,
+                                      program::ProgramVersion version,
+                                      program::ProgramInvocation invocation);
+    std::optional<CollaborationRecord::ProgramRequest>
+    get_program_request(std::string_view idempotency_key) const;
+#endif
     bool acknowledge(std::string_view idempotency_key);
     bool cancel(std::string_view link_id,
                 std::string_view correlation_id,
@@ -197,6 +235,10 @@ public:
     /// Unauthorized/missing links return nullopt without disclosing existence.
     std::optional<CollaborationRecord> get(std::string_view idempotency_key) const;
     std::vector<CollaborationRecord> snapshot() const;
+    /// Check the receiver-side artifact attenuation for one accepted link.
+    /// Missing, revoked, expired, or unauthorized links return false.
+    bool permits_artifact(std::string_view link_id,
+                          std::string_view artifact_identity) const;
     std::string serialize_canonical() const;
 
 private:

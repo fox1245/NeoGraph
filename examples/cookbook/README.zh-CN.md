@@ -1,7 +1,9 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=zh-CN source_sha256=196d9349dd69857b75125e53794c23da721273076c336c2c4a37f21748bda4f6 -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=zh-CN source_sha256=b668003b55bbf84e6463dc6dbc7c708f77d62a9face15528b6fc7e32caac0182 -->
 # NeoGraph Cookbook
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
+P8 切换处置：[`spec/neograph-example-disposition-v1.json`](../../spec/neograph-example-disposition-v1.json)。
 
 这些端到端示例会把多个 NeoGraph 功能组合成一个真实可运行的场景。
 每一个都是自包含的：复制该文件夹，按它的 README 操作，然后运行。

@@ -361,6 +361,81 @@ TEST(ProgramCatalogTest, AdmitsRecomputedBundleAndPublishesAtomicallyWithoutRunn
     EXPECT_EQ(version.core_materialization_receipt().plans, bundle.core_plan_identities());
 }
 
+TEST(ProgramCatalogTest, OwnerQualifiedStoreAndCatalogLookupsHideForeignPublicIds) {
+    CatalogFixture fixture(registry());
+    const auto     bundle  = compile(fixture.snapshot);
+    const auto     version = fixture.catalog.admit(bundle, fixture.request());
+
+    EXPECT_TRUE(fixture.store->get_version("tenant:catalog", version.id()).has_value());
+    EXPECT_FALSE(fixture.store->get_version("tenant:other", version.id()).has_value());
+    EXPECT_TRUE(fixture.store->get_bundle("tenant:catalog", bundle.id()).has_value());
+    EXPECT_FALSE(fixture.store->get_bundle("tenant:other", bundle.id()).has_value());
+    EXPECT_TRUE(fixture.catalog.find_version("tenant:catalog", version.id()).has_value());
+    EXPECT_FALSE(fixture.catalog.find_version("tenant:other", version.id()).has_value());
+}
+
+TEST(ProgramCatalogTest, TrustedNativeRequiresMatchingAuthenticatedHostIdentity) {
+    RegistrySnapshotBuilder registry_builder;
+    auto native = manifest(ExecutableKind::Node, "catalog-node", '1');
+    native.effect_mode = EffectMode::TrustedNative;
+    native.attestation_id = "host:trusted";
+    registry_builder.add_node(
+        std::move(native),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<CatalogNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+    registry_builder.add_reducer(manifest(ExecutableKind::Reducer, "catalog-overwrite", '2'),
+                                 [](const json&, const json& incoming) { return json(incoming); });
+    auto snapshot = std::move(registry_builder).build();
+    AdmissionProfileBuilder profile_builder;
+    profile_builder.id("trusted-catalog-profile")
+        .semantic_version("1.0.0")
+        .registry(snapshot)
+        .mode(AdmissionMode::TrustedEmbedding)
+        .max_program_schema_version(1)
+        .allow_source_kind(SourceKind::CppBuilder)
+        .allow_effect_mode(EffectMode::Brokered)
+        .allow_effect_mode(EffectMode::TrustedNative);
+    for (const auto& identity : snapshot.identities())
+        profile_builder.allow_executable(identity);
+    const auto trusted_profile = std::move(profile_builder).build();
+    PolicySnapshotBuilder policy_builder;
+    policy_builder.id("trusted-catalog-policy")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:catalog")
+        .admission_profile(trusted_profile)
+        .allow_capability(std::string(TRUSTED_NATIVE_CAPABILITY))
+        .budget_ceiling(BudgetLimits{1000, 100, 100, 1, 1, 20, 1, 1, 1});
+    const auto trusted_policy = std::move(policy_builder).build();
+    const auto bundle = compile(snapshot);
+
+    const auto try_admit = [&](std::string host_identity, std::string_view expected_code) {
+        ProgramCatalog catalog(CatalogConfig{
+            std::make_shared<InMemoryProgramStore>(), snapshot,
+            std::make_shared<EngineGenerationCache>(), "catalog-test/v1", {}, 1,
+            {}, std::move(host_identity)});
+        return [&] {
+            try {
+                (void)catalog.admit(
+                    bundle, ProgramAdmission{"tenant:catalog", trusted_profile, trusted_policy, {}});
+                return false;
+            } catch (const ProgramAdmissionError& error) {
+                return has_code(error, std::string(expected_code));
+            }
+        }();
+    };
+    EXPECT_TRUE(try_admit({}, "P_ADMIT_HOST_IDENTITY"));
+    EXPECT_TRUE(try_admit("host:other", "P_ADMIT_HOST_IDENTITY"));
+
+    ProgramCatalog catalog(CatalogConfig{
+        std::make_shared<InMemoryProgramStore>(), snapshot,
+        std::make_shared<EngineGenerationCache>(), "catalog-test/v1", {}, 1, {},
+        "host:trusted"});
+    EXPECT_NO_THROW((void)catalog.admit(
+        bundle, ProgramAdmission{"tenant:catalog", trusted_profile, trusted_policy, {}}));
+}
+
 TEST(ProgramCatalogTest, RejectsEveryCallerAssertedSemanticTamperBeforeFactory) {
     using Mutation = std::function<void(ProgramBundleData&)>;
     const std::vector<Mutation> mutations{
@@ -805,6 +880,56 @@ TEST(ProgramCatalogTest, ActivationCompareAndSwapAndRetentionAreOwnerScoped) {
     EXPECT_TRUE(fixture.store->get_bundle(bundle.id()).has_value());
 }
 
+TEST(ProgramCatalogTest, RollbackIsAnOwnerScopedActivationCasAndChecksPolicyIdentity) {
+    CatalogFixture fixture(registry());
+    const auto     bundle = compile(fixture.snapshot);
+    const auto     first  = fixture.catalog.admit(bundle, fixture.request());
+
+    PolicySnapshotBuilder policy_builder;
+    policy_builder.id("catalog-policy-rollback")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:catalog")
+        .admission_profile(fixture.admission)
+        .budget_ceiling(BudgetLimits{1000, 100, 100, 1, 1, 20, 1, 1, 1});
+    const auto second_policy = std::move(policy_builder).build();
+    const auto second = fixture.catalog.admit(
+        bundle, ProgramAdmission{"tenant:catalog", fixture.admission, second_policy, {}});
+
+    EXPECT_EQ(fixture.catalog.activate("tenant:catalog", first.id(), 0),
+              ProgramActivationResult::Activated);
+    EXPECT_EQ(fixture.catalog.activate("tenant:catalog", second.id(), 1),
+              ProgramActivationResult::Activated);
+    EXPECT_EQ(fixture.catalog.rollback("tenant:catalog", first.id(), 1),
+              ProgramActivationResult::Conflict);
+    EXPECT_EQ(fixture.catalog.rollback("tenant:catalog", first.id(), 2),
+              ProgramActivationResult::Activated);
+    ASSERT_TRUE(fixture.catalog.activation("tenant:catalog").has_value());
+    EXPECT_EQ(fixture.catalog.activation("tenant:catalog")->active_version_id(), first.id());
+
+    EXPECT_THROW(fixture.store->compare_activate("tenant:catalog", 3, first.id(), digest('z')),
+                 std::invalid_argument);
+    EXPECT_THROW(fixture.store->compare_activate("tenant:other", 0, first.id(),
+                                                 first.policy_snapshot().fingerprint()),
+                 std::invalid_argument);
+}
+
+TEST(ProgramCatalogTest, RetentionRejectsUnknownAndForeignPinsBeforeMutation) {
+    CatalogFixture fixture(registry());
+    const auto     bundle  = compile(fixture.snapshot);
+    const auto     version = fixture.catalog.admit(bundle, fixture.request());
+    ASSERT_TRUE(fixture.store->get_version("tenant:catalog", version.id()).has_value());
+    EXPECT_FALSE(fixture.store->get_version("tenant:other", version.id()).has_value());
+    ASSERT_TRUE(fixture.store->get_bundle("tenant:catalog", bundle.id()).has_value());
+    EXPECT_FALSE(fixture.store->get_bundle("tenant:other", bundle.id()).has_value());
+    EXPECT_THROW(fixture.catalog.collect_retention("tenant:catalog", {"sha256:missing"}),
+                 std::invalid_argument);
+    EXPECT_THROW(fixture.catalog.collect_retention("tenant:other", {version.id()}),
+                 std::invalid_argument);
+    EXPECT_THROW(fixture.store->collect_garbage("tenant:catalog", {"sha256:missing"}),
+                 std::invalid_argument);
+    EXPECT_TRUE(fixture.store->get_version(version.id()).has_value());
+}
+
 TEST(ProgramCatalogTest, MigrationPlanRecordsCompatibilityProofAndRoundTrips) {
     CatalogFixture fixture(registry());
     const auto     bundle = compile(fixture.snapshot);
@@ -833,6 +958,93 @@ TEST(ProgramCatalogTest, MigrationPlanRecordsCompatibilityProofAndRoundTrips) {
     EXPECT_EQ(explicit_plan.blockers(), std::vector<std::string>{"compiler_build_id"});
 }
 
+TEST(ProgramCatalogTest, ComposedAdmissionRequiresVerifiedModuleStore) {
+    CatalogFixture fixture(registry());
+    const auto     bundle = compile(fixture.snapshot);
+    ProgramModuleData module_data;
+    module_data.owner_scope    = "tenant:catalog";
+    module_data.coordinate     = ModuleCoordinate{"catalog", "parent", "1.0.0", ""};
+    module_data.attestation_id = "attestation:catalog";
+    const auto parent = ProgramModule::create(std::move(module_data));
+    ModuleResolution resolution;
+    resolution.root = parent.coordinate();
+    resolution.modules.push_back(parent);
+    const ProgramComposition composition{parent, resolution, {}};
+
+    EXPECT_THROW((void)fixture.catalog.admit_composed(bundle, fixture.request(), composition),
+                 std::invalid_argument);
+}
+
+TEST(ProgramCatalogTest, MigrationPlanCoversEveryP5DimensionWithNarrowMappings) {
+    CatalogFixture fixture(registry());
+    const auto     bundle = compile(fixture.snapshot);
+    const auto     source = fixture.catalog.admit(bundle, fixture.request());
+
+    PolicySnapshotBuilder policy_builder;
+    policy_builder.id("catalog-policy-p5-mapping")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:catalog")
+        .admission_profile(fixture.admission)
+        .budget_ceiling(BudgetLimits{1000, 100, 100, 1, 1, 20, 1, 1, 1});
+    const auto target = fixture.catalog.admit(
+        bundle, ProgramAdmission{"tenant:catalog", fixture.admission,
+                                 std::move(policy_builder).build(), {}});
+
+    const auto plan = fixture.catalog.plan_migration("tenant:catalog", source.id(), target.id());
+    ASSERT_TRUE(plan.is_compatible());
+    EXPECT_TRUE(plan.diagnostics().empty());
+    ASSERT_EQ(plan.mappings().size(), 14U);
+    for (std::uint8_t index = 0; index < 14; ++index) {
+        EXPECT_EQ(static_cast<std::uint8_t>(plan.mappings()[index].dimension), index);
+        EXPECT_FALSE(plan.mappings()[index].rule.empty());
+    }
+    const auto reparsed = MigrationPlan::parse(plan.serialize_canonical());
+    for (std::size_t index = 0; index < plan.mappings().size(); ++index) {
+        EXPECT_EQ(reparsed.mappings()[index].dimension, plan.mappings()[index].dimension);
+        EXPECT_EQ(reparsed.mappings()[index].rule, plan.mappings()[index].rule);
+    }
+}
+
+TEST(ProgramCatalogTest, MigrationPlanFailsClosedForUnknownCompatibilityAndMismatches) {
+    CatalogFixture fixture(registry());
+    const auto     bundle = compile(fixture.snapshot);
+    const auto     source = fixture.catalog.admit(bundle, fixture.request());
+    PolicySnapshotBuilder policy_builder;
+    policy_builder.id("catalog-policy-p5-blocked")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:catalog")
+        .admission_profile(fixture.admission)
+        .budget_ceiling(BudgetLimits{2000, 200, 200, 2, 2, 40, 2, 2, 2});
+    const auto target = fixture.catalog.admit(
+        bundle, ProgramAdmission{"tenant:catalog",
+                                 fixture.admission,
+                                 std::move(policy_builder).build(), {}});
+    const auto expanded =
+        fixture.catalog.plan_migration("tenant:catalog", source.id(), target.id());
+    EXPECT_TRUE(expanded.is_compatible());
+
+    const auto blocked = MigrationPlan::create(MigrationPlanData{
+        source.id(), target.id(), "tenant:catalog", MigrationCompatibility::Blocked,
+        {"budget_ceiling"},
+        {MigrationDiagnostic{MigrationDimension::Budget,
+                             "budget_ceiling",
+                             "source budget is not covered",
+                             json{{"max_core_steps", 20}},
+                             json{{"max_core_steps", 10}}}},
+        {}});
+    EXPECT_FALSE(blocked.is_compatible());
+    EXPECT_FALSE(blocked.diagnostics().empty());
+    EXPECT_EQ(blocked.diagnostics().front().dimension, MigrationDimension::Budget);
+
+    const auto compatible = MigrationPlan::between(source, source);
+    auto       stored     = compatible.serialize_canonical();
+    const auto marker     = std::string("fork_compatible");
+    const auto position   = stored.find(marker);
+    ASSERT_NE(position, std::string::npos);
+    stored.replace(position, marker.size(), "unknown_compatibility");
+    EXPECT_THROW((void)MigrationPlan::parse(stored), std::invalid_argument);
+}
+
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 TEST(ProgramCatalogTest, SQLiteProgramStoreReopensActivationAndRetention) {
     static std::atomic<unsigned> sequence{0};
@@ -857,6 +1069,10 @@ TEST(ProgramCatalogTest, SQLiteProgramStoreReopensActivationAndRetention) {
         SQLiteProgramStore store(path);
         ASSERT_TRUE(store.get_bundle(bundle.id()).has_value());
         ASSERT_TRUE(store.get_version(version.id()).has_value());
+        ASSERT_TRUE(store.get_version("tenant:catalog", version.id()).has_value());
+        EXPECT_FALSE(store.get_version("tenant:other", version.id()).has_value());
+        ASSERT_TRUE(store.get_bundle("tenant:catalog", bundle.id()).has_value());
+        EXPECT_FALSE(store.get_bundle("tenant:other", bundle.id()).has_value());
         const auto activation = store.get_activation("tenant:catalog");
         ASSERT_TRUE(activation.has_value());
         EXPECT_EQ(activation->generation(), 1U);
@@ -864,6 +1080,10 @@ TEST(ProgramCatalogTest, SQLiteProgramStoreReopensActivationAndRetention) {
         EXPECT_EQ(store.compare_activate("tenant:catalog", 0, version.id(),
                                          version.policy_snapshot().fingerprint()),
                   ProgramActivationResult::Conflict);
+        EXPECT_THROW(store.compare_activate("tenant:catalog", 1, version.id(), digest('z')),
+                     std::invalid_argument);
+        EXPECT_THROW(store.collect_garbage("tenant:catalog", {"sha256:missing"}),
+                     std::invalid_argument);
         EXPECT_EQ(store.collect_garbage("tenant:catalog", {}).versions_removed, 0U);
     }
 

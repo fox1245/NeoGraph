@@ -810,13 +810,17 @@ struct ProgramCatalog::Impl {
          std::shared_ptr<EngineGenerationCache> engine_cache,
          std::string                            build_id,
          CatalogCapabilityBinder                binder,
-         std::size_t                            workers)
+         std::size_t                            workers,
+         std::shared_ptr<const ModuleStore>     modules,
+         std::string                            host)
         : program_store(std::move(store)),
           registry(std::move(registry_snapshot)),
           engines(std::move(engine_cache)),
           compiler_build_id(std::move(build_id)),
           capability_binder(std::move(binder)),
-          worker_count(workers) {}
+          worker_count(workers),
+          module_store(std::move(modules)),
+          host_identity(std::move(host)) {}
 
     std::shared_ptr<ProgramStore>          program_store;
     RegistrySnapshot                       registry;
@@ -824,6 +828,8 @@ struct ProgramCatalog::Impl {
     std::string                            compiler_build_id;
     CatalogCapabilityBinder                capability_binder;
     std::size_t                            worker_count = 1;
+    std::shared_ptr<const ModuleStore>     module_store;
+    std::string                            host_identity;
 
     mutable std::mutex mutex;
     std::unordered_map<std::string, std::shared_ptr<const detail::MaterializedProgram>>
@@ -841,6 +847,9 @@ ProgramCatalog::ProgramCatalog(CatalogConfig config) {
     if (config.worker_count == 0) {
         throw std::invalid_argument("CatalogConfig worker_count must be positive");
     }
+    if (!config.host_identity.empty()) {
+        detail::validate_token(config.host_identity, "Catalog host_identity");
+    }
 
     {
         std::lock_guard lock(config.engines->impl_->mutex);
@@ -855,7 +864,7 @@ ProgramCatalog::ProgramCatalog(CatalogConfig config) {
     impl_ = std::make_unique<Impl>(
         std::move(config.program_store), std::move(config.registry), std::move(config.engines),
         std::move(config.compiler_build_id), std::move(config.capability_binder),
-        config.worker_count);
+        config.worker_count, std::move(config.module_store), std::move(config.host_identity));
 }
 
 ProgramCatalog::ProgramCatalog(ProgramCatalog&&) noexcept            = default;
@@ -865,6 +874,38 @@ ProgramCatalog::~ProgramCatalog()                                    = default;
 ProgramVersion ProgramCatalog::admit(const ProgramBundle& input_bundle,
                                      ProgramAdmission     admission) {
     return materialize(input_bundle, std::move(admission), std::nullopt, nullptr, true);
+}
+
+ProgramVersion ProgramCatalog::admit_composed(const ProgramBundle&      input_bundle,
+                                              ProgramAdmission           admission,
+                                              const ProgramComposition& composition) {
+    if (!impl_->module_store)
+        throw std::invalid_argument("Composed admission requires a configured ModuleStore");
+    if (composition.parent.owner_scope() != admission.owner_scope)
+        throw std::invalid_argument("Composed parent module owner differs from admission scope");
+    validate_program_composition(input_bundle, composition);
+    // Child identities are authority-bearing inputs. They must already be
+    // present in the owner-qualified durable catalog; a caller cannot pass a
+    // merely well-formed fabricated ProgramVersion into composition.
+    for (const auto& child : composition.children) {
+        const auto stored_version =
+            impl_->program_store->get_version(admission.owner_scope, child.version.id());
+        auto stored_bundle = impl_->program_store->get_bundle(admission.owner_scope,
+                                                              child.bundle.id());
+        if (!stored_bundle) stored_bundle = impl_->program_store->get_bundle(child.bundle.id());
+        if (!stored_version || !stored_bundle ||
+            stored_version->serialize_canonical() != child.version.serialize_canonical() ||
+            stored_bundle->serialize_canonical() != child.bundle.serialize_canonical())
+            throw std::invalid_argument("Composed child is not an exact admitted catalog value");
+    }
+    const auto receipts = composition.resolution.receipts;
+    if (admission.dependency_receipts.empty()) {
+        admission.dependency_receipts = receipts;
+    } else if (admission.dependency_receipts != receipts) {
+        throw std::invalid_argument(
+            "Composed admission dependency receipts differ from the resolved module closure");
+    }
+    return admit(input_bundle, std::move(admission));
 }
 
 ProgramVersion ProgramCatalog::materialize(
@@ -887,6 +928,14 @@ ProgramVersion ProgramCatalog::materialize(
 
     AdmissionDiagnostics diagnostics(bundle.id());
     const auto           registry_fingerprint = impl_->registry.fingerprint();
+
+    try {
+        (void)bundle.typed_orchestration_plan();
+    } catch (const std::exception& error) {
+        diagnostics.add("P_ADMIT_PLAN", "/orchestration_plan",
+                        "Bundle orchestration plan is not a valid typed immutable plan",
+                        json{{"error", error.what()}});
+    }
 
     if (bundle.compiler_build_id() != impl_->compiler_build_id) {
         diagnostics.add(
@@ -961,6 +1010,82 @@ ProgramVersion ProgramCatalog::materialize(
                         "Supplied dependency receipts do not match the bundle Merkle root",
                         json{{"bundle", bundle.module_dependency_merkle_root()},
                              {"recomputed", recomputed_dependency_root}});
+    }
+
+    // A Merkle root alone is not an authority proof. Re-open every pinned
+    // module through the owner-qualified store view and verify the complete
+    // transitive closure before Core materialization. Empty legacy imports
+    // remain valid; any non-empty dependency claim requires the immutable
+    // module store and an exact coordinate/receipt set.
+    const auto& module_coordinates = bundle.module_coordinates();
+    if (!module_coordinates.empty() || !admission.dependency_receipts.empty()) {
+        if (!impl_->module_store) {
+            diagnostics.add(
+                "P_ADMIT_MODULE_STORE", "/module_coordinates",
+                "Program admission with module dependencies requires an immutable ModuleStore");
+        } else {
+            std::set<std::pair<std::string, std::string>> coordinate_keys;
+            std::map<std::string, std::string, std::less<>> expected_receipts;
+            for (const auto& coordinate : module_coordinates) {
+                const auto key = std::pair{coordinate.qualified_name(), coordinate.content_identity};
+                if (!coordinate_keys.insert(key).second) continue;
+                expected_receipts.emplace(coordinate.qualified_name(), coordinate.content_identity);
+                const auto module = impl_->module_store->get(admission.owner_scope,
+                                                              coordinate.content_identity);
+                if (!module) {
+                    diagnostics.add(
+                        "P_ADMIT_DEPENDENCY", "/module_coordinates",
+                        "Pinned module is unavailable in the admitting owner scope",
+                        json{{"coordinate", coordinate.qualified_name()},
+                             {"content_identity", coordinate.content_identity}});
+                    continue;
+                }
+                if (module->coordinate() != coordinate || module->owner_scope() != admission.owner_scope) {
+                    diagnostics.add(
+                        "P_ADMIT_DEPENDENCY", "/module_coordinates",
+                        "Pinned module coordinate or owner scope does not match the stored module",
+                        json{{"coordinate", coordinate.qualified_name()},
+                             {"content_identity", coordinate.content_identity}});
+                }
+            }
+
+            std::map<std::string, std::string, std::less<>> actual_receipts;
+            for (const auto& receipt : admission.dependency_receipts)
+                actual_receipts.emplace(receipt.dependency_id, receipt.content_identity);
+            if (actual_receipts != expected_receipts) {
+                json expected_json = json::object();
+                json actual_json   = json::object();
+                for (const auto& [id, digest] : expected_receipts) expected_json[id] = digest;
+                for (const auto& [id, digest] : actual_receipts) actual_json[id] = digest;
+                diagnostics.add(
+                    "P_ADMIT_DEPENDENCY", "/dependency_receipts",
+                    "Dependency receipts must exactly cover the sealed module coordinates",
+                    json{{"expected", std::move(expected_json)},
+                         {"actual", std::move(actual_json)}});
+            }
+
+            try {
+                const ModuleResolver resolver(impl_->module_store);
+                for (const auto& coordinate : module_coordinates) {
+                    const auto resolution = resolver.resolve(coordinate, admission.policy);
+                    for (const auto& module : resolution.modules) {
+                        const auto key =
+                            std::pair{module.coordinate().qualified_name(), module.id()};
+                        if (!coordinate_keys.contains(key)) {
+                            diagnostics.add(
+                                "P_ADMIT_DEPENDENCY", "/module_coordinates",
+                                "Sealed module coordinates omit a transitive dependency",
+                                json{{"coordinate", module.coordinate().qualified_name()},
+                                     {"content_identity", module.id()}});
+                        }
+                    }
+                }
+            } catch (const std::exception& error) {
+                diagnostics.add("P_ADMIT_DEPENDENCY", "/module_coordinates",
+                                "Pinned module dependency closure failed closed",
+                                json{{"error", error.what()}});
+            }
+        }
     }
 
     const auto input_contract  = bundle.input_contract();
@@ -1086,6 +1211,34 @@ ProgramVersion ProgramCatalog::materialize(
                 diagnostics.add("P_ADMIT_POLICY", "/executable_registry_identities",
                                 "Executable effect mode is denied by the admission profile",
                                 json{{"effect_mode", std::string(to_string(mode))}});
+            }
+            if (mode == EffectMode::TrustedNative) {
+                if (admission.profile.mode() != AdmissionMode::TrustedEmbedding) {
+                    diagnostics.add(
+                        "P_ADMIT_TRUSTED_NATIVE", "/executable_registry_identities",
+                        "TrustedNative executables require TrustedEmbedding admission",
+                        json{{"admission_mode", std::string(to_string(admission.profile.mode()))}});
+                }
+                if (impl_->host_identity.empty()) {
+                    diagnostics.add(
+                        "P_ADMIT_HOST_IDENTITY", "/executable_registry_identities",
+                        "TrustedNative admission requires an authenticated Catalog host identity");
+                }
+            }
+        }
+        if (!impl_->host_identity.empty()) {
+            for (const auto& identity : closure->identities) {
+                const auto manifest = impl_->registry.find(identity.kind, identity.name);
+                if (!manifest || manifest->identity != identity) continue;
+                if (manifest->effect_mode == EffectMode::TrustedNative &&
+                    manifest->attestation_id != impl_->host_identity) {
+                    diagnostics.add(
+                        "P_ADMIT_HOST_IDENTITY", "/executable_registry_identities",
+                        "TrustedNative executable attestation does not match the Catalog host",
+                        json{{"executable", identity_json(identity)},
+                             {"attestation_id", manifest->attestation_id},
+                             {"host_identity", impl_->host_identity}});
+                }
             }
         }
         for (const auto& capability : closure->closure.capabilities) {
@@ -1290,8 +1443,8 @@ MigrationPlan ProgramCatalog::plan_migration(std::string_view owner_scope,
                                              std::string_view source_version_id,
                                              std::string_view target_version_id) const {
     detail::validate_token(owner_scope, "Program migration owner_scope");
-    const auto source = impl_->program_store->get_version(source_version_id);
-    const auto target = impl_->program_store->get_version(target_version_id);
+    const auto source = impl_->program_store->get_version(owner_scope, source_version_id);
+    const auto target = impl_->program_store->get_version(owner_scope, target_version_id);
     if (!source || !target)
         throw std::invalid_argument("Program migration references an unpublished version");
     if (source->ownership_scope() != owner_scope || target->ownership_scope() != owner_scope)
@@ -1308,6 +1461,15 @@ ProgramActivationResult ProgramCatalog::activate(std::string_view owner_scope,
                                                   version->policy_snapshot().fingerprint());
 }
 
+ProgramActivationResult ProgramCatalog::rollback(std::string_view owner_scope,
+                                                 std::string_view version_id,
+                                                 std::uint64_t expected_generation) {
+    // Rollback is deliberately the same owner-scoped activation CAS: an older
+    // immutable version is published for future resolutions while existing
+    // runs retain their already pinned materialization.
+    return activate(owner_scope, version_id, expected_generation);
+}
+
 std::optional<ProgramActivation>
 ProgramCatalog::activation(std::string_view owner_scope) const {
     detail::validate_token(owner_scope, "Program activation owner_scope");
@@ -1319,7 +1481,7 @@ ProgramRetentionReport ProgramCatalog::collect_retention(
     const std::vector<std::string>& pinned_version_ids) {
     detail::validate_token(owner_scope, "Program retention owner_scope");
     for (const auto& id : pinned_version_ids) {
-        const auto version = impl_->program_store->get_version(id);
+        const auto version = impl_->program_store->get_version(owner_scope, id);
         if (!version || version->ownership_scope() != owner_scope)
             throw std::invalid_argument("Program retention pin crosses an owner scope boundary");
     }
@@ -1343,7 +1505,7 @@ std::optional<ProgramVersion> ProgramCatalog::resolve_version_impl(
     std::optional<CatalogCapabilityBinding> supplied_binding,
     std::shared_ptr<const detail::MaterializedProgram>* isolated_materialization) {
     detail::validate_token(owner_scope, "Program resolve owner_scope");
-    const auto stored_value = impl_->program_store->get_version(id);
+    const auto stored_value = impl_->program_store->get_version(owner_scope, id);
     if (!stored_value) return std::nullopt;
 
     ProgramVersion stored = [&]() {
@@ -1359,7 +1521,12 @@ std::optional<ProgramVersion> ProgramCatalog::resolve_version_impl(
     }();
     if (stored.ownership_scope() != owner_scope) return std::nullopt;
 
-    const auto bundle_value = impl_->program_store->get_bundle(stored.bundle_id());
+    // The version is the owner-bearing authority record. A bounded adapter
+    // may expose only its one immutable bundle; after the exact owner-
+    // qualified version has been established, that hash-addressed bundle is
+    // safe to load through the legacy view as a compatibility fallback.
+    auto bundle_value = impl_->program_store->get_bundle(owner_scope, stored.bundle_id());
+    if (!bundle_value) bundle_value = impl_->program_store->get_bundle(stored.bundle_id());
     if (!bundle_value) {
         AdmissionDiagnostics diagnostics(stored.id());
         diagnostics.add("P_RESOLVE_STORE", "/bundle_id",
@@ -1401,10 +1568,24 @@ std::optional<ProgramVersion> ProgramCatalog::find_version(std::string_view id) 
     std::lock_guard lock(impl_->mutex);
     const auto      known = impl_->materialized.find(std::string(id));
     if (known == impl_->materialized.end()) return std::nullopt;
-    const auto stored = impl_->program_store->get_version(id);
+    const auto stored = impl_->program_store->get_version(known->second->version.ownership_scope(), id);
     if (!stored || stored->serialize_canonical() != known->second->version.serialize_canonical()) {
         return std::nullopt;
     }
+    return known->second->version;
+}
+
+std::optional<ProgramVersion> ProgramCatalog::find_version(std::string_view owner_scope,
+                                                            std::string_view id) const {
+    detail::validate_token(owner_scope, "Program find owner_scope");
+    std::lock_guard lock(impl_->mutex);
+    const auto      known = impl_->materialized.find(std::string(id));
+    if (known == impl_->materialized.end() ||
+        known->second->version.ownership_scope() != owner_scope)
+        return std::nullopt;
+    const auto stored = impl_->program_store->get_version(owner_scope, id);
+    if (!stored || stored->serialize_canonical() != known->second->version.serialize_canonical())
+        return std::nullopt;
     return known->second->version;
 }
 
@@ -1416,8 +1597,12 @@ std::shared_ptr<const detail::MaterializedProgram> detail::CatalogRuntimeAccess:
         found->second->version.serialize_canonical() != version.serialize_canonical()) {
         throw ProgramDiagnosticError(start_not_admitted(version.id()));
     }
-    const auto stored_version = catalog.impl_->program_store->get_version(version.id());
-    const auto stored_bundle = catalog.impl_->program_store->get_bundle(found->second->bundle.id());
+    const auto stored_version = catalog.impl_->program_store->get_version(
+        version.ownership_scope(), version.id());
+    auto stored_bundle = catalog.impl_->program_store->get_bundle(
+        version.ownership_scope(), found->second->bundle.id());
+    if (!stored_bundle)
+        stored_bundle = catalog.impl_->program_store->get_bundle(found->second->bundle.id());
     if (!stored_version || !stored_bundle ||
         stored_version->serialize_canonical() != found->second->version.serialize_canonical() ||
         stored_bundle->serialize_canonical() != found->second->bundle.serialize_canonical()) {

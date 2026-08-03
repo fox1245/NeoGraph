@@ -131,12 +131,47 @@ private:
 
 std::optional<ProgramActivation> load_activation(PGconn* connection,
                                                   std::string_view owner_scope) {
+    auto result = exec_params(
+        connection,
+        "SELECT generation, active_version_id, policy_snapshot_hash, canonical_bytes "
+        "FROM neograph_program_activations WHERE owner_scope = $1",
+        {std::string(owner_scope)});
+    if (PQntuples(result.get()) == 0) return std::nullopt;
+    if (PQntuples(result.get()) != 1 || PQnfields(result.get()) != 4)
+        throw std::runtime_error("PostgreSQL ProgramStore returned an invalid activation row shape");
+    for (int field = 0; field < 4; ++field) {
+        if (PQgetisnull(result.get(), 0, field))
+            throw std::runtime_error("PostgreSQL ProgramStore returned a null activation field");
+    }
+    const auto generation_text = std::string(PQgetvalue(result.get(), 0, 0));
+    const auto generation      = std::stoull(generation_text);
+    if (generation == 0)
+        throw std::runtime_error("PostgreSQL Program activation has an invalid generation");
+    const auto active_version_id    = std::string(PQgetvalue(result.get(), 0, 1));
+    const auto policy_snapshot_hash = std::string(PQgetvalue(result.get(), 0, 2));
+    const auto bytes = std::string(PQgetvalue(result.get(), 0, 3),
+                                   static_cast<std::size_t>(PQgetlength(result.get(), 0, 3)));
+    auto       activation = ProgramActivation::parse(bytes);
+    if (activation.owner_scope() != owner_scope || activation.generation() != generation ||
+        activation.active_version_id() != active_version_id ||
+        activation.policy_snapshot_hash() != policy_snapshot_hash) {
+        throw std::runtime_error(
+            "PostgreSQL Program activation metadata does not match its canonical value");
+    }
+    return activation;
+}
+
+void verify_activation_target(PGconn* connection, const ProgramActivation& activation) {
     const auto bytes = select_bytes(
         connection,
-        "SELECT canonical_bytes FROM neograph_program_activations WHERE owner_scope = $1",
-        {std::string(owner_scope)});
-    if (!bytes) return std::nullopt;
-    return ProgramActivation::parse(*bytes);
+        "SELECT canonical_bytes FROM neograph_program_versions WHERE id = $1",
+        {activation.active_version_id()});
+    if (!bytes)
+        throw std::runtime_error("PostgreSQL Program activation references a missing version");
+    const auto version = ProgramVersion::parse(*bytes);
+    if (version.ownership_scope() != activation.owner_scope() ||
+        version.policy_snapshot().fingerprint() != activation.policy_snapshot_hash())
+        throw std::runtime_error("PostgreSQL Program activation target is not owner/policy bound");
 }
 
 void verify_existing(const std::optional<std::string>& existing,
@@ -253,10 +288,60 @@ std::optional<ProgramVersion> PostgreSQLProgramStore::get_version(std::string_vi
     return ProgramVersion::parse(*bytes);
 }
 
+std::optional<ProgramVersion>
+PostgreSQLProgramStore::get_version(std::string_view owner_scope, std::string_view id) const {
+    if (owner_scope.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    auto result = exec_params(
+        impl_->connection,
+        "SELECT bundle_id, owner_scope, canonical_bytes FROM neograph_program_versions "
+        "WHERE owner_scope = $1 AND id = $2",
+        {std::string(owner_scope), std::string(id)});
+    if (PQntuples(result.get()) == 0) return std::nullopt;
+    if (PQntuples(result.get()) != 1 || PQnfields(result.get()) != 3)
+        throw std::runtime_error("PostgreSQL ProgramStore returned an invalid version row shape");
+    for (int field = 0; field < 3; ++field) {
+        if (PQgetisnull(result.get(), 0, field))
+            throw std::runtime_error("PostgreSQL ProgramStore returned a null version field");
+    }
+    const auto bundle    = std::string(PQgetvalue(result.get(), 0, 0));
+    const auto row_owner = std::string(PQgetvalue(result.get(), 0, 1));
+    const auto version = ProgramVersion::parse(
+        std::string(PQgetvalue(result.get(), 0, 2),
+                    static_cast<std::size_t>(PQgetlength(result.get(), 0, 2))));
+    if (version.id() != id || version.bundle_id() != bundle ||
+        version.ownership_scope() != row_owner || row_owner != owner_scope)
+        throw std::runtime_error("PostgreSQL Program version metadata does not match its canonical value");
+    return version;
+}
+
+std::optional<ProgramBundle>
+PostgreSQLProgramStore::get_bundle(std::string_view owner_scope, std::string_view id) const {
+    if (owner_scope.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    const auto visible = select_bytes(
+        impl_->connection,
+        "SELECT bundle_id FROM neograph_program_versions "
+        "WHERE owner_scope = $1 AND bundle_id = $2 LIMIT 1",
+        {std::string(owner_scope), std::string(id)});
+    if (!visible) return std::nullopt;
+    const auto bytes = select_bytes(impl_->connection,
+                                    "SELECT canonical_bytes FROM neograph_program_bundles "
+                                    "WHERE id = $1",
+                                    {std::string(id)});
+    if (!bytes) return std::nullopt;
+    const auto bundle = ProgramBundle::parse(*bytes);
+    if (bundle.id() != id)
+        throw std::runtime_error("PostgreSQL Program bundle metadata does not match its canonical value");
+    return bundle;
+}
+
 std::optional<ProgramActivation>
 PostgreSQLProgramStore::get_activation(std::string_view owner_scope) const {
     std::lock_guard lock(impl_->mutex);
-    return load_activation(impl_->connection, owner_scope);
+    const auto activation = load_activation(impl_->connection, owner_scope);
+    if (activation) verify_activation_target(impl_->connection, *activation);
+    return activation;
 }
 
 ProgramActivationResult PostgreSQLProgramStore::compare_activate(
@@ -264,6 +349,8 @@ ProgramActivationResult PostgreSQLProgramStore::compare_activate(
     std::uint64_t    expected_generation,
     std::string_view version_id,
     std::string_view policy_snapshot_hash) {
+    if (owner_scope.empty())
+        throw std::invalid_argument("Program activation owner scope must not be empty");
     std::lock_guard lock(impl_->mutex);
     Transaction transaction(impl_->connection);
     const auto version_bytes = select_bytes(
@@ -275,8 +362,11 @@ ProgramActivationResult PostgreSQLProgramStore::compare_activate(
     const auto version = ProgramVersion::parse(*version_bytes);
     if (version.ownership_scope() != owner_scope)
         throw std::invalid_argument("Program activation owner scope does not match the version");
+    if (version.policy_snapshot().fingerprint() != policy_snapshot_hash)
+        throw std::invalid_argument("Program activation policy hash does not match the version");
 
     const auto current = load_activation(impl_->connection, owner_scope);
+    if (current) verify_activation_target(impl_->connection, *current);
     const auto generation = current ? current->generation() : std::uint64_t{0};
     if (generation != expected_generation) {
         transaction.commit();
@@ -294,35 +384,61 @@ ProgramActivationResult PostgreSQLProgramStore::compare_activate(
         ProgramActivationData{std::string(owner_scope), std::string(version_id),
                               expected_generation + 1, std::string(policy_snapshot_hash)});
     const auto activation_bytes = activation.serialize_canonical();
-    exec_params(
+    const auto published = exec_params(
         impl_->connection,
         "INSERT INTO neograph_program_activations(owner_scope, generation, active_version_id, "
         "policy_snapshot_hash, canonical_bytes) VALUES($1, $2, $3, $4, $5) "
         "ON CONFLICT(owner_scope) DO UPDATE SET generation = EXCLUDED.generation, "
         "active_version_id = EXCLUDED.active_version_id, "
         "policy_snapshot_hash = EXCLUDED.policy_snapshot_hash, "
-        "canonical_bytes = EXCLUDED.canonical_bytes",
+        "canonical_bytes = EXCLUDED.canonical_bytes "
+        "WHERE neograph_program_activations.generation = $6",
         {std::string(owner_scope), std::to_string(activation.generation()),
-         activation.active_version_id(), activation.policy_snapshot_hash(), activation_bytes});
+         activation.active_version_id(), activation.policy_snapshot_hash(), activation_bytes,
+         std::to_string(expected_generation)});
+    if (result_count(published) == 0) {
+        const auto winner = load_activation(impl_->connection, owner_scope);
+        if (!winner || winner->generation() != expected_generation ||
+            winner->active_version_id() != version_id ||
+            winner->policy_snapshot_hash() != policy_snapshot_hash) {
+            transaction.commit();
+            return ProgramActivationResult::Conflict;
+        }
+        transaction.commit();
+        return ProgramActivationResult::AlreadyPresent;
+    }
     transaction.commit();
     return ProgramActivationResult::Activated;
 }
 
 std::vector<ProgramVersion>
 PostgreSQLProgramStore::list_versions(std::string_view owner_scope) const {
+    if (owner_scope.empty())
+        throw std::invalid_argument("Program version owner scope must not be empty");
     std::lock_guard lock(impl_->mutex);
     auto result = exec_params(
         impl_->connection,
-        "SELECT canonical_bytes FROM neograph_program_versions WHERE owner_scope = $1 ORDER BY id",
+        "SELECT id, bundle_id, owner_scope, canonical_bytes FROM neograph_program_versions "
+        "WHERE owner_scope = $1 ORDER BY id",
         {std::string(owner_scope)});
     std::vector<ProgramVersion> versions;
     versions.reserve(static_cast<std::size_t>(PQntuples(result.get())));
     for (int row = 0; row < PQntuples(result.get()); ++row) {
-        if (PQgetisnull(result.get(), row, 0))
-            throw std::runtime_error("PostgreSQL ProgramStore returned a null version");
-        versions.push_back(ProgramVersion::parse(
-            std::string(PQgetvalue(result.get(), row, 0),
-                        static_cast<std::size_t>(PQgetlength(result.get(), row, 0)))));
+        for (int field = 0; field < 4; ++field) {
+            if (PQgetisnull(result.get(), row, field))
+                throw std::runtime_error("PostgreSQL ProgramStore returned a null version field");
+        }
+        const auto id        = std::string(PQgetvalue(result.get(), row, 0));
+        const auto bundle    = std::string(PQgetvalue(result.get(), row, 1));
+        const auto row_owner = std::string(PQgetvalue(result.get(), row, 2));
+        const auto version = ProgramVersion::parse(
+            std::string(PQgetvalue(result.get(), row, 3),
+                        static_cast<std::size_t>(PQgetlength(result.get(), row, 3))));
+        if (version.id() != id || version.bundle_id() != bundle ||
+            version.ownership_scope() != row_owner || row_owner != owner_scope)
+            throw std::runtime_error(
+                "PostgreSQL Program version metadata does not match its canonical value");
+        versions.push_back(version);
     }
     return versions;
 }
@@ -330,22 +446,53 @@ PostgreSQLProgramStore::list_versions(std::string_view owner_scope) const {
 ProgramRetentionReport PostgreSQLProgramStore::collect_garbage(
     std::string_view owner_scope,
     const std::vector<std::string>& pinned_version_ids) {
+    if (owner_scope.empty())
+        throw std::invalid_argument("Program retention owner scope must not be empty");
     std::lock_guard lock(impl_->mutex);
     Transaction transaction(impl_->connection);
+    for (const auto& pinned_id : pinned_version_ids) {
+        const auto bytes = select_bytes(
+            impl_->connection,
+            "SELECT canonical_bytes FROM neograph_program_versions WHERE id = $1",
+            {pinned_id});
+        if (!bytes)
+            throw std::invalid_argument("Program retention pin references an unpublished version");
+        const auto version = ProgramVersion::parse(*bytes);
+        if (version.ownership_scope() != owner_scope)
+            throw std::invalid_argument("Program retention pin crosses an owner scope boundary");
+    }
     std::set<std::string, std::less<>> keep(pinned_version_ids.begin(), pinned_version_ids.end());
-    if (const auto active = load_activation(impl_->connection, owner_scope))
+    if (const auto active = load_activation(impl_->connection, owner_scope)) {
+        verify_activation_target(impl_->connection, *active);
         keep.insert(active->active_version_id());
+    }
 
     auto result = exec_params(
         impl_->connection,
-        "SELECT id FROM neograph_program_versions WHERE owner_scope = $1 ORDER BY id",
+        "SELECT id, bundle_id, owner_scope, canonical_bytes FROM neograph_program_versions "
+        "WHERE owner_scope = $1 ORDER BY id",
         {std::string(owner_scope)});
     std::vector<std::string> remove;
+    std::set<std::string, std::less<>> bundles_to_check;
     for (int row = 0; row < PQntuples(result.get()); ++row) {
-        if (PQgetisnull(result.get(), row, 0)) continue;
-        const std::string id(PQgetvalue(result.get(), row, 0),
-                             static_cast<std::size_t>(PQgetlength(result.get(), row, 0)));
-        if (!keep.contains(id)) remove.push_back(id);
+        for (int field = 0; field < 4; ++field) {
+            if (PQgetisnull(result.get(), row, field))
+                throw std::runtime_error("PostgreSQL ProgramStore returned a null version field");
+        }
+        const auto id        = std::string(PQgetvalue(result.get(), row, 0));
+        const auto bundle    = std::string(PQgetvalue(result.get(), row, 1));
+        const auto row_owner = std::string(PQgetvalue(result.get(), row, 2));
+        const auto version = ProgramVersion::parse(
+            std::string(PQgetvalue(result.get(), row, 3),
+                        static_cast<std::size_t>(PQgetlength(result.get(), row, 3))));
+        if (version.id() != id || version.bundle_id() != bundle ||
+            version.ownership_scope() != row_owner || row_owner != owner_scope)
+            throw std::runtime_error(
+                "PostgreSQL Program version metadata does not match its canonical value");
+        if (!keep.contains(id)) {
+            remove.push_back(id);
+            bundles_to_check.insert(bundle);
+        }
     }
 
     ProgramRetentionReport report;
@@ -354,11 +501,14 @@ ProgramRetentionReport PostgreSQLProgramStore::collect_garbage(
             impl_->connection, "DELETE FROM neograph_program_versions WHERE id = $1", {id});
         report.versions_removed += result_count(deleted);
     }
-    const auto bundles = exec_sql(
-        impl_->connection,
-        "DELETE FROM neograph_program_bundles b WHERE NOT EXISTS ("
-        "SELECT 1 FROM neograph_program_versions v WHERE v.bundle_id = b.id)");
-    report.bundles_removed = result_count(bundles);
+    for (const auto& bundle_id : bundles_to_check) {
+        const auto bundle = exec_params(
+            impl_->connection,
+            "DELETE FROM neograph_program_bundles b WHERE b.id = $1 AND NOT EXISTS ("
+            "SELECT 1 FROM neograph_program_versions v WHERE v.bundle_id = b.id)",
+            {bundle_id});
+        report.bundles_removed += result_count(bundle);
+    }
     transaction.commit();
     return report;
 }

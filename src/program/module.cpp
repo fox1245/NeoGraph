@@ -221,6 +221,17 @@ void validate_ports(const std::vector<ModulePort>& ports, std::string_view field
     }
 }
 
+void normalize_child_requirements(ChildProgramDescriptor& child) {
+    std::sort(child.required_capabilities.begin(), child.required_capabilities.end());
+    std::sort(child.required_effects.begin(), child.required_effects.end());
+    if (std::adjacent_find(child.required_capabilities.begin(),
+                           child.required_capabilities.end()) != child.required_capabilities.end())
+        throw std::invalid_argument("Child required_capabilities contains a duplicate");
+    if (std::adjacent_find(child.required_effects.begin(), child.required_effects.end()) !=
+        child.required_effects.end())
+        throw std::invalid_argument("Child required_effects contains a duplicate");
+}
+
 void validate_module_data(ProgramModuleData& data) {
     require_nonempty(data.owner_scope, "Module owner_scope");
     require_nonempty(data.coordinate.namespace_name, "Module namespace");
@@ -243,7 +254,16 @@ void validate_module_data(ProgramModuleData& data) {
     std::sort(data.children.begin(), data.children.end(), [](const auto& lhs, const auto& rhs) {
         return lhs.name < rhs.name;
     });
-    for (const auto& child : data.children) {
+    std::sort(data.allowed_capabilities.begin(), data.allowed_capabilities.end());
+    std::sort(data.declared_effects.begin(), data.declared_effects.end());
+    if (std::adjacent_find(data.allowed_capabilities.begin(), data.allowed_capabilities.end()) !=
+        data.allowed_capabilities.end())
+        throw std::invalid_argument("Module allowed_capabilities contains a duplicate");
+    if (std::adjacent_find(data.declared_effects.begin(), data.declared_effects.end()) !=
+        data.declared_effects.end())
+        throw std::invalid_argument("Module declared_effects contains a duplicate");
+    for (auto& child : data.children) {
+        normalize_child_requirements(child);
         require_nonempty(child.name, "Child name");
         require_digest(child.program_version_id, "Child program_version_id");
         validate_ports(child.inputs, "child inputs");
@@ -263,14 +283,6 @@ void validate_module_data(ProgramModuleData& data) {
                            [](const auto& lhs, const auto& rhs) { return lhs.name == rhs.name; }) !=
         data.children.end())
         throw std::invalid_argument("Module children contain a duplicate name");
-    std::sort(data.allowed_capabilities.begin(), data.allowed_capabilities.end());
-    std::sort(data.declared_effects.begin(), data.declared_effects.end());
-    if (std::adjacent_find(data.allowed_capabilities.begin(), data.allowed_capabilities.end()) !=
-        data.allowed_capabilities.end())
-        throw std::invalid_argument("Module allowed_capabilities contains a duplicate");
-    if (std::adjacent_find(data.declared_effects.begin(), data.declared_effects.end()) !=
-        data.declared_effects.end())
-        throw std::invalid_argument("Module declared_effects contains a duplicate");
 }
 
 json module_body(const ProgramModuleData& data, std::string_view id) {
@@ -336,11 +348,11 @@ bool budget_leq(const BudgetLimits& lhs, const BudgetLimits& rhs) {
 }
 
 bool budget_positive(const BudgetLimits& budget) {
-    return budget.wall_time_ms != 0 && budget.model_tokens != 0 &&
-           budget.monetary_microunits != 0 && budget.max_concurrency != 0 &&
-           budget.max_program_operations != 0 && budget.max_core_steps != 0 &&
-           budget.max_dynamic_compiles != 0 && budget.max_child_depth != 0 &&
-           budget.max_total_children != 0;
+    // Zero is a valid attenuation for an unused resource (notably dynamic
+    // compilation and nested children). Execution itself still needs a
+    // positive operation, step, and concurrency allowance.
+    return budget.max_concurrency != 0 && budget.max_program_operations != 0 &&
+           budget.max_core_steps != 0;
 }
 
 bool budget_covers_requirements(const BudgetLimits& budget,
@@ -367,7 +379,7 @@ bool budget_covers_requirements(const BudgetLimits& budget,
             granted = budget.max_total_children;
         else
             return false;
-        if (granted < requirement.minimum) return false;
+        if (granted < requirement.maximum) return false;
     }
     return true;
 }
@@ -530,6 +542,191 @@ std::vector<ImportRef> ModuleResolution::imports() const {
     return result;
 }
 
+std::vector<ModuleCoordinate> ModuleResolution::coordinates() const {
+    std::vector<ModuleCoordinate> result;
+    result.reserve(modules.size());
+    for (const auto& module : modules) result.push_back(module.coordinate());
+    std::sort(result.begin(), result.end(), [](const auto& lhs, const auto& rhs) {
+        return std::tie(lhs.namespace_name, lhs.name, lhs.semantic_version,
+                        lhs.content_identity) <
+               std::tie(rhs.namespace_name, rhs.name, rhs.semantic_version,
+                        rhs.content_identity);
+    });
+    return result;
+}
+
+void validate_module_resolution(const ModuleResolution& resolution) {
+    require_digest(resolution.root.content_identity, "Module resolution root content_identity");
+    if (resolution.modules.empty())
+        throw std::invalid_argument("Module resolution must contain its root module");
+    const auto root = std::find_if(resolution.modules.begin(), resolution.modules.end(),
+                                   [&](const auto& module) {
+                                       return module.id() == resolution.root.content_identity;
+                                   });
+    if (root == resolution.modules.end() || root->coordinate() != resolution.root)
+        throw std::invalid_argument("Module resolution root is not an exact resolved module");
+
+    std::map<std::string, const ProgramModule*, std::less<>> by_id;
+    std::set<std::string, std::less<>> qualified_names;
+    for (const auto& module : resolution.modules) {
+        if (!by_id.emplace(module.id(), &module).second)
+            throw std::invalid_argument("Module resolution contains a duplicate content identity");
+        if (!qualified_names.insert(module.coordinate().qualified_name()).second)
+            throw std::invalid_argument("Module resolution contains a coordinate collision");
+        if (module.coordinate().content_identity != module.id())
+            throw std::invalid_argument("Module coordinate identity does not match module id");
+        if (module.lifecycle() != ModuleLifecycle::Active)
+            throw std::invalid_argument("Module resolution contains a non-active module");
+    }
+    for (const auto& module : resolution.modules) {
+        for (const auto& dependency : module.dependencies()) {
+            const auto found = by_id.find(dependency.content_identity);
+            if (found == by_id.end() || found->second->coordinate() != dependency)
+                throw std::invalid_argument("Module resolution contains an unpinned dependency");
+        }
+    }
+    std::set<std::string, std::less<>> active;
+    std::set<std::string, std::less<>> visited;
+    std::function<void(const ProgramModule&)> visit = [&](const ProgramModule& module) {
+        if (!active.insert(module.id()).second)
+            throw std::invalid_argument("Module resolution dependency cycle detected");
+        if (!visited.insert(module.id()).second) {
+            active.erase(module.id());
+            return;
+        }
+        for (const auto& dependency : module.dependencies()) visit(*by_id.at(dependency.content_identity));
+        active.erase(module.id());
+    };
+    visit(*root);
+    if (visited.size() != by_id.size())
+        throw std::invalid_argument("Module resolution contains an unreachable module");
+
+    // A one-module, dependency-free link assembled by legacy callers has no
+    // receipt to carry. Any real closure must carry a receipt for every exact
+    // coordinate; accepting an omitted receipt in a multi-module graph would
+    // make an import unpinned.
+    if (resolution.receipts.empty()) {
+        if (by_id.size() != 1 || !root->dependencies().empty())
+            throw std::invalid_argument("Module resolution has unpinned imports");
+        return;
+    }
+    std::set<std::string, std::less<>> receipt_ids;
+    for (const auto& receipt : resolution.receipts) {
+        require_nonempty(receipt.dependency_id, "Module dependency receipt id");
+        require_digest(receipt.content_identity, "Module dependency receipt identity");
+        if (!receipt_ids.insert(receipt.dependency_id).second)
+            throw std::invalid_argument("Module resolution contains duplicate dependency receipts");
+        const auto found = by_id.find(receipt.content_identity);
+        if (found == by_id.end() || found->second->coordinate().qualified_name() != receipt.dependency_id)
+            throw std::invalid_argument("Module dependency receipt is not bound to its coordinate");
+    }
+    if (receipt_ids.size() != by_id.size())
+        throw std::invalid_argument("Module resolution receipts do not cover the full closure");
+}
+
+namespace {
+
+std::uint64_t budget_value(const BudgetLimits& budget, std::string_view resource) {
+    if (resource == "wall_time_ms") return budget.wall_time_ms;
+    if (resource == "model_tokens") return budget.model_tokens;
+    if (resource == "monetary_microunits") return budget.monetary_microunits;
+    if (resource == "max_concurrency") return budget.max_concurrency;
+    if (resource == "max_program_operations") return budget.max_program_operations;
+    if (resource == "max_core_steps") return budget.max_core_steps;
+    if (resource == "max_dynamic_compiles") return budget.max_dynamic_compiles;
+    if (resource == "max_child_depth") return budget.max_child_depth;
+    if (resource == "max_total_children") return budget.max_total_children;
+    return 0;
+}
+
+void add_budget(BudgetLimits& total, const BudgetLimits& value) {
+    total.wall_time_ms += value.wall_time_ms;
+    total.model_tokens += value.model_tokens;
+    total.monetary_microunits += value.monetary_microunits;
+    total.max_concurrency += value.max_concurrency;
+    total.max_program_operations += value.max_program_operations;
+    total.max_core_steps += value.max_core_steps;
+    total.max_dynamic_compiles += value.max_dynamic_compiles;
+    total.max_child_depth += value.max_child_depth;
+    total.max_total_children += value.max_total_children;
+}
+
+}  // namespace
+
+void validate_program_composition(const ProgramBundle& parent_bundle,
+                                  const ProgramComposition& composition) {
+    validate_module_resolution(composition.resolution);
+    if (composition.parent.lifecycle() != ModuleLifecycle::Active)
+        throw std::invalid_argument("Cannot compose a non-active parent module");
+    if (composition.resolution.root != composition.parent.coordinate())
+        throw std::invalid_argument("Composition resolution root does not match its parent module");
+    if (parent_bundle.module_dependency_merkle_root() !=
+        composition.resolution.dependency_merkle_root())
+        throw std::invalid_argument("Parent bundle does not pin the module dependency closure");
+    if (!composition.resolution.receipts.empty() &&
+        parent_bundle.module_coordinates() != composition.resolution.coordinates())
+        throw std::invalid_argument("Parent bundle module coordinates differ from the resolution");
+    const auto& parent_closure = parent_bundle.capability_effect_closure();
+    if (!contains_all(composition.parent.allowed_capabilities(), parent_closure.capabilities) ||
+        !contains_all(composition.parent.declared_effects(), parent_closure.effects))
+        throw std::invalid_argument("Parent executable closure exceeds module authority");
+
+    std::map<std::string, const ChildProgramBinding*, std::less<>> by_name;
+    std::set<std::string, std::less<>> bundle_ids;
+    std::set<std::string, std::less<>> version_ids;
+    for (const auto& child : composition.children) {
+        if (!by_name.emplace(child.child_name, &child).second)
+            throw std::invalid_argument("Composition contains a child-name collision");
+        if (!bundle_ids.insert(child.bundle.id()).second ||
+            !version_ids.insert(child.version.id()).second)
+            throw std::invalid_argument("Composition contains a child identity collision");
+        if (child.bundle.id() != child.version.bundle_id())
+            throw std::invalid_argument("Composition child version is bound to another bundle");
+        (void)link_module_child(composition.resolution, composition.parent, child.child_name,
+                                child.bundle, child.version);
+    }
+    if (by_name.size() != composition.parent.children().size())
+        throw std::invalid_argument("Composition does not bind every declared child");
+
+    BudgetLimits aggregate;
+    for (const auto& descriptor : composition.parent.children()) {
+        const auto child = by_name.find(descriptor.name);
+        if (child == by_name.end())
+            throw std::invalid_argument("Composition is missing a declared child");
+        if (child->second->version.id() != descriptor.program_version_id)
+            throw std::invalid_argument("Composition child version does not match its descriptor");
+        add_budget(aggregate, descriptor.budget);
+    }
+    const auto parent_plan = parent_bundle.orchestration_plan();
+    std::size_t spawn_count = 0;
+    if (parent_plan.plan.is_object() && parent_plan.plan.contains("operations") &&
+        parent_plan.plan["operations"].is_array()) {
+        for (const auto& operation : parent_plan.plan["operations"])
+            if (operation.is_object() && operation.value("op", "") == "spawn") ++spawn_count;
+    }
+    if (!composition.parent.children().empty() && spawn_count < composition.parent.children().size())
+        throw std::invalid_argument("Whole Program composition has no spawn operation for every child");
+
+    std::map<std::string, const BudgetRequirement*, std::less<>> requirements;
+    for (const auto& requirement : parent_bundle.declared_budget_requirements())
+        requirements.emplace(requirement.resource, &requirement);
+    for (const auto resource : {"wall_time_ms", "model_tokens", "monetary_microunits",
+                                "max_concurrency", "max_program_operations", "max_core_steps",
+                                "max_dynamic_compiles", "max_child_depth", "max_total_children"}) {
+        const auto found = requirements.find(resource);
+        if (found == requirements.end())
+            throw std::invalid_argument("Whole Program composition has an incomplete budget closure");
+        if (resource == std::string_view("max_child_depth")) {
+            if (found->second->maximum < 1) throw std::invalid_argument("Child depth is not admitted");
+        } else if (resource == std::string_view("max_total_children")) {
+            if (found->second->maximum < composition.parent.children().size())
+                throw std::invalid_argument("Child count exceeds the parent allocation");
+        } else if (found->second->maximum < budget_value(aggregate, resource)) {
+            throw std::invalid_argument("Child budget exceeds the parent allocation");
+        }
+    }
+}
+
 
 struct ModuleLinkReceipt::Impl {
     ModuleLinkReceiptData data;
@@ -627,6 +824,7 @@ ModuleLinkReceipt link_module_child(const ModuleResolution& resolution,
                                     const ProgramVersion&   child) {
     if (parent.lifecycle() != ModuleLifecycle::Active)
         throw std::invalid_argument("Cannot link a non-active parent module");
+    validate_module_resolution(resolution);
     if (resolution.root.content_identity != parent.id())
         throw std::invalid_argument("Module resolution root does not match parent module");
     const auto parent_it = std::find_if(
@@ -643,6 +841,9 @@ ModuleLinkReceipt link_module_child(const ModuleResolution& resolution,
         throw std::invalid_argument("Child Program bundle identity does not match its version");
     if (child_bundle.module_dependency_merkle_root() != resolution.dependency_merkle_root())
         throw std::invalid_argument("Child Program module dependency closure is not pinned");
+    if (!resolution.receipts.empty() &&
+        child_bundle.module_coordinates() != resolution.coordinates())
+        throw std::invalid_argument("Child Program module coordinates differ from the resolution");
 
     const auto descriptor_it = std::find_if(
         parent.children().begin(), parent.children().end(),
@@ -676,6 +877,16 @@ ModuleLinkReceipt link_module_child(const ModuleResolution& resolution,
     if (!contains_all(child_policy.allowed_capabilities(), closure.capabilities) ||
         !contains_all(child_policy.allowed_effects(), closure.effects))
         throw std::invalid_argument("Child policy does not cover its executable closure");
+    if (!contains_all(parent.allowed_capabilities(), child_policy.allowed_capabilities()) ||
+        !contains_all(parent.declared_effects(), child_policy.allowed_effects()))
+        throw std::invalid_argument("Child policy authority exceeds the parent module authority");
+    if (!resolution.receipts.empty()) {
+        const auto allowed_modules = child_policy.allowed_module_digests();
+        for (const auto& module : resolution.modules)
+            if (!contains(allowed_modules, module.id()))
+                throw std::invalid_argument(
+                    "Child policy does not pin its module dependency closure");
+    }
     if (!budget_leq(descriptor.budget, child_policy.budget_ceiling()) ||
         !budget_covers_requirements(descriptor.budget,
                                     child_bundle.declared_budget_requirements()))
@@ -724,6 +935,16 @@ std::optional<ProgramModule> InMemoryModuleStore::get(std::string_view content_i
     return ProgramModule::with_lifecycle(found->second.module, found->second.lifecycle);
 }
 
+std::optional<ProgramModule> InMemoryModuleStore::get(std::string_view owner_scope,
+                                                       std::string_view content_identity) const {
+    if (owner_scope.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    const auto found = impl_->modules.find(content_identity);
+    if (found == impl_->modules.end() || found->second.module.owner_scope() != owner_scope)
+        return std::nullopt;
+    return ProgramModule::with_lifecycle(found->second.module, found->second.lifecycle);
+}
+
 void InMemoryModuleStore::set_lifecycle(std::string_view content_identity, ModuleLifecycle lifecycle) {
     std::lock_guard lock(impl_->mutex);
     const auto found = impl_->modules.find(content_identity);
@@ -750,7 +971,7 @@ ModuleResolution ModuleResolver::resolve(const ModuleCoordinate& root,
     std::function<void(const ModuleCoordinate&)> visit = [&](const ModuleCoordinate& coordinate) {
         if (!visiting.insert(coordinate.content_identity).second)
             throw std::invalid_argument("Module dependency cycle detected at " + coordinate.qualified_name());
-        const auto module = store_->get(coordinate.content_identity);
+        const auto module = store_->get(policy.owner_scope(), coordinate.content_identity);
         if (!module) throw std::invalid_argument("Pinned module dependency is unavailable");
         if (module->coordinate() != coordinate)
             throw std::invalid_argument("Pinned module coordinate does not match its content identity");
@@ -759,7 +980,8 @@ ModuleResolution ModuleResolver::resolve(const ModuleCoordinate& root,
         if (!allowed_digest(module->id()))
             throw std::invalid_argument("Module digest is not allowed by the policy snapshot");
         if (module->lifecycle() == ModuleLifecycle::Revoked ||
-            module->lifecycle() == ModuleLifecycle::Quarantined)
+            module->lifecycle() == ModuleLifecycle::Quarantined ||
+            module->lifecycle() == ModuleLifecycle::Deprecated)
             throw std::invalid_argument("Module lifecycle is not admissible");
         for (const auto& capability : module->allowed_capabilities())
             if (!contains(policy.allowed_capabilities(), capability))
@@ -779,6 +1001,7 @@ ModuleResolution ModuleResolver::resolve(const ModuleCoordinate& root,
         result.modules.push_back(module);
         result.receipts.push_back({module.coordinate().qualified_name(), module.id()});
     }
+    validate_module_resolution(result);
     return result;
 }
 

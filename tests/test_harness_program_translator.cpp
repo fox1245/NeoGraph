@@ -142,6 +142,20 @@ json request() {
          {{"read_only", true}, {"evidence_required", json::array({"file", "line", "evidence"})}}},
     };
 }
+
+ContractManifest frozen_contract(std::string owner_scope, json expected = json::object()) {
+    ContractManifestSpec spec;
+    spec.manifest_id = "harness-contract";
+    spec.owner_scope = std::move(owner_scope);
+    spec.scope       = "harness-execution";
+    spec.requirements = {{"execute", "Execute the retained Harness Program"}};
+    spec.acceptance   = {{"runtime", "ProgramRuntime returns the expected outcome", true,
+                          std::move(expected)}};
+    spec.retry_policy = ContractRetryPolicy{2, 10, 5000};
+    return ContractManifest::propose(std::move(spec))
+        .review(ContractReview{"reviewer", "approved", true})
+        .freeze();
+}
 json without_field(const json& value, std::string_view omitted) {
     json result = json::object();
     for (const auto& [name, item] : value.items()) {
@@ -339,6 +353,44 @@ TEST(HarnessProgramTranslator, RejectionsNeverDispatchFactoriesOrUseGlobalFallba
                              ProgramCompilerConfig{"test:harness-translator"});
     EXPECT_THROW((void)compiler.compile(translated.source), ProgramCompileError);
     EXPECT_EQ(calls.load(), 0);
+}
+
+TEST(HarnessProgramTranslator, RequiresFrozenContractAndCarriesItToHarnessProjection) {
+    std::atomic<int> calls{0};
+    auto              fixture = host(calls);
+    auto               proposed = ContractManifest::propose(ContractManifestSpec{
+        1,
+        "unfrozen-harness-contract",
+        "owner:test",
+        "harness-execution",
+        {},
+        {{"execute", "Execute the retained Harness Program"}},
+        {},
+        {{"runtime", "ProgramRuntime returns the expected outcome", true, json::object()}},
+        {},
+        {},
+        {},
+        {},
+        ContractRetryPolicy{1, 1, 1000}});
+    auto rejected = request();
+    rejected["contract_manifest"] = json::parse(proposed.serialize_canonical());
+    EXPECT_THROW(HarnessRequestTranslator::translate(rejected, fixture.snapshots.registry,
+                                                     fixture.defaults),
+                 HarnessTranslationError);
+
+    auto frozen = request();
+    const auto manifest = frozen_contract("owner:test", json{{"outcome", "zero_findings"}});
+    frozen["contract"] = json::parse(manifest.serialize_canonical());
+    frozen["workspace_revision"] = "workspace-test-1";
+    const auto translated =
+        HarnessRequestTranslator::translate(frozen, fixture.snapshots.registry, fixture.defaults);
+    ASSERT_TRUE(translated.contract.has_value());
+    EXPECT_EQ(translated.contract->content_hash(), manifest.content_hash());
+    EXPECT_EQ(translated.wire.workspace_revision, "workspace-test-1");
+    EXPECT_EQ(translated.wire.legacy_projection["contract_manifest_hash"],
+              manifest.content_hash());
+    EXPECT_EQ(translated.invocation.budget.max_program_operations, 10U);
+    EXPECT_EQ(translated.invocation.budget.wall_time_ms, 5000U);
 }
 
 }  // namespace

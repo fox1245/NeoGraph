@@ -7,6 +7,7 @@
 #include <neograph/program/activation.h>
 #include <neograph/program/admission.h>
 #include <neograph/program/migration.h>
+#include <neograph/program/module.h>
 #include <neograph/tool_set.h>
 
 #include <functional>
@@ -89,6 +90,15 @@ struct CatalogConfig {
     std::string                            compiler_build_id;
     CatalogCapabilityBinder                capability_binder;
     std::size_t                            worker_count = 1;
+    /** Required for non-empty dependency receipts and composed admissions. */
+    std::shared_ptr<const ModuleStore>     module_store;
+    /**
+     * Authenticated embedding identity for trusted-native materialization.
+     * Empty is valid for brokered-only catalogs; a trusted-native closure
+     * fails closed unless this identity matches every trusted registry entry's
+     * host attestation.
+     */
+    std::string                            host_identity;
 };
 
 class NEOGRAPH_PROGRAM_API ProgramCatalog {
@@ -101,7 +111,16 @@ public:
     ~ProgramCatalog();
 
     ProgramVersion                admit(const ProgramBundle& bundle, ProgramAdmission admission);
+    /**
+     * Validate and admit a parent only after every child bundle/version is
+     * already admitted and the immutable module closure is resolved.
+     */
+    ProgramVersion                admit_composed(const ProgramBundle& bundle,
+                                                 ProgramAdmission admission,
+                                                 const ProgramComposition& composition);
     std::optional<ProgramVersion> find_version(std::string_view id) const;
+    std::optional<ProgramVersion> find_version(std::string_view owner_scope,
+                                               std::string_view id) const;
     std::optional<ProgramVersion> resolve_version(std::string_view owner_scope,
                                                   std::string_view id);
     std::optional<ProgramVersion> resolve_version_with_binding(
@@ -113,6 +132,10 @@ public:
                                  std::string_view target_version_id) const;
     /** Materialize and preflight a version before publishing its activation pointer. */
     ProgramActivationResult activate(std::string_view owner_scope,
+                                     std::string_view version_id,
+                                     std::uint64_t expected_generation);
+    /** CAS-publish a previously admitted version as the next owner-scoped activation. */
+    ProgramActivationResult rollback(std::string_view owner_scope,
                                      std::string_view version_id,
                                      std::uint64_t expected_generation);
     std::optional<ProgramActivation>

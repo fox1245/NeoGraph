@@ -65,7 +65,12 @@ ProgramBundle make_bundle(std::string    module_root,
     data.module_dependency_merkle_root = std::move(module_root);
     data.input_contract                = std::move(input);
     data.output_contract               = std::move(output);
-    data.orchestration_plan            = OrchestrationPlanRecord{1, json{{"entry", "main"}}};
+    data.orchestration_plan = OrchestrationPlanRecord{
+        1,
+        json{{"root", "root"},
+             {"operations", json::array({
+                                  json{{"id", "root"}, {"op", "spawn"}, {"body", "call"}},
+                                  json{{"id", "call"}, {"op", "call_core"}, {"core", "main"}}})}}};
     data.sealed_core_definitions       = {
         SealedCoreDefinition{"main", sealed_core_definition_hash(definition), definition}};
     data.core_plan_identities = {CorePlanIdentity{"main", digest('c')}};
@@ -182,6 +187,83 @@ TEST(ProgramModuleTest, ResolverRejectsCrossScopeAndUnapprovedCapabilities) {
 
     EXPECT_THROW(ModuleResolver(store).resolve(fixture.parent.coordinate(), capability_policy),
                  std::invalid_argument);
+
+    PolicySnapshotBuilder effect_policy_builder;
+    effect_policy_builder.id("resolver-effect-policy")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:module")
+        .admission_profile(make_admission(make_registry()))
+        .allow_module_digest(fixture.parent.id())
+        .allow_capability("read")
+        .budget_ceiling(BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1});
+    const auto effect_policy = std::move(effect_policy_builder).build();
+    EXPECT_THROW(ModuleResolver(store).resolve(fixture.parent.coordinate(), effect_policy),
+                 std::invalid_argument);
+}
+
+TEST(ProgramModuleTest, ResolverReturnsCompletePinnedDependencyClosure) {
+    ProgramModuleData dependency_data;
+    dependency_data.owner_scope    = "tenant:module";
+    dependency_data.coordinate     = ModuleCoordinate{"test", "dependency", "1.0.0", ""};
+    dependency_data.attestation_id = "attestation:module";
+    dependency_data.allowed_capabilities = {"read"};
+    dependency_data.declared_effects     = {"tool"};
+    const auto dependency = ProgramModule::create(std::move(dependency_data));
+
+    ProgramModuleData root_data;
+    root_data.owner_scope    = "tenant:module";
+    root_data.coordinate     = ModuleCoordinate{"test", "root", "1.0.0", ""};
+    root_data.attestation_id = "attestation:module";
+    root_data.dependencies   = {dependency.coordinate()};
+    root_data.allowed_capabilities = {"read"};
+    root_data.declared_effects     = {"tool"};
+    const auto root = ProgramModule::create(std::move(root_data));
+
+    auto store = std::make_shared<InMemoryModuleStore>();
+    store->publish(dependency);
+    store->publish(root);
+
+    PolicySnapshotBuilder policy_builder;
+    policy_builder.id("resolver-closure-policy")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:module")
+        .admission_profile(make_admission(make_registry()))
+        .allow_module_digest(root.id())
+        .allow_module_digest(dependency.id())
+        .allow_capability("read")
+        .allow_effect("tool")
+        .budget_ceiling(BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1});
+    const auto policy = std::move(policy_builder).build();
+
+    const auto resolution = ModuleResolver(store).resolve(root.coordinate(), policy);
+    EXPECT_EQ(resolution.modules.size(), 2U);
+    EXPECT_EQ(resolution.receipts.size(), 2U);
+    EXPECT_NO_THROW(validate_module_resolution(resolution));
+    EXPECT_EQ(resolution.root, root.coordinate());
+}
+
+TEST(ProgramModuleTest, ResolutionRejectsUnpinnedDependency) {
+    ProgramModuleData root_data;
+    root_data.owner_scope    = "tenant:module";
+    root_data.coordinate     = ModuleCoordinate{"test", "unresolved", "1.0.0", ""};
+    root_data.attestation_id = "attestation:module";
+    root_data.dependencies = {
+        ModuleCoordinate{"test", "missing", "1.0.0", digest('d')}};
+    const auto root = ProgramModule::create(std::move(root_data));
+
+    ModuleResolution resolution;
+    resolution.root = root.coordinate();
+    resolution.modules.push_back(root);
+    EXPECT_THROW(validate_module_resolution(resolution), std::invalid_argument);
+}
+
+TEST(ProgramModuleTest, OwnerQualifiedLookupHidesForeignModuleIdentity) {
+    auto fixture = make_fixture();
+    auto store   = std::make_shared<InMemoryModuleStore>();
+    store->publish(fixture.parent);
+
+    EXPECT_TRUE(store->get("tenant:module", fixture.parent.id()).has_value());
+    EXPECT_FALSE(store->get("tenant:other", fixture.parent.id()).has_value());
 }
 
 TEST(ProgramModuleTest, ResolverRejectsQuarantinedModuleEvenWithPinnedIdentity) {
@@ -223,6 +305,84 @@ TEST(ProgramModuleTest, RejectsDescriptorVersionSubstitution) {
     resolution.modules.front()    = substituted_parent;
 
     EXPECT_THROW(link_module_child(resolution, substituted_parent, "child", fixture.bundle, forged),
+                 std::invalid_argument);
+}
+
+TEST(ProgramModuleTest, RejectsChildPolicyAuthorityWiderThanParent) {
+    auto fixture = make_fixture();
+    PolicySnapshotBuilder policy_builder;
+    policy_builder.id("broader-child-policy")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:module")
+        .admission_profile(make_admission(make_registry()))
+        .allow_capability("read")
+        .allow_capability("write")
+        .allow_effect("tool")
+        .budget_ceiling(BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1});
+    const auto broad_policy = std::move(policy_builder).build();
+    const ProgramVersion broad_version(
+        ProgramVersionData{fixture.bundle.id(), fixture.version.admission_profile(), broad_policy, {},
+                           "tenant:module",
+                           CoreMaterializationReceipt{"compiler:module",
+                                                      fixture.version.admission_profile().registry_fingerprint(),
+                                                      {CorePlanIdentity{"main", digest('c')}}}});
+
+    ProgramModuleData parent_data;
+    parent_data.owner_scope          = fixture.parent.owner_scope();
+    parent_data.coordinate           = fixture.parent.coordinate();
+    parent_data.attestation_id       = fixture.parent.attestation_id();
+    parent_data.allowed_capabilities = fixture.parent.allowed_capabilities();
+    parent_data.declared_effects     = fixture.parent.declared_effects();
+    parent_data.children             = fixture.parent.children();
+    parent_data.children.front().program_version_id = broad_version.id();
+    parent_data.coordinate.content_identity.clear();
+    const auto parent = ProgramModule::create(std::move(parent_data));
+    ModuleResolution resolution;
+    resolution.root = parent.coordinate();
+    resolution.modules.push_back(parent);
+
+    EXPECT_THROW(link_module_child(resolution, parent, "child", fixture.bundle, broad_version),
+                 std::invalid_argument);
+}
+
+TEST(ProgramModuleTest, WholeCompositionValidatesBeforeChildDispatch) {
+    auto fixture = make_fixture();
+    const ProgramComposition composition{
+        fixture.parent,
+        fixture.resolution,
+        {ChildProgramBinding{"child", fixture.bundle, fixture.version}}};
+
+    EXPECT_NO_THROW(validate_program_composition(fixture.bundle, composition));
+}
+
+TEST(ProgramModuleTest, WholeCompositionDeniesChildIdentityCollision) {
+    auto fixture = make_fixture();
+    const ProgramComposition composition{
+        fixture.parent,
+        fixture.resolution,
+        {ChildProgramBinding{"child", fixture.bundle, fixture.version},
+         ChildProgramBinding{"child", fixture.bundle, fixture.version}}};
+
+    EXPECT_THROW(validate_program_composition(fixture.bundle, composition), std::invalid_argument);
+}
+
+TEST(ProgramModuleTest, ResolverRejectsDeprecatedPinnedModule) {
+    auto fixture = make_fixture();
+    auto store   = std::make_shared<InMemoryModuleStore>();
+    store->publish(fixture.parent);
+    store->set_lifecycle(fixture.parent.id(), ModuleLifecycle::Deprecated);
+
+    PolicySnapshotBuilder builder;
+    builder.id("resolver-deprecation-policy")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:module")
+        .admission_profile(make_admission(make_registry()))
+        .allow_module_digest(fixture.parent.id())
+        .allow_capability("read")
+        .allow_effect("tool")
+        .budget_ceiling(BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1});
+    EXPECT_THROW(ModuleResolver(store).resolve(fixture.parent.coordinate(),
+                                                std::move(builder).build()),
                  std::invalid_argument);
 }
 

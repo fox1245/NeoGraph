@@ -35,8 +35,28 @@ public:
     virtual std::optional<ProgramVersion> get_version(std::string_view id) const              = 0;
 
     /**
+     * Owner-qualified lookups. A wrong owner is indistinguishable from an
+     * absent object. The legacy unqualified overloads remain available for
+     * local migration/introspection callers, but Catalog and Runtime must use
+     * these overloads for authority-bearing resolution.
+     */
+    virtual std::optional<ProgramBundle> get_bundle(std::string_view /*owner_scope*/,
+                                                    std::string_view /*id*/) const {
+        return std::nullopt;
+    }
+    virtual std::optional<ProgramVersion> get_version(std::string_view owner_scope,
+                                                      std::string_view id) const {
+        if (owner_scope.empty()) return std::nullopt;
+        const auto value = get_version(id);
+        if (!value || value->ownership_scope() != owner_scope) return std::nullopt;
+        return value;
+    }
+
+    /**
      * Owner-scoped activation lifecycle.  The default keeps the bounded P2
-     * adapter intentionally administration-inaccessible.
+     * adapter intentionally administration-inaccessible. Implementations must
+     * verify that the target version and policy hash belong to owner_scope and
+     * must return Conflict without publishing when the generation is stale.
      */
     virtual std::optional<ProgramActivation>
     get_activation(std::string_view /*owner_scope*/) const {
@@ -72,6 +92,10 @@ public:
     void publish_admitted(const ProgramBundle& bundle, const ProgramVersion& version) override;
     std::optional<ProgramBundle>  get_bundle(std::string_view id) const override;
     std::optional<ProgramVersion> get_version(std::string_view id) const override;
+    std::optional<ProgramBundle>  get_bundle(std::string_view owner_scope,
+                                             std::string_view id) const override;
+    std::optional<ProgramVersion> get_version(std::string_view owner_scope,
+                                              std::string_view id) const override;
     std::optional<ProgramActivation>
     get_activation(std::string_view owner_scope) const override;
     ProgramActivationResult compare_activate(std::string_view owner_scope,

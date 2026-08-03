@@ -131,6 +131,27 @@ TEST(ProgramContractTest, FailedEvidenceCannotBeHiddenByWorkerSuccess) {
     EXPECT_EQ(result.failed_evidence_ids, std::vector<std::string>({"compile-evidence"}));
 }
 
+TEST(ProgramContractTest, RejectsUnfrozenManifestAndAnyFailedGate) {
+    const auto proposed = ContractManifest::propose(make_spec());
+    EXPECT_THROW((void)ContractRun(proposed), std::invalid_argument);
+
+    const auto frozen = proposed.review(ContractReview{"reviewer", "approved", true}).freeze();
+    ContractRun run(frozen);
+    run.begin_attempt();
+    run.record_worker_report("claims success", true);
+    run.record_evidence(make_evidence(frozen, "compile-failed", "compile-ok",
+                                      ContractEvidenceKind::DeterministicRun, false));
+    run.record_evidence(make_evidence(frozen, "compile-passed", "compile-ok",
+                                      ContractEvidenceKind::DeterministicRun, true));
+
+    const auto result = run.verify("program-v1", "workspace-1");
+    EXPECT_FALSE(result.publishable);
+    EXPECT_EQ(result.status, ContractRunStatus::Failed);
+    EXPECT_EQ(result.failed_evidence_ids,
+              std::vector<std::string>({"compile-failed"}));
+    EXPECT_THROW(run.publish(), std::logic_error);
+}
+
 TEST(ProgramContractTest, RetryPolicyBoundsAttempts) {
     auto spec = make_spec();
     spec.retry_policy.max_attempts = 1;

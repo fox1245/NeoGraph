@@ -1,7 +1,9 @@
-<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=84f4a33c9b43debfe5aadb78576b253b74978b01999c1bfd1c398115a1254b5f -->
+<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=b38723d49825be5864da3e487bb598e327050e455c01e93cc3d22f838f91396d -->
 # C++ API の例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
+P8 カットオーバー一覧: [`spec/neograph-example-disposition-v1.json`](../spec/neograph-example-disposition-v1.json)。
 
 NeoGraph エンジンの表面をカバーする 56 個の実行可能な C++ プログラム。
 それぞれがこのディレクトリ内の 1 つのファイルです (Docker-Compose が 1 つあります)
@@ -43,6 +45,8 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 |最初 |学ぶこと |
 |---|---|
+| [`62_core_quickstart.cpp`](62_core_quickstart.cpp) | **Core クイックスタート** — インストール済み `neograph::core` ターゲットで厳密なグラフと型付きチャンネルを実行します。オプション コンポーネント/API キー不要。 |
+| [`63_program_quickstart.cpp`](63_program_quickstart.cpp) | **Program クイックスタート** — インストール済み `neograph::program` ターゲットで `call_core` Program をコンパイル、admission、実行します。`-DNEOGRAPH_BUILD_PROGRAM=ON` が必要です。 |
 | [`51_minimal.cpp`](51_minimal.cpp) |最小の動作プログラム — `result.channel<T>("name")` をビルド、実行、読み取ります。 APIキーがありません。 |
 | [`02_custom_graph.cpp`](02_custom_graph.cpp) | JSON グラフ定義を構築し、実行します。 APIキーがありません。 |
 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | `make_parallel_group` による非同期ファンアウト。 APIキーがありません。 |

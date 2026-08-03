@@ -2289,6 +2289,7 @@ TEST(ProgramRuntimeTest, RetryRetriesCoreFailuresAndPreservesFailureClassificati
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
     EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(result.failure()->attempts, 2U);
 }
 
 TEST(ProgramRuntimeTest, ParallelJoinsAllBranchesInPlanOrder) {
@@ -2330,6 +2331,27 @@ TEST(ProgramRuntimeTest, RaceReturnsTheFirstCompletedBranchAndCancelsTheLoser) {
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(result.output(), json({{"branch", 2}}));
+}
+
+TEST(ProgramRuntimeTest, RaceUsesDeclarationOrderForAReadyTie) {
+    AdmittedRuntime fixture(2);
+    const auto result = run_orchestration(
+        fixture,
+        orchestration_document(
+            json{{"op", "race"},
+                 {"branches", json::array({
+                                  json{{"op", "sequence"},
+                                       {"children", json::array({json{{"op", "call_core"}},
+                                                                  json{{"op", "return"},
+                                                                       {"value", 1}}})}},
+                                  json{{"op", "sequence"},
+                                       {"children", json::array({json{{"op", "call_core"}},
+                                                                  json{{"op", "return"},
+                                                                       {"value", 2}}})}}})}}),
+        json::object(), "trace-race-tie");
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output(), 1);
 }
 
 TEST(ProgramRuntimeTest, QuorumStopsAfterRequiredSuccesses) {
@@ -2470,6 +2492,35 @@ TEST(ProgramRuntimeTest, ParentCompletionCancelsAttachedChild) {
 
     EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(child.wait().status(), ProgramTerminalStatus::Cancelled);
+}
+TEST(ProgramRuntimeTest, ParentTerminalReconnectRetainsDurableChildRecords) {
+    AdmittedRuntime fixture(2);
+    const auto linked =
+        make_linked_child(fixture, "runtime-short-blocking", "runtime-blocking");
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                           "trace-parent-reopen", {}});
+    auto child = fixture.runtime->start_child(
+        "tenant:runtime", parent, linked.receipt, linked.child_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                           "trace-child-reopen", {}});
+
+    ASSERT_EQ(parent.wait().status(), ProgramTerminalStatus::Completed);
+    ASSERT_EQ(child.wait().status(), ProgramTerminalStatus::Cancelled);
+    const auto parent_id = parent.run_id();
+    const auto child_id  = child.run_id();
+    const auto before    = parent.snapshot();
+    ASSERT_EQ(before.children().size(), 1U);
+    EXPECT_EQ(before.children().front().child_run_id, child_id);
+
+    fixture.recreate_catalog_and_runtime();
+    auto reconnected = fixture.runtime->reconnect("tenant:runtime", parent_id);
+    const auto after = reconnected.snapshot();
+    ASSERT_EQ(after.children().size(), 1U);
+    EXPECT_EQ(after.children().front().child_run_id, child_id);
+    EXPECT_EQ(after.children().front().invocation.parent_run_id, parent_id);
+    EXPECT_EQ(reconnected.wait().status(), ProgramTerminalStatus::Completed);
 }
 TEST(ProgramRuntimeTest, FailedChildPublicationReleasesParentReservation) {
     blocking_calls.store(0);

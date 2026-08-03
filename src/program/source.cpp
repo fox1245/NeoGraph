@@ -80,8 +80,9 @@ void validate_common(std::string_view                   source_id,
         if (import_ref.source_id.empty() || import_ref.content_identity.empty()) {
             throw std::invalid_argument("Program import requires source_id and content_identity");
         }
-        detail::validate_utf8(import_ref.source_id);
-        detail::validate_utf8(import_ref.content_identity);
+        detail::validate_token(import_ref.source_id, "Program import source_id");
+        if (!detail::is_sha256_identity(import_ref.content_identity))
+            throw std::invalid_argument("Program import content_identity must be sha256-pinned");
     }
     for (const auto& mapping : source_map) {
         detail::validate_json_pointer(mapping.generated_pointer);
@@ -132,6 +133,9 @@ void to_json(json& value, const ImportRef& import_ref) {
     if (import_ref.source_id.empty() || import_ref.content_identity.empty()) {
         throw std::invalid_argument("Program import requires source_id and content_identity");
     }
+    detail::validate_token(import_ref.source_id, "Program import source_id");
+    if (!detail::is_sha256_identity(import_ref.content_identity))
+        throw std::invalid_argument("Program import content_identity must be sha256-pinned");
     value                     = json::object();
     value["source_id"]        = import_ref.source_id;
     value["content_identity"] = import_ref.content_identity;
@@ -145,6 +149,9 @@ void from_json(const json& value, ImportRef& import_ref) {
     if (import_ref.source_id.empty() || import_ref.content_identity.empty()) {
         throw std::invalid_argument("Program import requires source_id and content_identity");
     }
+    detail::validate_token(import_ref.source_id, "Program import source_id");
+    if (!detail::is_sha256_identity(import_ref.content_identity))
+        throw std::invalid_argument("Program import content_identity must be sha256-pinned");
 }
 
 void to_json(json& value, const SourceMapEntry& entry) {

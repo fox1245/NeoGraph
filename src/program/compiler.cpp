@@ -1280,6 +1280,17 @@ struct ProgramCompiler::Impl {
                 sealed, config.compiler_build_id, registry.fingerprint(), closure.identities);
             auto orchestration = lower_plan(document.at("root"), parsed.root_name, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();
+            try {
+                // Seal the lowered graph through the same typed immutable projection consumed by
+                // ProgramRuntime. This keeps malformed references/source pointers from becoming
+                // a late scheduler failure while preserving the canonical JSON artifact.
+                (void)ProgramPlan::from_json(orchestration.plan);
+            } catch (const std::exception& error) {
+                diagnostics.add(CompilePhase::Seal, "P_PLAN_TYPED", DiagnosticSeverity::Error,
+                                "/root", "Program plan could not be sealed as typed immutable nodes",
+                                json{{"detail", error.what()}});
+                diagnostics.throw_error();
+            }
             const auto program_hash = canonical_program_hash(parsed, orchestration, sealed);
             const auto merkle_root  = import_merkle_root(source, diagnostics);
             auto       source_map   = generated_source_map(source, diagnostics);
@@ -1338,6 +1349,69 @@ const std::string& ProgramCompiler::registry_snapshot_fingerprint() const noexce
 
 ProgramBundle ProgramCompiler::compile(const ProgramSource& source) const {
     return impl_->compile(source);
+}
+
+ProgramBundle ProgramCompiler::compile(const ProgramSource&       source,
+                                       const ModuleResolution& resolution) const {
+    auto fail = [&](std::string code, std::string message, json witness) -> ProgramBundle {
+        Diagnostic diagnostic;
+        diagnostic.phase                = CompilePhase::Resolve;
+        diagnostic.code                 = std::move(code);
+        diagnostic.severity             = DiagnosticSeverity::Error;
+        diagnostic.primary              = {source.source_id(), "/imports", std::nullopt};
+        diagnostic.message              = std::move(message);
+        diagnostic.witness              = detail::owned_json_copy(witness);
+        throw ProgramCompileError({std::move(diagnostic)});
+    };
+    try {
+        validate_module_resolution(resolution);
+    } catch (const std::exception& error) {
+        return fail("P_IMPORT_UNRESOLVED",
+                    "Program module resolution is not a complete pinned closure",
+                    json{{"error", error.what()}});
+    }
+
+    auto actual_imports   = source.imports();
+    auto resolved_imports = resolution.imports();
+    const auto import_less = [](const auto& lhs, const auto& rhs) {
+        return std::tie(lhs.source_id, lhs.content_identity) <
+               std::tie(rhs.source_id, rhs.content_identity);
+    };
+    std::sort(actual_imports.begin(), actual_imports.end(), import_less);
+    std::sort(resolved_imports.begin(), resolved_imports.end(), import_less);
+    if (actual_imports != resolved_imports)
+        return fail("P_IMPORT_UNRESOLVED",
+                    "Program imports must exactly match the resolved module receipts",
+                    json{{"source_import_count", actual_imports.size()},
+                         {"resolved_import_count", resolved_imports.size()}});
+
+    auto compiled = compile(source);
+    if (compiled.module_dependency_merkle_root() != resolution.dependency_merkle_root())
+        return fail("P_IMPORT_UNRESOLVED",
+                    "Program module dependency root differs from the resolved closure",
+                    json{{"source_root", compiled.module_dependency_merkle_root()},
+                         {"resolved_root", resolution.dependency_merkle_root()}});
+
+    ProgramBundleData data;
+    data.source_kind                    = compiled.source_kind();
+    data.source_hash                    = compiled.source_hash();
+    data.canonical_program_hash         = compiled.canonical_program_hash();
+    data.compiler_build_id              = compiled.compiler_build_id();
+    data.program_schema_version         = compiled.program_schema_version();
+    data.registry_snapshot_fingerprint  = compiled.registry_snapshot_fingerprint();
+    data.module_dependency_merkle_root  = compiled.module_dependency_merkle_root();
+    data.module_coordinates             = resolution.coordinates();
+    data.input_contract                 = compiled.input_contract();
+    data.output_contract                = compiled.output_contract();
+    data.orchestration_plan             = compiled.orchestration_plan();
+    data.sealed_core_definitions        = compiled.sealed_core_definitions();
+    data.core_plan_identities           = compiled.core_plan_identities();
+    data.capability_effect_closure      = compiled.capability_effect_closure();
+    data.executable_registry_identities = compiled.executable_registry_identities();
+    data.declared_budget_requirements   = compiled.declared_budget_requirements();
+    data.source_map                     = compiled.source_map();
+    data.diagnostics                    = compiled.diagnostics();
+    return ProgramBundle(std::move(data));
 }
 
 }  // namespace neograph::program

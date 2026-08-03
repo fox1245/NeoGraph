@@ -485,6 +485,18 @@ std::optional<program::ProgramVersion> HarnessBoundedProgramStore::get_version(
     return record->version();
 }
 
+std::optional<program::ProgramBundle> HarnessBoundedProgramStore::get_bundle(
+    std::string_view owner_scope, std::string_view id) const {
+    if (owner_scope != impl_->owner_scope) return std::nullopt;
+    return get_bundle(id);
+}
+
+std::optional<program::ProgramVersion> HarnessBoundedProgramStore::get_version(
+    std::string_view owner_scope, std::string_view id) const {
+    if (owner_scope != impl_->owner_scope) return std::nullopt;
+    return get_version(id);
+}
+
 struct HarnessBoundedProgramJournal::Impl {
     Impl(std::shared_ptr<program::ProgramTransitionStore> store, std::string owner)
         : transitions(std::move(store)), owner_scope(std::move(owner)) {}

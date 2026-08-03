@@ -65,6 +65,43 @@ void require_sha256(std::string_view value, std::string_view name) {
     }
 }
 
+bool is_semantic_version(std::string_view value);
+
+void validate_module_coordinate(const ModuleCoordinate& coordinate,
+                                std::string_view          name) {
+    detail::validate_token(coordinate.namespace_name, std::string(name) + " namespace");
+    detail::validate_token(coordinate.name, std::string(name) + " name");
+    if (!is_semantic_version(coordinate.semantic_version))
+        throw std::invalid_argument(std::string(name) + " semantic_version is invalid");
+    require_sha256(coordinate.content_identity, std::string(name) + " content_identity");
+}
+
+json encode_module_coordinate(const ModuleCoordinate& coordinate) {
+    return json{{"namespace", coordinate.namespace_name},
+                {"name", coordinate.name},
+                {"semantic_version", coordinate.semantic_version},
+                {"content_identity", coordinate.content_identity}};
+}
+
+ModuleCoordinate parse_module_coordinate(const json& value) {
+    if (!value.is_object()) throw std::invalid_argument("Module coordinate must be an object");
+    detail::reject_unknown_fields(value, "Module coordinate",
+                                  {"namespace", "name", "semantic_version", "content_identity"});
+    ModuleCoordinate result;
+    const auto required = [&](std::string_view key) {
+        const auto owned = std::string(key);
+        if (!value.contains(owned) || !value[owned].is_string())
+            throw std::invalid_argument("Module coordinate field '" + owned + "' must be a string");
+        return value[owned].get<std::string>();
+    };
+    result.namespace_name    = required("namespace");
+    result.name              = required("name");
+    result.semantic_version  = required("semantic_version");
+    result.content_identity  = required("content_identity");
+    validate_module_coordinate(result, "Module coordinate");
+    return result;
+}
+
 bool is_ascii_digit(unsigned char value) noexcept {
     return value >= '0' && value <= '9';
 }
@@ -431,6 +468,27 @@ void normalize_data(ProgramBundleData& data) {
                    "Program bundle registry_snapshot_fingerprint");
     require_sha256(data.module_dependency_merkle_root,
                    "Program bundle module_dependency_merkle_root");
+    for (const auto& coordinate : data.module_coordinates)
+        validate_module_coordinate(coordinate, "Program bundle module coordinate");
+    std::sort(data.module_coordinates.begin(), data.module_coordinates.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return std::tie(lhs.namespace_name, lhs.name, lhs.semantic_version,
+                                   lhs.content_identity) <
+                         std::tie(rhs.namespace_name, rhs.name, rhs.semantic_version,
+                                  rhs.content_identity);
+              });
+    if (std::adjacent_find(data.module_coordinates.begin(), data.module_coordinates.end(),
+                           [](const auto& lhs, const auto& rhs) {
+                               return lhs.namespace_name == rhs.namespace_name &&
+                                      lhs.name == rhs.name &&
+                                      lhs.semantic_version == rhs.semantic_version;
+                           }) != data.module_coordinates.end())
+        throw std::invalid_argument("Program bundle contains a module coordinate collision");
+    if (std::adjacent_find(data.module_coordinates.begin(), data.module_coordinates.end(),
+                           [](const auto& lhs, const auto& rhs) {
+                               return lhs.content_identity == rhs.content_identity;
+                           }) != data.module_coordinates.end())
+        throw std::invalid_argument("Program bundle contains a duplicate module identity");
     validate_contract(data.input_contract, "Program input contract");
     validate_contract(data.output_contract, "Program output contract");
     validate_plan(data.orchestration_plan);
@@ -666,6 +724,12 @@ json bundle_body(const ProgramBundleData& data) {
     value["program_schema_version"]        = data.program_schema_version;
     value["registry_snapshot_fingerprint"] = data.registry_snapshot_fingerprint;
     value["module_dependency_merkle_root"] = data.module_dependency_merkle_root;
+    if (!data.module_coordinates.empty()) {
+        json coordinates = json::array();
+        for (const auto& coordinate : data.module_coordinates)
+            coordinates.push_back(encode_module_coordinate(coordinate));
+        value["module_coordinates"] = std::move(coordinates);
+    }
     value["input_contract"]                = encode_contract(data.input_contract);
     value["output_contract"]               = encode_contract(data.output_contract);
     value["orchestration_plan"]            = encode_plan(data.orchestration_plan);
@@ -743,6 +807,12 @@ ProgramBundleData parse_body(const json& value) {
     data.program_schema_version        = require_uint32(value, "program_schema_version");
     data.registry_snapshot_fingerprint = require_string(value, "registry_snapshot_fingerprint");
     data.module_dependency_merkle_root = require_string(value, "module_dependency_merkle_root");
+    if (value.contains("module_coordinates")) {
+        if (!value["module_coordinates"].is_array())
+            throw std::invalid_argument("Program bundle module_coordinates must be an array");
+        for (const auto& item : value["module_coordinates"])
+            data.module_coordinates.push_back(parse_module_coordinate(item));
+    }
     data.input_contract =
         parse_contract(require_value(value, "input_contract"), "Program input contract");
     data.output_contract =
@@ -1049,6 +1119,7 @@ std::string core_compiled_plan_identity(const SealedCoreDefinition& definition,
 struct ProgramBundle::Impl {
     ProgramBundleData data;
     std::string       id;
+    std::optional<ProgramPlan> typed_plan;
 };
 
 ProgramBundle::ProgramBundle(ProgramBundleData data) {
@@ -1058,6 +1129,14 @@ ProgramBundle::ProgramBundle(ProgramBundleData data) {
     impl->data = std::move(owned);
     impl->id   = detail::sha256_identity(
         "program-bundle", detail::canonical_json_bytes(bundle_identity_envelope(impl->data)));
+    // Keep legacy raw bundle construction permissive, but eagerly seal compiler-produced
+    // orchestration plans into the typed immutable scheduler view when possible. Admission and
+    // runtime both fail closed if this field is unavailable for an admitted artifact.
+    try {
+        impl->typed_plan = ProgramPlan::from_json(impl->data.orchestration_plan.plan);
+    } catch (const std::exception&) {
+        impl->typed_plan.reset();
+    }
     impl_ = std::move(impl);
 }
 
@@ -1078,7 +1157,8 @@ ProgramBundle ProgramBundle::parse(std::string_view stored_bytes) {
         value, "Stored ProgramBundle",
         {"format", "storage_schema_version", "id", "source_kind", "source_hash",
          "canonical_program_hash", "compiler_build_id", "program_schema_version",
-         "registry_snapshot_fingerprint", "module_dependency_merkle_root", "input_contract",
+         "registry_snapshot_fingerprint", "module_dependency_merkle_root", "module_coordinates",
+         "input_contract",
          "output_contract", "orchestration_plan", "sealed_core_definitions",
          "core_plan_identities", "capability_effect_closure",
          "executable_registry_identities", "declared_budget_requirements", "source_map",
@@ -1118,6 +1198,9 @@ const std::string& ProgramBundle::registry_snapshot_fingerprint() const noexcept
 const std::string& ProgramBundle::module_dependency_merkle_root() const noexcept {
     return impl_->data.module_dependency_merkle_root;
 }
+const std::vector<ModuleCoordinate>& ProgramBundle::module_coordinates() const noexcept {
+    return impl_->data.module_coordinates;
+}
 ContractRecord ProgramBundle::input_contract() const {
     auto copy   = impl_->data.input_contract;
     copy.schema = detail::owned_json_copy(copy.schema);
@@ -1132,6 +1215,11 @@ OrchestrationPlanRecord ProgramBundle::orchestration_plan() const {
     auto copy = impl_->data.orchestration_plan;
     copy.plan = detail::owned_json_copy(copy.plan);
     return copy;
+}
+const ProgramPlan& ProgramBundle::typed_orchestration_plan() const {
+    if (!impl_->typed_plan)
+        throw std::invalid_argument("Program bundle does not contain a valid typed orchestration plan");
+    return *impl_->typed_plan;
 }
 std::vector<SealedCoreDefinition> ProgramBundle::sealed_core_definitions() const {
     auto copy = impl_->data.sealed_core_definitions;

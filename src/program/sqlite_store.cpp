@@ -103,6 +103,13 @@ std::string column_bytes(sqlite3_stmt* statement, int index) {
     return std::string(bytes, static_cast<std::size_t>(size));
 }
 
+std::string column_text(sqlite3_stmt* statement, int index) {
+    const auto* value = reinterpret_cast<const char*>(sqlite3_column_text(statement, index));
+    const int   size  = sqlite3_column_bytes(statement, index);
+    if (!value || size < 0) throw std::runtime_error("SQLite returned a null Program field");
+    return std::string(value, static_cast<std::size_t>(size));
+}
+
 std::optional<std::string> stored_bytes(sqlite3* db, std::string_view table, std::string_view id,
                                         std::string_view id_column = "id") {
     const std::string sql = "SELECT canonical_bytes FROM " + std::string(table) + " WHERE " +
@@ -115,10 +122,34 @@ std::optional<std::string> stored_bytes(sqlite3* db, std::string_view table, std
 
 std::optional<ProgramActivation> load_activation(sqlite3* db, std::string_view owner_scope) {
     Statement statement(db,
-                        "SELECT canonical_bytes FROM program_activations WHERE owner_scope = ?1");
+                        "SELECT generation, active_version_id, policy_snapshot_hash, "
+                        "canonical_bytes FROM program_activations WHERE owner_scope = ?1");
     statement.bind_text(1, owner_scope);
     if (!statement.step_row()) return std::nullopt;
-    return ProgramActivation::parse(column_bytes(statement.get(), 0));
+    const auto generation = sqlite3_column_int64(statement.get(), 0);
+    if (generation <= 0)
+        throw std::runtime_error("SQLite Program activation has an invalid generation");
+    const auto active_version_id    = column_text(statement.get(), 1);
+    const auto policy_snapshot_hash = column_text(statement.get(), 2);
+    auto       activation = ProgramActivation::parse(column_bytes(statement.get(), 3));
+    if (activation.owner_scope() != owner_scope ||
+        activation.generation() != static_cast<std::uint64_t>(generation) ||
+        activation.active_version_id() != active_version_id ||
+        activation.policy_snapshot_hash() != policy_snapshot_hash) {
+        throw std::runtime_error(
+            "SQLite Program activation metadata does not match its canonical value");
+    }
+    return activation;
+}
+
+void verify_activation_target(sqlite3* db, const ProgramActivation& activation) {
+    const auto bytes = stored_bytes(db, "program_versions", activation.active_version_id());
+    if (!bytes)
+        throw std::runtime_error("SQLite Program activation references a missing version");
+    const auto version = ProgramVersion::parse(*bytes);
+    if (version.ownership_scope() != activation.owner_scope() ||
+        version.policy_snapshot().fingerprint() != activation.policy_snapshot_hash())
+        throw std::runtime_error("SQLite Program activation target is not owner/policy bound");
 }
 
 void verify_existing(std::optional<std::string> existing, std::string_view expected,
@@ -220,10 +251,49 @@ std::optional<ProgramVersion> SQLiteProgramStore::get_version(std::string_view i
     return ProgramVersion::parse(*bytes);
 }
 
+std::optional<ProgramVersion>
+SQLiteProgramStore::get_version(std::string_view owner_scope, std::string_view id) const {
+    if (owner_scope.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    Statement statement(impl_->db,
+                        "SELECT bundle_id, owner_scope, canonical_bytes FROM program_versions "
+                        "WHERE owner_scope = ?1 AND id = ?2");
+    statement.bind_text(1, owner_scope);
+    statement.bind_text(2, id);
+    if (!statement.step_row()) return std::nullopt;
+    const auto bundle    = column_text(statement.get(), 0);
+    const auto row_owner = column_text(statement.get(), 1);
+    const auto version   = ProgramVersion::parse(column_bytes(statement.get(), 2));
+    if (version.id() != id || version.bundle_id() != bundle ||
+        version.ownership_scope() != row_owner || row_owner != owner_scope)
+        throw std::runtime_error("SQLite Program version metadata does not match its canonical value");
+    return version;
+}
+
+std::optional<ProgramBundle>
+SQLiteProgramStore::get_bundle(std::string_view owner_scope, std::string_view id) const {
+    if (owner_scope.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    Statement owner(impl_->db,
+                    "SELECT 1 FROM program_versions "
+                    "WHERE owner_scope = ?1 AND bundle_id = ?2 LIMIT 1");
+    owner.bind_text(1, owner_scope);
+    owner.bind_text(2, id);
+    if (!owner.step_row()) return std::nullopt;
+    const auto bytes = stored_bytes(impl_->db, "program_bundles", id);
+    if (!bytes) return std::nullopt;
+    const auto bundle = ProgramBundle::parse(*bytes);
+    if (bundle.id() != id)
+        throw std::runtime_error("SQLite Program bundle metadata does not match its canonical value");
+    return bundle;
+}
+
 std::optional<ProgramActivation>
 SQLiteProgramStore::get_activation(std::string_view owner_scope) const {
     std::lock_guard lock(impl_->mutex);
-    return load_activation(impl_->db, owner_scope);
+    const auto activation = load_activation(impl_->db, owner_scope);
+    if (activation) verify_activation_target(impl_->db, *activation);
+    return activation;
 }
 
 ProgramActivationResult SQLiteProgramStore::compare_activate(
@@ -231,6 +301,8 @@ ProgramActivationResult SQLiteProgramStore::compare_activate(
     std::uint64_t expected_generation,
     std::string_view version_id,
     std::string_view policy_snapshot_hash) {
+    if (owner_scope.empty())
+        throw std::invalid_argument("Program activation owner scope must not be empty");
     std::lock_guard lock(impl_->mutex);
     Transaction transaction(impl_->db);
 
@@ -239,8 +311,11 @@ ProgramActivationResult SQLiteProgramStore::compare_activate(
     const auto version = ProgramVersion::parse(*bytes);
     if (version.ownership_scope() != owner_scope)
         throw std::invalid_argument("Program activation owner scope does not match the version");
+    if (version.policy_snapshot().fingerprint() != policy_snapshot_hash)
+        throw std::invalid_argument("Program activation policy hash does not match the version");
 
     const auto current = load_activation(impl_->db, owner_scope);
+    if (current) verify_activation_target(impl_->db, *current);
     const auto generation = current ? current->generation() : std::uint64_t{0};
     if (generation != expected_generation) {
         transaction.commit();
@@ -278,31 +353,69 @@ ProgramActivationResult SQLiteProgramStore::compare_activate(
 
 std::vector<ProgramVersion>
 SQLiteProgramStore::list_versions(std::string_view owner_scope) const {
+    if (owner_scope.empty())
+        throw std::invalid_argument("Program version owner scope must not be empty");
     std::lock_guard lock(impl_->mutex);
     Statement statement(impl_->db,
-                        "SELECT canonical_bytes FROM program_versions WHERE owner_scope = ?1 ORDER BY id");
+                        "SELECT id, bundle_id, owner_scope, canonical_bytes FROM program_versions "
+                        "WHERE owner_scope = ?1 ORDER BY id");
     statement.bind_text(1, owner_scope);
     std::vector<ProgramVersion> result;
-    while (statement.step_row()) result.push_back(ProgramVersion::parse(column_bytes(statement.get(), 0)));
+    while (statement.step_row()) {
+        const auto id        = column_text(statement.get(), 0);
+        const auto bundle    = column_text(statement.get(), 1);
+        const auto row_owner = column_text(statement.get(), 2);
+        const auto version   = ProgramVersion::parse(column_bytes(statement.get(), 3));
+        if (version.id() != id || version.bundle_id() != bundle ||
+            version.ownership_scope() != row_owner || row_owner != owner_scope)
+            throw std::runtime_error(
+                "SQLite Program version metadata does not match its canonical value");
+        result.push_back(version);
+    }
     return result;
 }
 
 ProgramRetentionReport SQLiteProgramStore::collect_garbage(
     std::string_view owner_scope,
     const std::vector<std::string>& pinned_version_ids) {
+    if (owner_scope.empty())
+        throw std::invalid_argument("Program retention owner scope must not be empty");
     std::lock_guard lock(impl_->mutex);
     Transaction transaction(impl_->db);
+    for (const auto& pinned_id : pinned_version_ids) {
+        const auto bytes = stored_bytes(impl_->db, "program_versions", pinned_id);
+        if (!bytes)
+            throw std::invalid_argument("Program retention pin references an unpublished version");
+        const auto version = ProgramVersion::parse(*bytes);
+        if (version.ownership_scope() != owner_scope)
+            throw std::invalid_argument("Program retention pin crosses an owner scope boundary");
+    }
     std::set<std::string, std::less<>> keep(pinned_version_ids.begin(), pinned_version_ids.end());
     const auto active = load_activation(impl_->db, owner_scope);
-    if (active) keep.insert(active->active_version_id());
+    if (active) {
+        verify_activation_target(impl_->db, *active);
+        keep.insert(active->active_version_id());
+    }
 
     Statement list(impl_->db,
-                   "SELECT id FROM program_versions WHERE owner_scope = ?1 ORDER BY id");
+                   "SELECT id, bundle_id, owner_scope, canonical_bytes FROM program_versions "
+                   "WHERE owner_scope = ?1 ORDER BY id");
     list.bind_text(1, owner_scope);
     std::vector<std::string> remove;
+    std::set<std::string, std::less<>> bundles_to_check;
     while (list.step_row()) {
-        const auto* id = reinterpret_cast<const char*>(sqlite3_column_text(list.get(), 0));
-        if (id && !keep.contains(id)) remove.emplace_back(id);
+        const auto id        = column_text(list.get(), 0);
+        const auto bundle    = column_text(list.get(), 1);
+        const auto row_owner = column_text(list.get(), 2);
+        const auto version   = ProgramVersion::parse(column_bytes(list.get(), 3));
+        if (version.id() != id || version.bundle_id() != bundle ||
+            version.ownership_scope() != row_owner || row_owner != owner_scope)
+            throw std::runtime_error(
+                "SQLite Program version metadata does not match its canonical value");
+        if (!keep.contains(id)) {
+            remove.push_back(id);
+            bundles_to_check.insert(bundle);
+        }
     }
 
     ProgramRetentionReport report;
@@ -312,10 +425,14 @@ ProgramRetentionReport SQLiteProgramStore::collect_garbage(
         statement.step_done();
         ++report.versions_removed;
     }
-    exec(impl_->db,
-         "DELETE FROM program_bundles WHERE id NOT IN "
-         "(SELECT DISTINCT bundle_id FROM program_versions)");
-    report.bundles_removed = static_cast<std::uint64_t>(sqlite3_changes(impl_->db));
+    for (const auto& bundle_id : bundles_to_check) {
+        Statement statement(impl_->db,
+                            "DELETE FROM program_bundles WHERE id = ?1 AND NOT EXISTS "
+                            "(SELECT 1 FROM program_versions WHERE bundle_id = ?1)");
+        statement.bind_text(1, bundle_id);
+        statement.step_done();
+        if (sqlite3_changes(impl_->db) != 0) ++report.bundles_removed;
+    }
     transaction.commit();
     return report;
 }

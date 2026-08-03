@@ -289,6 +289,18 @@ if(NEOGRAPH_BUILD_SQLITE)
 endif()
 
 include(GoogleTest)
+
+# Cross-repository compatibility is a metadata gate, not an integration
+# build.  Keep it runnable in the minimal test configuration so a historical
+# NeoCode/NeoProtocol reference cannot silently become current conformance.
+add_test(NAME CrossRepositoryCompatibility.Metadata
+    COMMAND Python3::Interpreter
+        ${PROJECT_SOURCE_DIR}/scripts/check_cross_repository_compatibility.py
+        --metadata ${PROJECT_SOURCE_DIR}/spec/cross-repository-compatibility-v1.json
+        --schema ${PROJECT_SOURCE_DIR}/spec/cross-repository-compatibility-v1.schema.json)
+set_tests_properties(CrossRepositoryCompatibility.Metadata
+    PROPERTIES LABELS "compatibility;metadata")
+
 if(TARGET neograph_program_tests)
     gtest_discover_tests(neograph_program_tests)
 endif()

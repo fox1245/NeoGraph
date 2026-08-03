@@ -2,7 +2,9 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-Fifty-six runnable C++ programs covering the NeoGraph engine surface.
+The numbered examples cover the NeoGraph engine surface, with one focused Core
+quickstart and one focused Program quickstart. The complete cutover inventory is
+the machine-readable [`spec/neograph-example-disposition-v1.json`](../spec/neograph-example-disposition-v1.json).
 Each is a single file in this directory (with one Docker-Compose
 exception, [`26_postgres_react_hitl/`](26_postgres_react_hitl/)) — copy
 one into your own project, link against `neograph::core` +
@@ -42,6 +44,8 @@ If this is your first time:
 
 | First | What you learn |
 |---|---|
+| [`62_core_quickstart.cpp`](62_core_quickstart.cpp) | **Core quickstart** — the installed `neograph::core` target, one strict graph, one typed channel. No optional component or API key. |
+| [`63_program_quickstart.cpp`](63_program_quickstart.cpp) | **Program quickstart** — compile, admit, and run one `call_core` Program through the installed `neograph::program` target. Requires `-DNEOGRAPH_BUILD_PROGRAM=ON`. |
 | [`51_minimal.cpp`](51_minimal.cpp) | The smallest working program — build, run, read `result.channel<T>("name")`. No API key. |
 | [`02_custom_graph.cpp`](02_custom_graph.cpp) | Build a JSON graph definition, run it. No API key. |
 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | Async fan-out with `make_parallel_group`. No API key. |

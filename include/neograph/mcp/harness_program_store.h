@@ -126,6 +126,10 @@ public:
                           const program::ProgramVersion& version) override;
     std::optional<program::ProgramBundle>  get_bundle(std::string_view id) const override;
     std::optional<program::ProgramVersion> get_version(std::string_view id) const override;
+    std::optional<program::ProgramBundle>
+    get_bundle(std::string_view owner_scope, std::string_view id) const override;
+    std::optional<program::ProgramVersion>
+    get_version(std::string_view owner_scope, std::string_view id) const override;
 
     /** Owner-scoped strict load. Wrong owners are indistinguishable from absent IDs. */
     std::optional<HarnessProgramArtifactRecord> load_artifact() const;

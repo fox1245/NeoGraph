@@ -96,6 +96,47 @@ void validate_defaults(const HarnessTranslationDefaults& defaults) {
     }
 }
 
+std::optional<program::ContractManifest> requested_contract(const json& request) {
+    const bool has_contract = request.contains("contract");
+    const bool has_manifest = request.contains("contract_manifest");
+    if (has_contract && has_manifest)
+        fail("H_CONTRACT_DUPLICATE", "/contract",
+             "Harness request must provide only one frozen contract manifest");
+    if (!has_contract && !has_manifest) return std::nullopt;
+
+    const auto pointer = has_contract ? "/contract" : "/contract_manifest";
+    auto       value   = request.at(has_contract ? "contract" : "contract_manifest");
+    if (value.is_string()) {
+        try {
+            value = json::parse(value.get<std::string>());
+        } catch (const std::exception& error) {
+            fail("H_CONTRACT_SCHEMA", pointer,
+                 std::string("Harness contract manifest JSON is invalid: ") + error.what());
+        }
+    }
+    // Accept the direct canonical ContractManifest object as the public form,
+    // while tolerating a {"manifest": ...} envelope used by older clients.
+    if (value.is_object() && value.contains("manifest") &&
+        !value.contains("storage_schema_version")) {
+        value = value.at("manifest");
+    }
+    if (!value.is_object())
+        fail("H_CONTRACT_SCHEMA", pointer, "Harness contract manifest must be an object");
+    try {
+        auto manifest = program::ContractManifest::parse(
+            program::detail::canonical_json_bytes(value));
+        if (manifest.lifecycle() != program::ContractManifestLifecycle::Frozen)
+            fail("H_CONTRACT_NOT_FROZEN", pointer,
+                 "Harness execution requires an approved frozen contract manifest");
+        return manifest;
+    } catch (const HarnessTranslationError&) {
+        throw;
+    } catch (const std::exception& error) {
+        fail("H_CONTRACT_INVALID", pointer,
+             std::string("Harness contract manifest is invalid: ") + error.what());
+    }
+}
+
 json input_contract_schema() {
     return {
         {"type", "object"},
@@ -219,8 +260,10 @@ struct EffectiveLimits {
     std::uint64_t input_token_ceiling_per_round;
 };
 
-EffectiveLimits effective_limits(const json& request, const HarnessTranslationDefaults& defaults) {
-    return {
+EffectiveLimits effective_limits(const json& request,
+                                 const HarnessTranslationDefaults& defaults,
+                                 const std::optional<program::ContractManifest>& contract) {
+    auto result = EffectiveLimits{
         effective_budget(request, "timeout_seconds", defaults.timeout_seconds, 1, 86400),
         static_cast<std::uint32_t>(effective_budget(request, "max_parallel_workers",
                                                     defaults.max_parallel_workers, 1, 64)),
@@ -233,6 +276,12 @@ EffectiveLimits effective_limits(const json& request, const HarnessTranslationDe
                          defaults.max_output_tokens),
         defaults.input_token_ceiling_per_round,
     };
+    if (contract) {
+        const auto& retry = contract->spec().retry_policy;
+        result.max_worker_retries = std::min<std::uint32_t>(
+            result.max_worker_retries, retry.max_attempts - 1);
+    }
+    return result;
 }
 
 json sealed_worker(const json&                               worker,
@@ -415,10 +464,16 @@ std::vector<program::SourceMapEntry> source_map(const json&                     
     return result;
 }
 
-program::RunBudget derive_budget(const json&                       core,
-                                 const EffectiveLimits&            limits,
-                                 const HarnessTranslationDefaults& defaults) {
-    const auto wall_time_ms = checked_mul(limits.timeout_seconds, 1000, "/budgets/timeout_seconds");
+program::RunBudget derive_budget(const json&                              core,
+                                 const EffectiveLimits&                   limits,
+                                 const HarnessTranslationDefaults&        defaults,
+                                 const std::optional<program::ContractManifest>& contract) {
+    auto wall_time_ms = checked_mul(limits.timeout_seconds, 1000, "/budgets/timeout_seconds");
+    auto max_program_operations = std::uint64_t{1};
+    if (contract) {
+        wall_time_ms = std::min(wall_time_ms, contract->spec().retry_policy.max_wall_time_ms);
+        max_program_operations = contract->spec().retry_policy.max_program_operations;
+    }
     std::uint64_t model_tokens = 0;
     if (core.contains("nodes") && core["nodes"].is_object()) {
         for (const auto& [name, node] : core["nodes"].items()) {
@@ -446,7 +501,7 @@ program::RunBudget derive_budget(const json&                       core,
             model_tokens,
             defaults.monetary_microunits,
             1,
-            1,
+            max_program_operations,
             limits.max_core_steps,
             0,
             0,
@@ -509,6 +564,9 @@ json harness_program_request_schema() {
                 "objective":{"type":"string"},
                 "acceptance":{"type":"array","items":{"type":"string"}}
             },"additionalProperties":true},
+            "contract":{},
+            "contract_manifest":{},
+            "workspace_revision":{"type":"string"},
             "harness":{"type":"object","required":["mode"],"properties":{
                 "mode":{"enum":["preset","dsl","core"]},
                 "preset":{"type":"string"},
@@ -553,7 +611,8 @@ json harness_program_request_schema() {
             "policy":{"type":"object","properties":{
                 "read_only":{"type":"boolean"},
                 "workspace_roots":{"type":"array","items":{"type":"string"}},
-                "evidence_required":{"type":"array","items":{"type":"string"}}
+                "evidence_required":{"type":"array","items":{"type":"string"}},
+                "workspace_revision":{"type":"string"}
             },"additionalProperties":false}
         },
         "additionalProperties":false
@@ -574,6 +633,7 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
         fail("H_REQUEST_SCHEMA", "", error.what());
     }
 
+    const auto contract = requested_contract(request);
     const auto mode = request.at("harness").at("mode").get<std::string>();
     if (mode != "core" && request.at("workers").empty())
         fail("H_WORKERS_EMPTY", "/workers", "At least one Harness worker is required");
@@ -585,7 +645,7 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
         fail("H_DSL_DEFINITION", "/harness/definition",
              "Harness dsl/core mode requires a definition");
 
-    const auto limits  = effective_limits(request, defaults);
+    const auto limits  = effective_limits(request, defaults, contract);
     const auto tools   = validate_tool_catalog(request, registry, defaults);
     const auto workers = workers_by_id(request, tools, limits, defaults);
 
@@ -632,7 +692,7 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
                  "Harness Provider identity is absent or mismatched in the immutable registry");
     }
 
-    const auto budget    = derive_budget(core, limits, defaults);
+    const auto budget    = derive_budget(core, limits, defaults, contract);
     const auto source_id = defaults.source_id_prefix + ":" + mode;
     json       document  = {
         {"program_schema_version", 1},
@@ -646,12 +706,22 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
     wire.source_id = source_id;
     wire.mode      = mode;
     wire.preset    = request.at("harness").value("preset", "");
+    wire.workspace_revision = request.value(
+        "workspace_revision",
+        request.value("policy", json::object()).value("workspace_revision", ""));
     for (const auto& worker : request.at("workers"))
         wire.worker_ids.push_back(worker.at("id").get<std::string>());
     wire.legacy_projection = {
         {"task", request.at("task")},
         {"output_channel", std::string(kResultChannel)},
     };
+    if (!wire.workspace_revision.empty())
+        wire.legacy_projection["workspace_revision"] = wire.workspace_revision;
+    if (contract) {
+        wire.legacy_projection["contract_manifest"] =
+            json::parse(contract->serialize_canonical());
+        wire.legacy_projection["contract_manifest_hash"] = contract->content_hash();
+    }
 
     HarnessCapabilityBindingRequest bindings;
     bindings.provider            = defaults.provider;
@@ -691,10 +761,14 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
 
     auto map    = source_map(document.at("root").at("definition"), elaborator_map, source_id, mode,
                              wire.worker_ids);
+    auto task = request.at("task");
+    if (contract)
+        task["contract_manifest"] = json::parse(contract->serialize_canonical());
     auto source = program::ProgramSource::from_cpp_builder(source_id, 1, std::move(document), {},
                                                            std::move(map));
-    program::ProgramInvocation invocation{{{"task", request.at("task")}}, budget, {}, nullptr};
-    return {std::move(source), std::move(invocation), std::move(wire), std::move(bindings)};
+    program::ProgramInvocation invocation{{{"task", std::move(task)}}, budget, {}, nullptr};
+    return {std::move(source), std::move(invocation), std::move(wire), std::move(bindings),
+            contract};
 }
 
 HarnessProgramSnapshots build_harness_program_snapshots(HarnessProgramSnapshotConfig config) {
