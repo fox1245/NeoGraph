@@ -61,7 +61,13 @@ void require_array(const json& value, std::string_view field) {
 std::vector<std::string> parse_strings(const json& value, std::string_view field) {
     require_array(value, field);
     std::vector<std::string> result;
-    for (const auto& item : value) result.push_back(required_string(item, "array entry"));
+    for (const auto& item : value) {
+        if (!item.is_string())
+            throw std::invalid_argument(std::string(field) + " must contain strings");
+        auto string_value = item.get<std::string>();
+        detail::validate_utf8(string_value);
+        result.push_back(std::move(string_value));
+    }
     std::sort(result.begin(), result.end());
     if (std::adjacent_find(result.begin(), result.end()) != result.end())
         throw std::invalid_argument(std::string(field) + " contains a duplicate");
@@ -301,6 +307,120 @@ std::string dependency_root(std::vector<DependencyReceipt> receipts) {
     return level.front();
 }
 
+json contract_body(const ContractRecord& contract) {
+    return json{{"schema_version", contract.schema_version}, {"schema", contract.schema}};
+}
+
+std::string contract_identity(const ContractRecord& contract) {
+    return detail::sha256_identity("program-module-port-contract/v1",
+                                   detail::canonical_json_bytes(contract_body(contract)));
+}
+
+bool contains_all(const std::vector<std::string>& available,
+                  const std::vector<std::string>& requested) {
+    return std::all_of(requested.begin(), requested.end(), [&](const auto& value) {
+        return std::find(available.begin(), available.end(), value) != available.end();
+    });
+}
+
+bool budget_leq(const BudgetLimits& lhs, const BudgetLimits& rhs) {
+    return lhs.wall_time_ms <= rhs.wall_time_ms &&
+           lhs.model_tokens <= rhs.model_tokens &&
+           lhs.monetary_microunits <= rhs.monetary_microunits &&
+           lhs.max_concurrency <= rhs.max_concurrency &&
+           lhs.max_program_operations <= rhs.max_program_operations &&
+           lhs.max_core_steps <= rhs.max_core_steps &&
+           lhs.max_dynamic_compiles <= rhs.max_dynamic_compiles &&
+           lhs.max_child_depth <= rhs.max_child_depth &&
+           lhs.max_total_children <= rhs.max_total_children;
+}
+
+bool budget_positive(const BudgetLimits& budget) {
+    return budget.wall_time_ms != 0 && budget.model_tokens != 0 &&
+           budget.monetary_microunits != 0 && budget.max_concurrency != 0 &&
+           budget.max_program_operations != 0 && budget.max_core_steps != 0 &&
+           budget.max_dynamic_compiles != 0 && budget.max_child_depth != 0 &&
+           budget.max_total_children != 0;
+}
+
+bool budget_covers_requirements(const BudgetLimits& budget,
+                                const std::vector<BudgetRequirement>& requirements) {
+    for (const auto& requirement : requirements) {
+        std::uint64_t granted = 0;
+        if (requirement.resource == "wall_time_ms")
+            granted = budget.wall_time_ms;
+        else if (requirement.resource == "model_tokens")
+            granted = budget.model_tokens;
+        else if (requirement.resource == "monetary_microunits")
+            granted = budget.monetary_microunits;
+        else if (requirement.resource == "max_concurrency")
+            granted = budget.max_concurrency;
+        else if (requirement.resource == "max_program_operations")
+            granted = budget.max_program_operations;
+        else if (requirement.resource == "max_core_steps")
+            granted = budget.max_core_steps;
+        else if (requirement.resource == "max_dynamic_compiles")
+            granted = budget.max_dynamic_compiles;
+        else if (requirement.resource == "max_child_depth")
+            granted = budget.max_child_depth;
+        else if (requirement.resource == "max_total_children")
+            granted = budget.max_total_children;
+        else
+            return false;
+        if (granted < requirement.minimum) return false;
+    }
+    return true;
+}
+
+json link_body(const ModuleLinkReceiptData& data, std::string_view id) {
+    return json{{"format", "neograph-program-module-link"},
+                {"storage_schema_version", ModuleLinkReceipt::STORAGE_SCHEMA_VERSION},
+                {"id", std::string(id)},
+                {"owner_scope", data.owner_scope},
+                {"parent_module_id", data.parent_module_id},
+                {"dependency_merkle_root", data.dependency_merkle_root},
+                {"child_name", data.child_name},
+                {"child_program_version_id", data.child_program_version_id},
+                {"child_bundle_id", data.child_bundle_id},
+                {"child_input_contract_fingerprint", data.child_input_contract_fingerprint},
+                {"child_output_contract_fingerprint", data.child_output_contract_fingerprint},
+                {"granted_capabilities", data.granted_capabilities},
+                {"granted_effects", data.granted_effects},
+                {"budget", encode_budget(data.budget)}};
+}
+
+std::string link_identity(const ModuleLinkReceiptData& data) {
+    return detail::sha256_identity(
+        "program-module-link/v1",
+        detail::canonical_json_bytes(link_body(data, "")));
+}
+
+void validate_link_data(ModuleLinkReceiptData& data) {
+    require_nonempty(data.owner_scope, "Module link owner_scope");
+    require_digest(data.parent_module_id, "Module link parent_module_id");
+    require_digest(data.dependency_merkle_root, "Module link dependency_merkle_root");
+    require_nonempty(data.child_name, "Module link child_name");
+    require_digest(data.child_program_version_id, "Module link child_program_version_id");
+    require_digest(data.child_bundle_id, "Module link child_bundle_id");
+    require_digest(data.child_input_contract_fingerprint,
+                   "Module link child_input_contract_fingerprint");
+    require_digest(data.child_output_contract_fingerprint,
+                   "Module link child_output_contract_fingerprint");
+    if (!budget_positive(data.budget))
+        throw std::invalid_argument("Module link budget must contain positive finite limits");
+    std::sort(data.granted_capabilities.begin(), data.granted_capabilities.end());
+    std::sort(data.granted_effects.begin(), data.granted_effects.end());
+    if (std::adjacent_find(data.granted_capabilities.begin(),
+                           data.granted_capabilities.end()) != data.granted_capabilities.end())
+        throw std::invalid_argument("Module link capabilities contain a duplicate");
+    if (std::adjacent_find(data.granted_effects.begin(), data.granted_effects.end()) !=
+        data.granted_effects.end())
+        throw std::invalid_argument("Module link effects contain a duplicate");
+    for (const auto& value : data.granted_capabilities)
+        require_nonempty(value, "Module link capability");
+    for (const auto& value : data.granted_effects) require_nonempty(value, "Module link effect");
+}
+
 }  // namespace
 
 std::string_view to_string(ModuleLifecycle state) noexcept {
@@ -410,6 +530,171 @@ std::vector<ImportRef> ModuleResolution::imports() const {
     return result;
 }
 
+
+struct ModuleLinkReceipt::Impl {
+    ModuleLinkReceiptData data;
+    std::string           id;
+};
+
+ModuleLinkReceipt::ModuleLinkReceipt(std::shared_ptr<const Impl> impl)
+    : impl_(std::move(impl)) {}
+
+ModuleLinkReceipt ModuleLinkReceipt::create(ModuleLinkReceiptData data) {
+    validate_link_data(data);
+    const auto computed = link_identity(data);
+    auto       result   = std::make_shared<Impl>();
+    result->id          = computed;
+    result->data        = std::move(data);
+    return ModuleLinkReceipt(std::move(result));
+}
+
+ModuleLinkReceipt ModuleLinkReceipt::parse(std::string_view stored_bytes) {
+    const auto value = detail::parse_json_strict(stored_bytes);
+    require_object(value, "Stored ModuleLinkReceipt");
+    detail::reject_unknown_fields(
+        value, "Stored ModuleLinkReceipt",
+        {"format", "storage_schema_version", "id", "owner_scope", "parent_module_id",
+         "dependency_merkle_root", "child_name", "child_program_version_id", "child_bundle_id",
+         "child_input_contract_fingerprint", "child_output_contract_fingerprint",
+         "granted_capabilities", "granted_effects", "budget"});
+    if (required_string(value, "format") != "neograph-program-module-link")
+        throw std::invalid_argument("Stored ModuleLinkReceipt has unknown format");
+    if (required_u32(value, "storage_schema_version") != STORAGE_SCHEMA_VERSION)
+        throw std::invalid_argument("Stored ModuleLinkReceipt schema version is unsupported");
+    const auto stored_id = required_string(value, "id");
+    require_digest(stored_id, "Stored ModuleLinkReceipt id");
+    ModuleLinkReceiptData data;
+    data.owner_scope = required_string(value, "owner_scope");
+    data.parent_module_id = required_string(value, "parent_module_id");
+    data.dependency_merkle_root = required_string(value, "dependency_merkle_root");
+    data.child_name = required_string(value, "child_name");
+    data.child_program_version_id = required_string(value, "child_program_version_id");
+    data.child_bundle_id = required_string(value, "child_bundle_id");
+    data.child_input_contract_fingerprint =
+        required_string(value, "child_input_contract_fingerprint");
+    data.child_output_contract_fingerprint =
+        required_string(value, "child_output_contract_fingerprint");
+    data.granted_capabilities = parse_strings(value.at("granted_capabilities"),
+                                               "granted_capabilities");
+    data.granted_effects = parse_strings(value.at("granted_effects"), "granted_effects");
+    data.budget = parse_budget(value.at("budget"));
+    auto result = create(std::move(data));
+    if (result.id() != stored_id)
+        throw std::invalid_argument("Stored ModuleLinkReceipt id does not match its body");
+    return result;
+}
+
+const std::string& ModuleLinkReceipt::owner_scope() const noexcept {
+    return impl_->data.owner_scope;
+}
+const std::string& ModuleLinkReceipt::parent_module_id() const noexcept {
+    return impl_->data.parent_module_id;
+}
+const std::string& ModuleLinkReceipt::dependency_merkle_root() const noexcept {
+    return impl_->data.dependency_merkle_root;
+}
+const std::string& ModuleLinkReceipt::child_name() const noexcept {
+    return impl_->data.child_name;
+}
+const std::string& ModuleLinkReceipt::child_program_version_id() const noexcept {
+    return impl_->data.child_program_version_id;
+}
+const std::string& ModuleLinkReceipt::child_bundle_id() const noexcept {
+    return impl_->data.child_bundle_id;
+}
+const std::string& ModuleLinkReceipt::child_input_contract_fingerprint() const noexcept {
+    return impl_->data.child_input_contract_fingerprint;
+}
+const std::string& ModuleLinkReceipt::child_output_contract_fingerprint() const noexcept {
+    return impl_->data.child_output_contract_fingerprint;
+}
+const std::vector<std::string>& ModuleLinkReceipt::granted_capabilities() const noexcept {
+    return impl_->data.granted_capabilities;
+}
+const std::vector<std::string>& ModuleLinkReceipt::granted_effects() const noexcept {
+    return impl_->data.granted_effects;
+}
+const BudgetLimits& ModuleLinkReceipt::budget() const noexcept { return impl_->data.budget; }
+const std::string& ModuleLinkReceipt::id() const noexcept { return impl_->id; }
+std::string ModuleLinkReceipt::serialize_canonical() const {
+    return detail::canonical_json_bytes(link_body(impl_->data, impl_->id));
+}
+
+ModuleLinkReceipt link_module_child(const ModuleResolution& resolution,
+                                    const ProgramModule&    parent,
+                                    std::string_view        child_name,
+                                    const ProgramBundle&    child_bundle,
+                                    const ProgramVersion&   child) {
+    if (parent.lifecycle() != ModuleLifecycle::Active)
+        throw std::invalid_argument("Cannot link a non-active parent module");
+    if (resolution.root.content_identity != parent.id())
+        throw std::invalid_argument("Module resolution root does not match parent module");
+    const auto parent_it = std::find_if(
+        resolution.modules.begin(), resolution.modules.end(),
+        [&](const ProgramModule& module) { return module.id() == parent.id(); });
+    if (parent_it == resolution.modules.end())
+        throw std::invalid_argument("Module resolution does not contain the parent module");
+    if (parent_it->owner_scope() != parent.owner_scope() ||
+        parent_it->serialize_canonical() != parent.serialize_canonical())
+        throw std::invalid_argument("Module resolution parent differs from supplied module");
+    if (child.ownership_scope() != parent.owner_scope())
+        throw std::invalid_argument("Child Program owner_scope differs from parent module");
+    if (child_bundle.id() != child.bundle_id())
+        throw std::invalid_argument("Child Program bundle identity does not match its version");
+    if (child_bundle.module_dependency_merkle_root() != resolution.dependency_merkle_root())
+        throw std::invalid_argument("Child Program module dependency closure is not pinned");
+
+    const auto descriptor_it = std::find_if(
+        parent.children().begin(), parent.children().end(),
+        [&](const ChildProgramDescriptor& descriptor) { return descriptor.name == child_name; });
+    if (descriptor_it == parent.children().end())
+        throw std::invalid_argument("Unknown child descriptor: " + std::string(child_name));
+    const auto& descriptor = *descriptor_it;
+    if (descriptor.program_version_id != child.id())
+        throw std::invalid_argument("Child Program version does not match its descriptor");
+    if (descriptor.inputs.size() != 1 || descriptor.outputs.size() != 1)
+        throw std::invalid_argument("Module links require exactly one input and output port");
+
+    const auto child_input = child_bundle.input_contract();
+    const auto child_output = child_bundle.output_contract();
+    const auto input_identity = contract_identity(child_input);
+    const auto output_identity = contract_identity(child_output);
+    if (contract_identity(descriptor.inputs.front().contract) != input_identity)
+        throw std::invalid_argument("Child input port contract does not match its bundle");
+    if (contract_identity(descriptor.outputs.front().contract) != output_identity)
+        throw std::invalid_argument("Child output port contract does not match its bundle");
+
+    const auto& closure = child_bundle.capability_effect_closure();
+    if (!contains_all(descriptor.required_capabilities, closure.capabilities) ||
+        !contains_all(descriptor.required_effects, closure.effects))
+        throw std::invalid_argument("Child descriptor does not cover its executable closure");
+    if (!contains_all(parent.allowed_capabilities(), descriptor.required_capabilities))
+        throw std::invalid_argument("Child capabilities exceed parent authority");
+    if (!contains_all(parent.declared_effects(), descriptor.required_effects))
+        throw std::invalid_argument("Child effects exceed parent authority");
+    const auto child_policy = child.policy_snapshot();
+    if (!contains_all(child_policy.allowed_capabilities(), closure.capabilities) ||
+        !contains_all(child_policy.allowed_effects(), closure.effects))
+        throw std::invalid_argument("Child policy does not cover its executable closure");
+    if (!budget_leq(descriptor.budget, child_policy.budget_ceiling()) ||
+        !budget_covers_requirements(descriptor.budget,
+                                    child_bundle.declared_budget_requirements()))
+        throw std::invalid_argument("Child budget exceeds policy or declared requirements");
+
+    ModuleLinkReceiptData data;
+    data.owner_scope = parent.owner_scope();
+    data.parent_module_id = parent.id();
+    data.dependency_merkle_root = resolution.dependency_merkle_root();
+    data.child_name = descriptor.name;
+    data.child_program_version_id = child.id();
+    data.child_bundle_id = child_bundle.id();
+    data.child_input_contract_fingerprint = input_identity;
+    data.child_output_contract_fingerprint = output_identity;
+    data.granted_capabilities = descriptor.required_capabilities;
+    data.granted_effects = descriptor.required_effects;
+    data.budget = descriptor.budget;
+    return ModuleLinkReceipt::create(std::move(data));
+}
 struct InMemoryModuleStore::Impl {
     mutable std::mutex mutex;
     struct Entry {

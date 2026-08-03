@@ -112,6 +112,65 @@ struct ModuleResolution {
     std::vector<ImportRef> imports() const;
 };
 
+/**
+ * Immutable proof that one child descriptor was linked to one exact admitted
+ * Program version. The receipt is the only module metadata accepted by the
+ * child runtime; callers cannot substitute a version after linking.
+ */
+struct ModuleLinkReceiptData {
+    std::string             owner_scope;
+    std::string             parent_module_id;
+    std::string             dependency_merkle_root;
+    std::string             child_name;
+    std::string             child_program_version_id;
+    std::string             child_bundle_id;
+    std::string             child_input_contract_fingerprint;
+    std::string             child_output_contract_fingerprint;
+    std::vector<std::string> granted_capabilities;
+    std::vector<std::string> granted_effects;
+    BudgetLimits             budget;
+};
+
+class NEOGRAPH_PROGRAM_API ModuleLinkReceipt final {
+public:
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+
+    static ModuleLinkReceipt create(ModuleLinkReceiptData data);
+    static ModuleLinkReceipt parse(std::string_view stored_bytes);
+
+    const std::string& owner_scope() const noexcept;
+    const std::string& parent_module_id() const noexcept;
+    const std::string& dependency_merkle_root() const noexcept;
+    const std::string& child_name() const noexcept;
+    const std::string& child_program_version_id() const noexcept;
+    const std::string& child_bundle_id() const noexcept;
+    const std::string& child_input_contract_fingerprint() const noexcept;
+    const std::string& child_output_contract_fingerprint() const noexcept;
+    const std::vector<std::string>& granted_capabilities() const noexcept;
+    const std::vector<std::string>& granted_effects() const noexcept;
+    const BudgetLimits& budget() const noexcept;
+    const std::string& id() const noexcept;
+    std::string serialize_canonical() const;
+
+private:
+    struct Impl;
+    explicit ModuleLinkReceipt(std::shared_ptr<const Impl> impl);
+
+    std::shared_ptr<const Impl> impl_;
+};
+
+/**
+ * Link one child descriptor from a verified module closure to an exact
+ * admitted ProgramVersion. The operation is pure and fails closed on owner,
+ * lifecycle, port, capability, effect, identity, or budget mismatches.
+ */
+NEOGRAPH_PROGRAM_API ModuleLinkReceipt link_module_child(
+    const ModuleResolution& resolution,
+    const ProgramModule&    parent,
+    std::string_view        child_name,
+    const ProgramBundle&    child_bundle,
+    const ProgramVersion&   child);
+
 class NEOGRAPH_PROGRAM_API ModuleStore {
 public:
     virtual ~ModuleStore() = default;

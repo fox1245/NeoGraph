@@ -88,6 +88,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         test_program_admission.cpp
         test_program_compiler.cpp
         test_program_catalog.cpp
+        test_program_module.cpp
         test_program_journal.cpp
         test_program_pending.cpp
         test_program_fork_replay.cpp
