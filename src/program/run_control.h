@@ -55,14 +55,19 @@ using ChildLaunchCallback =
     std::function<std::shared_ptr<RunControl>(std::string_view, json, std::string_view,
                                               std::string_view)>;
 
-class RunControl final {
+class RunControl final : public std::enable_shared_from_this<RunControl> {
+private:
+    static asio::awaitable<ProgramResult>
+    wait_async_with_control(std::shared_ptr<const RunControl> control);
+
 public:
     RunControl(std::string                                owner_scope,
                std::string                                run_id,
                std::uint64_t                              attempt,
                std::shared_ptr<const MaterializedProgram> materialized,
                std::string                                binding_fingerprint,
-               ProgramPersistedInvocation                 invocation,
+               ProgramPersistedInvocation                 execution_invocation,
+               RunInvocation                              invocation,
                std::string                                core_thread_id,
                std::uint64_t                              event_sequence,
                std::shared_ptr<ProgramEventSink>          sink,
@@ -86,6 +91,7 @@ public:
     const std::uint64_t                              attempt;
     const std::shared_ptr<const MaterializedProgram> materialized;
     const ProgramPersistedInvocation                 persisted_invocation;
+    const RunInvocation                              invocation;
     const RunBudget                                  granted_budget;
     const std::chrono::steady_clock::time_point      started_at;
     const std::chrono::steady_clock::time_point      deadline;

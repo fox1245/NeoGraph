@@ -11,6 +11,7 @@
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/dispatch.hpp>
+#include <asio/post.hpp>
 #include <asio/io_context.hpp>
 #include <asio/redirect_error.hpp>
 #include <asio/steady_timer.hpp>
@@ -1387,16 +1388,15 @@ SchemaProvider::complete_async(const CompletionParams& params)
     auto operation = params.cancel_token
         ? params.cancel_token->fork()
         : std::shared_ptr<neograph::graph::CancelToken>{};
-    if (operation) {
-        operation->bind_executor(executor);
-        operation->throw_if_cancelled("SchemaProvider completion entry");
-    }
     async::HttpResponse res;
     if (operation) {
+        const auto operation_executor = operation->bind_executor(executor);
+        graph::CancelExecutorLease operation_lease(operation);
+        co_await asio::post(operation_executor, asio::use_awaitable);
+        operation->throw_if_cancelled("SchemaProvider completion entry");
         res = co_await asio::co_spawn(
-            executor, std::move(*request),
-            asio::bind_cancellation_slot(
-                operation->slot(), asio::use_awaitable));
+            operation_executor, std::move(*request),
+            asio::bind_cancellation_slot(operation->slot(), asio::use_awaitable));
     } else {
         res = co_await std::move(*request);
     }
@@ -1860,12 +1860,14 @@ SchemaProvider::complete_stream_async(const CompletionParams& params,
         }
 
         auto operation = params.cancel_token->fork();
-        operation->bind_executor(exec);
+        const auto operation_executor = operation->bind_executor(exec);
+        graph::CancelExecutorLease operation_lease(operation);
+        co_await asio::post(operation_executor, asio::use_awaitable);
         operation->throw_if_cancelled("SchemaProvider WebSocket stream entry");
         auto operation_params = params;
         operation_params.cancel_token = operation;
         co_return co_await asio::co_spawn(
-            exec,
+            operation_executor,
             complete_stream_ws_responses(operation_params, on_chunk),
             asio::bind_cancellation_slot(operation->slot(), asio::use_awaitable));
     }
@@ -1895,9 +1897,12 @@ SchemaProvider::complete_stream_async(const CompletionParams& params,
     auto operation = params.cancel_token
         ? params.cancel_token->fork()
         : std::shared_ptr<neograph::graph::CancelToken>{};
+    graph::CancelExecutorLease operation_lease(operation);
     auto operation_params = params;
     if (operation) {
-        operation->bind_executor(exec);
+        const auto operation_executor = operation->bind_executor(exec);
+        co_await asio::post(operation_executor, asio::use_awaitable);
+        exec = operation_executor;
         operation->throw_if_cancelled("SchemaProvider HTTP stream entry");
         operation_params.cancel_token = operation;
         operation->slot().assign(

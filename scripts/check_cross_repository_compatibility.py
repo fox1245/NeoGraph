@@ -73,8 +73,30 @@ _CURRENT_SURFACE_SCHEMA_VERSIONS = {
     "a2a_collaboration": [2],
 }
 
+_CURRENT_SURFACE_APIS = {
+    "program_version": "neograph::program::ProgramVersion",
+    "run_invocation": "neograph::program::RunInvocation",
+    "a2a_collaboration": "neograph::a2a::CollaborationLink + CollaborationEnvelope",
+}
+
+_CURRENT_SURFACE_IMPLEMENTATION_STATES = {
+    "program_version": "implemented",
+    "run_invocation": "implemented_program_boundary",
+    "a2a_collaboration": "implemented_program_adapter",
+}
+
 
 _CURRENT_SURFACE_MARKERS = {
+    "run_invocation": (
+        (
+            "include/neograph/program/invocation.h",
+            "struct NEOGRAPH_PROGRAM_API RunInvocation",
+        ),
+        (
+            "include/neograph/program/runtime.h",
+            "ProgramHandle start(RunInvocation invocation);",
+        ),
+    ),
     "a2a_collaboration": (
         (
             "include/neograph/a2a/collaboration.h",
@@ -88,6 +110,10 @@ _CURRENT_SURFACE_MARKERS = {
             "include/neograph/a2a/collaboration.h",
             "std::vector<std::string> message_kind_allowlist",
         ),
+        (
+            "include/neograph/a2a/program_adapter.h",
+            "class NEOGRAPH_API ProgramAgentAdapter final",
+        ),
     ),
 }
 
@@ -99,6 +125,18 @@ def _validate_current_surface_contract(surface: dict[str, Any], root: Path, fiel
         _require(
             surface.get("schema_versions") == expected_versions,
             f"{field}.schema_versions does not match the current exposed contract",
+        )
+    expected_api = _CURRENT_SURFACE_APIS.get(surface_id)
+    if expected_api is not None:
+        _require(
+            surface.get("api") == expected_api,
+            f"{field}.api does not match the current exposed contract",
+        )
+    expected_implementation_state = _CURRENT_SURFACE_IMPLEMENTATION_STATES.get(surface_id)
+    if expected_implementation_state is not None:
+        _require(
+            surface.get("implementation_state") == expected_implementation_state,
+            f"{field}.implementation_state does not match the current exposed contract",
         )
     for marker_path, marker in _CURRENT_SURFACE_MARKERS.get(surface_id, ()):
         declared_sources = surface.get("source_paths")
@@ -332,12 +370,40 @@ def main() -> int:
     else:
         raise CompatibilityCheckError("stale A2A schema declaration was silently accepted")
 
+    # A stale historical API label must not be accepted merely because its
+    # source headers remain present in the repository.
+    candidate = copy.deepcopy(metadata)
+    invocation_surface = next(
+        surface for surface in candidate["current_surfaces"] if surface["id"] == "run_invocation"
+    )
+    invocation_surface["api"] = "neograph::graph::RunInvocation"
+    try:
+        _validate(candidate, root)
+    except CompatibilityCheckError:
+        pass
+    else:
+        raise CompatibilityCheckError("stale RunInvocation API declaration was silently accepted")
+
+    # The current A2A surface is Program-backed; an old "pending cutover"
+    # state cannot claim current NeoGraph conformance.
+    candidate = copy.deepcopy(metadata)
+    a2a_surface = next(
+        surface for surface in candidate["current_surfaces"] if surface["id"] == "a2a_collaboration"
+    )
+    a2a_surface["implementation_state"] = "compatibility_adapter_pending_program_cutover"
+    try:
+        _validate(candidate, root)
+    except CompatibilityCheckError:
+        pass
+    else:
+        raise CompatibilityCheckError("stale A2A implementation-state declaration was silently accepted")
+
     print(
         "cross-repository compatibility metadata: PASS "
         f"({len(metadata['current_surfaces'])} current surfaces, "
         f"{len(metadata['historical_references'])} historical references, "
         f"{len(metadata['consumers'])} guarded consumers; "
-        "negative current-claim and stale-schema checks rejected)"
+        "negative current-claim, stale-schema, stale-API, and stale-state checks rejected)"
     )
     return 0
 

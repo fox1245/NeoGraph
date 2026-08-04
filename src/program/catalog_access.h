@@ -4,7 +4,9 @@
 #include <neograph/program/catalog.h>
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 
 namespace neograph::program::detail {
 
@@ -33,6 +35,12 @@ public:
     static std::shared_ptr<const MaterializedProgram> pin_with_binding(
         ProgramCatalog& catalog, std::string_view owner_scope, std::string_view version_id,
         CatalogCapabilityBinding binding);
+    /**
+     * Read the immutable admitted version without materializing a live
+     * capability binding. Recorded replay uses this before pin_with_binding().
+     */
+    static std::optional<ProgramVersion> load_admitted_version(
+        const ProgramCatalog& catalog, std::string_view owner_scope, std::string_view version_id);
 };
 
 }  // namespace neograph::program::detail

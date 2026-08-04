@@ -61,6 +61,53 @@ std::string generate_run_id() {
     return id;
 }
 
+RunInvocation bind_runtime_invocation(const ProgramInvocation& projection,
+                                      std::string_view         owner_scope,
+                                      std::string_view         program_version_id,
+                                      std::string_view         run_id) {
+    if (projection.canonical_request) {
+        auto invocation = *projection.canonical_request;
+        invocation.validate();
+        if (invocation.owner_scope != owner_scope ||
+            invocation.program_version_id != program_version_id || invocation.run_id != run_id ||
+            invocation.input != projection.input || invocation.budget != projection.budget ||
+            invocation.correlation_id != projection.trace_id ||
+            invocation.parent_run_id != projection.parent_run_id) {
+            throw_runtime_diagnostic(
+                "P_INVOCATION_MISMATCH",
+                "Canonical RunInvocation does not match its runtime-only projection");
+        }
+        return invocation;
+    }
+
+    RunInvocation invocation;
+    invocation.owner_scope        = std::string(owner_scope);
+    invocation.agent_id           = "neograph-program-runtime";
+    invocation.program_version_id = std::string(program_version_id);
+    invocation.run_id             = std::string(run_id);
+    invocation.parent_run_id      = projection.parent_run_id;
+    invocation.budget             = projection.budget;
+    invocation.input              = projection.input;
+    invocation.message_sequence   = 1;
+    invocation.idempotency_key    = "runtime:" + invocation.run_id;
+    invocation.correlation_id =
+        projection.trace_id.empty() ? "runtime:" + invocation.run_id : projection.trace_id;
+    invocation.validate();
+    return invocation;
+}
+
+ProgramInvocation runtime_projection(RunInvocation invocation,
+                                     std::shared_ptr<ProgramEventSink> events = {}) {
+    ProgramInvocation projection;
+    projection.input             = invocation.input;
+    projection.budget            = invocation.budget;
+    projection.trace_id          = invocation.correlation_id;
+    projection.events            = std::move(events);
+    projection.requested_run_id  = invocation.run_id;
+    projection.canonical_request = std::move(invocation);
+    return projection;
+}
+
 std::string core_thread_identity(std::string_view run_id, std::string_view generation_id) {
     std::string identity(run_id);
     identity.push_back('\0');
@@ -510,6 +557,7 @@ ChildRecordPublication publish_child_record(
         data.bundle_id                        = previous->bundle_id();
         data.binding_fingerprint              = previous->binding_fingerprint();
         data.invocation                       = previous->invocation();
+        data.child_depth                     = previous->child_depth();
         data.continuation                     = journal.continuation;
         data.remaining_budget                 = previous->remaining_budget();
         data.exact_checkpoint                 = previous->exact_checkpoint();
@@ -620,7 +668,8 @@ ProgramTransitionPublication initial_publication(
     data.program_version_id  = control.program_version_id;
     data.bundle_id           = control.bundle_id;
     data.binding_fingerprint = control.binding_fingerprint;
-    data.invocation          = control.persisted_invocation;
+    data.invocation          = control.invocation;
+    data.child_depth         = control.persisted_invocation.child_depth;
     data.continuation        = journal.continuation;
     data.remaining_budget    = control.granted_budget;
     data.exact_checkpoint    = std::move(checkpoint);
@@ -717,6 +766,7 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
             data.bundle_id           = control.bundle_id;
             data.binding_fingerprint = previous->binding_fingerprint();
             data.invocation          = previous->invocation();
+            data.child_depth         = previous->child_depth();
             data.children            = terminal_children(previous->children());
             data.continuation        = journal.continuation;
             data.remaining_budget    = result.remaining_budget();
@@ -773,7 +823,8 @@ RunControl::RunControl(std::string                                owner,
                        std::uint64_t                              attempt_value,
                        std::shared_ptr<const MaterializedProgram> pinned,
                        std::string                                binding,
-                       ProgramPersistedInvocation                 invocation,
+                       ProgramPersistedInvocation                 execution_invocation,
+                       RunInvocation                              invocation_value,
                        std::string                                thread,
                        std::uint64_t                              event_sequence,
                        std::shared_ptr<ProgramEventSink>          sink,
@@ -788,20 +839,29 @@ RunControl::RunControl(std::string                                owner,
       binding_fingerprint(std::move(binding)),
       attempt(attempt_value),
       materialized(std::move(pinned)),
-      persisted_invocation(std::move(invocation)),
+      persisted_invocation(std::move(execution_invocation)),
+      invocation(std::move(invocation_value)),
       granted_budget(persisted_invocation.granted_budget),
       started_at(std::chrono::steady_clock::now()),
       deadline(started_at + std::chrono::milliseconds(granted_budget.wall_time_ms)),
       deadline_executor(std::move(deadline_executor_value)),
       waiter_strand(asio::make_strand(asio::system_executor{})),
       core_thread_id(std::move(thread)),
-      trace_id(persisted_invocation.trace_id),
+      trace_id(invocation.correlation_id),
       checkpoints(std::move(checkpoint_store)),
       state_store(std::move(store)),
       transitions(std::move(transition_store)),
       cancel_token(std::make_shared<graph::CancelToken>()),
       sink_(std::move(sink)),
-      next_sequence_(event_sequence + 1) {}
+      next_sequence_(event_sequence + 1) {
+    if (invocation.owner_scope != owner_scope || invocation.run_id != run_id ||
+        invocation.program_version_id != program_version_id ||
+        invocation.input != persisted_invocation.input ||
+        invocation.correlation_id != persisted_invocation.trace_id ||
+        invocation.parent_run_id != persisted_invocation.parent_run_id) {
+        throw std::invalid_argument("Program runtime projection does not match RunInvocation");
+    }
+}
 
 RunControl::RunControl(ProgramRunRecord                        record,
                        std::shared_ptr<ProgramTransitionStore> transition_store)
@@ -812,7 +872,11 @@ RunControl::RunControl(ProgramRunRecord                        record,
       binding_fingerprint(record.binding_fingerprint()),
       attempt(record.continuation().attempt),
       materialized(),
-      persisted_invocation(record.invocation()),
+      persisted_invocation(ProgramPersistedInvocation{
+          record.invocation().input, record.invocation().budget,
+          record.invocation().correlation_id, record.invocation().parent_run_id,
+          record.child_depth()}),
+      invocation(record.invocation()),
       granted_budget(persisted_invocation.granted_budget),
       started_at(std::chrono::steady_clock::now()),
       deadline(started_at),
@@ -820,7 +884,7 @@ RunControl::RunControl(ProgramRunRecord                        record,
       waiter_strand(asio::make_strand(asio::system_executor{})),
       core_thread_id(record.exact_checkpoint() ? record.exact_checkpoint()->core_thread_id
                                                : std::string{}),
-      trace_id(persisted_invocation.trace_id),
+      trace_id(invocation.correlation_id),
       checkpoints(),
       state_store(),
       transitions(std::move(transition_store)),
@@ -948,6 +1012,7 @@ bool RunControl::cancel(CancellationCause cause) noexcept {
                 data.bundle_id                      = bundle_id;
                 data.binding_fingerprint            = previous->binding_fingerprint();
                 data.invocation                     = previous->invocation();
+                data.child_depth                    = previous->child_depth();
                 data.children                    = terminal_children(previous->children());
                 data.continuation                   = journal.continuation;
                 data.remaining_budget               = previous->remaining_budget();
@@ -1279,24 +1344,30 @@ ProgramResult RunControl::wait() const {
 }
 
 asio::awaitable<ProgramResult> RunControl::wait_async() const {
-    auto timer = std::make_shared<asio::steady_timer>(waiter_strand);
+    return wait_async_with_control(shared_from_this());
+}
+
+asio::awaitable<ProgramResult>
+RunControl::wait_async_with_control(std::shared_ptr<const RunControl> control) {
+    auto timer = std::make_shared<asio::steady_timer>(control->waiter_strand);
     timer->expires_at((asio::steady_timer::time_point::max)());
     co_await asio::co_spawn(
-        waiter_strand,
-        [this, timer]() -> asio::awaitable<void> {
+        control->waiter_strand,
+        [control, timer]() -> asio::awaitable<void> {
             {
-                std::lock_guard lock(mutex_);
-                if (result_) co_return;
-                waiters_.push_back(AsyncWaiter{timer});
+                std::lock_guard lock(control->mutex_);
+                if (control->result_) co_return;
+                control->waiters_.push_back(AsyncWaiter{timer});
             }
             asio::error_code error;
             co_await         timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
         },
         asio::use_awaitable);
 
-    std::lock_guard lock(mutex_);
-    if (!result_) throw std::runtime_error("Program wait ended before terminal publication");
-    co_return* result_;
+    std::lock_guard lock(control->mutex_);
+    if (!control->result_)
+        throw std::runtime_error("Program wait ended before terminal publication");
+    co_return *control->result_;
 }
 
 std::optional<ProgramResult> RunControl::try_result() const {
@@ -1621,24 +1692,25 @@ ProgramRuntime::~ProgramRuntime() {
 }
 
 ProgramHandle ProgramRuntime::start(RunInvocation invocation) {
+    return start(std::move(invocation), {});
+}
+
+ProgramHandle ProgramRuntime::start(RunInvocation                    invocation,
+                                    std::shared_ptr<ProgramEventSink> events) {
     invocation.validate();
     if (!invocation.parent_run_id.empty()) {
         throw std::invalid_argument(
             "Top-level RunInvocation must not carry parent_run_id; use start_child");
     }
 
+    const auto owner_scope = invocation.owner_scope;
     const auto resolved = impl_->config.catalog->resolve_version(
-        invocation.owner_scope, invocation.program_version_id);
+        owner_scope, invocation.program_version_id);
     if (!resolved) {
         throw_runtime_diagnostic("P_VERSION_NOT_FOUND", "Program version was not found");
     }
 
-    ProgramInvocation runtime_invocation;
-    runtime_invocation.input = std::move(invocation.input);
-    runtime_invocation.budget = std::move(invocation.budget);
-    runtime_invocation.trace_id = std::move(invocation.correlation_id);
-    runtime_invocation.requested_run_id = std::move(invocation.run_id);
-    return start(invocation.owner_scope, *resolved, std::move(runtime_invocation));
+    return start(owner_scope, *resolved, runtime_projection(std::move(invocation), std::move(events)));
 }
 
 ProgramHandle ProgramRuntime::start(std::string_view      owner_scope,
@@ -1656,13 +1728,16 @@ ProgramHandle ProgramRuntime::start(std::string_view      owner_scope,
     validate_invocation(*pinned, invocation);
     const auto run_id =
         invocation.requested_run_id.empty() ? generate_run_id() : invocation.requested_run_id;
+    const auto canonical = bind_runtime_invocation(invocation, owner_scope, version.id(), run_id);
     const auto core_thread_id = core_thread_identity(run_id, pinned->root->compiled_plan_identity);
     const auto binding_fingerprint = capability_binding_receipt_root(
         pinned->version.core_materialization_receipt().capability_bindings);
-    ProgramPersistedInvocation persisted{invocation.input, invocation.budget, invocation.trace_id};
-    auto                       control = std::make_shared<detail::RunControl>(
+    ProgramPersistedInvocation persisted{canonical.input, canonical.budget,
+                                         canonical.correlation_id, canonical.parent_run_id,
+                                         invocation.child_depth};
+    auto control = std::make_shared<detail::RunControl>(
         std::string(owner_scope), run_id, 1, std::move(pinned), binding_fingerprint,
-        std::move(persisted), core_thread_id, 0, std::move(invocation.events),
+        std::move(persisted), canonical, core_thread_id, 0, std::move(invocation.events),
         impl_->deadline_pool.get_executor(), impl_->config.checkpoints, impl_->config.state_store,
         impl_->config.transitions);
 
@@ -1723,13 +1798,12 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     invocation.child_depth  = parent_depth + 1;
     const auto run_id        = child_run_id_for(parent_run_id, link, invocation);
     invocation.requested_run_id = run_id;
+    const auto canonical = bind_runtime_invocation(invocation, owner_scope, version.id(), run_id);
     if (const auto occupied = impl_->config.transitions->load(owner_scope, run_id)) {
-        const ProgramPersistedInvocation expected{
-            invocation.input, invocation.budget, invocation.trace_id,
-            invocation.parent_run_id, invocation.child_depth};
         if (occupied->program_version_id() != version.id() ||
             occupied->bundle_id() != version.bundle_id() ||
-            occupied->invocation() != expected) {
+            occupied->invocation() != canonical ||
+            occupied->child_depth() != invocation.child_depth) {
             throw_runtime_diagnostic(
                 "P_CHILD_CONFLICT",
                 "Requested child run id is already bound to another Program invocation",
@@ -1841,14 +1915,14 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
             core_thread_identity(run_id, pinned->root->compiled_plan_identity);
         const auto binding_fingerprint = capability_binding_receipt_root(
             pinned->version.core_materialization_receipt().capability_bindings);
-        ProgramPersistedInvocation persisted{invocation.input,
-                                             invocation.budget,
-                                             invocation.trace_id,
-                                             invocation.parent_run_id,
+        ProgramPersistedInvocation persisted{canonical.input,
+                                             canonical.budget,
+                                             canonical.correlation_id,
+                                             canonical.parent_run_id,
                                              invocation.child_depth};
         control = std::make_shared<detail::RunControl>(
             std::string(owner_scope), run_id, 1, std::move(pinned), binding_fingerprint,
-            std::move(persisted), core_thread_id, 0, std::move(invocation.events),
+            std::move(persisted), canonical, core_thread_id, 0, std::move(invocation.events),
             impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
             impl_->config.state_store, impl_->config.transitions);
         bind_child_completion(control, owner_scope, parent_run_id, run_id);
@@ -1935,6 +2009,26 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     return ProgramHandle(std::move(control));
 }
 
+ProgramHandle ProgramRuntime::start_recorded(RunInvocation                    invocation,
+                                             RecordedBindingSet               recorded,
+                                             std::shared_ptr<ProgramEventSink> events) {
+    invocation.validate();
+    if (!invocation.parent_run_id.empty()) {
+        throw std::invalid_argument(
+            "Top-level RunInvocation must not carry parent_run_id; use start_child");
+    }
+
+    const auto owner_scope = invocation.owner_scope;
+    const auto resolved = detail::CatalogRuntimeAccess::load_admitted_version(
+        *impl_->config.catalog, owner_scope, invocation.program_version_id);
+    if (!resolved) {
+        throw_runtime_diagnostic("P_VERSION_NOT_FOUND", "Program version was not found");
+    }
+    return start_recorded(owner_scope, *resolved,
+                          runtime_projection(std::move(invocation), std::move(events)),
+                          std::move(recorded));
+}
+
 ProgramHandle ProgramRuntime::start_recorded(std::string_view      owner_scope,
                                              const ProgramVersion& version,
                                              ProgramInvocation     invocation,
@@ -1955,13 +2049,16 @@ ProgramHandle ProgramRuntime::start_recorded(std::string_view      owner_scope,
     validate_invocation(*pinned, invocation);
     const auto run_id =
         invocation.requested_run_id.empty() ? generate_run_id() : invocation.requested_run_id;
+    const auto canonical = bind_runtime_invocation(invocation, owner_scope, version.id(), run_id);
     const auto core_thread_id = core_thread_identity(run_id, pinned->root->compiled_plan_identity);
     const auto binding_fingerprint = capability_binding_receipt_root(
         pinned->version.core_materialization_receipt().capability_bindings);
-    ProgramPersistedInvocation persisted{invocation.input, invocation.budget, invocation.trace_id};
-    auto                       control = std::make_shared<detail::RunControl>(
+    ProgramPersistedInvocation persisted{canonical.input, canonical.budget,
+                                         canonical.correlation_id, canonical.parent_run_id,
+                                         invocation.child_depth};
+    auto control = std::make_shared<detail::RunControl>(
         std::string(owner_scope), run_id, 1, std::move(pinned), binding_fingerprint,
-        std::move(persisted), core_thread_id, 0, std::move(invocation.events),
+        std::move(persisted), canonical, core_thread_id, 0, std::move(invocation.events),
         impl_->deadline_pool.get_executor(), impl_->config.checkpoints, impl_->config.state_store,
         impl_->config.transitions);
     const auto started =
@@ -1988,6 +2085,27 @@ ProgramHandle ProgramRuntime::start_recorded(std::string_view      owner_scope,
     }
     spawn_run_attempt(impl_->pool, control, std::move(invocation.input), std::nullopt);
     return ProgramHandle(std::move(control));
+}
+
+ProgramHandle ProgramRuntime::fork(ExactProgramCheckpointReference   source,
+                                   RunInvocation                      invocation,
+                                   ProgramResume                      resume_value,
+                                   std::shared_ptr<ProgramEventSink> events) {
+    invocation.validate();
+    if (!invocation.parent_run_id.empty()) {
+        throw std::invalid_argument(
+            "Top-level RunInvocation must not carry parent_run_id; use start_child");
+    }
+
+    const auto owner_scope = invocation.owner_scope;
+    const auto resolved =
+        impl_->config.catalog->resolve_version(owner_scope, invocation.program_version_id);
+    if (!resolved) {
+        throw_runtime_diagnostic("P_VERSION_NOT_FOUND", "Program version was not found");
+    }
+    return fork(owner_scope, std::move(source), *resolved,
+                runtime_projection(std::move(invocation), std::move(events)),
+                std::move(resume_value));
 }
 
 ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
@@ -2159,11 +2277,14 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
         target_thread_id, cloned_checkpoint_id, cloned_checkpoint.schema_version};
     const auto binding_fingerprint = capability_binding_receipt_root(
         resolved_target->core_materialization_receipt().capability_bindings);
-    ProgramPersistedInvocation persisted{invocation.input, invocation.budget, invocation.trace_id};
-    auto                       control = std::make_shared<detail::RunControl>(
+    const auto canonical = bind_runtime_invocation(invocation, owner_scope, target.id(), run_id);
+    ProgramPersistedInvocation persisted{canonical.input, canonical.budget,
+                                         canonical.correlation_id, canonical.parent_run_id,
+                                         invocation.child_depth};
+    auto control = std::make_shared<detail::RunControl>(
         std::string(owner_scope), run_id, source_record->continuation().attempt + 1,
-        std::move(target_pinned), binding_fingerprint, std::move(persisted), target_thread_id, 0,
-        std::move(invocation.events), impl_->deadline_pool.get_executor(),
+        std::move(target_pinned), binding_fingerprint, std::move(persisted), canonical,
+        target_thread_id, 0, std::move(invocation.events), impl_->deadline_pool.get_executor(),
         impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions);
     const auto started =
         control->stage_event(ProgramEventKind::Started, ProgramStartedEvent{invocation.budget});
@@ -2381,13 +2502,13 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         ProgramPersistedInvocation invocation{
             record->invocation().input,
             record->remaining_budget(),
-            record->invocation().trace_id,
+            record->invocation().correlation_id,
             record->invocation().parent_run_id,
-            record->invocation().child_depth};
+            record->child_depth()};
         auto control = std::make_shared<detail::RunControl>(
             std::string(owner_scope), std::string(run_id), record->continuation().attempt,
             std::move(pinned), record->binding_fingerprint(), std::move(invocation),
-            std::move(recovered_thread_id), record->event_sequence(),
+            record->invocation(), std::move(recovered_thread_id), record->event_sequence(),
             std::shared_ptr<ProgramEventSink>{},
             impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
             impl_->config.state_store, impl_->config.transitions);
@@ -2515,6 +2636,7 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         expired_data.bundle_id                      = previous->bundle_id();
         expired_data.binding_fingerprint            = previous->binding_fingerprint();
         expired_data.invocation                     = previous->invocation();
+        expired_data.child_depth                    = previous->child_depth();
         expired_data.children                     = terminal_children(previous->children());
         expired_data.continuation                   = journal.continuation;
         expired_data.remaining_budget               = previous->remaining_budget();
@@ -2582,15 +2704,15 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
     ProgramPersistedInvocation attempt_invocation{
         previous->invocation().input,
         previous->remaining_budget(),
-        resume_value.trace_id,
+        previous->invocation().correlation_id,
         previous->invocation().parent_run_id,
-        previous->invocation().child_depth};
+        previous->child_depth()};
     auto control = std::make_shared<detail::RunControl>(
         std::string(owner_scope), std::string(run_id), previous->continuation().attempt + 1,
         std::move(pinned), previous->binding_fingerprint(), std::move(attempt_invocation),
-        checkpoint.core_thread_id, previous->event_sequence(), std::move(resume_value.events),
-        impl_->deadline_pool.get_executor(), impl_->config.checkpoints, impl_->config.state_store,
-        impl_->config.transitions);
+        previous->invocation(), checkpoint.core_thread_id, previous->event_sequence(),
+        std::move(resume_value.events), impl_->deadline_pool.get_executor(),
+        impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions);
     if (!previous->invocation().parent_run_id.empty())
         bind_child_completion(control, owner_scope, previous->invocation().parent_run_id, run_id);
     if (!previous->invocation().parent_run_id.empty()) {
@@ -2608,6 +2730,7 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
     data.bundle_id                        = previous->bundle_id();
     data.binding_fingerprint              = previous->binding_fingerprint();
     data.invocation                       = previous->invocation();
+    data.child_depth                      = previous->child_depth();
     data.children                       = previous->children();
     data.continuation                     = journal.continuation;
     data.remaining_budget                 = previous->remaining_budget();
@@ -2773,13 +2896,14 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
     std::vector<ProgramEvent>           outbox;
     if (completed) {
         ProgramPersistedInvocation invocation{previous->invocation().input,
-                                              previous->remaining_budget(), resolution.trace_id,
+                                              previous->remaining_budget(),
+                                              previous->invocation().correlation_id,
                                               previous->invocation().parent_run_id,
-                                              previous->invocation().child_depth};
+                                              previous->child_depth()};
         live_control = std::make_shared<detail::RunControl>(
             std::string(owner_scope), std::string(run_id), next_attempt, std::move(pinned),
-            previous->binding_fingerprint(), std::move(invocation), checkpoint.core_thread_id,
-            previous->event_sequence(), std::move(resolution.events),
+            previous->binding_fingerprint(), std::move(invocation), previous->invocation(),
+            checkpoint.core_thread_id, previous->event_sequence(), std::move(resolution.events),
             impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
             impl_->config.state_store, impl_->config.transitions);
         if (!previous->invocation().parent_run_id.empty())
@@ -2834,6 +2958,7 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
     data.bundle_id                        = previous->bundle_id();
     data.binding_fingerprint              = previous->binding_fingerprint();
     data.invocation                       = previous->invocation();
+    data.child_depth                      = previous->child_depth();
     data.children                       = previous->children();
     data.continuation                     = journal.continuation;
     data.remaining_budget                 = previous->remaining_budget();

@@ -1014,6 +1014,34 @@ TEST(ProgramRuntimeTest, RequestedRunIdIsUsedExactlyAndCollisionNeverDispatches)
     EXPECT_EQ(completed_calls.load(), 1U);
 }
 
+TEST(ProgramRuntimeTest, CanonicalRunInvocationIsRetainedExactlyAndAcceptsRuntimeEventSink) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto      version = fixture.admit("runtime-completed");
+
+    RunInvocation invocation;
+    invocation.owner_scope        = "tenant:runtime";
+    invocation.agent_id           = "test-canonical-adapter";
+    invocation.program_version_id = version.id();
+    invocation.run_id             = "canonical-runtime-run";
+    invocation.budget             = grant();
+    invocation.input              = json{{"request", "canonical"}};
+    invocation.message_sequence   = 17;
+    invocation.idempotency_key    = "test-canonical-adapter:17";
+    invocation.correlation_id     = "trace-canonical-runtime";
+    invocation.validate();
+    auto sink = std::make_shared<CountingSink>();
+
+    auto handle = fixture.runtime->start(invocation, sink);
+    const auto result = handle.wait();
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.run_id(), invocation.run_id);
+    EXPECT_EQ(handle.snapshot().invocation(), invocation);
+    EXPECT_EQ(handle.snapshot().child_depth(), 0U);
+    EXPECT_GT(sink->calls.load(), 0U);
+}
+
 TEST(ProgramRuntimeTest, ReconnectTerminalAfterCatalogRecreationIsByteExactAndNonMutating) {
     completed_calls.store(0);
     AdmittedRuntime fixture;
@@ -2320,14 +2348,22 @@ TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersi
     const auto source_pending_id = source_record->pending_input()->call_id();
 
     fixture.recreate_catalog_and_runtime();
-    ProgramInvocation invocation{
-        json::object(), source.remaining_budget(), "trace-fork-target", {}, "fork-target-run"};
+    RunInvocation fork_invocation;
+    fork_invocation.owner_scope        = "tenant:runtime";
+    fork_invocation.agent_id           = "test-fork";
+    fork_invocation.program_version_id = version.id();
+    fork_invocation.run_id             = "fork-target-run";
+    fork_invocation.budget             = source.remaining_budget();
+    fork_invocation.input              = json::object();
+    fork_invocation.message_sequence   = 19;
+    fork_invocation.idempotency_key    = "test-fork:19";
+    fork_invocation.correlation_id     = "trace-fork-target";
+    fork_invocation.validate();
     const auto forked =
         fixture.runtime
-            ->fork("tenant:runtime",
-                   ExactProgramCheckpointReference{source.run_id(),
-                                                   source.checkpoint()->checkpoint_id},
-                   version, std::move(invocation),
+            ->fork(ExactProgramCheckpointReference{source.run_id(),
+                                                    source.checkpoint()->checkpoint_id},
+                   fork_invocation,
                    ProgramResume{
                        json{{"decision", "forked"}}, "trace-fork-resume", {}, source_pending_id})
             .wait();
@@ -2347,6 +2383,7 @@ TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersi
     EXPECT_EQ(target_record->fork_source_run_id(), source.run_id());
     EXPECT_EQ(target_record->fork_source_program_version_id(), version.id());
     EXPECT_EQ(target_record->fork_source_checkpoint_id(), source.checkpoint()->checkpoint_id);
+    EXPECT_EQ(target_record->invocation(), fork_invocation);
 
     const auto source_after = fixture.runtime->reconnect("tenant:runtime", source.run_id()).wait();
     EXPECT_EQ(source_after.status(), ProgramTerminalStatus::Interrupted);
@@ -2678,7 +2715,10 @@ TEST(ProgramRuntimeTest, RaceReturnsTheFirstCompletedBranchAndCancelsTheLoser) {
 }
 
 TEST(ProgramRuntimeTest, RaceUsesDeclarationOrderForAReadyTie) {
-    AdmittedRuntime fixture(2);
+    // A ready tie is a single scheduler-turn condition. Use one scheduler
+    // thread so this verifies declaration-order arbitration rather than
+    // treating cross-worker completion timing as a logical tie.
+    AdmittedRuntime fixture(1);
     const auto result = run_orchestration(
         fixture,
         orchestration_document(
@@ -2835,7 +2875,7 @@ TEST(ProgramRuntimeTest, ChildStartPinsReceiptAndPropagatesParentCancellation) {
 
     const auto child_record = child.snapshot();
     EXPECT_EQ(child_record.invocation().parent_run_id, parent.run_id());
-    EXPECT_EQ(child_record.invocation().child_depth, 1U);
+    EXPECT_EQ(child_record.child_depth(), 1U);
     EXPECT_EQ(parent.cancel(), true);
     EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
     EXPECT_EQ(child.wait().status(), ProgramTerminalStatus::Cancelled);
@@ -2891,6 +2931,7 @@ TEST(ProgramRuntimeTest, InterruptedChildRemainsInFlightAndResumeJoinsDurably) {
         resume_for(interrupted, json{{"decision", "approved"}}, "trace-child-resumed"));
     const auto result = resumed.wait();
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(resumed.snapshot().child_depth(), 1U);
     EXPECT_EQ(result.output()["channels"]["value"]["value"], "approved");
     const auto parent_after_resume = fixture.journal->load("tenant:runtime", parent.run_id());
     ASSERT_TRUE(parent_after_resume.has_value());

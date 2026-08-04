@@ -2,6 +2,7 @@
 
 #include <neograph/api.h>
 #include <neograph/json.h>
+#include <neograph/mcp/harness_program_translator.h>
 #include <neograph/program/store.h>
 #include <neograph/program/contract.h>
 #include <neograph/program/transition_store.h>
@@ -17,30 +18,31 @@ namespace neograph::mcp {
 class HarnessRecordStore;
 
 /**
- * Strict P2 compatibility record for one legacy Harness artifact alias.
+ * Strict P2 compatibility record for one Harness artifact alias.
  *
  * This is deliberately a bounded adapter value, not a general Program store format.
  * The canonical ProgramBundle and ProgramVersion bytes remain the authority and are
- * reparsed on every load.
+ * reparsed on every load. The invocation template is bound to an exact
+ * RunInvocation only when the Harness generates a run ID.
  */
 class NEOGRAPH_HARNESS_API HarnessProgramArtifactRecord {
 public:
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2;
 
-    static HarnessProgramArtifactRecord create(std::string             artifact_id,
-                                               std::string             owner_scope,
-                                               program::ProgramBundle  bundle,
-                                               program::ProgramVersion version,
-                                               json legacy_invocation,
-                                               json legacy_projection);
+    static HarnessProgramArtifactRecord create(std::string               artifact_id,
+                                               std::string               owner_scope,
+                                               program::ProgramBundle    bundle,
+                                               program::ProgramVersion   version,
+                                               HarnessInvocationTemplate invocation_template,
+                                               json                      projection);
     static HarnessProgramArtifactRecord parse(const json& stored);
 
-    const std::string&             artifact_id() const noexcept;
-    const std::string&             owner_scope() const noexcept;
-    const program::ProgramBundle&  bundle() const noexcept;
-    const program::ProgramVersion& version() const noexcept;
-    json                           legacy_invocation() const;
-    json                           legacy_projection() const;
+    const std::string&               artifact_id() const noexcept;
+    const std::string&               owner_scope() const noexcept;
+    const program::ProgramBundle&    bundle() const noexcept;
+    const program::ProgramVersion&   version() const noexcept;
+    const HarnessInvocationTemplate& invocation_template() const noexcept;
+    json                             projection() const;
 
     json serialize() const;
 
@@ -53,24 +55,24 @@ private:
 /**
  * Strict adapter wrapper for one canonical ProgramRunRecord.
  *
- * The Program run bytes remain authoritative. Adapter-only fields retain the
- * legacy artifact alias and projection required to reconstruct Harness views
- * after a cold restart.
+ * The Program run bytes and exact canonical RunInvocation remain authoritative.
+ * Adapter-only fields retain the Harness artifact alias and projection required
+ * to reconstruct Harness views after a cold restart.
  */
 class NEOGRAPH_HARNESS_API HarnessProgramRunRecord {
 public:
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2;
 
     static HarnessProgramRunRecord create(const HarnessProgramArtifactRecord& artifact,
                                           program::ProgramRunRecord            run_record,
-                                          json                                 legacy_projection);
+                                          json                                 projection);
     static HarnessProgramRunRecord parse(const json& stored);
 
     const std::string&               artifact_id() const noexcept;
     const std::string&               owner_scope() const noexcept;
     const program::ProgramRunRecord& run_record() const noexcept;
-    json                             legacy_invocation() const;
-    json                             legacy_projection() const;
+    const program::RunInvocation&    invocation() const noexcept;
+    json                             projection() const;
     void validate_artifact(const HarnessProgramArtifactRecord& artifact) const;
     json serialize() const;
 
@@ -131,8 +133,8 @@ public:
     HarnessBoundedProgramStore(std::shared_ptr<HarnessRecordStore> records,
                                std::string                         artifact_id,
                                std::string                         owner_scope,
-                               json                                legacy_invocation,
-                               json                                legacy_projection);
+                               HarnessInvocationTemplate           invocation_template,
+                               json                                projection);
     ~HarnessBoundedProgramStore() override;
 
     HarnessBoundedProgramStore(const HarnessBoundedProgramStore&)            = delete;

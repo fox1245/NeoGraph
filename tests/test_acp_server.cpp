@@ -558,8 +558,8 @@ TEST(ACPServer, NewSessionReturnsId) {
 }
 
 TEST(ACPServer, PromptRunsGraphAndEmitsUpdate) {
-    auto server = make_server();
     CapturingSink cap;
+    auto server = make_server();
     server.set_notification_sink(cap.as_sink());
 
     auto sess_resp = server.handle_message(make_request(1, "session/new",
@@ -895,8 +895,8 @@ TEST(ACPServer, WorkerLaunchFailureRollsBackReservation) {
 }
 
 TEST(ACPServer, CancelBeforeFinalReturnsCancelled) {
-    auto server = make_server();
     CapturingSink cap;
+    auto server = make_server();
     server.set_notification_sink(cap.as_sink());
 
     auto sess_resp = server.handle_message(make_request(1, "session/new",
@@ -923,9 +923,9 @@ TEST(ACPServer, CancelBeforeFinalReturnsCancelled) {
 
 TEST(ACPServer, CancelAbortsInflightPrompt) {
     auto probe = std::make_shared<CancelProbe>();
+    CapturingSink cap;
     ACPServer server(build_cancel_aware_engine(probe),
                      {{"name", "test-acp"}, {"version", "0.0.1"}});
-    CapturingSink cap;
     server.set_notification_sink(cap.as_sink());
     const std::string sid = "acp-cancel-inflight";
     server.handle_message(make_request(1, "session/prompt",
@@ -954,9 +954,9 @@ TEST(ACPServer, CancelReachesProviderAndToolFixtures) {
     auto probe = std::make_shared<DependencyProbe>();
     auto provider = std::make_shared<CancellableProvider>(probe);
     auto tool = std::make_shared<CancellableTool>(probe);
+    CapturingSink cap;
     ACPServer server(build_dependency_engine(provider, tool, probe),
                      {{"name", "test-acp"}, {"version", "0.0.1"}});
-    CapturingSink cap;
     server.set_notification_sink(cap.as_sink());
     const std::string sid = "acp-dependency-cancel";
     server.handle_message(make_request(1, "session/prompt",
@@ -1370,6 +1370,7 @@ TEST(ACPServer, NodeCallsBackToEditorViaFsRead) {
     auto engine = build_read_file_engine(client);
 
     neograph::json info = {{"name", "acp-bidir"}, {"version", "0.0.1"}};
+    CapturingSink cap;
     auto server = std::make_shared<ACPServer>(engine, info);
     server->attach_client(client);
     auto weak_server = std::weak_ptr<ACPServer>(server);
@@ -1377,7 +1378,6 @@ TEST(ACPServer, NodeCallsBackToEditorViaFsRead) {
     // Stub editor. The sink does double duty: capture envelopes for
     // assertions AND respond to outbound fs/read_text_file requests by
     // feeding a synthetic response back through handle_message.
-    CapturingSink cap;
     auto cap_sink = cap.as_sink();
     server->set_notification_sink([&, cap_sink, weak_server](const neograph::json& env) {
         cap_sink(env);
@@ -1669,11 +1669,11 @@ TEST(ACPServer, FsWriteTextFileRoundTrip) {
     auto engine = std::shared_ptr<GraphEngine>(std::move(unique));
 
     neograph::json info = {{"name", "acp-write-test"}, {"version", "0.0.1"}};
+    CapturingSink cap;
     auto server = std::make_shared<ACPServer>(engine, info);
     server->attach_client(client);
     auto weak_server = std::weak_ptr<ACPServer>(server);
 
-    CapturingSink cap;
     auto cap_sink = cap.as_sink();
     std::string seen_path, seen_body;
     server->set_notification_sink([&, cap_sink, weak_server](const neograph::json& env) {
@@ -1896,8 +1896,8 @@ TEST(ACPServer, MalformedEnvelope_MissingMethodOnRequest) {
 }
 
 TEST(ACPServer, MalformedEnvelope_PromptWithoutSessionId) {
-    auto server = make_server();
     CapturingSink cap;
+    auto server = make_server();
     server.set_notification_sink(cap.as_sink());
 
     neograph::json env;

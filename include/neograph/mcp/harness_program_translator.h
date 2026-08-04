@@ -17,6 +17,7 @@ namespace neograph::mcp {
 
 inline constexpr std::string_view HARNESS_WORKER_NODE_TYPE = "neograph_harness_worker";
 inline constexpr std::string_view HARNESS_JUDGE_NODE_TYPE  = "neograph_harness_judge";
+inline constexpr std::string_view HARNESS_PROGRAM_AGENT_ID = "neograph-harness";
 
 class NEOGRAPH_HARNESS_API HarnessTranslationError final : public std::invalid_argument {
 public:
@@ -45,6 +46,34 @@ struct HarnessTranslationDefaults {
     std::string                                source_id_prefix = "harness";
 };
 
+/**
+ * Immutable input and budget selected during Harness translation, before the
+ * admitted ProgramVersion and generated run ID are available. It is a
+ * persistence template, never a runtime ProgramInvocation projection.
+ */
+struct NEOGRAPH_HARNESS_API HarnessInvocationTemplate {
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+
+    json               input = json::object();
+    program::RunBudget budget;
+
+    std::string serialize_canonical() const;
+    static HarnessInvocationTemplate parse(std::string_view stored_bytes);
+
+    bool operator==(const HarnessInvocationTemplate&) const = default;
+};
+
+/**
+ * Bind a translated Harness request to one admitted Program run. The service
+ * owns the stable agent identity, message sequence, and idempotency key.
+ */
+NEOGRAPH_HARNESS_API program::RunInvocation
+bind_harness_invocation(HarnessInvocationTemplate request,
+                        std::string               owner_scope,
+                        std::string               program_version_id,
+                        std::string               run_id,
+                        std::string               correlation_id);
+
 struct HarnessWireReceipt {
     std::string              source_id;
     std::string              mode;
@@ -52,7 +81,7 @@ struct HarnessWireReceipt {
     std::string              workspace_revision;
     std::vector<std::string> worker_ids;
     std::vector<std::string> tool_ids;
-    json                     legacy_projection;
+    json                     projection;
 };
 
 struct HarnessCapabilityBinding {
@@ -68,7 +97,7 @@ struct HarnessCapabilityBindingRequest {
 
 struct HarnessTranslation {
     program::ProgramSource             source;
-    program::ProgramInvocation         invocation;
+    HarnessInvocationTemplate          invocation_template;
     HarnessWireReceipt                 wire;
     HarnessCapabilityBindingRequest    bindings;
     std::optional<program::ContractManifest> contract;

@@ -48,15 +48,15 @@
     },
     {
       "id": "run_invocation",
-      "api": "neograph::graph::RunInvocation",
-      "owner": "NeoGraph Core invocation boundary",
+      "api": "neograph::program::RunInvocation",
+      "owner": "NeoGraph Program invocation boundary",
       "source_paths": [
-        "include/neograph/graph/invocation.h",
-        "spec/issue-214-run-invocation-boundary.sdd.yaml"
+        "include/neograph/program/invocation.h",
+        "include/neograph/program/runtime.h"
       ],
       "contract_revision": "neograph-run-invocation-v1",
       "schema_versions": [1],
-      "implementation_state": "implemented_core_boundary",
+      "implementation_state": "implemented_program_boundary",
       "current_conformance": true,
       "comparison_to_historical": [
         {
@@ -78,11 +78,12 @@
       "source_paths": [
         "include/neograph/a2a/collaboration.h",
         "include/neograph/a2a/types.h",
+        "include/neograph/a2a/program_adapter.h",
         "docs/V1_ARCHITECTURE.md"
       ],
       "contract_revision": "neograph-a2a-collaboration-v1",
       "schema_versions": [2],
-      "implementation_state": "compatibility_adapter_pending_program_cutover",
+      "implementation_state": "implemented_program_adapter",
       "current_conformance": true,
       "comparison_to_historical": [
         {

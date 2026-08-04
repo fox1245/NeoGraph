@@ -5,11 +5,13 @@
 #include "core_progress.h"
 #include "run_control.h"
 #include <asio/co_spawn.hpp>
+#include <asio/bind_executor.hpp>
 #include <asio/detached.hpp>
 #include <asio/experimental/awaitable_operators.hpp>
 #include <asio/post.hpp>
 #include <asio/redirect_error.hpp>
 #include <asio/steady_timer.hpp>
+#include <asio/strand.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 #include <algorithm>
@@ -841,52 +843,71 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     std::vector<std::shared_ptr<graph::CancelToken>> branch_tokens;
                     std::exception_ptr                              error;
                     std::size_t                                     remaining = 0;
-                    std::shared_ptr<asio::steady_timer>              timer;
+                    std::shared_ptr<asio::steady_timer>             timer;
                 };
                 const auto executor = co_await asio::this_coro::executor;
+                const auto completion_executor = asio::make_strand(executor);
                 auto       parallel = std::make_shared<ParallelState>();
                 parallel->results.resize(branches.size());
                 parallel->remaining = branches.size();
-                parallel->timer = std::make_shared<asio::steady_timer>(executor);
+                parallel->timer = std::make_shared<asio::steady_timer>(completion_executor);
                 parallel->timer->expires_at((asio::steady_timer::time_point::max)());
+                parallel->branch_tokens.reserve(branches.size());
+                for (std::size_t index = 0; index < branches.size(); ++index) {
+                    parallel->branch_tokens.push_back(operation_token->fork());
+                }
                 for (std::size_t index = 0; index < branches.size(); ++index) {
                     const auto& branch_id = branches[index];
                     const auto branch_thread =
                         index == 0 ? control->core_thread_id
                                    : operation_thread_id(*control, branch_id);
-                    auto branch_token = operation_token->fork();
-                    parallel->branch_tokens.push_back(branch_token);
+                    auto branch_token = parallel->branch_tokens[index];
                     asio::co_spawn(
                         executor,
                         execute(branch_id, state, branch_thread, child_depth, branch_token),
-                        [parallel, index](std::exception_ptr error, PlanExecution result) {
-                            bool cancel_siblings = false;
-                            bool all_done = false;
-                            {
-                                std::lock_guard lock(parallel->mutex);
-                                if (error) {
-                                    parallel->error = error;
-                                    cancel_siblings = true;
-                                } else {
-                                    parallel->results[index] = std::move(result);
+                        asio::bind_executor(
+                            completion_executor,
+                            [parallel, index](std::exception_ptr error, PlanExecution result) {
+                                bool cancel_siblings = false;
+                                bool all_done = false;
+                                {
+                                    std::lock_guard lock(parallel->mutex);
+                                    if (error) {
+                                        parallel->error = error;
+                                        cancel_siblings = true;
+                                    } else {
+                                        parallel->results[index] = std::move(result);
+                                    }
+                                    all_done = --parallel->remaining == 0;
                                 }
-                                all_done = --parallel->remaining == 0;
-                            }
-                            if (cancel_siblings) {
-                                for (const auto& token : parallel->branch_tokens)
-                                    if (token) token->cancel();
-                            }
-                            if (all_done) parallel->timer->cancel();
-                        });
+                                if (cancel_siblings) {
+                                    for (const auto& token : parallel->branch_tokens)
+                                        if (token) token->cancel();
+                                }
+                                if (all_done) parallel->timer->cancel();
+                            }));
                 }
-                asio::error_code wait_error;
-                co_await parallel->timer->async_wait(
-                    asio::redirect_error(asio::use_awaitable, wait_error));
-                if (parallel->error) std::rethrow_exception(parallel->error);
+                co_await asio::co_spawn(
+                    completion_executor,
+                    [parallel]() -> asio::awaitable<void> {
+                        asio::error_code error;
+                        co_await parallel->timer->async_wait(
+                            asio::redirect_error(asio::use_awaitable, error));
+                    },
+                    asio::use_awaitable);
+
+                std::exception_ptr                        parallel_error;
+                std::vector<std::optional<PlanExecution>> parallel_results;
+                {
+                    std::lock_guard lock(parallel->mutex);
+                    parallel_error = parallel->error;
+                    parallel_results = std::move(parallel->results);
+                }
+                if (parallel_error) std::rethrow_exception(parallel_error);
 
                 PlanExecution result;
                 result.output = json::array();
-                for (auto& branch : parallel->results) {
+                for (auto& branch : parallel_results) {
                     if (!branch)
                         throw_runtime_diagnostic(
                             "P_RUNTIME_PARALLEL", "Parallel branch completed without a result");
@@ -923,14 +944,17 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     std::mutex                                      mutex;
                     std::array<std::optional<PlanExecution>, 2>    results;
                     std::array<std::exception_ptr, 2>              errors;
+                    std::array<bool, 2>                            finished{};
                     std::vector<std::shared_ptr<graph::CancelToken>> tokens;
                     std::optional<std::size_t>                      winner;
                     std::size_t                                     completed = 0;
-                    std::shared_ptr<asio::steady_timer>             timer;
+                    bool                                            selection_scheduled = false;
+                    std::shared_ptr<asio::steady_timer>            timer;
                 };
                 const auto executor = co_await asio::this_coro::executor;
+                const auto completion_executor = asio::make_strand(executor);
                 auto race = std::make_shared<RaceState>();
-                race->timer = std::make_shared<asio::steady_timer>(executor);
+                race->timer = std::make_shared<asio::steady_timer>(completion_executor);
                 race->timer->expires_at((asio::steady_timer::time_point::max)());
                 race->tokens.push_back(operation_token->fork());
                 race->tokens.push_back(operation_token->fork());
@@ -942,37 +966,90 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     asio::co_spawn(
                         executor,
                         execute(ids[index], state, branch_thread, child_depth, race->tokens[index]),
-                        [race, index](std::exception_ptr error, PlanExecution result) {
-                            bool cancel_loser = false;
-                            bool all_done = false;
-                            {
-                                std::lock_guard lock(race->mutex);
-                                race->errors[index] = error;
-                                if (!error) race->results[index] = std::move(result);
-                                ++race->completed;
-                                if (!race->winner) {
-                                    race->winner = index;
-                                    cancel_loser = true;
+                        asio::bind_executor(
+                            completion_executor,
+                            [race, index, completion_executor](std::exception_ptr error,
+                                                               PlanExecution result) {
+                                bool schedule_selection = false;
+                                bool all_done = false;
+                                {
+                                    std::lock_guard lock(race->mutex);
+                                    race->errors[index] = error;
+                                    if (!error) race->results[index] = std::move(result);
+                                    race->finished[index] = true;
+                                    ++race->completed;
+                                    // Defer selection by one strand turn. Completions that were
+                                    // already ready with this one are then visible together, so
+                                    // their deterministic tie break is declaration order rather
+                                    // than cross-worker handler arrival order.
+                                    if (!race->winner && !race->selection_scheduled) {
+                                        race->selection_scheduled = true;
+                                        schedule_selection = true;
+                                    }
+                                    all_done = race->winner &&
+                                               race->completed == race->tokens.size();
                                 }
-                                all_done = race->completed == race->tokens.size();
-                            }
-                            if (cancel_loser) {
-                                for (std::size_t sibling = 0; sibling < race->tokens.size(); ++sibling)
-                                    if (sibling != index) race->tokens[sibling]->cancel();
-                            }
-                            if (all_done) race->timer->cancel();
-                        });
+                                if (schedule_selection) {
+                                    asio::post(
+                                        completion_executor, [race]() {
+                                            std::optional<std::size_t> winner;
+                                            bool                       cancel_loser = false;
+                                            bool                       all_done = false;
+                                            {
+                                                std::lock_guard lock(race->mutex);
+                                                if (!race->winner) {
+                                                    for (std::size_t candidate = 0;
+                                                         candidate < race->finished.size();
+                                                         ++candidate) {
+                                                        if (race->finished[candidate]) {
+                                                            race->winner = candidate;
+                                                            cancel_loser = true;
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                                winner = race->winner;
+                                                all_done = winner &&
+                                                           race->completed == race->tokens.size();
+                                            }
+                                            if (cancel_loser) {
+                                                for (std::size_t sibling = 0;
+                                                     sibling < race->tokens.size(); ++sibling)
+                                                    if (sibling != *winner)
+                                                        race->tokens[sibling]->cancel();
+                                            }
+                                            if (all_done) race->timer->cancel();
+                                        });
+                                } else if (all_done) {
+                                    race->timer->cancel();
+                                }
+                            }));
                 }
-                asio::error_code wait_error;
-                co_await race->timer->async_wait(
-                    asio::redirect_error(asio::use_awaitable, wait_error));
-                if (!race->winner)
+                co_await asio::co_spawn(
+                    completion_executor,
+                    [race]() -> asio::awaitable<void> {
+                        asio::error_code error;
+                        co_await race->timer->async_wait(
+                            asio::redirect_error(asio::use_awaitable, error));
+                    },
+                    asio::use_awaitable);
+
+                std::optional<std::size_t>                   winner;
+                std::array<std::optional<PlanExecution>, 2> results;
+                std::array<std::exception_ptr, 2>           errors;
+                {
+                    std::lock_guard lock(race->mutex);
+                    winner = race->winner;
+                    results = std::move(race->results);
+                    errors = std::move(race->errors);
+                }
+                if (!winner)
                     throw_runtime_diagnostic("P_RUNTIME_RACE", "Race completed without a winner");
-                const auto index = *race->winner;
-                if (race->errors[index]) std::rethrow_exception(race->errors[index]);
-                if (!race->results[index])
+                const auto index = *winner;
+                if (errors[index]) std::rethrow_exception(errors[index]);
+                if (!results[index])
                     throw_runtime_diagnostic("P_RUNTIME_RACE", "Race winner has no result");
-                co_return std::move(*race->results[index]);
+                co_return std::move(*results[index]);
             }
             if (op == ProgramOperationKind::Quorum) {
                 const auto& branches = dispatch.branches;
@@ -1078,39 +1155,28 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         co_return plan_result_from_child(co_await child->wait_async());
                     }
 
-                    struct SpawnAwaitState {
-                        std::mutex                      mutex;
-                        std::optional<ProgramResult>    result;
-                        std::exception_ptr              error;
-                        bool                            settled = false;
-                        std::shared_ptr<asio::steady_timer> signal;
-                    };
                     const auto executor = co_await asio::this_coro::executor;
-                    auto wait_state = std::make_shared<SpawnAwaitState>();
-                    wait_state->signal = std::make_shared<asio::steady_timer>(executor);
-                    wait_state->signal->expires_after(
-                        std::chrono::milliseconds(*operation.timeout_ms()));
-                    asio::co_spawn(
-                        executor, child->wait_async(),
-                        [wait_state](std::exception_ptr error, ProgramResult child_result) {
-                            {
-                                std::lock_guard lock(wait_state->mutex);
-                                wait_state->error = error;
-                                if (!error) wait_state->result = std::move(child_result);
-                                wait_state->settled = true;
-                            }
-                            wait_state->signal->cancel();
-                        });
-                    asio::error_code wait_error;
-                    co_await wait_state->signal->async_wait(
-                        asio::redirect_error(asio::use_awaitable, wait_error));
-                    {
-                        std::lock_guard lock(wait_state->mutex);
-                        if (wait_state->settled) {
-                            if (wait_state->error) std::rethrow_exception(wait_state->error);
-                            co_return plan_result_from_child(*wait_state->result);
-                        }
+                    auto timeout = std::make_shared<asio::steady_timer>(executor);
+                    timeout->expires_after(std::chrono::milliseconds(*operation.timeout_ms()));
+                    auto timeout_operation = [timeout]() -> asio::awaitable<void> {
+                        asio::error_code error;
+                        co_await timeout->async_wait(
+                            asio::redirect_error(asio::use_awaitable, error));
+                    };
+                    // Use the same first-completion group as inline await. A
+                    // timer cancelled before a later async_wait registration
+                    // does not wake that future wait, whereas the group owns
+                    // both registrations before either branch can settle.
+                    auto [order, child_error, child_result, timeout_error] =
+                        co_await asio::experimental::make_parallel_group(
+                                     asio::co_spawn(executor, child->wait_async(), asio::deferred),
+                                     asio::co_spawn(executor, timeout_operation(), asio::deferred))
+                            .async_wait(asio::experimental::wait_for_one(), asio::use_awaitable);
+                    if (order[0] == 0) {
+                        if (child_error) std::rethrow_exception(child_error);
+                        co_return plan_result_from_child(child_result);
                     }
+                    (void)timeout_error;
                     if (const auto terminal = child->try_result())
                         co_return plan_result_from_child(*terminal);
                     (void)child->cancel(CancellationCause::ParentTerminal);

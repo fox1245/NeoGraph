@@ -264,14 +264,16 @@ void validate(const ProgramRunRecordData& d) {
     if (!d.continuation.attempt) {
         throw std::invalid_argument("Program run attempt must be positive");
     }
-    if (!d.invocation.trace_id.empty()) {
-        detail::validate_token(d.invocation.trace_id, "Program run trace_id");
+    d.invocation.validate();
+    if (d.invocation.owner_scope != d.owner_scope || d.invocation.run_id != d.run_id ||
+        d.invocation.program_version_id != d.program_version_id) {
+        throw std::invalid_argument("Program run invocation does not bind run identity");
     }
     if (!d.invocation.parent_run_id.empty()) {
-        detail::validate_token(d.invocation.parent_run_id, "Program run parent_run_id");
-        if (d.invocation.child_depth == 0)
-            throw std::invalid_argument("Child Program run must record a positive depth");
-    } else if (d.invocation.child_depth != 0) {
+        if (d.invocation.parent_run_id == d.run_id || d.child_depth == 0) {
+            throw std::invalid_argument("Child Program run has invalid parent topology");
+        }
+    } else if (d.child_depth != 0) {
         throw std::invalid_argument("Root Program run cannot record a child depth");
     }
     if (d.pending_input && d.pending_effect) {
@@ -322,8 +324,8 @@ void validate(const ProgramRunRecordData& d) {
             throw std::invalid_argument("Program child link receipt must not be empty");
         detail::validate_utf8(child.link_receipt);
         if (child.invocation.parent_run_id != d.run_id ||
-            d.invocation.child_depth == std::numeric_limits<std::uint32_t>::max() ||
-            child.invocation.child_depth != d.invocation.child_depth + 1) {
+            d.child_depth == std::numeric_limits<std::uint32_t>::max() ||
+            child.invocation.child_depth != d.child_depth + 1) {
             throw std::invalid_argument("Program child invocation does not bind its parent");
         }
         if ((child.state == ProgramChildState::Publishing && child.terminal_result) ||
@@ -366,7 +368,8 @@ json body(const ProgramRunRecordData& d) {
                {"program_version_id", d.program_version_id},
                {"bundle_id", d.bundle_id},
                {"binding_fingerprint", d.binding_fingerprint},
-               {"invocation", invocation_body(d.invocation)},
+               {"invocation", nested(d.invocation.serialize_canonical())},
+               {"child_depth", d.child_depth},
                {"continuation", json{{"operation_id", d.continuation.operation_id},
                                      {"state", std::string(to_string(d.continuation.state))},
                                      {"attempt", d.continuation.attempt}}},
@@ -465,6 +468,7 @@ ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
                                    "bundle_id",
                                    "binding_fingerprint",
                                    "invocation",
+                                   "child_depth",
                                    "continuation",
                                    "remaining_budget",
                                    "exact_checkpoint",
@@ -491,8 +495,8 @@ ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
     d.program_version_id  = rs(v, "program_version_id");
     d.bundle_id           = rs(v, "bundle_id");
     d.binding_fingerprint = rs(v, "binding_fingerprint");
-    const auto& inv = rv(v, "invocation");
-    d.invocation = parse_invocation(inv, "Program invocation");
+    d.invocation = RunInvocation::parse(detail::canonical_json_bytes(rv(v, "invocation")));
+    d.child_depth = r32(v, "child_depth");
     const auto& continuation = rv(v, "continuation");
     if (!continuation.is_object()) {
         throw std::invalid_argument("Program continuation must be an object");
@@ -546,8 +550,11 @@ const std::string& ProgramRunRecord::bundle_id() const noexcept {
 const std::string& ProgramRunRecord::binding_fingerprint() const noexcept {
     return impl_->data.binding_fingerprint;
 }
-ProgramPersistedInvocation ProgramRunRecord::invocation() const {
+const RunInvocation& ProgramRunRecord::invocation() const noexcept {
     return impl_->data.invocation;
+}
+std::uint32_t ProgramRunRecord::child_depth() const noexcept {
+    return impl_->data.child_depth;
 }
 ProgramContinuation ProgramRunRecord::continuation() const noexcept {
     return impl_->data.continuation;

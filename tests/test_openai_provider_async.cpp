@@ -22,9 +22,7 @@
 
 #include <asio/io_context.hpp>
 #include <asio/co_spawn.hpp>
-#include <asio/bind_cancellation_slot.hpp>
 #include <asio/detached.hpp>
-#include <asio/this_coro.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -130,13 +128,12 @@ TEST(OpenAIProviderAsync, CancelTokenAbortsLocalProviderSocket) {
     auto result = finished.get_future();
     asio::co_spawn(io, [&]() -> asio::awaitable<void> {
         try {
-            token->bind_executor(co_await asio::this_coro::executor);
             (void)co_await provider->complete_async(params);
             finished.set_value(false);
         } catch (...) {
             finished.set_value(true);
         }
-    }, asio::bind_cancellation_slot(token->slot(), asio::detached));
+    }, asio::detached);
     std::thread runner([&] { io.run(); });
     for (int i = 0; i < 200 && mock.request_count.load() == 0; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));

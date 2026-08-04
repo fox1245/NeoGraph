@@ -245,8 +245,8 @@ TEST(HarnessProgramTranslator, PresetDslAndCoreProduceEquivalentProgramDocuments
 
     EXPECT_EQ(preset.source.document(), dsl.source.document());
     EXPECT_EQ(preset.source.document(), core.source.document());
-    EXPECT_EQ(preset.invocation.input, dsl.invocation.input);
-    EXPECT_EQ(preset.invocation.input, core.invocation.input);
+    EXPECT_EQ(preset.invocation_template.input, dsl.invocation_template.input);
+    EXPECT_EQ(preset.invocation_template.input, core.invocation_template.input);
     EXPECT_EQ(calls.load(), 0);
 }
 
@@ -289,13 +289,13 @@ TEST(HarnessProgramTranslator, EmitsNineExactFiniteTotalBudgetsAndRejectsUnbound
                     budget["minimum"].is_number_integer());
         EXPECT_EQ(budget["minimum"], budget["maximum"]);
     }
-    EXPECT_EQ(translated.invocation.budget.wall_time_ms, 5000u);
-    EXPECT_EQ(translated.invocation.budget.model_tokens, 1800u);
-    EXPECT_EQ(translated.invocation.budget.max_concurrency, 1u);
-    EXPECT_EQ(translated.invocation.budget.max_program_operations, 1u);
-    EXPECT_EQ(translated.invocation.budget.max_dynamic_compiles, 0u);
-    EXPECT_EQ(translated.invocation.budget.max_child_depth, 0u);
-    EXPECT_EQ(translated.invocation.budget.max_total_children, 0u);
+    EXPECT_EQ(translated.invocation_template.budget.wall_time_ms, 5000u);
+    EXPECT_EQ(translated.invocation_template.budget.model_tokens, 1800u);
+    EXPECT_EQ(translated.invocation_template.budget.max_concurrency, 1u);
+    EXPECT_EQ(translated.invocation_template.budget.max_program_operations, 1u);
+    EXPECT_EQ(translated.invocation_template.budget.max_dynamic_compiles, 0u);
+    EXPECT_EQ(translated.invocation_template.budget.max_child_depth, 0u);
+    EXPECT_EQ(translated.invocation_template.budget.max_total_children, 0u);
 
     auto unbounded              = fixture.defaults;
     unbounded.max_output_tokens = 0;
@@ -387,10 +387,10 @@ TEST(HarnessProgramTranslator, RequiresFrozenContractAndCarriesItToHarnessProjec
     ASSERT_TRUE(translated.contract.has_value());
     EXPECT_EQ(translated.contract->content_hash(), manifest.content_hash());
     EXPECT_EQ(translated.wire.workspace_revision, "workspace-test-1");
-    EXPECT_EQ(translated.wire.legacy_projection["contract_manifest_hash"],
+    EXPECT_EQ(translated.wire.projection["contract_manifest_hash"],
               manifest.content_hash());
-    EXPECT_EQ(translated.invocation.budget.max_program_operations, 10U);
-    EXPECT_EQ(translated.invocation.budget.wall_time_ms, 5000U);
+    EXPECT_EQ(translated.invocation_template.budget.max_program_operations, 10U);
+    EXPECT_EQ(translated.invocation_template.budget.wall_time_ms, 5000U);
 }
 
 }  // namespace

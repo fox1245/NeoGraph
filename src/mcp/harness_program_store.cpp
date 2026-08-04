@@ -63,6 +63,18 @@ bool is_program_identity(std::string_view value) noexcept {
 json owned_json(const json& value) {
     return json::parse(value.dump());
 }
+bool budget_within_template(const program::RunBudget& requested,
+                            const program::RunBudget& ceiling) noexcept {
+    return requested.wall_time_ms <= ceiling.wall_time_ms &&
+           requested.model_tokens <= ceiling.model_tokens &&
+           requested.monetary_microunits <= ceiling.monetary_microunits &&
+           requested.max_concurrency <= ceiling.max_concurrency &&
+           requested.max_program_operations <= ceiling.max_program_operations &&
+           requested.max_core_steps <= ceiling.max_core_steps &&
+           requested.max_dynamic_compiles <= ceiling.max_dynamic_compiles &&
+           requested.max_child_depth <= ceiling.max_child_depth &&
+           requested.max_total_children <= ceiling.max_total_children;
+}
 
 json materialization_json(const program::CoreMaterializationReceipt& receipt) {
     json plans = json::array();
@@ -121,50 +133,51 @@ void validate_exact_bindings(const std::string&             owner_scope,
 }  // namespace
 
 struct HarnessProgramArtifactRecord::Impl {
-    Impl(std::string             artifact,
-         std::string             owner,
-         program::ProgramBundle  program_bundle,
-         program::ProgramVersion program_version,
-         json                    invocation,
-         json                    projection)
+    Impl(std::string               artifact,
+         std::string               owner,
+         program::ProgramBundle    program_bundle,
+         program::ProgramVersion   program_version,
+         HarnessInvocationTemplate request_template,
+         json                      harness_projection)
         : artifact_id(std::move(artifact)),
           owner_scope(std::move(owner)),
           bundle(std::move(program_bundle)),
           version(std::move(program_version)),
-          legacy_invocation(std::move(invocation)),
-          legacy_projection(std::move(projection)) {}
+          invocation_template(std::move(request_template)),
+          projection(std::move(harness_projection)) {}
 
-    std::string             artifact_id;
-    std::string             owner_scope;
-    program::ProgramBundle  bundle;
-    program::ProgramVersion version;
-    json                    legacy_invocation;
-    json                    legacy_projection;
+    std::string               artifact_id;
+    std::string               owner_scope;
+    program::ProgramBundle    bundle;
+    program::ProgramVersion   version;
+    HarnessInvocationTemplate invocation_template;
+    json                      projection;
 };
 
 HarnessProgramArtifactRecord::HarnessProgramArtifactRecord(std::shared_ptr<const Impl> impl)
     : impl_(std::move(impl)) {}
 
-HarnessProgramArtifactRecord HarnessProgramArtifactRecord::create(std::string artifact_id,
-                                                                  std::string owner_scope,
-                                                                  program::ProgramBundle  bundle,
-                                                                  program::ProgramVersion version,
-                                                                  json legacy_invocation,
-                                                                  json legacy_projection) {
+HarnessProgramArtifactRecord HarnessProgramArtifactRecord::create(
+    std::string               artifact_id,
+    std::string               owner_scope,
+    program::ProgramBundle    bundle,
+    program::ProgramVersion   version,
+    HarnessInvocationTemplate invocation_template,
+    json                      projection) {
     if (artifact_id.empty()) {
         throw std::invalid_argument("Harness Program adapter artifact_id must not be empty");
     }
     if (owner_scope.empty()) {
         throw std::invalid_argument("Harness Program adapter owner_scope must not be empty");
     }
-    if (!legacy_invocation.is_object() || !legacy_projection.is_object()) {
-        throw std::invalid_argument(
-            "Harness Program adapter invocation and projection must be objects");
+    if (!projection.is_object()) {
+        throw std::invalid_argument("Harness Program adapter projection must be an object");
     }
+    (void)invocation_template.serialize_canonical();
     validate_exact_bindings(owner_scope, bundle, version);
     return HarnessProgramArtifactRecord(std::make_shared<const Impl>(
         std::move(artifact_id), std::move(owner_scope), std::move(bundle), std::move(version),
-        owned_json(legacy_invocation), owned_json(legacy_projection)));
+        std::move(invocation_template), owned_json(projection)));
 }
 
 HarnessProgramArtifactRecord HarnessProgramArtifactRecord::parse(const json& stored) {
@@ -173,7 +186,7 @@ HarnessProgramArtifactRecord HarnessProgramArtifactRecord::parse(const json& sto
         {"format", "storage_schema_version", "artifact_id", "owner_scope", "bundle", "bundle_id",
          "version", "version_id", "admission_profile_fingerprint", "policy_fingerprint",
          "registry_fingerprint", "compiler_build_id", "materialization_receipt",
-         "legacy_invocation", "legacy_projection"});
+         "invocation_template", "projection"});
     if (require_string(stored, "format") != kArtifactFormat) {
         throw std::invalid_argument("Stored Harness Program artifact format is unsupported");
     }
@@ -202,13 +215,13 @@ HarnessProgramArtifactRecord HarnessProgramArtifactRecord::parse(const json& sto
             materialization_json(version.core_materialization_receipt())) {
         throw std::invalid_argument("Stored Harness Program materialization receipt mismatch");
     }
-    if (!stored.contains("legacy_invocation") || !stored["legacy_invocation"].is_object() ||
-        !stored.contains("legacy_projection") || !stored["legacy_projection"].is_object()) {
-        throw std::invalid_argument(
-            "Stored Harness Program invocation and projection must be explicit objects");
+    if (!stored.contains("projection") || !stored["projection"].is_object()) {
+        throw std::invalid_argument("Stored Harness Program projection must be an explicit object");
     }
-    return create(artifact_id, owner_scope, bundle, version, stored["legacy_invocation"],
-                  stored["legacy_projection"]);
+    const auto invocation_template =
+        HarnessInvocationTemplate::parse(require_string(stored, "invocation_template"));
+    return create(artifact_id, owner_scope, bundle, version, invocation_template,
+                  stored["projection"]);
 }
 
 const std::string& HarnessProgramArtifactRecord::artifact_id() const noexcept {
@@ -223,11 +236,11 @@ const program::ProgramBundle& HarnessProgramArtifactRecord::bundle() const noexc
 const program::ProgramVersion& HarnessProgramArtifactRecord::version() const noexcept {
     return impl_->version;
 }
-json HarnessProgramArtifactRecord::legacy_invocation() const {
-    return owned_json(impl_->legacy_invocation);
+const HarnessInvocationTemplate& HarnessProgramArtifactRecord::invocation_template() const noexcept {
+    return impl_->invocation_template;
 }
-json HarnessProgramArtifactRecord::legacy_projection() const {
-    return owned_json(impl_->legacy_projection);
+json HarnessProgramArtifactRecord::projection() const {
+    return owned_json(impl_->projection);
 }
 
 json HarnessProgramArtifactRecord::serialize() const {
@@ -248,22 +261,23 @@ json HarnessProgramArtifactRecord::serialize() const {
                 {"compiler_build_id", impl_->bundle.compiler_build_id()},
                 {"materialization_receipt",
                  materialization_json(impl_->version.core_materialization_receipt())},
-                {"legacy_invocation", owned_json(impl_->legacy_invocation)},
-                {"legacy_projection", owned_json(impl_->legacy_projection)}};
+                {"invocation_template", impl_->invocation_template.serialize_canonical()},
+                {"projection", owned_json(impl_->projection)}};
 }
 
 struct HarnessProgramRunRecord::Impl {
-    explicit Impl(program::ProgramRunRecord record) : run_record(std::move(record)) {}
+    Impl(program::ProgramRunRecord record, program::RunInvocation request)
+        : run_record(std::move(record)), invocation(std::move(request)) {}
     std::string               artifact_id;
     std::string               owner_scope;
     program::ProgramRunRecord run_record;
+    program::RunInvocation    invocation;
     std::string               admission_profile_fingerprint;
     std::string               policy_fingerprint;
     std::string               registry_fingerprint;
     std::string               compiler_build_id;
     json                      materialization_receipt;
-    json                      legacy_invocation;
-    json                      legacy_projection;
+    json                      projection;
 };
 
 HarnessProgramRunRecord::HarnessProgramRunRecord(std::shared_ptr<const Impl> impl)
@@ -272,29 +286,32 @@ HarnessProgramRunRecord::HarnessProgramRunRecord(std::shared_ptr<const Impl> imp
 HarnessProgramRunRecord HarnessProgramRunRecord::create(
     const HarnessProgramArtifactRecord& artifact,
     program::ProgramRunRecord           run_record,
-    json                                legacy_projection) {
-    if (!legacy_projection.is_object()) {
+    json                                projection) {
+    if (!projection.is_object()) {
         throw std::invalid_argument("Harness Program run projection must be an object");
     }
+    const auto invocation = run_record.invocation();
+    invocation.validate();
     if (run_record.owner_scope() != artifact.owner_scope() ||
         run_record.bundle_id() != artifact.bundle().id() ||
         run_record.program_version_id() != artifact.version().id()) {
         throw std::invalid_argument("Harness Program run/artifact binding mismatch");
     }
-    const auto profile                  = artifact.version().admission_profile();
-    const auto policy                   = artifact.version().policy_snapshot();
-    auto       impl                     = std::make_shared<Impl>(std::move(run_record));
-    impl->artifact_id                   = artifact.artifact_id();
-    impl->owner_scope                   = artifact.owner_scope();
+    const auto profile = artifact.version().admission_profile();
+    const auto policy  = artifact.version().policy_snapshot();
+    auto impl          = std::make_shared<Impl>(std::move(run_record), invocation);
+    impl->artifact_id  = artifact.artifact_id();
+    impl->owner_scope  = artifact.owner_scope();
     impl->admission_profile_fingerprint = profile.fingerprint();
     impl->policy_fingerprint            = policy.fingerprint();
     impl->registry_fingerprint          = artifact.bundle().registry_snapshot_fingerprint();
     impl->compiler_build_id             = artifact.bundle().compiler_build_id();
     impl->materialization_receipt =
         materialization_json(artifact.version().core_materialization_receipt());
-    impl->legacy_invocation = artifact.legacy_invocation();
-    impl->legacy_projection = owned_json(legacy_projection);
-    return HarnessProgramRunRecord(std::move(impl));
+    impl->projection = owned_json(projection);
+    HarnessProgramRunRecord record(std::move(impl));
+    record.validate_artifact(artifact);
+    return record;
 }
 
 HarnessProgramRunRecord HarnessProgramRunRecord::parse(const json& stored) {
@@ -303,28 +320,29 @@ HarnessProgramRunRecord HarnessProgramRunRecord::parse(const json& stored) {
         {"format", "storage_schema_version", "artifact_id", "owner_scope", "program_run",
          "program_run_id", "run_id", "bundle_id", "version_id", "binding_fingerprint",
          "admission_profile_fingerprint", "policy_fingerprint", "registry_fingerprint",
-         "compiler_build_id", "materialization_receipt", "legacy_invocation", "legacy_projection"});
+         "compiler_build_id", "materialization_receipt", "invocation", "projection"});
     if (require_string(stored, "format") != kRunFormat) {
         throw std::invalid_argument("Stored Harness Program run format is unsupported");
     }
     require_schema_version(stored);
     const auto run_record = program::ProgramRunRecord::parse(require_string(stored, "program_run"));
+    const auto invocation = program::RunInvocation::parse(require_string(stored, "invocation"));
     if (require_string(stored, "program_run_id") != run_record.id() ||
         require_string(stored, "owner_scope") != run_record.owner_scope() ||
         require_string(stored, "run_id") != run_record.run_id() ||
         require_string(stored, "bundle_id") != run_record.bundle_id() ||
         require_string(stored, "version_id") != run_record.program_version_id() ||
-        require_string(stored, "binding_fingerprint") != run_record.binding_fingerprint()) {
+        require_string(stored, "binding_fingerprint") != run_record.binding_fingerprint() ||
+        run_record.invocation() != invocation) {
         throw std::invalid_argument("Stored Harness Program run content identity mismatch");
     }
     if (!stored.contains("materialization_receipt") ||
-        !stored["materialization_receipt"].is_object() || !stored.contains("legacy_invocation") ||
-        !stored["legacy_invocation"].is_object() || !stored.contains("legacy_projection") ||
-        !stored["legacy_projection"].is_object()) {
+        !stored["materialization_receipt"].is_object() || !stored.contains("projection") ||
+        !stored["projection"].is_object()) {
         throw std::invalid_argument(
-            "Stored Harness Program run requires explicit receipt, invocation, and projection");
+            "Stored Harness Program run requires explicit receipt and projection");
     }
-    auto impl                           = std::make_shared<Impl>(run_record);
+    auto impl                           = std::make_shared<Impl>(run_record, invocation);
     impl->artifact_id                   = require_string(stored, "artifact_id");
     impl->owner_scope                   = run_record.owner_scope();
     impl->admission_profile_fingerprint = require_string(stored, "admission_profile_fingerprint");
@@ -332,8 +350,7 @@ HarnessProgramRunRecord HarnessProgramRunRecord::parse(const json& stored) {
     impl->registry_fingerprint          = require_string(stored, "registry_fingerprint");
     impl->compiler_build_id             = require_string(stored, "compiler_build_id");
     impl->materialization_receipt       = owned_json(stored["materialization_receipt"]);
-    impl->legacy_invocation             = owned_json(stored["legacy_invocation"]);
-    impl->legacy_projection             = owned_json(stored["legacy_projection"]);
+    impl->projection                    = owned_json(stored["projection"]);
     return HarnessProgramRunRecord(std::move(impl));
 }
 
@@ -346,17 +363,30 @@ const std::string& HarnessProgramRunRecord::owner_scope() const noexcept {
 const program::ProgramRunRecord& HarnessProgramRunRecord::run_record() const noexcept {
     return impl_->run_record;
 }
-json HarnessProgramRunRecord::legacy_invocation() const {
-    return owned_json(impl_->legacy_invocation);
+const program::RunInvocation& HarnessProgramRunRecord::invocation() const noexcept {
+    return impl_->invocation;
 }
-json HarnessProgramRunRecord::legacy_projection() const {
-    return owned_json(impl_->legacy_projection);
+json HarnessProgramRunRecord::projection() const {
+    return owned_json(impl_->projection);
 }
 
 void HarnessProgramRunRecord::validate_artifact(
     const HarnessProgramArtifactRecord& artifact) const {
     const auto profile = artifact.version().admission_profile();
     const auto policy  = artifact.version().policy_snapshot();
+    auto expected = bind_harness_invocation(
+        artifact.invocation_template(), artifact.owner_scope(), artifact.version().id(),
+        impl_->run_record.run_id(), impl_->invocation.correlation_id);
+    if (impl_->run_record.fork_receipt()) {
+        if (!budget_within_template(impl_->invocation.budget, expected.budget)) {
+            throw std::invalid_argument(
+                "Harness Program fork invocation exceeds its artifact template budget");
+        }
+        // ProgramRuntime derives an exact fork continuation budget from the
+        // source remainder before publishing its immutable migration receipt.
+        // The artifact template remains the upper authority bound.
+        expected.budget = impl_->invocation.budget;
+    }
     if (impl_->artifact_id != artifact.artifact_id() ||
         impl_->owner_scope != artifact.owner_scope() ||
         impl_->run_record.bundle_id() != artifact.bundle().id() ||
@@ -367,7 +397,8 @@ void HarnessProgramRunRecord::validate_artifact(
         impl_->compiler_build_id != artifact.bundle().compiler_build_id() ||
         impl_->materialization_receipt !=
             materialization_json(artifact.version().core_materialization_receipt()) ||
-        impl_->legacy_invocation != artifact.legacy_invocation()) {
+        impl_->invocation != impl_->run_record.invocation() ||
+        impl_->invocation != expected) {
         throw std::invalid_argument("Harness Program run retained artifact binding mismatch");
     }
 }
@@ -389,8 +420,8 @@ json HarnessProgramRunRecord::serialize() const {
         {"registry_fingerprint", impl_->registry_fingerprint},
         {"compiler_build_id", impl_->compiler_build_id},
         {"materialization_receipt", owned_json(impl_->materialization_receipt)},
-        {"legacy_invocation", owned_json(impl_->legacy_invocation)},
-        {"legacy_projection", owned_json(impl_->legacy_projection)},
+        {"invocation", impl_->invocation.serialize_canonical()},
+        {"projection", owned_json(impl_->projection)},
     };
 }
 
@@ -411,37 +442,38 @@ struct HarnessBoundedProgramStore::Impl {
     Impl(std::shared_ptr<HarnessRecordStore> store,
          std::string                         artifact,
          std::string                         owner,
-         json                                invocation,
-         json                                projection)
+         HarnessInvocationTemplate           request_template,
+         json                                harness_projection)
         : records(std::move(store)),
           artifact_id(std::move(artifact)),
           owner_scope(std::move(owner)),
-          legacy_invocation(owned_json(invocation)),
-          legacy_projection(owned_json(projection)) {}
+          invocation_template(std::move(request_template)),
+          projection(owned_json(harness_projection)) {}
 
     std::shared_ptr<HarnessRecordStore> records;
     std::string                         artifact_id;
     std::string                         owner_scope;
-    json                                legacy_invocation;
-    json                                legacy_projection;
+    HarnessInvocationTemplate           invocation_template;
+    json                                projection;
 };
 
-HarnessBoundedProgramStore::HarnessBoundedProgramStore(std::shared_ptr<HarnessRecordStore> records,
-                                                       std::string artifact_id,
-                                                       std::string owner_scope,
-                                                       json        legacy_invocation,
-                                                       json        legacy_projection) {
+HarnessBoundedProgramStore::HarnessBoundedProgramStore(
+    std::shared_ptr<HarnessRecordStore> records,
+    std::string                         artifact_id,
+    std::string                         owner_scope,
+    HarnessInvocationTemplate           invocation_template,
+    json                                projection) {
     if (!records) throw std::invalid_argument("Harness Program adapter requires a record store");
     if (artifact_id.empty() || owner_scope.empty()) {
         throw std::invalid_argument("Harness Program adapter requires artifact_id and owner_scope");
     }
-    if (!legacy_invocation.is_object() || !legacy_projection.is_object()) {
-        throw std::invalid_argument(
-            "Harness Program adapter invocation and projection must be objects");
+    if (!projection.is_object()) {
+        throw std::invalid_argument("Harness Program adapter projection must be an object");
     }
-    impl_ =
-        std::make_unique<Impl>(std::move(records), std::move(artifact_id), std::move(owner_scope),
-                               std::move(legacy_invocation), std::move(legacy_projection));
+    (void)invocation_template.serialize_canonical();
+    impl_ = std::make_unique<Impl>(std::move(records), std::move(artifact_id),
+                                   std::move(owner_scope), std::move(invocation_template),
+                                   std::move(projection));
 }
 
 HarnessBoundedProgramStore::~HarnessBoundedProgramStore() = default;
@@ -453,8 +485,8 @@ HarnessBoundedProgramStore& HarnessBoundedProgramStore::operator=(
 void HarnessBoundedProgramStore::publish_admitted(const program::ProgramBundle&  bundle,
                                                   const program::ProgramVersion& version) {
     const auto record = HarnessProgramArtifactRecord::create(
-        impl_->artifact_id, impl_->owner_scope, bundle, version, impl_->legacy_invocation,
-        impl_->legacy_projection);
+        impl_->artifact_id, impl_->owner_scope, bundle, version, impl_->invocation_template,
+        impl_->projection);
     impl_->records->save_artifact(impl_->artifact_id, record.serialize());
 }
 

@@ -22,6 +22,91 @@ constexpr std::array<std::string_view, 9> kBudgetResources = {
     "max_dynamic_compiles", "max_child_depth",        "max_total_children",
 };
 
+constexpr std::string_view kInvocationTemplateFormat = "neograph-harness-invocation-template";
+
+json template_budget_json(const program::RunBudget& budget) {
+    return {{"wall_time_ms", budget.wall_time_ms},
+            {"model_tokens", budget.model_tokens},
+            {"monetary_microunits", budget.monetary_microunits},
+            {"max_concurrency", budget.max_concurrency},
+            {"max_program_operations", budget.max_program_operations},
+            {"max_core_steps", budget.max_core_steps},
+            {"max_dynamic_compiles", budget.max_dynamic_compiles},
+            {"max_child_depth", budget.max_child_depth},
+            {"max_total_children", budget.max_total_children}};
+}
+
+std::uint64_t required_template_u64(const json& value, std::string_view field) {
+    const std::string key(field);
+    if (!value.contains(key)) {
+        throw std::invalid_argument("Harness invocation template requires field '" + key + "'");
+    }
+    const auto& encoded = value.at(key);
+    if (encoded.is_number_unsigned()) return encoded.get<std::uint64_t>();
+    if (encoded.is_number_integer()) {
+        const auto signed_value = encoded.get<std::int64_t>();
+        if (signed_value >= 0) return static_cast<std::uint64_t>(signed_value);
+    }
+    throw std::invalid_argument("Harness invocation template field '" + key +
+                                "' must be an unsigned integer");
+}
+
+std::uint32_t required_template_u32(const json& value, std::string_view field) {
+    const auto encoded = required_template_u64(value, field);
+    if (encoded > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::invalid_argument("Harness invocation template field '" + std::string(field) +
+                                    "' exceeds uint32");
+    }
+    return static_cast<std::uint32_t>(encoded);
+}
+
+program::RunBudget template_budget_from_json(const json& value) {
+    if (!value.is_object()) {
+        throw std::invalid_argument("Harness invocation template budget must be an object");
+    }
+    program::detail::reject_unknown_fields(
+        value, "Harness invocation template budget",
+        {"wall_time_ms", "model_tokens", "monetary_microunits", "max_concurrency",
+         "max_program_operations", "max_core_steps", "max_dynamic_compiles", "max_child_depth",
+         "max_total_children"});
+    return {required_template_u64(value, "wall_time_ms"),
+            required_template_u64(value, "model_tokens"),
+            required_template_u64(value, "monetary_microunits"),
+            required_template_u32(value, "max_concurrency"),
+            required_template_u64(value, "max_program_operations"),
+            required_template_u64(value, "max_core_steps"),
+            required_template_u64(value, "max_dynamic_compiles"),
+            required_template_u32(value, "max_child_depth"),
+            required_template_u64(value, "max_total_children")};
+}
+
+json invocation_template_body(const HarnessInvocationTemplate& request) {
+    (void)program::detail::canonical_json_bytes(request.input);
+    return {{"format", std::string(kInvocationTemplateFormat)},
+            {"storage_schema_version", HarnessInvocationTemplate::STORAGE_SCHEMA_VERSION},
+            {"input", request.input},
+            {"budget", template_budget_json(request.budget)}};
+}
+
+HarnessInvocationTemplate invocation_template_from_json(const json& value) {
+    if (!value.is_object()) {
+        throw std::invalid_argument("Harness invocation template must be an object");
+    }
+    program::detail::reject_unknown_fields(value, "Harness invocation template",
+                                           {"format", "storage_schema_version", "input", "budget"});
+    if (!value.contains("format") || !value.at("format").is_string() ||
+        value.at("format").get<std::string>() != kInvocationTemplateFormat ||
+        required_template_u32(value, "storage_schema_version") !=
+            HarnessInvocationTemplate::STORAGE_SCHEMA_VERSION ||
+        !value.contains("input") || !value.contains("budget")) {
+        throw std::invalid_argument("Harness invocation template format or schema is unsupported");
+    }
+    HarnessInvocationTemplate request{value.at("input"),
+                                      template_budget_from_json(value.at("budget"))};
+    (void)invocation_template_body(request);
+    return request;
+}
+
 [[noreturn]] void fail(std::string code, std::string pointer, std::string message) {
     throw HarnessTranslationError(std::move(code), std::move(pointer), std::move(message));
 }
@@ -555,6 +640,38 @@ const std::string& HarnessTranslationError::pointer() const noexcept {
     return pointer_;
 }
 
+std::string HarnessInvocationTemplate::serialize_canonical() const {
+    return program::detail::canonical_json_bytes(invocation_template_body(*this));
+}
+
+HarnessInvocationTemplate HarnessInvocationTemplate::parse(std::string_view stored_bytes) {
+    try {
+        return invocation_template_from_json(program::detail::parse_json_strict(stored_bytes));
+    } catch (const std::exception& error) {
+        throw std::invalid_argument(
+            std::string("Invalid stored Harness invocation template JSON: ") + error.what());
+    }
+}
+
+program::RunInvocation bind_harness_invocation(HarnessInvocationTemplate request,
+                                               std::string               owner_scope,
+                                               std::string               program_version_id,
+                                               std::string               run_id,
+                                               std::string               correlation_id) {
+    program::RunInvocation invocation;
+    invocation.owner_scope        = std::move(owner_scope);
+    invocation.agent_id           = std::string(HARNESS_PROGRAM_AGENT_ID);
+    invocation.program_version_id = std::move(program_version_id);
+    invocation.run_id             = std::move(run_id);
+    invocation.budget             = std::move(request.budget);
+    invocation.input              = std::move(request.input);
+    invocation.message_sequence   = 1;
+    invocation.idempotency_key    = "harness:" + invocation.run_id;
+    invocation.correlation_id     = std::move(correlation_id);
+    invocation.validate();
+    return invocation;
+}
+
 json harness_program_request_schema() {
     return json::parse(R"JSON({
         "type":"object",
@@ -711,16 +828,16 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
         request.value("policy", json::object()).value("workspace_revision", ""));
     for (const auto& worker : request.at("workers"))
         wire.worker_ids.push_back(worker.at("id").get<std::string>());
-    wire.legacy_projection = {
+    wire.projection = {
         {"task", request.at("task")},
         {"output_channel", std::string(kResultChannel)},
     };
     if (!wire.workspace_revision.empty())
-        wire.legacy_projection["workspace_revision"] = wire.workspace_revision;
+        wire.projection["workspace_revision"] = wire.workspace_revision;
     if (contract) {
-        wire.legacy_projection["contract_manifest"] =
+        wire.projection["contract_manifest"] =
             json::parse(contract->serialize_canonical());
-        wire.legacy_projection["contract_manifest_hash"] = contract->content_hash();
+        wire.projection["contract_manifest_hash"] = contract->content_hash();
     }
 
     HarnessCapabilityBindingRequest bindings;
@@ -766,9 +883,9 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
         task["contract_manifest"] = json::parse(contract->serialize_canonical());
     auto source = program::ProgramSource::from_cpp_builder(source_id, 1, std::move(document), {},
                                                            std::move(map));
-    program::ProgramInvocation invocation{{{"task", std::move(task)}}, budget, {}, nullptr};
-    return {std::move(source), std::move(invocation), std::move(wire), std::move(bindings),
-            contract};
+    HarnessInvocationTemplate invocation_template{{{"task", std::move(task)}}, budget};
+    return {std::move(source), std::move(invocation_template), std::move(wire),
+            std::move(bindings), contract};
 }
 
 HarnessProgramSnapshots build_harness_program_snapshots(HarnessProgramSnapshotConfig config) {

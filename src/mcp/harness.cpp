@@ -39,17 +39,6 @@ json budget_json(const program::RunBudget& v) {
             {"max_child_depth", v.max_child_depth},
             {"max_total_children", v.max_total_children}};
 }
-program::RunBudget parse_budget(const json& v) {
-    return {v.at("wall_time_ms").get<std::uint64_t>(),
-            v.at("model_tokens").get<std::uint64_t>(),
-            v.at("monetary_microunits").get<std::uint64_t>(),
-            v.at("max_concurrency").get<std::uint32_t>(),
-            v.at("max_program_operations").get<std::uint64_t>(),
-            v.at("max_core_steps").get<std::uint64_t>(),
-            v.at("max_dynamic_compiles").get<std::uint64_t>(),
-            v.at("max_child_depth").get<std::uint32_t>(),
-            v.at("max_total_children").get<std::uint64_t>()};
-}
 program::RunBudget bounded_budget(const program::RunBudget& requested,
                                   const program::RunBudget& ceiling) {
     return {std::min(requested.wall_time_ms, ceiling.wall_time_ms),
@@ -61,16 +50,6 @@ program::RunBudget bounded_budget(const program::RunBudget& requested,
             std::min(requested.max_dynamic_compiles, ceiling.max_dynamic_compiles),
             std::min(requested.max_child_depth, ceiling.max_child_depth),
             std::min(requested.max_total_children, ceiling.max_total_children)};
-}
-json invocation_json(const program::ProgramInvocation& v) {
-    return {{"input", v.input}, {"budget", budget_json(v.budget)}, {"trace_id", v.trace_id}};
-}
-program::ProgramInvocation parse_invocation(const json& v) {
-    program::ProgramInvocation r;
-    r.input    = v.at("input");
-    r.budget   = parse_budget(v.at("budget"));
-    r.trace_id = v.value("trace_id", "");
-    return r;
 }
 json executable_json(const program::ExecutableIdentity& v) {
     return {{"kind", std::string(program::to_string(v.kind))},
@@ -585,10 +564,11 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             if (x != artifacts.end()) return x->second;
         }
         auto store = std::make_shared<HarnessBoundedProgramStore>(
-            config.record_store, id, resources.owner_scope, json::object(), json::object());
+            config.record_store, id, resources.owner_scope, HarnessInvocationTemplate{},
+            json::object());
         auto rec = store->load_artifact();
         if (!rec) return {};
-        auto p = rec->legacy_projection();
+        auto p = rec->projection();
         if (!p.contains("program_bindings"))
             throw std::invalid_argument("legacy pre-Program Harness artifact is blocked");
         std::optional<program::ContractManifest> contract;
@@ -632,7 +612,7 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
                 alias(b, resources.snapshots.policy.fingerprint(), t.bindings,
                       resources.artifact_binding_identity,
                       t.contract ? t.contract->content_hash() : std::string_view{});
-            auto p  = t.wire.legacy_projection;
+            auto p  = t.wire.projection;
             auto source_map        = source_map_json(t.source.source_map());
             p["program_bindings"]  = bindings_json(t.bindings);
             p["source_id"]         = t.wire.source_id;
@@ -645,8 +625,8 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
                     json::parse(t.contract->serialize_canonical());
                 p["contract_manifest_hash"] = t.contract->content_hash();
             }
-            auto store             = std::make_shared<HarnessBoundedProgramStore>(
-                config.record_store, id, resources.owner_scope, invocation_json(t.invocation), p);
+            auto store = std::make_shared<HarnessBoundedProgramStore>(
+                config.record_store, id, resources.owner_scope, t.invocation_template, p);
             auto catalog = resources.make_program_catalog(store, t.bindings);
             if (!catalog) throw std::runtime_error("incomplete Program catalog");
             auto v   = catalog->admit(b, {resources.owner_scope,
@@ -714,7 +694,7 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
     json read_artifact(const std::string& id, const std::string& view) {
         auto x = artifact(id);
         if (!x) throw std::invalid_argument("unknown Harness artifact: " + id);
-        const auto& p = x->record.legacy_projection();
+        const auto p = x->record.projection();
         if (view != "core" && view != "sourcemap" && view != "diagnostics" &&
             view != "admission-profile" && view != "contract")
             throw std::invalid_argument("unsupported Harness artifact view: " + view);
@@ -820,22 +800,23 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
                                                      std::move(fork_transitions));
             if (!runtime) throw std::runtime_error("incomplete Program fork runtime");
         }
-        auto invocation             = parse_invocation(x->record.legacy_invocation());
+        auto invocation_template = x->record.invocation_template();
         if (fork_source) {
             const auto source_record =
                 fork_source_transitions->load(resources.owner_scope,
                                               fork_source->source_run_id);
             if (!source_record) return {{"started", false}, {"status", "not_found"}};
-            invocation.budget =
-                bounded_budget(invocation.budget, source_record->remaining_budget());
+            invocation_template.budget =
+                bounded_budget(invocation_template.budget, source_record->remaining_budget());
         }
-        auto id                     = run_id(resources.snapshots.policy.fingerprint());
-        invocation.requested_run_id = id;
-        invocation.events           = events;
+        auto id = run_id(resources.snapshots.policy.fingerprint());
+        auto invocation = bind_harness_invocation(
+            std::move(invocation_template), resources.owner_scope, x->record.version().id(), id,
+            "harness:" + id);
         std::optional<program::ContractRun> contract_run;
         std::shared_ptr<HarnessContractRunStore> durable_contract;
         std::string workspace_revision = x->record.version().id();
-        const auto projection = x->record.legacy_projection();
+        const auto projection = x->record.projection();
         if (projection.contains("workspace_revision")) {
             if (!projection.at("workspace_revision").is_string() ||
                 projection.at("workspace_revision").get<std::string>().empty())
@@ -856,21 +837,18 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
                 auto resume     = std::move(fork_resume);
                 resume.trace_id = "harness-fork:" + id;
                 resume.events   = events;
-                handle.emplace(runtime->fork(resources.owner_scope, *fork_source,
-                                             x->record.version(), std::move(invocation),
-                                             std::move(resume)));
+                handle.emplace(runtime->fork(*fork_source, std::move(invocation), std::move(resume),
+                                             events));
             } else if (mode == "recorded_replay") {
                 auto source_handle = retained_handle(replay_source);
                 if (!source_handle.try_result())
                     return {{"started", false}, {"status", "source_not_terminal"}};
                 auto recorded = resources.make_recorded_binding(
                     x->record.version(), x->bindings, source_handle.events_after(0));
-                handle.emplace(runtime->start_recorded(
-                    resources.owner_scope, x->record.version(), std::move(invocation),
-                    std::move(recorded)));
+                handle.emplace(
+                    runtime->start_recorded(std::move(invocation), std::move(recorded), events));
             } else {
-                handle.emplace(runtime->start(resources.owner_scope, x->record.version(),
-                                              std::move(invocation)));
+                handle.emplace(runtime->start(std::move(invocation), events));
             }
         } catch (const program::ProgramForkCompatibilityError& e) {
             return {{"started", false},
@@ -933,7 +911,7 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
                                                            : std::string("live");
         std::optional<program::ContractRun> contract_run;
         std::string workspace_revision = a->record.version().id();
-        const auto projection = a->record.legacy_projection();
+        const auto projection = a->record.projection();
         if (projection.contains("workspace_revision") &&
             projection.at("workspace_revision").is_string() &&
             !projection.at("workspace_revision").get<std::string>().empty())

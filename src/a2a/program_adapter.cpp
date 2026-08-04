@@ -299,12 +299,10 @@ ProgramAgentAdapter::recover_record(const CollaborationRecord& record) const {
             "Collaboration record is outside the Program adapter identity boundary");
     }
 
-    const program::ProgramPersistedInvocation expected{
-        invocation.input, invocation.budget, invocation.correlation_id, {}, 0};
     const auto verify_handle = [&](program::ProgramHandle handle) {
         const auto durable = handle.snapshot();
         if (handle.run_id() != run_id || handle.program_version_id() != version_.id() ||
-            durable.program_version_id() != version_.id() || durable.invocation() != expected) {
+            durable.program_version_id() != version_.id() || durable.invocation() != invocation) {
             throw ProgramA2ARequestError(
                 "Durable Program run does not match the accepted collaboration request");
         }

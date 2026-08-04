@@ -1622,6 +1622,14 @@ std::optional<ProgramVersion> ProgramCatalog::find_version(std::string_view owne
     return known->second->version;
 }
 
+std::optional<ProgramVersion> detail::CatalogRuntimeAccess::load_admitted_version(
+    const ProgramCatalog& catalog, std::string_view owner_scope, std::string_view version_id) {
+    detail::validate_token(owner_scope, "Program version owner_scope");
+    detail::validate_token(version_id, "Program version id");
+    std::lock_guard lock(catalog.impl_->mutex);
+    return catalog.impl_->program_store->get_version(owner_scope, version_id);
+}
+
 std::shared_ptr<const detail::MaterializedProgram> detail::CatalogRuntimeAccess::pin(
     const ProgramCatalog& catalog, const ProgramVersion& version) {
     std::lock_guard lock(catalog.impl_->mutex);

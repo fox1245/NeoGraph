@@ -117,6 +117,10 @@ PolicySnapshot policy(const AdmissionProfile& profile) {
     return std::move(builder).build();
 }
 
+RunBudget budget() {
+    return {1000, 100, 100, 1, 10, 100, 1, 1, 1};
+}
+
 struct Fixture {
     RegistrySnapshot registry_value = registry();
     ProgramBundle    bundle_value   = bundle(registry_value);
@@ -124,26 +128,19 @@ struct Fixture {
     PolicySnapshot   policy_value   = policy(profile_value);
     ProgramVersion   version_value  = ProgramVersion(
         ProgramVersionData(bundle_value.id(),
-                              profile_value,
-                              policy_value,
-                              {},
-                              policy_value.owner_scope(),
-                              CoreMaterializationReceipt{"persist-compiler/v1",
-                                                      registry_value.fingerprint(),
-                                                      bundle_value.core_plan_identities(),
-                                                         {}}));
-    HarnessProgramArtifactRecord artifact =
-        HarnessProgramArtifactRecord::create("artifact-one",
-                                             policy_value.owner_scope(),
-                                             bundle_value,
-                                             version_value,
-                                             json{{"transport", "mcp"}},
-                                             json{{"status", "queued"}});
+                           profile_value,
+                           policy_value,
+                           {},
+                           policy_value.owner_scope(),
+                           CoreMaterializationReceipt{"persist-compiler/v1",
+                                                     registry_value.fingerprint(),
+                                                     bundle_value.core_plan_identities(),
+                                                     {}}));
+    HarnessProgramArtifactRecord artifact = HarnessProgramArtifactRecord::create(
+        "artifact-one", policy_value.owner_scope(), bundle_value, version_value,
+        HarnessInvocationTemplate{json{{"request", "hello"}}, budget()},
+        json{{"status", "queued"}});
 };
-
-RunBudget budget() {
-    return {1000, 100, 100, 1, 10, 100, 1, 1, 1};
-}
 
 ProgramEvent event(const Fixture&      fixture,
                    std::string         run_id,
@@ -185,7 +182,9 @@ ProgramTransitionPublication initial_publication(const Fixture& fixture,
     data.program_version_id  = fixture.version_value.id();
     data.bundle_id           = fixture.bundle_value.id();
     data.binding_fingerprint = digest('6');
-    data.invocation          = {json{{"request", "hello"}}, budget(), "trace-one"};
+    data.invocation = bind_harness_invocation(
+        fixture.artifact.invocation_template(), fixture.artifact.owner_scope(),
+        fixture.version_value.id(), run_id, "trace-one");
     data.continuation        = journal.continuation;
     data.remaining_budget    = journal.remaining_budget;
     data.journal_head        = journal.id;
@@ -326,7 +325,7 @@ std::shared_ptr<program::ProgramTransitionStore> persist_and_bind(
     const std::shared_ptr<SqliteHarnessRecordStore>& store, const Fixture& fixture) {
     HarnessBoundedProgramStore bounded(
         store, fixture.artifact.artifact_id(), fixture.artifact.owner_scope(),
-        fixture.artifact.legacy_invocation(), fixture.artifact.legacy_projection());
+        fixture.artifact.invocation_template(), fixture.artifact.projection());
     bounded.publish_admitted(fixture.bundle_value, fixture.version_value);
     return require_harness_program_adapter_store(store)->bind_program_transitions(fixture.artifact);
 }
@@ -356,7 +355,7 @@ TEST(HarnessProgramStoreTest, StrictRecordsRejectMissingAndTamperedIdentityField
     auto initial     = initial_publication(fixture);
     auto wrapped     = HarnessProgramRunRecord::create(fixture.artifact, initial.run_record,
                                                        json{{"status", "running"}});
-    auto missing_run = without_field(wrapped.serialize(), "legacy_invocation");
+    auto missing_run = without_field(wrapped.serialize(), "invocation");
     EXPECT_THROW((void)HarnessProgramRunRecord::parse(missing_run), std::invalid_argument);
 }
 
@@ -406,7 +405,7 @@ TEST(HarnessProgramStoreTest, SqliteReopensExactOwnerBoundRunAndLegacyRowsStillW
 
         HarnessBoundedProgramStore bounded(
             store, fixture.artifact.artifact_id(), fixture.artifact.owner_scope(),
-            fixture.artifact.legacy_invocation(), fixture.artifact.legacy_projection());
+            fixture.artifact.invocation_template(), fixture.artifact.projection());
         const auto artifact = bounded.load_artifact();
         ASSERT_TRUE(artifact);
         auto transitions = capability->bind_program_transitions(*artifact);
@@ -422,10 +421,12 @@ TEST(HarnessProgramStoreTest, SqliteReopensExactOwnerBoundRunAndLegacyRowsStillW
 
         const auto target_artifact = HarnessProgramArtifactRecord::create(
             "artifact-two", fixture.artifact.owner_scope(), fixture.bundle_value,
-            fixture.version_value, json{{"transport", "mcp"}}, json{{"status", "queued"}});
+            fixture.version_value,
+            HarnessInvocationTemplate{json{{"request", "hello"}}, budget()},
+            json{{"status", "queued"}});
         HarnessBoundedProgramStore target_bounded(
             store, target_artifact.artifact_id(), target_artifact.owner_scope(),
-            target_artifact.legacy_invocation(), target_artifact.legacy_projection());
+            target_artifact.invocation_template(), target_artifact.projection());
         target_bounded.publish_admitted(fixture.bundle_value, fixture.version_value);
         const auto target_transitions = capability->bind_program_transitions(target_artifact);
         EXPECT_TRUE(target_transitions->load(fixture.artifact.owner_scope(), "run-one"));

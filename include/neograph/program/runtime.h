@@ -33,6 +33,8 @@ struct ProgramInvocation {
     std::string                       requested_run_id;
     std::string                       parent_run_id;
     std::uint32_t                     child_depth = 0;
+    /// Set only by the canonical RunInvocation entry point; never persisted as a projection.
+    std::optional<RunInvocation>      canonical_request;
 };
 
 struct ProgramResume {
@@ -73,6 +75,16 @@ public:
      * runtime-only projection internally.
      */
     ProgramHandle start(RunInvocation invocation);
+    /// Attach a runtime-only event sink without extending the canonical request.
+    ProgramHandle start(RunInvocation invocation, std::shared_ptr<ProgramEventSink> events);
+    /**
+     * Start a top-level Program using exact recorded capability bindings. The
+     * canonical invocation selects the owner and admitted ProgramVersion; the
+     * optional sink is runtime-only and is never persisted in the request.
+     */
+    ProgramHandle start_recorded(RunInvocation invocation,
+                                 RecordedBindingSet recorded,
+                                 std::shared_ptr<ProgramEventSink> events = {});
 
     ProgramHandle start(std::string_view      owner_scope,
                         const ProgramVersion& version,
@@ -106,6 +118,14 @@ public:
                                  const ProgramVersion& version,
                                  ProgramInvocation     invocation,
                                  RecordedBindingSet    recorded);
+    /**
+     * Fork an exact checkpoint into the ProgramVersion selected by the
+     * canonical top-level invocation. The optional sink is runtime-only.
+     */
+    ProgramHandle fork(ExactProgramCheckpointReference source,
+                       RunInvocation                 invocation,
+                       ProgramResume                 resume,
+                       std::shared_ptr<ProgramEventSink> events = {});
     ProgramHandle fork(std::string_view                  owner_scope,
                        ExactProgramCheckpointReference   source,
                        const ProgramVersion&             target,

@@ -10,6 +10,7 @@
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/error.hpp>
+#include <asio/post.hpp>
 #include <asio/system_error.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/thread_pool.hpp>
@@ -590,7 +591,8 @@ asio::awaitable<RunResult> GraphEngine::run_async_with_runtime(
     }
 
     auto executor = co_await asio::this_coro::executor;
-    operation->bind_executor(executor);
+    const auto operation_executor = operation->bind_executor(executor);
+    CancelExecutorLease operation_lease(operation);
     operation->throw_if_cancelled("run_async entry");
 
     // ``operation`` is the token exposed through RunContext. Keep the
@@ -598,10 +600,13 @@ asio::awaitable<RunResult> GraphEngine::run_async_with_runtime(
     // to bind operation->slot() for its own timer/socket, and Asio cancellation
     // slots have only one mutable handler.
     auto execution = operation->fork();
-    execution->bind_executor(executor);
+    const auto execution_executor = execution->bind_executor(operation_executor);
+    CancelExecutorLease execution_lease(execution);
+    co_await asio::post(execution_executor, asio::use_awaitable);
+    execution->throw_if_cancelled("run_async execution entry");
     try {
         co_return co_await asio::co_spawn(
-            executor,
+            execution_executor,
             execute_graph_async(config, cb, {}, nullptr, metadata, &resources),
             asio::bind_cancellation_slot(
                 execution->slot(), asio::use_awaitable));
@@ -796,17 +801,21 @@ asio::awaitable<RunResult> GraphEngine::resume_async_with_runtime(
     }
 
     auto executor = co_await asio::this_coro::executor;
-    operation->bind_executor(executor);
+    const auto operation_executor = operation->bind_executor(executor);
+    CancelExecutorLease operation_lease(operation);
     operation->throw_if_cancelled("resume_async entry");
 
     // Keep the RunContext token and the resume wrapper's co_spawn on
     // independent cancellation signals; nested node consumers may bind the
     // former without replacing the latter's awaitable handler.
     auto execution = operation->fork();
-    execution->bind_executor(executor);
+    const auto execution_executor = execution->bind_executor(operation_executor);
+    CancelExecutorLease execution_lease(execution);
+    co_await asio::post(execution_executor, asio::use_awaitable);
+    execution->throw_if_cancelled("resume_async execution entry");
     try {
         co_return co_await asio::co_spawn(
-            executor,
+            execution_executor,
             resume_execute_async(
                 std::move(config), std::move(resume_value), std::move(cb),
                 std::move(metadata), std::move(resources),

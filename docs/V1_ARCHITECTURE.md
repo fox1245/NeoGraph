@@ -77,10 +77,11 @@ contract is:
   second `ControlVm`/`DurableKernel` execution surface or select different
   semantics.
 
-`ProgramRuntime::start_child()` is the public foundation for this contract.
-Until the child lifecycle and restart gates close, an admitted DSL `spawn`
-must be treated as inline orchestration rather than being advertised as an
-independently recoverable sub-agent.
+`ProgramRuntime::start_child()` and the typed DSL `spawn` now implement this
+contract. `spawn` resolves an admitted `ModuleLinkReceipt`, durably records
+`Publishing -> Dispatched -> terminal` child state, and `recover_children()`
+reconstructs unfinished children from the parent record. The legacy inline
+path remains only for operations that are not a durable `spawn`.
 
 ### Remote collaborative agent network
 
@@ -138,15 +139,14 @@ A2A when the pair is moved to separate processes or hosts. Metrics must
 separate network, queue, Program scheduling, Core execution, provider, and
 artifact-publication time.
 
-The current A2A GraphEngine-facing server and in-memory task store are
-compatibility surfaces. The v1 cutover must map remote `message/send`,
-`tasks/get`, cancellation, streaming, and artifacts to Program lifecycle
-operations without leaking credentials, ambient host state, or unadmitted
-capabilities across the collaboration link.
-
-This network collaboration contract is a target architecture, not a claim
-that durable cross-owner links or restart-safe remote dispatch are already
-implemented.
+The legacy A2A `GraphEngine` constructor and in-memory task store remain
+source-compatible compatibility surfaces. The Program-backed A2A adapter now
+binds a `RunInvocation` and an accepted collaboration mailbox record before
+admission, reconnects the exact run after publication crashes, and projects
+durable lifecycle state back to A2A tasks. This closes the NeoGraph-local
+Program/A2A cutover; it does not classify NeoCode or NeoProtocol as rebased
+consumers, and cross-host enablement remains gated on their explicit
+conformance evidence.
 
 ### Cross-repository compatibility and rebase boundary
 
@@ -217,11 +217,12 @@ cross a second generic VM/Core boundary.
   a measured correctness and performance gate. It does not silently create a
   second adapter-specific runtime.
 
-The current implementation is not evidence that the specialized dispatch
-optimization is complete: admitted operation tags are still evaluated from
-the stored plan at runtime. Any replacement with typed direct dispatch must
-preserve diagnostics, source coordinates, cancellation, budgets, and replay
-identity before it can be accepted as a performance change.
+The specialized direct-dispatch implementation is complete for the admitted
+bounded operation set: runtime dispatch selects the sealed
+`ProgramOperationKind` and typed descriptor rather than reparsing operation
+tags from JSON. Future operation kinds must preserve diagnostics, source
+coordinates, cancellation, budgets, and replay identity before joining this
+path.
 
 Program is optional. A user who only needs a static graph links
 `neograph::core`, builds a `GraphEngine`, and pays no Program dependency,

@@ -138,6 +138,8 @@
           "enum": [
             "implemented",
             "implemented_core_boundary",
+            "implemented_program_boundary",
+            "implemented_program_adapter",
             "compatibility_adapter_pending_program_cutover"
           ]
         },

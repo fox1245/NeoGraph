@@ -225,6 +225,23 @@ RunBudget replay_budget() {
     return RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0};
 }
 
+RunInvocation replay_invocation(const ProgramVersion& version,
+                                std::string           run_id,
+                                std::string           correlation_id) {
+    RunInvocation invocation;
+    invocation.owner_scope        = "tenant:recorded";
+    invocation.agent_id           = "recorded-replay";
+    invocation.program_version_id = version.id();
+    invocation.run_id             = std::move(run_id);
+    invocation.budget             = replay_budget();
+    invocation.input              = json::object();
+    invocation.message_sequence   = 1;
+    invocation.idempotency_key    = "recorded-replay:" + invocation.run_id;
+    invocation.correlation_id     = std::move(correlation_id);
+    invocation.validate();
+    return invocation;
+}
+
 struct RecordedRuntimeFixture {
     std::atomic<unsigned>                           live_binder_calls{0};
     std::atomic<unsigned>                           live_provider_calls{0};
@@ -450,15 +467,10 @@ TEST(ProgramRecordedReplayRuntimeTest,
                                    fixture.make_binding(true, false), std::move(success_evidence));
     const auto         success_fingerprint = success_set.fingerprint();
 
-    const auto success = fixture.runtime
-                             ->start_recorded("tenant:recorded", version,
-                                              ProgramInvocation{json::object(),
-                                                                replay_budget(),
-                                                                "trace-recorded-success",
-                                                                {},
-                                                                "recorded-success-run"},
-                                              std::move(success_set))
-                             .wait();
+    const auto success_invocation =
+        replay_invocation(version, "recorded-success-run", "trace-recorded-success");
+    const auto success =
+        fixture.runtime->start_recorded(success_invocation, std::move(success_set)).wait();
     EXPECT_EQ(success.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(success.output()["channels"]["value"]["value"], "recorded-success");
     EXPECT_EQ(fixture.live_binder_calls.load(), 0U);
@@ -468,6 +480,7 @@ TEST(ProgramRecordedReplayRuntimeTest,
     ASSERT_TRUE(success_record.has_value());
     ASSERT_TRUE(success_record->recorded_binding_set_fingerprint().has_value());
     EXPECT_EQ(*success_record->recorded_binding_set_fingerprint(), success_fingerprint);
+    EXPECT_EQ(success_record->invocation(), success_invocation);
 
     fixture.restart();
     const auto reconnected_success =
@@ -487,19 +500,17 @@ TEST(ProgramRecordedReplayRuntimeTest,
     RecordedBindingSet failure_set({exact_receipt}, {failure_ref}, fixture.make_binding(true, true),
                                    std::move(failure_evidence));
 
-    const auto failure = fixture.runtime
-                             ->start_recorded("tenant:recorded", version,
-                                              ProgramInvocation{json::object(),
-                                                                replay_budget(),
-                                                                "trace-recorded-failure",
-                                                                {},
-                                                                "recorded-failure-run"},
-                                              std::move(failure_set))
-                             .wait();
+    const auto failure_invocation =
+        replay_invocation(version, "recorded-failure-run", "trace-recorded-failure");
+    const auto failure =
+        fixture.runtime->start_recorded(failure_invocation, std::move(failure_set)).wait();
     EXPECT_EQ(failure.status(), ProgramTerminalStatus::Failed);
     EXPECT_EQ(fixture.live_binder_calls.load(), 0U);
     EXPECT_EQ(fixture.live_provider_calls.load(), 0U);
     EXPECT_EQ(fixture.recorded_provider_calls.load(), 1U);
+    const auto failure_record = fixture.transitions->load("tenant:recorded", failure.run_id());
+    ASSERT_TRUE(failure_record.has_value());
+    EXPECT_EQ(failure_record->invocation(), failure_invocation);
 
     fixture.restart();
     const auto reconnected_failure =

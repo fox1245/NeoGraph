@@ -171,8 +171,8 @@ against source, tests, and current documents.
 | #190 dr_compare workers | **Partial.** Code and docs use worker count 4. | Run mock once; run one low-cost live-provider sample only when a key is available, then close with call metadata. | Performance / P0 |
 | #192 Provider dispatch | **Superseded.** ABI-safe `CompletionProvider::do_invoke` replaced the proposed `Provider::invoke` cutover. | Close as superseded; keep the old Provider vtable, require new implementations to use CompletionProvider. | Core/Release / P0 |
 | #193 checkpoint dispatch | **Partial.** New capability interfaces remove recursion for compliant backends, but legacy defaults still mutually recurse and sync-only stores still block async executors. | Add a nonblocking sync-store adapter, migrate internal callers, and retain regression tests for zero-override and sync-only implementations before closing. | State/Core / P1-P2 |
-| #214 `RunInvocation` | **Pending.** A2A, ACP, and gRPC still construct `RunConfig` and call GraphEngine separately. | Define one owned protocol-neutral invocation that can target Core now and Program after cutover; do not create a universal protocol adapter. | Protocol / P2 |
-| #215 invocation contracts | **Partial.** A2A/ACP have separate cases; no shared suite or gRPC parity. | Build a parameterized contract suite on #214 covering cancellation, identity, events, policy, Store, terminal states, pressure, and shutdown. | Protocol / P2 |
+| #214 `RunInvocation` | **Partial.** `program::RunInvocation` is canonical at the Program runtime boundary and is used by Harness and the Program-backed A2A adapter. Legacy GraphEngine A2A construction, ACP, and gRPC have not been rebased. | Keep legacy routes explicit; migrate each remaining protocol through the owned invocation and prove lifecycle parity before removing its compatibility path. | Protocol / P2-P8 |
+| #215 invocation contracts | **Partial.** Program/A2A and Harness regression suites cover canonical identity, cancellation, events, recovery, and terminal projection. ACP/gRPC parity is still absent. | Add a parameterized protocol suite only when each remaining adapter has a Program route; do not count legacy GraphEngine tests as Program conformance. | Protocol / P2-P8 |
 | #216 engine surfaces | **Partial.** Complete config and `GraphAdmin` exist, but execution-only dependency and admin concurrency policy do not. | Keep Core construction/run/admin responsibilities explicit; make adapters depend on a narrow invocation capability. | Core / P1-P2 |
 | #217 tool ownership | **Partial.** `ToolSet` is safe; legacy `NodeContext::tools` can still dangle. | Make owned `ToolSet`/sealed Program capability imports standard; remove the raw transfer path at the v1 rebuild boundary. | Core/Program / P1 |
 | #218 scoped registries | **Partial.** Local overlays and isolation tests exist; global fallback remains. | Freeze immutable registry snapshots and remove ambient fallback for strict Core/Program admission. Migrate Python registration deliberately. | Core/Program / P1 |
@@ -191,8 +191,8 @@ against source, tests, and current documents.
 | #252 Programmable Agents epic | **Partial.** Compiler-backed Harness and behavioral evaluation exist; child Programs, activation, modules, and feedback promotion do not. | Rewrite the epic around Core + Program; remove VM/Kernel claims and use this phase plan as its dependency graph. | Program / P0-P8 |
 | #254 sole Control VM | **Superseded.** Production uses GraphEngine and the cutover was already withdrawn. | Close; retain experiment history only. | Docs / P0 |
 | #255 lightweight planner/Kernel | **Partial experiment.** One reference Kernel lost in a narrow strict-linear measurement; other semantics were not measured. | Record that candidate as rejected. Keep broader runtime-boundary measurement only if a future concrete design needs it; do not generalize. | Core/State/Performance / independent lane |
-| #256 bounded DSL | **Partial.** Static topology, limited condition, and typed ports are present; dynamic send/interrupt and sealed recursive subgraphs remain. | Move supported syntax into Program frontend; implement lifecycle-sensitive constructs only through Program state/checkpoint contracts. | Program/State / P2-P3 |
-| #257 immutable generations | **Pending.** Existing immutable artifacts and compatible fork are foundations, not activation/version/migration protocol. | Becomes ProgramVersion, activation CAS, pinned runs, MigrationPlan, child attachment, lineage, and GC. | Program/State / P4-P5 |
+| #256 bounded DSL | **Partial.** The admitted bounded control set now lowers to typed direct operations, including durable `spawn`/`await`; arbitrary dynamic `Send` and topology mutation remain deliberately out of scope. | Add new syntax only when it can be sealed into the immutable plan and given lifecycle/checkpoint semantics. | Program / P3 |
+| #257 immutable generations | **Partial.** ProgramVersion admission/activation CAS, pinned runs, MigrationPlan, durable child attachment, lineage, and retention are implemented. Backend/SDK/ABI cutover remains. | Keep storage parity and consumer migration as separate P4-P8 gates. | Program/State / P4-P8 |
 | #260 fusion/AVX2 | **Partial experiment.** Fusion and compiler vectorization were useful for one sidecar shape; direct AVX2 had no proven win. | Publish corrected benchmark commit; design typed numeric buffer and safe fusion rules before any production candidate. No direct AVX binding. | Core/Performance / independent lane |
 
 ### Issue housekeeping order
@@ -351,9 +351,11 @@ user B's executor, receives progress and structured artifacts, sends a
 correction or clarification, and completes or cancels the collaboration
 without exposing either user's unrelated tools, credentials, or history.
 
-This is a target contract. The existing A2A GraphEngine-facing server and
-in-memory task store remain compatibility surfaces until the PR8/P8 adapter
-cutover and restart gates close.
+The Program-backed A2A adapter and durable collaboration mailbox now cover
+NeoGraph-local request admission, recovery, task projection, and
+owner/capability attenuation. The legacy GraphEngine constructor remains a
+compatibility surface; NeoCode/NeoProtocol and cross-host enablement remain
+blocked on the explicit Issue #7 rebase evidence.
 
 ### Cross-repository rebase gate
 
@@ -431,6 +433,21 @@ publication`, plus the fail-closed path for missing evidence or a failed
 independent check. The fixture must preserve manifest, evidence lineage,
 terminal status, and recovery behavior, and must execute through the existing
 typed Program/Core dispatch path without a generic bytecode VM.
+
+### Implementation audit — 2026-08-04
+
+This audit is source-and-contract evidence, not a claim that every historical
+consumer has migrated.
+
+| Area | Status | Evidence |
+|---|---|---|
+| Typed plan/direct dispatch (Issue #5) | **Done in NeoGraph.** | `ProgramPlanDispatchDescriptor` seals references; `run_attempt.cpp` dispatches `ProgramOperationKind` directly. |
+| Durable child Program lifecycle (Issue #4) | **Done in NeoGraph.** | `start_child`, durable child publication/dispatch/completion, `recover_children`, and child lineage/resume regressions. |
+| Program-backed A2A collaboration (Issue #6) | **Done in NeoGraph.** | `ProgramAgentAdapter`, owner-scoped `CollaborationMailbox`, restart/idempotency and authenticated-peer conformance tests. |
+| Frozen Harness implementation contract (Issue #8) | **Done in NeoGraph.** | Immutable `ContractManifest`/`ContractRun`, independently bound evidence, SQLite restart/tamper coverage. |
+| ACP/gRPC Program cutover and shared protocol suite | **Partial.** | These compatibility adapters still directly construct Core `RunConfig`; no Program parity claim is made. |
+| NeoCode/NeoProtocol rebase (Issue #7) | **Blocked externally, fail-closed locally.** | Compatibility metadata rejects a current-consumer claim without explicit rebase revision and conformance evidence. |
+
 
 ### Stored-data migration
 

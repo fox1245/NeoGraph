@@ -14,6 +14,7 @@
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/error.hpp>
+#include <asio/post.hpp>
 #include <asio/io_context.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/read.hpp>
@@ -250,15 +251,17 @@ TEST_F(WsLoopback, CancellationAbortsHeldReceive) {
             try {
                 auto ex = co_await asio::this_coro::executor;
                 auto operation = token->fork();
-                operation->bind_executor(ex);
+                const auto operation_executor = operation->bind_executor(ex);
+                co_await asio::post(operation_executor, asio::use_awaitable);
+                operation->throw_if_cancelled("WebSocket receive test entry");
                 auto ws = co_await ws_connect(
-                    ex, "127.0.0.1", port, "/hold", {}, /*tls=*/false);
+                    operation_executor, "127.0.0.1", port, "/hold", {}, /*tls=*/false);
                 auto wait_for_message = [&]() -> asio::awaitable<WsMessage> {
                     receive_entered.set_value();
                     co_return co_await ws->recv();
                 };
                 (void)co_await asio::co_spawn(
-                    ex, wait_for_message(),
+                    operation_executor, wait_for_message(),
                     asio::bind_cancellation_slot(
                         operation->slot(), asio::use_awaitable));
                 completion.set_value(asio::error::fault);

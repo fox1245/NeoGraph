@@ -8,6 +8,7 @@
 #include <neograph/program/fork.h>
 #include <neograph/program/journal.h>
 #include <neograph/program/pending.h>
+#include <neograph/program/invocation.h>
 #include <neograph/program/result.h>
 
 #include <vector>
@@ -58,7 +59,9 @@ struct ProgramRunRecordData {
     std::string                           program_version_id;
     std::string                           bundle_id;
     std::string                           binding_fingerprint;
-    ProgramPersistedInvocation            invocation;
+    RunInvocation                        invocation;
+    /// Runtime-only topology metadata; request identity remains in invocation.
+    std::uint32_t                         child_depth = 0;
     ProgramContinuation                   continuation;
     RunBudget                             remaining_budget;
     std::optional<CoreCheckpointIdentity> exact_checkpoint;
@@ -81,7 +84,7 @@ struct ProgramRunRecordData {
 /** Deep-owned, content-addressed run snapshot used for reconnect and CAS publication. */
 class NEOGRAPH_PROGRAM_API ProgramRunRecord {
 public:
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2;
 
     static ProgramRunRecord create(ProgramRunRecordData data);
     static ProgramRunRecord parse(std::string_view stored_bytes);
@@ -91,7 +94,8 @@ public:
     const std::string& program_version_id() const noexcept;
     const std::string& bundle_id() const noexcept;
     const std::string& binding_fingerprint() const noexcept;
-    ProgramPersistedInvocation invocation() const;
+    const RunInvocation& invocation() const noexcept;
+    std::uint32_t child_depth() const noexcept;
     ProgramContinuation continuation() const noexcept;
     RunBudget remaining_budget() const noexcept;
     std::optional<CoreCheckpointIdentity> exact_checkpoint() const;

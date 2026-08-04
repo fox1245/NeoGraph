@@ -101,7 +101,7 @@ bool valid_effect_outbox_binding(
 
 program::ContractManifest contract_manifest_for_artifact(
     const HarnessProgramArtifactRecord& artifact) {
-    const auto projection = artifact.legacy_projection();
+    const auto projection = artifact.projection();
     if (!projection.contains("contract_manifest") ||
         !projection.at("contract_manifest").is_object() ||
         !projection.contains("contract_manifest_hash") ||
@@ -119,7 +119,7 @@ program::ContractManifest contract_manifest_for_artifact(
 
 std::string contract_workspace_revision_for_artifact(
     const HarnessProgramArtifactRecord& artifact) {
-    const auto projection = artifact.legacy_projection();
+    const auto projection = artifact.projection();
     if (!projection.contains("workspace_revision")) return artifact.version().id();
     if (!projection.at("workspace_revision").is_string() ||
         projection.at("workspace_revision").get<std::string>().empty()) {
@@ -707,7 +707,7 @@ public:
             }
             publication_bytes = publication.serialize_canonical();
             wrapper.emplace(HarnessProgramRunRecord::create(artifact_, publication.run_record,
-                                                            artifact_.legacy_projection()));
+                                                            artifact_.projection()));
             if (publication.journal_record.sequence > static_cast<std::uint64_t>(INT64_MAX)) {
                 return program::ProgramTransitionPublishResult::Conflict;
             }
