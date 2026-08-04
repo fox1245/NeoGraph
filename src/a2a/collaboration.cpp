@@ -774,8 +774,11 @@ CollaborationMailbox CollaborationMailbox::parse(std::string_view stored_bytes) 
             throw std::invalid_argument("Collaboration mailbox link owner mismatch");
         }
         const auto link_id = link.spec().link_id;
-        impl->links.emplace(link_id, std::move(link));
+        if (!impl->links.emplace(link_id, std::move(link)).second) {
+            throw std::invalid_argument("Collaboration mailbox contains duplicate link identity");
+        }
     }
+    std::unordered_map<std::string, std::set<std::uint64_t>> seen_sequences;
     for (const auto& item : required_array(value, "records")) {
         auto record = record_from_json(item);
         const auto& envelope = record.envelope;
@@ -783,12 +786,58 @@ CollaborationMailbox CollaborationMailbox::parse(std::string_view stored_bytes) 
             envelope.receiver_agent_id != impl->agent_id) {
             throw std::invalid_argument("Collaboration mailbox record owner mismatch");
         }
+        const auto link_it = impl->links.find(envelope.link_id);
+        if (link_it == impl->links.end()) {
+            throw std::invalid_argument("Collaboration mailbox record references an unknown link");
+        }
+        const auto& link_spec = link_it->second.spec();
+        if (envelope.sender_owner_scope != link_spec.sender_owner_scope ||
+            envelope.sender_agent_id != link_spec.sender_agent_id ||
+            envelope.receiver_owner_scope != link_spec.receiver_owner_scope ||
+            envelope.receiver_agent_id != link_spec.receiver_agent_id) {
+            throw std::invalid_argument("Collaboration mailbox record/link identity mismatch");
+        }
+        if (link_it->second.state() == CollaborationLinkState::Proposed) {
+            throw std::invalid_argument("Collaboration mailbox record references an unaccepted link");
+        }
         const auto record_key = envelope.idempotency_key;
         const auto record_correlation = envelope.correlation_id;
         const auto record_sequence = envelope.sequence;
-        impl->records.emplace(record_key, std::move(record));
+        if (!seen_sequences[record_correlation].insert(record_sequence).second) {
+            throw std::invalid_argument("Collaboration mailbox contains duplicate sequence identity");
+        }
+#ifdef NEOGRAPH_A2A_PROGRAM
+        if (record.program_request) {
+            if (!record.program_request->version || !record.program_request->invocation ||
+                envelope.program_version_id.empty() ||
+                record.program_request->version->id() != envelope.program_version_id ||
+                record.program_request->version->ownership_scope() != impl->owner_scope ||
+                record.program_request->invocation->requested_run_id !=
+                    envelope.receiver_program_run_id ||
+                !record.program_request->invocation->parent_run_id.empty() ||
+                record.program_request->invocation->child_depth != 0) {
+                throw std::invalid_argument("Collaboration mailbox typed Program request mismatch");
+            }
+        } else if (!envelope.program_version_id.empty()) {
+            throw std::invalid_argument("Collaboration mailbox lost its typed Program request");
+        }
+#endif
+        if (!impl->records.emplace(record_key, std::move(record)).second) {
+            throw std::invalid_argument("Collaboration mailbox contains duplicate idempotency key");
+        }
         auto& highest = impl->highest_sequence[record_correlation];
         highest = std::max(highest, record_sequence);
+    }
+    for (const auto& [correlation, sequences] : seen_sequences) {
+        std::uint64_t expected = 1;
+        for (const auto sequence : sequences) {
+            if (sequence != expected) {
+                throw std::invalid_argument(
+                    "Collaboration mailbox contains a sequence gap in correlation '" +
+                    correlation + "'");
+            }
+            if (expected != std::numeric_limits<std::uint64_t>::max()) ++expected;
+        }
     }
     return CollaborationMailbox(std::move(impl));
 }

@@ -168,6 +168,46 @@ TEST(A2ACollaboration, MailboxJournalReopensWithoutLosingCorrelation) {
               CollaborationSubmitResult::Accepted);
 }
 
+TEST(A2ACollaboration, MailboxJournalRejectsIdentityTamperingOnReopen) {
+    const auto accepted = make_link().accept("executor-b", "consent-secret");
+    CollaborationMailbox receiver("owner-b", "executor-b");
+    receiver.accept_link(accepted, "consent-secret");
+    EXPECT_EQ(receiver.submit(make_envelope(accepted)), CollaborationSubmitResult::Accepted);
+    EXPECT_EQ(receiver.submit(make_envelope(accepted, 2, "retry", "idem-2")),
+              CollaborationSubmitResult::Accepted);
+
+    const auto stored = json::parse(receiver.serialize_canonical());
+
+    auto duplicate_link = stored;
+    duplicate_link["links"].push_back(duplicate_link["links"][0]);
+    EXPECT_THROW(CollaborationMailbox::parse(duplicate_link.dump()), std::invalid_argument);
+
+    auto duplicate_record = stored;
+    duplicate_record["records"].push_back(duplicate_record["records"][0]);
+    EXPECT_THROW(CollaborationMailbox::parse(duplicate_record.dump()), std::invalid_argument);
+
+    auto unknown_link = stored;
+    unknown_link["records"][0]["envelope"]["link_id"] = "link-missing";
+    EXPECT_THROW(CollaborationMailbox::parse(unknown_link.dump()), std::invalid_argument);
+
+    auto foreign_sender = stored;
+    foreign_sender["records"][0]["envelope"]["sender_owner_scope"] = "owner-forged";
+    EXPECT_THROW(CollaborationMailbox::parse(foreign_sender.dump()), std::invalid_argument);
+
+    auto duplicate_sequence = stored;
+    auto duplicate = duplicate_sequence["records"][0];
+    duplicate["envelope"]["idempotency_key"] = "idem-forged";
+    duplicate["envelope"]["message_id"] = "message-forged";
+    duplicate_sequence["records"].push_back(std::move(duplicate));
+    EXPECT_THROW(CollaborationMailbox::parse(duplicate_sequence.dump()), std::invalid_argument);
+
+    auto sequence_gap = stored;
+    auto records = json::array();
+    records.push_back(sequence_gap["records"][1]);
+    sequence_gap["records"] = std::move(records);
+    EXPECT_THROW(CollaborationMailbox::parse(sequence_gap.dump()), std::invalid_argument);
+}
+
 #ifdef NEOGRAPH_A2A_PROGRAM
 TEST(A2ACollaboration, MailboxRetainsTypedProgramRequestAcrossReconnect) {
     const auto accepted = make_link().accept("executor-b", "consent-secret");
@@ -196,6 +236,26 @@ TEST(A2ACollaboration, MailboxRetainsTypedProgramRequestAcrossReconnect) {
     EXPECT_EQ(request->invocation->input, invocation.input);
     EXPECT_EQ(reopened.submit(envelope, version, invocation),
               CollaborationSubmitResult::Duplicate);
+}
+
+TEST(A2ACollaboration, MailboxJournalRejectsLostTypedProgramRequestOnReopen) {
+    const auto accepted = make_link().accept("executor-b", "consent-secret");
+    auto version = make_program_version();
+    CollaborationMailbox receiver("owner-b", "executor-b");
+    receiver.accept_link(accepted, "consent-secret");
+
+    auto envelope = CollaborationEnvelope::bind_program(make_envelope(accepted), version);
+    neograph::program::ProgramInvocation invocation;
+    invocation.input = json{{"prompt", "typed"}};
+    invocation.budget = neograph::program::RunBudget{1000, 1000, 1000, 1, 1, 20, 0, 0, 0};
+    invocation.trace_id = "a2a:run-b";
+    invocation.requested_run_id = "run-b";
+    EXPECT_EQ(receiver.submit_program(envelope, version, invocation),
+              CollaborationSubmitResult::Accepted);
+
+    auto stored = json::parse(receiver.serialize_canonical());
+    stored["records"][0]["program_request"] = nullptr;
+    EXPECT_THROW(CollaborationMailbox::parse(stored.dump()), std::invalid_argument);
 }
 #endif
 
