@@ -433,6 +433,55 @@ TEST(A2ACollaboration, MailboxRetainsTypedProgramRequestAcrossReconnect) {
               CollaborationSubmitResult::Duplicate);
 }
 
+TEST(A2ACollaboration, DuplicateMailboxRequestRecoversCrashBeforeRuntimeStart) {
+    ProgramAdapterFixture fixture;
+    const auto accepted = make_link().accept("executor-b", "consent-secret");
+    const auto envelope = make_program_envelope(accepted, fixture.admitted_version());
+    auto mailbox = std::make_shared<CollaborationMailbox>("owner-b", "executor-b");
+    mailbox->accept_link(accepted, "consent-secret");
+    ASSERT_EQ(mailbox->submit_program(envelope, fixture.admitted_version(), persisted_invocation()),
+              CollaborationSubmitResult::Accepted);
+
+    auto reopened = std::make_shared<CollaborationMailbox>(
+        CollaborationMailbox::parse(mailbox->serialize_canonical()));
+    fixture.restart_after_mailbox_publication();
+    ProgramAgentAdapter adapter(fixture.runtime, fixture.admitted_version(), "owner-b", reopened);
+
+    const auto recovered = adapter.start(collaboration_to_message(envelope), "run-b", "context-1");
+    EXPECT_EQ(recovered.run_id(), "run-b");
+    EXPECT_EQ(recovered.snapshot().invocation().input, persisted_invocation().input);
+    EXPECT_EQ(recovered.wait().status(), neograph::program::ProgramTerminalStatus::Completed);
+    EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 1U);
+
+    const auto retry = adapter.start(collaboration_to_message(envelope), "run-b", "context-1");
+    EXPECT_EQ(retry.run_id(), "run-b");
+    EXPECT_EQ(retry.wait().status(), neograph::program::ProgramTerminalStatus::Completed);
+    EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 1U);
+}
+
+TEST(A2ACollaboration, DuplicateMailboxRequestReconnectsPublishedRunWithoutRedispatch) {
+    ProgramAdapterFixture fixture;
+    const auto accepted = make_link().accept("executor-b", "consent-secret");
+    const auto envelope = make_program_envelope(accepted, fixture.admitted_version());
+    auto mailbox = std::make_shared<CollaborationMailbox>("owner-b", "executor-b");
+    mailbox->accept_link(accepted, "consent-secret");
+    ProgramAgentAdapter original(fixture.runtime, fixture.admitted_version(), "owner-b", mailbox);
+
+    const auto initial = original.start(collaboration_to_message(envelope), "run-b", "context-1");
+    ASSERT_EQ(initial.wait().status(), neograph::program::ProgramTerminalStatus::Completed);
+    ASSERT_EQ(fixture.starts->load(std::memory_order_relaxed), 1U);
+
+    auto reopened = std::make_shared<CollaborationMailbox>(
+        CollaborationMailbox::parse(mailbox->serialize_canonical()));
+    fixture.restart_after_mailbox_publication();
+    ProgramAgentAdapter adapter(fixture.runtime, fixture.admitted_version(), "owner-b", reopened);
+
+    const auto retry = adapter.start(collaboration_to_message(envelope), "run-b", "context-1");
+    EXPECT_EQ(retry.run_id(), "run-b");
+    EXPECT_EQ(retry.wait().status(), neograph::program::ProgramTerminalStatus::Completed);
+    EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 1U);
+}
+
 TEST(A2ACollaboration, RecoveredTypedMailboxRequestStartsExactlyOnce) {
     ProgramAdapterFixture fixture;
     const auto accepted = make_link().accept("executor-b", "consent-secret");

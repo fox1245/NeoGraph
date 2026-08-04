@@ -56,7 +56,8 @@ public:
     const std::shared_ptr<CollaborationMailbox>& mailbox() const noexcept;
 
     /// Admit and start one request through the existing ProgramRuntime.
-    /// A repeated collaboration idempotency key reconnects the exact run.
+    /// A repeated collaboration idempotency key recovers the exact persisted
+    /// invocation if a crash occurred after mailbox publication.
     program::ProgramHandle start(const Message& inbound,
                                  std::string_view task_id,
                                  std::string_view context_id) const;
@@ -91,6 +92,10 @@ public:
     void acknowledge_task(std::string_view task_id) const;
 
 private:
+    /// Reconnect an accepted collaboration request or claim its exact persisted
+    /// invocation after a crash between mailbox publication and run admission.
+    /// Acknowledged/canceled records may reconnect only; they are never restarted.
+    program::ProgramHandle recover_record(const CollaborationRecord& record) const;
     std::shared_ptr<program::ProgramRuntime> runtime_;
     program::ProgramVersion                 version_;
     std::string                             owner_scope_;

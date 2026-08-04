@@ -202,6 +202,7 @@ program::ProgramHandle ProgramAgentAdapter::start(const Message& inbound,
              envelope->program_version_id != version_.id())) {
             throw ProgramA2ARequestError("Collaboration request identity is outside the Program boundary");
         }
+        const auto idempotency_key = envelope->idempotency_key;
         const auto result = mailbox_->submit_program(std::move(*envelope), version_, invocation);
         if (result == CollaborationSubmitResult::Conflict ||
             result == CollaborationSubmitResult::Rejected) {
@@ -209,7 +210,12 @@ program::ProgramHandle ProgramAgentAdapter::start(const Message& inbound,
                 "Collaboration request was rejected by owner/link/capability/effect policy");
         }
         if (result == CollaborationSubmitResult::Duplicate) {
-            return reconnect(task_id);
+            const auto record = mailbox_->get(idempotency_key);
+            if (!record) {
+                throw ProgramA2ARequestError(
+                    "Collaboration idempotency record disappeared after duplicate admission");
+            }
+            return recover_record(*record);
         }
     } else {
         // A legacy message/send retry has no collaboration idempotency key.
@@ -227,6 +233,59 @@ program::ProgramHandle ProgramAgentAdapter::start(const Message& inbound,
     }
     return handle;
 }
+program::ProgramHandle
+ProgramAgentAdapter::recover_record(const CollaborationRecord& record) const {
+    if (!record.program_request || !record.program_request->version ||
+        !record.program_request->invocation) {
+        throw ProgramA2ARequestError("Collaboration record lost its typed Program request");
+    }
+
+    const auto& request    = *record.program_request;
+    const auto& invocation = *request.invocation;
+    const auto& envelope   = record.envelope;
+    const auto& run_id     = invocation.requested_run_id;
+    if (envelope.program_version_id != version_.id() || request.version->id() != version_.id() ||
+        request.version->serialize_canonical() != version_.serialize_canonical() ||
+        run_id.empty() || envelope.a2a_task_id != run_id ||
+        envelope.receiver_program_run_id != run_id || envelope.a2a_context_id.empty() ||
+        envelope.receiver_owner_scope != owner_scope_ || !invocation.parent_run_id.empty() ||
+        invocation.child_depth != 0) {
+        throw ProgramA2ARequestError(
+            "Collaboration record is outside the Program adapter identity boundary");
+    }
+
+    const program::ProgramPersistedInvocation expected{
+        invocation.input, invocation.budget, invocation.trace_id, invocation.parent_run_id,
+        invocation.child_depth};
+    const auto verify_handle = [&](program::ProgramHandle handle) {
+        const auto durable = handle.snapshot();
+        if (handle.run_id() != run_id || handle.program_version_id() != version_.id() ||
+            durable.program_version_id() != version_.id() || durable.invocation() != expected) {
+            throw ProgramA2ARequestError(
+                "Durable Program run does not match the accepted collaboration request");
+        }
+        return handle;
+    };
+
+    try {
+        return verify_handle(reconnect(run_id));
+    } catch (const program::ProgramDiagnosticError& error) {
+        if (error.diagnostic().code != "P_RUN_NOT_FOUND") throw;
+    }
+
+    if (record.state != CollaborationRecordState::Accepted) {
+        throw ProgramA2ARequestError(
+            "Acknowledged/canceled collaboration record has no durable Program run");
+    }
+
+    try {
+        return verify_handle(runtime_->start(owner_scope_, version_, invocation));
+    } catch (const program::ProgramDiagnosticError& error) {
+        if (error.diagnostic().code != "P_RUN_CONFLICT") throw;
+        return verify_handle(reconnect(run_id));
+    }
+}
+
 
 std::vector<program::ProgramHandle> ProgramAgentAdapter::recover_pending() const {
     std::vector<program::ProgramHandle> recovered;
@@ -274,36 +333,7 @@ std::vector<program::ProgramHandle> ProgramAgentAdapter::recover_pending() const
     }
 
     for (const auto* record : pending) {
-        const auto& invocation = *record->program_request->invocation;
-        const auto& run_id     = invocation.requested_run_id;
-        const program::ProgramPersistedInvocation expected{
-            invocation.input, invocation.budget, invocation.trace_id, invocation.parent_run_id,
-            invocation.child_depth};
-        const auto verify_handle = [&](program::ProgramHandle handle) {
-            const auto durable = handle.snapshot();
-            if (handle.run_id() != run_id || handle.program_version_id() != version_.id() ||
-                durable.program_version_id() != version_.id() ||
-                durable.invocation() != expected) {
-                throw ProgramA2ARequestError(
-                    "Durable Program run does not match the accepted collaboration request");
-            }
-            return handle;
-        };
-
-        try {
-            recovered.push_back(verify_handle(reconnect(run_id)));
-            continue;
-        } catch (const program::ProgramDiagnosticError& error) {
-            if (error.diagnostic().code != "P_RUN_NOT_FOUND") throw;
-        }
-
-        try {
-            recovered.push_back(
-                verify_handle(runtime_->start(owner_scope_, version_, invocation)));
-        } catch (const program::ProgramDiagnosticError& error) {
-            if (error.diagnostic().code != "P_RUN_CONFLICT") throw;
-            recovered.push_back(verify_handle(reconnect(run_id)));
-        }
+        recovered.push_back(recover_record(*record));
     }
     return recovered;
 }
