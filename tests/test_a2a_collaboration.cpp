@@ -254,12 +254,24 @@ CollaborationEnvelope make_program_envelope(
         version);
 }
 
-neograph::program::ProgramInvocation persisted_invocation() {
-    neograph::program::ProgramInvocation invocation;
-    invocation.input = json{{"prompt", "persisted"}};
+neograph::program::RunInvocation
+persisted_invocation(const CollaborationEnvelope& envelope,
+                     const neograph::program::ProgramVersion& version) {
+    neograph::program::RunInvocation invocation;
+    invocation.owner_scope = envelope.receiver_owner_scope;
+    invocation.agent_id = envelope.receiver_agent_id;
+    invocation.program_version_id = version.id();
+    invocation.run_id = envelope.receiver_program_run_id;
     invocation.budget = neograph::program::RunBudget{1000, 1000, 1000, 1, 1, 20, 0, 0, 0};
-    invocation.trace_id = "a2a:run-b";
-    invocation.requested_run_id = "run-b";
+    invocation.input = envelope.payload;
+    invocation.message_sequence = envelope.sequence;
+    invocation.idempotency_key = envelope.idempotency_key;
+    invocation.correlation_id = envelope.correlation_id;
+    if (envelope.artifacts.size() == 1) {
+        const auto& artifact = envelope.artifacts.front();
+        invocation.artifact = neograph::program::InvocationArtifactReference{
+            artifact.artifact_identity, artifact.uri, artifact.media_type, artifact.size_bytes};
+    }
     return invocation;
 }
 #endif
@@ -412,26 +424,47 @@ TEST(A2ACollaboration, MailboxRetainsTypedProgramRequestAcrossReconnect) {
     receiver.accept_link(accepted, "consent-secret");
 
     auto envelope = CollaborationEnvelope::bind_program(make_envelope(accepted), version);
-    neograph::program::ProgramInvocation invocation;
-    invocation.input = json{{"prompt", "typed"}};
-    invocation.budget = neograph::program::RunBudget{1000, 1000, 1000, 1, 1, 20, 0, 0, 0};
-    invocation.trace_id = "a2a:run-b";
-    invocation.requested_run_id = "run-b";
+    const auto invocation = persisted_invocation(envelope, version);
 
     EXPECT_EQ(receiver.submit_program(envelope, version, invocation),
               CollaborationSubmitResult::Accepted);
     EXPECT_TRUE(receiver.permits_artifact("link-1", "artifact-1"));
     EXPECT_FALSE(receiver.permits_artifact("link-1", "unlisted"));
-    auto reopened = CollaborationMailbox::parse(receiver.serialize_canonical());
+    const auto serialized = json::parse(receiver.serialize_canonical());
+    EXPECT_EQ(serialized["storage_schema_version"], CollaborationMailbox::STORAGE_SCHEMA_VERSION);
+    EXPECT_EQ(serialized["records"][0]["program_request"]["invocation"]["format"],
+              "neograph-program-run-invocation");
+    auto obsolete_mailbox = serialized;
+    obsolete_mailbox["storage_schema_version"] = 1;
+    EXPECT_THROW(CollaborationMailbox::parse(obsolete_mailbox.dump()), std::invalid_argument);
+    auto reopened = CollaborationMailbox::parse(serialized.dump());
     const auto request = reopened.get_program_request("idem-1");
     ASSERT_TRUE(request.has_value());
     ASSERT_TRUE(request->version);
     ASSERT_TRUE(request->invocation);
     EXPECT_EQ(request->version->id(), version.id());
-    EXPECT_EQ(request->invocation->requested_run_id, "run-b");
+    EXPECT_EQ(request->invocation->run_id, "run-b");
     EXPECT_EQ(request->invocation->input, invocation.input);
     EXPECT_EQ(reopened.submit(envelope, version, invocation),
               CollaborationSubmitResult::Duplicate);
+}
+
+TEST(A2ACollaboration, MailboxRejectsRunInvocationDetachedFromEnvelope) {
+    const auto accepted = make_link().accept("executor-b", "consent-secret");
+    auto version = make_program_version();
+    CollaborationMailbox receiver("owner-b", "executor-b");
+    receiver.accept_link(accepted, "consent-secret");
+
+    const auto envelope = CollaborationEnvelope::bind_program(make_envelope(accepted), version);
+    auto correlation_mismatch = persisted_invocation(envelope, version);
+    correlation_mismatch.correlation_id = "forged-correlation";
+    EXPECT_EQ(receiver.submit_program(envelope, version, std::move(correlation_mismatch)),
+              CollaborationSubmitResult::Rejected);
+
+    auto input_mismatch = persisted_invocation(envelope, version);
+    input_mismatch.input = json{{"percent", 99}};
+    EXPECT_EQ(receiver.submit_program(envelope, version, std::move(input_mismatch)),
+              CollaborationSubmitResult::Rejected);
 }
 
 TEST(A2ACollaboration, DuplicateMailboxRequestRecoversCrashBeforeRuntimeStart) {
@@ -440,7 +473,9 @@ TEST(A2ACollaboration, DuplicateMailboxRequestRecoversCrashBeforeRuntimeStart) {
     const auto envelope = make_program_envelope(accepted, fixture.admitted_version());
     auto mailbox = std::make_shared<CollaborationMailbox>("owner-b", "executor-b");
     mailbox->accept_link(accepted, "consent-secret");
-    ASSERT_EQ(mailbox->submit_program(envelope, fixture.admitted_version(), persisted_invocation()),
+    ASSERT_EQ(mailbox->submit_program(
+                  envelope, fixture.admitted_version(),
+                  persisted_invocation(envelope, fixture.admitted_version())),
               CollaborationSubmitResult::Accepted);
 
     auto reopened = std::make_shared<CollaborationMailbox>(
@@ -450,7 +485,8 @@ TEST(A2ACollaboration, DuplicateMailboxRequestRecoversCrashBeforeRuntimeStart) {
 
     const auto recovered = adapter.start(collaboration_to_message(envelope), "run-b", "context-1");
     EXPECT_EQ(recovered.run_id(), "run-b");
-    EXPECT_EQ(recovered.snapshot().invocation().input, persisted_invocation().input);
+    EXPECT_EQ(recovered.snapshot().invocation().input,
+              persisted_invocation(envelope, fixture.admitted_version()).input);
     EXPECT_EQ(recovered.wait().status(), neograph::program::ProgramTerminalStatus::Completed);
     EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 1U);
 
@@ -490,7 +526,9 @@ TEST(A2ACollaboration, RecoveredTypedMailboxRequestStartsExactlyOnce) {
 
     CollaborationMailbox original("owner-b", "executor-b");
     original.accept_link(accepted, "consent-secret");
-    ASSERT_EQ(original.submit_program(envelope, fixture.admitted_version(), persisted_invocation()),
+    ASSERT_EQ(original.submit_program(
+                  envelope, fixture.admitted_version(),
+                  persisted_invocation(envelope, fixture.admitted_version())),
               CollaborationSubmitResult::Accepted);
 
     const auto persisted_mailbox = original.serialize_canonical();
@@ -518,7 +556,9 @@ TEST(A2ACollaboration, RevokedLinkCannotRecoverAcceptedProgramRequest) {
     const auto envelope = make_program_envelope(accepted, fixture.admitted_version());
     auto mailbox = std::make_shared<CollaborationMailbox>("owner-b", "executor-b");
     mailbox->accept_link(accepted, "consent-secret");
-    ASSERT_EQ(mailbox->submit_program(envelope, fixture.admitted_version(), persisted_invocation()),
+    ASSERT_EQ(mailbox->submit_program(
+                  envelope, fixture.admitted_version(),
+                  persisted_invocation(envelope, fixture.admitted_version())),
               CollaborationSubmitResult::Accepted);
     const auto pre_revoke = json::parse(mailbox->serialize_canonical());
 
@@ -527,7 +567,9 @@ TEST(A2ACollaboration, RevokedLinkCannotRecoverAcceptedProgramRequest) {
     ASSERT_TRUE(canceled.has_value());
     EXPECT_EQ(canceled->state, CollaborationRecordState::Canceled);
     EXPECT_FALSE(mailbox->get_program_request("idem-program-recovery").has_value());
-    EXPECT_EQ(mailbox->submit_program(envelope, fixture.admitted_version(), persisted_invocation()),
+    EXPECT_EQ(mailbox->submit_program(
+                  envelope, fixture.admitted_version(),
+                  persisted_invocation(envelope, fixture.admitted_version())),
               CollaborationSubmitResult::Rejected);
 
     // An older journal may have persisted the accepted record before the
@@ -556,9 +598,13 @@ TEST(A2ACollaboration, RecoveryRejectsDuplicateRunBeforeAnyDispatch) {
         fixture.admitted_version());
     auto mailbox = std::make_shared<CollaborationMailbox>("owner-b", "executor-b");
     mailbox->accept_link(accepted, "consent-secret");
-    ASSERT_EQ(mailbox->submit_program(first, fixture.admitted_version(), persisted_invocation()),
+    ASSERT_EQ(mailbox->submit_program(
+                  first, fixture.admitted_version(),
+                  persisted_invocation(first, fixture.admitted_version())),
               CollaborationSubmitResult::Accepted);
-    ASSERT_EQ(mailbox->submit_program(duplicate, fixture.admitted_version(), persisted_invocation()),
+    ASSERT_EQ(mailbox->submit_program(
+                  duplicate, fixture.admitted_version(),
+                  persisted_invocation(duplicate, fixture.admitted_version())),
               CollaborationSubmitResult::Accepted);
 
     ProgramAgentAdapter adapter(fixture.runtime, fixture.admitted_version(), "owner-b", mailbox);
@@ -598,7 +644,9 @@ TEST(A2ACollaboration, ServerRestoresMailboxRequestBeforeAcceptingTasks) {
 
     CollaborationMailbox original("owner-b", "executor-b");
     original.accept_link(accepted, "consent-secret");
-    ASSERT_EQ(original.submit_program(envelope, fixture.admitted_version(), persisted_invocation()),
+    ASSERT_EQ(original.submit_program(
+                  envelope, fixture.admitted_version(),
+                  persisted_invocation(envelope, fixture.admitted_version())),
               CollaborationSubmitResult::Accepted);
     auto reopened = std::make_shared<CollaborationMailbox>(
         CollaborationMailbox::parse(original.serialize_canonical()));
@@ -647,11 +695,7 @@ TEST(A2ACollaboration, MailboxJournalRejectsLostTypedProgramRequestOnReopen) {
     receiver.accept_link(accepted, "consent-secret");
 
     auto envelope = CollaborationEnvelope::bind_program(make_envelope(accepted), version);
-    neograph::program::ProgramInvocation invocation;
-    invocation.input = json{{"prompt", "typed"}};
-    invocation.budget = neograph::program::RunBudget{1000, 1000, 1000, 1, 1, 20, 0, 0, 0};
-    invocation.trace_id = "a2a:run-b";
-    invocation.requested_run_id = "run-b";
+    const auto invocation = persisted_invocation(envelope, version);
     EXPECT_EQ(receiver.submit_program(envelope, version, invocation),
               CollaborationSubmitResult::Accepted);
 

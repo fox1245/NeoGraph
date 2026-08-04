@@ -13,6 +13,7 @@
 #include <neograph/program/module.h>
 #include <neograph/program/pending.h>
 #include <neograph/program/replay.h>
+#include <neograph/program/invocation.h>
 #include <neograph/program/transition_store.h>
 
 #include <asio/awaitable.hpp>
@@ -65,6 +66,13 @@ public:
     ProgramRuntime(const ProgramRuntime&)            = delete;
     ProgramRuntime& operator=(const ProgramRuntime&) = delete;
     ~ProgramRuntime();
+
+    /**
+     * Start the owner-scoped transport-neutral invocation contract. The
+     * runtime resolves its admitted ProgramVersion by identity and derives its
+     * runtime-only projection internally.
+     */
+    ProgramHandle start(RunInvocation invocation);
 
     ProgramHandle start(std::string_view      owner_scope,
                         const ProgramVersion& version,

@@ -34,11 +34,13 @@ public:
 /**
  * One admitted ProgramVersion exposed through A2A. The default invocation is
  * `{ "prompt": <text> }` with a conservative policy-bounded budget. Callers
- * with a different input contract should supply an invocation builder.
+ * with a different input contract should supply an exact RunInvocation
+ * builder; runtime-only ProgramInvocation never crosses this transport
+ * boundary.
  */
 class NEOGRAPH_API ProgramAgentAdapter final {
 public:
-    using InvocationBuilder = std::function<program::ProgramInvocation(
+    using InvocationBuilder = std::function<program::RunInvocation(
         const Message&, std::string_view task_id, std::string_view context_id)>;
     using ArtifactBuilder = std::function<std::optional<Artifact>(
         const program::ProgramResult&, std::string_view task_id)>;

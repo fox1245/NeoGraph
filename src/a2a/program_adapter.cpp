@@ -40,6 +40,43 @@ program::RunBudget default_budget(const program::ProgramVersion& version) {
     return budget;
 }
 
+std::optional<program::InvocationArtifactReference>
+invocation_artifact(const std::optional<CollaborationEnvelope>& envelope) {
+    if (!envelope || envelope->artifacts.empty()) return std::nullopt;
+    if (envelope->artifacts.size() != 1) {
+        throw ProgramA2ARequestError(
+            "A Program-backed collaboration request may carry at most one invocation artifact");
+    }
+    const auto& artifact = envelope->artifacts.front();
+    return program::InvocationArtifactReference{
+        artifact.artifact_identity, artifact.uri, artifact.media_type, artifact.size_bytes};
+}
+
+program::RunInvocation default_invocation(
+    const program::ProgramVersion& version,
+    std::string_view owner_scope,
+    std::string_view agent_id,
+    const std::optional<CollaborationEnvelope>& envelope,
+    const Message& inbound,
+    std::string_view task_id,
+    std::string_view context_id) {
+    program::RunInvocation invocation;
+    invocation.owner_scope = std::string(owner_scope);
+    invocation.agent_id = std::string(agent_id);
+    invocation.program_version_id = version.id();
+    invocation.run_id = std::string(task_id);
+    invocation.budget = default_budget(version);
+    invocation.input =
+        envelope ? envelope->payload : json{{"prompt", extract_text(inbound)}};
+    invocation.message_sequence = envelope ? envelope->sequence : 1;
+    invocation.idempotency_key =
+        envelope ? envelope->idempotency_key : "legacy-a2a:" + std::string(task_id);
+    invocation.correlation_id =
+        envelope ? envelope->correlation_id : std::string(context_id);
+    invocation.artifact = invocation_artifact(envelope);
+    return invocation;
+}
+
 Message result_message(const program::ProgramResult& result,
                        std::string_view task_id,
                        std::string_view context_id) {
@@ -175,20 +212,22 @@ program::ProgramHandle ProgramAgentAdapter::start(const Message& inbound,
         // admitted ProgramVersion, without pretending to have a link grant.
     }
 
-    // A collaboration envelope's payload is already the sender-owned logical
-    // input. Use it for the default typed invocation; custom builders may
-    // still translate the full Message for contracts with another shape.
+    const std::string_view agent_id = mailbox_ ? mailbox_->agent_id() : "a2a-adapter";
     auto invocation = invocation_builder_
                           ? invocation_builder_(inbound, task_id, context_id)
-                          : program::ProgramInvocation{
-                                envelope ? envelope->payload
-                                          : json{{"prompt", extract_text(inbound)}},
-                                default_budget(version_),
-                                "a2a:" + std::string(task_id),
-                                {}};
-    if (invocation.requested_run_id.empty()) invocation.requested_run_id = std::string(task_id);
-    if (invocation.requested_run_id != task_id) {
-        throw ProgramA2ARequestError("Program invocation run ID does not match A2A task ID");
+                          : default_invocation(
+                                version_, owner_scope_, agent_id, envelope, inbound, task_id, context_id);
+    try {
+        invocation.validate();
+    } catch (const std::invalid_argument& error) {
+        throw ProgramA2ARequestError(
+            std::string("Program RunInvocation is invalid: ") + error.what());
+    }
+    if (invocation.owner_scope != owner_scope_ || invocation.program_version_id != version_.id() ||
+        invocation.run_id != task_id || !invocation.parent_run_id.empty() ||
+        (mailbox_ && invocation.agent_id != mailbox_->agent_id())) {
+        throw ProgramA2ARequestError(
+            "Program RunInvocation is outside the Program adapter identity boundary");
     }
 
     if (envelope) {
@@ -197,6 +236,7 @@ program::ProgramHandle ProgramAgentAdapter::start(const Message& inbound,
         }
         if (envelope->a2a_task_id != task_id || envelope->a2a_context_id != context_id ||
             envelope->receiver_owner_scope != owner_scope_ ||
+            envelope->receiver_agent_id != mailbox_->agent_id() ||
             envelope->receiver_program_run_id != task_id ||
             (!envelope->program_version_id.empty() &&
              envelope->program_version_id != version_.id())) {
@@ -227,7 +267,7 @@ program::ProgramHandle ProgramAgentAdapter::start(const Message& inbound,
             if (error.diagnostic().code != "P_RUN_NOT_FOUND") throw;
         }
     }
-    auto handle = runtime_->start(owner_scope_, version_, std::move(invocation));
+    auto handle = runtime_->start(std::move(invocation));
     if (handle.run_id() != task_id) {
         throw std::runtime_error("ProgramRuntime changed the requested A2A run ID");
     }
@@ -243,20 +283,24 @@ ProgramAgentAdapter::recover_record(const CollaborationRecord& record) const {
     const auto& request    = *record.program_request;
     const auto& invocation = *request.invocation;
     const auto& envelope   = record.envelope;
-    const auto& run_id     = invocation.requested_run_id;
-    if (envelope.program_version_id != version_.id() || request.version->id() != version_.id() ||
+    const auto& run_id     = invocation.run_id;
+    if (!mailbox_ || envelope.program_version_id != version_.id() ||
+        request.version->id() != version_.id() ||
         request.version->serialize_canonical() != version_.serialize_canonical() ||
-        run_id.empty() || envelope.a2a_task_id != run_id ||
-        envelope.receiver_program_run_id != run_id || envelope.a2a_context_id.empty() ||
-        envelope.receiver_owner_scope != owner_scope_ || !invocation.parent_run_id.empty() ||
-        invocation.child_depth != 0) {
+        invocation.owner_scope != owner_scope_ || invocation.agent_id != mailbox_->agent_id() ||
+        invocation.program_version_id != version_.id() || run_id.empty() ||
+        envelope.a2a_task_id != run_id || envelope.receiver_program_run_id != run_id ||
+        envelope.a2a_context_id.empty() || envelope.receiver_owner_scope != owner_scope_ ||
+        !invocation.parent_run_id.empty() || invocation.message_sequence != envelope.sequence ||
+        invocation.idempotency_key != envelope.idempotency_key ||
+        invocation.correlation_id != envelope.correlation_id ||
+        invocation.input != envelope.payload) {
         throw ProgramA2ARequestError(
             "Collaboration record is outside the Program adapter identity boundary");
     }
 
     const program::ProgramPersistedInvocation expected{
-        invocation.input, invocation.budget, invocation.trace_id, invocation.parent_run_id,
-        invocation.child_depth};
+        invocation.input, invocation.budget, invocation.correlation_id, {}, 0};
     const auto verify_handle = [&](program::ProgramHandle handle) {
         const auto durable = handle.snapshot();
         if (handle.run_id() != run_id || handle.program_version_id() != version_.id() ||
@@ -279,7 +323,7 @@ ProgramAgentAdapter::recover_record(const CollaborationRecord& record) const {
     }
 
     try {
-        return verify_handle(runtime_->start(owner_scope_, version_, invocation));
+        return verify_handle(runtime_->start(invocation));
     } catch (const program::ProgramDiagnosticError& error) {
         if (error.diagnostic().code != "P_RUN_CONFLICT") throw;
         return verify_handle(reconnect(run_id));
@@ -317,11 +361,17 @@ std::vector<program::ProgramHandle> ProgramAgentAdapter::recover_pending() const
 
         const auto& invocation = *request.invocation;
         const auto& envelope   = record.envelope;
-        const auto& run_id     = invocation.requested_run_id;
-        if (run_id.empty() || envelope.a2a_task_id != run_id ||
-            envelope.receiver_program_run_id != run_id || envelope.a2a_context_id.empty() ||
-            envelope.receiver_owner_scope != owner_scope_ ||
-            !invocation.parent_run_id.empty() || invocation.child_depth != 0) {
+        const auto& run_id     = invocation.run_id;
+        if (run_id.empty() || invocation.owner_scope != owner_scope_ ||
+            invocation.agent_id != mailbox_->agent_id() ||
+            invocation.program_version_id != version_.id() ||
+            envelope.a2a_task_id != run_id || envelope.receiver_program_run_id != run_id ||
+            envelope.a2a_context_id.empty() || envelope.receiver_owner_scope != owner_scope_ ||
+            !invocation.parent_run_id.empty() ||
+            invocation.message_sequence != envelope.sequence ||
+            invocation.idempotency_key != envelope.idempotency_key ||
+            invocation.correlation_id != envelope.correlation_id ||
+            invocation.input != envelope.payload) {
             throw ProgramA2ARequestError(
                 "Accepted collaboration record is outside the Program adapter identity boundary");
         }

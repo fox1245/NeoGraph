@@ -585,7 +585,7 @@ void A2AServer::Impl::recover_program_tasks() {
                 !record.program_request || !record.program_request->invocation) {
                 continue;
             }
-            const auto& run_id = record.program_request->invocation->requested_run_id;
+            const auto& run_id = record.program_request->invocation->run_id;
             if (!run_id.empty()) contexts.emplace(run_id, record.envelope.a2a_context_id);
         }
     }

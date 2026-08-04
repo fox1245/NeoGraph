@@ -1620,6 +1620,27 @@ ProgramRuntime::~ProgramRuntime() {
     if (impl_) impl_->shutdown();
 }
 
+ProgramHandle ProgramRuntime::start(RunInvocation invocation) {
+    invocation.validate();
+    if (!invocation.parent_run_id.empty()) {
+        throw std::invalid_argument(
+            "Top-level RunInvocation must not carry parent_run_id; use start_child");
+    }
+
+    const auto resolved = impl_->config.catalog->resolve_version(
+        invocation.owner_scope, invocation.program_version_id);
+    if (!resolved) {
+        throw_runtime_diagnostic("P_VERSION_NOT_FOUND", "Program version was not found");
+    }
+
+    ProgramInvocation runtime_invocation;
+    runtime_invocation.input = std::move(invocation.input);
+    runtime_invocation.budget = std::move(invocation.budget);
+    runtime_invocation.trace_id = std::move(invocation.correlation_id);
+    runtime_invocation.requested_run_id = std::move(invocation.run_id);
+    return start(invocation.owner_scope, *resolved, std::move(runtime_invocation));
+}
+
 ProgramHandle ProgramRuntime::start(std::string_view      owner_scope,
                                     const ProgramVersion& version,
                                     ProgramInvocation     invocation) {

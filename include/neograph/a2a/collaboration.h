@@ -24,7 +24,7 @@
 #ifdef NEOGRAPH_A2A_PROGRAM
 namespace neograph::program {
 class ProgramVersion;
-struct ProgramInvocation;
+struct RunInvocation;
 }  // namespace program
 #endif
 
@@ -192,12 +192,12 @@ struct NEOGRAPH_API CollaborationRecord {
     CollaborationRecordState state = CollaborationRecordState::Accepted;
     std::string diagnostic;
 #ifdef NEOGRAPH_A2A_PROGRAM
-    /// Optional typed request retained alongside the durable envelope. The
-    /// canonical mailbox bytes contain the ProgramVersion and invocation, so a
-    /// cold reopen does not fall back to a GraphEngine-only task identity.
+    /// Exact Program request retained beside the link journal.  Its invocation
+    /// bytes are the canonical transport-neutral Program contract; this
+    /// mailbox does not persist a runtime-only invocation projection.
     struct ProgramRequest {
         std::shared_ptr<const program::ProgramVersion> version;
-        std::shared_ptr<const program::ProgramInvocation> invocation;
+        std::shared_ptr<const program::RunInvocation> invocation;
     };
     std::optional<ProgramRequest> program_request;
 #endif
@@ -219,7 +219,7 @@ NEOGRAPH_API std::string_view to_string(CollaborationSubmitResult result) noexce
  */
 class NEOGRAPH_API CollaborationMailbox final {
 public:
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2;
 
     CollaborationMailbox(std::string owner_scope, std::string agent_id);
     CollaborationMailbox(CollaborationMailbox&&) noexcept;
@@ -241,11 +241,11 @@ public:
 #ifdef NEOGRAPH_A2A_PROGRAM
     CollaborationSubmitResult submit_program(CollaborationEnvelope envelope,
                                               program::ProgramVersion version,
-                                              program::ProgramInvocation invocation);
+                                              program::RunInvocation invocation);
     /// Typed overload matching the legacy submit() naming convention.
     CollaborationSubmitResult submit(CollaborationEnvelope envelope,
                                       program::ProgramVersion version,
-                                      program::ProgramInvocation invocation);
+                                      program::RunInvocation invocation);
     std::optional<CollaborationRecord::ProgramRequest>
     get_program_request(std::string_view idempotency_key) const;
 #endif
