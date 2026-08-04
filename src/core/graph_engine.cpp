@@ -216,6 +216,7 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
     engine->checkpoint_store_    = std::move(config.checkpoint_store);
     engine->store_               = std::move(config.store);
     engine->tool_gate_           = std::move(config.tool_gate);
+    engine->tool_execution_controller_ = std::move(config.tool_execution_controller);
     engine->owned_tools_         = std::move(resources.tools).release();
     engine->node_cache_.set_max_entries(config.node_cache_max_entries);
     for (const auto& node_name : config.cached_nodes) {
@@ -1020,6 +1021,10 @@ GraphEngine::execute_graph_async(
         ? *resources->parent_tool_gate
         : ToolGate{};
     ctx.tool_gate = compose_tool_gates(std::move(parent_tool_gate), tool_gate_);
+    ctx.tool_execution_controller = tool_execution_controller_;
+    ctx.tool_execution_identity.owner_scope = metadata.owner_scope;
+    ctx.tool_execution_identity.root_run_id = metadata.run_id;
+    ctx.tool_execution_identity.thread_id = config.thread_id;
 
     auto runtime = std::make_shared<detail::RunContextRuntime>();
     runtime->checkpoint_store = checkpoint_store;

@@ -71,6 +71,12 @@ struct RunContext {
     /// a parent gate by using a different GraphEngine instance.
     ToolGate tool_gate;
 
+    /// Shared host admission boundary for every tool call in this run.
+    std::shared_ptr<ToolExecutionController> tool_execution_controller;
+
+    /// Stable host/Program identity copied to each dispatched tool call.
+    ToolExecutionIdentity tool_execution_identity;
+
 };
 
 /// @brief Fold a completion's token usage into the run's running total.

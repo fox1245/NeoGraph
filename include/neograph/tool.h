@@ -8,11 +8,14 @@
 #pragma once
 
 #include <neograph/api.h>
+#include <neograph/tool_execution.h>
 #include <neograph/types.h>
 
 #include <asio/awaitable.hpp>
 
+#include <chrono>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace neograph::graph {
@@ -26,10 +29,15 @@ namespace neograph {
  *
  * Existing `Tool::execute_async(arguments)` overrides remain valid. Tools that
  * need to stop in-flight work can also implement `ContextualAsyncTool` and
- * poll or propagate `cancel_token` to their transport.
+ * poll or propagate `cancel_token` to their transport. Dispatchers populate
+ * controller and identity so the invocation remains inside the host's
+ * resource-admission boundary rather than bypassing it.
  */
 struct ToolExecutionContext {
     std::shared_ptr<graph::CancelToken> cancel_token;
+    std::shared_ptr<ToolExecutionController> controller;
+    ToolExecutionIdentity identity;
+    std::optional<std::chrono::steady_clock::time_point> deadline;
 };
 
 /**
@@ -87,13 +95,11 @@ class NEOGRAPH_API Tool {
     /**
      * @brief Canonical async entry point for tool execution.
      *
-     * The default bridges to the sync execute() so every existing Tool
-     * keeps working unchanged. I/O-bound tools (HTTP fetch, MCP RPC)
-     * override this with a real coroutine so that a node dispatching
-     * several tool calls at once can overlap their in-flight I/O
-     * instead of running them one-by-one through the blocking
-     * execute() facade. ToolDispatchNode awaits all calls of one
-     * assistant turn through a parallel group on this method.
+     * The default offloads the sync execute() implementation to NeoGraph's
+     * bounded blocking pool, so a legacy synchronous tool no longer pins the
+     * graph event loop or serializes unrelated tool calls. I/O-bound tools
+     * (HTTP fetch, MCP RPC) override this with a real coroutine. Dispatchers
+     * apply ToolExecutionController policy before calling either path.
      */
     virtual asio::awaitable<std::string> execute_async(const json& arguments);
 };

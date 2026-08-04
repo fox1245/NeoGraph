@@ -23,6 +23,7 @@ add_executable(neograph_tests
     test_scheduler.cpp
     test_node_execution.cpp
     test_tool_dispatch_parity.cpp
+    test_tool_execution.cpp
     test_compiler.cpp
     test_compiler_strict.cpp
     test_validator.cpp

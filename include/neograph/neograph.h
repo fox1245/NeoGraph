@@ -19,6 +19,7 @@
 #include <neograph/completion_provider.h>
 #include <neograph/provider.h>
 #include <neograph/tool.h>
+#include <neograph/tool_execution.h>
 #include <neograph/tool_set.h>
 #include <neograph/types.h>
 

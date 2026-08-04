@@ -76,6 +76,10 @@ struct EngineConfig {
     /// Engine-wide tool policy, preserved across run() and resume().
     ToolGate tool_gate;
 
+    /// Shared host admission boundary for every tool call made by this engine.
+    /// Empty uses the conservative process-default controller.
+    std::shared_ptr<ToolExecutionController> tool_execution_controller;
+
     /// Fan-out worker count. One preserves the historical no-pool fast path.
     std::size_t worker_count = 1;
 
@@ -193,6 +197,8 @@ struct RunMetadata {
     std::string trace_id;
     /// Durable Program run identity copied into RunContext for host journaling.
     std::string run_id;
+    /// Stable owner/tenant scope copied into ToolExecutionContext identity.
+    std::string owner_scope;
     /// Shared sibling-cancellation scope for budget-aware nodes.
     std::shared_ptr<CancelToken> budget_cancel_token;
 };
@@ -783,6 +789,13 @@ public:
      */
     void set_tool_gate(ToolGate gate) { tool_gate_ = std::move(gate); }
 
+    /// Set the shared host resource-admission boundary for tools. Like the
+    /// gate, this survives run() and resume(); configure before concurrent use.
+    void set_tool_execution_controller(
+        std::shared_ptr<ToolExecutionController> controller) {
+        tool_execution_controller_ = std::move(controller);
+    }
+
     /**
      * @brief Get the cross-thread shared memory store.
      * @return Shared pointer to the Store, or nullptr if not set.
@@ -916,6 +929,10 @@ private:
     /// #89 — set_tool_gate(). Lives on the engine rather than RunConfig so it
     /// survives resume(), which builds its own RunConfig internally.
     ToolGate tool_gate_;
+
+    /// Host-shared resource admission for tool calls. Empty defers to the
+    /// conservative process default in dispatch_tool_calls().
+    std::shared_ptr<ToolExecutionController> tool_execution_controller_;
 
     void init_state(GraphState& state) const;
     void apply_input(GraphState& state, const json& input) const;

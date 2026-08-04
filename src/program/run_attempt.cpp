@@ -582,6 +582,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             graph::RunMetadata metadata;
             metadata.deadline = deadline;
             metadata.run_id = control->run_id;
+            metadata.owner_scope = control->owner_scope;
             metadata.trace_id = control->trace_id;
             graph::RunResources resources{control->checkpoints, control->state_store};
             graph::GraphStreamCallback callback =

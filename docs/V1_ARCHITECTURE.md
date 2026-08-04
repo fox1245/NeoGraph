@@ -470,6 +470,31 @@ publish non-idempotent effects through the broker's
 `prepare/commit/ambiguous` protocol. The same durable parent ledger is shared by
 retries, resumes, forks, and child Programs.
 
+### Tool execution admission
+
+Every Engine and standalone `Agent` tool call enters the same
+`ToolExecutionController`. A host can share one controller across engines so
+resource limits remain process-wide instead of silently becoming per-engine
+limits. An unclassified tool defaults to one keyed-exclusive resource,
+`tool:{tool}`: calls to one tool serialize, while distinct tools may overlap.
+
+`ToolExecutionPolicy` is a versioned host value. It selects the native
+awaitable entry or the bounded blocking-thread bridge, one of `reentrant`,
+`keyed-exclusive`, or finite `capacity` concurrency, a pending limit, queue
+deadline, result-size limit, and a canonical resource-key template. Templates
+accept only `{tool}`, `{owner}`, `{root}`, `{thread}`, and scalar
+`{arg:name}` substitutions; missing, structured, or malformed components fail
+closed rather than collapsing two resources into the same key.
+
+Non-reentrant calls acquire an RAII `ResourceLease` from the shared FIFO
+`ResourceArbiter` before invoking the tool. Queue cancellation and expiry
+remove the waiter; scope exit returns a granted slot. The blocking bridge uses
+one bounded worker pool and posts completion back to the caller executor, so a
+legacy synchronous `Tool::execute` never pins an I/O or Core scheduler thread.
+The lease spans only one tool invocation and is released before dispatch
+returns. Composite spawn, handoff, and join operations must own their complete
+lifecycle explicitly; the arbiter never hides a cross-operation lock.
+
 Native C++ cannot be sandboxed by this library. Every executable registry entry
 must therefore declare `brokered` or `trusted_native` effect mode.
 Multi-tenant/model-authored admission rejects `trusted_native`; an embedding

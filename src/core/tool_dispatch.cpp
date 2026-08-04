@@ -96,11 +96,13 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
             json args = (decision && decision->args)
                             ? *decision->args
                             : json::parse(tc.arguments);
-            if (auto* contextual = dynamic_cast<ContextualAsyncTool*>(*it)) {
-                tool_msg.content = co_await contextual->execute_async(args, execution);
-            } else {
-                tool_msg.content = co_await (*it)->execute_async(args);
-            }
+            auto call_execution = execution;
+            call_execution.identity.request_id = tc.id;
+            auto controller = call_execution.controller
+                            ? call_execution.controller
+                            : default_tool_execution_controller();
+            tool_msg.content = co_await controller->execute_async(
+                **it, std::move(args), std::move(call_execution));
             if (execution.cancel_token) {
                 execution.cancel_token->throw_if_cancelled("after tool execution");
             }
