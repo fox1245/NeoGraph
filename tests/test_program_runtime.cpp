@@ -607,6 +607,49 @@ private:
     InMemoryProgramTransitionStore inner_;
     std::atomic<bool>              injected_{false};
 };
+class FailChildDispatchOnceJournal final : public ProgramTransitionStore {
+public:
+    std::optional<ProgramRunRecord> load(std::string_view owner,
+                                         std::string_view run_id) const override {
+        return inner_.load(owner, run_id);
+    }
+    std::optional<ProgramJournalRecord> latest(std::string_view owner,
+                                                std::string_view run_id) const override {
+        return inner_.latest(owner, run_id);
+    }
+    std::vector<ProgramEvent> load_events(std::string_view owner,
+                                          std::string_view run_id,
+                                          std::uint64_t    sequence) const override {
+        return inner_.load_events(owner, run_id, sequence);
+    }
+    std::vector<ProgramEffectOutboxEntry> load_effects(std::string_view owner,
+                                                       std::string_view run_id,
+                                                       std::uint64_t    sequence) const override {
+        return inner_.load_effects(owner, run_id, sequence);
+    }
+    ProgramTransitionPublishResult compare_publish(
+        std::string_view owner,
+        std::string_view expected,
+        ProgramTransitionPublication publication) override {
+        const auto children = publication.run_record.children();
+        if (children.empty() || children.back().state != ProgramChildState::Dispatched ||
+            !block_dispatch_.load()) {
+            return inner_.compare_publish(owner, expected, std::move(publication));
+        }
+        if (!injected_.exchange(true)) {
+            return ProgramTransitionPublishResult::Conflict;
+        }
+        return ProgramTransitionPublishResult::Conflict;
+    }
+    void allow_dispatch() noexcept {
+        block_dispatch_.store(false);
+    }
+
+private:
+    InMemoryProgramTransitionStore inner_;
+    std::atomic<bool>             injected_{false};
+    std::atomic<bool>             block_dispatch_{true};
+};
 class ThrowOnLatestJournal final : public ProgramTransitionStore {
 public:
     std::optional<ProgramRunRecord> load(std::string_view owner,
@@ -2610,6 +2653,79 @@ TEST(ProgramRuntimeTest, DuplicateChildRecoveryReturnsTheExistingRun) {
     EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
     EXPECT_EQ(first.wait().status(), ProgramTerminalStatus::Cancelled);
     EXPECT_EQ(duplicate.wait().status(), ProgramTerminalStatus::Cancelled);
+}
+TEST(ProgramRuntimeTest, InterruptedChildRemainsInFlightAndResumeJoinsDurably) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(2);
+    const auto linked = make_linked_child(fixture, "runtime-blocking", "runtime-interrupt");
+    auto       parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                           "trace-parent-interrupted-child", {}});
+    auto child = fixture.runtime->start_child(
+        "tenant:runtime", parent, linked.receipt, linked.child_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                           "trace-child-interrupted", {}});
+
+    const auto interrupted = child.wait();
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    const auto parent_after_interrupt = fixture.journal->load("tenant:runtime", parent.run_id());
+    ASSERT_TRUE(parent_after_interrupt.has_value());
+    ASSERT_EQ(parent_after_interrupt->children().size(), 1U);
+    EXPECT_EQ(parent_after_interrupt->children().front().state, ProgramChildState::Dispatched);
+    ASSERT_TRUE(parent_after_interrupt->children().front().terminal_result.has_value());
+    EXPECT_EQ(parent_after_interrupt->children().front().terminal_result->status(),
+              ProgramTerminalStatus::Interrupted);
+
+    auto resumed = fixture.runtime->resume(
+        "tenant:runtime", child.run_id(),
+        resume_for(interrupted, json{{"decision", "approved"}}, "trace-child-resumed"));
+    const auto result = resumed.wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output()["channels"]["value"]["value"], "approved");
+    const auto parent_after_resume = fixture.journal->load("tenant:runtime", parent.run_id());
+    ASSERT_TRUE(parent_after_resume.has_value());
+    ASSERT_EQ(parent_after_resume->children().size(), 1U);
+    EXPECT_EQ(parent_after_resume->children().front().state, ProgramChildState::Completed);
+    ASSERT_TRUE(parent_after_resume->children().front().terminal_result.has_value());
+    EXPECT_EQ(parent_after_resume->children().front().terminal_result->status(),
+              ProgramTerminalStatus::Completed);
+
+    EXPECT_TRUE(parent.cancel());
+    EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
+}
+TEST(ProgramRuntimeTest, FailedDispatchIsRetriedFromPublishingBoundary) {
+    auto journal = std::make_shared<FailChildDispatchOnceJournal>();
+    AdmittedRuntime fixture(2, {}, journal);
+    const auto linked = make_linked_child(fixture, "runtime-blocking", "runtime-completed");
+    auto       parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                           "trace-parent-dispatch-recovery", {}});
+    ProgramInvocation child_invocation{
+        json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+        "trace-child-dispatch-recovery", {}};
+    EXPECT_THROW((void)fixture.runtime->start_child("tenant:runtime", parent, linked.receipt,
+                                                     linked.child_version, child_invocation),
+                 ProgramDiagnosticError);
+
+    const auto publishing = journal->load("tenant:runtime", parent.run_id());
+    ASSERT_TRUE(publishing.has_value());
+    ASSERT_EQ(publishing->children().size(), 1U);
+    EXPECT_EQ(publishing->children().front().state, ProgramChildState::Publishing);
+
+    journal->allow_dispatch();
+    auto recovered = fixture.runtime->start_child("tenant:runtime", parent, linked.receipt,
+                                                  linked.child_version, child_invocation);
+    EXPECT_EQ(recovered.wait().status(), ProgramTerminalStatus::Completed);
+    const auto completed = journal->load("tenant:runtime", parent.run_id());
+    ASSERT_TRUE(completed.has_value());
+    ASSERT_EQ(completed->children().size(), 1U);
+    EXPECT_EQ(completed->children().front().state, ProgramChildState::Completed);
+    ASSERT_TRUE(completed->children().front().terminal_result.has_value());
+
+    EXPECT_TRUE(parent.cancel());
+    EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
 }
 TEST(ProgramRuntimeTest, ParentCompletionCancelsAttachedChild) {
     blocking_calls.store(0);
