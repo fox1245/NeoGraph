@@ -1333,6 +1333,36 @@ ProgramVersion ProgramCatalog::materialize(
                           "Catalog identity collision has different canonical bytes");
             collision.throw_error();
         }
+
+        // Retention may remove an immutable tuple while this process still
+        // holds its materialized generation for already-pinned runs.  A later
+        // equivalent admission must restore the durable authority record
+        // before returning the cached generation; otherwise the caller sees a
+        // successful admission that cannot be recovered after restart.
+        const auto stored_version =
+            impl_->program_store->get_version(version.ownership_scope(), version.id());
+        auto stored_bundle =
+            impl_->program_store->get_bundle(version.ownership_scope(), bundle.id());
+        if (!stored_bundle) stored_bundle = impl_->program_store->get_bundle(bundle.id());
+        if (!stored_version || !stored_bundle ||
+            stored_version->serialize_canonical() != version.serialize_canonical() ||
+            stored_bundle->serialize_canonical() != bundle.serialize_canonical()) {
+            try {
+                impl_->program_store->publish_admitted(bundle, version);
+            } catch (const std::exception& error) {
+                AdmissionDiagnostics publication(bundle.id());
+                publication.add("P_ADMIT_BINDING", "/id",
+                                "Cached admission could not restore its durable Program tuple",
+                                json{{"error", error.what()}});
+                publication.throw_error();
+            } catch (...) {
+                AdmissionDiagnostics publication(bundle.id());
+                publication.add(
+                    "P_ADMIT_BINDING", "/id",
+                    "Cached admission could not restore its durable Program tuple");
+                publication.throw_error();
+            }
+        }
         return existing->second->version;
     }
 

@@ -930,6 +930,40 @@ TEST(ProgramCatalogTest, RetentionRejectsUnknownAndForeignPinsBeforeMutation) {
     EXPECT_TRUE(fixture.store->get_version(version.id()).has_value());
 }
 
+TEST(ProgramCatalogTest, RetentionKeepsExplicitPinnedVersion) {
+    CatalogFixture fixture(registry());
+    const auto     bundle  = compile(fixture.snapshot);
+    const auto     version = fixture.catalog.admit(bundle, fixture.request());
+
+    const auto report = fixture.catalog.collect_retention("tenant:catalog", {version.id()});
+    EXPECT_EQ(report.versions_removed, 0U);
+    EXPECT_EQ(report.bundles_removed, 0U);
+    ASSERT_TRUE(fixture.store->get_version("tenant:catalog", version.id()).has_value());
+    EXPECT_TRUE(fixture.store->get_bundle("tenant:catalog", bundle.id()).has_value());
+}
+
+TEST(ProgramCatalogTest, ReAdmissionRestoresTupleAfterCachedVersionIsCollected) {
+    CatalogFixture fixture(registry());
+    const auto     bundle  = compile(fixture.snapshot);
+    const auto     version = fixture.catalog.admit(bundle, fixture.request());
+
+    const auto removed = fixture.catalog.collect_retention("tenant:catalog", {});
+    EXPECT_EQ(removed.versions_removed, 1U);
+    EXPECT_EQ(removed.bundles_removed, 1U);
+    EXPECT_FALSE(fixture.store->get_version("tenant:catalog", version.id()).has_value());
+    EXPECT_FALSE(fixture.store->get_bundle("tenant:catalog", bundle.id()).has_value());
+
+    const auto readmitted = fixture.catalog.admit(
+        ProgramBundle::parse(bundle.serialize_canonical()), fixture.request());
+    EXPECT_EQ(readmitted.id(), version.id());
+    EXPECT_EQ(readmitted.serialize_canonical(), version.serialize_canonical());
+    ASSERT_TRUE(fixture.store->get_version("tenant:catalog", version.id()).has_value());
+    ASSERT_TRUE(fixture.store->get_bundle("tenant:catalog", bundle.id()).has_value());
+    EXPECT_EQ(fixture.store->get_version("tenant:catalog", version.id())
+                  ->serialize_canonical(),
+              version.serialize_canonical());
+}
+
 TEST(ProgramCatalogTest, MigrationPlanRecordsCompatibilityProofAndRoundTrips) {
     CatalogFixture fixture(registry());
     const auto     bundle = compile(fixture.snapshot);
