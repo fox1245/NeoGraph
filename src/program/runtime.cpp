@@ -1443,7 +1443,8 @@ struct ProgramRuntime::Impl {
                 if (stopping) return;
                 stopping = true;
                 for (auto& weak : controls) {
-                    if (auto control = weak.lock()) live.push_back(std::move(control));
+                    if (auto control = weak.lock(); control && !control->try_result())
+                        live.push_back(std::move(control));
                 }
             }
             for (auto& control : live)

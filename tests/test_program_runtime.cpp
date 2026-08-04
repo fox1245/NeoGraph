@@ -2193,6 +2193,28 @@ TEST(ProgramRuntimeTest, ConcurrentAttemptsShareConfiguredSchedulerWithoutCrossT
     EXPECT_EQ(completed_calls.load(), 24U);
 }
 
+TEST(ProgramRuntimeTest, RuntimeShutdownPreservesDeliveredInterruptedRun) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto      version = fixture.admit("runtime-interrupt");
+    auto handle =
+        fixture.runtime->start("tenant:runtime", version,
+                               ProgramInvocation{json::object(), grant(),
+                                                 "trace-shutdown-interrupt", {}});
+    const auto interrupted = handle.wait();
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(interrupted.checkpoint().has_value());
+
+    fixture.recreate_catalog_and_runtime();
+
+    const auto persisted = fixture.journal->load("tenant:runtime", interrupted.run_id());
+    ASSERT_TRUE(persisted.has_value());
+    EXPECT_EQ(persisted->continuation().state, ContinuationState::Interrupted);
+    ASSERT_TRUE(persisted->terminal_result().has_value());
+    EXPECT_EQ(persisted->terminal_result()->status(), ProgramTerminalStatus::Interrupted);
+    EXPECT_TRUE(persisted->pending_input().has_value());
+}
+
 TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersistsLineage) {
     interrupt_calls.store(0);
     AdmittedRuntime fixture;
