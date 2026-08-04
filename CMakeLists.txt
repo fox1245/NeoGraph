@@ -413,6 +413,7 @@ add_library(neograph_core
     src/core/tool.cpp
     src/core/tool_execution.cpp
     src/core/host_admission.cpp
+    src/core/evidence_ledger.cpp
     src/core/run_context_runtime.cpp
     src/core/graph_engine.cpp
     src/core/graph_compiler.cpp
@@ -672,6 +673,7 @@ endif()
 if(NEOGRAPH_BUILD_SQLITE)
     add_library(neograph_sqlite
         src/core/sqlite_checkpoint.cpp
+        src/core/sqlite_evidence_ledger.cpp
     )
 
     target_include_directories(neograph_sqlite

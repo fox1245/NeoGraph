@@ -218,7 +218,7 @@ if(NEOGRAPH_BUILD_POSTGRES)
 endif()
 
 if(NEOGRAPH_BUILD_SQLITE)
-    target_sources(neograph_tests PRIVATE test_sqlite_checkpoint.cpp)
+    target_sources(neograph_tests PRIVATE test_sqlite_checkpoint.cpp test_evidence_ledger.cpp)
     target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_SQLITE)
 endif()
 

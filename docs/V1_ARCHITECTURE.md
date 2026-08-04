@@ -83,6 +83,39 @@ contract. `spawn` resolves an admitted `ModuleLinkReceipt`, durably records
 reconstructs unfinished children from the parent record. The legacy inline
 path remains only for operations that are not a durable `spawn`.
 
+### Durable research evidence coordination
+
+Large research Harnesses use a durable `EvidenceLedger`, not all-to-all chat, as
+their authoritative coordination state. `SourceIdentity` keys one immutable
+source version by canonical locator, version, and content hash; aliases resolve
+to that identity without collapsing a later version. A task is either a primary
+extraction or an explicitly marked independent review, reproduction, or
+rebuttal. The ledger rejects accidental duplicate primary work but never
+mistakes an intentional review for duplicate work.
+
+`SqliteEvidenceLedger` serializes task claims, expiry, and publication with
+SQLite transactions. A lease includes the task generation, worker, and
+owner scope, so an expired or superseded worker cannot renew or publish.
+Publication atomically stores a typed artifact and the task's terminal state;
+retrying the same artifact is idempotent, while a different artifact is
+rejected. Negative/no-support evidence records its exact searched scope and
+remains evidence rather than a global source closure. Conflicting evidence
+coexists and deterministically asks for reconciliation rather than
+last-writer-wins.
+
+All task, lease-expiry, claim-resolution, source-lifecycle, and evidence reads
+are owner-scoped. The authenticated Program/A2A admission boundary supplies
+that scope; callers cannot use a known task id to acquire, inspect, or publish
+another owner's work. Source identity is a shared immutable registry only;
+artifact visibility and task authority remain local to the owner.
+
+The ledger is deliberately a coordination substrate, not a second scheduler or
+node executor. Program admission, child lineage, owner/host resource ceilings,
+capabilities, effects, and A2A authorization remain enforced by the existing
+Program and host-admission contracts. A directed A2A message can ask for a
+review or report a finding, but it changes allocation or acceptance only after
+a typed artifact is durably committed.
+
 ### Remote collaborative agent network
 
 A2A is not only a compatibility transport for one remote agent. It is also the
