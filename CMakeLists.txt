@@ -1655,6 +1655,8 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
     if(NEOGRAPH_BUILD_PROGRAM)
         add_executable(bench_program benchmarks/bench_program.cpp)
         target_link_libraries(bench_program PRIVATE neograph::program)
+        add_executable(bench_program_dispatch benchmarks/bench_program_dispatch.cpp)
+        target_link_libraries(bench_program_dispatch PRIVATE neograph::program)
     endif()
 
     # OpenMP target-offload PoC. The target still builds without a device

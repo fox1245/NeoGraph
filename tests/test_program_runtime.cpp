@@ -2437,6 +2437,29 @@ TEST(ProgramRuntimeTest, RetryRetriesCoreFailuresAndPreservesFailureClassificati
     EXPECT_EQ(result.failure()->attempts, 2U);
 }
 
+TEST(ProgramRuntimeTest, DeepNestedCoreFailurePreservesOperationAndSourceCoordinate) {
+    AdmittedRuntime fixture;
+    const auto nested_root =
+        json{{"op", "sequence"},
+             {"children",
+              json::array(
+                  {json{{"op", "branch"},
+                        {"condition", json{{"path", "/route"}, {"equals", "then"}}},
+                        {"then",
+                         json{{"op", "retry"},
+                              {"max_attempts", 1},
+                              {"body", json{{"op", "call_core"}}}}}}})}};
+    const auto result = run_orchestration(
+        fixture, orchestration_document(nested_root, "runtime-failing"),
+        json{{"route", "then"}}, "trace-deep-nested-failure");
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(result.failure()->operation_id, "root.0.0.0");
+    EXPECT_EQ(result.failure()->witness["source_pointer"], "/root/children/0/then/body");
+}
+
 TEST(ProgramRuntimeTest, ParallelJoinsAllBranchesInPlanOrder) {
     completed_calls.store(0);
     AdmittedRuntime fixture(2);

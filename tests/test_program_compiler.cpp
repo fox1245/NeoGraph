@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -665,6 +667,45 @@ TEST(ProgramCompilerTest, SealsLoweredOperationsAsTypedImmutablePlanNodes) {
     EXPECT_EQ(plan.find("root.1")->else_id(), std::optional<std::string>("root.1.1"));
     EXPECT_EQ(detail::canonical_json_bytes(plan.to_json()),
               detail::canonical_json_bytes(bundle.orchestration_plan().plan));
+}
+
+TEST(ProgramCompilerTest, DispatchDescriptorWalkBenchmarkExcludesCoreExecution) {
+    const auto plan = ProgramPlan::from_json(
+        json{{"root", "root"},
+             {"operations",
+              json::array(
+                  {json{{"id", "root"},
+                        {"op", "sequence"},
+                        {"source_pointer", "/root"},
+                        {"children", json::array({"root.0", "root.1"})}},
+                   json{{"id", "root.0"},
+                        {"op", "return"},
+                        {"source_pointer", "/root/children/0"},
+                        {"value", 0}},
+                   json{{"id", "root.1"},
+                        {"op", "return"},
+                        {"source_pointer", "/root/children/1"},
+                        {"value", 1}}})}});
+
+    constexpr std::size_t iterations = 100000;
+    std::uint64_t checksum = 0;
+    const auto started = std::chrono::steady_clock::now();
+    for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
+        const auto* root = plan.find("root");
+        ASSERT_NE(root, nullptr);
+        checksum += static_cast<std::uint8_t>(root->dispatch().operation);
+        for (const auto& child_id : root->dispatch().children) {
+            const auto* child = plan.find(child_id);
+            ASSERT_NE(child, nullptr);
+            checksum += static_cast<std::uint8_t>(child->dispatch().operation);
+        }
+    }
+    const auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now() - started)
+                                .count();
+    RecordProperty("dispatch_only_iterations", static_cast<std::int64_t>(iterations));
+    RecordProperty("dispatch_only_elapsed_ns", static_cast<std::int64_t>(elapsed_ns));
+    EXPECT_NE(checksum, 0U);
 }
 
 TEST(ProgramCompilerTest, TypedPlanRejectsDanglingAndUnknownOperationFields) {
