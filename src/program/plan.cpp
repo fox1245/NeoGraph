@@ -154,7 +154,7 @@ struct ProgramPlanNode::Impl {
 ProgramPlanNode::ProgramPlanNode(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
 ProgramPlanNode::~ProgramPlanNode() = default;
 const std::string& ProgramPlanNode::id() const noexcept { return impl_->data.id; }
-ProgramOperationKind ProgramPlanNode::operation() const noexcept { return impl_->data.operation; }
+ProgramOperationKind ProgramPlanNode::operation() const noexcept { return impl_->dispatch.operation; }
 const ProgramPlanDispatchDescriptor& ProgramPlanNode::dispatch() const noexcept {
     return impl_->dispatch;
 }
@@ -162,26 +162,28 @@ const ProgramPlanDispatchDescriptor& ProgramPlanNode::dispatch_descriptor() cons
     return dispatch();
 }
 const std::string& ProgramPlanNode::source_pointer() const noexcept {
-    return impl_->data.source_pointer;
+    return impl_->dispatch.source_pointer;
 }
 const std::optional<std::string>& ProgramPlanNode::core() const noexcept {
     return impl_->data.core;
 }
 const std::vector<std::string>& ProgramPlanNode::children() const noexcept {
-    return impl_->data.children;
+    return impl_->dispatch.children;
 }
 const std::optional<std::string>& ProgramPlanNode::then_id() const noexcept {
-    return impl_->data.then_id;
+    return impl_->dispatch.then_id;
 }
 const std::optional<std::string>& ProgramPlanNode::else_id() const noexcept {
-    return impl_->data.else_id;
+    return impl_->dispatch.else_id;
 }
 const std::optional<std::string>& ProgramPlanNode::child_binding() const noexcept {
-    return impl_->data.child_binding;
+    return impl_->dispatch.child_binding;
 }
-const std::optional<std::string>& ProgramPlanNode::body() const noexcept { return impl_->data.body; }
+const std::optional<std::string>& ProgramPlanNode::body() const noexcept {
+    return impl_->dispatch.body;
+}
 const std::vector<std::string>& ProgramPlanNode::branches() const noexcept {
-    return impl_->data.branches;
+    return impl_->dispatch.branches;
 }
 const std::optional<std::uint64_t>& ProgramPlanNode::max_iterations() const noexcept {
     return impl_->data.max_iterations;
