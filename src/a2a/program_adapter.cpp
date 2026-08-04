@@ -1,5 +1,7 @@
 #include <neograph/a2a/program_adapter.h>
 
+#include <neograph/program/diagnostic.h>
+
 #include <algorithm>
 #include <utility>
 
@@ -206,15 +208,16 @@ program::ProgramHandle ProgramAgentAdapter::start(const Message& inbound,
                 "Collaboration request was rejected by owner/link/capability/effect policy");
         }
         if (result == CollaborationSubmitResult::Duplicate) {
-            return runtime_->reconnect(owner_scope_, task_id);
+            return reconnect(task_id);
         }
     } else {
         // A legacy message/send retry has no collaboration idempotency key.
         // Reconnect the exact durable run before attempting a new admission;
         // a missing run is the only case that falls through to start().
         try {
-            return runtime_->reconnect(owner_scope_, task_id);
-        } catch (const std::exception&) {
+            return reconnect(task_id);
+        } catch (const program::ProgramDiagnosticError& error) {
+            if (error.diagnostic().code != "P_RUN_NOT_FOUND") throw;
         }
     }
     auto handle = runtime_->start(owner_scope_, version_, std::move(invocation));
@@ -225,7 +228,11 @@ program::ProgramHandle ProgramAgentAdapter::start(const Message& inbound,
 }
 
 program::ProgramHandle ProgramAgentAdapter::reconnect(std::string_view task_id) const {
-    return runtime_->reconnect(owner_scope_, task_id);
+    auto handle = runtime_->reconnect(owner_scope_, task_id);
+    if (handle.program_version_id() != version_.id()) {
+        throw ProgramA2ARequestError("Program run version does not match A2A adapter version");
+    }
+    return handle;
 }
 
 Task ProgramAgentAdapter::task_snapshot(const program::ProgramHandle& handle,
