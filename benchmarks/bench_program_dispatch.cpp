@@ -78,7 +78,7 @@ json benchmark_plan() {
          json{{"id", "spawn"},
               {"op", "spawn"},
               {"source_pointer", "/benchmark/spawn"},
-              {"body", "ret"}},
+              {"child_binding", "demo-child"}},
          json{{"id", "await"},
               {"op", "await"},
               {"source_pointer", "/benchmark/await"},
