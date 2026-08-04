@@ -948,6 +948,16 @@ void CollaborationMailbox::revoke_link(std::string_view link_id, std::string act
     const auto it = impl_->links.find(std::string(link_id));
     if (it == impl_->links.end()) return;
     it->second = it->second.revoke(std::move(actor_agent_id));
+    // A revoke is a capability boundary transition, not just a future-submit
+    // check.  Accepted typed Program requests may otherwise be replayed by a
+    // restarted adapter from the mailbox journal after the link is revoked.
+    for (auto& [_, record] : impl_->records) {
+        if (record.envelope.link_id == link_id &&
+            record.state == CollaborationRecordState::Accepted) {
+            record.state = CollaborationRecordState::Canceled;
+            record.diagnostic = "collaboration link revoked";
+        }
+    }
 }
 
 CollaborationSubmitResult CollaborationMailbox::submit(CollaborationEnvelope envelope) {
@@ -1083,7 +1093,15 @@ std::optional<CollaborationRecord::ProgramRequest>
 CollaborationMailbox::get_program_request(std::string_view idempotency_key) const {
     std::lock_guard lock(impl_->mutex);
     const auto it = impl_->records.find(std::string(idempotency_key));
-    if (it == impl_->records.end() || !it->second.program_request) return std::nullopt;
+    if (it == impl_->records.end() || it->second.state != CollaborationRecordState::Accepted ||
+        !it->second.program_request) {
+        return std::nullopt;
+    }
+    const auto link = impl_->links.find(it->second.envelope.link_id);
+    if (link == impl_->links.end() || link->second.state() != CollaborationLinkState::Accepted ||
+        link->second.is_expired(now_unix_ms())) {
+        return std::nullopt;
+    }
     return it->second.program_request;
 }
 #endif

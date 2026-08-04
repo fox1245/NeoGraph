@@ -512,6 +512,39 @@ TEST(A2ACollaboration, RecoveredTypedMailboxRequestStartsExactlyOnce) {
     EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 1U);
 }
 
+TEST(A2ACollaboration, RevokedLinkCannotRecoverAcceptedProgramRequest) {
+    ProgramAdapterFixture fixture;
+    const auto accepted = make_link().accept("executor-b", "consent-secret");
+    const auto envelope = make_program_envelope(accepted, fixture.admitted_version());
+    auto mailbox = std::make_shared<CollaborationMailbox>("owner-b", "executor-b");
+    mailbox->accept_link(accepted, "consent-secret");
+    ASSERT_EQ(mailbox->submit_program(envelope, fixture.admitted_version(), persisted_invocation()),
+              CollaborationSubmitResult::Accepted);
+    const auto pre_revoke = json::parse(mailbox->serialize_canonical());
+
+    mailbox->revoke_link("link-1", "executor-b");
+    const auto canceled = mailbox->get("idem-program-recovery");
+    ASSERT_TRUE(canceled.has_value());
+    EXPECT_EQ(canceled->state, CollaborationRecordState::Canceled);
+    EXPECT_FALSE(mailbox->get_program_request("idem-program-recovery").has_value());
+    EXPECT_EQ(mailbox->submit_program(envelope, fixture.admitted_version(), persisted_invocation()),
+              CollaborationSubmitResult::Rejected);
+
+    // An older journal may have persisted the accepted record before the
+    // revoke became durable. Recovery must still consult the current revoked
+    // link rather than trusting that stale record state.
+    auto stale = json::parse(mailbox->serialize_canonical());
+    stale["records"] = pre_revoke["records"];
+    auto reopened = std::make_shared<CollaborationMailbox>(
+        CollaborationMailbox::parse(stale.dump()));
+    ASSERT_EQ(reopened->snapshot().front().state, CollaborationRecordState::Accepted);
+    EXPECT_FALSE(reopened->get_program_request("idem-program-recovery").has_value());
+    fixture.restart_after_mailbox_publication();
+    ProgramAgentAdapter adapter(fixture.runtime, fixture.admitted_version(), "owner-b", reopened);
+    EXPECT_TRUE(adapter.recover_pending().empty());
+    EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 0U);
+}
+
 TEST(A2ACollaboration, RecoveryRejectsDuplicateRunBeforeAnyDispatch) {
     ProgramAdapterFixture fixture;
     const auto accepted = make_link().accept("executor-b", "consent-secret");

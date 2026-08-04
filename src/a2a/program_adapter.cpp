@@ -325,6 +325,15 @@ std::vector<program::ProgramHandle> ProgramAgentAdapter::recover_pending() const
             throw ProgramA2ARequestError(
                 "Accepted collaboration record is outside the Program adapter identity boundary");
         }
+        // Revalidate the durable request against the receiver's current link
+        // before dispatch.  A link may have been revoked after the mailbox
+        // snapshot was written (or while an older journal is being reopened);
+        // submit_program returns Duplicate only when the exact request still
+        // passes the live owner/capability/expiry checks.
+        if (mailbox_->submit_program(envelope, *request.version, *request.invocation) !=
+            CollaborationSubmitResult::Duplicate) {
+            continue;
+        }
         if (!recovered_run_ids.insert(run_id).second) {
             throw ProgramA2ARequestError(
                 "Multiple accepted collaboration records claim the same Program run ID");
