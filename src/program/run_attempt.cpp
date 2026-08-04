@@ -29,7 +29,6 @@
 
 namespace neograph::program::detail {
 namespace {
-using namespace asio::experimental::awaitable_operators;
 
 std::uint64_t elapsed_ms(std::chrono::steady_clock::time_point start) {
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -633,9 +632,23 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         ++operation_count;
                     }
                 }
-                const auto active =
-                    active_concurrency.fetch_add(1, std::memory_order_relaxed) + 1;
-                update_peak(active);
+                // Concurrency is a run-wide resource, not merely a property of
+                // the immediate parallel node.  Nested parallel/race plans can
+                // otherwise pass their local branch-count checks and dispatch
+                // more Core calls than the admitted grant.  Reserve the slot
+                // immediately before the sole GraphEngine dispatch and release
+                // it on every completion path.
+                auto active = active_concurrency.load(std::memory_order_relaxed);
+                while (active < control->granted_budget.max_concurrency &&
+                       !active_concurrency.compare_exchange_weak(
+                           active, active + 1, std::memory_order_relaxed,
+                           std::memory_order_relaxed)) {}
+                if (active >= control->granted_budget.max_concurrency)
+                    co_return plan_failure(
+                        ProgramTerminalStatus::BudgetExhausted, "P_CONCURRENCY_BUDGET",
+                        "Program Core dispatch exceeds its admitted concurrency budget",
+                        operation_id);
+                update_peak(active + 1);
                 CoreInvocation invocation;
                 const auto resume_checkpoint_for_error = resume;
                 try {
@@ -738,9 +751,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         co_return result;
                 }
                 if (condition_matches(result.output, operation.condition())) {
-                    result = plan_failure(ProgramTerminalStatus::BudgetExhausted,
-                                          "P_LOOP_BOUND", "Program loop bound exhausted",
-                                          operation_id);
+                    auto bounded = plan_failure(ProgramTerminalStatus::BudgetExhausted,
+                                                "P_LOOP_BOUND", "Program loop bound exhausted",
+                                                operation_id);
+                    bounded.output          = std::move(result.output);
+                    bounded.execution_trace = std::move(result.execution_trace);
+                    result                  = std::move(bounded);
                 }
                 co_return result;
             }
@@ -1043,11 +1059,28 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 timeout->expires_after(std::chrono::milliseconds(*operation.timeout_ms()));
                 auto child_token = operation_token->fork();
                 auto timeout_operation = cancel_after_timer(timeout, child_token);
-                auto winner = co_await (
-                    execute(child_id, std::move(state), std::move(thread_id), child_depth,
-                            child_token) ||
-                    std::move(timeout_operation));
-                if (winner.index() == 0) co_return std::move(std::get<0>(winner));
+                // Await races the child completion (including a child error)
+                // against the timeout.  The awaitable `||` operator waits for
+                // one *successful* operation, which would mask an immediate
+                // Core failure until the timeout and misclassify it as a
+                // timeout.  The explicit parallel group preserves the first
+                // completion and lets the outer attempt classify the child
+                // exception normally.
+                auto [order, child_error, child_result, timeout_error] =
+                    co_await asio::experimental::make_parallel_group(
+                                 asio::co_spawn(
+                                     executor,
+                                     execute(child_id, std::move(state), std::move(thread_id),
+                                             child_depth, child_token),
+                                     asio::deferred),
+                                 asio::co_spawn(executor, std::move(timeout_operation),
+                                                asio::deferred))
+                        .async_wait(asio::experimental::wait_for_one(), asio::use_awaitable);
+                if (order[0] == 0) {
+                    if (child_error) std::rethrow_exception(child_error);
+                    co_return std::move(child_result);
+                }
+                (void)timeout_error;
                 child_token->cancel();
                 co_return plan_failure(ProgramTerminalStatus::TimedOut, "P_AWAIT_TIMEOUT",
                                        "Program await operation timed out", operation_id);
@@ -1170,7 +1203,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     } catch (const NestedOperationFailure& error) {
         outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", error.what(),
                                  error.operation_id, error.attempts);
-        if (outcome.failure) outcome.failure->core_node = error.core_node;
+        if (outcome.failure) {
+            outcome.failure->operation_id = error.operation_id;
+            outcome.failure->core_node     = error.core_node;
+        }
         outcome.usage.wall_time_ms = elapsed_ms(started_at);
         outcome.usage.model_tokens = model_tokens(usage);
         outcome.usage.program_operations = operation_count;

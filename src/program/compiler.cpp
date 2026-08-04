@@ -469,6 +469,15 @@ void validate_condition(const json& value,
         (!value["path"].is_string() || value["path"].get<std::string>().empty())) {
         add_type(diagnostics, child_pointer(pointer, "path"), "nonempty string",
                  value["path"]);
+    } else if (value.contains("path")) {
+        try {
+            detail::validate_json_pointer(value["path"].get<std::string>());
+        } catch (const std::exception& error) {
+            diagnostics.add(CompilePhase::Normalize, "P_PLAN_CONDITION",
+                            DiagnosticSeverity::Error, child_pointer(pointer, "path"),
+                            "Program condition path must be a valid RFC 6901 JSON pointer",
+                            json{{"error", error.what()}});
+        }
     }
     if (alternatives != 1) {
         diagnostics.add(CompilePhase::Normalize, "P_PLAN_CONDITION", DiagnosticSeverity::Error,
@@ -761,7 +770,19 @@ std::string lower_operation(const json& authored,
             allowed({"op", "name", "definition", "scope", "reason"});
         else
             allowed({"op", "scope", "reason"});
-        optional_string("scope");
+        if (authored.contains("scope")) {
+            if (!authored["scope"].is_string() || authored["scope"].get<std::string>().empty()) {
+                add_type(diagnostics, child_pointer(pointer, "scope"), "nonempty string",
+                         authored["scope"]);
+            } else if (authored["scope"].get<std::string>() != "run") {
+                diagnostics.add(CompilePhase::Normalize, "P_PLAN_CANCEL_SCOPE",
+                                DiagnosticSeverity::Error, child_pointer(pointer, "scope"),
+                                "Program cancel currently supports only the run scope",
+                                json{{"supported", "run"}});
+            } else {
+                lowered["scope"] = authored["scope"].get<std::string>();
+            }
+        }
         optional_string("reason");
     } else if (op == "emit" || op == "return") {
         if (is_root)

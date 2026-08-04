@@ -350,6 +350,10 @@ ProgramPlan ProgramPlan::from_json(const json& plan) {
                 throw std::invalid_argument("map requires nonempty items");
         } else if (op == ProgramOperationKind::Checkpoint) {
             if (node.body()) require_ref(*node.body(), node.id());
+        } else if (op == ProgramOperationKind::Cancel) {
+            if (node.scope() && *node.scope() != "run")
+                throw std::invalid_argument(
+                    "Program cancel currently supports only the run scope");
         } else if (op == ProgramOperationKind::Emit || op == ProgramOperationKind::Return) {
             if (!node.to_json().contains("value"))
                 throw std::invalid_argument("value operation requires value");

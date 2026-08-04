@@ -2319,6 +2319,31 @@ TEST(ProgramRuntimeTest, ParallelJoinsAllBranchesInPlanOrder) {
     EXPECT_EQ(completed_calls.load(), 1U);
 }
 
+TEST(ProgramRuntimeTest, NestedParallelCannotExceedRunConcurrencyGrant) {
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(4);
+    const json nested{{"op", "parallel"},
+                      {"branches", json::array({json{{"op", "call_core"}},
+                                                 json{{"op", "call_core"}}})}};
+    const auto version = fixture.admit_document(
+        orchestration_document(
+            json{{"op", "parallel"},
+                 {"branches", json::array({nested, nested})}},
+            "runtime-short-blocking"));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(),
+                           RunBudget{10000, 1000, 1000, 2, 32, 20, 0, 0, 0},
+                           "trace-nested-concurrency", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::BudgetExhausted);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_CONCURRENCY_BUDGET");
+    EXPECT_EQ(result.usage().peak_concurrency, 2U);
+    EXPECT_EQ(blocking_calls.load(), 2U);
+}
+
 TEST(ProgramRuntimeTest, RaceReturnsTheFirstCompletedBranchAndCancelsTheLoser) {
     AdmittedRuntime fixture(2);
     const json first{{"op", "sequence"},
@@ -2414,6 +2439,26 @@ TEST(ProgramRuntimeTest, AwaitTimeoutCancelsTheChildOperation) {
                   std::chrono::steady_clock::now() - started)
                   .count(),
               2);
+}
+
+TEST(ProgramRuntimeTest, AwaitPropagatesChildFailureBeforeTimeout) {
+    AdmittedRuntime fixture;
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = run_orchestration(
+        fixture, orchestration_document(json{{"op", "await"},
+                                             {"timeout_ms", 1000},
+                                             {"body", json{{"op", "call_core"}}}},
+                                        "runtime-failing"),
+        json::object(), "trace-await-failure");
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(result.failure()->operation_id, "root.0");
+    EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - started)
+                  .count(),
+              500);
 }
 
 TEST(ProgramRuntimeTest, ExplicitCancelStopsTheFollowingOperation) {

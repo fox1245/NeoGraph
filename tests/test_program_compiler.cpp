@@ -690,6 +690,39 @@ TEST(ProgramCompilerTest, TypedPlanRejectsDanglingAndUnknownOperationFields) {
     EXPECT_THROW((void)ProgramPlan::from_json(bad_condition), std::invalid_argument);
 }
 
+TEST(ProgramCompilerTest, RejectsMalformedConditionPointerDuringNormalization) {
+    auto snapshot = complete_snapshot();
+    auto document = program_document();
+    document["root"] = json{{"op", "branch"},
+                             {"name", "main"},
+                             {"definition", document["root"]["definition"]},
+                             {"condition", json{{"path", "route~2"}, {"exists", true}}},
+                             {"then", json{{"op", "call_core"}}}};
+
+    const auto diagnostics = compile_errors(snapshot, std::move(document));
+    EXPECT_TRUE(std::any_of(diagnostics.begin(), diagnostics.end(), [](const auto& diagnostic) {
+        return diagnostic.code == "P_PLAN_CONDITION" &&
+               diagnostic.primary.json_pointer == "/root/condition/path";
+    }));
+}
+
+TEST(ProgramCompilerTest, RejectsCancelScopesTheRuntimeCannotEnforce) {
+    auto snapshot = complete_snapshot();
+    auto document = program_document();
+    document["root"] = json{{"op", "sequence"},
+                             {"name", "main"},
+                             {"definition", document["root"]["definition"]},
+                             {"children", json::array({
+                                               json{{"op", "cancel"}, {"scope", "branch"}},
+                                               json{{"op", "call_core"}}})}};
+
+    const auto diagnostics = compile_errors(snapshot, std::move(document));
+    EXPECT_TRUE(std::any_of(diagnostics.begin(), diagnostics.end(), [](const auto& diagnostic) {
+        return diagnostic.code == "P_PLAN_CANCEL_SCOPE" &&
+               diagnostic.primary.json_pointer == "/root/children/0/scope";
+    }));
+}
+
 TEST(ProgramCompilerTest, RejectsMissingDuplicateAndInvalidBudgetClosure) {
     auto snapshot        = complete_snapshot();
     auto missing         = program_document();
