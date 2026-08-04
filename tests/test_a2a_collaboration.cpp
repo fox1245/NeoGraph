@@ -34,6 +34,10 @@ CollaborationLink make_link() {
     spec.effect_allowlist = {"artifact-publish"};
     spec.artifact_allowlist = {"artifact-1"};
     spec.cancellation_rights = {"sender", "receiver"};
+    spec.message_kind_allowlist = {
+        "request", "progress", "artifact", "correction", "retry", "completed",
+        "failed", "canceled", "rejected", "auth-required", "terminal",
+        "vendor-terminal-unknown"};
     spec.expires_at_unix_ms = 4102444800000ULL;
     spec.max_retries = 2;
     spec.acknowledgement_timeout_ms = 1000;
@@ -271,10 +275,32 @@ TEST(A2ACollaboration, ConsentFreezesOwnerAndCapabilityBoundary) {
     EXPECT_TRUE(accepted.permits_effect("artifact-publish"));
     EXPECT_TRUE(accepted.permits_artifact("artifact-1"));
     EXPECT_FALSE(accepted.permits_capability("host-shell"));
+    EXPECT_TRUE(accepted.permits_message_kind("progress"));
+    EXPECT_FALSE(accepted.permits_message_kind("host-shell"));
     EXPECT_EQ(CollaborationLink::parse(accepted.serialize_canonical()).content_hash(),
               accepted.content_hash());
     EXPECT_THROW(proposed.accept("wrong-agent", "consent-secret"), std::invalid_argument);
     EXPECT_THROW(proposed.accept("executor-b", ""), std::invalid_argument);
+}
+
+TEST(A2ACollaboration, LinkFailsClosedOnUndeclaredMessageKinds) {
+    const auto proposed = make_link();
+    auto spec = proposed.spec();
+    spec.message_kind_allowlist = {"progress"};
+    const auto accepted = CollaborationLink::create(std::move(spec)).accept(
+        "executor-b", "consent-secret");
+
+    EXPECT_THROW(make_envelope(accepted, 1, "correction"), std::invalid_argument);
+
+    CollaborationMailbox receiver("owner-b", "executor-b");
+    receiver.accept_link(accepted, "consent-secret");
+    auto forged = make_envelope(accepted);
+    forged.kind = "correction";
+    EXPECT_EQ(receiver.submit(std::move(forged)), CollaborationSubmitResult::Rejected);
+
+    auto stored = json::parse(accepted.serialize_canonical());
+    stored["spec"]["message_kind_allowlist"] = "not-an-array";
+    EXPECT_THROW(CollaborationLink::parse(stored.dump()), std::invalid_argument);
 }
 
 TEST(A2ACollaboration, EnvelopeRoundTripsThroughA2AMessage) {

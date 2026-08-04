@@ -41,7 +41,7 @@ NEOGRAPH_API CollaborationLinkState collaboration_link_state_from_string(std::st
 
 /** Explicit invitation and capability boundary between two owners. */
 struct NEOGRAPH_API CollaborationLinkSpec {
-    std::uint32_t schema_version = 1;
+    std::uint32_t schema_version = 2;
     std::string   link_id;
     std::string   sender_owner_scope;
     std::string   receiver_owner_scope;
@@ -52,6 +52,8 @@ struct NEOGRAPH_API CollaborationLinkSpec {
     std::vector<std::string> effect_allowlist;
     std::vector<std::string> artifact_allowlist;
     std::vector<std::string> cancellation_rights;
+    /// Explicit protocol actions permitted across this owner boundary.
+    std::vector<std::string> message_kind_allowlist;
     std::uint64_t expires_at_unix_ms = 0;
     std::uint32_t max_retries = 0;
     std::uint64_t acknowledgement_timeout_ms = 1;
@@ -62,7 +64,7 @@ struct NEOGRAPH_API CollaborationLinkSpec {
 /** Immutable invitation state. Accept/revoke return a new value. */
 class NEOGRAPH_API CollaborationLink final {
 public:
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2;
 
     static CollaborationLink create(CollaborationLinkSpec spec);
     static CollaborationLink parse(std::string_view stored_bytes);
@@ -78,6 +80,7 @@ public:
     bool permits_capability(std::string_view capability) const noexcept;
     bool permits_effect(std::string_view effect) const noexcept;
     bool permits_artifact(std::string_view artifact_identity) const noexcept;
+    bool permits_message_kind(std::string_view kind) const noexcept;
     bool permits_cancellation(std::string_view actor_agent_id) const noexcept;
     std::string serialize_canonical() const;
 

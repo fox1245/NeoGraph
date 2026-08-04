@@ -188,6 +188,7 @@ json link_spec_to_json(const CollaborationLinkSpec& spec) {
                 {"effect_allowlist", to_string_array(spec.effect_allowlist)},
                 {"artifact_allowlist", to_string_array(spec.artifact_allowlist)},
                 {"cancellation_rights", to_string_array(spec.cancellation_rights)},
+                {"message_kind_allowlist", to_string_array(spec.message_kind_allowlist)},
                 {"expires_at_unix_ms", spec.expires_at_unix_ms},
                 {"max_retries", spec.max_retries},
                 {"acknowledgement_timeout_ms", spec.acknowledgement_timeout_ms}};
@@ -208,6 +209,8 @@ CollaborationLinkSpec link_spec_from_json(const json& value) {
     spec.artifact_allowlist = string_array(required_array(value, "artifact_allowlist"), "artifact_allowlist");
     spec.cancellation_rights = string_array(required_array(value, "cancellation_rights"),
                                             "cancellation_rights");
+    spec.message_kind_allowlist = string_array(required_array(value, "message_kind_allowlist"),
+                                               "message_kind_allowlist");
     spec.expires_at_unix_ms = required_unsigned(value, "expires_at_unix_ms");
     spec.max_retries = static_cast<std::uint32_t>(required_unsigned(value, "max_retries"));
     spec.acknowledgement_timeout_ms = required_unsigned(value, "acknowledgement_timeout_ms");
@@ -249,6 +252,10 @@ void validate_link_spec(const CollaborationLinkSpec& spec) {
     require_unique_strings(spec.effect_allowlist, "effect_allowlist");
     require_unique_strings(spec.artifact_allowlist, "artifact_allowlist");
     require_unique_strings(spec.cancellation_rights, "cancellation_rights");
+    require_unique_strings(spec.message_kind_allowlist, "message_kind_allowlist");
+    if (spec.message_kind_allowlist.empty()) {
+        throw std::invalid_argument("Collaboration link requires an explicit message-kind allowlist");
+    }
     if (spec.expires_at_unix_ms == 0 || spec.acknowledgement_timeout_ms == 0) {
         throw std::invalid_argument("Collaboration link expiry and acknowledgement timeout are required");
     }
@@ -581,6 +588,11 @@ bool CollaborationLink::permits_artifact(std::string_view artifact_identity) con
            contains(spec().artifact_allowlist, artifact_identity);
 }
 
+bool CollaborationLink::permits_message_kind(std::string_view kind) const noexcept {
+    return state() == CollaborationLinkState::Accepted && !is_expired(now_unix_ms()) &&
+           contains(spec().message_kind_allowlist, kind);
+}
+
 bool CollaborationLink::permits_cancellation(std::string_view actor_agent_id) const noexcept {
     if (state() != CollaborationLinkState::Accepted || is_expired(now_unix_ms())) return false;
     const std::string_view side = actor_agent_id == spec().sender_agent_id ? "sender" :
@@ -629,6 +641,9 @@ CollaborationEnvelope CollaborationEnvelope::create(
                                    std::move(payload),
                                    std::move(artifacts)};
     validate_envelope_shape(envelope);
+    if (!link.permits_message_kind(envelope.kind)) {
+        throw std::invalid_argument("Collaboration message kind is outside the link allowlist");
+    }
     for (const auto& artifact : envelope.artifacts) {
         if (!link.permits_artifact(artifact.artifact_identity)) {
             throw std::invalid_argument("Collaboration artifact is outside the link allowlist");
@@ -884,6 +899,9 @@ CollaborationSubmitResult CollaborationMailbox::submit(CollaborationEnvelope env
         envelope.sender_agent_id != link_it->second.spec().sender_agent_id) {
         return CollaborationSubmitResult::Rejected;
     }
+    if (!link_it->second.permits_message_kind(envelope.kind)) {
+        return CollaborationSubmitResult::Rejected;
+    }
     for (const auto& artifact : envelope.artifacts) {
         if (!link_it->second.permits_artifact(artifact.artifact_identity)) {
             return CollaborationSubmitResult::Rejected;
@@ -948,6 +966,9 @@ CollaborationSubmitResult CollaborationMailbox::submit_program(
     }
     for (const auto& effect : version.policy_snapshot().allowed_effects()) {
         if (!link_it->second.permits_effect(effect)) return CollaborationSubmitResult::Rejected;
+    }
+    if (!link_it->second.permits_message_kind(envelope.kind)) {
+        return CollaborationSubmitResult::Rejected;
     }
     for (const auto& artifact : envelope.artifacts) {
         if (!link_it->second.permits_artifact(artifact.artifact_identity)) {
