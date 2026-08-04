@@ -1054,18 +1054,25 @@ void RunControl::deliver_event(const ProgramEvent& event) {
     try {
         sink->on_event(event);
     } catch (const std::exception& error) {
+        bool cancel_run = false;
         {
             std::lock_guard lock(mutex_);
             if (sink_ == sink) sink_.reset();
+            // Once the terminal transition has been durably published, an
+            // observer failure must not rewrite the committed result through
+            // the interrupted-pending cancellation path.
+            cancel_run = !terminal_decided_;
         }
-        cancel(CancellationCause::EventSink);
+        if (cancel_run) cancel(CancellationCause::EventSink);
         throw EventSinkError(error.what());
     } catch (...) {
+        bool cancel_run = false;
         {
             std::lock_guard lock(mutex_);
             if (sink_ == sink) sink_.reset();
+            cancel_run = !terminal_decided_;
         }
-        cancel(CancellationCause::EventSink);
+        if (cancel_run) cancel(CancellationCause::EventSink);
         throw EventSinkError("Program event sink threw");
     }
 }
