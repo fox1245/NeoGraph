@@ -1962,6 +1962,11 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
 
     const auto run_id =
         invocation.requested_run_id.empty() ? generate_run_id() : invocation.requested_run_id;
+    if (run_id == source_record->run_id()) {
+        throw_runtime_diagnostic(
+            "P_FORK_SAME_RUN",
+            "Fork target run id must differ from the exact source run");
+    }
     const auto target_thread_id =
         core_thread_identity(run_id, target_pinned->root->compiled_plan_identity);
     auto cloned_checkpoint      = *loaded_checkpoint;

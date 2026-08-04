@@ -2245,6 +2245,41 @@ TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersi
     EXPECT_EQ(source_after.checkpoint()->checkpoint_id, source.checkpoint()->checkpoint_id);
 }
 
+TEST(ProgramRuntimeTest, ForkRejectsSourceRunIdBeforeCloningCheckpoint) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto      version = fixture.admit("runtime-interrupt");
+    const auto      source =
+        fixture.runtime
+            ->start("tenant:runtime", version,
+                    ProgramInvocation{json::object(), grant(), "trace-fork-same-run", {}})
+            .wait();
+    ASSERT_EQ(source.status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(source.checkpoint().has_value());
+    const auto before = fixture.journal->load("tenant:runtime", source.run_id());
+    ASSERT_TRUE(before.has_value());
+    const auto source_thread = before->exact_checkpoint()->core_thread_id;
+    const auto source_checkpoints_before = fixture.checkpoints->list(source_thread, 100).size();
+    ProgramInvocation invocation{
+        json::object(), source.remaining_budget(), "trace-fork-same-run-target", {},
+        source.run_id()};
+    EXPECT_THROW(
+        (void)fixture.runtime->fork(
+            "tenant:runtime",
+            ExactProgramCheckpointReference{source.run_id(), source.checkpoint()->checkpoint_id},
+            version, std::move(invocation),
+            ProgramResume{json{{"decision", "must-not-clone"}}, "trace-fork-same-run-resume",
+                          {}, before->pending_input()->call_id()}),
+        std::exception);
+
+    const auto after = fixture.journal->load("tenant:runtime", source.run_id());
+    ASSERT_TRUE(after.has_value());
+    EXPECT_EQ(after->id(), before->id());
+    EXPECT_EQ(interrupt_calls.load(), 1U);
+    EXPECT_EQ(fixture.checkpoints->list(source_thread, 100).size(),
+              source_checkpoints_before);
+}
+
 TEST(ProgramRuntimeTest, ForkMismatchesRejectBeforeTargetRunAndLeaveSourceUnchanged) {
     interrupt_calls.store(0);
     followup_calls.store(0);

@@ -287,6 +287,25 @@ TEST(ProgramTransitionStoreTest, ForkPublicationRequiresDurableMigrationProof) {
     EXPECT_FALSE(store.load("owner-a", "run-1").has_value());
 }
 
+TEST(ProgramTransitionStoreTest, NonForkMigrationPlanCannotPublishForkLineage) {
+    InMemoryProgramTransitionStore store;
+    auto publication = start_publication();
+    attach_fork_receipt(publication);
+    publication.migration_plan = MigrationPlan::create(
+        MigrationPlanData{digest('6'), digest('1'), "owner-a",
+                          MigrationCompatibility::Blocked,
+                          {"authority_profile"},
+                          {MigrationDiagnostic{MigrationDimension::Authority,
+                                               "authority_profile",
+                                               "authority changed",
+                                               json{{"profile", "source"}},
+                                               json{{"profile", "target"}}}},
+                          {}});
+    EXPECT_EQ(store.compare_publish("owner-a", {}, std::move(publication)),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_FALSE(store.load("owner-a", "run-1").has_value());
+}
+
 TEST(ProgramTransitionStoreTest, EffectOutboxMustBindExactAwaitingPendingEffect) {
     InMemoryProgramTransitionStore store;
     const auto start = start_publication();
