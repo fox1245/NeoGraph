@@ -16,6 +16,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <map>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -163,15 +164,17 @@ bool condition_matches(const json& state, const json& condition) {
 
 struct PlanExecution {
     ProgramTerminalStatus           status = ProgramTerminalStatus::Completed;
-    json                             output = json::object();
+    json                            output = json::object();
+    std::shared_ptr<RunControl>     spawned_child;
     std::optional<ProgramInterrupt> interrupt;
-    std::optional<ProgramFailure>    failure;
-    std::vector<std::string>         execution_trace;
-    bool                             returned = false;
+    std::optional<ProgramFailure>   failure;
+    std::vector<std::string>        execution_trace;
+    bool                            returned = false;
 };
 
 void append_trace(PlanExecution& target, PlanExecution&& source) {
     target.output = std::move(source.output);
+    target.spawned_child = std::move(source.spawned_child);
     target.execution_trace.insert(target.execution_trace.end(),
                                   std::make_move_iterator(source.execution_trace.begin()),
                                   std::make_move_iterator(source.execution_trace.end()));
@@ -191,6 +194,16 @@ PlanExecution plan_failure(ProgramTerminalStatus status,
     result.status  = status;
     result.failure = ProgramFailure{std::move(code), std::move(message),
                                     std::move(operation_id), "", 0, json::object()};
+    return result;
+}
+
+PlanExecution plan_result_from_child(const ProgramResult& child_result) {
+    PlanExecution result;
+    result.status          = child_result.status();
+    result.output          = child_result.output();
+    result.interrupt       = child_result.interrupt();
+    result.failure         = child_result.failure();
+    result.execution_trace = child_result.execution_trace();
     return result;
 }
 class NestedOperationFailure final : public std::runtime_error {
@@ -472,7 +485,6 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     auto       usage      = std::make_shared<UsageAccumulator>();
     auto       core_progress = std::make_shared<AttemptCoreProgress>();
     std::uint64_t operation_count = 0;
-    std::atomic<std::size_t> total_children{0};
     std::atomic<std::size_t> active_concurrency{0};
     std::atomic<std::size_t> peak_concurrency{0};
     if (std::chrono::steady_clock::now() >= deadline) control->cancel(CancellationCause::Timeout);
@@ -517,6 +529,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         std::mutex plan_mutex;
         std::optional<std::string> resume_id = checkpoint_id;
         std::optional<CoreCheckpointIdentity> last_root_checkpoint;
+        std::map<std::string, std::uint64_t> spawn_occurrences;
         auto root_checkpoint = [&]() -> std::optional<CoreCheckpointIdentity> {
             std::lock_guard lock(plan_mutex);
             return last_root_checkpoint;
@@ -1013,25 +1026,24 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             }
 
             if (op == ProgramOperationKind::Spawn) {
-                if (child_depth >= control->granted_budget.max_child_depth)
-                    co_return plan_failure(
-                        ProgramTerminalStatus::BudgetExhausted, "P_CHILD_BUDGET",
-                        "Program child depth budget exhausted", operation_id);
-                const auto child_limit = control->granted_budget.max_total_children;
-                auto previous = total_children.load(std::memory_order_relaxed);
-                while (previous < child_limit &&
-                       !total_children.compare_exchange_weak(
-                           previous, previous + 1, std::memory_order_relaxed)) {
+                if (!operation.child_binding())
+                    co_return plan_failure(ProgramTerminalStatus::Failed, "P_CHILD_BINDING",
+                                           "Program spawn has no lowered child binding",
+                                           operation_id);
+                std::string execution_key;
+                {
+                    std::lock_guard lock(plan_mutex);
+                    const auto base = thread_id + ":" + operation_id;
+                    const auto ordinal = spawn_occurrences[base]++;
+                    execution_key = base + ":" + std::to_string(ordinal);
                 }
-                if (previous >= child_limit)
-                    co_return plan_failure(
-                        ProgramTerminalStatus::BudgetExhausted, "P_CHILD_BUDGET",
-                        "Program child budget exhausted", operation_id);
-                auto child_token = operation_token->fork();
-                co_return co_await execute(*dispatch.body,
-                                           std::move(state),
-                                           operation_thread_id(*control, operation_id),
-                                           child_depth + 1, std::move(child_token));
+                auto child = control->launch_child(*operation.child_binding(), std::move(state),
+                                                   operation_id, execution_key);
+                PlanExecution result;
+                result.output = json{{"child_run_id", child->run_id},
+                                     {"program_version_id", child->program_version_id}};
+                result.spawned_child = std::move(child);
+                co_return result;
             }
 
             if (op == ProgramOperationKind::Cancel) {
@@ -1051,6 +1063,60 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
 
             if (op == ProgramOperationKind::Await) {
                 const auto child_id = *dispatch.body;
+                const auto* child_operation = typed_plan.find(child_id);
+                if (child_operation && child_operation->operation() == ProgramOperationKind::Spawn) {
+                    auto launched = co_await execute(child_id, std::move(state), std::move(thread_id),
+                                                     child_depth, operation_token);
+                    if (launched.status != ProgramTerminalStatus::Completed) co_return launched;
+                    if (!launched.spawned_child) {
+                        co_return plan_failure(ProgramTerminalStatus::Failed, "P_AWAIT_HANDLE",
+                                               "Program await body did not produce a child handle",
+                                               operation_id);
+                    }
+                    auto child = std::move(launched.spawned_child);
+                    if (!operation.timeout_ms()) {
+                        co_return plan_result_from_child(co_await child->wait_async());
+                    }
+
+                    struct SpawnAwaitState {
+                        std::mutex                      mutex;
+                        std::optional<ProgramResult>    result;
+                        std::exception_ptr              error;
+                        bool                            settled = false;
+                        std::shared_ptr<asio::steady_timer> signal;
+                    };
+                    const auto executor = co_await asio::this_coro::executor;
+                    auto wait_state = std::make_shared<SpawnAwaitState>();
+                    wait_state->signal = std::make_shared<asio::steady_timer>(executor);
+                    wait_state->signal->expires_after(
+                        std::chrono::milliseconds(*operation.timeout_ms()));
+                    asio::co_spawn(
+                        executor, child->wait_async(),
+                        [wait_state](std::exception_ptr error, ProgramResult child_result) {
+                            {
+                                std::lock_guard lock(wait_state->mutex);
+                                wait_state->error = error;
+                                if (!error) wait_state->result = std::move(child_result);
+                                wait_state->settled = true;
+                            }
+                            wait_state->signal->cancel();
+                        });
+                    asio::error_code wait_error;
+                    co_await wait_state->signal->async_wait(
+                        asio::redirect_error(asio::use_awaitable, wait_error));
+                    {
+                        std::lock_guard lock(wait_state->mutex);
+                        if (wait_state->settled) {
+                            if (wait_state->error) std::rethrow_exception(wait_state->error);
+                            co_return plan_result_from_child(*wait_state->result);
+                        }
+                    }
+                    if (const auto terminal = child->try_result())
+                        co_return plan_result_from_child(*terminal);
+                    (void)child->cancel(CancellationCause::ParentTerminal);
+                    co_return plan_failure(ProgramTerminalStatus::TimedOut, "P_AWAIT_TIMEOUT",
+                                           "Program await operation timed out", operation_id);
+                }
                 if (!operation.timeout_ms()) {
                     co_return co_await execute(child_id, std::move(state),
                                                std::move(thread_id), child_depth, operation_token);
@@ -1230,6 +1296,25 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.usage.peak_concurrency = peak_concurrency.load(std::memory_order_relaxed);
         outcome.remaining_budget = settle_budget(control->granted_budget, outcome.usage);
         apply_terminal_cause(outcome, terminal_cause_at_deadline(control, deadline), error.what());
+    } catch (const ProgramDiagnosticError& error) {
+        const auto& diagnostic = error.diagnostic();
+        std::string operation_id = "root";
+        if (diagnostic.witness.is_object() &&
+            diagnostic.witness.contains("operation_id") &&
+            diagnostic.witness["operation_id"].is_string()) {
+            operation_id = diagnostic.witness["operation_id"].get<std::string>();
+        }
+        outcome = failed_outcome(control, diagnostic.code, diagnostic.message);
+        if (outcome.failure) outcome.failure->operation_id = operation_id;
+        if (outcome.failure) outcome.failure->witness = diagnostic.witness;
+        outcome.usage.wall_time_ms = elapsed_ms(started_at);
+        outcome.usage.model_tokens = model_tokens(usage);
+        outcome.usage.program_operations = operation_count;
+        outcome.usage.core_steps = failed_core_steps(*control, core_progress->steps());
+        outcome.usage.peak_concurrency = peak_concurrency.load(std::memory_order_relaxed);
+        outcome.remaining_budget = settle_budget(control->granted_budget, outcome.usage);
+        apply_terminal_cause(outcome, terminal_cause_at_deadline(control, deadline),
+                             diagnostic.message);
     } catch (const std::exception& error) {
         outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", error.what());
         outcome.usage.wall_time_ms = elapsed_ms(started_at);

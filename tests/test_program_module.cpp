@@ -51,7 +51,8 @@ PolicySnapshot make_policy(const AdmissionProfile& admission, std::string owner)
 ProgramBundle make_bundle(std::string    module_root,
                           std::string    registry_fingerprint,
                           ContractRecord input,
-                          ContractRecord output) {
+                          ContractRecord output,
+                          std::string    child_binding = "child") {
     const json definition = json{
         {"schema_version", SealedCoreDefinition::STORAGE_SCHEMA_VERSION},
         {"nodes", json{{"main", json{{"type", "module-node"}}}}}};
@@ -69,8 +70,10 @@ ProgramBundle make_bundle(std::string    module_root,
         1,
         json{{"root", "root"},
              {"operations", json::array({
-                                  json{{"id", "root"}, {"op", "spawn"}, {"body", "call"}},
-                                  json{{"id", "call"}, {"op", "call_core"}, {"core", "main"}}})}}};
+                                  json{{"id", "root"}, {"op", "await"}, {"body", "spawn"}},
+                                  json{{"id", "spawn"},
+                                       {"op", "spawn"},
+                                       {"child_binding", std::move(child_binding)}}})}}};
     data.sealed_core_definitions       = {
         SealedCoreDefinition{"main", sealed_core_definition_hash(definition), definition}};
     data.core_plan_identities = {CorePlanIdentity{"main", digest('c')}};
@@ -98,11 +101,13 @@ struct LinkFixture {
     ProgramVersion   version;
 };
 
-LinkFixture make_fixture(std::string child_owner = "tenant:module") {
+LinkFixture make_fixture(std::string child_owner = "tenant:module",
+                         std::string child_binding = "child") {
     const auto module_root = ModuleResolution{}.dependency_merkle_root();
     const ContractRecord contract{1, json{{"type", "object"}}};
     const auto registry  = make_registry();
-    auto       bundle    = make_bundle(module_root, registry.fingerprint(), contract, contract);
+    auto       bundle    = make_bundle(module_root, registry.fingerprint(), contract, contract,
+                                    std::move(child_binding));
     const auto admission = make_admission(registry);
     const auto policy    = make_policy(admission, child_owner);
     ProgramVersion version(
@@ -353,6 +358,16 @@ TEST(ProgramModuleTest, WholeCompositionValidatesBeforeChildDispatch) {
         {ChildProgramBinding{"child", fixture.bundle, fixture.version}}};
 
     EXPECT_NO_THROW(validate_program_composition(fixture.bundle, composition));
+}
+
+TEST(ProgramModuleTest, WholeCompositionRejectsUndeclaredSpawnBinding) {
+    auto fixture = make_fixture("tenant:module", "missing-child");
+    const ProgramComposition composition{
+        fixture.parent,
+        fixture.resolution,
+        {ChildProgramBinding{"child", fixture.bundle, fixture.version}}};
+
+    EXPECT_THROW(validate_program_composition(fixture.bundle, composition), std::invalid_argument);
 }
 
 TEST(ProgramModuleTest, WholeCompositionDeniesChildIdentityCollision) {

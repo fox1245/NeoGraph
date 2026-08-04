@@ -698,14 +698,33 @@ void validate_program_composition(const ProgramBundle& parent_bundle,
         add_budget(aggregate, descriptor.budget);
     }
     const auto parent_plan = parent_bundle.orchestration_plan();
-    std::size_t spawn_count = 0;
-    if (parent_plan.plan.is_object() && parent_plan.plan.contains("operations") &&
-        parent_plan.plan["operations"].is_array()) {
-        for (const auto& operation : parent_plan.plan["operations"])
-            if (operation.is_object() && operation.value("op", "") == "spawn") ++spawn_count;
+    std::set<std::string, std::less<>> referenced_children;
+    if (!composition.parent.children().empty()) {
+        if (!parent_plan.plan.is_object() || !parent_plan.plan.contains("operations") ||
+            !parent_plan.plan["operations"].is_array()) {
+            throw std::invalid_argument("Whole Program composition has no operation plan");
+        }
+        for (const auto& operation : parent_plan.plan["operations"]) {
+            if (!operation.is_object() || operation.value("op", "") != "spawn") continue;
+            if (!operation.contains("child_binding") || !operation["child_binding"].is_string() ||
+                operation["child_binding"].get<std::string>().empty()) {
+                throw std::invalid_argument(
+                    "Whole Program composition has a spawn without a verified child binding");
+            }
+            const auto binding = operation["child_binding"].get<std::string>();
+            if (!by_name.contains(binding)) {
+                throw std::invalid_argument(
+                    "Whole Program composition spawn references an undeclared child");
+            }
+            referenced_children.insert(std::move(binding));
+        }
+        for (const auto& descriptor : composition.parent.children()) {
+            if (!referenced_children.contains(descriptor.name)) {
+                throw std::invalid_argument(
+                    "Whole Program composition has no spawn operation for a declared child");
+            }
+        }
     }
-    if (!composition.parent.children().empty() && spawn_count < composition.parent.children().size())
-        throw std::invalid_argument("Whole Program composition has no spawn operation for every child");
 
     std::map<std::string, const BudgetRequirement*, std::less<>> requirements;
     for (const auto& requirement : parent_bundle.declared_budget_requirements())

@@ -16,8 +16,10 @@
 #include <chrono>
 #include <future>
 #include <limits>
+#include <map>
 #include <memory>
 #include <string>
+#include <mutex>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -361,6 +363,39 @@ json step_limited_program_document() {
         {"declared_budget_requirements", budget_requirements()}};
 }
 
+struct ChildBindingRegistry {
+    using Key = std::pair<std::string, std::string>;
+
+    void bind(std::string parent_version_id,
+              std::string binding_name,
+              ProgramRuntimeChildBinding binding) {
+        std::lock_guard lock(mutex);
+        bindings.insert_or_assign(Key{std::move(parent_version_id), std::move(binding_name)},
+                                  std::move(binding));
+    }
+
+    std::optional<ProgramRuntimeChildBinding> resolve(
+        std::string_view owner_scope,
+        std::string_view parent_version_id,
+        std::string_view binding_name) const {
+        if (owner_scope != "tenant:runtime") return std::nullopt;
+        std::lock_guard lock(mutex);
+        const auto found = bindings.find(
+            Key{std::string(parent_version_id), std::string(binding_name)});
+        return found == bindings.end() ? std::nullopt
+                                       : std::optional<ProgramRuntimeChildBinding>{found->second};
+    }
+
+    void clear() {
+        std::lock_guard lock(mutex);
+        bindings.clear();
+    }
+
+private:
+    mutable std::mutex                              mutex;
+    std::map<Key, ProgramRuntimeChildBinding>       bindings;
+};
+
 struct AdmittedRuntime {
     RegistrySnapshot                        registry;
     AdmissionProfile                        profile;
@@ -370,6 +405,8 @@ struct AdmittedRuntime {
     std::shared_ptr<ProgramCatalog>         catalog;
     std::shared_ptr<CheckpointStore>        checkpoints;
     std::shared_ptr<ProgramTransitionStore> journal;
+    std::shared_ptr<ChildBindingRegistry>   child_bindings;
+    std::size_t                             scheduler_thread_count;
     std::unique_ptr<ProgramRuntime>         runtime;
 
     explicit AdmittedRuntime(std::size_t                             scheduler_threads  = 1,
@@ -386,8 +423,9 @@ struct AdmittedRuntime {
                                          : std::make_shared<InMemoryCheckpointStore>()),
           journal(journal_backend ? std::move(journal_backend)
                                   : std::make_shared<InMemoryProgramTransitionStore>()),
-          runtime(std::make_unique<ProgramRuntime>(
-              RuntimeConfig{catalog, checkpoints, {}, journal, scheduler_threads})) {}
+          child_bindings(std::make_shared<ChildBindingRegistry>()),
+          scheduler_thread_count(scheduler_threads),
+          runtime(make_runtime()) {}
 
     static AdmissionProfile make_profile(const RegistrySnapshot& registry) {
         AdmissionProfileBuilder builder;
@@ -411,6 +449,20 @@ struct AdmittedRuntime {
             .admission_profile(profile)
             .budget_ceiling(BudgetLimits{10000, 1000, 1000, 4, 32, 20, 4, 4, 32});
         return std::move(builder).build();
+    }
+
+    std::unique_ptr<ProgramRuntime> make_runtime() const {
+        return std::make_unique<ProgramRuntime>(RuntimeConfig{
+            catalog,
+            checkpoints,
+            {},
+            journal,
+            scheduler_thread_count,
+            [bindings = child_bindings](std::string_view owner_scope,
+                                        std::string_view parent_version_id,
+                                        std::string_view binding_name) {
+                return bindings->resolve(owner_scope, parent_version_id, binding_name);
+            }});
     }
 
     ProgramVersion admit(std::string node_type) {
@@ -442,14 +494,22 @@ struct AdmittedRuntime {
             throw std::runtime_error(message);
         }
     }
+
+    void bind_child(const ProgramVersion& parent,
+                    std::string           binding_name,
+                    ProgramRuntimeChildBinding binding) {
+        child_bindings->bind(parent.id(), std::move(binding_name), std::move(binding));
+    }
+
+    void clear_child_bindings() { child_bindings->clear(); }
+
     void recreate_catalog_and_runtime() {
         runtime.reset();
         catalog.reset();
         engines = std::make_shared<EngineGenerationCache>();
         catalog = std::make_shared<ProgramCatalog>(
             CatalogConfig{store, registry, engines, "program-runtime-test/v1"});
-        runtime =
-            std::make_unique<ProgramRuntime>(RuntimeConfig{catalog, checkpoints, {}, journal, 1});
+        runtime = make_runtime();
     }
 };
 
@@ -460,19 +520,9 @@ struct LinkedChildAdmission {
     ModuleLinkReceipt receipt;
 };
 
-LinkedChildAdmission make_linked_child(
-    AdmittedRuntime& fixture,
-    std::string      parent_node_type = "runtime-blocking",
-    std::string      child_node_type  = "runtime-blocking") {
-    auto parent_document =
-        orchestration_document(json{{"op", "spawn"}, {"body", json{{"op", "call_core"}}}},
-                               std::move(parent_node_type));
-    parent_document["declared_budget_requirements"][7]["minimum"] = 1;
-    parent_document["declared_budget_requirements"][7]["maximum"] = 1;
-    parent_document["declared_budget_requirements"][8]["minimum"] = 1;
-    parent_document["declared_budget_requirements"][8]["maximum"] = 1;
-    auto parent_version = fixture.admit_document(std::move(parent_document));
-    auto child_version  = fixture.admit(std::move(child_node_type));
+LinkedChildAdmission link_child_versions(AdmittedRuntime& fixture,
+                                         ProgramVersion   parent_version,
+                                         ProgramVersion   child_version) {
     const auto child_bundle = fixture.store->get_bundle(child_version.bundle_id());
     if (!child_bundle) throw std::runtime_error("child bundle was not admitted");
 
@@ -487,7 +537,7 @@ LinkedChildAdmission make_linked_child(
                                {ModulePort{"output", child_bundle->output_contract()}},
                                child_bundle->capability_effect_closure().capabilities,
                                child_bundle->capability_effect_closure().effects,
-                               BudgetLimits{10000, 1000, 1000, 1, 1, 20, 1, 1, 1}});
+                               BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 1, 1}});
     module_data.allowed_capabilities = child_bundle->capability_effect_closure().capabilities;
     module_data.declared_effects     = child_bundle->capability_effect_closure().effects;
     const auto parent_module = ProgramModule::create(std::move(module_data));
@@ -496,8 +546,44 @@ LinkedChildAdmission make_linked_child(
     resolution.modules.push_back(parent_module);
     auto receipt =
         link_module_child(resolution, parent_module, "child", *child_bundle, child_version);
+    fixture.bind_child(parent_version, "child",
+                       ProgramRuntimeChildBinding{receipt, child_version});
     return LinkedChildAdmission{
         std::move(parent_version), std::move(child_version), std::move(receipt)};
+}
+
+LinkedChildAdmission make_linked_child(
+    AdmittedRuntime& fixture,
+    std::string      parent_node_type = "runtime-blocking",
+    std::string      child_node_type  = "runtime-blocking") {
+    auto parent_document = program_document(std::move(parent_node_type));
+    parent_document["declared_budget_requirements"][4]["minimum"] = 2;
+    parent_document["declared_budget_requirements"][4]["maximum"] = 2;
+    parent_document["declared_budget_requirements"][7]["minimum"] = 1;
+    parent_document["declared_budget_requirements"][7]["maximum"] = 1;
+    parent_document["declared_budget_requirements"][8]["minimum"] = 1;
+    parent_document["declared_budget_requirements"][8]["maximum"] = 1;
+    return link_child_versions(fixture, fixture.admit_document(std::move(parent_document)),
+                               fixture.admit(std::move(child_node_type)));
+}
+
+LinkedChildAdmission make_durable_spawn_child(
+    AdmittedRuntime& fixture,
+    std::string      parent_node_type = "runtime-completed",
+    std::string      child_node_type  = "runtime-completed",
+    std::optional<std::uint64_t> timeout_ms = std::nullopt) {
+    json await = json{{"op", "await"},
+                      {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}};
+    if (timeout_ms) await["timeout_ms"] = *timeout_ms;
+    auto parent_document = orchestration_document(std::move(await), std::move(parent_node_type));
+    parent_document["declared_budget_requirements"][4]["minimum"] = 2;
+    parent_document["declared_budget_requirements"][4]["maximum"] = 2;
+    parent_document["declared_budget_requirements"][7]["minimum"] = 1;
+    parent_document["declared_budget_requirements"][7]["maximum"] = 1;
+    parent_document["declared_budget_requirements"][8]["minimum"] = 1;
+    parent_document["declared_budget_requirements"][8]["maximum"] = 1;
+    return link_child_versions(fixture, fixture.admit_document(std::move(parent_document)),
+                               fixture.admit(std::move(child_node_type)));
 }
 
 
@@ -2849,6 +2935,142 @@ TEST(ProgramRuntimeTest, FailedDispatchIsRetriedFromPublishingBoundary) {
 
     EXPECT_TRUE(parent.cancel());
     EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
+}
+
+TEST(ProgramRuntimeTest, RecoverChildrenRetriesPublishingBoundaryWithoutDuplicateDispatch) {
+    completed_calls.store(0);
+    auto journal = std::make_shared<FailChildDispatchOnceJournal>();
+    AdmittedRuntime fixture(2, {}, journal);
+    const auto linked = make_linked_child(fixture, "runtime-blocking", "runtime-completed");
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                          "trace-parent-recover-children", {}});
+    ProgramInvocation child_invocation{
+        json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+        "trace-child-recover-children", {}};
+
+    EXPECT_THROW((void)fixture.runtime->start_child("tenant:runtime", parent, linked.receipt,
+                                                     linked.child_version, child_invocation),
+                 ProgramDiagnosticError);
+    const auto publishing = journal->load("tenant:runtime", parent.run_id());
+    ASSERT_TRUE(publishing.has_value());
+    ASSERT_EQ(publishing->children().size(), 1U);
+    EXPECT_EQ(publishing->children().front().state, ProgramChildState::Publishing);
+
+    journal->allow_dispatch();
+    auto recovered = fixture.runtime->recover_children("tenant:runtime", parent.run_id());
+    ASSERT_EQ(recovered.size(), 1U);
+    EXPECT_EQ(recovered.front().wait().status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(completed_calls.load(), 1U);
+
+    const auto completed = journal->load("tenant:runtime", parent.run_id());
+    ASSERT_TRUE(completed.has_value());
+    ASSERT_EQ(completed->children().size(), 1U);
+    EXPECT_EQ(completed->children().front().state, ProgramChildState::Completed);
+    EXPECT_TRUE(parent.cancel());
+    EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
+}
+
+TEST(ProgramRuntimeTest, DurableDslSpawnDispatchesTheLinkedChildAndJoinsItsResult) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2);
+    const auto linked = make_durable_spawn_child(fixture);
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                          "trace-durable-spawn", {}});
+
+    const auto result = parent.wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output()["channels"]["value"]["value"], "completed");
+    EXPECT_EQ(completed_calls.load(), 1U);
+
+    const auto record = parent.snapshot();
+    const auto children = record.children();
+    ASSERT_EQ(children.size(), 1U);
+    const auto& child = children.front();
+    EXPECT_EQ(child.link_id, linked.receipt.id());
+    EXPECT_EQ(child.invocation.parent_run_id, parent.run_id());
+    EXPECT_EQ(child.invocation.child_depth, 1U);
+    EXPECT_EQ(child.state, ProgramChildState::Completed);
+    ASSERT_TRUE(child.terminal_result.has_value());
+    EXPECT_EQ(child.terminal_result->status(), ProgramTerminalStatus::Completed);
+}
+
+TEST(ProgramRuntimeTest, DurableDslSpawnFailsClosedWhenItsBindingCannotBeResolved) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2);
+    const auto linked = make_durable_spawn_child(fixture);
+    fixture.clear_child_bindings();
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                          "trace-missing-durable-binding", {}});
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_CHILD_BINDING");
+    EXPECT_EQ(result.failure()->operation_id, "root.0");
+    EXPECT_EQ(result.failure()->witness["source_pointer"], "/root/body");
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, DurableDslSpawnRejectsAResolverReceiptForAnotherBinding) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2);
+    const auto linked = make_durable_spawn_child(fixture);
+    const ModuleLinkReceipt mismatched = ModuleLinkReceipt::create(ModuleLinkReceiptData{
+        linked.receipt.owner_scope(),
+        linked.receipt.parent_module_id(),
+        linked.receipt.dependency_merkle_root(),
+        "different-child",
+        linked.receipt.child_program_version_id(),
+        linked.receipt.child_bundle_id(),
+        linked.receipt.child_input_contract_fingerprint(),
+        linked.receipt.child_output_contract_fingerprint(),
+        linked.receipt.granted_capabilities(),
+        linked.receipt.granted_effects(),
+        linked.receipt.budget()});
+    fixture.bind_child(linked.parent_version, "child",
+                       ProgramRuntimeChildBinding{mismatched, linked.child_version});
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                          "trace-mismatched-durable-binding", {}});
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_CHILD_BINDING");
+    EXPECT_EQ(result.failure()->operation_id, "root.0");
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, DurableDslAwaitTimeoutCancelsAndRecordsItsChild) {
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(2);
+    const auto linked =
+        make_durable_spawn_child(fixture, "runtime-completed", "runtime-blocking", 10);
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                          "trace-durable-spawn-timeout", {}});
+
+    const auto result = parent.wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_AWAIT_TIMEOUT");
+
+    const auto pending = parent.snapshot();
+    const auto pending_children = pending.children();
+    ASSERT_EQ(pending_children.size(), 1U);
+    auto child = fixture.runtime->reconnect("tenant:runtime", pending_children.front().child_run_id);
+    EXPECT_EQ(child.wait().status(), ProgramTerminalStatus::Cancelled);
+    const auto settled = parent.snapshot();
+    const auto settled_children = settled.children();
+    ASSERT_EQ(settled_children.size(), 1U);
+    EXPECT_EQ(settled_children.front().state, ProgramChildState::Cancelled);
+    EXPECT_FALSE(settled_children.front().terminal_result.has_value());
 }
 TEST(ProgramRuntimeTest, ParentCompletionCancelsAttachedChild) {
     blocking_calls.store(0);

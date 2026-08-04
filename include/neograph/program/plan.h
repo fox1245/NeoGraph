@@ -56,8 +56,8 @@ struct NEOGRAPH_PROGRAM_API ProgramPlanDispatchDescriptor {
     std::optional<std::string>    then_id;
     std::optional<std::string>    else_id;
     std::optional<std::string>    body;
+    std::optional<std::string>    child_binding;
     std::vector<std::string>      branches;
-
     bool operator==(const ProgramPlanDispatchDescriptor&) const = default;
 };
 
@@ -82,6 +82,7 @@ public:
     const std::optional<std::string>& then_id() const noexcept;
     const std::optional<std::string>& else_id() const noexcept;
     const std::optional<std::string>& body() const noexcept;
+    const std::optional<std::string>& child_binding() const noexcept;
     const std::vector<std::string>& branches() const noexcept;
     const std::optional<std::uint64_t>& max_iterations() const noexcept;
     const std::optional<std::uint64_t>& max_attempts() const noexcept;

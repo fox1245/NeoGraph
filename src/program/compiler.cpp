@@ -373,7 +373,7 @@ void validate_root(const json&            document,
     add_unknown_fields(diagnostics, root, pointer,
                        {"op", "name", "definition", "children", "condition", "then", "else",
                         "body", "max_iterations", "max_attempts", "branches", "min_success",
-                        "items", "timeout_ms", "scope", "reason", "value"});
+                        "items", "child_binding", "timeout_ms", "scope", "reason", "value"});
     if (!root.contains("op")) {
         add_required(diagnostics, pointer, "op");
     } else if (!root["op"].is_string()) {
@@ -743,11 +743,22 @@ std::string lower_operation(const json& authored,
         if (body) lowered["body"] = singular_child(*body, "body", 0);
     } else if (op == "spawn") {
         if (is_root)
-            allowed({"op", "name", "definition", "body"});
+            allowed({"op", "name", "definition", "child_binding", "body"});
         else
-            allowed({"op", "body"});
-        const auto body = required_object("body");
-        if (body) lowered["body"] = singular_child(*body, "body", 0);
+            allowed({"op", "child_binding", "body"});
+        if (!authored.contains("child_binding") || !authored["child_binding"].is_string() ||
+            authored["child_binding"].get<std::string>().empty()) {
+            add_required(diagnostics, pointer, "child_binding");
+        } else {
+            lowered["child_binding"] = authored["child_binding"].get<std::string>();
+        }
+        if (authored.contains("body")) {
+            diagnostics.add(
+                CompilePhase::Normalize, "P_PLAN_SPAWN_SHAPE", DiagnosticSeverity::Error,
+                child_pointer(pointer, "body"),
+                "Program spawn dispatches a separately admitted child binding; it has no inline body",
+                json::object());
+        }
     } else if (op == "await") {
         if (is_root)
             allowed({"op", "name", "definition", "body", "timeout_ms"});
@@ -829,6 +840,21 @@ void validate_sealed_plan_dispatch(const ProgramPlan& plan,
         if (dispatch.body) require(*dispatch.body, "body");
         for (const auto& branch : dispatch.branches) require(branch, "branches");
     }
+    for (const auto& node : plan.nodes()) {
+        if (node.operation() != ProgramOperationKind::Spawn) continue;
+        const auto is_direct_await_body = std::any_of(
+            plan.nodes().begin(), plan.nodes().end(), [&](const ProgramPlanNode& candidate) {
+                return candidate.operation() == ProgramOperationKind::Await &&
+                       candidate.dispatch().body && *candidate.dispatch().body == node.id();
+            });
+        if (!is_direct_await_body) {
+            diagnostics.add(
+                CompilePhase::Seal, "P_PLAN_SPAWN_SHAPE", DiagnosticSeverity::Error,
+                node.source_pointer(),
+                "Program spawn must be the direct body of await so its durable child handle is joined",
+                json{{"operation_id", node.id()}});
+        }
+    }
 }
 
 OrchestrationPlanRecord lower_plan(const json& root,
@@ -837,12 +863,17 @@ OrchestrationPlanRecord lower_plan(const json& root,
     std::vector<json> operations;
     lower_operation(root, "root", "/root", root_name, true, operations, diagnostics);
     bool has_core = false;
-    for (const auto& operation : operations)
-        if (operation.value("op", "") == "call_core") has_core = true;
-    if (!has_core) {
-        diagnostics.add(CompilePhase::Normalize, "P_PLAN_CORE", DiagnosticSeverity::Error,
-                        "/root", "A Program plan must contain at least one call_core operation",
-                        json::object());
+    bool has_spawn = false;
+    for (const auto& operation : operations) {
+        const auto op = operation.value("op", "");
+        has_core = has_core || op == "call_core";
+        has_spawn = has_spawn || op == "spawn";
+    }
+    if (!has_core && !has_spawn) {
+        diagnostics.add(
+            CompilePhase::Normalize, "P_PLAN_CORE", DiagnosticSeverity::Error, "/root",
+            "A Program plan must contain either call_core or an admitted durable child spawn",
+            json::object());
     }
     json operation_array = json::array();
     for (auto& operation : operations) operation_array.push_back(std::move(operation));
@@ -887,6 +918,7 @@ void validate_budgets(const json&            document,
     const bool has_spawn =
         document.contains("root") && contains_operation(document["root"], "spawn");
     std::map<std::string, std::size_t> seen;
+    std::map<std::string, std::uint64_t> child_budget_maxima;
     for (std::size_t index = 0; index < values.size(); ++index) {
         const auto  item_pointer = child_pointer(pointer, std::to_string(index));
         const auto& value        = values[index];
@@ -949,8 +981,8 @@ void validate_budgets(const json&            document,
         } else if (resource == "max_dynamic_compiles") {
             structural_valid = *minimum == 0 && *maximum == 0;
         } else if (resource == "max_child_depth" || resource == "max_total_children") {
-            structural_valid = has_spawn ? *minimum >= 1
-                                         : (*minimum == 0 && *maximum == 0);
+            structural_valid = (*minimum == 0 && *maximum == 0) || *minimum >= 1;
+            if (has_spawn) structural_valid = *minimum >= 1;
         }
         if (!structural_valid) {
             diagnostics.add(
@@ -959,7 +991,19 @@ void validate_budgets(const json&            document,
                 json{{"resource", resource}, {"minimum", *minimum}, {"maximum", *maximum}});
             continue;
         }
+        if (resource == "max_child_depth" || resource == "max_total_children")
+            child_budget_maxima.emplace(resource, *maximum);
         output.budgets.push_back({resource, *minimum, *maximum});
+    }
+    const auto child_depth = child_budget_maxima.find("max_child_depth");
+    const auto total_children = child_budget_maxima.find("max_total_children");
+    if (child_depth != child_budget_maxima.end() && total_children != child_budget_maxima.end() &&
+        (child_depth->second == 0) != (total_children->second == 0)) {
+        diagnostics.add(CompilePhase::Normalize, "P_BUDGET_INVALID", DiagnosticSeverity::Error,
+                        std::string(pointer),
+                        "Child depth and total-child budgets must be enabled together",
+                        json{{"max_child_depth", child_depth->second},
+                             {"max_total_children", total_children->second}});
     }
     for (const auto resource : kBudgetResources) {
         if (!seen.contains(std::string(resource))) {

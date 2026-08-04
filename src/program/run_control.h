@@ -3,9 +3,9 @@
 #include <neograph/graph/engine.h>
 #include <neograph/program/event.h>
 #include <neograph/program/journal.h>
+#include <neograph/program/module.h>
 #include <neograph/program/result.h>
 #include <neograph/program/transition_store.h>
-
 #include "catalog_access.h"
 #include <asio/any_io_executor.hpp>
 #include <asio/steady_timer.hpp>
@@ -50,6 +50,11 @@ struct RunOutcome {
     std::vector<std::string>              execution_trace;
 };
 
+class RunControl;
+using ChildLaunchCallback =
+    std::function<std::shared_ptr<RunControl>(std::string_view, json, std::string_view,
+                                              std::string_view)>;
+
 class RunControl final {
 public:
     RunControl(std::string                                owner_scope,
@@ -70,6 +75,7 @@ public:
 
     using CompletionCallback = std::function<void(const ProgramResult&)>;
     void set_completion_callback(CompletionCallback callback) noexcept;
+    void set_child_launch_callback(ChildLaunchCallback callback) noexcept;
 
     const std::string                                owner_scope;
     const std::string                                run_id;
@@ -98,6 +104,10 @@ public:
     CancellationCause cancellation_cause() const noexcept;
     CancellationCause seal_terminal_cause() noexcept;
     void              attach_child(const std::shared_ptr<RunControl>& child) noexcept;
+    std::shared_ptr<RunControl> launch_child(std::string_view binding_name,
+                                             json             input,
+                                             std::string_view operation_id,
+                                             std::string_view execution_key) const;
 
     ProgramEvent stage_event(ProgramEventKind kind, ProgramEventPayload payload);
     ProgramEvent stage_event(std::string_view operation_id,
@@ -141,9 +151,10 @@ public:
     std::optional<ProgramResult>          result_;
     std::vector<ProgramEvent>             events_;
     std::optional<CoreCheckpointIdentity> latest_checkpoint_;
-    mutable std::vector<AsyncWaiter>      waiters_;
     std::shared_ptr<ProgramEventSink>     sink_;
     CompletionCallback                    completion_callback_;
+    mutable std::vector<AsyncWaiter>        waiters_;
+    ChildLaunchCallback                   child_launch_callback_;
     std::uint64_t                         next_sequence_      = 1;
     CancellationCause                     cancellation_cause_ = CancellationCause::None;
     bool                                  terminal_decided_   = false;

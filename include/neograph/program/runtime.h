@@ -55,13 +55,13 @@ struct RuntimeConfig {
     std::shared_ptr<graph::Store>           state_store;
     std::shared_ptr<ProgramTransitionStore> transitions;
     std::size_t                             scheduler_threads = 1;
+    ProgramChildBindingResolver              child_binding_resolver;
 };
-
 class NEOGRAPH_PROGRAM_API ProgramRuntime {
 public:
     explicit ProgramRuntime(RuntimeConfig config);
-    ProgramRuntime(ProgramRuntime&&) noexcept;
-    ProgramRuntime& operator=(ProgramRuntime&&) noexcept;
+    ProgramRuntime(ProgramRuntime&& other) noexcept;
+    ProgramRuntime& operator=(ProgramRuntime&& other) noexcept;
     ProgramRuntime(const ProgramRuntime&)            = delete;
     ProgramRuntime& operator=(const ProgramRuntime&) = delete;
     ~ProgramRuntime();

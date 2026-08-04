@@ -669,6 +669,72 @@ TEST(ProgramCompilerTest, SealsLoweredOperationsAsTypedImmutablePlanNodes) {
               detail::canonical_json_bytes(bundle.orchestration_plan().plan));
 }
 
+TEST(ProgramCompilerTest, AllowsExplicitChildCapacityForProgramRuntimeStartChild) {
+    const auto snapshot = complete_snapshot();
+    auto document = program_document();
+    auto requirements = document["declared_budget_requirements"];
+    for (std::size_t index = 0; index < requirements.size(); ++index) {
+        const auto resource = requirements[index]["resource"].get<std::string>();
+        if (resource == "max_child_depth" || resource == "max_total_children") {
+            requirements[index]["minimum"] = 1;
+            requirements[index]["maximum"] = 1;
+        }
+    }
+    document["declared_budget_requirements"] = std::move(requirements);
+
+    EXPECT_NO_THROW(
+        (void)ProgramCompiler(snapshot, {"program-compiler-test/v1"}).compile(source_from(document)));
+}
+
+TEST(ProgramCompilerTest, LowersOnlyDirectlyJoinedVerifiedChildBindingSpawns) {
+    const auto snapshot = complete_snapshot();
+    auto document = program_document();
+    const auto definition = document["root"]["definition"];
+    document["root"] = json{{"op", "await"},
+                            {"name", "main"},
+                            {"definition", definition},
+                            {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}};
+    auto requirements = document["declared_budget_requirements"];
+    for (std::size_t index = 0; index < requirements.size(); ++index) {
+        const auto resource = requirements[index]["resource"].get<std::string>();
+        if (resource == "max_program_operations") {
+            requirements[index]["minimum"] = 2;
+            requirements[index]["maximum"] = 2;
+        } else if (resource == "max_child_depth" || resource == "max_total_children") {
+            requirements[index]["minimum"] = 1;
+            requirements[index]["maximum"] = 1;
+        }
+    }
+    document["declared_budget_requirements"] = std::move(requirements);
+
+    const auto bundle =
+        ProgramCompiler(snapshot, {"program-compiler-test/v1"}).compile(source_from(document));
+    const auto& plan = bundle.typed_orchestration_plan();
+    ASSERT_EQ(plan.root().operation(), ProgramOperationKind::Await);
+    ASSERT_TRUE(plan.root().body().has_value());
+    const auto* spawn = plan.find(*plan.root().body());
+    ASSERT_NE(spawn, nullptr);
+    EXPECT_EQ(spawn->operation(), ProgramOperationKind::Spawn);
+    EXPECT_EQ(spawn->child_binding(), std::optional<std::string>("child"));
+    EXPECT_FALSE(spawn->body().has_value());
+
+    auto unjoined = document;
+    unjoined["root"] = json{{"op", "spawn"},
+                             {"name", "main"},
+                             {"definition", definition},
+                             {"child_binding", "child"}};
+    EXPECT_TRUE(contains_code(compile_errors(snapshot, std::move(unjoined)), "P_PLAN_SPAWN_SHAPE"));
+
+    auto inline_spawn = document;
+    inline_spawn["root"] = json{{"op", "spawn"},
+                                 {"name", "main"},
+                                 {"definition", definition},
+                                 {"child_binding", "child"},
+                                 {"body", json{{"op", "call_core"}}}};
+    EXPECT_TRUE(
+        contains_code(compile_errors(snapshot, std::move(inline_spawn)), "P_PLAN_SPAWN_SHAPE"));
+}
+
 TEST(ProgramCompilerTest, DispatchDescriptorWalkBenchmarkExcludesCoreExecution) {
     const auto plan = ProgramPlan::from_json(
         json{{"root", "root"},
@@ -1147,7 +1213,8 @@ TEST(ProgramCompilerTest, EveryFailurePathLeavesDispatchCountersZero) {
         auto document = program_document();
         for (std::size_t index = 0; index < document["declared_budget_requirements"].size();
              ++index) {
-            if (document["declared_budget_requirements"][index]["resource"] == "max_child_depth")
+            if (document["declared_budget_requirements"][index]["resource"] ==
+                "max_child_depth")
                 document["declared_budget_requirements"][index]["maximum"] = 1;
         }
         return !compile_errors(snapshot, std::move(document)).empty();

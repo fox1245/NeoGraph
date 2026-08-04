@@ -319,6 +319,33 @@ std::string child_run_id_for(std::string_view            parent_run_id,
                                           {"trace_id", invocation.trace_id}}));
 }
 
+bool checkpointless_replay_safe(const ProgramPlan& plan) {
+    if (plan.nodes().empty()) return false;
+    return std::all_of(plan.nodes().begin(), plan.nodes().end(),
+                       [](const ProgramPlanNode& node) {
+                           switch (node.operation()) {
+                               case ProgramOperationKind::Sequence:
+                               case ProgramOperationKind::Branch:
+                               case ProgramOperationKind::Loop:
+                               case ProgramOperationKind::Retry:
+                               case ProgramOperationKind::Parallel:
+                               case ProgramOperationKind::Race:
+                               case ProgramOperationKind::Quorum:
+                               case ProgramOperationKind::Map:
+                               case ProgramOperationKind::Spawn:
+                               case ProgramOperationKind::Await:
+                               case ProgramOperationKind::Return:
+                                   return true;
+                               case ProgramOperationKind::CallCore:
+                               case ProgramOperationKind::Emit:
+                               case ProgramOperationKind::Checkpoint:
+                               case ProgramOperationKind::Cancel:
+                                   return false;
+                           }
+                           return false;
+                       });
+}
+
 ProgramChildRecord child_record_for(std::string_view         child_run_id,
                                     const ModuleLinkReceipt& link,
                                     const ProgramInvocation& invocation,
@@ -807,6 +834,34 @@ RunControl::RunControl(ProgramRunRecord                        record,
 void RunControl::set_completion_callback(CompletionCallback callback) noexcept {
     std::lock_guard lock(mutex_);
     completion_callback_ = std::move(callback);
+}
+void RunControl::set_child_launch_callback(ChildLaunchCallback callback) noexcept {
+    std::lock_guard lock(mutex_);
+    child_launch_callback_ = std::move(callback);
+}
+
+std::shared_ptr<RunControl> RunControl::launch_child(std::string_view binding_name,
+                                                     json             input,
+                                                     std::string_view operation_id,
+                                                     std::string_view execution_key) const {
+    ChildLaunchCallback callback;
+    {
+        std::lock_guard lock(mutex_);
+        callback = child_launch_callback_;
+    }
+    if (!callback)
+        throw_runtime_diagnostic("P_CHILD_BINDING",
+                                 "Program spawn has no configured child binding resolver",
+                                 json{{"binding", std::string(binding_name)},
+                                      {"operation_id", std::string(operation_id)}});
+    try {
+        return callback(binding_name, std::move(input), operation_id, execution_key);
+    } catch (const ProgramDiagnosticError& error) {
+        auto diagnostic = error.diagnostic();
+        if (!diagnostic.witness.is_object()) diagnostic.witness = json::object();
+        diagnostic.witness["operation_id"] = std::string(operation_id);
+        throw ProgramDiagnosticError(std::move(diagnostic));
+    }
 }
 
 
@@ -1325,9 +1380,82 @@ ProgramHandle ProgramHandle::reconcile(ProgramRuntime&         runtime,
 struct ProgramRuntime::Impl {
     explicit Impl(RuntimeConfig runtime_config)
         : config(std::move(runtime_config)), pool(config.scheduler_threads) {}
+    ProgramRuntime* owner = nullptr;
+
+    void configure_child_launcher(const std::shared_ptr<detail::RunControl>& control) {
+        if (!config.child_binding_resolver || !owner) return;
+        const auto weak_control = std::weak_ptr<detail::RunControl>(control);
+        control->set_child_launch_callback(
+            [this, weak_control](std::string_view binding_name, json input,
+                                 std::string_view operation_id, std::string_view execution_key) {
+                const auto parent = weak_control.lock();
+                if (!parent) throw std::runtime_error("Parent Program control expired");
+                const auto resolved = config.child_binding_resolver(
+                    parent->owner_scope, parent->program_version_id, binding_name);
+                if (!resolved)
+                    throw_runtime_diagnostic(
+                        "P_CHILD_BINDING", "Verified child binding was not resolved",
+                        json{{"binding", std::string(binding_name)},
+                             {"operation_id", std::string(operation_id)}});
+                if (resolved->receipt.child_name() != binding_name)
+                    throw_runtime_diagnostic(
+                        "P_CHILD_BINDING",
+                        "Verified child binding does not match its immutable link receipt",
+                        json{{"binding", std::string(binding_name)},
+                             {"receipt_child_name", resolved->receipt.child_name()},
+                             {"operation_id", std::string(operation_id)}});
+                const auto& limits = resolved->receipt.budget();
+                RunBudget budget{limits.wall_time_ms,
+                                 limits.model_tokens,
+                                 limits.monetary_microunits,
+                                 limits.max_concurrency,
+                                 limits.max_program_operations,
+                                 limits.max_core_steps,
+                                 limits.max_dynamic_compiles,
+                                 limits.max_child_depth,
+                                 limits.max_total_children};
+                const auto parent_depth = parent->persisted_invocation.child_depth;
+                if (parent_depth < parent->granted_budget.max_child_depth) {
+                    budget.max_child_depth =
+                        std::min(budget.max_child_depth,
+                                 parent->granted_budget.max_child_depth - parent_depth - 1);
+                } else {
+                    budget.max_child_depth = 0;
+                }
+                if (parent->granted_budget.max_total_children > 0) {
+                    budget.max_total_children =
+                        std::min(budget.max_total_children,
+                                 parent->granted_budget.max_total_children - 1);
+                } else {
+                    budget.max_total_children = 0;
+                }
+                const auto child_run_id = detail::sha256_identity(
+                    "program-dsl-child/v1",
+                    detail::canonical_json_bytes(
+                        json{{"owner_scope", parent->owner_scope},
+                             {"parent_run_id", parent->run_id},
+                             {"parent_program_version_id", parent->program_version_id},
+                             {"link_id", resolved->receipt.id()},
+                             {"operation_id", std::string(operation_id)},
+                             {"execution_key", std::string(execution_key)}}));
+                ProgramInvocation invocation{std::move(input),
+                                             budget,
+                                             parent->trace_id + ":" +
+                                                 std::string(operation_id) + ":" +
+                                                 std::string(execution_key),
+                                             {},
+                                             child_run_id,
+                                             parent->run_id,
+                                             parent->persisted_invocation.child_depth + 1};
+                ProgramHandle child = owner->start_child(
+                    parent->owner_scope, ProgramHandle(parent), resolved->receipt,
+                    resolved->version, std::move(invocation));
+                return child.control_;
+            });
+    }
 
     void register_control(const std::shared_ptr<detail::RunControl>& control) {
-        std::lock_guard lock(mutex);
+        configure_child_launcher(control);
         if (stopping) throw std::runtime_error("ProgramRuntime is stopping");
         std::erase_if(controls, [](const std::weak_ptr<detail::RunControl>& weak) {
             const auto live = weak.lock();
@@ -1473,14 +1601,18 @@ ProgramRuntime::ProgramRuntime(RuntimeConfig config) {
             "scheduler thread");
     }
     impl_ = std::make_unique<Impl>(std::move(config));
+    impl_->owner = this;
 }
 
-ProgramRuntime::ProgramRuntime(ProgramRuntime&&) noexcept = default;
+ProgramRuntime::ProgramRuntime(ProgramRuntime&& other) noexcept : impl_(std::move(other.impl_)) {
+    if (impl_) impl_->owner = this;
+}
 
 ProgramRuntime& ProgramRuntime::operator=(ProgramRuntime&& other) noexcept {
     if (this == &other) return *this;
     if (impl_) impl_->shutdown();
     impl_ = std::move(other.impl_);
+    if (impl_) impl_->owner = this;
     return *this;
 }
 
@@ -2180,12 +2312,6 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
     }
     const auto state = record->continuation().state;
     if (state == ContinuationState::Running) {
-        const auto checkpoint = record->exact_checkpoint();
-        if (!checkpoint) {
-            throw_runtime_diagnostic(
-                "P_RUN_RECOVERY_BLOCKED",
-                "Running Program has no atomically published checkpoint and cannot be restarted");
-        }
         const auto version =
             impl_->config.catalog->resolve_version(owner_scope, record->program_version_id());
         if (!version) {
@@ -2196,20 +2322,41 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         const auto binding_fingerprint = capability_binding_receipt_root(
             version->core_materialization_receipt().capability_bindings);
         if (pinned->bundle.id() != record->bundle_id() ||
-            binding_fingerprint != record->binding_fingerprint() ||
-            pinned->root->compiled_plan_identity != checkpoint->core_generation_id ||
-            pinned->root->core_name != checkpoint->core_name) {
-            throw_runtime_diagnostic("P_CHECKPOINT_INCOMPATIBLE",
+            binding_fingerprint != record->binding_fingerprint()) {
+            throw_runtime_diagnostic("P_RUN_RECOVERY_IDENTITY",
                                      "Running Program recovery identity is incompatible");
         }
-        const auto stored_checkpoint =
-            impl_->config.checkpoints->load_by_id(checkpoint->checkpoint_id);
-        if (!stored_checkpoint || stored_checkpoint->thread_id != checkpoint->core_thread_id ||
-            stored_checkpoint->schema_version != checkpoint->checkpoint_schema_version ||
-            stored_checkpoint->schema_version != graph::CHECKPOINT_SCHEMA_VERSION) {
-            throw_runtime_diagnostic("P_CHECKPOINT_INCOMPATIBLE",
-                                     "Running Program recovery checkpoint is absent or invalid");
+
+        const auto checkpoint = record->exact_checkpoint();
+        std::string recovered_thread_id;
+        std::optional<std::string> resume_checkpoint_id;
+        if (checkpoint) {
+            if (pinned->root->compiled_plan_identity != checkpoint->core_generation_id ||
+                pinned->root->core_name != checkpoint->core_name) {
+                throw_runtime_diagnostic("P_CHECKPOINT_INCOMPATIBLE",
+                                         "Running Program recovery identity is incompatible");
+            }
+            const auto stored_checkpoint =
+                impl_->config.checkpoints->load_by_id(checkpoint->checkpoint_id);
+            if (!stored_checkpoint || stored_checkpoint->thread_id != checkpoint->core_thread_id ||
+                stored_checkpoint->schema_version != checkpoint->checkpoint_schema_version ||
+                stored_checkpoint->schema_version != graph::CHECKPOINT_SCHEMA_VERSION) {
+                throw_runtime_diagnostic("P_CHECKPOINT_INCOMPATIBLE",
+                                         "Running Program recovery checkpoint is absent or invalid");
+            }
+            recovered_thread_id = checkpoint->core_thread_id;
+            resume_checkpoint_id = checkpoint->checkpoint_id;
+        } else {
+            if (!checkpointless_replay_safe(pinned->bundle.typed_orchestration_plan())) {
+                throw_runtime_diagnostic(
+                    "P_RUN_RECOVERY_BLOCKED",
+                    "Running Program has no checkpoint and is not replay-safe without Core dispatch",
+                    json{{"run_id", std::string(run_id)}});
+            }
+            recovered_thread_id =
+                core_thread_identity(run_id, pinned->root->compiled_plan_identity);
         }
+
         ProgramPersistedInvocation invocation{
             record->invocation().input,
             record->remaining_budget(),
@@ -2219,7 +2366,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         auto control = std::make_shared<detail::RunControl>(
             std::string(owner_scope), std::string(run_id), record->continuation().attempt,
             std::move(pinned), record->binding_fingerprint(), std::move(invocation),
-            checkpoint->core_thread_id, record->event_sequence(),
+            std::move(recovered_thread_id), record->event_sequence(),
             std::shared_ptr<ProgramEventSink>{},
             impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
             impl_->config.state_store, impl_->config.transitions);
@@ -2233,7 +2380,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         }
         impl_->register_control(control);
         spawn_run_attempt(impl_->pool, control, record->invocation().input,
-                          checkpoint->checkpoint_id);
+                          std::move(resume_checkpoint_id));
         return ProgramHandle(std::move(control));
     }
     const bool requires_result = state != ContinuationState::Interrupted &&

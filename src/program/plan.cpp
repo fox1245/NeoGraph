@@ -62,7 +62,7 @@ void reject_unknown_fields(const json& value, ProgramOperationKind operation) {
         case ProgramOperationKind::Race: add({"branches"}); break;
         case ProgramOperationKind::Quorum: add({"branches", "min_success"}); break;
         case ProgramOperationKind::Map: add({"items", "body"}); break;
-        case ProgramOperationKind::Spawn: add({"body"}); break;
+        case ProgramOperationKind::Spawn: add({"child_binding"}); break;
         case ProgramOperationKind::Await: add({"body", "timeout_ms"}); break;
         case ProgramOperationKind::Emit:
         case ProgramOperationKind::Return: add({"value"}); break;
@@ -118,6 +118,7 @@ struct NodeData {
     std::optional<std::string>    then_id;
     std::optional<std::string>    else_id;
     std::optional<std::string>    body;
+    std::optional<std::string>    child_binding;
     std::vector<std::string>      branches;
     std::optional<std::uint64_t>  max_iterations;
     std::optional<std::uint64_t>  max_attempts;
@@ -175,6 +176,9 @@ const std::optional<std::string>& ProgramPlanNode::then_id() const noexcept {
 const std::optional<std::string>& ProgramPlanNode::else_id() const noexcept {
     return impl_->data.else_id;
 }
+const std::optional<std::string>& ProgramPlanNode::child_binding() const noexcept {
+    return impl_->data.child_binding;
+}
 const std::optional<std::string>& ProgramPlanNode::body() const noexcept { return impl_->data.body; }
 const std::vector<std::string>& ProgramPlanNode::branches() const noexcept {
     return impl_->data.branches;
@@ -210,6 +214,7 @@ json ProgramPlanNode::to_json() const {
     if (data.then_id) result["then"] = *data.then_id;
     if (data.else_id) result["else"] = *data.else_id;
     if (data.body) result["body"] = *data.body;
+    if (data.child_binding) result["child_binding"] = *data.child_binding;
     if (!data.branches.empty()) result["branches"] = data.branches;
     if (data.max_iterations) result["max_iterations"] = *data.max_iterations;
     if (data.max_attempts) result["max_attempts"] = *data.max_attempts;
@@ -266,6 +271,8 @@ ProgramPlan ProgramPlan::from_json(const json& plan) {
         if (encoded.contains("then")) data.then_id = require_string(encoded, "then");
         if (encoded.contains("else")) data.else_id = require_string(encoded, "else");
         if (encoded.contains("body")) data.body = require_string(encoded, "body");
+        if (encoded.contains("child_binding"))
+            data.child_binding = require_string(encoded, "child_binding");
         if (encoded.contains("branches")) data.branches = require_refs(encoded, "branches", 2);
         if (encoded.contains("condition")) {
             if (!encoded["condition"].is_object())
@@ -297,6 +304,7 @@ ProgramPlan ProgramPlan::from_json(const json& plan) {
         node_impl->dispatch.then_id        = data.then_id;
         node_impl->dispatch.else_id        = data.else_id;
         node_impl->dispatch.body           = data.body;
+        node_impl->dispatch.child_binding  = data.child_binding;
         node_impl->dispatch.branches       = data.branches;
         node_impl->data = std::move(data);
         impl->nodes.emplace_back(ProgramPlanNode(std::move(node_impl)));
@@ -342,12 +350,15 @@ ProgramPlan ProgramPlan::from_json(const json& plan) {
             if (op == ProgramOperationKind::Quorum &&
                 (!node.min_success() || *node.min_success() > node.branches().size()))
                 throw std::invalid_argument("quorum min_success exceeds branch count");
-        } else if (op == ProgramOperationKind::Map || op == ProgramOperationKind::Spawn ||
-                   op == ProgramOperationKind::Await) {
+        } else if (op == ProgramOperationKind::Map || op == ProgramOperationKind::Await) {
             if (!node.body()) throw std::invalid_argument("operation requires body");
             require_ref(*node.body(), node.id());
             if (op == ProgramOperationKind::Map && node.items().empty())
                 throw std::invalid_argument("map requires nonempty items");
+        } else if (op == ProgramOperationKind::Spawn) {
+            if (!node.child_binding())
+                throw std::invalid_argument("spawn requires a verified child_binding");
+            if (node.body()) require_ref(*node.body(), node.id());
         } else if (op == ProgramOperationKind::Checkpoint) {
             if (node.body()) require_ref(*node.body(), node.id());
         } else if (op == ProgramOperationKind::Cancel) {

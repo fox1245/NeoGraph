@@ -176,6 +176,17 @@ private:
     std::shared_ptr<const Impl> impl_;
 };
 
+/** Runtime-only immutable child binding supplied by an owning resolver. */
+struct ProgramRuntimeChildBinding {
+    ModuleLinkReceipt receipt;
+    ProgramVersion    version;
+};
+
+using ProgramChildBindingResolver = std::function<std::optional<ProgramRuntimeChildBinding>(
+    std::string_view owner_scope,
+    std::string_view parent_program_version_id,
+    std::string_view child_binding_name)>;
+
 /**
  * Link one child descriptor from a verified module closure to an exact
  * admitted ProgramVersion. The operation is pure and fails closed on owner,

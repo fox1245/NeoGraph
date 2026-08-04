@@ -7,6 +7,7 @@
 #include "catalog_access.h"
 #include "registry_access.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <map>
@@ -533,7 +534,7 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
             return fail("operation id is empty or duplicated", id);
     }
 
-    bool has_core = false;
+    bool has_execution = false;
     for (const auto& [id, operation] : operations) {
         const auto op = operation["op"].get<std::string>();
         if (op != "call_core" && op != "sequence" && op != "branch" && op != "loop" &&
@@ -546,7 +547,7 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
             if (!operation.contains("core") || !operation["core"].is_string() ||
                 operation["core"].get<std::string>() != core_name)
                 return fail("call_core does not bind the sealed Core", id, "core");
-            has_core = true;
+            has_execution = true;
         } else if (op == "sequence") {
             if (!references(operation, "children", id, 1)) return false;
         } else if (op == "branch") {
@@ -580,7 +581,23 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
                 operation["items"].empty())
                 return fail("map items are missing or empty", id, "items");
             if (!reference(operation, "body", id)) return false;
-        } else if (op == "spawn" || op == "await") {
+        } else if (op == "spawn") {
+            if (operation.contains("body"))
+                return fail("spawn must not carry an inline body", id, "body");
+            if (!operation.contains("child_binding") || !operation["child_binding"].is_string() ||
+                operation["child_binding"].get<std::string>().empty())
+                return fail("spawn child binding is missing or malformed", id, "child_binding");
+            const bool directly_joined = std::any_of(
+                operations.begin(), operations.end(), [&](const auto& candidate) {
+                    return candidate.second["op"] == "await" &&
+                           candidate.second.contains("body") &&
+                           candidate.second["body"].is_string() &&
+                           candidate.second["body"].template get<std::string>() == id;
+                });
+            if (!directly_joined)
+                return fail("spawn is not directly joined by await", id, "child_binding");
+            has_execution = true;
+        } else if (op == "await") {
             if (!reference(operation, "body", id)) return false;
         } else if (op == "checkpoint") {
             if (operation.contains("body") && !reference(operation, "body", id)) return false;
@@ -589,17 +606,18 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
                 return fail("value operation has no value", id, "value");
         }
     }
+    if (!has_execution) return fail("operation graph contains no execution operation");
     std::set<std::string, std::less<>> active;
     std::set<std::string, std::less<>> visited;
-    bool reachable_core = false;
+    bool reachable_execution = false;
     std::function<bool(const std::string&)> visit = [&](const std::string& id) {
         if (active.contains(id)) return fail("operation graph contains a cycle", id);
         if (!visited.insert(id).second) return true;
         active.insert(id);
         const auto& operation = operations.at(id);
         const auto  op = operation["op"].get<std::string>();
-        if (op == "call_core") {
-            reachable_core = true;
+        if (op == "call_core" || op == "spawn") {
+            reachable_execution = true;
         } else {
             const auto visit_one = [&](const json& value) {
                 return value.is_string() && visit(value.get<std::string>());
@@ -617,8 +635,7 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
             } else if (op == "branch") {
                 valid = visit_one(operation.at("then"));
                 if (valid && operation.contains("else")) valid = visit_one(operation.at("else"));
-            } else if (op == "loop" || op == "retry" || op == "map" ||
-                       op == "spawn" || op == "await") {
+            } else if (op == "loop" || op == "retry" || op == "map" || op == "await") {
                 valid = visit_one(operation.at("body"));
             } else if (op == "checkpoint" && operation.contains("body")) {
                 valid = visit_one(operation.at("body"));
@@ -630,7 +647,8 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
     };
     if (!operations.contains(root) || !visit(root))
         return fail("operation graph is not a finite rooted DAG", root, "root");
-    if (!reachable_core) return fail("rooted operation graph contains no call_core");
+    if (!reachable_execution)
+        return fail("rooted operation graph contains no execution operation");
     if (visited.size() != operations.size())
         return fail("operation graph contains unreachable operations");
     return true;
@@ -652,7 +670,7 @@ std::uint64_t policy_ceiling(std::string_view resource, const BudgetLimits& limi
 void validate_budgets(const ProgramBundle&  bundle,
                       const PolicySnapshot& policy,
                       AdmissionDiagnostics& diagnostics) {
-    const auto&                                     budgets = bundle.declared_budget_requirements();
+    const auto& budgets = bundle.declared_budget_requirements();
     std::map<std::string, const BudgetRequirement*> by_resource;
     for (const auto& budget : budgets)
         by_resource.emplace(budget.resource, &budget);
@@ -697,28 +715,6 @@ void validate_budgets(const ProgramBundle&  bundle,
                         "Budget closure differs from the closed Program-v1 resource set",
                         json{{"actual_count", by_resource.size()},
                              {"required_count", kBudgetResources.size()}});
-    }
-
-    const auto plan = bundle.orchestration_plan();
-    bool       has_spawn = false;
-    if (plan.plan.is_object() && plan.plan.contains("operations") &&
-        plan.plan["operations"].is_array()) {
-        for (const auto& operation : plan.plan["operations"]) {
-            if (operation.is_object() && operation.value("op", "") == "spawn") {
-                has_spawn = true;
-                break;
-            }
-        }
-    }
-    if (has_spawn) {
-        const auto depth = by_resource.find("max_child_depth");
-        const auto total = by_resource.find("max_total_children");
-        if (depth == by_resource.end() || total == by_resource.end() ||
-            depth->second->maximum == 0 || total->second->maximum == 0) {
-            diagnostics.add(
-                "P_ADMIT_POLICY", "/declared_budget_requirements",
-                "A Program containing spawn must admit positive child depth and child-count budgets");
-        }
     }
 }
 
