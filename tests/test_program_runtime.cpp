@@ -87,7 +87,8 @@ private:
 
 class EffectInterruptNode final : public GraphNode {
 public:
-    explicit EffectInterruptNode(std::string name) : name_(std::move(name)) {}
+    explicit EffectInterruptNode(std::string name, bool non_idempotent = false)
+        : name_(std::move(name)), non_idempotent_(non_idempotent) {}
 
     asio::awaitable<NodeOutput> run(NodeInput input) override {
         ++interrupt_calls;
@@ -99,7 +100,7 @@ public:
                      {"result_schema", json{{"type", "object"}}},
                      {"effect",
                       json{{"effect_id", "effect-search-1"},
-                           {"idempotency", "supported"},
+                           {"idempotency", non_idempotent_ ? "non_idempotent" : "supported"},
                            {"tool", "search"},
                            {"arguments", json{{"query", "neo"}}}}},
                      {"expires_at_unix_ms", 4102444800000ULL}});
@@ -113,6 +114,7 @@ public:
 
 private:
     std::string name_;
+    bool        non_idempotent_ = false;
 };
 
 class FailingNode final : public GraphNode {
@@ -222,6 +224,12 @@ RegistrySnapshot runtime_registry() {
         manifest(ExecutableKind::Node, "runtime-effect-interrupt", 'a'),
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<EffectInterruptNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-effect-nonidempotent", 'c'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<EffectInterruptNode>(name, true);
         },
         json{{"type", "object"}}, json::object());
     builder.add_node(
@@ -1001,6 +1009,58 @@ TEST(ProgramRuntimeTest, TypedPendingEffectPublishesOnceAndResumesByExactCallIde
     EXPECT_EQ(persisted->pending_effect()->state(), ProgramPendingState::Consumed);
     EXPECT_EQ(persisted->effect_sequence(), 1U);
     EXPECT_EQ(fixture.journal->load_effects("tenant:runtime", interrupted.run_id()).size(), 1U);
+}
+
+TEST(ProgramRuntimeTest, UnknownNonIdempotentEffectBlocksCancelAndRedispatch) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit("runtime-effect-nonidempotent");
+    const auto interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-effect-ambiguous", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(interrupted.interrupt().has_value());
+    ASSERT_TRUE(interrupted.interrupt()->pending_effect.has_value());
+    const auto pending = *interrupted.interrupt()->pending_effect;
+    const auto run_id = interrupted.run_id();
+
+    auto ambiguous = fixture.runtime
+                         ->reconcile("tenant:runtime", run_id,
+                                     ProgramEffectResolution{pending.call_id(),
+                                                             ProgramEffectReconciliation::Unknown,
+                                                             std::nullopt,
+                                                             "trace-effect-unknown", {}})
+                         .wait();
+    EXPECT_EQ(ambiguous.status(), ProgramTerminalStatus::AmbiguousEffect);
+    EXPECT_EQ(interrupt_calls.load(), 1U);
+    auto persisted = fixture.journal->load("tenant:runtime", run_id);
+    ASSERT_TRUE(persisted.has_value());
+    EXPECT_EQ(persisted->continuation().state, ContinuationState::AmbiguousEffect);
+    ASSERT_TRUE(persisted->pending_effect().has_value());
+    EXPECT_EQ(persisted->pending_effect()->state(), ProgramPendingState::Ambiguous);
+    const auto ambiguous_journal = persisted->journal_head();
+    ASSERT_EQ(fixture.journal->load_effects("tenant:runtime", run_id).size(), 1U);
+
+    fixture.recreate_catalog_and_runtime();
+    auto recovered = fixture.runtime->reconnect("tenant:runtime", run_id);
+    EXPECT_FALSE(recovered.cancel());
+    EXPECT_EQ(fixture.journal->latest("tenant:runtime", run_id)->id, ambiguous_journal);
+    EXPECT_EQ(interrupt_calls.load(), 1U);
+
+    auto completed = fixture.runtime
+                         ->reconcile("tenant:runtime", run_id,
+                                     ProgramEffectResolution{pending.call_id(),
+                                                             ProgramEffectReconciliation::Completed,
+                                                             json{{"result", "reconciled"}},
+                                                             "trace-effect-reconciled", {}})
+                         .wait();
+    EXPECT_EQ(completed.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(completed.output()["channels"]["value"]["value"], "reconciled");
+    EXPECT_EQ(interrupt_calls.load(), 2U);
+    persisted = fixture.journal->load("tenant:runtime", run_id);
+    ASSERT_TRUE(persisted.has_value());
+    EXPECT_EQ(persisted->pending_effect()->state(), ProgramPendingState::Consumed);
+    EXPECT_EQ(fixture.journal->load_effects("tenant:runtime", run_id).size(), 1U);
 }
 
 TEST(ProgramRuntimeTest, CrossOwnerResumeIsNoOracleAndNeverReadsCheckpoint) {
@@ -2104,6 +2164,7 @@ TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersi
     ASSERT_EQ(interrupt_calls.load(), 1U);
     const auto source_record = fixture.journal->load("tenant:runtime", source.run_id());
     ASSERT_TRUE(source_record.has_value());
+    ASSERT_EQ(source_record->continuation().state, ContinuationState::Interrupted);
     ASSERT_TRUE(source_record->pending_input().has_value());
     const auto source_pending_id = source_record->pending_input()->call_id();
 

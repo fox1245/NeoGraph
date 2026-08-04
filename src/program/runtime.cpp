@@ -804,7 +804,7 @@ bool RunControl::cancel(CancellationCause cause) noexcept {
                     previous->journal_head(), run_id, program_version_id, bundle_id,
                     previous_journal->sequence + 1,
                     ProgramContinuation{"root", ContinuationState::Cancelled, attempt},
-                    previous->remaining_budget(), previous->remaining_budget(),
+                    previous->remaining_budget(), RunBudget{},
                     previous->exact_checkpoint(), timestamp});
                 ProgramResultData result_data;
                 result_data.status             = ProgramTerminalStatus::Cancelled;
@@ -1876,6 +1876,23 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
 
         throw_runtime_diagnostic("P_RUN_CONFLICT", "Requested Program run id is unavailable");
     }
+    std::optional<MigrationPlan> durable_plan;
+    try {
+        durable_plan = control->transitions->load_migration_plan(owner_scope, run_id);
+    } catch (const std::exception& error) {
+        throw_runtime_diagnostic(
+            "P_FORK_MIGRATION_PROOF",
+            "Fork publication migration proof could not be read back",
+            json{{"run_id", run_id}, {"detail", error.what()}});
+    }
+    if (!durable_plan || durable_plan->id() != migration_plan.id()) {
+        throw_runtime_diagnostic(
+            "P_FORK_MIGRATION_PROOF",
+            "Fork publication did not durably retain its migration proof",
+            json{{"run_id", run_id},
+                 {"expected_plan_id", migration_plan.id()},
+                 {"stored_plan_id", durable_plan ? durable_plan->id() : std::string{}}});
+    }
     impl_->register_control(control);
     try {
         control->deliver_event(started);
@@ -1962,6 +1979,52 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
     const auto record = impl_->config.transitions->load(owner_scope, run_id);
     if (!record) {
         throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program run was not found");
+    }
+    if (const auto fork = record->fork_receipt()) {
+        // A fork is recoverable only when the exact migration proof survived
+        // with the target snapshot.  Recompute the content-addressed proof as
+        // well, so a store cannot silently substitute another compatible plan
+        // with the same source/target version pair.
+        std::optional<MigrationPlan> stored_plan;
+        try {
+            stored_plan = impl_->config.transitions->load_migration_plan(owner_scope, run_id);
+        } catch (const std::exception& error) {
+            throw_runtime_diagnostic(
+                "P_FORK_MIGRATION_PROOF",
+                "Fork recovery migration proof is unreadable",
+                json{{"run_id", std::string(run_id)}, {"detail", error.what()}});
+        }
+        const auto source_version = impl_->config.catalog->resolve_version(
+            owner_scope, fork->source_program_version_id());
+        const auto target_version =
+            impl_->config.catalog->resolve_version(owner_scope, record->program_version_id());
+        if (!stored_plan || !source_version || !target_version || !fork->compatible() ||
+            fork->owner_scope() != owner_scope || !record->fork_source_run_id() ||
+            *record->fork_source_run_id() != fork->source_run_id() ||
+            !record->fork_source_program_version_id() ||
+            *record->fork_source_program_version_id() != fork->source_program_version_id() ||
+            !record->fork_source_checkpoint_id() ||
+            *record->fork_source_checkpoint_id() != fork->source_checkpoint_id() ||
+            fork->target_program_version_id() != record->program_version_id() ||
+            stored_plan->owner_scope() != owner_scope || !stored_plan->is_compatible() ||
+            stored_plan->source_version_id() != fork->source_program_version_id() ||
+            stored_plan->target_version_id() != record->program_version_id()) {
+            throw_runtime_diagnostic(
+                "P_FORK_MIGRATION_PROOF",
+                "Fork recovery requires a durable compatible migration proof",
+                json{{"run_id", std::string(run_id)},
+                     {"source_version_id", fork->source_program_version_id()},
+                     {"target_version_id", record->program_version_id()}});
+        }
+        const auto expected_plan = MigrationPlan::between(*source_version, *target_version);
+        if (!expected_plan.is_compatible() || expected_plan.id() != stored_plan->id()) {
+            throw_runtime_diagnostic(
+                "P_FORK_MIGRATION_PROOF",
+                "Durable fork migration proof does not match admitted versions",
+                json{{"run_id", std::string(run_id)},
+                     {"stored_plan_id", stored_plan->id()},
+                     {"expected_plan_id", expected_plan.id()}});
+        }
     }
     const auto state = record->continuation().state;
     if (state == ContinuationState::Running) {
@@ -2090,7 +2153,7 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
             previous->bundle_id(), previous_journal->sequence + 1,
             ProgramContinuation{"root", ContinuationState::Failed,
                                 previous->continuation().attempt},
-            previous->remaining_budget(), previous->remaining_budget(), checkpoint, now_ms()});
+            previous->remaining_budget(), RunBudget{}, checkpoint, now_ms()});
         ProgramResultData result_data;
         result_data.status             = ProgramTerminalStatus::Failed;
         result_data.run_id             = std::string(run_id);
@@ -2358,7 +2421,7 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
         previous->journal_head(), std::string(run_id), previous->program_version_id(),
         previous->bundle_id(), previous_journal->sequence + 1,
         ProgramContinuation{"root", next_state, next_attempt}, previous->remaining_budget(),
-        previous->remaining_budget(), checkpoint, now_ms()});
+        completed ? previous->remaining_budget() : RunBudget{}, checkpoint, now_ms()});
 
     std::shared_ptr<detail::RunControl> live_control;
     std::optional<ProgramResult>        terminal;

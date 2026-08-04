@@ -266,10 +266,21 @@ TEST(ProgramJournalTest, InterruptedEventFailureCompetesAtomicallyWithResume) {
 TEST(ProgramJournalTest, AmbiguousEffectReconciliationPreservesExactCheckpoint) {
     InMemoryProgramJournal journal;
     const auto start = start_record();
-    const auto ambiguous =
-        terminal_record(start, ContinuationState::AmbiguousEffect, 20);
+    const auto interrupted = terminal_record(start, ContinuationState::Interrupted, 20);
+    const auto ambiguous = ProgramJournalRecord::create(ProgramJournalRecordData{
+        interrupted.id,
+        interrupted.run_id,
+        interrupted.program_version_id,
+        interrupted.bundle_id,
+        3,
+        ProgramContinuation{"root", ContinuationState::AmbiguousEffect, 1},
+        interrupted.remaining_budget,
+        empty_budget(),
+        interrupted.core_checkpoint,
+        30});
     ASSERT_EQ(journal.compare_append({}, start), JournalAppendResult::Appended);
-    ASSERT_EQ(journal.compare_append(start.id, ambiguous),
+    ASSERT_EQ(journal.compare_append(start.id, interrupted), JournalAppendResult::Appended);
+    ASSERT_EQ(journal.compare_append(interrupted.id, ambiguous),
               JournalAppendResult::Appended);
 
     const auto unknown = ProgramJournalRecord::create(ProgramJournalRecordData{
@@ -277,12 +288,12 @@ TEST(ProgramJournalTest, AmbiguousEffectReconciliationPreservesExactCheckpoint) 
         ambiguous.run_id,
         ambiguous.program_version_id,
         ambiguous.bundle_id,
-        3,
+        4,
         ProgramContinuation{"root", ContinuationState::AmbiguousEffect, 1},
         ambiguous.remaining_budget,
         empty_budget(),
         ambiguous.core_checkpoint,
-        30});
+        40});
     ASSERT_EQ(journal.compare_append(ambiguous.id, unknown),
               JournalAppendResult::Appended);
 
@@ -291,12 +302,12 @@ TEST(ProgramJournalTest, AmbiguousEffectReconciliationPreservesExactCheckpoint) 
         unknown.run_id,
         unknown.program_version_id,
         unknown.bundle_id,
-        4,
+        5,
         ProgramContinuation{"root", ContinuationState::Running, 2},
         unknown.remaining_budget,
         unknown.remaining_budget,
         unknown.core_checkpoint,
-        40});
+        50});
     EXPECT_EQ(journal.compare_append(unknown.id, resumed),
               JournalAppendResult::Appended);
 }

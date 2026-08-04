@@ -307,7 +307,8 @@ bool valid_transition_impl(const ProgramJournalRecord& previous,
     }
     if (previous.continuation.state == ContinuationState::Interrupted) {
         if (next.continuation.state == ContinuationState::Failed ||
-            next.continuation.state == ContinuationState::Cancelled) {
+            next.continuation.state == ContinuationState::Cancelled ||
+            next.continuation.state == ContinuationState::AmbiguousEffect) {
             return next.continuation.attempt == previous.continuation.attempt &&
                    previous.core_checkpoint && next.core_checkpoint &&
                    same_checkpoint(*previous.core_checkpoint, *next.core_checkpoint);

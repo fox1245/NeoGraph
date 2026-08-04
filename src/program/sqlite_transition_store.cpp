@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -161,6 +162,24 @@ bool valid_children_transition(const ProgramRunRecord& previous,
     return true;
 }
 
+bool effect_ids_are_unique(const std::vector<ProgramEffectOutboxEntry>& old_effects,
+                           const std::vector<ProgramEffectOutboxEntry>& new_effects) {
+    std::set<std::string, std::less<>> ids;
+    for (const auto& effect : old_effects)
+        if (!ids.emplace(effect.effect().effect_id()).second) return false;
+    for (const auto& effect : new_effects)
+        if (!ids.emplace(effect.effect().effect_id()).second) return false;
+    return true;
+}
+
+bool valid_effect_outbox_binding(const ProgramRunRecord& run,
+                                 const std::vector<ProgramEffectOutboxEntry>& effects) {
+    if (effects.empty()) return true;
+    const auto pending = run.pending_effect();
+    return pending && pending->state() == ProgramPendingState::Awaiting && effects.size() == 1 &&
+           effects.front().effect() == *pending;
+}
+
 bool valid_initial_publication(const ProgramTransitionPublication& publication) {
     const auto& journal = publication.journal_record;
     const auto  terminal = publication.run_record.terminal_result();
@@ -172,7 +191,8 @@ bool valid_initial_publication(const ProgramTransitionPublication& publication) 
            publication.run_record.effect_sequence() == publication.effects.size() &&
            publication.events.front().sequence == 1 &&
            (publication.effects.empty() || publication.effects.front().sequence() == 1) &&
-           (!terminal || terminal_event);
+           (!terminal || terminal_event) &&
+           (!publication.run_record.fork_receipt() || publication.migration_plan.has_value());
 }
 
 bool valid_increment(const ProgramTransitionPublication& old_publication,
@@ -211,6 +231,7 @@ bool valid_increment(const ProgramTransitionPublication& old_publication,
     if (!next_publication.effects.empty() &&
         next_publication.effects.front().sequence() != old_run.effect_sequence() + 1)
         return false;
+    if (!effect_ids_are_unique(old_publication.effects, next_publication.effects)) return false;
     if (next_publication.migration_plan &&
         (!old_publication.migration_plan ||
          next_publication.migration_plan->id() != old_publication.migration_plan->id()))
@@ -325,6 +346,8 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish(
     try {
         if (publication.run_record.owner_scope() != owner_scope)
             throw std::invalid_argument("Program transition owner scope does not match the publication");
+        if (!valid_effect_outbox_binding(publication.run_record, publication.effects))
+            return ProgramTransitionPublishResult::Conflict;
         publication_bytes = publication.serialize_canonical();
     } catch (const std::invalid_argument&) {
         return ProgramTransitionPublishResult::Conflict;

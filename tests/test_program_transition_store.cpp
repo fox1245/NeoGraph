@@ -22,13 +22,14 @@ ProgramJournalRecord start_journal() {
         {"root", ContinuationState::Running, 1}, budget(), budget(), std::nullopt, 10});
 }
 ProgramEvent event(std::uint64_t sequence, ProgramEventKind kind,
-                   ProgramEventPayload payload, std::int64_t time = 10) {
+                   ProgramEventPayload payload, std::int64_t time = 10,
+                   std::uint64_t attempt = 1) {
     ProgramEvent value;
     value.sequence = sequence; value.timestamp_ms = time; value.run_id = "run-1";
     value.program_version_id = digest('1'); value.bundle_id = digest('2');
     value.operation_id = "root"; value.core_generation_id = digest('4');
-    value.core_run_id = "thread-1"; value.trace_id = "trace-1"; value.attempt = 1;
-    value.kind = kind; value.payload = std::move(payload);
+    value.core_run_id = "thread-1"; value.trace_id = "trace-1";
+    value.kind = kind; value.payload = std::move(payload); value.attempt = attempt;
     return ProgramEvent::create(std::move(value));
 }
 ProgramRunRecord start_run(const ProgramJournalRecord& journal) {
@@ -112,11 +113,11 @@ ProgramTransitionPublication child_metadata_publication(
     return {ProgramRunRecord::create(std::move(data)), std::move(journal), {}, {}};
 }
 
-ProgramPendingEffect pending_effect() {
+ProgramPendingEffect pending_effect(std::string effect_id = "effect-one") {
     ProgramPendingEffectData data;
     data.operation_id         = "root";
     data.call_id              = "effect-call";
-    data.effect_id            = "effect-one";
+    data.effect_id            = std::move(effect_id);
     data.result_schema        = {{"type", "object"}, {"additionalProperties", true}};
     data.payload              = {{"kind", "publish"}};
     data.expires_at_unix_ms   = 5000;
@@ -168,6 +169,36 @@ ProgramTransitionPublication interrupted_effect_publication(
             {event(2, ProgramEventKind::Terminal,
                    ProgramTerminalEvent{ProgramTerminalStatus::Interrupted})},
             {{1, std::move(pending)}}};
+}
+ProgramTransitionPublication resumed_effect_publication(
+    const ProgramTransitionPublication& interrupted) {
+    const auto old_run = interrupted.run_record;
+    const auto pending = *old_run.pending_effect();
+    const auto consumed = pending.submit(pending.call_id(), pending.effect_id(),
+                                         json{{"result", "recorded"}}, 30)
+                               .value;
+    const auto cp = checkpoint();
+    auto journal = ProgramJournalRecord::create(
+        {interrupted.journal_record.id, "run-1", digest('1'), digest('2'), 3,
+         {"root", ContinuationState::Running, 2}, budget(), budget(), cp, 30});
+    ProgramRunRecordData data;
+    data.owner_scope         = old_run.owner_scope();
+    data.run_id              = old_run.run_id();
+    data.program_version_id  = old_run.program_version_id();
+    data.bundle_id           = old_run.bundle_id();
+    data.binding_fingerprint = old_run.binding_fingerprint();
+    data.invocation          = old_run.invocation();
+    data.continuation        = journal.continuation;
+    data.remaining_budget    = journal.remaining_budget;
+    data.exact_checkpoint    = cp;
+    data.pending_effect      = consumed;
+    data.journal_head        = journal.id;
+    data.event_sequence      = 3;
+    data.effect_sequence     = 1;
+    data.created_at_ms       = old_run.created_at_ms();
+    data.updated_at_ms       = 30;
+    return {ProgramRunRecord::create(std::move(data)), std::move(journal),
+            {event(3, ProgramEventKind::Started, ProgramStartedEvent{budget()}, 30, 2)}, {}};
 }
 ForkCompatibilityReceipt compatible_fork_receipt() {
     return ForkCompatibilityReceipt(ForkCompatibilityReceiptData{
@@ -245,6 +276,28 @@ TEST(ProgramTransitionStoreTest, MigrationPublicationIsDurableAndInheritedAcross
     const auto reparsed = ProgramTransitionPublication::parse(bytes);
     ASSERT_TRUE(reparsed.migration_plan.has_value());
     EXPECT_EQ(reparsed.migration_plan->id(), publication.migration_plan->id());
+}
+
+TEST(ProgramTransitionStoreTest, ForkPublicationRequiresDurableMigrationProof) {
+    InMemoryProgramTransitionStore store;
+    auto publication = start_publication();
+    attach_fork_receipt(publication);
+    EXPECT_EQ(store.compare_publish("owner-a", {}, publication),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_FALSE(store.load("owner-a", "run-1").has_value());
+}
+
+TEST(ProgramTransitionStoreTest, EffectOutboxMustBindExactAwaitingPendingEffect) {
+    InMemoryProgramTransitionStore store;
+    const auto start = start_publication();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, start),
+              ProgramTransitionPublishResult::Published);
+    auto interrupted = interrupted_effect_publication(start);
+    interrupted.effects = {ProgramEffectOutboxEntry(1, pending_effect("different-effect"))};
+    EXPECT_EQ(store.compare_publish("owner-a", start.journal_record.id, interrupted),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(store.latest("owner-a", "run-1")->id, start.journal_record.id);
+    EXPECT_TRUE(store.load_effects("owner-a", "run-1").empty());
 }
 
 TEST(ProgramTransitionStoreTest, ConflictingCasAndInvalidPublicationRollBack) {
@@ -454,6 +507,82 @@ TEST(ProgramTransitionStoreTest, SQLiteReopensAtomicPublicationAndOwnerIsolation
         EXPECT_EQ(store.load_events("owner-a", "run-1", 1).size(), 1U);
     }
 
+    std::filesystem::remove(path);
+}
+
+TEST(ProgramTransitionStoreTest, SQLiteReopensDurableMigrationProof) {
+    static std::atomic<unsigned> sequence{0};
+    const auto path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-program-migration-proof-" +
+          std::to_string(sequence.fetch_add(1)) + ".db"))
+            .string();
+    std::filesystem::remove(path);
+
+    auto publication = start_publication();
+    attach_fork_receipt(publication);
+    publication.migration_plan = MigrationPlan::create(
+        MigrationPlanData{digest('6'), digest('1'), "owner-a",
+                          MigrationCompatibility::ForkCompatible, {}, {}, {}});
+    const auto expected_id = publication.migration_plan->id();
+    {
+        SQLiteProgramTransitionStore store(path);
+        ASSERT_EQ(store.compare_publish("owner-a", {}, publication),
+                  ProgramTransitionPublishResult::Published);
+        ASSERT_TRUE(store.load_migration_plan("owner-a", "run-1").has_value());
+        EXPECT_EQ(store.load_migration_plan("owner-a", "run-1")->id(), expected_id);
+    }
+    {
+        SQLiteProgramTransitionStore store(path);
+        const auto run = store.load("owner-a", "run-1");
+        ASSERT_TRUE(run.has_value());
+        ASSERT_TRUE(run->fork_receipt().has_value());
+        const auto proof = store.load_migration_plan("owner-a", "run-1");
+        ASSERT_TRUE(proof.has_value());
+        EXPECT_EQ(proof->id(), expected_id);
+    }
+    std::filesystem::remove(path);
+}
+
+TEST(ProgramTransitionStoreTest, SQLiteEffectOutboxSurvivesResumePublication) {
+    static std::atomic<unsigned> sequence{0};
+    const auto path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-program-effect-history-" + std::to_string(sequence.fetch_add(1)) + ".db"))
+            .string();
+    std::filesystem::remove(path);
+
+    const auto start = start_publication();
+    const auto interrupted = interrupted_effect_publication(start);
+    const auto resumed = resumed_effect_publication(interrupted);
+    EXPECT_NO_THROW((void)resumed.serialize_canonical());
+    EXPECT_TRUE(is_valid_program_journal_transition(interrupted.journal_record,
+                                                    resumed.journal_record));
+    auto aggregate_events = interrupted.events;
+    aggregate_events.insert(aggregate_events.end(), resumed.events.begin(), resumed.events.end());
+    auto aggregate_effects = interrupted.effects;
+    aggregate_effects.insert(aggregate_effects.end(), resumed.effects.begin(), resumed.effects.end());
+    const ProgramTransitionPublication aggregate{
+        resumed.run_record, resumed.journal_record, std::move(aggregate_events),
+        std::move(aggregate_effects), std::nullopt};
+    EXPECT_NO_THROW((void)aggregate.serialize_canonical());
+    {
+        SQLiteProgramTransitionStore store(path);
+        ASSERT_EQ(store.compare_publish("owner-a", {}, start),
+                  ProgramTransitionPublishResult::Published);
+        ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, interrupted),
+                  ProgramTransitionPublishResult::Published);
+        ASSERT_EQ(store.compare_publish("owner-a", interrupted.journal_record.id, resumed),
+                  ProgramTransitionPublishResult::Published);
+        EXPECT_EQ(store.load_effects("owner-a", "run-1").size(), 1U);
+    }
+    {
+        SQLiteProgramTransitionStore store(path);
+        EXPECT_EQ(store.load_effects("owner-a", "run-1").size(), 1U);
+        ASSERT_TRUE(store.load("owner-a", "run-1").has_value());
+        EXPECT_EQ(store.load("owner-a", "run-1")->continuation().state,
+                  ContinuationState::Running);
+    }
     std::filesystem::remove(path);
 }
 

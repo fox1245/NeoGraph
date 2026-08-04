@@ -6,6 +6,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <utility>
 namespace neograph::program {
@@ -48,6 +49,36 @@ bool valid_children_transition(const ProgramRunRecord& previous,
             !valid_child_state_transition(child.state, found->state))
             return false;
     }
+    return true;
+}
+
+bool valid_effect_outbox_binding(const ProgramRunRecord& run,
+                                 const std::vector<ProgramEffectOutboxEntry>& effects) {
+    if (effects.empty()) return true;
+
+    // A Program has one durable pending operation at a time.  An outbox entry
+    // is therefore valid only when it is the exact immutable effect that left
+    // the run interrupted; a caller cannot smuggle a second effect through a
+    // transition publication.
+    const auto pending = run.pending_effect();
+    if (!pending || pending->state() != ProgramPendingState::Awaiting || effects.size() != 1 ||
+        effects.front().effect() != *pending) {
+        return false;
+    }
+    std::set<std::string, std::less<>> ids;
+    for (const auto& effect : effects) {
+        if (!ids.emplace(effect.effect().effect_id()).second) return false;
+    }
+    return true;
+}
+
+bool effect_ids_are_unique(const std::vector<ProgramEffectOutboxEntry>& old_effects,
+                           const std::vector<ProgramEffectOutboxEntry>& new_effects) {
+    std::set<std::string, std::less<>> ids;
+    for (const auto& effect : old_effects)
+        if (!ids.emplace(effect.effect().effect_id()).second) return false;
+    for (const auto& effect : new_effects)
+        if (!ids.emplace(effect.effect().effect_id()).second) return false;
     return true;
 }
 
@@ -103,25 +134,30 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
     std::uint64_t previous_sequence = 0;
     for (const auto& event : publication.events) {
         (void)event.serialize_canonical();
-        const bool snapshot_operation =
-            event.kind == ProgramEventKind::Started ||
-            event.kind == ProgramEventKind::Terminal;
         if (event.run_id != run.run_id() || event.program_version_id != run.program_version_id() ||
             event.bundle_id != run.bundle_id() ||
-            (snapshot_operation && event.operation_id != run.continuation().operation_id) ||
-            event.attempt != run.continuation().attempt || event.sequence <= previous_sequence) {
+            event.sequence <= previous_sequence) {
             throw std::invalid_argument("Program event does not bind snapshot");
-        }
-        if (event.kind == ProgramEventKind::CheckpointPublished) {
-            const auto& checkpoint = std::get<ProgramCheckpointEvent>(event.payload).checkpoint;
-            if (!run.exact_checkpoint() || checkpoint != *run.exact_checkpoint()) {
-                throw std::invalid_argument("Program checkpoint event disagrees with run snapshot");
-            }
         }
         previous_sequence = event.sequence;
     }
     if (!publication.events.empty() && publication.events.back().sequence != run.event_sequence()) {
         throw std::invalid_argument("Program event sequence mismatch");
+    }
+    if (!publication.events.empty()) {
+        const auto& latest = publication.events.back();
+        const bool snapshot_operation = latest.kind == ProgramEventKind::Started ||
+                                        latest.kind == ProgramEventKind::Terminal;
+        if (latest.attempt != run.continuation().attempt ||
+            (snapshot_operation && latest.operation_id != run.continuation().operation_id)) {
+            throw std::invalid_argument("Latest Program event does not bind snapshot");
+        }
+        if (latest.kind == ProgramEventKind::CheckpointPublished) {
+            const auto& checkpoint = std::get<ProgramCheckpointEvent>(latest.payload).checkpoint;
+            if (!run.exact_checkpoint() || checkpoint != *run.exact_checkpoint()) {
+                throw std::invalid_argument("Program checkpoint event disagrees with run snapshot");
+            }
+        }
     }
 
     previous_sequence = 0;
@@ -132,6 +168,12 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
             throw std::invalid_argument("Program effect does not bind snapshot");
         }
         previous_sequence = effect.sequence();
+    }
+    std::set<std::string, std::less<>> effect_ids;
+    for (const auto& effect : publication.effects) {
+        if (!effect_ids.emplace(effect.effect().effect_id()).second) {
+            throw std::invalid_argument("Program effect outbox contains a duplicate effect id");
+        }
     }
     if (!publication.effects.empty() &&
         publication.effects.back().sequence() != run.effect_sequence()) {
@@ -340,6 +382,9 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
     std::string publication_bytes;
     try {
         validate_pub(publication, owner);
+        if (!valid_effect_outbox_binding(publication.run_record, publication.effects)) {
+            return ProgramTransitionPublishResult::Conflict;
+        }
         publication_bytes = publication.serialize_canonical();
         if (!expected.empty() && !detail::is_sha256_identity(expected)) {
             return ProgramTransitionPublishResult::Conflict;
@@ -375,7 +420,8 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
             publication.run_record.effect_sequence() != publication.effects.size() ||
             publication.events.front().sequence != 1 ||
             (!publication.effects.empty() && publication.effects.front().sequence() != 1) ||
-            (new_terminal && !publishes_terminal_event)) {
+            (new_terminal && !publishes_terminal_event) ||
+            (publication.run_record.fork_receipt() && !publication.migration_plan)) {
             return ProgramTransitionPublishResult::Conflict;
         }
     } else {
@@ -409,7 +455,8 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
             (!publication.events.empty() &&
              publication.events.front().sequence != old.run.event_sequence() + 1) ||
             (!publication.effects.empty() &&
-             publication.effects.front().sequence() != old.run.effect_sequence() + 1)) {
+             publication.effects.front().sequence() != old.run.effect_sequence() + 1) ||
+            !effect_ids_are_unique(old.effects, publication.effects)) {
             return ProgramTransitionPublishResult::Conflict;
         }
     }

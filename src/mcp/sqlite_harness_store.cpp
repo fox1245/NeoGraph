@@ -79,6 +79,26 @@ bool is_program_identity(std::string_view value) noexcept {
     });
 }
 
+bool effect_ids_are_unique(
+    const std::vector<program::ProgramEffectOutboxEntry>& old_effects,
+    const std::vector<program::ProgramEffectOutboxEntry>& new_effects) {
+    std::set<std::string, std::less<>> ids;
+    for (const auto& effect : old_effects)
+        if (!ids.emplace(effect.effect().effect_id()).second) return false;
+    for (const auto& effect : new_effects)
+        if (!ids.emplace(effect.effect().effect_id()).second) return false;
+    return true;
+}
+
+bool valid_effect_outbox_binding(
+    const program::ProgramRunRecord& run,
+    const std::vector<program::ProgramEffectOutboxEntry>& effects) {
+    if (effects.empty()) return true;
+    const auto pending = run.pending_effect();
+    return pending && pending->state() == program::ProgramPendingState::Awaiting &&
+           effects.size() == 1 && effects.front().effect() == *pending;
+}
+
 std::string program_storage_run_id(std::string_view owner_scope, std::string_view run_id) {
     return "program/" + std::to_string(owner_scope.size()) + "/" + std::string(owner_scope) + "/" +
            std::to_string(run_id.size()) + "/" + std::string(run_id);
@@ -503,6 +523,31 @@ public:
         return values;
     }
 
+    std::optional<program::MigrationPlan> load_migration_plan(
+        std::string_view owner_scope, std::string_view run_id) const override {
+        const auto wrapper = load_wrapper(owner_scope, run_id);
+        if (!wrapper) return std::nullopt;
+        std::lock_guard lock(impl_->mutex);
+        Statement       query(
+            impl_->db,
+            "SELECT program_publication_json FROM neograph_harness_runs "
+                  "WHERE owner_scope=? AND run_id=? AND program_run_id<>''");
+        query.bind_text(1, std::string(owner_scope));
+        query.bind_text(2, program_storage_run_id(owner_scope, run_id));
+        const auto result = query.step();
+        if (result == SQLITE_DONE) return std::nullopt;
+        if (result != SQLITE_ROW) throw_sqlite_error(impl_->db, "Program migration read failed");
+        if (query.text(0).empty()) {
+            throw std::invalid_argument("Stored Program migration publication is missing");
+        }
+        const auto publication = program::ProgramTransitionPublication::parse(query.text(0));
+        if (publication.run_record.run_id() != run_id ||
+            publication.run_record.owner_scope() != owner_scope) {
+            throw std::invalid_argument("Stored Program migration publication binding is corrupt");
+        }
+        return publication.migration_plan;
+    }
+
     program::ProgramTransitionPublishResult compare_publish(
         std::string_view                      owner_scope,
         std::string_view                      expected_journal_head,
@@ -513,6 +558,9 @@ public:
             return program::ProgramTransitionPublishResult::Conflict;
         }
         try {
+            if (!valid_effect_outbox_binding(publication.run_record, publication.effects)) {
+                return program::ProgramTransitionPublishResult::Conflict;
+            }
             publication_bytes = publication.serialize_canonical();
             wrapper.emplace(HarnessProgramRunRecord::create(artifact_, publication.run_record,
                                                             artifact_.legacy_projection()));
@@ -565,6 +613,25 @@ public:
                 return program::ProgramTransitionPublishResult::Conflict;
             }
             if (exists) {
+                try {
+                    const auto previous_publication =
+                        program::ProgramTransitionPublication::parse(current.text(7));
+                    if (previous_publication.migration_plan) {
+                        if (publication.migration_plan &&
+                            publication.migration_plan->id() !=
+                                previous_publication.migration_plan->id()) {
+                            impl_->exec("ROLLBACK;");
+                            return program::ProgramTransitionPublishResult::Conflict;
+                        }
+                        publication.migration_plan = previous_publication.migration_plan;
+                        publication_bytes = publication.serialize_canonical();
+                    }
+                } catch (const std::invalid_argument&) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
+            }
+            if (exists) {
                 const auto stored_wrapper =
                     HarnessProgramRunRecord::parse(json::parse(current.text(6)));
                 if (stored_wrapper.run_record().run_id() != run_id) {
@@ -602,7 +669,8 @@ public:
                     publication.run_record.effect_sequence() != publication.effects.size() ||
                     publication.events.front().sequence != 1 ||
                     (!publication.effects.empty() && publication.effects.front().sequence() != 1) ||
-                    (new_terminal && !publishes_terminal_event)) {
+                    (new_terminal && !publishes_terminal_event) ||
+                    (publication.run_record.fork_receipt() && !publication.migration_plan)) {
                     impl_->exec("ROLLBACK;");
                     return program::ProgramTransitionPublishResult::Conflict;
                 }
@@ -649,6 +717,25 @@ public:
                 }
                 const auto previous =
                     program::ProgramJournalRecord::parse(previous_journal.text(0));
+                std::vector<program::ProgramEffectOutboxEntry> previous_effects;
+                Statement previous_effect_rows(
+                    impl_->db,
+                    "SELECT record_json FROM neograph_harness_program_effects "
+                          "WHERE run_id=? ORDER BY sequence");
+                previous_effect_rows.bind_text(1, storage_run_id);
+                while (true) {
+                    const auto effect_result = previous_effect_rows.step();
+                    if (effect_result == SQLITE_DONE) break;
+                    if (effect_result != SQLITE_ROW) {
+                        throw_sqlite_error(impl_->db, "Program effect history read failed");
+                    }
+                    previous_effects.push_back(
+                        program::ProgramEffectOutboxEntry::parse(previous_effect_rows.text(0)));
+                }
+                if (!effect_ids_are_unique(previous_effects, publication.effects)) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
                 if (previous.id != expected_journal_head ||
                     !program::is_valid_program_journal_transition(previous,
                                                                   publication.journal_record) ||
