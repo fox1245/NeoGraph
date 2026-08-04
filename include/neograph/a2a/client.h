@@ -60,6 +60,13 @@ class NEOGRAPH_API A2AClient {
     void set_timeout(std::chrono::seconds t);
 
     /**
+     * Set the explicit Authorization header for subsequent RPC requests.
+     * Passing an empty string clears it. The client retains no separate token
+     * representation and never copies this value into A2A payload metadata.
+     */
+    void set_authorization_header(std::string authorization_header);
+
+    /**
      * @brief GET /.well-known/agent-card.json.
      *
      * Exposes the agent's identity, transports, and skills. Caches the
@@ -150,6 +157,9 @@ class NEOGRAPH_API A2AClient {
     /// Cached agent card (populated by fetch_agent_card).
     AgentCard cached_card_;
     bool      card_loaded_ = false;
+    std::string authorization_header_;
+
+    std::string request_authorization_header() const;
 
     std::chrono::seconds request_timeout() const;
 };

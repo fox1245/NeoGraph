@@ -196,6 +196,31 @@ Task build_rejected_task(const std::string& task_id,
     return t;
 }
 
+Task build_auth_required_task(const std::string& task_id,
+                              const std::string& context_id) {
+    Task task;
+    task.id = task_id;
+    task.context_id = context_id;
+    task.status.state = TaskState::AuthRequired;
+    return task;
+}
+
+#ifdef NEOGRAPH_A2A_PROGRAM
+bool has_collaboration_marker(const Message& message) {
+    if (message.metadata.is_object() &&
+        message.metadata.value("neograph_collaboration", false)) {
+        return true;
+    }
+    for (const auto& part : message.parts) {
+        if (part.kind == "data" && part.data.is_object() &&
+            part.data.value("format", std::string()) == "neograph-a2a-collaboration-v1") {
+            return true;
+        }
+    }
+    return false;
+}
+#endif
+
 bool is_terminal(TaskState state) {
     return state == TaskState::Completed || state == TaskState::Canceled
         || state == TaskState::Failed || state == TaskState::Rejected
@@ -232,6 +257,7 @@ struct A2AServer::Impl {
     std::shared_ptr<GraphAgentAdapter>            adapter;
 #ifdef NEOGRAPH_A2A_PROGRAM
     std::shared_ptr<ProgramAgentAdapter>           program_adapter;
+    A2AServer::CollaborationAuthenticator          collaboration_authenticator;
 #endif
     httplib::Server                               svr;
     std::thread                                   listener;
@@ -312,10 +338,26 @@ struct A2AServer::Impl {
                    const std::string& context_id,
                    std::function<void(const TaskStatusUpdateEvent&)> on_event);
 #ifdef NEOGRAPH_A2A_PROGRAM
-    Task run_program(const Message& inbound,
-                     const std::string& task_id,
-                     const std::string& context_id,
-                     std::function<void(const TaskStatusUpdateEvent&)> on_event);
+    Task run_program(
+        const Message& inbound,
+        const std::string& task_id,
+        const std::string& context_id,
+        std::optional<CollaborationPeerIdentity> authenticated_peer,
+        std::function<void(const TaskStatusUpdateEvent&)> on_event);
+
+    /// Resolve a request header to a non-secret collaboration principal.
+    /// Failures intentionally collapse to no authenticated principal.
+    std::optional<CollaborationPeerIdentity> authenticate_collaboration_request(
+        const httplib::Request& request) const;
+
+    bool authorizes_collaboration_message(
+        const Message& inbound,
+        const std::optional<CollaborationPeerIdentity>& authenticated_peer) const;
+
+    CollaborationTaskAuthorization authorize_collaboration_task(
+        std::string_view task_id,
+        const std::optional<CollaborationPeerIdentity>& authenticated_peer,
+        bool require_cancellation) const;
 
     /// Rebuild task projections for accepted mailbox records before the
     /// listener accepts new requests. The Program transition store remains
@@ -324,13 +366,17 @@ struct A2AServer::Impl {
 #endif
 
     void handle_jsonrpc(const httplib::Request& req, httplib::Response& res);
-    void handle_message_send(const neograph::json& params, const neograph::json& id,
+    void handle_message_send(const httplib::Request& req,
+                             const neograph::json& params, const neograph::json& id,
                              httplib::Response& res);
-    void handle_message_stream(const neograph::json& params, const neograph::json& id,
+    void handle_message_stream(const httplib::Request& req,
+                               const neograph::json& params, const neograph::json& id,
                                httplib::Response& res);
-    void handle_tasks_get(const neograph::json& params, const neograph::json& id,
+    void handle_tasks_get(const httplib::Request& req,
+                          const neograph::json& params, const neograph::json& id,
                           httplib::Response& res);
-    void handle_tasks_cancel(const neograph::json& params, const neograph::json& id,
+    void handle_tasks_cancel(const httplib::Request& req,
+                             const neograph::json& params, const neograph::json& id,
                              httplib::Response& res);
 };
 
@@ -386,13 +432,13 @@ void A2AServer::Impl::handle_jsonrpc(const httplib::Request& req,
     }
 
     if (method == "message/send" || method == "SendMessage") {
-        handle_message_send(params, id, res);
+        handle_message_send(req, params, id, res);
     } else if (method == "message/stream" || method == "SendStreamingMessage") {
-        handle_message_stream(params, id, res);
+        handle_message_stream(req, params, id, res);
     } else if (method == "tasks/get" || method == "GetTask") {
-        handle_tasks_get(params, id, res);
+        handle_tasks_get(req, params, id, res);
     } else if (method == "tasks/cancel" || method == "CancelTask") {
-        handle_tasks_cancel(params, id, res);
+        handle_tasks_cancel(req, params, id, res);
     } else {
         res.status = 200;
         res.set_content(jsonrpc_error(-32601, "Method not found", id).dump(),
@@ -574,11 +620,70 @@ void A2AServer::Impl::recover_program_tasks() {
     }
 }
 
+std::optional<CollaborationPeerIdentity>
+A2AServer::Impl::authenticate_collaboration_request(const httplib::Request& request) const {
+    if (!collaboration_authenticator) return std::nullopt;
+    const auto authorization = request.get_header_value("Authorization");
+    if (authorization.empty()) return std::nullopt;
+    try {
+        auto peer = collaboration_authenticator(authorization);
+        if (!peer || peer->owner_scope.empty() || peer->agent_id.empty()) {
+            return std::nullopt;
+        }
+        return peer;
+    } catch (...) {
+        // Authentication failures are intentionally indistinguishable from
+        // absent credentials at the collaboration boundary.
+        return std::nullopt;
+    }
+}
+
+bool A2AServer::Impl::authorizes_collaboration_message(
+    const Message& inbound,
+    const std::optional<CollaborationPeerIdentity>& authenticated_peer) const {
+    if (!has_collaboration_marker(inbound)) return true;
+    if (!authenticated_peer || !program_adapter) return false;
+    const auto& mailbox = program_adapter->mailbox();
+    if (!mailbox) return false;
+    try {
+        const auto envelope = collaboration_from_message(inbound);
+        return mailbox->authenticates_sender(envelope.link_id, *authenticated_peer);
+    } catch (...) {
+        return false;
+    }
+}
+
+CollaborationTaskAuthorization A2AServer::Impl::authorize_collaboration_task(
+    std::string_view task_id,
+    const std::optional<CollaborationPeerIdentity>& authenticated_peer,
+    bool require_cancellation) const {
+    if (!program_adapter) return CollaborationTaskAuthorization::NotLinked;
+    const auto& mailbox = program_adapter->mailbox();
+    if (!mailbox) return CollaborationTaskAuthorization::NotLinked;
+    return mailbox->authorize_task(
+        task_id,
+        authenticated_peer.value_or(CollaborationPeerIdentity{}),
+        require_cancellation);
+}
+
 Task A2AServer::Impl::run_program(
     const Message& inbound,
     const std::string& task_id,
     const std::string& context_id,
+    std::optional<CollaborationPeerIdentity> authenticated_peer,
     std::function<void(const TaskStatusUpdateEvent&)> on_event) {
+    if (!authorizes_collaboration_message(inbound, authenticated_peer)) {
+        auto rejected = build_auth_required_task(task_id, context_id);
+        if (on_event) {
+            TaskStatusUpdateEvent event;
+            event.task_id = task_id;
+            event.context_id = context_id;
+            event.status = rejected.status;
+            event.final = true;
+            on_event(event);
+        }
+        return rejected;
+    }
     std::optional<Task> rejected;
     std::optional<Task> existing;
     std::uint64_t generation = 0;
@@ -686,7 +791,8 @@ Task A2AServer::Impl::run_program(
 }
 #endif
 
-void A2AServer::Impl::handle_message_send(const neograph::json& params,
+void A2AServer::Impl::handle_message_send(const httplib::Request& req,
+                                          const neograph::json& params,
                                           const neograph::json& id,
                                           httplib::Response& res) {
     MessageSendParams mp;
@@ -705,8 +811,10 @@ void A2AServer::Impl::handle_message_send(const neograph::json& params,
     auto context_id = mp.message.context_id.value_or(fresh_uuid_like());
 
 #ifdef NEOGRAPH_A2A_PROGRAM
-    auto task = program_adapter ? run_program(mp.message, task_id, context_id, /*on_event=*/{})
-                                : run_graph(mp.message, task_id, context_id, /*on_event=*/{});
+    auto task = program_adapter
+                    ? run_program(mp.message, task_id, context_id,
+                                  authenticate_collaboration_request(req), /*on_event=*/{})
+                    : run_graph(mp.message, task_id, context_id, /*on_event=*/{});
 #else
     auto task = run_graph(mp.message, task_id, context_id, /*on_event=*/{});
 #endif
@@ -718,7 +826,8 @@ void A2AServer::Impl::handle_message_send(const neograph::json& params,
                     "application/json");
 }
 
-void A2AServer::Impl::handle_message_stream(const neograph::json& params,
+void A2AServer::Impl::handle_message_stream(const httplib::Request& req,
+                                            const neograph::json& params,
                                             const neograph::json& id,
                                             httplib::Response& res) {
     MessageSendParams mp;
@@ -738,6 +847,9 @@ void A2AServer::Impl::handle_message_stream(const neograph::json& params,
     auto inbound    = mp.message;
     auto rpc_id     = id;
     auto self       = this;
+#ifdef NEOGRAPH_A2A_PROGRAM
+    auto authenticated_peer = authenticate_collaboration_request(req);
+#endif
 
     // Note on SSE resumability: this stream emits no `id:` field per
     // event and no `retry:` hints, so a client reconnecting with
@@ -750,8 +862,11 @@ void A2AServer::Impl::handle_message_stream(const neograph::json& params,
     // server.
     res.set_chunked_content_provider(
         "text/event-stream",
-        [self, inbound, task_id, context_id, rpc_id](
-            size_t /*offset*/, httplib::DataSink& sink) {
+        [self, inbound, task_id, context_id, rpc_id
+#ifdef NEOGRAPH_A2A_PROGRAM
+         , authenticated_peer
+#endif
+        ](size_t /*offset*/, httplib::DataSink& sink) {
 
             auto emit = [&](const TaskStatusUpdateEvent& ev) {
                 neograph::json env_json;
@@ -764,7 +879,8 @@ void A2AServer::Impl::handle_message_stream(const neograph::json& params,
             try {
 #ifdef NEOGRAPH_A2A_PROGRAM
                 auto task = self->program_adapter
-                                ? self->run_program(inbound, task_id, context_id, emit)
+                                ? self->run_program(
+                                      inbound, task_id, context_id, authenticated_peer, emit)
                                 : self->run_graph(inbound, task_id, context_id, emit);
 #else
                 auto task = self->run_graph(inbound, task_id, context_id, emit);
@@ -782,10 +898,21 @@ void A2AServer::Impl::handle_message_stream(const neograph::json& params,
         });
 }
 
-void A2AServer::Impl::handle_tasks_get(const neograph::json& params,
+void A2AServer::Impl::handle_tasks_get(const httplib::Request& req,
+                                       const neograph::json& params,
                                        const neograph::json& id,
                                        httplib::Response& res) {
     auto task_id = params.value("id", std::string());
+#ifdef NEOGRAPH_A2A_PROGRAM
+    if (authorize_collaboration_task(
+            task_id, authenticate_collaboration_request(req), false) ==
+        CollaborationTaskAuthorization::Unauthorized) {
+        res.status = 200;
+        res.set_content(jsonrpc_error(-32001, "Task not found", id).dump(),
+                        "application/json");
+        return;
+    }
+#endif
     Task t;
     bool found = false;
     bool live_program_active = false;
@@ -882,10 +1009,21 @@ void A2AServer::Impl::handle_tasks_get(const neograph::json& params,
                     "application/json");
 }
 
-void A2AServer::Impl::handle_tasks_cancel(const neograph::json& params,
+void A2AServer::Impl::handle_tasks_cancel(const httplib::Request& req,
+                                          const neograph::json& params,
                                           const neograph::json& id,
                                           httplib::Response& res) {
     auto task_id = params.value("id", std::string());
+#ifdef NEOGRAPH_A2A_PROGRAM
+    if (authorize_collaboration_task(
+            task_id, authenticate_collaboration_request(req), true) ==
+        CollaborationTaskAuthorization::Unauthorized) {
+        res.status = 200;
+        res.set_content(jsonrpc_error(-32001, "Task not found", id).dump(),
+                        "application/json");
+        return;
+    }
+#endif
     Task t;
     bool found = false;
     std::shared_ptr<neograph::graph::CancelToken> cancel_token;
@@ -967,10 +1105,13 @@ A2AServer::A2AServer(std::shared_ptr<neograph::graph::GraphEngine> engine,
 }
 
 #ifdef NEOGRAPH_A2A_PROGRAM
-A2AServer::A2AServer(std::shared_ptr<ProgramAgentAdapter> adapter, AgentCard card)
+A2AServer::A2AServer(std::shared_ptr<ProgramAgentAdapter> adapter,
+                     AgentCard card,
+                     CollaborationAuthenticator collaboration_authenticator)
     : impl_(std::make_unique<Impl>()) {
     if (!adapter) throw std::invalid_argument("A2AServer: ProgramAgentAdapter is null");
     impl_->program_adapter = std::move(adapter);
+    impl_->collaboration_authenticator = std::move(collaboration_authenticator);
     impl_->card = std::move(card);
     impl_->register_routes();
 }
@@ -979,19 +1120,22 @@ A2AServer::A2AServer(std::shared_ptr<neograph::program::ProgramRuntime> runtime,
                      neograph::program::ProgramVersion version,
                      std::string owner_scope,
                      AgentCard card,
-                     std::shared_ptr<CollaborationMailbox> mailbox)
+                     std::shared_ptr<CollaborationMailbox> mailbox,
+                     CollaborationAuthenticator collaboration_authenticator)
     : A2AServer(std::make_shared<ProgramAgentAdapter>(
                     std::move(runtime), std::move(version), std::move(owner_scope),
                     std::move(mailbox)),
-                std::move(card)) {}
+                std::move(card), std::move(collaboration_authenticator)) {}
 
 A2AServer::A2AServer(std::shared_ptr<neograph::program::ProgramRuntime> runtime,
                      neograph::program::ProgramVersion version,
                      AgentCard card,
                      std::string owner_scope,
-                     std::shared_ptr<CollaborationMailbox> mailbox)
+                     std::shared_ptr<CollaborationMailbox> mailbox,
+                     CollaborationAuthenticator collaboration_authenticator)
     : A2AServer(std::move(runtime), std::move(version), std::move(owner_scope),
-                std::move(card), std::move(mailbox)) {}
+                std::move(card), std::move(mailbox),
+                std::move(collaboration_authenticator)) {}
 #endif
 
 A2AServer::~A2AServer() { stop(); }

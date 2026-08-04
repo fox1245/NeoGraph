@@ -168,6 +168,25 @@ enum class CollaborationRecordState : std::uint8_t {
 NEOGRAPH_API std::string_view to_string(CollaborationRecordState state) noexcept;
 NEOGRAPH_API CollaborationRecordState collaboration_record_state_from_string(std::string_view value);
 
+/** Transport-authenticated owner/agent identity; never serialize credentials. */
+struct NEOGRAPH_API CollaborationPeerIdentity {
+    std::string owner_scope;
+    std::string agent_id;
+
+    bool operator==(const CollaborationPeerIdentity&) const = default;
+};
+
+/**
+ * Result of authorizing an already-known Program-backed collaboration task.
+ * `NotLinked` preserves the legacy A2A task path; `Unauthorized` deliberately
+ * does not disclose whether the task, link, or peer identity was wrong.
+ */
+enum class CollaborationTaskAuthorization : std::uint8_t {
+    NotLinked,
+    Authorized,
+    Unauthorized,
+};
+
 struct NEOGRAPH_API CollaborationRecord {
     CollaborationEnvelope envelope;
     CollaborationRecordState state = CollaborationRecordState::Accepted;
@@ -237,6 +256,23 @@ public:
 
     /// Unauthorized/missing links return nullopt without disclosing existence.
     std::optional<CollaborationRecord> get(std::string_view idempotency_key) const;
+    /**
+     * Verify that a transport-authenticated peer is the accepted sender for
+     * one link. Missing, expired, revoked, and mismatched links fail closed.
+     */
+    bool authenticates_sender(std::string_view link_id,
+                              const CollaborationPeerIdentity& peer) const;
+
+    /**
+     * Authorize one peer to read or cancel a Program-backed receiver task.
+     * An unrelated legacy task returns NotLinked; linked task authorization
+     * never leaks which identity or link check failed.
+     */
+    CollaborationTaskAuthorization authorize_task(
+        std::string_view receiver_program_run_id,
+        const CollaborationPeerIdentity& peer,
+        bool require_cancellation = false) const;
+
     std::vector<CollaborationRecord> snapshot() const;
     /// Check the receiver-side artifact attenuation for one accepted link.
     /// Missing, revoked, expired, or unauthorized links return false.

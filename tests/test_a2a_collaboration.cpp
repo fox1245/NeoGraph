@@ -17,6 +17,7 @@
 #include <string>
 #include <utility>
 #include <thread>
+#include <stdexcept>
 namespace {
 
 using namespace neograph::a2a;
@@ -579,10 +580,18 @@ TEST(A2ACollaboration, ServerRestoresMailboxRequestBeforeAcceptingTasks) {
     card.preferred_transport = "JSONRPC";
     card.default_input_modes = {"text/plain"};
     card.default_output_modes = {"text/plain"};
-    A2AServer server(fixture.runtime, fixture.admitted_version(), "owner-b", card, reopened);
+    A2AServer server(
+        fixture.runtime, fixture.admitted_version(), "owner-b", card, reopened,
+        [](std::string_view authorization) -> std::optional<CollaborationPeerIdentity> {
+            if (authorization == "Bearer coordinator-a") {
+                return CollaborationPeerIdentity{"owner-a", "coordinator-a"};
+            }
+            return std::nullopt;
+        });
     ASSERT_TRUE(server.start_async("127.0.0.1", 0));
 
     A2AClient client("http://127.0.0.1:" + std::to_string(server.port()));
+    client.set_authorization_header("Bearer coordinator-a");
     Task task;
     for (int attempt = 0; attempt < 100; ++attempt) {
         task = client.get_task("run-b");
@@ -617,6 +626,70 @@ TEST(A2ACollaboration, MailboxJournalRejectsLostTypedProgramRequestOnReopen) {
     stored["records"][0]["program_request"] = nullptr;
     EXPECT_THROW(CollaborationMailbox::parse(stored.dump()), std::invalid_argument);
 }
+TEST(A2ACollaboration, AuthenticatedPeerGatesProgramRequestAndTaskAccess) {
+    ProgramAdapterFixture fixture;
+    const auto accepted = make_link().accept("executor-b", "consent-secret");
+    const auto envelope = make_program_envelope(accepted, fixture.admitted_version());
+    auto mailbox = std::make_shared<CollaborationMailbox>("owner-b", "executor-b");
+    mailbox->accept_link(accepted, "consent-secret");
+
+    auto adapter = std::make_shared<ProgramAgentAdapter>(
+        fixture.runtime, fixture.admitted_version(), "owner-b", mailbox);
+    AgentCard card;
+    card.name = "authenticated-collaboration";
+    card.description = "Authenticated Program collaboration test";
+    card.url = "http://127.0.0.1:0/";
+    card.version = "1.0.0";
+    card.protocol_version = "0.3.0";
+    card.preferred_transport = "JSONRPC";
+    card.default_input_modes = {"text/plain"};
+    card.default_output_modes = {"text/plain"};
+    A2AServer server(
+        adapter, card, [](std::string_view authorization)
+                           -> std::optional<CollaborationPeerIdentity> {
+            if (authorization == "Bearer coordinator-a") {
+                return CollaborationPeerIdentity{"owner-a", "coordinator-a"};
+            }
+            if (authorization == "Bearer executor-b") {
+                return CollaborationPeerIdentity{"owner-b", "executor-b"};
+            }
+            return std::nullopt;
+        });
+    ASSERT_TRUE(server.start_async("127.0.0.1", 0));
+
+    A2AClient client("http://127.0.0.1:" + std::to_string(server.port()));
+    MessageSendParams request;
+    request.message = collaboration_to_message(envelope);
+
+    const auto unauthenticated = client.send_message_sync(request);
+    EXPECT_EQ(unauthenticated.status.state, TaskState::AuthRequired);
+    EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 0U);
+
+    client.set_authorization_header("Bearer executor-b");
+
+    const auto wrong_peer = client.send_message_sync(request);
+    EXPECT_EQ(wrong_peer.status.state, TaskState::AuthRequired);
+    EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 0U);
+
+    client.set_authorization_header("Bearer coordinator-a");
+    const auto completed = client.send_message_sync(request);
+    EXPECT_EQ(completed.status.state, TaskState::Completed);
+    EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 1U);
+    const auto streamed = client.send_message_stream(
+        request, [](const StreamEvent&) { return true; });
+    EXPECT_EQ(streamed.status.state, TaskState::Completed);
+
+    client.set_authorization_header({});
+    EXPECT_THROW(client.get_task("run-b"), std::runtime_error);
+    EXPECT_THROW(client.cancel_task("run-b"), std::runtime_error);
+
+    client.set_authorization_header("Bearer executor-b");
+    EXPECT_EQ(client.get_task("run-b").status.state, TaskState::Completed);
+    client.set_authorization_header("Bearer coordinator-a");
+    EXPECT_EQ(client.cancel_task("run-b").status.state, TaskState::Completed);
+    server.stop();
+}
+
 #endif
 
 }  // namespace

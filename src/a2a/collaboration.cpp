@@ -865,6 +865,69 @@ const std::string& CollaborationMailbox::agent_id() const noexcept {
     return impl_->agent_id;
 }
 
+bool CollaborationMailbox::authenticates_sender(
+    std::string_view link_id,
+    const CollaborationPeerIdentity& peer) const {
+    if (peer.owner_scope.empty() || peer.agent_id.empty()) return false;
+
+    std::lock_guard lock(impl_->mutex);
+    const auto link_it = impl_->links.find(std::string(link_id));
+    if (link_it == impl_->links.end() ||
+        link_it->second.state() != CollaborationLinkState::Accepted ||
+        link_it->second.is_expired(now_unix_ms())) {
+        return false;
+    }
+    const auto& spec = link_it->second.spec();
+    return peer.owner_scope == spec.sender_owner_scope &&
+           peer.agent_id == spec.sender_agent_id;
+}
+
+CollaborationTaskAuthorization CollaborationMailbox::authorize_task(
+    std::string_view receiver_program_run_id,
+    const CollaborationPeerIdentity& peer,
+    bool require_cancellation) const {
+    if (receiver_program_run_id.empty()) {
+        return CollaborationTaskAuthorization::NotLinked;
+    }
+
+    std::lock_guard lock(impl_->mutex);
+    const CollaborationRecord* matched = nullptr;
+    for (const auto& [_, record] : impl_->records) {
+#ifdef NEOGRAPH_A2A_PROGRAM
+        if (!record.program_request) continue;
+#else
+        continue;
+#endif
+        if (record.envelope.receiver_program_run_id != receiver_program_run_id) continue;
+        // More than one accepted inbound record for one durable run is
+        // ambiguous; refuse authorization rather than select an arbitrary link.
+        if (matched) return CollaborationTaskAuthorization::Unauthorized;
+        matched = &record;
+    }
+    if (!matched) return CollaborationTaskAuthorization::NotLinked;
+    if (peer.owner_scope.empty() || peer.agent_id.empty()) {
+        return CollaborationTaskAuthorization::Unauthorized;
+    }
+
+    const auto link_it = impl_->links.find(matched->envelope.link_id);
+    if (link_it == impl_->links.end() ||
+        link_it->second.state() != CollaborationLinkState::Accepted ||
+        link_it->second.is_expired(now_unix_ms())) {
+        return CollaborationTaskAuthorization::Unauthorized;
+    }
+    const auto& link = link_it->second;
+    const auto& spec = link.spec();
+    const bool is_sender = peer.owner_scope == spec.sender_owner_scope &&
+                           peer.agent_id == spec.sender_agent_id;
+    const bool is_receiver = peer.owner_scope == spec.receiver_owner_scope &&
+                             peer.agent_id == spec.receiver_agent_id;
+    if (!is_sender && !is_receiver) return CollaborationTaskAuthorization::Unauthorized;
+    if (require_cancellation && !link.permits_cancellation(peer.agent_id)) {
+        return CollaborationTaskAuthorization::Unauthorized;
+    }
+    return CollaborationTaskAuthorization::Authorized;
+}
+
 void CollaborationMailbox::accept_link(CollaborationLink link, std::string consent_token) {
     if (link.spec().receiver_owner_scope != owner_scope() ||
         link.spec().receiver_agent_id != agent_id()) {

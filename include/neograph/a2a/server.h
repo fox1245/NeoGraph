@@ -37,6 +37,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #ifdef NEOGRAPH_A2A_PROGRAM
 namespace neograph::program {
@@ -131,17 +132,31 @@ class NEOGRAPH_API A2AServer {
 #ifdef NEOGRAPH_A2A_PROGRAM
     /// Expose one admitted ProgramVersion through the existing A2A surface.
     /// The overload keeps legacy GraphEngine construction source-compatible.
-    A2AServer(std::shared_ptr<ProgramAgentAdapter> adapter, AgentCard card);
+    /**
+     * Resolve the HTTP Authorization header into an identity the application
+     * has authenticated. The server never retains the header or credentials.
+     * Collaboration envelopes require a non-empty, matching result; ordinary
+     * legacy A2A messages retain their existing unauthenticated behavior.
+     */
+    using CollaborationAuthenticator = std::function<std::optional<CollaborationPeerIdentity>(
+        std::string_view authorization_header)>;
+
+    A2AServer(std::shared_ptr<ProgramAgentAdapter> adapter,
+              AgentCard card,
+              CollaborationAuthenticator collaboration_authenticator = {});
+
     A2AServer(std::shared_ptr<neograph::program::ProgramRuntime> runtime,
               neograph::program::ProgramVersion version,
               std::string owner_scope,
               AgentCard card,
-              std::shared_ptr<CollaborationMailbox> mailbox = {});
+              std::shared_ptr<CollaborationMailbox> mailbox = {},
+              CollaborationAuthenticator collaboration_authenticator = {});
     A2AServer(std::shared_ptr<neograph::program::ProgramRuntime> runtime,
               neograph::program::ProgramVersion version,
               AgentCard card,
               std::string owner_scope,
-              std::shared_ptr<CollaborationMailbox> mailbox = {});
+              std::shared_ptr<CollaborationMailbox> mailbox = {},
+              CollaborationAuthenticator collaboration_authenticator = {});
 #endif
 
     ~A2AServer();
