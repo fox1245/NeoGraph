@@ -533,6 +533,12 @@ std::string lower_operation(const json& authored,
                                                std::to_string(index),
                                root_name, false, operations, diagnostics);
     };
+    const auto singular_child = [&](const json& value, std::string_view field,
+                                    std::size_t index) {
+        const auto child_id = operation_id + "." + std::to_string(index);
+        return lower_operation(value, child_id, child_pointer(pointer, field),
+                               root_name, false, operations, diagnostics);
+    };
     const auto required_object = [&](std::string_view field) -> std::optional<json> {
         const auto field_pointer = child_pointer(pointer, field);
         const auto key = std::string(field);
@@ -614,10 +620,10 @@ std::string lower_operation(const json& authored,
             lowered["condition"] = detail::owned_json_copy(authored["condition"]);
         }
         const auto then_value = required_object("then");
-        if (then_value) lowered["then"] = child(*then_value, "then", 0);
+        if (then_value) lowered["then"] = singular_child(*then_value, "then", 0);
         if (authored.contains("else")) {
             const auto else_value = required_object("else");
-            if (else_value) lowered["else"] = child(*else_value, "else", 1);
+            if (else_value) lowered["else"] = singular_child(*else_value, "else", 1);
         }
     } else if (op == "loop") {
         if (is_root)
@@ -632,7 +638,7 @@ std::string lower_operation(const json& authored,
             lowered["condition"] = detail::owned_json_copy(authored["condition"]);
         }
         const auto body = required_object("body");
-        if (body) lowered["body"] = child(*body, "body", 0);
+        if (body) lowered["body"] = singular_child(*body, "body", 0);
         if (!authored.contains("max_iterations")) {
             add_required(diagnostics, pointer, "max_iterations");
         } else if (const auto maximum = unsigned_integer(authored["max_iterations"]);
@@ -650,7 +656,7 @@ std::string lower_operation(const json& authored,
         else
             allowed({"op", "body", "max_attempts"});
         const auto body = required_object("body");
-        if (body) lowered["body"] = child(*body, "body", 0);
+        if (body) lowered["body"] = singular_child(*body, "body", 0);
         if (!authored.contains("max_attempts")) {
             add_required(diagnostics, pointer, "max_attempts");
         } else if (const auto maximum = unsigned_integer(authored["max_attempts"]);
@@ -725,21 +731,21 @@ std::string lower_operation(const json& authored,
             lowered["items"] = detail::owned_json_copy(authored["items"]);
         }
         const auto body = required_object("body");
-        if (body) lowered["body"] = child(*body, "body", 0);
+        if (body) lowered["body"] = singular_child(*body, "body", 0);
     } else if (op == "spawn") {
         if (is_root)
             allowed({"op", "name", "definition", "body"});
         else
             allowed({"op", "body"});
         const auto body = required_object("body");
-        if (body) lowered["body"] = child(*body, "body", 0);
+        if (body) lowered["body"] = singular_child(*body, "body", 0);
     } else if (op == "await") {
         if (is_root)
             allowed({"op", "name", "definition", "body", "timeout_ms"});
         else
             allowed({"op", "body", "timeout_ms"});
         const auto body = required_object("body");
-        if (body) lowered["body"] = child(*body, "body", 0);
+        if (body) lowered["body"] = singular_child(*body, "body", 0);
         optional_bound("timeout_ms", 24ULL * 60ULL * 60ULL * 1000ULL);
     } else if (op == "checkpoint") {
         if (is_root)
@@ -748,7 +754,7 @@ std::string lower_operation(const json& authored,
             allowed({"op", "body"});
         if (authored.contains("body")) {
             const auto body = required_object("body");
-            if (body) lowered["body"] = child(*body, "body", 0);
+            if (body) lowered["body"] = singular_child(*body, "body", 0);
         }
     } else if (op == "cancel") {
         if (is_root)
@@ -774,6 +780,34 @@ std::string lower_operation(const json& authored,
     }
     operations.push_back(std::move(lowered));
     return operation_id;
+}
+
+void validate_sealed_plan_dispatch(const ProgramPlan& plan,
+                                   DiagnosticAccumulator& diagnostics) {
+    for (const auto& node : plan.nodes()) {
+        const auto& dispatch = node.dispatch();
+        if (dispatch.source_pointer.empty() || dispatch.source_pointer.front() != '/') {
+            diagnostics.add(CompilePhase::Seal, "P_PLAN_SOURCE_POINTER",
+                            DiagnosticSeverity::Error, node.source_pointer(),
+                            "Sealed Program operation has an invalid source pointer",
+                            json{{"operation_id", node.id()},
+                                 {"source_pointer", dispatch.source_pointer}});
+        }
+        const auto require = [&](const std::string& referenced, std::string_view field) {
+            if (plan.find(referenced)) return;
+            diagnostics.add(CompilePhase::Seal, "P_PLAN_REFERENCE",
+                            DiagnosticSeverity::Error, node.source_pointer(),
+                            "Sealed Program operation has a dangling dispatch reference",
+                            json{{"operation_id", node.id()},
+                                 {"field", std::string(field)},
+                                 {"referenced_operation_id", referenced}});
+        };
+        for (const auto& child : dispatch.children) require(child, "children");
+        if (dispatch.then_id) require(*dispatch.then_id, "then");
+        if (dispatch.else_id) require(*dispatch.else_id, "else");
+        if (dispatch.body) require(*dispatch.body, "body");
+        for (const auto& branch : dispatch.branches) require(branch, "branches");
+    }
 }
 
 OrchestrationPlanRecord lower_plan(const json& root,
@@ -1284,7 +1318,11 @@ struct ProgramCompiler::Impl {
                 // Seal the lowered graph through the same typed immutable projection consumed by
                 // ProgramRuntime. This keeps malformed references/source pointers from becoming
                 // a late scheduler failure while preserving the canonical JSON artifact.
-                (void)ProgramPlan::from_json(orchestration.plan);
+                const auto typed_plan = ProgramPlan::from_json(orchestration.plan);
+                validate_sealed_plan_dispatch(typed_plan, diagnostics);
+                if (diagnostics.has_errors()) diagnostics.throw_error();
+            } catch (const ProgramCompileError&) {
+                throw;
             } catch (const std::exception& error) {
                 diagnostics.add(CompilePhase::Seal, "P_PLAN_TYPED", DiagnosticSeverity::Error,
                                 "/root", "Program plan could not be sealed as typed immutable nodes",

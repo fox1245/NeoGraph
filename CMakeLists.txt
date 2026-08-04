@@ -499,6 +499,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/runtime.cpp
         src/program/core_progress.cpp
         src/program/run_attempt.cpp
+        src/program/invocation.cpp
     )
     target_include_directories(neograph_program
         PUBLIC
@@ -780,6 +781,7 @@ if(NEOGRAPH_BUILD_MCP_SERVER AND NEOGRAPH_BUILD_PROGRAM)
         src/mcp/harness_program_translator.cpp
         src/mcp/harness_program_store.cpp
         src/mcp/harness_program_host.cpp
+        src/harness/contract.cpp
     )
     if(NEOGRAPH_BUILD_MCP_CLIENT)
         target_sources(neograph_harness PRIVATE src/mcp/harness_mcp_backend.cpp)

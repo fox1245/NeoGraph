@@ -95,6 +95,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         test_program_fork_replay.cpp
         test_program_transition_store.cpp
         test_program_runtime.cpp
+        test_program_invocation.cpp
     )
     target_include_directories(neograph_program_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/src/program
@@ -133,6 +134,9 @@ if(TARGET neograph_harness)
     target_sources(neograph_tests PRIVATE
         test_harness_program_translator.cpp
         test_harness_program_cutover.cpp
+    )
+    target_sources(neograph_tests PRIVATE
+        test_harness_contract.cpp
     )
     target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_HARNESS)
 endif()

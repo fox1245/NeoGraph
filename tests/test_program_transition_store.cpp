@@ -375,6 +375,50 @@ TEST(ProgramTransitionStoreTest, ChildMetadataPublicationIsIdempotentAndConflict
               ProgramTransitionPublishResult::Conflict);
     EXPECT_EQ(store.latest("owner-a", "run-1")->id, publishing.journal_record.id);
 }
+TEST(ProgramTransitionStoreTest, TerminalChildResultSurvivesRecordRoundTrip) {
+    const auto start = start_publication();
+    auto publishing = child_metadata_publication(start, ProgramChildState::Dispatched);
+    auto children = publishing.run_record.children();
+    ASSERT_EQ(children.size(), 1U);
+
+    const auto child_id = children.front().child_run_id;
+    ProgramResultData child_result_data;
+    child_result_data.status             = ProgramTerminalStatus::Completed;
+    child_result_data.run_id              = child_id;
+    child_result_data.program_version_id = digest('1');
+    child_result_data.bundle_id          = digest('2');
+    child_result_data.operation_id       = "root";
+    child_result_data.attempt            = 1;
+    child_result_data.output             = json{{"child", true}};
+    child_result_data.remaining_budget   = budget();
+    child_result_data.checkpoint         = checkpoint();
+    children.front().state = ProgramChildState::Completed;
+    children.front().terminal_result = ProgramResult::create(std::move(child_result_data));
+
+    const auto& run = publishing.run_record;
+    ProgramRunRecordData data;
+    data.owner_scope         = run.owner_scope();
+    data.run_id              = run.run_id();
+    data.program_version_id  = run.program_version_id();
+    data.bundle_id           = run.bundle_id();
+    data.binding_fingerprint = run.binding_fingerprint();
+    data.invocation          = run.invocation();
+    data.continuation        = run.continuation();
+    data.remaining_budget    = run.remaining_budget();
+    data.children            = std::move(children);
+    data.journal_head        = run.journal_head();
+    data.event_sequence      = run.event_sequence();
+    data.effect_sequence     = run.effect_sequence();
+    data.created_at_ms       = run.created_at_ms();
+    data.updated_at_ms       = run.updated_at_ms();
+    const auto parsed = ProgramRunRecord::parse(
+        ProgramRunRecord::create(std::move(data)).serialize_canonical());
+    ASSERT_TRUE(parsed.children().front().terminal_result.has_value());
+    EXPECT_EQ(parsed.children().front().state, ProgramChildState::Completed);
+    EXPECT_EQ(parsed.children().front().terminal_result->status(),
+              ProgramTerminalStatus::Completed);
+    EXPECT_EQ(parsed.children().front().terminal_result->run_id(), child_id);
+}
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 TEST(ProgramTransitionStoreTest, SQLiteReopensAtomicPublicationAndOwnerIsolation) {
     static std::atomic<unsigned> sequence{0};

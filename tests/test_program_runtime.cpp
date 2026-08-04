@@ -2293,6 +2293,8 @@ TEST(ProgramRuntimeTest, RetryRetriesCoreFailuresAndPreservesFailureClassificati
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
     EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(result.failure()->operation_id, "root.0");
+    EXPECT_EQ(result.failure()->witness["source_pointer"], "/root/body");
     EXPECT_EQ(result.failure()->attempts, 2U);
 }
 
@@ -2479,6 +2481,29 @@ TEST(ProgramRuntimeTest, ChildStartPinsReceiptAndPropagatesParentCancellation) {
     EXPECT_EQ(parent.cancel(), true);
     EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
     EXPECT_EQ(child.wait().status(), ProgramTerminalStatus::Cancelled);
+}
+TEST(ProgramRuntimeTest, DuplicateChildRecoveryReturnsTheExistingRun) {
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(2);
+    const auto linked = make_linked_child(fixture);
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                           "trace-parent-duplicate", {}});
+    ProgramInvocation invocation{
+        json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+        "trace-child-duplicate", {}};
+    auto first = fixture.runtime->start_child(
+        "tenant:runtime", parent, linked.receipt, linked.child_version, invocation);
+    auto duplicate = fixture.runtime->start_child(
+        "tenant:runtime", parent, linked.receipt, linked.child_version, invocation);
+
+    EXPECT_EQ(duplicate.run_id(), first.run_id());
+    EXPECT_EQ(duplicate.snapshot().id(), first.snapshot().id());
+    EXPECT_EQ(parent.cancel(), true);
+    EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_EQ(first.wait().status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_EQ(duplicate.wait().status(), ProgramTerminalStatus::Cancelled);
 }
 TEST(ProgramRuntimeTest, ParentCompletionCancelsAttachedChild) {
     blocking_calls.store(0);

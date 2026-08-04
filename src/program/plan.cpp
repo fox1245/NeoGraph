@@ -146,14 +146,20 @@ ProgramOperationKind program_operation_kind_from_string(std::string_view value) 
 }
 
 struct ProgramPlanNode::Impl {
-    NodeData data;
+    NodeData                     data;
+    ProgramPlanDispatchDescriptor dispatch;
 };
 
 ProgramPlanNode::ProgramPlanNode(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
 ProgramPlanNode::~ProgramPlanNode() = default;
-
 const std::string& ProgramPlanNode::id() const noexcept { return impl_->data.id; }
 ProgramOperationKind ProgramPlanNode::operation() const noexcept { return impl_->data.operation; }
+const ProgramPlanDispatchDescriptor& ProgramPlanNode::dispatch() const noexcept {
+    return impl_->dispatch;
+}
+const ProgramPlanDispatchDescriptor& ProgramPlanNode::dispatch_descriptor() const noexcept {
+    return dispatch();
+}
 const std::string& ProgramPlanNode::source_pointer() const noexcept {
     return impl_->data.source_pointer;
 }
@@ -285,6 +291,13 @@ ProgramPlan ProgramPlan::from_json(const json& plan) {
             throw std::invalid_argument("Program plan operation id is duplicated: " + data.id);
         impl->index.emplace(data.id, impl->nodes.size());
         auto node_impl = std::make_shared<ProgramPlanNode::Impl>();
+        node_impl->dispatch.operation      = data.operation;
+        node_impl->dispatch.source_pointer = data.source_pointer;
+        node_impl->dispatch.children       = data.children;
+        node_impl->dispatch.then_id        = data.then_id;
+        node_impl->dispatch.else_id        = data.else_id;
+        node_impl->dispatch.body           = data.body;
+        node_impl->dispatch.branches       = data.branches;
         node_impl->data = std::move(data);
         impl->nodes.emplace_back(ProgramPlanNode(std::move(node_impl)));
     }

@@ -1045,6 +1045,60 @@ TEST(ProgramCatalogTest, MigrationPlanFailsClosedForUnknownCompatibilityAndMisma
     EXPECT_THROW((void)MigrationPlan::parse(stored), std::invalid_argument);
 }
 
+TEST(ProgramCatalogTest, MigrationPlanClassMatrixAndEvidenceAreFailClosed) {
+    const auto source = digest('a');
+    const auto target = digest('b');
+    const auto evidence = MigrationDiagnostic{MigrationDimension::Recovery,
+                                              "recovery_required",
+                                              "operator recovery is required",
+                                              json{{"state", "source"}},
+                                              json{{"state", "target"}}};
+    const std::vector classes = {MigrationCompatibility::NewRunsOnly,
+                                 MigrationCompatibility::ForkCompatible,
+                                 MigrationCompatibility::DrainOnly,
+                                 MigrationCompatibility::OperatorReconciliation,
+                                 MigrationCompatibility::Blocked};
+    for (const auto compatibility : classes) {
+        MigrationPlanData data{source, target, "tenant:catalog", compatibility, {}, {}, {}};
+        if (compatibility == MigrationCompatibility::ForkCompatible)
+            data.mappings.push_back(MigrationMapping{MigrationDimension::Continuation,
+                                                      "exact_checkpoint_continuation", source,
+                                                      target});
+        else
+            data.diagnostics.push_back(evidence);
+        const auto plan = MigrationPlan::create(std::move(data));
+        EXPECT_EQ(plan.compatibility(), compatibility);
+        EXPECT_EQ(MigrationPlan::parse(plan.serialize_canonical()).id(), plan.id());
+    }
+
+    const auto alias = MigrationPlan::create(
+        MigrationPlanData{source, target, "tenant:catalog",
+                          MigrationCompatibility::CompilerMismatch, {"compiler_build_id"}});
+    EXPECT_EQ(alias.compatibility(), MigrationCompatibility::Blocked);
+    EXPECT_FALSE(alias.is_compatible());
+}
+
+TEST(ProgramCatalogTest, MigrationPlanRejectsMissingEvidenceAndArbitraryIdentity) {
+    const auto plan = MigrationPlan::create(
+        MigrationPlanData{digest('c'), digest('d'), "tenant:catalog",
+                          MigrationCompatibility::ForkCompatible, {}, {}, {}});
+    auto missing_diagnostics = plan.serialize_canonical();
+    const auto diagnostics_key = missing_diagnostics.find("\"diagnostics\"");
+    ASSERT_NE(diagnostics_key, std::string::npos);
+    const auto diagnostics_end = missing_diagnostics.find(",\"mappings\"", diagnostics_key);
+    ASSERT_NE(diagnostics_end, std::string::npos);
+    missing_diagnostics.erase(diagnostics_key, diagnostics_end - diagnostics_key);
+    EXPECT_ANY_THROW((void)MigrationPlan::parse(missing_diagnostics));
+
+    auto arbitrary_id = plan.serialize_canonical();
+    const auto id_key = arbitrary_id.find("\"id\":\"");
+    ASSERT_NE(id_key, std::string::npos);
+    const auto id_start = id_key + 6;
+    const auto id_end = arbitrary_id.find('"', id_start);
+    arbitrary_id.replace(id_start, id_end - id_start, "not-an-identity");
+    EXPECT_THROW((void)MigrationPlan::parse(arbitrary_id), std::invalid_argument);
+}
+
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 TEST(ProgramCatalogTest, SQLiteProgramStoreReopensActivationAndRetention) {
     static std::atomic<unsigned> sequence{0};

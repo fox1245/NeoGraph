@@ -21,6 +21,13 @@ std::uint64_t require_u64(const json& v, std::string_view key) {
     if (!v.contains(k) || !v[k].is_number_unsigned()) throw std::invalid_argument("Program result field '" + k + "' must be unsigned");
     return v[k].get<std::uint64_t>();
 }
+bool operation_id_matches_result(std::string_view result_operation,
+                                 std::string_view failure_operation) noexcept {
+    if (failure_operation == result_operation) return true;
+    return failure_operation.size() > result_operation.size() + 1 &&
+           failure_operation.compare(0, result_operation.size(), result_operation) == 0 &&
+           failure_operation[result_operation.size()] == '.';
+}
 std::uint32_t require_u32(const json& v, std::string_view key) {
     const auto n = require_u64(v, key);
     if (n > std::numeric_limits<std::uint32_t>::max()) throw std::invalid_argument("Program result integer exceeds uint32 range");
@@ -142,7 +149,12 @@ void validate_data(const ProgramResultData& d) {
         throw std::invalid_argument(
             "Only interrupted or ambiguous Program results may contain an interrupt");
     }
-    if (d.failure) { detail::validate_token(d.failure->code,"Program result failure code"); detail::validate_token(d.failure->operation_id,"Program result failure operation_id"); if (d.failure->operation_id != d.operation_id) throw std::invalid_argument("Program result failure operation_id does not match result"); }
+    if (d.failure) {
+        detail::validate_token(d.failure->code, "Program result failure code");
+        detail::validate_token(d.failure->operation_id, "Program result failure operation_id");
+        if (!operation_id_matches_result(d.operation_id, d.failure->operation_id))
+            throw std::invalid_argument("Program result failure operation_id does not match result");
+    }
     for (const auto& node : d.execution_trace) detail::validate_token(node,"Program result execution trace node");
 }
 json result_body(const ProgramResultData& d) { return json{{"format",std::string(RESULT_FORMAT)},{"storage_schema_version",RESULT_SCHEMA_VERSION},{"status",std::string(to_string(d.status))},{"run_id",d.run_id},{"program_version_id",d.program_version_id},{"bundle_id",d.bundle_id},{"operation_id",d.operation_id},{"attempt",d.attempt},{"output",d.output},{"usage",encode_usage(d.usage)},{"remaining_budget",encode_budget(d.remaining_budget)},{"checkpoint",d.checkpoint ? encode_checkpoint(*d.checkpoint) : json(nullptr)},{"interrupt",d.interrupt ? encode_interrupt(*d.interrupt) : json(nullptr)},{"failure",d.failure ? encode_failure(*d.failure) : json(nullptr)},{"execution_trace",d.execution_trace}}; }

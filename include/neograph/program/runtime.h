@@ -16,12 +16,12 @@
 #include <neograph/program/transition_store.h>
 
 #include <asio/awaitable.hpp>
-
 #include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace neograph::program {
 struct ProgramInvocation {
@@ -81,6 +81,13 @@ public:
                               const ProgramVersion&    version,
                               ProgramInvocation        invocation);
     ProgramHandle reconnect(std::string_view owner_scope, std::string_view run_id);
+    /**
+     * Reconcile the durable child join records for a parent. Existing terminal
+     * and in-flight child handles are returned; publishing records are resumed
+     * through their persisted immutable receipt and invocation.
+     */
+    std::vector<ProgramHandle> recover_children(std::string_view owner_scope,
+                                                std::string_view parent_run_id);
     ProgramHandle resume(std::string_view owner_scope,
                          std::string_view run_id,
                          ProgramResume   resume);

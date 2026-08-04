@@ -42,6 +42,27 @@ NEOGRAPH_PROGRAM_API std::string_view to_string(ProgramOperationKind kind) noexc
 NEOGRAPH_PROGRAM_API ProgramOperationKind
 program_operation_kind_from_string(std::string_view value);
 
+/**
+ * Immutable, typed dispatch metadata for one Program operation.
+ *
+ * The identifiers are resolved and validated while the plan is sealed.  An
+ * empty optional is meaningful only for operation kinds which do not use that
+ * reference; callers never need to parse the lowered JSON to dispatch.
+ */
+struct NEOGRAPH_PROGRAM_API ProgramPlanDispatchDescriptor {
+    ProgramOperationKind          operation = ProgramOperationKind::CallCore;
+    std::string                   source_pointer;
+    std::vector<std::string>      children;
+    std::optional<std::string>    then_id;
+    std::optional<std::string>    else_id;
+    std::optional<std::string>    body;
+    std::vector<std::string>      branches;
+
+    bool operator==(const ProgramPlanDispatchDescriptor&) const = default;
+};
+
+using ProgramPlanDispatch = ProgramPlanDispatchDescriptor;
+
 /** One immutable operation and its statically lowered references. */
 class NEOGRAPH_PROGRAM_API ProgramPlanNode final {
 public:
@@ -53,6 +74,8 @@ public:
 
     const std::string& id() const noexcept;
     ProgramOperationKind operation() const noexcept;
+    const ProgramPlanDispatchDescriptor& dispatch() const noexcept;
+    const ProgramPlanDispatchDescriptor& dispatch_descriptor() const noexcept;
     const std::string& source_pointer() const noexcept;
     const std::optional<std::string>& core() const noexcept;
     const std::vector<std::string>& children() const noexcept;

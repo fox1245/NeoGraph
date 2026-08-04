@@ -19,6 +19,7 @@
 #include <neograph/program/fork.h>
 #include <neograph/program/handle.h>
 #include <neograph/program/journal.h>
+#include <neograph/program/invocation.h>
 #include <neograph/program/migration.h>
 #include <neograph/program/pending.h>
 #include <neograph/program/module.h>

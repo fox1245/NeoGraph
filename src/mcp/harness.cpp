@@ -1,4 +1,6 @@
 #include <neograph/mcp/harness.h>
+#include <neograph/harness/contract.h>
+
 #include <neograph/mcp/harness_program_store.h>
 #include <neograph/mcp/server.h>
 #include <neograph/program/diagnostic.h>
@@ -833,7 +835,7 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             workspace_revision = projection.at("workspace_revision").get<std::string>();
         }
         if (x->contract) {
-            contract_run.emplace(*x->contract);
+            contract_run.emplace(harness::ContractBoundary::start_run(*x->contract));
             contract_run->begin_attempt();
         }
         std::optional<program::ProgramHandle> handle;

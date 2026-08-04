@@ -460,11 +460,14 @@ ForkCompatibilityReceipt check_exact_fork_compatibility(ExactForkCompatibilityFa
         const bool has_checkpoint_version = facts.loaded_checkpoint.channel_versions.is_object() &&
                                           facts.loaded_checkpoint.channel_versions.contains(name);
         if (has_checkpoint_value != has_checkpoint_version) {
-            add_witness(witnesses, ForkCompatibilityField::Channel, name,
-                        json{{"checkpoint_value", has_checkpoint_value},
-                             {"checkpoint_version", has_checkpoint_version}},
-                        json{{"checkpoint_value", has_checkpoint_value},
-                             {"checkpoint_version", has_checkpoint_version}});
+            // Keep the two halves of the checkpoint witness independent. A
+            // missing value is not the same defect as a missing version
+            // counter, and conflating them made recovery diagnostics
+            // impossible to act on.
+            add_witness(witnesses, ForkCompatibilityField::SourceCheckpoint,
+                        name + ".checkpoint_value", true, has_checkpoint_value);
+            add_witness(witnesses, ForkCompatibilityField::SourceCheckpoint,
+                        name + ".checkpoint_version", true, has_checkpoint_version);
         }
     }
 
@@ -503,6 +506,12 @@ ForkCompatibilityReceipt check_exact_fork_compatibility(ExactForkCompatibilityFa
     if (source_conditions != target_conditions) {
         add_witness(witnesses, ForkCompatibilityField::Continuation, "conditional_edges",
                     source_conditions, target_conditions);
+    }
+    if (facts.source_core_definition.definition !=
+        facts.target_core_definition.definition) {
+        add_witness(witnesses, ForkCompatibilityField::Continuation, "definition",
+                    facts.source_core_definition.definition,
+                    facts.target_core_definition.definition);
     }
 
     ForkCompatibilityReceiptData receipt;

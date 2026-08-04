@@ -120,11 +120,15 @@ ProgramChildState child_state_from_string(std::string_view value) {
 }
 
 json child_body(const ProgramChildRecord& child) {
-    return {{"child_run_id", child.child_run_id},
-            {"link_id", child.link_id},
-            {"link_receipt", child.link_receipt},
-            {"invocation", invocation_body(child.invocation)},
-            {"state", std::string(child_state_string(child.state))}};
+    json value{{"child_run_id", child.child_run_id},
+                {"link_id", child.link_id},
+                {"link_receipt", child.link_receipt},
+                {"invocation", invocation_body(child.invocation)},
+                {"state", std::string(child_state_string(child.state))}};
+    if (child.terminal_result)
+        value["terminal_result"] =
+            detail::parse_json_strict(child.terminal_result->serialize_canonical());
+    return value;
 }
 
 ProgramChildRecord parse_child(const json& value) {
@@ -132,12 +136,17 @@ ProgramChildRecord parse_child(const json& value) {
         throw std::invalid_argument("Program child record must be an object");
     detail::reject_unknown_fields(value,
                                   "Program child record",
-                                  {"child_run_id", "link_id", "link_receipt", "invocation", "state"});
-    return ProgramChildRecord{rs(value, "child_run_id"),
+                                  {"child_run_id", "link_id", "link_receipt", "invocation", "state",
+                                   "terminal_result"});
+    ProgramChildRecord result{rs(value, "child_run_id"),
                               rs(value, "link_id"),
                               rs(value, "link_receipt"),
                               parse_invocation(rv(value, "invocation"), "Program child invocation"),
                               child_state_from_string(rs(value, "state"))};
+    if (value.contains("terminal_result") && !value.at("terminal_result").is_null())
+        result.terminal_result = ProgramResult::parse(
+            detail::canonical_json_bytes(value.at("terminal_result")));
+    return result;
 }
 json ec(const CoreCheckpointIdentity& c) {
     return {{"core_name", c.core_name},
@@ -319,6 +328,21 @@ void validate(const ProgramRunRecordData& d) {
         if (child.invocation.parent_run_id != d.run_id ||
             child.invocation.child_depth != d.invocation.child_depth + 1) {
             throw std::invalid_argument("Program child invocation does not bind its parent");
+        }
+        if (child.terminal_result) {
+            const auto& result = *child.terminal_result;
+            if (result.run_id() != child.child_run_id ||
+                result.program_version_id().empty() ||
+                result.attempt() == 0 ||
+                (child.state == ProgramChildState::Completed &&
+                 result.status() != ProgramTerminalStatus::Completed) ||
+                (child.state == ProgramChildState::Cancelled &&
+                 result.status() != ProgramTerminalStatus::Cancelled) ||
+                (child.state == ProgramChildState::Failed &&
+                 result.status() == ProgramTerminalStatus::Completed)) {
+                throw std::invalid_argument("Program child terminal result does not bind its state");
+            }
+            (void)result.serialize_canonical();
         }
         (void)invocation_body(child.invocation);
     }

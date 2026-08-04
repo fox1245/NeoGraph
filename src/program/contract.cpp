@@ -711,14 +711,46 @@ void ContractRun::record_evidence(ContractEvidence evidence) {
     if (evidence.kind == ContractEvidenceKind::WorkerReport) {
         throw std::invalid_argument("Use record_worker_report for worker self-reports");
     }
-    if (!evidence.acceptance_id.empty()) {
-        validate_identifier(evidence.acceptance_id, "acceptance_id");
-    }
-    if (evidence.program_version_id.empty() || evidence.workspace_revision.empty()) {
-        throw std::invalid_argument("Contract evidence must identify program version and workspace");
+    if (evidence.program_version_id.empty() || evidence.workspace_revision.empty() ||
+        evidence.command.empty() || evidence.toolchain.empty() || evidence.artifact_hash.empty()) {
+        throw std::invalid_argument(
+            "Contract evidence must identify version, workspace, command, toolchain, and artifact");
     }
     if (!evidence.executed) {
         throw std::invalid_argument("Contract evidence must be marked executed");
+    }
+    validate_utf8(evidence.program_version_id);
+    validate_utf8(evidence.workspace_revision);
+    validate_utf8(evidence.command);
+    validate_utf8(evidence.toolchain);
+    validate_utf8(evidence.artifact_hash);
+    for (const auto& diagnostic : evidence.diagnostics) {
+        validate_utf8(diagnostic);
+    }
+    if (evidence.kind == ContractEvidenceKind::IndependentOracle) {
+        if (!evidence.acceptance_id.empty()) {
+            throw std::invalid_argument("Independent oracle evidence cannot target an acceptance gate");
+        }
+        if (!evidence.details.is_object() || !evidence.details.contains("oracle_id") ||
+            !evidence.details["oracle_id"].is_string()) {
+            throw std::invalid_argument("Independent oracle evidence must identify its oracle");
+        }
+        const auto oracle_id = evidence.details["oracle_id"].get<std::string>();
+        if (std::find(impl_->manifest.spec().independent_oracles.begin(),
+                      impl_->manifest.spec().independent_oracles.end(),
+                      oracle_id) == impl_->manifest.spec().independent_oracles.end()) {
+            throw std::invalid_argument("Contract evidence names an unknown independent oracle");
+        }
+    } else {
+        if (evidence.acceptance_id.empty()) {
+            throw std::invalid_argument("Deterministic evidence must target an acceptance gate");
+        }
+        const auto acceptance = std::find_if(
+            impl_->manifest.spec().acceptance.begin(), impl_->manifest.spec().acceptance.end(),
+            [&](const auto& item) { return item.id == evidence.acceptance_id; });
+        if (acceptance == impl_->manifest.spec().acceptance.end()) {
+            throw std::invalid_argument("Contract evidence names an unknown acceptance gate");
+        }
     }
     impl_->evidence.push_back(std::move(evidence));
 }

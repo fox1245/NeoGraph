@@ -46,6 +46,8 @@ struct ProgramChildRecord {
     std::string                link_receipt;
     ProgramPersistedInvocation invocation;
     ProgramChildState          state = ProgramChildState::Publishing;
+    /** Terminal outcome published with the parent join record, when available. */
+    std::optional<ProgramResult> terminal_result;
 
     bool operator==(const ProgramChildRecord&) const = default;
 };

@@ -53,6 +53,15 @@ enum class MigrationDimension : std::uint8_t {
     Effects,
     Caches,
     Output,
+    /// Additional dimensions are appended to preserve persisted ordering.
+    Compiler,
+    Registry,
+    Materialization,
+    Contract,
+    Recovery,
+
+    // The original P5 dimensions remain stable at values 0..13.
+    // New dimensions are appended to preserve persisted enum ordering.
 };
 
 /** Stable, machine-readable evidence for one migration dimension. */
@@ -89,18 +98,22 @@ struct MigrationPlanData {
     std::vector<MigrationDiagnostic> diagnostics;
     std::vector<MigrationMapping>    mappings;
 };
-
 /**
  * Immutable proof of whether an admitted run may move to another version.
  *
- * This plan never mutates a store or a live run.  A runtime can safely apply
+ * This plan never mutates a store or a live run. A runtime can safely apply
  * only a plan whose compatibility is ForkCompatible; all other outcomes carry
  * explicit blockers rather than silently falling back to a restart.
  */
 class NEOGRAPH_PROGRAM_API MigrationPlan final {
 public:
     static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
-
+    /**
+     * Explicit legacy input marker accepted by parse(). Legacy records are
+     * converted to a fail-closed modern plan; aliases and missing evidence are
+     * never accepted in the v1 schema.
+     */
+    static constexpr std::uint32_t LEGACY_STORAGE_SCHEMA_VERSION = 0;
     static MigrationPlan create(MigrationPlanData data);
     static MigrationPlan between(const ProgramVersion& source, const ProgramVersion& target);
     static MigrationPlan parse(std::string_view stored_bytes);

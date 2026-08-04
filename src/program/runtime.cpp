@@ -348,6 +348,12 @@ bool same_child_metadata(const ProgramChildRecord& lhs, const ProgramChildRecord
            lhs.link_receipt == rhs.link_receipt && lhs.invocation == rhs.invocation;
 }
 
+bool same_child_result(const std::optional<ProgramResult>& lhs,
+                       const std::optional<ProgramResult>& rhs) {
+    if (lhs.has_value() != rhs.has_value()) return false;
+    return !lhs || lhs->serialize_canonical() == rhs->serialize_canonical();
+}
+
 bool valid_child_state_transition(ProgramChildState previous, ProgramChildState next) {
     if (previous == next) return true;
     if (previous == ProgramChildState::Publishing &&
@@ -401,7 +407,8 @@ ChildRecordPublication publish_child_record(const std::shared_ptr<detail::RunCon
                     "Durable child identity is already bound to different metadata",
                     json{{"child_run_id", child.child_run_id}});
             }
-            if (existing->state == child.state) {
+            if (existing->state == child.state &&
+                same_child_result(existing->terminal_result, child.terminal_result)) {
                 return {ProgramTransitionPublishResult::AlreadyPresent, previous};
             }
             if (!valid_child_state_transition(existing->state, child.state)) {
@@ -413,8 +420,10 @@ ChildRecordPublication publish_child_record(const std::shared_ptr<detail::RunCon
                          {"to", std::string(to_string(child.state))}});
             }
             const auto next_state = child.state;
+            const auto next_result = child.terminal_result;
             child = *existing;
             child.state = next_state;
+            child.terminal_result = next_result;
         }
         if (previous->continuation().state != ContinuationState::Running) return {};
         const auto previous_journal =
@@ -479,16 +488,21 @@ ChildRecordPublication publish_child_record(const std::shared_ptr<detail::RunCon
 
 void publish_child_completion(const std::weak_ptr<detail::RunControl>& parent,
                               std::string_view                         child_run_id,
-                              ProgramChildState                        state) noexcept {
+                              const ProgramResult&                      result) noexcept {
     try {
         const auto control = parent.lock();
         if (!control) return;
         const auto record = control->transitions->load(control->owner_scope, control->run_id);
         if (!record) return;
         const auto existing = find_child(*record, child_run_id);
-        if (!existing || existing->state == state) return;
+        if (!existing) return;
+        const auto state = child_state_for_result(result.status());
+        if (existing->state == state && existing->terminal_result &&
+            existing->terminal_result->serialize_canonical() == result.serialize_canonical())
+            return;
         auto update = *existing;
         update.state = state;
+        update.terminal_result = result;
         (void)publish_child_record(control, std::move(update));
     } catch (...) {
     }
@@ -1503,6 +1517,25 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                 "Durable child identity is already bound to different metadata",
                 json{{"child_run_id", run_id}});
         }
+        try {
+            const auto persisted_link = ModuleLinkReceipt::parse(existing->link_receipt);
+            if (persisted_link.id() != link.id() ||
+                persisted_link.owner_scope() != owner_scope ||
+                existing->invocation.parent_run_id != parent_run_id ||
+                existing->invocation.child_depth != parent_depth + 1) {
+                throw_runtime_diagnostic(
+                    "P_CHILD_CONFLICT",
+                    "Durable child receipt does not preserve its parent lineage",
+                    json{{"child_run_id", run_id}});
+            }
+        } catch (const ProgramDiagnosticError&) {
+            throw;
+        } catch (const std::exception& error) {
+            throw_runtime_diagnostic(
+                "P_CHILD_RECEIPT",
+                "Durable child receipt is malformed",
+                json{{"child_run_id", run_id}, {"detail", error.what()}});
+        }
     } else {
         const auto reserved = impl_->reserved_children(parent_run_id);
         validate_child_link(*pinned, link, version, invocation, parent_record.remaining_budget(),
@@ -1540,6 +1573,16 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
             parent.control_->attach_child(live);
             return ProgramHandle(std::move(live));
         }
+        if (child_record->continuation().state == ContinuationState::Running) {
+            auto reconnected = reconnect(owner_scope, run_id);
+            const auto parent_control = std::weak_ptr<detail::RunControl>(parent.control_);
+            reconnected.control_->set_completion_callback(
+                [parent_control, child_run_id = run_id](const ProgramResult& result) {
+                    publish_child_completion(parent_control, child_run_id, result);
+                });
+            parent.control_->attach_child(reconnected.control_);
+            return reconnected;
+        }
         if (child_record->continuation().state != ContinuationState::Running) {
             auto reconnected = reconnect(owner_scope, run_id);
             parent.control_->attach_child(reconnected.control_);
@@ -1566,8 +1609,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
         const auto parent_control = std::weak_ptr<detail::RunControl>(parent.control_);
         control->set_completion_callback(
             [parent_control, child_run_id = run_id](const ProgramResult& result) {
-                publish_child_completion(parent_control, child_run_id,
-                                         child_state_for_result(result.status()));
+                publish_child_completion(parent_control, child_run_id, result);
             });
         const auto started =
             control->stage_event(ProgramEventKind::Started, ProgramStartedEvent{invocation.budget});
@@ -1580,6 +1622,11 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                                          "Requested child Program run id is unavailable");
             }
             auto reconnected = reconnect(owner_scope, run_id);
+            const auto parent_control = std::weak_ptr<detail::RunControl>(parent.control_);
+            reconnected.control_->set_completion_callback(
+                [parent_control, child_run_id = run_id](const ProgramResult& result) {
+                    publish_child_completion(parent_control, child_run_id, result);
+                });
             parent.control_->attach_child(reconnected.control_);
             return reconnected;
         }
@@ -1826,6 +1873,7 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
     const auto published =
         control->transitions->compare_publish(owner_scope, "", std::move(publication));
     if (published != ProgramTransitionPublishResult::Published) {
+
         throw_runtime_diagnostic("P_RUN_CONFLICT", "Requested Program run id is unavailable");
     }
     impl_->register_control(control);
@@ -1846,6 +1894,64 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
     return ProgramHandle(std::move(control));
 }
 
+std::vector<ProgramHandle> ProgramRuntime::recover_children(std::string_view owner_scope,
+                                                              std::string_view parent_run_id) {
+    if (owner_scope.empty())
+        throw std::invalid_argument("Program owner scope must not be empty");
+    if (parent_run_id.empty())
+        throw std::invalid_argument("Program child recovery parent_run_id must not be empty");
+
+    const auto parent_record = impl_->config.transitions->load(owner_scope, parent_run_id);
+    if (!parent_record)
+        throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program parent run was not found");
+    auto parent = reconnect(owner_scope, parent_run_id);
+
+    std::vector<ProgramHandle> recovered;
+    for (const auto& persisted : parent_record->children()) {
+        const auto link = [&] {
+            try {
+                return ModuleLinkReceipt::parse(persisted.link_receipt);
+            } catch (const std::exception& error) {
+                throw_runtime_diagnostic(
+                    "P_CHILD_RECEIPT", "Durable child receipt is malformed",
+                    json{{"child_run_id", persisted.child_run_id}, {"detail", error.what()}});
+            }
+        }();
+
+        if (link.owner_scope() != owner_scope || link.id() != persisted.link_id ||
+            persisted.invocation.parent_run_id != parent_run_id) {
+            throw_runtime_diagnostic(
+                "P_CHILD_CONFLICT", "Durable child receipt does not preserve parent lineage",
+                json{{"child_run_id", persisted.child_run_id}});
+        }
+
+        if (persisted.state == ProgramChildState::Completed ||
+            persisted.state == ProgramChildState::Cancelled ||
+            persisted.state == ProgramChildState::Failed) {
+            auto child = reconnect(owner_scope, persisted.child_run_id);
+            parent.control_->attach_child(child.control_);
+            recovered.push_back(std::move(child));
+            continue;
+        }
+
+        const auto version = impl_->config.catalog->resolve_version(
+            owner_scope, link.child_program_version_id());
+        if (!version)
+            throw_runtime_diagnostic("P_VERSION_NOT_FOUND",
+                                     "Program version required for child recovery was not found",
+                                     json{{"child_run_id", persisted.child_run_id}});
+        ProgramInvocation invocation{persisted.invocation.input,
+                                      persisted.invocation.granted_budget,
+                                      persisted.invocation.trace_id,
+                                      {},
+                                      persisted.child_run_id,
+                                      persisted.invocation.parent_run_id,
+                                      persisted.invocation.child_depth};
+        auto child = start_child(owner_scope, parent, link, *version, std::move(invocation));
+        recovered.push_back(std::move(child));
+    }
+    return recovered;
+}
 ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::string_view run_id) {
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
     if (run_id.empty()) throw std::invalid_argument("Program reconnect run_id must not be empty");

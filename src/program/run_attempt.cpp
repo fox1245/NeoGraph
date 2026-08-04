@@ -18,7 +18,6 @@
 #include <chrono>
 #include <functional>
 #include <limits>
-#include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -195,6 +194,25 @@ PlanExecution plan_failure(ProgramTerminalStatus status,
                                     std::move(operation_id), "", 0, json::object()};
     return result;
 }
+class NestedOperationFailure final : public std::runtime_error {
+public:
+    NestedOperationFailure(std::string operation_id,
+                           std::string message,
+                           std::string core_node = {},
+                           std::uint32_t attempts = 0,
+                           bool checkpoint_incompatible = false)
+        : std::runtime_error(std::move(message)),
+          operation_id(std::move(operation_id)),
+          core_node(std::move(core_node)),
+          attempts(attempts),
+          checkpoint_incompatible(checkpoint_incompatible) {}
+
+    std::string   operation_id;
+    std::string   core_node;
+    std::uint32_t attempts = 0;
+    bool          checkpoint_incompatible = false;
+};
+
 [[noreturn]] void throw_runtime_diagnostic(std::string code,
                                            std::string message,
                                            json        witness = json::object()) {
@@ -219,8 +237,22 @@ bool checkpoint_matches(const RunControl&             control,
 
 bool checkpoint_is_available(const RunControl& control, std::string_view checkpoint_id) noexcept {
     try {
-        const auto checkpoint = inspect_checkpoint(control, checkpoint_id);
-        return checkpoint && checkpoint_matches(control, *checkpoint);
+        if (checkpoint_id.empty()) return false;
+        const auto loaded = control.checkpoints->load_by_id(std::string(checkpoint_id));
+        if (!loaded) {
+            // A transient read miss after the Core engine has consumed the
+            // checkpoint is still a Core failure, not an identity mismatch.
+            const auto latest = control.checkpoints->load_latest(control.core_thread_id);
+            return latest && latest->id == checkpoint_id;
+        }
+        if (loaded->id != checkpoint_id) return false;
+        const CoreCheckpointIdentity identity{
+            control.materialized->root->core_name,
+            control.materialized->root->compiled_plan_identity,
+            loaded->thread_id,
+            loaded->id,
+            loaded->schema_version};
+        return checkpoint_matches(control, identity);
     } catch (...) {
         return false;
     }
@@ -479,14 +511,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         const auto& typed_plan = control->materialized->bundle.typed_orchestration_plan();
         if (typed_plan.schema_version() != ProgramPlan::SCHEMA_VERSION)
             throw_runtime_diagnostic("P_RUNTIME_PLAN", "Admitted Program plan schema is unsupported");
-        std::map<std::string, ProgramPlanNode> operations;
-        for (const auto& node : typed_plan.nodes()) {
-            if (!operations.emplace(node.id(), node).second)
-                throw_runtime_diagnostic("P_RUNTIME_PLAN", "Admitted Program operation id is duplicated",
-                                         json{{"operation_id", node.id()}});
-        }
         const auto root_id = typed_plan.root_id();
-        if (!operations.contains(root_id))
+        if (!typed_plan.find(root_id))
             throw_runtime_diagnostic("P_RUNTIME_PLAN", "Admitted Program root operation is missing");
 
         std::mutex plan_mutex;
@@ -574,13 +600,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                       std::uint32_t                       child_depth,
                       std::shared_ptr<graph::CancelToken> operation_token)
             -> asio::awaitable<PlanExecution> {
-            const auto found = operations.find(operation_id);
-            if (found == operations.end()) {
+            const auto* found = typed_plan.find(operation_id);
+            if (!found) {
                 throw_runtime_diagnostic("P_RUNTIME_PLAN",
                                          "Program operation reference is dangling",
                                          json{{"operation_id", operation_id}});
             }
-            const auto& operation = found->second;
+            const auto& operation = *found;
             const auto op = operation.operation();
             if (operation_token->is_cancelled()) {
                 co_return plan_failure(ProgramTerminalStatus::Cancelled,
@@ -611,12 +637,39 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     active_concurrency.fetch_add(1, std::memory_order_relaxed) + 1;
                 update_peak(active);
                 CoreInvocation invocation;
+                const auto resume_checkpoint_for_error = resume;
                 try {
-                    invocation = co_await run_core(operation_id, std::move(state), std::move(resume),
-                                                   std::move(thread_id), operation_token);
-                } catch (...) {
+                    invocation = co_await run_core(operation_id, std::move(state),
+                                                   std::move(resume), std::move(thread_id),
+                                                   operation_token);
+                } catch (const EventSinkError&) {
                     active_concurrency.fetch_sub(1, std::memory_order_relaxed);
                     throw;
+                } catch (const graph::CancelledException&) {
+                    active_concurrency.fetch_sub(1, std::memory_order_relaxed);
+                    throw;
+                } catch (const graph::NodeExecutionError& error) {
+                    active_concurrency.fetch_sub(1, std::memory_order_relaxed);
+                    const bool checkpoint_incompatible =
+                        resume_checkpoint_for_error &&
+                        !checkpoint_is_available(*control, *resume_checkpoint_for_error);
+                    throw NestedOperationFailure(
+                        operation_id, error.what(), error.node_name(),
+                        static_cast<std::uint32_t>(error.attempts()), checkpoint_incompatible);
+                } catch (const std::exception& error) {
+                    active_concurrency.fetch_sub(1, std::memory_order_relaxed);
+                    const bool checkpoint_incompatible =
+                        resume_checkpoint_for_error &&
+                        !checkpoint_is_available(*control, *resume_checkpoint_for_error);
+                    throw NestedOperationFailure(operation_id, error.what(), {}, 0,
+                                                 checkpoint_incompatible);
+                } catch (...) {
+                    active_concurrency.fetch_sub(1, std::memory_order_relaxed);
+                    const bool checkpoint_incompatible =
+                        resume_checkpoint_for_error &&
+                        !checkpoint_is_available(*control, *resume_checkpoint_for_error);
+                    throw NestedOperationFailure(operation_id, "Unknown Core failure", {}, 0,
+                                                 checkpoint_incompatible);
                 }
                 active_concurrency.fetch_sub(1, std::memory_order_relaxed);
 
@@ -710,6 +763,16 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         last_result = std::move(attempt_result);
                     } catch (const graph::CancelledException&) {
                         throw;
+                    } catch (const NestedOperationFailure& error) {
+                        if (error.checkpoint_incompatible) throw;
+                        if (attempt + 1 == maximum) {
+                            auto terminal = plan_failure(
+                                ProgramTerminalStatus::Failed, "P_RUNTIME_CORE_FAILURE",
+                                error.what(), error.operation_id);
+                            terminal.failure->core_node = error.core_node;
+                            terminal.failure->attempts = static_cast<std::uint32_t>(attempt + 1);
+                            co_return terminal;
+                        }
                     } catch (const graph::NodeExecutionError& error) {
                         if (attempt + 1 == maximum) {
                             auto terminal = plan_failure(
@@ -1080,9 +1143,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             auto& witness = outcome.failure->witness;
             if (!witness.is_object()) witness = json::object();
             if (!witness.contains("source_pointer")) {
-                const auto found = operations.find(outcome.failure->operation_id);
-                if (found != operations.end() && !found->second.source_pointer().empty())
-                    witness["source_pointer"] = found->second.source_pointer();
+                const auto* found = typed_plan.find(outcome.failure->operation_id);
+                if (found && !found->source_pointer().empty())
+                    witness["source_pointer"] = found->source_pointer();
             }
         }
     } catch (const EventSinkError& error) {
@@ -1104,6 +1167,22 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         auto cause = terminal_cause_at_deadline(control, deadline);
         if (cause == CancellationCause::None) cause = CancellationCause::User;
         apply_terminal_cause(outcome, cause, error.what());
+    } catch (const NestedOperationFailure& error) {
+        outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", error.what(),
+                                 error.operation_id, error.attempts);
+        if (outcome.failure) outcome.failure->core_node = error.core_node;
+        outcome.usage.wall_time_ms = elapsed_ms(started_at);
+        outcome.usage.model_tokens = model_tokens(usage);
+        outcome.usage.program_operations = operation_count;
+        outcome.usage.core_steps = failed_core_steps(*control, core_progress->steps());
+        outcome.usage.peak_concurrency = peak_concurrency.load(std::memory_order_relaxed);
+        outcome.remaining_budget = settle_budget(control->granted_budget, outcome.usage);
+        const auto cause = terminal_cause_at_deadline(control, deadline);
+        if (!apply_terminal_cause(outcome, cause, error.what()) &&
+            error.checkpoint_incompatible && checkpoint_id) {
+            apply_checkpoint_incompatible(outcome, control, *checkpoint_id, resume_checkpoint,
+                                          error.what());
+        }
     } catch (const graph::NodeExecutionError& error) {
         outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", error.what(), error.node_name(),
                                  static_cast<std::uint32_t>(error.attempts()));
@@ -1137,6 +1216,22 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.remaining_budget = settle_budget(control->granted_budget, outcome.usage);
         apply_terminal_cause(outcome, terminal_cause_at_deadline(control, deadline),
                              "Unknown Core failure");
+    }
+
+    if (outcome.failure) {
+        auto& witness = outcome.failure->witness;
+        if (!witness.is_object()) witness = json::object();
+        if (!witness.contains("source_pointer")) {
+            try {
+                const auto& typed_plan = control->materialized->bundle.typed_orchestration_plan();
+                const auto* operation = typed_plan.find(outcome.failure->operation_id);
+                if (operation && !operation->source_pointer().empty())
+                    witness["source_pointer"] = operation->source_pointer();
+            } catch (...) {
+                // Admission already validates the typed plan; preserve the terminal
+                // failure if a malformed legacy bundle reaches this boundary.
+            }
+        }
     }
 
     if (control->budget_exhausted->load(std::memory_order_acquire) &&
