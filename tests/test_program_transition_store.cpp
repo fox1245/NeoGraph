@@ -375,6 +375,15 @@ TEST(ProgramTransitionStoreTest, ChildMetadataPublicationIsIdempotentAndConflict
               ProgramTransitionPublishResult::Conflict);
     EXPECT_EQ(store.latest("owner-a", "run-1")->id, publishing.journal_record.id);
 }
+TEST(ProgramTransitionStoreTest, TerminalChildStatesRequireMatchingDurableResults) {
+    const auto start = start_publication();
+    EXPECT_THROW(
+        (void)child_metadata_publication(start, ProgramChildState::Completed),
+        std::invalid_argument);
+    EXPECT_THROW(
+        (void)child_metadata_publication(start, ProgramChildState::Failed),
+        std::invalid_argument);
+}
 TEST(ProgramTransitionStoreTest, TerminalChildResultSurvivesRecordRoundTrip) {
     const auto start = start_publication();
     auto publishing = child_metadata_publication(start, ProgramChildState::Dispatched);

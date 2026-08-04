@@ -312,25 +312,34 @@ void validate(const ProgramRunRecordData& d) {
         (void)receipt.serialize_canonical();
     }
     std::set<std::string, std::less<>> child_ids;
-    std::set<std::string, std::less<>> link_ids;
     for (const auto& child : d.children) {
         detail::validate_token(child.child_run_id, "Program child run_id");
         if (child.child_run_id == d.run_id || !child_ids.insert(child.child_run_id).second)
             throw std::invalid_argument("Program run child identities must be unique");
-        if (!detail::is_sha256_identity(child.link_id) ||
-            !link_ids.insert(child.link_id).second) {
-            throw std::invalid_argument(
-                "Program run child link identities must be unique sha256 values");
-        }
+        if (!detail::is_sha256_identity(child.link_id))
+            throw std::invalid_argument("Program run child link identity must be a sha256 value");
         if (child.link_receipt.empty())
             throw std::invalid_argument("Program child link receipt must not be empty");
         detail::validate_utf8(child.link_receipt);
         if (child.invocation.parent_run_id != d.run_id ||
+            d.invocation.child_depth == std::numeric_limits<std::uint32_t>::max() ||
             child.invocation.child_depth != d.invocation.child_depth + 1) {
             throw std::invalid_argument("Program child invocation does not bind its parent");
         }
+        if ((child.state == ProgramChildState::Publishing && child.terminal_result) ||
+            ((child.state == ProgramChildState::Completed ||
+              child.state == ProgramChildState::Failed) &&
+             !child.terminal_result)) {
+            throw std::invalid_argument(
+                "Program child terminal result does not match its lifecycle state");
+        }
         if (child.terminal_result) {
             const auto& result = *child.terminal_result;
+            const bool failed_status =
+                result.status() == ProgramTerminalStatus::Failed ||
+                result.status() == ProgramTerminalStatus::BudgetExhausted ||
+                result.status() == ProgramTerminalStatus::TimedOut ||
+                result.status() == ProgramTerminalStatus::CheckpointIncompatible;
             if (result.run_id() != child.child_run_id ||
                 result.program_version_id().empty() ||
                 result.attempt() == 0 ||
@@ -338,8 +347,10 @@ void validate(const ProgramRunRecordData& d) {
                  result.status() != ProgramTerminalStatus::Completed) ||
                 (child.state == ProgramChildState::Cancelled &&
                  result.status() != ProgramTerminalStatus::Cancelled) ||
-                (child.state == ProgramChildState::Failed &&
-                 result.status() == ProgramTerminalStatus::Completed)) {
+                (child.state == ProgramChildState::Failed && !failed_status) ||
+                (child.state == ProgramChildState::Dispatched &&
+                 result.status() != ProgramTerminalStatus::Interrupted &&
+                 result.status() != ProgramTerminalStatus::AmbiguousEffect)) {
                 throw std::invalid_argument("Program child terminal result does not bind its state");
             }
             (void)result.serialize_canonical();
