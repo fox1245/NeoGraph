@@ -343,26 +343,29 @@ json manifest_to_json(const ContractManifestSpec& spec,
 }
 
 ContractEvidence evidence_from_json(const json& value) {
-    detail::reject_unknown_fields(value,
-                                  "contract.evidence",
-                                  {"evidence_id",
-                                   "acceptance_id",
-                                   "kind",
-                                   "manifest_hash",
-                                   "program_version_id",
-                                   "workspace_revision",
-                                   "command",
-                                   "toolchain",
-                                   "artifact_hash",
-                                   "executed",
-                                   "passed",
-                                   "diagnostics",
-                                   "details"});
+    detail::reject_unknown_fields(
+        value,
+        "contract.evidence",
+        {"evidence_id",
+         "acceptance_id",
+         "kind",
+         "manifest_hash",
+         "program_version_id",
+         "run_id",
+         "workspace_revision",
+         "command",
+         "toolchain",
+         "artifact_hash",
+         "executed",
+         "passed",
+         "diagnostics",
+         "details"});
     return ContractEvidence{string_value(value, "evidence_id"),
                             string_value(value, "acceptance_id"),
                             contract_evidence_kind_from_string(string_value(value, "kind")),
                             string_value(value, "manifest_hash"),
                             string_value(value, "program_version_id"),
+                            string_value(value, "run_id"),
                             string_value(value, "workspace_revision"),
                             string_value(value, "command"),
                             string_value(value, "toolchain"),
@@ -379,6 +382,7 @@ json evidence_to_json(const ContractEvidence& value) {
                 {"kind", std::string(to_string(value.kind))},
                 {"manifest_hash", value.manifest_hash},
                 {"program_version_id", value.program_version_id},
+                {"run_id", value.run_id},
                 {"workspace_revision", value.workspace_revision},
                 {"command", value.command},
                 {"toolchain", value.toolchain},
@@ -711,15 +715,18 @@ void ContractRun::record_evidence(ContractEvidence evidence) {
     if (evidence.kind == ContractEvidenceKind::WorkerReport) {
         throw std::invalid_argument("Use record_worker_report for worker self-reports");
     }
-    if (evidence.program_version_id.empty() || evidence.workspace_revision.empty() ||
-        evidence.command.empty() || evidence.toolchain.empty() || evidence.artifact_hash.empty()) {
+    if (evidence.program_version_id.empty() || evidence.run_id.empty() ||
+        evidence.workspace_revision.empty() || evidence.command.empty() ||
+        evidence.toolchain.empty() || evidence.artifact_hash.empty()) {
         throw std::invalid_argument(
-            "Contract evidence must identify version, workspace, command, toolchain, and artifact");
+            "Contract evidence must identify version, run, workspace, command, toolchain, and "
+            "artifact");
     }
     if (!evidence.executed) {
         throw std::invalid_argument("Contract evidence must be marked executed");
     }
     validate_utf8(evidence.program_version_id);
+    validate_utf8(evidence.run_id);
     validate_utf8(evidence.workspace_revision);
     validate_utf8(evidence.command);
     validate_utf8(evidence.toolchain);
@@ -772,6 +779,7 @@ void ContractRun::record_diagnostic(ContractDiagnostic diagnostic) {
 }
 
 ContractVerification ContractRun::verify(std::string_view program_version_id,
+                                         std::string_view run_id,
                                          std::string_view workspace_revision) {
     if (impl_->status == ContractRunStatus::Published && impl_->verification) {
         return *impl_->verification;
@@ -780,8 +788,9 @@ ContractVerification ContractRun::verify(std::string_view program_version_id,
         impl_->status != ContractRunStatus::Failed) {
         throw std::logic_error("Contract run must be running before verification");
     }
-    if (program_version_id.empty() || workspace_revision.empty()) {
-        throw std::invalid_argument("Verification requires program version and workspace revision");
+    if (program_version_id.empty() || run_id.empty() || workspace_revision.empty()) {
+        throw std::invalid_argument(
+            "Verification requires program version, run identity, and workspace revision");
     }
 
     ContractVerification result;
@@ -798,6 +807,7 @@ ContractVerification ContractRun::verify(std::string_view program_version_id,
                 evidence.acceptance_id != acceptance.id ||
                 evidence.manifest_hash != impl_->manifest.content_hash() ||
                 evidence.program_version_id != program_version_id ||
+                evidence.run_id != run_id ||
                 evidence.workspace_revision != workspace_revision) {
                 continue;
             }
@@ -822,6 +832,7 @@ ContractVerification ContractRun::verify(std::string_view program_version_id,
             if (evidence.kind != ContractEvidenceKind::IndependentOracle ||
                 evidence.manifest_hash != impl_->manifest.content_hash() ||
                 evidence.program_version_id != program_version_id ||
+                evidence.run_id != run_id ||
                 evidence.workspace_revision != workspace_revision ||
                 !evidence.details.is_object() ||
                 !evidence.details.contains("oracle_id") ||

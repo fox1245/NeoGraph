@@ -967,17 +967,18 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             for (const auto& acceptance : contract.manifest().spec().acceptance) {
                 if (!acceptance.required) continue;
                 program::ContractEvidence evidence;
-                evidence.evidence_id = "runtime-" + acceptance.id + "-" +
-                                       std::to_string(contract.attempt());
-                evidence.acceptance_id      = acceptance.id;
-                evidence.kind               = program::ContractEvidenceKind::DeterministicRun;
-                evidence.manifest_hash     = contract.manifest().content_hash();
-                evidence.program_version_id = program_version;
-                evidence.workspace_revision = x.workspace_revision;
-                evidence.command            = "ProgramRuntime";
-                evidence.toolchain          = "neograph-program-runtime";
-                evidence.artifact_hash      = artifact_hash;
-                evidence.executed           = true;
+                evidence.evidence_id        = "runtime-" + acceptance.id + "-" +
+                                              std::to_string(contract.attempt());
+                evidence.acceptance_id       = acceptance.id;
+                evidence.kind                = program::ContractEvidenceKind::DeterministicRun;
+                evidence.manifest_hash       = contract.manifest().content_hash();
+                evidence.program_version_id  = program_version;
+                evidence.run_id               = x.handle.run_id();
+                evidence.workspace_revision  = x.workspace_revision;
+                evidence.command             = "ProgramRuntime";
+                evidence.toolchain           = "neograph-program-runtime";
+                evidence.artifact_hash       = artifact_hash;
+                evidence.executed            = true;
                 evidence.passed = completed && runtime_matches_expected(actual, acceptance.expected);
                 evidence.details = {{"actual", actual},
                                     {"expected", acceptance.expected},
@@ -991,17 +992,18 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             // Harness. Worker-provided fields are deliberately not consulted.
             for (const auto& oracle : contract.manifest().spec().independent_oracles) {
                 program::ContractEvidence evidence;
-                evidence.evidence_id = "oracle-" + oracle + "-" +
-                                       std::to_string(contract.attempt());
-                evidence.kind               = program::ContractEvidenceKind::IndependentOracle;
-                evidence.manifest_hash     = contract.manifest().content_hash();
-                evidence.program_version_id = program_version;
-                evidence.workspace_revision = x.workspace_revision;
-                evidence.command            = "ProgramRuntime outcome oracle";
-                evidence.toolchain          = "neograph-program-runtime";
-                evidence.artifact_hash      = artifact_hash;
-                evidence.executed           = true;
-                evidence.passed             = completed && !actual.is_null();
+                evidence.evidence_id         = "oracle-" + oracle + "-" +
+                                               std::to_string(contract.attempt());
+                evidence.kind                 = program::ContractEvidenceKind::IndependentOracle;
+                evidence.manifest_hash        = contract.manifest().content_hash();
+                evidence.program_version_id   = program_version;
+                evidence.run_id                = x.handle.run_id();
+                evidence.workspace_revision   = x.workspace_revision;
+                evidence.command              = "ProgramRuntime outcome oracle";
+                evidence.toolchain            = "neograph-program-runtime";
+                evidence.artifact_hash        = artifact_hash;
+                evidence.executed             = true;
+                evidence.passed               = completed && !actual.is_null();
                 evidence.details            = {{"oracle_id", oracle},
                                     {"observed", actual},
                                     {"program_status", std::string(program::to_string(
@@ -1012,7 +1014,8 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             contract.record_diagnostic(
                 {"harness-contract-finalization", error.what(), true});
         }
-        const auto verification = contract.verify(program_version, x.workspace_revision);
+        const auto verification =
+            contract.verify(program_version, x.handle.run_id(), x.workspace_revision);
         if (verification.publishable) contract.publish();
         x.contract_finalized = true;
     }

@@ -40,8 +40,9 @@ ContractEvidence make_evidence(const ContractManifest& manifest,
     evidence.kind = kind;
     evidence.manifest_hash = manifest.content_hash();
     evidence.program_version_id = "program-v1";
+    evidence.run_id             = "run-1";
     evidence.workspace_revision = "workspace-1";
-    evidence.command = "ctest --test-dir build";
+    evidence.command            = "ctest --test-dir build";
     evidence.toolchain = "gcc";
     evidence.artifact_hash = "artifact-1";
     evidence.executed = true;
@@ -79,8 +80,7 @@ TEST(ProgramContractTest, WorkerClaimCannotPublishWithoutIndependentEvidence) {
     ContractRun run(frozen);
     run.begin_attempt();
     run.record_worker_report("implemented everything", true);
-
-    const auto blocked = run.verify("program-v1", "workspace-1");
+    const auto blocked = run.verify("program-v1", "run-1", "workspace-1");
     EXPECT_FALSE(blocked.publishable);
     EXPECT_EQ(blocked.missing_acceptance_ids.size(), 2U);
     EXPECT_EQ(run.status(), ContractRunStatus::Blocked);
@@ -94,7 +94,7 @@ TEST(ProgramContractTest, IndependentEvidenceClosesGatesAndSurvivesRecovery) {
     ContractRun run(frozen);
     run.begin_attempt();
     run.record_worker_report("candidate result", true);
-    run.verify("program-v1", "workspace-1");
+    run.verify("program-v1", "run-1", "workspace-1");
 
     run.record_evidence(make_evidence(frozen, "compile-evidence", "compile-ok",
                                       ContractEvidenceKind::DeterministicRun, true));
@@ -104,8 +104,7 @@ TEST(ProgramContractTest, IndependentEvidenceClosesGatesAndSurvivesRecovery) {
                                 true);
     oracle.details = json{{"oracle_id", "oracle-smoke"}, {"observed", 42}};
     run.record_evidence(std::move(oracle));
-
-    const auto verified = run.verify("program-v1", "workspace-1");
+    const auto verified = run.verify("program-v1", "run-1", "workspace-1");
     EXPECT_TRUE(verified.publishable);
     EXPECT_EQ(run.status(), ContractRunStatus::Verified);
     run.publish();
@@ -125,7 +124,7 @@ TEST(ProgramContractTest, FailedEvidenceCannotBeHiddenByWorkerSuccess) {
     run.record_worker_report("passed", true);
     run.record_evidence(make_evidence(frozen, "compile-evidence", "compile-ok",
                                       ContractEvidenceKind::DeterministicRun, false));
-    const auto result = run.verify("program-v1", "workspace-1");
+    const auto result = run.verify("program-v1", "run-1", "workspace-1");
     EXPECT_FALSE(result.publishable);
     EXPECT_EQ(result.status, ContractRunStatus::Failed);
     EXPECT_EQ(result.failed_evidence_ids, std::vector<std::string>({"compile-evidence"}));
@@ -143,8 +142,7 @@ TEST(ProgramContractTest, RejectsUnfrozenManifestAndAnyFailedGate) {
                                       ContractEvidenceKind::DeterministicRun, false));
     run.record_evidence(make_evidence(frozen, "compile-passed", "compile-ok",
                                       ContractEvidenceKind::DeterministicRun, true));
-
-    const auto result = run.verify("program-v1", "workspace-1");
+    const auto result = run.verify("program-v1", "run-1", "workspace-1");
     EXPECT_FALSE(result.publishable);
     EXPECT_EQ(result.status, ContractRunStatus::Failed);
     EXPECT_EQ(result.failed_evidence_ids,
@@ -160,7 +158,7 @@ TEST(ProgramContractTest, RetryPolicyBoundsAttempts) {
                              .freeze();
     ContractRun run(frozen);
     run.begin_attempt();
-    run.verify("program-v1", "workspace-1");
+    run.verify("program-v1", "run-1", "workspace-1");
     EXPECT_THROW(run.begin_attempt(), std::runtime_error);
     EXPECT_EQ(run.attempt(), 1U);
 }

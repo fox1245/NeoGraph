@@ -142,6 +142,7 @@ struct NEOGRAPH_PROGRAM_API ContractEvidence {
     ContractEvidenceKind kind = ContractEvidenceKind::WorkerReport;
     std::string         manifest_hash;
     std::string         program_version_id;
+    std::string         run_id;
     std::string         workspace_revision;
     std::string         command;
     std::string         toolchain;
@@ -213,8 +214,9 @@ public:
     void record_evidence(ContractEvidence evidence);
     void record_diagnostic(ContractDiagnostic diagnostic);
 
-    /// Evaluate all required gates; missing/failed evidence becomes blocked.
+    /// Evaluate all required gates against one exact Program run lineage.
     ContractVerification verify(std::string_view program_version_id,
+                                std::string_view run_id,
                                 std::string_view workspace_revision);
 
     /// Mark the run publishable only after a successful verification.

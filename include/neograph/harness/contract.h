@@ -47,6 +47,7 @@ public:
     static void record_diagnostic(Run& run, Diagnostic diagnostic);
     static Verification verify(Run& run,
                                std::string_view program_version_id,
+                               std::string_view run_id,
                                std::string_view workspace_revision);
     static void publish(Run& run);
 };

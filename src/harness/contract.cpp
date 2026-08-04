@@ -56,11 +56,11 @@ void ContractBoundary::record_evidence(Run& run, Evidence evidence) {
 void ContractBoundary::record_diagnostic(Run& run, Diagnostic diagnostic) {
     run.record_diagnostic(std::move(diagnostic));
 }
-
 Verification ContractBoundary::verify(Run& run,
                                       std::string_view program_version_id,
+                                      std::string_view run_id,
                                       std::string_view workspace_revision) {
-    return run.verify(program_version_id, workspace_revision);
+    return run.verify(program_version_id, run_id, workspace_revision);
 }
 
 void ContractBoundary::publish(Run& run) {

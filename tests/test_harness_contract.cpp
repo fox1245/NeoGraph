@@ -37,6 +37,7 @@ Evidence make_evidence(const Manifest& manifest,
     evidence.kind = kind;
     evidence.manifest_hash = manifest.content_hash();
     evidence.program_version_id = "program-v1";
+    evidence.run_id = "run-1";
     evidence.workspace_revision = "workspace-v1";
     evidence.command = "ctest --test-dir build";
     evidence.toolchain = "gcc-13";
@@ -85,7 +86,7 @@ TEST(HarnessContractTest, MissingEvidenceCannotPublish) {
     auto run = ContractBoundary::start_run(frozen_manifest());
     run.begin_attempt();
     run.record_worker_report("worker claims success", true);
-    const auto result = ContractBoundary::verify(run, "program-v1", "workspace-v1");
+    const auto result = ContractBoundary::verify(run, "program-v1", "run-1", "workspace-v1");
 
     EXPECT_FALSE(result.publishable);
     EXPECT_EQ(result.missing_acceptance_ids, std::vector<std::string>({"accept-compile"}));
@@ -96,12 +97,12 @@ TEST(HarnessContractTest, FailedOracleBlocksPublication) {
     const auto manifest = frozen_manifest();
     auto run = ContractBoundary::start_run(manifest);
     run.begin_attempt();
+    run.record_worker_report("worker success", true);
     ContractBoundary::record_evidence(
         run, make_evidence(manifest, "compile", EvidenceKind::DeterministicRun, true));
     ContractBoundary::record_evidence(
         run, make_evidence(manifest, "oracle", EvidenceKind::IndependentOracle, false));
-
-    const auto result = ContractBoundary::verify(run, "program-v1", "workspace-v1");
+    const auto result = ContractBoundary::verify(run, "program-v1", "run-1", "workspace-v1");
     EXPECT_FALSE(result.publishable);
     EXPECT_EQ(result.status, RunStatus::Failed);
     EXPECT_EQ(result.failed_evidence_ids, std::vector<std::string>({"oracle"}));
@@ -116,8 +117,7 @@ TEST(HarnessContractTest, IndependentlyVerifiedEvidencePublishes) {
         run, make_evidence(manifest, "compile", EvidenceKind::DeterministicRun, true));
     ContractBoundary::record_evidence(
         run, make_evidence(manifest, "oracle", EvidenceKind::IndependentOracle, true));
-
-    const auto result = ContractBoundary::verify(run, "program-v1", "workspace-v1");
+    const auto result = ContractBoundary::verify(run, "program-v1", "run-1", "workspace-v1");
     ASSERT_TRUE(result.publishable);
     ContractBoundary::publish(run);
     EXPECT_EQ(run.status(), RunStatus::Published);
