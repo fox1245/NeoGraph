@@ -265,6 +265,7 @@ struct A2AServer::Impl {
     };
     std::unordered_map<std::string, ProgramActiveRun>          program_runs;
 #endif
+    bool                                                        program_recovery_complete = false;
     std::uint64_t                                              next_generation = 1;
     std::list<std::string>                                    task_lru;
     std::unordered_map<std::string, std::list<std::string>::iterator>
@@ -315,6 +316,11 @@ struct A2AServer::Impl {
                      const std::string& task_id,
                      const std::string& context_id,
                      std::function<void(const TaskStatusUpdateEvent&)> on_event);
+
+    /// Rebuild task projections for accepted mailbox records before the
+    /// listener accepts new requests. The Program transition store remains
+    /// authoritative; this only restores the HTTP-facing projection.
+    void recover_program_tasks();
 #endif
 
     void handle_jsonrpc(const httplib::Request& req, httplib::Response& res);
@@ -517,6 +523,57 @@ Task A2AServer::Impl::run_graph(
 }
 
 #ifdef NEOGRAPH_A2A_PROGRAM
+
+void A2AServer::Impl::recover_program_tasks() {
+    if (!program_adapter) return;
+    {
+        std::lock_guard lk(tasks_mu);
+        if (program_recovery_complete) return;
+    }
+
+
+    std::unordered_map<std::string, std::string> contexts;
+    if (const auto& mailbox = program_adapter->mailbox()) {
+        for (const auto& record : mailbox->snapshot()) {
+            if (record.state != CollaborationRecordState::Accepted ||
+                !record.program_request || !record.program_request->invocation) {
+                continue;
+            }
+            const auto& run_id = record.program_request->invocation->requested_run_id;
+            if (!run_id.empty()) contexts.emplace(run_id, record.envelope.a2a_context_id);
+        }
+    }
+
+    for (auto handle : program_adapter->recover_pending()) {
+        const auto task_id = handle.run_id();
+        const auto context_it = contexts.find(task_id);
+        const auto context_id =
+            context_it == contexts.end() || context_it->second.empty() ? task_id
+                                                                        : context_it->second;
+        auto task = program_adapter->task_snapshot(handle, task_id, context_id);
+        const bool terminal = is_terminal(task.status.state);
+
+        {
+            std::lock_guard lk(tasks_mu);
+            if (tasks.contains(task_id) || program_runs.contains(task_id)) {
+                throw ProgramA2ARequestError(
+                    "Recovered Program task collides with an existing A2A task identity");
+            }
+            tasks[task_id] = std::move(task);
+            touch_task_unlocked(task_id);
+            if (!terminal) {
+                program_runs.emplace(task_id, ProgramActiveRun{std::move(handle), next_generation++});
+            }
+            evict_lru_unlocked();
+        }
+        if (terminal) program_adapter->acknowledge_task(task_id);
+    }
+    {
+        std::lock_guard lk(tasks_mu);
+        program_recovery_complete = true;
+    }
+}
+
 Task A2AServer::Impl::run_program(
     const Message& inbound,
     const std::string& task_id,
@@ -731,23 +788,75 @@ void A2AServer::Impl::handle_tasks_get(const neograph::json& params,
     auto task_id = params.value("id", std::string());
     Task t;
     bool found = false;
+    bool live_program_active = false;
+#ifdef NEOGRAPH_A2A_PROGRAM
+    std::optional<program::ProgramHandle> live_program;
+    std::string                            live_context;
+    std::uint64_t                          live_generation = 0;
+#endif
     {
         std::lock_guard lk(tasks_mu);
-        auto it = tasks.find(task_id);
-        if (it != tasks.end()) {
-            t = it->second;
-            found = true;
-            touch_task_unlocked(task_id);  // tasks/get is a recency signal
+#ifdef NEOGRAPH_A2A_PROGRAM
+        if (program_adapter) {
+            if (const auto run_it = program_runs.find(task_id); run_it != program_runs.end()) {
+                live_program        = run_it->second.handle;
+                live_generation     = run_it->second.generation;
+                live_program_active = true;
+                if (const auto task_it = tasks.find(task_id); task_it != tasks.end()) {
+                    live_context = task_it->second.context_id;
+                }
+            }
+        }
+#endif
+        if (!live_program_active) {
+            if (const auto it = tasks.find(task_id); it != tasks.end()) {
+                t = it->second;
+                found = true;
+                touch_task_unlocked(task_id);  // tasks/get is a recency signal
+            }
         }
     }
 #ifdef NEOGRAPH_A2A_PROGRAM
+    if (live_program) {
+        try {
+            t = program_adapter->task_snapshot(
+                *live_program, task_id,
+                live_context.empty() ? std::string_view{task_id} : std::string_view{live_context});
+            const bool terminal = is_terminal(t.status.state);
+            {
+                std::lock_guard lk(tasks_mu);
+                const auto run_it = program_runs.find(task_id);
+                if (run_it != program_runs.end() && run_it->second.generation == live_generation) {
+                    const auto task_it = tasks.find(task_id);
+                    if (task_it != tasks.end() &&
+                        task_it->second.status.state == TaskState::Canceled) {
+                        t = task_it->second;
+                    } else {
+                        tasks[task_id] = t;
+                    }
+                    touch_task_unlocked(task_id);
+                    if (terminal) program_runs.erase(run_it);
+                    evict_lru_unlocked();
+                }
+            }
+            if (terminal) program_adapter->acknowledge_task(task_id);
+            found = true;
+        } catch (const std::exception&) {
+            // Preserve the stored task projection or owner-scoped not-found
+            // result; ProgramRuntime owns detailed recovery diagnostics.
+        }
+    }
     if (!found && program_adapter) {
         try {
             t = program_adapter->reconnect_task(task_id);
-            std::lock_guard lk(tasks_mu);
-            tasks[task_id] = t;
-            touch_task_unlocked(task_id);
-            evict_lru_unlocked();
+            const bool terminal = is_terminal(t.status.state);
+            {
+                std::lock_guard lk(tasks_mu);
+                tasks[task_id] = t;
+                touch_task_unlocked(task_id);
+                evict_lru_unlocked();
+            }
+            if (terminal) program_adapter->acknowledge_task(task_id);
             found = true;
         } catch (const std::exception&) {
             // Preserve the legacy not-found JSON-RPC contract. ProgramRuntime
@@ -895,6 +1004,15 @@ bool A2AServer::start(const std::string& host, int port) {
         if (!impl_->svr.bind_to_port(host, port)) return false;
         impl_->bound_port = port;
     }
+#ifdef NEOGRAPH_A2A_PROGRAM
+    try {
+        impl_->recover_program_tasks();
+    } catch (...) {
+        impl_->svr.stop();
+        impl_->bound_port = 0;
+        throw;
+    }
+#endif
     impl_->running.store(true, std::memory_order_release);
     bool ok = impl_->svr.listen_after_bind();
     impl_->running.store(false, std::memory_order_release);
@@ -909,6 +1027,15 @@ bool A2AServer::start_async(const std::string& host, int port) {
         if (!impl_->svr.bind_to_port(host, port)) return false;
         impl_->bound_port = port;
     }
+#ifdef NEOGRAPH_A2A_PROGRAM
+    try {
+        impl_->recover_program_tasks();
+    } catch (...) {
+        impl_->svr.stop();
+        impl_->bound_port = 0;
+        throw;
+    }
+#endif
     impl_->running.store(true, std::memory_order_release);
     impl_->listener = std::thread([this] {
         impl_->svr.listen_after_bind();

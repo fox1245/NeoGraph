@@ -1,13 +1,22 @@
 #include <neograph/a2a/collaboration.h>
 
 #ifdef NEOGRAPH_A2A_PROGRAM
+#include <neograph/a2a/client.h>
+#include <neograph/a2a/server.h>
+#include <neograph/a2a/program_adapter.h>
+#include <neograph/graph/node.h>
 #include <neograph/program/program.h>
 #endif
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
+#include <memory>
+#include <optional>
 #include <string>
-
+#include <utility>
+#include <thread>
 namespace {
 
 using namespace neograph::a2a;
@@ -87,6 +96,166 @@ neograph::program::ProgramVersion make_program_version() {
         digest('2'), admission, policy, {}, "owner-b",
         CoreMaterializationReceipt{"a2a-tests", registry.fingerprint(),
                                    {CorePlanIdentity{"main", digest('3')}}, {}}});
+}
+class AdapterCompletedNode final : public neograph::graph::GraphNode {
+public:
+    AdapterCompletedNode(std::string name, std::shared_ptr<std::atomic<unsigned>> starts)
+        : name_(std::move(name)), starts_(std::move(starts)) {}
+
+    asio::awaitable<neograph::graph::NodeOutput>
+    run(neograph::graph::NodeInput) override {
+        starts_->fetch_add(1, std::memory_order_relaxed);
+        neograph::graph::NodeOutput output;
+        output.writes.push_back(neograph::graph::ChannelWrite{"value", "completed"});
+        co_return output;
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string                            name_;
+    std::shared_ptr<std::atomic<unsigned>> starts_;
+};
+
+struct ProgramAdapterFixture {
+    std::shared_ptr<std::atomic<unsigned>> starts;
+    neograph::program::RegistrySnapshot registry;
+    neograph::program::AdmissionProfile profile;
+    neograph::program::PolicySnapshot policy;
+    std::shared_ptr<neograph::program::InMemoryProgramStore> store;
+    std::shared_ptr<neograph::program::EngineGenerationCache> engines;
+    std::shared_ptr<neograph::program::ProgramCatalog> catalog;
+    std::shared_ptr<neograph::graph::InMemoryCheckpointStore> checkpoints;
+    std::shared_ptr<neograph::program::InMemoryProgramTransitionStore> transitions;
+    std::shared_ptr<neograph::program::ProgramRuntime> runtime;
+    std::optional<neograph::program::ProgramVersion> version;
+
+    ProgramAdapterFixture()
+        : starts(std::make_shared<std::atomic<unsigned>>(0)),
+          registry(make_registry(starts)),
+          profile(make_profile(registry)),
+          policy(make_policy(profile)),
+          store(std::make_shared<neograph::program::InMemoryProgramStore>()),
+          engines(std::make_shared<neograph::program::EngineGenerationCache>()),
+          catalog(std::make_shared<neograph::program::ProgramCatalog>(
+              neograph::program::CatalogConfig{store, registry, engines,
+                                                "a2a-adapter-test/v1"})),
+          checkpoints(std::make_shared<neograph::graph::InMemoryCheckpointStore>()),
+          transitions(std::make_shared<neograph::program::InMemoryProgramTransitionStore>()) {
+        neograph::program::ProgramCompiler compiler(registry, {"a2a-adapter-test/v1"});
+        const auto source = neograph::program::ProgramSource::from_cpp_builder(
+            "test:a2a-adapter", 1, source_document());
+        version.emplace(catalog->admit(
+            compiler.compile(source),
+            neograph::program::ProgramAdmission{"owner-b", profile, policy, {}}));
+        restart_after_mailbox_publication();
+    }
+    const neograph::program::ProgramVersion& admitted_version() const { return *version; }
+
+    void restart_after_mailbox_publication() {
+        runtime.reset();
+        engines = std::make_shared<neograph::program::EngineGenerationCache>();
+        catalog = std::make_shared<neograph::program::ProgramCatalog>(
+            neograph::program::CatalogConfig{store, registry, engines, "a2a-adapter-test/v1"});
+        runtime = std::make_shared<neograph::program::ProgramRuntime>(
+            neograph::program::RuntimeConfig{catalog, checkpoints, {}, transitions, 1});
+    }
+
+private:
+    static neograph::program::RegistrySnapshot
+    make_registry(const std::shared_ptr<std::atomic<unsigned>>& starts) {
+        using namespace neograph::program;
+        RegistrySnapshotBuilder builder;
+        builder.add_node(
+            ExecutableManifest{{ExecutableKind::Node, "a2a-adapter-node", "1.0.0", digest('4')},
+                               EffectMode::Brokered, "attestation:a2a", {}, {}, {}},
+            [starts](const std::string& name, const json&, const neograph::graph::NodeContext&) {
+                return std::make_unique<AdapterCompletedNode>(name, starts);
+            },
+            json{{"type", "object"}}, json::object());
+        builder.add_reducer(
+            ExecutableManifest{{ExecutableKind::Reducer, "a2a-adapter-overwrite", "1.0.0", digest('5')},
+                               EffectMode::Brokered, "attestation:a2a", {}, {}, {}},
+            [](const json&, const json& incoming) { return json(incoming); });
+        return std::move(builder).build();
+    }
+
+    static neograph::program::AdmissionProfile
+    make_profile(const neograph::program::RegistrySnapshot& registry) {
+        using namespace neograph::program;
+        AdmissionProfileBuilder builder;
+        builder.id("a2a-adapter-profile")
+            .semantic_version("1.0.0")
+            .registry(registry)
+            .mode(AdmissionMode::MultiTenant)
+            .max_program_schema_version(1)
+            .allow_source_kind(SourceKind::CppBuilder)
+            .allow_effect_mode(EffectMode::Brokered);
+        for (const auto& identity : registry.identities()) builder.allow_executable(identity);
+        return std::move(builder).build();
+    }
+
+    static neograph::program::PolicySnapshot
+    make_policy(const neograph::program::AdmissionProfile& profile) {
+        using namespace neograph::program;
+        PolicySnapshotBuilder builder;
+        builder.id("a2a-adapter-policy")
+            .semantic_version("1.0.0")
+            .owner_scope("owner-b")
+            .admission_profile(profile)
+            .budget_ceiling(BudgetLimits{1000, 1000, 1000, 1, 1, 20, 1, 1, 1});
+        return std::move(builder).build();
+    }
+
+    static json source_document() {
+        return json{
+            {"program_schema_version", 1},
+            {"input_contract", json{{"schema_version", 1}, {"schema", json::object()}}},
+            {"output_contract", json{{"schema_version", 1}, {"schema", json::object()}}},
+            {"root",
+             json{{"op", "call_core"},
+                  {"name", "main"},
+                  {"definition",
+                   json{{"schema_version", 1},
+                        {"name", "main"},
+                        {"channels",
+                         json{{"value",
+                               json{{"reducer", "a2a-adapter-overwrite"}, {"initial", ""}}}}},
+                        {"nodes", json{{"work", json{{"type", "a2a-adapter-node"}}}}},
+                        {"edges",
+                         json::array({json{{"from", "__start__"}, {"to", "work"}},
+                                      json{{"from", "work"}, {"to", "__end__"}}})},
+                        {"conditional_edges", json::array()}}}}},
+            {"declared_budget_requirements",
+             json::array(
+                 {json{{"resource", "wall_time_ms"}, {"minimum", 1}, {"maximum", 1000}},
+                  json{{"resource", "model_tokens"}, {"minimum", 0}, {"maximum", 1000}},
+                  json{{"resource", "monetary_microunits"}, {"minimum", 0}, {"maximum", 1000}},
+                  json{{"resource", "max_concurrency"}, {"minimum", 1}, {"maximum", 1}},
+                  json{{"resource", "max_program_operations"}, {"minimum", 1}, {"maximum", 1}},
+                  json{{"resource", "max_core_steps"}, {"minimum", 1}, {"maximum", 20}},
+                  json{{"resource", "max_dynamic_compiles"}, {"minimum", 0}, {"maximum", 0}},
+                  json{{"resource", "max_child_depth"}, {"minimum", 0}, {"maximum", 0}},
+                  json{{"resource", "max_total_children"}, {"minimum", 0}, {"maximum", 0}}})}};
+    }
+};
+
+CollaborationEnvelope make_program_envelope(
+    const CollaborationLink& link, const neograph::program::ProgramVersion& version) {
+    return CollaborationEnvelope::bind_program(
+        CollaborationEnvelope::create(link, "run-a", "run-b", "run-b", "context-1",
+                                      "message-1", "correlation-1", 1, "request",
+                                      "idem-program-recovery", json{{"prompt", "persisted"}}),
+        version);
+}
+
+neograph::program::ProgramInvocation persisted_invocation() {
+    neograph::program::ProgramInvocation invocation;
+    invocation.input = json{{"prompt", "persisted"}};
+    invocation.budget = neograph::program::RunBudget{1000, 1000, 1000, 1, 1, 20, 0, 0, 0};
+    invocation.trace_id = "a2a:run-b";
+    invocation.requested_run_id = "run-b";
+    return invocation;
 }
 #endif
 
@@ -236,6 +405,122 @@ TEST(A2ACollaboration, MailboxRetainsTypedProgramRequestAcrossReconnect) {
     EXPECT_EQ(request->invocation->input, invocation.input);
     EXPECT_EQ(reopened.submit(envelope, version, invocation),
               CollaborationSubmitResult::Duplicate);
+}
+
+TEST(A2ACollaboration, RecoveredTypedMailboxRequestStartsExactlyOnce) {
+    ProgramAdapterFixture fixture;
+    const auto accepted = make_link().accept("executor-b", "consent-secret");
+    const auto envelope = make_program_envelope(accepted, fixture.admitted_version());
+
+    CollaborationMailbox original("owner-b", "executor-b");
+    original.accept_link(accepted, "consent-secret");
+    ASSERT_EQ(original.submit_program(envelope, fixture.admitted_version(), persisted_invocation()),
+              CollaborationSubmitResult::Accepted);
+
+    const auto persisted_mailbox = original.serialize_canonical();
+    auto reopened = std::make_shared<CollaborationMailbox>(
+        CollaborationMailbox::parse(persisted_mailbox));
+    fixture.restart_after_mailbox_publication();
+
+    ProgramAgentAdapter adapter(fixture.runtime, fixture.admitted_version(), "owner-b", reopened);
+    const auto recovered = adapter.recover_pending();
+    ASSERT_EQ(recovered.size(), 1U);
+    EXPECT_EQ(recovered.front().run_id(), "run-b");
+    EXPECT_EQ(recovered.front().program_version_id(), fixture.admitted_version().id());
+    EXPECT_EQ(recovered.front().wait().status(), neograph::program::ProgramTerminalStatus::Completed);
+    EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 1U);
+
+    const auto retry = adapter.start(collaboration_to_message(envelope), "run-b", "context-1");
+    EXPECT_EQ(retry.run_id(), "run-b");
+    EXPECT_EQ(retry.wait().status(), neograph::program::ProgramTerminalStatus::Completed);
+    EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 1U);
+}
+
+TEST(A2ACollaboration, RecoveryRejectsDuplicateRunBeforeAnyDispatch) {
+    ProgramAdapterFixture fixture;
+    const auto accepted = make_link().accept("executor-b", "consent-secret");
+    const auto first = make_program_envelope(accepted, fixture.admitted_version());
+    const auto duplicate = CollaborationEnvelope::bind_program(
+        CollaborationEnvelope::create(accepted, "run-a", "run-b", "run-b", "context-2",
+                                      "message-2", "correlation-2", 1, "request",
+                                      "idem-program-duplicate", json{{"prompt", "duplicate"}}),
+        fixture.admitted_version());
+    auto mailbox = std::make_shared<CollaborationMailbox>("owner-b", "executor-b");
+    mailbox->accept_link(accepted, "consent-secret");
+    ASSERT_EQ(mailbox->submit_program(first, fixture.admitted_version(), persisted_invocation()),
+              CollaborationSubmitResult::Accepted);
+    ASSERT_EQ(mailbox->submit_program(duplicate, fixture.admitted_version(), persisted_invocation()),
+              CollaborationSubmitResult::Accepted);
+
+    ProgramAgentAdapter adapter(fixture.runtime, fixture.admitted_version(), "owner-b", mailbox);
+    EXPECT_THROW(adapter.recover_pending(), ProgramA2ARequestError);
+    EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 0U);
+}
+
+TEST(A2ACollaboration, RecoveredMailboxReconnectsPublishedRunWithoutRedispatch) {
+    ProgramAdapterFixture fixture;
+    const auto accepted = make_link().accept("executor-b", "consent-secret");
+    const auto envelope = make_program_envelope(accepted, fixture.admitted_version());
+    auto mailbox = std::make_shared<CollaborationMailbox>("owner-b", "executor-b");
+    mailbox->accept_link(accepted, "consent-secret");
+
+    ProgramAgentAdapter original(fixture.runtime, fixture.admitted_version(), "owner-b", mailbox);
+    const auto first = original.start(collaboration_to_message(envelope), "run-b", "context-1");
+    ASSERT_EQ(first.wait().status(), neograph::program::ProgramTerminalStatus::Completed);
+    ASSERT_EQ(fixture.starts->load(std::memory_order_relaxed), 1U);
+
+    auto reopened = std::make_shared<CollaborationMailbox>(
+        CollaborationMailbox::parse(mailbox->serialize_canonical()));
+    fixture.restart_after_mailbox_publication();
+    ProgramAgentAdapter recovered_adapter(
+        fixture.runtime, fixture.admitted_version(), "owner-b", reopened);
+    const auto recovered = recovered_adapter.recover_pending();
+
+    ASSERT_EQ(recovered.size(), 1U);
+    EXPECT_EQ(recovered.front().run_id(), "run-b");
+    EXPECT_EQ(recovered.front().wait().status(), neograph::program::ProgramTerminalStatus::Completed);
+    EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 1U);
+}
+
+TEST(A2ACollaboration, ServerRestoresMailboxRequestBeforeAcceptingTasks) {
+    ProgramAdapterFixture fixture;
+    const auto accepted = make_link().accept("executor-b", "consent-secret");
+    const auto envelope = make_program_envelope(accepted, fixture.admitted_version());
+
+    CollaborationMailbox original("owner-b", "executor-b");
+    original.accept_link(accepted, "consent-secret");
+    ASSERT_EQ(original.submit_program(envelope, fixture.admitted_version(), persisted_invocation()),
+              CollaborationSubmitResult::Accepted);
+    auto reopened = std::make_shared<CollaborationMailbox>(
+        CollaborationMailbox::parse(original.serialize_canonical()));
+    fixture.restart_after_mailbox_publication();
+
+    AgentCard card;
+    card.name = "recovery-test";
+    card.description = "Program mailbox recovery test";
+    card.url = "http://127.0.0.1:0/";
+    card.version = "1.0.0";
+    card.protocol_version = "0.3.0";
+    card.preferred_transport = "JSONRPC";
+    card.default_input_modes = {"text/plain"};
+    card.default_output_modes = {"text/plain"};
+    A2AServer server(fixture.runtime, fixture.admitted_version(), "owner-b", card, reopened);
+    ASSERT_TRUE(server.start_async("127.0.0.1", 0));
+
+    A2AClient client("http://127.0.0.1:" + std::to_string(server.port()));
+    Task task;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        task = client.get_task("run-b");
+        if (task.status.state == TaskState::Completed) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    server.stop();
+
+    EXPECT_EQ(task.status.state, TaskState::Completed);
+    EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 1U);
+    const auto record = reopened->get("idem-program-recovery");
+    ASSERT_TRUE(record.has_value());
+    EXPECT_EQ(record->state, CollaborationRecordState::Acknowledged);
 }
 
 TEST(A2ACollaboration, MailboxJournalRejectsLostTypedProgramRequestOnReopen) {

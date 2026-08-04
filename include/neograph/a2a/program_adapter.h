@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace neograph::a2a {
 
@@ -59,6 +60,17 @@ public:
     program::ProgramHandle start(const Message& inbound,
                                  std::string_view task_id,
                                  std::string_view context_id) const;
+
+    /**
+     * Recover accepted, typed mailbox requests for this exact ProgramVersion.
+     *
+     * The mailbox is the durable inbound-publication boundary. For every
+     * unacknowledged request, this either reconnects its exact persisted run
+     * or atomically claims the requested run ID with the persisted invocation.
+     * It never rebuilds an invocation from a message or acknowledges a record.
+     * Records for another admitted ProgramVersion are left for that adapter.
+     */
+    std::vector<program::ProgramHandle> recover_pending() const;
 
     /// Reconnect a run from the ProgramTransitionStore without replaying input.
     program::ProgramHandle reconnect(std::string_view task_id) const;

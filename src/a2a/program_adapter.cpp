@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <utility>
+#include <unordered_set>
 
 namespace neograph::a2a {
 namespace {
@@ -225,6 +226,86 @@ program::ProgramHandle ProgramAgentAdapter::start(const Message& inbound,
         throw std::runtime_error("ProgramRuntime changed the requested A2A run ID");
     }
     return handle;
+}
+
+std::vector<program::ProgramHandle> ProgramAgentAdapter::recover_pending() const {
+    std::vector<program::ProgramHandle> recovered;
+    if (!mailbox_) return recovered;
+
+    const auto records = mailbox_->snapshot();
+    const auto adapter_version = version_.serialize_canonical();
+    std::vector<const CollaborationRecord*> pending;
+    std::unordered_set<std::string>          recovered_run_ids;
+    pending.reserve(records.size());
+
+    // Validate the complete recovery batch before any request is dispatched:
+    // a later duplicate must not make an earlier record observable as a
+    // partially accepted Program run.
+    for (const auto& record : records) {
+        if (record.state != CollaborationRecordState::Accepted) continue;
+        if (record.envelope.program_version_id != version_.id()) continue;
+        if (!record.program_request) {
+            throw ProgramA2ARequestError("Accepted collaboration record lost its typed Program request");
+        }
+
+        const auto& request = *record.program_request;
+        if (!request.version || !request.invocation ||
+            request.version->id() != version_.id() ||
+            request.version->serialize_canonical() != adapter_version) {
+            throw ProgramA2ARequestError(
+                "Accepted collaboration record does not preserve the adapter ProgramVersion");
+        }
+
+        const auto& invocation = *request.invocation;
+        const auto& envelope   = record.envelope;
+        const auto& run_id     = invocation.requested_run_id;
+        if (run_id.empty() || envelope.a2a_task_id != run_id ||
+            envelope.receiver_program_run_id != run_id || envelope.a2a_context_id.empty() ||
+            envelope.receiver_owner_scope != owner_scope_ ||
+            !invocation.parent_run_id.empty() || invocation.child_depth != 0) {
+            throw ProgramA2ARequestError(
+                "Accepted collaboration record is outside the Program adapter identity boundary");
+        }
+        if (!recovered_run_ids.insert(run_id).second) {
+            throw ProgramA2ARequestError(
+                "Multiple accepted collaboration records claim the same Program run ID");
+        }
+        pending.push_back(&record);
+    }
+
+    for (const auto* record : pending) {
+        const auto& invocation = *record->program_request->invocation;
+        const auto& run_id     = invocation.requested_run_id;
+        const program::ProgramPersistedInvocation expected{
+            invocation.input, invocation.budget, invocation.trace_id, invocation.parent_run_id,
+            invocation.child_depth};
+        const auto verify_handle = [&](program::ProgramHandle handle) {
+            const auto durable = handle.snapshot();
+            if (handle.run_id() != run_id || handle.program_version_id() != version_.id() ||
+                durable.program_version_id() != version_.id() ||
+                durable.invocation() != expected) {
+                throw ProgramA2ARequestError(
+                    "Durable Program run does not match the accepted collaboration request");
+            }
+            return handle;
+        };
+
+        try {
+            recovered.push_back(verify_handle(reconnect(run_id)));
+            continue;
+        } catch (const program::ProgramDiagnosticError& error) {
+            if (error.diagnostic().code != "P_RUN_NOT_FOUND") throw;
+        }
+
+        try {
+            recovered.push_back(
+                verify_handle(runtime_->start(owner_scope_, version_, invocation)));
+        } catch (const program::ProgramDiagnosticError& error) {
+            if (error.diagnostic().code != "P_RUN_CONFLICT") throw;
+            recovered.push_back(verify_handle(reconnect(run_id)));
+        }
+    }
+    return recovered;
 }
 
 program::ProgramHandle ProgramAgentAdapter::reconnect(std::string_view task_id) const {
