@@ -149,7 +149,18 @@
           "items": {"$ref": "#/$defs/surfaceComparison"}
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {"id": {"const": "a2a_collaboration"}},
+            "required": ["id"]
+          },
+          "then": {
+            "properties": {"schema_versions": {"const": [2]}}
+          }
+        }
+      ]
     },
     "historicalReference": {
       "type": "object",

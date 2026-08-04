@@ -188,7 +188,7 @@ silently accepted as current Program versions. Issue #7 tracks this
 cross-repository rebase gate. The machine-readable declaration in
 `spec/cross-repository-compatibility-v1.json` records the comparison between
 the current `ProgramVersion`, `RunInvocation`, and A2A collaboration surfaces
-and those historical references. Its metadata check is intentionally
+and those historical references. Its metadata/source check is intentionally
 fail-closed: NeoCode and NeoProtocol remain `historical_only` until a consumer
 declares every current contract revision and verified conformance evidence;
 changing a label alone cannot make a consumer current. Run the focused check

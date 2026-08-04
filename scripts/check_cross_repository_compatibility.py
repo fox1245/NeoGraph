@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Check the fail-closed cross-repository compatibility declaration.
 
-This is intentionally a metadata-only check.  It reads the two explicitly
-named JSON files and verifies their references; it does not clone, execute, or
-inspect NeoCode/NeoProtocol, and it never grants compatibility based on a
-repository name alone.
+This is intentionally a metadata/source-contract check.  It reads the two
+explicitly named JSON files and verifies their references plus current markers
+in the exposed NeoGraph headers; it does not clone, execute, or inspect
+NeoCode/NeoProtocol, and it never grants compatibility based on a repository
+name alone.
 """
 
 from __future__ import annotations
@@ -39,6 +40,73 @@ def _check_source(root: Path, relative_path: str, field: str) -> None:
     path = (root / relative_path).resolve()
     _require(path.is_relative_to(root.resolve()), f"{field} escapes repository root")
     _require(path.is_file(), f"{field} does not exist: {relative_path}")
+
+
+def _check_source_marker(root: Path, relative_path: str, marker: str, field: str) -> None:
+    """Require a current-contract marker in an exposed source surface.
+
+    Compatibility metadata is deliberately checked against the public source
+    that it names.  A path existing is not enough: a copied historical header
+    or schema must not be able to satisfy a current conformance declaration.
+    Whitespace is normalized so formatting-only edits do not change the gate.
+    """
+
+    _check_source(root, relative_path, field)
+    path = (root / relative_path).resolve()
+    try:
+        content = " ".join(path.read_text(encoding="utf-8").split())
+    except OSError as error:
+        raise CompatibilityCheckError(f"{field} cannot be read: {relative_path}: {error}") from error
+    normalized_marker = " ".join(marker.split())
+    _require(
+        normalized_marker in content,
+        f"{field} is missing current contract marker {marker!r}",
+    )
+
+
+_CURRENT_SURFACE_SCHEMA_VERSIONS = {
+    "program_version": [1],
+    "run_invocation": [1],
+    # CollaborationLink was extended with the explicit message-kind allowlist
+    # in schema v2.  The metadata previously accepted a stale [1] declaration
+    # because it only checked that versions were positive integers.
+    "a2a_collaboration": [2],
+}
+
+
+_CURRENT_SURFACE_MARKERS = {
+    "a2a_collaboration": (
+        (
+            "include/neograph/a2a/collaboration.h",
+            "std::uint32_t schema_version = 2",
+        ),
+        (
+            "include/neograph/a2a/collaboration.h",
+            "static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2",
+        ),
+        (
+            "include/neograph/a2a/collaboration.h",
+            "std::vector<std::string> message_kind_allowlist",
+        ),
+    ),
+}
+
+
+def _validate_current_surface_contract(surface: dict[str, Any], root: Path, field: str) -> None:
+    surface_id = surface.get("id")
+    expected_versions = _CURRENT_SURFACE_SCHEMA_VERSIONS.get(surface_id)
+    if expected_versions is not None:
+        _require(
+            surface.get("schema_versions") == expected_versions,
+            f"{field}.schema_versions does not match the current exposed contract",
+        )
+    for marker_path, marker in _CURRENT_SURFACE_MARKERS.get(surface_id, ()):
+        declared_sources = surface.get("source_paths")
+        _require(
+            isinstance(declared_sources, list) and marker_path in declared_sources,
+            f"{field}.source_paths omits the marker-backed public header {marker_path}",
+        )
+        _check_source_marker(root, marker_path, marker, f"{field}.{marker_path}")
 
 
 def _validate(metadata: dict[str, Any], root: Path) -> None:
@@ -85,6 +153,7 @@ def _validate(metadata: dict[str, Any], root: Path) -> None:
             isinstance(schema_versions, list) and schema_versions and all(isinstance(version, int) and version >= 1 for version in schema_versions),
             f"{prefix}.schema_versions must contain positive integers",
         )
+        _validate_current_surface_contract(surface, root, prefix)
         source_paths = surface.get("source_paths")
         _require(isinstance(source_paths, list) and source_paths, f"{prefix}.source_paths is empty")
         _unique(source_paths, f"{prefix}.source_paths")
@@ -248,12 +317,27 @@ def main() -> int:
     else:
         raise CompatibilityCheckError("historical consumer was silently accepted as current")
 
+    # A focused drift proof: a historical v1 A2A schema declaration must not
+    # pass merely because the source paths still exist.  The current public
+    # CollaborationLink contract is v2 and is checked against its header above.
+    candidate = copy.deepcopy(metadata)
+    a2a_surface = next(
+        surface for surface in candidate["current_surfaces"] if surface["id"] == "a2a_collaboration"
+    )
+    a2a_surface["schema_versions"] = [1]
+    try:
+        _validate(candidate, root)
+    except CompatibilityCheckError:
+        pass
+    else:
+        raise CompatibilityCheckError("stale A2A schema declaration was silently accepted")
+
     print(
         "cross-repository compatibility metadata: PASS "
         f"({len(metadata['current_surfaces'])} current surfaces, "
         f"{len(metadata['historical_references'])} historical references, "
         f"{len(metadata['consumers'])} guarded consumers; "
-        "negative current-claim check rejected)"
+        "negative current-claim and stale-schema checks rejected)"
     )
     return 0
 

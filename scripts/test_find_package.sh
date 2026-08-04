@@ -8,7 +8,8 @@
 # unit test in the repo links against the build tree, where the headers, the
 # vendored deps and the libraries are all reachable by accident.
 #
-#   exit 0 — a consumer can find_package(NeoGraph), link core/mcp_sqlite, and run
+#   exit 0 — a consumer can find_package(NeoGraph), link the exported targets,
+#            compile the public Core/A2A/ACP headers, and run
 #   exit 1 — it cannot, at whichever of the four stages failed
 #
 # Shared mode also verifies the platform loader metadata and versioned links.
