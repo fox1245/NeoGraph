@@ -81,14 +81,14 @@
         "docs/V1_ARCHITECTURE.md"
       ],
       "contract_revision": "neograph-a2a-collaboration-v1",
-      "schema_versions": [1],
+      "schema_versions": [2],
       "implementation_state": "compatibility_adapter_pending_program_cutover",
       "current_conformance": true,
       "comparison_to_historical": [
         {
           "reference_id": "neocode_harness_sidecar",
           "classification": "not_equivalent",
-          "reason": "A local stdio sidecar has no owner-scoped collaboration link, consent, artifact allowlist, or idempotent A2A envelope."
+          "reason": "A local stdio sidecar has no owner-scoped collaboration link, consent, capability/effect/artifact/message-kind allowlists, or idempotent A2A envelope."
         },
         {
           "reference_id": "neoprotocol_federated_acp",
