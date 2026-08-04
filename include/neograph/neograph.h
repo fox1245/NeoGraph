@@ -18,6 +18,7 @@
 // Foundation types
 #include <neograph/completion_provider.h>
 #include <neograph/provider.h>
+#include <neograph/host_admission.h>
 #include <neograph/tool.h>
 #include <neograph/tool_execution.h>
 #include <neograph/tool_set.h>

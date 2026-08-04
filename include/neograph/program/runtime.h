@@ -7,6 +7,7 @@
 #include <neograph/api.h>
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/store.h>
+#include <neograph/host_admission.h>
 #include <neograph/program/catalog.h>
 #include <neograph/program/fork.h>
 #include <neograph/program/handle.h>
@@ -18,6 +19,8 @@
 
 #include <asio/awaitable.hpp>
 #include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -52,13 +55,40 @@ struct ProgramEffectResolution {
     std::shared_ptr<ProgramEventSink> events;
 };
 
+/**
+ * Immutable data available when a host scheduler admits one Program attempt.
+ *
+ * The resolver receives this context exactly once per attempt.  The runtime
+ * owns the resulting request's owner and operation identities, so a policy
+ * cannot accidentally merge independent tenant attempts.
+ */
+struct ProgramHostAdmissionContext {
+    std::string_view owner_scope;
+    std::string_view program_version_id;
+    std::string_view run_id;
+    std::string_view operation_id;
+    std::uint64_t    attempt = 0;
+    RunBudget        granted_budget;
+    std::uint32_t    child_depth = 0;
+};
+
+using ProgramHostAdmissionResolver =
+    std::function<HostAdmissionRequest(const ProgramHostAdmissionContext&)>;
+
 struct RuntimeConfig {
     std::shared_ptr<ProgramCatalog>         catalog;
     std::shared_ptr<graph::CheckpointStore> checkpoints;
     std::shared_ptr<graph::Store>           state_store;
     std::shared_ptr<ProgramTransitionStore> transitions;
     std::size_t                             scheduler_threads = 1;
-    ProgramChildBindingResolver              child_binding_resolver;
+    ProgramChildBindingResolver             child_binding_resolver;
+    /**
+     * Optional shared host scheduler.  It becomes mandatory for every attempt
+     * when configured; leaving either member unset preserves legacy direct
+     * dispatch.
+     */
+    std::shared_ptr<HostAdmissionController> host_admission;
+    ProgramHostAdmissionResolver              host_admission_resolver;
 };
 class NEOGRAPH_PROGRAM_API ProgramRuntime {
 public:

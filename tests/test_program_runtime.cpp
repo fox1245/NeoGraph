@@ -2128,6 +2128,125 @@ TEST(ProgramRuntimeTest, UserCancellationWinsAndSkipsLaterNodes) {
     EXPECT_EQ(followup_calls.load(), 0U);
 }
 
+TEST(ProgramRuntimeTest, HostAdmissionQueuesProgramAttemptsUntilLeaseRelease) {
+    blocking_calls.store(0);
+    followup_calls.store(0);
+    AdmittedRuntime fixture(2);
+    const auto version = fixture.admit("runtime-short-blocking");
+
+    const auto host_profile = neograph::HostResourceProfile::create(
+        neograph::HostResourceProfileData{
+            "runtime-host-v1",
+            neograph::HostResourceVector{.cpu_millis = 1},
+            {},
+            neograph::HostResourceEvidence{"test", neograph::HostResourceConfidence::Measured,
+                                           1, false}});
+    auto host = std::make_shared<neograph::HostAdmissionController>(
+        neograph::HostAdmissionControllerConfig{host_profile});
+
+    RuntimeConfig config{fixture.catalog, fixture.checkpoints, {}, fixture.journal, 2};
+    config.host_admission = host;
+    config.host_admission_resolver = [](const ProgramHostAdmissionContext& context) {
+        EXPECT_EQ(context.owner_scope, "tenant:runtime");
+        EXPECT_EQ(context.operation_id, "root");
+        neograph::HostAdmissionRequest request;
+        request.resources.cpu_millis = 1;
+        request.priority             = 17;
+        return request;
+    };
+    fixture.runtime = std::make_unique<ProgramRuntime>(std::move(config));
+
+    auto first = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-host-first", {}});
+    for (int i = 0; i < 100 && blocking_calls.load() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    ASSERT_EQ(blocking_calls.load(), 1U);
+
+    auto second = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-host-second", {}});
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    EXPECT_EQ(blocking_calls.load(), 1U);
+    EXPECT_EQ(host->snapshot().queued, 1U);
+
+    EXPECT_EQ(first.wait().status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(second.wait().status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(blocking_calls.load(), 2U);
+    EXPECT_EQ(followup_calls.load(), 2U);
+    EXPECT_TRUE(host->snapshot().reserved.empty());
+}
+
+TEST(ProgramRuntimeTest, HostAdmissionDeadlineCancelsQueuedAttemptBeforeCoreDispatch) {
+    blocking_calls.store(0);
+    followup_calls.store(0);
+    AdmittedRuntime fixture(2);
+    const auto version = fixture.admit("runtime-blocking");
+
+    const auto host_profile = neograph::HostResourceProfile::create(
+        neograph::HostResourceProfileData{
+            "runtime-host-timeout-v1",
+            neograph::HostResourceVector{.cpu_millis = 1},
+            {},
+            neograph::HostResourceEvidence{"test", neograph::HostResourceConfidence::Measured,
+                                           1, false}});
+    auto host = std::make_shared<neograph::HostAdmissionController>(
+        neograph::HostAdmissionControllerConfig{host_profile});
+    RuntimeConfig config{fixture.catalog, fixture.checkpoints, {}, fixture.journal, 2};
+    config.host_admission = host;
+    config.host_admission_resolver = [](const ProgramHostAdmissionContext&) {
+        neograph::HostAdmissionRequest request;
+        request.resources.cpu_millis = 1;
+        return request;
+    };
+    fixture.runtime = std::make_unique<ProgramRuntime>(std::move(config));
+
+    auto first = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-host-timeout-holder", {}});
+    for (int i = 0; i < 100 && blocking_calls.load() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    ASSERT_EQ(blocking_calls.load(), 1U);
+
+    auto budget         = grant();
+    budget.wall_time_ms = 30;
+    auto queued = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), budget, "trace-host-timeout-queued", {}});
+    const auto queued_result = queued.wait();
+
+    EXPECT_EQ(queued_result.status(), ProgramTerminalStatus::TimedOut);
+    ASSERT_TRUE(queued_result.failure().has_value());
+    EXPECT_EQ(queued_result.failure()->code, "P_RUNTIME_TIMEOUT");
+    EXPECT_EQ(queued_result.usage().core_steps, 0U);
+    EXPECT_EQ(blocking_calls.load(), 1U);
+    EXPECT_TRUE(host->snapshot().reserved.cpu_millis == 1);
+    EXPECT_EQ(host->snapshot().queued, 0U);
+
+    EXPECT_TRUE(first.cancel());
+    EXPECT_EQ(first.wait().status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_TRUE(host->snapshot().reserved.empty());
+}
+
+TEST(ProgramRuntimeTest, HostAdmissionRequiresControllerAndResolverTogether) {
+    AdmittedRuntime fixture;
+    auto host = std::make_shared<neograph::HostAdmissionController>();
+
+    RuntimeConfig controller_only{
+        fixture.catalog, fixture.checkpoints, {}, fixture.journal, fixture.scheduler_thread_count};
+    controller_only.host_admission = host;
+    EXPECT_THROW({ ProgramRuntime runtime(std::move(controller_only)); }, std::invalid_argument);
+
+    RuntimeConfig resolver_only{
+        fixture.catalog, fixture.checkpoints, {}, fixture.journal, fixture.scheduler_thread_count};
+    resolver_only.host_admission_resolver = [](const ProgramHostAdmissionContext&) {
+        return neograph::HostAdmissionRequest{};
+    };
+    EXPECT_THROW({ ProgramRuntime runtime(std::move(resolver_only)); }, std::invalid_argument);
+}
+
 TEST(ProgramRuntimeTest, QueueWaitCountsAgainstWallTimeBudget) {
     scheduler_blocking_calls.store(0);
     completed_calls.store(0);

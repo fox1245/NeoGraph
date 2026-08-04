@@ -440,6 +440,36 @@ Child Programs and replacements receive a subset of the remaining budget.
 Resume, retry, fork, rollback, and child attachment never replenish it. Budget
 exhaustion is a typed terminal outcome, not a generic exception or model error.
 
+### Host admission
+
+`RunBudget` is a durable per-Program spending limit; it is not a statement
+that the current machine can safely run every admitted Program at once.
+`HostResourceProfile` is the separate host-owned, versioned capacity snapshot.
+It records measured, estimated, or conservative-fallback evidence, subtracts a
+non-admitted safety reserve, and never treats an unknown component as
+unlimited.
+
+`HostAdmissionController` atomically reserves a vector of CPU, memory, GPU,
+process, thread, file-descriptor, disk, network, tool, provider, token, cost,
+and wall-time components. It gives feasible queued work aging-priority/FIFO
+order; changing a profile never revokes a held lease, but blocks new grants
+while the profile is overcommitted.
+
+Program host admission is opt-in as an all-or-nothing pair in `RuntimeConfig`:
+a shared controller plus a request resolver. The resolver sees only immutable
+attempt context and chooses resource quantities and scheduling hints. The
+runtime stamps the owner and a unique per-attempt operation identity, clamps
+the queue timeout to the Program deadline, and starts Core only after a lease
+is granted. A user cancellation, runtime shutdown, or wall-time expiry removes
+a queued request without dispatching Core. The lease is terminal cleanup: it is
+released before a completed handle becomes observable, including failed,
+cancelled, and timed-out attempts.
+
+This is a host safety envelope, not another node engine, durable budget ledger,
+or hidden cross-operation lock. Hosts may leave the pair unset to preserve
+legacy direct Program dispatch, and may share one controller across Program
+runtimes, Engine tool dispatch, and other local work.
+
 ### Authority
 
 Every external action resolves through a sealed capability reference. The

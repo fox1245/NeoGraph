@@ -18,8 +18,8 @@
 #pragma once
 
 #include <neograph/api.h>
+#include <neograph/host_admission.h>
 #include <neograph/json.h>
-
 #include <asio/awaitable.hpp>
 
 #include <chrono>
@@ -76,7 +76,7 @@ struct ToolExecutionIdentity {
  * fail closed instead of silently collapsing unrelated resources together.
  */
 struct ToolExecutionPolicy {
-    static constexpr std::uint32_t SCHEMA_VERSION = 1;
+    static constexpr std::uint32_t SCHEMA_VERSION = 2;
 
     std::uint32_t schema_version = SCHEMA_VERSION;
     std::string   policy_id;
@@ -87,6 +87,13 @@ struct ToolExecutionPolicy {
     std::chrono::milliseconds queue_timeout{60'000};
     std::size_t output_limit_bytes = 16U * 1024U * 1024U;
     std::string resource_key_template{"tool:{tool}"};
+    /**
+     * Host-wide reservation held while the tool implementation executes. For
+     * non-reentrant policies it is acquired after tool-resource arbitration,
+     * so a queued request never occupies host capacity.
+     */
+    HostResourceVector host_resources;
+    std::uint8_t host_priority = 0;
 
     /// Throws std::invalid_argument for a malformed or unsafe policy.
     void validate() const;
@@ -173,10 +180,15 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-/** Dependencies injected into a ToolExecutionController. */
 struct ToolExecutionControllerConfig {
     std::shared_ptr<ToolExecutionPolicyRegistry> policies;
     std::shared_ptr<ResourceArbiter> arbiter;
+    /**
+     * Optional host-wide resource boundary. Absent preserves legacy direct
+     * embedding behavior; a configured controller admits every path routed
+     * through this ToolExecutionController.
+     */
+    std::shared_ptr<HostAdmissionController> host_admission;
 };
 
 /**
@@ -199,6 +211,7 @@ public:
 
     [[nodiscard]] std::shared_ptr<ToolExecutionPolicyRegistry> policies() const;
     [[nodiscard]] std::shared_ptr<ResourceArbiter> arbiter() const;
+    [[nodiscard]] std::shared_ptr<HostAdmissionController> host_admission() const;
 
 private:
     class Impl;

@@ -160,6 +160,27 @@ std::string derive_resource_key(const ToolExecutionPolicy& policy,
     return key;
 }
 
+HostAdmissionRequest host_request_for(const ToolExecutionPolicy& policy,
+                                      std::string_view tool_name,
+                                      const ToolExecutionIdentity& identity) {
+    HostAdmissionRequest request;
+    request.owner_scope = identity.owner_scope.empty() ? "anonymous" : identity.owner_scope;
+    request.operation_id = std::string(tool_name);
+    request.resources = policy.host_resources;
+    if (request.resources.empty()) {
+        // The host controller is opt-in. Once opted in, every tool consumes at
+        // least one explicit global tool slot instead of bypassing admission.
+        request.resources.tool_slots = 1;
+    }
+    // Host queue depth belongs to the shared host controller. Reusing the
+    // per-tool key queue's limit would reject a safe controller with a tighter
+    // global backlog cap rather than inheriting that cap.
+    request.max_pending = 0;
+    request.priority = policy.host_priority;
+    request.queue_timeout = policy.queue_timeout;
+    return request;
+}
+
 asio::thread_pool& blocking_tool_pool() {
     // This is intentionally one bounded shared pool, never one thread per tool
     // call. Resource leases bound the work admitted to it; the pool only keeps
@@ -510,11 +531,11 @@ ToolExecutionPolicy ToolExecutionPolicyRegistry::resolve(std::string_view tool_n
     const auto found = impl_->by_tool.find(std::string(tool_name));
     return found == impl_->by_tool.end() ? impl_->default_policy : found->second;
 }
-
 class ToolExecutionController::Impl final {
 public:
     std::shared_ptr<ToolExecutionPolicyRegistry> policies;
     std::shared_ptr<ResourceArbiter> arbiter;
+    std::shared_ptr<HostAdmissionController> host_admission;
 };
 
 ToolExecutionController::ToolExecutionController(ToolExecutionControllerConfig config)
@@ -523,6 +544,7 @@ ToolExecutionController::ToolExecutionController(ToolExecutionControllerConfig c
                                       : std::make_shared<ToolExecutionPolicyRegistry>();
     impl_->arbiter = config.arbiter ? std::move(config.arbiter)
                                     : std::make_shared<ResourceArbiter>();
+    impl_->host_admission = std::move(config.host_admission);
 }
 
 ToolExecutionController::~ToolExecutionController() = default;
@@ -531,6 +553,7 @@ asio::awaitable<std::string> ToolExecutionController::execute_async(
     Tool& tool, json arguments, ToolExecutionContext context) {
     const auto policy = impl_->policies->resolve(tool.get_name());
     policy.validate();
+    const auto identity = context.identity;
 
     auto invoke = [&tool, &policy, &arguments, &context]() -> asio::awaitable<std::string> {
         // ContextualAsyncTool has no safe synchronous fallback by design: its
@@ -551,13 +574,33 @@ asio::awaitable<std::string> ToolExecutionController::execute_async(
         return value;
     };
 
+    const auto queue_deadline = std::chrono::steady_clock::now() + policy.queue_timeout;
+    const auto host_admission = impl_->host_admission;
+    auto reserve_host = [host_admission, &policy, &tool, &identity, &context,
+                         queue_deadline]() -> asio::awaitable<HostResourceLease> {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= queue_deadline) throw asio::system_error(asio::error::timed_out);
+
+        auto request = host_request_for(policy, tool.get_name(), identity);
+        request.queue_timeout = std::min(
+            request.queue_timeout,
+            std::max(std::chrono::milliseconds{1},
+                     std::chrono::duration_cast<std::chrono::milliseconds>(queue_deadline - now)));
+        co_return co_await host_admission->reserve_async(std::move(request), context.cancel_token);
+    };
+
     if (policy.concurrency == ToolConcurrency::Reentrant) {
+        std::optional<HostResourceLease> host_lease;
+        if (host_admission) host_lease.emplace(co_await reserve_host());
+        if (context.cancel_token) {
+            context.cancel_token->throw_if_cancelled("after tool resource admission");
+        }
         co_return check_output(co_await invoke());
     }
 
     ResourceRequest request;
-    request.resource_key = derive_resource_key(policy, tool.get_name(), arguments, context.identity);
-    request.owner_scope = context.identity.owner_scope.empty() ? "anonymous" : context.identity.owner_scope;
+    request.resource_key = derive_resource_key(policy, tool.get_name(), arguments, identity);
+    request.owner_scope = identity.owner_scope.empty() ? "anonymous" : identity.owner_scope;
     request.capacity = policy.concurrency == ToolConcurrency::KeyedExclusive ? 1 : policy.capacity;
     request.max_pending = policy.max_pending;
     request.queue_timeout = policy.queue_timeout;
@@ -566,8 +609,15 @@ asio::awaitable<std::string> ToolExecutionController::execute_async(
     if (context.cancel_token) {
         context.cancel_token->throw_if_cancelled("after tool resource admission");
     }
+
+    std::optional<HostResourceLease> host_lease;
+    if (host_admission) host_lease.emplace(co_await reserve_host());
+    if (context.cancel_token) {
+        context.cancel_token->throw_if_cancelled("after host resource admission");
+    }
     co_return check_output(co_await invoke());
 }
+
 
 std::shared_ptr<ToolExecutionPolicyRegistry> ToolExecutionController::policies() const {
     return impl_->policies;
@@ -575,6 +625,10 @@ std::shared_ptr<ToolExecutionPolicyRegistry> ToolExecutionController::policies()
 
 std::shared_ptr<ResourceArbiter> ToolExecutionController::arbiter() const {
     return impl_->arbiter;
+}
+
+std::shared_ptr<HostAdmissionController> ToolExecutionController::host_admission() const {
+    return impl_->host_admission;
 }
 
 std::shared_ptr<ToolExecutionController> default_tool_execution_controller() {

@@ -79,7 +79,14 @@ public:
                std::shared_ptr<ProgramTransitionStore> transitions);
 
     using CompletionCallback = std::function<void(const ProgramResult&)>;
+    using TerminalCleanup = std::function<void()>;
     void set_completion_callback(CompletionCallback callback) noexcept;
+    /**
+     * Registers per-attempt cleanup that runs before the terminal transition
+     * is published.  Admission leases use this to free host capacity before a
+     * completed handle can start the next Program.
+     */
+    void add_terminal_cleanup(TerminalCleanup cleanup);
     void set_child_launch_callback(ChildLaunchCallback callback) noexcept;
 
     const std::string                                owner_scope;
@@ -160,6 +167,7 @@ public:
     std::shared_ptr<ProgramEventSink>     sink_;
     CompletionCallback                    completion_callback_;
     mutable std::vector<AsyncWaiter>        waiters_;
+    std::vector<TerminalCleanup>           terminal_cleanups_;
     ChildLaunchCallback                   child_launch_callback_;
     std::uint64_t                         next_sequence_      = 1;
     CancellationCause                     cancellation_cause_ = CancellationCause::None;

@@ -412,6 +412,7 @@ add_library(neograph_core
     src/core/completion_provider.cpp
     src/core/tool.cpp
     src/core/tool_execution.cpp
+    src/core/host_admission.cpp
     src/core/run_context_runtime.cpp
     src/core/graph_engine.cpp
     src/core/graph_compiler.cpp

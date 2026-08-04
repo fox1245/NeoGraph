@@ -9,6 +9,7 @@
 #include <chrono>
 #include <future>
 #include <memory>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -159,4 +160,171 @@ TEST(ToolExecutionController, HostCanWidenOnlyDeclaredResourceCapacity) {
         << "capacity was widened only by the host-declared policy";
     EXPECT_LT(elapsed, 2 * kDelay)
         << "declared capacity did not overlap blocking tool calls";
+}
+
+TEST(ToolExecutionController, HostAdmissionBoundsReentrantTools) {
+    constexpr auto kDelay = 100ms;
+    BlockingProbeTool tool(kDelay);
+    auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
+    ToolExecutionPolicy policy;
+    policy.implementation = ToolExecutionImplementation::BlockingThread;
+    policy.concurrency = ToolConcurrency::Reentrant;
+    policy.host_resources.tool_slots = 1;
+    policy.queue_timeout = 1s;
+    policies->upsert("probe", policy);
+
+    HostResourceVector capacity;
+    capacity.tool_slots = 1;
+    HostResourceProfileData profile_data;
+    profile_data.profile_id = "tool-host-v1";
+    profile_data.capacity = capacity;
+    profile_data.evidence = {"test", HostResourceConfidence::Measured, 1, false};
+    auto host_admission = std::make_shared<HostAdmissionController>(
+        HostAdmissionControllerConfig{HostResourceProfile::create(std::move(profile_data)), 8, 2ms});
+    auto controller = std::make_shared<ToolExecutionController>(
+        ToolExecutionControllerConfig{policies, std::make_shared<ResourceArbiter>(), host_admission});
+
+    std::vector<ToolCall> calls;
+    for (int index = 0; index < 2; ++index) {
+        calls.push_back({"host-call-" + std::to_string(index), "probe", "{}"});
+    }
+    ToolExecutionContext execution;
+    execution.controller = controller;
+    const auto results = neograph::async::run_sync(
+        dispatch_tool_calls(std::move(calls), std::vector<Tool*>{&tool}, {}, {}, execution));
+
+    ASSERT_EQ(results.size(), 2U);
+    EXPECT_EQ(results[0].content, "ok");
+    EXPECT_EQ(results[1].content, "ok");
+    EXPECT_EQ(tool.max_active(), 1)
+        << "a host-installed admission controller must constrain reentrant tool calls";
+}
+
+TEST(ToolExecutionController, PropagatesPolicyPriorityToHostAdmission) {
+    BlockingProbeTool tool(1ms);
+    auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
+    ToolExecutionPolicy policy;
+    policy.implementation = ToolExecutionImplementation::BlockingThread;
+    policy.concurrency = ToolConcurrency::Reentrant;
+    policy.host_resources.tool_slots = 1;
+    policy.host_priority = 77;
+    policy.queue_timeout = 1s;
+    policies->upsert("probe", policy);
+
+    HostResourceVector capacity;
+    capacity.tool_slots = 1;
+    HostResourceProfileData profile_data;
+    profile_data.profile_id = "tool-priority-host-v1";
+    profile_data.capacity = capacity;
+    profile_data.evidence = {"test", HostResourceConfidence::Measured, 1, false};
+    auto host_admission = std::make_shared<HostAdmissionController>(
+        HostAdmissionControllerConfig{HostResourceProfile::create(std::move(profile_data)), 8, 2ms});
+    auto controller = std::make_shared<ToolExecutionController>(
+        ToolExecutionControllerConfig{policies, std::make_shared<ResourceArbiter>(), host_admission});
+
+    HostAdmissionRequest holder_request;
+    holder_request.owner_scope = "tenant-a";
+    holder_request.operation_id = "holder";
+    holder_request.resources.tool_slots = 1;
+    holder_request.priority = 3;
+    holder_request.queue_timeout = 1s;
+    auto holder = neograph::async::run_sync(host_admission->reserve_async(std::move(holder_request)));
+
+    std::promise<std::exception_ptr> completion;
+    auto done = completion.get_future();
+    std::thread waiter([&] {
+        try {
+            ToolExecutionContext context;
+            const auto result = neograph::async::run_sync(
+                controller->execute_async(tool, json::object(), std::move(context)));
+            if (result != "ok") throw std::runtime_error("unexpected tool result");
+            completion.set_value(nullptr);
+        } catch (...) {
+            completion.set_value(std::current_exception());
+        }
+    });
+
+    std::this_thread::sleep_for(20ms);
+    EXPECT_GE(holder.priority_hint(), 77U)
+        << "the host controller did not receive the tool policy's priority";
+
+    holder.release();
+    const auto status = done.wait_for(1s);
+    if (status != std::future_status::ready) {
+        waiter.join();
+        FAIL() << "host-admitted tool did not complete after the holder released";
+    }
+    const auto error = done.get();
+    waiter.join();
+    EXPECT_EQ(error, nullptr);
+}
+
+TEST(ToolExecutionController, WaitingForToolResourceDoesNotHoldHostSlots) {
+    constexpr auto kDelay = 200ms;
+    BlockingProbeTool tool(kDelay);
+    auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
+    ToolExecutionPolicy policy;
+    policy.implementation = ToolExecutionImplementation::BlockingThread;
+    policy.concurrency = ToolConcurrency::KeyedExclusive;
+    policy.host_resources.tool_slots = 1;
+    policy.queue_timeout = 1s;
+    policies->upsert("probe", policy);
+
+    HostResourceVector capacity;
+    capacity.tool_slots = 2;
+    HostResourceProfileData profile_data;
+    profile_data.profile_id = "tool-wait-host-v1";
+    profile_data.capacity = capacity;
+    profile_data.evidence = {"test", HostResourceConfidence::Measured, 1, false};
+    auto host_admission = std::make_shared<HostAdmissionController>(
+        HostAdmissionControllerConfig{HostResourceProfile::create(std::move(profile_data)), 8, 2ms});
+    auto controller = std::make_shared<ToolExecutionController>(
+        ToolExecutionControllerConfig{policies, std::make_shared<ResourceArbiter>(), host_admission});
+
+    std::vector<ToolCall> calls{
+        {"waiting-host-call-1", "probe", "{}"},
+        {"waiting-host-call-2", "probe", "{}"},
+    };
+    ToolExecutionContext execution;
+    execution.controller = controller;
+    std::promise<std::exception_ptr> completion;
+    auto done = completion.get_future();
+    std::thread worker([&] {
+        try {
+            const auto results = neograph::async::run_sync(
+                dispatch_tool_calls(std::move(calls), std::vector<Tool*>{&tool}, {}, {}, execution));
+            if (results.size() != 2U || results[0].content != "ok" || results[1].content != "ok") {
+                throw std::runtime_error("unexpected tool dispatch result");
+            }
+            completion.set_value(nullptr);
+        } catch (...) {
+            completion.set_value(std::current_exception());
+        }
+    });
+
+    bool started = false;
+    for (int index = 0; index < 100; ++index) {
+        if (tool.max_active() == 1) {
+            started = true;
+            break;
+        }
+        std::this_thread::sleep_for(2ms);
+    }
+    if (!started) {
+        worker.join();
+        FAIL() << "the first keyed tool invocation did not start";
+    }
+
+    std::this_thread::sleep_for(20ms);
+    EXPECT_EQ(host_admission->snapshot().reserved.tool_slots, 1U)
+        << "a request waiting for a tool-specific resource retained a host slot";
+
+    const auto status = done.wait_for(2s);
+    if (status != std::future_status::ready) {
+        worker.join();
+        FAIL() << "keyed tool calls did not complete";
+    }
+    const auto error = done.get();
+    worker.join();
+    EXPECT_EQ(error, nullptr);
 }

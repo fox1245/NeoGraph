@@ -4,9 +4,12 @@
 #include "catalog_access.h"
 #include "run_control.h"
 #include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
 #include <asio/dispatch.hpp>
 #include <asio/error.hpp>
+#include <asio/post.hpp>
 #include <asio/redirect_error.hpp>
+#include <asio/steady_timer.hpp>
 #include <asio/thread_pool.hpp>
 #include <asio/use_awaitable.hpp>
 
@@ -148,11 +151,205 @@ void complete_attempt_launch_failure(const std::shared_ptr<detail::RunControl>& 
     control->complete(std::move(outcome));
 }
 
+std::optional<CoreCheckpointIdentity>
+attempt_checkpoint(const std::shared_ptr<detail::RunControl>& control,
+                   const std::optional<std::string>&          checkpoint_id) {
+    if (!checkpoint_id) return std::nullopt;
+    return CoreCheckpointIdentity{
+        control->materialized->root->core_name,
+        control->materialized->root->compiled_plan_identity,
+        control->core_thread_id,
+        *checkpoint_id,
+        graph::CHECKPOINT_SCHEMA_VERSION};
+}
+
+void complete_attempt_admission_cancelled(
+    const std::shared_ptr<detail::RunControl>& control,
+    const std::optional<std::string>&          checkpoint_id) noexcept {
+    const auto cause = control->seal_terminal_cause();
+    if (cause == detail::CancellationCause::None) {
+        complete_attempt_launch_failure(
+            control, checkpoint_id,
+            std::make_exception_ptr(std::runtime_error(
+                "Host admission stopped without a Program cancellation cause")));
+        return;
+    }
+
+    detail::RunOutcome outcome;
+    outcome.remaining_budget = control->granted_budget;
+    outcome.checkpoint       = attempt_checkpoint(control, checkpoint_id);
+    if (cause == detail::CancellationCause::Timeout) {
+        outcome.status  = ProgramTerminalStatus::TimedOut;
+        outcome.failure = ProgramFailure{
+            "P_RUNTIME_TIMEOUT",
+            "Program wall-time budget expired while waiting for host capacity",
+            "root",
+            "",
+            0,
+            json::object()};
+    } else if (cause == detail::CancellationCause::EventSink) {
+        outcome.status  = ProgramTerminalStatus::Failed;
+        outcome.failure = ProgramFailure{"P_EVENT_SINK",
+                                         "Program event sink failed before host admission",
+                                         "root",
+                                         "",
+                                         0,
+                                         json::object()};
+    } else {
+        outcome.status  = ProgramTerminalStatus::Cancelled;
+        outcome.failure = ProgramFailure{
+            "P_RUNTIME_CANCELLED",
+            "Program attempt was cancelled while waiting for host capacity",
+            "root",
+            "",
+            0,
+            json::object()};
+    }
+    control->complete(std::move(outcome));
+}
+
+void complete_attempt_host_admission_failure(
+    const std::shared_ptr<detail::RunControl>& control,
+    const std::optional<std::string>&          checkpoint_id,
+    const HostAdmissionError&                  error) noexcept {
+    detail::RunOutcome outcome;
+    outcome.status           = ProgramTerminalStatus::Failed;
+    outcome.remaining_budget = control->granted_budget;
+    outcome.checkpoint       = attempt_checkpoint(control, checkpoint_id);
+    outcome.failure          = ProgramFailure{
+        "P_HOST_ADMISSION",
+        error.what(),
+        "root",
+        "",
+        0,
+        json{{"failure", std::string(to_string(error.failure()))}}};
+    control->complete(std::move(outcome));
+}
+
+HostAdmissionRequest make_host_admission_request(
+    const std::shared_ptr<detail::RunControl>& control,
+    const ProgramHostAdmissionResolver&        resolver) {
+    const ProgramHostAdmissionContext context{
+        control->owner_scope,
+        control->program_version_id,
+        control->run_id,
+        control->operation_id,
+        control->attempt,
+        control->granted_budget,
+        control->persisted_invocation.child_depth};
+    auto request = resolver(context);
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= control->deadline) {
+        throw HostAdmissionError(HostAdmissionFailure::QueueTimeout,
+                                 "Program deadline elapsed before host admission");
+    }
+    const auto remaining = std::max(
+        std::chrono::milliseconds{1},
+        std::chrono::duration_cast<std::chrono::milliseconds>(control->deadline - now));
+    if (request.queue_timeout <= std::chrono::milliseconds::zero() ||
+        request.queue_timeout > remaining) {
+        request.queue_timeout = remaining;
+    }
+
+    // The policy selects capacity and scheduling hints, never a mutable
+    // identity.  Per-attempt identities keep accounting and priority
+    // inheritance isolated across concurrent Program runs.
+    request.owner_scope = control->owner_scope;
+    request.operation_id =
+        "program/" + control->run_id + "/attempt/" + std::to_string(control->attempt);
+    return request;
+}
+
+std::shared_ptr<asio::steady_timer>
+arm_host_admission_deadline(const std::shared_ptr<detail::RunControl>& control) {
+    auto timer = std::make_shared<asio::steady_timer>(control->deadline_executor);
+    timer->expires_at(control->deadline);
+    asio::co_spawn(
+        control->deadline_executor,
+        [control, timer]() -> asio::awaitable<void> {
+            asio::error_code error;
+            co_await timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
+            if (!error) (void)control->cancel(detail::CancellationCause::Timeout);
+            co_return;
+        },
+        asio::detached);
+    return timer;
+}
+
+void cancel_host_admission_deadline(const std::shared_ptr<detail::RunControl>& control,
+                                    std::shared_ptr<asio::steady_timer> timer) noexcept {
+    try {
+        asio::post(control->deadline_executor, [timer = std::move(timer)] {
+            timer->cancel();
+        });
+    } catch (...) {
+    }
+}
+
+asio::awaitable<void> execute_host_admitted_attempt(
+    std::shared_ptr<detail::RunControl>      control,
+    json                                     input,
+    std::optional<std::string>               checkpoint_id,
+    std::shared_ptr<HostAdmissionController> host_admission,
+    ProgramHostAdmissionResolver             resolver,
+    std::shared_ptr<asio::steady_timer>      deadline_timer) {
+    try {
+        if (control->cancel_token->is_cancelled()) {
+            cancel_host_admission_deadline(control, std::move(deadline_timer));
+            complete_attempt_admission_cancelled(control, checkpoint_id);
+            co_return;
+        }
+
+        auto request = make_host_admission_request(control, resolver);
+        auto lease =
+            co_await host_admission->reserve_async(std::move(request), control->cancel_token);
+        if (!lease.held()) {
+            throw std::logic_error("Host admission granted an empty Program resource lease");
+        }
+        auto held_lease = std::make_shared<HostResourceLease>(std::move(lease));
+        control->add_terminal_cleanup([held_lease] { held_lease->release(); });
+        cancel_host_admission_deadline(control, std::move(deadline_timer));
+
+        if (control->cancel_token->is_cancelled()) {
+            complete_attempt_admission_cancelled(control, checkpoint_id);
+            co_return;
+        }
+        co_await detail::execute_run_attempt(control, std::move(input), checkpoint_id);
+    } catch (const graph::CancelledException&) {
+        cancel_host_admission_deadline(control, std::move(deadline_timer));
+        complete_attempt_admission_cancelled(control, checkpoint_id);
+    } catch (const HostAdmissionError& error) {
+        cancel_host_admission_deadline(control, std::move(deadline_timer));
+        if (error.failure() == HostAdmissionFailure::QueueTimeout) {
+            (void)control->cancel(detail::CancellationCause::Timeout);
+            complete_attempt_admission_cancelled(control, checkpoint_id);
+        } else {
+            complete_attempt_host_admission_failure(control, checkpoint_id, error);
+        }
+    }
+    co_return;
+}
+
 void spawn_run_attempt(asio::thread_pool&                         pool,
                        const std::shared_ptr<detail::RunControl>& control,
                        json                                       input,
-                       std::optional<std::string>                 checkpoint_id) noexcept {
+                       std::optional<std::string>                 checkpoint_id,
+                       std::shared_ptr<HostAdmissionController>   host_admission = {},
+                       ProgramHostAdmissionResolver                host_admission_resolver = {}) noexcept {
     try {
+        if (host_admission) {
+            auto deadline_timer = arm_host_admission_deadline(control);
+            asio::co_spawn(pool,
+                           execute_host_admitted_attempt(
+                               control, std::move(input), checkpoint_id, std::move(host_admission),
+                               std::move(host_admission_resolver), std::move(deadline_timer)),
+                           [control, checkpoint_id](std::exception_ptr error) {
+                               if (error)
+                                   complete_attempt_launch_failure(control, checkpoint_id, error);
+                           });
+            return;
+        }
         asio::co_spawn(pool, detail::execute_run_attempt(control, std::move(input), checkpoint_id),
                        [control, checkpoint_id](std::exception_ptr error) {
                            if (error)
@@ -899,6 +1096,19 @@ void RunControl::set_completion_callback(CompletionCallback callback) noexcept {
     std::lock_guard lock(mutex_);
     completion_callback_ = std::move(callback);
 }
+
+void RunControl::add_terminal_cleanup(TerminalCleanup cleanup) {
+    bool run_now = false;
+    {
+        std::lock_guard lock(mutex_);
+        run_now = completion_claimed_;
+        if (!run_now) {
+            terminal_cleanups_.push_back(std::move(cleanup));
+            return;
+        }
+    }
+    if (cleanup) cleanup();
+}
 void RunControl::set_child_launch_callback(ChildLaunchCallback callback) noexcept {
     std::lock_guard lock(mutex_);
     child_launch_callback_ = std::move(callback);
@@ -1245,11 +1455,16 @@ void ensure_terminal_checkpoint(const RunControl& control, RunOutcome& outcome) 
 
 void RunControl::complete(RunOutcome outcome) noexcept {
     try {
+        std::vector<TerminalCleanup> terminal_cleanups;
         {
             std::lock_guard lock(mutex_);
             if (completion_claimed_) return;
             completion_claimed_ = true;
             terminal_decided_   = true;
+            terminal_cleanups.swap(terminal_cleanups_);
+        }
+        for (auto& cleanup : terminal_cleanups) {
+            if (cleanup) cleanup();
         }
         const auto current_cause = cancellation_cause();
         cancel_children(current_cause == CancellationCause::None
@@ -1671,6 +1886,11 @@ ProgramRuntime::ProgramRuntime(RuntimeConfig config) {
             "ProgramRuntime requires catalog, checkpoints, transitions, and at least one "
             "scheduler thread");
     }
+    if (static_cast<bool>(config.host_admission) !=
+        static_cast<bool>(config.host_admission_resolver)) {
+        throw std::invalid_argument(
+            "ProgramRuntime host admission requires both a controller and a request resolver");
+    }
     impl_ = std::make_unique<Impl>(std::move(config));
     impl_->owner = this;
 }
@@ -1765,7 +1985,8 @@ ProgramHandle ProgramRuntime::start(std::string_view      owner_scope,
         return ProgramHandle(std::move(control));
     }
 
-    spawn_run_attempt(impl_->pool, control, std::move(invocation.input), std::nullopt);
+    spawn_run_attempt(impl_->pool, control, std::move(invocation.input), std::nullopt,
+                      impl_->config.host_admission, impl_->config.host_admission_resolver);
     return ProgramHandle(std::move(control));
 }
 
@@ -2005,7 +2226,8 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     } catch (...) {
         throw;
     }
-    spawn_run_attempt(impl_->pool, control, std::move(invocation.input), std::nullopt);
+    spawn_run_attempt(impl_->pool, control, std::move(invocation.input), std::nullopt,
+                      impl_->config.host_admission, impl_->config.host_admission_resolver);
     return ProgramHandle(std::move(control));
 }
 
@@ -2083,7 +2305,8 @@ ProgramHandle ProgramRuntime::start_recorded(std::string_view      owner_scope,
         control->complete(std::move(failed));
         return ProgramHandle(std::move(control));
     }
-    spawn_run_attempt(impl_->pool, control, std::move(invocation.input), std::nullopt);
+    spawn_run_attempt(impl_->pool, control, std::move(invocation.input), std::nullopt,
+                      impl_->config.host_admission, impl_->config.host_admission_resolver);
     return ProgramHandle(std::move(control));
 }
 
@@ -2329,7 +2552,8 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
         return ProgramHandle(std::move(control));
     }
     spawn_run_attempt(impl_->pool, control, std::move(resume_value.value),
-                      target_checkpoint.checkpoint_id);
+                      target_checkpoint.checkpoint_id, impl_->config.host_admission,
+                      impl_->config.host_admission_resolver);
     return ProgramHandle(std::move(control));
 }
 
@@ -2522,7 +2746,8 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         }
         impl_->register_control(control);
         spawn_run_attempt(impl_->pool, control, record->invocation().input,
-                          std::move(resume_checkpoint_id));
+                          std::move(resume_checkpoint_id), impl_->config.host_admission,
+                          impl_->config.host_admission_resolver);
         return ProgramHandle(std::move(control));
     }
     const bool requires_result = state != ContinuationState::Interrupted &&
@@ -2787,7 +3012,8 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
     }
 
     spawn_run_attempt(impl_->pool, control, std::move(resume_value.value),
-                      checkpoint.checkpoint_id);
+                      checkpoint.checkpoint_id, impl_->config.host_admission,
+                      impl_->config.host_admission_resolver);
     return ProgramHandle(std::move(control));
 }
 
@@ -3023,7 +3249,8 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
         live_control->complete(std::move(failure));
         return ProgramHandle(std::move(live_control));
     }
-    spawn_run_attempt(impl_->pool, live_control, *resolution.result, checkpoint.checkpoint_id);
+    spawn_run_attempt(impl_->pool, live_control, *resolution.result, checkpoint.checkpoint_id,
+                      impl_->config.host_admission, impl_->config.host_admission_resolver);
     return ProgramHandle(std::move(live_control));
 }
 
