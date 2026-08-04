@@ -163,4 +163,20 @@ TEST(ProgramContractTest, RetryPolicyBoundsAttempts) {
     EXPECT_EQ(run.attempt(), 1U);
 }
 
+TEST(ProgramContractTest, RejectsLegacyRunStorageSchemaWithoutRunLineage) {
+    const auto frozen = ContractManifest::propose(make_spec())
+                             .review(ContractReview{"reviewer", "approved", true})
+                             .freeze();
+    ContractRun run(frozen);
+    run.begin_attempt();
+    run.record_worker_report("worker claim", true);
+
+    auto stored = run.serialize_canonical();
+    const std::string marker = "\"storage_schema_version\":2";
+    const auto marker_position = stored.find(marker);
+    ASSERT_NE(marker_position, std::string::npos);
+    stored.replace(marker_position, marker.size(), "\"storage_schema_version\":1");
+    EXPECT_THROW(ContractRun::parse(stored), std::invalid_argument);
+}
+
 }  // namespace

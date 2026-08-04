@@ -192,7 +192,7 @@ struct NEOGRAPH_PROGRAM_API ContractVerification {
  */
 class NEOGRAPH_PROGRAM_API ContractRun final {
 public:
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2;
 
     explicit ContractRun(ContractManifest frozen_manifest);
     static ContractRun parse(std::string_view stored_bytes);
