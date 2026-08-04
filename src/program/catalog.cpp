@@ -1449,7 +1449,14 @@ MigrationPlan ProgramCatalog::plan_migration(std::string_view owner_scope,
         throw std::invalid_argument("Program migration references an unpublished version");
     if (source->ownership_scope() != owner_scope || target->ownership_scope() != owner_scope)
         throw std::invalid_argument("Program migration crosses an owner scope boundary");
-    return MigrationPlan::between(*source, *target);
+    const auto source_bundle =
+        impl_->program_store->get_bundle(owner_scope, source->bundle_id());
+    const auto target_bundle =
+        impl_->program_store->get_bundle(owner_scope, target->bundle_id());
+    if (!source_bundle || !target_bundle)
+        throw std::invalid_argument(
+            "Program migration references an unpublished admitted bundle");
+    return MigrationPlan::between(*source, *source_bundle, *target, *target_bundle);
 }
 ProgramActivationResult ProgramCatalog::activate(std::string_view owner_scope,
                                                  std::string_view version_id,

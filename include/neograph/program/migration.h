@@ -115,7 +115,20 @@ public:
      */
     static constexpr std::uint32_t LEGACY_STORAGE_SCHEMA_VERSION = 0;
     static MigrationPlan create(MigrationPlanData data);
+    /**
+     * Builds a conservative version-only proof. Distinct bundle identities
+     * remain incompatible because their execution-relevant fields are absent.
+     */
     static MigrationPlan between(const ProgramVersion& source, const ProgramVersion& target);
+    /**
+     * Builds a field-level proof from the admitted bundles. It permits a
+     * budget-declaration change only when the fork invocation is separately
+     * checked against the source remainder and target admitted bounds.
+     */
+    static MigrationPlan between(const ProgramVersion& source,
+                                 const ProgramBundle&  source_bundle,
+                                 const ProgramVersion& target,
+                                 const ProgramBundle&  target_bundle);
     static MigrationPlan parse(std::string_view stored_bytes);
 
     const std::string& source_version_id() const noexcept;

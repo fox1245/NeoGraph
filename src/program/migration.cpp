@@ -146,17 +146,6 @@ json budget_json(const BudgetLimits& budget) {
                 {"max_total_children", budget.max_total_children}};
 }
 
-bool budget_covers(const BudgetLimits& target, const BudgetLimits& source) {
-    return target.wall_time_ms >= source.wall_time_ms &&
-           target.model_tokens >= source.model_tokens &&
-           target.monetary_microunits >= source.monetary_microunits &&
-           target.max_concurrency >= source.max_concurrency &&
-           target.max_program_operations >= source.max_program_operations &&
-           target.max_core_steps >= source.max_core_steps &&
-           target.max_dynamic_compiles >= source.max_dynamic_compiles &&
-           target.max_child_depth >= source.max_child_depth &&
-           target.max_total_children >= source.max_total_children;
-}
 
 json executable_json(const ExecutableIdentity& executable) {
     return json{{"kind", std::string(to_string(executable.kind))},
@@ -236,6 +225,32 @@ json materialization_json(const CoreMaterializationReceipt& receipt) {
                 {"capability_bindings", std::move(bindings)}};
 }
 
+struct BundleMigrationFacts {
+    json runtime_contract;
+    json budget;
+};
+
+BundleMigrationFacts bundle_migration_facts(const ProgramBundle& bundle,
+                                            const PolicySnapshot& policy) {
+    auto value = detail::parse_json_strict(bundle.serialize_canonical());
+    auto budget =
+        json{{"policy_ceiling", budget_json(policy.budget_ceiling())},
+             {"declared_requirements", value.at("declared_budget_requirements")}};
+
+    // These fields identify authored source and diagnostics, not the
+    // materialized execution contract. The wrapper has no in-place erase, so
+    // rebuild that contract while omitting the provenance-only fields.
+    json runtime_contract = json::object();
+    for (const auto& [key, field] : value.items()) {
+        if (key == "id" || key == "source_hash" || key == "canonical_program_hash" ||
+            key == "declared_budget_requirements") {
+            continue;
+        }
+        runtime_contract[key] = field;
+    }
+    return {std::move(runtime_contract), std::move(budget)};
+}
+
 }  // namespace
 
 struct MigrationPlan::Impl {
@@ -300,8 +315,15 @@ MigrationPlan MigrationPlan::create(MigrationPlanData data) {
                                        detail::canonical_json_bytes(body_for(impl->data)));
     return MigrationPlan(std::move(impl));
 }
-MigrationPlan MigrationPlan::between(const ProgramVersion& source,
-                                     const ProgramVersion& target) {
+namespace {
+
+MigrationPlan build_migration_plan(const ProgramVersion& source,
+                                   const ProgramVersion& target,
+                                   const ProgramBundle*  source_bundle,
+                                   const ProgramBundle*  target_bundle) {
+    if ((source_bundle == nullptr) != (target_bundle == nullptr))
+        throw std::invalid_argument("Migration bundle facts must be supplied as a pair");
+
     MigrationPlanData data{source.id(), target.id(), source.ownership_scope(),
                            MigrationCompatibility::ForkCompatible, {}, {}, {}};
 
@@ -315,15 +337,25 @@ MigrationPlan MigrationPlan::between(const ProgramVersion& source,
         materialization_json(source.core_materialization_receipt());
     const auto target_material =
         materialization_json(target.core_materialization_receipt());
-    // Policy fingerprints identify immutable snapshots and therefore may
-    // differ across admitted versions even when their authority closure is
-    // exactly the same. The closure fields below are the migration proof.
     const auto source_authority = authority_closure(source_auth);
     const auto target_authority = authority_closure(target_auth);
+    const bool has_bundle_facts = source_bundle != nullptr;
+    const auto source_facts =
+        has_bundle_facts
+            ? bundle_migration_facts(*source_bundle, source_policy)
+            : BundleMigrationFacts{
+                  json(source.bundle_id()),
+                  json{{"policy_ceiling", budget_json(source_policy.budget_ceiling())}}};
+    const auto target_facts =
+        has_bundle_facts
+            ? bundle_migration_facts(*target_bundle, target_policy)
+            : BundleMigrationFacts{
+                  json(target.bundle_id()),
+                  json{{"policy_ceiling", budget_json(target_policy.budget_ceiling())}}};
 
     // Preserve the original fourteen P5 mappings and their persisted order.
     add_mapping(data, MigrationDimension::Channels, "exact_channel_reducer_and_presence",
-                source.bundle_id(), target.bundle_id());
+                source_facts.runtime_contract, target_facts.runtime_contract);
     add_mapping(data, MigrationDimension::Continuation, "exact_checkpoint_continuation",
                 source.id(), target.id());
     add_mapping(data, MigrationDimension::PendingInput, "preserve_exact_call_identity",
@@ -336,9 +368,11 @@ MigrationPlan MigrationPlan::between(const ProgramVersion& source,
                 source.id(), target.id());
     add_mapping(data, MigrationDimension::Interrupt, "preserve_interrupt_projection",
                 source.id(), target.id());
-    add_mapping(data, MigrationDimension::Budget, "target_ceiling_must_cover_source",
-                budget_json(source_policy.budget_ceiling()),
-                budget_json(target_policy.budget_ceiling()));
+    add_mapping(data, MigrationDimension::Budget,
+                has_bundle_facts
+                    ? "runtime_request_must_fit_source_remainder_and_target_admitted_bounds"
+                    : "runtime_request_must_fit_source_remainder_and_target_ceiling",
+                source_facts.budget, target_facts.budget);
     add_mapping(data, MigrationDimension::Authority,
                 "exact_admission_profile_and_authority", source_auth, target_auth);
     add_mapping(data, MigrationDimension::Checkpoint, "exact_core_materialization_identity",
@@ -350,15 +384,13 @@ MigrationPlan MigrationPlan::between(const ProgramVersion& source,
     add_mapping(data, MigrationDimension::Caches, "pinned_materialization_only",
                 source_material, target_material);
     add_mapping(data, MigrationDimension::Output, "exact_output_contract",
-                source.bundle_id(), target.bundle_id());
+                source_facts.runtime_contract, target_facts.runtime_contract);
 
     const auto mismatch = [&](MigrationDimension dimension, std::string code,
                               std::string message, json source_value,
                               json target_value, MigrationCompatibility class_hint) {
         add_diagnostic(data, dimension, std::move(code), std::move(message),
                        std::move(source_value), std::move(target_value));
-        // The strongest class wins.  This makes classification independent of
-        // comparison order while retaining every deterministic witness.
         const auto rank = [](MigrationCompatibility value) {
             switch (value) {
                 case MigrationCompatibility::ForkCompatible: return 0;
@@ -404,25 +436,38 @@ MigrationPlan MigrationPlan::between(const ProgramVersion& source,
                  source_material, target_material,
                  MigrationCompatibility::OperatorReconciliation);
 
-    if (source.bundle_id() != target.bundle_id())
+    if (has_bundle_facts) {
+        if (source_facts.runtime_contract != target_facts.runtime_contract)
+            mismatch(MigrationDimension::Contract, "bundle_runtime_contract",
+                     "Migration changes an execution-relevant immutable bundle field",
+                     source_facts.runtime_contract, target_facts.runtime_contract,
+                     MigrationCompatibility::Blocked);
+    } else if (source.bundle_id() != target.bundle_id()) {
         mismatch(MigrationDimension::Contract, "bundle_id",
-                 "Migration changes the immutable bundle and its contracts",
+                 "Migration cannot inspect distinct immutable bundles",
                  source.bundle_id(), target.bundle_id(), MigrationCompatibility::Blocked);
+    }
 
     if (source.dependency_receipts() != target.dependency_receipts())
         mismatch(MigrationDimension::Recovery, "dependency_receipts",
                  "Migration changes dependency identities required for recovery",
                  source.id(), target.id(), MigrationCompatibility::OperatorReconciliation);
 
-    if (!budget_covers(target_policy.budget_ceiling(), source_policy.budget_ceiling()))
-        mismatch(MigrationDimension::Recovery, "budget_ceiling",
-                 "Migration cannot prove preservation of the source budget ledger",
-                 budget_json(source_policy.budget_ceiling()),
-                 budget_json(target_policy.budget_ceiling()),
-                 MigrationCompatibility::OperatorReconciliation);
+    return MigrationPlan::create(std::move(data));
+}
 
+}  // namespace
 
-    return create(std::move(data));
+MigrationPlan MigrationPlan::between(const ProgramVersion& source,
+                                     const ProgramVersion& target) {
+    return build_migration_plan(source, target, nullptr, nullptr);
+}
+
+MigrationPlan MigrationPlan::between(const ProgramVersion& source,
+                                     const ProgramBundle&  source_bundle,
+                                     const ProgramVersion& target,
+                                     const ProgramBundle&  target_bundle) {
+    return build_migration_plan(source, target, &source_bundle, &target_bundle);
 }
 
 MigrationPlan MigrationPlan::parse(std::string_view stored_bytes) {

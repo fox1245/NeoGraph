@@ -1897,7 +1897,9 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
     // Core shape compatibility is only one part of the P5 contract.  Prove
     // the immutable version transition before cloning any checkpoint or
     // mutating either transition store.
-    const auto migration_plan = MigrationPlan::between(*source_version, *resolved_target);
+    const auto migration_plan =
+        MigrationPlan::between(*source_version, source_pinned->bundle, *resolved_target,
+                               target_pinned->bundle);
     if (!migration_plan.is_compatible()) {
         throw_runtime_diagnostic(
             "P_FORK_MIGRATION_INCOMPATIBLE",
@@ -1936,6 +1938,24 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
                    target_pinned->version.policy_snapshot().budget_ceiling())) {
         throw_runtime_diagnostic("P_FORK_BUDGET",
                                  "Fork continuation budget exceeds target authority ceiling");
+    }
+    const auto& target_ceiling =
+        target_pinned->version.policy_snapshot().budget_ceiling();
+    // A fork carries a *remainder*, so the initial admission minimum may
+    // already have been consumed by the source run. Its upper bounds and
+    // authority ceiling still constrain the target continuation.
+    for (const auto& requirement : target_pinned->bundle.declared_budget_requirements()) {
+        const auto granted = budget_value(invocation.budget, requirement.resource);
+        const auto allowed = ceiling_value(target_ceiling, requirement.resource);
+        if (granted > requirement.maximum || granted > allowed) {
+            throw_runtime_diagnostic(
+                "P_FORK_BUDGET",
+                "Fork continuation budget exceeds target admitted bounds",
+                json{{"resource", requirement.resource},
+                     {"maximum", requirement.maximum},
+                     {"policy_ceiling", allowed},
+                     {"granted", granted}});
+        }
     }
     auto       fork_pending_input  = source_record->pending_input();
     auto       fork_pending_effect = source_record->pending_effect();
@@ -2146,7 +2166,8 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
                      {"source_version_id", fork->source_program_version_id()},
                      {"target_version_id", record->program_version_id()}});
         }
-        const auto expected_plan = MigrationPlan::between(*source_version, *target_version);
+        const auto expected_plan = impl_->config.catalog->plan_migration(
+            owner_scope, source_version->id(), target_version->id());
         if (!expected_plan.is_compatible() || expected_plan.id() != stored_plan->id()) {
             throw_runtime_diagnostic(
                 "P_FORK_MIGRATION_PROOF",

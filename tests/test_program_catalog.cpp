@@ -958,6 +958,30 @@ TEST(ProgramCatalogTest, MigrationPlanRecordsCompatibilityProofAndRoundTrips) {
     EXPECT_EQ(explicit_plan.blockers(), std::vector<std::string>{"compiler_build_id"});
 }
 
+TEST(ProgramCatalogTest, MigrationPlanDefersNarrowerTargetBudgetToForkInvocation) {
+    CatalogFixture fixture(registry());
+    const auto     bundle = compile(fixture.snapshot);
+
+    PolicySnapshotBuilder source_policy_builder;
+    source_policy_builder.id("catalog-policy-migration-source")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:catalog")
+        .admission_profile(fixture.admission)
+        .budget_ceiling(BudgetLimits{2000, 200, 200, 2, 2, 40, 2, 2, 2});
+    const auto source = fixture.catalog.admit(
+        bundle, ProgramAdmission{"tenant:catalog", fixture.admission,
+                                 std::move(source_policy_builder).build(), {}});
+    const auto target = fixture.catalog.admit(bundle, fixture.request());
+
+    const auto plan = fixture.catalog.plan_migration("tenant:catalog", source.id(), target.id());
+    EXPECT_TRUE(plan.is_compatible());
+    EXPECT_TRUE(plan.diagnostics().empty());
+    ASSERT_GT(plan.mappings().size(), 7U);
+    EXPECT_EQ(plan.mappings()[7].dimension, MigrationDimension::Budget);
+    EXPECT_EQ(plan.mappings()[7].rule,
+              "runtime_request_must_fit_source_remainder_and_target_admitted_bounds");
+}
+
 TEST(ProgramCatalogTest, ComposedAdmissionRequiresVerifiedModuleStore) {
     CatalogFixture fixture(registry());
     const auto     bundle = compile(fixture.snapshot);

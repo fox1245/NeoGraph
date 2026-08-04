@@ -2245,6 +2245,49 @@ TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersi
     EXPECT_EQ(source_after.checkpoint()->checkpoint_id, source.checkpoint()->checkpoint_id);
 }
 
+TEST(ProgramRuntimeTest, ForkAllowsBudgetOnlyMigrationButEnforcesTargetDeclaredBounds) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto source_version = fixture.admit("runtime-interrupt");
+    const auto source =
+        fixture.runtime
+            ->start("tenant:runtime", source_version,
+                    ProgramInvocation{json::object(), grant(), "trace-fork-budget-source", {}})
+            .wait();
+    ASSERT_EQ(source.status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(source.checkpoint().has_value());
+    const auto source_before = fixture.journal->load("tenant:runtime", source.run_id());
+    ASSERT_TRUE(source_before.has_value());
+
+    auto target_document = program_document("runtime-interrupt");
+    target_document["declared_budget_requirements"][1]["maximum"] = 10;
+    const auto target_version = fixture.admit_document(std::move(target_document));
+    const auto plan = fixture.catalog->plan_migration("tenant:runtime", source_version.id(),
+                                                       target_version.id());
+    EXPECT_TRUE(plan.is_compatible());
+
+    const std::string rejected_run_id = "fork-budget-rejected";
+    try {
+        (void)fixture.runtime->fork(
+            "tenant:runtime",
+            ExactProgramCheckpointReference{source.run_id(), source.checkpoint()->checkpoint_id},
+            target_version,
+            ProgramInvocation{json::object(), source.remaining_budget(),
+                              "trace-fork-budget-target", {}, rejected_run_id},
+            ProgramResume{json{{"decision", "must-not-dispatch"}}, "trace-fork-budget-resume",
+                          {}, pending_call_id(source)});
+        FAIL() << "budget outside target admitted bounds unexpectedly forked";
+    } catch (const std::exception& error) {
+        EXPECT_NE(std::string(error.what()).find("target admitted bounds"), std::string::npos);
+    }
+
+    EXPECT_FALSE(fixture.journal->load("tenant:runtime", rejected_run_id).has_value());
+    const auto source_after = fixture.journal->load("tenant:runtime", source.run_id());
+    ASSERT_TRUE(source_after.has_value());
+    EXPECT_EQ(source_after->id(), source_before->id());
+    EXPECT_EQ(interrupt_calls.load(), 1U);
+}
+
 TEST(ProgramRuntimeTest, ForkRejectsSourceRunIdBeforeCloningCheckpoint) {
     interrupt_calls.store(0);
     AdmittedRuntime fixture;
