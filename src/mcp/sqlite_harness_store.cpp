@@ -99,6 +99,120 @@ bool valid_effect_outbox_binding(
            effects.size() == 1 && effects.front().effect() == *pending;
 }
 
+program::ContractManifest contract_manifest_for_artifact(
+    const HarnessProgramArtifactRecord& artifact) {
+    const auto projection = artifact.legacy_projection();
+    if (!projection.contains("contract_manifest") ||
+        !projection.at("contract_manifest").is_object() ||
+        !projection.contains("contract_manifest_hash") ||
+        !projection.at("contract_manifest_hash").is_string()) {
+        throw std::invalid_argument("Harness contract artifact manifest is missing");
+    }
+    const auto manifest =
+        program::ContractManifest::parse(projection.at("contract_manifest").dump());
+    if (manifest.lifecycle() != program::ContractManifestLifecycle::Frozen ||
+        projection.at("contract_manifest_hash") != manifest.content_hash()) {
+        throw std::invalid_argument("Stored Harness contract manifest binding mismatch");
+    }
+    return manifest;
+}
+
+std::string contract_workspace_revision_for_artifact(
+    const HarnessProgramArtifactRecord& artifact) {
+    const auto projection = artifact.legacy_projection();
+    if (!projection.contains("workspace_revision")) return artifact.version().id();
+    if (!projection.at("workspace_revision").is_string() ||
+        projection.at("workspace_revision").get<std::string>().empty()) {
+        throw std::invalid_argument("Stored Harness contract workspace revision is invalid");
+    }
+    return projection.at("workspace_revision").get<std::string>();
+}
+
+void validate_contract_run_binding(const HarnessProgramArtifactRecord& artifact,
+                                   const program::ProgramRunRecord&     run_record,
+                                   const program::ContractRun&           contract_run) {
+    if (run_record.owner_scope() != artifact.owner_scope() ||
+        run_record.bundle_id() != artifact.bundle().id() ||
+        run_record.program_version_id() != artifact.version().id()) {
+        throw std::invalid_argument("Stored Harness contract Program binding mismatch");
+    }
+    if (contract_run.manifest().lifecycle() != program::ContractManifestLifecycle::Frozen) {
+        throw std::invalid_argument("Stored Harness contract manifest is not frozen");
+    }
+    const auto manifest = contract_manifest_for_artifact(artifact);
+    if (contract_run.manifest().serialize_canonical() != manifest.serialize_canonical()) {
+        throw std::invalid_argument("Stored Harness contract manifest binding mismatch");
+    }
+    if (contract_run.attempt() > manifest.spec().retry_policy.max_attempts) {
+        throw std::invalid_argument("Stored Harness contract attempt exceeds retry policy");
+    }
+    std::set<std::string, std::less<>> evidence_ids;
+    for (const auto& evidence : contract_run.evidence()) {
+        if (!evidence_ids.emplace(evidence.evidence_id).second ||
+            evidence.manifest_hash != manifest.content_hash()) {
+            throw std::invalid_argument("Stored Harness contract evidence lineage is corrupt");
+        }
+        if (evidence.kind == program::ContractEvidenceKind::WorkerReport) continue;
+        if (evidence.program_version_id != run_record.program_version_id() ||
+            evidence.run_id != run_record.run_id() ||
+            evidence.artifact_hash != run_record.bundle_id()) {
+            throw std::invalid_argument("Stored Harness contract evidence Program lineage mismatch");
+        }
+    }
+    const auto status = contract_run.status();
+    const auto verification = contract_run.verification();
+    switch (status) {
+        case program::ContractRunStatus::Frozen:
+            if (contract_run.attempt() != 0 || !contract_run.evidence().empty() ||
+                !contract_run.diagnostics().empty() || verification) {
+                throw std::invalid_argument("Stored Harness frozen contract state is corrupt");
+            }
+            break;
+        case program::ContractRunStatus::Running:
+            if (contract_run.attempt() == 0 || verification) {
+                throw std::invalid_argument("Stored Harness running contract state is corrupt");
+            }
+            break;
+        case program::ContractRunStatus::Verified:
+            if (!verification || verification->status != status || !verification->publishable) {
+                throw std::invalid_argument("Stored Harness verified contract state is corrupt");
+            }
+            break;
+        case program::ContractRunStatus::Published:
+            if (!verification || verification->status != status || !verification->publishable) {
+                throw std::invalid_argument("Stored Harness publication is not verified");
+            }
+            break;
+        case program::ContractRunStatus::Blocked:
+        case program::ContractRunStatus::Failed:
+            if (!verification || verification->status != status || verification->publishable) {
+                throw std::invalid_argument("Stored Harness rejected contract state is corrupt");
+            }
+            break;
+    }
+    if ((status == program::ContractRunStatus::Verified ||
+         status == program::ContractRunStatus::Published ||
+         status == program::ContractRunStatus::Blocked ||
+         status == program::ContractRunStatus::Failed) &&
+        !run_record.terminal_result()) {
+        throw std::invalid_argument("Stored Harness contract terminal state lacks Program result");
+    }
+    if (verification && status != program::ContractRunStatus::Running &&
+        status != program::ContractRunStatus::Frozen) {
+        auto replay_json = json::parse(contract_run.serialize_canonical());
+        replay_json["status"] = "running";
+        replay_json["verification"] = nullptr;
+        auto replay = program::ContractRun::parse(replay_json.dump());
+        auto expected = replay.verify(run_record.program_version_id(),
+                                      run_record.run_id(),
+                                      contract_workspace_revision_for_artifact(artifact));
+        if (status == program::ContractRunStatus::Published) expected.status = status;
+        if (*verification != expected) {
+            throw std::invalid_argument("Stored Harness contract verification is corrupt");
+        }
+    }
+}
+
 std::string program_storage_run_id(std::string_view owner_scope, std::string_view run_id) {
     return "program/" + std::to_string(owner_scope.size()) + "/" + std::string(owner_scope) + "/" +
            std::to_string(run_id.size()) + "/" + std::string(run_id);
@@ -203,7 +317,7 @@ CREATE TABLE IF NOT EXISTS neograph_harness_schema (
     version   INTEGER NOT NULL
 );
 INSERT INTO neograph_harness_schema (singleton, version)
-VALUES (1, 5)
+VALUES (1, 6)
 ON CONFLICT(singleton) DO NOTHING;
 CREATE TABLE IF NOT EXISTS neograph_harness_artifacts (
     artifact_id  TEXT PRIMARY KEY,
@@ -307,7 +421,25 @@ UPDATE neograph_harness_schema SET version = 5 WHERE singleton = 1;
 )SQL");
                 schema_version = 5;
             }
-            if (schema_version != 5) {
+            if (schema_version == 5) {
+                exec(R"SQL(
+CREATE TABLE IF NOT EXISTS neograph_harness_contract_runs (
+    run_id             TEXT PRIMARY KEY,
+    owner_scope        TEXT NOT NULL,
+    artifact_id        TEXT NOT NULL,
+    bundle_id          TEXT NOT NULL,
+    program_version_id TEXT NOT NULL,
+    manifest_hash      TEXT NOT NULL,
+    record_json        TEXT NOT NULL,
+    updated_at_ms      INTEGER NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES neograph_harness_runs (run_id)
+        ON DELETE RESTRICT
+);
+UPDATE neograph_harness_schema SET version = 6 WHERE singleton = 1;
+)SQL");
+                schema_version = 6;
+            }
+            if (schema_version != 6) {
                 throw std::runtime_error("SqliteHarnessRecordStore: unsupported schema version");
             }
             exec(R"SQL(
@@ -374,6 +506,18 @@ CREATE TABLE IF NOT EXISTS neograph_harness_program_effects (
     record_json TEXT    NOT NULL,
     PRIMARY KEY (run_id, sequence),
     UNIQUE (run_id, record_id),
+    FOREIGN KEY (run_id) REFERENCES neograph_harness_runs (run_id)
+        ON DELETE RESTRICT
+);
+CREATE TABLE IF NOT EXISTS neograph_harness_contract_runs (
+    run_id             TEXT PRIMARY KEY,
+    owner_scope        TEXT NOT NULL,
+    artifact_id        TEXT NOT NULL,
+    bundle_id          TEXT NOT NULL,
+    program_version_id TEXT NOT NULL,
+    manifest_hash      TEXT NOT NULL,
+    record_json        TEXT NOT NULL,
+    updated_at_ms      INTEGER NOT NULL,
     FOREIGN KEY (run_id) REFERENCES neograph_harness_runs (run_id)
         ON DELETE RESTRICT
 );
@@ -1418,6 +1562,138 @@ std::shared_ptr<program::ProgramTransitionStore> SqliteHarnessRecordStore::bind_
         throw std::invalid_argument("Harness Program transition artifact binding mismatch");
     }
     return std::make_shared<SqliteHarnessProgramTransitionStore>(impl_, std::move(artifact));
+}
+
+void SqliteHarnessRecordStore::save_contract_run(
+    const HarnessProgramArtifactRecord& artifact,
+    const program::ProgramRunRecord&     run_record,
+    const program::ContractRun&           contract_run) {
+    validate_contract_run_binding(artifact, run_record, contract_run);
+    const auto stored_artifact = load_artifact(artifact.artifact_id());
+    if (!stored_artifact || stored_artifact->dump() != artifact.serialize().dump()) {
+        throw std::invalid_argument("Harness contract artifact persistence binding mismatch");
+    }
+    const auto storage_id = program_storage_run_id(run_record.owner_scope(), run_record.run_id());
+    const auto serialized = contract_run.serialize_canonical();
+
+    std::lock_guard lock(impl_->mutex);
+    impl_->exec("BEGIN IMMEDIATE;");
+    try {
+        Statement current(
+            impl_->db,
+            "SELECT owner_scope, artifact_id, bundle_id, program_version_id, program_run_id, "
+            "record_json FROM neograph_harness_runs WHERE run_id=? AND program_run_id<>''");
+        current.bind_text(1, storage_id);
+        if (current.step() != SQLITE_ROW) {
+            throw std::invalid_argument("Harness contract requires a persisted Program run");
+        }
+        auto wrapper = HarnessProgramRunRecord::parse(json::parse(current.text(5)));
+        if (current.text(0) != run_record.owner_scope() ||
+            current.text(1) != artifact.artifact_id() || current.text(2) != run_record.bundle_id() ||
+            current.text(3) != run_record.program_version_id() ||
+            current.text(4) != wrapper.run_record().id() ||
+            wrapper.run_record().serialize_canonical() != run_record.serialize_canonical()) {
+            throw std::invalid_argument("Harness contract Program run binding is corrupt");
+        }
+        wrapper.validate_artifact(artifact);
+
+        Statement existing(
+            impl_->db,
+            "SELECT owner_scope, artifact_id, bundle_id, program_version_id, manifest_hash, "
+            "record_json FROM neograph_harness_contract_runs WHERE run_id=?");
+        existing.bind_text(1, storage_id);
+        const auto existing_result = existing.step();
+        if (existing_result != SQLITE_DONE && existing_result != SQLITE_ROW) {
+            throw_sqlite_error(impl_->db, "contract run read failed");
+        }
+        if (existing_result == SQLITE_ROW) {
+            if (existing.text(0) != artifact.owner_scope() ||
+                existing.text(1) != artifact.artifact_id() ||
+                existing.text(2) != run_record.bundle_id() ||
+                existing.text(3) != run_record.program_version_id() ||
+                existing.text(4) != contract_run.manifest().content_hash()) {
+                throw std::invalid_argument("Stored Harness contract SQLite binding is corrupt");
+            }
+            const auto stored = program::ContractRun::parse(existing.text(5));
+            validate_contract_run_binding(artifact, run_record, stored);
+            if (stored.serialize_canonical() != existing.text(5)) {
+                throw std::invalid_argument("Stored Harness contract canonical bytes are corrupt");
+            }
+            if (existing.text(5) == serialized) {
+                impl_->exec("COMMIT;");
+                return;
+            }
+            Statement update(
+                impl_->db,
+                "UPDATE neograph_harness_contract_runs SET manifest_hash=?, record_json=?, "
+                "updated_at_ms=? WHERE run_id=? AND owner_scope=? AND artifact_id=? "
+                "AND bundle_id=? AND program_version_id=?");
+            update.bind_text(1, contract_run.manifest().content_hash());
+            update.bind_text(2, serialized);
+            update.bind_int64(3, unix_millis());
+            update.bind_text(4, storage_id);
+            update.bind_text(5, artifact.owner_scope());
+            update.bind_text(6, artifact.artifact_id());
+            update.bind_text(7, run_record.bundle_id());
+            update.bind_text(8, run_record.program_version_id());
+            if (update.step() != SQLITE_DONE || sqlite3_changes(impl_->db) != 1) {
+                throw_sqlite_error(impl_->db, "contract run update failed");
+            }
+        } else {
+            Statement insert(
+                impl_->db,
+                "INSERT INTO neograph_harness_contract_runs "
+                "(run_id, owner_scope, artifact_id, bundle_id, program_version_id, "
+                "manifest_hash, record_json, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+            insert.bind_text(1, storage_id);
+            insert.bind_text(2, artifact.owner_scope());
+            insert.bind_text(3, artifact.artifact_id());
+            insert.bind_text(4, run_record.bundle_id());
+            insert.bind_text(5, run_record.program_version_id());
+            insert.bind_text(6, contract_run.manifest().content_hash());
+            insert.bind_text(7, serialized);
+            insert.bind_int64(8, unix_millis());
+            if (insert.step() != SQLITE_DONE) {
+                throw_sqlite_error(impl_->db, "contract run insert failed");
+            }
+        }
+        impl_->exec("COMMIT;");
+    } catch (...) {
+        try {
+            impl_->exec("ROLLBACK;");
+        } catch (...) {}
+        throw;
+    }
+}
+
+std::optional<program::ContractRun> SqliteHarnessRecordStore::load_contract_run(
+    const HarnessProgramArtifactRecord& artifact,
+    const program::ProgramRunRecord&     run_record) const {
+    (void)contract_manifest_for_artifact(artifact);
+    const auto storage_id = program_storage_run_id(run_record.owner_scope(), run_record.run_id());
+    std::lock_guard lock(impl_->mutex);
+    Statement query(
+        impl_->db,
+        "SELECT owner_scope, artifact_id, bundle_id, program_version_id, manifest_hash, "
+        "record_json FROM neograph_harness_contract_runs WHERE run_id=?");
+    query.bind_text(1, storage_id);
+    const auto result = query.step();
+    if (result == SQLITE_DONE) return std::nullopt;
+    if (result != SQLITE_ROW) throw_sqlite_error(impl_->db, "contract run read failed");
+    if (query.text(0) != artifact.owner_scope() || query.text(1) != artifact.artifact_id() ||
+        query.text(2) != run_record.bundle_id() ||
+        query.text(3) != run_record.program_version_id()) {
+        throw std::invalid_argument("Stored Harness contract SQLite binding is corrupt");
+    }
+    if (query.text(4) != contract_manifest_for_artifact(artifact).content_hash()) {
+        throw std::invalid_argument("Stored Harness contract manifest hash is corrupt");
+    }
+    const auto contract_run = program::ContractRun::parse(query.text(5));
+    if (contract_run.serialize_canonical() != query.text(5)) {
+        throw std::invalid_argument("Stored Harness contract canonical bytes are corrupt");
+    }
+    validate_contract_run_binding(artifact, run_record, contract_run);
+    return contract_run;
 }
 
 std::optional<HarnessProgramRunRecord> SqliteHarnessRecordStore::resolve_program_run(

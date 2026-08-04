@@ -102,6 +102,7 @@ TEST(HarnessContractTest, FailedOracleBlocksPublication) {
         run, make_evidence(manifest, "compile", EvidenceKind::DeterministicRun, true));
     ContractBoundary::record_evidence(
         run, make_evidence(manifest, "oracle", EvidenceKind::IndependentOracle, false));
+
     const auto result = ContractBoundary::verify(run, "program-v1", "run-1", "workspace-v1");
     EXPECT_FALSE(result.publishable);
     EXPECT_EQ(result.status, RunStatus::Failed);
@@ -117,6 +118,7 @@ TEST(HarnessContractTest, IndependentlyVerifiedEvidencePublishes) {
         run, make_evidence(manifest, "compile", EvidenceKind::DeterministicRun, true));
     ContractBoundary::record_evidence(
         run, make_evidence(manifest, "oracle", EvidenceKind::IndependentOracle, true));
+
     const auto result = ContractBoundary::verify(run, "program-v1", "run-1", "workspace-v1");
     ASSERT_TRUE(result.publishable);
     ContractBoundary::publish(run);

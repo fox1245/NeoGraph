@@ -231,7 +231,11 @@ json contract_projection(const program::ContractRun& run) {
             {"kind", std::string(program::to_string(evidence.kind))},
             {"manifest_hash", evidence.manifest_hash},
             {"program_version_id", evidence.program_version_id},
+            {"run_id", evidence.run_id},
             {"workspace_revision", evidence.workspace_revision},
+            {"command", evidence.command},
+            {"toolchain", evidence.toolchain},
+            {"artifact_hash", evidence.artifact_hash},
             {"executed", evidence.executed},
             {"passed", evidence.passed},
             {"diagnostics", evidence.diagnostics},
@@ -571,6 +575,9 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             return adapter->bind_program_transitions(record);
         return std::make_shared<program::InMemoryProgramTransitionStore>();
     }
+    std::shared_ptr<HarnessContractRunStore> contract_store() const {
+        return std::dynamic_pointer_cast<HarnessContractRunStore>(config.record_store);
+    }
     std::shared_ptr<Artifact> artifact(const std::string& id) {
         {
             std::lock_guard l(mutex);
@@ -826,6 +833,7 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
         invocation.requested_run_id = id;
         invocation.events           = events;
         std::optional<program::ContractRun> contract_run;
+        std::shared_ptr<HarnessContractRunStore> durable_contract;
         std::string workspace_revision = x->record.version().id();
         const auto projection = x->record.legacy_projection();
         if (projection.contains("workspace_revision")) {
@@ -837,6 +845,10 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
         if (x->contract) {
             contract_run.emplace(harness::ContractBoundary::start_run(*x->contract));
             contract_run->begin_attempt();
+            durable_contract = contract_store();
+            if (!durable_contract)
+                throw std::invalid_argument(
+                    "Harness contract runs require a durable contract run store");
         }
         std::optional<program::ProgramHandle> handle;
         try {
@@ -867,6 +879,9 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
         }
         if (handle->run_id() != id)
             throw std::runtime_error("ProgramRuntime changed requested run_id");
+        if (contract_run) {
+            durable_contract->save_contract_run(x->record, handle->snapshot(), *contract_run);
+        }
         {
             std::lock_guard l(mutex);
             runs[id] = std::make_shared<Run>(
@@ -924,8 +939,18 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             !projection.at("workspace_revision").get<std::string>().empty())
             workspace_revision = projection.at("workspace_revision").get<std::string>();
         if (a->contract) {
-            contract_run.emplace(*a->contract);
-            contract_run->begin_attempt();
+            auto durable_contract = contract_store();
+            if (!durable_contract)
+                throw std::invalid_argument(
+                    "Stored Harness contract run has no durable contract run store");
+            auto recovered = durable_contract->load_contract_run(a->record,
+                                                                  retained->run_record());
+            if (!recovered)
+                throw std::invalid_argument("Stored Harness contract run is missing");
+            if (recovered->manifest().serialize_canonical() !=
+                a->contract->serialize_canonical())
+                throw std::invalid_argument("Stored Harness contract manifest binding mismatch");
+            contract_run.emplace(std::move(*recovered));
         }
         auto value = std::make_shared<Run>(Run{a->id, std::move(mode), h, a->runtime,
                                                std::move(contract_run),
@@ -942,6 +967,16 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
     void finalize_contract(Run& x, const program::ProgramResult& terminal) {
         if (!x.contract || x.contract_finalized) return;
         auto& contract = *x.contract;
+        if (contract.verification() && contract.status() != program::ContractRunStatus::Running) {
+            auto durable_contract = contract_store();
+            if (!durable_contract)
+                throw std::invalid_argument(
+                    "Harness contract finalization requires a durable contract run store");
+            durable_contract->save_contract_run(artifact(x.artifact_id)->record,
+                                                x.handle.snapshot(), contract);
+            x.contract_finalized = true;
+            return;
+        }
         const auto program_version = terminal.program_version_id();
         const auto artifact_hash   = terminal.bundle_id();
         const auto actual           = runtime_final_value(terminal);
@@ -1017,6 +1052,12 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
         const auto verification =
             contract.verify(program_version, x.handle.run_id(), x.workspace_revision);
         if (verification.publishable) contract.publish();
+        auto durable_contract = contract_store();
+        if (!durable_contract)
+            throw std::invalid_argument(
+                "Harness contract finalization requires a durable contract run store");
+        durable_contract->save_contract_run(artifact(x.artifact_id)->record, x.handle.snapshot(),
+                                            contract);
         x.contract_finalized = true;
     }
     json snapshot(const std::shared_ptr<Run>& x) {

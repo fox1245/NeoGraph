@@ -2,10 +2,12 @@
 #include <neograph/graph/store.h>
 #include <neograph/mcp/harness.h>
 #include <neograph/mcp/harness_program_store.h>
+#include <neograph/harness/contract.h>
 #include <neograph/mcp/server.h>
 #include <neograph/provider.h>
 #ifdef NEOGRAPH_TESTS_HAVE_SQLITE
 #include <neograph/mcp/sqlite_harness_store.h>
+#include <sqlite3.h>
 #endif
 
 #include <asio/error.hpp>
@@ -13,6 +15,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -29,6 +32,26 @@ namespace {
 using neograph::json;
 std::string digest(char value) {
     return "sha256:" + std::string(64, value);
+}
+
+json canonical_json(const json& value) {
+    if (value.is_object()) {
+        std::vector<std::string> keys;
+        for (const auto& [key, child] : value.items()) {
+            (void)child;
+            keys.push_back(key);
+        }
+        std::sort(keys.begin(), keys.end());
+        json result = json::object();
+        for (const auto& key : keys) result[key] = canonical_json(value.at(key));
+        return result;
+    }
+    if (value.is_array()) {
+        json result = json::array();
+        for (const auto& child : value) result.push_back(canonical_json(child));
+        return result;
+    }
+    return value;
 }
 
 class RepeatingToolProvider final : public neograph::Provider {
@@ -948,6 +971,136 @@ TEST(HarnessProgramCutover, HostToolConfigurationChangesBindingAndArtifactIdenti
 }
 
 #ifdef NEOGRAPH_TESTS_HAVE_SQLITE
+TEST(HarnessProgramCutover, FrozenContractSurvivesSqliteServiceRestart) {
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("neograph-harness-contract-restart-" +
+                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+                       ".db");
+    auto contract_spec = neograph::program::ContractManifestSpec{};
+    contract_spec.manifest_id = "harness-restart-contract";
+    contract_spec.owner_scope = "harness-cutover-test";
+    contract_spec.scope = "harness-execution";
+    contract_spec.assumptions = {"ProgramRuntime is the executor"};
+    contract_spec.requirements = {{"execute", "Execute the retained Harness Program"}};
+    contract_spec.non_goals = {"Provider implementation selection"};
+    contract_spec.acceptance = {{"runtime", "ProgramRuntime returns a value", true,
+                                 json::object()}};
+    contract_spec.fixed_test_vectors = {{"smoke", json::object(), json{{"outcome", "ok"}}}};
+    contract_spec.independent_oracles = {"runtime-oracle"};
+    contract_spec.risk_register = {{"executor", "Executor may drift", "Pin ProgramRuntime", true}};
+    contract_spec.retry_policy = {1, 100, 5000};
+    const auto manifest = neograph::program::ContractManifest::propose(std::move(contract_spec))
+                              .review({"reviewer", "approved", true})
+                              .freeze();
+    auto contract_request = request();
+    contract_request["contract"] = json::parse(manifest.serialize_canonical());
+    contract_request["workspace_revision"] = "workspace-restart-1";
+
+    std::string run_id;
+    std::string artifact_id;
+    json        before;
+    json        frozen_artifact;
+    {
+        HarnessFixture fixture;
+        fixture.config.record_store =
+            std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(path.string());
+        neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
+        const auto compiled = service.compile(contract_request);
+        ASSERT_TRUE(compiled.at("ok").get<bool>()) << compiled.dump();
+        artifact_id = compiled.at("artifact_id").get<std::string>();
+        frozen_artifact = service.read("neograph://artifacts/" + artifact_id + "/contract");
+        const auto started = service.start({{"artifact_id", compiled.at("artifact_id")}});
+        ASSERT_TRUE(started.at("started").get<bool>()) << started.dump();
+        run_id = started.at("run_id").get<std::string>();
+        before = await_terminal(service, run_id);
+        ASSERT_EQ(before.at("status"), "completed") << before.dump();
+        ASSERT_EQ(before.at("contract").at("status"), "published") << before.dump();
+        EXPECT_EQ(before.at("contract").at("manifest_hash"), manifest.content_hash());
+        bool saw_runtime_evidence = false;
+        for (const auto& evidence : before.at("contract").at("evidence")) {
+            if (evidence.at("kind") != "deterministic_run") continue;
+            saw_runtime_evidence = true;
+            EXPECT_EQ(evidence.at("run_id"), run_id);
+            EXPECT_EQ(evidence.at("program_version_id"), before.at("program_version_id"));
+            EXPECT_EQ(evidence.at("artifact_hash"), before.at("bundle_id"));
+        }
+        EXPECT_TRUE(saw_runtime_evidence);
+    }
+
+    {
+        HarnessFixture fixture;
+        fixture.config.record_store =
+            std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(path.string());
+        neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
+        EXPECT_EQ(canonical_json(service.read("neograph://artifacts/" + artifact_id + "/contract")),
+                  canonical_json(frozen_artifact));
+        const auto recovered = service.get(run_id, "details");
+        EXPECT_EQ(recovered.at("status"), before.at("status"));
+        EXPECT_EQ(recovered.at("program_version_id"), before.at("program_version_id"));
+        EXPECT_EQ(recovered.at("bundle_id"), before.at("bundle_id"));
+        EXPECT_EQ(canonical_json(recovered.at("contract")),
+                  canonical_json(before.at("contract")));
+        EXPECT_EQ(canonical_json(recovered.at("result")),
+                  canonical_json(before.at("result")));
+    }
+    std::error_code error;
+    std::filesystem::remove(path, error);
+}
+
+TEST(HarnessProgramCutover, TamperedPersistedContractStateFailsClosed) {
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("neograph-harness-contract-tamper-" +
+                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+                       ".db");
+    neograph::program::ContractManifestSpec contract_spec;
+    contract_spec.manifest_id = "harness-tamper-contract";
+    contract_spec.owner_scope = "harness-cutover-test";
+    contract_spec.scope = "harness-execution";
+    contract_spec.assumptions = {"ProgramRuntime is the executor"};
+    contract_spec.requirements = {{"execute", "Execute the retained Harness Program"}};
+    contract_spec.non_goals = {"Provider implementation selection"};
+    contract_spec.acceptance = {{"runtime", "ProgramRuntime returns a value", true,
+                                 json::object()}};
+    contract_spec.fixed_test_vectors = {{"smoke", json::object(), json{{"outcome", "ok"}}}};
+    contract_spec.independent_oracles = {"runtime-oracle"};
+    contract_spec.risk_register = {{"executor", "Executor may drift", "Pin ProgramRuntime", true}};
+    contract_spec.retry_policy = {1, 100, 5000};
+    const auto manifest = neograph::program::ContractManifest::propose(std::move(contract_spec))
+                              .review({"reviewer", "approved", true})
+                              .freeze();
+    auto contract_request = request();
+    contract_request["contract"] = json::parse(manifest.serialize_canonical());
+
+    std::string run_id;
+    {
+        HarnessFixture fixture;
+        fixture.config.record_store =
+            std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(path.string());
+        neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
+        const auto compiled = service.compile(contract_request);
+        ASSERT_TRUE(compiled.at("ok").get<bool>()) << compiled.dump();
+        const auto started = service.start({{"artifact_id", compiled.at("artifact_id")}});
+        ASSERT_TRUE(started.at("started").get<bool>()) << started.dump();
+        run_id = started.at("run_id").get<std::string>();
+        ASSERT_EQ(await_terminal(service, run_id).at("status"), "completed");
+    }
+    sqlite3* database = nullptr;
+    ASSERT_EQ(sqlite3_open(path.string().c_str(), &database), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(database,
+                           "UPDATE neograph_harness_contract_runs SET bundle_id='tampered'",
+                           nullptr, nullptr, nullptr),
+              SQLITE_OK);
+    sqlite3_close(database);
+
+    HarnessFixture fixture;
+    fixture.config.record_store =
+        std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(path.string());
+    neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
+    EXPECT_THROW(service.get(run_id), std::invalid_argument);
+    std::error_code error;
+    std::filesystem::remove(path, error);
+}
+
 TEST(HarnessProgramCutover, ReconnectsExactSqliteProgramRunAfterServiceDestruction) {
     HarnessFixture fixture;
     const auto     path =

@@ -3,6 +3,7 @@
 #include <neograph/api.h>
 #include <neograph/json.h>
 #include <neograph/program/store.h>
+#include <neograph/program/contract.h>
 #include <neograph/program/transition_store.h>
 
 #include <cstdint>
@@ -95,6 +96,23 @@ public:
     /** Wrong-owner lookups are indistinguishable from absence. */
     virtual std::optional<HarnessProgramRunRecord>
     resolve_program_run(std::string_view owner_scope, std::string_view run_id) const = 0;
+};
+
+/**
+ * Optional durable boundary for the Harness contract state associated with a
+ * canonical Program run. This is a sibling interface so existing
+ * HarnessRecordStore and Program adapter vtables remain compatible.
+ */
+class NEOGRAPH_HARNESS_API HarnessContractRunStore {
+public:
+    virtual ~HarnessContractRunStore() = default;
+
+    virtual void save_contract_run(const HarnessProgramArtifactRecord& artifact,
+                                   const program::ProgramRunRecord&     run_record,
+                                   const program::ContractRun&         contract_run) = 0;
+    virtual std::optional<program::ContractRun>
+    load_contract_run(const HarnessProgramArtifactRecord& artifact,
+                      const program::ProgramRunRecord&     run_record) const = 0;
 };
 
 /** Rejects FileHarnessRecordStore and every backend without atomic Program publication. */

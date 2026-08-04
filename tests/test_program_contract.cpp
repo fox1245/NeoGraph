@@ -80,6 +80,7 @@ TEST(ProgramContractTest, WorkerClaimCannotPublishWithoutIndependentEvidence) {
     ContractRun run(frozen);
     run.begin_attempt();
     run.record_worker_report("implemented everything", true);
+
     const auto blocked = run.verify("program-v1", "run-1", "workspace-1");
     EXPECT_FALSE(blocked.publishable);
     EXPECT_EQ(blocked.missing_acceptance_ids.size(), 2U);
@@ -104,6 +105,7 @@ TEST(ProgramContractTest, IndependentEvidenceClosesGatesAndSurvivesRecovery) {
                                 true);
     oracle.details = json{{"oracle_id", "oracle-smoke"}, {"observed", 42}};
     run.record_evidence(std::move(oracle));
+
     const auto verified = run.verify("program-v1", "run-1", "workspace-1");
     EXPECT_TRUE(verified.publishable);
     EXPECT_EQ(run.status(), ContractRunStatus::Verified);
@@ -142,6 +144,7 @@ TEST(ProgramContractTest, RejectsUnfrozenManifestAndAnyFailedGate) {
                                       ContractEvidenceKind::DeterministicRun, false));
     run.record_evidence(make_evidence(frozen, "compile-passed", "compile-ok",
                                       ContractEvidenceKind::DeterministicRun, true));
+
     const auto result = run.verify("program-v1", "run-1", "workspace-1");
     EXPECT_FALSE(result.publishable);
     EXPECT_EQ(result.status, ContractRunStatus::Failed);

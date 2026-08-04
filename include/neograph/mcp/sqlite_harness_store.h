@@ -52,7 +52,8 @@ class SqliteHarnessProgramTransitionStore;
 class NEOGRAPH_API SqliteHarnessRecordStore final : public HarnessRecordStore,
                                                     public HarnessJournal,
                                                     public HarnessRetentionStore,
-                                                    public HarnessProgramAdapterStore {
+                                                    public HarnessProgramAdapterStore,
+                                                    public HarnessContractRunStore {
 public:
     /// Open or create a store with a five-second SQLite busy timeout.
     explicit SqliteHarnessRecordStore(const std::string& db_path);
@@ -78,6 +79,13 @@ public:
     HarnessRetentionResult cleanup_retained(const HarnessRetentionPolicy& policy) override;
     std::shared_ptr<program::ProgramTransitionStore>
     bind_program_transitions(HarnessProgramArtifactRecord artifact) override;
+
+    void save_contract_run(const HarnessProgramArtifactRecord& artifact,
+                           const program::ProgramRunRecord&     run_record,
+                           const program::ContractRun&           contract_run) override;
+    std::optional<program::ContractRun>
+    load_contract_run(const HarnessProgramArtifactRecord& artifact,
+                      const program::ProgramRunRecord&     run_record) const override;
 
 #ifdef NEOGRAPH_TESTING
     /// Fail one subsequent Program transition at the requested transaction point.

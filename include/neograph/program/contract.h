@@ -142,6 +142,7 @@ struct NEOGRAPH_PROGRAM_API ContractEvidence {
     ContractEvidenceKind kind = ContractEvidenceKind::WorkerReport;
     std::string         manifest_hash;
     std::string         program_version_id;
+    /// Exact Program run that produced this independently observed evidence.
     std::string         run_id;
     std::string         workspace_revision;
     std::string         command;
