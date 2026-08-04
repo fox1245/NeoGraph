@@ -29,16 +29,18 @@ namespace neograph::graph {
 class NEOGRAPH_API GraphState {
 public:
     /**
-     * @brief Initialize a new channel with a reducer and optional initial value.
-     * @param name Channel name (must be unique within the graph).
-     * @param type Reducer strategy for merging writes.
-     * @param reducer Custom reducer function (used when type == ReducerType::CUSTOM).
-     * @param initial_value Initial channel value (default: null).
+     * @brief Initialize a new channel with reducer and lifecycle policy.
+     *
+     * Writes are combined by the reducer, normalized by retention, and then
+     * projected to checkpoints according to persistence. Existing callers
+     * that pass only an initial value retain the historical unbounded,
+     * checkpointed behavior.
      */
     void init_channel(const std::string& name,
                       ReducerType type,
                       ReducerFn reducer,
-                      const json& initial_value = json());
+                      const json& initial_value = json(),
+                      ChannelLifecyclePolicy lifecycle = {});
 
     /**
      * @brief Read a channel's current value (thread-safe, shared lock).

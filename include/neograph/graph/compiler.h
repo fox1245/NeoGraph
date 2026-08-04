@@ -63,6 +63,11 @@ struct ChannelDef {
     /// key so CompiledGraph::to_json() can re-emit exactly what was
     /// declared (round-trip fidelity).
     bool has_initial = false;
+    /// Retention is applied after reducer combination.
+    ChannelRetentionPolicy   retention = ChannelRetentionPolicy::Unbounded;
+    std::uint64_t             retention_limit = 0;
+    /// Ephemeral channels are omitted from checkpoint snapshots.
+    ChannelPersistencePolicy persistence = ChannelPersistencePolicy::Checkpoint;
 };
 
 /**

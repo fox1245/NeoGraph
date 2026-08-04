@@ -17,6 +17,8 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
+#include <stdexcept>
 #include <fstream>
 #include <string>
 #include <unistd.h>
@@ -25,6 +27,8 @@ using neograph::CompletionParams;
 using neograph::ChatMessage;
 using neograph::json;
 using neograph::llm::SchemaProvider;
+using neograph::llm::SchemaStrategyFamily;
+using neograph::llm::SchemaStrategyRegistry;
 using neograph::llm::test_access::SchemaProviderTestAccess;
 
 namespace {
@@ -96,7 +100,9 @@ json base_schema() {
     };
 }
 
-std::unique_ptr<SchemaProvider> make_provider_from(const json& schema) {
+std::unique_ptr<SchemaProvider> make_provider_from(
+    const json& schema,
+    std::shared_ptr<const SchemaStrategyRegistry> strategy_registry = nullptr) {
     auto path = write_temp_schema(schema);
     if (path.empty()) return nullptr;
 
@@ -104,6 +110,7 @@ std::unique_ptr<SchemaProvider> make_provider_from(const json& schema) {
     cfg.schema_path = path;
     cfg.api_key = "test-key";
     cfg.default_model = "gpt-test";
+    cfg.strategy_registry = std::move(strategy_registry);
 
     auto sp = SchemaProvider::create(cfg);
     std::remove(path.c_str());
@@ -119,6 +126,43 @@ CompletionParams basic_params() {
 }
 
 }  // namespace
+
+TEST(SchemaStrategyRegistry, InjectedAliasSelectsReviewedPrimitive) {
+    auto schema = base_schema();
+    schema["system_prompt"]["strategy"] = "claude_system";
+
+    auto registry = std::make_shared<SchemaStrategyRegistry>();
+    registry->register_alias(
+        SchemaStrategyFamily::SystemPrompt, "claude_system", "top_level");
+
+    auto sp = make_provider_from(schema, registry);
+    ASSERT_NE(sp, nullptr);
+
+    CompletionParams params = basic_params();
+    params.messages.insert(params.messages.begin(), {"system", "be concise"});
+
+    const json body = SchemaProviderTestAccess::build_body(*sp, params);
+    ASSERT_TRUE(body.contains("system")) << body.dump();
+    EXPECT_EQ(body["system"], "be concise");
+    ASSERT_TRUE(body.contains("input")) << body.dump();
+    ASSERT_EQ(body["input"].size(), 1U);
+    EXPECT_EQ(body["input"][0]["role"], "user");
+}
+
+TEST(SchemaStrategyRegistry, RejectsUnknownPrimitiveAndDuplicateAlias) {
+    SchemaStrategyRegistry registry;
+    EXPECT_THROW(
+        registry.register_alias(
+            SchemaStrategyFamily::Response, "custom", "not_a_primitive"),
+        std::invalid_argument);
+    EXPECT_THROW(
+        registry.register_alias(
+            SchemaStrategyFamily::Response, "choices_message", "output_array"),
+        std::invalid_argument);
+    EXPECT_THROW(
+        registry.resolve(SchemaStrategyFamily::Response, "missing"),
+        std::invalid_argument);
+}
 
 // ─── #34: extra_fields applied without tools ───
 

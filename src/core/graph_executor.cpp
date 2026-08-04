@@ -122,7 +122,9 @@ void NodeExecutor::init_state(GraphState& state) const {
         if (cd.type == ReducerType::APPEND && initial.is_null()) {
             initial = json::array();
         }
-        state.init_channel(cd.name, cd.type, reducer, initial);
+        state.init_channel(cd.name, cd.type, reducer, initial,
+                           ChannelLifecyclePolicy{cd.retention, cd.retention_limit,
+                                                  cd.persistence});
     }
 }
 

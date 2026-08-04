@@ -23,13 +23,42 @@ static std::string declared_channel_list(
     return out;
 }
 
+static json apply_retention(json value, const ChannelLifecyclePolicy& lifecycle) {
+    if (lifecycle.retention == ChannelRetentionPolicy::Unbounded || !value.is_array()) {
+        return value;
+    }
+    if (lifecycle.retention == ChannelRetentionPolicy::Latest) {
+        if (value.empty()) return value;
+        return json::array({value.back()});
+    }
+    if (lifecycle.retention_limit == 0) {
+        throw std::invalid_argument(
+            "bounded channel retention requires a positive retention_limit");
+    }
+    json retained = json::array();
+    const auto first = value.size() > lifecycle.retention_limit
+                            ? value.size() - lifecycle.retention_limit
+                            : std::size_t(0);
+    for (std::size_t i = first; i < value.size(); ++i) {
+        retained.push_back(value[i]);
+    }
+    return retained;
+}
+
 void GraphState::init_channel(const std::string& name,
                                ReducerType type,
                                ReducerFn reducer,
-                               const json& initial_value) {
+                               const json& initial_value,
+                               ChannelLifecyclePolicy lifecycle) {
+    if (lifecycle.retention == ChannelRetentionPolicy::Bounded &&
+        lifecycle.retention_limit == 0) {
+        throw std::invalid_argument(
+            "bounded channel retention requires a positive retention_limit");
+    }
     std::unique_lock lock(mutex_);
     channels_.insert_or_assign(
-        name, Channel{name, type, std::move(reducer), initial_value, 0});
+        name, Channel{name, type, std::move(reducer), lifecycle,
+                      apply_retention(initial_value, lifecycle), 0});
 }
 
 json GraphState::get(const std::string& channel) const {
@@ -64,7 +93,7 @@ void GraphState::write(const std::string& channel, const json& value) {
             "See docs/troubleshooting.md \"Write to unknown channel\".");
     }
     auto& ch  = it->second;
-    ch.value   = ch.reducer(ch.value, value);
+    ch.value   = apply_retention(ch.reducer(ch.value, value), ch.lifecycle);
     ch.version = ++global_version_;
 }
 
@@ -86,9 +115,10 @@ void GraphState::apply_writes(const std::vector<ChannelWrite>& writes) {
         // from it. Because the intent rides on the write, it lands in the write
         // log, survives checkpointing, and replays identically — which a
         // side-door GraphState::overwrite() could never do.
-        ch.value = (w.mode == ChannelWrite::Mode::Overwrite)
-                       ? w.value
-                       : ch.reducer(ch.value, w.value);
+        const auto combined = (w.mode == ChannelWrite::Mode::Overwrite)
+                                  ? w.value
+                                  : ch.reducer(ch.value, w.value);
+        ch.value   = apply_retention(combined, ch.lifecycle);
         ch.version = ++global_version_;
     }
 }
@@ -108,8 +138,9 @@ json GraphState::serialize() const {
     std::shared_lock lock(mutex_);
     json data;
     for (const auto& [name, ch] : channels_) {
+        if (ch.lifecycle.persistence == ChannelPersistencePolicy::Ephemeral) continue;
         data["channels"][name] = {
-            {"value",   ch.value},
+            {"value", ch.value},
             {"version", ch.version}
         };
     }
@@ -122,7 +153,8 @@ void GraphState::restore(const json& data) {
     if (data.contains("channels")) {
         for (const auto& [name, ch_data] : data["channels"].items()) {
             auto it = channels_.find(name);
-            if (it != channels_.end()) {
+            if (it != channels_.end() &&
+                it->second.lifecycle.persistence != ChannelPersistencePolicy::Ephemeral) {
                 it->second.value   = ch_data["value"];
                 it->second.version = ch_data.value("version", uint64_t(0));
             }

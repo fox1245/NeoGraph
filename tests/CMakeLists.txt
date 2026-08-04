@@ -63,6 +63,7 @@ add_executable(neograph_tests
     test_provider_async_default.cpp
     test_provider_invoke_default.cpp
     test_completion_provider.cpp
+    test_artifact_provider.cpp
     test_run_context_store.cpp
     test_run_result_channel.cpp
     test_typed_events.cpp

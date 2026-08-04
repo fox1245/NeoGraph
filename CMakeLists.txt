@@ -410,6 +410,7 @@ add_library(neograph_core
     src/core/graph_invocation.cpp
     src/core/provider.cpp
     src/core/completion_provider.cpp
+    src/core/artifact_provider.cpp
     src/core/tool.cpp
     src/core/tool_execution.cpp
     src/core/host_admission.cpp
@@ -697,6 +698,7 @@ endif()
 if(NEOGRAPH_BUILD_LLM)
     add_library(neograph_llm
         src/llm/openai_provider.cpp
+        src/llm/schema_strategy_registry.cpp
         src/llm/schema_provider.cpp
         src/llm/rate_limited_provider.cpp
         src/llm/agent.cpp

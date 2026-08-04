@@ -20,6 +20,26 @@
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/this_coro.hpp>
+
+#include <atomic>
+#include <chrono>
+#include <thread>
+class SyncOnlyStore final : public neograph::graph::CheckpointStore {
+public:
+    void save(const neograph::graph::Checkpoint& cp) override {
+        if (std::this_thread::get_id() != caller_thread) {
+            ran_off_thread.store(true, std::memory_order_release);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        saved = cp;
+    }
+
+    std::thread::id caller_thread;
+    std::atomic<bool> ran_off_thread{false};
+    std::optional<neograph::graph::Checkpoint> saved;
+};
 
 using namespace neograph::graph;
 
@@ -201,6 +221,40 @@ TEST(CheckpointAsyncDefault, DeleteThreadAsyncRoutesToSync) {
 
     EXPECT_FALSE(store.load_latest("doomed").has_value());
     EXPECT_TRUE(store.load_latest("kept").has_value());
+}
+
+TEST(CheckpointAsyncDefault, SyncOnlyAsyncFallbackUsesBlockingPool) {
+    SyncOnlyStore store;
+    store.caller_thread = std::this_thread::get_id();
+    const auto cp = make_cp("sync-only", 1);
+
+    asio::io_context io;
+    bool timer_fired = false;
+    bool completed = false;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            asio::steady_timer timer(co_await asio::this_coro::executor);
+            timer.expires_after(std::chrono::milliseconds(5));
+            timer.async_wait([&](auto) { timer_fired = true; });
+            co_await store.save_async(cp);
+            completed = true;
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_TRUE(timer_fired);
+    EXPECT_TRUE(completed);
+    EXPECT_TRUE(store.ran_off_thread.load(std::memory_order_acquire));
+    ASSERT_TRUE(store.saved.has_value());
+    EXPECT_EQ(store.saved->id, cp.id);
+}
+
+TEST(CheckpointAsyncDefault, NeitherSideOverrideFailsClosed) {
+    CheckpointStore store;
+    EXPECT_THROW(
+        neograph::async::run_sync(store.save_async(make_cp("empty", 1))),
+        std::logic_error);
 }
 
 TEST(CheckpointCapabilities, AdapterDelegatesCoreAsyncAndPendingWrites) {

@@ -475,6 +475,14 @@ static ParseReport parse_report_impl(const json&          definition,
         }
         return true;
     };
+    auto invalid_channel_value = [&](const std::string& pointer,
+                                     const std::string& display,
+                                     const std::string& expected,
+                                     const json& actual) {
+        diagnostics.push_back(
+            {"GC_FIELD_VALUE", pointer, display + " has an invalid value",
+             json{{"expected", expected}, {"actual", actual}}});
+    };
     const bool channels_ok          = container_ok("channels", true);
     const bool nodes_ok             = container_ok("nodes", true);
     const bool edges_ok             = container_ok("edges", false, true);
@@ -531,9 +539,58 @@ static ParseReport parse_report_impl(const json&          definition,
                 parsed.type = ReducerType::OVERWRITE;
             else
                 parsed.type = ReducerType::CUSTOM;
+
+            if (channel.contains("retention")) {
+                const auto& retention = channel["retention"];
+                if (!retention.is_string()) {
+                    field_type(pointer + "/retention", "channels." + name + ".retention",
+                               "string", retention);
+                } else if (retention == "latest") {
+                    parsed.retention = ChannelRetentionPolicy::Latest;
+                } else if (retention == "bounded") {
+                    parsed.retention = ChannelRetentionPolicy::Bounded;
+                } else if (retention != "unbounded") {
+                    invalid_channel_value(pointer + "/retention",
+                                          "channels." + name + ".retention",
+                                          "unbounded, latest, or bounded", retention);
+                }
+            }
+            if (channel.contains("retention_limit")) {
+                const auto& limit = channel["retention_limit"];
+                if (!limit.is_number_unsigned() &&
+                    !(limit.is_number_integer() && limit.get<std::int64_t>() >= 0)) {
+                    field_type(pointer + "/retention_limit",
+                               "channels." + name + ".retention_limit",
+                               "non-negative integer", limit);
+                } else {
+                    parsed.retention_limit = limit.get<std::uint64_t>();
+                }
+            }
+            if (parsed.retention == ChannelRetentionPolicy::Bounded &&
+                parsed.retention_limit == 0) {
+                invalid_channel_value(pointer + "/retention_limit",
+                                      "channels." + name + ".retention_limit",
+                                      "positive integer when retention is bounded",
+                                      json(parsed.retention_limit));
+            }
+            if (channel.contains("persistence")) {
+                const auto& persistence = channel["persistence"];
+                if (!persistence.is_string()) {
+                    field_type(pointer + "/persistence", "channels." + name + ".persistence",
+                               "string", persistence);
+                } else if (persistence == "ephemeral") {
+                    parsed.persistence = ChannelPersistencePolicy::Ephemeral;
+                } else if (persistence != "checkpoint") {
+                    invalid_channel_value(pointer + "/persistence",
+                                          "channels." + name + ".persistence",
+                                          "checkpoint or ephemeral", persistence);
+                }
+            }
             if (strict) {
-                enforce_consumed(channel, {"reducer", "initial"}, "channels." + name, pointer,
-                                 diagnostics);
+                enforce_consumed(channel,
+                                 {"reducer", "initial", "retention", "retention_limit",
+                                  "persistence"},
+                                 "channels." + name, pointer, diagnostics);
             }
             topology.channel_defs.push_back(std::move(parsed));
         }
@@ -1018,6 +1075,16 @@ json TopologySpec::to_json() const {
             json c       = json::object();
             c["reducer"] = cd.reducer_name;
             if (cd.has_initial) c["initial"] = cd.initial_value;
+            if (cd.retention != ChannelRetentionPolicy::Unbounded) {
+                c["retention"] =
+                    cd.retention == ChannelRetentionPolicy::Latest ? "latest" : "bounded";
+                if (cd.retention == ChannelRetentionPolicy::Bounded) {
+                    c["retention_limit"] = cd.retention_limit;
+                }
+            }
+            if (cd.persistence == ChannelPersistencePolicy::Ephemeral) {
+                c["persistence"] = "ephemeral";
+            }
             channels[cd.name] = std::move(c);
         }
         j["channels"] = std::move(channels);

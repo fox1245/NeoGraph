@@ -111,7 +111,10 @@ struct SchemaProvider::StreamCancelControl {
 // ============================================================================
 
 SchemaProvider::SchemaProvider(Config config, json schema)
-    : user_config_(std::move(config))
+    : strategy_registry_(config.strategy_registry
+                         ? *config.strategy_registry
+                         : SchemaStrategyRegistry::standard())
+    , user_config_(std::move(config))
     , schema_(std::move(schema))
 {
     parse_schema();
@@ -263,13 +266,18 @@ void SchemaProvider::parse_schema()
             if (path.is_string()) req_.per_call_fields.insert(path.get<std::string>());
         }
     }
-
     // --- System Prompt ---
     auto s = schema_["system_prompt"];
-    std::string sys_strategy = s.value("strategy", "in_messages");
-    if (sys_strategy == "top_level") {
+
+    // Strategy names are resolved through the explicitly injected registry.
+    // The resolved value is always one of the reviewed built-in primitives;
+    // the rest of SchemaProvider can therefore keep its compact enum dispatch.
+    const auto system_prompt_strategy =
+        strategy_registry_.resolve(SchemaStrategyFamily::SystemPrompt,
+                                   s.value("strategy", "in_messages"));
+    if (system_prompt_strategy == "top_level") {
         sys_.strategy = SystemPromptStrategy::TOP_LEVEL;
-    } else if (sys_strategy == "top_level_parts") {
+    } else if (system_prompt_strategy == "top_level_parts") {
         sys_.strategy = SystemPromptStrategy::TOP_LEVEL_PARTS;
     } else {
         sys_.strategy = SystemPromptStrategy::IN_MESSAGES;
@@ -292,15 +300,18 @@ void SchemaProvider::parse_schema()
     if (m.contains("text_part")) {
         msgs_.text_part_template = m["text_part"];
     }
-
     // --- Tool Definition ---
     auto td = schema_["tool_definition"];
-    std::string wrapper = td.value("wrapper", "function");
-    if (wrapper == "none") {
+
+    // Tool definition wrappers share the same value-level registry contract.
+    const auto tool_definition_strategy =
+        strategy_registry_.resolve(SchemaStrategyFamily::ToolDefinition,
+                                   td.value("wrapper", "function"));
+    if (tool_definition_strategy == "none") {
         tool_def_.wrapper = ToolDefWrapper::NONE;
-    } else if (wrapper == "function_declarations") {
+    } else if (tool_definition_strategy == "function_declarations") {
         tool_def_.wrapper = ToolDefWrapper::FUNCTION_DECLARATIONS;
-    } else if (wrapper == "flat_function") {
+    } else if (tool_definition_strategy == "flat_function") {
         tool_def_.wrapper = ToolDefWrapper::FLAT_FUNCTION;
     } else {
         tool_def_.wrapper = ToolDefWrapper::FUNCTION;
@@ -308,15 +319,18 @@ void SchemaProvider::parse_schema()
     tool_def_.name_field = td.value("name_field", "name");
     tool_def_.description_field = td.value("description_field", "description");
     tool_def_.parameters_field = td.value("parameters_field", "parameters");
-
     // --- Tool Call in Message ---
     auto tc = schema_["tool_call_in_message"];
-    std::string tc_strategy = tc.value("strategy", "tool_calls_array");
-    if (tc_strategy == "content_array") {
+
+    // Tool-call and tool-result encodings may be named independently.
+    const auto tool_call_strategy =
+        strategy_registry_.resolve(SchemaStrategyFamily::ToolCall,
+                                   tc.value("strategy", "tool_calls_array"));
+    if (tool_call_strategy == "content_array") {
         tool_call_.strategy = ToolCallStrategy::CONTENT_ARRAY;
-    } else if (tc_strategy == "parts_array") {
+    } else if (tool_call_strategy == "parts_array") {
         tool_call_.strategy = ToolCallStrategy::PARTS_ARRAY;
-    } else if (tc_strategy == "flat_items") {
+    } else if (tool_call_strategy == "flat_items") {
         tool_call_.strategy = ToolCallStrategy::FLAT_ITEMS;
     } else {
         tool_call_.strategy = ToolCallStrategy::TOOL_CALLS_ARRAY;
@@ -324,16 +338,18 @@ void SchemaProvider::parse_schema()
     tool_call_.field = tc.value("field", "tool_calls");
     if (tc.contains("item")) tool_call_.item_template = tc["item"];
     if (tc.contains("text_item")) tool_call_.text_item_template = tc["text_item"];
-
     // --- Tool Result ---
     auto tr = schema_["tool_result"];
-    tool_result_.role = tr.value("role", "tool");
-    std::string tr_strategy = tr.value("strategy", "flat");
-    if (tr_strategy == "content_array") {
+
+    // Tool result encodings may be named independently.
+    const auto tool_result_strategy =
+        strategy_registry_.resolve(SchemaStrategyFamily::ToolResult,
+                                   tr.value("strategy", "flat"));
+    if (tool_result_strategy == "content_array") {
         tool_result_.strategy = ToolResultStrategy::CONTENT_ARRAY;
-    } else if (tr_strategy == "parts_array") {
+    } else if (tool_result_strategy == "parts_array") {
         tool_result_.strategy = ToolResultStrategy::PARTS_ARRAY;
-    } else if (tr_strategy == "flat_item") {
+    } else if (tool_result_strategy == "flat_item") {
         tool_result_.strategy = ToolResultStrategy::FLAT_ITEM;
     } else {
         tool_result_.strategy = ToolResultStrategy::FLAT;
@@ -350,12 +366,14 @@ void SchemaProvider::parse_schema()
 
     // --- Response ---
     auto resp = schema_["response"];
-    std::string resp_strategy = resp.value("strategy", "choices_message");
-    if (resp_strategy == "content_array") {
+    const auto response_strategy =
+        strategy_registry_.resolve(SchemaStrategyFamily::Response,
+                                   resp.value("strategy", "choices_message"));
+    if (response_strategy == "content_array") {
         resp_.strategy = ResponseStrategy::CONTENT_ARRAY;
-    } else if (resp_strategy == "candidates_parts") {
+    } else if (response_strategy == "candidates_parts") {
         resp_.strategy = ResponseStrategy::CANDIDATES_PARTS;
-    } else if (resp_strategy == "output_array") {
+    } else if (response_strategy == "output_array") {
         resp_.strategy = ResponseStrategy::OUTPUT_ARRAY;
     } else {
         resp_.strategy = ResponseStrategy::CHOICES_MESSAGE;
@@ -405,7 +423,9 @@ void SchemaProvider::parse_schema()
 
     // --- Streaming ---
     auto st = schema_["streaming"];
-    std::string stream_format = st.value("format", "sse_data");
+    const auto stream_format =
+        strategy_registry_.resolve(SchemaStrategyFamily::Stream,
+                                   st.value("format", "sse_data"));
     if (stream_format == "sse_events") {
         stream_.format = StreamFormat::SSE_EVENTS;
     } else {

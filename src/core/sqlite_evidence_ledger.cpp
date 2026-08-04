@@ -356,6 +356,8 @@ void validate_artifact(const EvidenceArtifact& artifact, const ResearchTask& tas
             "artifact owner_scope does not match lease");
     require(artifact.source_version == source.version,
             "artifact source_version does not match admitted source");
+    require(artifact.source_content_hash == source.content_hash,
+            "artifact source_content_hash does not match admitted source");
     require_nonempty(artifact.evidence_locator, "artifact evidence_locator");
     require_nonempty(artifact.observation, "artifact observation");
     require_nonempty(artifact.searched_scope, "artifact searched_scope");

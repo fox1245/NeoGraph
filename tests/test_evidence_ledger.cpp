@@ -192,6 +192,19 @@ TEST_F(EvidenceLedgerTest, StaleWorkerCannotPublishAfterLeaseExpiryAndReassignme
               EvidencePublishResult::Duplicate);
 }
 
+TEST_F(EvidenceLedgerTest, RejectsEvidenceBoundToWrongSourceContentHash) {
+    ledger.create_task(make_primary_task());
+    const auto lease = acquire("extract-1", "lease-forged-hash", "worker-hash");
+    auto forged = make_artifact(lease);
+    forged.source_content_hash = "sha256:not-the-admitted-source";
+
+    EXPECT_THROW((void)ledger.publish(lease, std::move(forged), 1'010),
+                 std::invalid_argument);
+    const auto task = ledger.task("owner-a", "extract-1");
+    ASSERT_TRUE(task.has_value());
+    EXPECT_EQ(task->state, ResearchTaskState::Leased);
+}
+
 TEST_F(EvidenceLedgerTest, NegativeEvidenceRetainsScopeAndRequestsIndependentReview) {
     ledger.create_task(make_primary_task());
     const auto lease = acquire("extract-1", "lease-negative", "worker-negative");

@@ -28,6 +28,7 @@
 #include <neograph/api.h>
 #include <neograph/provider.h>
 #include <neograph/llm/json_path.h>
+#include <neograph/llm/schema_strategy_registry.h>
 #include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
 #include <fstream>
@@ -94,6 +95,13 @@ class NEOGRAPH_API SchemaProvider : public Provider {
         /// hitting Cloudflare-WAF endpoints (where the default httplib
         /// path may get fingerprinted out).
         bool prefer_libcurl = false;
+
+        /// Optional value-level extension seam for schema strategy names.
+        /// The provider copies this registry before parsing, so the caller
+        /// may safely discard or mutate its builder after `create` returns.
+        /// The registry accepts aliases for reviewed built-in primitives;
+        /// it does not execute callbacks.
+        std::shared_ptr<const SchemaStrategyRegistry> strategy_registry;
     };
 
     /**
@@ -373,6 +381,7 @@ class NEOGRAPH_API SchemaProvider : public Provider {
     std::unique_ptr<async::CurlH2Pool>  curl_pool_;
 
     // --- Parsed config ---
+    SchemaStrategyRegistry strategy_registry_;
     Config user_config_;
     json schema_;
     std::string provider_name_;

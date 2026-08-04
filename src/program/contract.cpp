@@ -392,6 +392,80 @@ json evidence_to_json(const ContractEvidence& value) {
                 {"diagnostics", strings_to(value.diagnostics)},
                 {"details", value.details}};
 }
+void validate_loaded_evidence(const ContractEvidence& evidence,
+                              const ContractManifest& manifest,
+                              std::set<std::string>& seen_ids) {
+    validate_identifier(evidence.evidence_id, "evidence_id");
+    if (!seen_ids.insert(evidence.evidence_id).second) {
+        throw std::invalid_argument("Contract run contains duplicate evidence_id");
+    }
+    if (evidence.manifest_hash != manifest.content_hash()) {
+        throw std::invalid_argument("Contract run evidence hash mismatch");
+    }
+    if (!evidence.executed) {
+        throw std::invalid_argument("Persisted contract evidence must be marked executed");
+    }
+    for (const auto& diagnostic : evidence.diagnostics) validate_utf8(diagnostic);
+    (void)canonical_json_bytes(evidence.details);
+
+    if (evidence.kind == ContractEvidenceKind::WorkerReport) {
+        return;
+    }
+    if (evidence.program_version_id.empty() || evidence.run_id.empty() ||
+        evidence.workspace_revision.empty() || evidence.command.empty() ||
+        evidence.toolchain.empty() || evidence.artifact_hash.empty()) {
+        throw std::invalid_argument(
+            "Persisted contract evidence must identify version, run, workspace, command, "
+            "toolchain, and artifact");
+    }
+    validate_utf8(evidence.program_version_id);
+    validate_utf8(evidence.run_id);
+    validate_utf8(evidence.workspace_revision);
+    validate_utf8(evidence.command);
+    validate_utf8(evidence.toolchain);
+    validate_utf8(evidence.artifact_hash);
+
+    if (evidence.kind == ContractEvidenceKind::IndependentOracle) {
+        if (!evidence.acceptance_id.empty()) {
+            throw std::invalid_argument(
+                "Persisted independent oracle evidence cannot target an acceptance gate");
+        }
+        if (!evidence.details.is_object() || !evidence.details.contains("oracle_id") ||
+            !evidence.details["oracle_id"].is_string()) {
+            throw std::invalid_argument(
+                "Persisted independent oracle evidence must identify its oracle");
+        }
+        const auto oracle_id = evidence.details["oracle_id"].get<std::string>();
+        if (std::find(manifest.spec().independent_oracles.begin(),
+                      manifest.spec().independent_oracles.end(),
+                      oracle_id) == manifest.spec().independent_oracles.end()) {
+            throw std::invalid_argument(
+                "Persisted contract evidence names an unknown independent oracle");
+        }
+        return;
+    }
+
+    if (evidence.acceptance_id.empty()) {
+        throw std::invalid_argument(
+            "Persisted deterministic evidence must target an acceptance gate");
+    }
+    const auto acceptance = std::find_if(
+        manifest.spec().acceptance.begin(), manifest.spec().acceptance.end(),
+        [&](const auto& item) { return item.id == evidence.acceptance_id; });
+    if (acceptance == manifest.spec().acceptance.end()) {
+        throw std::invalid_argument(
+            "Persisted contract evidence names an unknown acceptance gate");
+    }
+}
+
+
+void validate_loaded_diagnostic(const ContractDiagnostic& diagnostic) {
+    validate_identifier(diagnostic.code, "diagnostic.code");
+    if (diagnostic.message.empty()) {
+        throw std::invalid_argument("Persisted contract diagnostic message must not be empty");
+    }
+    validate_utf8(diagnostic.message);
+}
 
 ContractDiagnostic diagnostic_from_json(const json& value) {
     detail::reject_unknown_fields(value, "contract.diagnostic", {"code", "message", "blocking"});
@@ -916,15 +990,16 @@ ContractRun ContractRun::parse(std::string_view stored_bytes) {
         canonical_json_bytes(required_object(value, "manifest"))));
     impl->status = contract_run_status_from_string(string_value(value, "status"));
     impl->attempt = static_cast<std::uint32_t>(unsigned_value(value, "attempt"));
+    std::set<std::string> seen_evidence_ids;
     for (const auto& item : required_array(value, "evidence")) {
         const auto evidence = evidence_from_json(item);
-        if (evidence.manifest_hash != impl->manifest.content_hash()) {
-            throw std::invalid_argument("Contract run evidence hash mismatch");
-        }
+        validate_loaded_evidence(evidence, impl->manifest, seen_evidence_ids);
         impl->evidence.push_back(evidence);
     }
     for (const auto& item : required_array(value, "diagnostics")) {
-        impl->diagnostics.push_back(diagnostic_from_json(item));
+        const auto diagnostic = diagnostic_from_json(item);
+        validate_loaded_diagnostic(diagnostic);
+        impl->diagnostics.push_back(diagnostic);
     }
     if (value.contains("verification") && !value["verification"].is_null()) {
         impl->verification = verification_from_json(value["verification"]);

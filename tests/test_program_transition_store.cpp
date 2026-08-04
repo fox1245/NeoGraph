@@ -387,6 +387,7 @@ TEST(ProgramTransitionStoreTest, FaultAtEachPublishBoundaryPreservesCommittedSta
         const auto latest = store.latest("owner-a", "run-1");
         ASSERT_TRUE(latest);
         EXPECT_EQ(latest->id, start.journal_record.id);
+
         EXPECT_FALSE(store.load("owner-a", "run-1")->terminal_result());
         EXPECT_EQ(store.load_events("owner-a", "run-1").size(), 1u);
         EXPECT_TRUE(store.load_effects("owner-a", "run-1").empty());
@@ -396,6 +397,37 @@ TEST(ProgramTransitionStoreTest, FaultAtEachPublishBoundaryPreservesCommittedSta
                       terminal_publication(start, ProgramTerminalStatus::Completed,
                                            ContinuationState::Completed)),
                   ProgramTransitionPublishResult::Published);
+    }
+}
+TEST(ProgramTransitionStoreTest, EffectPublicationFaultsPreserveSourceAndOutbox) {
+    const std::array faults{
+        ProgramTransitionFaultPoint::AfterRunSnapshot,
+        ProgramTransitionFaultPoint::AfterJournalSnapshot,
+        ProgramTransitionFaultPoint::AfterEventSnapshot,
+        ProgramTransitionFaultPoint::AfterEffectSnapshot,
+        ProgramTransitionFaultPoint::BeforeCommit,
+    };
+    for (const auto fault : faults) {
+        InMemoryProgramTransitionStore store;
+        const auto start = start_publication();
+        ASSERT_EQ(store.compare_publish("owner-a", {}, start),
+                  ProgramTransitionPublishResult::Published);
+        const auto interrupted = interrupted_effect_publication(start);
+        store.fail_next_publication_for_testing(fault);
+        EXPECT_THROW(
+            store.compare_publish("owner-a", start.journal_record.id, interrupted),
+            std::runtime_error);
+
+        const auto source = store.load("owner-a", "run-1");
+        ASSERT_TRUE(source.has_value());
+        EXPECT_EQ(source->serialize_canonical(), start.run_record.serialize_canonical());
+        EXPECT_EQ(store.latest("owner-a", "run-1")->id, start.journal_record.id);
+        EXPECT_EQ(store.load_events("owner-a", "run-1").size(), 1U);
+        EXPECT_TRUE(store.load_effects("owner-a", "run-1").empty());
+
+        EXPECT_EQ(store.compare_publish("owner-a", start.journal_record.id, interrupted),
+                  ProgramTransitionPublishResult::Published);
+        EXPECT_EQ(store.load_effects("owner-a", "run-1").size(), 1U);
     }
 }
 

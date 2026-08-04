@@ -73,6 +73,24 @@ TEST(ProgramContractTest, LifecycleIsImmutableAndCanonical) {
     EXPECT_THROW(proposed.freeze(), std::logic_error);
 }
 
+TEST(ProgramContractTest, RecoveryRejectsMalformedEvidenceAndDiagnostics) {
+    const auto frozen = ContractManifest::propose(make_spec())
+                             .review(ContractReview{"reviewer", "approved", true})
+                             .freeze();
+    ContractRun run(frozen);
+    run.begin_attempt();
+    run.record_worker_report("worker claim", true);
+
+    auto malformed_evidence = json::parse(run.serialize_canonical());
+    malformed_evidence["evidence"][0]["executed"] = false;
+    EXPECT_THROW(ContractRun::parse(malformed_evidence.dump()), std::invalid_argument);
+
+    auto malformed_diagnostic = json::parse(run.serialize_canonical());
+    malformed_diagnostic["diagnostics"] =
+        json::array({json{{"code", "P_BAD"}, {"message", ""}, {"blocking", true}}});
+    EXPECT_THROW(ContractRun::parse(malformed_diagnostic.dump()), std::invalid_argument);
+}
+
 TEST(ProgramContractTest, WorkerClaimCannotPublishWithoutIndependentEvidence) {
     const auto frozen = ContractManifest::propose(make_spec())
                              .review(ContractReview{"reviewer", "approved", true})
