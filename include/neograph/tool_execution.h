@@ -45,16 +45,64 @@ enum class ToolExecutionImplementation : std::uint8_t {
     BlockingThread,
 };
 
+/** Terminal state returned by the typed tool-execution surface. */
+enum class ToolTerminalStatus : std::uint8_t {
+    Succeeded,
+    Failed,
+    CancelledBeforeStart,
+    CancellationRequested,
+    Expired,
+    TimedOut,
+    Killed,
+    InputRequired,
+    ReconciliationRequired,
+    Rejected,
+};
+
+/** One stable result contract for native async and blocking Tool bridges. */
+struct NEOGRAPH_API ToolExecutionResult {
+    ToolTerminalStatus status = ToolTerminalStatus::Failed;
+    std::string output;
+    std::string error;
+    bool retryable = false;
+    bool effect_uncertain = false;
+
+    [[nodiscard]] bool succeeded() const noexcept {
+        return status == ToolTerminalStatus::Succeeded;
+    }
+};
+
+/** Explicit effect classification used to decide retry and recovery behavior. */
+enum class ToolEffectClass : std::uint8_t {
+    Unknown,
+    ReadOnly,
+    ExternalRead,
+    WorkspaceWrite,
+    ExternalWrite,
+};
+
+enum class ToolIdempotency : std::uint8_t {
+    Unknown,
+    Idempotent,
+    Conditional,
+    NonIdempotent,
+};
+
 /** Scheduler concurrency semantics for one policy-derived resource key. */
 enum class ToolConcurrency : std::uint8_t {
     /// No arbiter lease. Only safe for a host-declared re-entrant tool.
     Reentrant,
     /// One active invocation for each derived resource key.
     KeyedExclusive,
+    /// Alias for a process-wide exclusive tool key.
+    Exclusive = KeyedExclusive,
     /// Up to capacity active invocations for each derived resource key.
     Capacity,
+    /// One in-flight invocation per key; concurrent callers share its result.
+    SingleFlight,
+    /// The external service owns concurrency; enforce the declared local capacity.
+    ExternalLimited,
 };
-
 /** Stable request identity used for resource accounting and audit correlation. */
 struct ToolExecutionIdentity {
     /// Stable caller or tenant scope. Empty is normalized to "anonymous".
@@ -80,11 +128,19 @@ struct ToolExecutionPolicy {
 
     std::uint32_t schema_version = SCHEMA_VERSION;
     std::string   policy_id;
+    std::string   policy_source{"host-default"};
+    std::string   policy_hash;
     ToolExecutionImplementation implementation = ToolExecutionImplementation::NativeAsync;
     ToolConcurrency concurrency = ToolConcurrency::KeyedExclusive;
     std::uint32_t capacity = 1;
     std::uint32_t max_pending = 128;
     std::chrono::milliseconds queue_timeout{60'000};
+    std::chrono::milliseconds execution_timeout{0};
+    bool cancellable = true;
+    ToolEffectClass effect = ToolEffectClass::Unknown;
+    ToolIdempotency idempotency = ToolIdempotency::Unknown;
+    std::uint32_t retry_max_attempts = 1;
+    std::chrono::milliseconds retry_backoff{0};
     std::size_t output_limit_bytes = 16U * 1024U * 1024U;
     std::string resource_key_template{"tool:{tool}"};
     /**
@@ -94,6 +150,8 @@ struct ToolExecutionPolicy {
      */
     HostResourceVector host_resources;
     std::uint8_t host_priority = 0;
+    std::uint8_t priority_ceiling = 255;
+    std::uint8_t fairness_weight = 1;
 
     /// Throws std::invalid_argument for a malformed or unsafe policy.
     void validate() const;
@@ -106,6 +164,8 @@ struct ResourceRequest {
     std::uint32_t capacity = 1;
     std::uint32_t max_pending = 128;
     std::chrono::milliseconds queue_timeout{60'000};
+    std::uint8_t priority = 0;
+    std::uint8_t fairness_weight = 1;
 };
 
 namespace detail {
@@ -205,6 +265,11 @@ public:
     ToolExecutionController(const ToolExecutionController&) = delete;
     ToolExecutionController& operator=(const ToolExecutionController&) = delete;
 
+    /** Typed terminal contract shared by all tool implementations. */
+    asio::awaitable<ToolExecutionResult> execute_result_async(
+        Tool& tool, json arguments, ToolExecutionContext context);
+
+    /** Legacy throwing facade over execute_result_async. */
     asio::awaitable<std::string> execute_async(Tool& tool,
                                                json arguments,
                                                ToolExecutionContext context);

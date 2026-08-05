@@ -16,7 +16,10 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <memory>
+#include <limits>
 #include <vector>
+#include <utility>
 
 namespace neograph::research {
 
@@ -221,6 +224,9 @@ public:
     [[nodiscard]] virtual std::optional<ResearchTask>
     task(std::string_view owner_scope, std::string_view task_id) const = 0;
 
+    /** Returns owner-scoped task snapshots in deterministic task-id order. */
+    [[nodiscard]] virtual std::vector<ResearchTask>
+    tasks(std::string_view owner_scope, bool include_terminal) const = 0;
     /**
      * Atomically claims a ready/expired task.  Returns nullopt when another
      * unexpired worker holds it or it has reached a terminal state.  Repeating
@@ -253,6 +259,54 @@ public:
                                                             std::uint64_t now_unix_ms) const = 0;
     [[nodiscard]] virtual ClaimResolution
     resolve_claim(std::string_view owner_scope, std::string_view claim_id) const = 0;
+};
+
+/**
+ * Owner-scoped scheduling budget for a durable research board.  Costs and
+ * information values come from task.requirements; absent values default to
+ * one.  The board never mutates a task's requirements while scheduling.
+ */
+struct NEOGRAPH_API ResearchTaskBoardBudget {
+    std::uint32_t max_active_leases = 1;
+    std::uint64_t max_cost_microunits = std::numeric_limits<std::uint64_t>::max();
+};
+
+/**
+ * Deterministic scheduler layered on EvidenceLedger.
+ *
+ * Selection is durable because the ledger is the source of task state: the
+ * board only ranks owner-scoped snapshots, then claims one through the
+ * ledger's atomic lease CAS.  A crash therefore leaves an expiring lease,
+ * not an in-memory queue entry.  `information_value / cost` is the primary
+ * score, with an explicit bounded priority tie-breaker.
+ */
+class NEOGRAPH_API ResearchTaskBoard final {
+public:
+    explicit ResearchTaskBoard(EvidenceLedger& ledger) noexcept : ledger_(ledger) {}
+
+    ResearchTaskBoard(const ResearchTaskBoard&) = delete;
+    ResearchTaskBoard& operator=(const ResearchTaskBoard&) = delete;
+
+    void submit(ResearchTaskSpec task) { ledger_.create_task(std::move(task)); }
+
+    [[nodiscard]] std::optional<ResearchTaskLease> acquire_next(
+        std::string_view owner_scope, std::string_view worker_id,
+        std::string_view board_id, std::uint64_t now_unix_ms,
+        ResearchTaskBoardBudget budget = {}) const;
+
+    [[nodiscard]] EvidencePublishResult publish(
+        const ResearchTaskLease& lease, EvidenceArtifact artifact,
+        std::uint64_t now_unix_ms) const {
+        return ledger_.publish(lease, std::move(artifact), now_unix_ms);
+    }
+
+    [[nodiscard]] std::vector<ResearchTask>
+    snapshot(std::string_view owner_scope) const {
+        return ledger_.tasks(owner_scope, true);
+    }
+
+private:
+    EvidenceLedger& ledger_;
 };
 
 } // namespace neograph::research

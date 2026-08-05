@@ -34,6 +34,9 @@ public:
     [[nodiscard]] std::optional<ResearchTask>
     task(std::string_view owner_scope, std::string_view task_id) const override;
 
+    [[nodiscard]] std::vector<ResearchTask>
+    tasks(std::string_view owner_scope, bool include_terminal) const override;
+
     [[nodiscard]] std::optional<ResearchTaskLease>
     acquire_lease(ResearchLeaseRequest request) override;
     [[nodiscard]] bool renew_lease(const ResearchTaskLease& lease,

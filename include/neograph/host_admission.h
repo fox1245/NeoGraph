@@ -102,7 +102,9 @@ public:
     /** Intersect independently enforced sources; the tightest limit wins per dimension. */
     static HostResourceProfile intersect(const std::vector<HostResourceProfile>& profiles,
                                          std::string profile_id);
-
+    /** Scale only schedulable capacity, preserving the immutable safety reserve. */
+    HostResourceProfile scaled_available(std::uint8_t percent,
+                                         std::string profile_id) const;
     const std::string&          profile_id() const noexcept;
     const HostResourceVector&   capacity() const noexcept;
     const HostResourceVector&   safety_reserve() const noexcept;
@@ -113,6 +115,20 @@ public:
 private:
     explicit HostResourceProfile(HostResourceProfileData data);
     HostResourceProfileData data_;
+};
+
+enum class HostPressureLevel : std::uint8_t {
+    Normal,
+    Elevated,
+    Critical,
+};
+
+NEOGRAPH_API std::string_view to_string(HostPressureLevel level) noexcept;
+
+struct NEOGRAPH_API HostPressureSample {
+    HostPressureLevel          level = HostPressureLevel::Normal;
+    std::int64_t               observed_at_ms = 0;
+    std::string                source;
 };
 
 enum class HostAdmissionFailure : std::uint8_t {
@@ -144,6 +160,8 @@ struct NEOGRAPH_API HostAdmissionRequest {
     /// Zero inherits HostAdmissionControllerConfig::max_pending.
     std::uint32_t               max_pending = 0;
     std::chrono::milliseconds   queue_timeout{0};
+    /// Weighted aging prevents a busy owner from monopolizing a shared host.
+    std::uint8_t                fairness_weight = 1;
 };
 
 struct NEOGRAPH_API HostAdmissionSnapshot {
@@ -152,6 +170,10 @@ struct NEOGRAPH_API HostAdmissionSnapshot {
     HostResourceVector  available;
     std::uint32_t       queued = 0;
     bool                overcommitted = false;
+    HostPressureLevel   pressure = HostPressureLevel::Normal;
+    std::uint8_t        pressure_scale_percent = 100;
+    std::int64_t        pressure_changed_at_ms = 0;
+    std::string         pressure_source;
 };
 
 struct NEOGRAPH_API HostAdmissionControllerConfig {
@@ -159,6 +181,14 @@ struct NEOGRAPH_API HostAdmissionControllerConfig {
     std::uint32_t                      max_pending = 1024;
     /** A queued request gains one priority point per quantum, capped at 255. */
     std::chrono::milliseconds          aging_quantum{100};
+    /** Effective available capacity under elevated pressure. */
+    std::uint8_t                       elevated_capacity_percent = 75;
+    /** Effective available capacity under critical pressure. */
+    std::uint8_t                       critical_capacity_percent = 50;
+    /** Recovery increases the effective capacity by this amount per quiet interval. */
+    std::uint8_t                       recovery_step_percent = 10;
+    /** Pressure must remain normal for this interval before recovery begins. */
+    std::chrono::milliseconds          recovery_quiet_period{5000};
 };
 
 namespace detail {
@@ -191,9 +221,7 @@ private:
     std::uint64_t                                        reservation_id_ = 0;
     HostResourceVector                                   resources_;
 };
-
-/**
- * Shared asynchronous capacity scheduler.
+/** Shared asynchronous capacity scheduler.
  *
  * Queued requests are selected by aging priority then FIFO sequence.  A held
  * lease receives the strongest priority of feasible work it blocks, allowing a
@@ -217,6 +245,11 @@ public:
     std::optional<HostResourceLease> try_reserve(HostAdmissionRequest request);
 
     void update_profile(HostResourceProfile profile);
+    /**
+     * Apply an observed pressure state. Held leases are never revoked.
+     * Normal pressure recovers in configured increments after a quiet interval.
+     */
+    void observe_pressure(HostPressureSample sample);
     [[nodiscard]] HostAdmissionSnapshot snapshot() const;
     void shutdown() noexcept;
 

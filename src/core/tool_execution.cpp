@@ -3,6 +3,7 @@
 #include <neograph/graph/cancel.h>
 #include <neograph/tool.h>
 
+#include <asio/experimental/awaitable_operators.hpp>
 #include <asio/async_result.hpp>
 #include <asio/bind_executor.hpp>
 #include <asio/error.hpp>
@@ -33,6 +34,13 @@ constexpr std::size_t kMaximumResourceKeyBytes = 512;
 constexpr std::size_t kMaximumResourceComponentBytes = 256;
 constexpr std::size_t kMaximumPolicyQueueDepth = 65'536;
 constexpr std::size_t kMaximumOutputBytes = 64U * 1024U * 1024U;
+
+struct SingleFlightState {
+    mutable std::mutex mutex;
+    bool completed = false;
+    ToolExecutionResult result;
+    std::uint32_t waiters = 0;
+};
 
 bool is_identifier_char(unsigned char value) {
     return std::isalnum(value) || value == '_' || value == '-';
@@ -204,17 +212,39 @@ void ToolExecutionPolicy::validate() const {
     if (queue_timeout <= std::chrono::milliseconds::zero()) {
         throw std::invalid_argument("tool execution queue_timeout must be positive");
     }
+    if (execution_timeout < std::chrono::milliseconds::zero()) {
+        throw std::invalid_argument("tool execution execution_timeout must not be negative");
+    }
+    if (retry_max_attempts == 0) {
+        throw std::invalid_argument("tool execution retry_max_attempts must be positive");
+    }
+    if (retry_backoff < std::chrono::milliseconds::zero()) {
+        throw std::invalid_argument("tool execution retry_backoff must not be negative");
+    }
     if (output_limit_bytes == 0 || output_limit_bytes > kMaximumOutputBytes) {
         throw std::invalid_argument("tool execution output_limit_bytes must be 1..64MiB");
     }
-    if (concurrency == ToolConcurrency::KeyedExclusive && capacity != 1) {
-        throw std::invalid_argument("keyed-exclusive tool policy must have capacity 1");
-    }
-    if (concurrency == ToolConcurrency::Capacity && capacity == 0) {
+    if (concurrency == ToolConcurrency::KeyedExclusive
+        || concurrency == ToolConcurrency::Exclusive
+        || concurrency == ToolConcurrency::SingleFlight
+        || concurrency == ToolConcurrency::ExternalLimited) {
+        if (capacity != 1 && concurrency != ToolConcurrency::ExternalLimited) {
+            throw std::invalid_argument("exclusive tool policy must have capacity 1");
+        }
+        validate_resource_template(resource_key_template);
+    } else if (concurrency == ToolConcurrency::Capacity && capacity == 0) {
         throw std::invalid_argument("capacity tool policy must have positive capacity");
     }
-    if (concurrency != ToolConcurrency::Reentrant) {
-        validate_resource_template(resource_key_template);
+    if (concurrency == ToolConcurrency::Reentrant && capacity != 1) {
+        throw std::invalid_argument("reentrant tool policy cannot declare a capacity");
+    }
+    if (retry_max_attempts > 1
+        && (idempotency == ToolIdempotency::Unknown
+            || idempotency == ToolIdempotency::NonIdempotent)
+        && effect != ToolEffectClass::ReadOnly
+        && effect != ToolEffectClass::ExternalRead) {
+        throw std::invalid_argument(
+            "automatic retries require idempotent or read-only tool effects");
     }
 }
 
@@ -261,6 +291,10 @@ public:
 
         std::string resource_key;
         State state = State::Queued;
+        std::uint8_t priority = 0;
+        std::uint8_t fairness_weight = 1;
+        std::uint64_t sequence = 0;
+        std::chrono::steady_clock::time_point submitted_at;
     };
 
     struct Resource {
@@ -300,6 +334,10 @@ public:
 
         auto waiter = std::make_shared<Waiter>();
         waiter->resource_key = found->first;
+        waiter->priority = request.priority;
+        waiter->fairness_weight = std::max<std::uint8_t>(1, request.fairness_weight);
+        waiter->sequence = next_sequence_++;
+        waiter->submitted_at = std::chrono::steady_clock::now();
         resource.waiters.push_back(waiter);
         return Registration{{}, std::move(waiter)};
     }
@@ -364,6 +402,18 @@ private:
             && request.queue_timeout > std::chrono::milliseconds::zero();
     }
 
+    static std::uint8_t effective_priority(
+        const Waiter& waiter, const std::chrono::steady_clock::time_point now) noexcept {
+        const auto elapsed = now > waiter.submitted_at
+                           ? std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 now - waiter.submitted_at)
+                           : std::chrono::milliseconds::zero();
+        const auto age = static_cast<std::uint64_t>(elapsed.count()) / 1000U;
+        const auto score = static_cast<std::uint64_t>(waiter.priority)
+                         + age * std::max<std::uint8_t>(1, waiter.fairness_weight);
+        return static_cast<std::uint8_t>(std::min<std::uint64_t>(255, score));
+    }
+
     void release_one_locked(const std::string& resource_key) noexcept {
         const auto found = resources_.find(resource_key);
         if (found == resources_.end() || found->second.active == 0) return;
@@ -371,9 +421,26 @@ private:
         --resource.active;
         if (stopping_) return;
         while (resource.active < resource.capacity && !resource.waiters.empty()) {
-            auto waiter = std::move(resource.waiters.front());
-            resource.waiters.pop_front();
-            if (waiter->state != Waiter::State::Queued) continue;
+            const auto now = std::chrono::steady_clock::now();
+            auto best = resource.waiters.end();
+            std::uint8_t best_priority = 0;
+            std::uint64_t best_sequence = std::numeric_limits<std::uint64_t>::max();
+            for (auto candidate = resource.waiters.begin();
+                 candidate != resource.waiters.end(); ++candidate) {
+                if ((*candidate)->state != Waiter::State::Queued) continue;
+                const auto priority = effective_priority(*(*candidate), now);
+                if (best == resource.waiters.end()
+                    || priority > best_priority
+                    || (priority == best_priority
+                        && (*candidate)->sequence < best_sequence)) {
+                    best = candidate;
+                    best_priority = priority;
+                    best_sequence = (*candidate)->sequence;
+                }
+            }
+            if (best == resource.waiters.end()) break;
+            auto waiter = std::move(*best);
+            resource.waiters.erase(best);
             waiter->state = Waiter::State::Granted;
             ++resource.active;
         }
@@ -381,6 +448,7 @@ private:
 
     mutable std::mutex mu_;
     std::unordered_map<std::string, Resource> resources_;
+    std::uint64_t next_sequence_ = 1;
     bool stopping_ = false;
 };
 
@@ -536,6 +604,8 @@ public:
     std::shared_ptr<ToolExecutionPolicyRegistry> policies;
     std::shared_ptr<ResourceArbiter> arbiter;
     std::shared_ptr<HostAdmissionController> host_admission;
+    std::mutex singleflight_mutex;
+    std::unordered_map<std::string, std::shared_ptr<SingleFlightState>> singleflight;
 };
 
 ToolExecutionController::ToolExecutionController(ToolExecutionControllerConfig config)
@@ -549,73 +619,284 @@ ToolExecutionController::ToolExecutionController(ToolExecutionControllerConfig c
 
 ToolExecutionController::~ToolExecutionController() = default;
 
-asio::awaitable<std::string> ToolExecutionController::execute_async(
+asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_async(
     Tool& tool, json arguments, ToolExecutionContext context) {
     const auto policy = impl_->policies->resolve(tool.get_name());
-    policy.validate();
-    const auto identity = context.identity;
-
-    auto invoke = [&tool, &policy, &arguments, &context]() -> asio::awaitable<std::string> {
-        // ContextualAsyncTool has no safe synchronous fallback by design: its
-        // context-bearing entry point is the contract it opted into.
-        if (auto* contextual = dynamic_cast<ContextualAsyncTool*>(&tool)) {
-            co_return co_await contextual->execute_async(arguments, std::move(context));
+    bool started = false;
+    std::shared_ptr<SingleFlightState> singleflight_state;
+    std::string singleflight_key;
+    bool singleflight_leader = false;
+    auto publish_singleflight = [&, this](ToolExecutionResult result) {
+        if (!singleflight_leader) return result;
+        std::lock_guard<std::mutex> map_lock(impl_->singleflight_mutex);
+        const auto found = impl_->singleflight.find(singleflight_key);
+        if (found != impl_->singleflight.end()
+            && found->second == singleflight_state) {
+            std::lock_guard<std::mutex> state_lock(singleflight_state->mutex);
+            singleflight_state->result = result;
+            singleflight_state->completed = true;
+            impl_->singleflight.erase(found);
         }
-        if (policy.implementation == ToolExecutionImplementation::BlockingThread) {
-            co_return co_await detail::execute_blocking_tool_async(tool, std::move(arguments));
+        return result;
+    };
+    try {
+        policy.validate();
+        const auto identity = context.identity;
+
+        if (policy.concurrency == ToolConcurrency::SingleFlight) {
+            singleflight_key = derive_resource_key(
+                policy, tool.get_name(), arguments, identity);
+            {
+                std::lock_guard<std::mutex> lock(impl_->singleflight_mutex);
+                const auto found = impl_->singleflight.find(singleflight_key);
+                if (found != impl_->singleflight.end()) {
+                    singleflight_state = found->second;
+                    std::lock_guard<std::mutex> state_lock(singleflight_state->mutex);
+                    if (singleflight_state->waiters >= policy.max_pending) {
+                        throw asio::system_error(asio::error::no_buffer_space);
+                    }
+                    ++singleflight_state->waiters;
+                } else {
+                    singleflight_state = std::make_shared<SingleFlightState>();
+                    impl_->singleflight.emplace(singleflight_key, singleflight_state);
+                    singleflight_leader = true;
+                }
+            }
+
+            if (!singleflight_leader) {
+                const auto executor = co_await asio::this_coro::executor;
+                asio::steady_timer poll(executor);
+                const auto deadline =
+                    std::chrono::steady_clock::now() + policy.queue_timeout;
+                for (;;) {
+                    {
+                        std::lock_guard<std::mutex> lock(singleflight_state->mutex);
+                        if (singleflight_state->completed) {
+                            co_return singleflight_state->result;
+                        }
+                    }
+                    if (context.cancel_token && context.cancel_token->is_cancelled()) {
+                        throw graph::CancelledException("while waiting for single-flight result");
+                    }
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now >= deadline) {
+                        throw asio::system_error(asio::error::timed_out);
+                    }
+                    poll.expires_after(std::min(
+                        std::chrono::milliseconds{1},
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            deadline - now)));
+                    asio::error_code wait_error;
+                    co_await poll.async_wait(
+                        asio::redirect_error(asio::use_awaitable, wait_error));
+                    if (wait_error && wait_error != asio::error::operation_aborted) {
+                        throw asio::system_error(wait_error);
+                    }
+                }
+            }
         }
-        co_return co_await tool.execute_async(arguments);
-    };
 
-    auto check_output = [&policy](std::string value) -> std::string {
-        if (value.size() > policy.output_limit_bytes) {
-            throw std::length_error("tool result exceeds policy output_limit_bytes");
+
+        auto invoke = [&tool, &policy, &arguments, &context,
+                       &started]() -> asio::awaitable<std::string> {
+            if (context.cancel_token) {
+                context.cancel_token->throw_if_cancelled("before tool execution");
+            }
+            started = true;
+            // ContextualAsyncTool has no safe synchronous fallback by design:
+            // its context-bearing entry point is the contract it opted into.
+            if (auto* contextual = dynamic_cast<ContextualAsyncTool*>(&tool)) {
+                co_return co_await contextual->execute_async(arguments, context);
+            }
+            if (policy.implementation == ToolExecutionImplementation::BlockingThread) {
+                co_return co_await detail::execute_blocking_tool_async(tool, arguments);
+            }
+            co_return co_await tool.execute_async(arguments);
+        };
+
+        auto check_output = [&policy](std::string value) -> std::string {
+            if (value.size() > policy.output_limit_bytes) {
+                throw std::length_error("tool result exceeds policy output_limit_bytes");
+            }
+            return value;
+        };
+
+        auto invoke_with_timeout = [&]() -> asio::awaitable<std::string> {
+            if (policy.execution_timeout <= std::chrono::milliseconds::zero()
+                || policy.implementation != ToolExecutionImplementation::NativeAsync
+                || !policy.cancellable) {
+                co_return co_await invoke();
+            }
+            using asio::experimental::awaitable_operators::operator||;
+            const auto executor = co_await asio::this_coro::executor;
+            asio::steady_timer timer(executor);
+            timer.expires_after(policy.execution_timeout);
+            try {
+                auto result = co_await (
+                    invoke() || timer.async_wait(asio::use_awaitable));
+                if (result.index() == 1) {
+                    throw asio::system_error(asio::error::timed_out,
+                                             "tool execution deadline expired");
+                }
+                co_return std::get<0>(std::move(result));
+            } catch (const asio::multiple_exceptions&) {
+                throw asio::system_error(asio::error::timed_out,
+                                         "tool execution deadline expired");
+            }
+        };
+        auto invoke_with_retry = [&]() -> asio::awaitable<std::string> {
+            const auto max_attempts = std::max<std::uint32_t>(1, policy.retry_max_attempts);
+            std::exception_ptr last_error;
+            for (std::uint32_t attempt = 0; attempt < max_attempts; ++attempt) {
+                std::optional<std::string> output;
+                try {
+                    output.emplace(co_await invoke_with_timeout());
+                } catch (const graph::CancelledException&) {
+                    throw;
+                } catch (const asio::system_error& error) {
+                    if (error.code() == asio::error::operation_aborted) throw;
+                    last_error = std::current_exception();
+                } catch (...) {
+                    last_error = std::current_exception();
+                }
+                if (output) co_return std::move(*output);
+                if (attempt + 1 >= max_attempts) {
+                    std::rethrow_exception(last_error);
+                }
+                if (policy.retry_backoff > std::chrono::milliseconds::zero()) {
+                    auto executor = co_await asio::this_coro::executor;
+                    asio::steady_timer backoff(executor);
+                    backoff.expires_after(policy.retry_backoff);
+                    co_await backoff.async_wait(asio::use_awaitable);
+                }
+            }
+            throw std::logic_error("tool retry loop exhausted without a result");
+        };
+
+        const auto queue_deadline = std::chrono::steady_clock::now() + policy.queue_timeout;
+        const auto host_admission = impl_->host_admission;
+        auto reserve_host = [host_admission, &policy, &tool, &identity, &context,
+                             queue_deadline]() -> asio::awaitable<HostResourceLease> {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= queue_deadline) throw asio::system_error(asio::error::timed_out);
+
+            auto request = host_request_for(policy, tool.get_name(), identity);
+            const auto inherited = std::max(context.requested_priority,
+                                             context.inherited_priority);
+            request.priority = std::min(policy.priority_ceiling,
+                                        std::max(request.priority, inherited));
+            request.fairness_weight = policy.fairness_weight;
+            request.queue_timeout = std::min(
+                request.queue_timeout,
+                std::max(std::chrono::milliseconds{1},
+                         std::chrono::duration_cast<std::chrono::milliseconds>(
+                             queue_deadline - now)));
+            co_return co_await host_admission->reserve_async(
+                std::move(request), context.cancel_token);
+        };
+
+        if (policy.concurrency == ToolConcurrency::Reentrant) {
+            std::optional<HostResourceLease> host_lease;
+            if (host_admission) host_lease.emplace(co_await reserve_host());
+            if (context.cancel_token) {
+                context.cancel_token->throw_if_cancelled("after tool resource admission");
+            }
+            co_return publish_singleflight(ToolExecutionResult{
+                ToolTerminalStatus::Succeeded,
+                check_output(co_await invoke_with_retry()), {}, false, false});
         }
-        return value;
-    };
 
-    const auto queue_deadline = std::chrono::steady_clock::now() + policy.queue_timeout;
-    const auto host_admission = impl_->host_admission;
-    auto reserve_host = [host_admission, &policy, &tool, &identity, &context,
-                         queue_deadline]() -> asio::awaitable<HostResourceLease> {
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= queue_deadline) throw asio::system_error(asio::error::timed_out);
+        ResourceRequest request;
+        request.resource_key = derive_resource_key(policy, tool.get_name(), arguments, identity);
+        request.owner_scope = identity.owner_scope.empty() ? "anonymous" : identity.owner_scope;
+        const auto keyed = policy.concurrency == ToolConcurrency::KeyedExclusive
+                        || policy.concurrency == ToolConcurrency::Exclusive
+                        || policy.concurrency == ToolConcurrency::SingleFlight;
+        request.capacity = keyed ? 1 : policy.capacity;
+        request.max_pending = policy.max_pending;
+        request.queue_timeout = policy.queue_timeout;
+        request.priority = std::min(
+            policy.priority_ceiling,
+            std::max(policy.host_priority,
+                     std::max(context.requested_priority, context.inherited_priority)));
+        request.fairness_weight = policy.fairness_weight;
 
-        auto request = host_request_for(policy, tool.get_name(), identity);
-        request.queue_timeout = std::min(
-            request.queue_timeout,
-            std::max(std::chrono::milliseconds{1},
-                     std::chrono::duration_cast<std::chrono::milliseconds>(queue_deadline - now)));
-        co_return co_await host_admission->reserve_async(std::move(request), context.cancel_token);
-    };
-
-    if (policy.concurrency == ToolConcurrency::Reentrant) {
-        std::optional<HostResourceLease> host_lease;
-        if (host_admission) host_lease.emplace(co_await reserve_host());
+        auto lease = co_await impl_->arbiter->acquire_async(std::move(request),
+                                                             context.cancel_token);
         if (context.cancel_token) {
             context.cancel_token->throw_if_cancelled("after tool resource admission");
         }
-        co_return check_output(co_await invoke());
-    }
 
-    ResourceRequest request;
-    request.resource_key = derive_resource_key(policy, tool.get_name(), arguments, identity);
-    request.owner_scope = identity.owner_scope.empty() ? "anonymous" : identity.owner_scope;
-    request.capacity = policy.concurrency == ToolConcurrency::KeyedExclusive ? 1 : policy.capacity;
-    request.max_pending = policy.max_pending;
-    request.queue_timeout = policy.queue_timeout;
-
-    auto lease = co_await impl_->arbiter->acquire_async(std::move(request), context.cancel_token);
-    if (context.cancel_token) {
-        context.cancel_token->throw_if_cancelled("after tool resource admission");
+        std::optional<HostResourceLease> host_lease;
+        if (host_admission) host_lease.emplace(co_await reserve_host());
+        if (context.cancel_token) {
+            context.cancel_token->throw_if_cancelled("after host resource admission");
+        }
+        co_return publish_singleflight(ToolExecutionResult{
+            ToolTerminalStatus::Succeeded,
+            check_output(co_await invoke_with_retry()), {}, false, false});
+    } catch (const graph::CancelledException& error) {
+        co_return publish_singleflight(ToolExecutionResult{
+            started ? ToolTerminalStatus::CancellationRequested
+                    : ToolTerminalStatus::CancelledBeforeStart,
+            {}, error.what(), false, started && policy.effect != ToolEffectClass::ReadOnly});
+    } catch (const asio::system_error& error) {
+        const auto code = error.code();
+        const auto queue_failure = code == asio::error::timed_out
+                                || code == asio::error::no_buffer_space;
+        const auto status = code == asio::error::timed_out
+                          ? (started ? ToolTerminalStatus::TimedOut
+                                     : ToolTerminalStatus::Expired)
+                          : (code == asio::error::operation_aborted
+                                 ? (started ? ToolTerminalStatus::Killed
+                                            : ToolTerminalStatus::CancelledBeforeStart)
+                                 : ToolTerminalStatus::Rejected);
+        const auto uncertain = started
+            && policy.effect != ToolEffectClass::ReadOnly
+            && policy.effect != ToolEffectClass::ExternalRead
+            && policy.idempotency != ToolIdempotency::Idempotent;
+        co_return publish_singleflight(ToolExecutionResult{
+            status, {}, error.what(),
+            queue_failure && policy.idempotency == ToolIdempotency::Idempotent, uncertain});
+    } catch (const std::length_error& error) {
+        co_return publish_singleflight(ToolExecutionResult{
+            ToolTerminalStatus::Failed, {}, error.what(), false, false});
+    } catch (const std::exception& error) {
+        const auto uncertain = started
+            && policy.effect != ToolEffectClass::ReadOnly
+            && policy.effect != ToolEffectClass::ExternalRead
+            && policy.idempotency != ToolIdempotency::Idempotent;
+        co_return publish_singleflight(ToolExecutionResult{
+            uncertain ? ToolTerminalStatus::ReconciliationRequired
+                      : ToolTerminalStatus::Failed,
+            {}, error.what(), false, uncertain});
+    } catch (...) {
+        co_return publish_singleflight(ToolExecutionResult{
+            started ? ToolTerminalStatus::ReconciliationRequired
+                    : ToolTerminalStatus::Failed,
+            {}, "tool execution failed with an unknown exception", false, started});
     }
+}
 
-    std::optional<HostResourceLease> host_lease;
-    if (host_admission) host_lease.emplace(co_await reserve_host());
-    if (context.cancel_token) {
-        context.cancel_token->throw_if_cancelled("after host resource admission");
+asio::awaitable<std::string> ToolExecutionController::execute_async(
+    Tool& tool, json arguments, ToolExecutionContext context) {
+    const auto result = co_await execute_result_async(tool, std::move(arguments),
+                                                       std::move(context));
+    if (result.succeeded()) co_return result.output;
+    switch (result.status) {
+        case ToolTerminalStatus::CancelledBeforeStart:
+        case ToolTerminalStatus::CancellationRequested:
+            throw graph::CancelledException(result.error);
+        case ToolTerminalStatus::Expired:
+        case ToolTerminalStatus::TimedOut:
+            throw asio::system_error(asio::error::timed_out);
+        case ToolTerminalStatus::Rejected:
+            throw asio::system_error(asio::error::no_buffer_space);
+        default:
+            throw std::runtime_error(result.error.empty()
+                                         ? "tool execution failed"
+                                         : result.error);
     }
-    co_return check_output(co_await invoke());
 }
 
 

@@ -75,6 +75,14 @@ struct ProgramHostAdmissionContext {
 using ProgramHostAdmissionResolver =
     std::function<HostAdmissionRequest(const ProgramHostAdmissionContext&)>;
 
+struct ProgramChildQuotaConfig {
+    /// Zero disables the corresponding global limit.
+    std::uint64_t max_active_children = 0;
+    std::uint64_t max_pending_spawn_requests = 0;
+    std::uint64_t max_active_children_per_owner = 0;
+    std::uint64_t max_pending_spawn_requests_per_owner = 0;
+};
+
 struct RuntimeConfig {
     std::shared_ptr<ProgramCatalog>         catalog;
     std::shared_ptr<graph::CheckpointStore> checkpoints;
@@ -89,6 +97,8 @@ struct RuntimeConfig {
      */
     std::shared_ptr<HostAdmissionController> host_admission;
     ProgramHostAdmissionResolver              host_admission_resolver;
+    /// Process-wide limits for admitted child publication and dispatch.
+    ProgramChildQuotaConfig                   child_quota;
 };
 class NEOGRAPH_PROGRAM_API ProgramRuntime {
 public:

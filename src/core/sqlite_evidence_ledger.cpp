@@ -698,6 +698,31 @@ std::optional<ResearchTask> SqliteEvidenceLedger::task(std::string_view owner_sc
     return found;
 }
 
+std::vector<ResearchTask>
+SqliteEvidenceLedger::tasks(std::string_view owner_scope, bool include_terminal) const {
+    require_nonempty(owner_scope, "task owner_scope");
+    std::lock_guard lock(impl_->mutex);
+    const char* sql = include_terminal
+        ? R"SQL(
+SELECT payload FROM neograph_research_task
+WHERE owner_scope = ? ORDER BY task_id
+)SQL"
+        : R"SQL(
+SELECT payload FROM neograph_research_task
+WHERE owner_scope = ? AND state IN ('ready', 'leased') ORDER BY task_id
+)SQL";
+    Statement statement(impl_->db, sql);
+    statement.bind_text(1, owner_scope);
+    std::vector<ResearchTask> result;
+    for (;;) {
+        const auto step = statement.step();
+        if (step == SQLITE_DONE) break;
+        if (step != SQLITE_ROW) throw_sqlite_error(impl_->db, "list tasks failed");
+        result.push_back(task_from_json(json::parse(statement.column_text(0))));
+    }
+    return result;
+}
+
 std::optional<ResearchTaskLease>
 SqliteEvidenceLedger::acquire_lease(ResearchLeaseRequest request) {
     require_nonempty(request.task_id, "lease task_id");

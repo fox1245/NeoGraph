@@ -4,6 +4,8 @@
 #include <neograph/tool_dispatch.h>
 #include <neograph/tool_execution.h>
 
+#include <asio/steady_timer.hpp>
+#include <asio/use_awaitable.hpp>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -29,6 +31,7 @@ public:
     }
 
     std::string execute(const json&) override {
+        calls_.fetch_add(1, std::memory_order_acq_rel);
         const int active = active_.fetch_add(1, std::memory_order_acq_rel) + 1;
         int observed = max_active_.load(std::memory_order_acquire);
         while (observed < active
@@ -45,11 +48,65 @@ public:
     [[nodiscard]] int max_active() const {
         return max_active_.load(std::memory_order_acquire);
     }
+    [[nodiscard]] int calls() const {
+        return calls_.load(std::memory_order_acquire);
+    }
 
 private:
     std::chrono::milliseconds delay_;
     std::atomic<int> active_{0};
+    std::atomic<int> calls_{0};
     std::atomic<int> max_active_{0};
+};
+
+class FlakyProbeTool final : public Tool {
+public:
+    ChatTool get_definition() const override {
+        return {"flaky", "retry probe",
+                json{{"type", "object"}, {"properties", json::object()}}};
+    }
+
+    std::string execute(const json&) override {
+        const auto call = calls_.fetch_add(1, std::memory_order_acq_rel);
+        if (call == 0) throw std::runtime_error("transient");
+        return "recovered";
+    }
+
+    std::string get_name() const override { return "flaky"; }
+    [[nodiscard]] int calls() const {
+        return calls_.load(std::memory_order_acquire);
+    }
+
+private:
+    std::atomic<int> calls_{0};
+};
+
+class SlowContextualTool final : public Tool, public ContextualAsyncTool {
+public:
+    ChatTool get_definition() const override {
+        return {"slow", "deadline probe",
+                json{{"type", "object"}, {"properties", json::object()}}};
+    }
+
+    std::string execute(const json&) override { return "sync"; }
+
+    asio::awaitable<std::string> execute_async(
+        const json&, ToolExecutionContext) override {
+        ++calls_;
+        auto executor = co_await asio::this_coro::executor;
+        asio::steady_timer timer(executor);
+        timer.expires_after(100ms);
+        co_await timer.async_wait(asio::use_awaitable);
+        co_return "late";
+    }
+
+    std::string get_name() const override { return "slow"; }
+    [[nodiscard]] int calls() const {
+        return calls_.load(std::memory_order_acquire);
+    }
+
+private:
+    std::atomic<int> calls_{0};
 };
 
 ResourceRequest exclusive_request(std::chrono::milliseconds timeout = 80ms) {
@@ -327,4 +384,121 @@ TEST(ToolExecutionController, WaitingForToolResourceDoesNotHoldHostSlots) {
     const auto error = done.get();
     worker.join();
     EXPECT_EQ(error, nullptr);
+}
+
+
+TEST(ToolExecutionController, TypedResultDistinguishesSuccessAndOutputFailure) {
+    BlockingProbeTool tool(1ms);
+    auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
+    ToolExecutionPolicy policy;
+    policy.implementation = ToolExecutionImplementation::BlockingThread;
+    policy.output_limit_bytes = 2;
+    policies->upsert("probe", policy);
+    auto controller = std::make_shared<ToolExecutionController>(
+        ToolExecutionControllerConfig{policies, std::make_shared<ResourceArbiter>()});
+
+    ToolExecutionContext context;
+    const auto success = neograph::async::run_sync(
+        controller->execute_result_async(tool, json::object(), context));
+    ASSERT_TRUE(success.succeeded());
+    EXPECT_EQ(success.status, ToolTerminalStatus::Succeeded);
+    EXPECT_EQ(success.output, "ok");
+    EXPECT_TRUE(success.error.empty());
+
+    policy.output_limit_bytes = 1;
+    policies->upsert("probe", policy);
+    const auto failure = neograph::async::run_sync(
+        controller->execute_result_async(tool, json::object(), context));
+    EXPECT_EQ(failure.status, ToolTerminalStatus::Failed);
+    EXPECT_FALSE(failure.succeeded());
+    EXPECT_FALSE(failure.error.empty());
+}
+
+TEST(ToolExecutionController, RetriesOnlyAfterPolicyAllowsIdempotentCalls) {
+    FlakyProbeTool tool;
+    auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
+    ToolExecutionPolicy policy;
+    policy.implementation = ToolExecutionImplementation::BlockingThread;
+    policy.effect = ToolEffectClass::ExternalRead;
+    policy.idempotency = ToolIdempotency::Idempotent;
+    policy.retry_max_attempts = 2;
+    policy.retry_backoff = 1ms;
+    policies->upsert("flaky", policy);
+    auto controller = std::make_shared<ToolExecutionController>(
+        ToolExecutionControllerConfig{policies, std::make_shared<ResourceArbiter>()});
+
+    const auto result = neograph::async::run_sync(
+        controller->execute_result_async(tool, json::object(), {}));
+    ASSERT_TRUE(result.succeeded());
+    EXPECT_EQ(result.output, "recovered");
+    EXPECT_EQ(tool.calls(), 2);
+}
+
+TEST(ToolExecutionController, NativeAsyncExecutionTimeoutIsTyped) {
+    SlowContextualTool tool;
+    auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
+    ToolExecutionPolicy policy;
+    policy.execution_timeout = 10ms;
+    policy.queue_timeout = 1s;
+    policies->upsert("slow", policy);
+    auto controller = std::make_shared<ToolExecutionController>(
+        ToolExecutionControllerConfig{policies, std::make_shared<ResourceArbiter>()});
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = neograph::async::run_sync(
+        controller->execute_result_async(tool, json::object(), {}));
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    EXPECT_EQ(result.status, ToolTerminalStatus::TimedOut);
+    EXPECT_FALSE(result.succeeded());
+    EXPECT_EQ(tool.calls(), 1);
+    EXPECT_LT(elapsed, 90ms);
+}
+
+TEST(ToolExecutionController, SingleFlightSharesOneInFlightResultPerKey) {
+    BlockingProbeTool tool(40ms);
+    auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
+    ToolExecutionPolicy policy;
+    policy.implementation = ToolExecutionImplementation::BlockingThread;
+    policy.concurrency = ToolConcurrency::SingleFlight;
+    policy.max_pending = 8;
+    policy.queue_timeout = 1s;
+    policies->upsert("probe", policy);
+    auto controller = std::make_shared<ToolExecutionController>(
+        ToolExecutionControllerConfig{policies, std::make_shared<ResourceArbiter>()});
+
+    std::vector<ToolCall> calls{
+        {"single-flight-1", "probe", "{}"},
+        {"single-flight-2", "probe", "{}"},
+    };
+    ToolExecutionContext context;
+    context.controller = controller;
+    const auto results = neograph::async::run_sync(
+        dispatch_tool_calls(std::move(calls), std::vector<Tool*>{&tool}, {}, {}, context));
+
+    ASSERT_EQ(results.size(), 2U);
+    EXPECT_EQ(results[0].content, "ok");
+    EXPECT_EQ(results[1].content, "ok");
+    EXPECT_EQ(tool.calls(), 1)
+        << "single-flight callers with the same derived key must share one invocation";
+}
+
+TEST(ToolExecutionController, CancellationBeforeAdmissionIsTyped) {
+    BlockingProbeTool tool(1ms);
+    auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
+    ToolExecutionPolicy policy;
+    policy.implementation = ToolExecutionImplementation::BlockingThread;
+    policies->upsert("probe", policy);
+    auto controller = std::make_shared<ToolExecutionController>(
+        ToolExecutionControllerConfig{policies, std::make_shared<ResourceArbiter>()});
+    auto cancel = std::make_shared<graph::CancelToken>();
+    cancel->cancel();
+
+    ToolExecutionContext context;
+    context.cancel_token = std::move(cancel);
+    const auto result = neograph::async::run_sync(
+        controller->execute_result_async(tool, json::object(), std::move(context)));
+    EXPECT_EQ(result.status, ToolTerminalStatus::CancelledBeforeStart);
+    EXPECT_FALSE(result.retryable);
+    EXPECT_FALSE(result.effect_uncertain);
 }

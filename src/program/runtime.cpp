@@ -120,6 +120,73 @@ std::string core_thread_identity(std::string_view run_id, std::string_view gener
     return detail::sha256_identity("program-core-thread/v1", identity);
 }
 
+struct GlobalChildQuotaState {
+    explicit GlobalChildQuotaState(ProgramChildQuotaConfig limits_value)
+        : limits(limits_value) {}
+
+    ProgramChildQuotaConfig limits;
+    std::mutex              mutex;
+    std::uint64_t           active_children = 0;
+    std::uint64_t           pending_spawns = 0;
+    std::unordered_map<std::string, std::uint64_t> active_by_owner;
+    std::unordered_map<std::string, std::uint64_t> pending_by_owner;
+};
+
+struct ChildQuotaReservation {
+    std::shared_ptr<GlobalChildQuotaState> state;
+    std::string                            owner_scope;
+    bool                                   pending = true;
+    bool                                   active = false;
+
+    bool activate() {
+        if (!pending || active) return false;
+        std::lock_guard lock(state->mutex);
+        const auto& limits = state->limits;
+        const auto owner_active =
+            state->active_by_owner.find(owner_scope) == state->active_by_owner.end()
+                ? 0
+                : state->active_by_owner.at(owner_scope);
+        if (limits.max_active_children != 0
+            && state->active_children >= limits.max_active_children)
+            return false;
+        if (limits.max_active_children_per_owner != 0
+            && owner_active >= limits.max_active_children_per_owner)
+            return false;
+        --state->pending_spawns;
+        auto pending_it = state->pending_by_owner.find(owner_scope);
+        if (pending_it != state->pending_by_owner.end() && --pending_it->second == 0)
+            state->pending_by_owner.erase(pending_it);
+        ++state->active_children;
+        ++state->active_by_owner[owner_scope];
+        pending = false;
+        active = true;
+        return true;
+    }
+
+    void release() noexcept {
+        if (!state || (!pending && !active)) return;
+        std::lock_guard lock(state->mutex);
+        if (pending) {
+            if (state->pending_spawns != 0) --state->pending_spawns;
+            auto it = state->pending_by_owner.find(owner_scope);
+            if (it != state->pending_by_owner.end() && it->second != 0
+                && --it->second == 0)
+                state->pending_by_owner.erase(it);
+            pending = false;
+        }
+        if (active) {
+            if (state->active_children != 0) --state->active_children;
+            auto it = state->active_by_owner.find(owner_scope);
+            if (it != state->active_by_owner.end() && it->second != 0
+                && --it->second == 0)
+                state->active_by_owner.erase(it);
+            active = false;
+        }
+    }
+
+    ~ChildQuotaReservation() { release(); }
+};
+
 void complete_attempt_launch_failure(const std::shared_ptr<detail::RunControl>& control,
                                      const std::optional<std::string>&          checkpoint_id,
                                      std::exception_ptr                         error) noexcept {
@@ -1663,7 +1730,9 @@ ProgramHandle ProgramHandle::reconcile(ProgramRuntime&         runtime,
 
 struct ProgramRuntime::Impl {
     explicit Impl(RuntimeConfig runtime_config)
-        : config(std::move(runtime_config)), pool(config.scheduler_threads) {}
+        : config(std::move(runtime_config)), pool(config.scheduler_threads) {
+        global_child_quota = std::make_shared<GlobalChildQuotaState>(config.child_quota);
+    }
     ProgramRuntime* owner = nullptr;
 
     void configure_child_launcher(const std::shared_ptr<detail::RunControl>& control) {
@@ -1745,6 +1814,40 @@ struct ProgramRuntime::Impl {
             return !live || live->try_result().has_value();
         });
         controls.push_back(control);
+    }
+
+    std::shared_ptr<ChildQuotaReservation>
+    reserve_global_child(std::string_view owner_scope) {
+        if (!global_child_quota) return {};
+        auto reservation = std::make_shared<ChildQuotaReservation>();
+        reservation->state = global_child_quota;
+        reservation->owner_scope = std::string(owner_scope);
+        auto& state = *global_child_quota;
+        std::lock_guard lock(state.mutex);
+        const auto pending_for_owner =
+            state.pending_by_owner.find(reservation->owner_scope)
+                == state.pending_by_owner.end()
+            ? 0
+            : state.pending_by_owner.at(reservation->owner_scope);
+        if (state.limits.max_pending_spawn_requests != 0
+            && state.pending_spawns >= state.limits.max_pending_spawn_requests)
+            throw_runtime_diagnostic(
+                "P_CHILD_QUOTA",
+                "Global pending child-spawn quota is exhausted",
+                json{{"owner_scope", reservation->owner_scope},
+                     {"kind", "pending"},
+                     {"limit", state.limits.max_pending_spawn_requests}});
+        if (state.limits.max_pending_spawn_requests_per_owner != 0
+            && pending_for_owner >= state.limits.max_pending_spawn_requests_per_owner)
+            throw_runtime_diagnostic(
+                "P_CHILD_QUOTA",
+                "Per-owner pending child-spawn quota is exhausted",
+                json{{"owner_scope", reservation->owner_scope},
+                     {"kind", "pending-owner"},
+                     {"limit", state.limits.max_pending_spawn_requests_per_owner}});
+        ++state.pending_spawns;
+        ++state.pending_by_owner[reservation->owner_scope];
+        return reservation;
     }
 
     std::shared_ptr<detail::RunControl> find_control(std::string_view owner_scope,
@@ -1829,7 +1932,8 @@ struct ProgramRuntime::Impl {
         const auto [found, inserted] =
             child_reservations.emplace(parent.run_id(), persisted);
         if (!inserted) {
-            found->second.wall_time_ms = std::max(found->second.wall_time_ms, persisted.wall_time_ms);
+            found->second.wall_time_ms =
+                std::max(found->second.wall_time_ms, persisted.wall_time_ms);
             found->second.model_tokens =
                 std::max(found->second.model_tokens, persisted.model_tokens);
             found->second.monetary_microunits =
@@ -1869,10 +1973,11 @@ struct ProgramRuntime::Impl {
 
     RuntimeConfig                                  config;
     asio::thread_pool                              pool;
+    std::shared_ptr<GlobalChildQuotaState>         global_child_quota;
     asio::thread_pool                              deadline_pool{1};
     std::mutex                                     mutex;
     bool                                           stopping = false;
-    std::unordered_map<std::string, RunBudget> child_reservations;
+    std::unordered_map<std::string, RunBudget>     child_reservations;
     std::vector<std::weak_ptr<detail::RunControl>> controls;
 };
 
@@ -2064,6 +2169,9 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
         validate_invocation(*pinned, invocation, true);
     }
 
+    std::shared_ptr<ChildQuotaReservation> global_quota;
+    if (!existing) global_quota = impl_->reserve_global_child(owner_scope);
+
     bool reservation_active = false;
     if (!existing) {
         if (!impl_->reserve_child(parent_run_id, parent_record.remaining_budget(),
@@ -2072,6 +2180,15 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                                      "Child budget exceeds the parent's unspent allocation");
         }
         reservation_active = true;
+        if (global_quota && !global_quota->activate()) {
+            impl_->release_child(parent_run_id, invocation.budget);
+            reservation_active = false;
+            throw_runtime_diagnostic(
+                "P_CHILD_QUOTA",
+                "Global active child quota is exhausted",
+                json{{"owner_scope", std::string(owner_scope)},
+                     {"limit", impl_->config.child_quota.max_active_children}});
+        }
         try {
             const auto publishing = child_record_for(
                 run_id, link, invocation, ProgramChildState::Publishing);
@@ -2082,9 +2199,13 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                 throw_runtime_diagnostic("P_CHILD_CONFLICT",
                                          "Parent-child attachment lost its transition CAS");
             }
-            if (attached.result == ProgramTransitionPublishResult::AlreadyPresent)
+            if (attached.result == ProgramTransitionPublishResult::AlreadyPresent) {
                 impl_->release_child(parent_run_id, invocation.budget);
-            reservation_active = false;
+                if (global_quota) {
+                    global_quota->release();
+                    global_quota.reset();
+                }
+            }
         } catch (...) {
             if (reservation_active) impl_->release_child(parent_run_id, invocation.budget);
             throw;
@@ -2143,6 +2264,11 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
             std::move(persisted), canonical, core_thread_id, 0, std::move(invocation.events),
             impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
             impl_->config.state_store, impl_->config.transitions);
+        if (global_quota) {
+            const auto quota = global_quota;
+            control->add_terminal_cleanup([quota] { quota->release(); });
+            global_quota.reset();
+        }
         bind_child_completion(control, owner_scope, parent_run_id, run_id);
         ProgramEvent started;
         if (replay_initial_dispatch) {

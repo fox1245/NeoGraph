@@ -14,10 +14,10 @@
 #include <asio/awaitable.hpp>
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
-
 namespace neograph::graph {
 class CancelToken;
 }
@@ -38,6 +38,10 @@ struct ToolExecutionContext {
     std::shared_ptr<ToolExecutionController> controller;
     ToolExecutionIdentity identity;
     std::optional<std::chrono::steady_clock::time_point> deadline;
+    /// Policy-derived priority request; depth never supplies this value.
+    std::uint8_t requested_priority = 0;
+    /// Bounded critical-path inheritance supplied by the parent policy.
+    std::uint8_t inherited_priority = 0;
 };
 
 /**

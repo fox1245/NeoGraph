@@ -80,6 +80,13 @@ std::uint64_t clamped_component_subtract(const std::uint64_t lhs,
                                          const std::uint64_t rhs) noexcept {
     return lhs > rhs ? lhs - rhs : 0;
 }
+std::uint64_t scale_component(const std::uint64_t value,
+                              const std::uint8_t percent) noexcept {
+    if (percent >= 100) return value;
+    const auto whole = value / 100;
+    const auto remainder = value % 100;
+    return whole * percent + (remainder * percent) / 100;
+}
 
 std::array<std::uint64_t, 14> components(const HostResourceVector& value) noexcept {
     return {value.cpu_millis, value.memory_bytes, value.gpu_slots, value.gpu_memory_bytes,
@@ -238,6 +245,14 @@ std::string_view to_string(const HostResourceConfidence confidence) noexcept {
     }
     return "unknown";
 }
+std::string_view to_string(const HostPressureLevel level) noexcept {
+    switch (level) {
+        case HostPressureLevel::Normal: return "normal";
+        case HostPressureLevel::Elevated: return "elevated";
+        case HostPressureLevel::Critical: return "critical";
+    }
+    return "unknown";
+}
 
 HostResourceProfile::HostResourceProfile(HostResourceProfileData data)
     : data_(std::move(data)) {}
@@ -334,6 +349,28 @@ HostResourceProfile HostResourceProfile::intersect(const std::vector<HostResourc
     return create(std::move(data));
 }
 
+HostResourceProfile HostResourceProfile::scaled_available(std::uint8_t percent,
+                                                          std::string profile_id) const {
+    if (percent > 100) {
+        throw std::invalid_argument("host resource capacity scale must be in 0..100");
+    }
+    if (!valid_token(profile_id)) {
+        throw std::invalid_argument("scaled host profile_id is invalid");
+    }
+    HostResourceProfileData data = data_;
+    const auto available = available_capacity();
+    const auto source = components(available);
+    std::array<std::uint64_t, 14> scaled{};
+    for (std::size_t index = 0; index < scaled.size(); ++index)
+        scaled[index] = scale_component(source[index], percent);
+    data.capacity = HostResourceVector::saturating_add(from_components(scaled),
+                                                        data.safety_reserve);
+    data.profile_id = std::move(profile_id);
+    data.evidence.source = "pressure";
+    data.evidence.confidence = HostResourceConfidence::Estimated;
+    return create(std::move(data));
+}
+
 const std::string& HostResourceProfile::profile_id() const noexcept { return data_.profile_id; }
 const HostResourceVector& HostResourceProfile::capacity() const noexcept { return data_.capacity; }
 const HostResourceVector& HostResourceProfile::safety_reserve() const noexcept { return data_.safety_reserve; }
@@ -400,14 +437,30 @@ public:
     };
 
     explicit HostAdmissionControllerImpl(HostAdmissionControllerConfig config)
-        : profile_(config.profile.value_or(HostResourceProfile::detect_current())),
+        : base_profile_(config.profile.value_or(HostResourceProfile::detect_current())),
+          profile_(base_profile_),
           max_pending_(config.max_pending),
-          aging_quantum_(config.aging_quantum) {
+          aging_quantum_(config.aging_quantum),
+          elevated_capacity_percent_(config.elevated_capacity_percent),
+          critical_capacity_percent_(config.critical_capacity_percent),
+          recovery_step_percent_(config.recovery_step_percent),
+          recovery_quiet_period_(config.recovery_quiet_period) {
         if (max_pending_ == 0 || max_pending_ > kMaximumPendingRequests) {
             throw std::invalid_argument("host admission max_pending must be in 1..65536");
         }
         if (aging_quantum_ <= std::chrono::milliseconds::zero()) {
             throw std::invalid_argument("host admission aging_quantum must be positive");
+        }
+        if (elevated_capacity_percent_ == 0 || elevated_capacity_percent_ > 100
+            || critical_capacity_percent_ == 0
+            || critical_capacity_percent_ > elevated_capacity_percent_) {
+            throw std::invalid_argument(
+                "host admission pressure capacity percentages must be 1..100 with critical <= elevated");
+        }
+        if (recovery_step_percent_ == 0 || recovery_step_percent_ > 100
+            || recovery_quiet_period_ <= std::chrono::milliseconds::zero()) {
+            throw std::invalid_argument(
+                "host admission pressure recovery settings are invalid");
         }
     }
 
@@ -504,15 +557,66 @@ public:
 
     void update_profile(HostResourceProfile profile) {
         std::lock_guard lock(mu_);
-        profile_ = std::move(profile);
+        base_profile_ = std::move(profile);
+        profile_ = effective_profile_locked(pressure_scale_percent_,
+                                            pressure_changed_at_ms_ > 0
+                                                ? pressure_changed_at_ms_
+                                                : now_ms());
+        if (!stopping_) schedule_locked(std::chrono::steady_clock::now());
+    }
+
+    void observe_pressure(HostPressureSample sample) {
+        if (sample.observed_at_ms <= 0) sample.observed_at_ms = now_ms();
+        if (!sample.source.empty() && !valid_token(sample.source)) {
+            throw std::invalid_argument("host pressure source must be a safe token");
+        }
+        std::lock_guard lock(mu_);
+        ensure_running_locked();
+        const auto target = sample.level == HostPressureLevel::Critical
+                                ? critical_capacity_percent_
+                                : sample.level == HostPressureLevel::Elevated
+                                      ? elevated_capacity_percent_
+                                      : 100;
+        if (sample.level != HostPressureLevel::Normal) {
+            pressure_ = sample.level;
+            pressure_scale_percent_ = target;
+            pressure_changed_at_ms_ = sample.observed_at_ms;
+            pressure_source_ = std::move(sample.source);
+            profile_ = effective_profile_locked(pressure_scale_percent_,
+                                                pressure_changed_at_ms_);
+        } else if (pressure_scale_percent_ < 100
+                   && sample.observed_at_ms >= pressure_changed_at_ms_
+                   && sample.observed_at_ms - pressure_changed_at_ms_
+                          >= recovery_quiet_period_.count()) {
+            pressure_ = HostPressureLevel::Normal;
+            pressure_scale_percent_ = static_cast<std::uint8_t>(
+                std::min<std::uint32_t>(100,
+                                        pressure_scale_percent_ + recovery_step_percent_));
+            pressure_changed_at_ms_ = sample.observed_at_ms;
+            pressure_source_ = std::move(sample.source);
+            profile_ = effective_profile_locked(pressure_scale_percent_,
+                                                pressure_changed_at_ms_);
+        } else if (pressure_scale_percent_ == 100) {
+            pressure_ = HostPressureLevel::Normal;
+            pressure_source_ = std::move(sample.source);
+        }
         if (!stopping_) schedule_locked(std::chrono::steady_clock::now());
     }
 
     [[nodiscard]] HostAdmissionSnapshot snapshot() const {
         std::lock_guard lock(mu_);
         const auto effective_capacity = profile_.available_capacity();
-        return {profile_, reserved_, HostResourceVector::subtract_clamped(effective_capacity, reserved_),
-                static_cast<std::uint32_t>(waiters_.size()), !reserved_.fits_within(effective_capacity)};
+        HostAdmissionSnapshot result;
+        result.profile = profile_;
+        result.reserved = reserved_;
+        result.available = HostResourceVector::subtract_clamped(effective_capacity, reserved_);
+        result.queued = static_cast<std::uint32_t>(waiters_.size());
+        result.overcommitted = !reserved_.fits_within(effective_capacity);
+        result.pressure = pressure_;
+        result.pressure_scale_percent = pressure_scale_percent_;
+        result.pressure_changed_at_ms = pressure_changed_at_ms_;
+        result.pressure_source = pressure_source_;
+        return result;
     }
 
     void shutdown() noexcept {
@@ -525,6 +629,13 @@ public:
     }
 
 private:
+    [[nodiscard]] HostResourceProfile
+    effective_profile_locked(std::uint8_t percent, std::int64_t observed_at_ms) const {
+        if (percent >= 100) return base_profile_;
+        const auto profile_id = "pressure-" + std::to_string(percent) + "-"
+            + std::to_string(std::max<std::int64_t>(0, observed_at_ms));
+        return base_profile_.scaled_available(percent, profile_id);
+    }
     void normalize_request(HostAdmissionRequest& request, const bool blocking) const {
         if (request.resources.empty()) {
             throw HostAdmissionError(HostAdmissionFailure::InvalidRequest,
@@ -532,6 +643,7 @@ private:
         }
         if (request.owner_scope.empty()) request.owner_scope = "anonymous";
         if (request.operation_id.empty()) request.operation_id = "unspecified";
+        if (request.fairness_weight == 0) request.fairness_weight = 1;
         if (request.owner_scope.size() > 512 || request.operation_id.size() > 512) {
             throw HostAdmissionError(HostAdmissionFailure::InvalidRequest,
                                      "owner_scope and operation_id must be at most 512 bytes");
@@ -582,8 +694,14 @@ private:
             : std::chrono::milliseconds::zero();
         const auto gains = static_cast<std::uint64_t>(elapsed.count())
             / static_cast<std::uint64_t>(aging_quantum_.count());
+        const auto weight = std::max<std::uint8_t>(1, waiter.request.fairness_weight);
+        const auto weighted_gains =
+            gains > (std::numeric_limits<std::uint64_t>::max() / weight)
+                ? std::numeric_limits<std::uint64_t>::max()
+                : gains * weight;
         return static_cast<std::uint8_t>(
-            std::min<std::uint64_t>(255, static_cast<std::uint64_t>(waiter.request.priority) + gains));
+            std::min<std::uint64_t>(
+                255, static_cast<std::uint64_t>(waiter.request.priority) + weighted_gains));
     }
 
     void schedule_locked(const std::chrono::steady_clock::time_point now) {
@@ -647,6 +765,7 @@ private:
     }
 
     mutable std::mutex mu_;
+    HostResourceProfile base_profile_;
     HostResourceProfile profile_;
     HostResourceVector reserved_;
     std::unordered_map<std::uint64_t, Reservation> reservations_;
@@ -655,6 +774,14 @@ private:
     std::uint64_t next_sequence_ = 1;
     std::uint32_t max_pending_;
     std::chrono::milliseconds aging_quantum_;
+    std::uint8_t elevated_capacity_percent_;
+    std::uint8_t critical_capacity_percent_;
+    std::uint8_t recovery_step_percent_;
+    std::chrono::milliseconds recovery_quiet_period_;
+    HostPressureLevel pressure_ = HostPressureLevel::Normal;
+    std::uint8_t pressure_scale_percent_ = 100;
+    std::int64_t pressure_changed_at_ms_ = 0;
+    std::string pressure_source_;
     bool stopping_ = false;
 };
 
@@ -778,6 +905,10 @@ std::optional<HostResourceLease> HostAdmissionController::try_reserve(HostAdmiss
 
 void HostAdmissionController::update_profile(HostResourceProfile profile) {
     impl_->update_profile(std::move(profile));
+}
+
+void HostAdmissionController::observe_pressure(HostPressureSample sample) {
+    impl_->observe_pressure(std::move(sample));
 }
 
 HostAdmissionSnapshot HostAdmissionController::snapshot() const { return impl_->snapshot(); }

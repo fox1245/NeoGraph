@@ -161,3 +161,56 @@ TEST(HostAdmissionController, CapacityShrinkBlocksNewWorkWithoutRevokingHeldLeas
     EXPECT_THROW((void)neograph::async::run_sync(controller.reserve_async(request(1, 20ms))),
                  HostAdmissionError);
 }
+
+TEST(HostResourceProfile, ScalesSchedulableCapacityWithoutDroppingSafetyReserve) {
+    HostResourceVector capacity;
+    capacity.cpu_millis = 1000;
+    HostResourceVector reserve;
+    reserve.cpu_millis = 200;
+    const auto base = profile(capacity, reserve);
+
+    const auto scaled = base.scaled_available(50, "scaled-host-v1");
+    EXPECT_EQ(scaled.capacity().cpu_millis, 600U);
+    EXPECT_EQ(scaled.safety_reserve().cpu_millis, 200U);
+    EXPECT_EQ(scaled.available_capacity().cpu_millis, 400U);
+}
+
+TEST(HostAdmissionController, PressureLimitsNewReservationsAndRecovers) {
+    HostResourceVector capacity;
+    capacity.tool_slots = 4;
+    HostAdmissionControllerConfig config;
+    config.profile = profile(capacity);
+    config.max_pending = 8;
+    config.aging_quantum = 2ms;
+    config.recovery_step_percent = 25;
+    config.recovery_quiet_period = 5ms;
+    HostAdmissionController controller(std::move(config));
+
+    controller.observe_pressure({HostPressureLevel::Elevated, 10, "test-pressure"});
+    EXPECT_EQ(controller.snapshot().pressure, HostPressureLevel::Elevated);
+    EXPECT_EQ(controller.snapshot().pressure_scale_percent, 75U);
+
+    HostAdmissionRequest admitted_request;
+    admitted_request.owner_scope = "tenant-a";
+    admitted_request.operation_id = "admitted";
+    admitted_request.resources.tool_slots = 1;
+    admitted_request.queue_timeout = 15ms;
+    auto admitted = neograph::async::run_sync(
+        controller.reserve_async(std::move(admitted_request)));
+    EXPECT_TRUE(admitted.held());
+    EXPECT_EQ(controller.snapshot().reserved.tool_slots, 1U);
+
+    HostAdmissionRequest slots;
+    slots.owner_scope = "tenant-a";
+    slots.operation_id = "slots";
+    slots.resources.tool_slots = 3;
+    slots.queue_timeout = 15ms;
+    EXPECT_THROW((void)neograph::async::run_sync(controller.reserve_async(std::move(slots))),
+                 HostAdmissionError);
+
+    controller.observe_pressure({HostPressureLevel::Normal, 20, "test-recovery"});
+    std::this_thread::sleep_for(8ms);
+    controller.observe_pressure({HostPressureLevel::Normal, 30, "test-recovery"});
+    EXPECT_EQ(controller.snapshot().pressure_scale_percent, 100U);
+    admitted.release();
+}

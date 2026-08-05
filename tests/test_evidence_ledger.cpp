@@ -130,6 +130,49 @@ TEST_F(EvidenceLedgerTest, DeduplicatesPrimaryExtractionButAdmitsExplicitIndepen
     EXPECT_NO_THROW(ledger.create_task(std::move(review)));
 }
 
+TEST_F(EvidenceLedgerTest, ListsOwnerScopedTasksAcrossRestartableStates) {
+    ledger.create_task(make_primary_task());
+    EXPECT_EQ(ledger.tasks("owner-a", false).size(), 1U);
+    const auto lease = acquire("extract-1", "lease-list", "worker-list");
+    ASSERT_EQ(ledger.tasks("owner-a", false).size(), 1U);
+    ASSERT_EQ(ledger.publish(lease, make_artifact(lease), 1'001),
+              EvidencePublishResult::Published);
+    EXPECT_TRUE(ledger.tasks("owner-a", false).empty());
+    ASSERT_EQ(ledger.tasks("owner-a", true).size(), 1U);
+    EXPECT_EQ(ledger.tasks("owner-a", true).front().state, ResearchTaskState::Published);
+}
+
+TEST_F(EvidenceLedgerTest, ResearchTaskBoardRanksInformationPerCostAndEnforcesBudget) {
+    auto high_cost = make_primary_task("task-high-cost");
+    high_cost.scope = "scope-high-cost";
+    high_cost.claim_id = "claim-high";
+    high_cost.requirements = {{"information_value", 10.0}, {"cost_microunits", 10}};
+    ledger.create_task(std::move(high_cost));
+    auto high_ratio = make_primary_task("task-high-ratio");
+    high_ratio.scope = "scope-high-ratio";
+    high_ratio.claim_id = "claim-ratio";
+    high_ratio.requirements = {{"information_value", 4.0}, {"cost_microunits", 1}};
+    ledger.create_task(std::move(high_ratio));
+
+    ResearchTaskBoard board(ledger);
+    const auto first = board.acquire_next("owner-a", "worker-board", "board-v1", 1'000,
+                                          ResearchTaskBoardBudget{1, 20});
+    ASSERT_TRUE(first.has_value());
+    EXPECT_EQ(first->task_id, "task-high-ratio");
+
+    EXPECT_FALSE(board.acquire_next("owner-a", "worker-board-2", "board-v1", 1'001,
+                                    ResearchTaskBoardBudget{1, 20}));
+    auto first_artifact = make_artifact(*first);
+    first_artifact.claim_id = "claim-ratio";
+    ASSERT_EQ(board.publish(*first, std::move(first_artifact), 1'002),
+              EvidencePublishResult::Published);
+
+    const auto second = board.acquire_next("owner-a", "worker-board", "board-v1", 1'003,
+                                           ResearchTaskBoardBudget{1, 20});
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(second->task_id, "task-high-cost");
+}
+
 TEST_F(EvidenceLedgerTest, ExactlyOneWorkerClaimsPrimaryLeaseAndExpiryReassignsIt) {
     ledger.create_task(make_primary_task());
     std::atomic<int> acquired{0};

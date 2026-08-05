@@ -675,6 +675,7 @@ if(NEOGRAPH_BUILD_SQLITE)
     add_library(neograph_sqlite
         src/core/sqlite_checkpoint.cpp
         src/core/sqlite_evidence_ledger.cpp
+        src/core/research_task_board.cpp
     )
 
     target_include_directories(neograph_sqlite
