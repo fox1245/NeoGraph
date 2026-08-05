@@ -36,3 +36,10 @@ race:yyjson_read
 # CRYPTO_ONCE. Functionally correct.
 race:CRYPTO_THREAD_run_once
 race:OPENSSL_init_crypto
+
+# Asio's shared any_executor reference-count implementation uses an atomic
+# decrement followed by delete on the final owner. TSan reports the atomic
+# decrement in a concurrent non-final owner as racing with that delete even
+# though the reference-count modification order makes the delete occur only
+# after the final decrement. This is dependency code, not a NeoGraph access.
+race:asio::execution::detail::shared_target_executor

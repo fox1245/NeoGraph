@@ -212,7 +212,8 @@ program::ProgramHandle ProgramAgentAdapter::start(const Message& inbound,
         // admitted ProgramVersion, without pretending to have a link grant.
     }
 
-    const std::string_view agent_id = mailbox_ ? mailbox_->agent_id() : "a2a-adapter";
+    const std::string_view agent_id =
+        mailbox_ ? std::string_view(mailbox_->agent_id()) : std::string_view("a2a-adapter");
     auto invocation = invocation_builder_
                           ? invocation_builder_(inbound, task_id, context_id)
                           : default_invocation(
