@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ko source_sha256=828f35d27b957d55c8c766d3ce714ae4094397f9f2d4f0cabea710750619cb9a -->
+<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ko source_sha256=4fc02b6c921618283b005ec1a6e8819e815c28840f34ad72b347d1ad86ff4e4b -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 # AI 국회
@@ -62,7 +62,7 @@ NeoGraph의 `A2AClient`는 응답에서 각 회원의 투표를 분석하고,
 ## 빌드 + 실행(NeoGraph 트리에서)
 
 ```bash
-# NeoGraph 저장소 루트에서; A2A와 LLM은 선택적 빌드 구성요소입니다
+# from NeoGraph repo root; A2A and LLM are optional build components
 cmake -S . -B build-cookbook \
     -DNEOGRAPH_BUILD_EXAMPLES=ON \
     -DNEOGRAPH_BUILD_PROGRAM=ON \
@@ -85,7 +85,7 @@ bash examples/cookbook/ai-assembly/scripts/run_session.sh
 
 ```bash
 pip install 'neograph-engine>=0.2.1'
-# (위와 같이 다른 터미널에서 C++ 멤버를 시작)
+# (start the C++ members in another terminal as above)
 PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     examples/cookbook/ai-assembly/bills/basic_income.txt \
     http://127.0.0.1:8101 http://127.0.0.1:8102 \
@@ -144,9 +144,9 @@ NeoGraph는 둘 다 병렬 클라이언트 요청을 깔끔하게 처리합니�
 
 ```
 ai-assembly/
-├── member_server.cpp           # 구성 가능한 페르소나 서버
-├── speaker.cpp                 # 방송·집계를 담당하는 오케스트레이터
-├── speaker.py                  # Python A2A 클라이언트 변형
+├── member_server.cpp           # one configurable persona server
+├── speaker.cpp                 # orchestrator, broadcasts bill, tallies
+├── speaker.py                  # Python A2A client variant
 ├── prompts/
 │   ├── jinbo.txt               # Kim Jinbo (Progress)
 │   ├── bosu.txt                # Park Bosu (Conservative)
@@ -155,7 +155,7 @@ ai-assembly/
 ├── bills/
 │   └── basic_income.txt        # sample bill: National Basic Income Law
 └── scripts/
-    └── run_session.sh          # 4개 멤버 실행 + 스피커 실행
+    └── run_session.sh          # spin up 4 members + run speaker
 ```
 
 ## 특허

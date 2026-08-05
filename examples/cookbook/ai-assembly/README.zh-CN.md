@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=zh-CN source_sha256=828f35d27b957d55c8c766d3ce714ae4094397f9f2d4f0cabea710750619cb9a -->
+<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=zh-CN source_sha256=4fc02b6c921618283b005ec1a6e8819e815c28840f34ad72b347d1ad86ff4e4b -->
 # AI 国会
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -57,7 +57,7 @@ A2A server 默认的 `GraphAgentAdapter` 会通过 JSON-RPC 暴露这些 channel
 ## 构建并运行（在 NeoGraph 源码树中）
 
 ```bash
-# 在 NeoGraph 仓库根目录执行；A2A 和 LLM 是可选构建组件
+# from NeoGraph repo root; A2A and LLM are optional build components
 cmake -S . -B build-cookbook \
     -DNEOGRAPH_BUILD_EXAMPLES=ON \
     -DNEOGRAPH_BUILD_PROGRAM=ON \
@@ -78,7 +78,7 @@ bash examples/cookbook/ai-assembly/scripts/run_session.sh
 
 ```bash
 pip install 'neograph-engine>=0.2.1'
-#（像上面一样在另一个终端启动 C++ 成员）
+# (start the C++ members in another terminal as above)
 PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     examples/cookbook/ai-assembly/bills/basic_income.txt \
     http://127.0.0.1:8101 http://127.0.0.1:8102 \
@@ -137,9 +137,9 @@ README 现在有一个“从你的 CMake 项目使用 NeoGraph”小节，
 
 ```
 ai-assembly/
-├── member_server.cpp           # 可配置 persona 的成员服务器
-├── speaker.cpp                 # 广播和计票的编排器
-├── speaker.py                  # Python A2A 客户端变体
+├── member_server.cpp           # one configurable persona server
+├── speaker.cpp                 # orchestrator, broadcasts bill, tallies
+├── speaker.py                  # Python A2A client variant
 ├── prompts/
 │   ├── jinbo.txt               # Kim Jinbo (Progress)
 │   ├── bosu.txt                # Park Bosu (Conservative)
@@ -148,7 +148,7 @@ ai-assembly/
 ├── bills/
 │   └── basic_income.txt        # sample bill: National Basic Income Law
 └── scripts/
-    └── run_session.sh          # 启动 4 个成员并运行 speaker
+    └── run_session.sh          # spin up 4 members + run speaker
 ```
 
 ## 许可证

@@ -439,9 +439,13 @@ typed Program/Core dispatch path without a generic bytecode VM.
 This audit is source-and-contract evidence, not a claim that every historical
 consumer has migrated. “Partial” means the local contract exists but one or
 more acceptance gates in the corresponding architecture issue remain open.
-The current local slice is covered by focused normal, ASan/UBSan, and TSan
-regressions; the sanitizer runs were intentionally scoped to the new
-concurrency/resource contracts rather than presented as a full sanitizer gate.
+The current checkout passed the configured serial debug CTest gate (1,303 tests,
+three explicitly skipped live/integration tests, no failures; 150.99 seconds)
+and the configured TSan CTest gate (1,303 tests, the same three skips, no
+unsuppressed race reports; 271.40 seconds). The full ASan/UBSan CTest gate also
+passed all 1,303 tests with four intentional skips (the same three live tests
+plus the RSS-under-ASan stress test), with leak detection enabled and no
+failures (413.88 seconds).
 
 | Area | Status | Evidence and remaining boundary |
 |---|---|---|
@@ -514,12 +518,22 @@ coverage, transition fault injection, recovery, and the final validation gates.
 Its recorded configured CTest result was 1,281 passed, three explicitly
 skipped live/integration tests, and no failures; issue #3 is closed.
 
-Current focused evidence in this checkout also includes:
+Current focused and configured evidence in this checkout also includes:
 
-- 83 focused ASan/UBSan tests passed with leak detection and fail-fast
-  sanitizer settings;
-- the same 83 focused contention, tool, host, ledger, ACP, and checkpoint
-  tests passed under TSan with ASLR disabled as required by the build;
+- 1,303 configured debug CTest tests passed serially; three live/environment
+  tests were explicitly skipped and no test failed;
+- the same 1,303-test CTest gate passed under TSan with ASLR disabled; the only
+  suppression added during this pass covers Asio's shared executor
+  reference-count implementation, not NeoGraph symbols;
+- the full 1,303-test ASan/UBSan gate passed with leak detection enabled; the
+  RSS stress test is intentionally skipped under ASan because its measurement
+  is dominated by sanitizer shadow memory;
+- documentation validators passed: 42 English sources and 126/126 translations,
+  with active runtime documentation claims clean and historical claims labeled;
+- the local libFuzzer canary could not run because clang/clang++ is not
+  installed and package installation requires unavailable privileged access;
+- five A2A mailbox/adapter regressions passed under ASan/UBSan after fixing the
+  temporary `std::string_view` identity lifetime;
 - the implementation audit above and issue #2 retain the remaining P3-P8
   boundaries instead of treating PR7 as the complete v1 redesign.
 

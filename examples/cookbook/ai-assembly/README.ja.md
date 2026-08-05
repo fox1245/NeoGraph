@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ja source_sha256=828f35d27b957d55c8c766d3ce714ae4094397f9f2d4f0cabea710750619cb9a -->
+<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ja source_sha256=4fc02b6c921618283b005ec1a6e8819e815c28840f34ad72b347d1ad86ff4e4b -->
 # AI国会
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -61,7 +61,7 @@ Discovery) は純粋な NeoGraph です。
 ## ビルド + 実行 (NeoGraph ツリー内)
 
 ```bash
-# NeoGraph リポジトリのルートから。A2A と LLM は任意のビルド要素です
+# from NeoGraph repo root; A2A and LLM are optional build components
 cmake -S . -B build-cookbook \
     -DNEOGRAPH_BUILD_EXAMPLES=ON \
     -DNEOGRAPH_BUILD_PROGRAM=ON \
@@ -82,7 +82,7 @@ bash examples/cookbook/ai-assembly/scripts/run_session.sh
 
 ```bash
 pip install 'neograph-engine>=0.2.1'
-# (上記のように別ターミナルで C++ メンバーを起動)
+# (start the C++ members in another terminal as above)
 PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     examples/cookbook/ai-assembly/bills/basic_income.txt \
     http://127.0.0.1:8101 http://127.0.0.1:8102 \
@@ -145,9 +145,9 @@ NeoGraph ツリー内にあるため、何もせずに直接 `add_executable` �
 
 ```
 ai-assembly/
-├── member_server.cpp           # 設定可能なペルソナサーバー
-├── speaker.cpp                 # ブロードキャストと集計を行うオーケストレーター
-├── speaker.py                  # Python A2A クライアント バリアント
+├── member_server.cpp           # one configurable persona server
+├── speaker.cpp                 # orchestrator, broadcasts bill, tallies
+├── speaker.py                  # Python A2A client variant
 ├── prompts/
 │   ├── jinbo.txt               # Kim Jinbo (Progress)
 │   ├── bosu.txt                # Park Bosu (Conservative)
@@ -156,7 +156,7 @@ ai-assembly/
 ├── bills/
 │   └── basic_income.txt        # sample bill: National Basic Income Law
 └── scripts/
-    └── run_session.sh          # 4 メンバーを起動してスピーカーを実行
+    └── run_session.sh          # spin up 4 members + run speaker
 ```
 
 ## ライセンス
