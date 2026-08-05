@@ -57,8 +57,13 @@ A2A server 默认的 `GraphAgentAdapter` 会通过 JSON-RPC 暴露这些 channel
 ## 构建并运行（在 NeoGraph 源码树中）
 
 ```bash
-# from NeoGraph repo root
-cmake --build build-pybind --target \
+# 在 NeoGraph 仓库根目录执行；A2A 和 LLM 是可选构建组件
+cmake -S . -B build-cookbook \
+    -DNEOGRAPH_BUILD_EXAMPLES=ON \
+    -DNEOGRAPH_BUILD_PROGRAM=ON \
+    -DNEOGRAPH_BUILD_A2A=ON \
+    -DNEOGRAPH_BUILD_LLM=ON
+cmake --build build-cookbook --target \
     cookbook_ai_assembly_member cookbook_ai_assembly_speaker -j4
 
 echo 'OPENAI_API_KEY=sk-...' > .env
@@ -66,15 +71,15 @@ echo 'OPENAI_API_KEY=sk-...' > .env
 bash examples/cookbook/ai-assembly/scripts/run_session.sh
 ```
 
+成员服务器会调用 OpenAI，因此需要 `OPENAI_API_KEY` 和网络访问。
+编译本身可以离线验证。
+
 ## Python speaker 变体（v0.2.1+，跨语言 A2A）
 
-同一个 speaker 逻辑，用约 100 行 Python 实现，对接同一组
-C++ 成员服务器 — 证明 A2A 协议可以干净地跨语言桥接：
-
 ```bash
-pip install neograph-engine          # >= 0.2.1
-# (start the C++ members in another terminal as above)
-PYTHONPATH=build-pybind python3 examples/cookbook/ai-assembly/speaker.py \
+pip install 'neograph-engine>=0.2.1'
+#（像上面一样在另一个终端启动 C++ 成员）
+PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     examples/cookbook/ai-assembly/bills/basic_income.txt \
     http://127.0.0.1:8101 http://127.0.0.1:8102 \
     http://127.0.0.1:8103 http://127.0.0.1:8104
@@ -84,9 +89,6 @@ Python A2A binding（`neograph_engine.a2a`）随 v0.2.1 发布。
 服务器端（graph-as-A2A-endpoint）目前仍然只支持 C++。
 
 ## 摩擦点记录 — NeoGraph 新用户踩到的问题
-
-这些是构建本 cookbook 时发现的粗糙边缘。**四个都已在 v0.2.1 修复** —
-保留在这里作为记录。
 
 ### 1. A2A 曾经只支持 C++ — Python binding 没有暴露它（已在 v0.2.1 修复）
 
@@ -128,17 +130,16 @@ README 现在有一个“从你的 CMake 项目使用 NeoGraph”小节，
 - 对自由格式韩文文本使用 `parse_vote` regex 能工作，是因为模型
   在被要求时可靠遵守 `vote: support/oppose/abstain`。Persona 输出
   保持在格式内，使它成为一个 5 行计票函数。
-- 构建很干净 — FetchContent 拉取 v0.2.0，不需要手动依赖
-  安装。原版 Ubuntu 上的 OpenSSL/CURL 就足够了。
+- 源码树内的 CMake 构建是自包含的；请像上面一样配置
+  `NEOGRAPH_BUILD_A2A=ON` 和 `NEOGRAPH_BUILD_LLM=ON`。
 
 ## 文件
 
 ```
-ai-national-assembly/
-├── CMakeLists.txt              # FetchContent NeoGraph v0.2.0
-├── src/
-│   ├── member_server.cpp       # one binary, configurable persona
-│   └── speaker.cpp             # orchestrator, broadcasts bill, tallies
+ai-assembly/
+├── member_server.cpp           # 可配置 persona 的成员服务器
+├── speaker.cpp                 # 广播和计票的编排器
+├── speaker.py                  # Python A2A 客户端变体
 ├── prompts/
 │   ├── jinbo.txt               # Kim Jinbo (Progress)
 │   ├── bosu.txt                # Park Bosu (Conservative)
@@ -147,7 +148,7 @@ ai-national-assembly/
 ├── bills/
 │   └── basic_income.txt        # sample bill: National Basic Income Law
 └── scripts/
-    └── run_session.sh          # spin up 4 members + run speaker
+    └── run_session.sh          # 启动 4 个成员并运行 speaker
 ```
 
 ## 许可证

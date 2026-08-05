@@ -63,6 +63,11 @@ std::optional<ResearchTaskLease> ResearchTaskBoard::acquire_next(
     std::vector<Candidate> candidates;
     candidates.reserve(snapshots.size());
     for (const auto& task : snapshots) {
+        if ((task.state == ResearchTaskState::Leased
+             || task.state == ResearchTaskState::Published)
+            && task.board_id != board_id) {
+            continue;
+        }
         const auto cost = task_cost(task);
         if (task.state == ResearchTaskState::Leased
             && task.lease_expires_at_unix_ms > now_unix_ms) {

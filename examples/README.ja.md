@@ -13,18 +13,30 @@ NeoGraph エンジンの表面をカバーする 56 個の実行可能な C++ �
 
 ## 建てる
 
-デフォルトの CMake ビルドでは、すべての例がビルドされます。
+デフォルトの CMake 構成では、有効なコンポーネントがサポートする
+例をビルドします。Program quickstart と Program ベースの例には
+`-DNEOGRAPH_BUILD_PROGRAM=ON` が必要です。gRPC と Python バインディングは
+オプションで、対応するオプションを有効にしない限り該当例は省略されます。
 
 ```bash
-mkdir build && cd build
-cmake -DCMAKE_BUILD_TYPE=Release ..
-make -j$(nproc)
+cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON
+cmake --build build -j$(nproc)
 ```
 
-それらをスキップするには、`-DNEOGRAPH_BUILD_EXAMPLES=OFF` を渡します。必要な例
-追加の deps (Crawl4AI Docker、Postgres、MCP サーバー、Clay+Raylib) は次のとおりです。
-明示的な CMake オプションまたはランタイム プローブによってゲートされます — を参照してください。
-その下の「セットアップ」列。
+完全な C++ 例セットをビルドするには、Program と A2A も有効にします。
+
+```bash
+cmake -S . -B build \
+  -DNEOGRAPH_BUILD_EXAMPLES=ON \
+  -DNEOGRAPH_BUILD_PROGRAM=ON \
+  -DNEOGRAPH_BUILD_A2A=ON
+cmake --build build -j$(nproc)
+```
+
+例をスキップするには `-DNEOGRAPH_BUILD_EXAMPLES=OFF` を渡します。追加の
+依存関係 (Crawl4AI Docker、Postgres、MCP サーバー、Clay+Raylib) が必要な例は、
+明示的な CMake オプションまたはランタイムプローブで制御されます。
+以下の「セットアップ」列を参照してください。
 
 ## 設定
 

@@ -4,14 +4,18 @@
 // GraphEngine, provider, journal, or runtime. It measures immutable plan lookup
 // and nested operation-reference scheduling separately from Core execution.
 //
-// Usage: bench_program_dispatch [iterations]
+// Usage: bench_program_dispatch [iterations] [warmup] [samples]
 
 #include <neograph/program/plan.h>
 
+#include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -102,7 +106,7 @@ json benchmark_plan() {
 }
 
 void enqueue_references(const ProgramPlanDispatchDescriptor& dispatch,
-                        std::vector<std::string_view>&       work) {
+                        std::vector<std::string_view>& work) {
     for (const auto& child : dispatch.children) work.push_back(child);
     if (dispatch.then_id) work.push_back(*dispatch.then_id);
     if (dispatch.else_id) work.push_back(*dispatch.else_id);
@@ -110,37 +114,93 @@ void enqueue_references(const ProgramPlanDispatchDescriptor& dispatch,
     for (const auto& branch : dispatch.branches) work.push_back(branch);
 }
 
+std::uint64_t walk_plan(const ProgramPlan& plan,
+                        std::vector<std::string_view>& work) {
+    std::uint64_t visited = 0;
+    work.clear();
+    work.push_back(plan.root_id());
+    while (!work.empty()) {
+        const auto id = work.back();
+        work.pop_back();
+        const auto* node = plan.find(id);
+        if (!node) throw std::runtime_error("benchmark plan reference missing");
+        const auto& dispatch = node->dispatch();
+        visited += static_cast<std::uint8_t>(dispatch.operation) +
+                   dispatch.source_pointer.size();
+        enqueue_references(dispatch, work);
+    }
+    return visited;
+}
+
+std::size_t parse_positive(std::string_view text, const char* name) {
+    std::size_t value = 0;
+    const auto [end, error] = std::from_chars(
+        text.data(), text.data() + text.size(), value);
+    if (error != std::errc{} || end != text.data() + text.size() || value == 0) {
+        throw std::invalid_argument(
+            std::string(name) + " must be a positive integer");
+    }
+    return value;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    const auto iterations = argc > 1 ? std::stoull(argv[1]) : 100000ULL;
-    const auto plan       = ProgramPlan::from_json(benchmark_plan());
-    std::vector<std::string_view> work;
-    work.reserve(plan.nodes().size());
-
-    std::uint64_t visited = 0;
-    const auto   started  = std::chrono::steady_clock::now();
-    for (std::uint64_t iteration = 0; iteration < iterations; ++iteration) {
-        work.clear();
-        work.push_back(plan.root_id());
-        while (!work.empty()) {
-            const auto id = work.back();
-            work.pop_back();
-            const auto* node = plan.find(id);
-            if (!node) return 2;
-            const auto& dispatch = node->dispatch();
-            visited += static_cast<std::uint8_t>(dispatch.operation) +
-                       dispatch.source_pointer.size();
-            enqueue_references(dispatch, work);
+    try {
+        if (argc > 4) {
+            throw std::invalid_argument(
+                "usage: bench_program_dispatch [iterations] [warmup] [samples]");
         }
+        const auto iterations = argc > 1
+            ? parse_positive(argv[1], "iterations") : 100000ULL;
+        const auto warmup = argc > 2
+            ? parse_positive(argv[2], "warmup") : 10ULL;
+        const auto samples = argc > 3
+            ? parse_positive(argv[3], "samples") : 5ULL;
+        const auto plan = ProgramPlan::from_json(benchmark_plan());
+        std::vector<std::string_view> work;
+        work.reserve(plan.nodes().size());
+
+        std::uint64_t warmup_visited = 0;
+        for (std::uint64_t sample = 0; sample < warmup; ++sample)
+            warmup_visited += walk_plan(plan, work);
+
+        std::vector<std::int64_t> timings;
+        timings.reserve(samples);
+        std::uint64_t visited = warmup_visited;
+        for (std::uint64_t sample = 0; sample < samples; ++sample) {
+            const auto started = std::chrono::steady_clock::now();
+            for (std::uint64_t iteration = 0; iteration < iterations; ++iteration)
+                visited += walk_plan(plan, work);
+            timings.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - started).count());
+        }
+        std::sort(timings.begin(), timings.end());
+        const auto median_ns = timings[timings.size() / 2];
+        const double per_walk = static_cast<double>(median_ns) /
+                                static_cast<double>(iterations);
+        std::cout << "config\titerations\t" << iterations << '\n'
+                  << "config\twarmup\t" << warmup << '\n'
+                  << "config\tsamples\t" << samples << '\n'
+                  << "runtime\tos\tLinux\n"
+                  << "runtime\tcompiler\t" << __VERSION__ << '\n'
+#ifdef NEOGRAPH_BENCH_BUILD_TYPE
+                  << "runtime\tbuild_type\t" << NEOGRAPH_BENCH_BUILD_TYPE << '\n'
+#else
+                  << "runtime\tbuild_type\tunspecified\n"
+#endif
+#if defined(NDEBUG)
+                  << "runtime\toptimization\toptimized\n"
+#else
+                  << "runtime\toptimization\tunoptimized\n"
+#endif
+                  << "header\tworkload\titerations\tmedian_ns\tns_per_walk\n"
+                  << "result\tdispatch_only\t" << iterations << '\t'
+                  << median_ns << '\t' << per_walk << '\n'
+                  << "metric\tvisited\t" << visited << '\n';
+        return visited == 0 ? 3 : 0;
+    } catch (const std::exception& error) {
+        std::cerr << "error: " << error.what() << '\n';
+        return 2;
     }
-    const auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                std::chrono::steady_clock::now() - started)
-                                .count();
-    const auto per_walk = iterations == 0 ? 0.0
-                                          : static_cast<double>(elapsed_ns) /
-                                                static_cast<double>(iterations);
-    std::cout << "dispatch_only iterations=" << iterations << " visited=" << visited
-              << " total_ns=" << elapsed_ns << " ns_per_walk=" << per_walk << '\n';
-    return visited == 0 ? 3 : 0;
 }

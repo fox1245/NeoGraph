@@ -14,18 +14,30 @@ NeoGraph 엔진 표면을 다루는 56개의 실행 가능한 C++ 프로그램.
 
 ## 짓다
 
-기본 CMake 빌드는 모든 예제를 빌드합니다.
+기본 CMake 구성은 활성화된 구성요소가 지원하는 예제를 빌드합니다.
+Program quickstart와 Program 기반 예제에는
+`-DNEOGRAPH_BUILD_PROGRAM=ON`이 필요합니다. gRPC와 Python 바인딩은
+선택 사항이며 해당 옵션을 켜지 않으면 관련 예제가 생략됩니다.
 
 ```bash
-mkdir build && cd build
-cmake -DCMAKE_BUILD_TYPE=Release ..
-make -j$(nproc)
+cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON
+cmake --build build -j$(nproc)
 ```
 
-건너뛰려면 `-DNEOGRAPH_BUILD_EXAMPLES=OFF`를 전달하세요. 필요한 예
-추가 deps(Crawl4AI Docker, Postgres, MCP 서버, Clay+Raylib)는
-명시적인 CMake 옵션 또는 런타임 프로브에 의해 제어됩니다.
-아래의 '설정' 열.
+전체 C++ 예제를 빌드하려면 Program과 A2A도 활성화하세요.
+
+```bash
+cmake -S . -B build \
+  -DNEOGRAPH_BUILD_EXAMPLES=ON \
+  -DNEOGRAPH_BUILD_PROGRAM=ON \
+  -DNEOGRAPH_BUILD_A2A=ON
+cmake --build build -j$(nproc)
+```
+
+예제를 건너뛰려면 `-DNEOGRAPH_BUILD_EXAMPLES=OFF`를 전달하세요. 추가
+의존성(Crawl4AI Docker, Postgres, MCP 서버, Clay+Raylib)이 필요한 예제는
+명시적인 CMake 옵션 또는 런타임 프로브로 제어됩니다. 아래의 '설정' 열을
+참조하세요.
 
 ## 설정
 

@@ -37,6 +37,7 @@ int main(int argc, char** argv) {
 
     // --- Discover MCP tools ---
     neograph::mcp::MCPClient mcp_client(mcp_url);
+    mcp_client.initialize("example-mcp-hitl");
     auto tools = mcp_client.get_tools();
     std::cout << "[*] Discovered " << tools.size() << " MCP tools from " << mcp_url << "\n";
 

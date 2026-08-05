@@ -205,9 +205,9 @@ if (turn % EVAL_INTERVAL == 0) {
 - **Anti-oscillation guard** — Handle eve case. Lockout if evolved in last N turns,
   or hysteresis (don't change if current topology not N% lower than next-candidate).
 - **LLM-generated graph_def** — Currently selects from 3 pre-defined topologies.
-  More ambitiously, LLM generates graph_def JSON from scratch. NG's
-  [v0.5.0 example 23 evolving chat agent](../../23_*.cpp) fork +
-  meta assembly pattern goes this direction.
+  More ambitiously, an LLM can generate graph_def JSON from scratch. The
+  [`the-beast/`](../the-beast/) cookbook demonstrates the same
+  model-authored topology plus compile/validation gates.
 - **Parallel customer processing** — Sequential demo 7 minutes, parallel per customer = ~1.5 minutes.
   Use `asio::thread_pool` + compile cache directly.
 - **A/B framework** — Operate 2 topologies for same customer simultaneously, decide winner by

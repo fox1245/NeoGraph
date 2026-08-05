@@ -12,15 +12,26 @@ P8 切换清单：[`spec/neograph-example-disposition-v1.json`](../spec/neograph
 
 ## 构建
 
-默认 CMake 构建会构建所有示例：
+默认 CMake 配置会构建已启用组件所支持的示例。Program quickstart
+和基于 Program 的示例需要 `-DNEOGRAPH_BUILD_PROGRAM=ON`；gRPC 和
+Python binding 是可选的，未启用对应选项时相关示例会被省略。
 
 ```bash
-mkdir build && cd build
-cmake -DCMAKE_BUILD_TYPE=Release ..
-make -j$(nproc)
+cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON
+cmake --build build -j$(nproc)
 ```
 
-传入 `-DNEOGRAPH_BUILD_EXAMPLES=OFF` 可以跳过它们。需要额外依赖的示例
+要构建完整的 C++ 示例集，还要启用 Program 和 A2A：
+
+```bash
+cmake -S . -B build \
+  -DNEOGRAPH_BUILD_EXAMPLES=ON \
+  -DNEOGRAPH_BUILD_PROGRAM=ON \
+  -DNEOGRAPH_BUILD_A2A=ON
+cmake --build build -j$(nproc)
+```
+
+传入 `-DNEOGRAPH_BUILD_EXAMPLES=OFF` 可以跳过示例。需要额外依赖的示例
 （Crawl4AI Docker、Postgres、MCP servers、Clay+Raylib）会由显式 CMake option
 或运行时探测门控控制 — 见下方“设置”列。
 

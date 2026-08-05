@@ -31,7 +31,7 @@
 //
 // Optional environment:
 //   CRAWL4AI_URL       defaults to http://localhost:11235
-//   DR_MODEL           defaults to claude-sonnet-4-5
+//   DR_MODEL           defaults to claude-sonnet-4-6
 
 #include <neograph/neograph.h>
 #include <neograph/llm/schema_provider.h>
@@ -206,7 +206,7 @@ static AppCtx build_app(bool with_human_review) {
     std::string crawl_url = crawl_env ? crawl_env : "http://localhost:11235";
 
     const char* model_env = std::getenv("DR_MODEL");
-    std::string model = model_env ? model_env : "claude-sonnet-4-5";
+    std::string model = model_env ? model_env : "claude-sonnet-4-6";
 
     auto raw_claude = llm::SchemaProvider::create({
         .schema_path     = "claude",
@@ -287,7 +287,7 @@ static int print_usage() {
         "\n"
         "Required env: ANTHROPIC_API_KEY, POSTGRES_URL.\n"
         "Optional env: CRAWL4AI_URL (default http://localhost:11235),\n"
-        "              DR_MODEL (default claude-sonnet-4-5).\n";
+        "              DR_MODEL (default claude-sonnet-4-6).\n";
     return 2;
 }
 

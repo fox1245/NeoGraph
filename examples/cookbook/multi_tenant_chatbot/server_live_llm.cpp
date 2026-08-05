@@ -11,18 +11,13 @@
 // 비용 추정: gpt-4o-mini × 100 요청 × 평균 2.3 LLM call (topology 평균)
 //          ≈ 230 call × ~$0.0002/call ≈ $0.05.
 //
-// 빌드:
-//   g++ -std=c++20 -O2 -DNDEBUG \
-//       -Iinclude -Ideps -Ideps/yyjson -Ideps/asio/include \
-//       -DASIO_STANDALONE \
-//       projects/multi_tenant_chatbot/server_live_llm.cpp \
-//       -Lbuild -lneograph_core -lneograph_async -lneograph_llm \
-//       -lcppdotenv -lyyjson -lssl -lcrypto \
-//       -Wl,-rpath,'$ORIGIN/build' \
-//       -pthread -o /tmp/multi_tenant_live
+// Build and run from the repository root:
+//   cmake -S . -B build-cookbook \
+//       -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_LLM=ON
+//   cmake --build build-cookbook --target cookbook_multi_tenant_live -j4
+//   ./build-cookbook/cookbook_multi_tenant_live
 //
-// 실행 (repo root 에 .env 가 OPENAI_API_KEY 박혀있어야):
-//   LD_LIBRARY_PATH=build /tmp/multi_tenant_live
+// Runtime requires OPENAI_API_KEY in the repository-root .env (or environment).
 
 #include <neograph/neograph.h>
 #include <neograph/llm/openai_provider.h>

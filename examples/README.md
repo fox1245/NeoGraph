@@ -12,17 +12,29 @@ one into your own project, link against `neograph::core` +
 
 ## Build
 
-The default CMake build builds every example:
+The default CMake configuration builds the examples supported by the enabled
+components. The Program quickstart and Program-backed examples require
+`-DNEOGRAPH_BUILD_PROGRAM=ON`; gRPC and Python bindings are opt-in, and
+examples behind those components are omitted unless their options are enabled.
 
 ```bash
-mkdir build && cd build
-cmake -DCMAKE_BUILD_TYPE=Release ..
-make -j$(nproc)
+cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON
+cmake --build build -j$(nproc)
 ```
 
-Pass `-DNEOGRAPH_BUILD_EXAMPLES=OFF` to skip them. Examples that need
-extra deps (Crawl4AI Docker, Postgres, MCP servers, Clay+Raylib) are
-gated by an explicit CMake option or a runtime probe — see the
+For the complete C++ example set, also enable Program and A2A:
+
+```bash
+cmake -S . -B build \
+  -DNEOGRAPH_BUILD_EXAMPLES=ON \
+  -DNEOGRAPH_BUILD_PROGRAM=ON \
+  -DNEOGRAPH_BUILD_A2A=ON
+cmake --build build -j$(nproc)
+```
+
+Pass `-DNEOGRAPH_BUILD_EXAMPLES=OFF` to skip examples. Examples that need
+extra deps (Crawl4AI Docker, Postgres, MCP servers, Clay+Raylib) are gated
+by an explicit CMake option or a runtime probe — see the
 "Setup" column below.
 
 ## Setup

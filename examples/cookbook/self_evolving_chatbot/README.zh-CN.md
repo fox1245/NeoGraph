@@ -181,7 +181,7 @@ if (turn % EVAL_INTERVAL == 0) {
 ## 未来扩展
 
 - **防摇摆保护** — 处理 eve case。如果最近 N turns 内已演化，则 lockout；或使用 hysteresis（如果当前 topology 不比下一候选低 N%，就不切换）。
-- **LLM 生成 graph_def** — 当前从 3 个预定义拓扑中选择。更大胆地说，LLM 可以从零生成 graph_def JSON。NG 的 [v0.5.0 example 23 evolving chat agent](../../23_*.cpp) fork + meta assembly pattern 正朝这个方向走。
+- **LLM 生成 graph_def** — 当前从 3 个预定义拓扑中选择。更大胆地说，LLM 可以从零生成 graph_def JSON。请参考 [`the-beast/`](../the-beast/) cookbook 中的模型编写拓扑及编译/验证门控。
 - **并行客户处理** — 顺序 demo 7 分钟，按客户并行 = ~1.5 分钟。直接使用 `asio::thread_pool` + compile cache。
 - **A/B 框架** — 同时为同一客户运行 2 个拓扑，根据响应满意度决定赢家。按 graph_id sticky split。
 - **CheckpointStore 集成** — Postgres + 上述 SQL schema，面向真实生产可用。

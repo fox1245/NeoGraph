@@ -15,7 +15,7 @@
 // Environment:
 //   ANTHROPIC_API_KEY         — required
 //   CRAWL4AI_URL              — optional, defaults to http://localhost:11235
-//   DR_MODEL                  — optional, defaults to claude-sonnet-4-5
+//   DR_MODEL                  — optional, defaults to claude-sonnet-4-6
 
 #include <neograph/neograph.h>
 #include <neograph/llm/schema_provider.h>
@@ -263,7 +263,7 @@ int main(int argc, char** argv) {
                                                 : "http://localhost:11235";
 
     const char* model_env = std::getenv("DR_MODEL");
-    std::string model = model_env ? model_env : "claude-sonnet-4-5";
+    std::string model = model_env ? model_env : "claude-sonnet-4-6";
 
     // Anthropic provider via built-in "claude" schema. Wrapped in the
     // RateLimitedProvider decorator because Deep Research fans out several

@@ -1665,6 +1665,21 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
         add_executable(bench_program_dispatch benchmarks/bench_program_dispatch.cpp)
         target_link_libraries(bench_program_dispatch PRIVATE neograph::program)
     endif()
+    set(_neograph_benchmark_build_type "${CMAKE_BUILD_TYPE}")
+    if(_neograph_benchmark_build_type STREQUAL "")
+        set(_neograph_benchmark_build_type "unspecified")
+    endif()
+    set(_neograph_benchmark_targets bench_neograph)
+    if(NEOGRAPH_BUILD_PROGRAM)
+        list(APPEND _neograph_benchmark_targets
+            bench_program bench_program_dispatch)
+    endif()
+    foreach(_neograph_benchmark_target IN LISTS _neograph_benchmark_targets)
+        target_compile_definitions(${_neograph_benchmark_target} PRIVATE
+            NEOGRAPH_BENCH_BUILD_TYPE="${_neograph_benchmark_build_type}")
+    endforeach()
+    unset(_neograph_benchmark_targets)
+    unset(_neograph_benchmark_build_type)
 
     # OpenMP target-offload PoC. The target still builds without a device
     # backend so the executable can report host fallback explicitly.
@@ -1714,26 +1729,26 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
         endif()
     endif()
 
-    # async-runtime PoC: pure-timer fan-out to compare thread-per-agent
-    # vs io_context + coroutines at 100/1K/10K concurrency. No HTTP in
-    # this cut — measures the scheduling primitive in isolation.
-    add_executable(bench_async_fanout benchmarks/bench_async_fanout.cpp)
-    target_link_libraries(bench_async_fanout PRIVATE neograph::async)
-    target_compile_features(bench_async_fanout PRIVATE cxx_std_20)
+    if(NEOGRAPH_BUILD_ASYNC)
+        # async-runtime PoC: pure-timer fan-out to compare thread-per-agent
+        # vs io_context + coroutines at 100/1K/10K concurrency. No HTTP in
+        # this cut — measures the scheduling primitive in isolation.
+        add_executable(bench_async_fanout benchmarks/bench_async_fanout.cpp)
+        target_link_libraries(bench_async_fanout PRIVATE neograph::async)
+        target_compile_features(bench_async_fanout PRIVATE cxx_std_20)
 
-    # async-runtime PoC stage 2: mock HTTP server + sync/async clients.
-    # Confirms the timer-only advantage survives real TCP / HTTP parse
-    # / socket setup overhead.
-    add_executable(bench_async_http benchmarks/bench_async_http.cpp)
-    target_link_libraries(bench_async_http PRIVATE
-        neograph::async httplib OpenSSL::SSL OpenSSL::Crypto)
-    target_compile_features(bench_async_http PRIVATE cxx_std_20)
-    # bench_async_http 가 conn_pool.h → httplib.h 를 끌어들이는데, neograph
-    # 의 번들 cpp-httplib 는 TLS=ON 으로 빌드되므로 매크로 일관성
-    # (issue #16) 가드가 같은 정의를 요구한다. PRIVATE 으로 추가.
-    target_compile_definitions(bench_async_http PRIVATE
-        CPPHTTPLIB_OPENSSL_SUPPORT)
-
+        # async-runtime PoC stage 2: mock HTTP server + sync/async clients.
+        # Confirms the timer-only advantage survives real TCP / HTTP parse
+        # / socket setup overhead.
+        add_executable(bench_async_http benchmarks/bench_async_http.cpp)
+        target_link_libraries(bench_async_http PRIVATE
+            neograph::async httplib OpenSSL::SSL OpenSSL::Crypto)
+        target_compile_features(bench_async_http PRIVATE cxx_std_20)
+        # bench_async_http includes httplib.h with TLS enabled, so keep the
+        # feature macro consistent with the bundled library.
+        target_compile_definitions(bench_async_http PRIVATE
+            CPPHTTPLIB_OPENSSL_SUPPORT)
+    endif()
     # Sustained-burst stress harness — Phase 3 operational-readiness
     # gate. Holds N runs in flight for M wall-clock seconds, samples
     # RSS + per-window p99 latency at fixed intervals, and exits 1 if

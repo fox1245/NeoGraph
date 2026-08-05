@@ -100,6 +100,7 @@ void expect_socket_cancel(bool prefer_libcurl) {
     asio::io_context io;
     std::promise<asio::error_code> completion;
     auto result = completion.get_future();
+    graph::CancelExecutorLease token_lease(token);
     asio::co_spawn(io, [&]() -> asio::awaitable<void> {
         try {
             token->bind_executor(co_await asio::this_coro::executor);
@@ -159,6 +160,7 @@ void expect_stream_socket_cancel() {
     asio::io_context io;
     std::promise<std::exception_ptr> completion;
     auto result = completion.get_future();
+    graph::CancelExecutorLease token_lease(token);
     asio::co_spawn(io, [&]() -> asio::awaitable<void> {
         try {
             token->bind_executor(co_await asio::this_coro::executor);

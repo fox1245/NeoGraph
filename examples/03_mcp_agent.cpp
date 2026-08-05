@@ -56,6 +56,7 @@ int main(int argc, char* argv[]) {
     std::cout << "[*] Connecting to MCP server: " << mcp_url << "\n";
 
     neograph::mcp::MCPClient mcp_client(mcp_url);
+    mcp_client.initialize("example-mcp-agent");
     auto tools = mcp_client.get_tools();
 
     std::cout << "[*] Discovered " << tools.size() << " tools:\n";

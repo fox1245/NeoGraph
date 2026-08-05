@@ -61,8 +61,13 @@ Discovery) は純粋な NeoGraph です。
 ## ビルド + 実行 (NeoGraph ツリー内)
 
 ```bash
-# from NeoGraph repo root
-cmake --build build-pybind --target \
+# NeoGraph リポジトリのルートから。A2A と LLM は任意のビルド要素です
+cmake -S . -B build-cookbook \
+    -DNEOGRAPH_BUILD_EXAMPLES=ON \
+    -DNEOGRAPH_BUILD_PROGRAM=ON \
+    -DNEOGRAPH_BUILD_A2A=ON \
+    -DNEOGRAPH_BUILD_LLM=ON
+cmake --build build-cookbook --target \
     cookbook_ai_assembly_member cookbook_ai_assembly_speaker -j4
 
 echo 'OPENAI_API_KEY=sk-...' > .env
@@ -70,28 +75,24 @@ echo 'OPENAI_API_KEY=sk-...' > .env
 bash examples/cookbook/ai-assembly/scripts/run_session.sh
 ```
 
+メンバーサーバーは OpenAI を呼び出すため、`OPENAI_API_KEY` と
+ネットワーク接続が必要です。コンパイル自体はオフラインで検証できます。
+
 ## Python スピーカー バリアント (v0.2.1+、クロスランゲージ A2A)
 
-同じスピーカーのロジックを Python の約 100 行で、同じものに対して
-C++ メンバー サーバー — A2A プロトコル ブリッジ言語を証明します
-きれいに：
-
 ```bash
-pip install neograph-engine          # >= 0.2.1
-# (start the C++ members in another terminal as above)
-PYTHONPATH=build-pybind python3 examples/cookbook/ai-assembly/speaker.py \
+pip install 'neograph-engine>=0.2.1'
+# (上記のように別ターミナルで C++ メンバーを起動)
+PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     examples/cookbook/ai-assembly/bills/basic_income.txt \
     http://127.0.0.1:8101 http://127.0.0.1:8102 \
     http://127.0.0.1:8103 http://127.0.0.1:8104
 ```
 
 Python A2A バインディング (`neograph_engine.a2a`) は v0.2.1 で出荷されます。
-サーバー側 (A2A エンドポイントとしてのグラフ) は、現時点では C++ のみのままです。
+サーバー側 (グラフを A2A エンドポイントとして公開) は現在も C++ のみです。
 
 ## 摩擦ジャーナル — 新人 NeoGraph ユーザーがつまずいたもの
-
-これらは、これを構築中に発見された大まかなエッジです。 **4つすべて
-v0.2.1** で修正されました — 記録としてここに残しました。
 
 ### 1. A2A は C++ のみでした — Python バインディングはそれを公開しませんでした (v0.2.1 で修正)
 
@@ -137,17 +138,16 @@ NeoGraph ツリー内にあるため、何もせずに直接 `add_executable` �
 - 自由形式の韓国語テキストの `parse_vote` 正規表現は、モデルが次のように機能するため機能します。
   尋ねられた場合は、確実に `vote: support/oppose/abstain` を尊重します。ペルソナの出力
   フォーマット内にとどまるため、これは 5 行の集計関数になりました。
-- ビルドはクリーンでした — FetchContent は v0.2.0 をプルしましたが、手動によるデプロイはありませんでした
-  インストール。標準の Ubuntu 上の OpenSSL/CURL で十分でした。
+- ツリー内の CMake ビルドは自己完結しています。上記のように
+  `NEOGRAPH_BUILD_A2A=ON` と `NEOGRAPH_BUILD_LLM=ON` を指定してください。
 
 ## ファイル
 
 ```
-ai-national-assembly/
-├── CMakeLists.txt              # FetchContent NeoGraph v0.2.0
-├── src/
-│   ├── member_server.cpp       # one binary, configurable persona
-│   └── speaker.cpp             # orchestrator, broadcasts bill, tallies
+ai-assembly/
+├── member_server.cpp           # 設定可能なペルソナサーバー
+├── speaker.cpp                 # ブロードキャストと集計を行うオーケストレーター
+├── speaker.py                  # Python A2A クライアント バリアント
 ├── prompts/
 │   ├── jinbo.txt               # Kim Jinbo (Progress)
 │   ├── bosu.txt                # Park Bosu (Conservative)
@@ -156,7 +156,7 @@ ai-national-assembly/
 ├── bills/
 │   └── basic_income.txt        # sample bill: National Basic Income Law
 └── scripts/
-    └── run_session.sh          # spin up 4 members + run speaker
+    └── run_session.sh          # 4 メンバーを起動してスピーカーを実行
 ```
 
 ## ライセンス

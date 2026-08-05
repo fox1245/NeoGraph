@@ -135,7 +135,7 @@ struct GlobalChildQuotaState {
 struct ChildQuotaReservation {
     std::shared_ptr<GlobalChildQuotaState> state;
     std::string                            owner_scope;
-    bool                                   pending = true;
+    bool                                   pending = false;
     bool                                   active = false;
 
     bool activate() {
@@ -1847,7 +1847,31 @@ struct ProgramRuntime::Impl {
                      {"limit", state.limits.max_pending_spawn_requests_per_owner}});
         ++state.pending_spawns;
         ++state.pending_by_owner[reservation->owner_scope];
+        reservation->pending = true;
         return reservation;
+    }
+
+    std::shared_ptr<ChildQuotaReservation>
+    reserve_active_child(std::string_view owner_scope) {
+        auto reservation = reserve_global_child(owner_scope);
+        if (reservation && !reservation->activate()) {
+            reservation->release();
+            throw_runtime_diagnostic(
+                "P_CHILD_QUOTA",
+                "Global active child quota is exhausted",
+                json{{"owner_scope", std::string(owner_scope)},
+                     {"limit", config.child_quota.max_active_children}});
+        }
+        return reservation;
+    }
+
+    void commit_active_child(
+        const std::shared_ptr<detail::RunControl>& control,
+        std::shared_ptr<ChildQuotaReservation>&    reservation) {
+        if (!reservation) return;
+        const auto held = reservation;
+        control->add_terminal_cleanup([held] { held->release(); });
+        reservation.reset();
     }
 
     std::shared_ptr<detail::RunControl> find_control(std::string_view owner_scope,
@@ -2170,7 +2194,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     }
 
     std::shared_ptr<ChildQuotaReservation> global_quota;
-    if (!existing) global_quota = impl_->reserve_global_child(owner_scope);
+    if (!existing) global_quota = impl_->reserve_active_child(owner_scope);
 
     bool reservation_active = false;
     if (!existing) {
@@ -2180,15 +2204,6 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                                      "Child budget exceeds the parent's unspent allocation");
         }
         reservation_active = true;
-        if (global_quota && !global_quota->activate()) {
-            impl_->release_child(parent_run_id, invocation.budget);
-            reservation_active = false;
-            throw_runtime_diagnostic(
-                "P_CHILD_QUOTA",
-                "Global active child quota is exhausted",
-                json{{"owner_scope", std::string(owner_scope)},
-                     {"limit", impl_->config.child_quota.max_active_children}});
-        }
         try {
             const auto publishing = child_record_for(
                 run_id, link, invocation, ProgramChildState::Publishing);
@@ -2201,10 +2216,15 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
             }
             if (attached.result == ProgramTransitionPublishResult::AlreadyPresent) {
                 impl_->release_child(parent_run_id, invocation.budget);
+                reservation_active = false;
                 if (global_quota) {
                     global_quota->release();
                     global_quota.reset();
                 }
+            } else {
+                // The immutable child reservation is now durable. It must remain
+                // charged even if the in-memory dispatch is created later.
+                reservation_active = false;
             }
         } catch (...) {
             if (reservation_active) impl_->release_child(parent_run_id, invocation.budget);
@@ -2223,12 +2243,20 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
              (durable_child && durable_child->state == ProgramChildState::Publishing)) &&
             is_unstarted_child_dispatch(impl_->config.transitions, owner_scope, run_id);
         if (auto live = impl_->find_control(owner_scope, run_id)) {
+            if (global_quota) {
+                global_quota->release();
+                global_quota.reset();
+            }
             bind_child_completion(live, owner_scope, parent_run_id, run_id);
             parent.control_->attach_child(live);
             return ProgramHandle(std::move(live));
         }
         if (child_record->continuation().state == ContinuationState::Running &&
             !replay_initial_dispatch) {
+            if (global_quota) {
+                global_quota->release();
+                global_quota.reset();
+            }
             auto reconnected = reconnect(owner_scope, run_id);
             bind_child_completion(reconnected.control_, owner_scope, parent_run_id, run_id);
             parent.control_->attach_child(reconnected.control_);
@@ -2238,6 +2266,10 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
             return reconnected;
         }
         if (child_record->continuation().state != ContinuationState::Running) {
+            if (global_quota) {
+                global_quota->release();
+                global_quota.reset();
+            }
             auto reconnected = reconnect(owner_scope, run_id);
             bind_child_completion(reconnected.control_, owner_scope, parent_run_id, run_id);
             parent.control_->attach_child(reconnected.control_);
@@ -2264,11 +2296,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
             std::move(persisted), canonical, core_thread_id, 0, std::move(invocation.events),
             impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
             impl_->config.state_store, impl_->config.transitions);
-        if (global_quota) {
-            const auto quota = global_quota;
-            control->add_terminal_cleanup([quota] { quota->release(); });
-            global_quota.reset();
-        }
+        impl_->commit_active_child(control, global_quota);
         bind_child_completion(control, owner_scope, parent_run_id, run_id);
         ProgramEvent started;
         if (replay_initial_dispatch) {
@@ -2855,6 +2883,10 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             recovered_thread_id =
                 core_thread_identity(run_id, pinned->root->compiled_plan_identity);
         }
+        std::shared_ptr<ChildQuotaReservation> global_quota;
+        if (!record->invocation().parent_run_id.empty())
+            global_quota = impl_->reserve_active_child(owner_scope);
+
 
         ProgramPersistedInvocation invocation{
             record->invocation().input,
@@ -2869,6 +2901,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             std::shared_ptr<ProgramEventSink>{},
             impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
             impl_->config.state_store, impl_->config.transitions);
+        impl_->commit_active_child(control, global_quota);
         if (!record->invocation().parent_run_id.empty())
             bind_child_completion(control, owner_scope, record->invocation().parent_run_id,
                                   run_id);
@@ -3064,6 +3097,10 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
     if (!previous_journal || previous_journal->id != previous->journal_head()) {
         throw_runtime_diagnostic("P_RESUME_CONFLICT", "Program resume lost the transition CAS");
     }
+    std::shared_ptr<ChildQuotaReservation> global_quota;
+    if (!previous->invocation().parent_run_id.empty())
+        global_quota = impl_->reserve_active_child(owner_scope);
+
 
     ProgramPersistedInvocation attempt_invocation{
         previous->invocation().input,
@@ -3077,6 +3114,7 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         previous->invocation(), checkpoint.core_thread_id, previous->event_sequence(),
         std::move(resume_value.events), impl_->deadline_pool.get_executor(),
         impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions);
+    impl_->commit_active_child(control, global_quota);
     if (!previous->invocation().parent_run_id.empty())
         bind_child_completion(control, owner_scope, previous->invocation().parent_run_id, run_id);
     if (!previous->invocation().parent_run_id.empty()) {

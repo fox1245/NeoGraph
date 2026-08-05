@@ -10,16 +10,22 @@
 답변: **아니오.** 부풀림은 Python 인터프리터가 아니라 LangChain 가져오기 트리에서 발생합니다.
 NeoGraph-from-Python = 린 Python(10MB/30ms) + 단일 컴파일된 .so.
 
-## 측정 결과 (2026-07-05, WSL2, python3.12)
+## 재현
+
+먼저 Python 개발 헤더와 pybind11이 필요한 소스 빌드를 구성합니다.
 
 ```bash
-cd <neograph>/build-pybind
-LD=$(pwd)
-PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" python3 <bench>/pybind/startup_rss.py neograph
-PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" python3 <bench>/pybind/perturn.py   neograph 5000
-python3 <bench>/pybind/startup_rss.py langgraph          # bare
-python3 <bench>/pybind/startup_rss.py langgraph_openai   # actual chatbot stack
-python3 <bench>/pybind/perturn.py   langgraph 5000
+cmake -S . -B build-pybind \
+  -DNEOGRAPH_BUILD_PYBIND=ON -DNEOGRAPH_BUILD_LLM=ON
+cmake --build build-pybind --target _neograph -j
+LD="$PWD/build-pybind"
+PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" \
+  python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py neograph
+PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" \
+  python3 examples/cookbook/jarvis/bench/pybind/perturn.py neograph 5000
+python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py langgraph
+python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py langgraph_openai
+python3 examples/cookbook/jarvis/bench/pybind/perturn.py langgraph 5000
 ```
 
 |측정항목(모든 Python 프로세스)|Python의 NeoGraph|랭그래프|이점|

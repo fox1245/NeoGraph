@@ -5,20 +5,25 @@
 // timing; Program timing intentionally includes its runtime envelope, journal,
 // checkpoint, and result construction.
 //
-// Usage: bench_program [iterations]
+// Usage: bench_program [iterations] [warmup] [samples]
 
 #include <neograph/neograph.h>
 #include <neograph/program/program.h>
 
 #include <asio/awaitable.hpp>
 
+#include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -141,82 +146,130 @@ struct BenchResult {
 };
 
 template <class Operation>
-BenchResult measure(int iterations, Operation&& operation) {
-    const auto started = std::chrono::steady_clock::now();
-    for (int index = 0; index < iterations; ++index)
-        operation();
-    const auto total_ms =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
-            .count();
-    return {total_ms, total_ms * 1000.0 / iterations};
+BenchResult measure(int iterations, int samples, Operation&& operation) {
+    std::vector<double> timings;
+    timings.reserve(static_cast<std::size_t>(samples));
+    for (int sample = 0; sample < samples; ++sample) {
+        const auto started = std::chrono::steady_clock::now();
+        for (int index = 0; index < iterations; ++index) operation();
+        timings.push_back(
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started).count());
+    }
+    std::sort(timings.begin(), timings.end());
+    const double median_ms = timings[timings.size() / 2];
+    return {median_ms, median_ms * 1000.0 / static_cast<double>(iterations)};
+}
+
+std::size_t parse_positive(std::string_view text, const char* name) {
+    std::size_t value = 0;
+    const auto [end, error] = std::from_chars(
+        text.data(), text.data() + text.size(), value);
+    if (error != std::errc{} || end != text.data() + text.size() || value == 0 ||
+        value > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument(
+            std::string(name) + " must be a positive integer");
+    }
+    return value;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    const int iterations = argc > 1 ? std::atoi(argv[1]) : 1000;
-    if (iterations <= 0) throw std::invalid_argument("iterations must be positive");
+    try {
+        if (argc > 4) {
+            throw std::invalid_argument(
+                "usage: bench_program [iterations] [warmup] [samples]");
+        }
+        const int iterations = argc > 1
+            ? static_cast<int>(parse_positive(argv[1], "iterations")) : 1000;
+        const int warmup = argc > 2
+            ? static_cast<int>(parse_positive(argv[2], "warmup")) : 10;
+        const int samples = argc > 3
+            ? static_cast<int>(parse_positive(argv[3], "samples")) : 5;
 
-    NodeFactory::instance().register_type(
-        "bench-program-inc", [](const std::string& name, const json&, const NodeContext&) {
-            return std::make_unique<IncrementNode>(name);
-        });
-    auto core = GraphEngine::compile(core_definition(), NodeContext{});
+        NodeFactory::instance().register_type(
+            "bench-program-inc", [](const std::string& name, const json&, const NodeContext&) {
+                return std::make_unique<IncrementNode>(name);
+            });
+        auto core = GraphEngine::compile(core_definition(), NodeContext{});
 
-    const auto      registry = registry_snapshot();
-    const auto      profile  = admission_profile(registry);
-    const auto      policy   = policy_snapshot(profile);
-    ProgramCompiler compiler(registry, {"bench-program/v1"});
-    const auto source = ProgramSource::from_cpp_builder("bench:program", 1, program_document());
-    const auto bundle = [&] {
-        try {
-            return compiler.compile(source);
-        } catch (const ProgramCompileError& error) {
-            for (const auto& diagnostic : error.diagnostics()) {
-                std::cerr << diagnostic.code << ' ' << diagnostic.primary.json_pointer << ": "
-                          << diagnostic.message << '\n';
+        const auto registry = registry_snapshot();
+        const auto profile  = admission_profile(registry);
+        const auto policy   = policy_snapshot(profile);
+        ProgramCompiler compiler(registry, {"bench-program/v1"});
+        const auto source = ProgramSource::from_cpp_builder(
+            "bench:program", 1, program_document());
+        const auto bundle = [&] {
+            try {
+                return compiler.compile(source);
+            } catch (const ProgramCompileError& error) {
+                for (const auto& diagnostic : error.diagnostics()) {
+                    std::cerr << diagnostic.code << ' '
+                              << diagnostic.primary.json_pointer << ": "
+                              << diagnostic.message << '\n';
+                }
+                throw;
             }
-            throw;
-        }
-    }();
-    auto store = std::make_shared<InMemoryProgramStore>();
-    auto cache = std::make_shared<EngineGenerationCache>();
-    auto catalog =
-        std::make_shared<ProgramCatalog>(CatalogConfig{store, registry, cache, "bench-program/v1"});
-    const auto version =
-        catalog->admit(bundle, ProgramAdmission{"bench-program", profile, policy, {}});
-    auto           checkpoints = std::make_shared<InMemoryCheckpointStore>();
-    auto           transitions = std::make_shared<InMemoryProgramTransitionStore>();
-    ProgramRuntime runtime(RuntimeConfig{catalog, checkpoints, {}, transitions, 1});
-    const RunBudget budget{10000, 0, 0, 1, 1, 20, 0, 0, 0};
+        }();
+        auto store = std::make_shared<InMemoryProgramStore>();
+        auto cache = std::make_shared<EngineGenerationCache>();
+        auto catalog = std::make_shared<ProgramCatalog>(
+            CatalogConfig{store, registry, cache, "bench-program/v1"});
+        const auto version = catalog->admit(
+            bundle, ProgramAdmission{"bench-program", profile, policy, {}});
+        auto checkpoints = std::make_shared<InMemoryCheckpointStore>();
+        auto transitions = std::make_shared<InMemoryProgramTransitionStore>();
+        ProgramRuntime runtime(
+            RuntimeConfig{catalog, checkpoints, {}, transitions, 1});
+        const RunBudget budget{10000, 0, 0, 1, 1, 20, 0, 0, 0};
 
-    for (int index = 0; index < 10; ++index) {
-        (void)core->run(RunConfig{});
-        const auto result = runtime.run(
-            "bench-program",
-            version,
-            ProgramInvocation{json::object(), budget, "bench-program-warmup", {}});
-        if (result.status() != ProgramTerminalStatus::Completed) {
-            throw std::runtime_error("Program warm-up did not complete");
+        for (int index = 0; index < warmup; ++index) {
+            (void)core->run(RunConfig{});
+            const auto result = runtime.run(
+                "bench-program", version,
+                ProgramInvocation{json::object(), budget,
+                                  "bench-program-warmup", {}});
+            if (result.status() != ProgramTerminalStatus::Completed)
+                throw std::runtime_error("Program warm-up did not complete");
         }
+
+        const auto direct = measure(iterations, samples, [&] {
+            (void)core->run(RunConfig{});
+        });
+        const auto wrapped = measure(iterations, samples, [&] {
+            const auto result = runtime.run(
+                "bench-program", version,
+                ProgramInvocation{json::object(), budget, "bench-program", {}});
+            if (result.status() != ProgramTerminalStatus::Completed)
+                throw std::runtime_error("Program benchmark run did not complete");
+        });
+
+        std::cout << "config\titerations\t" << iterations << '\n'
+                  << "config\twarmup\t" << warmup << '\n'
+                  << "config\tsamples\t" << samples << '\n'
+                  << "runtime\tos\tLinux\n"
+                  << "runtime\tcompiler\t" << __VERSION__ << '\n'
+#ifdef NEOGRAPH_BENCH_BUILD_TYPE
+                  << "runtime\tbuild_type\t" << NEOGRAPH_BENCH_BUILD_TYPE << '\n'
+#else
+                  << "runtime\tbuild_type\tunspecified\n"
+#endif
+#if defined(NDEBUG)
+                  << "runtime\toptimization\toptimized\n"
+#else
+                  << "runtime\toptimization\tunoptimized\n"
+#endif
+                  << "header\tworkload\titerations\ttotal_ms\tper_iter_us\n"
+                  << "result\tcore_seq\t" << iterations << '\t'
+                  << direct.total_ms << '\t' << direct.per_iter_us << '\n'
+                  << "result\tprogram_single_call_core\t" << iterations << '\t'
+                  << wrapped.total_ms << '\t' << wrapped.per_iter_us << '\n'
+                  << "metric\toverhead_ratio\t"
+                  << wrapped.per_iter_us / direct.per_iter_us << '\n';
+        return EXIT_SUCCESS;
+    } catch (const std::exception& error) {
+        std::cerr << "error: " << error.what() << '\n';
+        return 2;
     }
-
-    const auto direct  = measure(iterations, [&] { (void)core->run(RunConfig{}); });
-    const auto wrapped = measure(iterations, [&] {
-        const auto result = runtime.run(
-            "bench-program",
-            version,
-            ProgramInvocation{json::object(), budget, "bench-program", {}});
-        if (result.status() != ProgramTerminalStatus::Completed) {
-            throw std::runtime_error("Program benchmark run did not complete");
-        }
-    });
-
-    std::cout << "workload\titerations\ttotal_ms\tper_iter_us\n"
-              << "core_seq\t" << iterations << '\t' << direct.total_ms << '\t' << direct.per_iter_us
-              << '\n'
-              << "program_single_call_core\t" << iterations << '\t' << wrapped.total_ms << '\t'
-              << wrapped.per_iter_us << '\n'
-              << "program_overhead_ratio\t" << wrapped.per_iter_us / direct.per_iter_us << '\n';
-    return EXIT_SUCCESS;
 }

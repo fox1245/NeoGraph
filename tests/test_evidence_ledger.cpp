@@ -181,6 +181,30 @@ TEST_F(EvidenceLedgerTest, ResearchTaskBoardRanksInformationPerCostAndEnforcesBu
     EXPECT_EQ(second->task_id, "task-high-cost");
 
 }
+TEST_F(EvidenceLedgerTest, TaskBoardBudgetsAreScopedToTheirDurableBoardIdentity) {
+    auto board_b_task = make_primary_task("board-b-task");
+    board_b_task.scope = "board-b-scope";
+    board_b_task.claim_id = "board-b-claim";
+    board_b_task.requirements = {{"information_value", 2.0}, {"cost_microunits", 2}};
+    ledger.create_task(std::move(board_b_task));
+
+    auto board_a_task = make_primary_task("board-a-task");
+    board_a_task.scope = "board-a-scope";
+    board_a_task.claim_id = "board-a-claim";
+    board_a_task.requirements = {{"information_value", 2.0}, {"cost_microunits", 2}};
+    ledger.create_task(std::move(board_a_task));
+
+    ResearchTaskBoard board(ledger);
+    const auto board_b_lease = board.acquire_next(
+        "owner-a", "worker-b", "board-b", 2'000, ResearchTaskBoardBudget{1, 2});
+    ASSERT_TRUE(board_b_lease.has_value());
+
+    const auto board_a_lease = board.acquire_next(
+        "owner-a", "worker-a", "board-a", 2'001, ResearchTaskBoardBudget{1, 2});
+    ASSERT_TRUE(board_a_lease.has_value())
+        << "one durable board must not consume another board's active lease budget";
+}
+
 
 TEST_F(EvidenceLedgerTest, ExactlyOneWorkerClaimsPrimaryLeaseAndExpiryReassignsIt) {
     ledger.create_task(make_primary_task());
@@ -243,6 +267,57 @@ TEST_F(EvidenceLedgerTest, StaleWorkerCannotPublishAfterLeaseExpiryAndReassignme
     EXPECT_EQ(ledger.publish(second, make_artifact(second), 1'103),
               EvidencePublishResult::Duplicate);
 }
+TEST_F(EvidenceLedgerTest, ConcurrentPublicationKeepsOneImmutableArtifact) {
+    ledger.create_task(make_primary_task());
+    const auto lease = acquire("extract-1", "lease-publish-race", "worker-publish-race");
+
+    auto first = make_artifact(lease);
+    first.artifact_id = "artifact-publish-first";
+    auto second = make_artifact(lease);
+    second.artifact_id = "artifact-publish-second";
+
+    std::atomic<int> published{0};
+    std::atomic<int> rejected{0};
+    std::atomic<int> unexpected{0};
+    std::thread first_worker([&] {
+        try {
+            if (ledger.publish(lease, first, 1'010) == EvidencePublishResult::Published) {
+                ++published;
+            } else {
+                ++unexpected;
+            }
+        } catch (const std::logic_error&) {
+            ++rejected;
+        } catch (...) {
+            ++unexpected;
+        }
+    });
+    std::thread second_worker([&] {
+        try {
+            if (ledger.publish(lease, second, 1'010) == EvidencePublishResult::Published) {
+                ++published;
+            } else {
+                ++unexpected;
+            }
+        } catch (const std::logic_error&) {
+            ++rejected;
+        } catch (...) {
+            ++unexpected;
+        }
+    });
+    first_worker.join();
+    second_worker.join();
+
+    EXPECT_EQ(published.load(), 1);
+    EXPECT_EQ(rejected.load(), 1);
+    EXPECT_EQ(unexpected.load(), 0);
+    const auto task = ledger.task("owner-a", "extract-1");
+    ASSERT_TRUE(task.has_value());
+    ASSERT_EQ(ledger.artifacts_for_claim("owner-a", "claim-1").size(), 1U);
+    EXPECT_TRUE(task->published_artifact_id == "artifact-publish-first"
+                || task->published_artifact_id == "artifact-publish-second");
+}
+
 TEST_F(EvidenceLedgerTest, LeaseRenewalRejectsStaleGenerationAndExactExpiry) {
     ledger.create_task(make_primary_task());
     const auto first = acquire("extract-1", "lease-renew", "worker-renew");

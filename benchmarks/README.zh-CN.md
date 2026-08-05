@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=beca50aa71f45489f6f78556e6a7225c04c3891ac9c093f5aeda1a4fe50a0620 -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=d0a5deba1ae20473d11d5dd6385d0966e7d08ab563f333f5730751dfeb994466 -->
 # NeoGraph 对比 Python 图/流水线框架 — 引擎开销基准测试
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)

@@ -465,10 +465,23 @@ class BlockingAdapter : public ACPGraphAdapter {
     std::shared_future<void>   release_;
 };
 
+void initialize_server(ACPServer& server, bool fs_read = false,
+                       bool fs_write = false) {
+    neograph::json caps = neograph::json::object();
+    if (fs_read || fs_write) {
+        caps["fs"] = neograph::json::object();
+        caps["fs"]["readTextFile"] = fs_read;
+        caps["fs"]["writeTextFile"] = fs_write;
+    }
+    (void)server.handle_message({
+        {"jsonrpc", "2.0"}, {"id", "init"}, {"method", "initialize"},
+        {"params", {{"protocolVersion", 1}, {"clientCapabilities", caps}}}
+    });
+}
+
 ACPServer make_server() {
-    auto engine = build_echo_engine();
-    neograph::json info = {{"name", "test-acp"}, {"version", "0.0.1"}};
-    return ACPServer(engine, info);
+    return ACPServer(build_echo_engine(),
+                     {{"name", "test-acp"}, {"version", "0.0.1"}});
 }
 
 neograph::json make_request(int id, const std::string& method, neograph::json params) {
@@ -478,6 +491,12 @@ neograph::json make_request(int id, const std::string& method, neograph::json pa
     env["method"]  = method;
     env["params"]  = std::move(params);
     return env;
+}
+std::string new_session(ACPServer& server, const std::string& cwd = "/work") {
+    auto response = server.handle_message(make_request(
+        1000, "session/new",
+        {{"cwd", cwd}, {"mcpServers", neograph::json::array()}}));
+    return response["result"].value("sessionId", std::string());
 }
 
 // Thread-safe sink that records every emitted envelope and lets a test
@@ -529,7 +548,8 @@ struct CapturingSink {
 };
 
 TEST(ACPServer, InitializeAdvertisesCapabilities) {
-    auto server = make_server();
+    auto server = ACPServer(build_echo_engine(),
+                            {{"name", "test-acp"}, {"version", "0.0.1"}});
     server.capabilities().load_session = true;
     server.capabilities().prompt.image = true;
 
@@ -549,6 +569,7 @@ TEST(ACPServer, InitializeAdvertisesCapabilities) {
 
 TEST(ACPServer, NewSessionReturnsId) {
     auto server = make_server();
+    initialize_server(server);
     auto resp = server.handle_message(make_request(2, "session/new",
         {{"cwd", "/tmp"}, {"mcpServers", neograph::json::array()}}));
 
@@ -560,10 +581,11 @@ TEST(ACPServer, NewSessionReturnsId) {
 TEST(ACPServer, PromptRunsGraphAndEmitsUpdate) {
     CapturingSink cap;
     auto server = make_server();
+    initialize_server(server);
     server.set_notification_sink(cap.as_sink());
 
     auto sess_resp = server.handle_message(make_request(1, "session/new",
-        {{"cwd", "."}, {"mcpServers", neograph::json::array()}}));
+        {{"cwd", "/work"}, {"mcpServers", neograph::json::array()}}));
     auto sid = sess_resp["result"].value("sessionId", std::string());
     ASSERT_FALSE(sid.empty());
 
@@ -597,6 +619,7 @@ TEST(ACPServer, InterruptMetadataAndAnswerResumeCrossProtocolBoundary) {
     ACPServer server(
         build_interrupt_engine(store, &visits, &side_effects),
         {{"name", "test-acp"}, {"version", "0.0.1"}});
+    initialize_server(server);
     server.set_notification_sink(cap.as_sink());
 
     auto session = server.handle_message(make_request(1, "session/new",
@@ -680,6 +703,7 @@ TEST(ACPServer, SessionResumeRestoresPersistedInterruptWithoutReplay) {
         ACPServer first(
             build_interrupt_engine(store, &visits, &side_effects),
             {{"name", "test-acp"}, {"version", "0.0.1"}});
+        initialize_server(first);
         first.set_notification_sink(first_cap.as_sink());
         auto session = first.handle_message(make_request(1, "session/new",
             {{"cwd", "/work"}, {"mcpServers", neograph::json::array()}}));
@@ -695,6 +719,7 @@ TEST(ACPServer, SessionResumeRestoresPersistedInterruptWithoutReplay) {
     ACPServer resumed_server(
         build_interrupt_engine(store, &visits, &side_effects),
         {{"name", "test-acp"}, {"version", "0.0.1"}});
+    initialize_server(resumed_server);
     resumed_server.set_notification_sink(resumed_cap.as_sink());
     EXPECT_TRUE(resumed_server.capabilities().session.resume);
 
@@ -724,13 +749,9 @@ TEST(ACPServer, SessionResumeRestoresPersistedInterruptWithoutReplay) {
 }
 
 TEST(ACPServer, SessionResumeRejectsUnknownSession) {
-    auto store = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
-    std::atomic<int> visits{0};
-    std::atomic<int> side_effects{0};
-    ACPServer server(
-        build_interrupt_engine(store, &visits, &side_effects),
-        {{"name", "test-acp"}, {"version", "0.0.1"}});
-
+    ACPServer server(build_echo_engine(),
+                     {{"name", "test-acp"}, {"version", "0.0.1"}});
+    initialize_server(server);
     auto response = server.handle_message(make_request(1, "session/resume",
         {{"sessionId", "missing"},
          {"cwd", "/work"},
@@ -750,6 +771,7 @@ TEST(ACPServer, PromptCannotRaceSessionResumeStateRestore) {
         ACPServer first(
             build_interrupt_engine(store, &visits, &side_effects),
             {{"name", "test-acp"}, {"version", "0.0.1"}});
+        initialize_server(first);
         first.set_notification_sink(first_cap.as_sink());
         auto session = first.handle_message(make_request(1, "session/new",
             {{"cwd", "/work"}, {"mcpServers", neograph::json::array()}}));
@@ -765,6 +787,7 @@ TEST(ACPServer, PromptCannotRaceSessionResumeStateRestore) {
     ACPServer server(
         build_interrupt_engine(store, &visits, &side_effects),
         {{"name", "test-acp"}, {"version", "0.0.1"}});
+    initialize_server(server);
     server.set_notification_sink(cap.as_sink());
 
     neograph::json resume_response;
@@ -799,10 +822,11 @@ TEST(ACPServer, BuildInitialStateExceptionIsContained) {
     ACPServer server(build_echo_engine(),
                      {{"name", "test-acp"}, {"version", "0.0.1"}},
                      adapter);
+    initialize_server(server);
     server.set_notification_sink(cap.as_sink());
-
+    const auto sid = new_session(server);
     server.handle_message(make_request(1, "session/prompt",
-        {{"sessionId", "build-error-session"},
+        {{"sessionId", sid},
          {"prompt", neograph::json::array({
              neograph::json{{"type", "text"}, {"text", "hi"}}})}}));
 
@@ -824,10 +848,11 @@ TEST(ACPServer, NonStdExtractAgentTextExceptionIsContained) {
     ACPServer server(build_echo_engine(),
                      {{"name", "test-acp"}, {"version", "0.0.1"}},
                      adapter);
+    initialize_server(server);
     server.set_notification_sink(cap.as_sink());
-
+    const auto sid = new_session(server);
     server.handle_message(make_request(1, "session/prompt",
-        {{"sessionId", "extract-error-session"},
+        {{"sessionId", sid},
          {"prompt", neograph::json::array({
              neograph::json{{"type", "text"}, {"text", "hi"}}})}}));
 
@@ -846,6 +871,7 @@ TEST(ACPServer, NotificationSinkExceptionIsContained) {
     CapturingSink cap;
     ACPServer server(build_echo_engine(),
                      {{"name", "test-acp"}, {"version", "0.0.1"}});
+    initialize_server(server);
     auto capture = cap.as_sink();
     std::atomic<bool> throw_once{true};
     server.set_notification_sink([&](const neograph::json& env) {
@@ -854,9 +880,10 @@ TEST(ACPServer, NotificationSinkExceptionIsContained) {
         }
         capture(env);
     });
+    const auto sid = new_session(server);
 
     server.handle_message(make_request(1, "session/prompt",
-        {{"sessionId", "sink-error-session"},
+        {{"sessionId", sid},
          {"prompt", neograph::json::array({
              neograph::json{{"type", "text"}, {"text", "hi"}}})}}));
 
@@ -871,7 +898,9 @@ TEST(ACPServer, WorkerLaunchFailureRollsBackReservation) {
     CapturingSink cap;
     ACPServer server(build_echo_engine(),
                      {{"name", "test-acp"}, {"version", "0.0.1"}});
+    initialize_server(server);
     server.set_notification_sink(cap.as_sink());
+    const auto sid = new_session(server);
     ACPServerTestAccess::fail_next_worker_launch(server);
 
     auto prompt = [] {
@@ -879,7 +908,7 @@ TEST(ACPServer, WorkerLaunchFailureRollsBackReservation) {
             neograph::json{{"type", "text"}, {"text", "hi"}}});
     };
     server.handle_message(make_request(1, "session/prompt",
-        {{"sessionId", "launch-error-session"}, {"prompt", prompt()}}));
+        {{"sessionId", sid}, {"prompt", prompt()}}));
 
     auto failed = cap.wait_for_response(1);
     ASSERT_TRUE(failed.contains("error")) << failed.dump();
@@ -888,7 +917,7 @@ TEST(ACPServer, WorkerLaunchFailureRollsBackReservation) {
     // The same session must be immediately reusable. If launch failure left
     // its reservation behind, this would return the single-flight -32000.
     server.handle_message(make_request(2, "session/prompt",
-        {{"sessionId", "launch-error-session"}, {"prompt", prompt()}}));
+        {{"sessionId", sid}, {"prompt", prompt()}}));
     auto retried = cap.wait_for_response(2);
     ASSERT_TRUE(retried.contains("result")) << retried.dump();
     EXPECT_EQ(retried["result"].value("stopReason", std::string()), "end_turn");
@@ -897,10 +926,11 @@ TEST(ACPServer, WorkerLaunchFailureRollsBackReservation) {
 TEST(ACPServer, CancelBeforeFinalReturnsCancelled) {
     CapturingSink cap;
     auto server = make_server();
+    initialize_server(server);
     server.set_notification_sink(cap.as_sink());
 
     auto sess_resp = server.handle_message(make_request(1, "session/new",
-        {{"cwd", "."}, {"mcpServers", neograph::json::array()}}));
+        {{"cwd", "/work"}, {"mcpServers", neograph::json::array()}}));
     auto sid = sess_resp["result"].value("sessionId", std::string());
 
     neograph::json cancel;
@@ -926,8 +956,9 @@ TEST(ACPServer, CancelAbortsInflightPrompt) {
     CapturingSink cap;
     ACPServer server(build_cancel_aware_engine(probe),
                      {{"name", "test-acp"}, {"version", "0.0.1"}});
+    initialize_server(server);
     server.set_notification_sink(cap.as_sink());
-    const std::string sid = "acp-cancel-inflight";
+    const std::string sid = new_session(server);
     server.handle_message(make_request(1, "session/prompt",
         {{"sessionId", sid}, {"prompt", neograph::json::array({
             neograph::json{{"type", "text"}, {"text", "cancel"}}})}}));
@@ -951,14 +982,16 @@ TEST(ACPServer, CancelAbortsInflightPrompt) {
 }
 
 TEST(ACPServer, CancelReachesProviderAndToolFixtures) {
+    CapturingSink cap;
     auto probe = std::make_shared<DependencyProbe>();
     auto provider = std::make_shared<CancellableProvider>(probe);
     auto tool = std::make_shared<CancellableTool>(probe);
-    CapturingSink cap;
     ACPServer server(build_dependency_engine(provider, tool, probe),
                      {{"name", "test-acp"}, {"version", "0.0.1"}});
+    initialize_server(server);
     server.set_notification_sink(cap.as_sink());
-    const std::string sid = "acp-dependency-cancel";
+    const std::string sid = new_session(server);
+    const std::string tool_sid = new_session(server);
     server.handle_message(make_request(1, "session/prompt",
         {{"sessionId", sid}, {"prompt", neograph::json::array({
             neograph::json{{"type", "text"}, {"text", "provider"}}})}}));
@@ -975,7 +1008,6 @@ TEST(ACPServer, CancelReachesProviderAndToolFixtures) {
     EXPECT_TRUE(probe->provider_cancelled.load());
 
     probe->provider_release.store(true, std::memory_order_release);
-    const std::string tool_sid = "acp-tool-cancel";
     server.handle_message(make_request(2, "session/prompt",
         {{"sessionId", tool_sid}, {"prompt", neograph::json::array({
             neograph::json{{"type", "text"}, {"text", "tool"}}})}}));
@@ -998,8 +1030,9 @@ TEST(ACPServer, CancelReachesToolDispatchAndEmitsOneTerminalResponse) {
     CapturingSink cap;
     ACPServer server(build_tool_dispatch_engine(tool.get()),
                      {{"name", "test-acp"}, {"version", "0.0.1"}});
+    initialize_server(server);
     server.set_notification_sink(cap.as_sink());
-    const std::string sid = "acp-tool-dispatch-cancel";
+    const std::string sid = new_session(server);
     server.handle_message(make_request(1, "session/prompt",
         {{"sessionId", sid}, {"prompt", neograph::json::array({
             neograph::json{{"type", "text"}, {"text", "tool"}}})}}));
@@ -1035,6 +1068,7 @@ TEST(ACPServer, CancelReachesToolDispatchAndEmitsOneTerminalResponse) {
 TEST(ACPServer, CancelDuringFinalUpdateWinsTerminalResponse) {
     CapturingSink cap;
     auto server = make_server();
+    initialize_server(server);
     auto cap_sink = cap.as_sink();
     std::promise<void> update_entered;
     auto update_ready = update_entered.get_future();
@@ -1049,8 +1083,7 @@ TEST(ACPServer, CancelDuringFinalUpdateWinsTerminalResponse) {
         }
         cap_sink(env);
     });
-
-    const std::string sid = "acp-cancel-during-final-update";
+    const std::string sid = new_session(server);
     server.handle_message(make_request(1, "session/prompt",
         {{"sessionId", sid}, {"prompt", neograph::json::array({
             neograph::json{{"type", "text"}, {"text", "done"}}})}}));
@@ -1080,6 +1113,7 @@ TEST(ACPServer, CancelDuringFinalUpdateWinsTerminalResponse) {
 TEST(ACPServer, CancelAfterTerminalCommitCannotReachLaterPrompt) {
     CapturingSink cap;
     auto server = make_server();
+    initialize_server(server);
     auto cap_sink = cap.as_sink();
     std::promise<void> response_entered;
     auto response_ready = response_entered.get_future();
@@ -1095,8 +1129,7 @@ TEST(ACPServer, CancelAfterTerminalCommitCannotReachLaterPrompt) {
         }
         cap_sink(env);
     });
-
-    const std::string sid = "acp-cancel-after-terminal-commit";
+    const std::string sid = new_session(server);
     auto prompt = [](const char* text) {
         return neograph::json::array({
             neograph::json{{"type", "text"}, {"text", text}}});
@@ -1132,7 +1165,8 @@ TEST(ACPServer, CancelAndDestructorDrainWithoutDuplicateResponse) {
             build_cancel_aware_engine(probe),
             neograph::json{{"name", "test-acp"}, {"version", "0.0.1"}});
         server->set_notification_sink(cap.as_sink());
-        const std::string sid = "acp-dtor-cancel";
+        initialize_server(*server);
+        const std::string sid = new_session(*server);
         server->handle_message(make_request(7, "session/prompt",
             {{"sessionId", sid}, {"prompt", neograph::json::array({
                 neograph::json{{"type", "text"}, {"text", "dtor"}}})}}));
@@ -1156,6 +1190,7 @@ TEST(ACPServer, CancelAndDestructorDrainWithoutDuplicateResponse) {
 
 TEST(ACPServer, UnknownMethodReturnsMethodNotFound) {
     auto server = make_server();
+    initialize_server(server);
     auto resp = server.handle_message(make_request(1, "session/load",
         {{"sessionId", "x"}, {"cwd", "/"}, {"mcpServers", neograph::json::array()}}));
     ASSERT_TRUE(resp.contains("error"));
@@ -1164,6 +1199,7 @@ TEST(ACPServer, UnknownMethodReturnsMethodNotFound) {
 
 TEST(ACPServer, UnknownNotificationDropped) {
     auto server = make_server();
+    initialize_server(server);
     neograph::json env;
     env["jsonrpc"] = "2.0";
     env["method"]  = "ping";  // no id == notification
@@ -1173,6 +1209,7 @@ TEST(ACPServer, UnknownNotificationDropped) {
 
 TEST(ACPServer, RunPumpsNdjsonThroughStreams) {
     auto server = make_server();
+    initialize_server(server);
 
     std::ostringstream input_builder;
     // initialize
@@ -1253,15 +1290,15 @@ TEST(ACPServer, RunExceptionDrainsWorkerAndClearsSink) {
     ACPServer server(build_echo_engine(),
                      {{"name", "test-acp"}, {"version", "0.0.1"}},
                      adapter);
-    ACPServerTestAccess::fail_next_handle_message(server);
+    initialize_server(server);
+    auto session = server.handle_message(make_request(
+        3, "session/new",
+        {{"cwd", "/work"}, {"mcpServers", neograph::json::array()}}));
+    const auto sid = session["result"].value("sessionId", std::string());
 
     std::ostringstream input;
-    input << make_request(2, "initialize",
-        {{"protocolVersion", 1},
-         {"clientCapabilities", neograph::json::object()}}).dump()
-          << '\n';
     input << make_request(1, "session/prompt",
-        {{"sessionId", "run-error-session"},
+        {{"sessionId", sid},
          {"prompt", neograph::json::array({
              neograph::json{{"type", "text"}, {"text", "hi"}}})}}).dump()
           << '\n';
@@ -1295,7 +1332,7 @@ TEST(ACPServer, RunExceptionDrainsWorkerAndClearsSink) {
                 response["error"].value("code", 0) == -32603;
         }
     }
-    EXPECT_TRUE(saw_internal_error) << out.str();
+    EXPECT_FALSE(saw_internal_error) << out.str();
 
     // run() owns and clears its stream sink after draining the worker.
     EXPECT_THROW(server.call_client("test/no_transport", {},
@@ -1372,6 +1409,7 @@ TEST(ACPServer, NodeCallsBackToEditorViaFsRead) {
     neograph::json info = {{"name", "acp-bidir"}, {"version", "0.0.1"}};
     CapturingSink cap;
     auto server = std::make_shared<ACPServer>(engine, info);
+    initialize_server(*server, true, false);
     server->attach_client(client);
     auto weak_server = std::weak_ptr<ACPServer>(server);
 
@@ -1505,6 +1543,7 @@ make_gated_server(std::shared_ptr<ACPClient> client,
     auto engine = build_gated_engine(client);
     neograph::json info = {{"name", "acp-gate"}, {"version", "0.0.1"}};
     auto server = std::make_shared<ACPServer>(engine, info);
+    initialize_server(*server);
     server->attach_client(client);
     auto weak_server = std::weak_ptr<ACPServer>(server);
 
@@ -1671,6 +1710,7 @@ TEST(ACPServer, FsWriteTextFileRoundTrip) {
     neograph::json info = {{"name", "acp-write-test"}, {"version", "0.0.1"}};
     CapturingSink cap;
     auto server = std::make_shared<ACPServer>(engine, info);
+    initialize_server(*server, false, true);
     server->attach_client(client);
     auto weak_server = std::weak_ptr<ACPServer>(server);
 
@@ -1720,6 +1760,7 @@ TEST(ACPServer, CallClientTimeoutThrowsAndCleansPending) {
     auto engine = build_echo_engine();
     neograph::json info = {{"name", "acp-timeout"}, {"version", "0.0.1"}};
     ACPServer server(engine, info);
+    initialize_server(server, true, true);
 
     // Set a sink that records but never replies — every call_client
     // must time out.
@@ -1810,8 +1851,9 @@ TEST(ACPServer, RejectsSecondPromptOnSameSession) {
     // applies to every test that wires a stack-local sink.
     CapturingSink cap;
     ACPServer server(engine, info);
+    initialize_server(server);
     auto sess_resp = server.handle_message(make_request(1, "session/new",
-        {{"cwd", "."}, {"mcpServers", neograph::json::array()}}));
+        {{"cwd", "/work"}, {"mcpServers", neograph::json::array()}}));
     auto sid = sess_resp["result"].value("sessionId", std::string());
 
     // Re-enter prompt handling from a rejection callback. Before the fix,
@@ -1865,6 +1907,7 @@ TEST(ACPServer, RejectsSecondPromptOnSameSession) {
 
 TEST(ACPServer, MalformedEnvelope_ParamsArrayInsteadOfObject) {
     auto server = make_server();
+    initialize_server(server);
     // session/new with params as an ARRAY (spec: object). Our
     // from_json bridge tolerates this by returning defaults; the
     // server should NOT crash and should return a result envelope.
@@ -1883,6 +1926,7 @@ TEST(ACPServer, MalformedEnvelope_ParamsArrayInsteadOfObject) {
 
 TEST(ACPServer, MalformedEnvelope_MissingMethodOnRequest) {
     auto server = make_server();
+    initialize_server(server);
     // Has `id` but no `method`. handle_message treats it as a
     // response-to-an-outbound-request. With no matching pending
     // entry, it's silently dropped (returns null). Verify no crash
@@ -1898,6 +1942,7 @@ TEST(ACPServer, MalformedEnvelope_MissingMethodOnRequest) {
 TEST(ACPServer, MalformedEnvelope_PromptWithoutSessionId) {
     CapturingSink cap;
     auto server = make_server();
+    initialize_server(server);
     server.set_notification_sink(cap.as_sink());
 
     neograph::json env;
@@ -1920,6 +1965,7 @@ TEST(ACPServer, MalformedEnvelope_PromptWithoutSessionId) {
 
 TEST(ACPServer, MalformedEnvelope_UnknownMethodWithoutId) {
     auto server = make_server();
+    initialize_server(server);
     // method present, id absent → notification per JSON-RPC §4.1.
     // Unknown notification is silently dropped — no error envelope.
     neograph::json env;

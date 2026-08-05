@@ -66,6 +66,7 @@ int main(int argc, char** argv) {
     std::string api_key = key_env;
 
     neograph::mcp::MCPClient mcp_client(mcp_url);
+    mcp_client.initialize("example-mcp-feedback");
     auto tools = mcp_client.get_tools();
     std::cout << "[*] " << tools.size()
               << " MCP tools available (agent may or may not call them)\n\n";

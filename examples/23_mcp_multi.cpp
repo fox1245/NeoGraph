@@ -50,10 +50,13 @@ int main(int argc, char** argv) {
     // --- Two MCP clients, different transports ---
     std::cout << "[*] Connecting HTTP MCP: " << http_url << "\n";
     neograph::mcp::MCPClient http_client(http_url);
+    http_client.initialize("example-mcp-multi-http");
+
     auto http_tools = http_client.get_tools();
 
     std::cout << "[*] Spawning stdio MCP:  " << py << " " << stdio_srv << "\n";
     neograph::mcp::MCPClient stdio_client(std::vector<std::string>{py, stdio_srv});
+    stdio_client.initialize("example-mcp-multi-stdio");
     auto stdio_tools = stdio_client.get_tools();
 
     // --- Merge tool lists ---

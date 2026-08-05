@@ -62,8 +62,13 @@ NeoGraph의 `A2AClient`는 응답에서 각 회원의 투표를 분석하고,
 ## 빌드 + 실행(NeoGraph 트리에서)
 
 ```bash
-# from NeoGraph repo root
-cmake --build build-pybind --target \
+# NeoGraph 저장소 루트에서; A2A와 LLM은 선택적 빌드 구성요소입니다
+cmake -S . -B build-cookbook \
+    -DNEOGRAPH_BUILD_EXAMPLES=ON \
+    -DNEOGRAPH_BUILD_PROGRAM=ON \
+    -DNEOGRAPH_BUILD_A2A=ON \
+    -DNEOGRAPH_BUILD_LLM=ON
+cmake --build build-cookbook --target \
     cookbook_ai_assembly_member cookbook_ai_assembly_speaker -j4
 
 echo 'OPENAI_API_KEY=sk-...' > .env
@@ -71,16 +76,17 @@ echo 'OPENAI_API_KEY=sk-...' > .env
 bash examples/cookbook/ai-assembly/scripts/run_session.sh
 ```
 
+멤버 서버는 실제 OpenAI 호출을 하므로 `OPENAI_API_KEY`와 네트워크가
+필요합니다. 컴파일 자체는 오프라인으로 검증할 수 있습니다.
+
 ## Python 스피커 변형(v0.2.1+, 교차 언어 A2A)
 
-Python의 최대 100줄에 있는 동일한 스피커 논리와 동일한 스피커 논리
-C++ 멤버 서버 — A2A 프로토콜 브리지 언어를 증명합니다.
-깨끗하게:
+동일한 C++ 멤버 서버에 연결하는 약 100줄의 Python 스피커입니다.
 
 ```bash
-pip install neograph-engine          # >= 0.2.1
-# (start the C++ members in another terminal as above)
-PYTHONPATH=build-pybind python3 examples/cookbook/ai-assembly/speaker.py \
+pip install 'neograph-engine>=0.2.1'
+# (위와 같이 다른 터미널에서 C++ 멤버를 시작)
+PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     examples/cookbook/ai-assembly/bills/basic_income.txt \
     http://127.0.0.1:8101 http://127.0.0.1:8102 \
     http://127.0.0.1:8103 http://127.0.0.1:8104
@@ -90,9 +96,6 @@ Python A2A 바인딩(`neograph_engine.a2a`)은 v0.2.1에 제공됩니다.
 서버 측(graph-as-A2A-endpoint)은 현재 C++ 전용으로 유지됩니다.
 
 ## 마찰 저널 — 새로운 NeoGraph 사용자가 넘어진 것
-
-이것은 이것을 만드는 동안 발견된 거친 가장자리입니다. **네 가지 모두
-v0.2.1**에서 수정되었습니다 — 여기에 기록으로 남겨두었습니다.
 
 ### 1. A2A는 C++ 전용이었습니다. Python 바인딩에서는 이를 노출하지 않았습니다(v0.2.1의 FIXED).
 
@@ -135,20 +138,15 @@ HTTP가 필요합니다.
 클라이언트 측 잠금, 공유 세션 상태 없음. A2A 사양 /
 NeoGraph는 둘 다 병렬 클라이언트 요청을 깔끔하게 처리합니다.
 상자.
-- 자유 형식 한국어 텍스트의 `parse_vote` 정규식은 다음과 같은 이유로 작동합니다.
-요청 시 `vote: support/oppose/abstain`를 안정적으로 적용합니다. 페르소나 출력
-형식 안에 머무르면 5줄 집계 기능이 됩니다.
-- 빌드가 깔끔했습니다. FetchContent가 v0.2.0을 가져왔고 수동 설정이 없습니다.
-설치. 재고 우분투의 OpenSSL/CURL로 충분했습니다.
-
+- 인트리 CMake 빌드는 자체 포함되어 있습니다. 위와 같이
+  `NEOGRAPH_BUILD_A2A=ON`, `NEOGRAPH_BUILD_LLM=ON`으로 구성하세요.
 ## 파일
 
 ```
-ai-national-assembly/
-├── CMakeLists.txt              # FetchContent NeoGraph v0.2.0
-├── src/
-│   ├── member_server.cpp       # one binary, configurable persona
-│   └── speaker.cpp             # orchestrator, broadcasts bill, tallies
+ai-assembly/
+├── member_server.cpp           # 구성 가능한 페르소나 서버
+├── speaker.cpp                 # 방송·집계를 담당하는 오케스트레이터
+├── speaker.py                  # Python A2A 클라이언트 변형
 ├── prompts/
 │   ├── jinbo.txt               # Kim Jinbo (Progress)
 │   ├── bosu.txt                # Park Bosu (Conservative)
@@ -157,7 +155,7 @@ ai-national-assembly/
 ├── bills/
 │   └── basic_income.txt        # sample bill: National Basic Income Law
 └── scripts/
-    └── run_session.sh          # spin up 4 members + run speaker
+    └── run_session.sh          # 4개 멤버 실행 + 스피커 실행
 ```
 
 ## 특허

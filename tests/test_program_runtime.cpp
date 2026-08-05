@@ -3136,6 +3136,62 @@ TEST(ProgramRuntimeTest, GlobalChildQuotaRejectsFragmentationAndReleasesOnTermin
     EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
     EXPECT_EQ(replacement.wait().status(), ProgramTerminalStatus::Cancelled);
 }
+TEST(ProgramRuntimeTest, ChildResumeReclaimsGlobalQuotaAfterACompetingChildStops) {
+    ProgramChildQuotaConfig quota;
+    quota.max_active_children = 1;
+    quota.max_active_children_per_owner = 1;
+
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, quota);
+    const auto interrupted_link =
+        make_linked_child(fixture, "runtime-blocking", "runtime-interrupt");
+    const auto active_link =
+        make_linked_child(fixture, "runtime-blocking", "runtime-blocking");
+
+    auto interrupted_parent = fixture.runtime->start(
+        "tenant:runtime", interrupted_link.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                           "trace-quota-resume-parent", {}});
+    auto interrupted_child = fixture.runtime->start_child(
+        "tenant:runtime", interrupted_parent, interrupted_link.receipt,
+        interrupted_link.child_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                           "trace-quota-resume-child", {}});
+    const auto interrupted = interrupted_child.wait();
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+
+    auto active_parent = fixture.runtime->start(
+        "tenant:runtime", active_link.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                           "trace-quota-active-parent", {}});
+    auto active_child = fixture.runtime->start_child(
+        "tenant:runtime", active_parent, active_link.receipt, active_link.child_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                           "trace-quota-active-child", {}});
+
+    try {
+        (void)fixture.runtime->resume(
+            "tenant:runtime", interrupted_child.run_id(),
+            resume_for(interrupted, json{{"decision", "approved"}}, "trace-quota-retry"));
+        FAIL() << "Expected child resume to honor the active global quota";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_CHILD_QUOTA");
+    }
+
+    EXPECT_TRUE(active_child.cancel());
+    EXPECT_EQ(active_child.wait().status(), ProgramTerminalStatus::Cancelled);
+
+    auto resumed = fixture.runtime->resume(
+        "tenant:runtime", interrupted_child.run_id(),
+        resume_for(interrupted, json{{"decision", "approved"}}, "trace-quota-retry"));
+    EXPECT_EQ(resumed.wait().status(), ProgramTerminalStatus::Completed);
+
+    EXPECT_TRUE(interrupted_parent.cancel());
+    EXPECT_EQ(interrupted_parent.wait().status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_TRUE(active_parent.cancel());
+    EXPECT_EQ(active_parent.wait().status(), ProgramTerminalStatus::Cancelled);
+}
+
 
 TEST(ProgramRuntimeTest, DuplicateChildRecoveryReturnsTheExistingRun) {
     blocking_calls.store(0);

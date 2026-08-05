@@ -6,9 +6,11 @@
  * **newline-delimited JSON over stdio** (one message per line on stdin,
  * one per line on stdout) — the form used by Zed's agent-client-protocol
  * Rust crate and by every editor that launches an agent as a sub-process.
+ * The implementation is audited against ACP protocol version 1 and the
+ * official schema fetched 2026-08-05.
  *
  * Methods served (client → agent):
- *   - initialize
+ *   - initialize (exactly once, before all session methods)
  *   - session/new
  *   - session/resume
  *   - session/prompt
@@ -16,10 +18,9 @@
  *
  * Methods emitted (agent → client):
  *   - session/update  (streaming notification while a prompt is in flight)
- *
- * Deferred (return JSON-RPC -32601 Method not found until added):
- *   authenticate, session/load, session/list, session/close,
- *   session/set_config_option, session/set_mode.
+ *   - fs/read_text_file, fs/write_text_file and session/request_permission
+ *     only when requested by graph nodes; filesystem calls require the
+ *     corresponding client capability from initialize.
  *
  * Adapter pattern mirrors neograph::a2a — by default the inbound prompt
  * text is dropped into the `prompt` channel and the `response` channel
@@ -255,8 +256,8 @@ class NEOGRAPH_API ACPServer {
     ///
     /// A cancel received after `session/new` but before the first prompt is
     /// consumed by that prompt. Once a terminal response has committed, a
-    /// cancel with no active prompt is ignored as stale: ACP does not include a
-    /// prompt/request id that could safely associate it with a future turn.
+    /// cancel with no active prompt is ignored as stale: ACP does not include
+    /// a prompt/request id that could safely associate it with a future turn.
     ///
     /// **Destructor semantics**: ~ACPServer joins all in-flight
     /// session/prompt worker threads before returning. Each worker
@@ -265,8 +266,6 @@ class NEOGRAPH_API ACPServer {
     /// thread for the full duration. Drain or cancel before
     /// destruction if you need a bounded-latency teardown.
     void stop();
-
-    /// True after at least one initialize has been processed.
     bool initialized() const;
 
     /// Handle for issuing agent→client requests (fs/*, etc.). On first

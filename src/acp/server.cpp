@@ -119,6 +119,25 @@ bool is_interrupt_phase(neograph::graph::CheckpointPhase phase) {
            phase == neograph::graph::CheckpointPhase::NodeInterrupt;
 }
 
+
+bool valid_request_id(const neograph::json& id) {
+    return id.is_null() || id.is_string() || id.is_number_integer();
+}
+
+bool require_object(const neograph::json& value) {
+    return value.is_object();
+}
+
+bool has_string(const neograph::json& object, const char* key,
+                bool allow_empty = false) {
+    if (!object.contains(key) || !object[key].is_string()) return false;
+    return allow_empty || !object[key].get<std::string>().empty();
+}
+
+bool has_array(const neograph::json& object, const char* key) {
+    return object.contains(key) && object[key].is_array();
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -128,9 +147,10 @@ struct ACPServer::Impl {
     std::shared_ptr<neograph::graph::GraphEngine> engine;
     neograph::json                                info;
     std::shared_ptr<ACPGraphAdapter>              adapter;
-
     AgentCapabilities                             caps;
+    ClientCapabilities                            client_caps;
     std::atomic<bool>                             initialized{false};
+    std::atomic<bool>                             initialize_seen{false};
     std::atomic<bool>                             stop_flag{false};
     /// Toggled on by run() entry, off on exit. Mirrors
     /// A2AServer::is_running so a generic protocol-server supervisor
@@ -252,7 +272,8 @@ struct ACPServer::Impl {
                                           const neograph::json& id);
     void           handle_session_prompt(ACPServer& owner,
                                          const neograph::json& params,
-                                         const neograph::json& id);
+                                         const neograph::json& id,
+                                         bool reply_expected);
     void           handle_session_cancel(const neograph::json& params);
 
     void emit(const neograph::json& env) {
@@ -277,24 +298,43 @@ struct ACPServer::Impl {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Method handlers
-// ---------------------------------------------------------------------------
 neograph::json
 ACPServer::Impl::handle_initialize(const neograph::json& params,
                                    const neograph::json& id) {
-    InitializeRequest req;
-    if (!params.is_null()) {
-        try { from_json(params, req); }
-        catch (const std::exception& e) {
-            return jsonrpc_error(-32602, std::string("Invalid params: ") + e.what(), id);
-        }
+    if (initialize_seen.load(std::memory_order_acquire)) {
+        return jsonrpc_error(-32600, "initialize may only be called once", id);
+    }
+    if (!require_object(params)
+        || !params.contains("protocolVersion")
+        || !params["protocolVersion"].is_number_integer()
+        || params["protocolVersion"].get<std::int64_t>() < 0
+        || params["protocolVersion"].get<std::int64_t>() > 65535
+        || (params.contains("clientCapabilities")
+            && !params["clientCapabilities"].is_object())
+        || (params.contains("clientInfo")
+            && !params["clientInfo"].is_object()
+            && !params["clientInfo"].is_null())) {
+        return jsonrpc_error(-32602, "Invalid params: malformed initialize request", id);
     }
 
+    InitializeRequest req;
+    try { from_json(params, req); }
+    catch (const std::exception& e) {
+        return jsonrpc_error(-32602, std::string("Invalid params: ") + e.what(), id);
+    }
+    bool expected = false;
+    if (!initialize_seen.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel)) {
+        return jsonrpc_error(-32600, "initialize may only be called once", id);
+    }
+    client_caps = req.client_capabilities;
+
     InitializeResponse resp;
-    resp.protocol_version    = req.protocol_version > 0 ? req.protocol_version : 1;
-    resp.agent_capabilities  = caps;
-    resp.agent_info          = info;
+    // ACP v1 negotiation: return the client's version when supported,
+    // otherwise return the latest version this agent supports (v1).
+    resp.protocol_version = 1;
+    resp.agent_capabilities = caps;
+    resp.agent_info = info;
 
     initialized.store(true, std::memory_order_release);
 
@@ -306,12 +346,37 @@ ACPServer::Impl::handle_initialize(const neograph::json& params,
 neograph::json
 ACPServer::Impl::handle_session_new(const neograph::json& params,
                                     const neograph::json& id) {
-    NewSessionRequest req;
-    if (!params.is_null()) {
-        try { from_json(params, req); }
-        catch (const std::exception& e) {
-            return jsonrpc_error(-32602, std::string("Invalid params: ") + e.what(), id);
+    if (!initialized.load(std::memory_order_acquire)) {
+        return jsonrpc_error(-32000, "initialize must be called first", id);
+    }
+    if (!require_object(params)
+        || !has_string(params, "cwd")
+        || !has_array(params, "mcpServers")) {
+        return jsonrpc_error(-32602, "Invalid params: session/new requires cwd and mcpServers", id);
+    }
+    if (params.contains("additionalDirectories")
+        && !params["additionalDirectories"].is_array()) {
+        return jsonrpc_error(-32602, "Invalid params: additionalDirectories must be an array", id);
+    }
+    for (const auto& path : params.value("additionalDirectories", neograph::json::array())) {
+        if (!path.is_string() || path.get<std::string>().empty()
+            || path.get<std::string>().front() != '/') {
+            return jsonrpc_error(-32602, "Invalid params: workspace paths must be absolute", id);
         }
+    }
+    for (const auto& server : params["mcpServers"]) {
+        if (!server.is_object()) {
+            return jsonrpc_error(-32602, "Invalid params: MCP servers must be objects", id);
+        }
+    }
+    const auto cwd = params["cwd"].get<std::string>();
+    if (cwd.empty() || cwd.front() != '/') {
+        return jsonrpc_error(-32602, "Invalid params: cwd must be absolute", id);
+    }
+    NewSessionRequest req;
+    try { from_json(params, req); }
+    catch (const std::exception& e) {
+        return jsonrpc_error(-32602, std::string("Invalid params: ") + e.what(), id);
     }
 
     auto sid = fresh_session_id();
@@ -319,10 +384,8 @@ ACPServer::Impl::handle_session_new(const neograph::json& params,
         std::lock_guard lk(sessions_mu);
         sessions[sid] = req.cwd;
     }
-
     NewSessionResponse resp;
     resp.session_id = sid;
-
     neograph::json rj;
     to_json(rj, resp);
     return jsonrpc_result(std::move(rj), id);
@@ -331,6 +394,22 @@ ACPServer::Impl::handle_session_new(const neograph::json& params,
 neograph::json
 ACPServer::Impl::handle_session_resume(const neograph::json& params,
                                        const neograph::json& id) {
+    if (!initialized.load(std::memory_order_acquire)) {
+        return jsonrpc_error(-32000, "initialize must be called first", id);
+    }
+    if (!caps.session.resume) {
+        return jsonrpc_error(-32601, "session/resume is not supported", id);
+    }
+    if (!require_object(params)
+        || !has_string(params, "sessionId")
+        || !has_string(params, "cwd")
+        || (params.contains("mcpServers") && !params["mcpServers"].is_array())) {
+        return jsonrpc_error(-32602, "Invalid params: malformed session/resume request", id);
+    }
+    const auto cwd = params["cwd"].get<std::string>();
+    if (cwd.front() != '/') {
+        return jsonrpc_error(-32602, "Invalid params: cwd must be absolute", id);
+    }
     ResumeSessionRequest req;
     try { from_json(params, req); }
     catch (const std::exception& e) {
@@ -385,12 +464,56 @@ ACPServer::Impl::handle_session_resume(const neograph::json& params,
 void
 ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                                        const neograph::json& params,
-                                       const neograph::json& id) {
+                                       const neograph::json& id,
+                                       bool reply_expected) {
+    if (!initialized.load(std::memory_order_acquire)) {
+        if (reply_expected) emit(jsonrpc_error(-32000, "initialize must be called first", id));
+        return;
+    }
+    if (!require_object(params)
+        || !has_string(params, "sessionId")
+        || !has_array(params, "prompt")) {
+        if (reply_expected) {
+            emit(jsonrpc_error(-32602, "Invalid params: session/prompt requires sessionId and prompt", id));
+        }
+        return;
+    }
+    for (const auto& block : params["prompt"]) {
+        if (!block.is_object() || !has_string(block, "type")) {
+            if (reply_expected) {
+                emit(jsonrpc_error(-32602, "Invalid params: malformed content block", id));
+            }
+            return;
+        }
+    }
     PromptRequest req;
     try { from_json(params, req); }
     catch (const std::exception& e) {
-        emit(jsonrpc_error(-32602, std::string("Invalid params: ") + e.what(), id));
+        if (reply_expected) {
+            emit(jsonrpc_error(-32602, std::string("Invalid params: ") + e.what(), id));
+        }
         return;
+    }
+    {
+        std::lock_guard lk(workers_mu);
+        if (resuming_sessions.contains(req.session_id)) {
+            if (reply_expected) {
+                emit(jsonrpc_error(-32000,
+                                   "session_id " + req.session_id
+                                       + " is already in use",
+                                   id));
+            }
+            return;
+        }
+    }
+    {
+        std::lock_guard lk(sessions_mu);
+        if (!sessions.contains(req.session_id)) {
+            if (reply_expected) {
+                emit(jsonrpc_error(-32002, "Unknown session: " + req.session_id, id));
+            }
+            return;
+        }
     }
 
     // Backpressure: refuse new prompts when the in-flight cap is hit
@@ -427,7 +550,7 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
         }
     }
     if (!rejection.is_null()) {
-        emit(rejection);
+        if (reply_expected) emit(rejection);
         return;
     }
 
@@ -436,9 +559,6 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
     bool resume_pending = false;
     {
         std::lock_guard lk(sessions_mu);
-        if (sessions.count(req.session_id) == 0) {
-            sessions[req.session_id] = "";
-        }
         task_cancel = std::make_shared<neograph::graph::CancelToken>();
         active_cancel_tokens[req.session_id] = task_cancel;
         pre_cancelled = pending_cancels.erase(req.session_id) != 0;
@@ -463,7 +583,7 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
 #endif
         std::thread worker(
             [this, req = std::move(req), id, task_cancel, reservation,
-              resume_pending]() mutable {
+              resume_pending, reply_expected]() mutable {
                 bool response_attempted = false;
                 bool terminal_committed = false;
                 auto cleanup = [&] {
@@ -629,23 +749,26 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                     // cannot observe a stale single-flight reservation.
                     reservation->release_session();
 
-                    PromptResponse resp;
-                    resp.stop_reason = stop;
-                    neograph::json rj;
-                    to_json(rj, resp);
-                    response_attempted = true;
-                    emit(jsonrpc_result(std::move(rj), id));
+                    if (reply_expected) {
+                        PromptResponse resp;
+                        resp.stop_reason = stop;
+                        neograph::json rj;
+                        to_json(rj, resp);
+                        response_attempted = true;
+                        emit(jsonrpc_result(std::move(rj), id));
+                    }
                     cleanup();
                 } catch (const std::exception& e) {
                     cleanup();
-                    if (!response_attempted) emit_internal_error(
-                        id, "ACP prompt worker failed: ", e.what());
+                    if (reply_expected && !response_attempted) {
+                        emit_internal_error(id, "ACP prompt worker failed: ", e.what());
+                    }
                 } catch (...) {
                     cleanup();
-                    if (!response_attempted) emit_internal_error(
-                        id, "ACP prompt worker failed: unknown exception");
+                    if (reply_expected && !response_attempted) {
+                        emit_internal_error(id, "ACP prompt worker failed: unknown exception");
+                    }
                 }
-                // The captured reservation is the last owner after dispatch
                 // returns. Its destructor cleans every worker exit path.
             });
 
@@ -660,14 +783,15 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
         reservation.reset();
     } catch (const std::exception& e) {
         // If std::thread construction fails, no worker owns the reservation.
-        // Dropping the local owner rolls back count + session before replying.
         reservation.reset();
-        emit_internal_error(
-            id, "ACP prompt worker launch failed: ", e.what());
+        if (reply_expected) {
+            emit_internal_error(id, "ACP prompt worker launch failed: ", e.what());
+        }
     } catch (...) {
         reservation.reset();
-        emit_internal_error(id,
-            "ACP prompt worker launch failed: unknown exception");
+        if (reply_expected) {
+            emit_internal_error(id, "ACP prompt worker launch failed: unknown exception");
+        }
     }
 }
 
@@ -796,6 +920,18 @@ neograph::json
 ACPServer::call_client(std::string method,
                        neograph::json params,
                        std::chrono::milliseconds timeout) {
+    if (!impl_->initialized.load(std::memory_order_acquire)) {
+        throw std::runtime_error(
+            "ACPServer::call_client: initialize must complete before client requests");
+    }
+    if (method == "fs/read_text_file" && !impl_->client_caps.fs.read_text_file) {
+        throw std::runtime_error(
+            "ACPServer::call_client: client did not advertise fs.readTextFile");
+    }
+    if (method == "fs/write_text_file" && !impl_->client_caps.fs.write_text_file) {
+        throw std::runtime_error(
+            "ACPServer::call_client: client did not advertise fs.writeTextFile");
+    }
     auto s_snap = std::atomic_load_explicit(&impl_->sink_,
                                             std::memory_order_acquire);
     if (!s_snap || !*s_snap) {
@@ -844,18 +980,31 @@ ACPServer::handle_message(const neograph::json& env) {
         throw std::runtime_error("injected ACP handle_message failure");
     }
 #endif
-    bool has_method = env.contains("method") && !env["method"].is_null();
+    const auto invalid_request_id =
+        env.is_object() && env.contains("id") && valid_request_id(env["id"])
+            ? env["id"] : neograph::json();
+    if (!env.is_object()
+        || !env.contains("jsonrpc")
+        || env["jsonrpc"] != "2.0") {
+        return jsonrpc_error(-32600, "Invalid Request", invalid_request_id);
+    }
+    const bool has_method = env.contains("method");
 
-    // Response to one of OUR outbound requests — fulfil the promise
-    // and emit no reply.
+    // Response to one of our outbound requests — fulfil the promise and emit
+    // no reply. Outbound IDs are integers; inbound request IDs may also be
+    // strings and are echoed by the normal request handlers below.
     if (!has_method) {
-        if (env.contains("id")) {
-            auto id_v = env["id"];
-            std::int64_t id = id_v.is_number_integer() ? id_v.get<std::int64_t>() : -1;
+        if (!env.contains("id") || !valid_request_id(env["id"])
+            || (env.contains("result") == env.contains("error"))
+            || (env.contains("error") && !env["error"].is_object())) {
+            return jsonrpc_error(-32600, "Invalid Request", invalid_request_id);
+        }
+        if (env["id"].is_number_integer()) {
+            const auto numeric_id = env["id"].get<std::int64_t>();
             std::shared_ptr<std::promise<neograph::json>> p;
             {
                 std::lock_guard lk(impl_->pending_mu);
-                auto it = impl_->pending.find(id);
+                auto it = impl_->pending.find(numeric_id);
                 if (it != impl_->pending.end()) {
                     p = it->second;
                     impl_->pending.erase(it);
@@ -866,23 +1015,34 @@ ACPServer::handle_message(const neograph::json& env) {
         return {};
     }
 
-    auto method = env.value("method", std::string());
-    auto params = env.contains("params") ? env["params"] : neograph::json::object();
-    auto id     = env.contains("id") ? env["id"] : neograph::json();
-    bool is_notification = !env.contains("id");
+    if (!env["method"].is_string()
+        || (env.contains("id") && !valid_request_id(env["id"]))) {
+        return jsonrpc_error(-32600, "Invalid Request", invalid_request_id);
+    }
+    const auto method = env["method"].get<std::string>();
+    const auto params = env.contains("params") ? env["params"] : neograph::json::object();
+    const auto id = env.contains("id") ? env["id"] : neograph::json();
+    const bool is_notification = !env.contains("id");
 
+    // session/cancel is defined as a notification, never a request.
+    if (method == "session/cancel" && !is_notification) {
+        return jsonrpc_error(-32600, "session/cancel must be a notification", id);
+    }
     if (method == "initialize") {
-        return impl_->handle_initialize(params, id);
+        auto response = impl_->handle_initialize(params, id);
+        return is_notification ? neograph::json() : response;
     }
     if (method == "session/new") {
-        return impl_->handle_session_new(params, id);
+        auto response = impl_->handle_session_new(params, id);
+        return is_notification ? neograph::json() : response;
     }
     if (method == "session/resume") {
-        return impl_->handle_session_resume(params, id);
+        auto response = impl_->handle_session_resume(params, id);
+        return is_notification ? neograph::json() : response;
     }
     if (method == "session/prompt") {
-        // Async dispatch — the worker will emit the response via the sink.
-        impl_->handle_session_prompt(*this, params, id);
+        // Async dispatch — the worker emits a response only for a request.
+        impl_->handle_session_prompt(*this, params, id, !is_notification);
         return {};
     }
     if (method == "session/cancel") {

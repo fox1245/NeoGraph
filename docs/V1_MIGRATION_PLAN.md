@@ -4,7 +4,7 @@ Status: Accepted execution plan
 Date: 2026-07-31
 Architecture: `V1_ARCHITECTURE.md`
 Implementation gates: maintained as private project controls
-Audited source: `d80c316de1f3a10f0948477c3689a0b1b80d771b`
+Audited source: `6b5a36fbcdafffb5da766922321157140ab906ce`
 
 ## 1. Starting point
 
@@ -178,7 +178,7 @@ against source, tests, and current documents.
 | #218 scoped registries | **Partial.** Local overlays and isolation tests exist; global fallback remains. | Freeze immutable registry snapshots and remove ambient fallback for strict Core/Program admission. Migrate Python registration deliberately. | Core/Program / P1 |
 | #219 MCP transport split | **Partial.** Internal sessions exist, but protocol/tool code still branches on HTTP vs stdio. | Add one MCP transport capability with owned cancellation, timeout, shutdown, and error translation. | Protocol / P6 |
 | #220 SchemaProvider split | **Partial.** Request mapping has a test seam; parsing, transport, pools, and callback ownership remain coupled. | Extract value-level parsers, then transport strategy; preserve the Provider-facing contract. | Extension/Protocol / P6 |
-| #230 Galaxy A34 benchmark | **Partial.** Measurement exists; async-off CMake benchmark guards and repository result documentation do not. | Fix target guards, reproduce from one source tree, keep the result device-specific, then close. | Performance/Release / P0 |
+| #230 Galaxy A34 benchmark | **Done in this branch.** Async-off CMake target guards, one-source-tree reproduction instructions, explicit machine/compiler metadata, and repeated-median result output now exist. | Retain the measurement as device-specific evidence; do not promote it to a universal performance gate. | Performance/Release / P0 |
 | #231 adaptive fan-out/token path | **Pending.** Only a fixed no-op 5-way benchmark exists. | Keep as a measurement program. Add width × body cost × worker and token batching/crossover tests before changing defaults. | Core/Performance / independent lane |
 | #237 channel lifecycle | **Partial.** Reducers, full snapshots, SQLite deduplication, and pending writes exist; combine/retention/checkpoint policy is not explicit. | Define separate channel combine, retention, and persistence policies; resolve executor/validator order wording and measure long histories. | Core/State / P1-P3 |
 | #238 subgraph persistence | **Partial.** Per-invocation derived identity and context inheritance exist; mode and nested inspection do not. | Add explicit stateless/per-invocation/per-thread modes, stable graph paths, nested inspection, and concurrency rules after #237. | Core/Program / P3 |
@@ -198,8 +198,8 @@ against source, tests, and current documents.
 ### Issue housekeeping order
 
 1. Close/reclassify #112, #179, #192, and #254 with the evidence above.
-2. Finish the bounded validation items in #188, #189, #190, and #230.
-3. Rewrite #187 and #252 to point at Core + Program and this plan.
+2. Finish the bounded validation items in #188, #189, and #190.
+3. Retain #230 as a device-specific benchmark record and update #187/#252 to point at Core + Program and this plan.
 4. Keep #193, #214-#220, #237-#251, #256, and #257 as focused deliverables
    with the revised phase ownership.
 5. Keep #231/#255/#260 out of the architecture critical path. Performance work
@@ -439,6 +439,9 @@ typed Program/Core dispatch path without a generic bytecode VM.
 This audit is source-and-contract evidence, not a claim that every historical
 consumer has migrated. “Partial” means the local contract exists but one or
 more acceptance gates in the corresponding architecture issue remain open.
+The current local slice is covered by focused normal, ASan/UBSan, and TSan
+regressions; the sanitizer runs were intentionally scoped to the new
+concurrency/resource contracts rather than presented as a full sanitizer gate.
 
 | Area | Status | Evidence and remaining boundary |
 |---|---|---|
@@ -446,13 +449,86 @@ more acceptance gates in the corresponding architecture issue remain open.
 | Durable child Program lifecycle (Issue #4) | **Implemented with bounded recursive authority.** | `start_child`, durable publication/dispatch/completion, recovery, timeout, duplicate-dispatch, and lineage tests exist. Child grants carry remaining descendant depth, attenuate by one per hop, and reserve subtree child quotas before publication. |
 | Program-backed A2A collaboration (Issue #6) | **Done for the current adapter contract.** | `ProgramAgentAdapter`, owner-scoped `CollaborationMailbox`, authenticated peer/task authorization, replay/idempotency, revocation, and artifact attenuation tests. |
 | Frozen Harness implementation contract (Issue #8) | **Done for the local contract surface.** | Immutable `ContractManifest`/`ContractRun`, independently bound evidence, fail-closed verification, SQLite restart/tamper coverage, and Harness conformance tests. |
-| Evidence-ledger swarm foundation (Issue #11) | **Partial.** | `EvidenceLedger` and SQLite persistence cover source identity, task leases/expiry, immutable evidence, contradictions, negative findings, idempotent publication, and claim resolution. Scheduler/task-board policy and large-swarm adaptive control remain open. |
-| Async tool/resource arbitration (Issue #13) | **Partial.** | Versioned policies, conservative defaults, keyed leases, cancellation, queue deadlines, and async controller paths exist. Process bridges, complete typed terminal/reconciliation taxonomy, bounded priority inheritance, and owner-weighted fairness remain open. |
-| Host admission and adaptive concurrency (Issue #14) | **Partial.** | Multidimensional host vectors, FIFO/aging admission, RAII leases, cancellation, and snapshots exist. Effective cgroup detection, durable parked-child state, pressure hysteresis, adaptive promotion, and restart remeasurement remain open. |
+| Evidence-ledger swarm foundation (Issue #11) | **Implemented foundation; issue remains partial.** | `EvidenceLedger`, SQLite persistence, `ResearchTaskBoard`, durable board budgets, source/version identity, lease expiry/reassignment, owner isolation, immutable publication, negative evidence, contradiction resolution, and restart tests exist in `src/core/research_task_board.cpp`, `src/core/sqlite_evidence_ledger.cpp`, and `tests/test_evidence_ledger.cpp`. The 100-worker/Program, federated/NetLAB, adaptive large-swarm, and full fault/benchmark matrices remain open. |
+| Async tool/resource arbitration (Issue #13) | **Implemented local execution surface; issue remains partial.** | `ToolExecutionController` has awaitable native/thread/process bridges, versioned policy classes, keyed/exclusive/capacity/single-flight/external-limited admission, cancellation/deadlines, output limits, process-group cleanup, typed terminal results, and reconciliation flags. `tests/test_tool_execution.cpp` covers these paths and host-admission integration. Weighted owner/root fairness, complete bounded priority inheritance, durable queue/restart recovery, and the full threat/benchmark matrix remain open. |
+| Host admission and adaptive concurrency (Issue #14) | **Implemented bounded controller; issue remains partial.** | `HostResourceProfile::detect_current` applies conservative process/cgroup-v2, memory, file-descriptor, disk, and safety-reserve limits; `HostAdmissionController` adds component-wise intersection, FIFO/aging admission, RAII leases, cancellation, capacity shrink, pressure reduction, hysteresis, bounded recovery, and snapshots. `tests/test_host_admission.cpp` covers the local contract. Durable parked-child state, full GPU/network/provider/device detection, restart remeasurement, cooperative preemption, and the 1,000-logical-child capacity/benchmark matrix remain open. |
 | Task-specific Harness synthesis/reuse (Issue #9) | **Partial.** | Strict Program compilation/admission, child execution, A2A, evidence, and contract verification are available. Reusable Harness retrieval/rebinding, attributable evaluation/feedback, and the benchmark/fault matrix remain open. |
-| Recursive child authority (Issue #12) | **Implemented through the hard-ceiling contract.** | Leaf-only `(max_child_depth,max_total_children)=(0,0)` policy remains valid; explicit paired grants support bounded recursion through the hard depth ceiling, with fail-closed depth/count checks and persisted recovery guards. |
+| Recursive child authority (Issue #12) | **Implemented local bounded slice; issue remains partial.** | Leaf-only `(max_child_depth,max_total_children)=(0,0)` policy remains valid; explicit paired grants support bounded recursion through the hard depth ceiling, with fail-closed depth/count checks and persisted recovery guards. Full issue acceptance remains open as recorded in the issue comment. |
 | ACP/gRPC Program cutover and shared protocol suite | **Partial.** | Compatibility adapters still directly construct Core `RunConfig`; no Program parity claim is made. |
 | NeoCode/NeoProtocol rebase (Issue #7) | **Blocked externally, fail-closed locally.** | Compatibility metadata rejects a current-consumer claim without an explicit rebase revision and conformance evidence. |
+Status (2026-08-05): **Implemented for the currently admitted non-child vocabulary.**
+The typed direct-dispatch path covers sequence, branch, bounded loop/retry,
+parallel/race/quorum/map, await, cancel, checkpoint, emit, return, and Core
+operations. Durable `spawn`/child `await` remains the P6 child path; arbitrary
+dynamic `Send` and topology mutation remain out of scope.
+Status (2026-08-05): **Partial.** In-memory and SQLite catalog/store activation,
+rollback, owner isolation, retention, and migration records are implemented.
+PostgreSQL Program transition persistence and backend-parity process-restart
+proof remain open.
+Status (2026-08-05): **Partial.** Migration classes, exact compatible forks,
+journal CAS, pending input/effect records, outbox binding, and ambiguity
+classification are implemented locally. The runtime-level crash gate spanning
+Core checkpoint, pending value, Program transition, and journal publication
+remains open.
+Status (2026-08-05): **Partial.** Child modules, receipts, bounded durable
+spawn/await, authority attenuation, lineage, and artifact/LRO primitives exist.
+The MCP transport split and SchemaProvider parser/transport split remain open.
+Status (2026-08-05): **Partial.** Host admission, owner-scoped Program/A2A
+identity, and consent/attenuation foundations exist. End-to-end tenant,
+authenticated host-model, and credentialless trusted global-MCP boundaries
+remain open.
+Status (2026-08-05): **Partial.** Core and Program quickstarts plus the example
+disposition manifest exist, but only the quickstarts are verified. ACP/gRPC
+Program cutover, component/example smoke coverage, SDK/ABI/storage freeze, and
+translated documentation remain open.
+### PR7 implementation checkpoint — historical closure and current boundary
+
+The end-of-day checkpoint below recorded the first Harness-to-Program cutover
+and intentionally preserved a failing durable-adapter boundary. That boundary
+was subsequently closed by the PR7 hardening work recorded in issue #3 and is
+not a current failure claim.
+
+The completed local PR7 slices are:
+
+- Harness request translation, Program compilation/admission, runtime start,
+  resume, cancel, reconnect, recorded replay, and compatible fork projection;
+- owner-scoped Program artifact/run lookup and reconnect snapshots;
+- typed pending input/effect persistence, exact-call reconciliation, TTL
+  handling, and one-winner resume compare-and-swap;
+- source-transition lookup and pending-value forwarding for cross-artifact
+  compatible forks;
+- recorded capability binding isolation from live bindings and host
+  configuration participation in binding/artifact identity;
+- Program journal/transition-store publication and the P2 Harness file/SQLite
+  adapters.
+
+The historical checkpoint failures were:
+
+- `HarnessProgramStoreTest.SqliteReopensExactOwnerBoundRunAndLegacyRowsStillWork`;
+- `HarnessProgramStoreTest.TwoSqliteInstancesHaveOneCasWinnerAndRollbackInvalidBatch`;
+- `HarnessProgramStoreTest.ReopenRejectsTamperAndMissingPublishedOutbox`.
+
+Issue #3 records their resolution through provider-budget accounting,
+deterministic host identities, durable pending atomicity, Harness conformance
+coverage, transition fault injection, recovery, and the final validation gates.
+Its recorded configured CTest result was 1,281 passed, three explicitly
+skipped live/integration tests, and no failures; issue #3 is closed.
+
+Current focused evidence in this checkout also includes:
+
+- 83 focused ASan/UBSan tests passed with leak detection and fail-fast
+  sanitizer settings;
+- the same 83 focused contention, tool, host, ledger, ACP, and checkpoint
+  tests passed under TSan with ASLR disabled as required by the build;
+- the implementation audit above and issue #2 retain the remaining P3-P8
+  boundaries instead of treating PR7 as the complete v1 redesign.
+
+A PR that changes both the Core execution mechanism and Program semantics is
+still too large. Split at the layer boundary and prove equivalence first.
+The following is the v1 completion definition, not a claim that the current
+branch has already passed every gate. Current P3 is implemented for the
+bounded admitted vocabulary; P4-P8 and the external NeoCode/NeoProtocol rebase
+remain explicitly partial or blocked in the implementation audit above.
 
 
 ### Stored-data migration
@@ -515,6 +591,11 @@ Exit gate: Core-direct and Program-wrapped results are equivalent; current
 Harness conformance passes through Program; no Harness-only execution path.
 
 ### P3 — Non-child orchestration vocabulary
+Status (2026-08-05): **Implemented for the currently admitted non-child vocabulary.**
+The typed direct-dispatch path covers sequence, branch, bounded loop/retry,
+parallel/race/quorum/map, await, cancel, checkpoint, emit, return, and Core
+operations. Durable `spawn`/child `await` remains the P6 child path; arbitrary
+dynamic `Send` and topology mutation remain out of scope.
 
 Order:
 
@@ -551,6 +632,10 @@ portable performance promise. Any future generic interpreter requires a new
 measured architecture decision.
 
 ### P4 — Versions, activation, and durable stores
+Status (2026-08-05): **Partial.** In-memory and SQLite catalog/store activation,
+rollback, owner isolation, retention, and migration records are implemented.
+PostgreSQL Program transition persistence and backend-parity process-restart
+proof remain open.
 
 Deliverables:
 
@@ -570,6 +655,11 @@ and SQLite and PostgreSQL pass the same persistence contract suite across a real
 process restart.
 
 ### P5 — Migration, journal, and effect safety
+Status (2026-08-05): **Partial.** Migration classes, exact compatible forks,
+journal CAS, pending input/effect records, outbox binding, and ambiguity
+classification are implemented locally. The runtime-level crash gate spanning
+Core checkpoint, pending value, Program transition, and journal publication
+remains open.
 
 Deliverables:
 
@@ -583,6 +673,9 @@ source-visible state, published lineage, journal, and effects; crash injection
 yields no false success or untracked duplicate.
 
 ### P6 — Child Programs, modules, and extension cleanup
+Status (2026-08-05): **Partial.** Child modules, receipts, bounded durable
+spawn/await, authority attenuation, lineage, and artifact/LRO primitives exist.
+The MCP transport split and SchemaProvider parser/transport split remain open.
 
 Deliverables:
 
@@ -608,6 +701,10 @@ crash/restart at the child publication/dispatch boundary produces neither a
 lost child nor an untracked duplicate.
 
 ### P7 — Tenant and host capability boundary
+Status (2026-08-05): **Partial.** Host admission, owner-scoped Program/A2A
+identity, and consent/attenuation foundations exist. End-to-end tenant,
+authenticated host-model, and credentialless trusted global-MCP boundaries
+remain open.
 
 Deliverables:
 
@@ -625,6 +722,10 @@ Exit gate: same-public-ID cross-tenant matrix has zero leakage; no ambient host
 credential can enter a tenant Program.
 
 ### P8 — SDK convergence and v1 cutover
+Status (2026-08-05): **Partial.** Core and Program quickstarts plus the example
+disposition manifest exist, but only the quickstarts are verified. ACP/gRPC
+Program cutover, component/example smoke coverage, SDK/ABI/storage freeze, and
+translated documentation remain open.
 
 Deliverables:
 
@@ -678,11 +779,14 @@ rows merely to reduce PR count.
 | 16 | Host model/global MCP adapters | clean profile, process-tree cancel, no secret extraction, local-only guard |
 | 17 | SDK cleanup and v1 removal | all callers migrated, installed consumers, storage migration, docs |
 
-### PR7 implementation checkpoint — 2026-07-31
+### PR7 implementation checkpoint — historical closure and current boundary
 
-PR7 is implemented as an end-of-day checkpoint but is **not merge-ready**. The
-current branch has cut Harness execution ownership over to Program and has
-focused regression proof for the following completed slices:
+The end-of-day checkpoint below recorded the first Harness-to-Program cutover
+and intentionally preserved a failing durable-adapter boundary. That boundary
+was subsequently closed by the PR7 hardening work recorded in issue #3 and is
+not a current failure claim.
+
+The completed local PR7 slices are:
 
 - Harness request translation, Program compilation/admission, runtime start,
   resume, cancel, reconnect, recorded replay, and compatible fork projection;
@@ -696,55 +800,29 @@ focused regression proof for the following completed slices:
 - Program journal/transition-store publication and the P2 Harness file/SQLite
   adapters.
 
-Focused checks observed during this checkpoint include:
-
-- `ProgramRuntimeTest.TypedPendingEffectPublishesOnceAndResumesByExactCallIdentity`;
-- `HarnessProgramCutover.RecordedReplayUsesCapturedCallsWithoutLiveDispatch`;
-- `HarnessProgramCutover.ReconnectsInterruptedSqliteRunAndContinuesExactCheckpoint`;
-- `HarnessProgramCutover.ConcurrentSqliteReconnectResumeHasOneCasWinnerAndOneDispatch`;
-- `HarnessProgramCutover.CrossArtifactForkReadsSourceTransitionsAndForwardsPendingValue`;
-- `HarnessProgramCutover.HostConfigurationChangesBindingAndArtifactIdentity`.
-
-End-of-day validation rebuilt all configured targets successfully, then ran
-`ctest --test-dir build-program-pr3-full -j8 --output-on-failure`: 1,044 tests
-were discovered, three live/environment tests were skipped, and exactly three
-tests failed:
+The historical checkpoint failures were:
 
 - `HarnessProgramStoreTest.SqliteReopensExactOwnerBoundRunAndLegacyRowsStillWork`;
 - `HarnessProgramStoreTest.TwoSqliteInstancesHaveOneCasWinnerAndRollbackInvalidBatch`;
 - `HarnessProgramStoreTest.ReopenRejectsTamperAndMissingPublishedOutbox`.
 
-All three failures are in the durable Harness Program transition adapter and
-remain part of item 3 below. The checkpoint therefore records a reproducible
-failing boundary rather than claiming a green PR7 gate.
+Issue #3 records their resolution through provider-budget accounting,
+deterministic host identities, durable pending atomicity, Harness conformance
+coverage, transition fault injection, recovery, and the final validation gates.
+Its recorded configured CTest result was 1,281 passed, three explicitly
+skipped live/integration tests, and no failures; issue #3 is closed.
 
-The next session must close these items before PR7 review or merge:
+Current focused evidence in this checkout also includes:
 
-1. **Finite provider accounting.** Charge each provider/tool round against the
-   admitted Program budget, enforce the provider timeout and output-token
-   ceiling, and prove that a provider that keeps requesting tools terminates
-   through the Program cancellation/budget path.
-2. **Installable host identities.** Replace the example host's repeated-character
-   placeholder digests with deterministic SHA-256 identities derived from the
-   installed provider/tool implementation and non-secret host configuration;
-   retain tests proving configuration changes alter binding and artifact IDs.
-3. **Durable pending atomicity.** Add the crash gate for the Core checkpoint,
-   typed pending value, Program transition, and journal publication boundary in
-   both in-memory and SQLite-backed reconnect paths. No terminal/interrupted
-   state may become visible without the exact resumable checkpoint and pending
-   identity.
-4. **Harness conformance migration.** Restore the complete applicable legacy
-   Harness matrix through the Program path: preset/DSL/core, file and SQLite
-   stores, cancel, reconnect, recorded replay, fork, tamper rejection, pending
-   input/effect reconciliation, owner isolation, and all six MCP callbacks.
-5. **Final gates.** Run the focused PR7 contract suite, the complete Program and
-   Harness suites, sanitizer builds, static/shared installed consumers, package
-   checks, and the independent PR7 reviewer. Record any environment-specific
-   gaps explicitly; do not treat this checkpoint commit as PR7 approval.
+- 83 focused ASan/UBSan tests passed with leak detection and fail-fast
+  sanitizer settings;
+- the same 83 focused contention, tool, host, ledger, ACP, and checkpoint
+  tests passed under TSan with ASLR disabled as required by the build;
+- the implementation audit above and issue #2 retain the remaining P3-P8
+  boundaries instead of treating PR7 as the complete v1 redesign.
 
-A PR that changes both the Core execution mechanism and Program semantics is too
-large. Split at the layer boundary and prove equivalence first.
-
+A PR that changes both the Core execution mechanism and Program semantics is
+still too large. Split at the layer boundary and prove equivalence first.
 ## 8. Test and measurement strategy
 
 ### Behavior

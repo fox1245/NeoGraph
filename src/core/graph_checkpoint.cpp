@@ -5,6 +5,7 @@
 #include <asio/bind_executor.hpp>
 #include <asio/post.hpp>
 #include <asio/this_coro.hpp>
+#include <asio/executor_work_guard.hpp>
 #include <asio/thread_pool.hpp>
 #include <asio/use_awaitable.hpp>
 
@@ -17,7 +18,9 @@
 #include <random>
 #include <sstream>
 #include <stdexcept>
+#include <mutex>
 #include <thread>
+#include <condition_variable>
 #include <type_traits>
 
 namespace neograph::graph {
@@ -72,14 +75,41 @@ asio::thread_pool& blocking_checkpoint_pool() {
     return pool;
 }
 
+template <typename Handler>
+void post_checkpoint_completion(asio::any_io_executor caller_executor,
+                                std::shared_ptr<Handler> completion) {
+    struct CompletionBarrier {
+        std::condition_variable cv;
+        std::mutex mutex;
+        bool post_returned = false;
+    };
+
+    auto barrier = std::make_shared<CompletionBarrier>();
+    asio::post(
+        caller_executor,
+        [completion = std::move(completion), barrier]() mutable {
+            std::unique_lock lock(barrier->mutex);
+            barrier->cv.wait(lock, [&] { return barrier->post_returned; });
+            lock.unlock();
+            (*completion)();
+        });
+
+    {
+        std::lock_guard lock(barrier->mutex);
+        barrier->post_returned = true;
+    }
+    barrier->cv.notify_one();
+}
+
 template <typename Fn>
 asio::awaitable<void> run_blocking_checkpoint(Fn fn, LegacyBridgeOperation operation) {
     struct Result {
         std::exception_ptr error;
     };
+    auto result = std::make_shared<Result>();
 
     const auto caller_executor = co_await asio::this_coro::executor;
-    auto result = std::make_shared<Result>();
+    auto caller_work = asio::make_work_guard(caller_executor);
     auto completion_token = asio::bind_executor(caller_executor, asio::use_awaitable);
     co_await asio::async_initiate<decltype(completion_token), void()>(
         [fn = std::move(fn), result, caller_executor, operation](auto handler) mutable {
@@ -95,10 +125,8 @@ asio::awaitable<void> run_blocking_checkpoint(Fn fn, LegacyBridgeOperation opera
                     } catch (...) {
                         result->error = std::current_exception();
                     }
-                    asio::post(caller_executor,
-                               [completion = std::move(completion)]() mutable {
-                                   (*completion)();
-                               });
+                    post_checkpoint_completion(
+                        caller_executor, std::move(completion));
                 });
         },
         completion_token);
@@ -113,9 +141,10 @@ asio::awaitable<T> run_blocking_checkpoint(Fn fn, LegacyBridgeOperation operatio
         std::optional<T> value;
         std::exception_ptr error;
     };
+    auto result = std::make_shared<Result>();
 
     const auto caller_executor = co_await asio::this_coro::executor;
-    auto result = std::make_shared<Result>();
+    auto caller_work = asio::make_work_guard(caller_executor);
     auto completion_token = asio::bind_executor(caller_executor, asio::use_awaitable);
     co_await asio::async_initiate<decltype(completion_token), void()>(
         [fn = std::move(fn), result, caller_executor, operation](auto handler) mutable {
@@ -131,10 +160,8 @@ asio::awaitable<T> run_blocking_checkpoint(Fn fn, LegacyBridgeOperation operatio
                     } catch (...) {
                         result->error = std::current_exception();
                     }
-                    asio::post(caller_executor,
-                               [completion = std::move(completion)]() mutable {
-                                   (*completion)();
-                               });
+                    post_checkpoint_completion(
+                        caller_executor, std::move(completion));
                 });
         },
         completion_token);

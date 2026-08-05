@@ -58,6 +58,7 @@ int main(int argc, char** argv) {
               << argv[1] << " " << argv[2] << "\n";
 
     neograph::mcp::MCPClient mcp_client(server_argv);
+    mcp_client.initialize("example-mcp-stdio");
 
     auto tools = mcp_client.get_tools();
     std::cout << "[*] Discovered " << tools.size() << " tools over stdio:\n";
