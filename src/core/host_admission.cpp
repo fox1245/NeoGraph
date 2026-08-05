@@ -572,6 +572,14 @@ public:
         }
         std::lock_guard lock(mu_);
         ensure_running_locked();
+
+        // Samples are externally supplied evidence. A stale sample must not
+        // reopen an older pressure transition or accelerate recovery.
+        if (pressure_changed_at_ms_ > 0
+            && sample.observed_at_ms < pressure_changed_at_ms_) {
+            return;
+        }
+
         const auto target = sample.level == HostPressureLevel::Critical
                                 ? critical_capacity_percent_
                                 : sample.level == HostPressureLevel::Elevated
@@ -588,12 +596,18 @@ public:
                    && sample.observed_at_ms >= pressure_changed_at_ms_
                    && sample.observed_at_ms - pressure_changed_at_ms_
                           >= recovery_quiet_period_.count()) {
-            pressure_ = HostPressureLevel::Normal;
+            // Recovery is deliberately stepwise. Keep the last non-normal
+            // level visible until the throttled capacity reaches full size;
+            // otherwise a "normal" label would hide an active recovery
+            // throttle from admission observers.
             pressure_scale_percent_ = static_cast<std::uint8_t>(
                 std::min<std::uint32_t>(100,
                                         pressure_scale_percent_ + recovery_step_percent_));
             pressure_changed_at_ms_ = sample.observed_at_ms;
             pressure_source_ = std::move(sample.source);
+            if (pressure_scale_percent_ == 100) {
+                pressure_ = HostPressureLevel::Normal;
+            }
             profile_ = effective_profile_locked(pressure_scale_percent_,
                                                 pressure_changed_at_ms_);
         } else if (pressure_scale_percent_ == 100) {

@@ -129,6 +129,8 @@ struct NEOGRAPH_API ResearchTask {
     std::string lease_id;
     std::string leased_by;
     std::uint64_t lease_expires_at_unix_ms = 0;
+    /// Board identity that owns the active or last published reservation.
+    std::string board_id;
     std::string published_artifact_id;
 
     bool operator==(const ResearchTask&) const = default;
@@ -141,6 +143,14 @@ struct NEOGRAPH_API ResearchLeaseRequest {
     std::string worker_id;
     std::string owner_scope;
     std::uint64_t now_unix_ms = 0;
+    /**
+     * Optional durable board budget. Empty board_id preserves the raw ledger
+     * lease API; ResearchTaskBoard always supplies these fields.
+     */
+    std::string board_id;
+    std::uint32_t board_max_active_leases = 0;
+    std::uint64_t board_max_cost_microunits = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t cost_microunits = 0;
 
     bool operator==(const ResearchLeaseRequest&) const = default;
 };
@@ -153,9 +163,11 @@ struct NEOGRAPH_API ResearchTaskLease {
     std::string owner_scope;
     std::uint64_t generation = 0;
     std::uint64_t expires_at_unix_ms = 0;
+    std::string board_id;
 
     bool operator==(const ResearchTaskLease&) const = default;
 };
+
 
 /**
  * Typed material result.  `NoSupport` is first-class evidence: it records the

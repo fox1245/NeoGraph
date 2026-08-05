@@ -113,6 +113,10 @@ std::optional<ResearchTaskLease> ResearchTaskBoard::acquire_next(
         request.worker_id = worker_id;
         request.owner_scope = owner_scope;
         request.now_unix_ms = now_unix_ms;
+        request.board_id = board_id;
+        request.board_max_active_leases = budget.max_active_leases;
+        request.board_max_cost_microunits = budget.max_cost_microunits;
+        request.cost_microunits = candidate.cost;
         if (auto lease = ledger_.acquire_lease(std::move(request))) {
             return lease;
         }

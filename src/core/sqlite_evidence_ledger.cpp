@@ -74,6 +74,11 @@ public:
         if (!text) return {};
         return std::string(reinterpret_cast<const char*>(text), sqlite3_column_bytes(statement_, index));
     }
+    std::uint64_t column_int64(int index) const {
+        const auto value = sqlite3_column_int64(statement_, index);
+        if (value < 0) throw std::logic_error("negative SQLite integer in evidence ledger");
+        return static_cast<std::uint64_t>(value);
+    }
 
 private:
     sqlite3* db_ = nullptr;
@@ -166,6 +171,13 @@ CREATE INDEX IF NOT EXISTS neograph_research_artifact_claim
     ON neograph_research_artifact(owner_scope, claim_id, artifact_id);
 CREATE INDEX IF NOT EXISTS neograph_research_artifact_source
     ON neograph_research_artifact(owner_scope, source_id, artifact_id);
+CREATE TABLE IF NOT EXISTS neograph_research_board (
+    owner_scope TEXT NOT NULL,
+    board_id TEXT NOT NULL,
+    max_active_leases INTEGER NOT NULL,
+    max_cost_microunits INTEGER NOT NULL,
+    PRIMARY KEY(owner_scope, board_id)
+);
 )SQL";
 
 json to_json(const SourceIdentity& source) {
@@ -229,6 +241,7 @@ json to_json(const ResearchTask& task) {
                 {"lease_id", task.lease_id},
                 {"leased_by", task.leased_by},
                 {"lease_expires_at_unix_ms", task.lease_expires_at_unix_ms},
+                {"board_id", task.board_id},
                 {"published_artifact_id", task.published_artifact_id}};
 }
 
@@ -240,6 +253,7 @@ ResearchTask task_from_json(const json& value) {
     task.lease_id = value.at("lease_id").get<std::string>();
     task.leased_by = value.at("leased_by").get<std::string>();
     task.lease_expires_at_unix_ms = value.at("lease_expires_at_unix_ms").get<std::uint64_t>();
+    task.board_id = value.value("board_id", "");
     task.published_artifact_id = value.at("published_artifact_id").get<std::string>();
     return task;
 }
@@ -434,7 +448,7 @@ WHERE task_id = ?
 ResearchTaskLease as_lease(const ResearchTask& task) {
     return ResearchTaskLease{task.spec.task_id, task.lease_id, task.leased_by,
                              task.spec.owner_scope, task.generation,
-                             task.lease_expires_at_unix_ms};
+                             task.lease_expires_at_unix_ms, task.board_id};
 }
 
 void clear_expired_lease(ResearchTask& task, std::uint64_t now_unix_ms) {
@@ -444,6 +458,100 @@ void clear_expired_lease(ResearchTask& task, std::uint64_t now_unix_ms) {
         task.leased_by.clear();
         task.lease_expires_at_unix_ms = 0;
     }
+}
+
+constexpr std::uint64_t kSqliteIntegerMax =
+    static_cast<std::uint64_t>(std::numeric_limits<sqlite3_int64>::max());
+
+std::uint64_t board_cost_limit(const std::uint64_t value) {
+    if (value == std::numeric_limits<std::uint64_t>::max()) return kSqliteIntegerMax;
+    require(value <= kSqliteIntegerMax, "board cost limit exceeds SQLite integer range");
+    return value;
+}
+
+std::uint64_t task_cost(const ResearchTask& task) {
+    if (!task.spec.requirements.contains("cost_microunits")
+        || !task.spec.requirements.at("cost_microunits").is_number()) {
+        return 1;
+    }
+    const auto value = task.spec.requirements.at("cost_microunits").get<double>();
+    if (!std::isfinite(value) || value <= 0.0) return 1;
+    if (value >= static_cast<double>(std::numeric_limits<std::uint64_t>::max())) {
+        return std::numeric_limits<std::uint64_t>::max();
+    }
+    return static_cast<std::uint64_t>(std::ceil(value));
+}
+
+struct BoardUsage {
+    std::uint32_t active = 0;
+    std::uint64_t spent = 0;
+};
+
+BoardUsage board_usage(sqlite3* db, std::string_view owner_scope,
+                       std::string_view board_id, std::uint64_t now_unix_ms) {
+    Statement statement(db, R"SQL(
+SELECT payload FROM neograph_research_task
+WHERE owner_scope = ? AND state IN ('leased', 'published')
+ORDER BY task_id
+)SQL");
+    statement.bind_text(1, owner_scope);
+    BoardUsage usage;
+    for (;;) {
+        const auto result = statement.step();
+        if (result == SQLITE_DONE) break;
+        if (result != SQLITE_ROW) throw_sqlite_error(db, "query board usage failed");
+        const auto task = task_from_json(json::parse(statement.column_text(0)));
+        if (task.board_id != board_id) continue;
+        const bool active = task.state == ResearchTaskState::Leased
+            && task.lease_expires_at_unix_ms > now_unix_ms;
+        if (task.state != ResearchTaskState::Published && !active) continue;
+        if (active && usage.active != std::numeric_limits<std::uint32_t>::max()) {
+            ++usage.active;
+        }
+        const auto cost = task_cost(task);
+        if (std::numeric_limits<std::uint64_t>::max() - usage.spent < cost) {
+            usage.spent = std::numeric_limits<std::uint64_t>::max();
+        } else {
+            usage.spent += cost;
+        }
+    }
+    return usage;
+}
+
+void ensure_board(sqlite3* db, const ResearchLeaseRequest& request) {
+    if (request.board_id.empty()) return;
+    require_nonempty(request.board_id, "board_id");
+    require(request.board_max_active_leases > 0,
+            "board max_active_leases must be positive");
+    const auto max_cost = board_cost_limit(request.board_max_cost_microunits);
+
+    Statement existing(db, R"SQL(
+SELECT max_active_leases, max_cost_microunits
+FROM neograph_research_board
+WHERE owner_scope = ? AND board_id = ?
+)SQL");
+    existing.bind_text(1, request.owner_scope);
+    existing.bind_text(2, request.board_id);
+    const auto result = existing.step();
+    if (result == SQLITE_ROW) {
+        if (existing.column_int64(0) != request.board_max_active_leases
+            || existing.column_int64(1) != max_cost) {
+            throw std::invalid_argument("board_id is already bound to a different durable budget");
+        }
+        return;
+    }
+    if (result != SQLITE_DONE) throw_sqlite_error(db, "load board budget failed");
+
+    Statement insert(db, R"SQL(
+INSERT INTO neograph_research_board
+(owner_scope, board_id, max_active_leases, max_cost_microunits)
+VALUES (?, ?, ?, ?)
+)SQL");
+    insert.bind_text(1, request.owner_scope);
+    insert.bind_text(2, request.board_id);
+    insert.bind_int64(3, request.board_max_active_leases);
+    insert.bind_int64(4, max_cost);
+    if (insert.step() != SQLITE_DONE) throw_sqlite_error(db, "insert board budget failed");
 }
 
 bool has_live_lease(sqlite3* db, std::string_view owner_scope, std::string_view source_id,
@@ -741,10 +849,17 @@ SqliteEvidenceLedger::acquire_lease(ResearchLeaseRequest request) {
         transaction.commit();
         return std::nullopt;
     }
+    if (!request.board_id.empty()) {
+        ensure_board(impl_->db, request);
+        const auto required_cost = task_cost(*task);
+        require(request.cost_microunits == required_cost,
+                "board lease cost must match the immutable task cost");
+    }
 
     if (task->state == ResearchTaskState::Leased) {
         if (task->lease_expires_at_unix_ms > request.now_unix_ms
-            && task->lease_id == request.lease_id && task->leased_by == request.worker_id) {
+            && task->lease_id == request.lease_id && task->leased_by == request.worker_id
+            && task->board_id == request.board_id) {
             const auto lease = as_lease(*task);
             transaction.commit();
             return lease;
@@ -760,11 +875,24 @@ SqliteEvidenceLedger::acquire_lease(ResearchLeaseRequest request) {
         return std::nullopt;
     }
 
+    if (!request.board_id.empty()) {
+        const auto usage = board_usage(impl_->db, request.owner_scope,
+                                       request.board_id, request.now_unix_ms);
+        if (usage.active >= request.board_max_active_leases
+            || (request.cost_microunits > request.board_max_cost_microunits
+                || usage.spent > request.board_max_cost_microunits - request.cost_microunits)) {
+            transaction.commit();
+            return std::nullopt;
+        }
+    }
+
     task->state = ResearchTaskState::Leased;
     ++task->generation;
     task->lease_id = std::move(request.lease_id);
     task->leased_by = std::move(request.worker_id);
-    task->lease_expires_at_unix_ms = checked_deadline(request.now_unix_ms, task->spec.lease_duration_ms);
+    task->lease_expires_at_unix_ms =
+        checked_deadline(request.now_unix_ms, task->spec.lease_duration_ms);
+    task->board_id = std::move(request.board_id);
     write_task(impl_->db, *task);
     const auto lease = as_lease(*task);
     transaction.commit();
@@ -784,6 +912,7 @@ bool SqliteEvidenceLedger::renew_lease(const ResearchTaskLease& lease,
     if (!task || task->spec.owner_scope != lease.owner_scope
         || task->state != ResearchTaskState::Leased || task->lease_id != lease.lease_id
         || task->leased_by != lease.worker_id || task->generation != lease.generation
+        || task->board_id != lease.board_id
         || task->lease_expires_at_unix_ms <= now_unix_ms) {
         transaction.commit();
         return false;
@@ -851,6 +980,7 @@ EvidencePublishResult SqliteEvidenceLedger::publish(const ResearchTaskLease& lea
     if (task->spec.owner_scope != lease.owner_scope
         || task->state != ResearchTaskState::Leased || task->lease_id != lease.lease_id
         || task->leased_by != lease.worker_id || task->generation != lease.generation
+        || task->board_id != lease.board_id
         || task->lease_expires_at_unix_ms <= now_unix_ms) {
         throw std::logic_error("evidence publication does not own a live task lease");
     }

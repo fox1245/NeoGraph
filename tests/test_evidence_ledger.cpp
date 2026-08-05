@@ -159,9 +159,17 @@ TEST_F(EvidenceLedgerTest, ResearchTaskBoardRanksInformationPerCostAndEnforcesBu
                                           ResearchTaskBoardBudget{1, 20});
     ASSERT_TRUE(first.has_value());
     EXPECT_EQ(first->task_id, "task-high-ratio");
+    ResearchTaskBoard concurrent_board(ledger);
+    EXPECT_FALSE(concurrent_board.acquire_next(
+        "owner-a", "worker-board-2", "board-v1", 1'001,
+        ResearchTaskBoardBudget{1, 20}));
+    EXPECT_THROW(
+        (void)concurrent_board.acquire_next(
+            "owner-a", "worker-board-2", "board-v1", 1'001,
+            ResearchTaskBoardBudget{2, 20}),
+        std::invalid_argument)
+        << "a durable board identity must not silently widen its budget";
 
-    EXPECT_FALSE(board.acquire_next("owner-a", "worker-board-2", "board-v1", 1'001,
-                                    ResearchTaskBoardBudget{1, 20}));
     auto first_artifact = make_artifact(*first);
     first_artifact.claim_id = "claim-ratio";
     ASSERT_EQ(board.publish(*first, std::move(first_artifact), 1'002),
@@ -171,6 +179,7 @@ TEST_F(EvidenceLedgerTest, ResearchTaskBoardRanksInformationPerCostAndEnforcesBu
                                            ResearchTaskBoardBudget{1, 20});
     ASSERT_TRUE(second.has_value());
     EXPECT_EQ(second->task_id, "task-high-cost");
+
 }
 
 TEST_F(EvidenceLedgerTest, ExactlyOneWorkerClaimsPrimaryLeaseAndExpiryReassignsIt) {
@@ -233,6 +242,24 @@ TEST_F(EvidenceLedgerTest, StaleWorkerCannotPublishAfterLeaseExpiryAndReassignme
               EvidencePublishResult::Published);
     EXPECT_EQ(ledger.publish(second, make_artifact(second), 1'103),
               EvidencePublishResult::Duplicate);
+}
+TEST_F(EvidenceLedgerTest, LeaseRenewalRejectsStaleGenerationAndExactExpiry) {
+    ledger.create_task(make_primary_task());
+    const auto first = acquire("extract-1", "lease-renew", "worker-renew");
+
+    auto stale_generation = first;
+    stale_generation.generation = 0;
+    EXPECT_FALSE(ledger.renew_lease(stale_generation, 1'001));
+    EXPECT_TRUE(ledger.renew_lease(first, 1'050));
+    EXPECT_FALSE(ledger.renew_lease(first, 1'150))
+        << "a lease is not live at its exact expiry boundary";
+
+    const auto expired = ledger.expire_leases("owner-a", 1'150);
+    ASSERT_EQ(expired, std::vector<std::string>{"extract-1"});
+    const auto reassigned = acquire("extract-1", "lease-renew-reassigned",
+                                    "worker-renew-reassigned", 1'151);
+    EXPECT_FALSE(ledger.renew_lease(first, 1'152));
+    EXPECT_TRUE(ledger.renew_lease(reassigned, 1'152));
 }
 
 TEST_F(EvidenceLedgerTest, RejectsEvidenceBoundToWrongSourceContentHash) {
@@ -311,6 +338,49 @@ TEST(EvidenceLedgerPersistence, ReopensTasksAndCommittedEvidence) {
         const auto artifacts = reopened.artifacts_for_claim("owner-a", "claim-1");
         ASSERT_EQ(artifacts.size(), 1U);
         EXPECT_EQ(artifacts.front().program_run_id, "run-extract-1");
+    }
+    std::filesystem::remove(path);
+}
+
+TEST(EvidenceLedgerPersistence, DurableBoardBudgetSurvivesRestart) {
+    const auto path = std::filesystem::temp_directory_path()
+                    / ("neograph-evidence-board-" + std::to_string(::getpid()) + ".sqlite");
+    std::filesystem::remove(path);
+    {
+        SqliteEvidenceLedger ledger(path.string());
+        ledger.register_source(make_source());
+
+        auto first = make_primary_task("board-task-1");
+        first.scope = "board-scope-1";
+        first.claim_id = "board-claim-1";
+        first.requirements = {{"information_value", 3.0}, {"cost_microunits", 3}};
+        ledger.create_task(std::move(first));
+
+        auto second = make_primary_task("board-task-2");
+        second.scope = "board-scope-2";
+        second.claim_id = "board-claim-2";
+        second.requirements = {{"information_value", 3.0}, {"cost_microunits", 3}};
+        ledger.create_task(std::move(second));
+
+        ResearchTaskBoard board(ledger);
+        const auto lease = board.acquire_next(
+            "owner-a", "worker-board", "durable-board", 2'000,
+            ResearchTaskBoardBudget{1, 3});
+        ASSERT_TRUE(lease.has_value());
+        auto artifact = make_artifact(*lease);
+        artifact.claim_id = "board-claim-1";
+        ASSERT_EQ(board.publish(*lease, std::move(artifact), 2'001),
+                  EvidencePublishResult::Published);
+    }
+    {
+        SqliteEvidenceLedger reopened(path.string());
+        ResearchTaskBoard board(reopened);
+        EXPECT_FALSE(board.acquire_next(
+            "owner-a", "worker-after-restart", "durable-board", 2'002,
+            ResearchTaskBoardBudget{1, 3}));
+        const auto task = reopened.task("owner-a", "board-task-1");
+        ASSERT_TRUE(task.has_value());
+        EXPECT_EQ(task->board_id, "durable-board");
     }
     std::filesystem::remove(path);
 }

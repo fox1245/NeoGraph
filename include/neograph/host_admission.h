@@ -122,7 +122,6 @@ enum class HostPressureLevel : std::uint8_t {
     Elevated,
     Critical,
 };
-
 NEOGRAPH_API std::string_view to_string(HostPressureLevel level) noexcept;
 
 struct NEOGRAPH_API HostPressureSample {

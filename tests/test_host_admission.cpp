@@ -214,3 +214,41 @@ TEST(HostAdmissionController, PressureLimitsNewReservationsAndRecovers) {
     EXPECT_EQ(controller.snapshot().pressure_scale_percent, 100U);
     admitted.release();
 }
+TEST(HostAdmissionController, CriticalPressureRecoversInBoundedSteps) {
+    HostResourceVector capacity;
+    capacity.tool_slots = 10;
+    HostAdmissionControllerConfig config;
+    config.profile = profile(capacity);
+    config.max_pending = 8;
+    config.recovery_step_percent = 10;
+    config.recovery_quiet_period = 5ms;
+    auto controller = HostAdmissionController(std::move(config));
+
+    controller.observe_pressure({HostPressureLevel::Critical, 100, "critical"});
+    auto critical = controller.snapshot();
+    EXPECT_EQ(critical.pressure, HostPressureLevel::Critical);
+    EXPECT_EQ(critical.pressure_scale_percent, 50U);
+    EXPECT_EQ(critical.available.tool_slots, 5U);
+
+    controller.observe_pressure({HostPressureLevel::Normal, 104, "too-soon"});
+    EXPECT_EQ(controller.snapshot().pressure_scale_percent, 50U);
+    EXPECT_EQ(controller.snapshot().pressure, HostPressureLevel::Critical);
+
+    controller.observe_pressure({HostPressureLevel::Normal, 105, "recovery-1"});
+    EXPECT_EQ(controller.snapshot().pressure_scale_percent, 60U);
+    EXPECT_EQ(controller.snapshot().pressure, HostPressureLevel::Critical);
+
+    controller.observe_pressure({HostPressureLevel::Normal, 110, "recovery-2"});
+    EXPECT_EQ(controller.snapshot().pressure_scale_percent, 70U);
+    controller.observe_pressure({HostPressureLevel::Normal, 115, "recovery-3"});
+    EXPECT_EQ(controller.snapshot().pressure_scale_percent, 80U);
+
+    // An older pressure report cannot roll the state backwards.
+    controller.observe_pressure({HostPressureLevel::Elevated, 114, "stale"});
+    EXPECT_EQ(controller.snapshot().pressure_scale_percent, 80U);
+
+    controller.observe_pressure({HostPressureLevel::Normal, 120, "recovery-4"});
+    controller.observe_pressure({HostPressureLevel::Normal, 125, "recovery-5"});
+    EXPECT_EQ(controller.snapshot().pressure_scale_percent, 100U);
+    EXPECT_EQ(controller.snapshot().pressure, HostPressureLevel::Normal);
+}
