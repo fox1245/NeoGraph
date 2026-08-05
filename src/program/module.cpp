@@ -352,7 +352,8 @@ bool budget_positive(const BudgetLimits& budget) {
     // compilation and nested children). Execution itself still needs a
     // positive operation, step, and concurrency allowance.
     return budget.max_concurrency != 0 && budget.max_program_operations != 0 &&
-           budget.max_core_steps != 0;
+           budget.max_core_steps != 0 &&
+           budget.max_child_depth <= MAX_SUPPORTED_CHILD_DEPTH;
 }
 
 bool budget_covers_requirements(const BudgetLimits& budget,
@@ -735,6 +736,9 @@ void validate_program_composition(const ProgramBundle& parent_bundle,
         const auto found = requirements.find(resource);
         if (found == requirements.end())
             throw std::invalid_argument("Whole Program composition has an incomplete budget closure");
+        if (resource == std::string_view("max_child_depth") &&
+            found->second->maximum > MAX_SUPPORTED_CHILD_DEPTH)
+            throw std::invalid_argument("Child depth exceeds the supported hard ceiling");
         if (resource == std::string_view("max_child_depth")) {
             if (found->second->maximum < 1) throw std::invalid_argument("Child depth is not admitted");
         } else if (resource == std::string_view("max_total_children")) {

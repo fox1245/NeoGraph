@@ -44,6 +44,7 @@
       "minimum": 1,
       "maximum": 18446744073709551615
     },
+    "child_depth": { "type": "integer", "minimum": 0, "maximum": 8 },
     "contract": {
       "type": "object",
       "required": ["schema_version", "schema"],
@@ -303,8 +304,8 @@
       "required": ["resource", "minimum", "maximum"],
       "properties": {
         "resource": {"const": "max_child_depth"},
-        "minimum": {"const": 0},
-        "maximum": {"const": 0}
+        "minimum": {"$ref": "#/$defs/child_depth"},
+        "maximum": {"$ref": "#/$defs/child_depth"}
       },
       "additionalProperties": false
     },
@@ -313,8 +314,8 @@
       "required": ["resource", "minimum", "maximum"],
       "properties": {
         "resource": {"const": "max_total_children"},
-        "minimum": {"const": 0},
-        "maximum": {"const": 0}
+        "minimum": {"$ref": "#/$defs/uint64"},
+        "maximum": {"$ref": "#/$defs/uint64"}
       },
       "additionalProperties": false
     },

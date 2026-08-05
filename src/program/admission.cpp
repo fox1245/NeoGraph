@@ -132,9 +132,15 @@ ExecutableIdentity parse_identity(const json& value) {
 void validate_budget(const BudgetLimits& value) {
     if (value.wall_time_ms == 0 || value.model_tokens == 0 || value.monetary_microunits == 0 ||
         value.max_concurrency == 0 || value.max_program_operations == 0 ||
-        value.max_core_steps == 0 || value.max_dynamic_compiles == 0 ||
-        value.max_child_depth == 0 || value.max_total_children == 0) {
-        throw std::invalid_argument("Every policy budget ceiling must be positive");
+        value.max_core_steps == 0 || value.max_dynamic_compiles == 0) {
+        throw std::invalid_argument("Every policy budget ceiling except child budgets must be positive");
+    }
+    if ((value.max_child_depth == 0) != (value.max_total_children == 0)) {
+        throw std::invalid_argument(
+            "Policy child depth and total-child ceilings must be enabled together");
+    }
+    if (value.max_child_depth > MAX_SUPPORTED_CHILD_DEPTH) {
+        throw std::invalid_argument("Policy child depth exceeds the supported hard ceiling");
     }
 }
 

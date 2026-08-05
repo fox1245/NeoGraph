@@ -160,6 +160,7 @@
       "minimum": 0,
       "maximum": 4294967295
     },
+    "child_depth": { "type": "integer", "minimum": 0, "maximum": 8 },
     "continuation": {
       "type": "object",
       "required": ["operation_id", "state", "attempt"],
@@ -202,7 +203,7 @@
         "max_program_operations": {"$ref": "#/$defs/uint64"},
         "max_core_steps": {"$ref": "#/$defs/uint64"},
         "max_dynamic_compiles": {"$ref": "#/$defs/uint64"},
-        "max_child_depth": {"$ref": "#/$defs/uint32"},
+        "max_child_depth": {"$ref": "#/$defs/child_depth"},
         "max_total_children": {"$ref": "#/$defs/uint64"}
       },
       "additionalProperties": false

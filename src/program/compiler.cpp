@@ -981,7 +981,7 @@ void validate_budgets(const json&            document,
         } else if (resource == "max_dynamic_compiles") {
             structural_valid = *minimum == 0 && *maximum == 0;
         } else if (resource == "max_child_depth" || resource == "max_total_children") {
-            structural_valid = (*minimum == 0 && *maximum == 0) || *minimum >= 1;
+            structural_valid = true;
             if (has_spawn) structural_valid = *minimum >= 1;
         }
         if (!structural_valid) {
@@ -989,6 +989,15 @@ void validate_budgets(const json&            document,
                 CompilePhase::Normalize, "P_BUDGET_INVALID", DiagnosticSeverity::Error,
                 item_pointer, "Budget record violates the Program-v1 structural floor",
                 json{{"resource", resource}, {"minimum", *minimum}, {"maximum", *maximum}});
+            continue;
+        }
+        if (resource == "max_child_depth" && *maximum > MAX_SUPPORTED_CHILD_DEPTH) {
+            diagnostics.add(
+                CompilePhase::Normalize, "P_BUDGET_INVALID", DiagnosticSeverity::Error,
+                item_pointer, "Child depth exceeds the supported hard ceiling",
+                json{{"resource", resource},
+                     {"maximum", *maximum},
+                     {"hard_ceiling", MAX_SUPPORTED_CHILD_DEPTH}});
             continue;
         }
         if (resource == "max_child_depth" || resource == "max_total_children")

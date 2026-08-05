@@ -195,6 +195,33 @@ TEST(PolicySnapshotTest, CanonicalFingerprintIsOrderIndependentAndRoundTripsStri
     EXPECT_THROW((void)PolicySnapshot::parse(overflowing_dynamic.dump()), std::invalid_argument);
 }
 
+TEST(PolicySnapshotTest, AllowsLeafOnlyChildPolicyAndRejectsDepthAboveHardCeiling) {
+    const auto registry  = registry_snapshot();
+    const auto admission = admission_profile(registry);
+
+    auto leaf_budget             = finite_budget();
+    leaf_budget.max_child_depth  = 0;
+    leaf_budget.max_total_children = 0;
+    PolicySnapshotBuilder leaf;
+    leaf.id("leaf-policy")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:one")
+        .admission_profile(admission)
+        .budget_ceiling(leaf_budget);
+    EXPECT_NO_THROW((void)std::move(leaf).build());
+
+    auto oversized_budget              = finite_budget();
+    oversized_budget.max_child_depth   = MAX_SUPPORTED_CHILD_DEPTH + 1;
+    oversized_budget.max_total_children = 2;
+    PolicySnapshotBuilder oversized;
+    oversized.id("oversized-policy")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:one")
+        .admission_profile(admission)
+        .budget_ceiling(oversized_budget);
+    EXPECT_THROW((void)std::move(oversized).build(), std::invalid_argument);
+}
+
 TEST(PolicySnapshotTest, EnforcesTrustedNativeCapabilityAndFiniteBudgets) {
     const auto trusted = admission_profile(registry_snapshot(), AdmissionMode::TrustedEmbedding);
     PolicySnapshotBuilder missing_capability;

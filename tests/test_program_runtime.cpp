@@ -520,9 +520,11 @@ struct LinkedChildAdmission {
     ModuleLinkReceipt receipt;
 };
 
-LinkedChildAdmission link_child_versions(AdmittedRuntime& fixture,
-                                         ProgramVersion   parent_version,
-                                         ProgramVersion   child_version) {
+LinkedChildAdmission link_child_versions(
+    AdmittedRuntime& fixture,
+    ProgramVersion   parent_version,
+    ProgramVersion   child_version,
+    BudgetLimits     child_budget = BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 1, 1}) {
     const auto child_bundle = fixture.store->get_bundle(child_version.bundle_id());
     if (!child_bundle) throw std::runtime_error("child bundle was not admitted");
 
@@ -537,7 +539,7 @@ LinkedChildAdmission link_child_versions(AdmittedRuntime& fixture,
                                {ModulePort{"output", child_bundle->output_contract()}},
                                child_bundle->capability_effect_closure().capabilities,
                                child_bundle->capability_effect_closure().effects,
-                               BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 1, 1}});
+                               std::move(child_budget)});
     module_data.allowed_capabilities = child_bundle->capability_effect_closure().capabilities;
     module_data.declared_effects     = child_bundle->capability_effect_closure().effects;
     const auto parent_module = ProgramModule::create(std::move(module_data));
@@ -566,6 +568,29 @@ LinkedChildAdmission make_linked_child(
     return link_child_versions(fixture, fixture.admit_document(std::move(parent_document)),
                                fixture.admit(std::move(child_node_type)));
 }
+LinkedChildAdmission make_recursive_linked_child(AdmittedRuntime& fixture) {
+    auto parent_document = program_document("runtime-blocking");
+    parent_document["declared_budget_requirements"][4]["minimum"] = 2;
+    parent_document["declared_budget_requirements"][4]["maximum"] = 2;
+    parent_document["declared_budget_requirements"][7]["minimum"] = 1;
+    parent_document["declared_budget_requirements"][7]["maximum"] = 4;
+    parent_document["declared_budget_requirements"][8]["minimum"] = 1;
+    parent_document["declared_budget_requirements"][8]["maximum"] = 4;
+
+    auto child_document = program_document("runtime-blocking");
+    child_document["declared_budget_requirements"][7]["minimum"] = 0;
+    child_document["declared_budget_requirements"][7]["maximum"] = 4;
+    child_document["declared_budget_requirements"][8]["minimum"] = 0;
+    child_document["declared_budget_requirements"][8]["maximum"] = 4;
+    auto linked = link_child_versions(
+        fixture, fixture.admit_document(std::move(parent_document)),
+        fixture.admit_document(std::move(child_document)),
+        BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 4, 4});
+    fixture.bind_child(linked.child_version, "child",
+                       ProgramRuntimeChildBinding{linked.receipt, linked.child_version});
+    return linked;
+}
+
 
 LinkedChildAdmission make_durable_spawn_child(
     AdmittedRuntime& fixture,
@@ -2999,6 +3024,67 @@ TEST(ProgramRuntimeTest, ChildStartPinsReceiptAndPropagatesParentCancellation) {
     EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
     EXPECT_EQ(child.wait().status(), ProgramTerminalStatus::Cancelled);
 }
+TEST(ProgramRuntimeTest, RecursiveChildGrantsAttenuateToZeroAtTheConfiguredBoundary) {
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(4);
+    const auto linked = make_recursive_linked_child(fixture);
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 4, 4},
+                           "trace-recursive-parent", {}});
+    auto child = fixture.runtime->start_child(
+        "tenant:runtime", parent, linked.receipt, linked.child_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 3, 3},
+                           "trace-recursive-child", {}});
+    auto grandchild = fixture.runtime->start_child(
+        "tenant:runtime", child, linked.receipt, linked.child_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 2, 2},
+                           "trace-recursive-grandchild", {}});
+    auto great_grandchild = fixture.runtime->start_child(
+        "tenant:runtime", grandchild, linked.receipt, linked.child_version,
+        ProgramInvocation{json::object(),
+                           RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 1, 1},
+                           "trace-recursive-great-grandchild", {}});
+    auto leaf = fixture.runtime->start_child(
+        "tenant:runtime", great_grandchild, linked.receipt, linked.child_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                           "trace-recursive-leaf", {}});
+
+    EXPECT_EQ(child.snapshot().child_depth(), 1U);
+    EXPECT_EQ(grandchild.snapshot().child_depth(), 2U);
+    EXPECT_EQ(great_grandchild.snapshot().child_depth(), 3U);
+    EXPECT_EQ(leaf.snapshot().child_depth(), 4U);
+
+    try {
+        (void)fixture.runtime->start_child(
+            "tenant:runtime", parent, linked.receipt, linked.child_version,
+            ProgramInvocation{json::object(),
+                               RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 3, 0},
+                               "trace-recursive-sibling-after-subtree-reservation", {}});
+        FAIL() << "Expected the reserved descendant quota to reject a sibling";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_CHILD_COUNT");
+    }
+
+    try {
+        (void)fixture.runtime->start_child(
+            "tenant:runtime", leaf, linked.receipt, linked.child_version,
+            ProgramInvocation{json::object(),
+                               RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                               "trace-recursive-overflow", {}});
+        FAIL() << "Expected recursive child depth to fail closed";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_CHILD_DEPTH");
+    }
+
+    EXPECT_TRUE(parent.cancel());
+    EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_EQ(child.wait().status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_EQ(grandchild.wait().status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_EQ(great_grandchild.wait().status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_EQ(leaf.wait().status(), ProgramTerminalStatus::Cancelled);
+}
+
 TEST(ProgramRuntimeTest, DuplicateChildRecoveryReturnsTheExistingRun) {
     blocking_calls.store(0);
     AdmittedRuntime fixture(2);

@@ -16,6 +16,10 @@
 namespace neograph::program {
 
 inline constexpr std::string_view TRUSTED_NATIVE_CAPABILITY = "neograph.native.trusted";
+/// Default grant for a caller that explicitly opts into bounded child execution.
+inline constexpr std::uint32_t DEFAULT_MAX_CHILD_DEPTH = 1;
+/// Hard upper bound for recursive child grants in one Program lineage.
+inline constexpr std::uint32_t MAX_SUPPORTED_CHILD_DEPTH = 8;
 
 enum class AdmissionMode : std::uint8_t {
     MultiTenant,

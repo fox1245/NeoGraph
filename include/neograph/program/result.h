@@ -44,8 +44,10 @@ struct RunBudget {
     std::uint64_t max_program_operations = 0;
     std::uint64_t max_core_steps         = 0;
     std::uint64_t max_dynamic_compiles   = 0;
-    std::uint32_t max_child_depth        = 0;
-    std::uint64_t max_total_children     = 0;
+    /// Remaining descendant levels granted to this run; each child receives at most grant - 1.
+    std::uint32_t max_child_depth = 0;
+    /// Reserved descendants, including the child subtree grant, for this run.
+    std::uint64_t max_total_children = 0;
 
     bool operator==(const RunBudget&) const = default;
 };

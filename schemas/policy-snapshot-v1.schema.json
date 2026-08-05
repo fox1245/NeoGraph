@@ -41,6 +41,12 @@
       "minimum": 1,
       "maximum": 18446744073709551615
     },
+    "uint64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "childDepth": { "type": "integer", "minimum": 0, "maximum": 8 },
     "positive32": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
     "budget": {
       "type": "object", "additionalProperties": false,
@@ -53,8 +59,8 @@
         "max_program_operations": { "$ref": "#/$defs/positive64" },
         "max_core_steps": { "$ref": "#/$defs/positive64" },
         "max_dynamic_compiles": { "$ref": "#/$defs/positive32" },
-        "max_child_depth": { "$ref": "#/$defs/positive32" },
-        "max_total_children": { "$ref": "#/$defs/positive64" }
+        "max_child_depth": { "$ref": "#/$defs/childDepth" },
+        "max_total_children": { "$ref": "#/$defs/uint64" }
       }
     }
   }

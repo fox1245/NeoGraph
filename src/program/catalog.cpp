@@ -691,8 +691,7 @@ void validate_budgets(const ProgramBundle&  bundle,
         } else if (resource == "max_dynamic_compiles") {
             structural = budget.minimum == 0 && budget.maximum == 0;
         } else if (resource == "max_child_depth" || resource == "max_total_children") {
-            structural = (budget.minimum == 0 && budget.maximum == 0) ||
-                         (budget.minimum >= 1 && budget.maximum >= budget.minimum);
+            structural = budget.minimum <= budget.maximum;
         }
         if (!structural) {
             diagnostics.add("P_ADMIT_SEMANTIC_MISMATCH", "/declared_budget_requirements",

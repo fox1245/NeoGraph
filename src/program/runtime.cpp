@@ -410,6 +410,7 @@ void validate_invocation(const detail::MaterializedProgram& materialized,
         budget.max_core_steps == 0 ||
         budget.max_core_steps > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
         budget.max_dynamic_compiles != 0 ||
+        budget.max_child_depth > MAX_SUPPORTED_CHILD_DEPTH ||
         ((budget.max_child_depth == 0) != (budget.max_total_children == 0))) {
         throw_runtime_diagnostic(
             "P_START_BUDGET",
@@ -494,7 +495,6 @@ void validate_child_link(const detail::MaterializedProgram& materialized,
                          const ProgramVersion&              requested_version,
                          const ProgramInvocation&           invocation,
                          const RunBudget&                   parent_budget,
-                         std::uint32_t                      parent_depth,
                          const RunBudget&                   reserved_children) {
     if (link.owner_scope() != requested_version.ownership_scope())
         throw_runtime_diagnostic("P_CHILD_OWNER", "Child link owner scope is not admitted");
@@ -530,15 +530,13 @@ void validate_child_link(const detail::MaterializedProgram& materialized,
     if (!budget_leq(invocation.budget, link.budget()))
         throw_runtime_diagnostic("P_CHILD_BUDGET",
                                  "Child invocation exceeds its immutable link budget");
-    if (parent_depth >= parent_budget.max_child_depth) {
+    if (parent_budget.max_child_depth == 0)
         throw_runtime_diagnostic("P_CHILD_DEPTH", "Child depth budget is exhausted");
-    }
-    const auto remaining_depth =
-        parent_budget.max_child_depth - static_cast<std::uint32_t>(parent_depth) - 1;
+    const auto remaining_depth = parent_budget.max_child_depth - 1;
     if (invocation.budget.max_child_depth >
         std::min(link.budget().max_child_depth, remaining_depth)) {
-        throw_runtime_diagnostic("P_CHILD_DEPTH",
-                                 "Child invocation would retain an unbounded depth grant");
+        throw_runtime_diagnostic(
+            "P_CHILD_DEPTH", "Child invocation would retain an unbounded depth grant");
     }
     if (reserved_children.max_total_children >= parent_budget.max_total_children) {
         throw_runtime_diagnostic("P_CHILD_COUNT", "Parent child-count budget is exhausted");
@@ -1700,11 +1698,10 @@ struct ProgramRuntime::Impl {
                                  limits.max_dynamic_compiles,
                                  limits.max_child_depth,
                                  limits.max_total_children};
-                const auto parent_depth = parent->persisted_invocation.child_depth;
-                if (parent_depth < parent->granted_budget.max_child_depth) {
+                if (parent->granted_budget.max_child_depth > 0) {
                     budget.max_child_depth =
                         std::min(budget.max_child_depth,
-                                 parent->granted_budget.max_child_depth - parent_depth - 1);
+                                 parent->granted_budget.max_child_depth - 1);
                 } else {
                     budget.max_child_depth = 0;
                 }
@@ -2063,7 +2060,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     } else {
         const auto reserved = impl_->reserved_children(parent_run_id);
         validate_child_link(*pinned, link, version, invocation, parent_record.remaining_budget(),
-                            parent_depth, reserved);
+                            reserved);
         validate_invocation(*pinned, invocation, true);
     }
 
@@ -2685,6 +2682,16 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
                                      "Program version required for recovery was not found");
         }
         auto pinned = detail::CatalogRuntimeAccess::pin(*impl_->config.catalog, *version);
+        const auto& recovery_budget = record->remaining_budget();
+        if (record->child_depth() > MAX_SUPPORTED_CHILD_DEPTH ||
+            recovery_budget.max_child_depth > MAX_SUPPORTED_CHILD_DEPTH ||
+            (recovery_budget.max_child_depth == 0) !=
+                (recovery_budget.max_total_children == 0) ||
+            !budget_leq(recovery_budget, pinned->version.policy_snapshot().budget_ceiling())) {
+            throw_runtime_diagnostic(
+                "P_RUN_RECOVERY_BUDGET",
+                "Running Program recovery exceeds its admitted child budget boundary");
+        }
         const auto binding_fingerprint = capability_binding_receipt_root(
             version->core_materialization_receipt().capability_bindings);
         if (pinned->bundle.id() != record->bundle_id() ||
@@ -2770,6 +2777,12 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
     const auto previous = impl_->config.transitions->load(owner_scope, run_id);
     if (!previous) {
         throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program run was not found");
+    }
+    if (previous->child_depth() > MAX_SUPPORTED_CHILD_DEPTH ||
+        previous->remaining_budget().max_child_depth > MAX_SUPPORTED_CHILD_DEPTH) {
+        throw_runtime_diagnostic(
+            "P_RESUME_BUDGET",
+            "Program resume exceeds the supported child depth boundary");
     }
     if (previous->recorded_binding_set_fingerprint()) {
         throw_runtime_diagnostic(
