@@ -43,6 +43,8 @@ enum class ToolExecutionImplementation : std::uint8_t {
     NativeAsync,
     /// Invoke Tool::execute on the bounded blocking executor explicitly.
     BlockingThread,
+    /// Launch a ProcessTool in its own process group on the blocking bridge.
+    BlockingProcess,
 };
 
 /** Terminal state returned by the typed tool-execution surface. */
@@ -59,6 +61,9 @@ enum class ToolTerminalStatus : std::uint8_t {
     Rejected,
 };
 
+NEOGRAPH_API std::string_view to_string(ToolTerminalStatus status) noexcept;
+NEOGRAPH_API ToolTerminalStatus tool_terminal_status_from_string(std::string_view value);
+
 /** One stable result contract for native async and blocking Tool bridges. */
 struct NEOGRAPH_API ToolExecutionResult {
     ToolTerminalStatus status = ToolTerminalStatus::Failed;
@@ -66,6 +71,12 @@ struct NEOGRAPH_API ToolExecutionResult {
     std::string error;
     bool retryable = false;
     bool effect_uncertain = false;
+    /// Exit status of a completed process bridge, when a child was launched.
+    std::optional<int> exit_code;
+    /// Signal that terminated a process bridge, when applicable.
+    std::optional<int> signal_number;
+    /// True when the bridge stopped after hitting the policy output limit.
+    bool output_truncated = false;
 
     [[nodiscard]] bool succeeded() const noexcept {
         return status == ToolTerminalStatus::Succeeded;
@@ -94,8 +105,8 @@ enum class ToolConcurrency : std::uint8_t {
     Reentrant,
     /// One active invocation for each derived resource key.
     KeyedExclusive,
-    /// Alias for a process-wide exclusive tool key.
-    Exclusive = KeyedExclusive,
+    /// One process-wide invocation regardless of argument-derived aliases.
+    Exclusive,
     /// Up to capacity active invocations for each derived resource key.
     Capacity,
     /// One in-flight invocation per key; concurrent callers share its result.
@@ -173,6 +184,11 @@ class ResourceArbiterImpl;
 
 /// Shared bounded executor used only by synchronous Tool fallbacks.
 asio::awaitable<std::string> execute_blocking_tool_async(Tool& tool, json arguments);
+/// ProcessTool bridge. It returns stdout/stderr and throws a typed bridge
+/// exception for timeout, cancellation, input-required, or non-zero exit.
+asio::awaitable<std::string> execute_process_tool_async(
+    Tool& tool, json arguments, ToolExecutionContext context,
+    std::size_t output_limit_bytes, std::chrono::milliseconds timeout);
 } // namespace detail
 
 /** RAII proof that the caller owns one ResourceArbiter capacity slot. */

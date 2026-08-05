@@ -18,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 namespace neograph::graph {
 class CancelToken;
 }
@@ -57,6 +58,36 @@ class NEOGRAPH_API ContextualAsyncTool {
 
     virtual asio::awaitable<std::string> execute_async(
         const json& arguments, ToolExecutionContext context) = 0;
+};
+
+/**
+ * @brief Description of a subprocess invocation owned by a ProcessTool.
+ *
+ * `argv[0]` is the executable. Environment entries use `NAME=VALUE` form and
+ * replace inherited values with the same name. The process bridge never
+ * executes a shell, so arguments cannot expand shell syntax accidentally.
+ */
+struct NEOGRAPH_API ToolProcessSpec {
+    std::vector<std::string> argv;
+    std::vector<std::string> environment;
+    std::string working_directory;
+    std::string stdin_data;
+    bool interactive = false;
+};
+
+/**
+ * @brief Optional extension for tools implemented by a real subprocess.
+ *
+ * A process is placed in its own process group. The controller drains output,
+ * enforces limits, polls cancellation, and escalates TERM to KILL. Interactive
+ * tools must return `interactive=true` when they need a human input turn; the
+ * bridge returns `InputRequired` instead of leaving a worker blocked on stdin.
+ */
+class NEOGRAPH_API ProcessTool {
+public:
+    virtual ~ProcessTool() = default;
+    virtual ToolProcessSpec prepare_process(
+        const json& arguments, const ToolExecutionContext& context) const = 0;
 };
 
 /**

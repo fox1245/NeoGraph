@@ -109,6 +109,37 @@ private:
     std::atomic<int> calls_{0};
 };
 
+#if defined(__unix__) || defined(__APPLE__)
+class ProcessProbeTool final : public Tool, public ProcessTool {
+public:
+    ChatTool get_definition() const override {
+        return {"process-probe", "process bridge probe",
+                json{{"type", "object"}, {"properties", json::object()}}};
+    }
+
+    std::string execute(const json&) override { return "sync-not-used"; }
+    std::string get_name() const override { return "process-probe"; }
+
+    ToolProcessSpec prepare_process(
+        const json& arguments, const ToolExecutionContext&) const override {
+        const auto mode = arguments.value("mode", "echo");
+        if (mode == "echo") return ToolProcessSpec{{"/bin/echo", "process-ok"}};
+        if (mode == "sleep") return ToolProcessSpec{{"/bin/sleep", "5"}};
+        if (mode == "fail") {
+            return ToolProcessSpec{{"/bin/sh", "-c", "printf partial; exit 7"}};
+        }
+        if (mode == "input") {
+            ToolProcessSpec spec;
+            spec.argv = {"/bin/cat"};
+            spec.interactive = true;
+            return spec;
+        }
+        if (mode == "flood") return ToolProcessSpec{{"/usr/bin/yes", "flood"}};
+        throw std::invalid_argument("unknown process probe mode");
+    }
+};
+#endif
+
 ResourceRequest exclusive_request(std::chrono::milliseconds timeout = 80ms) {
     ResourceRequest request;
     request.resource_key = "test:exclusive";
@@ -414,6 +445,110 @@ TEST(ToolExecutionController, TypedResultDistinguishesSuccessAndOutputFailure) {
     EXPECT_FALSE(failure.error.empty());
 }
 
+TEST(ToolExecutionController, RejectsUnsafeSingleFlightPolicies) {
+    ToolExecutionPolicy policy;
+    policy.concurrency = ToolConcurrency::SingleFlight;
+    policy.effect = ToolEffectClass::ExternalWrite;
+    policy.idempotency = ToolIdempotency::Idempotent;
+    EXPECT_THROW(policy.validate(), std::invalid_argument);
+
+    policy.effect = ToolEffectClass::ReadOnly;
+    policy.idempotency = ToolIdempotency::Idempotent;
+    EXPECT_NO_THROW(policy.validate());
+    EXPECT_EQ(tool_terminal_status_from_string(std::string(to_string(
+                  ToolTerminalStatus::ReconciliationRequired))),
+              ToolTerminalStatus::ReconciliationRequired);
+}
+
+#if defined(__unix__) || defined(__APPLE__)
+TEST(ToolExecutionController, ProcessBridgePreservesTypedTerminalDetails) {
+    ProcessProbeTool tool;
+    auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
+    ToolExecutionPolicy policy;
+    policy.implementation = ToolExecutionImplementation::BlockingProcess;
+    policy.effect = ToolEffectClass::ReadOnly;
+    policy.idempotency = ToolIdempotency::Idempotent;
+    policy.execution_timeout = 1s;
+    policy.output_limit_bytes = 4096;
+    policies->upsert("process-probe", policy);
+    auto controller = std::make_shared<ToolExecutionController>(
+        ToolExecutionControllerConfig{policies, std::make_shared<ResourceArbiter>()});
+
+    const auto success = neograph::async::run_sync(
+        controller->execute_result_async(tool, json{{"mode", "echo"}}, {}));
+    EXPECT_EQ(success.output, "process-ok\n");
+    ASSERT_TRUE(success.exit_code.has_value());
+    EXPECT_EQ(*success.exit_code, 0);
+
+    const auto failure = neograph::async::run_sync(
+        controller->execute_result_async(tool, json{{"mode", "fail"}}, {}));
+    EXPECT_EQ(failure.status, ToolTerminalStatus::Failed);
+    EXPECT_EQ(failure.output, "partial");
+    ASSERT_TRUE(failure.exit_code.has_value());
+    EXPECT_EQ(*failure.exit_code, 7);
+
+    const auto input = neograph::async::run_sync(
+        controller->execute_result_async(tool, json{{"mode", "input"}}, {}));
+    EXPECT_EQ(input.status, ToolTerminalStatus::InputRequired);
+
+    policy.output_limit_bytes = 256;
+    policies->upsert("process-probe", policy);
+    const auto flood = neograph::async::run_sync(
+        controller->execute_result_async(tool, json{{"mode", "flood"}}, {}));
+    EXPECT_EQ(flood.status, ToolTerminalStatus::Killed);
+    EXPECT_TRUE(flood.output_truncated);
+}
+
+TEST(ToolExecutionController, ProcessBridgeKillsTheProcessGroupOnCancellation) {
+    ProcessProbeTool tool;
+    auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
+    ToolExecutionPolicy policy;
+    policy.implementation = ToolExecutionImplementation::BlockingProcess;
+    policy.effect = ToolEffectClass::WorkspaceWrite;
+    policy.idempotency = ToolIdempotency::Unknown;
+    policy.execution_timeout = 10s;
+    policies->upsert("process-probe", policy);
+    auto controller = std::make_shared<ToolExecutionController>(
+        ToolExecutionControllerConfig{policies, std::make_shared<ResourceArbiter>()});
+    auto cancel = std::make_shared<graph::CancelToken>();
+    std::promise<ToolExecutionResult> completed;
+    auto result = completed.get_future();
+    std::thread worker([&] {
+        completed.set_value(neograph::async::run_sync(
+            controller->execute_result_async(tool, json{{"mode", "sleep"}},
+                                              ToolExecutionContext{cancel})));
+    });
+    std::this_thread::sleep_for(40ms);
+    cancel->cancel();
+    ASSERT_EQ(result.wait_for(1s), std::future_status::ready);
+    const auto terminal = result.get();
+    worker.join();
+    EXPECT_EQ(terminal.status, ToolTerminalStatus::CancellationRequested);
+    EXPECT_TRUE(terminal.effect_uncertain);
+}
+#endif
+
+TEST(ToolDispatch, EmitsTypedTerminalStatusInToolMessages) {
+    BlockingProbeTool tool(1ms);
+    auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
+    ToolExecutionPolicy policy;
+    policy.implementation = ToolExecutionImplementation::BlockingThread;
+    policies->upsert("probe", policy);
+    auto controller = std::make_shared<ToolExecutionController>(
+        ToolExecutionControllerConfig{policies, std::make_shared<ResourceArbiter>()});
+    ToolExecutionContext context;
+    context.controller = controller;
+    const auto messages = neograph::async::run_sync(dispatch_tool_calls(
+        {ToolCall{"call-typed", "probe", "{}"}}, {&tool}, {}, {}, context));
+    ASSERT_EQ(messages.size(), 1U);
+    EXPECT_EQ(messages.front().tool_status, "succeeded");
+    EXPECT_EQ(messages.front().content, "ok");
+
+    json serialized;
+    to_json(serialized, messages.front());
+    EXPECT_EQ(serialized.at("tool_status"), "succeeded");
+}
+
 TEST(ToolExecutionController, RetriesOnlyAfterPolicyAllowsIdempotentCalls) {
     FlakyProbeTool tool;
     auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
@@ -461,6 +596,8 @@ TEST(ToolExecutionController, SingleFlightSharesOneInFlightResultPerKey) {
     ToolExecutionPolicy policy;
     policy.implementation = ToolExecutionImplementation::BlockingThread;
     policy.concurrency = ToolConcurrency::SingleFlight;
+    policy.effect = ToolEffectClass::ReadOnly;
+    policy.idempotency = ToolIdempotency::Idempotent;
     policy.max_pending = 8;
     policy.queue_timeout = 1s;
     policies->upsert("probe", policy);

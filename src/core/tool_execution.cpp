@@ -26,6 +26,15 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#if defined(__unix__) || defined(__APPLE__)
+#include <cerrno>
+#include <csignal>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 namespace neograph {
 namespace {
@@ -202,6 +211,36 @@ asio::thread_pool& blocking_tool_pool() {
 
 } // namespace
 
+std::string_view to_string(const ToolTerminalStatus status) noexcept {
+    switch (status) {
+        case ToolTerminalStatus::Succeeded: return "succeeded";
+        case ToolTerminalStatus::Failed: return "failed";
+        case ToolTerminalStatus::CancelledBeforeStart: return "cancelled_before_start";
+        case ToolTerminalStatus::CancellationRequested: return "cancellation_requested";
+        case ToolTerminalStatus::Expired: return "expired";
+        case ToolTerminalStatus::TimedOut: return "timed_out";
+        case ToolTerminalStatus::Killed: return "killed";
+        case ToolTerminalStatus::InputRequired: return "input_required";
+        case ToolTerminalStatus::ReconciliationRequired: return "reconciliation_required";
+        case ToolTerminalStatus::Rejected: return "rejected";
+    }
+    return "unknown";
+}
+
+ToolTerminalStatus tool_terminal_status_from_string(const std::string_view value) {
+    if (value == "succeeded") return ToolTerminalStatus::Succeeded;
+    if (value == "failed") return ToolTerminalStatus::Failed;
+    if (value == "cancelled_before_start") return ToolTerminalStatus::CancelledBeforeStart;
+    if (value == "cancellation_requested") return ToolTerminalStatus::CancellationRequested;
+    if (value == "expired") return ToolTerminalStatus::Expired;
+    if (value == "timed_out") return ToolTerminalStatus::TimedOut;
+    if (value == "killed") return ToolTerminalStatus::Killed;
+    if (value == "input_required") return ToolTerminalStatus::InputRequired;
+    if (value == "reconciliation_required") return ToolTerminalStatus::ReconciliationRequired;
+    if (value == "rejected") return ToolTerminalStatus::Rejected;
+    throw std::invalid_argument("unknown tool terminal status");
+}
+
 void ToolExecutionPolicy::validate() const {
     if (schema_version != SCHEMA_VERSION) {
         throw std::invalid_argument("unsupported tool execution policy schema version");
@@ -228,15 +267,28 @@ void ToolExecutionPolicy::validate() const {
         || concurrency == ToolConcurrency::Exclusive
         || concurrency == ToolConcurrency::SingleFlight
         || concurrency == ToolConcurrency::ExternalLimited) {
-        if (capacity != 1 && concurrency != ToolConcurrency::ExternalLimited) {
+        if (capacity != 1
+            && concurrency != ToolConcurrency::ExternalLimited) {
             throw std::invalid_argument("exclusive tool policy must have capacity 1");
         }
-        validate_resource_template(resource_key_template);
+        if (concurrency != ToolConcurrency::Exclusive) {
+            validate_resource_template(resource_key_template);
+        }
     } else if (concurrency == ToolConcurrency::Capacity && capacity == 0) {
         throw std::invalid_argument("capacity tool policy must have positive capacity");
     }
+    if (concurrency == ToolConcurrency::ExternalLimited && capacity == 0) {
+        throw std::invalid_argument("external-limited tool policy must have positive capacity");
+    }
     if (concurrency == ToolConcurrency::Reentrant && capacity != 1) {
         throw std::invalid_argument("reentrant tool policy cannot declare a capacity");
+    }
+    if (concurrency == ToolConcurrency::SingleFlight
+        && (idempotency != ToolIdempotency::Idempotent
+            || (effect != ToolEffectClass::ReadOnly
+                && effect != ToolEffectClass::ExternalRead))) {
+        throw std::invalid_argument(
+            "single-flight requires an idempotent read-only tool effect");
     }
     if (retry_max_attempts > 1
         && (idempotency == ToolIdempotency::Unknown
@@ -282,6 +334,324 @@ asio::awaitable<std::string> execute_blocking_tool_async(Tool& tool, json argume
 
     if (result->error) std::rethrow_exception(result->error);
     co_return std::move(result->value);
+}
+
+class ProcessBridgeError final : public std::runtime_error {
+public:
+    ProcessBridgeError(ToolTerminalStatus status, std::string message,
+                       std::string output = {}, std::optional<int> exit_code = {},
+                       std::optional<int> signal_number = {}, bool uncertain = false,
+                       bool output_truncated = false)
+        : std::runtime_error(std::move(message)),
+          status(status),
+          output(std::move(output)),
+          exit_code(exit_code),
+          signal_number(signal_number),
+          effect_uncertain(uncertain),
+          output_truncated(output_truncated) {}
+
+    ToolTerminalStatus        status;
+    std::string               output;
+    std::optional<int>        exit_code;
+    std::optional<int>        signal_number;
+    bool                      effect_uncertain = false;
+    bool                      output_truncated = false;
+};
+
+#if defined(__unix__) || defined(__APPLE__)
+namespace {
+
+void close_fd(int& fd) noexcept {
+    if (fd >= 0) {
+        ::close(fd);
+        fd = -1;
+    }
+}
+
+[[noreturn]] void throw_process_setup(std::string message) {
+    throw ProcessBridgeError(ToolTerminalStatus::Failed, std::move(message));
+}
+
+void terminate_process_group(pid_t pid, int signal) noexcept {
+    if (pid > 0) {
+        (void)::kill(-pid, signal);
+    }
+}
+
+struct ProcessExit {
+    std::string output;
+    std::optional<int> exit_code;
+    std::optional<int> signal_number;
+};
+
+ProcessExit run_process(const ToolProcessSpec& spec,
+                        std::size_t output_limit_bytes,
+                        std::chrono::milliseconds timeout,
+                        const std::shared_ptr<graph::CancelToken>& cancel_token) {
+    if (spec.argv.empty() || spec.argv.front().empty()) {
+        throw_process_setup("process tool requires a non-empty argv");
+    }
+    if (spec.interactive) {
+        throw ProcessBridgeError(ToolTerminalStatus::InputRequired,
+                                 "process tool requires an interactive input turn");
+    }
+    if (spec.stdin_data.size() > kMaximumOutputBytes) {
+        throw_process_setup("process tool stdin exceeds the safety limit");
+    }
+
+    int output_pipe[2] = {-1, -1};
+    int input_pipe[2] = {-1, -1};
+    if (::pipe(output_pipe) != 0 || ::pipe(input_pipe) != 0) {
+        close_fd(output_pipe[0]);
+        close_fd(output_pipe[1]);
+        close_fd(input_pipe[0]);
+        close_fd(input_pipe[1]);
+        throw_process_setup("process tool pipe creation failed");
+    }
+
+    const pid_t child = ::fork();
+    if (child < 0) {
+        close_fd(output_pipe[0]);
+        close_fd(output_pipe[1]);
+        close_fd(input_pipe[0]);
+        close_fd(input_pipe[1]);
+        throw_process_setup("process tool fork failed");
+    }
+    if (child == 0) {
+        (void)::setpgid(0, 0);
+        if (!spec.working_directory.empty()
+            && ::chdir(spec.working_directory.c_str()) != 0) {
+            _exit(126);
+        }
+        if (::dup2(output_pipe[1], STDOUT_FILENO) < 0
+            || ::dup2(output_pipe[1], STDERR_FILENO) < 0
+            || ::dup2(input_pipe[0], STDIN_FILENO) < 0) {
+            _exit(126);
+        }
+        close_fd(output_pipe[0]);
+        close_fd(output_pipe[1]);
+        close_fd(input_pipe[0]);
+        close_fd(input_pipe[1]);
+        for (const auto& entry : spec.environment) {
+            const auto separator = entry.find('=');
+            if (separator == std::string::npos || separator == 0) _exit(126);
+            const auto key = entry.substr(0, separator);
+            const auto value = entry.substr(separator + 1);
+            if (::setenv(key.c_str(), value.c_str(), 1) != 0) _exit(126);
+        }
+
+        std::vector<char*> argv;
+        argv.reserve(spec.argv.size() + 1);
+        for (const auto& argument : spec.argv) {
+            argv.push_back(const_cast<char*>(argument.c_str()));
+        }
+        argv.push_back(nullptr);
+        ::execvp(argv.front(), argv.data());
+        _exit(127);
+    }
+
+    (void)::setpgid(child, child);
+    close_fd(output_pipe[1]);
+    close_fd(input_pipe[0]);
+    const bool has_input = !spec.stdin_data.empty();
+    if (!has_input) close_fd(input_pipe[1]);
+    const auto set_nonblocking = [](int fd) {
+        const auto flags = ::fcntl(fd, F_GETFL, 0);
+        return flags >= 0 && ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+    };
+    if (!set_nonblocking(output_pipe[0])
+        || (has_input && !set_nonblocking(input_pipe[1]))) {
+        terminate_process_group(child, SIGKILL);
+        (void)::waitpid(child, nullptr, 0);
+        close_fd(output_pipe[0]);
+        close_fd(input_pipe[1]);
+        throw_process_setup("process tool failed to configure nonblocking pipes");
+    }
+
+    std::string output;
+    output.reserve(std::min<std::size_t>(output_limit_bytes, 4096));
+    std::size_t input_offset = 0;
+    int status = 0;
+    bool output_open = true;
+    bool input_open = has_input;
+    bool child_reaped = false;
+    const auto started_at = std::chrono::steady_clock::now();
+    const auto deadline = timeout > std::chrono::milliseconds::zero()
+                              ? started_at + timeout
+                              : std::chrono::steady_clock::time_point::max();
+
+    const auto reap_after_kill = [&](int signal, ToolTerminalStatus terminal,
+                                     std::string message,
+                                     bool output_truncated = false) -> ProcessExit {
+        terminate_process_group(child, signal);
+        const auto grace_deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds{100};
+        while (!child_reaped && std::chrono::steady_clock::now() < grace_deadline) {
+            const auto result = ::waitpid(child, &status, WNOHANG);
+            if (result == child) {
+                child_reaped = true;
+                break;
+            }
+            if (result < 0 && errno != EINTR) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds{2});
+        }
+        if (!child_reaped) {
+            terminate_process_group(child, SIGKILL);
+            while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+            child_reaped = true;
+        }
+        close_fd(output_pipe[0]);
+        close_fd(input_pipe[1]);
+        std::optional<int> exit_code;
+        std::optional<int> signal_number;
+        if (WIFEXITED(status)) exit_code = WEXITSTATUS(status);
+        if (WIFSIGNALED(status)) signal_number = WTERMSIG(status);
+        throw ProcessBridgeError(terminal, std::move(message), std::move(output),
+                                 exit_code, signal_number, true, output_truncated);
+    };
+
+    while (!child_reaped || output_open || input_open) {
+        if (cancel_token && cancel_token->is_cancelled()) {
+            return reap_after_kill(SIGTERM, ToolTerminalStatus::CancellationRequested,
+                                   "process cancellation requested");
+        }
+        if (!child_reaped && std::chrono::steady_clock::now() >= deadline) {
+            return reap_after_kill(SIGTERM, ToolTerminalStatus::TimedOut,
+                                   "process execution deadline expired");
+        }
+
+        pollfd descriptors[2]{};
+        nfds_t count = 0;
+        int output_index = -1;
+        int input_index = -1;
+        if (output_open) {
+            output_index = static_cast<int>(count);
+            descriptors[count++] = pollfd{output_pipe[0], POLLIN | POLLHUP, 0};
+        }
+        if (input_open) {
+            input_index = static_cast<int>(count);
+            descriptors[count++] = pollfd{input_pipe[1], POLLOUT | POLLHUP, 0};
+        }
+        const auto poll_result = ::poll(descriptors, count, 10);
+        if (poll_result < 0 && errno != EINTR) {
+            return reap_after_kill(SIGKILL, ToolTerminalStatus::Killed,
+                                   "process output polling failed");
+        }
+        if (output_index >= 0
+            && (descriptors[output_index].revents & (POLLIN | POLLHUP))) {
+            char buffer[8192];
+            for (;;) {
+                const auto read_count = ::read(output_pipe[0], buffer, sizeof(buffer));
+                if (read_count > 0) {
+                    output.append(buffer, static_cast<std::size_t>(read_count));
+                    if (output.size() > output_limit_bytes) {
+                        return reap_after_kill(SIGTERM, ToolTerminalStatus::Killed,
+                                               "process output exceeded the policy limit", true);
+                    }
+                    continue;
+                }
+                if (read_count == 0 || (read_count < 0 && errno != EAGAIN && errno != EINTR)) {
+                    close_fd(output_pipe[0]);
+                    output_open = false;
+                }
+                break;
+            }
+        }
+        if (input_index >= 0
+            && (descriptors[input_index].revents & (POLLOUT | POLLHUP))) {
+            while (input_offset < spec.stdin_data.size()) {
+                const auto written = ::write(input_pipe[1], spec.stdin_data.data() + input_offset,
+                                             spec.stdin_data.size() - input_offset);
+                if (written > 0) {
+                    input_offset += static_cast<std::size_t>(written);
+                    continue;
+                }
+                if (written < 0 && (errno == EAGAIN || errno == EINTR)) break;
+                input_open = false;
+                close_fd(input_pipe[1]);
+                break;
+            }
+            if (input_offset == spec.stdin_data.size()) {
+                input_open = false;
+                close_fd(input_pipe[1]);
+            }
+        }
+        if (!child_reaped) {
+            const auto result = ::waitpid(child, &status, WNOHANG);
+            if (result == child) child_reaped = true;
+            else if (result < 0 && errno != EINTR) {
+                return reap_after_kill(SIGKILL, ToolTerminalStatus::Killed,
+                                       "process wait failed");
+            }
+        }
+        if (child_reaped && !output_open) break;
+    }
+    close_fd(output_pipe[0]);
+    close_fd(input_pipe[1]);
+    std::optional<int> exit_code;
+    std::optional<int> signal_number;
+    if (WIFEXITED(status)) exit_code = WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) signal_number = WTERMSIG(status);
+    if (signal_number || !exit_code || *exit_code != 0) {
+        const auto message = exit_code
+            ? "process exited with status " + std::to_string(*exit_code)
+            : "process exited by signal " + std::to_string(signal_number.value_or(0));
+        throw ProcessBridgeError(ToolTerminalStatus::Failed, message, std::move(output),
+                                 exit_code, signal_number);
+    }
+    return ProcessExit{std::move(output), exit_code, signal_number};
+}
+
+} // namespace
+#endif
+
+asio::awaitable<std::string> execute_process_tool_async(
+    Tool& tool, json arguments, ToolExecutionContext context,
+    std::size_t output_limit_bytes, std::chrono::milliseconds timeout) {
+    auto* process_tool = dynamic_cast<ProcessTool*>(&tool);
+    if (!process_tool) {
+        throw std::invalid_argument(
+            "blocking_process policy requires a ProcessTool implementation");
+    }
+    const auto spec = process_tool->prepare_process(arguments, context);
+#if defined(__unix__) || defined(__APPLE__)
+    struct Result {
+        std::string value;
+        std::exception_ptr error;
+    };
+    const auto caller_executor = co_await asio::this_coro::executor;
+    auto result = std::make_shared<Result>();
+    auto completion_token = asio::bind_executor(caller_executor, asio::use_awaitable);
+    co_await asio::async_initiate<decltype(completion_token), void()>(
+        [spec, output_limit_bytes, timeout, cancel_token = context.cancel_token,
+         result, caller_executor](auto handler) mutable {
+            using Handler = std::decay_t<decltype(handler)>;
+            auto completion = std::make_shared<Handler>(std::move(handler));
+            asio::post(blocking_tool_pool().get_executor(),
+                       [spec, output_limit_bytes, timeout, cancel_token = std::move(cancel_token),
+                        result, completion = std::move(completion), caller_executor]() mutable {
+                           try {
+                               result->value = run_process(spec, output_limit_bytes, timeout,
+                                                           cancel_token).output;
+                           } catch (...) {
+                               result->error = std::current_exception();
+                           }
+                           asio::post(caller_executor,
+                                      [completion = std::move(completion)]() mutable {
+                                          (*completion)();
+                                      });
+                       });
+        },
+        completion_token);
+    if (result->error) std::rethrow_exception(result->error);
+    co_return std::move(result->value);
+#else
+    (void)arguments;
+    (void)context;
+    (void)output_limit_bytes;
+    (void)timeout;
+    throw std::runtime_error("process tools are unsupported on this platform");
+#endif
 }
 
 class ResourceArbiterImpl final : public std::enable_shared_from_this<ResourceArbiterImpl> {
@@ -703,6 +1073,11 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
                 context.cancel_token->throw_if_cancelled("before tool execution");
             }
             started = true;
+            if (policy.implementation == ToolExecutionImplementation::BlockingProcess) {
+                co_return co_await detail::execute_process_tool_async(
+                    tool, arguments, context, policy.output_limit_bytes,
+                    policy.execution_timeout);
+            }
             // ContextualAsyncTool has no safe synchronous fallback by design:
             // its context-bearing entry point is the contract it opted into.
             if (auto* contextual = dynamic_cast<ContextualAsyncTool*>(&tool)) {
@@ -801,13 +1176,20 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
             if (context.cancel_token) {
                 context.cancel_token->throw_if_cancelled("after tool resource admission");
             }
-            co_return publish_singleflight(ToolExecutionResult{
+            ToolExecutionResult result{
                 ToolTerminalStatus::Succeeded,
-                check_output(co_await invoke_with_retry()), {}, false, false});
+                check_output(co_await invoke_with_retry()), {}, false, false};
+            if (policy.implementation == ToolExecutionImplementation::BlockingProcess) {
+                result.exit_code = 0;
+            }
+            co_return publish_singleflight(std::move(result));
         }
 
         ResourceRequest request;
-        request.resource_key = derive_resource_key(policy, tool.get_name(), arguments, identity);
+        request.resource_key =
+            policy.concurrency == ToolConcurrency::Exclusive
+                ? "tool:" + required_identity_component(tool.get_name(), "tool")
+                : derive_resource_key(policy, tool.get_name(), arguments, identity);
         request.owner_scope = identity.owner_scope.empty() ? "anonymous" : identity.owner_scope;
         const auto keyed = policy.concurrency == ToolConcurrency::KeyedExclusive
                         || policy.concurrency == ToolConcurrency::Exclusive
@@ -832,9 +1214,13 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
         if (context.cancel_token) {
             context.cancel_token->throw_if_cancelled("after host resource admission");
         }
-        co_return publish_singleflight(ToolExecutionResult{
+        ToolExecutionResult result{
             ToolTerminalStatus::Succeeded,
-            check_output(co_await invoke_with_retry()), {}, false, false});
+            check_output(co_await invoke_with_retry()), {}, false, false};
+        if (policy.implementation == ToolExecutionImplementation::BlockingProcess) {
+            result.exit_code = 0;
+        }
+        co_return publish_singleflight(std::move(result));
     } catch (const graph::CancelledException& error) {
         co_return publish_singleflight(ToolExecutionResult{
             started ? ToolTerminalStatus::CancellationRequested
@@ -858,6 +1244,11 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
         co_return publish_singleflight(ToolExecutionResult{
             status, {}, error.what(),
             queue_failure && policy.idempotency == ToolIdempotency::Idempotent, uncertain});
+    } catch (const detail::ProcessBridgeError& error) {
+        co_return publish_singleflight(ToolExecutionResult{
+            error.status, std::move(error.output), error.what(), false,
+            error.effect_uncertain, error.exit_code, error.signal_number,
+            error.output_truncated});
     } catch (const std::length_error& error) {
         co_return publish_singleflight(ToolExecutionResult{
             ToolTerminalStatus::Failed, {}, error.what(), false, false});

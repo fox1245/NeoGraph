@@ -43,6 +43,10 @@ struct ChatMessage {
     std::vector<ToolCall> tool_calls;    ///< Tool calls made by the assistant (if any).
     std::string tool_call_id;            ///< ID of the tool call being responded to (role == "tool").
     std::string tool_name;               ///< Name of the tool being called.
+    /// Typed terminal status emitted by the shared ToolExecutionController.
+    std::string tool_status;
+    bool tool_retryable = false;
+    bool tool_effect_uncertain = false;
     std::vector<std::string> image_urls; ///< Base64 data URLs or HTTP URLs for vision support.
 };
 
@@ -245,6 +249,9 @@ inline void to_json(json& j, const ChatMessage& msg) {
     }
     if (!msg.tool_call_id.empty()) j["tool_call_id"] = msg.tool_call_id;
     if (!msg.tool_name.empty())    j["tool_name"] = msg.tool_name;
+    if (!msg.tool_status.empty())  j["tool_status"] = msg.tool_status;
+    if (msg.tool_retryable)        j["tool_retryable"] = true;
+    if (msg.tool_effect_uncertain) j["tool_effect_uncertain"] = true;
     if (!msg.image_urls.empty())   j["image_urls"] = msg.image_urls;
 }
 
@@ -263,6 +270,9 @@ inline void from_json(const json& j, ChatMessage& msg) {
     }
     msg.tool_call_id = j.value("tool_call_id", "");
     msg.tool_name    = j.value("tool_name", "");
+    msg.tool_status  = j.value("tool_status", "");
+    msg.tool_retryable = j.value("tool_retryable", false);
+    msg.tool_effect_uncertain = j.value("tool_effect_uncertain", false);
     if (j.contains("image_urls") && j["image_urls"].is_array()) {
         msg.image_urls = j["image_urls"].get<std::vector<std::string>>();
     }
