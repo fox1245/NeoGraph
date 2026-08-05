@@ -118,6 +118,8 @@ std::string key(std::string_view owner, std::string_view run) {
     return out;
 }
 void validate_pub(const ProgramTransitionPublication& publication, std::string_view owner) {
+    // Nested values are validated once by pub_body() while it materializes the
+    // canonical publication; this pass only checks cross-record invariants.
     const auto& run     = publication.run_record;
     const auto& journal = publication.journal_record;
     if (run.owner_scope() != owner || run.run_id() != journal.run_id ||
@@ -128,12 +130,9 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
         run.exact_checkpoint() != journal.core_checkpoint) {
         throw std::invalid_argument("Program snapshot and journal do not match");
     }
-    (void)run.serialize_canonical();
-    (void)journal.serialize_canonical();
 
     std::uint64_t previous_sequence = 0;
     for (const auto& event : publication.events) {
-        (void)event.serialize_canonical();
         if (event.run_id != run.run_id() || event.program_version_id != run.program_version_id() ||
             event.bundle_id != run.bundle_id() ||
             event.sequence <= previous_sequence) {
@@ -162,7 +161,6 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
 
     previous_sequence = 0;
     for (const auto& effect : publication.effects) {
-        (void)effect.serialize_canonical();
         if (effect.sequence() <= previous_sequence ||
             effect.effect().operation_id().empty()) {
             throw std::invalid_argument("Program effect does not bind snapshot");
@@ -195,7 +193,6 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
             throw std::invalid_argument(
                 "Program migration publication requires a compatible fork receipt");
         }
-        (void)plan.serialize_canonical();
     }
 }
 json pub_body(const ProgramTransitionPublication& p) {
@@ -381,11 +378,10 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
     std::string_view owner, std::string_view expected, ProgramTransitionPublication publication) {
     std::string publication_bytes;
     try {
-        validate_pub(publication, owner);
+        publication_bytes = publication.serialize_canonical();
         if (!valid_effect_outbox_binding(publication.run_record, publication.effects)) {
             return ProgramTransitionPublishResult::Conflict;
         }
-        publication_bytes = publication.serialize_canonical();
         if (!expected.empty() && !detail::is_sha256_identity(expected)) {
             return ProgramTransitionPublishResult::Conflict;
         }

@@ -201,7 +201,6 @@ void val(const ProgramEvent& e) {
         if (!payload) throw std::invalid_argument("Program checkpoint payload missing");
         validate_checkpoint(payload->checkpoint);
     }
-    (void)ep(e);
 }
 json body(const ProgramEvent& e) {
     return {{"format", std::string(FORMAT)},

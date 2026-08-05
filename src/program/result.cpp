@@ -115,7 +115,6 @@ void validate_data(const ProgramResultData& d) {
                 throw std::invalid_argument(
                     "Program interrupt projection disagrees with pending input");
             }
-            (void)d.interrupt->pending_input->serialize_canonical();
         }
         if (d.interrupt->pending_effect) {
             if (d.interrupt->core_node != d.interrupt->pending_effect->core_node() ||
@@ -124,7 +123,6 @@ void validate_data(const ProgramResultData& d) {
                 throw std::invalid_argument(
                     "Program interrupt projection disagrees with pending effect");
             }
-            (void)d.interrupt->pending_effect->serialize_canonical();
         }
     }
     if (d.status == ProgramTerminalStatus::Interrupted) {
@@ -178,6 +176,14 @@ ProgramResult ProgramResult::parse(std::string_view bytes) {
     const auto& trace=require_value(v,"execution_trace"); if(!trace.is_array())throw std::invalid_argument("Program result execution_trace must be an array"); for(const auto& n:trace){if(!n.is_string())throw std::invalid_argument("Program result execution trace entries must be strings");d.execution_trace.push_back(n.get<std::string>());}
     auto result=create(std::move(d)); if(result.id()!=require_string(v,"id"))throw std::invalid_argument("Stored ProgramResult id does not match its canonical body"); return result;
 }
-std::string ProgramResult::serialize_canonical() const { validate_data(impl_->data); if(impl_->id!=computed_id(impl_->data))throw std::invalid_argument("Program result id does not match its canonical body"); auto v=result_body(impl_->data);v["id"]=impl_->id;return detail::canonical_json_bytes(v); }
+std::string ProgramResult::serialize_canonical() const {
+    validate_data(impl_->data);
+    auto value = result_body(impl_->data);
+    const auto bytes = detail::canonical_json_bytes(value);
+    if (impl_->id != detail::sha256_identity("program-result/v1", bytes))
+        throw std::invalid_argument("Program result id does not match its canonical body");
+    value["id"] = impl_->id;
+    return detail::canonical_json_bytes(value);
+}
 const std::string& ProgramResult::id()const noexcept{return impl_->id;} ProgramTerminalStatus ProgramResult::status()const noexcept{return impl_->data.status;} const std::string& ProgramResult::run_id()const noexcept{return impl_->data.run_id;} const std::string& ProgramResult::program_version_id()const noexcept{return impl_->data.program_version_id;} const std::string& ProgramResult::bundle_id()const noexcept{return impl_->data.bundle_id;} const std::string& ProgramResult::operation_id()const noexcept{return impl_->data.operation_id;} std::uint64_t ProgramResult::attempt()const noexcept{return impl_->data.attempt;} json ProgramResult::output()const{return impl_->data.output;} ProgramUsage ProgramResult::usage()const noexcept{return impl_->data.usage;} RunBudget ProgramResult::remaining_budget()const noexcept{return impl_->data.remaining_budget;} std::optional<CoreCheckpointIdentity> ProgramResult::checkpoint()const{return impl_->data.checkpoint;} std::optional<ProgramInterrupt> ProgramResult::interrupt()const{return impl_->data.interrupt;} std::optional<ProgramFailure> ProgramResult::failure()const{return impl_->data.failure;} std::vector<std::string> ProgramResult::execution_trace()const{return impl_->data.execution_trace;}
 }  // namespace neograph::program

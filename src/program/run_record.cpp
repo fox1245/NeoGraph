@@ -249,6 +249,8 @@ void validate_result_state(const ProgramRunRecordData& d) {
 }
 
 void validate(const ProgramRunRecordData& d) {
+    // Nested values are validated by stored_body(); keep this pass structural
+    // so serialization does not repeat their canonical work.
     if (d.owner_scope.empty()) {
         throw std::invalid_argument("Program run owner_scope must not be empty");
     }
@@ -291,12 +293,9 @@ void validate(const ProgramRunRecordData& d) {
             result.checkpoint() != d.exact_checkpoint) {
             throw std::invalid_argument("Program terminal result does not bind the run snapshot");
         }
-        (void)result.serialize_canonical();
     } else if (terminal(d.continuation.state)) {
         throw std::invalid_argument("Terminal run snapshot requires ProgramResult");
     }
-    if (d.pending_input) (void)d.pending_input->serialize_canonical();
-    if (d.pending_effect) (void)d.pending_effect->serialize_canonical();
     const bool has_fork_lineage =
         d.fork_source_run_id || d.fork_source_program_version_id || d.fork_source_checkpoint_id;
     if (static_cast<bool>(d.fork_receipt) != has_fork_lineage) {
@@ -311,7 +310,6 @@ void validate(const ProgramRunRecordData& d) {
             receipt.source_checkpoint_id() != *d.fork_source_checkpoint_id) {
             throw std::invalid_argument("Program fork receipt does not bind target lineage");
         }
-        (void)receipt.serialize_canonical();
     }
     std::set<std::string, std::less<>> child_ids;
     for (const auto& child : d.children) {
@@ -355,7 +353,6 @@ void validate(const ProgramRunRecordData& d) {
                  result.status() != ProgramTerminalStatus::AmbiguousEffect)) {
                 throw std::invalid_argument("Program child terminal result does not bind its state");
             }
-            (void)result.serialize_canonical();
         }
         (void)invocation_body(child.invocation);
     }
@@ -614,11 +611,11 @@ std::string ProgramRunRecord::serialize_canonical() const {
     validate(impl_->data);
     validate_continuation_state(impl_->data);
     validate_result_state(impl_->data);
-    if (impl_->id != hash(impl_->data)) {
+    auto value = stored_body(impl_->data);
+    const auto bytes = detail::canonical_json_bytes(value);
+    if (impl_->id != detail::sha256_identity("program-run-record/v1", bytes))
         throw std::invalid_argument("Program run record id does not match canonical body");
-    }
-    auto v  = stored_body(impl_->data);
-    v["id"] = impl_->id;
-    return detail::canonical_json_bytes(v);
+    value["id"] = impl_->id;
+    return detail::canonical_json_bytes(value);
 }
 }  // namespace neograph::program
