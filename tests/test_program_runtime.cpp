@@ -406,12 +406,14 @@ struct AdmittedRuntime {
     std::shared_ptr<CheckpointStore>        checkpoints;
     std::shared_ptr<ProgramTransitionStore> journal;
     std::shared_ptr<ChildBindingRegistry>   child_bindings;
+    ProgramChildQuotaConfig                 child_quota;
     std::size_t                             scheduler_thread_count;
     std::unique_ptr<ProgramRuntime>         runtime;
 
     explicit AdmittedRuntime(std::size_t                             scheduler_threads  = 1,
                              std::shared_ptr<CheckpointStore>        checkpoint_backend = {},
-                             std::shared_ptr<ProgramTransitionStore> journal_backend    = {})
+                             std::shared_ptr<ProgramTransitionStore> journal_backend    = {},
+                             ProgramChildQuotaConfig                 quota              = {})
         : registry(runtime_registry()),
           profile(make_profile(registry)),
           policy(make_policy(profile)),
@@ -424,6 +426,7 @@ struct AdmittedRuntime {
           journal(journal_backend ? std::move(journal_backend)
                                   : std::make_shared<InMemoryProgramTransitionStore>()),
           child_bindings(std::make_shared<ChildBindingRegistry>()),
+          child_quota(quota),
           scheduler_thread_count(scheduler_threads),
           runtime(make_runtime()) {}
 
@@ -450,9 +453,8 @@ struct AdmittedRuntime {
             .budget_ceiling(BudgetLimits{10000, 1000, 1000, 4, 32, 20, 4, 4, 32});
         return std::move(builder).build();
     }
-
     std::unique_ptr<ProgramRuntime> make_runtime() const {
-        return std::make_unique<ProgramRuntime>(RuntimeConfig{
+        RuntimeConfig config{
             catalog,
             checkpoints,
             {},
@@ -462,7 +464,9 @@ struct AdmittedRuntime {
                                         std::string_view parent_version_id,
                                         std::string_view binding_name) {
                 return bindings->resolve(owner_scope, parent_version_id, binding_name);
-            }});
+            }};
+        config.child_quota = child_quota;
+        return std::make_unique<ProgramRuntime>(std::move(config));
     }
 
     ProgramVersion admit(std::string node_type) {
@@ -570,6 +574,7 @@ LinkedChildAdmission make_linked_child(
 }
 LinkedChildAdmission make_recursive_linked_child(AdmittedRuntime& fixture) {
     auto parent_document = program_document("runtime-blocking");
+    parent_document["declared_budget_requirements"][3]["maximum"] = 2;
     parent_document["declared_budget_requirements"][4]["minimum"] = 2;
     parent_document["declared_budget_requirements"][4]["maximum"] = 2;
     parent_document["declared_budget_requirements"][7]["minimum"] = 1;
@@ -3083,6 +3088,53 @@ TEST(ProgramRuntimeTest, RecursiveChildGrantsAttenuateToZeroAtTheConfiguredBound
     EXPECT_EQ(grandchild.wait().status(), ProgramTerminalStatus::Cancelled);
     EXPECT_EQ(great_grandchild.wait().status(), ProgramTerminalStatus::Cancelled);
     EXPECT_EQ(leaf.wait().status(), ProgramTerminalStatus::Cancelled);
+}
+
+TEST(ProgramRuntimeTest, GlobalChildQuotaRejectsFragmentationAndReleasesOnTerminal) {
+    ProgramChildQuotaConfig quota;
+    quota.max_active_children = 1;
+    quota.max_active_children_per_owner = 1;
+    quota.max_pending_spawn_requests = 4;
+    quota.max_pending_spawn_requests_per_owner = 4;
+
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, quota);
+    const auto linked = make_recursive_linked_child(fixture);
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(),
+                           RunBudget{10000, 1000, 1000, 2, 2, 20, 0, 4, 4},
+                           "trace-global-quota-parent", {}});
+    auto child = fixture.runtime->start_child(
+        "tenant:runtime", parent, linked.receipt, linked.child_version,
+        ProgramInvocation{json::object(),
+                           RunBudget{5000, 500, 500, 1, 1, 10, 0, 3, 1},
+                           "trace-global-quota-child-a", {}});
+
+    try {
+        (void)fixture.runtime->start_child(
+            "tenant:runtime", parent, linked.receipt, linked.child_version,
+            ProgramInvocation{json::object(),
+                               RunBudget{5000, 500, 500, 1, 1, 10, 0, 3, 1},
+                               "trace-global-quota-child-b", {}});
+        FAIL() << "Expected the global active-child quota to reject a fragmented sibling";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_CHILD_QUOTA");
+    }
+
+    EXPECT_TRUE(child.cancel());
+    EXPECT_EQ(child.wait().status(), ProgramTerminalStatus::Cancelled);
+
+    auto replacement = fixture.runtime->start_child(
+        "tenant:runtime", parent, linked.receipt, linked.child_version,
+        ProgramInvocation{json::object(),
+                           RunBudget{5000, 500, 500, 1, 1, 10, 0, 3, 1},
+                           "trace-global-quota-child-c", {}});
+    EXPECT_EQ(replacement.snapshot().child_depth(), 1U);
+
+    EXPECT_TRUE(parent.cancel());
+    EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_EQ(replacement.wait().status(), ProgramTerminalStatus::Cancelled);
 }
 
 TEST(ProgramRuntimeTest, DuplicateChildRecoveryReturnsTheExistingRun) {
