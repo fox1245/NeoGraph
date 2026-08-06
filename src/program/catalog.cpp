@@ -460,7 +460,7 @@ std::string recompute_program_hash(const ProgramBundle&           bundle,
                                {"maximum", budget.maximum}});
     }
     const json semantic{
-        {"program_schema_version", ProgramCompiler::PROGRAM_SCHEMA_VERSION},
+        {"program_schema_version", bundle.program_schema_version()},
         {"input_contract", contract_json(bundle.input_contract())},
         {"output_contract", contract_json(bundle.output_contract())},
         {"orchestration_plan", json{{"schema_version", plan.schema_version}, {"plan", plan.plan}}},

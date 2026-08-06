@@ -436,7 +436,7 @@ struct AdmittedRuntime {
             .semantic_version("1.0.0")
             .registry(registry)
             .mode(AdmissionMode::MultiTenant)
-            .max_program_schema_version(1)
+            .max_program_schema_version(PROGRAM_SCHEMA_VERSION_V2)
             .allow_source_kind(SourceKind::CppBuilder)
             .allow_effect_mode(EffectMode::Brokered);
         for (const auto& identity : registry.identities())
@@ -475,7 +475,13 @@ struct AdmittedRuntime {
 
     ProgramVersion admit_document(json document) {
         ProgramCompiler compiler(registry, {"program-runtime-test/v1"});
-        auto source = ProgramSource::from_cpp_builder("test:runtime", 1, std::move(document));
+        const auto schema_version =
+            document.contains("program_schema_version") &&
+                    document["program_schema_version"].is_number_unsigned()
+                ? document["program_schema_version"].get<std::uint32_t>()
+                : PROGRAM_SCHEMA_VERSION_V1;
+        auto source = ProgramSource::from_cpp_builder("test:runtime", schema_version,
+                                                      std::move(document));
         std::optional<ProgramBundle> bundle;
         try {
             bundle = compiler.compile(source);
@@ -563,6 +569,7 @@ LinkedChildAdmission make_linked_child(
     std::string      parent_node_type = "runtime-blocking",
     std::string      child_node_type  = "runtime-blocking") {
     auto parent_document = program_document(std::move(parent_node_type));
+    parent_document["program_schema_version"] = PROGRAM_SCHEMA_VERSION_V2;
     parent_document["declared_budget_requirements"][4]["minimum"] = 2;
     parent_document["declared_budget_requirements"][4]["maximum"] = 2;
     parent_document["declared_budget_requirements"][7]["minimum"] = 1;
@@ -574,6 +581,7 @@ LinkedChildAdmission make_linked_child(
 }
 LinkedChildAdmission make_recursive_linked_child(AdmittedRuntime& fixture) {
     auto parent_document = program_document("runtime-blocking");
+    parent_document["program_schema_version"] = PROGRAM_SCHEMA_VERSION_V2;
     parent_document["declared_budget_requirements"][3]["maximum"] = 2;
     parent_document["declared_budget_requirements"][4]["minimum"] = 2;
     parent_document["declared_budget_requirements"][4]["maximum"] = 2;
@@ -2695,6 +2703,7 @@ TEST(ProgramRuntimeTest, ForkMismatchesRejectBeforeTargetRunAndLeaveSourceUnchan
 
 json orchestration_document(json root, std::string node_type = "runtime-completed") {
     auto document = program_document(std::move(node_type));
+    document["program_schema_version"] = PROGRAM_SCHEMA_VERSION_V2;
     root["name"] = "main";
     root["definition"] = std::move(document["root"]["definition"]);
     document["declared_budget_requirements"][3]["maximum"] = 4;

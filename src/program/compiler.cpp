@@ -279,34 +279,52 @@ bool valid_nonempty_utf8(std::string_view value) {
 }
 
 struct ParsedProgram {
-    ContractRecord                 input_contract;
-    ContractRecord                 output_contract;
-    std::string                    root_name;
-    json                           core_definition;
-    std::vector<BudgetRequirement> budgets;
+    std::uint32_t                       schema_version = 0;
+    ContractRecord                      input_contract;
+    ContractRecord                      output_contract;
+    std::string                         root_name;
+    json                                core_definition;
+    std::vector<BudgetRequirement>      budgets;
+    std::map<std::string, std::string>  budget_pointers;
 };
 
 void validate_program_version(const ProgramSource&   source,
                               const json&            document,
+                              ParsedProgram&          output,
                               DiagnosticAccumulator& diagnostics) {
     constexpr std::string_view pointer = "/program_schema_version";
-    if (source.schema_version() != ProgramCompiler::PROGRAM_SCHEMA_VERSION) {
+    if (!is_supported_program_schema_version(source.schema_version())) {
         diagnostics.add(CompilePhase::Schema, "P_SCHEMA_VERSION", DiagnosticSeverity::Error,
-                        std::string(pointer), "Program source metadata requires schema version 1",
+                        std::string(pointer), "Program source metadata uses an unsupported schema version",
                         json{{"source_schema_version", source.schema_version()},
-                             {"supported", ProgramCompiler::PROGRAM_SCHEMA_VERSION}});
+                             {"supported",
+                              json::array({PROGRAM_SCHEMA_VERSION_V1,
+                                           PROGRAM_SCHEMA_VERSION_V2})}});
     }
     if (!document.contains("program_schema_version")) {
         diagnostics.add(CompilePhase::Schema, "P_SCHEMA_VERSION", DiagnosticSeverity::Error,
-                        std::string(pointer), "Program document requires explicit schema version 1",
-                        json{{"supported", ProgramCompiler::PROGRAM_SCHEMA_VERSION}});
+                        std::string(pointer), "Program document requires an explicit schema version",
+                        json{{"supported",
+                              json::array({PROGRAM_SCHEMA_VERSION_V1,
+                                           PROGRAM_SCHEMA_VERSION_V2})}});
         return;
     }
     const auto encoded = unsigned_integer(document["program_schema_version"]);
-    if (!encoded || *encoded != ProgramCompiler::PROGRAM_SCHEMA_VERSION) {
+    if (!encoded || !is_supported_program_schema_version(*encoded)) {
         diagnostics.add(CompilePhase::Schema, "P_SCHEMA_VERSION", DiagnosticSeverity::Error,
-                        std::string(pointer), "Program document requires schema version 1",
-                        json{{"supported", ProgramCompiler::PROGRAM_SCHEMA_VERSION}});
+                        std::string(pointer), "Program document uses an unsupported schema version",
+                        json{{"supported",
+                              json::array({PROGRAM_SCHEMA_VERSION_V1,
+                                           PROGRAM_SCHEMA_VERSION_V2})}});
+        return;
+    }
+    output.schema_version = static_cast<std::uint32_t>(*encoded);
+    if (source.schema_version() != output.schema_version) {
+        diagnostics.add(CompilePhase::Schema, "P_SCHEMA_VERSION", DiagnosticSeverity::Error,
+                        std::string(pointer),
+                        "Program source metadata and document schema versions must match",
+                        json{{"source_schema_version", source.schema_version()},
+                             {"document_schema_version", output.schema_version}});
     }
 }
 
@@ -387,20 +405,27 @@ void validate_root(const json&            document,
         if (std::find(operations.begin(), operations.end(), op) == operations.end()) {
             diagnostics.add(CompilePhase::Normalize, "P_PLAN_OPERATION",
                             DiagnosticSeverity::Error, "/root/op",
-                            "Program-v1 root operation is not supported",
+                            "Program root operation is not supported",
                             json{{"operation", op}});
+        } else if (output.schema_version == PROGRAM_SCHEMA_VERSION_V1 && op != "call_core") {
+            diagnostics.add(CompilePhase::Schema, "P_SCHEMA_OPERATION",
+                            DiagnosticSeverity::Error, "/root/op",
+                            "Program schema version 1 permits only a call_core root",
+                            json{{"schema_version", PROGRAM_SCHEMA_VERSION_V1},
+                                 {"operation", op},
+                                 {"supported", "call_core"}});
         }
     }
     if (!root.contains("name")) {
         diagnostics.add(CompilePhase::Normalize, "P_ROOT_NAME", DiagnosticSeverity::Error,
-                        "/root/name", "Program-v1 root name is required", json::object());
+                        "/root/name", "Program root name is required", json::object());
     } else if (!root["name"].is_string()) {
         add_type(diagnostics, "/root/name", "string", root["name"]);
     } else {
         output.root_name = root["name"].get<std::string>();
         if (!valid_nonempty_utf8(output.root_name)) {
             diagnostics.add(CompilePhase::Normalize, "P_ROOT_NAME", DiagnosticSeverity::Error,
-                            "/root/name", "Program-v1 root name must be nonempty UTF-8",
+                            "/root/name", "Program root name must be nonempty UTF-8",
                             json::object());
         }
     }
@@ -911,7 +936,7 @@ void validate_budgets(const json&            document,
     constexpr std::string_view pointer = "/declared_budget_requirements";
     if (!document.contains("declared_budget_requirements")) {
         diagnostics.add(CompilePhase::Normalize, "P_BUDGET_INVALID", DiagnosticSeverity::Error,
-                        std::string(pointer), "Program-v1 requires all nine finite budget records",
+                        std::string(pointer), "Program requires all nine finite budget records",
                         json::object());
         return;
     }
@@ -962,7 +987,7 @@ void validate_budgets(const json&            document,
             kBudgetResources.end()) {
             diagnostics.add(CompilePhase::Normalize, "P_BUDGET_INVALID", DiagnosticSeverity::Error,
                             child_pointer(item_pointer, "resource"),
-                            "Budget resource is not part of the closed Program-v1 set",
+                            "Budget resource is not part of the closed Program resource set",
                             json{{"resource", resource}});
             continue;
         }
@@ -979,6 +1004,14 @@ void validate_budgets(const json&            document,
                 json{{"resource", resource}, {"minimum", *minimum}, {"maximum", *maximum}});
             continue;
         }
+        if (output.schema_version == PROGRAM_SCHEMA_VERSION_V1 &&
+            resource == "max_program_operations" && (*minimum != 1 || *maximum != 1)) {
+            diagnostics.add(CompilePhase::Schema, "P_BUDGET_V1", DiagnosticSeverity::Error,
+                            item_pointer,
+                            "Program schema version 1 fixes max_program_operations to exactly one",
+                            json{{"minimum", *minimum}, {"maximum", *maximum}});
+            continue;
+        }
         bool structural_valid = true;
         if (resource == "max_program_operations" || resource == "max_concurrency" ||
             resource == "max_core_steps") {
@@ -992,7 +1025,7 @@ void validate_budgets(const json&            document,
         if (!structural_valid) {
             diagnostics.add(
                 CompilePhase::Normalize, "P_BUDGET_INVALID", DiagnosticSeverity::Error,
-                item_pointer, "Budget record violates the Program-v1 structural floor",
+                item_pointer, "Budget record violates the Program structural floor",
                 json{{"resource", resource}, {"minimum", *minimum}, {"maximum", *maximum}});
             continue;
         }
@@ -1008,6 +1041,7 @@ void validate_budgets(const json&            document,
         if (resource == "max_child_depth" || resource == "max_total_children")
             child_budget_maxima.emplace(resource, *maximum);
         output.budgets.push_back({resource, *minimum, *maximum});
+        output.budget_pointers.emplace(resource, item_pointer);
     }
     const auto child_depth = child_budget_maxima.find("max_child_depth");
     const auto total_children = child_budget_maxima.find("max_total_children");
@@ -1030,6 +1064,35 @@ void validate_budgets(const json&            document,
               [](const auto& lhs, const auto& rhs) { return lhs.resource < rhs.resource; });
 }
 
+void validate_static_budget_requirements(const ParsedProgram&                    parsed,
+                                         const ProgramStaticBudgetRequirements& required,
+                                         DiagnosticAccumulator&                  diagnostics) {
+    const auto validate = [&](std::string_view resource, std::uint64_t minimum) {
+        const auto found = std::find_if(
+            parsed.budgets.begin(), parsed.budgets.end(), [&](const BudgetRequirement& budget) {
+                return budget.resource == resource;
+            });
+        if (found == parsed.budgets.end()) return;
+        if (found->maximum >= minimum) return;
+        const auto pointer = parsed.budget_pointers.find(std::string(resource));
+        diagnostics.add(
+            CompilePhase::Normalize, "P_BUDGET_STATIC", DiagnosticSeverity::Error,
+            pointer == parsed.budget_pointers.end()
+                ? std::string("/declared_budget_requirements")
+                : pointer->second + "/maximum",
+            "Program declared budget cannot cover its finite static operation tree",
+            json{{"resource", resource},
+                 {"required_maximum", minimum},
+                 {"declared_minimum", found->minimum},
+                 {"declared_maximum", found->maximum}});
+    };
+    validate("max_program_operations", required.max_program_operations);
+    validate("max_concurrency", required.max_concurrency);
+    validate("max_core_steps", required.max_core_steps);
+    validate("max_child_depth", required.max_child_depth);
+    validate("max_total_children", required.max_total_children);
+}
+
 ParsedProgram parse_program(const ProgramSource&   source,
                             const json&            document,
                             DiagnosticAccumulator& diagnostics) {
@@ -1041,7 +1104,7 @@ ParsedProgram parse_program(const ProgramSource&   source,
     add_unknown_fields(diagnostics, document, "",
                        {"program_schema_version", "input_contract", "output_contract", "root",
                         "declared_budget_requirements"});
-    validate_program_version(source, document, diagnostics);
+    validate_program_version(source, document, result, diagnostics);
     validate_contract(document, "input_contract", result.input_contract, diagnostics);
     validate_contract(document, "output_contract", result.output_contract, diagnostics);
     validate_root(document, result, diagnostics);
@@ -1324,7 +1387,7 @@ std::string canonical_program_hash(const ParsedProgram&           parsed,
                                {"minimum", budget.minimum},
                                {"maximum", budget.maximum}});
     const json semantic{
-        {"program_schema_version", ProgramCompiler::PROGRAM_SCHEMA_VERSION},
+        {"program_schema_version", parsed.schema_version},
         {"input_contract", contract_json(parsed.input_contract)},
         {"output_contract", contract_json(parsed.output_contract)},
         {"orchestration_plan", json{{"schema_version", plan.schema_version}, {"plan", plan.plan}}},
@@ -1399,6 +1462,9 @@ struct ProgramCompiler::Impl {
                 // a late scheduler failure while preserving the canonical JSON artifact.
                 const auto typed_plan = ProgramPlan::from_json(orchestration.plan);
                 validate_sealed_plan_dispatch(typed_plan, diagnostics);
+                if (parsed.schema_version == PROGRAM_SCHEMA_VERSION_V2)
+                    validate_static_budget_requirements(
+                        parsed, derive_static_budget_requirements(typed_plan), diagnostics);
                 if (diagnostics.has_errors()) diagnostics.throw_error();
             } catch (const ProgramCompileError&) {
                 throw;
@@ -1417,7 +1483,7 @@ struct ProgramCompiler::Impl {
             data.source_hash                    = source.source_hash();
             data.canonical_program_hash         = program_hash;
             data.compiler_build_id              = config.compiler_build_id;
-            data.program_schema_version         = PROGRAM_SCHEMA_VERSION;
+            data.program_schema_version         = parsed.schema_version;
             data.registry_snapshot_fingerprint  = registry.fingerprint();
             data.module_dependency_merkle_root  = merkle_root;
             data.input_contract                 = std::move(parsed.input_contract);

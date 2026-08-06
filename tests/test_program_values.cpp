@@ -386,11 +386,15 @@ TEST(ProgramBundleTest, RejectsInvalidTypedRecordsAndNestedUnknownFields) {
     EXPECT_THROW((void)ProgramBundle::parse(stored.dump()), std::invalid_argument);
 }
 
-TEST(ProgramBundleTest, RejectsUnsupportedSourceSchemaAndErrorDiagnostics) {
+TEST(ProgramBundleTest, AcceptsSupportedSourceSchemasAndRejectsErrorDiagnostics) {
     const auto source = make_source();
 
+    auto version_two                   = make_bundle_data(source);
+    version_two.program_schema_version = PROGRAM_SCHEMA_VERSION_V2;
+    EXPECT_NO_THROW((void)ProgramBundle(std::move(version_two)));
+
     auto unsupported_schema                   = make_bundle_data(source);
-    unsupported_schema.program_schema_version = 2;
+    unsupported_schema.program_schema_version = PROGRAM_SCHEMA_VERSION_V2 + 1;
     EXPECT_THROW((void)ProgramBundle(std::move(unsupported_schema)), std::invalid_argument);
 
     auto failed_compilation                         = make_bundle_data(source);

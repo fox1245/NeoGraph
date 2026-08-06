@@ -1,4 +1,5 @@
 #include <neograph/program/bundle.h>
+#include <neograph/program/schema.h>
 
 #include "canonical_json.h"
 
@@ -461,7 +462,7 @@ void normalize_data(ProgramBundleData& data) {
     require_sha256(data.source_hash, "Program bundle source_hash");
     require_sha256(data.canonical_program_hash, "Program bundle canonical_program_hash");
     require_nonempty_utf8(data.compiler_build_id, "Program bundle compiler_build_id");
-    if (data.program_schema_version != 1) {
+    if (!is_supported_program_schema_version(data.program_schema_version)) {
         throw std::invalid_argument("Program bundle program_schema_version is unsupported");
     }
     require_sha256(data.registry_snapshot_fingerprint,

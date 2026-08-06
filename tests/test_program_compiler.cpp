@@ -255,12 +255,31 @@ json program_document(json definition = core_definition()) {
         {"declared_budget_requirements", budgets()}};
 }
 
+json operation_document(json definition = core_definition()) {
+    auto document = program_document(std::move(definition));
+    document["program_schema_version"] = PROGRAM_SCHEMA_VERSION_V2;
+    document["declared_budget_requirements"][3]["minimum"] = 32;
+    document["declared_budget_requirements"][3]["maximum"] = 32;
+    document["declared_budget_requirements"][4]["minimum"] = 100;
+    document["declared_budget_requirements"][4]["maximum"] = 100;
+    return document;
+}
+
+std::uint32_t source_schema_version(const json& document) {
+    if (!document.contains("program_schema_version") ||
+        !document["program_schema_version"].is_number_unsigned())
+        return PROGRAM_SCHEMA_VERSION_V1;
+    return document["program_schema_version"].get<std::uint32_t>();
+}
+
 ProgramSource source_from(json                        document,
                           std::vector<ImportRef>      imports    = {},
                           std::vector<SourceMapEntry> source_map = {},
                           std::string                 source_id  = "test:program") {
-    return ProgramSource::from_cpp_builder(std::move(source_id), 1, std::move(document),
-                                           std::move(imports), std::move(source_map));
+    const auto schema_version = source_schema_version(document);
+    return ProgramSource::from_cpp_builder(std::move(source_id), schema_version,
+                                           std::move(document), std::move(imports),
+                                           std::move(source_map));
 }
 
 std::vector<neograph::program::Diagnostic> compile_errors(
@@ -592,7 +611,7 @@ TEST(ProgramCompilerTest, RejectsUnknownProgramFieldsAndWrongNestedTypes) {
 
 TEST(ProgramCompilerTest, AcceptsSequenceRootAndRejectsMalformedRootPlans) {
     auto snapshot = complete_snapshot();
-    auto sequence = program_document();
+    auto sequence = operation_document();
     sequence["root"]["op"] = "sequence";
     sequence["root"]["children"] = json::array({
         json{{"op", "call_core"}},
@@ -616,7 +635,15 @@ TEST(ProgramCompilerTest, AcceptsSequenceRootAndRejectsMalformedRootPlans) {
     EXPECT_EQ(sequence_bundle->orchestration_plan().plan["operations"][0]["op"], "call_core");
     EXPECT_EQ(sequence_bundle->orchestration_plan().plan["operations"][1]["op"], "emit");
     EXPECT_EQ(sequence_bundle->orchestration_plan().plan["operations"][2]["op"], "return");
-    auto malformed = program_document();
+    auto legacy_sequence = program_document();
+    legacy_sequence["root"] = json{{"op", "sequence"},
+                                   {"children",
+                                    json::array({json{{"op", "call_core"}},
+                                                 json{{"op", "emit"}, {"value", "legacy"}}})}};
+    EXPECT_TRUE(
+        contains_code(compile_errors(snapshot, std::move(legacy_sequence)), "P_SCHEMA_OPERATION"));
+
+    auto malformed = operation_document();
     malformed["root"]["op"] = "sequence";
     const auto malformed_errors = compile_errors(snapshot, std::move(malformed));
     EXPECT_TRUE(contains_code(malformed_errors, "P_SCHEMA_REQUIRED"));
@@ -632,7 +659,7 @@ TEST(ProgramCompilerTest, AcceptsSequenceRootAndRejectsMalformedRootPlans) {
 
 TEST(ProgramCompilerTest, RejectsNonBinaryRaceDuringCompilation) {
     const auto snapshot = complete_snapshot();
-    auto       document = program_document();
+    auto       document = operation_document();
     const auto definition = document["root"]["definition"];
     document["root"] = json{{"op", "race"},
                             {"name", "main"},
@@ -648,7 +675,7 @@ TEST(ProgramCompilerTest, RejectsNonBinaryRaceDuringCompilation) {
 
 TEST(ProgramCompilerTest, SealsLoweredOperationsAsTypedImmutablePlanNodes) {
     auto snapshot = complete_snapshot();
-    auto document = program_document();
+    auto document = operation_document();
     auto root = json{{"op", "sequence"},
                      {"name", "main"},
                      {"definition", document["root"]["definition"]}};
@@ -704,7 +731,7 @@ TEST(ProgramCompilerTest, AllowsExplicitChildCapacityForProgramRuntimeStartChild
 
 TEST(ProgramCompilerTest, LowersOnlyDirectlyJoinedVerifiedChildBindingSpawns) {
     const auto snapshot = complete_snapshot();
-    auto document = program_document();
+    auto document = operation_document();
     const auto definition = document["root"]["definition"];
     document["root"] = json{{"op", "await"},
                             {"name", "main"},
@@ -815,7 +842,7 @@ TEST(ProgramCompilerTest, TypedPlanRejectsDanglingAndUnknownOperationFields) {
 
 TEST(ProgramCompilerTest, RejectsMalformedConditionPointerDuringNormalization) {
     auto snapshot = complete_snapshot();
-    auto document = program_document();
+    auto document = operation_document();
     document["root"] = json{{"op", "branch"},
                              {"name", "main"},
                              {"definition", document["root"]["definition"]},
@@ -831,7 +858,7 @@ TEST(ProgramCompilerTest, RejectsMalformedConditionPointerDuringNormalization) {
 
 TEST(ProgramCompilerTest, RejectsCancelScopesTheRuntimeCannotEnforce) {
     auto snapshot = complete_snapshot();
-    auto document = program_document();
+    auto document = operation_document();
     document["root"] = json{{"op", "sequence"},
                              {"name", "main"},
                              {"definition", document["root"]["definition"]},

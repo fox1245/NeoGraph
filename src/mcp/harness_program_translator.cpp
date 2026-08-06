@@ -1,6 +1,7 @@
 #include <neograph/graph/elaborator.h>
 #include <neograph/mcp/harness_program_translator.h>
 #include <neograph/mcp/json_schema.h>
+#include <neograph/program/compiler.h>
 #include "../program/canonical_json.h"
 
 #include <algorithm>
@@ -272,6 +273,13 @@ json core_output_schema() {
     };
 }
 
+json program_output_schema() {
+    // Program control operations may preserve a Core output, return an authored
+    // terminal value, or aggregate branch values. The Harness adapter projects
+    // these values without evaluating or reshaping them.
+    return json::object();
+}
+
 std::optional<json> registry_metadata(const program::RegistrySnapshot& registry,
                                       program::ExecutableKind          kind,
                                       std::string_view                 name) {
@@ -466,14 +474,17 @@ json preset_core(const std::string&                 preset,
     return core;
 }
 
-void enrich_worker_nodes(json& core, const std::map<std::string, json>& workers) {
+void enrich_worker_nodes(json&                               core,
+                         const std::map<std::string, json>& workers,
+                         std::string_view                   authored_root) {
     if (!core.contains("nodes") || !core["nodes"].is_object()) return;
     for (const auto& [name, node] : core["nodes"].items()) {
         if (!node.is_object() || node.value("type", "") != HARNESS_WORKER_NODE_TYPE) continue;
         const auto worker_id = node.value("worker_id", "");
         const auto worker    = workers.find(worker_id);
         if (worker == workers.end())
-            fail("H_WORKER_BINDING", "/harness/definition/nodes/" + escape_pointer(name),
+            fail("H_WORKER_BINDING",
+                 std::string(authored_root) + "/nodes/" + escape_pointer(name),
                  "Harness DSL worker node references an undeclared worker");
         const auto barrier =
             node.contains("barrier") ? std::optional<json>{node.at("barrier")} : std::nullopt;
@@ -549,6 +560,65 @@ std::vector<program::SourceMapEntry> source_map(const json&                     
     return result;
 }
 
+void reject_unsupported_program_operations(const json& operation,
+                                           std::string_view pointer) {
+    if (!operation.is_object()) return;
+    if (operation.value("op", "") == "spawn") {
+        fail("H_PROGRAM_CHILD_BINDING", std::string(pointer),
+             "Harness program mode does not support durable child publication or scheduling");
+    }
+    const auto visit = [&](const json& child, std::string_view child_pointer) {
+        reject_unsupported_program_operations(child, child_pointer);
+    };
+    if (operation.contains("children") && operation["children"].is_array()) {
+        for (std::size_t index = 0; index < operation["children"].size(); ++index)
+            visit(operation["children"][index],
+                  std::string(pointer) + "/children/" + std::to_string(index));
+    }
+    if (operation.contains("branches") && operation["branches"].is_array()) {
+        for (std::size_t index = 0; index < operation["branches"].size(); ++index)
+            visit(operation["branches"][index],
+                  std::string(pointer) + "/branches/" + std::to_string(index));
+    }
+    for (const auto field : {"then", "else", "body"}) {
+        if (operation.contains(field))
+            visit(operation[field], std::string(pointer) + "/" + field);
+    }
+}
+
+std::vector<program::SourceMapEntry> program_preflight_source_map(std::string_view source_id) {
+    return {
+        {"/input_contract", {std::string(source_id), "/task", std::nullopt}},
+        {"/output_contract", {std::string(source_id), "/harness", std::nullopt}},
+        {"/declared_budget_requirements", {std::string(source_id), "/budgets", std::nullopt}},
+        {"/root", {std::string(source_id), "/harness/definition", std::nullopt}},
+        {"/root/definition",
+         {std::string(source_id), "/harness/definition/definition", std::nullopt}},
+    };
+}
+
+std::vector<program::SourceMapEntry>
+program_source_map(std::string_view source_id, const program::ProgramBundle& bundle) {
+    auto result = program_preflight_source_map(source_id);
+    result.reserve(result.size() + bundle.typed_orchestration_plan().nodes().size());
+    const auto& operations = bundle.typed_orchestration_plan().nodes();
+    for (std::size_t index = 0; index < operations.size(); ++index) {
+        const auto& source_pointer = operations[index].source_pointer();
+        constexpr std::string_view root = "/root";
+        const auto authored = source_pointer.starts_with(root)
+                                  ? std::string("/harness/definition") +
+                                        source_pointer.substr(root.size())
+                                  : std::string("/harness/definition");
+        result.push_back(program::SourceMapEntry{
+            "/operations/" + std::to_string(index),
+            program::SourceCoordinate{std::string(source_id), authored, std::nullopt}});
+    }
+    std::sort(result.begin(), result.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.generated_pointer < rhs.generated_pointer;
+    });
+    return result;
+}
+
 program::RunBudget derive_budget(const json&                              core,
                                  const EffectiveLimits&                   limits,
                                  const HarnessTranslationDefaults&        defaults,
@@ -591,6 +661,35 @@ program::RunBudget derive_budget(const json&                              core,
             0,
             0,
             0};
+}
+
+program::RunBudget
+derive_program_budget(program::RunBudget                         budget,
+                      const program::ProgramStaticBudgetRequirements& requirements,
+                      const EffectiveLimits&                     limits,
+                      const std::optional<program::ContractManifest>& contract) {
+    if (requirements.max_concurrency > limits.max_parallel_workers) {
+        fail("H_PROGRAM_CONCURRENCY", "/harness/definition",
+             "Program static concurrency exceeds the Harness max_parallel_workers limit");
+    }
+    if (requirements.max_core_steps > budget.max_core_steps) {
+        fail("H_PROGRAM_BUDGET", "/harness/definition",
+             "Program static core-step requirement exceeds the Harness max_steps limit");
+    }
+    if (contract &&
+        requirements.max_program_operations > contract->spec().retry_policy.max_program_operations) {
+        fail("H_PROGRAM_BUDGET", "/harness/definition",
+             "Program static operation requirement exceeds the frozen contract limit");
+    }
+
+    budget.max_concurrency        = requirements.max_concurrency;
+    budget.max_program_operations = requirements.max_program_operations;
+    budget.model_tokens = checked_mul(budget.model_tokens, requirements.max_core_invocations,
+                                      "/harness/definition");
+    budget.monetary_microunits =
+        checked_mul(budget.monetary_microunits, requirements.max_core_invocations,
+                    "/harness/definition");
+    return budget;
 }
 
 json budget_records(const program::RunBudget& budget) {
@@ -685,7 +784,7 @@ json harness_program_request_schema() {
             "contract_manifest":{},
             "workspace_revision":{"type":"string"},
             "harness":{"type":"object","required":["mode"],"properties":{
-                "mode":{"enum":["preset","dsl","core"]},
+                "mode":{"enum":["preset","dsl","core","program"]},
                 "preset":{"type":"string"},
                 "definition":{"type":"object"}
             },"additionalProperties":false},
@@ -758,15 +857,17 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
                                                   "research_synthesis"};
     if (mode == "preset" && !presets.contains(request.at("harness").value("preset", "")))
         fail("H_PRESET", "/harness/preset", "Unknown Harness preset");
-    if ((mode == "dsl" || mode == "core") && !request.at("harness").contains("definition"))
+    if ((mode == "dsl" || mode == "core" || mode == "program") &&
+        !request.at("harness").contains("definition"))
         fail("H_DSL_DEFINITION", "/harness/definition",
-             "Harness dsl/core mode requires a definition");
+             "Harness dsl/core/program mode requires a definition");
 
     const auto limits  = effective_limits(request, defaults, contract);
     const auto tools   = validate_tool_catalog(request, registry, defaults);
     const auto workers = workers_by_id(request, tools, limits, defaults);
 
     json core;
+    json program_root;
     json elaborator_map = json::array();
     if (mode == "preset") {
         core = preset_core(request.at("harness").at("preset").get<std::string>(),
@@ -779,16 +880,27 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
         } catch (const std::exception& error) {
             fail("H_ELABORATION", "/harness/definition", error.what());
         }
-        enrich_worker_nodes(core, workers);
+        enrich_worker_nodes(core, workers, "/harness/definition");
+    } else if (mode == "program") {
+        program_root = request.at("harness").at("definition");
+        if (!program_root.is_object() || !program_root.contains("definition")) {
+            fail("H_PROGRAM_COMPILE", "/harness/definition",
+                 "Harness program mode requires a root operation and a sealed Core definition");
+        }
+        reject_unsupported_program_operations(program_root, "/harness/definition");
+        core = program_root.at("definition");
+        enrich_worker_nodes(core, workers, "/harness/definition/definition");
     } else {
         core = request.at("harness").at("definition");
     }
+    const auto core_pointer = mode == "program" ? "/harness/definition/definition"
+                                                  : "/harness/definition";
     if (!core.is_object() || core.value("schema_version", 0) != 1 || !core.contains("name") ||
         !core.at("name").is_string()) {
-        fail("H_STRICT_CORE", "/harness/definition",
+        fail("H_STRICT_CORE", core_pointer,
              "Harness translation requires a named strict Core schema_version 1 definition");
     }
-    reject_transport_values(core, "/harness/definition");
+    reject_transport_values(mode == "program" ? program_root : core, "/harness/definition");
 
     bool has_worker_node = false;
     if (core.contains("nodes") && core["nodes"].is_object()) {
@@ -809,16 +921,67 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
                  "Harness Provider identity is absent or mismatched in the immutable registry");
     }
 
-    const auto budget    = derive_budget(core, limits, defaults, contract);
+    auto       budget    = derive_budget(core, limits, defaults, contract);
     const auto source_id = defaults.source_id_prefix + ":" + mode;
-    json       document  = {
-        {"program_schema_version", 1},
-        {"input_contract", {{"schema_version", 1}, {"schema", input_contract_schema()}}},
-        {"output_contract", {{"schema_version", 1}, {"schema", core_output_schema()}}},
-        {"root", {{"op", "call_core"}, {"name", core.at("name")}, {"definition", std::move(core)}}},
-        {"declared_budget_requirements", budget_records(budget)},
-    };
-
+    const auto source_schema_version =
+        mode == "program" ? program::PROGRAM_SCHEMA_VERSION_V2
+                          : program::PROGRAM_SCHEMA_VERSION_V1;
+    json document;
+    std::vector<program::SourceMapEntry> program_map;
+    if (mode == "program") {
+        program_root["definition"] = core;
+        auto preflight_budget = budget;
+        preflight_budget.max_concurrency = std::numeric_limits<std::uint32_t>::max();
+        preflight_budget.max_program_operations = std::numeric_limits<std::uint64_t>::max();
+        preflight_budget.max_core_steps = std::numeric_limits<std::uint64_t>::max();
+        document = {
+            {"program_schema_version", source_schema_version},
+            {"input_contract", {{"schema_version", 1}, {"schema", input_contract_schema()}}},
+            {"output_contract", {{"schema_version", 1}, {"schema", program_output_schema()}}},
+            {"root", std::move(program_root)},
+            {"declared_budget_requirements", budget_records(preflight_budget)},
+        };
+        try {
+            const auto preflight_source = program::ProgramSource::from_cpp_builder(
+                source_id, source_schema_version, document, {}, program_preflight_source_map(source_id));
+            const program::ProgramCompiler compiler(
+                registry, {"neograph-harness-program-translator/v2"});
+            const auto preflight = compiler.compile(preflight_source);
+            const auto requirements =
+                program::derive_static_budget_requirements(preflight.typed_orchestration_plan());
+            budget = derive_program_budget(std::move(budget), requirements, limits, contract);
+            program_map = program_source_map(source_id, preflight);
+        } catch (const program::ProgramCompileError& error) {
+            const program::Diagnostic* diagnostic = nullptr;
+            for (const auto& value : error.diagnostics()) {
+                if (value.severity != program::DiagnosticSeverity::Error) continue;
+                if (!diagnostic ||
+                    value.primary.json_pointer.size() > diagnostic->primary.json_pointer.size())
+                    diagnostic = &value;
+            }
+            auto pointer = !diagnostic || diagnostic->primary.json_pointer.empty()
+                               ? std::string("/harness/definition")
+                               : diagnostic->primary.json_pointer;
+            if (pointer.starts_with("/root"))
+                pointer = std::string("/harness/definition") + pointer.substr(5);
+            std::string message = error.what();
+            for (const auto& value : error.diagnostics())
+                message += " [" + value.code + "] " + value.message;
+            fail("H_PROGRAM_COMPILE", std::move(pointer), std::move(message));
+        } catch (const std::overflow_error& error) {
+            fail("H_PROGRAM_BUDGET", "/harness/definition", error.what());
+        }
+        document["declared_budget_requirements"] = budget_records(budget);
+    } else {
+        document = {
+            {"program_schema_version", source_schema_version},
+            {"input_contract", {{"schema_version", 1}, {"schema", input_contract_schema()}}},
+            {"output_contract", {{"schema_version", 1}, {"schema", core_output_schema()}}},
+            {"root",
+             {{"op", "call_core"}, {"name", core.at("name")}, {"definition", std::move(core)}}},
+            {"declared_budget_requirements", budget_records(budget)},
+        };
+    }
     HarnessWireReceipt wire;
     wire.source_id = source_id;
     wire.mode      = mode;
@@ -876,13 +1039,15 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
         wire.tool_ids.push_back(id);
     }
 
-    auto map    = source_map(document.at("root").at("definition"), elaborator_map, source_id, mode,
-                             wire.worker_ids);
+    auto map = std::move(program_map);
+    if (mode != "program")
+        map = source_map(document.at("root").at("definition"), elaborator_map, source_id, mode,
+                         wire.worker_ids);
     auto task = request.at("task");
     if (contract)
         task["contract_manifest"] = json::parse(contract->serialize_canonical());
-    auto source = program::ProgramSource::from_cpp_builder(source_id, 1, std::move(document), {},
-                                                           std::move(map));
+    auto source = program::ProgramSource::from_cpp_builder(
+        source_id, source_schema_version, std::move(document), {}, std::move(map));
     HarnessInvocationTemplate invocation_template{{{"task", std::move(task)}}, budget};
     return {std::move(source), std::move(invocation_template), std::move(wire),
             std::move(bindings), contract};
@@ -976,7 +1141,7 @@ HarnessProgramSnapshots build_harness_program_snapshots(HarnessProgramSnapshotCo
         .semantic_version(std::move(config.admission_semantic_version))
         .registry(registry)
         .mode(config.admission_mode)
-        .max_program_schema_version(1)
+        .max_program_schema_version(program::LATEST_PROGRAM_SCHEMA_VERSION)
         .allow_source_kind(program::SourceKind::CppBuilder);
     bool brokered = false;
     bool trusted  = false;

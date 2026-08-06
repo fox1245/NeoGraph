@@ -1,6 +1,6 @@
 # Current DSL and Program composition limits
 
-_Status: source-level audit of the current working tree — 2026-08-06. This is an implementation inventory, not a product commitment or a replacement for [the v1 architecture](V1_ARCHITECTURE.md)._
+_Status: implementation inventory after the P1 static Program authoring surface — 2026-08-06. This is an implementation snapshot, not a product commitment or a replacement for [the v1 architecture](V1_ARCHITECTURE.md)._
 
 ---
 
@@ -11,7 +11,7 @@ This record separates four often-conflated surfaces:
 1. the bounded `graph::Elaborator` convenience language;
 2. strict Core topology JSON and registered Core node behavior;
 3. the typed Program operation tree; and
-4. Harness `mode: "dsl"`, which currently translates only the first two.
+4. Harness `mode: "dsl"` and `mode: "program"`, which deliberately admit different source languages.
 
 Code is the source of truth for this snapshot. The superseded [Programmable
 Harness DSL study](PROGRAMMABLE_HARNESS_DSL_DESIGN.md) is useful history but
@@ -22,13 +22,14 @@ must not be used to infer current runtime behavior.
 ```mermaid
 flowchart LR
     accTitle: DSL and Program boundary
-    accDescr: The bounded Core DSL elaborates into strict topology JSON and Harness wraps that topology in one call_core Program root, while Program JSON is compiled through a separate path.
+    accDescr: The bounded Core DSL elaborates into strict topology JSON. Harness DSL wraps that topology in one call_core root, while Harness Program mode and direct Program JSON compile a separately admitted typed operation tree.
 
     core_dsl[Core topology DSL] --> elaborator[Elaborator]
     elaborator --> strict_core[Strict Core JSON]
-    strict_core --> harness_translate[Harness dsl translation]
-    harness_translate --> call_core_root[Program call_core root]
-    program_source[Program JSON] --> program_compiler[ProgramCompiler]
+    strict_core --> harness_dsl[Harness dsl translation]
+    harness_dsl --> call_core_root[Program call_core root]
+    program_source[Program JSON v2] --> program_compiler[ProgramCompiler]
+    harness_program[Harness program translation] --> program_compiler
     program_compiler --> program_plan[Typed Program plan]
 
     classDef core_surface fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a5f
@@ -37,12 +38,13 @@ flowchart LR
 
     class core_dsl,elaborator,strict_core core_surface
     class program_source,program_compiler,program_plan program_surface
-    class harness_translate,call_core_root bridge_surface
+    class harness_dsl,call_core_root,harness_program bridge_surface
 ```
 
 The important boundary is directional: Core DSL can produce strict Core JSON,
-but it does not produce a Program operation tree. Harness currently preserves
-that boundary by wrapping the elaborated graph in one `call_core` root.
+but it does not produce a Program operation tree. Harness preserves that
+boundary by keeping `mode: "dsl"` on the one-`call_core` path and admitting
+Program composition only through the separate `mode: "program"` path.
 
 ## What each surface can express today
 
@@ -50,26 +52,29 @@ that boundary by wrapping the elaborated graph in one `call_core` root.
 | --- | --- | --- |
 | Core topology DSL | `vars`, whole-value and scalar interpolation, non-recursive `templates` + `use`, local node-prefix renaming, global channel merge, and boolean `when` | Elaboration removes all DSL keys and returns strict Core topology JSON; it never emits Program operations. [Elaborator contract](../include/neograph/graph/elaborator.h#L5-L87) |
 | Strict Core JSON | Static channels, nodes, edges, conditional edges, barriers, static interrupts, retry policy, and registered node configuration | Topology is data. Runtime-determined routing and pauses come from registered node code, not a JSON expression evaluator. [Topology model](../include/neograph/graph/compiler.h#L73-L93) |
-| Program JSON (compiler) | `call_core`, `sequence`, `branch`, bounded `loop`/`retry`, `parallel`, `race`, `quorum`, `map`, `spawn`, `await`, `emit`, `checkpoint`, `cancel`, and `return` | This is a separate typed operation grammar with its own compiler and admission path. The published Program JSON Schema still permits only `call_core`; see P-SCHEMA-003. [Operation list](../src/program/compiler.cpp#L360-L452) |
-| Harness `mode: "dsl"` | Bounded Core DSL plus sealed Harness worker enrichment | It elaborates to Core and constructs a Program document with one `call_core` root; it does not accept a Program tree from the request. [Translation path](../src/mcp/harness_program_translator.cpp#L743-L820) |
+| Program JSON (compiler) | `call_core`, `sequence`, `branch`, bounded `loop`/`retry`, `parallel`, `race`, `quorum`, `map`, `spawn`, `await`, `emit`, `checkpoint`, `cancel`, and `return` | Program-v1 preserves the one-`call_core` legacy contract; Program-v2 publishes the recursive operation grammar. Compiler and admission checks remain authoritative for semantic closure. [Operation list](../src/program/compiler.cpp#L360-L452) |
+| Harness `mode: "dsl"` | Bounded Core DSL plus sealed Harness worker enrichment | It elaborates to Core and constructs a Program document with one `call_core` root; it does not accept a Program tree from the request. [Translation path](../src/mcp/harness_program_translator.cpp#L870-L915) |
+| Harness `mode: "program"` | Program-v2 static operations over the sealed Harness Core definition | It preflights through `ProgramCompiler`, derives exact finite budgets, and rejects durable child publication (`spawn`), transport values, or unsupported authority. [Translation path](../src/mcp/harness_program_translator.cpp#L915-L1045) |
 
 ## Verified practical limits
 
-### H-DSL-001: Harness DSL cannot author Program composition
+### H-DSL-001: Harness separates Core DSL from Program composition
 
 `HarnessRequestTranslator::translate()` sends `harness.definition` through
-`Elaborator` only for `mode == "dsl"`, then emits a Program document whose root
-is exactly `{"op":"call_core", ...}`. The request schema admits only
-`preset`, `dsl`, and `core` modes.[^harness-modes]
+`Elaborator` only for `mode == "dsl"` and emits a Program document whose root is
+exactly `{"op":"call_core", ...}`. `mode == "program"` instead requires a
+Program root with an embedded strict Core definition, compiles it before
+translation, and maps compiler diagnostics back to the authored request.[^harness-modes]
 
-**Effect:** A Harness caller cannot write a top-level `sequence`, `branch`,
-`parallel`, `loop`, `spawn`, or `await` plan in the DSL request. Template use
-can duplicate static Core topology, but it cannot express Program control
-composition.
+**Effect:** Existing `dsl` callers retain the total elaboration-to-Core
+contract. A `program` caller can author the admitted static vocabulary:
+`call_core`, `sequence`, `branch`, bounded `loop`/`retry`, `parallel`, binary
+`race`, `quorum`, serial `map`, `await`, `emit`, `checkpoint`, `cancel`, and
+`return`.
 
-**Safe extension direction:** add an explicit, separately admitted Program
-source mode. Do not reinterpret existing `dsl` as Program JSON; callers rely on
-its total elaboration-to-Core contract.
+**Boundary:** Program mode does not admit durable child publication or
+scheduling: `spawn` is rejected even though Program-v2 represents it. It also
+does not reinterpret `dsl` as Program JSON.
 
 ### P-CORE-002: One Program document seals one directly callable Core graph
 
@@ -82,19 +87,20 @@ but cannot directly compose Core graph `A` followed by Core graph `B` in one
 source document. Separately admitted child Programs are the available boundary
 for a distinct graph today.
 
-### P-SCHEMA-003: Published Program schema lags the compiler
+### P-SCHEMA-003: Versioned Program schema publishes the operation grammar
 
-`ProgramCompiler` accepts the operation tree above, but
-`program-document-v1.schema.json` describes one `call_core` root and fixes
-`max_program_operations` to exactly one.[^program-schema]
+`program-document-v1.schema.json` remains the legacy one-`call_core` contract.
+`program-document-v2.schema.json` publishes the recursive typed operation
+grammar accepted by `ProgramCompiler`; the source declares version 2 and the
+Harness admission profile accepts the current latest version.[^program-schema]
 
-**Effect:** Schema-driven callers cannot author the compiler/runtime control
-vocabulary. Those operations are implementation-supported through
-`ProgramSource`, but are not yet a schema-supported external JSON contract.
+**Effect:** Schema-driven callers can author static Program composition through
+the explicit v2 contract. A v1 caller keeps its original strict boundary.
 
-**Safe extension direction:** evolve the schema and its conformance fixtures as
-one recursive operation grammar before exposing Program composition through an
-adapter. Do not claim that a schema validates a control operation it rejects.
+**Boundary:** JSON Schema validates portable source shape. `ProgramCompiler`
+still enforces registry closure, one sealed Core identity, exact finite budgets,
+operation semantics, and source-coordinate diagnostics before a Program can be
+admitted.
 
 ### P-DATA-003: Program dataflow is intentionally small
 
@@ -121,6 +127,10 @@ unexpressible without a purpose-built node.
 | `quorum` | Branches execute in declaration order until enough succeed or success becomes impossible | It is not concurrent fan-out and cannot cancel already-running siblings because it launches none concurrently. [Runtime](../src/program/run_attempt.cpp#L1055-L1080) |
 | `map` | Items execute in declaration order | It is ordered serial mapping, not bounded parallel mapping. [Runtime](../src/program/run_attempt.cpp#L1083-L1103) |
 | `parallel` | All branches launch concurrently, subject to run-wide `max_concurrency` checks | Parallelism is real but is capped by the admitted budget and nested Core dispatches share that cap. [Runtime](../src/program/run_attempt.cpp#L833-L928) |
+
+**P2 gap:** P1 does not add a parallel-map form or change `map` semantics.
+Callers that need bounded parallel fan-out must author explicit `parallel`
+branches within their admitted concurrency ceiling.
 
 ### P-CHILD-005: Child control is durable but deliberately narrow
 
@@ -167,9 +177,9 @@ admission, or lifecycle semantics.
 ## Classification and next decisions
 
 | ID | Classification | Why it matters | Minimum safe next action |
-| H-DSL-001 | Product gap | Harness users cannot reach the Program composition layer | Specify a new Program request mode and its source-map, policy, and backward-compatibility contract |
+| H-DSL-001 | Closed P1 boundary | Program composition is reachable only through a distinct mode, preserving `dsl` semantics | Keep `dsl` and `program` source admission separate; expand Program operations only with matching compiler and runtime proof |
 | P-CORE-002 | Product gap | One Program cannot directly compose independently pinned Core graphs | Decide whether multi-Core modules are needed before extending `call_core` references |
-| P-SCHEMA-003 | Public-contract gap | Published JSON Schema rejects the compiler's operation vocabulary | Evolve recursive schema, schema tests, and adapter admission together before claiming external Program JSON support |
+| P-SCHEMA-003 | Closed P1 public contract | Program-v2 publishes recursive static operation source while v1 remains stable | Maintain v1/v2 conformance fixtures and version-specific admission limits |
 | P-DATA-003 | Deliberate restriction with usability cost | Prevents ambient computation in Program JSON | Add only typed, bounded data transforms justified by a concrete workload; keep arbitrary predicates in registered nodes |
 | P-RUNTIME-004 | Deliberate binary race plus semantic limits | `map`/`quorum` are more serial than their names suggest | Keep binary race validation; decide whether the other two names or their runtime semantics should change |
 | P-CHILD-005 | Deliberate authority boundary with missing controls | Child admission is safe, but control operations are narrow | Add scoped cancellation and explicit handle/event await only with durable lineage and recovery semantics |
@@ -179,8 +189,8 @@ admission, or lifecycle semantics.
 ## Required regression cases before expanding the surface
 
 | Scenario | Observable contract |
-| Harness `dsl` containing a Program operation | Fails with a source-level diagnostic; a future explicit Program mode succeeds without changing `dsl` meaning |
-| Published Program JSON Schema for `sequence` | Rejects it until the schema is upgraded alongside the compiler/admission contract |
+| Harness `dsl` containing a Program operation | Fails with a source-level diagnostic; explicit `program` mode accepts the admitted static operation grammar without changing `dsl` meaning |
+| Published Program JSON Schema for `sequence` | Program-v1 rejects it; Program-v2 accepts it alongside compiler/admission validation |
 | Three-branch `race` | Fails during compilation with `P_PLAN_RACE_ARITY` until n-ary behavior is implemented |
 | `map` and `quorum` | Tests state whether execution is serial or concurrent and enforce that documented choice |
 | Multiple Core graph references | A Program either rejects a second Core identity during compilation or resolves a sealed, admitted module reference with an exact source map |
@@ -189,8 +199,8 @@ admission, or lifecycle semantics.
 
 ## Evidence
 
-[^harness-modes]: [`src/mcp/harness_program_translator.cpp`](../src/mcp/harness_program_translator.cpp#L687-L690), [`src/mcp/harness_program_translator.cpp`](../src/mcp/harness_program_translator.cpp#L743-L820)
-[^program-schema]: [`schemas/program-document-v1.schema.json`](../schemas/program-document-v1.schema.json#L1-L66), [`schemas/program-document-v1.schema.json`](../schemas/program-document-v1.schema.json#L272-L280)
+[^harness-modes]: [`src/mcp/harness_program_translator.cpp`](../src/mcp/harness_program_translator.cpp), [`tests/test_harness_program_translator.cpp`](../tests/test_harness_program_translator.cpp#L275-L478)
+[^program-schema]: [`schemas/program-document-v1.schema.json`](../schemas/program-document-v1.schema.json), [`schemas/program-document-v2.schema.json`](../schemas/program-document-v2.schema.json), [`include/neograph/program/schema.h`](../include/neograph/program/schema.h)
 [^program-single-core]: [`src/program/compiler.cpp`](../src/program/compiler.cpp#L360-L452), [`src/program/compiler.cpp`](../src/program/compiler.cpp#L587-L600)
 [^program-condition]: [`src/program/compiler.cpp`](../src/program/compiler.cpp#L455-L512)
 [^program-literal-values]: [`src/program/compiler.cpp`](../src/program/compiler.cpp#L798-L806), [`src/program/run_attempt.cpp`](../src/program/run_attempt.cpp#L1249-L1261)

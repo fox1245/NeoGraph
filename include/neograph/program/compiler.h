@@ -1,11 +1,11 @@
 /**
  * @file program/compiler.h
- * @brief Pure single-root Program-v1 compiler.
+ * @brief Pure versioned Program source compiler.
  */
-#pragma once
 
 #include <neograph/program/bundle.h>
 #include <neograph/program/module.h>
+#include <neograph/program/schema.h>
 #include <neograph/program/registry.h>
 
 #include <cstdint>
@@ -17,7 +17,7 @@
 namespace neograph::program {
 
 struct ProgramCompilerConfig {
-    // Exact opaque build identity. It identifies Program-v1 normalization,
+    // Exact opaque build identity. It identifies Program normalization,
     // closure, Core-parser, round-trip, and validator semantics together.
     // Mandatory, nonempty UTF-8; do not synthesize from pointer/RTTI/process state.
     std::string compiler_build_id;
@@ -34,7 +34,9 @@ private:
 
 class NEOGRAPH_PROGRAM_API ProgramCompiler {
 public:
-    static constexpr std::uint32_t PROGRAM_SCHEMA_VERSION = 1;
+    /** Legacy v1 source identifier retained for source compatibility. */
+    static constexpr std::uint32_t PROGRAM_SCHEMA_VERSION =
+        neograph::program::PROGRAM_SCHEMA_VERSION_V1;
 
     ProgramCompiler(RegistrySnapshot registry, ProgramCompilerConfig config);
     ProgramCompiler(ProgramCompiler&&) noexcept;

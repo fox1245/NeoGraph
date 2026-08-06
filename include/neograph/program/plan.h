@@ -137,4 +137,32 @@ private:
     std::shared_ptr<const Impl> impl_;
 };
 
+/**
+ * Worst-case resource floors implied by one finite typed Program tree.
+ *
+ * These counts are structural: branches choose their largest path, parallel
+ * and race sum live work, and bounded loop/retry/map bodies are multiplied.
+ * They intentionally do not infer unbounded Core-node behavior.
+ */
+struct NEOGRAPH_PROGRAM_API ProgramStaticBudgetRequirements {
+    std::uint64_t max_program_operations = 0;
+    std::uint32_t max_concurrency        = 0;
+    std::uint64_t max_core_steps         = 0;
+    std::uint64_t max_core_invocations   = 0;
+    std::uint32_t max_child_depth        = 0;
+    std::uint64_t max_total_children     = 0;
+
+    bool operator==(const ProgramStaticBudgetRequirements&) const = default;
+};
+
+/**
+ * Derive finite worst-case floors for a sealed Program operation tree.
+ *
+ * Throws std::invalid_argument for a cyclic or malformed graph and
+ * std::overflow_error when a bounded composition exceeds the supported
+ * resource integer range.
+ */
+NEOGRAPH_PROGRAM_API ProgramStaticBudgetRequirements
+derive_static_budget_requirements(const ProgramPlan& plan);
+
 }  // namespace neograph::program

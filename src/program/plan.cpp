@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <initializer_list>
+#include <limits>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -387,6 +388,203 @@ json ProgramPlan::to_json() const {
     json result{{"root", impl_->root_id}, {"operations", json::array()}};
     for (const auto& node : impl_->nodes) result["operations"].push_back(node.to_json());
     return result;
+}
+
+namespace {
+
+constexpr const char* kStaticBudgetOverflow =
+    "Program static budget requirements exceed the supported integer range";
+
+std::uint64_t checked_add(std::uint64_t left, std::uint64_t right) {
+    if (right > std::numeric_limits<std::uint64_t>::max() - left)
+        throw std::overflow_error(kStaticBudgetOverflow);
+    return left + right;
+}
+
+std::uint64_t checked_multiply(std::uint64_t value, std::uint64_t multiplier) {
+    if (value != 0 && multiplier > std::numeric_limits<std::uint64_t>::max() / value)
+        throw std::overflow_error(kStaticBudgetOverflow);
+    return value * multiplier;
+}
+
+std::uint32_t checked_concurrency(std::uint64_t value) {
+    if (value > std::numeric_limits<std::uint32_t>::max())
+        throw std::overflow_error(kStaticBudgetOverflow);
+    return static_cast<std::uint32_t>(value);
+}
+
+ProgramStaticBudgetRequirements add_requirements(
+    ProgramStaticBudgetRequirements left, const ProgramStaticBudgetRequirements& right) {
+    left.max_program_operations =
+        checked_add(left.max_program_operations, right.max_program_operations);
+    left.max_core_steps = checked_add(left.max_core_steps, right.max_core_steps);
+    left.max_core_invocations =
+        checked_add(left.max_core_invocations, right.max_core_invocations);
+    left.max_total_children = checked_add(left.max_total_children, right.max_total_children);
+    left.max_concurrency =
+        checked_concurrency(static_cast<std::uint64_t>(left.max_concurrency) + right.max_concurrency);
+    left.max_child_depth = std::max(left.max_child_depth, right.max_child_depth);
+    return left;
+}
+
+ProgramStaticBudgetRequirements scale_requirements(ProgramStaticBudgetRequirements value,
+                                                   std::uint64_t multiplier) {
+    value.max_program_operations = checked_multiply(value.max_program_operations, multiplier);
+    value.max_core_steps         = checked_multiply(value.max_core_steps, multiplier);
+    value.max_core_invocations   = checked_multiply(value.max_core_invocations, multiplier);
+    value.max_total_children     = checked_multiply(value.max_total_children, multiplier);
+    // Loop/retry/map execute their bodies serially.
+    return value;
+}
+
+const ProgramPlanNode& require_target(const ProgramPlan& plan, const std::optional<std::string>& id,
+                                      std::string_view field) {
+    if (!id) throw std::invalid_argument("Program plan operation is missing " + std::string(field));
+    const auto* target = plan.find(*id);
+    if (!target)
+        throw std::invalid_argument("Program plan operation references an unknown " +
+                                    std::string(field));
+    return *target;
+}
+
+class StaticBudgetDeriver final {
+public:
+    explicit StaticBudgetDeriver(const ProgramPlan& plan) : plan_(plan) {}
+
+    ProgramStaticBudgetRequirements derive() { return visit(plan_.root()); }
+
+private:
+    const ProgramPlan& plan_;
+    std::set<std::string_view, std::less<>> active_;
+
+    ProgramStaticBudgetRequirements visit(const ProgramPlanNode& operation) {
+        if (!active_.emplace(operation.id()).second)
+            throw std::invalid_argument("Program plan operation graph contains a cycle");
+        try {
+            auto result = derive(operation);
+            active_.erase(operation.id());
+            return result;
+        } catch (...) {
+            active_.erase(operation.id());
+            throw;
+        }
+    }
+
+    ProgramStaticBudgetRequirements derive(const ProgramPlanNode& operation) {
+        using Kind = ProgramOperationKind;
+        const auto one = ProgramStaticBudgetRequirements{1, 1, 0, 0, 0, 0};
+        const auto append_serial = [](ProgramStaticBudgetRequirements& result,
+                                      const ProgramStaticBudgetRequirements& nested) {
+            result.max_program_operations =
+                checked_add(result.max_program_operations, nested.max_program_operations);
+            result.max_core_steps = checked_add(result.max_core_steps, nested.max_core_steps);
+            result.max_core_invocations =
+                checked_add(result.max_core_invocations, nested.max_core_invocations);
+            result.max_total_children =
+                checked_add(result.max_total_children, nested.max_total_children);
+            result.max_child_depth = std::max(result.max_child_depth, nested.max_child_depth);
+            result.max_concurrency = std::max(result.max_concurrency, nested.max_concurrency);
+        };
+
+        switch (operation.operation()) {
+        case Kind::CallCore:
+            return ProgramStaticBudgetRequirements{1, 1, 1, 1, 0, 0};
+        case Kind::Emit:
+        case Kind::Cancel:
+        case Kind::Return:
+            return one;
+        case Kind::Spawn:
+            return ProgramStaticBudgetRequirements{1, 1, 0, 0, 1, 1};
+        case Kind::Sequence: {
+            auto result = one;
+            for (const auto& child : operation.children()) {
+                const auto* target = plan_.find(child);
+                if (!target)
+                    throw std::invalid_argument("Program plan sequence has an unknown child");
+                append_serial(result, visit(*target));
+            }
+            return result;
+        }
+        case Kind::Branch: {
+            auto selected = visit(require_target(plan_, operation.then_id(), "then"));
+            if (operation.else_id()) {
+                const auto alternative =
+                    visit(require_target(plan_, operation.else_id(), "else"));
+                selected.max_program_operations =
+                    std::max(selected.max_program_operations, alternative.max_program_operations);
+                selected.max_concurrency =
+                    std::max(selected.max_concurrency, alternative.max_concurrency);
+                selected.max_core_steps =
+                    std::max(selected.max_core_steps, alternative.max_core_steps);
+                selected.max_core_invocations =
+                    std::max(selected.max_core_invocations, alternative.max_core_invocations);
+                selected.max_child_depth =
+                    std::max(selected.max_child_depth, alternative.max_child_depth);
+                selected.max_total_children =
+                    std::max(selected.max_total_children, alternative.max_total_children);
+            }
+            selected.max_program_operations =
+                checked_add(one.max_program_operations, selected.max_program_operations);
+            selected.max_concurrency = std::max(one.max_concurrency, selected.max_concurrency);
+            return selected;
+        }
+        case Kind::Loop:
+        case Kind::Retry:
+        case Kind::Map: {
+            const auto multiplier =
+                operation.operation() == Kind::Loop ? operation.max_iterations()
+                : operation.operation() == Kind::Retry ? operation.max_attempts()
+                                                       : std::optional<std::uint64_t>{
+                                                             operation.items().size()};
+            if (!multiplier || *multiplier == 0)
+                throw std::invalid_argument("Program bounded operation has no positive bound");
+            auto result = scale_requirements(
+                visit(require_target(plan_, operation.body(), "body")), *multiplier);
+            result.max_program_operations =
+                checked_add(one.max_program_operations, result.max_program_operations);
+            result.max_concurrency = std::max(one.max_concurrency, result.max_concurrency);
+            return result;
+        }
+        case Kind::Parallel:
+        case Kind::Race: {
+            auto result = one;
+            result.max_concurrency = 0;
+            for (const auto& branch : operation.branches()) {
+                const auto* target = plan_.find(branch);
+                if (!target)
+                    throw std::invalid_argument("Program plan fan-out has an unknown branch");
+                result = add_requirements(result, visit(*target));
+            }
+            result.max_concurrency =
+                std::max(result.max_concurrency, checked_concurrency(operation.branches().size()));
+            return result;
+        }
+        case Kind::Quorum: {
+            auto result = one;
+            for (const auto& branch : operation.branches()) {
+                const auto* target = plan_.find(branch);
+                if (!target)
+                    throw std::invalid_argument("Program plan quorum has an unknown branch");
+                append_serial(result, visit(*target));
+            }
+            return result;
+        }
+        case Kind::Await:
+        case Kind::Checkpoint: {
+            auto result = one;
+            if (operation.body())
+                append_serial(result, visit(require_target(plan_, operation.body(), "body")));
+            return result;
+        }
+        }
+        throw std::invalid_argument("Program plan operation kind is unsupported");
+    }
+};
+
+}  // namespace
+
+ProgramStaticBudgetRequirements derive_static_budget_requirements(const ProgramPlan& plan) {
+    return StaticBudgetDeriver(plan).derive();
 }
 
 }  // namespace neograph::program

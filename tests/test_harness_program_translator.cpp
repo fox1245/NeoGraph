@@ -205,6 +205,28 @@ json direct_dsl(const json& sealed_worker) {
     };
 }
 
+json program_root(const json& core, json root) {
+    root["name"]       = core.at("name");
+    root["definition"] = core;
+    return root;
+}
+
+json program_request(const json& core, json root) {
+    auto value         = request();
+    value["harness"] = {{"mode", "program"},
+                        {"definition", program_root(core, std::move(root))}};
+    return value;
+}
+
+const SourceMapEntry* find_source_map_entry(const ProgramBundle& bundle,
+                                            std::string_view     generated_pointer) {
+    const auto found = std::find_if(
+        bundle.source_map().begin(), bundle.source_map().end(), [&](const auto& entry) {
+            return entry.generated_pointer == generated_pointer;
+        });
+    return found == bundle.source_map().end() ? nullptr : &*found;
+}
+
 bool contains_forbidden_transport_key(const json& value) {
     static const std::vector<std::string> keys = {"executor", "server_ref", "agent",  "url",
                                                   "auth",     "session_id", "process"};
@@ -247,6 +269,214 @@ TEST(HarnessProgramTranslator, PresetDslAndCoreProduceEquivalentProgramDocuments
     EXPECT_EQ(preset.source.document(), core.source.document());
     EXPECT_EQ(preset.invocation_template.input, dsl.invocation_template.input);
     EXPECT_EQ(preset.invocation_template.input, core.invocation_template.input);
+    EXPECT_EQ(calls.load(), 0);
+}
+
+TEST(HarnessProgramTranslator,
+     ProgramModeBuildsVersionTwoStaticSequenceAndMapsCanonicalOperationsToAuthoredSource) {
+    std::atomic<int> calls{0};
+    auto             fixture = host(calls);
+    EXPECT_EQ(fixture.snapshots.admission_profile.max_program_schema_version(),
+              LATEST_PROGRAM_SCHEMA_VERSION);
+    const auto preset =
+        HarnessRequestTranslator::translate(request(), fixture.snapshots.registry, fixture.defaults);
+    const auto core = preset.source.document()["root"]["definition"];
+
+    auto value = program_request(
+        core, json{{"op", "sequence"},
+                   {"children",
+                    json::array({json{{"op", "call_core"}},
+                                 json{{"op", "emit"}, {"value", json{{"kind", "audited"}}}}})}});
+    const auto translated =
+        HarnessRequestTranslator::translate(value, fixture.snapshots.registry, fixture.defaults);
+
+    EXPECT_EQ(translated.source.schema_version(), PROGRAM_SCHEMA_VERSION_V2);
+    EXPECT_EQ(translated.source.document()["program_schema_version"], PROGRAM_SCHEMA_VERSION_V2);
+    EXPECT_EQ(translated.invocation_template.budget.max_program_operations, 3U);
+    EXPECT_EQ(translated.invocation_template.budget.max_concurrency, 1U);
+    EXPECT_EQ(translated.invocation_template.budget.max_core_steps, 10U);
+    EXPECT_EQ(translated.invocation_template.budget.model_tokens, 1800U);
+
+    ProgramCompiler compiler(fixture.snapshots.registry,
+                             ProgramCompilerConfig{"test:harness-program-mode"});
+    const auto bundle = compiler.compile(translated.source);
+    const auto* first = find_source_map_entry(bundle, "/operations/0");
+    const auto* emit  = find_source_map_entry(bundle, "/operations/1");
+    const auto* root  = find_source_map_entry(bundle, "/operations/2");
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(emit, nullptr);
+    ASSERT_NE(root, nullptr);
+    EXPECT_EQ(first->authored.json_pointer, "/harness/definition/children/0");
+    EXPECT_EQ(emit->authored.json_pointer, "/harness/definition/children/1");
+    EXPECT_EQ(root->authored.json_pointer, "/harness/definition");
+    EXPECT_EQ(calls.load(), 0);
+}
+
+TEST(HarnessProgramTranslator, ProgramModeCompilesEverySupportedStaticOperation) {
+    std::atomic<int> calls{0};
+    auto             fixture = host(calls);
+    const auto preset =
+        HarnessRequestTranslator::translate(request(), fixture.snapshots.registry, fixture.defaults);
+    const auto core = preset.source.document()["root"]["definition"];
+
+    const std::vector<std::pair<std::string, json>> operations = {
+        {"call_core", json{{"op", "call_core"}}},
+        {"sequence",
+         json{{"op", "sequence"},
+              {"children", json::array({json{{"op", "call_core"}}})}}},
+        {"branch",
+         json{{"op", "branch"},
+              {"condition", json{{"path", "/task/objective"}, {"exists", true}}},
+              {"then", json{{"op", "call_core"}}},
+              {"else", json{{"op", "call_core"}}}}},
+        {"loop",
+         json{{"op", "loop"},
+              {"condition", json{{"path", "/not-present"}, {"exists", true}}},
+              {"body", json{{"op", "call_core"}}},
+              {"max_iterations", 1}}},
+        {"retry",
+         json{{"op", "retry"},
+              {"body", json{{"op", "call_core"}}},
+              {"max_attempts", 1}}},
+        {"parallel",
+         json{{"op", "parallel"},
+              {"branches", json::array({json{{"op", "call_core"}}, json{{"op", "call_core"}}})}}},
+        {"race",
+         json{{"op", "race"},
+              {"branches", json::array({json{{"op", "call_core"}}, json{{"op", "call_core"}}})}}},
+        {"quorum",
+         json{{"op", "quorum"},
+              {"branches", json::array({json{{"op", "call_core"}}, json{{"op", "call_core"}}})},
+              {"min_success", 1}}},
+        {"map",
+         json{{"op", "map"},
+              {"items", json::array({json{{"item", 1}}, json{{"item", 2}}})},
+              {"body", json{{"op", "call_core"}}}}},
+        {"await", json{{"op", "await"}, {"body", json{{"op", "call_core"}}}}},
+        {"emit",
+         json{{"op", "sequence"},
+              {"children",
+               json::array({json{{"op", "call_core"}},
+                            json{{"op", "emit"}, {"value", json{{"kind", "audit"}}}}})}}},
+        {"checkpoint",
+         json{{"op", "checkpoint"}, {"body", json{{"op", "call_core"}}}}},
+        {"cancel",
+         json{{"op", "sequence"},
+              {"children",
+               json::array({json{{"op", "call_core"}},
+                            json{{"op", "cancel"}, {"scope", "run"}, {"reason", "test"}}})}}},
+        {"return",
+         json{{"op", "sequence"},
+              {"children",
+               json::array({json{{"op", "call_core"}},
+                            json{{"op", "return"}, {"value", json{{"outcome", "ok"}}}}})}}},
+    };
+
+    ProgramCompiler compiler(fixture.snapshots.registry,
+                             ProgramCompilerConfig{"test:harness-static-operations"});
+    for (const auto& [name, root] : operations) {
+        SCOPED_TRACE(name);
+        const auto translated = HarnessRequestTranslator::translate(
+            program_request(core, root), fixture.snapshots.registry, fixture.defaults);
+        EXPECT_EQ(translated.source.schema_version(), PROGRAM_SCHEMA_VERSION_V2);
+        EXPECT_NO_THROW((void)compiler.compile(translated.source));
+    }
+    EXPECT_EQ(calls.load(), 0);
+}
+
+TEST(HarnessProgramTranslator,
+     ProgramModeRejectsUnsupportedChildBindingAndStaticBudgetOrGrammarViolations) {
+    std::atomic<int> calls{0};
+    auto             fixture = host(calls);
+    const auto preset =
+        HarnessRequestTranslator::translate(request(), fixture.snapshots.registry, fixture.defaults);
+    const auto core = preset.source.document()["root"]["definition"];
+
+    const auto expect_error = [&](json root, std::string_view code, std::string_view pointer) {
+        try {
+            (void)HarnessRequestTranslator::translate(program_request(core, std::move(root)),
+                                                      fixture.snapshots.registry, fixture.defaults);
+            ADD_FAILURE() << "expected HarnessTranslationError";
+        } catch (const HarnessTranslationError& error) {
+            EXPECT_EQ(error.code(), code);
+            EXPECT_EQ(error.pointer(), pointer);
+        }
+    };
+
+    expect_error(json{{"op", "await"},
+                      {"body", json{{"op", "spawn"}, {"child_binding", "child-program"}}}},
+                 "H_PROGRAM_CHILD_BINDING", "/harness/definition/body");
+    expect_error(
+        json{{"op", "parallel"},
+             {"branches",
+              json::array({json{{"op", "call_core"}}, json{{"op", "call_core"}},
+                           json{{"op", "call_core"}}})}},
+        "H_PROGRAM_CONCURRENCY", "/harness/definition");
+    expect_error(json{{"op", "loop"},
+                      {"condition", json{{"path", "/never"}, {"exists", true}}},
+                      {"body", json{{"op", "call_core"}}},
+                      {"max_iterations", 11}},
+                 "H_PROGRAM_BUDGET", "/harness/definition");
+
+    try {
+        (void)HarnessRequestTranslator::translate(
+            program_request(
+                core, json{{"op", "race"},
+                            {"branches",
+                             json::array({json{{"op", "call_core"}}, json{{"op", "call_core"}},
+                                          json{{"op", "call_core"}}})}}),
+            fixture.snapshots.registry, fixture.defaults);
+        ADD_FAILURE() << "expected HarnessTranslationError";
+    } catch (const HarnessTranslationError& error) {
+        EXPECT_EQ(error.code(), "H_PROGRAM_COMPILE");
+        EXPECT_EQ(error.pointer(), "/harness/definition/branches");
+        EXPECT_NE(std::string(error.what()).find("P_PLAN_RACE_ARITY"), std::string::npos);
+    }
+
+    try {
+        (void)HarnessRequestTranslator::translate(
+            program_request(core, json{{"op", "loop"},
+                                        {"condition", json{{"path", "/never"}, {"exists", true}}},
+                                        {"body", json{{"op", "call_core"}}}}),
+            fixture.snapshots.registry, fixture.defaults);
+        ADD_FAILURE() << "expected HarnessTranslationError";
+    } catch (const HarnessTranslationError& error) {
+        EXPECT_EQ(error.code(), "H_PROGRAM_COMPILE");
+        EXPECT_EQ(error.pointer(), "/harness/definition/max_iterations");
+    }
+    expect_error(json{{"op", "retry"}, {"body", json{{"op", "call_core"}}}},
+                 "H_PROGRAM_COMPILE", "/harness/definition/max_attempts");
+
+    EXPECT_EQ(calls.load(), 0);
+}
+
+TEST(HarnessProgramTranslator, ProgramModePreservesDslAndTransportAuthorityBoundaries) {
+    std::atomic<int> calls{0};
+    auto             fixture = host(calls);
+    const auto preset =
+        HarnessRequestTranslator::translate(request(), fixture.snapshots.registry, fixture.defaults);
+    const auto core = preset.source.document()["root"]["definition"];
+
+    auto dsl = program_request(core, json{{"op", "call_core"}});
+    dsl["harness"]["mode"] = "dsl";
+    try {
+        (void)HarnessRequestTranslator::translate(dsl, fixture.snapshots.registry, fixture.defaults);
+        ADD_FAILURE() << "expected HarnessTranslationError";
+    } catch (const HarnessTranslationError& error) {
+        EXPECT_EQ(error.code(), "H_STRICT_CORE");
+        EXPECT_EQ(error.pointer(), "/harness/definition");
+    }
+
+    try {
+        (void)HarnessRequestTranslator::translate(
+            program_request(core, json{{"op", "emit"},
+                                        {"value", json{{"command", "untrusted"}}}}),
+            fixture.snapshots.registry, fixture.defaults);
+        ADD_FAILURE() << "expected HarnessTranslationError";
+    } catch (const HarnessTranslationError& error) {
+        EXPECT_EQ(error.code(), "H_TRANSPORT_VALUE");
+        EXPECT_EQ(error.pointer(), "/harness/definition/value/command");
+    }
     EXPECT_EQ(calls.load(), 0);
 }
 
