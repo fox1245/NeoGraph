@@ -630,6 +630,22 @@ TEST(ProgramCompilerTest, AcceptsSequenceRootAndRejectsMalformedRootPlans) {
     EXPECT_TRUE(contains_code(compile_errors(snapshot, std::move(mismatch)), "P_ROOT_NAME"));
 }
 
+TEST(ProgramCompilerTest, RejectsNonBinaryRaceDuringCompilation) {
+    const auto snapshot = complete_snapshot();
+    auto       document = program_document();
+    const auto definition = document["root"]["definition"];
+    document["root"] = json{{"op", "race"},
+                            {"name", "main"},
+                            {"definition", definition},
+                            {"branches",
+                             json::array({json{{"op", "call_core"}},
+                                          json{{"op", "return"}, {"value", 1}},
+                                          json{{"op", "return"}, {"value", 2}}})}};
+
+    const auto diagnostics = compile_errors(snapshot, std::move(document));
+    EXPECT_TRUE(contains_code(diagnostics, "P_PLAN_RACE_ARITY"));
+}
+
 TEST(ProgramCompilerTest, SealsLoweredOperationsAsTypedImmutablePlanNodes) {
     auto snapshot = complete_snapshot();
     auto document = program_document();

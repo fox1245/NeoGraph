@@ -687,8 +687,13 @@ std::string lower_operation(const json& authored,
             if (!authored.contains("branches"))
                 add_required(diagnostics, pointer, "branches");
             else
-                add_type(diagnostics, child_pointer(pointer, "branches"), "array with two entries",
-                         authored["branches"]);
+                add_type(diagnostics, child_pointer(pointer, "branches"),
+                         "array with at least two entries", authored["branches"]);
+        } else if (op == "race" && authored["branches"].size() != 2) {
+            diagnostics.add(CompilePhase::Normalize, "P_PLAN_RACE_ARITY",
+                            DiagnosticSeverity::Error, child_pointer(pointer, "branches"),
+                            "Program race currently requires exactly two branches",
+                            json{{"actual", authored["branches"].size()}, {"supported", 2}});
         } else {
             json ids = json::array();
             for (std::size_t index = 0; index < authored["branches"].size(); ++index)

@@ -432,14 +432,19 @@ nodes retain source coordinates and directly reference compiled Core generations
 or other Program nodes. ProgramRuntime schedules that graph; GraphEngine remains
 the only executor of application nodes.
 
-The current P3 slice directly schedules `sequence`, `branch`, `return`, bounded
-`loop`/`retry`, `parallel`, `race`, `cancel`, `await`, `emit`, and `checkpoint`.
-`map` and `quorum` remain compatibility sugar with bounded direct scheduling.
-`spawn` is intentionally not a durable child-program primitive yet: its admitted
-vocabulary and budget checks remain for existing child-link tests, while the
-durable `ProgramRuntime::start_child`/`await` lifecycle is the P6 boundary. No
-new plan operation is silently treated as a no-op; malformed operations fail
-admission with a typed-plan diagnostic.
+The current runtime directly schedules `sequence`, `branch`, `return`, bounded
+`loop`/`retry`, `parallel`, `race`, `cancel`, `await`, `emit`, `checkpoint`,
+`map`, and `quorum`. `spawn` resolves a separately admitted child binding and,
+only as the direct body of an `await`, starts the durable child lifecycle. It
+deliberately has no inline body; that `await` consumes its transient child handle.
+`await` can also wrap an inline body. No new plan operation is silently treated
+as a no-op; malformed operations fail admission with a typed-plan diagnostic.
+
+This is a compiler/runtime capability. The published
+`program-document-v1.schema.json` still describes a `call_core`-only source
+document, so operation trees beyond that shape are not yet a schema-supported
+external authoring contract. The tracked current boundary is in
+[Current DSL and Program composition limits](DSL_COMPOSITION_LIMITS.md).
 
 ProgramRuntime is therefore an intentional second **scheduling domain**, but not
 a second node executor. It owns readiness and joins for Program operations,
@@ -450,6 +455,11 @@ result/event stream. Contract tests must cover cancellation propagation in both
 directions, destruction with losing race children, checkpoint ordering, budget
 debits, and equivalence with direct Core execution. ProgramRuntime may not reach
 inside GraphEngine's ready queue or checkpoint state.
+
+The current source-level boundary and the remaining composition limits are
+recorded in [Current DSL and Program composition limits](DSL_COMPOSITION_LIMITS.md).
+That inventory is intentionally separate from this target architecture so this
+document does not promise authoring paths that have not landed.
 
 ### Boundedness
 
