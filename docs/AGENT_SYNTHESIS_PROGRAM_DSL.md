@@ -217,6 +217,11 @@ requests, and any value outside the source/admission ceilings. A loop is never
 encoded as a graph cycle: it remains a separately declared Program loop with a
 hard iteration limit.
 
+At publication, the candidate must also fit the remaining
+`max_program_operations`, `max_dynamic_compiles`, `max_child_depth`,
+`max_total_children`, and `max_concurrency` values in the admitted
+`RunBudget`, plus host-owned resource ceilings.
+
 The canonicalizer assigns stable operation IDs from the parent run, expansion
 operation ID, proposal hash, and task ordinal. Replaying a recorded expansion
 must reconstruct the same child identities and never generate new work because
