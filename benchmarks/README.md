@@ -242,14 +242,29 @@ cmake -B build-program-bench -DCMAKE_BUILD_TYPE=Release \
     -DNEOGRAPH_BUILD_PROGRAM=ON \
     -DNEOGRAPH_BUILD_ASYNC=ON
 cmake --build build-program-bench --target \
-    bench_neograph bench_program bench_program_dispatch -j
+    bench_neograph bench_program bench_program_dispatch \
+    bench_program_serialization_poc bench_program_binary_poc -j
 
 # Positional arguments are iterations, warmup runs, and measured samples.
 # bench_neograph additionally accepts par_workers before warmup/samples.
+# bench_program's optional fourth argument measures closed-batch outer-run concurrency.
+# Its burst rows are throughput-equivalent time, not individual request latency.
 ./build-program-bench/bench_neograph 10000 5000 1 10 5
 ./build-program-bench/bench_neograph 10000 5000 auto 10 5
 ./build-program-bench/bench_program 1000 10 5
+./build-program-bench/bench_program 1000 10 5 8
 ./build-program-bench/bench_program_dispatch 100000 10 5
+./build-program-bench/bench_program_serialization_poc 25 100
+./build-program-bench/bench_program_binary_poc 25 100
+
+# Build the opt-in protobuf/Cap'n Proto transport-envelope experiment.
+# This target alone requires protoc/libprotobuf and capnp/libcapnp.
+cmake -S . -B build-program-codec-poc -DCMAKE_BUILD_TYPE=Release \
+    -DNEOGRAPH_BUILD_BENCHMARKS=ON \
+    -DNEOGRAPH_BUILD_PROGRAM=ON \
+    -DNEOGRAPH_BUILD_PROGRAM_CODEC_POC=ON
+cmake --build build-program-codec-poc --target bench_program_codec_poc -j
+taskset -c 0 ./build-program-codec-poc/bench_program_codec_poc 25 100
 ```
 
 Each native benchmark prints `config`, `runtime`, `header`, and `result`
@@ -257,6 +272,23 @@ records. Report the median of the measured samples after the explicit warmup;
 do not compare a single short run. `bench_program` uses in-memory stores and
 no provider/network calls. `bench_program_dispatch` measures only immutable
 `ProgramPlan` lookup and descriptor traversal, not Core execution.
+
+The serialization POCs are offline, in-memory measurements. They capture
+immutable publications from completed Program runs; the serialization POC
+measures canonical-byte reuse, while the binary POC compares the current
+canonical JSON envelope with a length-prefixed envelope that retains each
+nested record's canonical bytes. The binary result is a lower-bound experiment,
+not a replacement persistence contract.
+
+`bench_program_codec_poc` is separately opt-in and compares protobuf and
+Cap'n Proto **transport envelopes** over the same nested canonical bytes.
+`*_envelope_only_*` measures only envelope construction after those bytes are
+already available. `*_transport_total_lower_bound_*` also builds the nested
+canonical bytes, but deliberately skips `ProgramTransitionPublication`'s outer
+cross-record validation; it is not a persistence or identity-format benchmark.
+The recovery metrics parse back into owning Program records and are the only
+codec numbers that model a full receiving consumer. None of these POCs measures
+SQLite/Postgres transaction latency or end-to-end `ProgramRuntime` latency.
 
 The Python framework comparison remains optional and requires third-party
 packages:

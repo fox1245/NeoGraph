@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=d0a5deba1ae20473d11d5dd6385d0966e7d08ab563f333f5730751dfeb994466 -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=db24e5932e8c6357d88b133d6230abaaffdeeb4c0cf8453e7afd97d0dae66e76 -->
 # NeoGraph 对比 Python 图/流水线框架 — 引擎开销基准测试
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -148,14 +148,29 @@ cmake -B build-program-bench -DCMAKE_BUILD_TYPE=Release \
     -DNEOGRAPH_BUILD_PROGRAM=ON \
     -DNEOGRAPH_BUILD_ASYNC=ON
 cmake --build build-program-bench --target \
-    bench_neograph bench_program bench_program_dispatch -j
+    bench_neograph bench_program bench_program_dispatch \
+    bench_program_serialization_poc bench_program_binary_poc -j
 
 # Positional arguments are iterations, warmup runs, and measured samples.
 # bench_neograph additionally accepts par_workers before warmup/samples.
+# bench_program's optional fourth argument measures closed-batch outer-run concurrency.
+# Its burst rows are throughput-equivalent time, not individual request latency.
 ./build-program-bench/bench_neograph 10000 5000 1 10 5
 ./build-program-bench/bench_neograph 10000 5000 auto 10 5
 ./build-program-bench/bench_program 1000 10 5
+./build-program-bench/bench_program 1000 10 5 8
 ./build-program-bench/bench_program_dispatch 100000 10 5
+./build-program-bench/bench_program_serialization_poc 25 100
+./build-program-bench/bench_program_binary_poc 25 100
+
+# Build the opt-in protobuf/Cap'n Proto transport-envelope experiment.
+# This target alone requires protoc/libprotobuf and capnp/libcapnp.
+cmake -S . -B build-program-codec-poc -DCMAKE_BUILD_TYPE=Release \
+    -DNEOGRAPH_BUILD_BENCHMARKS=ON \
+    -DNEOGRAPH_BUILD_PROGRAM=ON \
+    -DNEOGRAPH_BUILD_PROGRAM_CODEC_POC=ON
+cmake --build build-program-codec-poc --target bench_program_codec_poc -j
+taskset -c 0 ./build-program-codec-poc/bench_program_codec_poc 25 100
 ```
 
 Each native benchmark prints `config`, `runtime`, `header`, and `result`

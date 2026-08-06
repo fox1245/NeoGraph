@@ -1117,8 +1117,9 @@ std::string core_compiled_plan_identity(const SealedCoreDefinition& definition,
 }
 
 struct ProgramBundle::Impl {
-    ProgramBundleData data;
-    std::string       id;
+    ProgramBundleData          data;
+    std::string                id;
+    std::string                canonical_bytes;
     std::optional<ProgramPlan> typed_plan;
 };
 
@@ -1127,8 +1128,11 @@ ProgramBundle::ProgramBundle(ProgramBundleData data) {
     normalize_data(owned);
     auto impl  = std::make_shared<Impl>();
     impl->data = std::move(owned);
+    auto value = bundle_identity_envelope(impl->data);
     impl->id   = detail::sha256_identity(
-        "program-bundle", detail::canonical_json_bytes(bundle_identity_envelope(impl->data)));
+        "program-bundle", detail::canonical_json_bytes(value));
+    value["id"]          = impl->id;
+    impl->canonical_bytes = detail::canonical_json_bytes(value);
     // Keep legacy raw bundle construction permissive, but eagerly seal compiler-produced
     // orchestration plans into the typed immutable scheduler view when possible. Admission and
     // runtime both fail closed if this field is unavailable for an admitted artifact.
@@ -1252,10 +1256,6 @@ std::vector<Diagnostic> ProgramBundle::diagnostics() const {
     return copy;
 }
 
-std::string ProgramBundle::serialize_canonical() const {
-    auto value  = bundle_identity_envelope(impl_->data);
-    value["id"] = impl_->id;
-    return detail::canonical_json_bytes(value);
-}
+std::string ProgramBundle::serialize_canonical() const { return impl_->canonical_bytes; }
 
 }  // namespace neograph::program

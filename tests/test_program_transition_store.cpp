@@ -1,14 +1,17 @@
 #include <neograph/program/transition_store.h>
+#include "canonical_json.h"
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 #include <neograph/program/sqlite_transition_store.h>
+#include <sqlite3.h>
 #endif
 #include <gtest/gtest.h>
 #include <atomic>
 #include <barrier>
 #include <filesystem>
 #include <future>
+#include <stdexcept>
 #include <string>
-
+#include <string_view>
 namespace {
 using namespace neograph::program;
 std::string digest(char c) { return "sha256:" + std::string(64, c); }
@@ -63,8 +66,10 @@ ProgramTransitionPublication terminal_publication(const ProgramTransitionPublica
                                                   ContinuationState state,
                                                   std::int64_t time = 20) {
     const auto cp = checkpoint();
-    auto journal = ProgramJournalRecord::create({start.journal_record.id, "run-1", digest('1'),
-        digest('2'), 2, {"root", state, 1}, budget(), {}, cp, time});
+    const auto event_sequence = start.run_record.event_sequence() + 1;
+    auto journal = ProgramJournalRecord::create(
+        {start.journal_record.id, "run-1", digest('1'), digest('2'),
+         start.journal_record.sequence + 1, {"root", state, 1}, budget(), {}, cp, time});
     ProgramResultData outcome;
     outcome.status = status; outcome.run_id = "run-1"; outcome.program_version_id = digest('1');
     outcome.bundle_id = digest('2'); outcome.attempt = 1; outcome.output = {{"ok", true}};
@@ -78,10 +83,10 @@ ProgramTransitionPublication terminal_publication(const ProgramTransitionPublica
     data.bundle_id = digest('2'); data.binding_fingerprint = digest('3');
     data.invocation = start.run_record.invocation(); data.continuation = journal.continuation;
     data.remaining_budget = journal.remaining_budget; data.exact_checkpoint = cp;
-    data.terminal_result = result; data.journal_head = journal.id; data.event_sequence = 2;
+    data.terminal_result = result; data.journal_head = journal.id; data.event_sequence = event_sequence;
     data.created_at_ms = 10; data.updated_at_ms = time;
     return {ProgramRunRecord::create(std::move(data)), journal,
-            {event(2, ProgramEventKind::Terminal, ProgramTerminalEvent{status}, time)}, {}};
+            {event(event_sequence, ProgramEventKind::Terminal, ProgramTerminalEvent{status}, time)}, {}};
 }
 
 ProgramTransitionPublication child_metadata_publication(
@@ -242,6 +247,114 @@ void attach_fork_receipt(ProgramTransitionPublication& publication) {
     data.updated_at_ms = run.updated_at_ms();
     publication.run_record = ProgramRunRecord::create(std::move(data));
 }
+json publication_reference_body(const ProgramTransitionPublication& publication) {
+    json events = json::array();
+    for (const auto& event : publication.events) {
+        events.push_back(detail::parse_json_strict(event.serialize_canonical()));
+    }
+
+    json effects = json::array();
+    for (const auto& effect : publication.effects) {
+        effects.push_back(detail::parse_json_strict(effect.serialize_canonical()));
+    }
+
+    return {{"format", "neograph-program-transition-publication"},
+            {"storage_schema_version", 1},
+            {"run_record",
+             detail::parse_json_strict(publication.run_record.serialize_canonical())},
+            {"journal_record",
+             detail::parse_json_strict(publication.journal_record.serialize_canonical())},
+            {"events", std::move(events)},
+            {"effects", std::move(effects)},
+            {"migration_plan",
+             publication.migration_plan
+                 ? detail::parse_json_strict(publication.migration_plan->serialize_canonical())
+                 : json(nullptr)}};
+}
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+class TestSqliteDatabase final {
+public:
+    explicit TestSqliteDatabase(const std::string& path) {
+        if (sqlite3_open_v2(path.c_str(), &db_, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+                            nullptr) != SQLITE_OK) {
+            const std::string error = db_ ? sqlite3_errmsg(db_) : "SQLite unavailable";
+            if (db_) sqlite3_close_v2(db_);
+            db_ = nullptr;
+            throw std::runtime_error("test SQLite open: " + error);
+        }
+    }
+
+    TestSqliteDatabase(const TestSqliteDatabase&) = delete;
+    TestSqliteDatabase& operator=(const TestSqliteDatabase&) = delete;
+
+    ~TestSqliteDatabase() {
+        if (db_) sqlite3_close_v2(db_);
+    }
+
+    void execute(std::string_view sql) {
+        char* error = nullptr;
+        if (sqlite3_exec(db_, sql.data(), nullptr, nullptr, &error) != SQLITE_OK) {
+            const std::string message = error ? error : sqlite3_errmsg(db_);
+            sqlite3_free(error);
+            throw std::runtime_error("test SQLite execute: " + message);
+        }
+    }
+
+    std::int64_t scalar(std::string_view sql) {
+        sqlite3_stmt* statement = nullptr;
+        if (sqlite3_prepare_v2(db_, sql.data(), static_cast<int>(sql.size()), &statement, nullptr) !=
+            SQLITE_OK)
+            throw std::runtime_error("test SQLite prepare: " + std::string(sqlite3_errmsg(db_)));
+        const int result = sqlite3_step(statement);
+        if (result != SQLITE_ROW) {
+            const std::string error = sqlite3_errmsg(db_);
+            sqlite3_finalize(statement);
+            throw std::runtime_error("test SQLite scalar: " + error);
+        }
+        const auto value = sqlite3_column_int64(statement, 0);
+        sqlite3_finalize(statement);
+        return value;
+    }
+
+    void insert_legacy(std::string_view owner_scope,
+                       std::string_view run_id,
+                       std::string_view canonical_bytes,
+                       std::string_view last_publication_bytes) {
+        sqlite3_stmt* statement = nullptr;
+        constexpr std::string_view sql =
+            "INSERT INTO program_transition_runs"
+            "(owner_scope, run_id, canonical_bytes, last_publication_bytes) "
+            "VALUES(?1, ?2, ?3, ?4)";
+        if (sqlite3_prepare_v2(db_, sql.data(), static_cast<int>(sql.size()), &statement, nullptr) !=
+            SQLITE_OK)
+            throw std::runtime_error("test SQLite prepare: " + std::string(sqlite3_errmsg(db_)));
+        const auto bind = [&](int index, std::string_view value, bool blob) {
+            const int result = blob
+                                   ? sqlite3_bind_blob(statement, index, value.data(),
+                                                       static_cast<int>(value.size()), SQLITE_TRANSIENT)
+                                   : sqlite3_bind_text(statement, index, value.data(),
+                                                       static_cast<int>(value.size()), SQLITE_TRANSIENT);
+            if (result != SQLITE_OK) throw std::runtime_error("test SQLite bind");
+        };
+        try {
+            bind(1, owner_scope, false);
+            bind(2, run_id, false);
+            bind(3, canonical_bytes, true);
+            bind(4, last_publication_bytes, true);
+            if (sqlite3_step(statement) != SQLITE_DONE)
+                throw std::runtime_error("test SQLite insert: " + std::string(sqlite3_errmsg(db_)));
+        } catch (...) {
+            sqlite3_finalize(statement);
+            throw;
+        }
+        sqlite3_finalize(statement);
+    }
+
+private:
+    sqlite3* db_ = nullptr;
+};
+#endif
+
 } // namespace
 
 TEST(ProgramTransitionStoreTest, CanonicalValuesRejectTamper) {
@@ -256,6 +369,14 @@ TEST(ProgramTransitionStoreTest, CanonicalValuesRejectTamper) {
     auto run_bytes = publication.run_record.serialize_canonical();
     run_bytes.replace(run_bytes.find("owner-a"), 7, "owner-b");
     EXPECT_THROW((void)ProgramRunRecord::parse(run_bytes), std::invalid_argument);
+}
+
+TEST(ProgramTransitionStoreTest, PublicationCanonicalWireMatchesReferenceTree) {
+    const auto start = start_publication();
+    const auto publication = interrupted_effect_publication(start);
+
+    EXPECT_EQ(publication.serialize_canonical(),
+              detail::canonical_json_bytes(publication_reference_body(publication)));
 }
 
 TEST(ProgramTransitionStoreTest, FirstPublishRetryAndOwnerIsolation) {
@@ -361,6 +482,37 @@ TEST(ProgramTransitionStoreTest, ExactTerminalRetryIsAlreadyPresent) {
     EXPECT_EQ(store.compare_publish(
                   "owner-a", start.journal_record.id, terminal),
               ProgramTransitionPublishResult::AlreadyPresent);
+}
+
+TEST(ProgramTransitionStoreTest, InMemoryHistoryRetainsOrderedEventAndEffectHistory) {
+    InMemoryProgramTransitionStore store;
+    const auto start = start_publication();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, start),
+              ProgramTransitionPublishResult::Published);
+
+    const auto interrupted = interrupted_effect_publication(start);
+    ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, interrupted),
+              ProgramTransitionPublishResult::Published);
+
+    const auto resumed = resumed_effect_publication(interrupted);
+    ASSERT_EQ(store.compare_publish("owner-a", interrupted.journal_record.id, resumed),
+              ProgramTransitionPublishResult::Published);
+
+    const auto events = store.load_events("owner-a", "run-1");
+    ASSERT_EQ(events.size(), 3U);
+    EXPECT_EQ(events[0].sequence, 1U);
+    EXPECT_EQ(events[1].sequence, 2U);
+    EXPECT_EQ(events[2].sequence, 3U);
+
+    const auto after_first = store.load_events("owner-a", "run-1", 1);
+    ASSERT_EQ(after_first.size(), 2U);
+    EXPECT_EQ(after_first.front().sequence, 2U);
+    EXPECT_EQ(after_first.back().sequence, 3U);
+
+    const auto effects = store.load_effects("owner-a", "run-1");
+    ASSERT_EQ(effects.size(), 1U);
+    EXPECT_EQ(effects.front().sequence(), 1U);
+    EXPECT_TRUE(store.load_effects("owner-a", "run-1", 1).empty());
 }
 
 TEST(ProgramTransitionStoreTest, FaultAtEachPublishBoundaryPreservesCommittedState) {
@@ -683,6 +835,143 @@ TEST(ProgramTransitionStoreTest, SQLiteChildMetadataPublicationSurvivesReopen) {
         ASSERT_EQ(run->children().size(), 1U);
         EXPECT_EQ(run->children().front().child_run_id, "child-run-1");
         EXPECT_EQ(store.latest("owner-a", "run-1")->id, child.journal_record.id);
+    }
+    std::filesystem::remove(path);
+}
+
+TEST(ProgramTransitionStoreTest, SQLiteStoresTransitionDeltasAndReopens) {
+    static std::atomic<unsigned> sequence{0};
+    const auto path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-program-transition-delta-" + std::to_string(sequence.fetch_add(1)) + ".db"))
+            .string();
+    std::filesystem::remove(path);
+
+    const auto start = start_publication();
+    const auto child = child_metadata_publication(start);
+    {
+        SQLiteProgramTransitionStore store(path);
+        ASSERT_EQ(store.compare_publish("owner-a", {}, start),
+                  ProgramTransitionPublishResult::Published);
+        ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, child),
+                  ProgramTransitionPublishResult::Published);
+    }
+    {
+        TestSqliteDatabase database(path);
+        EXPECT_EQ(database.scalar("SELECT COUNT(*) FROM program_transition_run_heads_v2"), 1);
+        EXPECT_EQ(database.scalar("SELECT COUNT(*) FROM program_transition_event_log_v2"), 1);
+        EXPECT_EQ(database.scalar("SELECT COUNT(*) FROM program_transition_effect_log_v2"), 0);
+        EXPECT_EQ(database.scalar(
+                      "SELECT COUNT(*) FROM sqlite_master "
+                      "WHERE type = 'table' AND name = 'program_transition_runs'"),
+                  0);
+    }
+    {
+        SQLiteProgramTransitionStore store(path);
+        const auto run = store.load("owner-a", "run-1");
+        ASSERT_TRUE(run.has_value());
+        EXPECT_FALSE(run->terminal_result().has_value());
+        EXPECT_EQ(store.latest("owner-a", "run-1")->id, child.journal_record.id);
+        EXPECT_EQ(store.load_events("owner-a", "run-1").size(), 1U);
+        EXPECT_TRUE(store.load_events("owner-a", "run-1", 1).empty());
+        EXPECT_EQ(store.compare_publish("owner-a", start.journal_record.id, child),
+                  ProgramTransitionPublishResult::AlreadyPresent);
+    }
+    std::filesystem::remove(path);
+}
+
+TEST(ProgramTransitionStoreTest, SQLiteMigratesLegacySnapshotToDeltaLog) {
+    static std::atomic<unsigned> sequence{0};
+    const auto path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-program-transition-legacy-" + std::to_string(sequence.fetch_add(1)) + ".db"))
+            .string();
+    std::filesystem::remove(path);
+
+    const auto start = start_publication();
+    const auto interrupted = interrupted_effect_publication(start);
+    const auto resumed = resumed_effect_publication(interrupted);
+    auto legacy_events = start.events;
+    legacy_events.insert(legacy_events.end(), interrupted.events.begin(), interrupted.events.end());
+    const ProgramTransitionPublication legacy{interrupted.run_record, interrupted.journal_record,
+                                               std::move(legacy_events), interrupted.effects, std::nullopt};
+    {
+        TestSqliteDatabase database(path);
+        database.execute("CREATE TABLE program_transition_runs ("
+                         "owner_scope TEXT NOT NULL, run_id TEXT NOT NULL, "
+                         "canonical_bytes BLOB NOT NULL, last_publication_bytes BLOB NOT NULL, "
+                         "PRIMARY KEY(owner_scope, run_id))");
+        database.insert_legacy("owner-a", "run-1", legacy.serialize_canonical(),
+                               interrupted.serialize_canonical());
+    }
+    {
+        SQLiteProgramTransitionStore store(path);
+        const auto run = store.load("owner-a", "run-1");
+        ASSERT_TRUE(run.has_value());
+        EXPECT_EQ(run->continuation().state, ContinuationState::Interrupted);
+        EXPECT_EQ(store.latest("owner-a", "run-1")->id, interrupted.journal_record.id);
+        EXPECT_EQ(store.load_events("owner-a", "run-1").size(), 2U);
+        EXPECT_EQ(store.load_effects("owner-a", "run-1").size(), 1U);
+        EXPECT_EQ(store.compare_publish("owner-a", start.journal_record.id, interrupted),
+                  ProgramTransitionPublishResult::AlreadyPresent);
+        EXPECT_EQ(store.compare_publish("owner-a", interrupted.journal_record.id, resumed),
+                  ProgramTransitionPublishResult::Published);
+    }
+    {
+        TestSqliteDatabase database(path);
+        EXPECT_EQ(database.scalar("SELECT COUNT(*) FROM program_transition_run_heads_v2"), 1);
+        EXPECT_EQ(database.scalar("SELECT COUNT(*) FROM program_transition_event_log_v2"), 3);
+        EXPECT_EQ(database.scalar("SELECT COUNT(*) FROM program_transition_effect_log_v2"), 1);
+    }
+    {
+        SQLiteProgramTransitionStore store(path);
+        const auto run = store.load("owner-a", "run-1");
+        ASSERT_TRUE(run.has_value());
+        EXPECT_EQ(run->continuation().state, ContinuationState::Running);
+        EXPECT_EQ(store.latest("owner-a", "run-1")->id, resumed.journal_record.id);
+        EXPECT_EQ(store.load_events("owner-a", "run-1", 2).size(), 1U);
+        EXPECT_EQ(store.load_effects("owner-a", "run-1").size(), 1U);
+    }
+    std::filesystem::remove(path);
+}
+
+TEST(ProgramTransitionStoreTest, SQLiteConcurrentCasAcrossConnectionsHasOneWinner) {
+    static std::atomic<unsigned> sequence{0};
+    const auto path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-program-transition-cas-" + std::to_string(sequence.fetch_add(1)) + ".db"))
+            .string();
+    std::filesystem::remove(path);
+    {
+
+    SQLiteProgramTransitionStore first(path);
+    SQLiteProgramTransitionStore second(path);
+    const auto start = start_publication();
+    ASSERT_EQ(first.compare_publish("owner-a", {}, start), ProgramTransitionPublishResult::Published);
+    const auto completed = terminal_publication(
+        start, ProgramTerminalStatus::Completed, ContinuationState::Completed, 20);
+    const auto failed =
+        terminal_publication(start, ProgramTerminalStatus::Failed, ContinuationState::Failed, 21);
+    std::barrier ready(3);
+    auto publish = [&](SQLiteProgramTransitionStore& store, ProgramTransitionPublication publication) {
+        ready.arrive_and_wait();
+        return store.compare_publish("owner-a", start.journal_record.id, std::move(publication));
+    };
+    auto a = std::async(std::launch::async, [&] { return publish(first, completed); });
+    auto b = std::async(std::launch::async, [&] { return publish(second, failed); });
+    ready.arrive_and_wait();
+    const auto a_result = a.get();
+    const auto b_result = b.get();
+    EXPECT_TRUE((a_result == ProgramTransitionPublishResult::Published &&
+                 b_result == ProgramTransitionPublishResult::Conflict) ||
+                (b_result == ProgramTransitionPublishResult::Published &&
+                 a_result == ProgramTransitionPublishResult::Conflict));
+
+    const auto run = first.load("owner-a", "run-1");
+    ASSERT_TRUE(run.has_value());
+    ASSERT_TRUE(run->terminal_result().has_value());
+    EXPECT_TRUE(run->terminal_result()->status() == ProgramTerminalStatus::Completed ||
+                run->terminal_result()->status() == ProgramTerminalStatus::Failed);
     }
     std::filesystem::remove(path);
 }

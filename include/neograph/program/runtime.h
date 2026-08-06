@@ -183,6 +183,10 @@ public:
                       ProgramInvocation     invocation);
 
 private:
+    ProgramHandle start_resolved(std::string_view      owner_scope,
+                                 const ProgramVersion& version,
+                                 ProgramInvocation     invocation);
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

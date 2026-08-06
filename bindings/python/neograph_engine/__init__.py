@@ -63,6 +63,10 @@ _ensure_ssl_ca_bundle()
 from ._neograph import (
     ToolDecision,
     ToolGateContext,
+    ToolConcurrency,
+    ToolExecutionPolicy,
+    ToolExecutionPolicyRegistry,
+    ToolExecutionController,
 
     # Long-term memory across conversations (#97)
     Store,
@@ -176,7 +180,9 @@ except ImportError:
 # MCP (Model Context Protocol) — present when the binding was built with
 # neograph::mcp, which the wheel now does (issue #95). Reachable as
 # `neograph_engine.mcp.MCPClient(...)`. get_tools() hands back C++ tools that go
-# straight into NodeContext(tools=[...]) and keep their concurrency there.
+# straight into NodeContext(tools=[...]). Graph dispatch retains a conservative
+# per-tool default; configure ToolExecutionPolicyRegistry only after verifying
+# that the remote server safely accepts concurrent requests.
 try:
     from ._neograph import mcp  # noqa: F401
     _HAVE_MCP = True
@@ -553,6 +559,10 @@ __all__ = [
     "Diagnostic",
     "ToolDecision",
     "ToolGateContext",
+    "ToolConcurrency",
+    "ToolExecutionPolicy",
+    "ToolExecutionPolicyRegistry",
+    "ToolExecutionController",
     "NodeFactory",
     "ReducerRegistry",
     "ConditionRegistry",

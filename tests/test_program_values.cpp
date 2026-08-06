@@ -790,6 +790,7 @@ TEST(ProgramResultTest, DefaultValueIsCoherentAsioExceptionSentinel) {
     EXPECT_EQ(result.attempt(), 0U);
     ASSERT_TRUE(result.failure().has_value());
     EXPECT_EQ(result.failure()->code, "P_RESULT_EMPTY");
+    EXPECT_THROW(result.serialize_canonical(), std::invalid_argument);
 }
 
 }  // namespace

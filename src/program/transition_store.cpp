@@ -3,8 +3,10 @@
 #include "canonical_json.h"
 
 #include <algorithm>
+#include <iterator>
 #include <limits>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <stdexcept>
@@ -72,13 +74,140 @@ bool valid_effect_outbox_binding(const ProgramRunRecord& run,
     return true;
 }
 
+struct ProgramTransitionHistory final {
+    ProgramTransitionHistory(std::shared_ptr<const ProgramTransitionHistory> previous_history,
+                             std::vector<ProgramEvent>                     appended_events,
+                             std::vector<ProgramEffectOutboxEntry>         appended_effects)
+        : previous(std::move(previous_history)), events(std::move(appended_events)),
+          effects(std::move(appended_effects)),
+          event_count((previous ? previous->event_count : 0) + events.size()),
+          effect_count((previous ? previous->effect_count : 0) + effects.size()) {}
+
+    std::shared_ptr<const ProgramTransitionHistory> previous;
+    std::vector<ProgramEvent>                       events;
+    std::vector<ProgramEffectOutboxEntry>           effects;
+    std::size_t                                      event_count;
+    std::size_t                                      effect_count;
+};
+
+using ProgramTransitionHistoryPtr = std::shared_ptr<const ProgramTransitionHistory>;
+
+constexpr std::size_t TRANSITION_HISTORY_CHUNK_CAPACITY = 32;
+
+template <typename Entry>
+std::vector<Entry> append_entries(const std::vector<Entry>& existing,
+                                  std::vector<Entry>        additions) {
+    if (existing.empty()) return additions;
+
+    std::vector<Entry> entries;
+    entries.reserve(existing.size() + additions.size());
+    entries.insert(entries.end(), existing.begin(), existing.end());
+    entries.insert(entries.end(), std::make_move_iterator(additions.begin()),
+                   std::make_move_iterator(additions.end()));
+    return entries;
+}
+
+ProgramTransitionHistoryPtr append_history(
+    ProgramTransitionHistoryPtr                    previous,
+    std::vector<ProgramEvent>                      events,
+    std::vector<ProgramEffectOutboxEntry>          effects) {
+    if (events.empty() && effects.empty()) return previous;
+    if (!previous ||
+        previous->events.size() + events.size() > TRANSITION_HISTORY_CHUNK_CAPACITY ||
+        previous->effects.size() + effects.size() > TRANSITION_HISTORY_CHUNK_CAPACITY) {
+        return std::make_shared<const ProgramTransitionHistory>(
+            std::move(previous), std::move(events), std::move(effects));
+    }
+    return std::make_shared<const ProgramTransitionHistory>(
+        previous->previous, append_entries(previous->events, std::move(events)),
+        append_entries(previous->effects, std::move(effects)));
+}
+
+ProgramTransitionHistoryPtr begin_history(
+    const std::vector<ProgramEvent>&               events,
+    const std::vector<ProgramEffectOutboxEntry>&   effects,
+    std::vector<ProgramEvent>                      appended_events,
+    std::vector<ProgramEffectOutboxEntry>          appended_effects) {
+    return std::make_shared<const ProgramTransitionHistory>(
+        nullptr, append_entries(events, std::move(appended_events)),
+        append_entries(effects, std::move(appended_effects)));
+}
+
+template <typename Entry, typename Sequence>
+std::vector<Entry> entries_after(const std::vector<Entry>& entries,
+                                 std::uint64_t             after_sequence,
+                                 Sequence&&                sequence) {
+    if (entries.empty() || after_sequence >= sequence(entries.back())) return {};
+
+    std::vector<Entry> result;
+    if (!after_sequence) result.reserve(entries.size());
+    for (const auto& entry : entries) {
+        if (sequence(entry) > after_sequence) result.push_back(entry);
+    }
+    return result;
+}
+
+std::vector<ProgramEvent> event_entries_after(const ProgramTransitionHistoryPtr& history,
+                                              std::uint64_t after_sequence) {
+    if (!history || !history->event_count) return {};
+
+    std::vector<ProgramEvent> result;
+    if (!after_sequence) result.reserve(history->event_count);
+    for (auto current = history; current; current = current->previous) {
+        for (auto event = current->events.rbegin(); event != current->events.rend(); ++event) {
+            if (event->sequence > after_sequence) result.push_back(*event);
+        }
+    }
+    std::reverse(result.begin(), result.end());
+    return result;
+}
+
+std::vector<ProgramEffectOutboxEntry>
+effect_entries_after(const ProgramTransitionHistoryPtr& history,
+                     std::uint64_t                      after_sequence) {
+    if (!history || !history->effect_count) return {};
+
+    std::vector<ProgramEffectOutboxEntry> result;
+    if (!after_sequence) result.reserve(history->effect_count);
+    for (auto current = history; current; current = current->previous) {
+        for (auto effect = current->effects.rbegin(); effect != current->effects.rend(); ++effect) {
+            if (effect->sequence() > after_sequence) result.push_back(*effect);
+        }
+    }
+    std::reverse(result.begin(), result.end());
+    return result;
+}
+
+bool effect_history_contains(const std::vector<ProgramEffectOutboxEntry>& effects,
+                             const ProgramTransitionHistoryPtr&            history,
+                             std::string_view                              id) {
+    if (std::any_of(effects.begin(), effects.end(), [&](const auto& existing) {
+            return existing.effect().effect_id() == id;
+        })) {
+        return true;
+    }
+    for (auto current = history; current; current = current->previous) {
+        if (std::any_of(current->effects.begin(), current->effects.end(),
+                        [&](const auto& existing) {
+                            return existing.effect().effect_id() == id;
+                        })) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool effect_ids_are_unique(const std::vector<ProgramEffectOutboxEntry>& old_effects,
-                           const std::vector<ProgramEffectOutboxEntry>& new_effects) {
-    std::set<std::string, std::less<>> ids;
-    for (const auto& effect : old_effects)
-        if (!ids.emplace(effect.effect().effect_id()).second) return false;
-    for (const auto& effect : new_effects)
-        if (!ids.emplace(effect.effect().effect_id()).second) return false;
+                           const ProgramTransitionHistoryPtr&            old_history,
+                           const std::vector<ProgramEffectOutboxEntry>&  new_effects) {
+    for (auto next = new_effects.begin(); next != new_effects.end(); ++next) {
+        if (std::any_of(new_effects.begin(), next, [&](const auto& existing) {
+                return existing.effect().effect_id() == next->effect().effect_id();
+            }) ||
+            effect_history_contains(old_effects, old_history, next->effect().effect_id())) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -118,8 +247,8 @@ std::string key(std::string_view owner, std::string_view run) {
     return out;
 }
 void validate_pub(const ProgramTransitionPublication& publication, std::string_view owner) {
-    // Nested values are validated once by pub_body() while it materializes the
-    // canonical publication; this pass only checks cross-record invariants.
+    // Child serializers validate their immutable identity and canonical body while
+    // the publication compositor checks these cross-record invariants.
     const auto& run     = publication.run_record;
     const auto& journal = publication.journal_record;
     if (run.owner_scope() != owner || run.run_id() != journal.run_id ||
@@ -195,21 +324,46 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
         }
     }
 }
-json pub_body(const ProgramTransitionPublication& p) {
-    json events = json::array(), effects = json::array();
-    for (auto& e : p.events)
-        events.push_back(nested(e.serialize_canonical()));
-    for (auto& e : p.effects)
-        effects.push_back(nested(e.serialize_canonical()));
-    return {{"format", std::string(PUBLICATION_FORMAT)},
-            {"storage_schema_version", 1},
-            {"run_record", nested(p.run_record.serialize_canonical())},
-            {"journal_record", nested(p.journal_record.serialize_canonical())},
-            {"events", std::move(events)},
-            {"effects", std::move(effects)},
-            {"migration_plan", p.migration_plan
-                                    ? nested(p.migration_plan->serialize_canonical())
-                                    : json(nullptr)}};
+constexpr std::size_t MAX_CANONICAL_PUBLICATION_BYTES = 16u * 1024u * 1024u;
+
+void append_publication_bytes(std::string& out, std::string_view bytes) {
+    if (bytes.size() > MAX_CANONICAL_PUBLICATION_BYTES - out.size()) {
+        throw std::invalid_argument("Program JSON exceeds the 16 MiB materialized limit");
+    }
+    out.append(bytes);
+}
+
+std::string publication_bytes(const ProgramTransitionPublication& publication) {
+    std::string bytes;
+    bytes.reserve(4096);
+
+    append_publication_bytes(bytes, "{\"effects\":[");
+    for (std::size_t index = 0; index < publication.effects.size(); ++index) {
+        if (index != 0) append_publication_bytes(bytes, ",");
+        append_publication_bytes(bytes, publication.effects[index].serialize_canonical());
+    }
+
+    append_publication_bytes(bytes,
+                             "],\"events\":[");
+    for (std::size_t index = 0; index < publication.events.size(); ++index) {
+        if (index != 0) append_publication_bytes(bytes, ",");
+        append_publication_bytes(bytes, publication.events[index].serialize_canonical());
+    }
+
+    append_publication_bytes(bytes,
+                             "],\"format\":\"neograph-program-transition-publication\","
+                             "\"journal_record\":");
+    append_publication_bytes(bytes, publication.journal_record.serialize_canonical());
+    append_publication_bytes(bytes, ",\"migration_plan\":");
+    if (publication.migration_plan) {
+        append_publication_bytes(bytes, publication.migration_plan->serialize_canonical());
+    } else {
+        append_publication_bytes(bytes, "null");
+    }
+    append_publication_bytes(bytes, ",\"run_record\":");
+    append_publication_bytes(bytes, publication.run_record.serialize_canonical());
+    append_publication_bytes(bytes, ",\"storage_schema_version\":1}");
+    return bytes;
 }
 }  // namespace
 struct ProgramEffectOutboxEntry::Impl {
@@ -268,7 +422,7 @@ ProgramEffectOutboxEntry ProgramEffectOutboxEntry::parse(std::string_view bytes)
 }
 std::string ProgramTransitionPublication::serialize_canonical() const {
     validate_pub(*this, run_record.owner_scope());
-    return detail::canonical_json_bytes(pub_body(*this));
+    return publication_bytes(*this);
 }
 ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_view bytes) {
     auto v = detail::parse_json_strict(bytes);
@@ -305,12 +459,13 @@ ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_vie
 }
 struct InMemoryProgramTransitionStore::Impl {
     struct Stored {
-        ProgramRunRecord                      run;
-        ProgramJournalRecord                  journal;
-        std::vector<ProgramEvent>             events;
-        std::vector<ProgramEffectOutboxEntry> effects;
-        std::optional<MigrationPlan>          migration_plan;
-        std::string                           bytes;
+        ProgramRunRecord                         run;
+        ProgramJournalRecord                     journal;
+        std::vector<ProgramEvent>                events;
+        std::vector<ProgramEffectOutboxEntry>    effects;
+        ProgramTransitionHistoryPtr              history;
+        std::optional<MigrationPlan>             migration_plan;
+        std::string                              bytes;
     };
     mutable std::mutex                                                mutex;
     std::map<std::string, std::shared_ptr<const Stored>, std::less<>> runs;
@@ -332,47 +487,67 @@ void InMemoryProgramTransitionStore::fail_next_publication_for_testing(
 std::optional<ProgramRunRecord> InMemoryProgramTransitionStore::load(std::string_view o,
                                                                      std::string_view r) const {
     if (o.empty() || r.empty()) return std::nullopt;
-    std::lock_guard l(impl_->mutex);
-    auto            i = impl_->runs.find(key(o, r));
-    if (i == impl_->runs.end()) return std::nullopt;
-    return i->second->run;
+    std::shared_ptr<const Impl::Stored> snapshot;
+    {
+        std::lock_guard lock(impl_->mutex);
+        const auto      found = impl_->runs.find(key(o, r));
+        if (found == impl_->runs.end()) return std::nullopt;
+        snapshot = found->second;
+    }
+    return snapshot->run;
 }
 std::optional<ProgramJournalRecord> InMemoryProgramTransitionStore::latest(
     std::string_view o, std::string_view r) const {
     if (o.empty() || r.empty()) return std::nullopt;
-    std::lock_guard l(impl_->mutex);
-    auto            i = impl_->runs.find(key(o, r));
-    if (i == impl_->runs.end()) return std::nullopt;
-    return i->second->journal;
+    std::shared_ptr<const Impl::Stored> snapshot;
+    {
+        std::lock_guard lock(impl_->mutex);
+        const auto      found = impl_->runs.find(key(o, r));
+        if (found == impl_->runs.end()) return std::nullopt;
+        snapshot = found->second;
+    }
+    return snapshot->journal;
 }
 std::vector<ProgramEvent> InMemoryProgramTransitionStore::load_events(std::string_view o,
                                                                       std::string_view r,
                                                                       std::uint64_t    a) const {
-    std::lock_guard l(impl_->mutex);
-    auto            i = impl_->runs.find(key(o, r));
-    if (i == impl_->runs.end()) return {};
-    std::vector<ProgramEvent> x;
-    for (auto& e : i->second->events)
-        if (e.sequence > a) x.push_back(e);
-    return x;
+    std::shared_ptr<const Impl::Stored> snapshot;
+    {
+        std::lock_guard lock(impl_->mutex);
+        const auto      found = impl_->runs.find(key(o, r));
+        if (found == impl_->runs.end()) return {};
+        snapshot = found->second;
+    }
+    if (snapshot->history) return event_entries_after(snapshot->history, a);
+    return entries_after(snapshot->events, a,
+                         [](const ProgramEvent& event) { return event.sequence; });
 }
 std::vector<ProgramEffectOutboxEntry> InMemoryProgramTransitionStore::load_effects(
     std::string_view o, std::string_view r, std::uint64_t a) const {
-    std::lock_guard l(impl_->mutex);
-    auto            i = impl_->runs.find(key(o, r));
-    if (i == impl_->runs.end()) return {};
-    std::vector<ProgramEffectOutboxEntry> x;
-    for (auto& e : i->second->effects)
-        if (e.sequence() > a) x.push_back(e);
-    return x;
+    std::shared_ptr<const Impl::Stored> snapshot;
+    {
+        std::lock_guard lock(impl_->mutex);
+        const auto      found = impl_->runs.find(key(o, r));
+        if (found == impl_->runs.end()) return {};
+        snapshot = found->second;
+    }
+    if (snapshot->history) return effect_entries_after(snapshot->history, a);
+    return entries_after(snapshot->effects, a,
+                         [](const ProgramEffectOutboxEntry& effect) {
+                             return effect.sequence();
+                         });
 }
 std::optional<MigrationPlan> InMemoryProgramTransitionStore::load_migration_plan(
     std::string_view o, std::string_view r) const {
     if (o.empty() || r.empty()) return std::nullopt;
-    std::lock_guard l(impl_->mutex);
-    auto            i = impl_->runs.find(key(o, r));
-    if (i == impl_->runs.end()) return std::nullopt;
-    return i->second->migration_plan;
+    std::shared_ptr<const Impl::Stored> snapshot;
+    {
+        std::lock_guard lock(impl_->mutex);
+        const auto      found = impl_->runs.find(key(o, r));
+        if (found == impl_->runs.end()) return std::nullopt;
+        snapshot = found->second;
+    }
+    return snapshot->migration_plan;
 }
 ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
     std::string_view owner, std::string_view expected, ProgramTransitionPublication publication) {
@@ -452,7 +627,7 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
              publication.events.front().sequence != old.run.event_sequence() + 1) ||
             (!publication.effects.empty() &&
              publication.effects.front().sequence() != old.run.effect_sequence() + 1) ||
-            !effect_ids_are_unique(old.effects, publication.effects)) {
+            !effect_ids_are_unique(old.effects, old.history, publication.effects)) {
             return ProgramTransitionPublishResult::Conflict;
         }
     }
@@ -463,27 +638,42 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
             throw std::runtime_error("injected in-memory Program transition failure");
         }
     };
-    auto staged_run = publication.run_record;
+    auto staged_run = std::move(publication.run_record);
     maybe_fail(ProgramTransitionFaultPoint::AfterRunSnapshot);
-    auto staged_journal = publication.journal_record;
+    auto staged_journal = std::move(publication.journal_record);
     maybe_fail(ProgramTransitionFaultPoint::AfterJournalSnapshot);
+
+    auto appended_events = std::move(publication.events);
+    maybe_fail(ProgramTransitionFaultPoint::AfterEventSnapshot);
+    auto appended_effects = std::move(publication.effects);
+    maybe_fail(ProgramTransitionFaultPoint::AfterEffectSnapshot);
 
     std::vector<ProgramEvent>            events;
     std::vector<ProgramEffectOutboxEntry> effects;
-    if (current != impl_->runs.end()) {
-        events  = current->second->events;
-        effects = current->second->effects;
+    ProgramTransitionHistoryPtr           history;
+    if (current == impl_->runs.end()) {
+        events  = std::move(appended_events);
+        effects = std::move(appended_effects);
+    } else {
+        const auto& old = *current->second;
+        if (old.history) {
+            history =
+                append_history(old.history, std::move(appended_events), std::move(appended_effects));
+        } else if (appended_events.empty() && appended_effects.empty()) {
+            events  = old.events;
+            effects = old.effects;
+        } else {
+            history = begin_history(old.events, old.effects, std::move(appended_events),
+                                    std::move(appended_effects));
+        }
     }
-    events.insert(events.end(), publication.events.begin(), publication.events.end());
-    maybe_fail(ProgramTransitionFaultPoint::AfterEventSnapshot);
-    effects.insert(effects.end(), publication.effects.begin(), publication.effects.end());
-    maybe_fail(ProgramTransitionFaultPoint::AfterEffectSnapshot);
+
+    auto migration_plan = current == impl_->runs.end()
+                              ? std::move(publication.migration_plan)
+                              : current->second->migration_plan;
     auto candidate = std::make_shared<const Impl::Stored>(
         Impl::Stored{std::move(staged_run), std::move(staged_journal), std::move(events),
-                     std::move(effects),
-                     current == impl_->runs.end()
-                         ? publication.migration_plan
-                         : current->second->migration_plan,
+                     std::move(effects), std::move(history), std::move(migration_plan),
                      std::move(publication_bytes)});
     maybe_fail(ProgramTransitionFaultPoint::BeforeCommit);
     if (current == impl_->runs.end()) {

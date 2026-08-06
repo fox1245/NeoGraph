@@ -1656,6 +1656,11 @@ endif()
 # Benchmarks (opt-in)
 # ===========================================================================
 option(NEOGRAPH_BUILD_BENCHMARKS "Build micro/load benchmark binaries" OFF)
+# Transport-only codec benchmark. Default OFF: it probes optional protobuf and
+# Cap'n Proto dependencies only when explicitly requested.
+option(NEOGRAPH_BUILD_PROGRAM_CODEC_POC
+       "Build protobuf/Cap'n Proto Program publication transport benchmark"
+       OFF)
 if(NEOGRAPH_BUILD_BENCHMARKS)
     add_executable(bench_neograph benchmarks/bench_neograph.cpp)
     target_link_libraries(bench_neograph PRIVATE neograph::core)
@@ -1664,6 +1669,158 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
         target_link_libraries(bench_program PRIVATE neograph::program)
         add_executable(bench_program_dispatch benchmarks/bench_program_dispatch.cpp)
         target_link_libraries(bench_program_dispatch PRIVATE neograph::program)
+        add_executable(bench_program_serialization_poc
+            benchmarks/bench_program_serialization_poc.cpp)
+        target_link_libraries(bench_program_serialization_poc PRIVATE neograph::program)
+        add_executable(bench_program_binary_poc
+            benchmarks/bench_program_binary_poc.cpp)
+        target_link_libraries(bench_program_binary_poc PRIVATE neograph::program)
+        if(NEOGRAPH_BUILD_PROGRAM_CODEC_POC)
+            find_package(Protobuf REQUIRED)
+            find_package(CapnProto CONFIG REQUIRED)
+            if(NOT TARGET protobuf::libprotobuf)
+                message(FATAL_ERROR
+                    "Program codec PoC requires the protobuf::libprotobuf target")
+            endif()
+            if(NOT TARGET CapnProto::capnp OR NOT TARGET CapnProto::kj)
+                message(FATAL_ERROR
+                    "Program codec PoC requires the Cap'n Proto and KJ runtime targets")
+            endif()
+
+            set(_ng_program_codec_generated
+                "${CMAKE_CURRENT_BINARY_DIR}/generated/program_codec_poc")
+            set(_ng_program_codec_proto
+                "${PROJECT_SOURCE_DIR}/benchmarks/program_publication_poc.proto")
+            set(_ng_program_codec_capnp
+                "${PROJECT_SOURCE_DIR}/benchmarks/program_publication_poc.capnp")
+            set(_ng_program_codec_pb_cc
+                "${_ng_program_codec_generated}/benchmarks/program_publication_poc.pb.cc")
+            set(_ng_program_codec_pb_h
+                "${_ng_program_codec_generated}/benchmarks/program_publication_poc.pb.h")
+            set(_ng_program_codec_capnp_cc
+                "${_ng_program_codec_generated}/benchmarks/program_publication_poc.capnp.c++")
+            set(_ng_program_codec_capnp_h
+                "${_ng_program_codec_generated}/benchmarks/program_publication_poc.capnp.h")
+            if(TARGET protobuf::protoc)
+                set(_ng_program_codec_protoc "$<TARGET_FILE:protobuf::protoc>")
+                set(_ng_program_codec_protoc_dep protobuf::protoc)
+            elseif(Protobuf_PROTOC_EXECUTABLE)
+                set(_ng_program_codec_protoc "${Protobuf_PROTOC_EXECUTABLE}")
+                set(_ng_program_codec_protoc_dep)
+            else()
+                message(FATAL_ERROR "Program codec PoC requires protoc")
+            endif()
+            get_target_property(_ng_program_codec_capnp_library_path
+                CapnProto::capnp IMPORTED_LOCATION)
+            if(NOT _ng_program_codec_capnp_library_path)
+                message(FATAL_ERROR
+                    "Program codec PoC could not locate the Cap'n Proto C++ runtime")
+            endif()
+            get_filename_component(_ng_program_codec_capnp_library_dir
+                "${_ng_program_codec_capnp_library_path}" DIRECTORY)
+            get_filename_component(_ng_program_codec_capnp_library_parent
+                "${_ng_program_codec_capnp_library_dir}" DIRECTORY)
+            get_filename_component(_ng_program_codec_capnp_prefix
+                "${_ng_program_codec_capnp_library_parent}" DIRECTORY)
+
+            set(_ng_program_codec_capnp_tool_path)
+            if(TARGET CapnProto::capnp_tool)
+                get_target_property(_ng_program_codec_capnp_tool_path
+                    CapnProto::capnp_tool IMPORTED_LOCATION)
+            endif()
+            if(NOT EXISTS "${_ng_program_codec_capnp_tool_path}")
+                unset(_ng_program_codec_capnp_tool_path)
+                find_program(_ng_program_codec_capnp_tool_path NAMES capnp
+                    PATHS "${_ng_program_codec_capnp_library_parent}/bin"
+                          "${_ng_program_codec_capnp_prefix}/bin"
+                    NO_DEFAULT_PATH)
+            endif()
+
+            set(_ng_program_codec_capnpc_cpp_path)
+            if(TARGET CapnProto::capnpc_cpp)
+                get_target_property(_ng_program_codec_capnpc_cpp_path
+                    CapnProto::capnpc_cpp IMPORTED_LOCATION)
+            endif()
+            if(NOT EXISTS "${_ng_program_codec_capnpc_cpp_path}")
+                unset(_ng_program_codec_capnpc_cpp_path)
+                find_program(_ng_program_codec_capnpc_cpp_path NAMES capnpc-c++
+                    PATHS "${_ng_program_codec_capnp_library_parent}/bin"
+                          "${_ng_program_codec_capnp_prefix}/bin"
+                    NO_DEFAULT_PATH)
+            endif()
+            if(NOT _ng_program_codec_capnp_tool_path OR
+               NOT _ng_program_codec_capnpc_cpp_path)
+                message(FATAL_ERROR
+                    "Program codec PoC requires capnp and capnpc-c++ tools near its runtime")
+            endif()
+
+            set(_ng_program_codec_capnp_includes)
+            if(EXISTS "${_ng_program_codec_capnp_prefix}/include/capnp/c++.capnp")
+                list(APPEND _ng_program_codec_capnp_includes
+                    "${_ng_program_codec_capnp_prefix}/include")
+            endif()
+            get_target_property(_ng_program_codec_capnp_target_includes
+                CapnProto::capnp INTERFACE_INCLUDE_DIRECTORIES)
+            list(APPEND _ng_program_codec_capnp_includes
+                ${_ng_program_codec_capnp_target_includes})
+            if(NOT _ng_program_codec_capnp_includes)
+                message(FATAL_ERROR
+                    "Program codec PoC could not locate Cap'n Proto schema imports")
+            endif()
+            list(REMOVE_DUPLICATES _ng_program_codec_capnp_includes)
+            set(_ng_program_codec_capnp_import_args)
+            foreach(_ng_program_codec_capnp_include
+                    IN LISTS _ng_program_codec_capnp_includes)
+                list(APPEND _ng_program_codec_capnp_import_args
+                    "-I${_ng_program_codec_capnp_include}")
+            endforeach()
+
+            add_custom_command(
+                OUTPUT "${_ng_program_codec_pb_cc}" "${_ng_program_codec_pb_h}"
+                COMMAND "${CMAKE_COMMAND}" -E make_directory
+                    "${_ng_program_codec_generated}/benchmarks"
+                COMMAND "${_ng_program_codec_protoc}"
+                    "--proto_path=${PROJECT_SOURCE_DIR}"
+                    "--cpp_out=${_ng_program_codec_generated}"
+                    "${_ng_program_codec_proto}"
+                DEPENDS "${_ng_program_codec_proto}" ${_ng_program_codec_protoc_dep}
+                COMMENT "Generating Protocol Buffers Program codec PoC schema"
+                VERBATIM)
+            add_custom_command(
+                OUTPUT "${_ng_program_codec_capnp_cc}" "${_ng_program_codec_capnp_h}"
+                COMMAND "${CMAKE_COMMAND}" -E make_directory
+                    "${_ng_program_codec_generated}/benchmarks"
+                COMMAND "${_ng_program_codec_capnp_tool_path}" compile
+                    ${_ng_program_codec_capnp_import_args}
+                    "-o${_ng_program_codec_capnpc_cpp_path}:${_ng_program_codec_generated}"
+                    "--src-prefix=${PROJECT_SOURCE_DIR}"
+                    "${_ng_program_codec_capnp}"
+                DEPENDS "${_ng_program_codec_capnp}"
+                    "${_ng_program_codec_capnp_tool_path}"
+                    "${_ng_program_codec_capnpc_cpp_path}"
+                COMMENT "Generating Cap'n Proto Program codec PoC schema"
+                VERBATIM)
+            set_source_files_properties(
+                "${_ng_program_codec_pb_cc}" "${_ng_program_codec_pb_h}"
+                "${_ng_program_codec_capnp_cc}" "${_ng_program_codec_capnp_h}"
+                PROPERTIES GENERATED TRUE)
+            add_executable(bench_program_codec_poc
+                benchmarks/bench_program_codec_poc.cpp
+                "${_ng_program_codec_pb_cc}" "${_ng_program_codec_capnp_cc}")
+            target_include_directories(bench_program_codec_poc PRIVATE
+                "${_ng_program_codec_generated}")
+            # A private shared Cap'n Proto prefix needs KJ as a direct ELF dependency:
+            # DT_RUNPATH is not searched for Cap'n Proto's transitive dependencies.
+            # Keep the linker scope narrow so normal target dependencies retain their defaults.
+            if(UNIX AND NOT APPLE)
+                target_link_libraries(bench_program_codec_poc PRIVATE
+                    neograph::program protobuf::libprotobuf CapnProto::capnp
+                    "-Wl,--no-as-needed" CapnProto::kj "-Wl,--as-needed")
+            else()
+                target_link_libraries(bench_program_codec_poc PRIVATE
+                    neograph::program protobuf::libprotobuf CapnProto::capnp CapnProto::kj)
+            endif()
+        endif()
     endif()
     set(_neograph_benchmark_build_type "${CMAKE_BUILD_TYPE}")
     if(_neograph_benchmark_build_type STREQUAL "")
@@ -1672,7 +1829,11 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
     set(_neograph_benchmark_targets bench_neograph)
     if(NEOGRAPH_BUILD_PROGRAM)
         list(APPEND _neograph_benchmark_targets
-            bench_program bench_program_dispatch)
+            bench_program bench_program_dispatch
+            bench_program_serialization_poc bench_program_binary_poc)
+        if(NEOGRAPH_BUILD_PROGRAM_CODEC_POC)
+            list(APPEND _neograph_benchmark_targets bench_program_codec_poc)
+        endif()
     endif()
     foreach(_neograph_benchmark_target IN LISTS _neograph_benchmark_targets)
         target_compile_definitions(${_neograph_benchmark_target} PRIVATE

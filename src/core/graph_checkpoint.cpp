@@ -22,6 +22,7 @@
 #include <thread>
 #include <condition_variable>
 #include <type_traits>
+#include <typeinfo>
 
 namespace neograph::graph {
 
@@ -99,6 +100,10 @@ void post_checkpoint_completion(asio::any_io_executor caller_executor,
         barrier->post_returned = true;
     }
     barrier->cv.notify_one();
+}
+
+bool is_exact_in_memory_store(const InMemoryCheckpointStore& store) {
+    return typeid(store) == typeid(InMemoryCheckpointStore);
 }
 
 template <typename Fn>
@@ -578,6 +583,81 @@ void InMemoryCheckpointStore::delete_thread(const std::string& thread_id) {
             ++bit;
         }
     }
+}
+
+asio::awaitable<void> InMemoryCheckpointStore::save_async(const Checkpoint& cp) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_await CheckpointStore::save_async(cp);
+        co_return;
+    }
+    save(cp);
+}
+
+asio::awaitable<std::optional<Checkpoint>>
+InMemoryCheckpointStore::load_latest_async(const std::string& thread_id) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_return co_await CheckpointStore::load_latest_async(thread_id);
+    }
+    co_return load_latest(thread_id);
+}
+
+asio::awaitable<std::optional<Checkpoint>>
+InMemoryCheckpointStore::load_by_id_async(const std::string& id) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_return co_await CheckpointStore::load_by_id_async(id);
+    }
+    co_return load_by_id(id);
+}
+
+asio::awaitable<std::vector<Checkpoint>>
+InMemoryCheckpointStore::list_async(const std::string& thread_id, int limit) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_return co_await CheckpointStore::list_async(thread_id, limit);
+    }
+    co_return list(thread_id, limit);
+}
+
+asio::awaitable<void>
+InMemoryCheckpointStore::delete_thread_async(const std::string& thread_id) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_await CheckpointStore::delete_thread_async(thread_id);
+        co_return;
+    }
+    delete_thread(thread_id);
+}
+
+asio::awaitable<void> InMemoryCheckpointStore::put_writes_async(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id,
+    const PendingWrite& write) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_await CheckpointStore::put_writes_async(
+            thread_id, parent_checkpoint_id, write);
+        co_return;
+    }
+    put_writes(thread_id, parent_checkpoint_id, write);
+}
+
+asio::awaitable<std::vector<PendingWrite>>
+InMemoryCheckpointStore::get_writes_async(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_return co_await CheckpointStore::get_writes_async(
+            thread_id, parent_checkpoint_id);
+    }
+    co_return get_writes(thread_id, parent_checkpoint_id);
+}
+
+asio::awaitable<void> InMemoryCheckpointStore::clear_writes_async(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_await CheckpointStore::clear_writes_async(
+            thread_id, parent_checkpoint_id);
+        co_return;
+    }
+    clear_writes(thread_id, parent_checkpoint_id);
 }
 
 size_t InMemoryCheckpointStore::size() const {

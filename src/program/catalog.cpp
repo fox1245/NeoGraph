@@ -1539,10 +1539,39 @@ std::optional<ProgramVersion> ProgramCatalog::resolve_version_impl(
     detail::validate_token(owner_scope, "Program resolve owner_scope");
     const auto stored_value = impl_->program_store->get_version(owner_scope, id);
     if (!stored_value) return std::nullopt;
+    if (stored_value->ownership_scope() != owner_scope) return std::nullopt;
+
+    const auto stored_id    = stored_value->id();
+    const auto stored_bytes = stored_value->serialize_canonical();
+
+    // The version is the owner-bearing authority record. A bounded adapter
+    // may expose only its one immutable bundle; after the exact owner-
+    // qualified version has been established, that hash-addressed bundle is
+    // safe to load through the legacy view as a compatibility fallback.
+    auto bundle_value = impl_->program_store->get_bundle(owner_scope, stored_value->bundle_id());
+    if (!bundle_value) bundle_value = impl_->program_store->get_bundle(stored_value->bundle_id());
+    if (!bundle_value) {
+        AdmissionDiagnostics diagnostics(stored_id);
+        diagnostics.add("P_RESOLVE_STORE", "/bundle_id",
+                        "Stored ProgramVersion references a missing ProgramBundle",
+                        json{{"bundle_id", stored_value->bundle_id()}});
+        diagnostics.throw_error();
+    }
+    const auto bundle_bytes = bundle_value->serialize_canonical();
+
+    if (!supplied_binding) {
+        std::lock_guard lock(impl_->mutex);
+        const auto known = impl_->materialized.find(stored_id);
+        if (known != impl_->materialized.end() &&
+            known->second->version.serialize_canonical() == stored_bytes &&
+            known->second->bundle.serialize_canonical() == bundle_bytes) {
+            return known->second->version;
+        }
+    }
 
     ProgramVersion stored = [&]() {
         try {
-            return ProgramVersion::parse(stored_value->serialize_canonical());
+            return ProgramVersion::parse(stored_bytes);
         } catch (const std::exception& error) {
             AdmissionDiagnostics diagnostics("catalog");
             diagnostics.add("P_RESOLVE_STORE", "/program_version_id",
@@ -1553,22 +1582,9 @@ std::optional<ProgramVersion> ProgramCatalog::resolve_version_impl(
     }();
     if (stored.ownership_scope() != owner_scope) return std::nullopt;
 
-    // The version is the owner-bearing authority record. A bounded adapter
-    // may expose only its one immutable bundle; after the exact owner-
-    // qualified version has been established, that hash-addressed bundle is
-    // safe to load through the legacy view as a compatibility fallback.
-    auto bundle_value = impl_->program_store->get_bundle(owner_scope, stored.bundle_id());
-    if (!bundle_value) bundle_value = impl_->program_store->get_bundle(stored.bundle_id());
-    if (!bundle_value) {
-        AdmissionDiagnostics diagnostics(stored.id());
-        diagnostics.add("P_RESOLVE_STORE", "/bundle_id",
-                        "Stored ProgramVersion references a missing ProgramBundle",
-                        json{{"bundle_id", stored.bundle_id()}});
-        diagnostics.throw_error();
-    }
     ProgramBundle bundle = [&]() {
         try {
-            return ProgramBundle::parse(bundle_value->serialize_canonical());
+            return ProgramBundle::parse(bundle_bytes);
         } catch (const std::exception& error) {
             AdmissionDiagnostics diagnostics(stored.id());
             diagnostics.add("P_RESOLVE_STORE", "/bundle_id",
@@ -1577,15 +1593,6 @@ std::optional<ProgramVersion> ProgramCatalog::resolve_version_impl(
             diagnostics.throw_error();
         }
     }();
-    if (!supplied_binding) {
-        std::lock_guard lock(impl_->mutex);
-        const auto known = impl_->materialized.find(stored.id());
-        if (known != impl_->materialized.end() &&
-            known->second->version.serialize_canonical() == stored.serialize_canonical() &&
-            known->second->bundle.serialize_canonical() == bundle.serialize_canonical()) {
-            return known->second->version;
-        }
-    }
 
     ProgramAdmission admission{stored.ownership_scope(),
                                stored.admission_profile(),

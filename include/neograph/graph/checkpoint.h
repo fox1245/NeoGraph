@@ -431,8 +431,22 @@ public:
     std::optional<Checkpoint> load_latest(const std::string& thread_id) override;
     std::optional<Checkpoint> load_by_id(const std::string& id) override;
     std::vector<Checkpoint> list(const std::string& thread_id,
-                                  int limit = 100) override;
+                                 int limit = 100) override;
     void delete_thread(const std::string& thread_id) override;
+
+    // The exact in-memory concrete type has no I/O boundary, so its async
+    // operations stay on the caller executor instead of paying a legacy
+    // blocking-pool handoff for each mutex-protected map operation. Derived
+    // stores retain the base fallback unless they explicitly override async.
+    asio::awaitable<void> save_async(const Checkpoint& cp) override;
+    asio::awaitable<std::optional<Checkpoint>>
+    load_latest_async(const std::string& thread_id) override;
+    asio::awaitable<std::optional<Checkpoint>>
+    load_by_id_async(const std::string& id) override;
+    asio::awaitable<std::vector<Checkpoint>>
+    list_async(const std::string& thread_id, int limit = 100) override;
+    asio::awaitable<void>
+    delete_thread_async(const std::string& thread_id) override;
 
     void put_writes(const std::string& thread_id,
                     const std::string& parent_checkpoint_id,
@@ -442,6 +456,17 @@ public:
         const std::string& parent_checkpoint_id) override;
     void clear_writes(const std::string& thread_id,
                       const std::string& parent_checkpoint_id) override;
+
+    asio::awaitable<void> put_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id,
+        const PendingWrite& write) override;
+    asio::awaitable<std::vector<PendingWrite>> get_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id) override;
+    asio::awaitable<void> clear_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id) override;
 
     /**
      * @brief Get the total number of stored checkpoints (test helper).

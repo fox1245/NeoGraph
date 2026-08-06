@@ -156,16 +156,54 @@ void validate_data(const ProgramResultData& d) {
     for (const auto& node : d.execution_trace) detail::validate_token(node,"Program result execution trace node");
 }
 json result_body(const ProgramResultData& d) { return json{{"format",std::string(RESULT_FORMAT)},{"storage_schema_version",RESULT_SCHEMA_VERSION},{"status",std::string(to_string(d.status))},{"run_id",d.run_id},{"program_version_id",d.program_version_id},{"bundle_id",d.bundle_id},{"operation_id",d.operation_id},{"attempt",d.attempt},{"output",d.output},{"usage",encode_usage(d.usage)},{"remaining_budget",encode_budget(d.remaining_budget)},{"checkpoint",d.checkpoint ? encode_checkpoint(*d.checkpoint) : json(nullptr)},{"interrupt",d.interrupt ? encode_interrupt(*d.interrupt) : json(nullptr)},{"failure",d.failure ? encode_failure(*d.failure) : json(nullptr)},{"execution_trace",d.execution_trace}}; }
-std::string computed_id(const ProgramResultData& d) { return detail::sha256_identity("program-result/v1",detail::canonical_json_bytes(result_body(d))); }
 }  // namespace
 
 std::string_view to_string(ProgramTerminalStatus s) noexcept { switch (s) { case ProgramTerminalStatus::Completed:return "completed"; case ProgramTerminalStatus::Interrupted:return "interrupted"; case ProgramTerminalStatus::Cancelled:return "cancelled"; case ProgramTerminalStatus::BudgetExhausted:return "budget_exhausted"; case ProgramTerminalStatus::TimedOut:return "timed_out"; case ProgramTerminalStatus::Failed:return "failed"; case ProgramTerminalStatus::AmbiguousEffect:return "ambiguous_effect"; case ProgramTerminalStatus::CheckpointIncompatible:return "checkpoint_incompatible"; } return "unknown"; }
 ProgramTerminalStatus program_terminal_status_from_string(std::string_view v) { if(v=="completed")return ProgramTerminalStatus::Completed; if(v=="interrupted")return ProgramTerminalStatus::Interrupted; if(v=="cancelled")return ProgramTerminalStatus::Cancelled; if(v=="budget_exhausted")return ProgramTerminalStatus::BudgetExhausted; if(v=="timed_out")return ProgramTerminalStatus::TimedOut; if(v=="failed")return ProgramTerminalStatus::Failed; if(v=="ambiguous_effect")return ProgramTerminalStatus::AmbiguousEffect; if(v=="checkpoint_incompatible")return ProgramTerminalStatus::CheckpointIncompatible; throw std::invalid_argument("Unknown Program terminal status: "+std::string(v)); }
 
-struct ProgramResult::Impl { explicit Impl(ProgramResultData v):data(std::move(v)),id(computed_id(data)){} ProgramResultData data; std::string id; };
-ProgramResult::ProgramResult():ProgramResult(ConstructionData{ProgramTerminalStatus::Failed,"","","","root",0,json::object(),{},{},std::nullopt,std::nullopt,ProgramFailure{"P_RESULT_EMPTY","Empty Program result","root","",0,json::object()},{}}){}
-ProgramResult::ProgramResult(ConstructionData d):impl_(std::make_shared<const Impl>(std::move(d))){}
-ProgramResult ProgramResult::create(ProgramResultData d){validate_data(d);return ProgramResult(std::move(d));}
+struct ProgramResult::Impl {
+    Impl(ProgramResultData value, bool cache_canonical) : data(std::move(value)) {
+        auto body             = result_body(data);
+        const auto body_bytes = detail::canonical_json_bytes(body);
+        id = detail::sha256_identity("program-result/v1", body_bytes);
+        if (cache_canonical) {
+            body["id"] = id;
+            canonical_bytes = detail::canonical_json_bytes(body);
+        }
+    }
+
+    ProgramResultData           data;
+    std::string                 id;
+    std::optional<std::string> canonical_bytes;
+};
+
+ProgramResult::ProgramResult()
+    : impl_(std::make_shared<const Impl>(
+          ConstructionData{ProgramTerminalStatus::Failed,
+                           "",
+                           "",
+                           "",
+                           "root",
+                           0,
+                           json::object(),
+                           {},
+                           {},
+                           std::nullopt,
+                           std::nullopt,
+                           ProgramFailure{"P_RESULT_EMPTY",
+                                          "Empty Program result",
+                                          "root",
+                                          "",
+                                          0,
+                                          json::object()},
+                           {}},
+          false)) {}
+ProgramResult::ProgramResult(ConstructionData d)
+    : impl_(std::make_shared<const Impl>(std::move(d), true)) {}
+ProgramResult ProgramResult::create(ProgramResultData d) {
+    validate_data(d);
+    return ProgramResult(std::move(d));
+}
 ProgramResult ProgramResult::parse(std::string_view bytes) {
     json v; try { v=detail::parse_json_strict(bytes); } catch(const std::exception& e){throw std::invalid_argument(std::string("Invalid stored ProgramResult JSON: ")+e.what());}
     if(!v.is_object()||require_string(v,"format")!=RESULT_FORMAT)throw std::invalid_argument("Stored ProgramResult has unknown format");
@@ -178,10 +216,12 @@ ProgramResult ProgramResult::parse(std::string_view bytes) {
 }
 std::string ProgramResult::serialize_canonical() const {
     validate_data(impl_->data);
-    auto value = result_body(impl_->data);
-    const auto bytes = detail::canonical_json_bytes(value);
-    if (impl_->id != detail::sha256_identity("program-result/v1", bytes))
-        throw std::invalid_argument("Program result id does not match its canonical body");
+    if (impl_->canonical_bytes) return *impl_->canonical_bytes;
+
+    auto value             = result_body(impl_->data);
+    const auto body_bytes = detail::canonical_json_bytes(value);
+    if (impl_->id != detail::sha256_identity("program-result/v1", body_bytes))
+        throw std::invalid_argument("Program result id does not match canonical body");
     value["id"] = impl_->id;
     return detail::canonical_json_bytes(value);
 }

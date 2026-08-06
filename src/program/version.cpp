@@ -347,14 +347,18 @@ struct ProgramVersion::Impl {
 
     ProgramVersionData data;
     std::string        id;
+    std::string        canonical_bytes;
 };
 
 ProgramVersion::ProgramVersion(ProgramVersionData data) {
     normalize_data(data);
-    auto impl = std::make_shared<Impl>(std::move(data));
-    impl->id  = detail::sha256_identity(
-        "program-version", detail::canonical_json_bytes(version_identity_envelope(impl->data)));
-    impl_ = std::move(impl);
+    auto impl  = std::make_shared<Impl>(std::move(data));
+    auto value = version_identity_envelope(impl->data);
+    impl->id   = detail::sha256_identity(
+        "program-version", detail::canonical_json_bytes(value));
+    value["id"]          = impl->id;
+    impl->canonical_bytes = detail::canonical_json_bytes(value);
+    impl_                = std::move(impl);
 }
 
 ProgramVersion::ProgramVersion(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
@@ -407,10 +411,6 @@ const CoreMaterializationReceipt& ProgramVersion::core_materialization_receipt()
     return impl_->data.core_materialization_receipt;
 }
 
-std::string ProgramVersion::serialize_canonical() const {
-    auto value  = version_identity_envelope(impl_->data);
-    value["id"] = impl_->id;
-    return detail::canonical_json_bytes(value);
-}
+std::string ProgramVersion::serialize_canonical() const { return impl_->canonical_bytes; }
 
 }  // namespace neograph::program

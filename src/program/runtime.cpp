@@ -2056,7 +2056,8 @@ ProgramHandle ProgramRuntime::start(RunInvocation                    invocation,
         throw_runtime_diagnostic("P_VERSION_NOT_FOUND", "Program version was not found");
     }
 
-    return start(owner_scope, *resolved, runtime_projection(std::move(invocation), std::move(events)));
+    return start_resolved(owner_scope, *resolved,
+                          runtime_projection(std::move(invocation), std::move(events)));
 }
 
 ProgramHandle ProgramRuntime::start(std::string_view      owner_scope,
@@ -2070,7 +2071,13 @@ ProgramHandle ProgramRuntime::start(std::string_view      owner_scope,
     if (!resolved) {
         throw_runtime_diagnostic("P_VERSION_NOT_FOUND", "Program version was not found");
     }
-    auto pinned = detail::CatalogRuntimeAccess::pin(*impl_->config.catalog, *resolved);
+    return start_resolved(owner_scope, *resolved, std::move(invocation));
+}
+
+ProgramHandle ProgramRuntime::start_resolved(std::string_view      owner_scope,
+                                             const ProgramVersion& version,
+                                             ProgramInvocation     invocation) {
+    auto pinned = detail::CatalogRuntimeAccess::pin(*impl_->config.catalog, version);
     validate_invocation(*pinned, invocation);
     const auto run_id =
         invocation.requested_run_id.empty() ? generate_run_id() : invocation.requested_run_id;

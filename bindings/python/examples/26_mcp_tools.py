@@ -14,21 +14,27 @@ nobody revisited.
     client = ng.mcp.MCPClient("http://localhost:8931")   # or ["python", "server.py"]
     client.initialize()
     engine = ng.GraphEngine.compile(defn, ng.NodeContext(tools=client.get_tools()))
+    policy = ng.ToolExecutionPolicy()
+    policy.concurrency = ng.ToolConcurrency.Reentrant    # only if the server is safe
+    policies = ng.ToolExecutionPolicyRegistry()
+    policies.upsert("fetch", policy)
+    engine.set_tool_execution_controller(ng.ToolExecutionController(policies))
 
-That is the whole integration. The tools come back as C++ tools and go straight
-into the graph.
+That is the transport integration. The tools come back as C++ tools and go
+straight into the graph.
 
 WHY THEY OVERLAP, AND WHERE THEY DO NOT
 
-MCP tools are network round-trips — the case where concurrent dispatch actually
-pays. `MCPTool` is a real C++ `AsyncTool`, so several calls in one turn overlap
-instead of queueing. This program measures it.
+MCP tools are network round-trips — the case where concurrent dispatch can pay.
+`MCPTool` is a real C++ `AsyncTool`, but graph dispatch deliberately serializes
+repeated calls to the same tool name by default. Only the host knows whether a
+remote server safely accepts concurrent requests, so this example explicitly
+marks its threaded ``fetch`` server re-entrant before measuring overlap.
 
-But the two transports are not the same, and it would be easy to overstate:
-
-  - **HTTP** — each call is its own request. Three 0.4 s calls take ~0.4 s.
+  - **HTTP** — each call is its own request. Three 0.4 s calls take ~0.4 s
+    after that explicit policy.
   - **stdio** — one subprocess and one framed pipe, multiplexed by JSON-RPC ID.
-    Calls overlap when the server processes requests concurrently; a serial
+    Calls overlap when both the host policy and subprocess permit it; a serial
     server still makes three 0.4 s calls take 1.2 s.
 
 The test suite measures both stdio server policies instead of attributing either
@@ -142,11 +148,24 @@ DEFINITION = {
 }
 
 
-def run_against(client, label, thread_id):
+def reentrant_tool_controller(*tool_names):
+    """Declare remote tools safe only after verifying their server contract."""
+    policies = ng.ToolExecutionPolicyRegistry()
+    policy = ng.ToolExecutionPolicy()
+    policy.concurrency = ng.ToolConcurrency.Reentrant
+    for tool_name in tool_names:
+        policies.upsert(tool_name, policy)
+    return ng.ToolExecutionController(policies)
+
+
+def run_against(client, label, thread_id, reentrant_tools=()):
     tools = client.get_tools()
     print(f"  discovered: {[t.get_name() for t in tools]}")
 
     engine = ng.GraphEngine.compile(DEFINITION, ng.NodeContext(tools=tools))
+    if reentrant_tools:
+        engine.set_tool_execution_controller(
+            reentrant_tool_controller(*reentrant_tools))
     cfg = ng.RunConfig()
     cfg.thread_id = thread_id
 
@@ -173,7 +192,8 @@ def main():
         print(f"\nHTTP transport  ({url})\n")
         http = ng.mcp.MCPClient(url)
         assert http.initialize("demo"), "handshake failed"
-        concurrent = run_against(http, "overlapped", "mcp-http")
+        concurrent = run_against(http, "explicit re-entrant policy", "mcp-http",
+                                 reentrant_tools=("fetch",))
 
         print("\nstdio transport  (a subprocess, one multiplexed pipe)\n")
         stdio_server = os.path.join(
@@ -187,8 +207,8 @@ def main():
 
         print(f"\n  -> HTTP overlapped: {N * DELAY:.1f}s of work in "
               f"{concurrent:.2f}s ({N * DELAY / concurrent:.1f}x).")
-        print("     stdio request IDs also permit overlap; the server decides")
-        print("     whether requests execute concurrently or serially.\n")
+        print("     this required an explicit host policy for the threaded server;")
+        print("     stdio request IDs permit overlap only when its server does too.\n")
     finally:
         server.shutdown()
         server.server_close()

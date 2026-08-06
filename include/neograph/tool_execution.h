@@ -165,7 +165,7 @@ struct ToolExecutionPolicy {
     std::uint8_t fairness_weight = 1;
 
     /// Throws std::invalid_argument for a malformed or unsafe policy.
-    void validate() const;
+    NEOGRAPH_API void validate() const;
 };
 
 /** One admission request to the fair resource arbiter. */

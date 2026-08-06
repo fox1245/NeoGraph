@@ -1,12 +1,14 @@
-// Warm single-call_core Program overhead benchmark.
+// Warm Program runtime overhead benchmark.
 //
 // Compares the same three-node sequential Core graph when invoked directly and
 // through an admitted Program. Compilation, admission, and warm-up happen before
 // timing; Program timing intentionally includes its runtime envelope, journal,
 // checkpoint, and result construction. The phase rows split `start()` from
-// post-start completion; together they are the same path as `run()`.
+// post-start completion; together they are the same path as `run()`. An optional
+// burst size reports per-run throughput when one caller keeps that many admitted
+// runs in flight against an equivalently sized ProgramRuntime worker pool.
 //
-// Usage: bench_program [iterations] [warmup] [samples]
+// Usage: bench_program [iterations] [warmup] [samples] [burst_concurrency]
 
 #include <neograph/neograph.h>
 #include <neograph/program/program.h>
@@ -22,6 +24,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -54,6 +57,10 @@ public:
 private:
     std::string name_;
 };
+
+// The derived type deliberately takes CheckpointStore's documented legacy
+// bridge. It is a same-process control for the exact-type native async path.
+class LegacyBridgeInMemoryCheckpointStore final : public InMemoryCheckpointStore {};
 
 ExecutableManifest manifest(ExecutableKind kind, std::string name, char implementation) {
     return ExecutableManifest{{kind, std::move(name), "1.0.0", digest(implementation)},
@@ -163,6 +170,44 @@ BenchResult measure(int iterations, int samples, Operation&& operation) {
     std::sort(timings.begin(), timings.end());
     const double median_ms = timings[timings.size() / 2];
     return {median_ms, median_ms * 1000.0 / static_cast<double>(iterations)};
+}
+
+void run_program_burst(int                   runs,
+                       int                   concurrency,
+                       ProgramRuntime&       runtime,
+                       const ProgramVersion& version,
+                       const RunBudget&      budget) {
+    for (int submitted = 0; submitted < runs;) {
+        const int batch_size = std::min(concurrency, runs - submitted);
+        std::vector<ProgramHandle> handles;
+        handles.reserve(static_cast<std::size_t>(batch_size));
+        for (int index = 0; index < batch_size; ++index) {
+            handles.push_back(runtime.start(
+                "bench-program", version,
+                ProgramInvocation{json::object(), budget, "bench-program-burst", {}}));
+        }
+        for (auto& handle : handles) {
+            const auto result = handle.wait();
+            if (result.status() != ProgramTerminalStatus::Completed) {
+                throw std::runtime_error("Program burst benchmark run did not complete");
+            }
+        }
+        submitted += batch_size;
+    }
+}
+
+BenchResult measure_program_burst(int                   runs,
+                                  int                   samples,
+                                  int                   concurrency,
+                                  ProgramRuntime&       runtime,
+                                  const ProgramVersion& version,
+                                  const RunBudget&      budget) {
+    // A sample is one complete burst. `measure(runs, ...)` would execute
+    // runs squared operations and then mislabel the result as per-run time.
+    const auto burst = measure(1, samples, [&] {
+        run_program_burst(runs, concurrency, runtime, version, budget);
+    });
+    return {burst.total_ms, burst.total_ms * 1000.0 / static_cast<double>(runs)};
 }
 
 class PhaseEventSink final : public ProgramEventSink {
@@ -300,9 +345,9 @@ std::size_t parse_positive(std::string_view text, const char* name) {
 
 int main(int argc, char** argv) {
     try {
-        if (argc > 4) {
+        if (argc > 5) {
             throw std::invalid_argument(
-                "usage: bench_program [iterations] [warmup] [samples]");
+                "usage: bench_program [iterations] [warmup] [samples] [burst_concurrency]");
         }
         const int iterations = argc > 1
             ? static_cast<int>(parse_positive(argv[1], "iterations")) : 1000;
@@ -310,6 +355,10 @@ int main(int argc, char** argv) {
             ? static_cast<int>(parse_positive(argv[2], "warmup")) : 10;
         const int samples = argc > 3
             ? static_cast<int>(parse_positive(argv[3], "samples")) : 5;
+        const bool measure_burst = argc > 4;
+        const int burst_concurrency = measure_burst
+            ? static_cast<int>(parse_positive(argv[4], "burst_concurrency"))
+            : 1;
 
         NodeFactory::instance().register_type(
             "bench-program-inc", [](const std::string& name, const json&, const NodeContext&) {
@@ -339,8 +388,10 @@ int main(int argc, char** argv) {
         auto cache = std::make_shared<EngineGenerationCache>();
         auto catalog = std::make_shared<ProgramCatalog>(
             CatalogConfig{store, registry, cache, "bench-program/v1"});
+        const auto bundle_canonical_bytes = bundle.serialize_canonical().size();
         const auto version = catalog->admit(
             bundle, ProgramAdmission{"bench-program", profile, policy, {}});
+        const auto version_canonical_bytes = version.serialize_canonical().size();
         auto checkpoints = std::make_shared<InMemoryCheckpointStore>();
         auto transitions = std::make_shared<InMemoryProgramTransitionStore>();
         ProgramRuntime runtime(
@@ -350,6 +401,22 @@ int main(int argc, char** argv) {
         ProgramRuntime phase_runtime(
             RuntimeConfig{catalog, phase_checkpoints, {}, phase_transitions, 1});
         auto phase_events = std::make_shared<PhaseEventSink>();
+        std::unique_ptr<ProgramRuntime> burst_runtime;
+        std::unique_ptr<ProgramRuntime> legacy_burst_runtime;
+        if (measure_burst) {
+            burst_runtime = std::make_unique<ProgramRuntime>(RuntimeConfig{
+                catalog,
+                std::make_shared<InMemoryCheckpointStore>(),
+                {},
+                std::make_shared<InMemoryProgramTransitionStore>(),
+                static_cast<std::size_t>(burst_concurrency)});
+            legacy_burst_runtime = std::make_unique<ProgramRuntime>(RuntimeConfig{
+                catalog,
+                std::make_shared<LegacyBridgeInMemoryCheckpointStore>(),
+                {},
+                std::make_shared<InMemoryProgramTransitionStore>(),
+                static_cast<std::size_t>(burst_concurrency)});
+        }
         const RunBudget budget{10000, 0, 0, 1, 1, 20, 0, 0, 0};
 
         for (int index = 0; index < warmup; ++index) {
@@ -367,6 +434,14 @@ int main(int argc, char** argv) {
                                   "bench-program-phase-warmup", phase_events});
             if (phase_result.status() != ProgramTerminalStatus::Completed)
                 throw std::runtime_error("Program phase warm-up did not complete");
+            if (legacy_burst_runtime) {
+                run_program_burst(burst_concurrency, burst_concurrency,
+                                  *legacy_burst_runtime, version, budget);
+            }
+            if (burst_runtime) {
+                run_program_burst(
+                    burst_concurrency, burst_concurrency, *burst_runtime, version, budget);
+            }
         }
 
         const auto direct = measure(iterations, samples, [&] {
@@ -398,8 +473,18 @@ int main(int argc, char** argv) {
         const double phase_terminal_to_wait_return_per_iter_us =
             phases.terminal_to_wait_return_ms * 1000.0 /
             static_cast<double>(iterations);
+        std::optional<BenchResult> legacy_burst;
+        std::optional<BenchResult> burst;
+        if (burst_runtime && legacy_burst_runtime) {
+            legacy_burst = measure_program_burst(
+                iterations, samples, burst_concurrency, *legacy_burst_runtime, version, budget);
+            burst = measure_program_burst(
+                iterations, samples, burst_concurrency, *burst_runtime, version, budget);
+        }
 
         std::cout << "config\titerations\t" << iterations << '\n'
+                  << "config\tbundle_canonical_bytes\t" << bundle_canonical_bytes << '\n'
+                  << "config\tversion_canonical_bytes\t" << version_canonical_bytes << '\n'
                   << "config\twarmup\t" << warmup << '\n'
                   << "config\tsamples\t" << samples << '\n'
                   << "runtime\tos\tLinux\n"
@@ -445,6 +530,25 @@ int main(int argc, char** argv) {
                   << phase_total_per_iter_us / wrapped.per_iter_us << '\n'
                   << "metric\toverhead_ratio\t"
                   << wrapped.per_iter_us / direct.per_iter_us << '\n';
+        if (burst && legacy_burst) {
+            const int burst_batches =
+                (iterations + burst_concurrency - 1) / burst_concurrency;
+            std::cout << "config\tburst_scheduler_threads\t" << burst_concurrency << '\n'
+                      << "config\tburst_runs_per_sample\t" << iterations << '\n'
+                      << "config\tburst_batches_per_sample\t" << burst_batches << '\n'
+                      << "header\tburst\truns_per_sample\tbatch_median_ms\t"
+                         "throughput_equivalent_us_per_run\tthroughput_runs_per_s\n"
+                      << "result\tprogram_burst_legacy_bridge\t" << iterations << '\t'
+                      << legacy_burst->total_ms << '\t' << legacy_burst->per_iter_us << '\t'
+                      << 1'000'000.0 / legacy_burst->per_iter_us << '\n'
+                      << "result\tprogram_burst_exact_inmemory\t" << iterations << '\t'
+                      << burst->total_ms << '\t' << burst->per_iter_us << '\t'
+                      << 1'000'000.0 / burst->per_iter_us << '\n'
+                      << "metric\tprogram_burst_workers_vs_single_worker_speedup\t"
+                      << wrapped.per_iter_us / burst->per_iter_us << '\n'
+                      << "metric\tprogram_burst_exact_inmemory_vs_bridge_speedup\t"
+                      << legacy_burst->per_iter_us / burst->per_iter_us << '\n';
+        }
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {
         std::cerr << "error: " << error.what() << '\n';

@@ -405,10 +405,6 @@ json stored_body(const ProgramRunRecordData& d) {
                                                     : json(nullptr);
     return value;
 }
-std::string hash(const ProgramRunRecordData& d) {
-    return detail::sha256_identity("program-run-record/v1",
-                                   detail::canonical_json_bytes(stored_body(d)));
-}
 }  // namespace
 std::string_view to_string(ProgramChildState state) noexcept {
     return child_state_string(state);
@@ -418,9 +414,17 @@ ProgramChildState program_child_state_from_string(std::string_view value) {
     return child_state_from_string(value);
 }
 struct ProgramRunRecord::Impl {
-    explicit Impl(ProgramRunRecordData d) : data(std::move(d)), id(hash(data)) {}
+    explicit Impl(ProgramRunRecordData value) : data(std::move(value)) {
+        auto body             = stored_body(data);
+        const auto body_bytes = detail::canonical_json_bytes(body);
+        id = detail::sha256_identity("program-run-record/v1", body_bytes);
+        body["id"] = id;
+        canonical_bytes = detail::canonical_json_bytes(body);
+    }
+
     ProgramRunRecordData data;
     std::string          id;
+    std::string          canonical_bytes;
 };
 ProgramRunRecord::ProgramRunRecord(std::shared_ptr<const Impl> p) : impl_(std::move(p)) {}
 ProgramRunRecord ProgramRunRecord::create(ProgramRunRecordData d) {
@@ -607,15 +611,5 @@ std::optional<std::string> ProgramRunRecord::fork_source_checkpoint_id() const {
 std::optional<std::string> ProgramRunRecord::recorded_binding_set_fingerprint() const {
     return impl_->data.recorded_binding_set_fingerprint;
 }
-std::string ProgramRunRecord::serialize_canonical() const {
-    validate(impl_->data);
-    validate_continuation_state(impl_->data);
-    validate_result_state(impl_->data);
-    auto value = stored_body(impl_->data);
-    const auto bytes = detail::canonical_json_bytes(value);
-    if (impl_->id != detail::sha256_identity("program-run-record/v1", bytes))
-        throw std::invalid_argument("Program run record id does not match canonical body");
-    value["id"] = impl_->id;
-    return detail::canonical_json_bytes(value);
-}
+std::string ProgramRunRecord::serialize_canonical() const { return impl_->canonical_bytes; }
 }  // namespace neograph::program

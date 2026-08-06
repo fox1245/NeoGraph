@@ -419,10 +419,10 @@ wrap_python_tools(py::handle tools_list) {
         // A tool that is ALREADY a C++ Tool — an MCPTool from
         // MCPClient.get_tools(), say (issue #95) — must pass through as what it
         // is. Wrapping it in a PyToolOwner would compile, run, and pass a
-        // functional test, while quietly serializing it: a PyToolOwner only
-        // runs concurrently when it holds a Python ng.AsyncTool, and a C++ tool
-        // is not one. MCP calls are network round-trips, so that would deliver
-        // the feature without the reason anyone wants it (#96).
+        // functional test, while losing its native async execution path: a
+        // PyToolOwner only forwards real async work when it holds a Python
+        // ng.AsyncTool. A host may then explicitly widen the preserved C++
+        // tool's named policy after verifying the remote server is re-entrant.
         if (py::isinstance<neograph::Tool>(t)) {
             auto shared = t.cast<std::shared_ptr<neograph::Tool>>();
             out.push_back(std::make_unique<SharedToolRef>(std::move(shared)));
