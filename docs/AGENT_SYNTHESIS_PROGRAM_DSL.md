@@ -2,6 +2,8 @@
 
 _Proposal — 2026-08-06. This specifies an implementation direction; it does not change the current Core DSL, Harness wire contract, or runtime behavior._
 
+_Implementation tracking: [#19](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/19)._
+
 ---
 
 ## 💡 Decision
