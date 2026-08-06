@@ -29,6 +29,7 @@
 #include <neograph/program/result.h>
 #include <neograph/program/runtime.h>
 #include <neograph/program/source.h>
+#include <neograph/program/task_graph_proposal.h>
 #include <neograph/program/store.h>
 #include <neograph/program/transition_store.h>
 #include <neograph/program/sqlite_transition_store.h>

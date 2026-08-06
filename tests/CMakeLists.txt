@@ -99,6 +99,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         test_program_transition_store.cpp
         test_program_runtime.cpp
         test_program_invocation.cpp
+        test_program_task_graph_proposal.cpp
     )
     target_include_directories(neograph_program_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/src/program

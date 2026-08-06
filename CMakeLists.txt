@@ -481,6 +481,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/contract.cpp
         src/program/diagnostic.cpp
         src/program/source.cpp
+        src/program/task_graph_proposal.cpp
         src/program/bundle.cpp
         src/program/module.cpp
         src/program/version.cpp
