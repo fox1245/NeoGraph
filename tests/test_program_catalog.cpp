@@ -247,13 +247,14 @@ json bound_document(std::uint64_t max_concurrency = 1) {
 AdmissionProfile profile(const RegistrySnapshot& snapshot,
                          bool                    allow_source = true,
                          bool                    allow_node   = true,
-                         bool                    allow_mode   = true) {
+                         bool                    allow_mode   = true,
+                         std::uint32_t           max_schema_version = 1) {
     AdmissionProfileBuilder builder;
     builder.id("catalog-profile")
         .semantic_version("1.0.0")
         .registry(snapshot)
         .mode(AdmissionMode::MultiTenant)
-        .max_program_schema_version(1);
+        .max_program_schema_version(max_schema_version);
     if (allow_source) builder.allow_source_kind(SourceKind::CppBuilder);
     if (allow_mode) builder.allow_effect_mode(EffectMode::Brokered);
     for (const auto& identity : snapshot.identities()) {
@@ -359,6 +360,38 @@ TEST(ProgramCatalogTest, AdmitsRecomputedBundleAndPublishesAtomicallyWithoutRunn
     ASSERT_TRUE(fixture.catalog.find_version(version.id()).has_value());
     EXPECT_EQ(version.bundle_id(), bundle.id());
     EXPECT_EQ(version.core_materialization_receipt().plans, bundle.core_plan_identities());
+}
+
+TEST(ProgramCatalogTest, V3BundleThroughV2AdmissionReportsSchemaBoundary) {
+    factory_calls.store(0);
+    auto snapshot = registry();
+    auto v3_document = document();
+    v3_document["program_schema_version"] = PROGRAM_SCHEMA_VERSION_V3;
+    ProgramCompiler compiler(snapshot, {"catalog-test/v3"});
+    const auto bundle = compiler.compile(ProgramSource::from_cpp_builder(
+        "test:catalog-v3", PROGRAM_SCHEMA_VERSION_V3, std::move(v3_document)));
+
+    const auto admission = profile(snapshot, true, true, true, PROGRAM_SCHEMA_VERSION_V2);
+    const auto authorization = policy(admission);
+    ProgramCatalog catalog(CatalogConfig{
+        std::make_shared<InMemoryProgramStore>(), snapshot,
+        std::make_shared<EngineGenerationCache>(), "catalog-test/v3"});
+
+    try {
+        (void)catalog.admit(
+            bundle, ProgramAdmission{"tenant:catalog", admission, authorization, {}});
+        FAIL() << "v3 bundle crossed a v2-only admission profile";
+    } catch (const ProgramAdmissionError& error) {
+        EXPECT_TRUE(has_code(error, "P_ADMIT_BINDING"));
+        EXPECT_NE(std::find_if(error.diagnostics().begin(), error.diagnostics().end(),
+                               [](const auto& diagnostic) {
+                                   return diagnostic.code == "P_ADMIT_BINDING" &&
+                                          diagnostic.primary.json_pointer ==
+                                              "/program_schema_version";
+                               }),
+                  error.diagnostics().end());
+    }
+    EXPECT_EQ(factory_calls.load(), 0U);
 }
 
 TEST(ProgramCatalogTest, OwnerQualifiedStoreAndCatalogLookupsHideForeignPublicIds) {

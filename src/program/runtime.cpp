@@ -16,6 +16,8 @@
 #include <algorithm>
 #include <chrono>
 #include <exception>
+#include <functional>
+
 #include <limits>
 #include <mutex>
 #include <random>
@@ -205,6 +207,7 @@ void complete_attempt_launch_failure(const std::shared_ptr<detail::RunControl>& 
     detail::RunOutcome outcome;
     outcome.status                   = ProgramTerminalStatus::Failed;
     outcome.remaining_budget         = control->granted_budget;
+
     outcome.usage.program_operations = control->attempt == 1 ? 1 : 0;
     if (control->attempt == 1) outcome.remaining_budget.max_program_operations = 0;
     outcome.failure =
@@ -855,41 +858,53 @@ ChildRecordPublication publish_child_record(const std::shared_ptr<detail::RunCon
                                 std::move(child));
 }
 
-void publish_child_completion(const std::shared_ptr<ProgramTransitionStore>& transitions,
+bool publish_child_completion(const std::shared_ptr<ProgramTransitionStore>& transitions,
                               std::string_view                              owner_scope,
                               std::string_view                              parent_run_id,
                               std::string_view                              child_run_id,
                               const ProgramResult&                           result) noexcept {
     try {
         const auto record = transitions->load(owner_scope, parent_run_id);
-        if (!record) return;
+        if (!record) return false;
         const auto existing = find_child(*record, child_run_id);
-        if (!existing) return;
+        if (!existing) return false;
         const auto state = child_state_for_result(result.status());
         if (existing->state == state && existing->terminal_result &&
             existing->terminal_result->serialize_canonical() == result.serialize_canonical())
-            return;
-        auto update = *existing;
-        update.state = state;
-        update.terminal_result = result;
-        (void)publish_child_record(owner_scope, parent_run_id, transitions, std::move(update));
+            return true;
+        const auto publication = publish_child_record(owner_scope, parent_run_id, transitions,
+                                                      ProgramChildRecord{
+                                                          existing->child_run_id,
+                                                          existing->link_id,
+                                                          existing->link_receipt,
+                                                          existing->invocation,
+                                                          state,
+                                                          result});
+        return publication.result == ProgramTransitionPublishResult::Published ||
+               publication.result == ProgramTransitionPublishResult::AlreadyPresent;
     } catch (...) {
+        return false;
     }
 }
 
 void bind_child_completion(const std::shared_ptr<detail::RunControl>& child,
                            std::string_view                              owner_scope,
                            std::string_view                              parent_run_id,
-                           std::string_view                              child_run_id) {
+                           std::string_view                              child_run_id,
+                           std::function<void()>                         after_publication = {}) {
     const auto transitions = child->transitions;
     const std::string owner(owner_scope);
     const std::string parent(parent_run_id);
     const std::string child_id(child_run_id);
     child->set_completion_callback(
-        [transitions, owner, parent, child_id](const ProgramResult& result) {
-            publish_child_completion(transitions, owner, parent, child_id, result);
+        [transitions, owner, parent, child_id,
+         after_publication = std::move(after_publication)](const ProgramResult& result) {
+            const bool published =
+                publish_child_completion(transitions, owner, parent, child_id, result);
+            if (published && after_publication) after_publication();
         });
 }
+
 
 bool is_unstarted_child_dispatch(const std::shared_ptr<ProgramTransitionStore>& transitions,
                                  std::string_view                              owner_scope,
@@ -1743,6 +1758,12 @@ struct ProgramRuntime::Impl {
                                  std::string_view operation_id, std::string_view execution_key) {
                 const auto parent = weak_control.lock();
                 if (!parent) throw std::runtime_error("Parent Program control expired");
+                if (parent->cancellation_cause() != detail::CancellationCause::None)
+                    throw_runtime_diagnostic(
+                        "P_RUNTIME_CANCELLED", "Parent Program is already cancelling",
+                        json{{"parent_run_id", parent->run_id},
+                             {"operation_id", std::string(operation_id)}});
+
                 const auto resolved = config.child_binding_resolver(
                     parent->owner_scope, parent->program_version_id, binding_name);
                 if (!resolved)
@@ -1886,93 +1907,249 @@ struct ProgramRuntime::Impl {
         return {};
     }
 
+    struct ChildReservationState {
+        RunBudget                                      used;
+        std::unordered_map<std::string, RunBudget>     permanent_by_child;
+        std::unordered_map<std::string, std::uint32_t> active_concurrency;
+    };
+    struct ParentChildBudget {
+        RunBudget parent;
+        RunBudget child;
+    };
 
-    bool reserve_child(std::string_view parent_run_id,
-                       const RunBudget& parent_budget,
-                       const RunBudget& child_budget) {
-        const auto additional = child_reservation(child_budget);
-        std::lock_guard lock(mutex);
-        auto&           used = child_reservations[std::string(parent_run_id)];
-        if (!budget_sum_fits(parent_budget, used, additional)) return false;
-        used.wall_time_ms += additional.wall_time_ms;
-        used.model_tokens += additional.model_tokens;
-        used.monetary_microunits += additional.monetary_microunits;
-        used.max_concurrency += additional.max_concurrency;
-        used.max_program_operations += additional.max_program_operations;
-        used.max_core_steps += additional.max_core_steps;
-        used.max_dynamic_compiles += additional.max_dynamic_compiles;
-        used.max_total_children += additional.max_total_children;
+    static bool child_execution_active(const ProgramChildRecord& child) noexcept {
+        return child.state == ProgramChildState::Publishing ||
+               (child.state == ProgramChildState::Dispatched && !child.terminal_result);
+    }
+
+    static RunBudget permanent_child_reservation(const RunBudget& budget) {
+        auto reservation = child_reservation(budget);
+        reservation.max_concurrency = 0;
+        return reservation;
+    }
+
+    static void add_budget(RunBudget& target, const RunBudget& value) noexcept {
+        target.wall_time_ms += value.wall_time_ms;
+        target.model_tokens += value.model_tokens;
+        target.monetary_microunits += value.monetary_microunits;
+        target.max_concurrency += value.max_concurrency;
+        target.max_program_operations += value.max_program_operations;
+        target.max_core_steps += value.max_core_steps;
+        target.max_dynamic_compiles += value.max_dynamic_compiles;
+        target.max_total_children += value.max_total_children;
+    }
+
+    static void subtract_budget(RunBudget& target, const RunBudget& value) noexcept {
+        const auto subtract = [](auto& current, const auto amount) {
+            current = current >= amount ? current - amount : 0;
+        };
+        subtract(target.wall_time_ms, value.wall_time_ms);
+        subtract(target.model_tokens, value.model_tokens);
+        subtract(target.monetary_microunits, value.monetary_microunits);
+        subtract(target.max_concurrency, value.max_concurrency);
+        subtract(target.max_program_operations, value.max_program_operations);
+        subtract(target.max_core_steps, value.max_core_steps);
+        subtract(target.max_dynamic_compiles, value.max_dynamic_compiles);
+        subtract(target.max_total_children, value.max_total_children);
+    }
+
+    static bool activate_concurrency_locked(ChildReservationState& state,
+                                            std::string_view       child_run_id,
+                                            const RunBudget&       parent_budget,
+                                            std::uint32_t          amount) noexcept {
+        if (amount == 0) return true;
+        const auto existing = state.active_concurrency.find(std::string(child_run_id));
+        if (existing != state.active_concurrency.end()) return existing->second == amount;
+        if (state.used.max_concurrency > parent_budget.max_concurrency ||
+            amount > parent_budget.max_concurrency - state.used.max_concurrency)
+            return false;
+        state.used.max_concurrency += amount;
+        state.active_concurrency.emplace(std::string(child_run_id), amount);
         return true;
     }
 
-    void release_child(const std::string& parent_run_id, const RunBudget& child_budget) noexcept {
-        const auto released = child_reservation(child_budget);
+    static void release_concurrency_locked(ChildReservationState& state,
+                                           std::string_view       child_run_id,
+                                           std::uint32_t          amount) noexcept {
+        const auto found = state.active_concurrency.find(std::string(child_run_id));
+        if (found == state.active_concurrency.end()) return;
+        const auto released = std::min(found->second, amount);
+        found->second -= released;
+        if (found->second == 0) state.active_concurrency.erase(found);
+        state.used.max_concurrency =
+            state.used.max_concurrency >= released ? state.used.max_concurrency - released : 0;
+    }
+
+    void bind_budgeted_child_completion(const std::shared_ptr<detail::RunControl>& child,
+                                        std::string_view                         owner_scope,
+                                        std::string_view                         parent_run_id,
+                                        std::string_view                         child_run_id) {
+        const auto parent = std::string(parent_run_id);
+        const auto child_id = std::string(child_run_id);
+        const auto concurrency = child->granted_budget.max_concurrency;
+        // Resource release is independent of the parent join CAS.  A transient
+        // publication failure must not strand the parent's active-concurrency
+        // lease while the durable child record remains recoverable.
+        child->add_terminal_cleanup(
+            [this, parent, child_id, concurrency] {
+                release_child_concurrency(parent, child_id, concurrency);
+            });
+        ::neograph::program::bind_child_completion(child, owner_scope, parent, child_id);
+    }
+
+    bool activate_child_concurrency(std::string_view parent_run_id,
+                                    std::string_view child_run_id,
+                                    const RunBudget& parent_budget,
+                                    const RunBudget& child_budget) {
         std::lock_guard lock(mutex);
-        const auto found = child_reservations.find(parent_run_id);
+        const auto found = child_reservations.find(std::string(parent_run_id));
+        if (found == child_reservations.end()) return false;
+        return activate_concurrency_locked(found->second, child_run_id, parent_budget,
+                                           child_budget.max_concurrency);
+    }
+
+    void release_child_concurrency(std::string_view parent_run_id,
+                                   std::string_view child_run_id,
+                                   std::uint32_t    amount) noexcept {
+        std::lock_guard lock(mutex);
+        const auto found = child_reservations.find(std::string(parent_run_id));
         if (found == child_reservations.end()) return;
-        auto& used = found->second;
-        const auto subtract = [](auto& value, auto amount) {
-            value = value >= amount ? value - amount : 0;
-        };
-        subtract(used.wall_time_ms, released.wall_time_ms);
-        subtract(used.model_tokens, released.model_tokens);
-        subtract(used.monetary_microunits, released.monetary_microunits);
-        subtract(used.max_concurrency, released.max_concurrency);
-        subtract(used.max_program_operations, released.max_program_operations);
-        subtract(used.max_core_steps, released.max_core_steps);
-        subtract(used.max_dynamic_compiles, released.max_dynamic_compiles);
-        subtract(used.max_total_children, released.max_total_children);
-        if (used == RunBudget{}) child_reservations.erase(found);
+        release_concurrency_locked(found->second, child_run_id, amount);
+        if (found->second.used == RunBudget{} && found->second.permanent_by_child.empty() &&
+            found->second.active_concurrency.empty())
+            child_reservations.erase(found);
+    }
+    struct ChildConcurrencyLease {
+        Impl*          owner = nullptr;
+        std::string    parent_run_id;
+        std::string    child_run_id;
+        std::uint32_t  amount = 0;
+
+        ~ChildConcurrencyLease() {
+            if (owner) owner->release_child_concurrency(parent_run_id, child_run_id, amount);
+        }
+
+        void commit() noexcept { owner = nullptr; }
+    };
+
+    bool reserve_child(std::string_view parent_run_id,
+                       std::string_view child_run_id,
+                       const RunBudget& parent_budget,
+                       const RunBudget& child_budget) {
+        const auto permanent = permanent_child_reservation(child_budget);
+        const auto full = child_reservation(child_budget);
+        std::lock_guard lock(mutex);
+        auto& state = child_reservations[std::string(parent_run_id)];
+        const auto child_id = std::string(child_run_id);
+        if (state.permanent_by_child.find(child_id) != state.permanent_by_child.end() ||
+            !budget_sum_fits(parent_budget, state.used, full))
+            return false;
+        add_budget(state.used, permanent);
+        state.permanent_by_child.emplace(child_id, permanent);
+        if (activate_concurrency_locked(state, child_id, parent_budget,
+                                        child_budget.max_concurrency))
+            return true;
+        state.permanent_by_child.erase(child_id);
+        subtract_budget(state.used, permanent);
+        return false;
+    }
+
+    void release_child(std::string_view parent_run_id,
+                       std::string_view child_run_id,
+                       const RunBudget& child_budget) noexcept {
+        (void)child_budget;
+        std::lock_guard lock(mutex);
+        const auto found = child_reservations.find(std::string(parent_run_id));
+        if (found == child_reservations.end()) return;
+        const auto child = found->second.permanent_by_child.find(std::string(child_run_id));
+        if (child == found->second.permanent_by_child.end()) return;
+        subtract_budget(found->second.used, child->second);
+        found->second.permanent_by_child.erase(child);
+        release_concurrency_locked(found->second, child_run_id,
+                                   std::numeric_limits<std::uint32_t>::max());
+        if (found->second.used == RunBudget{} && found->second.permanent_by_child.empty() &&
+            found->second.active_concurrency.empty())
+            child_reservations.erase(found);
     }
 
     RunBudget reserved_children(std::string_view parent_run_id) {
         std::lock_guard lock(mutex);
-        const auto      found = child_reservations.find(std::string(parent_run_id));
-        return found == child_reservations.end() ? RunBudget{} : found->second;
+        const auto found = child_reservations.find(std::string(parent_run_id));
+        return found == child_reservations.end() ? RunBudget{} : found->second.used;
     }
+
     void hydrate_child_reservations(const ProgramRunRecord& parent) {
-        RunBudget persisted{};
-        const auto add = [](RunBudget& target, const RunBudget& value) {
-            target.wall_time_ms += value.wall_time_ms;
-            target.model_tokens += value.model_tokens;
-            target.monetary_microunits += value.monetary_microunits;
-            target.max_concurrency += value.max_concurrency;
-            target.max_program_operations += value.max_program_operations;
-            target.max_core_steps += value.max_core_steps;
-            target.max_dynamic_compiles += value.max_dynamic_compiles;
-            target.max_total_children += value.max_total_children;
-        };
-        for (const auto& child : parent.children()) {
-            const auto reservation = child_reservation(child.invocation.granted_budget);
-            if (!budget_sum_fits(parent.remaining_budget(), persisted, reservation)) {
+        const auto children = parent.children();
+        std::set<std::string> child_ids;
+        for (const auto& child : children) {
+            if (!child_ids.insert(child.child_run_id).second) {
                 throw_runtime_diagnostic(
-                    "P_CHILD_BUDGET",
-                    "Persisted child reservations exceed the parent remainder",
-                    json{{"parent_run_id", parent.run_id()}});
+                    "P_CHILD_CONFLICT", "Persisted parent contains duplicate child records",
+                    json{{"parent_run_id", parent.run_id()},
+                         {"child_run_id", child.child_run_id}});
             }
-            add(persisted, reservation);
         }
+
         std::lock_guard lock(mutex);
-        const auto [found, inserted] =
-            child_reservations.emplace(parent.run_id(), persisted);
-        if (!inserted) {
-            found->second.wall_time_ms =
-                std::max(found->second.wall_time_ms, persisted.wall_time_ms);
-            found->second.model_tokens =
-                std::max(found->second.model_tokens, persisted.model_tokens);
-            found->second.monetary_microunits =
-                std::max(found->second.monetary_microunits, persisted.monetary_microunits);
-            found->second.max_concurrency =
-                std::max(found->second.max_concurrency, persisted.max_concurrency);
-            found->second.max_program_operations =
-                std::max(found->second.max_program_operations, persisted.max_program_operations);
-            found->second.max_core_steps =
-                std::max(found->second.max_core_steps, persisted.max_core_steps);
-            found->second.max_dynamic_compiles =
-                std::max(found->second.max_dynamic_compiles, persisted.max_dynamic_compiles);
-            found->second.max_total_children =
-                std::max(found->second.max_total_children, persisted.max_total_children);
+        auto& state = child_reservations[parent.run_id()];
+        for (const auto& child : children) {
+            const auto permanent = permanent_child_reservation(child.invocation.granted_budget);
+            const bool in_flight = child_execution_active(child);
+            const auto existing = state.permanent_by_child.find(child.child_run_id);
+            if (existing == state.permanent_by_child.end()) {
+                auto additional = permanent;
+                if (in_flight) additional.max_concurrency = child.invocation.granted_budget.max_concurrency;
+                if (!budget_sum_fits(parent.remaining_budget(), state.used, additional)) {
+                    throw_runtime_diagnostic(
+                        "P_CHILD_BUDGET",
+                        "Persisted child reservations exceed the parent remainder",
+                        json{{"parent_run_id", parent.run_id()},
+                             {"child_run_id", child.child_run_id}});
+                }
+                add_budget(state.used, permanent);
+                state.permanent_by_child.emplace(child.child_run_id, permanent);
+            } else if (existing->second != permanent) {
+                throw_runtime_diagnostic(
+                    "P_CHILD_BUDGET", "Persisted child reservation changed after admission",
+                    json{{"parent_run_id", parent.run_id()},
+                         {"child_run_id", child.child_run_id}});
+            }
+
+            const auto active = state.active_concurrency.find(child.child_run_id);
+            if (in_flight) {
+                if (!activate_concurrency_locked(state, child.child_run_id,
+                                                 parent.remaining_budget(),
+                                                 child.invocation.granted_budget.max_concurrency)) {
+                    throw_runtime_diagnostic(
+                        "P_CHILD_BUDGET",
+                        "Persisted child concurrency exceeds the parent remainder",
+                        json{{"parent_run_id", parent.run_id()},
+                             {"child_run_id", child.child_run_id}});
+                }
+            } else if (active != state.active_concurrency.end()) {
+                release_concurrency_locked(state, child.child_run_id, active->second);
+            }
         }
+    }
+    ParentChildBudget hydrate_parent_child_budget(std::string_view owner_scope,
+                                                   std::string_view parent_run_id,
+                                                   std::string_view child_run_id) {
+        const auto parent = config.transitions->load(owner_scope, parent_run_id);
+        if (!parent) {
+            throw_runtime_diagnostic(
+                "P_CHILD_PARENT", "Child recovery requires its durable parent run",
+                json{{"parent_run_id", std::string(parent_run_id)},
+                     {"child_run_id", std::string(child_run_id)}});
+        }
+        const auto child = find_child(*parent, child_run_id);
+        if (!child || child->invocation.parent_run_id != parent_run_id) {
+            throw_runtime_diagnostic(
+                "P_CHILD_CONFLICT", "Durable child relation does not match its parent",
+                json{{"parent_run_id", std::string(parent_run_id)},
+                     {"child_run_id", std::string(child_run_id)}});
+        }
+        hydrate_child_reservations(*parent);
+        return ParentChildBudget{parent->remaining_budget(), child->invocation.granted_budget};
     }
     void shutdown() noexcept {
         try {
@@ -2001,7 +2178,7 @@ struct ProgramRuntime::Impl {
     asio::thread_pool                              deadline_pool{1};
     std::mutex                                     mutex;
     bool                                           stopping = false;
-    std::unordered_map<std::string, RunBudget>     child_reservations;
+    std::unordered_map<std::string, ChildReservationState> child_reservations;
     std::vector<std::weak_ptr<detail::RunControl>> controls;
 };
 
@@ -2135,9 +2312,13 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     if (parent.control_->owner_scope != owner_scope || link.owner_scope() != owner_scope)
         throw_runtime_diagnostic("P_CHILD_OWNER", "Child owner scope is not admitted");
 
-    const auto parent_record = parent.snapshot();
+    auto parent_record = parent.snapshot();
     if (parent_record.continuation().state != ContinuationState::Running)
         throw_runtime_diagnostic("P_CHILD_PARENT", "Child can only attach to a running parent");
+    if (parent.control_->cancellation_cause() != detail::CancellationCause::None)
+        throw_runtime_diagnostic(
+            "P_RUNTIME_CANCELLED", "Parent Program is already cancelling",
+            json{{"parent_run_id", std::string(parent.run_id())}});
     if (version.ownership_scope() != owner_scope)
         throw_runtime_diagnostic("P_VERSION_NOT_FOUND", "Program version was not found");
     const auto resolved = impl_->config.catalog->resolve_version(owner_scope, version.id());
@@ -2153,7 +2334,8 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     const auto run_id        = child_run_id_for(parent_run_id, link, invocation);
     invocation.requested_run_id = run_id;
     const auto canonical = bind_runtime_invocation(invocation, owner_scope, version.id(), run_id);
-    if (const auto occupied = impl_->config.transitions->load(owner_scope, run_id)) {
+    const auto occupied = impl_->config.transitions->load(owner_scope, run_id);
+    if (occupied) {
         if (occupied->program_version_id() != version.id() ||
             occupied->bundle_id() != version.bundle_id() ||
             occupied->invocation() != canonical ||
@@ -2164,8 +2346,25 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                 json{{"child_run_id", run_id}});
         }
     }
+    auto existing = find_child(parent_record, run_id);
+    if (occupied && !existing) {
+        const auto durable_parent =
+            impl_->config.transitions->load(owner_scope, parent_run_id);
+        if (!durable_parent ||
+            durable_parent->continuation().state != ContinuationState::Running)
+            throw_runtime_diagnostic(
+                "P_CHILD_PARENT",
+                "Durable parent is no longer running for child recovery",
+                json{{"parent_run_id", parent_run_id}, {"child_run_id", run_id}});
+        existing = find_child(*durable_parent, run_id);
+        if (!existing)
+            throw_runtime_diagnostic(
+                "P_CHILD_CONFLICT",
+                "Existing child run has no durable parent admission",
+                json{{"parent_run_id", parent_run_id}, {"child_run_id", run_id}});
+        parent_record = *durable_parent;
+    }
     impl_->hydrate_child_reservations(parent_record);
-    const auto existing = find_child(parent_record, run_id);
     if (existing) {
         const auto expected = child_record_for(run_id, link, invocation, existing->state);
         if (!same_child_metadata(*existing, expected)) {
@@ -2205,7 +2404,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
 
     bool reservation_active = false;
     if (!existing) {
-        if (!impl_->reserve_child(parent_run_id, parent_record.remaining_budget(),
+        if (!impl_->reserve_child(parent_run_id, run_id, parent_record.remaining_budget(),
                                   invocation.budget)) {
             throw_runtime_diagnostic("P_CHILD_BUDGET",
                                      "Child budget exceeds the parent's unspent allocation");
@@ -2216,13 +2415,13 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                 run_id, link, invocation, ProgramChildState::Publishing);
             const auto attached = publish_child_record(parent.control_, publishing);
             if (!attached.record) {
-                impl_->release_child(parent_run_id, invocation.budget);
+                impl_->release_child(parent_run_id, run_id, invocation.budget);
                 reservation_active = false;
                 throw_runtime_diagnostic("P_CHILD_CONFLICT",
                                          "Parent-child attachment lost its transition CAS");
             }
             if (attached.result == ProgramTransitionPublishResult::AlreadyPresent) {
-                impl_->release_child(parent_run_id, invocation.budget);
+                impl_->release_child(parent_run_id, run_id, invocation.budget);
                 reservation_active = false;
                 if (global_quota) {
                     global_quota->release();
@@ -2234,7 +2433,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                 reservation_active = false;
             }
         } catch (...) {
-            if (reservation_active) impl_->release_child(parent_run_id, invocation.budget);
+            if (reservation_active) impl_->release_child(parent_run_id, run_id, invocation.budget);
             throw;
         }
     }
@@ -2254,7 +2453,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                 global_quota->release();
                 global_quota.reset();
             }
-            bind_child_completion(live, owner_scope, parent_run_id, run_id);
+            impl_->bind_budgeted_child_completion(live, owner_scope, parent_run_id, run_id);
             parent.control_->attach_child(live);
             return ProgramHandle(std::move(live));
         }
@@ -2265,7 +2464,8 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                 global_quota.reset();
             }
             auto reconnected = reconnect(owner_scope, run_id);
-            bind_child_completion(reconnected.control_, owner_scope, parent_run_id, run_id);
+            impl_->bind_budgeted_child_completion(reconnected.control_, owner_scope, parent_run_id,
+                                                  run_id);
             parent.control_->attach_child(reconnected.control_);
             if (const auto result = reconnected.try_result())
                 publish_child_completion(impl_->config.transitions, owner_scope, parent_run_id,
@@ -2278,7 +2478,8 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                 global_quota.reset();
             }
             auto reconnected = reconnect(owner_scope, run_id);
-            bind_child_completion(reconnected.control_, owner_scope, parent_run_id, run_id);
+            impl_->bind_budgeted_child_completion(reconnected.control_, owner_scope, parent_run_id,
+                                                  run_id);
             parent.control_->attach_child(reconnected.control_);
             if (const auto result = reconnected.try_result())
                 publish_child_completion(impl_->config.transitions, owner_scope, parent_run_id,
@@ -2304,7 +2505,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
             impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
             impl_->config.state_store, impl_->config.transitions);
         impl_->commit_active_child(control, global_quota);
-        bind_child_completion(control, owner_scope, parent_run_id, run_id);
+        impl_->bind_budgeted_child_completion(control, owner_scope, parent_run_id, run_id);
         ProgramEvent started;
         if (replay_initial_dispatch) {
             const auto events = impl_->config.transitions->load_events(owner_scope, run_id);
@@ -2329,7 +2530,8 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                                              "Requested child Program run id is unavailable");
                 }
                 auto reconnected = reconnect(owner_scope, run_id);
-                bind_child_completion(reconnected.control_, owner_scope, parent_run_id, run_id);
+                impl_->bind_budgeted_child_completion(reconnected.control_, owner_scope,
+                                                      parent_run_id, run_id);
                 parent.control_->attach_child(reconnected.control_);
                 if (const auto result = reconnected.try_result())
                     publish_child_completion(impl_->config.transitions, owner_scope, parent_run_id,
@@ -2349,7 +2551,8 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
         if (!dispatched_record || dispatched_record->state != ProgramChildState::Dispatched) {
             if (dispatched_record && dispatched_record->state != ProgramChildState::Publishing) {
                 auto reconnected = reconnect(owner_scope, run_id);
-                bind_child_completion(reconnected.control_, owner_scope, parent_run_id, run_id);
+                impl_->bind_budgeted_child_completion(reconnected.control_, owner_scope,
+                                                      parent_run_id, run_id);
                 parent.control_->attach_child(reconnected.control_);
                 if (const auto result = reconnected.try_result())
                     publish_child_completion(impl_->config.transitions, owner_scope, parent_run_id,
@@ -2890,9 +3093,21 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             recovered_thread_id =
                 core_thread_identity(run_id, pinned->root->compiled_plan_identity);
         }
+        impl_->hydrate_child_reservations(*record);
         std::shared_ptr<ChildQuotaReservation> global_quota;
-        if (!record->invocation().parent_run_id.empty())
+        if (!record->invocation().parent_run_id.empty()) {
+            const auto parent_child = impl_->hydrate_parent_child_budget(
+                owner_scope, record->invocation().parent_run_id, run_id);
             global_quota = impl_->reserve_active_child(owner_scope);
+            if (!impl_->activate_child_concurrency(record->invocation().parent_run_id, run_id,
+                                                    parent_child.parent, parent_child.child)) {
+                throw_runtime_diagnostic(
+                    "P_CHILD_CONCURRENCY",
+                    "Recovered child exceeds the parent's active concurrency budget",
+                    json{{"parent_run_id", record->invocation().parent_run_id},
+                         {"child_run_id", std::string(run_id)}});
+            }
+        }
 
 
         ProgramPersistedInvocation invocation{
@@ -2910,8 +3125,8 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             impl_->config.state_store, impl_->config.transitions);
         impl_->commit_active_child(control, global_quota);
         if (!record->invocation().parent_run_id.empty())
-            bind_child_completion(control, owner_scope, record->invocation().parent_run_id,
-                                  run_id);
+            impl_->bind_budgeted_child_completion(
+                control, owner_scope, record->invocation().parent_run_id, run_id);
         if (!record->invocation().parent_run_id.empty()) {
             if (auto parent = impl_->find_control(owner_scope,
                                                   record->invocation().parent_run_id))
@@ -2930,7 +3145,8 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
     }
     auto control = std::make_shared<detail::RunControl>(*record, impl_->config.transitions);
     if (!record->invocation().parent_run_id.empty())
-        bind_child_completion(control, owner_scope, record->invocation().parent_run_id, run_id);
+        impl_->bind_budgeted_child_completion(
+            control, owner_scope, record->invocation().parent_run_id, run_id);
     return ProgramHandle(std::move(control));
 }
 
@@ -3105,8 +3321,24 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         throw_runtime_diagnostic("P_RESUME_CONFLICT", "Program resume lost the transition CAS");
     }
     std::shared_ptr<ChildQuotaReservation> global_quota;
-    if (!previous->invocation().parent_run_id.empty())
+    Impl::ChildConcurrencyLease             child_concurrency;
+    if (!previous->invocation().parent_run_id.empty()) {
+        const auto parent_run_id = previous->invocation().parent_run_id;
+        const auto parent_child =
+            impl_->hydrate_parent_child_budget(owner_scope, parent_run_id, run_id);
         global_quota = impl_->reserve_active_child(owner_scope);
+        if (!impl_->activate_child_concurrency(parent_run_id, run_id, parent_child.parent,
+                                                parent_child.child)) {
+            throw_runtime_diagnostic(
+                "P_CHILD_CONCURRENCY",
+                "Resumed child exceeds the parent's active concurrency budget",
+                json{{"parent_run_id", parent_run_id}, {"child_run_id", std::string(run_id)}});
+        }
+        child_concurrency.owner         = impl_.get();
+        child_concurrency.parent_run_id = parent_run_id;
+        child_concurrency.child_run_id  = std::string(run_id);
+        child_concurrency.amount        = parent_child.child.max_concurrency;
+    }
 
 
     ProgramPersistedInvocation attempt_invocation{
@@ -3123,7 +3355,8 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions);
     impl_->commit_active_child(control, global_quota);
     if (!previous->invocation().parent_run_id.empty())
-        bind_child_completion(control, owner_scope, previous->invocation().parent_run_id, run_id);
+        impl_->bind_budgeted_child_completion(
+            control, owner_scope, previous->invocation().parent_run_id, run_id);
     if (!previous->invocation().parent_run_id.empty()) {
         if (auto parent = impl_->find_control(owner_scope, previous->invocation().parent_run_id))
             parent->attach_child(control);
@@ -3180,6 +3413,7 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         }
         throw_runtime_diagnostic("P_RESUME_CONFLICT", "Program resume lost the transition CAS");
     }
+    child_concurrency.commit();
 
     impl_->register_control(control);
     try {
@@ -3290,6 +3524,25 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
         throw_runtime_diagnostic("P_RECONCILE_CONFLICT",
                                  "Program reconciliation lost the transition CAS");
     }
+    std::shared_ptr<ChildQuotaReservation> global_quota;
+    Impl::ChildConcurrencyLease             child_concurrency;
+    if (completed && !previous->invocation().parent_run_id.empty()) {
+        const auto parent_run_id = previous->invocation().parent_run_id;
+        const auto parent_child =
+            impl_->hydrate_parent_child_budget(owner_scope, parent_run_id, run_id);
+        global_quota = impl_->reserve_active_child(owner_scope);
+        if (!impl_->activate_child_concurrency(parent_run_id, run_id, parent_child.parent,
+                                                parent_child.child)) {
+            throw_runtime_diagnostic(
+                "P_CHILD_CONCURRENCY",
+                "Reconciled child exceeds the parent's active concurrency budget",
+                json{{"parent_run_id", parent_run_id}, {"child_run_id", std::string(run_id)}});
+        }
+        child_concurrency.owner         = impl_.get();
+        child_concurrency.parent_run_id = parent_run_id;
+        child_concurrency.child_run_id  = std::string(run_id);
+        child_concurrency.amount        = parent_child.child.max_concurrency;
+    }
     const auto next_attempt =
         completed ? previous->continuation().attempt + 1 : previous->continuation().attempt;
     const auto next_state = completed   ? ContinuationState::Running
@@ -3316,9 +3569,10 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
             checkpoint.core_thread_id, previous->event_sequence(), std::move(resolution.events),
             impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
             impl_->config.state_store, impl_->config.transitions);
+        impl_->commit_active_child(live_control, global_quota);
         if (!previous->invocation().parent_run_id.empty())
-            bind_child_completion(live_control, owner_scope,
-                                  previous->invocation().parent_run_id, run_id);
+            impl_->bind_budgeted_child_completion(
+                live_control, owner_scope, previous->invocation().parent_run_id, run_id);
         if (!previous->invocation().parent_run_id.empty()) {
             if (auto parent = impl_->find_control(owner_scope,
                                                   previous->invocation().parent_run_id))
@@ -3410,6 +3664,7 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
         throw_runtime_diagnostic("P_RECONCILE_CONFLICT",
                                  "Program reconciliation lost the transition CAS");
     }
+    child_concurrency.commit();
     if (!completed) {
         auto reconnected = reconnect(owner_scope, run_id);
         if (const auto result = reconnected.try_result()) {

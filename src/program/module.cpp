@@ -3,6 +3,7 @@
 #include "canonical_json.h"
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <set>
@@ -627,6 +628,24 @@ void validate_module_resolution(const ModuleResolution& resolution) {
 
 namespace {
 
+constexpr std::string_view kCompositionBudgetOverflow =
+    "Whole Program composition child budget exceeds the supported range";
+
+template <typename T>
+T checked_budget_add(T left, T right) {
+    if (right > std::numeric_limits<T>::max() - left)
+        throw std::invalid_argument(std::string(kCompositionBudgetOverflow));
+    return static_cast<T>(left + right);
+}
+
+template <typename T>
+T checked_budget_multiply(T value, std::uint64_t multiplier) {
+    if (value != 0 &&
+        multiplier > static_cast<std::uint64_t>(std::numeric_limits<T>::max() / value))
+        throw std::invalid_argument(std::string(kCompositionBudgetOverflow));
+    return static_cast<T>(value * multiplier);
+}
+
 std::uint64_t budget_value(const BudgetLimits& budget, std::string_view resource) {
     if (resource == "wall_time_ms") return budget.wall_time_ms;
     if (resource == "model_tokens") return budget.model_tokens;
@@ -641,16 +660,184 @@ std::uint64_t budget_value(const BudgetLimits& budget, std::string_view resource
 }
 
 void add_budget(BudgetLimits& total, const BudgetLimits& value) {
-    total.wall_time_ms += value.wall_time_ms;
-    total.model_tokens += value.model_tokens;
-    total.monetary_microunits += value.monetary_microunits;
-    total.max_concurrency += value.max_concurrency;
-    total.max_program_operations += value.max_program_operations;
-    total.max_core_steps += value.max_core_steps;
-    total.max_dynamic_compiles += value.max_dynamic_compiles;
-    total.max_child_depth += value.max_child_depth;
-    total.max_total_children += value.max_total_children;
+    total.wall_time_ms =
+        checked_budget_add(total.wall_time_ms, value.wall_time_ms);
+    total.model_tokens = checked_budget_add(total.model_tokens, value.model_tokens);
+    total.monetary_microunits =
+        checked_budget_add(total.monetary_microunits, value.monetary_microunits);
+    total.max_concurrency =
+        checked_budget_add(total.max_concurrency, value.max_concurrency);
+    total.max_program_operations =
+        checked_budget_add(total.max_program_operations, value.max_program_operations);
+    total.max_core_steps =
+        checked_budget_add(total.max_core_steps, value.max_core_steps);
+    total.max_dynamic_compiles =
+        checked_budget_add(total.max_dynamic_compiles, value.max_dynamic_compiles);
+    total.max_child_depth =
+        checked_budget_add(total.max_child_depth, value.max_child_depth);
+    total.max_total_children =
+        checked_budget_add(total.max_total_children, value.max_total_children);
 }
+
+BudgetLimits maximum_budget(const BudgetLimits& left, const BudgetLimits& right) {
+    return {
+        std::max(left.wall_time_ms, right.wall_time_ms),
+        std::max(left.model_tokens, right.model_tokens),
+        std::max(left.monetary_microunits, right.monetary_microunits),
+        std::max(left.max_concurrency, right.max_concurrency),
+        std::max(left.max_program_operations, right.max_program_operations),
+        std::max(left.max_core_steps, right.max_core_steps),
+        std::max(left.max_dynamic_compiles, right.max_dynamic_compiles),
+        std::max(left.max_child_depth, right.max_child_depth),
+        std::max(left.max_total_children, right.max_total_children),
+    };
+}
+
+BudgetLimits scale_budget(BudgetLimits value, std::uint64_t multiplier) {
+    value.wall_time_ms = checked_budget_multiply(value.wall_time_ms, multiplier);
+    value.model_tokens = checked_budget_multiply(value.model_tokens, multiplier);
+    value.monetary_microunits =
+        checked_budget_multiply(value.monetary_microunits, multiplier);
+    value.max_concurrency = checked_budget_multiply(value.max_concurrency, multiplier);
+    value.max_program_operations =
+        checked_budget_multiply(value.max_program_operations, multiplier);
+    value.max_core_steps = checked_budget_multiply(value.max_core_steps, multiplier);
+    value.max_dynamic_compiles =
+        checked_budget_multiply(value.max_dynamic_compiles, multiplier);
+    value.max_child_depth = checked_budget_multiply(value.max_child_depth, multiplier);
+    value.max_total_children =
+        checked_budget_multiply(value.max_total_children, multiplier);
+    return value;
+}
+
+BudgetLimits child_reservation(BudgetLimits value) {
+    value.max_child_depth = 0;
+    value.max_total_children = checked_budget_add(value.max_total_children, std::uint64_t{1});
+    return value;
+}
+
+class ChildReservationDeriver final {
+public:
+    ChildReservationDeriver(
+        const ProgramPlan& plan,
+        const std::map<std::string, const ChildProgramDescriptor*, std::less<>>& descriptors)
+        : plan_(plan), descriptors_(descriptors) {}
+
+    BudgetLimits derive() { return visit(plan_.root()); }
+
+    const std::set<std::string, std::less<>>& referenced_children() const noexcept {
+        return referenced_children_;
+    }
+
+private:
+    const ProgramPlan& plan_;
+    const std::map<std::string, const ChildProgramDescriptor*, std::less<>>& descriptors_;
+    std::set<std::string, std::less<>> active_;
+    std::set<std::string, std::less<>> referenced_children_;
+
+    const ProgramPlanNode& target(const std::optional<std::string>& id,
+                                  std::string_view                 field) const {
+        if (!id)
+            throw std::invalid_argument(
+                "Whole Program composition operation is missing " + std::string(field));
+        const auto* found = plan_.find(*id);
+        if (!found)
+            throw std::invalid_argument(
+                "Whole Program composition operation has a dangling " + std::string(field));
+        return *found;
+    }
+
+    BudgetLimits referenced_child_reservation(const ProgramPlanNode& operation) {
+        const auto& binding = operation.child_binding();
+        if (!binding || binding->empty())
+            throw std::invalid_argument(
+                "Whole Program composition has a child-launch operation without a verified child binding");
+        const auto found = descriptors_.find(*binding);
+        if (found == descriptors_.end())
+            throw std::invalid_argument(
+                "Whole Program composition child-launch operation references an undeclared child");
+        referenced_children_.insert(*binding);
+        return child_reservation(found->second->budget);
+    }
+
+    BudgetLimits visit_ids(const std::vector<std::string>& ids) {
+        BudgetLimits total;
+        for (const auto& id : ids) {
+            const auto* operation = plan_.find(id);
+            if (!operation)
+                throw std::invalid_argument(
+                    "Whole Program composition operation has a dangling child reference");
+            add_budget(total, visit(*operation));
+        }
+        return total;
+    }
+
+    BudgetLimits visit(const ProgramPlanNode& operation) {
+        if (!active_.insert(operation.id()).second)
+            throw std::invalid_argument("Whole Program composition operation graph has a cycle");
+        try {
+            auto result = derive_operation(operation);
+            active_.erase(operation.id());
+            return result;
+        } catch (...) {
+            active_.erase(operation.id());
+            throw;
+        }
+    }
+
+    BudgetLimits derive_operation(const ProgramPlanNode& operation) {
+        using Kind = ProgramOperationKind;
+        switch (operation.operation()) {
+            case Kind::CallCore:
+            case Kind::Emit:
+            case Kind::Cancel:
+            case Kind::Return: return {};
+            case Kind::Spawn: return referenced_child_reservation(operation);
+            case Kind::ParallelMap: {
+                const auto& map = operation.parallel_map();
+                if (!map || map->max_items == 0)
+                    throw std::invalid_argument(
+                        "Whole Program composition parallel_map has no finite item bound");
+                auto result = scale_budget(referenced_child_reservation(operation), map->max_items);
+                const auto* descriptor = descriptors_.at(*operation.child_binding());
+                result.max_concurrency = checked_budget_multiply(
+                    descriptor->budget.max_concurrency, map->max_in_flight);
+                return result;
+            }
+            case Kind::Sequence:
+            case Kind::Parallel:
+            case Kind::Race:
+            case Kind::Quorum: return visit_ids(operation.operation() == Kind::Sequence
+                                                     ? operation.children()
+                                                     : operation.branches());
+            case Kind::Branch: {
+                auto selected = visit(target(operation.then_id(), "then"));
+                if (operation.else_id())
+                    selected = maximum_budget(selected, visit(target(operation.else_id(), "else")));
+                return selected;
+            }
+            case Kind::Loop:
+            case Kind::Retry:
+            case Kind::Map: {
+                const auto multiplier =
+                    operation.operation() == Kind::Loop
+                        ? operation.max_iterations()
+                        : operation.operation() == Kind::Retry
+                              ? operation.max_attempts()
+                              : std::optional<std::uint64_t>{
+                                    static_cast<std::uint64_t>(operation.items().size())};
+                if (!multiplier || *multiplier == 0)
+                    throw std::invalid_argument(
+                        "Whole Program composition bounded operation has no positive bound");
+                return scale_budget(visit(target(operation.body(), "body")), *multiplier);
+            }
+            case Kind::Await:
+            case Kind::Checkpoint:
+                return operation.body() ? visit(target(operation.body(), "body")) : BudgetLimits{};
+        }
+        throw std::invalid_argument("Whole Program composition operation is unsupported");
+    }
+};
 
 }  // namespace
 
@@ -689,42 +876,23 @@ void validate_program_composition(const ProgramBundle& parent_bundle,
     if (by_name.size() != composition.parent.children().size())
         throw std::invalid_argument("Composition does not bind every declared child");
 
-    BudgetLimits aggregate;
+    std::map<std::string, const ChildProgramDescriptor*, std::less<>> descriptors;
     for (const auto& descriptor : composition.parent.children()) {
         const auto child = by_name.find(descriptor.name);
         if (child == by_name.end())
             throw std::invalid_argument("Composition is missing a declared child");
         if (child->second->version.id() != descriptor.program_version_id)
             throw std::invalid_argument("Composition child version does not match its descriptor");
-        add_budget(aggregate, descriptor.budget);
+        descriptors.emplace(descriptor.name, &descriptor);
     }
-    const auto parent_plan = parent_bundle.orchestration_plan();
-    std::set<std::string, std::less<>> referenced_children;
-    if (!composition.parent.children().empty()) {
-        if (!parent_plan.plan.is_object() || !parent_plan.plan.contains("operations") ||
-            !parent_plan.plan["operations"].is_array()) {
-            throw std::invalid_argument("Whole Program composition has no operation plan");
-        }
-        for (const auto& operation : parent_plan.plan["operations"]) {
-            if (!operation.is_object() || operation.value("op", "") != "spawn") continue;
-            if (!operation.contains("child_binding") || !operation["child_binding"].is_string() ||
-                operation["child_binding"].get<std::string>().empty()) {
-                throw std::invalid_argument(
-                    "Whole Program composition has a spawn without a verified child binding");
-            }
-            const auto binding = operation["child_binding"].get<std::string>();
-            if (!by_name.contains(binding)) {
-                throw std::invalid_argument(
-                    "Whole Program composition spawn references an undeclared child");
-            }
-            referenced_children.insert(std::move(binding));
-        }
-        for (const auto& descriptor : composition.parent.children()) {
-            if (!referenced_children.contains(descriptor.name)) {
-                throw std::invalid_argument(
-                    "Whole Program composition has no spawn operation for a declared child");
-            }
-        }
+
+    ChildReservationDeriver deriver(parent_bundle.typed_orchestration_plan(), descriptors);
+    const auto aggregate = deriver.derive();
+    const auto& referenced_children = deriver.referenced_children();
+    for (const auto& descriptor : composition.parent.children()) {
+        if (!referenced_children.contains(descriptor.name))
+            throw std::invalid_argument(
+                "Whole Program composition has no child-launch operation for a declared child");
     }
 
     std::map<std::string, const BudgetRequirement*, std::less<>> requirements;
@@ -740,10 +908,8 @@ void validate_program_composition(const ProgramBundle& parent_bundle,
             found->second->maximum > MAX_SUPPORTED_CHILD_DEPTH)
             throw std::invalid_argument("Child depth exceeds the supported hard ceiling");
         if (resource == std::string_view("max_child_depth")) {
-            if (found->second->maximum < 1) throw std::invalid_argument("Child depth is not admitted");
-        } else if (resource == std::string_view("max_total_children")) {
-            if (found->second->maximum < composition.parent.children().size())
-                throw std::invalid_argument("Child count exceeds the parent allocation");
+            if (!referenced_children.empty() && found->second->maximum < 1)
+                throw std::invalid_argument("Child depth is not admitted");
         } else if (found->second->maximum < budget_value(aggregate, resource)) {
             throw std::invalid_argument("Child budget exceeds the parent allocation");
         }

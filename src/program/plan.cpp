@@ -14,10 +14,10 @@
 namespace neograph::program {
 namespace {
 
-constexpr std::array<std::string_view, 15> kOperationNames = {
+constexpr std::array<std::string_view, 16> kOperationNames = {
     "call_core", "sequence", "branch", "loop", "retry", "parallel", "race", "quorum",
-    "map",       "spawn",    "await",  "emit", "checkpoint", "cancel", "return"};
-
+    "map",       "spawn",    "await",  "emit", "checkpoint", "cancel", "return",
+    "parallel_map"};
 std::string require_string(const json& value, std::string_view field) {
     const auto key = std::string(field);
     if (!value.contains(key) || !value.at(key).is_string() || value.at(key).get<std::string>().empty())
@@ -69,6 +69,10 @@ void reject_unknown_fields(const json& value, ProgramOperationKind operation) {
         case ProgramOperationKind::Return: add({"value"}); break;
         case ProgramOperationKind::Checkpoint: add({"body"}); break;
         case ProgramOperationKind::Cancel: add({"scope", "reason"}); break;
+        case ProgramOperationKind::ParallelMap:
+            add({"item_source", "child_binding", "input_binding", "output_binding",
+                 "max_items", "max_in_flight", "max_output_bytes", "failure_policy"});
+            break;
     }
     for (const auto& [field, ignored] : value.items()) {
         (void)ignored;
@@ -130,8 +134,118 @@ struct NodeData {
     json                          condition = json::object();
     json                          value     = json();
     json                          items     = json::array();
+    std::optional<ProgramParallelMapSpec> parallel_map;
     bool                          has_value = false;
 };
+
+bool valid_json_pointer(std::string_view pointer) {
+    if (pointer.empty()) return true;
+    if (pointer.front() != '/') return false;
+    for (std::size_t index = 0; index < pointer.size(); ++index) {
+        if (pointer[index] != '~') continue;
+        if (++index == pointer.size() || (pointer[index] != '0' && pointer[index] != '1'))
+            return false;
+    }
+    return true;
+}
+
+std::string require_json_pointer(const json& value, std::string_view field) {
+    const auto key = std::string(field);
+    if (!value.contains(key) || !value.at(key).is_string())
+        throw std::invalid_argument("Program parallel_map field " + key + " must be a string");
+    const auto pointer = value.at(key).get<std::string>();
+    if (!valid_json_pointer(pointer))
+        throw std::invalid_argument("Program parallel_map field " + key +
+                                    " must be a JSON Pointer");
+    return pointer;
+}
+
+void reject_unknown_object_fields(const json& value,
+                                  std::initializer_list<std::string_view> allowed,
+                                  std::string_view context) {
+    if (!value.is_object())
+        throw std::invalid_argument("Program parallel_map " + std::string(context) +
+                                    " must be an object");
+    for (const auto& [field, ignored] : value.items()) {
+        if (std::find(allowed.begin(), allowed.end(), field) == allowed.end())
+            throw std::invalid_argument("Unknown Program parallel_map " + std::string(context) +
+                                        " field: " + field);
+    }
+}
+
+ProgramParallelMapSpec parse_parallel_map_spec(const json& encoded) {
+    constexpr std::uint64_t kMaxItems       = 1'000'000;
+    constexpr std::uint64_t kMaxOutputBytes = 1ULL << 30;
+
+    ProgramParallelMapSpec result;
+    const auto& item_source = encoded.at("item_source");
+    reject_unknown_object_fields(item_source, {"literal", "artifact", "field"}, "item_source");
+    if (item_source.contains("literal")) {
+        if (item_source.size() != 1 || !item_source.at("literal").is_array())
+            throw std::invalid_argument(
+                "Program parallel_map item_source.literal must be the only array source");
+        result.item_source   = ProgramParallelMapItemSource::Literal;
+        result.literal_items = item_source.at("literal");
+    } else {
+        if (item_source.size() != 2 || !item_source.contains("artifact") ||
+            !item_source.contains("field") || require_string(item_source, "artifact") != "input")
+            throw std::invalid_argument(
+                "Program parallel_map item_source must be literal items or input artifact field");
+        result.item_source = ProgramParallelMapItemSource::InputField;
+        result.input_field = require_json_pointer(item_source, "field");
+    }
+
+    result.child_binding = require_string(encoded, "child_binding");
+    if (result.child_binding.empty())
+        throw std::invalid_argument("Program parallel_map child_binding must be nonempty");
+
+    const auto parse_endpoint = [](const json& endpoint, std::string_view context) {
+        reject_unknown_object_fields(endpoint, {"field"}, context);
+        if (!endpoint.contains("field"))
+            throw std::invalid_argument("Program parallel_map " + std::string(context) +
+                                        " requires field");
+        return require_json_pointer(endpoint, "field");
+    };
+    const auto& input_binding = encoded.at("input_binding");
+    reject_unknown_object_fields(input_binding, {"from", "to"}, "input_binding");
+    if (!input_binding.contains("from") || !input_binding.contains("to"))
+        throw std::invalid_argument("Program parallel_map input_binding requires from and to");
+    result.input_from_field = parse_endpoint(input_binding.at("from"), "input_binding.from");
+    result.input_to_field   = parse_endpoint(input_binding.at("to"), "input_binding.to");
+
+    const auto& output_binding = encoded.at("output_binding");
+    reject_unknown_object_fields(output_binding, {"from"}, "output_binding");
+    if (!output_binding.contains("from"))
+        throw std::invalid_argument("Program parallel_map output_binding requires from");
+    result.output_from_field = parse_endpoint(output_binding.at("from"), "output_binding.from");
+
+    result.max_items = require_bound(encoded, "max_items");
+    if (result.max_items > kMaxItems)
+        throw std::invalid_argument("Program parallel_map max_items exceeds supported limit");
+    if (result.item_source == ProgramParallelMapItemSource::Literal &&
+        result.literal_items.size() > result.max_items)
+        throw std::invalid_argument(
+            "Program parallel_map literal item count exceeds max_items");
+    const auto in_flight = require_bound(encoded, "max_in_flight");
+    if (in_flight > result.max_items ||
+        in_flight > std::numeric_limits<std::uint32_t>::max())
+        throw std::invalid_argument(
+            "Program parallel_map max_in_flight exceeds max_items or supported limit");
+    result.max_in_flight = static_cast<std::uint32_t>(in_flight);
+    result.max_output_bytes = require_bound(encoded, "max_output_bytes");
+    if (result.max_output_bytes > kMaxOutputBytes)
+        throw std::invalid_argument("Program parallel_map max_output_bytes exceeds supported limit");
+
+    const auto failure_policy = require_string(encoded, "failure_policy");
+    if (failure_policy == "fail_fast") {
+        result.failure_policy = ProgramParallelMapFailurePolicy::FailFast;
+    } else if (failure_policy == "collect") {
+        result.failure_policy = ProgramParallelMapFailurePolicy::Collect;
+    } else {
+        throw std::invalid_argument("Program parallel_map failure_policy is invalid");
+    }
+    return result;
+}
 
 }  // namespace
 
@@ -201,6 +315,10 @@ const std::optional<std::uint64_t>& ProgramPlanNode::timeout_ms() const noexcept
 const std::optional<std::string>& ProgramPlanNode::scope() const noexcept {
     return impl_->data.scope;
 }
+
+const std::optional<ProgramParallelMapSpec>& ProgramPlanNode::parallel_map() const noexcept {
+    return impl_->data.parallel_map;
+}
 const std::optional<std::string>& ProgramPlanNode::reason() const noexcept {
     return impl_->data.reason;
 }
@@ -234,6 +352,24 @@ json ProgramPlanNode::to_json() const {
         result["value"] = data.value;
     if (!data.items.empty() && data.operation == ProgramOperationKind::Map)
         result["items"] = data.items;
+    if (data.parallel_map) {
+        const auto& map = *data.parallel_map;
+        if (map.item_source == ProgramParallelMapItemSource::Literal) {
+            result["item_source"] = json{{"literal", map.literal_items}};
+        } else {
+            result["item_source"] = json{{"artifact", "input"}, {"field", map.input_field}};
+        }
+        result["child_binding"] = map.child_binding;
+        result["input_binding"] =
+            json{{"from", json{{"field", map.input_from_field}}},
+                 {"to", json{{"field", map.input_to_field}}}};
+        result["output_binding"] = json{{"from", json{{"field", map.output_from_field}}}};
+        result["max_items"] = map.max_items;
+        result["max_in_flight"] = map.max_in_flight;
+        result["max_output_bytes"] = map.max_output_bytes;
+        result["failure_policy"] =
+            map.failure_policy == ProgramParallelMapFailurePolicy::FailFast ? "fail_fast" : "collect";
+    }
     return result;
 }
 
@@ -295,6 +431,8 @@ ProgramPlan ProgramPlan::from_json(const json& plan) {
         if (encoded.contains("max_attempts")) data.max_attempts = require_bound(encoded, "max_attempts");
         if (encoded.contains("min_success")) data.min_success = require_bound(encoded, "min_success");
         if (encoded.contains("timeout_ms")) data.timeout_ms = require_bound(encoded, "timeout_ms");
+        if (data.operation == ProgramOperationKind::ParallelMap)
+            data.parallel_map = parse_parallel_map_spec(encoded);
         if (encoded.contains("scope")) data.scope = require_string(encoded, "scope");
         if (encoded.contains("reason")) data.reason = require_string(encoded, "reason");
         if (impl->index.contains(data.id))
@@ -358,6 +496,9 @@ ProgramPlan ProgramPlan::from_json(const json& plan) {
             require_ref(*node.body(), node.id());
             if (op == ProgramOperationKind::Map && node.items().empty())
                 throw std::invalid_argument("map requires nonempty items");
+        } else if (op == ProgramOperationKind::ParallelMap) {
+            if (!node.parallel_map())
+                throw std::invalid_argument("parallel_map requires a complete bounded map contract");
         } else if (op == ProgramOperationKind::Spawn) {
             if (!node.child_binding())
                 throw std::invalid_argument("spawn requires a verified child_binding");
@@ -495,6 +636,13 @@ private:
             return one;
         case Kind::Spawn:
             return ProgramStaticBudgetRequirements{1, 1, 0, 0, 1, 1};
+        case Kind::ParallelMap: {
+            const auto& map = operation.parallel_map();
+            if (!map)
+                throw std::invalid_argument("parallel_map has no bounded map contract");
+            return ProgramStaticBudgetRequirements{1, map->max_in_flight, 0, 0, 1,
+                                                   map->max_items};
+        }
         case Kind::Sequence: {
             auto result = one;
             for (const auto& child : operation.children()) {

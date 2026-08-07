@@ -393,8 +393,12 @@ TEST(ProgramBundleTest, AcceptsSupportedSourceSchemasAndRejectsErrorDiagnostics)
     version_two.program_schema_version = PROGRAM_SCHEMA_VERSION_V2;
     EXPECT_NO_THROW((void)ProgramBundle(std::move(version_two)));
 
+    auto version_three                   = make_bundle_data(source);
+    version_three.program_schema_version = PROGRAM_SCHEMA_VERSION_V3;
+    EXPECT_NO_THROW((void)ProgramBundle(std::move(version_three)));
+
     auto unsupported_schema                   = make_bundle_data(source);
-    unsupported_schema.program_schema_version = PROGRAM_SCHEMA_VERSION_V2 + 1;
+    unsupported_schema.program_schema_version = LATEST_PROGRAM_SCHEMA_VERSION + 1;
     EXPECT_THROW((void)ProgramBundle(std::move(unsupported_schema)), std::invalid_argument);
 
     auto failed_compilation                         = make_bundle_data(source);

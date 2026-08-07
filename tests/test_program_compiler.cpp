@@ -265,6 +265,51 @@ json operation_document(json definition = core_definition()) {
     return document;
 }
 
+json parallel_map_document() {
+    auto document = operation_document();
+    document["program_schema_version"] = PROGRAM_SCHEMA_VERSION_V3;
+    const auto definition = document["root"]["definition"];
+    document["root"] = json{
+        {"op", "parallel_map"},
+        {"name", "main"},
+        {"definition", definition},
+        {"item_source",
+         json{{"literal", json::array({json{{"request", "first"}}, json{{"request", "second"}},
+                                       json{{"request", "third"}}})}}},
+        {"child_binding", "child"},
+        {"input_binding",
+         json{{"from", json{{"field", ""}}}, {"to", json{{"field", ""}}}}},
+        {"output_binding", json{{"from", json{{"field", ""}}}}},
+        {"max_items", 3},
+        {"max_in_flight", 2},
+        {"max_output_bytes", 65536},
+        {"failure_policy", "collect"}};
+    auto requirements = document["declared_budget_requirements"];
+    for (std::size_t index = 0; index < requirements.size(); ++index) {
+        auto requirement = requirements[index];
+        const auto resource = requirement["resource"].get<std::string>();
+        if (resource == "max_concurrency") {
+            requirement["minimum"] = 2;
+            requirement["maximum"] = 2;
+        } else if (resource == "max_program_operations") {
+            requirement["minimum"] = 1;
+            requirement["maximum"] = 1;
+        } else if (resource == "max_core_steps") {
+            requirement["minimum"] = 1;
+            requirement["maximum"] = 1;
+        } else if (resource == "max_child_depth") {
+            requirement["minimum"] = 1;
+            requirement["maximum"] = 1;
+        } else if (resource == "max_total_children") {
+            requirement["minimum"] = 3;
+            requirement["maximum"] = 3;
+        }
+        requirements[index] = std::move(requirement);
+    }
+    document["declared_budget_requirements"] = std::move(requirements);
+    return document;
+}
+
 std::uint32_t source_schema_version(const json& document) {
     if (!document.contains("program_schema_version") ||
         !document["program_schema_version"].is_number_unsigned())
@@ -426,6 +471,23 @@ TEST(ProgramCompilerTest,
     ASSERT_NE(it, second.source_map().end());
     EXPECT_EQ(it->authored.source_id, "dsl:test");
 }
+TEST(ProgramCompilerTest, DiagnosticsRestoreAuthoredCoordinatesAfterCoreNormalization) {
+    auto document = program_document();
+    document["root"]["definition"]["name"] = "different";
+    const SourceMapEntry mapped{
+        "/root/definition", {"dsl:test", "/graph", SourceSpan{10, 20, 1, 1, 1, 11}}};
+
+    const auto diagnostics = compile_errors(complete_snapshot(), std::move(document), {}, {mapped});
+    const auto it = std::find_if(
+        diagnostics.begin(), diagnostics.end(), [](const auto& diagnostic) {
+            return diagnostic.code == "P_ROOT_NAME";
+        });
+    ASSERT_NE(it, diagnostics.end());
+    EXPECT_EQ(it->primary.source_id, "dsl:test");
+    EXPECT_EQ(it->primary.json_pointer, "/graph/name");
+    EXPECT_FALSE(it->primary.span.has_value());
+}
+
 
 TEST(ProgramCompilerTest,
      CoreSemanticChangeCompilerBuildIdRegistryDigestAndDependencyEachChangeExpectedIdentity) {
@@ -778,6 +840,108 @@ TEST(ProgramCompilerTest, LowersOnlyDirectlyJoinedVerifiedChildBindingSpawns) {
         contains_code(compile_errors(snapshot, std::move(inline_spawn)), "P_PLAN_SPAWN_SHAPE"));
 }
 
+TEST(ProgramCompilerTest, LowersOnlyVersionThreeBoundedParallelMaps) {
+    const auto snapshot = complete_snapshot();
+    const auto document = parallel_map_document();
+
+    const auto bundle =
+        ProgramCompiler(snapshot, {"program-compiler-test/v1"}).compile(source_from(document));
+    const auto& plan = bundle.typed_orchestration_plan();
+    ASSERT_EQ(plan.root().operation(), ProgramOperationKind::ParallelMap);
+    ASSERT_TRUE(plan.root().parallel_map().has_value());
+    const auto& map = *plan.root().parallel_map();
+    EXPECT_EQ(map.child_binding, "child");
+    EXPECT_EQ(map.max_items, 3U);
+    EXPECT_EQ(map.max_in_flight, 2U);
+    EXPECT_EQ(map.failure_policy, ProgramParallelMapFailurePolicy::Collect);
+    EXPECT_EQ(map.literal_items.size(), 3U);
+
+    const auto requirements = derive_static_budget_requirements(plan);
+    EXPECT_EQ(requirements.max_program_operations, 1U);
+    EXPECT_EQ(requirements.max_concurrency, 2U);
+    EXPECT_EQ(requirements.max_core_steps, 0U);
+    EXPECT_EQ(requirements.max_child_depth, 1U);
+    EXPECT_EQ(requirements.max_total_children, 3U);
+    {
+        SCOPED_TRACE("version-two parallel_map rejection");
+        auto v2 = document;
+        v2["program_schema_version"] = PROGRAM_SCHEMA_VERSION_V2;
+        EXPECT_EQ(v2["program_schema_version"].get<std::uint32_t>(), PROGRAM_SCHEMA_VERSION_V2);
+        EXPECT_TRUE(contains_code(compile_errors(snapshot, std::move(v2)), "P_SCHEMA_OPERATION"));
+    }
+
+    {
+        SCOPED_TRACE("literal item source exceeds max_items");
+        auto exceeds_items = document;
+        auto root = exceeds_items["root"];
+        root["max_items"] = 2;
+        exceeds_items["root"] = std::move(root);
+        EXPECT_TRUE(contains_code(compile_errors(snapshot, std::move(exceeds_items)),
+                                  "P_PARALLEL_MAP_BOUND"));
+    }
+
+    {
+        SCOPED_TRACE("max_in_flight exceeds max_items");
+        auto exceeds_items = document;
+        auto root = exceeds_items["root"];
+        root["max_in_flight"] = 4;
+        exceeds_items["root"] = std::move(root);
+        ASSERT_EQ(exceeds_items["root"]["max_in_flight"].get<std::uint32_t>(), 4U);
+        const SourceMapEntry bound_mapping{
+            "/root/max_in_flight",
+            {"dsl:test", "/map/concurrency", SourceSpan{10, 20, 1, 1, 1, 11}}};
+        const auto bound_errors =
+            compile_errors(snapshot, std::move(exceeds_items), {}, {bound_mapping});
+        EXPECT_TRUE(std::any_of(bound_errors.begin(), bound_errors.end(), [](const auto& diagnostic) {
+            return diagnostic.code == "P_PARALLEL_MAP_BOUND" &&
+                   diagnostic.primary.json_pointer == "/map/concurrency";
+        }));
+    }
+
+    {
+        SCOPED_TRACE("ambiguous item source");
+        auto ambiguous_source = document;
+        auto root = ambiguous_source["root"];
+        auto item_source = root["item_source"];
+        item_source["artifact"] = "input";
+        item_source["field"] = "/items";
+        root["item_source"] = std::move(item_source);
+        ambiguous_source["root"] = std::move(root);
+        ASSERT_TRUE(ambiguous_source["root"]["item_source"].contains("artifact"));
+        EXPECT_TRUE(contains_code(compile_errors(snapshot, std::move(ambiguous_source)),
+                                  "P_PARALLEL_MAP_SOURCE"));
+    }
+
+    {
+        SCOPED_TRACE("malformed input binding");
+        auto bad_binding = document;
+        auto root = bad_binding["root"];
+        auto input_binding = root["input_binding"];
+        input_binding["to"] = json::object();
+        root["input_binding"] = std::move(input_binding);
+        bad_binding["root"] = std::move(root);
+        ASSERT_TRUE(bad_binding["root"]["input_binding"]["to"].empty());
+        EXPECT_TRUE(contains_code(compile_errors(snapshot, std::move(bad_binding)),
+                                  "P_PARALLEL_MAP_BINDING"));
+    }
+
+    {
+        SCOPED_TRACE("malformed JSON Pointer");
+        auto malformed_pointer = document;
+        malformed_pointer["root"]["input_binding"]["from"]["field"] = "/items/bad~2pointer";
+        const auto diagnostics = compile_errors(snapshot, std::move(malformed_pointer));
+        EXPECT_TRUE(contains_code(diagnostics, "P_PARALLEL_MAP_BINDING"));
+    }
+}
+TEST(ProgramCompilerTest, RejectsPerItemAuthorityFieldsInsteadOfInterpretingThem) {
+    const auto snapshot = complete_snapshot();
+    auto       document = parallel_map_document();
+    document["root"]["capabilities"] = json::array({"admin"});
+
+    EXPECT_TRUE(contains_code(compile_errors(snapshot, std::move(document)),
+                              "P_SCHEMA_UNKNOWN_FIELD"));
+}
+
 TEST(ProgramCompilerTest, DispatchDescriptorWalkBenchmarkExcludesCoreExecution) {
     const auto plan = ProgramPlan::from_json(
         json{{"root", "root"},
@@ -838,6 +1002,26 @@ TEST(ProgramCompilerTest, TypedPlanRejectsDanglingAndUnknownOperationFields) {
               {"condition", json{{"path", "route"}, {"equals", true}}},
               {"then", "return"}}});
     EXPECT_THROW((void)ProgramPlan::from_json(bad_condition), std::invalid_argument);
+}
+
+TEST(ProgramCompilerTest, TypedPlanRejectsParallelMapLiteralBeyondMaxItems) {
+    const auto invalid = json{
+        {"root", "root"},
+        {"operations",
+         json::array({json{{"id", "root"},
+                            {"op", "parallel_map"},
+                            {"source_pointer", "/root"},
+                            {"item_source", json{{"literal", json::array({1, 2})}}},
+                            {"child_binding", "child"},
+                            {"input_binding",
+                             json{{"from", json{{"field", ""}}},
+                                  {"to", json{{"field", ""}}}}},
+                            {"output_binding", json{{"from", json{{"field", ""}}}}},
+                            {"max_items", 1},
+                            {"max_in_flight", 1},
+                            {"max_output_bytes", 2},
+                            {"failure_policy", "fail_fast"}}})}};
+    EXPECT_THROW((void)ProgramPlan::from_json(invalid), std::invalid_argument);
 }
 
 TEST(ProgramCompilerTest, RejectsMalformedConditionPointerDuringNormalization) {

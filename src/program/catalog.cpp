@@ -481,6 +481,14 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
         return false;
     }
 
+    try {
+        (void)ProgramPlan::from_json(plan.plan);
+    } catch (const std::exception& error) {
+        witness = json{{"reason", "plan is not a valid typed immutable plan"},
+                       {"error", error.what()}};
+        return false;
+    }
+
     const auto root = plan.plan["root"].get<std::string>();
     std::map<std::string, json> operations;
     const auto fail = [&](std::string reason, std::string id = {},
@@ -539,8 +547,8 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
         const auto op = operation["op"].get<std::string>();
         if (op != "call_core" && op != "sequence" && op != "branch" && op != "loop" &&
             op != "retry" && op != "parallel" && op != "race" && op != "quorum" &&
-            op != "map" && op != "spawn" && op != "await" && op != "emit" &&
-            op != "checkpoint" && op != "cancel" && op != "return") {
+            op != "map" && op != "parallel_map" && op != "spawn" && op != "await" &&
+            op != "emit" && op != "checkpoint" && op != "cancel" && op != "return") {
             return fail("unknown operation", id, "op");
         }
         if (op == "call_core") {
@@ -581,6 +589,14 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
                 operation["items"].empty())
                 return fail("map items are missing or empty", id, "items");
             if (!reference(operation, "body", id)) return false;
+        } else if (op == "parallel_map") {
+            if (!operation.contains("child_binding") ||
+                !operation["child_binding"].is_string() ||
+                operation["child_binding"].get<std::string>().empty()) {
+                return fail("parallel_map child binding is missing or malformed", id,
+                            "child_binding");
+            }
+            has_execution = true;
         } else if (op == "spawn") {
             if (operation.contains("body"))
                 return fail("spawn must not carry an inline body", id, "body");
@@ -616,7 +632,7 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
         active.insert(id);
         const auto& operation = operations.at(id);
         const auto  op = operation["op"].get<std::string>();
-        if (op == "call_core" || op == "spawn") {
+        if (op == "call_core" || op == "parallel_map" || op == "spawn") {
             reachable_execution = true;
         } else {
             const auto visit_one = [&](const json& value) {

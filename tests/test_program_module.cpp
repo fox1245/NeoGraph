@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -52,7 +53,13 @@ ProgramBundle make_bundle(std::string    module_root,
                           std::string    registry_fingerprint,
                           ContractRecord input,
                           ContractRecord output,
-                          std::string    child_binding = "child") {
+                          std::string    child_binding = "child",
+                          std::uint64_t  parallel_map_items = 0,
+                          std::uint64_t  declared_total_children = 2,
+                          std::uint32_t  parallel_map_in_flight = 1,
+                          std::uint32_t  declared_max_concurrency = 1,
+                          std::uint64_t  declared_resource_max = 10,
+                          std::uint64_t  declared_dynamic_compiles = 1) {
     const json definition = json{
         {"schema_version", SealedCoreDefinition::STORAGE_SCHEMA_VERSION},
         {"nodes", json{{"main", json{{"type", "module-node"}}}}}};
@@ -66,14 +73,42 @@ ProgramBundle make_bundle(std::string    module_root,
     data.module_dependency_merkle_root = std::move(module_root);
     data.input_contract                = std::move(input);
     data.output_contract               = std::move(output);
-    data.orchestration_plan = OrchestrationPlanRecord{
-        1,
-        json{{"root", "root"},
-             {"operations", json::array({
-                                  json{{"id", "root"}, {"op", "await"}, {"body", "spawn"}},
-                                  json{{"id", "spawn"},
-                                       {"op", "spawn"},
-                                       {"child_binding", std::move(child_binding)}}})}}};
+    if (parallel_map_items == 0) {
+        data.orchestration_plan = OrchestrationPlanRecord{
+            1,
+            json{{"root", "root"},
+                 {"operations",
+                  json::array({json{{"id", "root"},
+                                    {"op", "await"},
+                                    {"source_pointer", "/root"},
+                                    {"body", "spawn"}},
+                               json{{"id", "spawn"},
+                                    {"op", "spawn"},
+                                    {"source_pointer", "/root/body"},
+                                    {"child_binding", std::move(child_binding)}}})}}};
+    } else {
+        auto items = json::array();
+        for (std::uint64_t index = 0; index < parallel_map_items; ++index)
+            items.push_back(index);
+        data.orchestration_plan = OrchestrationPlanRecord{
+            1,
+            json{{"root", "root"},
+                 {"operations",
+                  json::array({json{{"id", "root"},
+                                    {"op", "parallel_map"},
+                                    {"source_pointer", "/root"},
+                                    {"item_source", json{{"literal", std::move(items)}}},
+                                    {"child_binding", std::move(child_binding)},
+                                    {"max_items", parallel_map_items},
+                                    {"max_in_flight", parallel_map_in_flight},
+                                    {"input_binding",
+                                     json{{"from", json{{"field", "/item"}}},
+                                          {"to", json{{"field", "/item"}}}}},
+                                    {"output_binding",
+                                     json{{"from", json{{"field", "/result"}}}}},
+                                    {"max_output_bytes", std::uint64_t{1}},
+                                    {"failure_policy", "fail_fast"}}})}}};
+    }
     data.sealed_core_definitions       = {
         SealedCoreDefinition{"main", sealed_core_definition_hash(definition), definition}};
     data.core_plan_identities = {CorePlanIdentity{"main", digest('c')}};
@@ -81,15 +116,15 @@ ProgramBundle make_bundle(std::string    module_root,
         ExecutableIdentity{ExecutableKind::Node, "module-node", "1.0.0", digest('5')}};
     data.capability_effect_closure = CapabilityEffectClosure{{"read"}, {"tool"}};
     data.declared_budget_requirements = {
-        BudgetRequirement{"wall_time_ms", 1, 10},
-        BudgetRequirement{"model_tokens", 1, 10},
-        BudgetRequirement{"monetary_microunits", 1, 10},
-        BudgetRequirement{"max_concurrency", 1, 1},
-        BudgetRequirement{"max_program_operations", 1, 10},
-        BudgetRequirement{"max_core_steps", 1, 10},
-        BudgetRequirement{"max_dynamic_compiles", 1, 1},
+        BudgetRequirement{"wall_time_ms", 1, declared_resource_max},
+        BudgetRequirement{"model_tokens", 1, declared_resource_max},
+        BudgetRequirement{"monetary_microunits", 1, declared_resource_max},
+        BudgetRequirement{"max_concurrency", 1, declared_max_concurrency},
+        BudgetRequirement{"max_program_operations", 1, declared_resource_max},
+        BudgetRequirement{"max_core_steps", 1, declared_resource_max},
+        BudgetRequirement{"max_dynamic_compiles", 1, declared_dynamic_compiles},
         BudgetRequirement{"max_child_depth", 1, 1},
-        BudgetRequirement{"max_total_children", 1, 1},
+        BudgetRequirement{"max_total_children", 1, declared_total_children},
     };
     return ProgramBundle(std::move(data));
 }
@@ -98,20 +133,32 @@ struct LinkFixture {
     ProgramModule    parent;
     ModuleResolution resolution;
     ProgramBundle    bundle;
+    ProgramBundle    child_bundle;
     ProgramVersion   version;
 };
 
 LinkFixture make_fixture(std::string child_owner = "tenant:module",
-                         std::string child_binding = "child") {
+                         std::string child_binding = "child",
+                         std::uint64_t parallel_map_items = 0,
+                         std::uint32_t parallel_map_in_flight = 1,
+                         std::uint64_t declared_total_children = 2,
+                         std::uint32_t declared_max_concurrency = 1,
+                         std::uint64_t declared_resource_max = 10,
+                         std::uint64_t declared_dynamic_compiles = 1) {
     const auto module_root = ModuleResolution{}.dependency_merkle_root();
     const ContractRecord contract{1, json{{"type", "object"}}};
     const auto registry  = make_registry();
-    auto       bundle    = make_bundle(module_root, registry.fingerprint(), contract, contract,
-                                    std::move(child_binding));
+    auto bundle = make_bundle(module_root, registry.fingerprint(), contract, contract,
+                              std::move(child_binding), parallel_map_items,
+                              declared_total_children, parallel_map_in_flight,
+                              declared_max_concurrency, declared_resource_max,
+                              declared_dynamic_compiles);
+    auto child_bundle =
+        make_bundle(module_root, registry.fingerprint(), contract, contract, "child", 0, 1);
     const auto admission = make_admission(registry);
     const auto policy    = make_policy(admission, child_owner);
     ProgramVersion version(
-        ProgramVersionData{bundle.id(),
+        ProgramVersionData{child_bundle.id(),
                            admission,
                            policy,
                            {},
@@ -134,18 +181,18 @@ LinkFixture make_fixture(std::string child_owner = "tenant:module",
     resolution.root = parent.coordinate();
     resolution.modules.push_back(parent);
     return LinkFixture{std::move(parent), std::move(resolution), std::move(bundle),
-                       std::move(version)};
+                       std::move(child_bundle), std::move(version)};
 }
 
 TEST(ProgramModuleTest, LinksExactChildAndRoundTripsImmutableReceipt) {
     auto fixture = make_fixture();
     const auto receipt = link_module_child(fixture.resolution, fixture.parent, "child",
-                                           fixture.bundle, fixture.version);
+                                           fixture.child_bundle, fixture.version);
 
     EXPECT_EQ(receipt.owner_scope(), "tenant:module");
     EXPECT_EQ(receipt.parent_module_id(), fixture.parent.id());
     EXPECT_EQ(receipt.child_program_version_id(), fixture.version.id());
-    EXPECT_EQ(receipt.child_bundle_id(), fixture.bundle.id());
+    EXPECT_EQ(receipt.child_bundle_id(), fixture.child_bundle.id());
     EXPECT_EQ(receipt.granted_capabilities(), std::vector<std::string>({"read"}));
     EXPECT_EQ(receipt.granted_effects(), std::vector<std::string>({"tool"}));
     EXPECT_EQ(receipt.budget(), (BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1}));
@@ -157,7 +204,8 @@ TEST(ProgramModuleTest, LinksExactChildAndRoundTripsImmutableReceipt) {
 
 TEST(ProgramModuleTest, RejectsChildOwnerOutsideParentScope) {
     auto fixture = make_fixture("tenant:other");
-    EXPECT_THROW(link_module_child(fixture.resolution, fixture.parent, "child", fixture.bundle,
+    EXPECT_THROW(link_module_child(fixture.resolution, fixture.parent, "child",
+                                   fixture.child_bundle,
                                    fixture.version), std::invalid_argument);
 }
 
@@ -309,7 +357,8 @@ TEST(ProgramModuleTest, RejectsDescriptorVersionSubstitution) {
     resolution.root               = substituted_parent.coordinate();
     resolution.modules.front()    = substituted_parent;
 
-    EXPECT_THROW(link_module_child(resolution, substituted_parent, "child", fixture.bundle, forged),
+    EXPECT_THROW(link_module_child(resolution, substituted_parent, "child", fixture.child_bundle,
+                                   forged),
                  std::invalid_argument);
 }
 
@@ -326,7 +375,7 @@ TEST(ProgramModuleTest, RejectsChildPolicyAuthorityWiderThanParent) {
         .budget_ceiling(BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1});
     const auto broad_policy = std::move(policy_builder).build();
     const ProgramVersion broad_version(
-        ProgramVersionData{fixture.bundle.id(), fixture.version.admission_profile(), broad_policy, {},
+        ProgramVersionData{fixture.child_bundle.id(), fixture.version.admission_profile(), broad_policy, {},
                            "tenant:module",
                            CoreMaterializationReceipt{"compiler:module",
                                                       fixture.version.admission_profile().registry_fingerprint(),
@@ -346,7 +395,7 @@ TEST(ProgramModuleTest, RejectsChildPolicyAuthorityWiderThanParent) {
     resolution.root = parent.coordinate();
     resolution.modules.push_back(parent);
 
-    EXPECT_THROW(link_module_child(resolution, parent, "child", fixture.bundle, broad_version),
+    EXPECT_THROW(link_module_child(resolution, parent, "child", fixture.child_bundle, broad_version),
                  std::invalid_argument);
 }
 
@@ -355,9 +404,38 @@ TEST(ProgramModuleTest, WholeCompositionValidatesBeforeChildDispatch) {
     const ProgramComposition composition{
         fixture.parent,
         fixture.resolution,
-        {ChildProgramBinding{"child", fixture.bundle, fixture.version}}};
+        {ChildProgramBinding{"child", fixture.child_bundle, fixture.version}}};
 
     EXPECT_NO_THROW(validate_program_composition(fixture.bundle, composition));
+}
+
+TEST(ProgramModuleTest, WholeCompositionAccountsForOneParallelMapReservation) {
+    auto fixture = make_fixture("tenant:module", "child", 1);
+    const ProgramComposition composition{
+        fixture.parent,
+        fixture.resolution,
+        {ChildProgramBinding{"child", fixture.child_bundle, fixture.version}}};
+
+    EXPECT_NO_THROW(validate_program_composition(fixture.bundle, composition));
+}
+TEST(ProgramModuleTest, WholeCompositionChargesParallelMapInFlightNotItemCount) {
+    auto fixture = make_fixture("tenant:module", "child", 3, 2, 6, 2, 30, 3);
+    const ProgramComposition composition{
+        fixture.parent,
+        fixture.resolution,
+        {ChildProgramBinding{"child", fixture.child_bundle, fixture.version}}};
+
+    EXPECT_NO_THROW(validate_program_composition(fixture.bundle, composition));
+}
+
+TEST(ProgramModuleTest, WholeCompositionRejectsParallelMapReservationsBeyondParentAllocation) {
+    auto fixture = make_fixture("tenant:module", "child", 3);
+    const ProgramComposition composition{
+        fixture.parent,
+        fixture.resolution,
+        {ChildProgramBinding{"child", fixture.child_bundle, fixture.version}}};
+
+    EXPECT_THROW(validate_program_composition(fixture.bundle, composition), std::invalid_argument);
 }
 
 TEST(ProgramModuleTest, WholeCompositionRejectsUndeclaredSpawnBinding) {
@@ -365,7 +443,7 @@ TEST(ProgramModuleTest, WholeCompositionRejectsUndeclaredSpawnBinding) {
     const ProgramComposition composition{
         fixture.parent,
         fixture.resolution,
-        {ChildProgramBinding{"child", fixture.bundle, fixture.version}}};
+        {ChildProgramBinding{"child", fixture.child_bundle, fixture.version}}};
 
     EXPECT_THROW(validate_program_composition(fixture.bundle, composition), std::invalid_argument);
 }
@@ -375,8 +453,8 @@ TEST(ProgramModuleTest, WholeCompositionDeniesChildIdentityCollision) {
     const ProgramComposition composition{
         fixture.parent,
         fixture.resolution,
-        {ChildProgramBinding{"child", fixture.bundle, fixture.version},
-         ChildProgramBinding{"child", fixture.bundle, fixture.version}}};
+        {ChildProgramBinding{"child", fixture.child_bundle, fixture.version},
+         ChildProgramBinding{"child", fixture.child_bundle, fixture.version}}};
 
     EXPECT_THROW(validate_program_composition(fixture.bundle, composition), std::invalid_argument);
 }

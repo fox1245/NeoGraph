@@ -138,6 +138,87 @@ std::optional<json> json_path_value(const json& value, std::string_view path) {
     return current;
 }
 
+std::optional<std::vector<std::string>> decode_json_pointer(std::string_view path) {
+    if (path.empty()) return std::vector<std::string>{};
+    if (path.front() != '/') return std::nullopt;
+
+    std::vector<std::string> tokens;
+    std::size_t              begin = 1;
+    while (begin <= path.size()) {
+        const auto end = path.find('/', begin);
+        const auto part = path.substr(
+            begin, end == std::string_view::npos ? path.size() - begin : end - begin);
+        std::string decoded;
+        decoded.reserve(part.size());
+        for (std::size_t index = 0; index < part.size(); ++index) {
+            if (part[index] != '~') {
+                decoded.push_back(part[index]);
+                continue;
+            }
+            if (index + 1 == part.size() ||
+                (part[index + 1] != '0' && part[index + 1] != '1'))
+                return std::nullopt;
+            decoded.push_back(part[index + 1] == '0' ? '~' : '/');
+            ++index;
+        }
+        tokens.push_back(std::move(decoded));
+        if (end == std::string_view::npos) break;
+        begin = end + 1;
+    }
+    return tokens;
+}
+
+bool json_array_index(std::string_view token, std::size_t& result) {
+    if (token.empty()) return false;
+    std::size_t value = 0;
+    for (const char character : token) {
+        if (character < '0' || character > '9') return false;
+        const auto digit = static_cast<std::size_t>(character - '0');
+        if (value > (std::numeric_limits<std::size_t>::max() - digit) / 10) return false;
+        value = value * 10 + digit;
+    }
+    result = value;
+    return true;
+}
+
+bool assign_json_pointer(json&&                         target,
+                         const std::vector<std::string>& tokens,
+                         std::size_t                     index,
+                         json                            value) {
+    if (index == tokens.size()) {
+        target = std::move(value);
+        return true;
+    }
+    if (target.is_null()) {
+        std::size_t array_index = 0;
+        target = json_array_index(tokens[index], array_index) ? json::array() : json::object();
+    }
+    if (target.is_object())
+        return assign_json_pointer(target[tokens[index]], tokens, index + 1, std::move(value));
+    if (!target.is_array()) return false;
+
+    std::size_t array_index = 0;
+    if (!json_array_index(tokens[index], array_index) || array_index > target.size()) return false;
+    if (array_index == target.size()) target.push_back(nullptr);
+    try {
+        return assign_json_pointer(target.at(array_index), tokens, index + 1, std::move(value));
+    } catch (...) {
+        return false;
+    }
+}
+
+bool assign_json_pointer(json&                           target,
+                         const std::vector<std::string>& tokens,
+                         std::size_t                     index,
+                         json                            value) {
+    return assign_json_pointer(std::move(target), tokens, index, std::move(value));
+}
+
+bool assign_json_path(json& target, std::string_view path, json value) {
+    const auto tokens = decode_json_pointer(path);
+    return tokens && assign_json_pointer(target, *tokens, 0, std::move(value));
+}
+
 bool condition_matches(const json& state, const json& condition) {
     if (!condition.is_object()) return false;
     if (condition.contains("all")) {
@@ -1099,6 +1180,335 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         co_return result;
                     }
                     result.output.push_back(std::move(mapped.output));
+                }
+                co_return result;
+            }
+
+            if (op == ProgramOperationKind::ParallelMap) {
+                const auto& map_spec = operation.parallel_map();
+                if (!map_spec || map_spec->max_in_flight == 0 || map_spec->max_output_bytes == 0)
+                    throw_runtime_diagnostic(
+                        "P_RUNTIME_PLAN", "parallel_map has an invalid bounded map contract",
+                        json{{"operation_id", operation_id}});
+                const auto& map = *map_spec;
+
+                const auto cancellation = [&]() {
+                    PlanExecution cancelled = plan_failure(
+                        ProgramTerminalStatus::Cancelled, "P_RUNTIME_CANCELLED",
+                        "Program cancelled while executing parallel_map", operation_id);
+                    cancelled.output = json::array();
+                    return cancelled;
+                };
+
+                json items;
+                if (map.item_source == ProgramParallelMapItemSource::Literal) {
+                    items = map.literal_items;
+                } else {
+                    const auto selected = json_path_value(state, map.input_field);
+                    if (!selected || !selected->is_array())
+                        co_return plan_failure(
+                            ProgramTerminalStatus::Failed, "P_PARALLEL_MAP_SOURCE",
+                            "parallel_map input item source did not resolve to an array",
+                            operation_id);
+                    items = std::move(*selected);
+                }
+                if (!items.is_array())
+                    throw_runtime_diagnostic(
+                        "P_RUNTIME_PLAN", "parallel_map literal item source is not an array",
+                        json{{"operation_id", operation_id}});
+                if (items.size() > map.max_items)
+                    co_return plan_failure(
+                        ProgramTerminalStatus::BudgetExhausted, "P_PARALLEL_MAP_BOUND",
+                        "parallel_map item source exceeds its immutable max_items bound",
+                        operation_id);
+                if (map.max_in_flight > control->granted_budget.max_concurrency)
+                    co_return plan_failure(
+                        ProgramTerminalStatus::BudgetExhausted, "P_CONCURRENCY_BUDGET",
+                        "parallel_map fan-out exceeds its admitted concurrency budget",
+                        operation_id);
+                if (operation_token->is_cancelled()) co_return cancellation();
+
+
+                PlanExecution result;
+                result.output = json::array();
+                if (items.empty()) {
+                    if (result.output.dump().size() > map.max_output_bytes)
+                        co_return plan_failure(
+                            ProgramTerminalStatus::BudgetExhausted, "P_PARALLEL_MAP_OUTPUT",
+                            "parallel_map output exceeds its immutable byte bound", operation_id);
+                    co_return result;
+                }
+
+                struct ParallelMapState {
+                    std::mutex                                       mutex;
+                    std::vector<std::optional<PlanExecution>>       results;
+                    std::vector<std::shared_ptr<RunControl>>        children;
+                    std::exception_ptr                              error;
+                    std::optional<std::size_t>                      first_fail_fast_failure;
+                    std::size_t                                     next_item = 0;
+                    std::size_t                                     workers_remaining = 0;
+                    bool                                            stop_launching = false;
+                    std::shared_ptr<asio::steady_timer>             timer;
+                };
+
+                const auto executor = co_await asio::this_coro::executor;
+                const auto completion_executor = asio::make_strand(executor);
+                const auto worker_count =
+                    std::min<std::size_t>(map.max_in_flight, items.size());
+                auto parallel_map = std::make_shared<ParallelMapState>();
+                parallel_map->results.resize(items.size());
+                parallel_map->workers_remaining = worker_count;
+                parallel_map->timer =
+                    std::make_shared<asio::steady_timer>(completion_executor);
+                parallel_map->timer->expires_at((asio::steady_timer::time_point::max)());
+
+                std::string execution_key_prefix;
+                {
+                    std::lock_guard lock(plan_mutex);
+                    const auto base = thread_id + ":" + operation_id + ":parallel-map";
+                    const auto ordinal = spawn_occurrences[base]++;
+                    execution_key_prefix = base + ":" + std::to_string(ordinal);
+                }
+
+                auto cancel_children =
+                    [](const std::vector<std::shared_ptr<RunControl>>& children) {
+                        for (const auto& child : children)
+                            if (child) (void)child->cancel(CancellationCause::ParentTerminal);
+                    };
+
+                auto worker = [&, parallel_map]() -> asio::awaitable<void> {
+                    while (true) {
+                        std::size_t item_index = 0;
+                        {
+                            std::lock_guard lock(parallel_map->mutex);
+                            if (parallel_map->stop_launching ||
+                                operation_token->is_cancelled() ||
+                                parallel_map->next_item == items.size())
+                                break;
+                            item_index = parallel_map->next_item++;
+                        }
+
+                        PlanExecution mapped;
+                        const auto selected =
+                            json_path_value(items.at(item_index), map.input_from_field);
+                        if (!selected) {
+                            mapped = plan_failure(
+                                ProgramTerminalStatus::Failed, "P_PARALLEL_MAP_INPUT",
+                                "parallel_map input binding source did not resolve",
+                                operation_id);
+                        } else {
+                            json child_input = json::object();
+                            if (!assign_json_path(child_input, map.input_to_field,
+                                                  std::move(*selected))) {
+                                mapped = plan_failure(
+                                    ProgramTerminalStatus::Failed, "P_PARALLEL_MAP_INPUT",
+                                    "parallel_map input binding target could not be assigned",
+                                    operation_id);
+                            } else {
+                                if (operation_token->is_cancelled()) {
+                                    mapped = cancellation();
+                                } else {
+                                    bool reserved = false;
+                                    auto active =
+                                        active_concurrency.load(std::memory_order_relaxed);
+                                    while (active < control->granted_budget.max_concurrency) {
+                                        if (active_concurrency.compare_exchange_weak(
+                                                active, active + 1, std::memory_order_relaxed,
+                                                std::memory_order_relaxed)) {
+                                            reserved = true;
+                                            update_peak(active + 1);
+                                            break;
+                                        }
+                                    }
+                                    if (!reserved) {
+                                        mapped = plan_failure(
+                                            ProgramTerminalStatus::BudgetExhausted,
+                                            "P_CONCURRENCY_BUDGET",
+                                            "parallel_map child dispatch exceeds its admitted "
+                                            "concurrency budget",
+                                            operation_id);
+                                    } else if (operation_token->is_cancelled()) {
+                                        active_concurrency.fetch_sub(1,
+                                                                     std::memory_order_relaxed);
+                                        mapped = cancellation();
+                                    } else {
+                                        try {
+                                            auto child = control->launch_child(
+                                                map.child_binding, std::move(child_input),
+                                                operation_id,
+                                                execution_key_prefix + ":" +
+                                                    std::to_string(item_index));
+                                            bool cancel_child = false;
+                                            {
+                                                std::lock_guard lock(parallel_map->mutex);
+                                                parallel_map->children.push_back(child);
+                                                cancel_child = parallel_map->stop_launching;
+                                            }
+                                            if (cancel_child)
+                                                (void)child->cancel(
+                                                    CancellationCause::ParentTerminal);
+                                            mapped = plan_result_from_child(
+                                                co_await child->wait_async());
+                                        } catch (...) {
+                                            active_concurrency.fetch_sub(
+                                                1, std::memory_order_relaxed);
+                                            throw;
+                                        }
+                                        active_concurrency.fetch_sub(1, std::memory_order_relaxed);
+                                    }
+                                    if (mapped.status == ProgramTerminalStatus::Completed) {
+                                        const auto output = json_path_value(
+                                            mapped.output, map.output_from_field);
+                                        if (!output) {
+                                            auto failure = plan_failure(
+                                                ProgramTerminalStatus::Failed,
+                                                "P_PARALLEL_MAP_OUTPUT",
+                                                "parallel_map output binding source did not resolve",
+                                                operation_id);
+                                            failure.execution_trace =
+                                                std::move(mapped.execution_trace);
+                                            mapped = std::move(failure);
+                                        } else {
+                                            mapped.output = std::move(*output);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        const bool failed = mapped.status != ProgramTerminalStatus::Completed;
+                        std::vector<std::shared_ptr<RunControl>> children_to_cancel;
+                        {
+                            std::lock_guard lock(parallel_map->mutex);
+                            parallel_map->results[item_index] = std::move(mapped);
+                            if (failed &&
+                                map.failure_policy ==
+                                    ProgramParallelMapFailurePolicy::FailFast &&
+                                !parallel_map->stop_launching) {
+                                parallel_map->stop_launching = true;
+                                parallel_map->first_fail_fast_failure = item_index;
+                                children_to_cancel = parallel_map->children;
+                            }
+                        }
+                        cancel_children(children_to_cancel);
+                    }
+                    co_return;
+                };
+
+                for (std::size_t worker_index = 0; worker_index < worker_count; ++worker_index) {
+                    asio::co_spawn(
+                        executor, worker(),
+                        asio::bind_executor(
+                            completion_executor,
+                            [parallel_map, cancel_children](std::exception_ptr error) {
+                                std::vector<std::shared_ptr<RunControl>> children_to_cancel;
+                                bool all_done = false;
+                                {
+                                    std::lock_guard lock(parallel_map->mutex);
+                                    if (error && !parallel_map->error) {
+                                        parallel_map->error = error;
+                                        parallel_map->stop_launching = true;
+                                        children_to_cancel = parallel_map->children;
+                                    }
+                                    all_done = --parallel_map->workers_remaining == 0;
+                                }
+                                cancel_children(children_to_cancel);
+                                if (all_done) parallel_map->timer->cancel();
+                            }));
+                }
+
+                co_await asio::co_spawn(
+                    completion_executor,
+                    [parallel_map]() -> asio::awaitable<void> {
+                        asio::error_code error;
+                        co_await parallel_map->timer->async_wait(
+                            asio::redirect_error(asio::use_awaitable, error));
+                    },
+                    asio::use_awaitable);
+
+                std::exception_ptr                        parallel_error;
+                std::vector<std::optional<PlanExecution>> map_results;
+                std::optional<std::size_t>                 first_fail_fast_failure;
+                {
+                    std::lock_guard lock(parallel_map->mutex);
+                    parallel_error = parallel_map->error;
+                    map_results = std::move(parallel_map->results);
+                    first_fail_fast_failure = parallel_map->first_fail_fast_failure;
+                }
+                if (parallel_error) std::rethrow_exception(parallel_error);
+                if (operation_token->is_cancelled()) {
+                    for (auto& mapped : map_results) {
+                        if (!mapped) continue;
+                        result.execution_trace.insert(
+                            result.execution_trace.end(),
+                            std::make_move_iterator(mapped->execution_trace.begin()),
+                            std::make_move_iterator(mapped->execution_trace.end()));
+                    }
+                    auto cancelled = cancellation();
+                    cancelled.execution_trace = std::move(result.execution_trace);
+                    co_return cancelled;
+                }
+
+
+                std::optional<std::size_t> first_failure =
+                    map.failure_policy == ProgramParallelMapFailurePolicy::FailFast
+                        ? first_fail_fast_failure
+                        : std::optional<std::size_t>{};
+                std::uint64_t output_bytes = 2; // '[' and ']'
+                std::size_t    output_items = 0;
+                for (std::size_t index = 0; index < map_results.size(); ++index) {
+                    auto& mapped = map_results[index];
+                    if (!mapped) continue;
+                    result.execution_trace.insert(
+                        result.execution_trace.end(),
+                        std::make_move_iterator(mapped->execution_trace.begin()),
+                        std::make_move_iterator(mapped->execution_trace.end()));
+                    if (mapped->status != ProgramTerminalStatus::Completed && !first_failure)
+                        first_failure = index;
+
+                    json output = mapped->status == ProgramTerminalStatus::Completed
+                                      ? std::move(mapped->output)
+                                      : json();
+                    const auto encoded_size =
+                        static_cast<std::uint64_t>(output.dump().size());
+                    const auto separator_bytes = output_items == 0 ? 0ULL : 1ULL;
+                    if (output_bytes > map.max_output_bytes ||
+                        separator_bytes > map.max_output_bytes - output_bytes ||
+                        encoded_size >
+                            map.max_output_bytes - output_bytes - separator_bytes) {
+                        auto failure = plan_failure(
+                            ProgramTerminalStatus::BudgetExhausted, "P_PARALLEL_MAP_OUTPUT",
+                            "parallel_map output exceeds its immutable byte bound", operation_id);
+                        failure.output = json::array();
+                        failure.execution_trace = std::move(result.execution_trace);
+                        co_return failure;
+                    }
+                    output_bytes += separator_bytes + encoded_size;
+                    ++output_items;
+                    result.output.push_back(std::move(output));
+                }
+
+                if (!first_failure) co_return result;
+                const auto& failed = map_results[*first_failure];
+                if (!failed)
+                    throw_runtime_diagnostic(
+                        "P_RUNTIME_PARALLEL_MAP",
+                        "parallel_map selected a missing failed item result",
+                        json{{"operation_id", operation_id}, {"item_index", *first_failure}});
+                result.status = failed->status;
+                result.interrupt = std::move(failed->interrupt);
+                result.failure = std::move(failed->failure);
+                if (!result.failure) {
+                    result.failure = ProgramFailure{
+                        "P_PARALLEL_MAP_CHILD", "Mapped child did not complete", operation_id,
+                        "", 0, json::object()};
+                } else {
+                    auto& witness = result.failure->witness;
+                    if (!witness.is_object()) witness = json::object();
+                    witness["item_index"] = static_cast<std::uint64_t>(*first_failure);
+                    if (result.failure->operation_id != operation_id)
+                        witness["child_operation_id"] = result.failure->operation_id;
+                    result.failure->operation_id = operation_id;
                 }
                 co_return result;
             }

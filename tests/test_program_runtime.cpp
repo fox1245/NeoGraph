@@ -33,13 +33,27 @@ using namespace neograph::program;
 std::atomic<unsigned> completed_calls{0};
 std::atomic<unsigned> interrupt_calls{0};
 std::atomic<unsigned> blocking_calls{0};
+std::atomic<unsigned> blocking_active{0};
+std::atomic<unsigned> blocking_peak{0};
 std::atomic<unsigned> followup_calls{0};
 std::atomic<unsigned> stubborn_calls{0};
 std::atomic<unsigned> scheduler_blocking_calls{0};
+std::atomic<unsigned> map_fail_first_calls{0};
+std::shared_ptr<std::barrier<>> overlap_barrier;
+std::shared_ptr<std::promise<void>> overlap_ready;
+std::atomic<unsigned> map_fail_first_active{0};
+std::atomic<unsigned> window_calls{0};
+std::atomic<unsigned> window_active{0};
+std::atomic<unsigned> window_peak{0};
+std::atomic<unsigned> window_completed{0};
+std::atomic<unsigned> window_second_started_before_completion{0};
+std::shared_ptr<std::barrier<>> window_first_barrier;
 
 std::string digest(char value) {
     return "sha256:" + std::string(64, value);
 }
+
+
 
 ExecutableManifest manifest(ExecutableKind kind, std::string name, char implementation) {
     return ExecutableManifest{{kind, std::move(name), "1.0.0", digest(implementation)},
@@ -66,6 +80,23 @@ public:
 private:
     std::string name_;
 };
+class MapEchoNode final : public GraphNode {
+public:
+    explicit MapEchoNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        ++completed_calls;
+        NodeOutput output;
+        output.writes.push_back(ChannelWrite{"value", input.state.get("item")});
+        co_return output;
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
 
 class InterruptNode final : public GraphNode {
 public:
@@ -134,6 +165,44 @@ private:
     std::string name_;
 };
 
+class ActiveCallGuard final {
+public:
+    explicit ActiveCallGuard(std::atomic<unsigned>& active) : active_(active) {}
+    ~ActiveCallGuard() { active_.fetch_sub(1, std::memory_order_relaxed); }
+
+private:
+    std::atomic<unsigned>& active_;
+};
+
+class MapFailFirstNode final : public GraphNode {
+public:
+    explicit MapFailFirstNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        const auto call = map_fail_first_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (call == 1) {
+            auto timer = asio::steady_timer(co_await asio::this_coro::executor);
+            timer.expires_after(std::chrono::milliseconds(1));
+            co_await timer.async_wait(asio::use_awaitable);
+            throw std::runtime_error("map fail-fast sentinel");
+        }
+        map_fail_first_active.fetch_add(1, std::memory_order_relaxed);
+        ActiveCallGuard active_guard(map_fail_first_active);
+        auto            timer = asio::steady_timer(co_await asio::this_coro::executor);
+        timer.expires_after(std::chrono::seconds(5));
+        co_await timer.async_wait(
+            asio::bind_cancellation_slot(input.ctx.cancel_token->slot(), asio::use_awaitable));
+        co_return NodeOutput{};
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+
+
 class BlockingNode final : public GraphNode {
 public:
     explicit BlockingNode(std::string name,
@@ -142,7 +211,14 @@ public:
 
     asio::awaitable<NodeOutput> run(NodeInput input) override {
         ++blocking_calls;
-        auto timer = asio::steady_timer(co_await asio::this_coro::executor);
+        const auto active = blocking_active.fetch_add(1, std::memory_order_relaxed) + 1;
+        auto       peak   = blocking_peak.load(std::memory_order_relaxed);
+        while (peak < active &&
+               !blocking_peak.compare_exchange_weak(peak, active, std::memory_order_relaxed,
+                                                     std::memory_order_relaxed)) {
+        }
+        ActiveCallGuard active_guard(blocking_active);
+        auto            timer = asio::steady_timer(co_await asio::this_coro::executor);
         timer.expires_after(duration_);
         co_await timer.async_wait(
             asio::bind_cancellation_slot(input.ctx.cancel_token->slot(), asio::use_awaitable));
@@ -155,6 +231,64 @@ private:
     std::string name_;
     std::chrono::milliseconds duration_;
 };
+class BarrierNode final : public GraphNode {
+public:
+    explicit BarrierNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        ++blocking_calls;
+        const auto active = blocking_active.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (active == 2 && overlap_ready) overlap_ready->set_value();
+        auto peak = blocking_peak.load(std::memory_order_relaxed);
+        while (peak < active &&
+               !blocking_peak.compare_exchange_weak(peak, active, std::memory_order_relaxed,
+                                                     std::memory_order_relaxed)) {
+        }
+        ActiveCallGuard active_guard(blocking_active);
+        if (overlap_barrier) overlap_barrier->arrive_and_wait();
+        auto timer = asio::steady_timer(co_await asio::this_coro::executor);
+        timer.expires_after(std::chrono::seconds(5));
+        co_await timer.async_wait(
+            asio::bind_cancellation_slot(input.ctx.cancel_token->slot(), asio::use_awaitable));
+        co_return NodeOutput{};
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+class WindowedNode final : public GraphNode {
+public:
+    explicit WindowedNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        const auto call = window_calls.fetch_add(1) + 1;
+        const auto active = window_active.fetch_add(1) + 1;
+        auto       peak = window_peak.load();
+        while (peak < active &&
+               !window_peak.compare_exchange_weak(peak, active)) {
+        }
+        ActiveCallGuard active_guard(window_active);
+        if (call <= 2 && window_first_barrier) window_first_barrier->arrive_and_wait();
+        if (call == 3 && window_completed.load() == 0)
+            ++window_second_started_before_completion;
+
+        auto timer = asio::steady_timer(co_await asio::this_coro::executor);
+        timer.expires_after(std::chrono::milliseconds(20));
+        co_await timer.async_wait(
+            asio::bind_cancellation_slot(input.ctx.cancel_token->slot(), asio::use_awaitable));
+        if (call <= 2) ++window_completed;
+        co_return NodeOutput{};
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+
 class StubbornNode final : public GraphNode {
 public:
     explicit StubbornNode(std::string name) : name_(std::move(name)) {}
@@ -217,6 +351,12 @@ RegistrySnapshot runtime_registry() {
         },
         json{{"type", "object"}}, json::object());
     builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-map-echo", 'e'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<MapEchoNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
         manifest(ExecutableKind::Node, "runtime-interrupt", '2'),
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<InterruptNode>(name);
@@ -241,9 +381,28 @@ RegistrySnapshot runtime_registry() {
         },
         json{{"type", "object"}}, json::object());
     builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-map-fail-first", 'd'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<MapFailFirstNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+
+    builder.add_node(
         manifest(ExecutableKind::Node, "runtime-blocking", '5'),
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<BlockingNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-barrier", 'f'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<BarrierNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-windowed", '0'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<WindowedNode>(name);
         },
         json{{"type", "object"}}, json::object());
     builder.add_node(
@@ -320,6 +479,21 @@ json program_document(std::string node_type) {
         {"root",
          json{{"op", "call_core"}, {"name", "main"}, {"definition", std::move(definition)}}},
         {"declared_budget_requirements", budget_requirements()}};
+}
+
+json parallel_map_child_document(std::string node_type) {
+    auto document = program_document(std::move(node_type));
+    document["declared_budget_requirements"][0]["maximum"] = 3333;
+    document["declared_budget_requirements"][1]["maximum"] = 333;
+    document["declared_budget_requirements"][2]["maximum"] = 333;
+    document["declared_budget_requirements"][5]["maximum"] = 6;
+    return document;
+}
+json parallel_map_echo_child_document() {
+    auto document = parallel_map_child_document("runtime-map-echo");
+    document["root"]["definition"]["channels"]["item"] =
+        json{{"reducer", "runtime-overwrite"}, {"initial", json::object()}};
+    return document;
 }
 json failing_fanout_program_document(std::string completed_name = "completed",
                                      std::string failing_name   = "failing") {
@@ -436,7 +610,7 @@ struct AdmittedRuntime {
             .semantic_version("1.0.0")
             .registry(registry)
             .mode(AdmissionMode::MultiTenant)
-            .max_program_schema_version(PROGRAM_SCHEMA_VERSION_V2)
+            .max_program_schema_version(PROGRAM_SCHEMA_VERSION_V3)
             .allow_source_kind(SourceKind::CppBuilder)
             .allow_effect_mode(EffectMode::Brokered);
         for (const auto& identity : registry.identities())
@@ -622,6 +796,37 @@ LinkedChildAdmission make_durable_spawn_child(
     parent_document["declared_budget_requirements"][8]["maximum"] = 1;
     return link_child_versions(fixture, fixture.admit_document(std::move(parent_document)),
                                fixture.admit(std::move(child_node_type)));
+}
+
+json parallel_map_document(json          item_source,
+                           std::uint64_t max_items,
+                           std::string   failure_policy = "fail_fast",
+                           std::uint64_t max_output_bytes = 65536) {
+    auto document = program_document("runtime-completed");
+    document["program_schema_version"] = PROGRAM_SCHEMA_VERSION_V3;
+    const auto definition = document["root"]["definition"];
+    document["root"] = json{
+        {"op", "parallel_map"},
+        {"name", "main"},
+        {"definition", definition},
+        {"item_source", std::move(item_source)},
+        {"child_binding", "child"},
+        {"input_binding",
+         json{{"from", json{{"field", ""}}}, {"to", json{{"field", "/item"}}}}},
+        {"output_binding", json{{"from", json{{"field", "/channels/value/value"}}}}},
+        {"max_items", max_items},
+        {"max_in_flight", std::min<std::uint64_t>(2, max_items)},
+        {"max_output_bytes", max_output_bytes},
+        {"failure_policy", std::move(failure_policy)}};
+    document["declared_budget_requirements"][3]["minimum"] =
+        std::min<std::uint64_t>(2, max_items);
+    document["declared_budget_requirements"][3]["maximum"] =
+        std::min<std::uint64_t>(2, max_items);
+    document["declared_budget_requirements"][7]["minimum"] = 1;
+    document["declared_budget_requirements"][7]["maximum"] = 1;
+    document["declared_budget_requirements"][8]["minimum"] = max_items;
+    document["declared_budget_requirements"][8]["maximum"] = max_items;
+    return document;
 }
 
 
@@ -2933,6 +3138,27 @@ TEST(ProgramRuntimeTest, MapEvaluatesEveryItemAndCollectsOutputs) {
     EXPECT_EQ(completed_calls.load(), 2U);
 }
 
+TEST(ProgramRuntimeTest, MapExecutesItemsSerially) {
+    blocking_calls.store(0);
+    blocking_active.store(0);
+    blocking_peak.store(0);
+    AdmittedRuntime fixture(2);
+    const auto result = run_orchestration(
+        fixture,
+        orchestration_document(
+            json{{"op", "map"},
+                 {"items", json::array({1, 2})},
+                 {"body", json{{"op", "call_core"}}}},
+            "runtime-short-blocking"),
+        json::object(), "trace-map-serial");
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(blocking_calls.load(), 2U);
+    EXPECT_EQ(blocking_peak.load(), 1U);
+    EXPECT_EQ(blocking_active.load(), 0U);
+}
+
+
 TEST(ProgramRuntimeTest, AwaitTimeoutCancelsTheChildOperation) {
     AdmittedRuntime fixture(2);
     const auto started = std::chrono::steady_clock::now();
@@ -3037,6 +3263,27 @@ TEST(ProgramRuntimeTest, ChildStartPinsReceiptAndPropagatesParentCancellation) {
     EXPECT_EQ(parent.cancel(), true);
     EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
     EXPECT_EQ(child.wait().status(), ProgramTerminalStatus::Cancelled);
+}
+TEST(ProgramRuntimeTest, PlannerCannotOverrideResolvedChildBudget) {
+    AdmittedRuntime fixture(2);
+    const auto linked = make_linked_child(fixture);
+    auto       parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                           "trace-planner-budget-parent", {}});
+
+    try {
+        (void)fixture.runtime->start_child(
+            "tenant:runtime", parent, linked.receipt, linked.child_version,
+            ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 21, 0, 0, 0},
+                               "trace-planner-budget-override", {}});
+        FAIL() << "Expected the planner-supplied child budget to be rejected";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_CHILD_BUDGET");
+    }
+
+    EXPECT_TRUE(parent.cancel());
+    EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
 }
 TEST(ProgramRuntimeTest, RecursiveChildGrantsAttenuateToZeroAtTheConfiguredBoundary) {
     blocking_calls.store(0);
@@ -3199,6 +3446,67 @@ TEST(ProgramRuntimeTest, ChildResumeReclaimsGlobalQuotaAfterACompetingChildStops
     EXPECT_EQ(interrupted_parent.wait().status(), ProgramTerminalStatus::Cancelled);
     EXPECT_TRUE(active_parent.cancel());
     EXPECT_EQ(active_parent.wait().status(), ProgramTerminalStatus::Cancelled);
+}
+
+TEST(ProgramRuntimeTest,
+     InterruptedChildReleasesParentConcurrencyUntilItsResumeIsActive) {
+    interrupt_calls.store(0);
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(2);
+
+    auto parent_document = program_document("runtime-blocking");
+    parent_document["program_schema_version"] = PROGRAM_SCHEMA_VERSION_V2;
+    parent_document["declared_budget_requirements"][4]["minimum"] = 2;
+    parent_document["declared_budget_requirements"][4]["maximum"] = 2;
+    parent_document["declared_budget_requirements"][7]["minimum"] = 1;
+    parent_document["declared_budget_requirements"][7]["maximum"] = 1;
+    parent_document["declared_budget_requirements"][8]["minimum"] = 2;
+    parent_document["declared_budget_requirements"][8]["maximum"] = 2;
+    const auto parent_version = fixture.admit_document(std::move(parent_document));
+    const auto interrupted_version =
+        fixture.admit_document(parallel_map_child_document("runtime-interrupt"));
+    const auto blocking_version =
+        fixture.admit_document(parallel_map_child_document("runtime-blocking"));
+    const auto child_budget = BudgetLimits{3333, 333, 333, 1, 1, 6, 0, 0, 0};
+    const auto interrupted_link =
+        link_child_versions(fixture, parent_version, interrupted_version, child_budget);
+    const auto blocking_link =
+        link_child_versions(fixture, parent_version, blocking_version, child_budget);
+
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 2},
+                          "trace-parent-concurrency-reclaim", {}});
+    auto interrupted_child = fixture.runtime->start_child(
+        "tenant:runtime", parent, interrupted_link.receipt, interrupted_link.child_version,
+        ProgramInvocation{json::object(), RunBudget{3333, 333, 333, 1, 1, 6, 0, 0, 0},
+                          "trace-interrupted-concurrency-child", {}});
+    const auto interrupted = interrupted_child.wait();
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+
+    auto active_child = fixture.runtime->start_child(
+        "tenant:runtime", parent, blocking_link.receipt, blocking_link.child_version,
+        ProgramInvocation{json::object(), RunBudget{3333, 333, 333, 1, 1, 6, 0, 0, 0},
+                          "trace-active-concurrency-child", {}});
+
+    try {
+        (void)fixture.runtime->resume(
+            "tenant:runtime", interrupted_child.run_id(),
+            resume_for(interrupted, json{{"decision", "approved"}}, "trace-concurrency-resume"));
+        FAIL() << "Expected active sibling concurrency to block child resume";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_CHILD_CONCURRENCY");
+    }
+
+    EXPECT_TRUE(active_child.cancel());
+    EXPECT_EQ(active_child.wait().status(), ProgramTerminalStatus::Cancelled);
+    const auto resumed = fixture.runtime->resume(
+        "tenant:runtime", interrupted_child.run_id(),
+        resume_for(interrupted, json{{"decision", "approved"}}, "trace-concurrency-resume"));
+    EXPECT_EQ(resumed.wait().status(), ProgramTerminalStatus::Completed);
+
+    EXPECT_TRUE(parent.cancel());
+    EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
 }
 
 
@@ -3513,4 +3821,397 @@ TEST(ProgramRuntimeTest, FailedChildPublicationReleasesParentReservation) {
     EXPECT_EQ(child.wait().status(), ProgramTerminalStatus::Cancelled);
     EXPECT_EQ(occupied.cancel(), true);
     EXPECT_EQ(occupied.wait().status(), ProgramTerminalStatus::Cancelled);
+}
+
+TEST(ProgramRuntimeTest, ParallelMapBindsInputAndReturnsOrderedBoundedChildOutputs) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2);
+    const auto items =
+        json::array({json{{"id", 1}}, json{{"id", 2}}, json{{"id", 3}}});
+    auto parent_document = parallel_map_document(
+        json{{"literal", json::array({json{{"id", 1}}, json{{"id", 2}}, json{{"id", 3}}})}},
+        3);
+    parent_document["root"]["item_source"] =
+        json{{"artifact", "input"}, {"field", "/items"}};
+    parent_document["declared_budget_requirements"][3]["maximum"] = 3;
+    parent_document["declared_budget_requirements"][4]["maximum"] = 4;
+    const auto linked = link_child_versions(
+        fixture, fixture.admit_document(std::move(parent_document)),
+        fixture.admit_document(parallel_map_child_document("runtime-completed")),
+        BudgetLimits{3333, 333, 333, 1, 1, 6, 0, 0, 0});
+
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json{{"items", items}},
+                          RunBudget{10000, 1000, 1000, 2, 4, 20, 0, 1, 3},
+                          "trace-parallel-map-input-output", {}});
+    const auto result = parent.wait();
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    const auto output = result.output();
+    ASSERT_TRUE(output.is_array());
+    ASSERT_EQ(output.size(), 3U);
+    EXPECT_EQ(output.at(0).get<std::string>(), "completed");
+    EXPECT_EQ(output.at(1).get<std::string>(), "completed");
+    EXPECT_EQ(output.at(2).get<std::string>(), "completed");
+    EXPECT_EQ(result.usage().peak_concurrency, 2U);
+    EXPECT_EQ(completed_calls.load(), 3U);
+    const auto children = parent.snapshot().children();
+    ASSERT_EQ(children.size(), 3U);
+    for (std::size_t index = 0; index < children.size(); ++index) {
+        EXPECT_EQ(children[index].state, ProgramChildState::Completed);
+        const json expected_input{{"item", items.at(index)}};
+        EXPECT_EQ(children[index].invocation.input, expected_input);
+    }
+}
+TEST(ProgramRuntimeTest, ParallelMapCollectPreservesInputOrdinalOutputOrder) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2);
+    const auto items =
+        json::array({json{{"id", 1}}, json{{"id", 2}}, json{{"id", 3}}});
+    auto parent_document = parallel_map_document(
+        json{{"literal", items}}, 3, "collect");
+    parent_document["declared_budget_requirements"][3]["maximum"] = 3;
+    parent_document["declared_budget_requirements"][4]["maximum"] = 4;
+    const auto linked = link_child_versions(
+        fixture, fixture.admit_document(std::move(parent_document)),
+        fixture.admit_document(parallel_map_echo_child_document()),
+        BudgetLimits{3333, 333, 333, 1, 1, 6, 0, 0, 0});
+
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(),
+                           RunBudget{10000, 1000, 1000, 2, 4, 20, 0, 1, 3},
+                           "trace-parallel-map-collect-order", {}});
+    const auto result = parent.wait();
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    ASSERT_TRUE(result.output().is_array());
+    ASSERT_EQ(result.output().size(), items.size());
+    for (std::size_t index = 0; index < items.size(); ++index)
+        EXPECT_EQ(result.output().at(index), items.at(index));
+    EXPECT_EQ(completed_calls.load(), 3U);
+}
+
+
+TEST(ProgramRuntimeTest, ParallelMapRejectsDynamicCollectionBeforeLaunchingChildren) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2);
+    auto parent_document = parallel_map_document(
+        json{{"artifact", "input"}, {"field", "/items"}}, 2);
+    const auto linked = link_child_versions(
+        fixture, fixture.admit_document(std::move(parent_document)),
+        fixture.admit_document(parallel_map_child_document("runtime-completed")),
+        BudgetLimits{3333, 333, 333, 1, 1, 6, 0, 0, 0});
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json{{"items", json::array({1, 2, 3})}},
+                          RunBudget{10000, 1000, 1000, 2, 1, 20, 0, 1, 2},
+                          "trace-parallel-map-oversized-input", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::BudgetExhausted);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_PARALLEL_MAP_BOUND");
+    EXPECT_EQ(result.failure()->operation_id, "root");
+    EXPECT_EQ(completed_calls.load(), 0U);
+    EXPECT_TRUE(fixture.runtime->reconnect("tenant:runtime", result.run_id())
+                    .snapshot()
+                    .children()
+                    .empty());
+}
+TEST(ProgramRuntimeTest, ParallelMapRejectsMissingInputArtifactFieldBeforeChildLaunch) {
+    AdmittedRuntime fixture(2);
+    auto parent_document = parallel_map_document(
+        json{{"artifact", "input"}, {"field", "/missing"}}, 1);
+    const auto linked = link_child_versions(
+        fixture, fixture.admit_document(std::move(parent_document)),
+        fixture.admit_document(parallel_map_child_document("runtime-completed")),
+        BudgetLimits{3333, 333, 333, 1, 1, 6, 0, 0, 0});
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 1, 1},
+                          "trace-parallel-map-missing-input", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_PARALLEL_MAP_SOURCE");
+    EXPECT_TRUE(fixture.runtime->reconnect("tenant:runtime", result.run_id())
+                    .snapshot()
+                    .children()
+                    .empty());
+}
+
+TEST(ProgramRuntimeTest, ParallelMapRejectsMissingChildOutputField) {
+    AdmittedRuntime fixture(2);
+    auto parent_document =
+        parallel_map_document(json{{"literal", json::array({1})}}, 1);
+    parent_document["root"]["output_binding"]["from"]["field"] = "/missing";
+    const auto linked = link_child_versions(
+        fixture, fixture.admit_document(std::move(parent_document)),
+        fixture.admit_document(parallel_map_child_document("runtime-completed")),
+        BudgetLimits{3333, 333, 333, 1, 1, 6, 0, 0, 0});
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 1, 1},
+                          "trace-parallel-map-missing-output", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_PARALLEL_MAP_OUTPUT");
+    ASSERT_EQ(fixture.runtime->reconnect("tenant:runtime", result.run_id())
+                  .snapshot()
+                  .children()
+                  .size(),
+              1U);
+}
+TEST(ProgramRuntimeTest, ParallelMapRejectsChildOutputContractMismatch) {
+    AdmittedRuntime fixture(2);
+    auto parent_document =
+        parallel_map_document(json{{"literal", json::array({1})}}, 1);
+    auto child_document = parallel_map_child_document("runtime-completed");
+    child_document["output_contract"]["schema"] =
+        json{{"type", "object"}, {"required", json::array({"must"})}};
+    const auto linked = link_child_versions(
+        fixture, fixture.admit_document(std::move(parent_document)),
+        fixture.admit_document(std::move(child_document)),
+        BudgetLimits{3333, 333, 333, 1, 1, 6, 0, 0, 0});
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 1, 1},
+                          "trace-parallel-map-output-contract", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_OUTPUT_CONTRACT");
+    ASSERT_EQ(fixture.runtime->reconnect("tenant:runtime", result.run_id())
+                  .snapshot()
+                  .children()
+                  .size(),
+              1U);
+}
+
+
+TEST(ProgramRuntimeTest, ParallelMapBuildsNestedArrayInputBindings) {
+    AdmittedRuntime fixture(2);
+    auto parent_document =
+        parallel_map_document(json{{"literal", json::array({json{{"id", 7}}})}}, 1);
+    parent_document["root"]["input_binding"]["to"]["field"] = "/payload/0";
+    const auto linked = link_child_versions(
+        fixture, fixture.admit_document(std::move(parent_document)),
+        fixture.admit_document(parallel_map_child_document("runtime-completed")),
+        BudgetLimits{3333, 333, 333, 1, 1, 6, 0, 0, 0});
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 1, 1},
+                          "trace-parallel-map-array-input", {}});
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    const auto children = fixture.runtime->reconnect("tenant:runtime", result.run_id()).snapshot().children();
+    ASSERT_EQ(children.size(), 1U);
+    const json expected_input{{"payload", json::array({json{{"id", 7}}})}};
+    EXPECT_EQ(children.front().invocation.input, expected_input);
+}
+
+TEST(ProgramRuntimeTest, ParallelMapCollectWaitsForEveryChildFailure) {
+    AdmittedRuntime fixture(2);
+    auto parent_document =
+        parallel_map_document(json{{"literal", json::array({1, 2, 3})}}, 3, "collect");
+    parent_document["declared_budget_requirements"][3]["maximum"] = 3;
+    parent_document["declared_budget_requirements"][4]["maximum"] = 4;
+    const auto linked = link_child_versions(
+        fixture, fixture.admit_document(std::move(parent_document)),
+        fixture.admit_document(parallel_map_child_document("runtime-failing")),
+        BudgetLimits{3333, 333, 333, 1, 1, 6, 0, 0, 0});
+
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 3, 4, 20, 0, 1, 3},
+                          "trace-parallel-map-collect", {}});
+    const auto result = parent.wait();
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(result.failure()->operation_id, "root");
+    EXPECT_EQ(result.failure()->witness["item_index"], 0U);
+    const auto children = parent.snapshot().children();
+    ASSERT_EQ(children.size(), 3U);
+    for (const auto& child : children)
+        EXPECT_EQ(child.state, ProgramChildState::Failed);
+}
+
+TEST(ProgramRuntimeTest, ParallelMapFailFastStopsLaunchingAfterFirstFailedItem) {
+    AdmittedRuntime fixture(2);
+    auto parent_document =
+        parallel_map_document(json{{"literal", json::array({1, 2, 3})}}, 3, "fail_fast");
+    parent_document["root"]["max_in_flight"] = 1;
+    parent_document["declared_budget_requirements"][3]["minimum"] = 1;
+    parent_document["declared_budget_requirements"][3]["maximum"] = 1;
+    const auto linked = link_child_versions(
+        fixture, fixture.admit_document(std::move(parent_document)),
+        fixture.admit_document(parallel_map_child_document("runtime-failing")),
+        BudgetLimits{3333, 333, 333, 1, 1, 6, 0, 0, 0});
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 1, 3},
+                          "trace-parallel-map-fail-fast", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(result.failure()->witness["item_index"], 0U);
+    const auto children = fixture.runtime->reconnect("tenant:runtime", result.run_id())
+                              .snapshot()
+                              .children();
+    ASSERT_EQ(children.size(), 1U);
+    EXPECT_EQ(children.front().state, ProgramChildState::Failed);
+}
+
+TEST(ProgramRuntimeTest, ParallelMapFailFastCancelsActiveSiblingAfterFailure) {
+    map_fail_first_calls.store(0);
+    map_fail_first_active.store(0);
+    AdmittedRuntime fixture(2);
+    auto parent_document =
+        parallel_map_document(json{{"literal", json::array({1, 2, 3})}}, 3, "fail_fast");
+    parent_document["declared_budget_requirements"][3]["maximum"] = 2;
+    parent_document["declared_budget_requirements"][4]["maximum"] = 3;
+    const auto linked = link_child_versions(
+        fixture, fixture.admit_document(std::move(parent_document)),
+        fixture.admit_document(parallel_map_child_document("runtime-map-fail-first")),
+        BudgetLimits{3333, 333, 333, 1, 1, 6, 0, 0, 0});
+
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 2, 3, 20, 0, 1, 3},
+                           "trace-parallel-map-fail-fast-active", {}});
+
+    for (int attempt = 0; attempt < 100 && map_fail_first_active.load() == 0; ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    ASSERT_GT(map_fail_first_active.load(), 0U);
+
+    const auto result = parent.wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(map_fail_first_calls.load(), 2U);
+    EXPECT_EQ(map_fail_first_active.load(), 0U);
+
+    const auto children = parent.snapshot().children();
+    ASSERT_EQ(children.size(), 2U);
+    std::size_t failed = 0;
+    std::size_t cancelled = 0;
+    for (const auto& child : children) {
+        failed += child.state == ProgramChildState::Failed;
+        cancelled += child.state == ProgramChildState::Cancelled;
+    }
+    EXPECT_EQ(failed, 1U);
+    EXPECT_EQ(cancelled, 1U);
+}
+
+TEST(ProgramRuntimeTest, ParallelMapRejectsOutputBeyondItsImmutableByteBound) {
+    AdmittedRuntime fixture(2);
+    const auto linked = link_child_versions(
+        fixture,
+        fixture.admit_document(parallel_map_document(
+            json{{"literal", json::array({1})}}, 1, "fail_fast", 2)),
+        fixture.admit("runtime-completed"),
+        BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 0, 0});
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 1, 1},
+                          "trace-parallel-map-output-cap", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::BudgetExhausted);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_PARALLEL_MAP_OUTPUT");
+    EXPECT_EQ(result.failure()->operation_id, "root");
+    EXPECT_TRUE(result.output().is_array());
+    EXPECT_TRUE(result.output().empty());
+    const auto record = fixture.journal->load("tenant:runtime", result.run_id());
+    ASSERT_TRUE(record.has_value());
+    ASSERT_TRUE(record->terminal_result().has_value());
+    EXPECT_TRUE(record->terminal_result()->output().is_array());
+    EXPECT_TRUE(record->terminal_result()->output().empty());
+}
+
+TEST(ProgramRuntimeTest, ParallelMapProvidesBoundedChildOverlapAndCancelsActiveChildren) {
+    blocking_calls.store(0);
+    blocking_active.store(0);
+    blocking_peak.store(0);
+    overlap_barrier = std::make_shared<std::barrier<>>(2);
+    overlap_ready = std::make_shared<std::promise<void>>();
+    auto overlap_future = overlap_ready->get_future();
+    AdmittedRuntime fixture(4);
+    auto parent_document =
+        parallel_map_document(json{{"literal", json::array({1, 2, 3})}}, 3);
+    parent_document["declared_budget_requirements"][3]["maximum"] = 3;
+    parent_document["declared_budget_requirements"][4]["maximum"] = 3;
+    const auto linked = link_child_versions(
+        fixture, fixture.admit_document(std::move(parent_document)),
+        fixture.admit_document(parallel_map_child_document("runtime-barrier")),
+        BudgetLimits{3333, 333, 333, 1, 1, 6, 0, 0, 0});
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 3, 3, 20, 0, 1, 3},
+                          "trace-parallel-map-overlap-cancel", {}});
+    ASSERT_EQ(overlap_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_EQ(blocking_calls.load(), 2U);
+    ASSERT_EQ(blocking_calls.load(), 2U);
+    EXPECT_EQ(blocking_active.load(), 2U);
+    EXPECT_EQ(blocking_peak.load(), 2U);
+    ASSERT_TRUE(parent.cancel());
+
+    const auto result = parent.wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_EQ(blocking_active.load(), 0U);
+    const auto children = parent.snapshot().children();
+    ASSERT_EQ(children.size(), 2U);
+    for (const auto& child : children)
+        EXPECT_EQ(child.state, ProgramChildState::Cancelled);
+    overlap_barrier.reset();
+    overlap_ready.reset();
+}
+TEST(ProgramRuntimeTest, ParallelMapLaunchesNextWindowAfterPriorCompletion) {
+    window_calls.store(0);
+    window_active.store(0);
+    window_peak.store(0);
+    window_completed.store(0);
+    window_second_started_before_completion.store(0);
+    window_first_barrier = std::make_shared<std::barrier<>>(2);
+    AdmittedRuntime fixture(4);
+    auto parent_document =
+        parallel_map_document(json{{"literal", json::array({1, 2, 3, 4})}}, 4);
+    parent_document["declared_budget_requirements"][3]["maximum"] = 2;
+    parent_document["declared_budget_requirements"][4]["maximum"] = 5;
+    parent_document["declared_budget_requirements"][5]["maximum"] = 20;
+    auto child_document = parallel_map_child_document("runtime-windowed");
+    child_document["declared_budget_requirements"][0]["maximum"] = 2000;
+    child_document["declared_budget_requirements"][1]["maximum"] = 200;
+    child_document["declared_budget_requirements"][2]["maximum"] = 200;
+    child_document["declared_budget_requirements"][5]["maximum"] = 4;
+    const auto linked = link_child_versions(
+        fixture, fixture.admit_document(std::move(parent_document)),
+        fixture.admit_document(std::move(child_document)),
+        BudgetLimits{2000, 200, 200, 1, 1, 4, 0, 0, 0});
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 2, 5, 20, 0, 1, 4},
+                           "trace-parallel-map-windowed", {}});
+
+    ASSERT_FALSE(result.failure().has_value());
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(window_calls.load(), 4U);
+    EXPECT_EQ(window_completed.load(), 2U);
+    EXPECT_EQ(window_active.load(), 0U);
+    EXPECT_EQ(window_peak.load(), 2U);
+    EXPECT_EQ(window_second_started_before_completion.load(), 0U);
+    window_first_barrier.reset();
 }

@@ -299,14 +299,16 @@ void validate_program_version(const ProgramSource&   source,
                         json{{"source_schema_version", source.schema_version()},
                              {"supported",
                               json::array({PROGRAM_SCHEMA_VERSION_V1,
-                                           PROGRAM_SCHEMA_VERSION_V2})}});
+                                           PROGRAM_SCHEMA_VERSION_V2,
+                                           PROGRAM_SCHEMA_VERSION_V3})}});
     }
     if (!document.contains("program_schema_version")) {
         diagnostics.add(CompilePhase::Schema, "P_SCHEMA_VERSION", DiagnosticSeverity::Error,
                         std::string(pointer), "Program document requires an explicit schema version",
                         json{{"supported",
                               json::array({PROGRAM_SCHEMA_VERSION_V1,
-                                           PROGRAM_SCHEMA_VERSION_V2})}});
+                                           PROGRAM_SCHEMA_VERSION_V2,
+                                           PROGRAM_SCHEMA_VERSION_V3})}});
         return;
     }
     const auto encoded = unsigned_integer(document["program_schema_version"]);
@@ -315,7 +317,8 @@ void validate_program_version(const ProgramSource&   source,
                         std::string(pointer), "Program document uses an unsupported schema version",
                         json{{"supported",
                               json::array({PROGRAM_SCHEMA_VERSION_V1,
-                                           PROGRAM_SCHEMA_VERSION_V2})}});
+                                           PROGRAM_SCHEMA_VERSION_V2,
+                                           PROGRAM_SCHEMA_VERSION_V3})}});
         return;
     }
     output.schema_version = static_cast<std::uint32_t>(*encoded);
@@ -391,17 +394,19 @@ void validate_root(const json&            document,
     add_unknown_fields(diagnostics, root, pointer,
                        {"op", "name", "definition", "children", "condition", "then", "else",
                         "body", "max_iterations", "max_attempts", "branches", "min_success",
-                        "items", "child_binding", "timeout_ms", "scope", "reason", "value"});
+                        "items", "child_binding", "timeout_ms", "scope", "reason", "value",
+                        "item_source", "input_binding", "output_binding", "max_items",
+                        "max_in_flight", "max_output_bytes", "failure_policy"});
     if (!root.contains("op")) {
         add_required(diagnostics, pointer, "op");
     } else if (!root["op"].is_string()) {
         add_type(diagnostics, "/root/op", "string", root["op"]);
     } else {
         const auto op = root["op"].get<std::string>();
-        static constexpr std::array<std::string_view, 15> operations = {
-            "call_core", "sequence", "branch", "loop", "retry",
-            "parallel", "race", "quorum", "map", "spawn",
-            "await", "emit", "checkpoint", "cancel", "return"};
+        static constexpr std::array<std::string_view, 16> operations = {
+            "call_core", "sequence", "branch", "loop", "retry", "parallel", "race", "quorum",
+            "map",       "spawn",    "await",  "emit", "checkpoint", "cancel", "return",
+            "parallel_map"};
         if (std::find(operations.begin(), operations.end(), op) == operations.end()) {
             diagnostics.add(CompilePhase::Normalize, "P_PLAN_OPERATION",
                             DiagnosticSeverity::Error, "/root/op",
@@ -540,6 +545,7 @@ std::string lower_operation(const json& authored,
                             std::string        operation_id,
                             std::string_view   pointer,
                             std::string_view   root_name,
+                            std::uint32_t      schema_version,
                             bool               is_root,
                             std::vector<json>& operations,
                             DiagnosticAccumulator& diagnostics) {
@@ -565,13 +571,13 @@ std::string lower_operation(const json& authored,
         const auto child_id = operation_id + "." + std::to_string(index);
         return lower_operation(value, child_id, child_pointer(pointer, field) + "/" +
                                                std::to_string(index),
-                               root_name, false, operations, diagnostics);
+                               root_name, schema_version, false, operations, diagnostics);
     };
     const auto singular_child = [&](const json& value, std::string_view field,
                                     std::size_t index) {
         const auto child_id = operation_id + "." + std::to_string(index);
         return lower_operation(value, child_id, child_pointer(pointer, field),
-                               root_name, false, operations, diagnostics);
+                               root_name, schema_version, false, operations, diagnostics);
     };
     const auto required_object = [&](std::string_view field) -> std::optional<json> {
         const auto field_pointer = child_pointer(pointer, field);
@@ -771,6 +777,212 @@ std::string lower_operation(const json& authored,
         }
         const auto body = required_object("body");
         if (body) lowered["body"] = singular_child(*body, "body", 0);
+    } else if (op == "parallel_map") {
+        if (schema_version != PROGRAM_SCHEMA_VERSION_V3) {
+            diagnostics.add(CompilePhase::Schema, "P_SCHEMA_OPERATION", DiagnosticSeverity::Error,
+                            child_pointer(pointer, "op"),
+                            "parallel_map requires Program schema version 3",
+                            json{{"minimum_schema_version", PROGRAM_SCHEMA_VERSION_V3},
+                                 {"actual_schema_version", schema_version}});
+        }
+        if (is_root) {
+            allowed({"op", "name", "definition", "item_source", "child_binding", "input_binding",
+                     "output_binding", "max_items", "max_in_flight", "max_output_bytes",
+                     "failure_policy"});
+        } else {
+            allowed({"op", "item_source", "child_binding", "input_binding", "output_binding",
+                     "max_items", "max_in_flight", "max_output_bytes", "failure_policy"});
+        }
+
+        std::optional<std::uint64_t> literal_item_count;
+        if (!authored.contains("item_source")) {
+            add_required(diagnostics, pointer, "item_source");
+        } else if (!authored["item_source"].is_object()) {
+            diagnostics.add(CompilePhase::Normalize, "P_PARALLEL_MAP_SOURCE",
+                            DiagnosticSeverity::Error, child_pointer(pointer, "item_source"),
+                            "parallel_map item_source must be an object", json::object());
+        } else {
+            const auto& item_source = authored["item_source"];
+            const auto  item_pointer = child_pointer(pointer, "item_source");
+            add_unknown_fields(diagnostics, item_source, item_pointer, {"literal", "artifact", "field"});
+            const bool has_literal  = item_source.contains("literal");
+            const bool has_artifact = item_source.contains("artifact");
+            const bool has_field    = item_source.contains("field");
+            if (has_literal) {
+                if (has_artifact || has_field || !item_source["literal"].is_array() ||
+                    item_source["literal"].size() > 1000000) {
+                    diagnostics.add(
+                        CompilePhase::Normalize, "P_PARALLEL_MAP_SOURCE", DiagnosticSeverity::Error,
+                        item_pointer,
+                        "parallel_map item_source must contain exactly one bounded literal array",
+                        json::object());
+                } else {
+                    literal_item_count = item_source["literal"].size();
+                    lowered["item_source"] =
+                        json{{"literal", detail::owned_json_copy(item_source["literal"])}};
+                }
+            } else if (has_artifact || has_field) {
+                if (!has_artifact || !has_field || !item_source["artifact"].is_string() ||
+                    item_source["artifact"].get<std::string>() != "input" ||
+                    !item_source["field"].is_string()) {
+                    diagnostics.add(
+                        CompilePhase::Normalize, "P_PARALLEL_MAP_SOURCE", DiagnosticSeverity::Error,
+                        item_pointer,
+                        "parallel_map item_source must name an input artifact JSON Pointer",
+                        json::object());
+                } else {
+                    try {
+                        detail::validate_json_pointer(item_source["field"].get<std::string>());
+                        lowered["item_source"] =
+                            json{{"artifact", "input"}, {"field", item_source["field"]}};
+                    } catch (const std::exception& error) {
+                        diagnostics.add(CompilePhase::Normalize, "P_PARALLEL_MAP_SOURCE",
+                                        DiagnosticSeverity::Error,
+                                        child_pointer(item_pointer, "field"),
+                                        "parallel_map item_source field must be a JSON Pointer",
+                                        json{{"detail", error.what()}});
+                    }
+                }
+            } else {
+                diagnostics.add(
+                    CompilePhase::Normalize, "P_PARALLEL_MAP_SOURCE", DiagnosticSeverity::Error,
+                    item_pointer,
+                    "parallel_map item_source requires literal items or an input artifact field",
+                    json::object());
+            }
+        }
+
+        if (!authored.contains("child_binding") || !authored["child_binding"].is_string() ||
+            authored["child_binding"].get<std::string>().empty()) {
+            diagnostics.add(CompilePhase::Normalize, "P_PARALLEL_MAP_BINDING",
+                            DiagnosticSeverity::Error, child_pointer(pointer, "child_binding"),
+                            "parallel_map requires a nonempty admitted child binding",
+                            json::object());
+        } else {
+            lowered["child_binding"] = authored["child_binding"].get<std::string>();
+        }
+
+        const auto validate_endpoint = [&](const json& endpoint,
+                                           std::string_view endpoint_pointer)
+            -> std::optional<std::string> {
+            if (!endpoint.is_object()) {
+                diagnostics.add(CompilePhase::Normalize, "P_PARALLEL_MAP_BINDING",
+                                DiagnosticSeverity::Error, std::string(endpoint_pointer),
+                                "parallel_map binding endpoint must be an object", json::object());
+                return std::nullopt;
+            }
+            add_unknown_fields(diagnostics, endpoint, endpoint_pointer, {"field"});
+            if (!endpoint.contains("field") || !endpoint["field"].is_string()) {
+                diagnostics.add(CompilePhase::Normalize, "P_PARALLEL_MAP_BINDING",
+                                DiagnosticSeverity::Error,
+                                child_pointer(endpoint_pointer, "field"),
+                                "parallel_map binding endpoint requires a JSON Pointer field",
+                                json::object());
+                return std::nullopt;
+            }
+            try {
+                const auto field = endpoint["field"].get<std::string>();
+                detail::validate_json_pointer(field);
+                return field;
+            } catch (const std::exception& error) {
+                diagnostics.add(CompilePhase::Normalize, "P_PARALLEL_MAP_BINDING",
+                                DiagnosticSeverity::Error,
+                                child_pointer(endpoint_pointer, "field"),
+                                "parallel_map binding field must be a JSON Pointer",
+                                json{{"detail", error.what()}});
+                return std::nullopt;
+            }
+        };
+
+        if (!authored.contains("input_binding") || !authored["input_binding"].is_object()) {
+            diagnostics.add(CompilePhase::Normalize, "P_PARALLEL_MAP_BINDING",
+                            DiagnosticSeverity::Error, child_pointer(pointer, "input_binding"),
+                            "parallel_map requires input_binding", json::object());
+        } else {
+            const auto& input_binding = authored["input_binding"];
+            const auto input_pointer = child_pointer(pointer, "input_binding");
+            add_unknown_fields(diagnostics, input_binding, input_pointer, {"from", "to"});
+            if (!input_binding.contains("from") || !input_binding.contains("to")) {
+                diagnostics.add(CompilePhase::Normalize, "P_PARALLEL_MAP_BINDING",
+                                DiagnosticSeverity::Error, input_pointer,
+                                "parallel_map input_binding requires from and to endpoints",
+                                json::object());
+            } else {
+                const auto from =
+                    validate_endpoint(input_binding["from"], child_pointer(input_pointer, "from"));
+                const auto to =
+                    validate_endpoint(input_binding["to"], child_pointer(input_pointer, "to"));
+                if (from && to) {
+                    lowered["input_binding"] =
+                        json{{"from", json{{"field", *from}}}, {"to", json{{"field", *to}}}};
+                }
+            }
+        }
+
+        if (!authored.contains("output_binding") || !authored["output_binding"].is_object()) {
+            diagnostics.add(CompilePhase::Normalize, "P_PARALLEL_MAP_BINDING",
+                            DiagnosticSeverity::Error, child_pointer(pointer, "output_binding"),
+                            "parallel_map requires output_binding", json::object());
+        } else {
+            const auto& output_binding = authored["output_binding"];
+            const auto output_pointer = child_pointer(pointer, "output_binding");
+            add_unknown_fields(diagnostics, output_binding, output_pointer, {"from"});
+            if (!output_binding.contains("from")) {
+                diagnostics.add(CompilePhase::Normalize, "P_PARALLEL_MAP_BINDING",
+                                DiagnosticSeverity::Error, output_pointer,
+                                "parallel_map output_binding requires a from endpoint",
+                                json::object());
+            } else if (const auto from = validate_endpoint(
+                           output_binding["from"], child_pointer(output_pointer, "from"))) {
+                lowered["output_binding"] = json{{"from", json{{"field", *from}}}};
+            }
+        }
+
+        const auto map_bound = [&](std::string_view field, std::uint64_t maximum)
+            -> std::optional<std::uint64_t> {
+            const auto key = std::string(field);
+            if (!authored.contains(key)) {
+                add_required(diagnostics, pointer, field);
+                return std::nullopt;
+            }
+            const auto value = unsigned_integer(authored[key]);
+            if (!value || *value == 0 || *value > maximum) {
+                diagnostics.add(CompilePhase::Normalize, "P_PARALLEL_MAP_BOUND",
+                                DiagnosticSeverity::Error, child_pointer(pointer, field),
+                                "parallel_map bound is outside its supported range",
+                                json{{"maximum", maximum}});
+                return std::nullopt;
+            }
+            lowered[key] = *value;
+            return value;
+        };
+        const auto max_items       = map_bound("max_items", 1000000);
+        const auto max_in_flight   = map_bound("max_in_flight", 1000000);
+        const auto max_output_bytes = map_bound("max_output_bytes", 1ULL << 30);
+        (void)max_output_bytes;
+        if (max_items && max_in_flight && *max_in_flight > *max_items) {
+            diagnostics.add(CompilePhase::Normalize, "P_PARALLEL_MAP_BOUND",
+                            DiagnosticSeverity::Error, child_pointer(pointer, "max_in_flight"),
+                            "parallel_map max_in_flight cannot exceed max_items",
+                            json{{"max_items", *max_items}, {"max_in_flight", *max_in_flight}});
+        }
+        if (literal_item_count && max_items && *literal_item_count > *max_items) {
+            diagnostics.add(CompilePhase::Normalize, "P_PARALLEL_MAP_BOUND",
+                            DiagnosticSeverity::Error, child_pointer(pointer, "max_items"),
+                            "parallel_map literal item count cannot exceed max_items",
+                            json{{"literal_item_count", *literal_item_count},
+                                 {"max_items", *max_items}});
+        }
+        if (!authored.contains("failure_policy") || !authored["failure_policy"].is_string() ||
+            (authored["failure_policy"].get<std::string>() != "fail_fast" &&
+             authored["failure_policy"].get<std::string>() != "collect")) {
+            diagnostics.add(CompilePhase::Normalize, "P_PARALLEL_MAP_FAILURE",
+                            DiagnosticSeverity::Error, child_pointer(pointer, "failure_policy"),
+                            "parallel_map failure_policy must be fail_fast or collect",
+                            json::object());
+        } else {
+            lowered["failure_policy"] = authored["failure_policy"].get<std::string>();
+        }
     } else if (op == "spawn") {
         if (is_root)
             allowed({"op", "name", "definition", "child_binding", "body"});
@@ -889,20 +1101,21 @@ void validate_sealed_plan_dispatch(const ProgramPlan& plan,
 
 OrchestrationPlanRecord lower_plan(const json& root,
                                    std::string_view root_name,
+                                   std::uint32_t schema_version,
                                    DiagnosticAccumulator& diagnostics) {
     std::vector<json> operations;
-    lower_operation(root, "root", "/root", root_name, true, operations, diagnostics);
-    bool has_core = false;
-    bool has_spawn = false;
+    lower_operation(root, "root", "/root", root_name, schema_version, true, operations, diagnostics);
+    bool has_core           = false;
+    bool has_child_dispatch = false;
     for (const auto& operation : operations) {
         const auto op = operation.value("op", "");
         has_core = has_core || op == "call_core";
-        has_spawn = has_spawn || op == "spawn";
+        has_child_dispatch = has_child_dispatch || op == "spawn" || op == "parallel_map";
     }
-    if (!has_core && !has_spawn) {
+    if (!has_core && !has_child_dispatch) {
         diagnostics.add(
             CompilePhase::Normalize, "P_PLAN_CORE", DiagnosticSeverity::Error, "/root",
-            "A Program plan must contain either call_core or an admitted durable child spawn",
+            "A Program plan must contain either call_core or an admitted bounded child dispatch",
             json::object());
     }
     json operation_array = json::array();
@@ -945,8 +1158,10 @@ void validate_budgets(const json&            document,
         add_type(diagnostics, pointer, "array", values);
         return;
     }
-    const bool has_spawn =
-        document.contains("root") && contains_operation(document["root"], "spawn");
+    const bool has_child_dispatch =
+        document.contains("root") &&
+        (contains_operation(document["root"], "spawn") ||
+         contains_operation(document["root"], "parallel_map"));
     std::map<std::string, std::size_t> seen;
     std::map<std::string, std::uint64_t> child_budget_maxima;
     for (std::size_t index = 0; index < values.size(); ++index) {
@@ -1020,7 +1235,7 @@ void validate_budgets(const json&            document,
             structural_valid = *minimum == 0 && *maximum == 0;
         } else if (resource == "max_child_depth" || resource == "max_total_children") {
             structural_valid = true;
-            if (has_spawn) structural_valid = *minimum >= 1;
+            if (has_child_dispatch) structural_valid = *minimum >= 1;
         }
         if (!structural_valid) {
             diagnostics.add(
@@ -1452,9 +1667,10 @@ struct ProgramCompiler::Impl {
             auto                 sealed_json = topology.to_json();
             SealedCoreDefinition sealed{parsed.root_name, sealed_core_definition_hash(sealed_json),
                                         std::move(sealed_json)};
-            const auto           compiled_plan = core_compiled_plan_identity(
+            const auto compiled_plan = core_compiled_plan_identity(
                 sealed, config.compiler_build_id, registry.fingerprint(), closure.identities);
-            auto orchestration = lower_plan(document.at("root"), parsed.root_name, diagnostics);
+            auto orchestration =
+                lower_plan(document.at("root"), parsed.root_name, parsed.schema_version, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();
             try {
                 // Seal the lowered graph through the same typed immutable projection consumed by
@@ -1462,7 +1678,8 @@ struct ProgramCompiler::Impl {
                 // a late scheduler failure while preserving the canonical JSON artifact.
                 const auto typed_plan = ProgramPlan::from_json(orchestration.plan);
                 validate_sealed_plan_dispatch(typed_plan, diagnostics);
-                if (parsed.schema_version == PROGRAM_SCHEMA_VERSION_V2)
+                if (parsed.schema_version == PROGRAM_SCHEMA_VERSION_V2 ||
+                    parsed.schema_version == PROGRAM_SCHEMA_VERSION_V3)
                     validate_static_budget_requirements(
                         parsed, derive_static_budget_requirements(typed_plan), diagnostics);
                 if (diagnostics.has_errors()) diagnostics.throw_error();

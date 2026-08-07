@@ -36,6 +36,38 @@ enum class ProgramOperationKind : std::uint8_t {
     Checkpoint,
     Cancel,
     Return,
+    ParallelMap,
+};
+
+enum class ProgramParallelMapItemSource : std::uint8_t {
+    Literal,
+    InputField,
+};
+
+enum class ProgramParallelMapFailurePolicy : std::uint8_t {
+    FailFast,
+    Collect,
+};
+
+/**
+ * Closed, bounded child-work fan-out contract carried by a `parallel_map`
+ * operation.  JSON values remain data; every control and authority field is
+ * typed and validated before the plan is sealed.
+ */
+struct NEOGRAPH_PROGRAM_API ProgramParallelMapSpec {
+    ProgramParallelMapItemSource    item_source = ProgramParallelMapItemSource::Literal;
+    json                            literal_items = json::array();
+    std::string                     input_field;
+    std::string                     child_binding;
+    std::string                     input_from_field;
+    std::string                     input_to_field;
+    std::string                     output_from_field;
+    std::uint64_t                   max_items = 0;
+    std::uint32_t                   max_in_flight = 0;
+    std::uint64_t                   max_output_bytes = 0;
+    ProgramParallelMapFailurePolicy failure_policy = ProgramParallelMapFailurePolicy::FailFast;
+
+    bool operator==(const ProgramParallelMapSpec&) const = default;
 };
 
 NEOGRAPH_PROGRAM_API std::string_view to_string(ProgramOperationKind kind) noexcept;
@@ -89,6 +121,8 @@ public:
     const std::optional<std::uint64_t>& min_success() const noexcept;
     const std::optional<std::uint64_t>& timeout_ms() const noexcept;
     const std::optional<std::string>& scope() const noexcept;
+
+    const std::optional<ProgramParallelMapSpec>& parallel_map() const noexcept;
     const std::optional<std::string>& reason() const noexcept;
 
     /** Authored condition/value/items are returned as owned immutable copies. */

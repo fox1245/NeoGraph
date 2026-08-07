@@ -253,6 +253,9 @@ TEST(HarnessProgramTranslator, PresetDslAndCoreProduceEquivalentProgramDocuments
                                                       fixture.defaults);
     const auto preset_document = preset.source.document();
     const auto sealed_worker   = preset_document["root"]["definition"]["nodes"]["worker_0"];
+    EXPECT_EQ(preset_document["root"]["op"], "call_core");
+    EXPECT_EQ(preset_document["program_schema_version"], PROGRAM_SCHEMA_VERSION_V1);
+    EXPECT_EQ(sealed_worker["type"], HARNESS_WORKER_NODE_TYPE);
 
     auto dsl_request       = preset_request;
     dsl_request["harness"] = {{"mode", "dsl"}, {"definition", direct_dsl(sealed_worker)}};
@@ -406,6 +409,8 @@ TEST(HarnessProgramTranslator,
     expect_error(json{{"op", "await"},
                       {"body", json{{"op", "spawn"}, {"child_binding", "child-program"}}}},
                  "H_PROGRAM_CHILD_BINDING", "/harness/definition/body");
+    expect_error(json{{"op", "parallel_map"}},
+                 "H_PROGRAM_CHILD_BINDING", "/harness/definition");
     expect_error(
         json{{"op", "parallel"},
              {"branches",

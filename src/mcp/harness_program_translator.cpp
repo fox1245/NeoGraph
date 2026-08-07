@@ -562,8 +562,8 @@ std::vector<program::SourceMapEntry> source_map(const json&                     
 
 void reject_unsupported_program_operations(const json& operation,
                                            std::string_view pointer) {
-    if (!operation.is_object()) return;
-    if (operation.value("op", "") == "spawn") {
+    const auto operation_name = operation.is_object() ? operation.value("op", "") : "";
+    if (operation_name == "spawn" || operation_name == "parallel_map") {
         fail("H_PROGRAM_CHILD_BINDING", std::string(pointer),
              "Harness program mode does not support durable child publication or scheduling");
     }
