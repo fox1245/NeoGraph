@@ -568,6 +568,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     auto       usage      = std::make_shared<UsageAccumulator>();
     auto       core_progress = std::make_shared<AttemptCoreProgress>();
     std::uint64_t operation_count = 0;
+    std::uint64_t dynamic_compile_count = 0;
     std::atomic<std::size_t> active_concurrency{0};
     std::atomic<std::size_t> peak_concurrency{0};
     if (std::chrono::steady_clock::now() >= deadline) control->cancel(CancellationCause::Timeout);
@@ -685,6 +686,528 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             auto checkpoint = inspect_checkpoint_for(*control, result.checkpoint_id, thread_id);
             if (checkpoint && checkpoint->core_thread_id != thread_id) checkpoint.reset();
             co_return CoreInvocation{std::move(result), std::move(checkpoint)};
+        };
+
+        struct ExpansionTaskRun {
+            std::string task_id;
+            ProgramTerminalStatus status = ProgramTerminalStatus::Failed;
+            json output = json::object();
+            std::optional<ProgramFailure> failure;
+        };
+
+        struct ExpansionBatchState {
+            std::mutex                                  mutex;
+            std::vector<std::optional<ExpansionTaskRun>> results;
+            std::vector<std::shared_ptr<RunControl>>     children;
+            std::size_t                                 remaining = 0;
+            std::shared_ptr<asio::steady_timer>         timer;
+            bool                                        failed = false;
+        };
+
+        struct ExpansionRecordState {
+            explicit ExpansionRecordState(const CompiledTaskGraphFragment& value)
+                : record{value, {}, 0, false, false} {}
+            std::mutex                              mutex;
+            TaskGraphFragmentRecord                 record;
+            std::shared_ptr<TaskGraphFragmentStore> store;
+        };
+        auto execute_expand = [&](const ProgramPlanNode& operation,
+                                  json                    state)
+            -> asio::awaitable<PlanExecution> {
+            const auto& spec = operation.expand_task_graph();
+            if (!spec) {
+                co_return plan_failure(ProgramTerminalStatus::Failed, "P_EXPAND_PLAN",
+                                       "expand_task_graph has no typed expansion contract",
+                                       operation.id());
+            }
+            const auto store = control->task_graph_fragments();
+            const auto policy = control->task_graph_policy(operation.id());
+            if (!store || !policy) {
+                co_return plan_failure(
+                    ProgramTerminalStatus::Failed, "P_EXPAND_UNAVAILABLE",
+                    "expand_task_graph requires a durable fragment store and host policy",
+                    operation.id());
+            }
+            json proposal;
+            const auto& source = spec->proposal_source;
+            if (source.contains("inline")) {
+                proposal = source.at("inline");
+            } else {
+                const auto selected = json_path_value(state, source.at("field").get<std::string>());
+                if (!selected || !selected->is_object()) {
+                    co_return plan_failure(
+                        ProgramTerminalStatus::Failed, "P_EXPAND_SOURCE",
+                        "expand_task_graph proposal source did not resolve to an object",
+                        operation.id());
+                }
+                proposal = *selected;
+            }
+
+            const auto compile_limit =
+                std::min<std::uint64_t>(spec->max_dynamic_compiles,
+                                        control->granted_budget.max_dynamic_compiles);
+            {
+                std::lock_guard lock(plan_mutex);
+                if (dynamic_compile_count >= compile_limit) {
+                    co_return plan_failure(
+                        ProgramTerminalStatus::BudgetExhausted, "P_DYNAMIC_COMPILE_BUDGET",
+                        "expand_task_graph dynamic compilation budget exhausted",
+                        operation.id());
+                }
+                ++dynamic_compile_count;
+            }
+
+            const auto bounded = [](std::uint64_t requested, std::uint64_t ceiling) {
+                return ceiling == 0 ? requested : std::min(requested, ceiling);
+            };
+            auto limits = policy->limits;
+            limits.max_tasks = bounded(spec->max_tasks, policy->limits.max_tasks);
+            limits.max_edges = bounded(spec->max_edges, policy->limits.max_edges);
+            limits.max_depth = bounded(spec->max_depth, policy->limits.max_depth);
+            if (limits.max_tasks == 0 || limits.max_edges == 0 || limits.max_depth == 0) {
+                co_return plan_failure(
+                    ProgramTerminalStatus::BudgetExhausted, "P_EXPAND_LIMIT",
+                    "expand_task_graph has no positive host policy ceiling",
+                    operation.id());
+            }
+            limits.max_tasks = std::min(limits.max_tasks,
+                                        control->granted_budget.max_total_children == 0
+                                            ? limits.max_tasks
+                                            : control->granted_budget.max_total_children);
+
+            TaskGraphProposalOptions proposal_options;
+            proposal_options.source_id = control->run_id + ":" + operation.id();
+            proposal_options.limits = limits;
+            proposal_options.template_allowlist = policy->template_allowlist;
+
+            TaskGraphFragmentCompileOptions compile_options;
+            compile_options.owner_scope = control->owner_scope;
+            compile_options.parent_run_id = control->run_id;
+            compile_options.expansion_operation_id = operation.id();
+            compile_options.parent_program_version_id = control->program_version_id;
+            compile_options.child_depth = control->persisted_invocation.child_depth;
+            compile_options.limits = limits;
+            compile_options.limits.max_tasks =
+                std::min(compile_options.limits.max_tasks, spec->max_tasks);
+            compile_options.limits.max_edges =
+                std::min(compile_options.limits.max_edges, spec->max_edges);
+            compile_options.limits.max_depth =
+                std::min(compile_options.limits.max_depth, spec->max_depth);
+            compile_options.remaining_budget = BudgetLimits{
+                control->granted_budget.wall_time_ms,
+                control->granted_budget.model_tokens,
+                control->granted_budget.monetary_microunits,
+                std::min<std::uint32_t>(control->granted_budget.max_concurrency,
+                                        spec->max_concurrency),
+                control->granted_budget.max_program_operations,
+                control->granted_budget.max_core_steps,
+                static_cast<std::uint32_t>(
+                    std::min<std::uint64_t>(control->granted_budget.max_dynamic_compiles,
+                                            spec->max_dynamic_compiles)),
+                control->granted_budget.max_child_depth,
+                std::min<std::uint64_t>(control->granted_budget.max_total_children,
+                                        spec->max_total_children)};
+            compile_options.template_allowlist = policy->template_allowlist;
+            compile_options.parent_capabilities =
+                control->materialized->bundle.capability_effect_closure().capabilities;
+            compile_options.parent_effects =
+                control->materialized->bundle.capability_effect_closure().effects;
+            compile_options.host_capabilities = policy->host_capabilities;
+            compile_options.host_effects = policy->host_effects;
+
+            std::optional<CompiledTaskGraphFragment> compiled_fragment;
+            try {
+                compiled_fragment.emplace(TaskGraphFragmentCompiler::compile(
+                    proposal, std::move(proposal_options), compile_options));
+            } catch (const std::exception& error) {
+                co_return plan_failure(
+                    ProgramTerminalStatus::Failed, "P_EXPAND_REJECTED",
+                    std::string("expand_task_graph proposal was rejected: ") + error.what(),
+                    operation.id());
+            }
+            const auto& fragment = *compiled_fragment;
+
+            auto durable = std::make_shared<ExpansionRecordState>(fragment);
+            for (const auto& task : fragment.tasks()) {
+                durable->record.tasks.push_back(
+                    TaskGraphTaskRecord{task.task_id, task.operation_id,
+                                        TaskGraphTaskState::Pending, 0, std::nullopt,
+                                        std::nullopt});
+            }
+            try {
+                const auto publication = store->publish(durable->record);
+                if (publication == TaskGraphPublishResult::Conflict ||
+                    publication == TaskGraphPublishResult::Missing) {
+                    co_return plan_failure(
+                        ProgramTerminalStatus::Failed, "P_EXPAND_PUBLICATION",
+                        "expand_task_graph fragment publication conflicted",
+                        operation.id());
+                }
+                const auto loaded = store->load(fragment.fragment_id());
+                if (!loaded || !loaded->published) {
+                    co_return plan_failure(
+                        ProgramTerminalStatus::Failed, "P_EXPAND_PUBLICATION",
+                        "expand_task_graph fragment was not durably published",
+                        operation.id());
+                }
+                durable->record = *loaded;
+                durable->store = store;
+            } catch (const std::exception& error) {
+                co_return plan_failure(
+                    ProgramTerminalStatus::Failed, "P_EXPAND_PUBLICATION",
+                    std::string("expand_task_graph publication failed: ") + error.what(),
+                    operation.id());
+            }
+
+            auto failure_json = [](const std::optional<ProgramFailure>& failure) {
+                if (!failure) return json::object();
+                return json{{"code", failure->code},
+                            {"message", failure->message},
+                            {"operation_id", failure->operation_id},
+                            {"core_node", failure->core_node},
+                            {"attempts", failure->attempts},
+                            {"witness", failure->witness}};
+            };
+            auto update_task = [&](std::string_view task_id, TaskGraphTaskState task_state,
+                                   std::uint32_t attempt, std::optional<json> output,
+                                   std::optional<json> failure) {
+                std::lock_guard lock(durable->mutex);
+                auto candidate = durable->record;
+                auto found = std::find_if(
+                    candidate.tasks.begin(), candidate.tasks.end(),
+                    [task_id](const auto& task) { return task.task_id == task_id; });
+                if (found == candidate.tasks.end())
+                    throw_runtime_diagnostic(
+                        "P_EXPAND_RECORD", "Published fragment task identity is missing",
+                        json{{"task_id", std::string(task_id)}});
+                found->state = task_state;
+                found->attempt = attempt;
+                found->output = std::move(output);
+                found->failure = std::move(failure);
+                candidate.revision = durable->record.revision + 1;
+                candidate.published = true;
+                const auto result = durable->store->compare_update(
+                    durable->record.fragment.fragment_id(), durable->record.revision, candidate);
+                if (result != TaskGraphPublishResult::Published)
+                    throw_runtime_diagnostic(
+                        "P_EXPAND_CAS", "Published fragment task update lost its revision race",
+                        json{{"task_id", std::string(task_id)},
+                             {"expected_revision", durable->record.revision}});
+                durable->record = std::move(candidate);
+            };
+
+            std::map<std::string, TaskGraphTaskState, std::less<>> states;
+            std::map<std::string, std::uint32_t, std::less<>> attempts;
+            std::map<std::string, json, std::less<>> outputs;
+            std::map<std::string, json, std::less<>> failures;
+            for (const auto& record : durable->record.tasks) {
+                states[record.task_id] = record.state;
+                attempts[record.task_id] = record.attempt;
+                if (record.output) outputs[record.task_id] = *record.output;
+                if (record.failure) failures[record.task_id] = *record.failure;
+            }
+
+            auto make_output = [&]() {
+                json result{{"fragment_id", durable->record.fragment.fragment_id()},
+                            {"tasks", json::array()}};
+                for (const auto& task : fragment.tasks()) {
+                    json item{{"task_id", task.task_id},
+                              {"operation_id", task.operation_id},
+                              {"state", std::string(to_string(states[task.task_id]))}};
+                    if (outputs.contains(task.task_id)) item["output"] = outputs[task.task_id];
+                    if (failures.contains(task.task_id)) item["failure"] = failures[task.task_id];
+                    result["tasks"].push_back(std::move(item));
+                }
+                return result;
+            };
+
+            auto run_task = [&](const CompiledTaskGraphTask& task,
+                                const std::shared_ptr<ExpansionBatchState>& batch_state)
+                -> asio::awaitable<ExpansionTaskRun> {
+                ExpansionTaskRun result;
+                result.task_id = task.task_id;
+                json child_input = state;
+                if (!child_input.is_object()) child_input = json::object();
+                for (const auto& binding : task.input_bindings) {
+                    const auto producer = outputs.find(binding.from.task_id);
+                    if (producer == outputs.end()) {
+                        result.failure = ProgramFailure{
+                            "P_TASK_INPUT", "Task dependency output is unavailable",
+                            task.operation_id, "", 0,
+                            json{{"producer_task_id", binding.from.task_id}}};
+                        co_return result;
+                    }
+                    const auto value = json_path_value(producer->second, binding.from.field);
+                    if (!value || !assign_json_path(child_input, binding.to.field, *value)) {
+                        result.failure = ProgramFailure{
+                            "P_TASK_INPUT", "Task input binding could not be materialized",
+                            task.operation_id, "", 0,
+                            json{{"producer_task_id", binding.from.task_id},
+                                 {"source_field", binding.from.field},
+                                 {"target_field", binding.to.field}}};
+                        co_return result;
+                    }
+                }
+                if (control->cancellation_cause() != CancellationCause::None) {
+                    result.status = ProgramTerminalStatus::Cancelled;
+                    result.failure = ProgramFailure{
+                        "P_TASK_CANCELLED", "Parent expansion was cancelled",
+                        task.operation_id, "", 0, json::object()};
+                    co_return result;
+                }
+                try {
+                    auto child = control->launch_child(
+                        task.child_binding, std::move(child_input), operation.id(),
+                        "task:" + task.operation_id);
+                    {
+                        std::lock_guard lock(batch_state->mutex);
+                        batch_state->children.push_back(child);
+                    }
+                    const auto child_result = co_await child->wait_async();
+                    result.status = child_result.status();
+                    result.output = child_result.output();
+                    result.failure = child_result.failure();
+                } catch (const ProgramDiagnosticError& error) {
+                    const auto& diagnostic = error.diagnostic();
+                    result.failure = ProgramFailure{
+                        diagnostic.code, diagnostic.message, task.operation_id, "", 0,
+                        diagnostic.witness};
+                } catch (const std::exception& error) {
+                    result.failure = ProgramFailure{
+                        "P_TASK_DISPATCH", error.what(), task.operation_id, "", 0, json::object()};
+                }
+                co_return result;
+            };
+
+            for (const auto& task : fragment.tasks()) {
+                if (states[task.task_id] == TaskGraphTaskState::Completed) continue;
+                if (states[task.task_id] == TaskGraphTaskState::Failed ||
+                    states[task.task_id] == TaskGraphTaskState::Cancelled) {
+                    continue;
+                }
+                states[task.task_id] = TaskGraphTaskState::Pending;
+            }
+
+            while (true) {
+                bool all_terminal = true;
+                for (const auto& task : fragment.tasks()) {
+                    const auto state_value = states[task.task_id];
+                    if (state_value != TaskGraphTaskState::Completed &&
+                        state_value != TaskGraphTaskState::Failed &&
+                        state_value != TaskGraphTaskState::Cancelled) {
+                        all_terminal = false;
+                        break;
+                    }
+                }
+                if (all_terminal) break;
+
+                if (control->cancellation_cause() != CancellationCause::None) {
+                    for (const auto& task : fragment.tasks()) {
+                        if (states[task.task_id] == TaskGraphTaskState::Completed ||
+                            states[task.task_id] == TaskGraphTaskState::Failed ||
+                            states[task.task_id] == TaskGraphTaskState::Cancelled)
+                            continue;
+                        states[task.task_id] = TaskGraphTaskState::Cancelled;
+                        const auto failure = json{{"code", "P_TASK_CANCELLED"},
+                                                  {"message", "Parent expansion was cancelled"},
+                                                  {"operation_id", task.operation_id}};
+                        update_task(task.task_id, TaskGraphTaskState::Cancelled,
+                                    attempts[task.task_id], std::nullopt, failure);
+                        failures[task.task_id] = failure;
+                    }
+                    break;
+                }
+
+                std::vector<const CompiledTaskGraphTask*> ready;
+                for (const auto& task : fragment.tasks()) {
+                    if (states[task.task_id] != TaskGraphTaskState::Pending &&
+                        states[task.task_id] != TaskGraphTaskState::Active)
+                        continue;
+                    bool dependency_failed = false;
+                    bool dependency_waiting = false;
+                    for (const auto& dependency : task.depends_on) {
+                        const auto dependency_state = states[dependency];
+                        if (dependency_state == TaskGraphTaskState::Failed ||
+                            dependency_state == TaskGraphTaskState::Cancelled) {
+                            dependency_failed = true;
+                            break;
+                        }
+                        if (dependency_state != TaskGraphTaskState::Completed)
+                            dependency_waiting = true;
+                    }
+                    if (dependency_failed) {
+                        states[task.task_id] = TaskGraphTaskState::Failed;
+                        const auto failure = json{
+                            {"code", "P_TASK_DEPENDENCY"},
+                            {"message", "Task dependency did not complete successfully"},
+                            {"operation_id", task.operation_id}};
+                        update_task(task.task_id, TaskGraphTaskState::Failed,
+                                    attempts[task.task_id], std::nullopt, failure);
+                        failures[task.task_id] = failure;
+                        continue;
+                    }
+                    if (!dependency_waiting) ready.push_back(&task);
+                }
+                if (ready.empty()) {
+                    const auto resolved = std::all_of(
+                        fragment.tasks().begin(), fragment.tasks().end(), [&](const auto& task) {
+                            const auto state_value = states[task.task_id];
+                            return state_value == TaskGraphTaskState::Completed ||
+                                   state_value == TaskGraphTaskState::Failed ||
+                                   state_value == TaskGraphTaskState::Cancelled;
+                        });
+                    if (resolved) break;
+                    co_return plan_failure(
+                        ProgramTerminalStatus::Failed, "P_EXPAND_SCHEDULER",
+                        "Published task graph has no dependency-ready task",
+                        operation.id());
+                }
+
+                const auto batch_width = std::max<std::uint32_t>(
+                    1, std::min<std::uint32_t>(
+                           {spec->max_concurrency, control->granted_budget.max_concurrency,
+                            static_cast<std::uint32_t>(ready.size())}));
+                std::size_t offset = 0;
+                while (offset < ready.size()) {
+                    const auto count = std::min<std::size_t>(batch_width, ready.size() - offset);
+                    auto batch_state = std::make_shared<ExpansionBatchState>();
+                    batch_state->results.resize(count);
+                    batch_state->remaining = count;
+                    const auto executor = co_await asio::this_coro::executor;
+                    const auto completion_executor = asio::make_strand(executor);
+                    batch_state->timer =
+                        std::make_shared<asio::steady_timer>(completion_executor);
+                    batch_state->timer->expires_at((asio::steady_timer::time_point::max)());
+                    for (std::size_t index = 0; index < count; ++index) {
+                        const auto* task = ready[offset + index];
+                        states[task->task_id] = TaskGraphTaskState::Active;
+                        ++attempts[task->task_id];
+                        update_task(task->task_id, TaskGraphTaskState::Active,
+                                    attempts[task->task_id], std::nullopt, std::nullopt);
+                        asio::co_spawn(
+                            executor, run_task(*task, batch_state),
+                            asio::bind_executor(
+                                completion_executor,
+                                [batch_state, index](std::exception_ptr error,
+                                                      ExpansionTaskRun result) {
+                                    bool complete = false;
+                                    {
+                                        std::lock_guard lock(batch_state->mutex);
+                                        if (error) {
+                                            result.status = ProgramTerminalStatus::Failed;
+                                            result.failure = ProgramFailure{
+                                                "P_TASK_DISPATCH", "Task coroutine failed",
+                                                result.task_id, "", 0, json::object()};
+                                        }
+                                        batch_state->results[index] = std::move(result);
+                                        complete = --batch_state->remaining == 0;
+                                    }
+                                    if (complete) batch_state->timer->cancel();
+                                }));
+                    }
+                    co_await asio::co_spawn(
+                        completion_executor,
+                        [batch_state]() -> asio::awaitable<void> {
+                            asio::error_code error;
+                            co_await batch_state->timer->async_wait(
+                                asio::redirect_error(asio::use_awaitable, error));
+                        },
+                        asio::use_awaitable);
+                    std::vector<std::optional<ExpansionTaskRun>> results;
+                    {
+                        std::lock_guard lock(batch_state->mutex);
+                        results = std::move(batch_state->results);
+                    }
+                    for (auto& maybe_result : results) {
+                        if (!maybe_result) continue;
+                        auto& task_result = *maybe_result;
+                        const bool completed =
+                            task_result.status == ProgramTerminalStatus::Completed &&
+                            !task_result.failure;
+                        if (completed) {
+                            states[task_result.task_id] = TaskGraphTaskState::Completed;
+                            outputs[task_result.task_id] = task_result.output;
+                            update_task(task_result.task_id, TaskGraphTaskState::Completed,
+                                        attempts[task_result.task_id], task_result.output,
+                                        std::nullopt);
+                        } else {
+                            const auto cancelled =
+                                task_result.status == ProgramTerminalStatus::Cancelled ||
+                                task_result.status == ProgramTerminalStatus::TimedOut;
+                            states[task_result.task_id] =
+                                cancelled ? TaskGraphTaskState::Cancelled
+                                          : TaskGraphTaskState::Failed;
+                            const auto failure = failure_json(task_result.failure);
+                            failures[task_result.task_id] = failure;
+                            update_task(task_result.task_id, states[task_result.task_id],
+                                        attempts[task_result.task_id], std::nullopt, failure);
+                        }
+                    }
+                    bool failed = false;
+                    for (const auto& task : fragment.tasks()) {
+                        failed = failed || states[task.task_id] == TaskGraphTaskState::Failed ||
+                                 states[task.task_id] == TaskGraphTaskState::Cancelled;
+                    }
+                    if (failed && spec->failure_policy == ProgramTaskGraphFailurePolicy::FailFast) {
+                        for (const auto& task : fragment.tasks()) {
+                            if (states[task.task_id] == TaskGraphTaskState::Pending ||
+                                states[task.task_id] == TaskGraphTaskState::Active) {
+                                states[task.task_id] = TaskGraphTaskState::Cancelled;
+                                const auto failure = json{
+                                    {"code", "P_TASK_FAIL_FAST"},
+                                    {"message", "Task graph fail-fast policy cancelled pending work"},
+                                    {"operation_id", task.operation_id}};
+                                failures[task.task_id] = failure;
+                                update_task(task.task_id, TaskGraphTaskState::Cancelled,
+                                            attempts[task.task_id], std::nullopt, failure);
+                            }
+                        }
+                    }
+                    offset += count;
+                    if (failed && spec->failure_policy == ProgramTaskGraphFailurePolicy::FailFast)
+                        break;
+                }
+            }
+
+            bool failed = false;
+            bool cancelled = false;
+            std::optional<ProgramFailure> first_failure;
+            for (const auto& task : fragment.tasks()) {
+                if (states[task.task_id] == TaskGraphTaskState::Failed) {
+                    failed = true;
+                    if (!first_failure)
+                        first_failure = ProgramFailure{
+                            "P_TASK_FAILED", "A dynamic task failed", task.operation_id, "", 0,
+                            failures[task.task_id]};
+                } else if (states[task.task_id] == TaskGraphTaskState::Cancelled) {
+                    cancelled = true;
+                }
+            }
+            {
+                std::lock_guard lock(durable->mutex);
+                auto candidate = durable->record;
+                candidate.terminal = true;
+                candidate.published = true;
+                candidate.revision = durable->record.revision + 1;
+                const auto result = durable->store->compare_update(
+                    durable->record.fragment.fragment_id(), durable->record.revision, candidate);
+                if (result != TaskGraphPublishResult::Published)
+                    throw_runtime_diagnostic("P_EXPAND_CAS",
+                                             "Dynamic fragment terminal update lost its revision race");
+                durable->record = std::move(candidate);
+            }
+            PlanExecution result;
+            result.output = make_output();
+            if (failed) {
+                result.status = ProgramTerminalStatus::Failed;
+                result.failure = std::move(first_failure);
+            } else if (cancelled) {
+                result.status = ProgramTerminalStatus::Cancelled;
+                result.failure = ProgramFailure{"P_TASK_CANCELLED",
+                                                 "Dynamic task graph was cancelled",
+                                                 operation.id(), "", 0, json::object()};
+            }
+            co_return result;
         };
 
         std::function<asio::awaitable<PlanExecution>(
@@ -1513,6 +2036,17 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 co_return result;
             }
 
+            if (op == ProgramOperationKind::ExpandTaskGraph) {
+                auto result = co_await execute_expand(operation, std::move(state));
+                if (result.failure && result.failure->operation_id != operation_id) {
+                    auto& witness = result.failure->witness;
+                    if (!witness.is_object()) witness = json::object();
+                    witness["child_operation_id"] = result.failure->operation_id;
+                    result.failure->operation_id = operation_id;
+                }
+                result.execution_trace.push_back(operation_id);
+                co_return result;
+            }
             if (op == ProgramOperationKind::Spawn) {
                 if (!operation.child_binding())
                     co_return plan_failure(ProgramTerminalStatus::Failed, "P_CHILD_BINDING",

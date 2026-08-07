@@ -479,10 +479,11 @@ if(NEOGRAPH_BUILD_PROGRAM)
     add_library(neograph_program
         src/program/canonical_json.cpp
         src/program/contract.cpp
+        src/program/bundle.cpp
         src/program/diagnostic.cpp
         src/program/source.cpp
         src/program/task_graph_proposal.cpp
-        src/program/bundle.cpp
+        src/program/task_graph_fragment.cpp
         src/program/module.cpp
         src/program/version.cpp
         src/program/registry.cpp

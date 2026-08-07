@@ -300,7 +300,8 @@ void validate_program_version(const ProgramSource&   source,
                              {"supported",
                               json::array({PROGRAM_SCHEMA_VERSION_V1,
                                            PROGRAM_SCHEMA_VERSION_V2,
-                                           PROGRAM_SCHEMA_VERSION_V3})}});
+                                           PROGRAM_SCHEMA_VERSION_V3,
+                                           PROGRAM_SCHEMA_VERSION_V4})}});
     }
     if (!document.contains("program_schema_version")) {
         diagnostics.add(CompilePhase::Schema, "P_SCHEMA_VERSION", DiagnosticSeverity::Error,
@@ -308,7 +309,8 @@ void validate_program_version(const ProgramSource&   source,
                         json{{"supported",
                               json::array({PROGRAM_SCHEMA_VERSION_V1,
                                            PROGRAM_SCHEMA_VERSION_V2,
-                                           PROGRAM_SCHEMA_VERSION_V3})}});
+                                           PROGRAM_SCHEMA_VERSION_V3,
+                                           PROGRAM_SCHEMA_VERSION_V4})}});
         return;
     }
     const auto encoded = unsigned_integer(document["program_schema_version"]);
@@ -318,7 +320,8 @@ void validate_program_version(const ProgramSource&   source,
                         json{{"supported",
                               json::array({PROGRAM_SCHEMA_VERSION_V1,
                                            PROGRAM_SCHEMA_VERSION_V2,
-                                           PROGRAM_SCHEMA_VERSION_V3})}});
+                                           PROGRAM_SCHEMA_VERSION_V3,
+                                           PROGRAM_SCHEMA_VERSION_V4})}});
         return;
     }
     output.schema_version = static_cast<std::uint32_t>(*encoded);
@@ -396,17 +399,19 @@ void validate_root(const json&            document,
                         "body", "max_iterations", "max_attempts", "branches", "min_success",
                         "items", "child_binding", "timeout_ms", "scope", "reason", "value",
                         "item_source", "input_binding", "output_binding", "max_items",
-                        "max_in_flight", "max_output_bytes", "failure_policy"});
+                        "max_in_flight", "max_output_bytes", "failure_policy", "proposal_source",
+                        "max_tasks", "max_edges", "max_depth", "max_dynamic_compiles",
+                        "max_total_children", "max_concurrency"});
     if (!root.contains("op")) {
         add_required(diagnostics, pointer, "op");
     } else if (!root["op"].is_string()) {
         add_type(diagnostics, "/root/op", "string", root["op"]);
     } else {
         const auto op = root["op"].get<std::string>();
-        static constexpr std::array<std::string_view, 16> operations = {
+        static constexpr std::array<std::string_view, 17> operations = {
             "call_core", "sequence", "branch", "loop", "retry", "parallel", "race", "quorum",
             "map",       "spawn",    "await",  "emit", "checkpoint", "cancel", "return",
-            "parallel_map"};
+            "parallel_map", "expand_task_graph"};
         if (std::find(operations.begin(), operations.end(), op) == operations.end()) {
             diagnostics.add(CompilePhase::Normalize, "P_PLAN_OPERATION",
                             DiagnosticSeverity::Error, "/root/op",
@@ -419,6 +424,13 @@ void validate_root(const json&            document,
                             json{{"schema_version", PROGRAM_SCHEMA_VERSION_V1},
                                  {"operation", op},
                                  {"supported", "call_core"}});
+        } else if (op == "expand_task_graph" &&
+                   output.schema_version != PROGRAM_SCHEMA_VERSION_V4) {
+            diagnostics.add(CompilePhase::Schema, "P_SCHEMA_OPERATION",
+                            DiagnosticSeverity::Error, "/root/op",
+                            "expand_task_graph requires Program schema version 4",
+                            json{{"minimum_schema_version", PROGRAM_SCHEMA_VERSION_V4},
+                                 {"actual_schema_version", output.schema_version}});
         }
     }
     if (!root.contains("name")) {
@@ -983,6 +995,100 @@ std::string lower_operation(const json& authored,
         } else {
             lowered["failure_policy"] = authored["failure_policy"].get<std::string>();
         }
+    } else if (op == "expand_task_graph") {
+        if (schema_version != PROGRAM_SCHEMA_VERSION_V4) {
+            diagnostics.add(CompilePhase::Schema, "P_SCHEMA_OPERATION",
+                            DiagnosticSeverity::Error, child_pointer(pointer, "op"),
+                            "expand_task_graph requires Program schema version 4",
+                            json{{"required_schema_version", PROGRAM_SCHEMA_VERSION_V4},
+                                 {"actual_schema_version", schema_version}});
+        }
+        if (is_root)
+            allowed({"op", "name", "definition", "proposal_source", "max_tasks", "max_edges",
+                     "max_depth", "max_dynamic_compiles", "max_total_children",
+                     "max_concurrency", "failure_policy"});
+        else
+            allowed({"op", "proposal_source", "max_tasks", "max_edges", "max_depth",
+                     "max_dynamic_compiles", "max_total_children", "max_concurrency",
+                     "failure_policy"});
+        const auto source = required_object("proposal_source");
+        if (source) {
+            add_unknown_fields(diagnostics, *source, child_pointer(pointer, "proposal_source"),
+                               {"inline", "artifact", "field"});
+            const auto source_pointer = child_pointer(pointer, "proposal_source");
+            const bool has_inline = source->contains("inline");
+            const bool has_artifact = source->contains("artifact");
+            const bool has_field = source->contains("field");
+            if (has_inline) {
+                if (source->size() != 1 || !(*source)["inline"].is_object()) {
+                    diagnostics.add(CompilePhase::Normalize, "P_EXPAND_SOURCE",
+                                    DiagnosticSeverity::Error, source_pointer,
+                                    "expand_task_graph inline proposal_source must contain only an object",
+                                    json::object());
+                } else {
+                    lowered["proposal_source"] =
+                        json{{"inline", detail::owned_json_copy((*source)["inline"])}};
+                }
+            } else if (has_artifact || has_field) {
+                if (source->size() != 2 || !has_artifact || !has_field ||
+                    !(*source)["artifact"].is_string() ||
+                    (*source)["artifact"].get<std::string>() != "input" ||
+                    !(*source)["field"].is_string()) {
+                    diagnostics.add(CompilePhase::Normalize, "P_EXPAND_SOURCE",
+                                    DiagnosticSeverity::Error, source_pointer,
+                                    "expand_task_graph proposal_source must name an input JSON Pointer",
+                                    json::object());
+                } else {
+                    try {
+                        detail::validate_json_pointer((*source)["field"].get<std::string>());
+                        lowered["proposal_source"] = detail::owned_json_copy(*source);
+                    } catch (const std::exception& error) {
+                        diagnostics.add(CompilePhase::Normalize, "P_EXPAND_SOURCE",
+                                        DiagnosticSeverity::Error,
+                                        child_pointer(source_pointer, "field"),
+                                        "expand_task_graph proposal_source field must be a JSON Pointer",
+                                        json{{"detail", error.what()}});
+                    }
+                }
+            } else {
+                diagnostics.add(CompilePhase::Normalize, "P_EXPAND_SOURCE",
+                                DiagnosticSeverity::Error, source_pointer,
+                                "expand_task_graph proposal_source requires inline or input artifact",
+                                json::object());
+            }
+        }
+        const auto required_bound = [&](std::string_view field, std::uint64_t maximum) {
+            const auto key = std::string(field);
+            if (!authored.contains(key)) {
+                add_required(diagnostics, pointer, field);
+                return;
+            }
+            const auto value = unsigned_integer(authored[key]);
+            if (!value || *value == 0 || *value > maximum) {
+                diagnostics.add(CompilePhase::Normalize, "P_EXPAND_BOUND",
+                                DiagnosticSeverity::Error, child_pointer(pointer, field),
+                                "expand_task_graph bound is outside its supported range",
+                                json{{"maximum", maximum}});
+            } else {
+                lowered[key] = *value;
+            }
+        };
+        required_bound("max_tasks", 1000000);
+        required_bound("max_edges", 4000000);
+        required_bound("max_depth", 1024);
+        required_bound("max_dynamic_compiles", 1000000);
+        required_bound("max_total_children", 1000000);
+        required_bound("max_concurrency", 1000000);
+        if (!authored.contains("failure_policy") || !authored["failure_policy"].is_string() ||
+            (authored["failure_policy"].get<std::string>() != "fail_fast" &&
+             authored["failure_policy"].get<std::string>() != "collect")) {
+            diagnostics.add(CompilePhase::Normalize, "P_EXPAND_FAILURE",
+                            DiagnosticSeverity::Error, child_pointer(pointer, "failure_policy"),
+                            "expand_task_graph failure_policy must be fail_fast or collect",
+                            json::object());
+        } else {
+            lowered["failure_policy"] = authored["failure_policy"].get<std::string>();
+        }
     } else if (op == "spawn") {
         if (is_root)
             allowed({"op", "name", "definition", "child_binding", "body"});
@@ -1110,7 +1216,8 @@ OrchestrationPlanRecord lower_plan(const json& root,
     for (const auto& operation : operations) {
         const auto op = operation.value("op", "");
         has_core = has_core || op == "call_core";
-        has_child_dispatch = has_child_dispatch || op == "spawn" || op == "parallel_map";
+        has_child_dispatch = has_child_dispatch || op == "spawn" || op == "parallel_map" ||
+                             op == "expand_task_graph";
     }
     if (!has_core && !has_child_dispatch) {
         diagnostics.add(
@@ -1161,7 +1268,10 @@ void validate_budgets(const json&            document,
     const bool has_child_dispatch =
         document.contains("root") &&
         (contains_operation(document["root"], "spawn") ||
-         contains_operation(document["root"], "parallel_map"));
+         contains_operation(document["root"], "parallel_map") ||
+         contains_operation(document["root"], "expand_task_graph"));
+    const bool has_dynamic_expansion =
+        document.contains("root") && contains_operation(document["root"], "expand_task_graph");
     std::map<std::string, std::size_t> seen;
     std::map<std::string, std::uint64_t> child_budget_maxima;
     for (std::size_t index = 0; index < values.size(); ++index) {
@@ -1232,7 +1342,8 @@ void validate_budgets(const json&            document,
             resource == "max_core_steps") {
             structural_valid = *minimum >= 1;
         } else if (resource == "max_dynamic_compiles") {
-            structural_valid = *minimum == 0 && *maximum == 0;
+            structural_valid = has_dynamic_expansion ? *minimum >= 1
+                                                     : (*minimum == 0 && *maximum == 0);
         } else if (resource == "max_child_depth" || resource == "max_total_children") {
             structural_valid = true;
             if (has_child_dispatch) structural_valid = *minimum >= 1;
@@ -1304,6 +1415,7 @@ void validate_static_budget_requirements(const ParsedProgram&                   
     validate("max_program_operations", required.max_program_operations);
     validate("max_concurrency", required.max_concurrency);
     validate("max_core_steps", required.max_core_steps);
+    validate("max_dynamic_compiles", required.max_dynamic_compiles);
     validate("max_child_depth", required.max_child_depth);
     validate("max_total_children", required.max_total_children);
 }
@@ -1679,7 +1791,8 @@ struct ProgramCompiler::Impl {
                 const auto typed_plan = ProgramPlan::from_json(orchestration.plan);
                 validate_sealed_plan_dispatch(typed_plan, diagnostics);
                 if (parsed.schema_version == PROGRAM_SCHEMA_VERSION_V2 ||
-                    parsed.schema_version == PROGRAM_SCHEMA_VERSION_V3)
+                    parsed.schema_version == PROGRAM_SCHEMA_VERSION_V3 ||
+                    parsed.schema_version == PROGRAM_SCHEMA_VERSION_V4)
                     validate_static_budget_requirements(
                         parsed, derive_static_budget_requirements(typed_plan), diagnostics);
                 if (diagnostics.has_errors()) diagnostics.throw_error();

@@ -656,15 +656,37 @@ void validate_options(TaskGraphProposalOptions& options) {
     for (auto& contract : options.template_allowlist) {
         detail::validate_token(contract.template_id, "Task graph template_id");
         if (!detail::is_sha256_identity(contract.content_identity)) {
-            throw std::invalid_argument("Task graph template content_identity must be a sha256 identity");
+            throw std::invalid_argument(
+                "Task graph template content_identity must be a sha256 identity");
         }
         if (!templates.insert(contract.template_id).second) {
-            throw std::invalid_argument("Task graph template allow-list contains duplicate template_id");
+            throw std::invalid_argument(
+                "Task graph template allow-list contains duplicate template_id");
+        }
+        if (!contract.child_binding.empty())
+            detail::validate_token(contract.child_binding, "Task graph template child_binding");
+        if (!contract.executable_identity.empty())
+            detail::validate_token(contract.executable_identity,
+                                   "Task graph template executable_identity");
+        if (!contract.kind.empty())
+            detail::validate_token(contract.kind, "Task graph template kind");
+        std::set<std::string> capabilities;
+        for (const auto& capability : contract.capabilities) {
+            detail::validate_token(capability, "Task graph template capability");
+            if (!capabilities.insert(capability).second)
+                throw std::invalid_argument("Task graph template capabilities must be unique");
+        }
+        std::set<std::string> effects;
+        for (const auto& effect : contract.effects) {
+            detail::validate_token(effect, "Task graph template effect");
+            if (!effects.insert(effect).second)
+                throw std::invalid_argument("Task graph template effects must be unique");
         }
         std::set<std::string> inputs;
         for (const auto& field : contract.input_fields) {
             detail::validate_json_pointer(field);
-            if (field.empty()) throw std::invalid_argument("Task graph template input field must not be empty");
+            if (field.empty())
+                throw std::invalid_argument("Task graph template input field must not be empty");
             if (!inputs.insert(field).second) {
                 throw std::invalid_argument("Task graph template input fields must be unique");
             }
@@ -694,13 +716,17 @@ void validate_options(TaskGraphProposalOptions& options) {
         detail::validate_token(entry.authored.source_id, "Task graph source-map source_id");
         detail::validate_json_pointer(entry.authored.json_pointer);
         if (!source_pointers.insert(entry.generated_pointer).second) {
-            throw std::invalid_argument("Task graph proposal source map has duplicate generated pointer");
+            throw std::invalid_argument(
+                "Task graph proposal source map has duplicate generated pointer");
         }
     }
-    std::sort(options.source_map.begin(), options.source_map.end(), [](const auto& lhs, const auto& rhs) {
-        return std::tie(lhs.generated_pointer, lhs.authored.source_id, lhs.authored.json_pointer) <
-               std::tie(rhs.generated_pointer, rhs.authored.source_id, rhs.authored.json_pointer);
-    });
+    std::sort(options.source_map.begin(), options.source_map.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return std::tie(lhs.generated_pointer, lhs.authored.source_id,
+                                  lhs.authored.json_pointer) <
+                         std::tie(rhs.generated_pointer, rhs.authored.source_id,
+                                  rhs.authored.json_pointer);
+              });
 }
 
 }  // namespace

@@ -547,8 +547,9 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
         const auto op = operation["op"].get<std::string>();
         if (op != "call_core" && op != "sequence" && op != "branch" && op != "loop" &&
             op != "retry" && op != "parallel" && op != "race" && op != "quorum" &&
-            op != "map" && op != "parallel_map" && op != "spawn" && op != "await" &&
-            op != "emit" && op != "checkpoint" && op != "cancel" && op != "return") {
+            op != "map" && op != "parallel_map" && op != "expand_task_graph" &&
+            op != "spawn" && op != "await" && op != "emit" && op != "checkpoint" &&
+            op != "cancel" && op != "return") {
             return fail("unknown operation", id, "op");
         }
         if (op == "call_core") {
@@ -597,6 +598,13 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
                             "child_binding");
             }
             has_execution = true;
+        } else if (op == "expand_task_graph") {
+            if (!operation.contains("proposal_source") ||
+                !operation["proposal_source"].is_object()) {
+                return fail("expand_task_graph proposal source is missing or malformed", id,
+                            "proposal_source");
+            }
+            has_execution = true;
         } else if (op == "spawn") {
             if (operation.contains("body"))
                 return fail("spawn must not carry an inline body", id, "body");
@@ -632,7 +640,8 @@ bool valid_orchestration_plan(const OrchestrationPlanRecord& plan,
         active.insert(id);
         const auto& operation = operations.at(id);
         const auto  op = operation["op"].get<std::string>();
-        if (op == "call_core" || op == "parallel_map" || op == "spawn") {
+        if (op == "call_core" || op == "parallel_map" || op == "expand_task_graph" ||
+            op == "spawn") {
             reachable_execution = true;
         } else {
             const auto visit_one = [&](const json& value) {
@@ -705,9 +714,15 @@ void validate_budgets(const ProgramBundle&  bundle,
             resource == "max_core_steps") {
             structural = budget.minimum >= 1;
         } else if (resource == "max_dynamic_compiles") {
-            structural = budget.minimum == 0 && budget.maximum == 0;
-        } else if (resource == "max_child_depth" || resource == "max_total_children") {
-            structural = budget.minimum <= budget.maximum;
+            const bool has_dynamic_expansion =
+                bundle.program_schema_version() >= PROGRAM_SCHEMA_VERSION_V4 &&
+                std::any_of(bundle.typed_orchestration_plan().nodes().begin(),
+                            bundle.typed_orchestration_plan().nodes().end(),
+                            [](const auto& node) {
+                                return node.operation() == ProgramOperationKind::ExpandTaskGraph;
+                            });
+            structural = has_dynamic_expansion ? budget.minimum >= 1
+                                                : (budget.minimum == 0 && budget.maximum == 0);
         }
         if (!structural) {
             diagnostics.add("P_ADMIT_SEMANTIC_MISMATCH", "/declared_budget_requirements",

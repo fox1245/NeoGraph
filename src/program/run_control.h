@@ -6,6 +6,7 @@
 #include <neograph/program/module.h>
 #include <neograph/program/result.h>
 #include <neograph/program/transition_store.h>
+#include <neograph/program/task_graph_fragment.h>
 #include "catalog_access.h"
 #include <asio/any_io_executor.hpp>
 #include <asio/steady_timer.hpp>
@@ -55,6 +56,10 @@ using ChildLaunchCallback =
     std::function<std::shared_ptr<RunControl>(std::string_view, json, std::string_view,
                                               std::string_view)>;
 
+struct AsyncWaiter {
+    std::weak_ptr<asio::steady_timer> timer;
+};
+
 class RunControl final : public std::enable_shared_from_this<RunControl> {
 private:
     static asio::awaitable<ProgramResult>
@@ -81,13 +86,24 @@ public:
     using CompletionCallback = std::function<void(const ProgramResult&)>;
     using TerminalCleanup = std::function<void()>;
     void set_completion_callback(CompletionCallback callback) noexcept;
+    void set_child_launch_callback(ChildLaunchCallback callback) noexcept;
     /**
      * Registers per-attempt cleanup that runs before the terminal transition
      * is published.  Admission leases use this to free host capacity before a
      * completed handle can start the next Program.
      */
     void add_terminal_cleanup(TerminalCleanup cleanup);
-    void set_child_launch_callback(ChildLaunchCallback callback) noexcept;
+    /**
+     * Registers the host-owned policy/store boundary used by
+     * expand_task_graph.  The callback is consulted only after the proposal
+     * has been selected from the operation's typed source contract.
+     */
+    void set_task_graph_expansion_context(
+        std::shared_ptr<TaskGraphFragmentStore> store,
+        TaskGraphExpansionPolicyResolver        policy_resolver) noexcept;
+    std::shared_ptr<TaskGraphFragmentStore> task_graph_fragments() const;
+    std::optional<TaskGraphExpansionPolicy> task_graph_policy(
+        std::string_view expansion_operation_id) const;
 
     const std::string                                owner_scope;
     const std::string                                run_id;
@@ -153,26 +169,25 @@ public:
     ProgramEvent  preview_event(std::uint64_t sequence,
                                 ProgramEventKind kind,
                                 ProgramEventPayload payload) const;
-    void          adopt_published_event(ProgramEvent event);
+    void adopt_published_event(ProgramEvent event);
 
-    struct AsyncWaiter {
-        std::weak_ptr<asio::steady_timer> timer;
-    };
-
+private:
     mutable std::mutex                    mutex_;
     mutable std::condition_variable       cv_;
-    std::optional<ProgramResult>          result_;
-    std::vector<ProgramEvent>             events_;
-    std::optional<CoreCheckpointIdentity> latest_checkpoint_;
-    std::shared_ptr<ProgramEventSink>     sink_;
-    CompletionCallback                    completion_callback_;
-    mutable std::vector<AsyncWaiter>        waiters_;
+    std::optional<ProgramResult>           result_;
+    std::vector<ProgramEvent>              events_;
+    std::optional<CoreCheckpointIdentity>  latest_checkpoint_;
+    std::shared_ptr<ProgramEventSink>      sink_;
+    CompletionCallback                     completion_callback_;
+    mutable std::vector<AsyncWaiter>       waiters_;
     std::vector<TerminalCleanup>           terminal_cleanups_;
-    ChildLaunchCallback                   child_launch_callback_;
-    std::uint64_t                         next_sequence_      = 1;
-    CancellationCause                     cancellation_cause_ = CancellationCause::None;
-    bool                                  terminal_decided_   = false;
-    bool                                  completion_claimed_ = false;
+    ChildLaunchCallback                    child_launch_callback_;
+    std::shared_ptr<TaskGraphFragmentStore> task_graph_fragments_;
+    TaskGraphExpansionPolicyResolver       task_graph_policy_resolver_;
+    std::uint64_t                          next_sequence_ = 1;
+    CancellationCause                      cancellation_cause_ = CancellationCause::None;
+    bool                                    terminal_decided_ = false;
+    bool                                    completion_claimed_ = false;
     std::vector<std::weak_ptr<RunControl>> children_;
 };
 

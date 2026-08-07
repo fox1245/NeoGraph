@@ -14,6 +14,7 @@
 #include <neograph/program/module.h>
 #include <neograph/program/pending.h>
 #include <neograph/program/replay.h>
+#include <neograph/program/task_graph_fragment.h>
 #include <neograph/program/invocation.h>
 #include <neograph/program/transition_store.h>
 
@@ -83,23 +84,29 @@ struct ProgramChildQuotaConfig {
     std::uint64_t max_pending_spawn_requests_per_owner = 0;
 };
 
-struct RuntimeConfig {
-    std::shared_ptr<ProgramCatalog>         catalog;
-    std::shared_ptr<graph::CheckpointStore> checkpoints;
-    std::shared_ptr<graph::Store>           state_store;
-    std::shared_ptr<ProgramTransitionStore> transitions;
-    std::size_t                             scheduler_threads = 1;
-    ProgramChildBindingResolver             child_binding_resolver;
-    /**
-     * Optional shared host scheduler.  It becomes mandatory for every attempt
-     * when configured; leaving either member unset preserves legacy direct
-     * dispatch.
-     */
-    std::shared_ptr<HostAdmissionController> host_admission;
-    ProgramHostAdmissionResolver              host_admission_resolver;
-    /// Process-wide limits for admitted child publication and dispatch.
-    ProgramChildQuotaConfig                   child_quota;
-};
+ struct RuntimeConfig {
+     std::shared_ptr<ProgramCatalog>         catalog;
+     std::shared_ptr<graph::CheckpointStore> checkpoints;
+     std::shared_ptr<graph::Store>           state_store;
+     std::shared_ptr<ProgramTransitionStore> transitions;
+     std::size_t                              scheduler_threads = 1;
+     ProgramChildBindingResolver             child_binding_resolver;
+     /**
+      * Optional durable dynamic task-graph expansion boundary.  An absent
+      * store or policy resolver makes expand_task_graph fail closed at runtime.
+      */
+     std::shared_ptr<TaskGraphFragmentStore> task_graph_fragments;
+     TaskGraphExpansionPolicyResolver        task_graph_policy_resolver;
+     /**
+      * Optional shared host scheduler.  It becomes mandatory for every attempt
+      * when configured; leaving either member unset preserves legacy direct
+      * dispatch.
+      */
+     std::shared_ptr<HostAdmissionController> host_admission;
+     ProgramHostAdmissionResolver             host_admission_resolver;
+     /// Process-wide limits for admitted child publication and dispatch.
+     ProgramChildQuotaConfig                  child_quota;
+ };
 class NEOGRAPH_PROGRAM_API ProgramRuntime {
 public:
     explicit ProgramRuntime(RuntimeConfig config);

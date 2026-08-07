@@ -47,11 +47,16 @@ struct TaskGraphArtifactContract {
  * the proposal contract.
  */
 struct TaskGraphTemplateContract {
-    std::string                          template_id;
-    std::string                          content_identity;
-    std::vector<std::string>             input_fields;
+    std::string                            template_id;
+    std::string                            content_identity;
+    std::vector<std::string>               input_fields;
     std::vector<TaskGraphArtifactContract> output_artifacts;
-    TaskGraphBudget                      budget_ceiling;
+    TaskGraphBudget                        budget_ceiling;
+    std::string                            child_binding;
+    std::string                            executable_identity;
+    std::string                            kind;
+    std::vector<std::string>               capabilities;
+    std::vector<std::string>               effects;
 
     bool operator==(const TaskGraphTemplateContract&) const = default;
 };

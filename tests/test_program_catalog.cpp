@@ -2,6 +2,7 @@
 #include <neograph/provider.h>
 #include <neograph/tool.h>
 #include <neograph/program/program.h>
+#include <neograph/program/store.h>
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 #include <neograph/program/sqlite_store.h>
 #endif

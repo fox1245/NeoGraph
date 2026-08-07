@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/program-document-v4.schema.json",
+  "title": "NeoGraph Program Document v4",
+  "description": "Closed authored source contract for a finite typed Program operation tree. Version 4 adds expand_task_graph: a bounded, policy-admitted dynamic task-graph expansion operation. The compiler remains authoritative for cross-field constraints, source resolution, static budgets, and admission.",
+  "type": "object",
+  "required": ["program_schema_version", "input_contract", "output_contract", "root", "declared_budget_requirements"],
+  "properties": {
+    "program_schema_version": {"const": 4},
+    "input_contract": {"$ref": "#/$defs/contract"},
+    "output_contract": {"$ref": "#/$defs/contract"},
+    "root": {"$ref": "#/$defs/root"},
+    "declared_budget_requirements": {"$ref": "#/$defs/budget_requirements"}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "nonempty_string": {"type": "string", "minLength": 1},
+    "uint64": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+    "positive_uint64": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+    "json_pointer": {"type": "string", "pattern": "^(?:/(?:[^~/]|~[01])*)*$"},
+    "opaque_object": {"type": "object", "additionalProperties": true},
+    "contract": {
+      "type": "object",
+      "required": ["schema_version", "schema"],
+      "properties": {"schema_version": {"const": 1}, "schema": {"$ref": "#/$defs/opaque_object"}},
+      "additionalProperties": false
+    },
+    "core_definition": {
+      "type": "object",
+      "required": ["schema_version", "name", "nodes"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "name": {"$ref": "#/$defs/nonempty_string"},
+        "channels": {"type": "object", "additionalProperties": true},
+        "nodes": {"type": "object", "minProperties": 1, "additionalProperties": true},
+        "edges": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "conditional_edges": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+        "interrupt_before": {"type": "array", "items": {"$ref": "#/$defs/nonempty_string"}},
+        "interrupt_after": {"type": "array", "items": {"$ref": "#/$defs/nonempty_string"}},
+        "retry_policy": {"type": "object", "additionalProperties": true}
+      },
+      "patternProperties": {"^(?:_|x-)": {}},
+      "additionalProperties": false
+    },
+    "condition": {
+      "type": "object",
+      "oneOf": [
+        {"required": ["path", "equals"], "properties": {"path": {"$ref": "#/$defs/json_pointer"}, "equals": {}}},
+        {"required": ["path", "not_equals"], "properties": {"path": {"$ref": "#/$defs/json_pointer"}, "not_equals": {}}},
+        {"required": ["path", "exists"], "properties": {"path": {"$ref": "#/$defs/json_pointer"}, "exists": {"type": "boolean"}}},
+        {"required": ["all"], "properties": {"all": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/condition"}}}},
+        {"required": ["any"], "properties": {"any": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/condition"}}}},
+        {"required": ["not"], "properties": {"not": {"$ref": "#/$defs/condition"}}}
+      ],
+      "unevaluatedProperties": false
+    },
+    "operation_shape": {
+      "type": "object",
+      "required": ["op"],
+      "properties": {
+        "op": {"enum": ["call_core", "sequence", "branch", "loop", "retry", "parallel", "race", "quorum", "map", "spawn", "await", "emit", "checkpoint", "cancel", "return", "parallel_map", "expand_task_graph"]},
+        "core": {"$ref": "#/$defs/nonempty_string"},
+        "children": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/operation"}},
+        "condition": {"$ref": "#/$defs/condition"},
+        "then": {"$ref": "#/$defs/operation"},
+        "else": {"$ref": "#/$defs/operation"},
+        "body": {"$ref": "#/$defs/operation"},
+        "max_iterations": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "max_attempts": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "branches": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/operation"}},
+        "min_success": {"$ref": "#/$defs/positive_uint64"},
+        "items": {"type": "array", "minItems": 1, "maxItems": 1000000},
+        "child_binding": {"$ref": "#/$defs/nonempty_string"},
+        "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 86400000},
+        "scope": {"const": "run"},
+        "reason": {"$ref": "#/$defs/nonempty_string"},
+        "value": {},
+        "item_source": {"$ref": "#/$defs/parallel_map_item_source"},
+        "input_binding": {"$ref": "#/$defs/parallel_map_input_binding"},
+        "output_binding": {"$ref": "#/$defs/parallel_map_output_binding"},
+        "max_items": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "max_in_flight": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "max_output_bytes": {"type": "integer", "minimum": 1, "maximum": 1073741824},
+        "failure_policy": {"enum": ["fail_fast", "collect"]},
+        "proposal_source": {"$ref": "#/$defs/proposal_source"},
+        "max_tasks": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "max_edges": {"type": "integer", "minimum": 1, "maximum": 4000000},
+        "max_depth": {"type": "integer", "minimum": 1, "maximum": 1024},
+        "max_dynamic_compiles": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "max_total_children": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 1000000}
+      }
+    },
+    "operation": {
+      "allOf": [{"$ref": "#/$defs/operation_shape"}],
+      "unevaluatedProperties": false
+    },
+    "root": {
+      "allOf": [{"$ref": "#/$defs/operation_shape"}],
+      "required": ["name", "definition"],
+      "properties": {"name": {"$ref": "#/$defs/nonempty_string"}, "definition": {"$ref": "#/$defs/core_definition"}},
+      "unevaluatedProperties": false
+    },
+    "parallel_map_item_source": {
+      "type": "object",
+      "oneOf": [
+        {"required": ["literal"], "properties": {"literal": {"type": "array", "maxItems": 1000000}}, "additionalProperties": false},
+        {"required": ["artifact", "field"], "properties": {"artifact": {"const": "input"}, "field": {"$ref": "#/$defs/json_pointer"}}, "additionalProperties": false}
+      ]
+    },
+    "parallel_map_endpoint": {
+      "type": "object", "required": ["field"],
+      "properties": {"field": {"$ref": "#/$defs/json_pointer"}}, "additionalProperties": false
+    },
+    "parallel_map_input_binding": {
+      "type": "object", "required": ["from", "to"],
+      "properties": {"from": {"$ref": "#/$defs/parallel_map_endpoint"}, "to": {"$ref": "#/$defs/parallel_map_endpoint"}}, "additionalProperties": false
+    },
+    "parallel_map_output_binding": {
+      "type": "object", "required": ["from"],
+      "properties": {"from": {"$ref": "#/$defs/parallel_map_endpoint"}}, "additionalProperties": false
+    },
+    "proposal_source": {
+      "type": "object",
+      "oneOf": [
+        {"required": ["inline"], "properties": {"inline": {"type": "object"}}, "additionalProperties": false},
+        {"required": ["artifact", "field"], "properties": {"artifact": {"const": "input"}, "field": {"$ref": "#/$defs/json_pointer"}}, "additionalProperties": false}
+      ]
+    },
+    "budget_requirement": {
+      "type": "object",
+      "required": ["resource", "minimum", "maximum"],
+      "properties": {"resource": {"$ref": "#/$defs/nonempty_string"}, "minimum": {"$ref": "#/$defs/uint64"}, "maximum": {"$ref": "#/$defs/uint64"}},
+      "additionalProperties": false
+    },
+    "budget_requirements": {
+      "type": "array", "minItems": 1, "items": {"$ref": "#/$defs/budget_requirement"}
+    }
+  }
+}

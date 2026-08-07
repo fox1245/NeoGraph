@@ -2,6 +2,7 @@
 #include <neograph/graph/engine.h>
 #include <neograph/graph/node.h>
 #include <neograph/program/program.h>
+#include <neograph/program/store.h>
 
 #include "registry_access.h"
 #include <asio/bind_cancellation_slot.hpp>
@@ -349,7 +350,8 @@ RegistrySnapshot runtime_registry() {
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<CompletedNode>(name);
         },
-        json{{"type", "object"}}, json::object());
+        json{{"type", "object"}},
+        json{{"writes", json::array({"value"})}, {"exports", json::array({"value"})}});
     builder.add_node(
         manifest(ExecutableKind::Node, "runtime-map-echo", 'e'),
         [](const std::string& name, const json&, const NodeContext&) {
@@ -449,6 +451,87 @@ json budget_requirements() {
         json{{"resource", "max_total_children"}, {"minimum", 0}, {"maximum", 0}},
     });
 }
+json program_document(std::string node_type);
+TaskGraphTemplateContract expansion_template_contract() {
+    TaskGraphTemplateContract contract;
+    contract.template_id      = "runtime-map/v1";
+    contract.content_identity = digest('a');
+    contract.input_fields     = {"/item"};
+    contract.output_artifacts = {
+        TaskGraphArtifactContract{"result", {"/channels/value/value"}}};
+    contract.budget_ceiling   = TaskGraphBudget{1000, 100, 100, 4096};
+    contract.child_binding    = "child";
+    contract.kind             = "program";
+    return contract;
+}
+
+TaskGraphExpansionPolicy expansion_policy() {
+    TaskGraphExpansionPolicy policy;
+    policy.limits.max_tasks                   = 4;
+    policy.limits.max_edges                   = 8;
+    policy.limits.max_depth                   = 4;
+    policy.limits.per_task_budget_ceiling     = TaskGraphBudget{1000, 100, 100, 4096};
+    policy.limits.total_budget_ceiling        = TaskGraphBudget{4000, 400, 400, 8192};
+    policy.template_allowlist                 = {expansion_template_contract()};
+    return policy;
+}
+
+json expansion_proposal() {
+    return json{
+        {"schema_version", 1},
+        {"tasks",
+         json::array({
+             json{{"id", "dependent"},
+                  {"template", "runtime-map/v1"},
+                  {"input_bindings",
+                   json::array({json{{"from",
+                                      json{{"task", "seed"},
+                                           {"artifact", "result"},
+                                           {"field", "/channels/value/value"}}},
+                                      {"to", json{{"field", "/item"}}}}})},
+                  {"depends_on", json::array({"seed"})},
+                  {"budget", json{{"wall_time_ms", 100}, {"model_tokens", 1}}}},
+             json{{"id", "seed"},
+                  {"template", "runtime-map/v1"},
+                  {"input_bindings", json::array()},
+                  {"depends_on", json::array()},
+                  {"budget", json{{"wall_time_ms", 100}, {"model_tokens", 1}}}},
+         })},
+        {"join", json{{"kind", "all"}}},
+    };
+}
+
+json expand_task_graph_document(json proposal,
+                                std::uint64_t max_tasks       = 2,
+                                std::uint64_t max_edges       = 4,
+                                std::uint64_t max_depth       = 2,
+                                std::uint64_t max_concurrency = 1) {
+    auto document = program_document("runtime-completed");
+    document["program_schema_version"] = PROGRAM_SCHEMA_VERSION_V4;
+    document["declared_budget_requirements"][3]["maximum"] = max_concurrency;
+    document["declared_budget_requirements"][4]["maximum"] = max_tasks;
+    document["declared_budget_requirements"][6]["minimum"] = 1;
+    document["declared_budget_requirements"][6]["maximum"] = 1;
+    document["declared_budget_requirements"][7]["minimum"] = max_depth;
+    document["declared_budget_requirements"][7]["maximum"] = max_depth;
+    document["declared_budget_requirements"][8]["minimum"] = max_tasks;
+    document["declared_budget_requirements"][8]["maximum"] = max_tasks;
+    const auto definition = document["root"]["definition"];
+    document["root"] = json{
+        {"op", "expand_task_graph"},
+        {"name", "main"},
+        {"definition", definition},
+        {"proposal_source", json{{"inline", std::move(proposal)}}},
+        {"max_tasks", max_tasks},
+        {"max_edges", max_edges},
+        {"max_depth", max_depth},
+        {"max_dynamic_compiles", 1},
+        {"max_total_children", max_tasks},
+        {"max_concurrency", max_concurrency},
+        {"failure_policy", "collect"}};
+    return document;
+}
+
 
 json program_document(std::string node_type) {
     json nodes{{"work", json{{"type", node_type}}}};
@@ -579,8 +662,9 @@ struct AdmittedRuntime {
     std::shared_ptr<ProgramCatalog>         catalog;
     std::shared_ptr<CheckpointStore>        checkpoints;
     std::shared_ptr<ProgramTransitionStore> journal;
-    std::shared_ptr<ChildBindingRegistry>   child_bindings;
-    ProgramChildQuotaConfig                 child_quota;
+    std::shared_ptr<ChildBindingRegistry>              child_bindings;
+    std::shared_ptr<InMemoryTaskGraphFragmentStore>   task_graph_fragments;
+    ProgramChildQuotaConfig                            child_quota;
     std::size_t                             scheduler_thread_count;
     std::unique_ptr<ProgramRuntime>         runtime;
 
@@ -600,6 +684,7 @@ struct AdmittedRuntime {
           journal(journal_backend ? std::move(journal_backend)
                                   : std::make_shared<InMemoryProgramTransitionStore>()),
           child_bindings(std::make_shared<ChildBindingRegistry>()),
+          task_graph_fragments(std::make_shared<InMemoryTaskGraphFragmentStore>()),
           child_quota(quota),
           scheduler_thread_count(scheduler_threads),
           runtime(make_runtime()) {}
@@ -610,7 +695,7 @@ struct AdmittedRuntime {
             .semantic_version("1.0.0")
             .registry(registry)
             .mode(AdmissionMode::MultiTenant)
-            .max_program_schema_version(PROGRAM_SCHEMA_VERSION_V3)
+            .max_program_schema_version(PROGRAM_SCHEMA_VERSION_V4)
             .allow_source_kind(SourceKind::CppBuilder)
             .allow_effect_mode(EffectMode::Brokered);
         for (const auto& identity : registry.identities())
@@ -639,6 +724,13 @@ struct AdmittedRuntime {
                                         std::string_view binding_name) {
                 return bindings->resolve(owner_scope, parent_version_id, binding_name);
             }};
+        config.task_graph_fragments = task_graph_fragments;
+        config.task_graph_policy_resolver =
+            [](std::string_view owner_scope, std::string_view,
+               std::string_view) -> std::optional<TaskGraphExpansionPolicy> {
+            if (owner_scope != "tenant:runtime") return std::nullopt;
+            return expansion_policy();
+        };
         config.child_quota = child_quota;
         return std::make_unique<ProgramRuntime>(std::move(config));
     }
@@ -3136,6 +3228,55 @@ TEST(ProgramRuntimeTest, MapEvaluatesEveryItemAndCollectsOutputs) {
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(result.output(), json::array({json{{"mapped", true}}, json{{"mapped", true}}}));
     EXPECT_EQ(completed_calls.load(), 2U);
+}
+
+TEST(ProgramRuntimeTest, ExpandTaskGraphPublishesAndBindsDependentChildTasks) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2);
+    const auto linked = link_child_versions(
+        fixture,
+        fixture.admit_document(expand_task_graph_document(expansion_proposal())),
+        fixture.admit_document(parallel_map_echo_child_document()),
+        BudgetLimits{3333, 333, 333, 1, 1, 6, 0, 0, 0});
+
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json{{"item", "seed"}},
+                           RunBudget{10000, 1000, 1000, 1, 2, 20, 1, 2, 2},
+                           "trace-expand-task-graph", {}});
+    const auto result = parent.wait();
+    if (result.status() != ProgramTerminalStatus::Completed) {
+        std::cerr << "expand failure=" << (result.failure() ? result.failure()->code : "<none>")
+                  << " message=" << (result.failure() ? result.failure()->message : "<none>")
+                  << " output=" << result.output().dump() << '\n';
+    }
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(completed_calls.load(), 2U);
+    const auto output = result.output();
+    ASSERT_TRUE(output.is_object());
+    ASSERT_TRUE(output.contains("fragment_id"));
+    ASSERT_TRUE(output.contains("tasks"));
+    ASSERT_TRUE(output["tasks"].is_array());
+    ASSERT_EQ(output["tasks"].size(), 2U);
+    EXPECT_EQ(output["tasks"][0]["task_id"], "seed");
+    EXPECT_EQ(output["tasks"][0]["state"], "completed");
+    EXPECT_EQ(output["tasks"][1]["task_id"], "dependent");
+    EXPECT_EQ(output["tasks"][1]["state"], "completed");
+    EXPECT_EQ(output["tasks"][0]["output"]["channels"]["value"]["value"], "seed");
+    EXPECT_EQ(output["tasks"][1]["output"]["channels"]["value"]["value"], "seed");
+
+    const auto fragment_id = output["fragment_id"].get<std::string>();
+    const auto record = fixture.task_graph_fragments->load(fragment_id);
+    ASSERT_TRUE(record.has_value());
+    EXPECT_TRUE(record->published);
+    EXPECT_TRUE(record->terminal);
+    EXPECT_EQ(record->revision, 6U);
+    ASSERT_EQ(record->tasks.size(), 2U);
+    for (const auto& task : record->tasks) {
+        EXPECT_EQ(task.state, TaskGraphTaskState::Completed);
+        EXPECT_EQ(task.attempt, 1U);
+    }
 }
 
 TEST(ProgramRuntimeTest, MapExecutesItemsSerially) {

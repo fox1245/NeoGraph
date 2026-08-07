@@ -286,3 +286,100 @@ TEST(TaskGraphProposalTest, PreservesOriginalBindingCoordinatesAfterMalformedEnt
     EXPECT_EQ(diagnostic.primary.source_id, "planner:turn-8");
     EXPECT_EQ(diagnostic.primary.json_pointer, "/response/binding");
 }
+
+
+namespace {
+
+TaskGraphFragmentCompileOptions fragment_compile_options() {
+    const auto base = proposal_options();
+    TaskGraphFragmentCompileOptions options;
+    options.owner_scope                  = "tenant-a";
+    options.parent_run_id                = "run-parent";
+    options.expansion_operation_id       = "op-expand";
+    options.parent_program_version_id    = "version-parent";
+    options.child_depth                  = 0;
+    options.remaining_budget.wall_time_ms = 90000;
+    options.remaining_budget.model_tokens = 16000;
+    options.remaining_budget.monetary_microunits = 1500000;
+    options.remaining_budget.max_child_depth = 4;
+    options.remaining_budget.max_total_children = 4;
+    options.limits = base.limits;
+    options.template_allowlist = base.template_allowlist;
+    for (std::size_t index = 0; index < options.template_allowlist.size(); ++index) {
+        options.template_allowlist[index].child_binding =
+            "child-" + std::to_string(index);
+        options.template_allowlist[index].executable_identity =
+            "worker-" + std::to_string(index);
+        options.template_allowlist[index].kind = "node";
+    }
+    return options;
+}
+
+CompiledTaskGraphFragment compiled_fragment() {
+    const auto proposal = TaskGraphProposal::parse(valid_proposal(), proposal_options());
+    return TaskGraphFragmentCompiler::compile(proposal, fragment_compile_options());
+}
+
+TaskGraphFragmentRecord fragment_record(const CompiledTaskGraphFragment& fragment) {
+    TaskGraphFragmentRecord record{fragment, {}, 0, false, false};
+    for (const auto& task : fragment.tasks()) {
+        record.tasks.push_back(
+            TaskGraphTaskRecord{task.task_id, task.operation_id, TaskGraphTaskState::Pending, 0,
+                                 std::nullopt, std::nullopt});
+    }
+    return record;
+}
+
+}  // namespace
+
+TEST(TaskGraphFragmentTest, RoundTripsCanonicalFragmentAndPreservesSourceMetadata) {
+    const auto fragment = compiled_fragment();
+
+    EXPECT_EQ(fragment.parent_program_version_id(), "version-parent");
+    EXPECT_EQ(fragment.child_depth(), 0U);
+    const auto parsed = CompiledTaskGraphFragment::parse(fragment.serialize_canonical());
+    EXPECT_EQ(parsed, fragment);
+    EXPECT_EQ(parsed.serialize_canonical(), fragment.serialize_canonical());
+}
+
+TEST(TaskGraphFragmentTest, RejectsTamperedOperationIdentity) {
+    auto tampered = compiled_fragment().to_json();
+    tampered["tasks"][0]["operation_id"] = "sha256:" + std::string(64, 'f');
+    EXPECT_THROW(CompiledTaskGraphFragment::parse(tampered.dump()), std::invalid_argument);
+}
+
+TEST(TaskGraphFragmentTest, PublishesAndUpdatesOnlyThroughDurableCompareAndSwap) {
+    const auto fragment = compiled_fragment();
+    const auto record = fragment_record(fragment);
+    InMemoryTaskGraphFragmentStore store;
+
+    EXPECT_EQ(store.publish(record), TaskGraphPublishResult::Published);
+    const auto first = store.load(fragment.fragment_id());
+    ASSERT_TRUE(first.has_value());
+    EXPECT_TRUE(first->published);
+    EXPECT_EQ(first->revision, 1U);
+    EXPECT_EQ(store.publish(record), TaskGraphPublishResult::AlreadyPresent);
+
+    auto next = *first;
+    next.tasks[0].state = TaskGraphTaskState::Completed;
+    next.tasks[0].output = json{{"summary", "done"}};
+    next.terminal = true;
+    EXPECT_EQ(store.compare_update(fragment.fragment_id(), 1, next),
+              TaskGraphPublishResult::Published);
+    EXPECT_EQ(store.compare_update(fragment.fragment_id(), 1, next),
+              TaskGraphPublishResult::Conflict);
+
+    const auto updated = store.load(fragment.fragment_id());
+    ASSERT_TRUE(updated.has_value());
+    EXPECT_EQ(updated->revision, 2U);
+    EXPECT_TRUE(updated->terminal);
+    EXPECT_EQ(updated->tasks[0].state, TaskGraphTaskState::Completed);
+    EXPECT_EQ(TaskGraphFragmentRecord::parse(updated->serialize_canonical()), *updated);
+}
+
+TEST(TaskGraphFragmentTest, RejectsRecordTaskSetOrOperationMismatches) {
+    auto record = fragment_record(compiled_fragment());
+    record.tasks[0].operation_id = "sha256:" + std::string(64, 'e');
+    EXPECT_THROW(TaskGraphFragmentRecord::parse(record.serialize_canonical()),
+                 std::invalid_argument);
+}

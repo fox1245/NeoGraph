@@ -37,6 +37,12 @@ enum class ProgramOperationKind : std::uint8_t {
     Cancel,
     Return,
     ParallelMap,
+    ExpandTaskGraph,
+};
+
+enum class ProgramTaskGraphFailurePolicy : std::uint8_t {
+    FailFast,
+    Collect,
 };
 
 enum class ProgramParallelMapItemSource : std::uint8_t {
@@ -68,6 +74,20 @@ struct NEOGRAPH_PROGRAM_API ProgramParallelMapSpec {
     ProgramParallelMapFailurePolicy failure_policy = ProgramParallelMapFailurePolicy::FailFast;
 
     bool operator==(const ProgramParallelMapSpec&) const = default;
+};
+
+/** Fixed, bounded source and admission contract for expand_task_graph. */
+struct NEOGRAPH_PROGRAM_API ProgramExpandTaskGraphSpec {
+    json                          proposal_source = json::object();
+    std::uint64_t                 max_tasks = 0;
+    std::uint64_t                 max_edges = 0;
+    std::uint64_t                 max_depth = 0;
+    std::uint64_t                 max_dynamic_compiles = 0;
+    std::uint64_t                 max_total_children = 0;
+    std::uint32_t                 max_concurrency = 0;
+    ProgramTaskGraphFailurePolicy failure_policy = ProgramTaskGraphFailurePolicy::FailFast;
+
+    bool operator==(const ProgramExpandTaskGraphSpec&) const = default;
 };
 
 NEOGRAPH_PROGRAM_API std::string_view to_string(ProgramOperationKind kind) noexcept;
@@ -121,10 +141,9 @@ public:
     const std::optional<std::uint64_t>& min_success() const noexcept;
     const std::optional<std::uint64_t>& timeout_ms() const noexcept;
     const std::optional<std::string>& scope() const noexcept;
-
     const std::optional<ProgramParallelMapSpec>& parallel_map() const noexcept;
+    const std::optional<ProgramExpandTaskGraphSpec>& expand_task_graph() const noexcept;
     const std::optional<std::string>& reason() const noexcept;
-
     /** Authored condition/value/items are returned as owned immutable copies. */
     json condition() const;
     json value() const;
@@ -185,6 +204,7 @@ struct NEOGRAPH_PROGRAM_API ProgramStaticBudgetRequirements {
     std::uint64_t max_core_invocations   = 0;
     std::uint32_t max_child_depth        = 0;
     std::uint64_t max_total_children     = 0;
+    std::uint64_t max_dynamic_compiles   = 0;
 
     bool operator==(const ProgramStaticBudgetRequirements&) const = default;
 };

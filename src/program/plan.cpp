@@ -14,10 +14,10 @@
 namespace neograph::program {
 namespace {
 
-constexpr std::array<std::string_view, 16> kOperationNames = {
+constexpr std::array<std::string_view, 17> kOperationNames = {
     "call_core", "sequence", "branch", "loop", "retry", "parallel", "race", "quorum",
-    "map",       "spawn",    "await",  "emit", "checkpoint", "cancel", "return",
-    "parallel_map"};
+    "map",       "spawn",    "await",  "emit",  "checkpoint", "cancel", "return",
+    "parallel_map", "expand_task_graph"};
 std::string require_string(const json& value, std::string_view field) {
     const auto key = std::string(field);
     if (!value.contains(key) || !value.at(key).is_string() || value.at(key).get<std::string>().empty())
@@ -72,6 +72,11 @@ void reject_unknown_fields(const json& value, ProgramOperationKind operation) {
         case ProgramOperationKind::ParallelMap:
             add({"item_source", "child_binding", "input_binding", "output_binding",
                  "max_items", "max_in_flight", "max_output_bytes", "failure_policy"});
+            break;
+        case ProgramOperationKind::ExpandTaskGraph:
+            add({"proposal_source", "max_tasks", "max_edges", "max_depth",
+                 "max_dynamic_compiles", "max_total_children", "max_concurrency",
+                 "failure_policy"});
             break;
     }
     for (const auto& [field, ignored] : value.items()) {
@@ -131,10 +136,11 @@ struct NodeData {
     std::optional<std::uint64_t>  timeout_ms;
     std::optional<std::string>    scope;
     std::optional<std::string>    reason;
+    std::optional<ProgramParallelMapSpec>      parallel_map;
+    std::optional<ProgramExpandTaskGraphSpec> expand_task_graph;
     json                          condition = json::object();
     json                          value     = json();
     json                          items     = json::array();
-    std::optional<ProgramParallelMapSpec> parallel_map;
     bool                          has_value = false;
 };
 
@@ -247,6 +253,44 @@ ProgramParallelMapSpec parse_parallel_map_spec(const json& encoded) {
     return result;
 }
 
+ProgramExpandTaskGraphSpec parse_expand_task_graph_spec(const json& encoded) {
+    ProgramExpandTaskGraphSpec result;
+    if (!encoded.contains("proposal_source") || !encoded["proposal_source"].is_object())
+        throw std::invalid_argument("expand_task_graph proposal_source must be an object");
+    const auto& source = encoded["proposal_source"];
+    if (source.contains("inline")) {
+        reject_unknown_object_fields(source, {"inline"}, "proposal_source");
+        if (!source["inline"].is_object())
+            throw std::invalid_argument("expand_task_graph inline proposal must be an object");
+        result.proposal_source = detail::owned_json_copy(source);
+    } else {
+        reject_unknown_object_fields(source, {"artifact", "field"}, "proposal_source");
+        if (!source.contains("artifact") || require_string(source, "artifact") != "input")
+            throw std::invalid_argument(
+                "expand_task_graph proposal_source artifact must be 'input'");
+        result.proposal_source = detail::owned_json_copy(source);
+        (void)require_json_pointer(source, "field");
+    }
+    result.max_tasks = require_bound(encoded, "max_tasks");
+    result.max_edges = require_bound(encoded, "max_edges");
+    result.max_depth = require_bound(encoded, "max_depth");
+    result.max_dynamic_compiles = require_bound(encoded, "max_dynamic_compiles");
+    result.max_total_children = require_bound(encoded, "max_total_children");
+    const auto max_concurrency = require_bound(encoded, "max_concurrency");
+    if (max_concurrency > std::numeric_limits<std::uint32_t>::max())
+        throw std::invalid_argument("expand_task_graph max_concurrency exceeds uint32 range");
+    result.max_concurrency = static_cast<std::uint32_t>(max_concurrency);
+    const auto failure_policy = require_string(encoded, "failure_policy");
+    if (failure_policy == "fail_fast") {
+        result.failure_policy = ProgramTaskGraphFailurePolicy::FailFast;
+    } else if (failure_policy == "collect") {
+        result.failure_policy = ProgramTaskGraphFailurePolicy::Collect;
+    } else {
+        throw std::invalid_argument("expand_task_graph failure_policy is invalid");
+    }
+    return result;
+}
+
 }  // namespace
 
 std::string_view to_string(ProgramOperationKind kind) noexcept {
@@ -315,9 +359,12 @@ const std::optional<std::uint64_t>& ProgramPlanNode::timeout_ms() const noexcept
 const std::optional<std::string>& ProgramPlanNode::scope() const noexcept {
     return impl_->data.scope;
 }
-
 const std::optional<ProgramParallelMapSpec>& ProgramPlanNode::parallel_map() const noexcept {
     return impl_->data.parallel_map;
+}
+const std::optional<ProgramExpandTaskGraphSpec>&
+ProgramPlanNode::expand_task_graph() const noexcept {
+    return impl_->data.expand_task_graph;
 }
 const std::optional<std::string>& ProgramPlanNode::reason() const noexcept {
     return impl_->data.reason;
@@ -369,6 +416,18 @@ json ProgramPlanNode::to_json() const {
         result["max_output_bytes"] = map.max_output_bytes;
         result["failure_policy"] =
             map.failure_policy == ProgramParallelMapFailurePolicy::FailFast ? "fail_fast" : "collect";
+    }
+    if (data.expand_task_graph) {
+        const auto& expand = *data.expand_task_graph;
+        result["proposal_source"] = expand.proposal_source;
+        result["max_tasks"] = expand.max_tasks;
+        result["max_edges"] = expand.max_edges;
+        result["max_depth"] = expand.max_depth;
+        result["max_dynamic_compiles"] = expand.max_dynamic_compiles;
+        result["max_total_children"] = expand.max_total_children;
+        result["max_concurrency"] = expand.max_concurrency;
+        result["failure_policy"] =
+            expand.failure_policy == ProgramTaskGraphFailurePolicy::FailFast ? "fail_fast" : "collect";
     }
     return result;
 }
@@ -427,12 +486,18 @@ ProgramPlan ProgramPlan::from_json(const json& plan) {
                 throw std::invalid_argument("Program plan items must be a nonempty array");
             data.items = detail::owned_json_copy(encoded["items"]);
         }
-        if (encoded.contains("max_iterations")) data.max_iterations = require_bound(encoded, "max_iterations");
-        if (encoded.contains("max_attempts")) data.max_attempts = require_bound(encoded, "max_attempts");
-        if (encoded.contains("min_success")) data.min_success = require_bound(encoded, "min_success");
-        if (encoded.contains("timeout_ms")) data.timeout_ms = require_bound(encoded, "timeout_ms");
+        if (encoded.contains("max_iterations"))
+            data.max_iterations = require_bound(encoded, "max_iterations");
+        if (encoded.contains("max_attempts"))
+            data.max_attempts = require_bound(encoded, "max_attempts");
+        if (encoded.contains("min_success"))
+            data.min_success = require_bound(encoded, "min_success");
+        if (encoded.contains("timeout_ms"))
+            data.timeout_ms = require_bound(encoded, "timeout_ms");
         if (data.operation == ProgramOperationKind::ParallelMap)
             data.parallel_map = parse_parallel_map_spec(encoded);
+        if (data.operation == ProgramOperationKind::ExpandTaskGraph)
+            data.expand_task_graph = parse_expand_task_graph_spec(encoded);
         if (encoded.contains("scope")) data.scope = require_string(encoded, "scope");
         if (encoded.contains("reason")) data.reason = require_string(encoded, "reason");
         if (impl->index.contains(data.id))
@@ -499,6 +564,10 @@ ProgramPlan ProgramPlan::from_json(const json& plan) {
         } else if (op == ProgramOperationKind::ParallelMap) {
             if (!node.parallel_map())
                 throw std::invalid_argument("parallel_map requires a complete bounded map contract");
+        } else if (op == ProgramOperationKind::ExpandTaskGraph) {
+            if (!node.expand_task_graph())
+                throw std::invalid_argument(
+                    "expand_task_graph requires a complete bounded expansion contract");
         } else if (op == ProgramOperationKind::Spawn) {
             if (!node.child_binding())
                 throw std::invalid_argument("spawn requires a verified child_binding");
@@ -562,6 +631,8 @@ ProgramStaticBudgetRequirements add_requirements(
     left.max_core_invocations =
         checked_add(left.max_core_invocations, right.max_core_invocations);
     left.max_total_children = checked_add(left.max_total_children, right.max_total_children);
+    left.max_dynamic_compiles =
+        checked_add(left.max_dynamic_compiles, right.max_dynamic_compiles);
     left.max_concurrency =
         checked_concurrency(static_cast<std::uint64_t>(left.max_concurrency) + right.max_concurrency);
     left.max_child_depth = std::max(left.max_child_depth, right.max_child_depth);
@@ -574,6 +645,7 @@ ProgramStaticBudgetRequirements scale_requirements(ProgramStaticBudgetRequiremen
     value.max_core_steps         = checked_multiply(value.max_core_steps, multiplier);
     value.max_core_invocations   = checked_multiply(value.max_core_invocations, multiplier);
     value.max_total_children     = checked_multiply(value.max_total_children, multiplier);
+    value.max_dynamic_compiles   = checked_multiply(value.max_dynamic_compiles, multiplier);
     // Loop/retry/map execute their bodies serially.
     return value;
 }
@@ -613,7 +685,7 @@ private:
 
     ProgramStaticBudgetRequirements derive(const ProgramPlanNode& operation) {
         using Kind = ProgramOperationKind;
-        const auto one = ProgramStaticBudgetRequirements{1, 1, 0, 0, 0, 0};
+        const auto one = ProgramStaticBudgetRequirements{1, 1, 0, 0, 0, 0, 0};
         const auto append_serial = [](ProgramStaticBudgetRequirements& result,
                                       const ProgramStaticBudgetRequirements& nested) {
             result.max_program_operations =
@@ -623,25 +695,40 @@ private:
                 checked_add(result.max_core_invocations, nested.max_core_invocations);
             result.max_total_children =
                 checked_add(result.max_total_children, nested.max_total_children);
+            result.max_dynamic_compiles =
+                checked_add(result.max_dynamic_compiles, nested.max_dynamic_compiles);
             result.max_child_depth = std::max(result.max_child_depth, nested.max_child_depth);
             result.max_concurrency = std::max(result.max_concurrency, nested.max_concurrency);
         };
-
         switch (operation.operation()) {
         case Kind::CallCore:
-            return ProgramStaticBudgetRequirements{1, 1, 1, 1, 0, 0};
+            return ProgramStaticBudgetRequirements{1, 1, 1, 1, 0, 0, 0};
         case Kind::Emit:
         case Kind::Cancel:
         case Kind::Return:
             return one;
         case Kind::Spawn:
-            return ProgramStaticBudgetRequirements{1, 1, 0, 0, 1, 1};
+            return ProgramStaticBudgetRequirements{1, 1, 0, 0, 1, 1, 0};
         case Kind::ParallelMap: {
             const auto& map = operation.parallel_map();
             if (!map)
                 throw std::invalid_argument("parallel_map has no bounded map contract");
             return ProgramStaticBudgetRequirements{1, map->max_in_flight, 0, 0, 1,
-                                                   map->max_items};
+                                                   map->max_items, 0};
+        }
+        case Kind::ExpandTaskGraph: {
+            const auto& expand = operation.expand_task_graph();
+            if (!expand)
+                throw std::invalid_argument(
+                    "expand_task_graph has no bounded expansion contract");
+            return ProgramStaticBudgetRequirements{
+                1,
+                expand->max_concurrency,
+                0,
+                0,
+                checked_concurrency(expand->max_depth),
+                expand->max_total_children,
+                expand->max_dynamic_compiles};
         }
         case Kind::Sequence: {
             auto result = one;
@@ -670,6 +757,8 @@ private:
                     std::max(selected.max_child_depth, alternative.max_child_depth);
                 selected.max_total_children =
                     std::max(selected.max_total_children, alternative.max_total_children);
+                selected.max_dynamic_compiles =
+                    std::max(selected.max_dynamic_compiles, alternative.max_dynamic_compiles);
             }
             selected.max_program_operations =
                 checked_add(one.max_program_operations, selected.max_program_operations);

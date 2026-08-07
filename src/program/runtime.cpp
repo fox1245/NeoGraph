@@ -1,4 +1,5 @@
 #include <neograph/program/runtime.h>
+ #include <neograph/program/schema.h>
 
 #include "canonical_json.h"
 #include "catalog_access.h"
@@ -24,6 +25,7 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
+#include <iostream>
 
 namespace neograph::program {
 namespace {
@@ -473,19 +475,28 @@ void validate_invocation(const detail::MaterializedProgram& materialized,
                                  json{{"detail", error.what()}});
     }
     const auto&    budget = invocation.budget;
+    const bool     has_dynamic_expansion =
+        materialized.bundle.program_schema_version() >= PROGRAM_SCHEMA_VERSION_V4 &&
+        std::any_of(materialized.bundle.typed_orchestration_plan().nodes().begin(),
+                    materialized.bundle.typed_orchestration_plan().nodes().end(),
+                    [](const auto& node) {
+                        return node.operation() == ProgramOperationKind::ExpandTaskGraph;
+                    });
     constexpr auto max_safe_wall_time_ms =
         static_cast<std::uint64_t>(std::numeric_limits<std::chrono::milliseconds::rep>::max()) / 2;
     if (budget.wall_time_ms == 0 || budget.wall_time_ms > max_safe_wall_time_ms ||
         budget.max_concurrency == 0 || budget.max_program_operations == 0 ||
         budget.max_core_steps == 0 ||
         budget.max_core_steps > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
-        budget.max_dynamic_compiles != 0 ||
+        (!has_dynamic_expansion && budget.max_dynamic_compiles != 0) ||
+        (has_dynamic_expansion && budget.max_dynamic_compiles == 0) ||
         budget.max_child_depth > MAX_SUPPORTED_CHILD_DEPTH ||
         ((budget.max_child_depth == 0) != (budget.max_total_children == 0))) {
         throw_runtime_diagnostic(
             "P_START_BUDGET",
-            "Program requires positive wall/Core/operation/concurrency limits and "
-            "does not permit dynamic compilation or an unpaired child budget");
+            "Program requires positive wall/Core/operation/concurrency limits, "
+            "a dynamic-compilation grant only when expand_task_graph is present, and "
+            "an unpaired child budget is forbidden");
     }
 
     const auto ceiling = materialized.version.policy_snapshot().budget_ceiling();
@@ -1010,7 +1021,12 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
         std::optional<ProgramRunRecord> previous;
         try {
             previous = control.transitions->load(control.owner_scope, control.run_id);
+        } catch (const std::exception& error) {
+            std::cerr << "terminal load exception run=" << control.run_id
+                      << " error=" << error.what() << '\n';
+            return TerminalPublicationResult::JournalFailure;
         } catch (...) {
+            std::cerr << "terminal load unknown exception run=" << control.run_id << '\n';
             return TerminalPublicationResult::JournalFailure;
         }
         if (!previous || previous->continuation().state != ContinuationState::Running ||
@@ -1021,10 +1037,19 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
         std::optional<ProgramJournalRecord> previous_journal;
         try {
             previous_journal = control.transitions->latest(control.owner_scope, control.run_id);
+        } catch (const std::exception& error) {
+            std::cerr << "terminal latest exception run=" << control.run_id
+                      << " error=" << error.what() << '\n';
+            return TerminalPublicationResult::JournalFailure;
         } catch (...) {
+            std::cerr << "terminal latest unknown exception run=" << control.run_id << '\n';
             return TerminalPublicationResult::JournalFailure;
         }
         if (!previous_journal || previous_journal->id != previous->journal_head()) {
+            std::cerr << "terminal journal mismatch run=" << control.run_id
+                      << " record_head=" << previous->journal_head()
+                      << " latest=" << (previous_journal ? previous_journal->id : "<none>")
+                      << " record_seq=" << previous->event_sequence() << '\n';
             return TerminalPublicationResult::JournalFailure;
         }
 
@@ -1034,7 +1059,6 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
                 control.bundle_id, previous_journal->sequence + 1,
                 ProgramContinuation{"root", continuation_state(result.status()), control.attempt},
                 result.remaining_budget(), RunBudget{}, result.checkpoint(), now_ms()});
-
             auto                 events = control.events_after(previous->event_sequence());
             ProgramRunRecordData data;
             data.owner_scope         = control.owner_scope;
@@ -1072,7 +1096,6 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
             }
             data.created_at_ms = previous->created_at_ms();
             data.updated_at_ms = journal.timestamp_ms;
-
             auto publication =
                 ProgramTransitionPublication{ProgramRunRecord::create(std::move(data)),
                                              std::move(journal),
@@ -1084,7 +1107,12 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
                 published == ProgramTransitionPublishResult::AlreadyPresent) {
                 return TerminalPublicationResult::Published;
             }
+        } catch (const std::exception& error) {
+            std::cerr << "terminal publication exception run=" << control.run_id
+                      << " error=" << error.what() << '\n';
+            return TerminalPublicationResult::JournalFailure;
         } catch (...) {
+            std::cerr << "terminal publication unknown exception run=" << control.run_id << '\n';
             return TerminalPublicationResult::JournalFailure;
         }
     }
@@ -1192,6 +1220,30 @@ void RunControl::add_terminal_cleanup(TerminalCleanup cleanup) {
 void RunControl::set_child_launch_callback(ChildLaunchCallback callback) noexcept {
     std::lock_guard lock(mutex_);
     child_launch_callback_ = std::move(callback);
+}
+
+void RunControl::set_task_graph_expansion_context(
+    std::shared_ptr<TaskGraphFragmentStore> store,
+    TaskGraphExpansionPolicyResolver        policy_resolver) noexcept {
+    std::lock_guard lock(mutex_);
+    task_graph_fragments_       = std::move(store);
+    task_graph_policy_resolver_ = std::move(policy_resolver);
+}
+
+std::shared_ptr<TaskGraphFragmentStore> RunControl::task_graph_fragments() const {
+    std::lock_guard lock(mutex_);
+    return task_graph_fragments_;
+}
+
+std::optional<TaskGraphExpansionPolicy>
+RunControl::task_graph_policy(std::string_view expansion_operation_id) const {
+    TaskGraphExpansionPolicyResolver resolver;
+    {
+        std::lock_guard lock(mutex_);
+        resolver = task_graph_policy_resolver_;
+    }
+    if (!resolver) return std::nullopt;
+    return resolver(owner_scope, program_version_id, expansion_operation_id);
 }
 
 std::shared_ptr<RunControl> RunControl::launch_child(std::string_view binding_name,
@@ -1717,9 +1769,9 @@ std::uint64_t ProgramHandle::attempt() const noexcept {
 bool ProgramHandle::cancel() noexcept {
     return control_->cancel(detail::CancellationCause::User);
 }
-ProgramResult ProgramHandle::wait() const {
-    return control_->wait();
-}
+ ProgramResult ProgramHandle::wait() const {
+     return control_->wait();
+ }
 asio::awaitable<ProgramResult> ProgramHandle::wait_async() const {
     return wait_for_control(control_);
 }
@@ -1751,7 +1803,13 @@ struct ProgramRuntime::Impl {
     ProgramRuntime* owner = nullptr;
 
     void configure_child_launcher(const std::shared_ptr<detail::RunControl>& control) {
-        if (!config.child_binding_resolver || !owner) return;
+        if (!owner) return;
+        if (!config.child_binding_resolver) {
+            if (config.task_graph_fragments && config.task_graph_policy_resolver)
+                control->set_task_graph_expansion_context(
+                    config.task_graph_fragments, config.task_graph_policy_resolver);
+            return;
+        }
         const auto weak_control = std::weak_ptr<detail::RunControl>(control);
         control->set_child_launch_callback(
             [this, weak_control](std::string_view binding_name, json input,
@@ -1825,6 +1883,9 @@ struct ProgramRuntime::Impl {
                     resolved->version, std::move(invocation));
                 return child.control_;
             });
+        if (config.task_graph_fragments && config.task_graph_policy_resolver)
+            control->set_task_graph_expansion_context(
+                config.task_graph_fragments, config.task_graph_policy_resolver);
     }
 
     void register_control(const std::shared_ptr<detail::RunControl>& control) {
