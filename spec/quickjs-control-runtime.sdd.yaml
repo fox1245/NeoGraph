@@ -19,16 +19,31 @@ spec:
     selection: final
     alternatives_are_product_modes: false
   supersedes_direction:
+    - user-authored bounded Core DSL and Core elaborator growth
     - general Program authoring through NeoGraph Program JSON operation trees
     - extending ProgramOperationKind as a general-purpose language
     - VM-free direct dispatch as the permanent general Program execution model
     - permanent parallel Core DSL and Program DSL product evolution
+  product_objectives:
+    easy_adoption: >-
+      Standard JavaScript and its established tooling replace two
+      NeoGraph-specific authoring languages; users learn only the ng domain API
+      and NeoGraph authority and durability rules.
+    stable_program_performance: >-
+      One measured QuickJS-to-command-to-ProgramRuntime execution path has
+      explicit cold and warm regression thresholds. This is a stability
+      requirement, not an assumption that QuickJS is inherently faster.
+    maintainability: >-
+      ECMAScript owns general computation and composition while NeoGraph owns
+      typed Core IR, admission, effects, durability, and GraphEngine dispatch;
+      duplicate grammar, schema, lowering, and dispatcher paths are removed.
 
 completion_state:
   architecture_decision: accepted
   legacy_document_retirement: in_progress
   issue_cutover: in_progress
   quickjs_dependency_qualification: not_started
+  javascript_graph_definition: not_started
   javascript_source_and_admission: not_started
   generator_command_protocol: not_started
   metering_and_isolation: not_started
@@ -50,12 +65,23 @@ blocking_invariants:
       - NEOGRAPH_BUILD_PROGRAM=OFF installed-consumer build and run
       - QuickJS absent from the Core link interface and transitive package metadata
       - enabled-but-unused and disabled Core benchmark comparison
-  one_general_program_language:
-    statement: JavaScript is the sole general Program authoring language after cutover.
+  stable_program_performance:
+    statement: >-
+      The fixed QuickJS-to-command-to-ProgramRuntime path remains within
+      preregistered cold and warm regression thresholds.
     proof:
+      - representative workloads and thresholds are fixed before optimization
+      - repeated distributions cover runtime creation, compilation, first command, warm command, hostcall, replay growth, allocation, and concurrency
+      - framework overhead is isolated from GraphEngine, provider, tool, journal, and persistence time
+      - direct Core and JavaScript-wrapped Core are reported separately
+  one_authoring_language:
+    statement: JavaScript is the sole source authoring language after cutover.
+    proof:
+      - no new bounded Core DSL definitions after the freeze
       - no new Program JSON operation versions after the freeze
       - Lua and Janet are not public source kinds or runtime modes
-      - Harness and direct Program publication resolve to the same JavaScript contract
+      - Harness Core and Program publication resolve to JavaScript profiles
+      - strict Core JSON remains validated interchange rather than a programming language
   no_language_reinvention:
     statement: NeoGraph does not define a second expression, function, scope, loop, exception, class, module, or macro language.
     proof:
@@ -74,9 +100,9 @@ blocking_invariants:
       - dynamic native modules, files, network, processes, environment, workers, clocks, and random values are unavailable
       - only sealed import slots can yield executable commands
   exact_runtime_identity:
-    statement: Every admitted JavaScript Program pins the exact runtime, profile, source, module, and native binding semantics.
+    statement: Every admitted JavaScript source pins the exact runtime, profile, source, module, Core, and native binding semantics.
     proof:
-      - QuickJS release, build options, and implementation digest enter bundle identity
+      - QuickJS release, build options, and implementation digest enter Core and Program bundle identity
       - JavaScript profile and ng API versions enter bundle identity
       - mismatch fails before replay or dispatch
   deterministic_recovery:
@@ -130,15 +156,22 @@ selected_upstream_contract:
     exact runtime/compiler identity.
 
 javascript_profile:
-  entry_contract:
-    export: main
-    kind: generator_function
-    input: canonical_json_compatible_value
-    output: canonical_json_compatible_value
+  entry_contracts:
+    core_definition:
+      export: define
+      kind: function
+      context: bounded_dispatch_free_compile
+      output: sealed_typed_graph_builder
+    program_control:
+      export: main
+      kind: generator_function
+      input: canonical_json_compatible_value
+      output: canonical_json_compatible_value
   allowed:
     - standard deterministic JavaScript computation
     - closures and generators
     - arrays and plain data objects
+    - sealed graph builder composition
     - reviewed sealed pure modules
     - ng command constructors
     - admitted pure native intrinsics
@@ -236,14 +269,16 @@ phases:
       - platform/static/shared/installed-consumer evidence
       - sanitizer, binary-size, startup, and allocation evidence
     gate: QuickJS is absent from the disabled Core consumer and all dependency evidence is accepted.
-  Q1_source_and_admission:
+  Q1_authoring_and_admission:
     deliver:
-      - JavaScript ProgramSource
+      - owned JavaScript source with define and main profiles
+      - bounded dispatch-free graph definition context
+      - sealed typed graph builder and canonical strict Core lowering
       - sealed module resolver
-      - restricted context
-      - exact bundle identity
-      - stable diagnostics and source maps
-    gate: Valid source admits immutably and every invalid class dispatches zero work.
+      - restricted contexts
+      - exact Core and Program bundle identity
+      - stable syntax, graph-validation, and source-map diagnostics
+    gate: Valid graph and Program source seal immutably and every invalid class dispatches zero work.
   Q2_command_execution:
     deliver:
       - canonical command schema
@@ -276,18 +311,18 @@ phases:
     gate: Supported native plugins pass static/shared/compiler boundary tests.
   Q6_authoring_cutover:
     deliver:
-      - JavaScript public authoring
-      - Harness and direct Program convergence
-      - stored-version classification
+      - JavaScript public Core graph and Program authoring
+      - Harness and direct publication convergence
+      - stored Core definition and Program version classification
       - legacy publication rejection diagnostics
-    gate: Every new general Program is JavaScript and no adapter silently selects legacy semantics.
+    gate: Every new authored source is JavaScript and no adapter silently selects legacy semantics.
   Q7_legacy_removal:
     deliver:
-      - final stored-version drain proof
-      - legacy schema/parser/dispatcher deletion
+      - final stored-definition and stored-version drain proof
+      - Core DSL elaborator and Program schema/parser/dispatcher deletion
       - compatibility dependency removal
-      - full migration, replay, sanitizer, consumer, and performance evidence
-    gate: One general Program language and one durable effect model remain.
+      - full graph-equivalence, migration, replay, sanitizer, consumer, and performance evidence
+    gate: One source authoring language, one canonical Core IR, and one durable effect model remain.
 
 issue_plan:
   epic: 23
@@ -295,17 +330,19 @@ issue_plan:
   javascript_runtime_and_replay: 25
   native_control_abi: 26
   legacy_authoring_cutover: 27
+  javascript_graph_definition: 28
 
 acceptance:
-  - QuickJS is the sole selected general Program runtime.
-  - Standard JavaScript owns general computation; NeoGraph owns only its domain API and execution invariants.
-  - Core-only consumers remain independent of QuickJS.
+  - QuickJS is the sole selected JavaScript runtime.
+  - Standard JavaScript owns source composition and general computation; NeoGraph owns only its domain API and execution invariants.
+  - JavaScript define evaluation lowers to validated canonical Core IR without dispatch.
+  - Core-only C++ consumers remain independent of QuickJS.
   - Adversarial source cannot reach ungranted host authority.
   - Replay after process death reaches the exact pending command without repeating completed effects.
   - Native extension behavior is exact-bound, cancellable, durable, and ABI-versioned.
-  - Stored legacy Programs have an explicit terminal migration classification.
+  - Stored legacy Core definitions and Programs have an explicit terminal migration classification.
   - Legacy DSL direction documents and open issues are superseded by the QuickJS issue tree.
-  - No permanent dual-language Program implementation remains after cutover.
+  - No permanent Core DSL or Program DSL implementation remains after cutover.
 
 documentation:
   update_rule: >-

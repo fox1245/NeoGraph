@@ -3,38 +3,42 @@
 Status: Accepted architecture direction; implementation is gated
 Date: 2026-08-08
 Source baseline: `61661e9ad1fc386b5142139c48c327ede7464633`
-Supersedes: general-purpose authoring through the NeoGraph Program JSON operation DSL
+Supersedes: user authoring through the bounded Core DSL and Program JSON operation DSL
 Runtime selection: QuickJS with JavaScript
 Canonical migration plan: `QUICKJS_CONTROL_MIGRATION.md`
 Executable plan: `../spec/quickjs-control-runtime.sdd.yaml`
 Tracking epic: [#23](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/23)
 Workstreams: [#24](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/24),
 [#25](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/25),
-[#26](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/26), and
-[#27](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/27)
+[#26](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/26),
+[#27](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/27), and
+[#28](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/28)
 
 
 ## Decision
 
-NeoGraph will not design another general-purpose DSL. General Program authoring
-will use standard JavaScript executed by an embedded QuickJS runtime. NeoGraph
-will own only the domain boundary that an external language cannot provide:
-capability admission, typed host calls, budgets, cancellation, durability,
-replay, version identity, and dispatch to pinned `GraphEngine` generations.
+NeoGraph will have one user-authored language: standard JavaScript executed by
+embedded QuickJS. This replaces both the bounded Core DSL and the Program JSON
+operation DSL. NeoGraph will own only the domain boundary that JavaScript cannot
+provide: typed graph construction, canonical Core IR, capability admission,
+typed host calls, budgets, cancellation, durability, replay, version identity,
+and dispatch to pinned `GraphEngine` generations.
 
-The decision follows four product requirements:
+The decision follows three product requirements:
 
-1. **Easy adoption.** Developers can use a familiar language, editor, formatter,
-   syntax highlighter, and ordinary control-flow vocabulary.
-2. **A much smaller learning curve.** Users learn the `ng` API and NeoGraph's
-   authority/durability rules instead of a second expression, function, loop,
-   and module language.
-3. **Cheap extension.** New NeoGraph capabilities are versioned host functions,
-   not coordinated changes to a JSON schema, parser, compiler, plan hierarchy,
-   runtime dispatcher, migration layer, and documentation.
-4. **Less design fragmentation.** ECMAScript owns general computation semantics;
-   NeoGraph owns orchestration authority and durable effects. The same concept
-   must not exist as both a JavaScript construct and a NeoGraph operation node.
+1. **Easy adoption.** Developers use a familiar language, editor, formatter,
+   syntax highlighter, debugger vocabulary, and standard control flow. They
+   learn the small `ng` domain API rather than two NeoGraph languages.
+2. **Stable Program performance.** One fixed path—QuickJS computation, typed
+   command validation, `ProgramRuntime`, then `GraphEngine` or a host
+   binding—can be benchmarked and optimized without adding parser, plan, and
+   dispatcher branches for every language feature. This is a measured stability
+   requirement, not a claim that embedding QuickJS is automatically faster.
+3. **Maintainability.** Core graph composition and Program control reuse
+   ECMAScript functions, modules, expressions, conditions, and loops. NeoGraph
+   deletes duplicate grammar, schema, lowering, dispatcher, migration,
+   documentation, and test surfaces while retaining its validated IR and
+   durable execution invariants.
 
 QuickJS is the selected runtime, not one member of a permanent multi-language
 surface. Lua and Janet are not parallel product modes. They may be reconsidered
@@ -66,7 +70,7 @@ Authoritative upstream reference:
 - lexical scope, functions, closures, and generators;
 - expressions, conditions, loops, exceptions, and ordinary local state;
 - arrays, objects, maps, sets, strings, numbers, and `BigInt`;
-- pure library composition and reusable control helpers; and
+- pure graph-construction helpers and reusable control helpers; and
 - source-level module syntax subject to NeoGraph's sealed module resolver.
 
 NeoGraph will not add `ng.if`, `ng.loop`, `ng.map`, a second expression grammar,
@@ -74,7 +78,8 @@ or custom JavaScript syntax.
 
 ### NeoGraph owns
 
-- immutable Program source, bundle, runtime, and dependency identities;
+- typed graph-builder validation and canonical strict Core serialization;
+- immutable source, bundle, runtime, Core, and dependency identities;
 - the sealed `ng` module and versioned native binding ABI;
 - input/output schemas and import-slot resolution;
 - capability, effect, owner, tenant, and budget admission;
@@ -82,13 +87,39 @@ or custom JavaScript syntax.
 - cancellation, child lineage, checkpoint, recovery, and terminal status; and
 - invocation of pinned Core generations through `GraphEngine`.
 
-`GraphEngine` remains the only executor of Core/application nodes. QuickJS is a
-Program control interpreter above Core, not another node scheduler and not a
-public replacement for `GraphEngine`.
+`GraphEngine` remains the only executor of Core/application nodes. QuickJS has
+two bounded contexts: definition evaluation constructs validated graph data
+without dispatch, and Program evaluation yields durable control commands above
+Core. Neither context is another node scheduler or a replacement for
+`GraphEngine`.
 
-## Program shape
+## Authoring shape
 
-A control program exports a generator entry point. Generator yields are the only
+### Graph definition
+
+A module may export `define()` to construct Core topology through the sealed
+`ng` graph-builder API. The host evaluates it in a compile context with
+instruction, memory, and time limits and no effectful host calls. The returned
+builder is validated and frozen as canonical strict Core IR before any node can
+run.
+
+```javascript
+export function define() {
+  const graph = ng.graph("review");
+  graph.node("writer", {type: "agent", model: "writer-model"});
+  graph.node("reviewer", {type: "agent", model: "reviewer-model"});
+  graph.edge("writer", "reviewer");
+  return graph;
+}
+```
+
+JavaScript replaces Core DSL `vars`, interpolation, `templates`, `use`, and
+`when` with ordinary constants, template literals, functions, imports, and
+conditions. NeoGraph does not reproduce those features in the builder API.
+
+### Program control
+
+A control module exports a generator entry point. Generator yields are the only
 way untrusted JavaScript requests durable NeoGraph work.
 
 ```javascript
@@ -254,27 +285,31 @@ identity remains the durable authority.
 
 ## Compatibility and cutover
 
-Strict Core JSON and the bounded Core topology elaborator remain supported Core
-inputs. They are not the general Program language.
-
-The existing Program JSON operation tree, Program-v2/v3/v4 authoring schemas,
-and Harness `mode: "program"` are frozen legacy authoring surfaces. They receive
-correctness and migration fixes only while in-flight and stored versions drain.
-No new general computation construct is added to those schemas.
+Strict Core JSON remains the canonical serialization and low-level Core
+interchange format; it is validated data, not a second user programming
+language. The bounded Core topology elaborator, Harness `mode: "dsl"`, Program
+JSON operation trees, Program-v2/v3/v4 authoring schemas, and Harness
+`mode: "program"` are frozen legacy authoring surfaces. They receive only
+correctness, security, and migration fixes while stored definitions and
+in-flight runs drain. No new language feature is added to them.
 
 The migration uses a clean cutover:
 
 1. qualify and pin QuickJS without changing default runtime behavior;
-2. add JavaScript source, bundle, admission, and generator command execution;
-3. prove deterministic recovery, budgets, cancellation, and effect replay;
-4. expose the versioned native C ABI and C++ wrapper;
-5. switch new general Program publication to JavaScript;
-6. drain or explicitly migrate stored Program DSL versions; and
-7. delete the legacy general Program parser/operation dispatcher after the
-   announced compatibility boundary.
+2. add the sealed JavaScript `define()` graph-builder context and canonical Core
+   lowering;
+3. add JavaScript Program source, admission, and generator command execution;
+4. prove deterministic recovery, stable performance, budgets, cancellation,
+   and effect replay;
+5. expose the versioned native C ABI and C++ wrapper;
+6. switch all new user authoring to JavaScript;
+7. classify and drain or explicitly migrate stored Core DSL and Program DSL
+   versions; and
+8. delete the Core elaborator and legacy Program parser/operation dispatcher
+   after the announced compatibility boundary.
 
-There is no permanent dual-language Program product. Compatibility adapters do
-not become an alternate runtime.
+There is no permanent dual-language authoring product. Compatibility adapters
+do not become alternate compilers or runtimes.
 
 ## Blocking evidence
 
@@ -295,15 +330,18 @@ following evidence exists:
    results, exceptions, static/shared linking, and compiler boundaries.
 8. Core-only installed consumers have no QuickJS dependency, allocation, branch,
    symbol, or binary-size cost when Program/QuickJS support is disabled.
-9. Performance evidence separates JavaScript computation, replay, Program
-   scheduling, Core execution, provider/tool time, journal time, and startup.
-10. The final source and issue migration leaves one authoritative general Program
+9. Performance evidence separates compile-context evaluation, JavaScript
+   computation, replay, Program scheduling, Core execution, provider/tool time,
+   journal time, and startup. Repeated cold and warm benchmarks enforce explicit
+   regression thresholds for stable Program performance.
+10. The final source and issue migration leaves one authoritative user-authored
     language and no contradictory DSL roadmap.
 
 ## Non-goals
 
 - Designing a NeoGraph expression, function, class, module, or macro language.
-- Supporting JavaScript, Lua, Janet, and the Program JSON DSL in parallel.
+- Supporting JavaScript, Lua, Janet, the Core DSL, and the Program JSON DSL in
+  parallel.
 - Exposing Node.js, npm compatibility, browser APIs, or QuickJS `std`/`os` by
   implication.
 - Allowing planner-authored native libraries, shell commands, URLs, credentials,
@@ -316,8 +354,9 @@ following evidence exists:
 
 ## Authority
 
-This document owns the general Program language and embedded-runtime direction.
-`V1_ARCHITECTURE.md` continues to own unaffected Core, catalog, activation,
+This document owns the user-authored language and embedded-runtime direction.
+`V1_ARCHITECTURE.md` continues to own the retained Core IR, catalog, activation,
 tenant, capability, durability, and GraphEngine boundaries. Where the earlier
-architecture requires a bounded Program operation DSL or rejects an embedded
-control interpreter, this document supersedes it.
+architecture preserves the Core elaborator, requires a bounded Program
+operation DSL, or rejects an embedded control interpreter, this document
+supersedes it.

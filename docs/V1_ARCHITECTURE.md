@@ -1,14 +1,14 @@
 # NeoGraph v1 Core + Program Architecture
 
-Status: Accepted Core architecture; Program-language direction amended 2026-08-08
+Status: Accepted Core architecture; source-language direction amended 2026-08-08
 Date: 2026-07-31
 Source baseline: `d80c316de1f3a10f0948477c3689a0b1b80d771b`
-Program-language amendment:
+Source-language amendment:
 [`QUICKJS_CONTROL_ARCHITECTURE.md`](QUICKJS_CONTROL_ARCHITECTURE.md) supersedes
-this document wherever it requires a bounded NeoGraph Program operation DSL or
-rejects an embedded general control interpreter. The Core, GraphEngine,
-catalog, activation, authority, durability, and tenant boundaries below remain
-in force.
+this document wherever it preserves the bounded Core authoring DSL, requires a
+bounded NeoGraph Program operation DSL, or rejects embedded JavaScript control.
+The typed Core IR, GraphEngine, catalog, activation, authority, durability, and
+tenant boundaries below remain in force.
 
 ## Decision
 
@@ -28,31 +28,35 @@ NeoGraph v1 has two public layers and one execution engine:
 The architectural boundary is therefore:
 
 ```text
-JavaScript source + sealed modules
-                  |
-                  v
-  QuickJS compile + Program admission
-                  |
-                  v
-             ProgramBundle
-                  |
-                  v
- ProgramCatalog (publish/admit/activate/materialize)
-                  |
-                  v
- ProgramVersion + sealed Core/native bindings
-                  |
-                  v
- QuickJS generator -> typed yielded command
-                  |
-                  v
-       ProgramRuntime (durability/replay)
-                  |
-                  v
-      GraphEngine / admitted host binding
-                  |
-                  v
- checkpoint / store / provider / tool / events
+JavaScript define()/main() source + sealed modules
+                       |
+                       v
+      bounded QuickJS contexts + admission
+                 /                 \
+                v                   v
+ define(): validated strict     main(): ProgramBundle
+ Core definition                     |
+        |                             v
+        |                ProgramCatalog (publish/admit/
+        |                  activate/materialize)
+        |                             |
+        |                             v
+        |                ProgramVersion + sealed Core/
+        |                    native bindings
+        |                             |
+        |                             v
+        |                QuickJS generator -> typed command
+        |                             |
+        |                             v
+        |                 ProgramRuntime (durability/replay)
+        |                             |
+        +-----------------------------+
+                       |
+                       v
+         GraphEngine / admitted host binding
+                       |
+                       v
+      checkpoint / store / provider / tool / events
 ```
 
 ### Durable child execution contract
@@ -996,20 +1000,23 @@ than inferred from wall time.
 
 ## Compatibility and cutover
 
-The current Harness DSL, Program JSON operation trees, strict Core documents,
-retained artifacts, and MCP methods are migration inputs, not parallel
-permanent architectures.
+The current Harness Core DSL, Program JSON operation trees, strict Core
+documents, retained artifacts, and MCP methods are migration inputs, not
+parallel permanent architectures.
 
-- Existing strict Core JSON remains a supported Core input.
-- Bounded Core topology elaboration remains compatibility sugar for strict Core;
-  it is not the general Program language.
-- Program-v2/v3/v4 operation-tree authoring and Harness `mode: "program"` are
-  frozen. Existing versions are classified as translated, drain-only, or
+- Existing strict Core JSON remains validated low-level interchange and
+  canonical serialization, not a second programming language.
+- Bounded Core topology elaboration, Harness `mode: "dsl"`, Program-v2/v3/v4
+  operation-tree authoring, and Harness `mode: "program"` are frozen. Stored
+  definitions and versions are classified as translated, drain-only, or
   rejected before the JavaScript authoring cutover.
-- New general Programs use JavaScript and the same Program admission,
-  activation, durability, effect, and GraphEngine boundaries.
+- New Core graph definitions use bounded JavaScript `define()` evaluation; new
+  Programs use JavaScript generator `main()`. Both retain the same validation,
+  admission, activation, durability, effect, and GraphEngine boundaries.
 - Existing MCP method names may remain as transport compatibility, but adapters
   do not own another compiler or runtime.
+- The Core elaborator and legacy Program parser/dispatcher are deleted after
+  their stored data drains.
 - Superseded DSL and Control-VM studies are removed from the live documentation;
   repository history remains the historical record.
 
@@ -1018,7 +1025,9 @@ permanent architectures.
 The architecture is implemented only when all are true:
 
 1. A Core-only installed consumer builds and runs without Program enabled.
-2. A developer can build and run the same static graph through Core directly.
+2. A developer can build and run the same static graph through Core directly
+   and through bounded JavaScript `define()`, with canonical Core and observable
+   behavior equivalence.
 3. A developer can compile and run a JavaScript generator containing functions,
    closures, branches, loops, checkpoints, and child commands through pinned
    native and Core bindings.
