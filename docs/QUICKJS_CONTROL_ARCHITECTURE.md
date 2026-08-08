@@ -7,6 +7,9 @@ Supersedes: user authoring through the bounded Core DSL and Program JSON operati
 Runtime selection: QuickJS with JavaScript
 Canonical migration plan: `QUICKJS_CONTROL_MIGRATION.md`
 Executable plan: `../spec/quickjs-control-runtime.sdd.yaml`
+Controller extension: [`SELF_EVOLVING_AGENT_CONTROLLER.md`](SELF_EVOLVING_AGENT_CONTROLLER.md)
+defines developer-authorized profiles, capability compilation, immutable
+self-evolution, and the falsifiable general-agent-controller hypothesis.
 Tracking epic: [#23](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/23)
 Workstreams: [#24](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/24),
 [#25](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/25),
@@ -161,8 +164,10 @@ commands outside the admitted closure fail before dispatch.
 
 ## Native extension model
 
-The language runtime must be extensible from C/C++, but user programs must not
-receive arbitrary C FFI.
+The language runtime must be extensible from C/C++. User programs receive no
+arbitrary C FFI or ambient host authority by default. A developer may admit a
+privileged profile with broader authority under the explicit guarantee and
+identity rules below.
 
 ### Pure native intrinsics
 
@@ -177,16 +182,20 @@ A trusted intrinsic may run directly inside QuickJS only when it is:
 Examples include canonicalization, hashing, a reviewed parser, or a bounded
 numeric primitive.
 
-### Durable or effectful host calls
+### Durable, recorded, and unmanaged host calls
 
-Core calls, child operations, providers, tools, databases, files, networks,
-timers, and human input never block inside a QuickJS C function. JavaScript
-yields a typed command; `ProgramRuntime` invokes the registered C/C++ binding
-after the VM has returned to the host, journals the outcome, and resumes the
-generator with a canonical value.
+Under the default `strict` profile, Core calls, child operations, providers,
+tools, databases, files, networks, timers, and human input never block inside a
+QuickJS C function. JavaScript yields a typed command; `ProgramRuntime` invokes
+the registered C/C++ binding after the VM has returned to the host, journals the
+outcome, and resumes the generator with a canonical value.
 
 This keeps native callback lifetime, cancellation, asynchronous completion, and
-replay outside the VM stack.
+replay outside the VM stack. A developer may explicitly admit `recorded` or
+`unmanaged` effects. The effective Program guarantee becomes the weakest
+reachable guarantee, and unmanaged effects receive no exact-replay,
+duplicate-prevention, cancellation-completion, or crash-resume claim across
+that boundary.
 
 ### ABI rule
 
@@ -232,6 +241,27 @@ NeoGraph supplies deterministic replacements only when a workload requires
 them. Time, random values, external results, and human decisions are recorded
 commands, not ambient JavaScript state.
 
+### Developer-authorized profiles
+
+NeoGraph is default-deny, not feature-deny. The default profile above remains
+the safe product baseline, but a developer may explicitly grant scoped or broad
+filesystem, network, process, environment, credential, provider/model,
+dynamic-child, native-module, or unmanaged-effect authority. Requesting a
+capability in source is not a grant; admission derives the effective
+intersection with developer and tenant policy.
+
+Every effective grant, native identity, capability scope, and execution
+guarantee enters immutable Program identity and replay diagnostics. Credential
+use and plaintext credential export are distinct grants. Dynamic source must
+compile and admit before it can spawn. Budget may grow only through a separately
+authorized journaled grant, never through retry, replay, resume, fork, child,
+replacement, or mutation of the remaining balance.
+
+The canonical authority model, `strict`/`recorded`/`unmanaged` guarantee
+lattice, composition rules, capability-compiler boundary, and self-evolution
+protocol are defined in
+[`SELF_EVOLVING_AGENT_CONTROLLER.md`](SELF_EVOLVING_AGENT_CONTROLLER.md).
+
 ## Deterministic replay
 
 QuickJS does not provide the architecture with a portable suspended-generator
@@ -275,8 +305,9 @@ A published bundle records at least:
 - JavaScript profile and `ng` API versions;
 - entry point and module dependency Merkle root;
 - exact native/core executable receipts;
-- capability/effect closure;
-- input/output contracts and budget requirements; and
+- requested and effective authority grants;
+- capability/effect closure and effective execution-guarantee floor;
+- input/output contracts and initial plus appended budget grants; and
 - compiler diagnostics and source maps.
 
 QuickJS bytecode is an internal cache only unless the dependency qualification
@@ -311,6 +342,13 @@ The migration uses a clean cutover:
 There is no permanent dual-language authoring product. Compatibility adapters
 do not become alternate compilers or runtimes.
 
+The self-evolving controller work tracked by
+[#29](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/29) through
+[#34](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/34) is a
+post-cutover extension. It reuses this one-language runtime and does not block
+the base authoring cutover or introduce another compiler, scheduler, execution
+engine, effect journal, capability registry, or activation model.
+
 ## Blocking evidence
 
 The selected direction is accepted, but implementation cannot ship until the
@@ -343,9 +381,10 @@ following evidence exists:
 - Supporting JavaScript, Lua, Janet, the Core DSL, and the Program JSON DSL in
   parallel.
 - Exposing Node.js, npm compatibility, browser APIs, or QuickJS `std`/`os` by
-  implication.
-- Allowing planner-authored native libraries, shell commands, URLs, credentials,
-  providers, or arbitrary endpoints.
+  implication or default.
+- Treating planner-authored native libraries, shell commands, URLs,
+  credentials, providers, endpoints, or descriptor claims as authority without
+  an explicit developer grant and ordinary admission.
 - Serializing raw QuickJS heaps, C pointers, callbacks, or live host objects.
 - Moving Core node execution, persistence ownership, or effect commit into
   QuickJS.
@@ -355,8 +394,10 @@ following evidence exists:
 ## Authority
 
 This document owns the user-authored language and embedded-runtime direction.
-`V1_ARCHITECTURE.md` continues to own the retained Core IR, catalog, activation,
-tenant, capability, durability, and GraphEngine boundaries. Where the earlier
-architecture preserves the Core elaborator, requires a bounded Program
-operation DSL, or rejects an embedded control interpreter, this document
-supersedes it.
+`SELF_EVOLVING_AGENT_CONTROLLER.md` owns the developer-authority,
+machine-readable capability, immutable self-evolution, and controller-evidence
+extension. `V1_ARCHITECTURE.md` continues to own the retained Core IR, catalog,
+activation, tenant, capability, durability, and `GraphEngine` boundaries.
+Where the earlier architecture preserves the Core elaborator, requires a
+bounded Program operation DSL, or rejects an embedded control interpreter, this
+document supersedes it.

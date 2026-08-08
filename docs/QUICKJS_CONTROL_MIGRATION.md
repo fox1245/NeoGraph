@@ -5,6 +5,8 @@ Date: 2026-08-08
 Architecture: `QUICKJS_CONTROL_ARCHITECTURE.md`
 Source baseline: `61661e9ad1fc386b5142139c48c327ede7464633`
 Executable gates: `../spec/quickjs-control-runtime.sdd.yaml`
+Post-cutover controller extension:
+[`SELF_EVOLVING_AGENT_CONTROLLER.md`](SELF_EVOLVING_AGENT_CONTROLLER.md)
 Tracking epic: [#23](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/23)
 Delivery issues: [#24](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/24),
 [#25](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/25),
@@ -274,6 +276,12 @@ The cutover must preserve:
 9. Runtime/profile/source mismatch and nondeterministic replay fail closed.
 10. Transport adapters do not own alternate compilation or runtime semantics.
 
+The base cutover ships the default `strict` authority profile. Post-cutover
+developer-authorized `recorded` or `unmanaged` profiles may weaken only the
+claims explicitly identified by their immutable effective guarantee floor; they
+do not alter strict-profile recovery semantics or allow an in-flight child to
+broaden its parent's authority.
+
 ## 6. Validation matrix
 
 ### Language
@@ -346,6 +354,40 @@ recreate the design fragmentation this decision rejects:
 - `../spec/programmable-harness-vm-integration.sdd.yaml`.
 
 Current implementation details remain discoverable from code, schemas, tests,
-and repository history until the legacy runtime is removed. New work is tracked
-only by this plan, the QuickJS architecture, the executable SDD, and their
-registered GitHub issues.
+and repository history until the legacy runtime is removed. Base cutover work is
+tracked only by this plan, the QuickJS architecture, the executable SDD, and
+their registered GitHub issues.
+
+## 9. Post-cutover controller extension
+
+The self-evolving general-agent controller is a dependent product extension, not
+a second migration path. Its canonical architecture is
+[`SELF_EVOLVING_AGENT_CONTROLLER.md`](SELF_EVOLVING_AGENT_CONTROLLER.md), and
+its delivery/evaluation tree is tracked by
+[#29](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/29) through
+[#34](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues/34).
+
+The extension may start compatible implementation work after its direct base
+dependencies are available, but it does not change cutover acceptance and
+cannot delay deletion of the legacy Core and Program authoring DSLs. It must
+reuse the one JavaScript runtime, sealed compilation path, `ProgramRuntime`,
+`GraphEngine`, capability registry, journal/outbox, version catalog, and
+activation CAS.
+
+Extension delivery order is:
+
+1. add immutable developer-authority profiles and explicit
+   `strict`/`recorded`/`unmanaged` guarantee labels;
+2. compile untrusted OpenAPI, A2A, MCP, and JSON Schema descriptors into
+   separately admitted capability candidates;
+3. store reusable Harnesses, behavioral fingerprints, failures, evaluation
+   evidence, and version lineage;
+4. synthesize bounded immutable candidates, evaluate them in simulation,
+   shadow, and canary modes, and promote through authorized CAS activation; and
+5. execute the preregistered falsification program before raising the public
+   claim above the evidence-supported claim-ladder level.
+
+Rollback of this extension deactivates or retires successor versions and
+restores a previously admitted future-run activation. It never mutates
+in-flight runs, erases effects or negative evidence, reopens legacy authoring,
+or creates another runtime stack.

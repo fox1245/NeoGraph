@@ -6,6 +6,7 @@
   "excluded": {
     "docs/QUICKJS_CONTROL_ARCHITECTURE.md": "Normative embedded-language architecture remains English-only until its public contract freezes.",
     "docs/QUICKJS_CONTROL_MIGRATION.md": "Pre-cutover implementation sequence remains English-only until the runtime contract freezes.",
+    "docs/SELF_EVOLVING_AGENT_CONTROLLER.md": "Pre-implementation controller architecture and evidence contract remains English-only until its public contract freezes.",
     "docs/V1_ARCHITECTURE.md": "Pre-v1 normative Core architecture remains English-only until the public contract freezes at P8.",
     "docs/V1_MIGRATION_PLAN.md": "Pre-v1 Core implementation sequence remains English-only until the public contract freezes at P8.",
     "THIRD_PARTY_LICENSES.md": "Legal notices remain in their authoritative original form.",

@@ -9,6 +9,12 @@ this document wherever it preserves the bounded Core authoring DSL, requires a
 bounded NeoGraph Program operation DSL, or rejects embedded JavaScript control.
 The typed Core IR, GraphEngine, catalog, activation, authority, durability, and
 tenant boundaries below remain in force.
+Post-cutover controller extension:
+[`SELF_EVOLVING_AGENT_CONTROLLER.md`](SELF_EVOLVING_AGENT_CONTROLLER.md)
+defines developer-authorized profiles, machine-readable capability compilation,
+immutable self-evolution, reusable Harness memory, and the evidence boundary for
+any general-agent-controller claim. It reuses, rather than replaces, the
+retained boundaries in this document.
 
 ## Decision
 
@@ -982,6 +988,9 @@ silently retried; it enters `ambiguous_effect` until reconciled.
   revalidates transitive dependencies, effects, and policy.
 - Replay identifies exact Program/Core/module/provider/tool versions and performs
   no unrecorded live effect.
+- Remote descriptors, generated source, retrieved Harnesses, children, and
+  candidates request authority but cannot grant it. Any stronger successor
+  requires an explicit control-plane grant and new immutable admission.
 
 ## Observability
 
@@ -997,6 +1006,41 @@ Source maps connect runtime events and diagnostics to Program source spans.
 Metrics separate compile, queue, Program scheduling, Core execution, provider,
 tool, checkpoint, and journal time so framework overhead is measurable rather
 than inferred from wall time.
+
+The controller extension additionally correlates descriptor, behavioral
+fingerprint, evolution proposal, candidate, evaluation, authority grant,
+effective guarantee, promotion, and activation identities. These fields add
+lineage; they do not replace the base run and effect coordinates.
+
+## Post-cutover controller extension
+
+After the one-language QuickJS cutover, NeoGraph may close an outer controller
+loop around this architecture:
+
+```text
+observe capability and outcome evidence
+  -> synthesize bounded immutable candidate Programs
+  -> compile and admit through the same Program path
+  -> evaluate in simulation, shadow, and authorized canary modes
+  -> publish and compare-and-swap activate a passing successor
+```
+
+The extension supports explicit developer grants for filesystem, network,
+process, environment, credential, provider/model, dynamic-child, native, and
+unmanaged effects. Default programs retain no ambient authority. Effective
+execution guarantees are labeled `strict`, `recorded`, or `unmanaged` and
+degrade to the weakest reachable closure; broad authority never silently
+inherits a strict replay claim.
+
+OpenAPI, A2A, MCP, and JSON Schema descriptions enter as untrusted declarations.
+Generated adapters and Harnesses use the same sealed JavaScript source,
+capability/effect closure, budget, admission, journal, catalog, and activation
+contracts as handwritten Programs.
+
+Self-evolution creates new versions only. It never mutates a running Program,
+live Core generation, journal history, effect record, budget ledger, or active
+version in place. The complete protocol and falsifiable claim ladder are defined
+in [`SELF_EVOLVING_AGENT_CONTROLLER.md`](SELF_EVOLVING_AGENT_CONTROLLER.md).
 
 ## Compatibility and cutover
 
@@ -1088,8 +1132,11 @@ Rejected. Harness is a useful application and transport service, but keeping
 its compiler, retained artifacts, and lifecycle as MCP-only concepts prevents
 normal C++ users from using the same capabilities and encourages duplicate APIs.
 
-### Mutable live graphs
+### Mutable live graphs or Programs
 
-Rejected. In-place topology mutation makes checkpoint, pending work, retry,
-cancellation, effect, and authority semantics ambiguous. Immutable generations
-plus explicit migration are safer and keep ordinary execution lock-free.
+Rejected. In-place topology or Program mutation makes checkpoint, pending work,
+retry, cancellation, effect, budget, lineage, and authority semantics
+ambiguous. Immutable generations and Program versions plus explicit migration
+or activation are safer and keep ordinary execution lock-free. Self-evolution
+therefore proposes, evaluates, publishes, and activates a successor instead of
+rewriting an active object.

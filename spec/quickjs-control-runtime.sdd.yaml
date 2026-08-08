@@ -1,8 +1,10 @@
-# Executable migration contract for docs/QUICKJS_CONTROL_ARCHITECTURE.md.
+# Executable base migration contract for docs/QUICKJS_CONTROL_ARCHITECTURE.md.
+# The dependent self-evolving controller extension is specified separately in
+# spec/self-evolving-agent-controller.sdd.yaml.
 
 spec:
   id: quickjs-control-runtime
-  revision: 3
+  revision: 4
   created: "2026-08-08"
   owner: fox1245
   status: accepted
@@ -13,6 +15,14 @@ spec:
   source_baseline: 61661e9ad1fc386b5142139c48c327ede7464633
   canonical_design: docs/QUICKJS_CONTROL_ARCHITECTURE.md
   migration_plan: docs/QUICKJS_CONTROL_MIGRATION.md
+  controller_extension:
+    canonical_design: docs/SELF_EVOLVING_AGENT_CONTROLLER.md
+    executable_contract: spec/self-evolving-agent-controller.sdd.yaml
+    tracking_epic: 29
+    role: post_cutover_dependent_extension
+    base_cutover_blocking: false
+    language_runtime_reuse: required
+    second_execution_stack: forbidden
   runtime_selection:
     language: javascript
     engine: quickjs
@@ -37,6 +47,11 @@ spec:
       ECMAScript owns general computation and composition while NeoGraph owns
       typed Core IR, admission, effects, durability, and GraphEngine dispatch;
       duplicate grammar, schema, lowering, and dispatcher paths are removed.
+    controller_extensibility: >-
+      The one JavaScript runtime, ProgramRuntime, GraphEngine, capability
+      registry, journal, version catalog, and activation model can support
+      developer-authorized capability discovery and immutable self-evolution
+      without another source language or execution stack.
 
 completion_state:
   architecture_decision: accepted
@@ -52,6 +67,9 @@ completion_state:
   native_control_abi: not_started
   authoring_cutover: not_started
   legacy_runtime_removal: not_started
+  controller_extension_architecture: accepted
+  controller_extension_implementation: not_started
+  controller_hypothesis_evaluation: not_started
 
 blocking_invariants:
   one_node_executor:

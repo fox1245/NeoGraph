@@ -1,0 +1,651 @@
+# Executable architecture and evidence contract for
+# docs/SELF_EVOLVING_AGENT_CONTROLLER.md.
+
+spec:
+  id: self-evolving-agent-controller
+  revision: 1
+  created: "2026-08-08"
+  owner: fox1245
+  status: accepted
+  priority: P1
+  kind: architecture-extension-and-evaluation
+  visibility: repository
+  methodology: [SDD, TDD, EDD]
+  canonical_design: docs/SELF_EVOLVING_AGENT_CONTROLLER.md
+  base_architecture: docs/QUICKJS_CONTROL_ARCHITECTURE.md
+  base_migration: docs/QUICKJS_CONTROL_MIGRATION.md
+  base_executable_contract: spec/quickjs-control-runtime.sdd.yaml
+  tracking_epic: 29
+  workstreams:
+    authority_and_guarantees: 30
+    capability_compiler: 31
+    reusable_memory: 32
+    evolution_loop: 33
+    falsification_program: 34
+  dependency_rule: >-
+    This extension may implement only against delivered base QuickJS contracts.
+    It does not block the one-language cutover and must not create a second
+    source compiler, scheduler, runtime, effect journal, capability registry,
+    catalog, or activation mechanism.
+
+completion_state:
+  architecture_decision: accepted
+  authority_profiles: not_started
+  execution_guarantee_lattice: not_started
+  capability_descriptor_normalization: not_started
+  openapi_frontend: not_started
+  a2a_frontend: not_started
+  mcp_frontend: not_started
+  json_schema_frontend: not_started
+  behavioral_probes: not_started
+  reusable_harness_memory: not_started
+  evolution_proposal: not_started
+  candidate_synthesis: not_started
+  simulation_evaluation: not_started
+  shadow_evaluation: not_started
+  canary_activation: not_started
+  claim_preregistration: not_started
+  controller_hypothesis_evaluation: not_started
+
+claim_boundary:
+  accepted_now: >-
+    NeoGraph is designed as a candidate model-independent controller that can
+    adapt to machine-readable capabilities, synthesize and evaluate immutable
+    Harness versions, preserve explicit authority, and improve future runs.
+  not_accepted_now:
+    - NeoGraph is AGI
+    - QuickJS creates intelligence
+    - one successful self-rewrite proves self-improvement
+    - one domain or descriptor family proves generality
+    - architecture alone proves adaptation, transfer, or agency
+  promotion_rule: >-
+    Public claims may name only the highest claim-ladder level whose complete
+    preregistered acceptance gates pass. Negative evidence must remain
+    published and narrow the claim when required.
+
+blocking_invariants:
+  one_language_one_runtime:
+    statement: >-
+      All handwritten and generated general Program source is standard
+      JavaScript executed by the one admitted QuickJS runtime.
+    proof:
+      - generated and handwritten fixtures enter the same source kind and entry contracts
+      - no descriptor frontend owns a source compiler or executable runtime
+      - no new NeoGraph expression, loop, function, class, module, or macro language
+  base_execution_ownership:
+    statement: >-
+      ProgramRuntime owns Program scheduling and durable child/effect lifecycle;
+      GraphEngine remains the only Core/application-node executor.
+    proof:
+      - synthesis and descriptor adapters yield the existing typed command protocol
+      - QuickJS callbacks perform zero worker, provider, tool, child, or Core dispatch
+      - extension concurrency lowers to existing admitted host-owned joins and children
+  default_deny_not_feature_deny:
+    statement: >-
+      Default JavaScript has no ambient host authority, while a developer can
+      deliberately grant scoped or broad authority through admission.
+    proof:
+      - default profile rejects file, network, process, environment, credential export, provider selection, dynamic child compilation, native loading, and unmanaged effects
+      - explicit-grant fixtures exercise every privileged authority family
+      - source and descriptors can request but never create grants
+      - effective grants enter immutable bundle and run identity
+  descriptor_has_no_authority:
+    statement: >-
+      OpenAPI, A2A, MCP, JSON Schema, generated source, remote descriptions, and
+      BehavioralFingerprint artifacts are untrusted declarations or evidence,
+      never authorization.
+    proof:
+      - descriptor URL, auth scheme, endpoint, and skill claims cannot dispatch during parse or generation
+      - endpoint, credential, provider, tenant, and capability grants come only from host admission
+      - malformed, recursive, oversized, unsupported, and unresolved documents fail with zero dispatch
+  one_admission_path:
+    statement: >-
+      Generated adapters, synthesized Harnesses, retrieved Harnesses, and
+      handwritten Programs compile, bind, budget, and admit through one sealed
+      Program path.
+    proof:
+      - no trusted code-generation bypass
+      - identical schema, capability, effect, source, module, executable, and budget checks
+      - rejection dispatch counters remain zero
+  explicit_guarantee_floor:
+    statement: >-
+      Each Program and invocation reports the weakest execution-integrity class
+      reachable through its executable, effect, and child closure.
+    proof:
+      - strict, recorded, and unmanaged identities are distinct
+      - composition cannot silently strengthen a descendant guarantee
+      - catalog, activation, invocation, replay, telemetry, and diagnostics expose the same effective floor
+      - strict fixtures preserve existing exact recovery and duplicate-prevention behavior
+  immutable_self_evolution:
+    statement: >-
+      Self-evolution creates candidate versions and changes future activation;
+      it never edits active source, in-flight runs, Core generations, journal
+      history, effect records, or budget ledgers in place.
+    proof:
+      - every candidate has a new immutable version and parent lineage
+      - running Vn remains pinned after Vn+1 activation
+      - stale activation compare-and-swap loses deterministically
+      - rollback changes future resolution and preserves completed history
+  authorized_budget_growth:
+    statement: >-
+      Retry, replay, resume, fork, child, replacement, and evolution do not
+      replenish budget; growth requires a separate authorized journal grant.
+    proof:
+      - denied budget requests leave remaining balance unchanged
+      - approved requests append approver, reason, amount, and decision identity
+      - every child and candidate consumes explicit parent or evaluation ceilings
+      - total self-improvement cost includes rejected and failed candidates
+  bounded_search:
+    statement: >-
+      Candidate generation, compilation, probing, evaluation, and activation
+      terminate at admitted ceilings.
+    proof:
+      - independent candidate, generation, child-depth, compile, instruction, heap, stack, wall-time, token, money, concurrency, descriptor-depth, reference, and byte limits
+      - malformed or adversarial search cannot enlarge its own limits
+      - exhaustion has stable terminal diagnostics and no post-terminal dispatch
+  independent_promotion:
+    statement: >-
+      Candidate generation, evaluation, publication, and activation are
+      separately attributable and require the admitted authorities declared by
+      the promotion policy.
+    proof:
+      - synthesizer cannot self-activate by default
+      - evaluator identity and evidence are bound to the decision
+      - simulation and shadow profiles cannot commit production effects
+      - canary and production dispatch require distinct explicit grants
+  reusable_memory_is_not_authority:
+    statement: >-
+      Retrieved Harnesses and fingerprints are candidates or evidence; current
+      admission is always authoritative.
+    proof:
+      - retrieval never transfers credential, tenant, endpoint, provider, activation, or budget grants
+      - source and dependencies recompile and rebind under current policy
+      - negative results and retirement state participate in retrieval filters
+      - cross-tenant existence and content remain isolated
+  falsifiable_claims:
+    statement: >-
+      Controller claims depend on preregistered held-out evidence and survive
+      controls for model, provider, budget, search cost, leakage, and evaluator
+      bias.
+    proof:
+      - development, selection, and final held-out sets have immutable identities
+      - thresholds and stopping rules are recorded before final evaluation
+      - all candidate costs, failures, exclusions, and negative outcomes are retained
+      - changed-after-reveal experiments receive a new held-out set
+
+execution_guarantee_contract:
+  classes:
+    strict:
+      rank: 3
+      effect_boundary: typed_durable_journal_and_outbox
+      claims:
+        - exact_recorded_replay
+        - completed_non_idempotent_duplicate_prevention
+        - durable_cancellation_and_reconciliation
+        - crash_resume_at_declared_boundaries
+    recorded:
+      rank: 2
+      effect_boundary: outcome_recorded_but_completion_may_be_ambiguous
+      claims:
+        - replay_recorded_outcomes
+        - ambiguity_requires_reconciliation
+      excluded_claims:
+        - universal_duplicate_prevention
+        - universal_exact_crash_resume
+    unmanaged:
+      rank: 1
+      effect_boundary: developer_authorized_direct_host_or_native_effect
+      claims:
+        - authority_and_invocation_are_recorded_when_observable
+      excluded_claims:
+        - exact_replay_across_unmanaged_effect
+        - duplicate_prevention_across_unmanaged_effect
+        - cancellation_completion_across_unmanaged_effect
+        - crash_resume_across_unmanaged_effect
+  composition:
+    effective_floor: minimum_rank_of_reachable_closure
+    silent_weakening: reject
+    explicit_weakening: admit_and_bind_to_identity
+    automatic_upgrade: forbidden
+    strict_parent_weak_child: requires_declared_accepted_floor
+
+basic_authority_contract:
+  default_profile: restricted_strict
+  request_is_grant: false
+  effective_grant: requested_intersect_developer_intersect_tenant_intersect_runtime
+  grant_families:
+    - network
+    - filesystem_read
+    - filesystem_write
+    - process_spawn
+    - environment_read
+    - credential_use
+    - credential_export
+    - provider_selection
+    - dynamic_child_compile
+    - native_module_load
+    - unmanaged_effects
+  credential_rules:
+    use_without_plaintext: default_binding_shape
+    plaintext_export: separately_granted_high_risk_authority
+    descriptor_may_grant: false
+    source_may_grant: false
+  provider_rules:
+    default: pinned_admitted_slot
+    dynamic_selection: separately_granted_and_recorded_before_replay_authority
+  child_rules:
+    generated_source_is_executable: false
+    transitions:
+      - generate
+      - compile
+      - derive_requirements
+      - admit_immutable_version
+      - reserve_budget
+      - spawn_pinned_identity
+    in_flight_inheritance: no_broader_than_parent_effective_authority
+    future_successor_broadening: requires_external_grant_and_new_admission
+  budget_grant_record:
+    required_fields:
+      - request_identity
+      - run_identity
+      - requester
+      - approver
+      - reason
+      - amount_by_budget_dimension
+      - previous_remaining_balance
+      - new_remaining_balance
+      - decision
+      - timestamp
+
+javascript_package_contract:
+  package_manager_execution_inside_QuickJS: forbidden
+  ambient_node_modules_resolution: forbidden
+  acquisition_and_lock_resolution: build_or_publication_time
+  compatibility_tiers:
+    pure_ES_module: sealed_direct_import
+    browser_neutral_bundle: reviewed_QuickJS_bundle_with_source_map
+    selected_Node_style_APIs: versioned_admitted_host_modules
+    native_npm_addon: admitted_native_ABI_wrapper_or_port
+    full_Node_runtime_dependency: admitted_external_process_or_reject
+  required_identity:
+    - package_source
+    - exact_version
+    - lockfile
+    - transformed_bundle
+    - source_map
+    - license_and_provenance
+    - dependency_Merkle_root
+    - implementation_digests
+  implicit_file_network_process_or_credential_authority: false
+  mutable_global_package_lookup_during_replay: forbidden
+
+capability_descriptor_contract:
+  artifact: CapabilityDescriptor
+  supported_frontends:
+    - OpenAPI
+    - A2A_AgentCard
+    - MCP
+    - JSON_Schema
+  required_fields:
+    source:
+      - descriptor_kind
+      - descriptor_version
+      - content_digest
+      - retrieval_provenance
+      - parser_identity
+      - source_coordinates
+    interface:
+      - capability_identity
+      - declared_description
+      - transport
+      - endpoint_declaration
+      - input_schema
+      - output_schema
+      - error_schema
+      - artifact_schema
+    protocol:
+      - streaming
+      - pagination
+      - task_lifecycle
+      - cancellation
+      - callbacks
+      - content_modes
+    requested_authority:
+      - authentication_scheme
+      - endpoint_scope
+      - credential_role
+      - capability_scopes
+      - effect_hypothesis
+    generated_identity:
+      - adapter_source_identity
+      - module_graph_identity
+      - executable_candidate_identity
+    diagnostics:
+      - unsupported_constructs
+      - ambiguity
+      - limit_failures
+      - rejected_references
+  declaration_observation_separation: required
+  reference_resolution:
+    ambient_network_retrieval: false
+    required_ceilings:
+      - document_count
+      - reference_count
+      - recursion_depth
+      - total_bytes
+      - per_document_bytes
+      - allowed_schemes
+      - allowed_hosts
+      - wall_time
+  stages:
+    - bounded_parse
+    - normalize_declaration
+    - generate_adapter_and_harness
+    - sealed_compile
+    - derive_closure
+    - independent_admission
+    - bounded_behavioral_probe
+    - record_fingerprint
+    - publish_candidate
+
+behavioral_fingerprint_contract:
+  artifact: BehavioralFingerprint
+  purpose: observed_behavior_not_internal_identity
+  required_context:
+    - descriptor_identity
+    - endpoint_and_transport_identity
+    - probe_suite_identity
+    - capability_and_credential_binding_receipts
+    - provider_or_agent_identity_when_observable
+    - authority_profile
+    - execution_guarantee_floor
+    - budget
+    - timestamp
+  measurements:
+    - conformance
+    - quality
+    - reliability
+    - latency_distribution
+    - cost
+    - determinism
+    - streaming_behavior
+    - cancellation_behavior
+    - error_behavior
+  prohibited_claims:
+    - exact_private_implementation_recovered
+    - identical_agent_from_AgentCard_alone
+    - descriptor_claim_is_observed_fact
+
+reusable_harness_memory_contract:
+  artifacts:
+    - HarnessDefinition
+    - ProgramVersion
+    - BehavioralFingerprint
+    - EvaluationRecord
+    - PromotionRecord
+    - NegativeResult
+  required_lineage:
+    - source
+    - runtime
+    - module
+    - Core_generation
+    - executable_binding
+    - authority_profile
+    - execution_guarantee
+    - budget
+    - descriptor
+    - parent_candidate_successor
+    - run_child_fork_replacement
+    - evaluation
+    - activation
+  retrieval:
+    methods:
+      - structured_filter
+      - semantic_similarity
+      - outcome_and_cost_filter
+      - lineage_filter
+    result_role: candidate_or_reference
+    direct_execution: forbidden
+    current_recompile_rebind_readmit: required
+    negative_results_retained: true
+    authority_transfer: forbidden
+
+self_evolution_contract:
+  artifact: EvolutionProposal
+  required_fields:
+    - proposal_identity
+    - parent_program_version_identity
+    - parent_activation_identity
+    - evidence_identity_set
+    - hypothesis
+    - allowed_mutation_envelope
+    - requested_authority_delta
+    - candidate_ceiling
+    - generation_ceiling
+    - compile_and_probe_ceilings
+    - evaluation_protocol_identity
+    - development_set_identity
+    - selection_set_identity
+    - held_out_set_identity
+    - metrics
+    - stopping_rule
+    - promotion_rule
+    - minimum_execution_guarantee
+    - rollback_rule
+  mutation_surfaces:
+    - task_decomposition
+    - graph_topology
+    - worker_reviewer_verifier_roles
+    - model_or_provider_binding
+    - concurrency_quorum_retry_timeout
+    - budget_allocation
+    - evidence_gates
+    - capability_adapters
+    - retrieval_strategy
+    - reusable_harness_seed
+    - requested_capabilities
+  mutation_algorithms_owned_by_javascript:
+    - genetic_search
+    - tree_search
+    - Bayesian_optimization
+    - rule_based_mutation
+    - model_proposed_edits
+    - library_composition
+  phases:
+    - observe
+    - propose
+    - synthesize_bounded_candidates
+    - compile_and_admit
+    - simulate
+    - shadow
+    - authorized_canary
+    - evaluate
+    - publish
+    - compare_and_swap_activate
+    - monitor
+    - retain_or_rollback
+  evaluation_modes:
+    deterministic_simulation:
+      production_effects: forbidden
+      bindings: recorded_or_synthetic
+    shadow:
+      production_commits: forbidden
+      input: read_or_authorized_duplicate
+    canary:
+      production_effects: separately_authorized_bounded_slice
+    production:
+      production_effects: normal_admitted_effects
+  activation:
+    mechanism: existing_generation_checked_compare_and_swap
+    stale_candidate: deterministic_CAS_loss_and_re_evaluation
+    in_flight_run_migration: forbidden
+    history_rewrite: forbidden
+
+claim_evaluation_contract:
+  status: blocking_preregistration_before_general_agent_claim
+  claim_ladder:
+    L0: durable_orchestrator
+    L1: adaptive_controller
+    L2: self_improving_controller
+    L3: general_agent_controller
+    AGI: outside_current_architecture_claim
+  primary_hypothesis: >-
+    Under a fixed resource and authority envelope, NeoGraph-generated admitted
+    Harnesses improve held-out total utility for previously unseen
+    machine-readable capabilities over preregistered fixed, handwritten, and
+    no-evolution controls while preserving the declared guarantee floor.
+  null_hypothesis: >-
+    Apparent gains result from seen templates, stronger models/providers,
+    uncontrolled search cost, leakage, evaluator bias, or weakened authority
+    and durability semantics rather than controller adaptation.
+  experiment_families:
+    - unseen_OpenAPI_adaptation
+    - unseen_A2A_adaptation
+    - long_horizon_crash_recovery
+    - cross_domain_transfer
+    - held_out_self_improvement
+    - evaluator_integrity_and_reward_hacking
+    - bounded_autonomy_and_authority_escalation
+  required_controls:
+    - fixed_handwritten_harness
+    - fixed_generated_template_without_probing
+    - no_memory
+    - no_evolution
+    - random_mutation_same_budget
+    - identical_model_provider_controller_only_change
+    - stronger_model_fixed_controller
+    - oracle_upper_bound_when_available
+    - misleading_descriptor_and_evaluator_inputs
+  required_measurements:
+    - task_success
+    - protocol_and_schema_conformance
+    - total_quality
+    - latency_distributions
+    - recovery_time
+    - model_tokens
+    - tool_calls
+    - external_effects
+    - money
+    - total_candidate_search_cost
+    - human_interventions
+    - candidate_and_failure_counts
+    - authority_violations
+    - effective_guarantee_floor
+    - effect_loss_duplication_and_ambiguity
+    - evaluator_independence_and_faithfulness
+    - repeated_run_uncertainty
+  split_rules:
+    development_selection_held_out_disjoint: true
+    held_out_identity_sealed_before_final_run: true
+    changed_after_reveal_invalidates_result: true
+  evidence_rules:
+    thresholds_preregistered: true
+    stopping_rule_preregistered: true
+    raw_evidence_retained: true
+    negative_results_retained: true
+    exclusions_reported: true
+    one_off_demonstration_sufficient: false
+  falsification_conditions:
+    - adaptation_requires_seen_descriptor_shapes
+    - no_held_out_gain_over_controls_after_total_cost
+    - gain_disappears_after_model_and_provider_control
+    - reward_hacking_or_correlated_review_drives_promotion
+    - strict_recovery_loses_or_duplicates_an_effect
+    - ungranted_authority_crossed_or_weak_guarantee_hidden
+    - memory_transfers_tenant_authority_or_systematically_regresses
+    - search_exceeds_declared_ceiling
+    - no_transfer_across_unrelated_domains_and_protocols
+
+phases:
+  C0_base_contract_gate:
+    issues: [24, 25, 26, 28]
+    deliver:
+      - pinned QuickJS runtime and sealed JavaScript source
+      - generator command protocol and deterministic replay
+      - sealed define graph construction
+      - versioned native control ABI
+    gate: >-
+      Extension implementation uses delivered base interfaces and no duplicate
+      language, runtime, scheduler, journal, registry, or activation path exists.
+  C1_authority_and_guarantee_profiles:
+    issue: 30
+    depends_on: [C0_base_contract_gate]
+    deliver:
+      - versioned authority profile contract
+      - developer grant and effective-closure admission
+      - credential use versus export separation
+      - provider selection and dynamic child authority
+      - authorized durable budget grants
+      - strict recorded unmanaged guarantee propagation
+    gate: >-
+      Default source has zero ambient authority, every privileged fixture is
+      available only with an explicit grant, and every composed Program reports
+      the weakest reachable execution guarantee.
+  C2_capability_compiler:
+    issue: 31
+    depends_on: [C1_authority_and_guarantee_profiles]
+    deliver:
+      - CapabilityDescriptor contract
+      - OpenAPI frontend
+      - A2A Agent Card frontend
+      - MCP frontend
+      - JSON Schema frontend
+      - generated adapter and Harness source
+      - behavioral probe and fingerprint
+    gate: >-
+      Unseen bounded descriptor fixtures generate admitted candidates or stable
+      zero-dispatch diagnostics; descriptors never create authority.
+  C3_reusable_memory:
+    issue: 32
+    depends_on: [C1_authority_and_guarantee_profiles]
+    deliver:
+      - first-class Harness and fingerprint storage
+      - success failure cost feedback and evaluation retention
+      - structured plus semantic retrieval
+      - exact parent candidate successor lineage
+    gate: >-
+      Retrieved Harnesses recompile and readmit under current policy, negative
+      results remain queryable, and no authority crosses a retrieval boundary.
+  C4_immutable_evolution_loop:
+    issue: 33
+    depends_on:
+      - C1_authority_and_guarantee_profiles
+      - C2_capability_compiler
+      - C3_reusable_memory
+    deliver:
+      - EvolutionProposal contract
+      - bounded candidate synthesis
+      - simulation and shadow evaluation
+      - separately authorized canary
+      - publication promotion and activation receipts
+      - rollback without history mutation
+    gate: >-
+      Active and in-flight versions remain immutable, candidate search stops at
+      every ceiling, shadow effects remain zero, and promotion follows the
+      preregistered rule and activation CAS.
+  C5_controller_hypothesis_evaluation:
+    issue: 34
+    depends_on: [C4_immutable_evolution_loop]
+    deliver:
+      - immutable preregistration artifacts
+      - seven experiment-family fixture suites
+      - fixed handwritten no-memory no-evolution random and model controls
+      - repeated held-out evaluations with total-cost accounting
+      - adversarial authority and evaluator tests
+      - public positive and negative evidence packet
+    gate: >-
+      Publish only the highest claim-ladder level whose complete gates pass;
+      retain the null or narrow the claim when falsification conditions hold.
+
+documentation:
+  authority: docs/SELF_EVOLVING_AGENT_CONTROLLER.md
+  base_links_required:
+    - docs/QUICKJS_CONTROL_ARCHITECTURE.md
+    - docs/QUICKJS_CONTROL_MIGRATION.md
+    - docs/V1_ARCHITECTURE.md
+    - spec/quickjs-control-runtime.sdd.yaml
+  issue_links_required: [29, 30, 31, 32, 33, 34]
+  update_rule: >-
+    Public API, examples, claims, and changelog update only after the
+    corresponding behavior is implemented and smoke-tested. Architecture and
+    evaluation contracts may precede implementation.
