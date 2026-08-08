@@ -2,7 +2,7 @@
 
 spec:
   id: quickjs-control-runtime
-  revision: 2
+  revision: 3
   created: "2026-08-08"
   owner: fox1245
   status: accepted
@@ -46,6 +46,7 @@ completion_state:
   javascript_graph_definition: not_started
   javascript_source_and_admission: not_started
   generator_command_protocol: not_started
+  structured_concurrency: not_started
   metering_and_isolation: not_started
   deterministic_replay: not_started
   native_control_abi: not_started
@@ -88,6 +89,21 @@ blocking_invariants:
       - no ng.if, ng.loop, ng.map, or custom JavaScript syntax
       - new domain behavior enters through a versioned host binding
       - ordinary computation uses standard JavaScript semantics
+  host_owned_structured_concurrency:
+    statement: >-
+      Actual parallel, race, quorum, and bounded fan-out are C++ ProgramRuntime
+      scheduling semantics. QuickJS and JavaScript Promise machinery never own
+      external concurrency, child lifecycle, or join completion.
+    proof:
+      - ng.parallel, ng.race, and ng.quorum lower to one typed join command
+      - standard JavaScript array mapping constructs member descriptors without dispatch
+      - QuickJS command constructors and native bindings perform zero dispatch and never block
+      - ProgramRuntime validates the complete group and reserves admitted budget before launching new work
+      - C++ scheduling enforces max_in_flight, failure policy, output bounds, deterministic ordering, cancellation, and drain
+      - race ties use declaration order and every loser observes cancellation before the join completes
+      - quorum launches admitted members concurrently and reports a stable unreachable outcome
+      - multi-step concurrent branches use pinned child Programs rather than concurrent callbacks into one QuickJS context
+      - crash and replay fixtures preserve each member identity and never repeat a completed effect
   no_raw_execution:
     statement: Raw or unadmitted JavaScript and modules perform zero dispatch.
     proof:
@@ -299,10 +315,73 @@ command_protocol:
     - call_core
     - spawn
     - await
+    - join
     - emit
     - checkpoint
     - cancel_scope
     - host_capability
+  structured_concurrency:
+    canonical_kind: join
+    import_slot: sealed_builtin_join_slot_pinned_by_ng_API_version
+    execution_owner: Cpp_ProgramRuntime
+    quickjs_role: immutable_command_construction_only
+    frontend_lowering:
+      ng_parallel: join_mode_all
+      ng_race: join_mode_race
+      ng_quorum: join_mode_quorum
+      parallel_map: standard_JavaScript_Array_map_plus_bounded_join
+    member_sources:
+      - immutable_admitted_deferred_command_descriptors
+      - durable_child_handles_owned_or_joinable_by_the_run
+    member_rejections:
+      - JavaScript_functions_or_closures
+      - symbols_or_cyclic_values
+      - live_JSValue_or_host_object_references
+      - unsealed_imports
+      - handles_without_join_authority
+    multi_step_branch_rule: use_an_admitted_pinned_child_Program
+    modes:
+      all:
+        result_order: declaration_order
+        failure_policies: [fail_fast, collect]
+      race:
+        winner: first_terminal_member
+        same_turn_tie_break: declaration_order
+        loser_rule: cancel_and_drain_before_join_completion
+      quorum:
+        required_successes: positive_integer_not_greater_than_member_count
+        scheduling: actual_concurrent_launch_within_max_in_flight
+        impossible_outcome: stable_quorum_unreachable_failure
+        remainder_rule: cancel_and_drain_when_policy_terminates_the_group
+    immutable_bounds:
+      - admitted_member_count_ceiling
+      - max_in_flight
+      - max_output_bytes
+      - timeout_when_present
+      - admitted_budget_reservation
+    pre_dispatch_atomicity:
+      - validate_every_member_schema_slot_identity_capability_effect_owner_and_replay_coordinate
+      - reserve_all_budget_required_for_new_group_work
+      - dispatch_zero_members_when_group_validation_or_reservation_fails
+      - existing_child_handles_retain_their_original_budget_and_lineage
+    durability:
+      - publish_group_and_member_identities_before_dispatch
+      - record_each_terminal_member_outcome
+      - record_winner_or_quorum_selection_before_generator_resume
+      - recover_the_exact_pending_members_after_process_restart
+      - replay_completed_members_from_recorded_results_with_zero_external_dispatch
+  quickjs_binding_boundary:
+    module: sealed_versioned_ng_control_module
+    c_function_role: bounded_synchronous_command_construction
+    before_yield: no_dispatch_no_wait_no_journal_publication
+    at_yield: copy_to_canonical_host_owned_command
+    resume: serialized_on_the_owning_QuickJS_executor
+    forbidden:
+      - blocking_for_Cpp_async_completion_inside_a_QuickJS_callback
+      - retaining_JSValue_or_JSContext_borrowed_state_in_async_work
+      - resuming_or_calling_one_QuickJS_context_from_worker_threads
+      - executing_JavaScript_from_a_native_finalizer
+      - passing_a_JavaScript_closure_to_the_Cpp_scheduler
   pre_dispatch_checks:
     - protocol_and_kind
     - import_slot
@@ -339,6 +418,7 @@ performance_contract:
     - replay_cost_by_recorded_command_count
     - runtime_and_builder_peak_memory
     - concurrent_invocation_throughput_and_tail_latency
+    - structured_join_overhead_by_mode_member_count_and_max_in_flight
     - JavaScript_wrapped_Core_overhead_against_direct_Core
     - Program_enabled_but_unused_against_disabled_Core
   method:
@@ -366,6 +446,10 @@ performance_contract:
 native_control_abi:
   base: C_v1
   cpp_surface: convenience_wrapper_only
+  quickjs_binding_role: command_constructor_only
+  scheduler_execution_site: outside_the_QuickJS_stack
+  threading_rule: one_owning_executor_serializes_each_QuickJS_context
+  async_value_rule: canonical_host_owned_bytes_replace_borrowed_JSValue_state_before_dispatch
   required_metadata:
     - executable_identity
     - input_schema
@@ -423,7 +507,7 @@ authoring_cutover_contract:
     - Core_DSL_parser_and_elaborator
     - Harness_Core_DSL_translation
     - Program_source_schemas_and_operation_tree_parser
-    - Program_operation_specific_lowering_and_dispatch
+    - legacy_Program_operation_tree_lowering_and_dispatch
     - Harness_Program_JSON_translation
     - legacy_syntax_only_docs_examples_and_tests
   rollback_rule: never_reopen_legacy_authoring_or_create_a_permanent_dual_stack
@@ -449,10 +533,16 @@ phases:
   Q2_command_execution:
     deliver:
       - canonical command schema
-      - ng module constructors
+      - sealed ng module constructors
       - import-slot resolution
       - generator resume with typed outcomes
-    gate: Representative control programs invoke only admitted Core and host bindings.
+      - C++ ProgramRuntime join handler
+      - ng.parallel, ng.race, and ng.quorum lowering to join
+      - bounded JavaScript map-to-command construction with C++ max_in_flight enforcement
+    gate: >-
+      Representative control programs invoke only admitted Core and host
+      bindings, structured groups run with actual C++ concurrency, and every
+      rejected group dispatches zero members.
   Q3_metering_and_isolation:
     deliver:
       - memory ceiling
@@ -468,7 +558,11 @@ phases:
       - mismatch failure
       - pending-head recovery
       - canonical explicit checkpoint state
-    gate: Crash injection loses or duplicates no command, child, or external effect.
+      - durable join group and member coordinates
+      - winner, quorum, cancellation, and drain recovery
+    gate: >-
+      Crash injection at every command and join publication boundary loses or
+      duplicates no command, group member, child, or external effect.
   Q5_native_abi:
     deliver:
       - versioned C ABI
@@ -506,6 +600,9 @@ acceptance:
   - Core-only C++ consumers remain independent of QuickJS.
   - Adversarial source cannot reach ungranted host authority.
   - Replay after process death reaches the exact pending command without repeating completed effects.
+  - Parallel, race, quorum, and bounded fan-out execute in C++ ProgramRuntime and never inside a blocking QuickJS callback.
+  - Sealed ng structured-concurrency constructors perform zero dispatch until their typed join command is yielded and durably admitted.
+  - Structured joins preserve admitted bounds, deterministic selection, cancellation drain, child lineage, and exact replay across process death.
   - Native extension behavior is exact-bound, cancellable, durable, and ABI-versioned.
   - Stored legacy Core definitions and Programs have an explicit terminal migration classification.
   - Legacy DSL direction documents and open issues are superseded by the QuickJS issue tree.
