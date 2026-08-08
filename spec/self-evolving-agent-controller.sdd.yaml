@@ -3,7 +3,7 @@
 
 spec:
   id: self-evolving-agent-controller
-  revision: 1
+  revision: 2
   created: "2026-08-08"
   owner: fox1245
   status: accepted
@@ -39,6 +39,8 @@ completion_state:
   json_schema_frontend: not_started
   behavioral_probes: not_started
   reusable_harness_memory: not_started
+  skill_input_boundary: not_started
+  skill_centric_comparison_baseline: not_started
   evolution_proposal: not_started
   candidate_synthesis: not_started
   simulation_evaluation: not_started
@@ -63,6 +65,51 @@ claim_boundary:
     preregistered acceptance gates pass. Negative evidence must remain
     published and narrow the claim when required.
 
+product_differentiation_contract:
+  category: model_independent_general_agent_controller_substrate
+  not_category:
+    - skill_registry_orchestrator
+    - prompt_router
+    - tool_description_retriever
+    - mutable_skill_file_optimizer
+    - model_owned_effect_executor
+  unit_of_adaptation: immutable_admitted_Program_or_Harness_version
+  unit_of_activation: generation_checked_ProgramVersion
+  environment_input:
+    - machine_readable_capability_descriptors
+    - observed_behavior
+    - execution_outcomes
+    - reusable_Harnesses
+    - optional_skills
+  synthesized_surfaces:
+    - control_algorithm
+    - task_and_agent_topology
+    - capability_adapters
+    - model_provider_and_tool_bindings
+    - concurrency_and_recovery_policy
+    - evaluation_and_promotion_policy
+  skill_role:
+    allowed:
+      - optional_seed
+      - procedural_reference
+      - example
+      - capability_hint
+      - evaluation_evidence
+    forbidden:
+      - executable_authority
+      - implicit_capability_grant
+      - activation_target_without_Program_admission
+      - sole_proof_of_environment_adaptation
+      - sole_unit_of_self_evolution
+  empty_skill_registry_behavior: >-
+    A previously unseen admitted descriptor or host capability can still become
+    a generated, compiled, probed, and admitted Harness without a matching
+    preinstalled skill.
+  no_false_superiority_claim: >-
+    Architectural difference is accepted now; outcome superiority over a
+    strong skill-centric evolving Harness requires the controlled evidence
+    specified by claim_evaluation_contract.
+
 blocking_invariants:
   one_language_one_runtime:
     statement: >-
@@ -80,6 +127,18 @@ blocking_invariants:
       - synthesis and descriptor adapters yield the existing typed command protocol
       - QuickJS callbacks perform zero worker, provider, tool, child, or Core dispatch
       - extension concurrency lowers to existing admitted host-owned joins and children
+  skills_are_inputs_not_control_plane:
+    statement: >-
+      A skill may seed or inform synthesis, but selection, mutation, or
+      retrieval of a skill never dispatches work, grants authority, defines
+      durable lifecycle semantics, or changes activation by itself.
+    proof:
+      - an empty skill registry still admits an unseen descriptor through the capability compiler
+      - retrieved skill text is untrusted input to the same sealed compilation and admission path
+      - skill metadata cannot select credentials providers tenants budgets or execution guarantees
+      - a skill-created candidate receives a ProgramVersion identity distinct from the skill artifact
+      - deleting or replacing a skill does not mutate an admitted or in-flight Program
+      - skill-only retrieval is never counted as controller adaptation or self-improvement
   default_deny_not_feature_deny:
     statement: >-
       Default JavaScript has no ambient host authority, while a developer can
@@ -279,6 +338,34 @@ javascript_package_contract:
   implicit_file_network_process_or_credential_authority: false
   mutable_global_package_lookup_during_replay: forbidden
 
+skill_input_contract:
+  artifact_role: optional_untrusted_synthesis_input
+  admitted_skill_shapes:
+    - prompt_or_procedure
+    - code_or_module_template
+    - descriptor_reference
+    - evaluation_recipe
+    - reusable_Harness_reference
+  direct_dispatch: forbidden
+  authority_transfer: forbidden
+  activation_transfer: forbidden
+  durable_identity_transfer: forbidden
+  required_provenance:
+    - skill_identity
+    - content_digest
+    - source_and_license
+    - version
+    - retrieval_reason
+    - consuming_EvolutionProposal_or_compile_identity
+  executable_material_rule: >-
+    Code, modules, descriptors, or Harness references obtained from a skill
+    enter their ordinary sealed parse, compile, closure, budget, and admission
+    path before work can dispatch.
+  evolution_rule: >-
+    Editing or generating a skill is evidence or candidate input. A completed
+    evolution step requires a new immutable admitted ProgramVersion plus an
+    evaluation and activation decision.
+
 capability_descriptor_contract:
   artifact: CapabilityDescriptor
   supported_frontends:
@@ -417,6 +504,9 @@ self_evolution_contract:
     - parent_program_version_identity
     - parent_activation_identity
     - evidence_identity_set
+    - seed_artifact_identity_set
+    - candidate_program_version_identity
+    - whole_program_delta_identity
     - hypothesis
     - allowed_mutation_envelope
     - requested_authority_delta
@@ -481,6 +571,49 @@ self_evolution_contract:
     in_flight_run_migration: forbidden
     history_rewrite: forbidden
 
+skill_centric_baseline_contract:
+  purpose: >-
+    Test outcome superiority without confusing NeoGraph's already-defined
+    architectural boundary with an unmeasured performance claim.
+  baseline_must_support:
+    - skill_retrieval
+    - skill_creation
+    - skill_editing_and_versioning
+    - skill_composition
+    - persistent_skill_memory
+    - the_strongest_documented_planning_and_reflection_mode
+  parity_controls:
+    - same_foundation_models_and_provider_versions
+    - same_initial_skill_corpus_and_examples
+    - same_machine_readable_descriptors_and_task_inputs
+    - same_tool_and_endpoint_availability
+    - same_authority_ceiling
+    - same_total_token_tool_money_wall_time_and_candidate_budget
+    - same_human_intervention_ceiling
+    - same_development_selection_and_held_out_splits
+  no_straw_baseline_rule: >-
+    Do not disable a skill-centric system feature merely because NeoGraph owns
+    an analogous feature. Configure the baseline according to its strongest
+    documented reproducible mode within the shared resource envelope.
+  classification_rule: >-
+    If a comparison system independently compiles whole immutable Programs,
+    owns typed durable effects and recovery, admits explicit authority, and
+    promotes versions through held-out evaluation, classify it as another
+    controller substrate rather than a skill-only baseline.
+  differential_tasks_require:
+    - no_matching_preinstalled_skill
+    - previously_unseen_descriptor_or_protocol_combination
+    - whole_Harness_or_Program_change_beyond_skill_text
+    - effectful_long_horizon_execution
+    - interruption_and_recovery
+  interpretation:
+    architecture_difference: established_by_contract_and_implementation_evidence
+    outcome_superiority: requires_preregistered_comparative_results
+    no_superiority_result: >-
+      Preserve the architectural distinction but reject any claim that the
+      NeoGraph mechanism improves held-out total utility over the strong
+      skill-centric baseline.
+
 claim_evaluation_contract:
   status: blocking_preregistration_before_general_agent_claim
   claim_ladder:
@@ -490,14 +623,16 @@ claim_evaluation_contract:
     L3: general_agent_controller
     AGI: outside_current_architecture_claim
   primary_hypothesis: >-
-    Under a fixed resource and authority envelope, NeoGraph-generated admitted
-    Harnesses improve held-out total utility for previously unseen
-    machine-readable capabilities over preregistered fixed, handwritten, and
-    no-evolution controls while preserving the declared guarantee floor.
+    Under the same model, tool, authority, and total resource envelope,
+    NeoGraph-generated admitted Harnesses improve held-out total utility for
+    previously unseen machine-readable capabilities over preregistered fixed,
+    handwritten, no-evolution, and strong skill-centric evolution controls
+    while preserving the declared guarantee floor.
   null_hypothesis: >-
     Apparent gains result from seen templates, stronger models/providers,
-    uncontrolled search cost, leakage, evaluator bias, or weakened authority
-    and durability semantics rather than controller adaptation.
+    unequal tools or authority, uncontrolled search cost, leakage, evaluator
+    bias, a weakened skill-centric baseline, or weaker durability semantics
+    rather than controller adaptation.
   experiment_families:
     - unseen_OpenAPI_adaptation
     - unseen_A2A_adaptation
@@ -506,8 +641,10 @@ claim_evaluation_contract:
     - held_out_self_improvement
     - evaluator_integrity_and_reward_hacking
     - bounded_autonomy_and_authority_escalation
+    - strong_skill_centric_harness_differential
   required_controls:
     - fixed_handwritten_harness
+    - strong_skill_centric_evolution_same_model_tools_authority_and_total_budget
     - fixed_generated_template_without_probing
     - no_memory
     - no_evolution
@@ -528,6 +665,9 @@ claim_evaluation_contract:
     - money
     - total_candidate_search_cost
     - human_interventions
+    - unseen_capability_integration_without_preexisting_skill
+    - human_authored_integration_artifact_count
+    - generated_whole_Program_change_surface
     - candidate_and_failure_counts
     - authority_violations
     - effective_guarantee_floor
@@ -555,6 +695,7 @@ claim_evaluation_contract:
     - memory_transfers_tenant_authority_or_systematically_regresses
     - search_exceeds_declared_ceiling
     - no_transfer_across_unrelated_domains_and_protocols
+    - no_held_out_advantage_over_strong_skill_centric_baseline
 
 phases:
   C0_base_contract_gate:
@@ -592,9 +733,11 @@ phases:
       - JSON Schema frontend
       - generated adapter and Harness source
       - behavioral probe and fingerprint
+      - empty-skill-registry unseen capability fixture
     gate: >-
       Unseen bounded descriptor fixtures generate admitted candidates or stable
-      zero-dispatch diagnostics; descriptors never create authority.
+      zero-dispatch diagnostics; descriptors never create authority, and a
+      matching preinstalled skill is not required.
   C3_reusable_memory:
     issue: 32
     depends_on: [C1_authority_and_guarantee_profiles]
@@ -602,10 +745,12 @@ phases:
       - first-class Harness and fingerprint storage
       - success failure cost feedback and evaluation retention
       - structured plus semantic retrieval
+      - optional skill seeds and references stored without authority
       - exact parent candidate successor lineage
     gate: >-
-      Retrieved Harnesses recompile and readmit under current policy, negative
-      results remain queryable, and no authority crosses a retrieval boundary.
+      Retrieved Harnesses and skill seeds recompile and readmit under current
+      policy, negative results remain queryable, and no authority crosses a
+      retrieval boundary.
   C4_immutable_evolution_loop:
     issue: 33
     depends_on:
@@ -615,6 +760,7 @@ phases:
     deliver:
       - EvolutionProposal contract
       - bounded candidate synthesis
+      - whole-Program change-set identity beyond skill text mutation
       - simulation and shadow evaluation
       - separately authorized canary
       - publication promotion and activation receipts
@@ -622,14 +768,16 @@ phases:
     gate: >-
       Active and in-flight versions remain immutable, candidate search stops at
       every ceiling, shadow effects remain zero, and promotion follows the
-      preregistered rule and activation CAS.
+      preregistered rule and activation CAS. A successful evolution produces a
+      new admitted ProgramVersion even when a skill supplied its seed.
   C5_controller_hypothesis_evaluation:
     issue: 34
     depends_on: [C4_immutable_evolution_loop]
     deliver:
       - immutable preregistration artifacts
-      - seven experiment-family fixture suites
-      - fixed handwritten no-memory no-evolution random and model controls
+      - fair strong skill-centric baseline implementation and parity receipts
+      - eight experiment-family fixture suites
+      - fixed handwritten no-memory no-evolution random model and strong skill-centric controls
       - repeated held-out evaluations with total-cost accounting
       - adversarial authority and evaluator tests
       - public positive and negative evidence packet
