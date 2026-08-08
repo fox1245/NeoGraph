@@ -54,7 +54,8 @@ struct RunOutcome {
 class RunControl;
 using ChildLaunchCallback =
     std::function<std::shared_ptr<RunControl>(std::string_view, json, std::string_view,
-                                              std::string_view)>;
+                                              std::string_view,
+                                              std::optional<TaskGraphBudget>)>;
 
 struct AsyncWaiter {
     std::weak_ptr<asio::steady_timer> timer;
@@ -132,11 +133,13 @@ public:
     bool              cancel(CancellationCause cause) noexcept;
     CancellationCause cancellation_cause() const noexcept;
     CancellationCause seal_terminal_cause() noexcept;
-    void              attach_child(const std::shared_ptr<RunControl>& child) noexcept;
-    std::shared_ptr<RunControl> launch_child(std::string_view binding_name,
-                                             json             input,
-                                             std::string_view operation_id,
-                                             std::string_view execution_key) const;
+    void attach_child(const std::shared_ptr<RunControl>& child) noexcept;
+    std::shared_ptr<RunControl> launch_child(
+        std::string_view binding_name,
+        json             input,
+        std::string_view operation_id,
+        std::string_view execution_key,
+        std::optional<TaskGraphBudget> budget_override = std::nullopt) const;
 
     ProgramEvent stage_event(ProgramEventKind kind, ProgramEventPayload payload);
     ProgramEvent stage_event(std::string_view operation_id,

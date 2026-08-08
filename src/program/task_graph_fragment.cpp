@@ -737,6 +737,20 @@ std::string_view to_string(TaskGraphPublishResult result) noexcept {
     return "unknown";
 }
 
+bool same_record_identity(const TaskGraphFragmentRecord& lhs,
+                          const TaskGraphFragmentRecord& rhs) {
+    if (!(lhs.fragment == rhs.fragment) || lhs.tasks.size() != rhs.tasks.size()) return false;
+    std::map<std::string, std::string, std::less<>> left;
+    std::map<std::string, std::string, std::less<>> right;
+    for (const auto& task : lhs.tasks) {
+        if (!left.emplace(task.task_id, task.operation_id).second) return false;
+    }
+    for (const auto& task : rhs.tasks) {
+        if (!right.emplace(task.task_id, task.operation_id).second) return false;
+    }
+    return left == right;
+}
+
 struct InMemoryTaskGraphFragmentStore::Impl {
     mutable std::mutex mutex;
     std::map<std::string, TaskGraphFragmentRecord, std::less<>> records;
@@ -757,8 +771,7 @@ TaskGraphPublishResult InMemoryTaskGraphFragmentStore::publish(
     std::lock_guard lock(impl_->mutex);
     const auto found = impl_->records.find(id);
     if (found != impl_->records.end()) {
-        if (found->second.fragment == copy.fragment && found->second.tasks == copy.tasks &&
-            found->second.terminal == copy.terminal) {
+        if (same_record_identity(found->second, copy)) {
             return TaskGraphPublishResult::AlreadyPresent;
         }
         return TaskGraphPublishResult::Conflict;
@@ -784,6 +797,7 @@ TaskGraphPublishResult InMemoryTaskGraphFragmentStore::compare_update(
     std::lock_guard lock(impl_->mutex);
     const auto found = impl_->records.find(std::string(fragment_id));
     if (found == impl_->records.end()) return TaskGraphPublishResult::Missing;
+    if (!same_record_identity(found->second, copy)) return TaskGraphPublishResult::Conflict;
     if (found->second.revision != expected_revision) return TaskGraphPublishResult::Conflict;
     copy.revision = expected_revision + 1;
     copy.published = true;

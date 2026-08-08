@@ -1246,10 +1246,12 @@ RunControl::task_graph_policy(std::string_view expansion_operation_id) const {
     return resolver(owner_scope, program_version_id, expansion_operation_id);
 }
 
-std::shared_ptr<RunControl> RunControl::launch_child(std::string_view binding_name,
-                                                     json             input,
-                                                     std::string_view operation_id,
-                                                     std::string_view execution_key) const {
+std::shared_ptr<RunControl> RunControl::launch_child(
+    std::string_view binding_name,
+    json             input,
+    std::string_view operation_id,
+    std::string_view execution_key,
+    std::optional<TaskGraphBudget> budget_override) const {
     ChildLaunchCallback callback;
     {
         std::lock_guard lock(mutex_);
@@ -1261,7 +1263,8 @@ std::shared_ptr<RunControl> RunControl::launch_child(std::string_view binding_na
                                  json{{"binding", std::string(binding_name)},
                                       {"operation_id", std::string(operation_id)}});
     try {
-        return callback(binding_name, std::move(input), operation_id, execution_key);
+        return callback(binding_name, std::move(input), operation_id, execution_key,
+                        std::move(budget_override));
     } catch (const ProgramDiagnosticError& error) {
         auto diagnostic = error.diagnostic();
         if (!diagnostic.witness.is_object()) diagnostic.witness = json::object();
@@ -1813,7 +1816,8 @@ struct ProgramRuntime::Impl {
         const auto weak_control = std::weak_ptr<detail::RunControl>(control);
         control->set_child_launch_callback(
             [this, weak_control](std::string_view binding_name, json input,
-                                 std::string_view operation_id, std::string_view execution_key) {
+                                 std::string_view operation_id, std::string_view execution_key,
+                                 std::optional<TaskGraphBudget> budget_override) {
                 const auto parent = weak_control.lock();
                 if (!parent) throw std::runtime_error("Parent Program control expired");
                 if (parent->cancellation_cause() != detail::CancellationCause::None)
@@ -1846,6 +1850,18 @@ struct ProgramRuntime::Impl {
                                  limits.max_dynamic_compiles,
                                  limits.max_child_depth,
                                  limits.max_total_children};
+                if (budget_override) {
+                    const auto apply_requested = [](std::uint64_t requested,
+                                                    std::uint64_t ceiling) {
+                        return requested == 0 ? ceiling : std::min(requested, ceiling);
+                    };
+                    budget.wall_time_ms =
+                        apply_requested(budget_override->wall_time_ms, budget.wall_time_ms);
+                    budget.model_tokens =
+                        apply_requested(budget_override->model_tokens, budget.model_tokens);
+                    budget.monetary_microunits = apply_requested(
+                        budget_override->monetary_microunits, budget.monetary_microunits);
+                }
                 if (parent->granted_budget.max_child_depth > 0) {
                     budget.max_child_depth =
                         std::min(budget.max_child_depth,

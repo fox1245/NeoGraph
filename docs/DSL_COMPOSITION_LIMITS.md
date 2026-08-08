@@ -1,6 +1,6 @@
 # Current DSL and Program composition limits
 
-_Status: implementation inventory after the P2 bounded Program child-map surface — 2026-08-07. This is an implementation snapshot, not a product commitment or a replacement for [the v1 architecture](V1_ARCHITECTURE.md)._
+_Status: implementation inventory after the P3 bounded `expand_task_graph` surface — 2026-08-07. This is an implementation snapshot, not a product commitment or a replacement for [the v1 architecture](V1_ARCHITECTURE.md)._
 
 ---
 
@@ -28,7 +28,7 @@ flowchart LR
     elaborator --> strict_core[Strict Core JSON]
     strict_core --> harness_dsl[Harness dsl translation]
     harness_dsl --> call_core_root[Program call_core root]
-    program_source[program_source] -->|Program JSON v3| program_compiler[ProgramCompiler]
+    program_source[program_source] -->|Program JSON v4| program_compiler[ProgramCompiler]
     harness_program[Harness program translation] --> program_compiler
     program_compiler --> program_plan[Typed Program plan]
 
@@ -52,7 +52,7 @@ Program composition only through the separate `mode: "program"` path.
 | --- | --- | --- |
 | Core topology DSL | `vars`, whole-value and scalar interpolation, non-recursive `templates` + `use`, local node-prefix renaming, global channel merge, and boolean `when` | Elaboration removes all DSL keys and returns strict Core topology JSON; it never emits Program operations. [Elaborator contract](../include/neograph/graph/elaborator.h#L5-L87) |
 | Strict Core JSON | Static channels, nodes, edges, conditional edges, barriers, static interrupts, retry policy, and registered node configuration | Topology is data. Runtime-determined routing and pauses come from registered node code, not a JSON expression evaluator. [Topology model](../include/neograph/graph/compiler.h#L73-L93) |
-| Program JSON (compiler) | `call_core`, `sequence`, `branch`, bounded `loop`/`retry`, `parallel`, `race`, `quorum`, `map`, bounded `parallel_map`, `spawn`, `await`, `emit`, `checkpoint`, `cancel`, and `return` | Program-v1 preserves the one-`call_core` legacy contract; Program-v2 publishes the recursive operation grammar; Program-v3 adds the typed bounded child map. Compiler and admission checks remain authoritative for semantic closure. [Operation list](../src/program/compiler.cpp#L360-L452) |
+| Program JSON (compiler) | `call_core`, `sequence`, `branch`, bounded `loop`/`retry`, `parallel`, `race`, `quorum`, `map`, bounded `parallel_map`, `expand_task_graph`, `spawn`, `await`, `emit`, `checkpoint`, `cancel`, and `return` | Program-v1 preserves the one-`call_core` legacy contract; Program-v2 publishes the recursive operation grammar; Program-v3 adds the typed bounded child map; Program-v4 adds policy-admitted dynamic task-graph expansion. Compiler and admission checks remain authoritative for semantic closure. [Operation list](../src/program/compiler.cpp#L360-L452) |
 | Harness `mode: "dsl"` | Bounded Core DSL plus sealed Harness worker enrichment | It elaborates to Core and constructs a Program document with one `call_core` root; it does not accept a Program tree from the request. [Translation path](../src/mcp/harness_program_translator.cpp#L870-L915) |
 | Harness `mode: "program"` | Program-v2 static operations over the sealed Harness Core definition | It preflights through `ProgramCompiler`, derives exact finite budgets, and rejects durable child publication and child scheduling (`spawn`, `parallel_map`), transport values, or unsupported authority. [Translation path](../src/mcp/harness_program_translator.cpp#L915-L1045) |
 
@@ -94,11 +94,14 @@ for a distinct graph today.
 `program-document-v1.schema.json` remains the legacy one-`call_core` contract.
 `program-document-v2.schema.json` publishes the recursive typed operation
 grammar. `program-document-v3.schema.json` adds `parallel_map` and keeps the
-v2 vocabulary unchanged; the source declares the matching version and
-`ProgramCompiler` enforces the version-specific surface.[^program-schema]
+v2 vocabulary unchanged. `program-document-v4.schema.json` adds
+`expand_task_graph` and keeps the v3 vocabulary unchanged; the source declares
+the matching version and `ProgramCompiler` enforces the version-specific
+surface.[^program-schema]
 
 **Effect:** Schema-driven callers can author static Program composition through
-the explicit v2 or v3 contract. A v1 caller keeps its original strict boundary.
+the explicit v2, v3, or v4 contract. A v1 caller keeps its original strict
+boundary.
 
 **Boundary:** JSON Schema validates portable source shape. `ProgramCompiler`
 still enforces registry closure, one sealed Core identity, exact finite budgets,
@@ -165,6 +168,36 @@ further launches, and cancels active children. `collect` lets all permitted
 items finish, preserves successful mapped outputs in item order, and then
 returns the first failure if any. Output serialization is checked against
 `max_output_bytes` before the map result is returned.
+
+### P3-GRAPH-006: Bounded dependent task-graph expansion
+
+`expand_task_graph` is available only in direct Program schema v4. Its
+`proposal_source` is either an inline proposal object or one JSON Pointer into
+the current input state. The runtime selects that typed source, checks the
+dynamic-compile and child ceilings, asks the host-owned policy resolver for the
+template and capability boundary, compiles the proposal through the typed
+`TaskGraphProposal` path, and publishes the resulting fragment before
+dispatching any child.
+
+The proposal compiler rejects unknown templates, invalid bindings, cycles,
+depth/edge/task limits, capability or effect escalation, and per-task or
+aggregate budget overages. A compiled task carries its stable operation
+identity, sealed template receipt, typed bindings, dependency edges, requested
+and reserved budgets, and attenuated capability/effect closure. `join.kind`
+currently supports only `all`; the operation's `failure_policy` is explicitly
+`fail_fast` or `collect`.
+
+Publication is content-addressed and compare-and-swap based. Retrying the same
+fragment is idempotent even when task state has advanced; a different immutable
+fragment with the same identity conflicts, and a stale revision never overwrites
+the durable record. Child launches use the compiled per-task budget, then
+intersect it with the verified binding receipt and the parent's remaining depth
+and descendant quota.
+
+**Boundary:** This is finite task-DAG materialization, not a general Program
+interpreter. The proposal cannot contain raw Program JSON, executable endpoints,
+credentials, paths, arbitrary expressions, or unregistered templates. Recovery
+continues from the durable fragment; replanning is not a resume mechanism.
 
 ### P-CHILD-005: Child control is durable but deliberately narrow
 
@@ -258,12 +291,11 @@ post-restart cancellation requires a separate storage and lifecycle contract.[^p
 ## Evidence
 
 [^harness-modes]: [`src/mcp/harness_program_translator.cpp`](../src/mcp/harness_program_translator.cpp), [`tests/test_harness_program_translator.cpp`](../tests/test_harness_program_translator.cpp#L275-L478)
-[^program-schema]: [`schemas/program-document-v1.schema.json`](../schemas/program-document-v1.schema.json), [`schemas/program-document-v2.schema.json`](../schemas/program-document-v2.schema.json), [`schemas/program-document-v3.schema.json`](../schemas/program-document-v3.schema.json), [`include/neograph/program/schema.h`](../include/neograph/program/schema.h)
-[^program-single-core]: [`src/program/compiler.cpp`](../src/program/compiler.cpp#L360-L452), [`src/program/compiler.cpp`](../src/program/compiler.cpp#L587-L600)
-[^program-condition]: [`src/program/compiler.cpp`](../src/program/compiler.cpp#L455-L512)
+[^program-schema]: [`schemas/program-document-v1.schema.json`](../schemas/program-document-v1.schema.json), [`schemas/program-document-v2.schema.json`](../schemas/program-document-v2.schema.json), [`schemas/program-document-v3.schema.json`](../schemas/program-document-v3.schema.json), [`schemas/program-document-v4.schema.json`](../schemas/program-document-v4.schema.json), [`include/neograph/program/schema.h`](../include/neograph/program/schema.h)
+[^program-parallel-map]: [`src/program/compiler.cpp`](../src/program/compiler.cpp#L780-L985), [`src/program/plan.cpp`](../src/program/plan.cpp#L176-L243), [`src/program/run_attempt.cpp`](../src/program/run_attempt.cpp#L1183-L1476), [`tests/test_program_runtime.cpp`](../tests/test_program_runtime.cpp#L3619-L3770)
+[^program-expand]: [`src/program/compiler.cpp`](../src/program/compiler.cpp#L998-L1094), [`src/program/task_graph_proposal.cpp`](../src/program/task_graph_proposal.cpp#L1-L690), [`src/program/task_graph_fragment.cpp`](../src/program/task_graph_fragment.cpp#L1-L808), [`src/program/run_attempt.cpp`](../src/program/run_attempt.cpp#L714-L1212), [`tests/test_program_task_graph_proposal.cpp`](../tests/test_program_task_graph_proposal.cpp#L335-L385), [`tests/test_program_runtime.cpp`](../tests/test_program_runtime.cpp#L3233-L3280)
 [^program-literal-values]: [`src/program/compiler.cpp`](../src/program/compiler.cpp#L798-L806), [`src/program/run_attempt.cpp`](../src/program/run_attempt.cpp#L1249-L1261)
 [^program-map]: [`src/program/compiler.cpp`](../src/program/compiler.cpp#L727-L743), [`src/program/run_attempt.cpp`](../src/program/run_attempt.cpp#L1083-L1103)
-[^program-parallel-map]: [`src/program/compiler.cpp`](../src/program/compiler.cpp#L780-L985), [`src/program/plan.cpp`](../src/program/plan.cpp#L176-L243), [`src/program/run_attempt.cpp`](../src/program/run_attempt.cpp#L1183-L1476), [`tests/test_program_runtime.cpp`](../tests/test_program_runtime.cpp#L3619-L3770)
 [^program-spawn]: [`src/program/compiler.cpp`](../src/program/compiler.cpp#L744-L761), [`src/program/compiler.cpp`](../src/program/compiler.cpp#L817-L857), [`src/program/run_attempt.cpp`](../src/program/run_attempt.cpp#L1106-L1125)
 [^program-await]: [`src/program/compiler.cpp`](../src/program/compiler.cpp#L762-L769), [`src/program/run_attempt.cpp`](../src/program/run_attempt.cpp#L1142-L1221)
 [^program-cancel]: [`src/program/compiler.cpp`](../src/program/compiler.cpp#L779-L797)

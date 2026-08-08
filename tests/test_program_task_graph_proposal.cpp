@@ -359,6 +359,15 @@ TEST(TaskGraphFragmentTest, PublishesAndUpdatesOnlyThroughDurableCompareAndSwap)
     EXPECT_TRUE(first->published);
     EXPECT_EQ(first->revision, 1U);
     EXPECT_EQ(store.publish(record), TaskGraphPublishResult::AlreadyPresent);
+    auto retry = *first;
+    retry.tasks[0].state = TaskGraphTaskState::Completed;
+    retry.tasks[0].output = json{{"summary", "done"}};
+    retry.terminal = true;
+    EXPECT_EQ(store.publish(retry), TaskGraphPublishResult::AlreadyPresent);
+    const auto after_retry = store.load(fragment.fragment_id());
+    ASSERT_TRUE(after_retry.has_value());
+    EXPECT_EQ(after_retry->revision, 1U);
+    EXPECT_FALSE(after_retry->terminal);
 
     auto next = *first;
     next.tasks[0].state = TaskGraphTaskState::Completed;

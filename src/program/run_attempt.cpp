@@ -958,7 +958,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 try {
                     auto child = control->launch_child(
                         task.child_binding, std::move(child_input), operation.id(),
-                        "task:" + task.operation_id);
+                        "task:" + task.operation_id, task.requested_budget);
                     {
                         std::lock_guard lock(batch_state->mutex);
                         batch_state->children.push_back(child);
@@ -1860,7 +1860,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                                 map.child_binding, std::move(child_input),
                                                 operation_id,
                                                 execution_key_prefix + ":" +
-                                                    std::to_string(item_index));
+                                                    std::to_string(item_index),
+                                                std::nullopt);
                                             bool cancel_child = false;
                                             {
                                                 std::lock_guard lock(parallel_map->mutex);
@@ -2060,7 +2061,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     execution_key = base + ":" + std::to_string(ordinal);
                 }
                 auto child = control->launch_child(*operation.child_binding(), std::move(state),
-                                                   operation_id, execution_key);
+                                                   operation_id, execution_key, std::nullopt);
                 PlanExecution result;
                 result.output = json{{"child_run_id", child->run_id},
                                      {"program_version_id", child->program_version_id}};
