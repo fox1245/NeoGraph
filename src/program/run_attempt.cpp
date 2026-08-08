@@ -89,6 +89,16 @@ std::string operation_thread_id(const RunControl& control, std::string_view oper
     value.append(control.materialized->root->compiled_plan_identity);
     return detail::sha256_identity("program-core-thread/v1", value);
 }
+std::string task_attempt_identity(std::string_view fragment_id,
+                                  std::string_view task_id,
+                                  std::uint32_t   attempt) {
+    return detail::sha256_identity(
+        "program-task-graph-attempt/v1",
+        detail::canonical_json_bytes(json{{"fragment_id", std::string(fragment_id)},
+                                          {"task_id", std::string(task_id)},
+                                          {"attempt", attempt}}));
+}
+
 
 std::optional<json> json_path_value(const json& value, std::string_view path) {
     if (path.empty()) return value;
@@ -137,6 +147,41 @@ std::optional<json> json_path_value(const json& value, std::string_view path) {
     }
     return current;
 }
+std::optional<ProgramFailure> validate_task_output(
+    const CompiledTaskGraphTask& task, const std::optional<json>& output) {
+    if (!output) {
+        if (task.output_artifacts.empty()) return std::nullopt;
+        return ProgramFailure{"P_TASK_OUTPUT_CONTRACT",
+                              "Completed task did not produce its declared output artifacts",
+                              task.operation_id, "", 0, json::object()};
+    }
+    for (const auto& artifact : task.output_artifacts) {
+        for (const auto& field : artifact.fields) {
+            if (!json_path_value(*output, field)) {
+                return ProgramFailure{
+                    "P_TASK_OUTPUT_CONTRACT",
+                    "Task output is missing a declared artifact field",
+                    task.operation_id,
+                    "",
+                    0,
+                    json{{"artifact", artifact.artifact}, {"field", field}}};
+            }
+        }
+    }
+    if (task.reserved_budget.output_bytes != 0 &&
+        output->dump().size() > task.reserved_budget.output_bytes) {
+        return ProgramFailure{
+            "P_TASK_OUTPUT_BUDGET",
+            "Task output exceeds its reserved output byte budget",
+            task.operation_id,
+            "",
+            0,
+            json{{"output_bytes", output->dump().size()},
+                 {"reserved_output_bytes", task.reserved_budget.output_bytes}}};
+    }
+    return std::nullopt;
+}
+
 
 std::optional<std::vector<std::string>> decode_json_pointer(std::string_view path) {
     if (path.empty()) return std::vector<std::string>{};
@@ -689,10 +734,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         };
 
         struct ExpansionTaskRun {
-            std::string task_id;
-            ProgramTerminalStatus status = ProgramTerminalStatus::Failed;
-            json output = json::object();
-            std::optional<ProgramFailure> failure;
+            std::string                    task_id;
+            std::uint32_t                  attempt = 0;
+            std::string                    attempt_identity;
+            std::optional<std::string>     child_run_id;
+            ProgramTerminalStatus           status = ProgramTerminalStatus::Failed;
+            json                            output = json::object();
+            std::optional<ProgramFailure>   failure;
         };
 
         struct ExpansionBatchState {
@@ -721,14 +769,46 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                        operation.id());
             }
             const auto store = control->task_graph_fragments();
-            const auto policy = control->task_graph_policy(operation.id());
-            if (!store || !policy) {
-                co_return plan_failure(
-                    ProgramTerminalStatus::Failed, "P_EXPAND_UNAVAILABLE",
-                    "expand_task_graph requires a durable fragment store and host policy",
-                    operation.id());
+            std::shared_ptr<ExpansionRecordState> durable;
+            if (store) {
+                try {
+                    const auto recovered = store->find_published_lineage(
+                        control->owner_scope, control->run_id, operation.id());
+                    if (recovered) {
+                        const auto& fragment = recovered->fragment;
+                        if (!recovered->published ||
+                            fragment.owner_scope() != control->owner_scope ||
+                            fragment.parent_run_id() != control->run_id ||
+                            fragment.expansion_operation_id() != operation.id() ||
+                            fragment.parent_program_version_id() !=
+                                control->program_version_id ||
+                            fragment.child_depth() != control->persisted_invocation.child_depth) {
+                            co_return plan_failure(
+                                ProgramTerminalStatus::Failed, "P_EXPAND_RECOVERY",
+                                "Stored task graph fragment does not match the parent operation",
+                                operation.id());
+                        }
+                        durable = std::make_shared<ExpansionRecordState>(fragment);
+                        durable->record = *recovered;
+                        durable->store = store;
+                    }
+                } catch (const std::exception& error) {
+                    co_return plan_failure(
+                        ProgramTerminalStatus::Failed, "P_EXPAND_RECOVERY",
+                        std::string("Stored task graph fragment recovery failed: ") +
+                            error.what(),
+                        operation.id());
+                }
             }
-            json proposal;
+            if (!durable) {
+                const auto policy = control->task_graph_policy(operation.id());
+                if (!store || !policy) {
+                    co_return plan_failure(
+                        ProgramTerminalStatus::Failed, "P_EXPAND_UNAVAILABLE",
+                        "expand_task_graph requires a durable fragment store and host policy",
+                        operation.id());
+                }
+                json proposal;
             const auto& source = spec->proposal_source;
             if (source.contains("inline")) {
                 proposal = source.at("inline");
@@ -741,20 +821,6 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         operation.id());
                 }
                 proposal = *selected;
-            }
-
-            const auto compile_limit =
-                std::min<std::uint64_t>(spec->max_dynamic_compiles,
-                                        control->granted_budget.max_dynamic_compiles);
-            {
-                std::lock_guard lock(plan_mutex);
-                if (dynamic_compile_count >= compile_limit) {
-                    co_return plan_failure(
-                        ProgramTerminalStatus::BudgetExhausted, "P_DYNAMIC_COMPILE_BUDGET",
-                        "expand_task_graph dynamic compilation budget exhausted",
-                        operation.id());
-                }
-                ++dynamic_compile_count;
             }
 
             const auto bounded = [](std::uint64_t requested, std::uint64_t ceiling) {
@@ -780,84 +846,124 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             proposal_options.limits = limits;
             proposal_options.template_allowlist = policy->template_allowlist;
 
-            TaskGraphFragmentCompileOptions compile_options;
-            compile_options.owner_scope = control->owner_scope;
-            compile_options.parent_run_id = control->run_id;
-            compile_options.expansion_operation_id = operation.id();
-            compile_options.parent_program_version_id = control->program_version_id;
-            compile_options.child_depth = control->persisted_invocation.child_depth;
-            compile_options.limits = limits;
-            compile_options.limits.max_tasks =
-                std::min(compile_options.limits.max_tasks, spec->max_tasks);
-            compile_options.limits.max_edges =
-                std::min(compile_options.limits.max_edges, spec->max_edges);
-            compile_options.limits.max_depth =
-                std::min(compile_options.limits.max_depth, spec->max_depth);
-            compile_options.remaining_budget = BudgetLimits{
-                control->granted_budget.wall_time_ms,
-                control->granted_budget.model_tokens,
-                control->granted_budget.monetary_microunits,
-                std::min<std::uint32_t>(control->granted_budget.max_concurrency,
-                                        spec->max_concurrency),
-                control->granted_budget.max_program_operations,
-                control->granted_budget.max_core_steps,
-                static_cast<std::uint32_t>(
-                    std::min<std::uint64_t>(control->granted_budget.max_dynamic_compiles,
-                                            spec->max_dynamic_compiles)),
-                control->granted_budget.max_child_depth,
-                std::min<std::uint64_t>(control->granted_budget.max_total_children,
-                                        spec->max_total_children)};
-            compile_options.template_allowlist = policy->template_allowlist;
-            compile_options.parent_capabilities =
-                control->materialized->bundle.capability_effect_closure().capabilities;
-            compile_options.parent_effects =
-                control->materialized->bundle.capability_effect_closure().effects;
-            compile_options.host_capabilities = policy->host_capabilities;
-            compile_options.host_effects = policy->host_effects;
-
-            std::optional<CompiledTaskGraphFragment> compiled_fragment;
-            try {
-                compiled_fragment.emplace(TaskGraphFragmentCompiler::compile(
-                    proposal, std::move(proposal_options), compile_options));
-            } catch (const std::exception& error) {
-                co_return plan_failure(
-                    ProgramTerminalStatus::Failed, "P_EXPAND_REJECTED",
-                    std::string("expand_task_graph proposal was rejected: ") + error.what(),
-                    operation.id());
-            }
-            const auto& fragment = *compiled_fragment;
-
-            auto durable = std::make_shared<ExpansionRecordState>(fragment);
-            for (const auto& task : fragment.tasks()) {
-                durable->record.tasks.push_back(
-                    TaskGraphTaskRecord{task.task_id, task.operation_id,
-                                        TaskGraphTaskState::Pending, 0, std::nullopt,
-                                        std::nullopt});
-            }
-            try {
-                const auto publication = store->publish(durable->record);
-                if (publication == TaskGraphPublishResult::Conflict ||
-                    publication == TaskGraphPublishResult::Missing) {
+            TaskGraphProposal parsed_proposal = [&]() -> TaskGraphProposal {
+                try {
+                    return TaskGraphProposal::parse(proposal, proposal_options);
+                } catch (const std::exception& error) {
+                    throw_runtime_diagnostic(
+                        "P_EXPAND_REJECTED",
+                        std::string("expand_task_graph proposal was rejected: ") + error.what(),
+                        json{{"operation_id", operation.id()}});
+                }
+            }();
+            const auto recovered = store->find_published(
+                control->owner_scope, control->run_id, operation.id(),
+                parsed_proposal.proposal_hash());
+            if (recovered) {
+                if (!recovered->published) {
                     co_return plan_failure(
-                        ProgramTerminalStatus::Failed, "P_EXPAND_PUBLICATION",
-                        "expand_task_graph fragment publication conflicted",
+                        ProgramTerminalStatus::Failed, "P_EXPAND_RECOVERY",
+                        "Stored task graph fragment is not durably published",
                         operation.id());
                 }
-                const auto loaded = store->load(fragment.fragment_id());
-                if (!loaded || !loaded->published) {
-                    co_return plan_failure(
-                        ProgramTerminalStatus::Failed, "P_EXPAND_PUBLICATION",
-                        "expand_task_graph fragment was not durably published",
-                        operation.id());
-                }
-                durable->record = *loaded;
+                durable = std::make_shared<ExpansionRecordState>(recovered->fragment);
+                durable->record = *recovered;
                 durable->store = store;
-            } catch (const std::exception& error) {
-                co_return plan_failure(
-                    ProgramTerminalStatus::Failed, "P_EXPAND_PUBLICATION",
-                    std::string("expand_task_graph publication failed: ") + error.what(),
-                    operation.id());
+            } else {
+                const auto compile_limit =
+                    std::min<std::uint64_t>(spec->max_dynamic_compiles,
+                                            control->granted_budget.max_dynamic_compiles);
+                {
+                    std::lock_guard lock(plan_mutex);
+                    if (dynamic_compile_count >= compile_limit) {
+                        co_return plan_failure(
+                            ProgramTerminalStatus::BudgetExhausted, "P_DYNAMIC_COMPILE_BUDGET",
+                            "expand_task_graph dynamic compilation budget exhausted",
+                            operation.id());
+                    }
+                    ++dynamic_compile_count;
+                }
+
+                TaskGraphFragmentCompileOptions compile_options;
+                compile_options.owner_scope = control->owner_scope;
+                compile_options.parent_run_id = control->run_id;
+                compile_options.expansion_operation_id = operation.id();
+                compile_options.parent_program_version_id = control->program_version_id;
+                compile_options.child_depth = control->persisted_invocation.child_depth;
+                compile_options.limits = limits;
+                compile_options.limits.max_tasks =
+                    std::min(compile_options.limits.max_tasks, spec->max_tasks);
+                compile_options.limits.max_edges =
+                    std::min(compile_options.limits.max_edges, spec->max_edges);
+                compile_options.limits.max_depth =
+                    std::min(compile_options.limits.max_depth, spec->max_depth);
+                compile_options.remaining_budget = BudgetLimits{
+                    control->granted_budget.wall_time_ms,
+                    control->granted_budget.model_tokens,
+                    control->granted_budget.monetary_microunits,
+                    std::min<std::uint32_t>(control->granted_budget.max_concurrency,
+                                            spec->max_concurrency),
+                    control->granted_budget.max_program_operations,
+                    control->granted_budget.max_core_steps,
+                    static_cast<std::uint32_t>(
+                        std::min<std::uint64_t>(control->granted_budget.max_dynamic_compiles,
+                                                spec->max_dynamic_compiles)),
+                    control->granted_budget.max_child_depth,
+                    std::min<std::uint64_t>(control->granted_budget.max_total_children,
+                                            spec->max_total_children)};
+                compile_options.template_allowlist = policy->template_allowlist;
+                compile_options.parent_capabilities =
+                    control->materialized->bundle.capability_effect_closure().capabilities;
+                compile_options.parent_effects =
+                    control->materialized->bundle.capability_effect_closure().effects;
+                compile_options.host_capabilities = policy->host_capabilities;
+                compile_options.host_effects = policy->host_effects;
+
+                std::optional<CompiledTaskGraphFragment> compiled_fragment;
+                try {
+                    compiled_fragment.emplace(
+                        TaskGraphFragmentCompiler::compile(parsed_proposal, compile_options));
+                } catch (const std::exception& error) {
+                    co_return plan_failure(
+                        ProgramTerminalStatus::Failed, "P_EXPAND_REJECTED",
+                        std::string("expand_task_graph proposal was rejected: ") + error.what(),
+                        operation.id());
+                }
+
+                durable = std::make_shared<ExpansionRecordState>(*compiled_fragment);
+                for (const auto& task : compiled_fragment->tasks()) {
+                    durable->record.tasks.push_back(
+                        TaskGraphTaskRecord{task.task_id, task.operation_id,
+                                            TaskGraphTaskState::Pending, 0, std::nullopt,
+                                            std::nullopt});
+                }
+                try {
+                    const auto publication = store->publish(durable->record);
+                    if (publication == TaskGraphPublishResult::Conflict ||
+                        publication == TaskGraphPublishResult::Missing) {
+                        co_return plan_failure(
+                            ProgramTerminalStatus::Failed, "P_EXPAND_PUBLICATION",
+                            "expand_task_graph fragment publication conflicted",
+                            operation.id());
+                    }
+                    const auto loaded = store->load(compiled_fragment->fragment_id());
+                    if (!loaded || !loaded->published) {
+                        co_return plan_failure(
+                            ProgramTerminalStatus::Failed, "P_EXPAND_PUBLICATION",
+                            "expand_task_graph fragment was not durably published",
+                            operation.id());
+                    }
+                    durable->record = *loaded;
+                    durable->store = store;
+                } catch (const std::exception& error) {
+                    co_return plan_failure(
+                        ProgramTerminalStatus::Failed, "P_EXPAND_PUBLICATION",
+                        std::string("expand_task_graph publication failed: ") + error.what(),
+                        operation.id());
+                }
             }
+            }
+            const auto& fragment = durable->record.fragment;
 
             auto failure_json = [](const std::optional<ProgramFailure>& failure) {
                 if (!failure) return json::object();
@@ -870,8 +976,18 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             };
             auto update_task = [&](std::string_view task_id, TaskGraphTaskState task_state,
                                    std::uint32_t attempt, std::optional<json> output,
-                                   std::optional<json> failure) {
+                                   std::optional<json> failure,
+                                   std::optional<std::string> attempt_identity,
+                                   std::optional<std::string> child_run_id) {
+                if (task_state != TaskGraphTaskState::Cancelled &&
+                    (control->cancellation_cause() != CancellationCause::None ||
+                     control->try_result().has_value()))
+                    return;
                 std::lock_guard lock(durable->mutex);
+                if (task_state != TaskGraphTaskState::Cancelled &&
+                    (control->cancellation_cause() != CancellationCause::None ||
+                     control->try_result().has_value()))
+                    return;
                 auto candidate = durable->record;
                 auto found = std::find_if(
                     candidate.tasks.begin(), candidate.tasks.end(),
@@ -880,29 +996,63 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     throw_runtime_diagnostic(
                         "P_EXPAND_RECORD", "Published fragment task identity is missing",
                         json{{"task_id", std::string(task_id)}});
+                if (attempt < found->attempt)
+                    throw_runtime_diagnostic(
+                        "P_EXPAND_ATTEMPT", "Task attempt identity moved backwards",
+                        json{{"task_id", std::string(task_id)},
+                             {"previous_attempt", found->attempt},
+                             {"requested_attempt", attempt}});
                 found->state = task_state;
                 found->attempt = attempt;
+                if (attempt_identity) found->attempt_identity = std::move(*attempt_identity);
+                if (child_run_id) found->child_run_id = std::move(child_run_id);
                 found->output = std::move(output);
                 found->failure = std::move(failure);
                 candidate.revision = durable->record.revision + 1;
                 candidate.published = true;
                 const auto result = durable->store->compare_update(
                     durable->record.fragment.fragment_id(), durable->record.revision, candidate);
-                if (result != TaskGraphPublishResult::Published)
+                if (result != TaskGraphPublishResult::Published &&
+                    result != TaskGraphPublishResult::AlreadyPresent)
                     throw_runtime_diagnostic(
                         "P_EXPAND_CAS", "Published fragment task update lost its revision race",
                         json{{"task_id", std::string(task_id)},
                              {"expected_revision", durable->record.revision}});
-                durable->record = std::move(candidate);
+                if (result == TaskGraphPublishResult::AlreadyPresent) {
+                    const auto winner =
+                        durable->store->load(durable->record.fragment.fragment_id());
+                    if (!winner)
+                        throw_runtime_diagnostic(
+                            "P_EXPAND_CAS", "Published task update winner disappeared",
+                            json{{"task_id", std::string(task_id)}});
+                    durable->record = *winner;
+                } else {
+                    durable->record = std::move(candidate);
+                }
             };
 
             std::map<std::string, TaskGraphTaskState, std::less<>> states;
             std::map<std::string, std::uint32_t, std::less<>> attempts;
+            std::map<std::string, std::string, std::less<>> attempt_identities;
+            std::map<std::string, std::string, std::less<>> child_run_ids;
             std::map<std::string, json, std::less<>> outputs;
             std::map<std::string, json, std::less<>> failures;
             for (const auto& record : durable->record.tasks) {
                 states[record.task_id] = record.state;
                 attempts[record.task_id] = record.attempt;
+                if (record.attempt != 0) {
+                    const auto expected =
+                        task_attempt_identity(fragment.fragment_id(), record.task_id, record.attempt);
+                    if (!record.attempt_identity.empty() && record.attempt_identity != expected) {
+                        co_return plan_failure(
+                            ProgramTerminalStatus::Failed, "P_EXPAND_RECORD",
+                            "Published task record has an unstable attempt identity",
+                            operation.id());
+                    }
+                    attempt_identities[record.task_id] =
+                        record.attempt_identity.empty() ? expected : record.attempt_identity;
+                }
+                if (record.child_run_id) child_run_ids[record.task_id] = *record.child_run_id;
                 if (record.output) outputs[record.task_id] = *record.output;
                 if (record.failure) failures[record.task_id] = *record.failure;
             }
@@ -914,6 +1064,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     json item{{"task_id", task.task_id},
                               {"operation_id", task.operation_id},
                               {"state", std::string(to_string(states[task.task_id]))}};
+                    if (attempts[task.task_id] != 0)
+                        item["attempt"] = attempts[task.task_id];
+                    if (child_run_ids.contains(task.task_id))
+                        item["child_run_id"] = child_run_ids[task.task_id];
                     if (outputs.contains(task.task_id)) item["output"] = outputs[task.task_id];
                     if (failures.contains(task.task_id)) item["failure"] = failures[task.task_id];
                     result["tasks"].push_back(std::move(item));
@@ -921,11 +1075,34 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 return result;
             };
 
+            if (durable->record.terminal) {
+                PlanExecution replay;
+                replay.output = make_output();
+                for (const auto& task : fragment.tasks()) {
+                    if (states[task.task_id] == TaskGraphTaskState::Failed) {
+                        replay.status = ProgramTerminalStatus::Failed;
+                        replay.failure = ProgramFailure{
+                            "P_TASK_FAILED", "A dynamic task failed", task.operation_id, "", 0,
+                            failures[task.task_id]};
+                        break;
+                    }
+                    if (states[task.task_id] == TaskGraphTaskState::Cancelled) {
+                        replay.status = ProgramTerminalStatus::Cancelled;
+                        replay.failure = ProgramFailure{
+                            "P_TASK_CANCELLED", "Dynamic task graph was cancelled",
+                            operation.id(), "", 0, failures[task.task_id]};
+                    }
+                }
+                co_return replay;
+            }
+
             auto run_task = [&](const CompiledTaskGraphTask& task,
                                 const std::shared_ptr<ExpansionBatchState>& batch_state)
                 -> asio::awaitable<ExpansionTaskRun> {
                 ExpansionTaskRun result;
                 result.task_id = task.task_id;
+                result.attempt = attempts[task.task_id];
+                result.attempt_identity = attempt_identities[task.task_id];
                 json child_input = state;
                 if (!child_input.is_object()) child_input = json::object();
                 for (const auto& binding : task.input_bindings) {
@@ -958,7 +1135,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 try {
                     auto child = control->launch_child(
                         task.child_binding, std::move(child_input), operation.id(),
-                        "task:" + task.operation_id, task.requested_budget);
+                        result.attempt_identity, task.reserved_budget);
+                    result.child_run_id = child->run_id;
                     {
                         std::lock_guard lock(batch_state->mutex);
                         batch_state->children.push_back(child);
@@ -967,6 +1145,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     result.status = child_result.status();
                     result.output = child_result.output();
                     result.failure = child_result.failure();
+                    if (result.status == ProgramTerminalStatus::Completed && !result.failure) {
+                        result.failure = validate_task_output(task, result.output);
+                        if (result.failure) result.status = ProgramTerminalStatus::Failed;
+                    }
                 } catch (const ProgramDiagnosticError& error) {
                     const auto& diagnostic = error.diagnostic();
                     result.failure = ProgramFailure{
@@ -1012,7 +1194,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                                   {"message", "Parent expansion was cancelled"},
                                                   {"operation_id", task.operation_id}};
                         update_task(task.task_id, TaskGraphTaskState::Cancelled,
-                                    attempts[task.task_id], std::nullopt, failure);
+                                    attempts[task.task_id], std::nullopt, failure,
+                                    attempt_identities[task.task_id],
+                                    child_run_ids.contains(task.task_id)
+                                        ? std::optional<std::string>{child_run_ids[task.task_id]}
+                                        : std::nullopt);
                         failures[task.task_id] = failure;
                     }
                     break;
@@ -1042,7 +1228,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             {"message", "Task dependency did not complete successfully"},
                             {"operation_id", task.operation_id}};
                         update_task(task.task_id, TaskGraphTaskState::Failed,
-                                    attempts[task.task_id], std::nullopt, failure);
+                                    attempts[task.task_id], std::nullopt, failure,
+                                    attempt_identities[task.task_id],
+                                    child_run_ids.contains(task.task_id)
+                                        ? std::optional<std::string>{child_run_ids[task.task_id]}
+                                        : std::nullopt);
                         failures[task.task_id] = failure;
                         continue;
                     }
@@ -1080,10 +1270,49 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     batch_state->timer->expires_at((asio::steady_timer::time_point::max)());
                     for (std::size_t index = 0; index < count; ++index) {
                         const auto* task = ready[offset + index];
+                        auto& task_attempt = attempts[task->task_id];
+                        if (task_attempt == std::numeric_limits<std::uint32_t>::max()) {
+                            states[task->task_id] = TaskGraphTaskState::Failed;
+                            const auto failure = ProgramFailure{
+                                "P_TASK_RETRY_EXHAUSTED",
+                                "Task graph retry identity limit was exhausted",
+                                task->operation_id,
+                                "",
+                                0,
+                                json{{"operation_id", task->operation_id}}};
+                            failures[task->task_id] = failure_json(failure);
+                            update_task(task->task_id, TaskGraphTaskState::Failed, task_attempt,
+                                        std::nullopt, failures[task->task_id],
+                                        attempt_identities[task->task_id],
+                                        child_run_ids.contains(task->task_id)
+                                            ? std::optional<std::string>{child_run_ids[task->task_id]}
+                                            : std::nullopt);
+                            ExpansionTaskRun exhausted;
+                            exhausted.task_id = task->task_id;
+                            exhausted.attempt = task_attempt;
+                            exhausted.attempt_identity = attempt_identities[task->task_id];
+                            exhausted.status = ProgramTerminalStatus::Failed;
+                            exhausted.failure = failure;
+                            bool complete = false;
+                            {
+                                std::lock_guard lock(batch_state->mutex);
+                                batch_state->results[index] = std::move(exhausted);
+                                complete = --batch_state->remaining == 0;
+                            }
+                            if (complete) batch_state->timer->cancel();
+                            continue;
+                        }
+                        if (task_attempt == 0) ++task_attempt;
+                        auto& identity = attempt_identities[task->task_id];
+                        if (identity.empty())
+                            identity = task_attempt_identity(fragment.fragment_id(), task->task_id,
+                                                             task_attempt);
                         states[task->task_id] = TaskGraphTaskState::Active;
-                        ++attempts[task->task_id];
-                        update_task(task->task_id, TaskGraphTaskState::Active,
-                                    attempts[task->task_id], std::nullopt, std::nullopt);
+                        update_task(task->task_id, TaskGraphTaskState::Active, task_attempt,
+                                    std::nullopt, std::nullopt, identity,
+                                    child_run_ids.contains(task->task_id)
+                                        ? std::optional<std::string>{child_run_ids[task->task_id]}
+                                        : std::nullopt);
                         asio::co_spawn(
                             executor, run_task(*task, batch_state),
                             asio::bind_executor(
@@ -1124,12 +1353,14 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         const bool completed =
                             task_result.status == ProgramTerminalStatus::Completed &&
                             !task_result.failure;
+                        const auto child_id = task_result.child_run_id;
+                        if (child_id) child_run_ids[task_result.task_id] = *child_id;
                         if (completed) {
                             states[task_result.task_id] = TaskGraphTaskState::Completed;
                             outputs[task_result.task_id] = task_result.output;
                             update_task(task_result.task_id, TaskGraphTaskState::Completed,
-                                        attempts[task_result.task_id], task_result.output,
-                                        std::nullopt);
+                                        task_result.attempt, task_result.output, std::nullopt,
+                                        task_result.attempt_identity, child_id);
                         } else {
                             const auto cancelled =
                                 task_result.status == ProgramTerminalStatus::Cancelled ||
@@ -1140,7 +1371,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             const auto failure = failure_json(task_result.failure);
                             failures[task_result.task_id] = failure;
                             update_task(task_result.task_id, states[task_result.task_id],
-                                        attempts[task_result.task_id], std::nullopt, failure);
+                                        task_result.attempt, std::nullopt, failure,
+                                        task_result.attempt_identity, child_id);
                         }
                     }
                     bool failed = false;
@@ -1159,7 +1391,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                     {"operation_id", task.operation_id}};
                                 failures[task.task_id] = failure;
                                 update_task(task.task_id, TaskGraphTaskState::Cancelled,
-                                            attempts[task.task_id], std::nullopt, failure);
+                                            attempts[task.task_id], std::nullopt, failure,
+                                            attempt_identities[task.task_id],
+                                            child_run_ids.contains(task.task_id)
+                                                ? std::optional<std::string>{child_run_ids[task.task_id]}
+                                                : std::nullopt);
                             }
                         }
                     }
@@ -1191,10 +1427,21 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 candidate.revision = durable->record.revision + 1;
                 const auto result = durable->store->compare_update(
                     durable->record.fragment.fragment_id(), durable->record.revision, candidate);
-                if (result != TaskGraphPublishResult::Published)
-                    throw_runtime_diagnostic("P_EXPAND_CAS",
-                                             "Dynamic fragment terminal update lost its revision race");
-                durable->record = std::move(candidate);
+                if (result != TaskGraphPublishResult::Published &&
+                    result != TaskGraphPublishResult::AlreadyPresent)
+                    throw_runtime_diagnostic(
+                        "P_EXPAND_CAS",
+                        "Dynamic fragment terminal update lost its revision race");
+                if (result == TaskGraphPublishResult::AlreadyPresent) {
+                    const auto winner =
+                        durable->store->load(durable->record.fragment.fragment_id());
+                    if (!winner)
+                        throw_runtime_diagnostic(
+                            "P_EXPAND_CAS", "Published terminal fragment disappeared");
+                    durable->record = *winner;
+                } else {
+                    durable->record = std::move(candidate);
+                }
             }
             PlanExecution result;
             result.output = make_output();

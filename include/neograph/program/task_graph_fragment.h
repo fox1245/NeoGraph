@@ -33,23 +33,27 @@ struct NEOGRAPH_PROGRAM_API TaskGraphTemplateReceipt {
     std::string              kind;
     std::vector<std::string> capabilities;
     std::vector<std::string> effects;
+    std::vector<std::string> input_fields;
+    std::vector<TaskGraphArtifactContract> output_artifacts;
 
     bool operator==(const TaskGraphTemplateReceipt&) const = default;
 };
 
 /** A stable operation identity and all typed edges for one dynamic task. */
 struct NEOGRAPH_PROGRAM_API CompiledTaskGraphTask {
-    std::string                        task_id;
-    std::string                        operation_id;
-    std::string                        template_id;
-    std::string                        template_identity;
-    std::string                        child_binding;
-    std::vector<TaskGraphInputBinding> input_bindings;
-    std::vector<std::string>           depends_on;
-    TaskGraphBudget                    requested_budget;
-    TaskGraphBudget                    reserved_budget;
-    std::vector<std::string>           capabilities;
-    std::vector<std::string>           effects;
+    std::string                           task_id;
+    std::string                           operation_id;
+    std::string                           template_id;
+    std::string                           template_identity;
+    std::string                           child_binding;
+    std::vector<TaskGraphInputBinding>    input_bindings;
+    std::vector<std::string>              depends_on;
+    TaskGraphBudget                       requested_budget;
+    TaskGraphBudget                       reserved_budget;
+    std::vector<std::string>              capabilities;
+    std::vector<std::string>              effects;
+    std::vector<std::string>              input_fields;
+    std::vector<TaskGraphArtifactContract> output_artifacts;
 
     bool operator==(const CompiledTaskGraphTask&) const = default;
 };
@@ -119,6 +123,10 @@ struct NEOGRAPH_PROGRAM_API TaskGraphTaskRecord {
     std::uint32_t       attempt = 0;
     std::optional<json> output;
     std::optional<json> failure;
+    /** Stable identity for this bounded dispatch attempt. */
+    std::string attempt_identity;
+    /** Durable child lineage, populated before the child result is joined. */
+    std::optional<std::string> child_run_id;
 
     bool operator==(const TaskGraphTaskRecord&) const = default;
 };
@@ -157,6 +165,41 @@ public:
     virtual TaskGraphPublishResult publish(const TaskGraphFragmentRecord& record) = 0;
     virtual std::optional<TaskGraphFragmentRecord> load(
         std::string_view fragment_id) const = 0;
+    /**
+     * Locate the published expansion for one immutable parent operation.
+     *
+     * This lookup is used before reading the proposal source during recovery.
+     * A durable fragment is the source of truth after publication; the
+     * proposal is only needed on the first execution or when no fragment has
+     * crossed the publication boundary.
+     */
+    virtual std::optional<TaskGraphFragmentRecord> find_published_lineage(
+        std::string_view owner_scope,
+        std::string_view parent_run_id,
+        std::string_view expansion_operation_id) const {
+        (void)owner_scope;
+        (void)parent_run_id;
+        (void)expansion_operation_id;
+        return std::nullopt;
+    }
+    /**
+     * Locate an already published expansion by immutable parent lineage and
+     * proposal identity.
+     *
+     * The default is deliberately empty for legacy stores; such stores remain
+     * safe but cannot recover an expansion without replanning.
+     */
+    virtual std::optional<TaskGraphFragmentRecord> find_published(
+        std::string_view owner_scope,
+        std::string_view parent_run_id,
+        std::string_view expansion_operation_id,
+        std::string_view proposal_hash) const {
+        (void)owner_scope;
+        (void)parent_run_id;
+        (void)expansion_operation_id;
+        (void)proposal_hash;
+        return std::nullopt;
+    }
     virtual TaskGraphPublishResult compare_update(
         std::string_view fragment_id,
         std::uint64_t expected_revision,
@@ -220,6 +263,15 @@ public:
 
     TaskGraphPublishResult publish(const TaskGraphFragmentRecord& record) override;
     std::optional<TaskGraphFragmentRecord> load(std::string_view fragment_id) const override;
+    std::optional<TaskGraphFragmentRecord> find_published_lineage(
+        std::string_view owner_scope,
+        std::string_view parent_run_id,
+        std::string_view expansion_operation_id) const override;
+    std::optional<TaskGraphFragmentRecord> find_published(
+        std::string_view owner_scope,
+        std::string_view parent_run_id,
+        std::string_view expansion_operation_id,
+        std::string_view proposal_hash) const override;
     TaskGraphPublishResult compare_update(
         std::string_view fragment_id, std::uint64_t expected_revision,
         const TaskGraphFragmentRecord& record) override;

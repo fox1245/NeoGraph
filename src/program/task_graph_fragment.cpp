@@ -67,6 +67,16 @@ json binding_to_json(const TaskGraphInputBinding& binding) {
                 {"to", {{"field", binding.to.field}}}};
 }
 
+json artifact_contract_to_json(const TaskGraphArtifactContract& contract) {
+    return json{{"artifact", contract.artifact}, {"fields", contract.fields}};
+}
+
+json artifact_contracts_to_json(const std::vector<TaskGraphArtifactContract>& contracts) {
+    json encoded = json::array();
+    for (const auto& contract : contracts) encoded.push_back(artifact_contract_to_json(contract));
+    return encoded;
+}
+
 json task_to_json(const CompiledTaskGraphTask& task) {
     json bindings = json::array();
     for (const auto& binding : task.input_bindings) bindings.push_back(binding_to_json(binding));
@@ -80,7 +90,9 @@ json task_to_json(const CompiledTaskGraphTask& task) {
                 {"budget", budget_to_json(task.requested_budget)},
                 {"reserved_budget", budget_to_json(task.reserved_budget)},
                 {"capabilities", task.capabilities},
-                {"effects", task.effects}};
+                {"effects", task.effects},
+                {"input_fields", task.input_fields},
+                {"output_artifacts", artifact_contracts_to_json(task.output_artifacts)}};
 }
 
 json receipt_to_json(const TaskGraphTemplateReceipt& receipt) {
@@ -90,7 +102,9 @@ json receipt_to_json(const TaskGraphTemplateReceipt& receipt) {
                 {"executable_identity", receipt.executable_identity},
                 {"kind", receipt.kind},
                 {"capabilities", receipt.capabilities},
-                {"effects", receipt.effects}};
+                {"effects", receipt.effects},
+                {"input_fields", receipt.input_fields},
+                {"output_artifacts", artifact_contracts_to_json(receipt.output_artifacts)}};
 }
 
 json limits_to_json(const TaskGraphBudget& budget) { return budget_to_json(budget); }
@@ -206,6 +220,7 @@ TaskGraphInputBinding binding_from_json(const json& value) {
     detail::reject_unknown_fields(value, "Task graph fragment input binding", {"from", "to"});
     if (!value.contains("from") || !value.contains("to"))
         throw std::invalid_argument("Task graph fragment input binding requires from and to");
+
     const auto& from = value.at("from");
     const auto& to = value.at("to");
     if (!from.is_object() || !to.is_object())
@@ -220,6 +235,43 @@ TaskGraphInputBinding binding_from_json(const json& value) {
     result.to.field = required_string(to, "field");
     return result;
 }
+void validate_field_list(const std::vector<std::string>& fields, std::string_view label) {
+    std::set<std::string, std::less<>> unique;
+    for (const auto& field : fields) {
+        detail::validate_json_pointer(field);
+        if (field.empty())
+            throw std::invalid_argument(std::string(label) + " must not contain empty fields");
+        if (!unique.insert(field).second)
+            throw std::invalid_argument(std::string(label) + " must contain unique fields");
+    }
+}
+
+TaskGraphArtifactContract artifact_contract_from_json(const json& value) {
+    if (!value.is_object())
+        throw std::invalid_argument("Task graph artifact contract must be an object");
+    detail::reject_unknown_fields(value, "Task graph artifact contract", {"artifact", "fields"});
+    TaskGraphArtifactContract result;
+    result.artifact = required_string(value, "artifact");
+    result.fields = required_strings(value, "fields");
+    require_token(result.artifact, "Task graph artifact");
+    validate_field_list(result.fields, "Task graph artifact fields");
+    return result;
+}
+
+std::vector<TaskGraphArtifactContract> artifact_contracts_from_json(const json& value) {
+    if (!value.is_array())
+        throw std::invalid_argument("Task graph output artifacts must be an array");
+    std::vector<TaskGraphArtifactContract> result;
+    std::set<std::string, std::less<>> artifacts;
+    result.reserve(value.size());
+    for (const auto& item : value) {
+        auto contract = artifact_contract_from_json(item);
+        if (!artifacts.insert(contract.artifact).second)
+            throw std::invalid_argument("Task graph output artifacts must be unique");
+        result.push_back(std::move(contract));
+    }
+    return result;
+}
 
 CompiledTaskGraphTask task_from_json(const json& value) {
     if (!value.is_object())
@@ -227,7 +279,8 @@ CompiledTaskGraphTask task_from_json(const json& value) {
     detail::reject_unknown_fields(
         value, "Task graph compiled task",
         {"id", "operation_id", "template_id", "template_identity", "child_binding",
-         "input_bindings", "depends_on", "budget", "reserved_budget", "capabilities", "effects"});
+         "input_bindings", "depends_on", "budget", "reserved_budget", "capabilities", "effects",
+         "input_fields", "output_artifacts"});
     for (const auto field : {"input_bindings", "depends_on", "capabilities", "effects"}) {
         if (!value.contains(field) || !value.at(field).is_array())
             throw std::invalid_argument("Task graph compiled task field '" + std::string(field) +
@@ -256,6 +309,12 @@ CompiledTaskGraphTask task_from_json(const json& value) {
         budget_from_json(value.at("reserved_budget"), "Task graph task reserved_budget");
     result.capabilities = required_strings(value, "capabilities");
     result.effects = required_strings(value, "effects");
+    if (value.contains("input_fields")) {
+        result.input_fields = required_strings(value, "input_fields");
+        validate_field_list(result.input_fields, "Task graph input_fields");
+    }
+    if (value.contains("output_artifacts"))
+        result.output_artifacts = artifact_contracts_from_json(value.at("output_artifacts"));
     return result;
 }
 
@@ -264,7 +323,8 @@ TaskGraphTemplateReceipt receipt_from_json(const json& value) {
         throw std::invalid_argument("Task graph template receipt must be an object");
     detail::reject_unknown_fields(value, "Task graph template receipt",
                                   {"template_id", "content_identity", "child_binding",
-                                   "executable_identity", "kind", "capabilities", "effects"});
+                                   "executable_identity", "kind", "capabilities", "effects",
+                                   "input_fields", "output_artifacts"});
     TaskGraphTemplateReceipt result;
     result.template_id = required_string(value, "template_id");
     result.content_identity = required_string(value, "content_identity");
@@ -273,6 +333,12 @@ TaskGraphTemplateReceipt receipt_from_json(const json& value) {
     result.kind = required_string(value, "kind");
     result.capabilities = required_strings(value, "capabilities");
     result.effects = required_strings(value, "effects");
+    if (value.contains("input_fields")) {
+        result.input_fields = required_strings(value, "input_fields");
+        validate_field_list(result.input_fields, "Task graph receipt input_fields");
+    }
+    if (value.contains("output_artifacts"))
+        result.output_artifacts = artifact_contracts_from_json(value.at("output_artifacts"));
     require_token(result.template_id, "Task graph receipt template_id");
     require_identity(result.content_identity, "Task graph receipt content_identity");
     require_token(result.child_binding, "Task graph receipt child_binding");
@@ -426,6 +492,31 @@ CompiledTaskGraphFragment CompiledTaskGraphFragment::parse(std::string_view stor
     const auto aggregate =
         budget_from_json(document.at("aggregate_budget"), "Stored task graph aggregate_budget");
     const auto closure = required_strings(document, "capability_effect_closure");
+    std::map<std::string, const TaskGraphTemplateReceipt*, std::less<>> receipt_by_template;
+    for (const auto& receipt : receipts) {
+        if (!receipt_by_template.emplace(receipt.template_id, &receipt).second)
+            throw std::invalid_argument("Stored task graph fragment has duplicate template receipt");
+    }
+    TaskGraphBudget reserved_total;
+    const std::set<std::string, std::less<>> closure_set(closure.begin(), closure.end());
+    for (const auto& task : tasks) {
+        const auto receipt = receipt_by_template.find(task.template_id);
+        if (receipt == receipt_by_template.end())
+            throw std::invalid_argument("Stored task graph task has no template receipt");
+        if (task.template_identity != receipt->second->content_identity ||
+            task.child_binding != receipt->second->child_binding ||
+            task.capabilities != receipt->second->capabilities ||
+            task.effects != receipt->second->effects ||
+            task.input_fields != receipt->second->input_fields ||
+            task.output_artifacts != receipt->second->output_artifacts)
+            throw std::invalid_argument("Stored task graph task does not match its template receipt");
+        if (!is_subset(task.capabilities, closure_set) ||
+            !is_subset(task.effects, closure_set))
+            throw std::invalid_argument("Stored task graph task exceeds capability/effect closure");
+        reserved_total = add_budget(reserved_total, task.reserved_budget);
+    }
+    if (!(reserved_total == aggregate))
+        throw std::invalid_argument("Stored task graph aggregate budget does not match reservations");
 
     std::vector<SourceMapEntry> source_map;
     if (document.contains("source_map")) {
@@ -478,12 +569,31 @@ json task_record_to_json(const TaskGraphTaskRecord& task) {
         throw std::invalid_argument("Task graph task record requires task_id and operation_id");
     require_token(task.task_id, "Task graph task record task_id");
     require_token(task.operation_id, "Task graph task record operation_id");
+    if (task.attempt_identity.empty() != (task.attempt == 0))
+        throw std::invalid_argument(
+            "Task graph task record attempt_identity must be present exactly when attempt is non-zero");
+    if (!task.attempt_identity.empty())
+        require_identity(task.attempt_identity, "Task graph task record attempt_identity");
+    if (task.child_run_id) require_token(*task.child_run_id, "Task graph task record child_run_id");
+    if (task.state == TaskGraphTaskState::Pending && (task.output || task.failure))
+        throw std::invalid_argument(
+            "Pending task graph task record cannot contain a terminal result");
+    if (task.state == TaskGraphTaskState::Active &&
+        (task.attempt == 0 || task.attempt_identity.empty()))
+        throw std::invalid_argument(
+            "Active task graph task record requires a bounded attempt identity");
+    if (task.state == TaskGraphTaskState::Active && task.output)
+        throw std::invalid_argument("Active task graph task record cannot contain output");
+    if (task.output && task.failure)
+        throw std::invalid_argument("Task graph task record cannot have output and failure");
     json result{{"task_id", task.task_id},
                 {"operation_id", task.operation_id},
                 {"state", to_string(task.state)},
                 {"attempt", task.attempt}};
     if (task.output) result["output"] = owned_json_copy(*task.output);
     if (task.failure) result["failure"] = owned_json_copy(*task.failure);
+    if (!task.attempt_identity.empty()) result["attempt_identity"] = task.attempt_identity;
+    if (task.child_run_id) result["child_run_id"] = *task.child_run_id;
     return result;
 }
 
@@ -492,7 +602,7 @@ TaskGraphTaskRecord task_record_from_json(const json& value) {
         throw std::invalid_argument("Stored task graph task record must be an object");
     detail::reject_unknown_fields(value, "Stored task graph task record",
                                   {"task_id", "operation_id", "state", "attempt", "output",
-                                   "failure"});
+                                   "failure", "attempt_identity", "child_run_id"});
     TaskGraphTaskRecord result;
     result.task_id = required_string(value, "task_id");
     result.operation_id = required_string(value, "operation_id");
@@ -500,23 +610,43 @@ TaskGraphTaskRecord task_record_from_json(const json& value) {
     result.attempt = required_uint32(value, "attempt");
     if (value.contains("output")) result.output = owned_json_copy(value.at("output"));
     if (value.contains("failure")) result.failure = owned_json_copy(value.at("failure"));
+    if (value.contains("attempt_identity"))
+        result.attempt_identity = required_string(value, "attempt_identity");
+    if (value.contains("child_run_id"))
+        result.child_run_id = required_string(value, "child_run_id");
     require_token(result.task_id, "Stored task graph task record task_id");
     require_token(result.operation_id, "Stored task graph task record operation_id");
     if (result.output && result.failure)
         throw std::invalid_argument("Stored task graph task record cannot have output and failure");
+    (void)task_record_to_json(result);
     return result;
 }
 
 } // namespace
 
 json TaskGraphFragmentRecord::to_json() const {
+    if (published && revision == 0)
+        throw std::invalid_argument("Published task graph record must have a positive revision");
+    if (terminal && !published)
+        throw std::invalid_argument("Terminal task graph record must be published");
     json encoded_tasks = json::array();
+    std::map<std::string, const CompiledTaskGraphTask*, std::less<>> compiled;
+    for (const auto& compiled_task : fragment.tasks()) {
+        if (!compiled.emplace(compiled_task.task_id, &compiled_task).second)
+            throw std::invalid_argument("Task graph fragment has duplicate compiled task_id");
+    }
     std::set<std::string, std::less<>> ids;
     for (const auto& task : tasks) {
         if (!ids.insert(task.task_id).second)
             throw std::invalid_argument("Task graph fragment record has duplicate task_id");
+        const auto found = compiled.find(task.task_id);
+        if (found == compiled.end() || found->second->operation_id != task.operation_id)
+            throw std::invalid_argument(
+                "Task graph fragment record task identity does not match its fragment");
         encoded_tasks.push_back(task_record_to_json(task));
     }
+    if (tasks.size() != compiled.size())
+        throw std::invalid_argument("Task graph fragment record task set does not match fragment");
     return json{{"storage_schema_version", STORAGE_SCHEMA_VERSION},
                 {"fragment", fragment.to_json()},
                 {"tasks", std::move(encoded_tasks)},
@@ -579,6 +709,7 @@ TaskGraphFragmentRecord TaskGraphFragmentRecord::parse(std::string_view stored_b
     }
     if (result.published && result.revision == 0)
         throw std::invalid_argument("Published task graph record must have a positive revision");
+    (void)result.to_json();
     return result;
 }
 
@@ -650,16 +781,22 @@ CompiledTaskGraphFragment TaskGraphFragmentCompiler::compile(
         compiled.reserved_budget = task.budget;
         compiled.capabilities = sorted_unique(contract.capabilities);
         compiled.effects = sorted_unique(contract.effects);
+        compiled.input_fields = contract.input_fields;
+        compiled.output_artifacts = contract.output_artifacts;
         tasks.push_back(std::move(compiled));
 
         if (seen_templates.insert(contract.template_id).second) {
-            receipts.push_back(TaskGraphTemplateReceipt{contract.template_id,
-                                                        contract.content_identity,
-                                                        contract.child_binding,
-                                                        contract.executable_identity,
-                                                        contract.kind,
-                                                        sorted_unique(contract.capabilities),
-                                                        sorted_unique(contract.effects)});
+            TaskGraphTemplateReceipt receipt;
+            receipt.template_id = contract.template_id;
+            receipt.content_identity = contract.content_identity;
+            receipt.child_binding = contract.child_binding;
+            receipt.executable_identity = contract.executable_identity;
+            receipt.kind = contract.kind;
+            receipt.capabilities = sorted_unique(contract.capabilities);
+            receipt.effects = sorted_unique(contract.effects);
+            receipt.input_fields = contract.input_fields;
+            receipt.output_artifacts = contract.output_artifacts;
+            receipts.push_back(std::move(receipt));
         }
     }
     if (edge_count > options.limits.max_edges)
@@ -789,6 +926,46 @@ std::optional<TaskGraphFragmentRecord> InMemoryTaskGraphFragmentStore::load(
     if (found == impl_->records.end()) return std::nullopt;
     return found->second;
 }
+std::optional<TaskGraphFragmentRecord> InMemoryTaskGraphFragmentStore::find_published_lineage(
+    std::string_view owner_scope,
+    std::string_view parent_run_id,
+    std::string_view expansion_operation_id) const {
+    std::lock_guard lock(impl_->mutex);
+    std::optional<TaskGraphFragmentRecord> result;
+    for (const auto& [fragment_id, record] : impl_->records) {
+        (void)fragment_id;
+        const auto& fragment = record.fragment;
+        if (!record.published || fragment.owner_scope() != owner_scope ||
+            fragment.parent_run_id() != parent_run_id ||
+            fragment.expansion_operation_id() != expansion_operation_id)
+            continue;
+        if (result) {
+            throw std::runtime_error(
+                "Multiple published task graph fragments share one parent operation lineage");
+        }
+        result = record;
+    }
+    return result;
+}
+
+std::optional<TaskGraphFragmentRecord> InMemoryTaskGraphFragmentStore::find_published(
+    std::string_view owner_scope,
+    std::string_view parent_run_id,
+    std::string_view expansion_operation_id,
+    std::string_view proposal_hash) const {
+    std::lock_guard lock(impl_->mutex);
+    for (const auto& [fragment_id, record] : impl_->records) {
+        (void)fragment_id;
+        const auto& fragment = record.fragment;
+        if (!record.published || fragment.owner_scope() != owner_scope ||
+            fragment.parent_run_id() != parent_run_id ||
+            fragment.expansion_operation_id() != expansion_operation_id ||
+            fragment.proposal_hash() != proposal_hash)
+            continue;
+        return record;
+    }
+    return std::nullopt;
+}
 TaskGraphPublishResult InMemoryTaskGraphFragmentStore::compare_update(
     std::string_view fragment_id, std::uint64_t expected_revision,
     const TaskGraphFragmentRecord& record) {
@@ -799,6 +976,8 @@ TaskGraphPublishResult InMemoryTaskGraphFragmentStore::compare_update(
     if (found == impl_->records.end()) return TaskGraphPublishResult::Missing;
     if (!same_record_identity(found->second, copy)) return TaskGraphPublishResult::Conflict;
     if (found->second.revision != expected_revision) return TaskGraphPublishResult::Conflict;
+    if (expected_revision == std::numeric_limits<std::uint64_t>::max())
+        return TaskGraphPublishResult::Conflict;
     copy.revision = expected_revision + 1;
     copy.published = true;
     found->second = std::move(copy);

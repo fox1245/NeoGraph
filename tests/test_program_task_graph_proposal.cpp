@@ -385,6 +385,21 @@ TEST(TaskGraphFragmentTest, PublishesAndUpdatesOnlyThroughDurableCompareAndSwap)
     EXPECT_EQ(updated->tasks[0].state, TaskGraphTaskState::Completed);
     EXPECT_EQ(TaskGraphFragmentRecord::parse(updated->serialize_canonical()), *updated);
 }
+TEST(TaskGraphFragmentTest, RecoversPublishedFragmentByParentLineage) {
+    const auto fragment = compiled_fragment();
+    InMemoryTaskGraphFragmentStore store;
+    ASSERT_EQ(store.publish(fragment_record(fragment)), TaskGraphPublishResult::Published);
+
+    const auto recovered = store.find_published(
+        fragment.owner_scope(), fragment.parent_run_id(), fragment.expansion_operation_id(),
+        fragment.proposal_hash());
+    ASSERT_TRUE(recovered.has_value());
+    EXPECT_TRUE(recovered->published);
+    EXPECT_EQ(recovered->fragment, fragment);
+
+    EXPECT_FALSE(store.find_published(
+        fragment.owner_scope(), fragment.parent_run_id(), "op-other", fragment.proposal_hash()));
+}
 
 TEST(TaskGraphFragmentTest, RejectsRecordTaskSetOrOperationMismatches) {
     auto record = fragment_record(compiled_fragment());
