@@ -1,13 +1,13 @@
-# Executable migration contract for docs/V1_ARCHITECTURE.md.
-# The architecture document owns the target model; this file owns sequence,
-# blocking invariants, evidence, and completion gates.
+# Executable Core migration baseline for docs/V1_ARCHITECTURE.md.
+# Program-language and embedded-runtime work moved to
+# spec/quickjs-control-runtime.sdd.yaml on 2026-08-08.
 
 spec:
   id: v1-core-program-redesign
   revision: 1
   created: "2026-07-31"
   owner: fox1245
-  status: accepted
+  status: accepted_core_baseline_program_direction_superseded
   priority: P0
   kind: architecture-migration
   visibility: local-private
@@ -15,10 +15,17 @@ spec:
   source_baseline: d80c316de1f3a10f0948477c3689a0b1b80d771b
   canonical_design: docs/V1_ARCHITECTURE.md
   migration_plan: docs/V1_MIGRATION_PLAN.md
+  program_language_replacement:
+    design: docs/QUICKJS_CONTROL_ARCHITECTURE.md
+    migration: docs/QUICKJS_CONTROL_MIGRATION.md
+    executable_spec: spec/quickjs-control-runtime.sdd.yaml
   supersedes_direction:
     - sole Control VM execution cutover
     - separate Durable Kernel ownership
     - Harness-only ownership of Program compilation and lifecycle
+  superseded_by_quickjs_direction:
+    - bounded Program JSON operation trees as the permanent general authoring language
+    - VM-free direct typed-plan dispatch as the permanent general Program runtime
 
 completion_state:
   architecture_decision: accepted

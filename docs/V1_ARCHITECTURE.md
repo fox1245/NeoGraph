@@ -1,11 +1,14 @@
 # NeoGraph v1 Core + Program Architecture
 
-Status: Accepted architecture decision
+Status: Accepted Core architecture; Program-language direction amended 2026-08-08
 Date: 2026-07-31
 Source baseline: `d80c316de1f3a10f0948477c3689a0b1b80d771b`
-Revisit trigger: a measured workload requires a second execution engine, or the
-Core execution path cannot satisfy the Program contract without per-step
-interpretation overhead.
+Program-language amendment:
+[`QUICKJS_CONTROL_ARCHITECTURE.md`](QUICKJS_CONTROL_ARCHITECTURE.md) supersedes
+this document wherever it requires a bounded NeoGraph Program operation DSL or
+rejects an embedded general control interpreter. The Core, GraphEngine,
+catalog, activation, authority, durability, and tenant boundaries below remain
+in force.
 
 ## Decision
 
@@ -14,21 +17,21 @@ NeoGraph v1 has two public layers and one execution engine:
 1. **Core** is the embeddable graph engine. The installed target remains
    `neograph::core`; the C++ graph types remain in `neograph::graph` so existing
    code is not renamed merely for branding.
-2. **Program** is the optional agent-program layer. It compiles declarative
-   orchestration into immutable, versioned plans that invoke pinned Core graph
-   generations.
-3. **GraphEngine remains the only node-execution engine.** Program does not add
-   a bytecode VM or a second executor for Core/application nodes. Durable child
-   orchestration, when enabled, remains Program-owned and must not become a
-   second node engine or a public `ControlVm`/`DurableKernel` API.
+2. **Program** is the optional agent-program layer. General Program source is
+   standard JavaScript executed by embedded QuickJS; Program admission binds it
+   to immutable versions, sealed native/Core imports, and nonrenewable budgets.
+3. **GraphEngine remains the only node-execution engine.** QuickJS interprets
+   Program control code and yields typed commands to `ProgramRuntime`; it does
+   not execute Core/application nodes or own Core scheduling, persistence, or
+   effect commit.
 
 The architectural boundary is therefore:
 
 ```text
-C++ builder / JSON / model-authored source
+JavaScript source + sealed modules
                   |
                   v
-        ProgramCompiler (structural compile)
+  QuickJS compile + Program admission
                   |
                   v
              ProgramBundle
@@ -37,13 +40,16 @@ C++ builder / JSON / model-authored source
  ProgramCatalog (publish/admit/activate/materialize)
                   |
                   v
- ProgramVersion + sealed Core generations
+ ProgramVersion + sealed Core/native bindings
                   |
                   v
-       ProgramRuntime (orchestration)
+ QuickJS generator -> typed yielded command
                   |
                   v
-      GraphEngine (node execution)
+       ProgramRuntime (durability/replay)
+                  |
+                  v
+      GraphEngine / admitted host binding
                   |
                   v
  checkpoint / store / provider / tool / events
@@ -228,34 +234,30 @@ changing a label alone cannot make a consumer current. Run the focused check
 with `python3 scripts/check_cross_repository_compatibility.py` (also wired as
 `CrossRepositoryCompatibility.Metadata` when tests are enabled).
 
-### Execution strategy: VM semantics without a general-purpose VM
+### Execution strategy: embedded JavaScript with a sealed command boundary
 
-Program retains the control semantics normally associated with a Control VM,
-but the default implementation does not encode/decode a bytecode program or
-cross a second generic VM/Core boundary.
+The bounded typed-plan dispatcher remains the current legacy implementation,
+but it is no longer the target general authoring model. Standard JavaScript on
+embedded QuickJS owns expressions, functions, closures, branches, loops, and
+ordinary local computation.
 
-- Admission lowers source into a typed immutable plan with stable operation
-  identifiers, typed references, and statically known continuation edges.
-- `ProgramRuntime` directly dispatches those plan operations through its
-  scheduler/coroutine machinery. This is VM-like execution semantics without
-  a separate bytecode interpreter, stack machine, or JIT.
-- Inline sequence/branch/loop work stays on the fast in-memory path and does
-  not perform a durable commit for every operation.
-- Durable child `spawn`, `await`/join, checkpoint, and external-effect
-  publication persist only at their semantic durability boundaries. The
-  persistence and recovery cost of those boundaries is mandatory and must
-  not be hidden in a performance claim.
-- A future workload that requires arbitrary dynamic code, unbounded topology
-  mutation, or a generic sandboxed interpreter reopens this decision only with
-  a measured correctness and performance gate. It does not silently create a
-  second adapter-specific runtime.
+- Admission compiles pinned JavaScript source and sealed modules with an exact
+  QuickJS build and binds every Core/native import to an immutable slot.
+- A generator yields typed commands; `ProgramRuntime` validates, budgets,
+  journals, dispatches, and resumes those commands.
+- QuickJS never reaches into `GraphEngine` readiness or checkpoint state and
+  never commits an external effect directly.
+- Recovery replays pinned source against exact recorded command outcomes.
+  Completed effects are not redispatched; any command mismatch fails closed.
+- Memory limits, execution interruption, cancellation, and nonrenewable budgets
+  bound every admitted production run even though the language is general.
+- QuickJS and the native binding layer remain optional Program dependencies.
+  Core-only users pay no dependency, allocation, symbol, branch, or binary-size
+  cost.
 
-The specialized direct-dispatch implementation is complete for the admitted
-bounded operation set: runtime dispatch selects the sealed
-`ProgramOperationKind` and typed descriptor rather than reparsing operation
-tags from JSON. Future operation kinds must preserve diagnostics, source
-coordinates, cancellation, budgets, and replay identity before joining this
-path.
+The authoritative language, sandbox, ABI, replay, and cutover contracts are in
+[`QUICKJS_CONTROL_ARCHITECTURE.md`](QUICKJS_CONTROL_ARCHITECTURE.md) and
+[`QUICKJS_CONTROL_MIGRATION.md`](QUICKJS_CONTROL_MIGRATION.md).
 
 Program is optional. A user who only needs a static graph links
 `neograph::core`, builds a `GraphEngine`, and pays no Program dependency,
@@ -427,24 +429,18 @@ The Program compiler lowers authoring sugar to a small orchestration plan:
 compiler expansions or bounded compatibility sugar over this vocabulary. They
 do not add feature-specific branches to Core or GraphEngine.
 
-This plan is not bytecode. It is a typed, immutable orchestration graph whose
-nodes retain source coordinates and directly reference compiled Core generations
-or other Program nodes. ProgramRuntime schedules that graph; GraphEngine remains
-the only executor of application nodes.
+The current implementation uses a typed immutable operation graph whose nodes
+retain source coordinates and directly reference compiled Core generations or
+other Program nodes. It directly schedules `sequence`, `branch`, `return`,
+bounded `loop`/`retry`, `parallel`, `race`, `cancel`, `await`, `emit`,
+`checkpoint`, `map`, `quorum`, and bounded child operations.
 
-The current runtime directly schedules `sequence`, `branch`, `return`, bounded
-`loop`/`retry`, `parallel`, `race`, `cancel`, `await`, `emit`, `checkpoint`,
-`map`, and `quorum`. `spawn` resolves a separately admitted child binding and,
-only as the direct body of an `await`, starts the durable child lifecycle. It
-deliberately has no inline body; that `await` consumes its transient child handle.
-`await` can also wrap an inline body. No new plan operation is silently treated
-as a no-op; malformed operations fail admission with a typed-plan diagnostic.
-
-This is a compiler/runtime capability. The published
-`program-document-v1.schema.json` still describes a `call_core`-only source
-document, so operation trees beyond that shape are not yet a schema-supported
-external authoring contract. The tracked current boundary is in
-[Current DSL and Program composition limits](DSL_COMPOSITION_LIMITS.md).
+That vocabulary is now a frozen legacy implementation and migration input. New
+general computation constructs do not extend `ProgramOperationKind` or the
+Program-v2/v3/v4 JSON schemas. JavaScript expresses ordinary control flow and
+yields only NeoGraph domain commands. Legacy operations remain available only
+for correctness fixes, stored-version drain, and equivalence/migration
+evidence until the announced cutover removes them.
 
 ProgramRuntime is therefore an intentional second **scheduling domain**, but not
 a second node executor. It owns readiness and joins for Program operations,
@@ -456,10 +452,10 @@ directions, destruction with losing race children, checkpoint ordering, budget
 debits, and equivalence with direct Core execution. ProgramRuntime may not reach
 inside GraphEngine's ready queue or checkpoint state.
 
-The current source-level boundary and the remaining composition limits are
-recorded in [Current DSL and Program composition limits](DSL_COMPOSITION_LIMITS.md).
-That inventory is intentionally separate from this target architecture so this
-document does not promise authoring paths that have not landed.
+The current source-level compatibility boundary is code, schemas, and tests.
+The replacement authoring and removal sequence is defined only by
+[`QUICKJS_CONTROL_MIGRATION.md`](QUICKJS_CONTROL_MIGRATION.md); the retired DSL
+roadmaps are not future implementation authority.
 
 ### Boundedness
 
@@ -1000,25 +996,22 @@ than inferred from wall time.
 
 ## Compatibility and cutover
 
-The current Harness DSL, strict Core documents, retained artifacts, and MCP
-methods are migration inputs, not parallel permanent architectures.
+The current Harness DSL, Program JSON operation trees, strict Core documents,
+retained artifacts, and MCP methods are migration inputs, not parallel
+permanent architectures.
 
 - Existing strict Core JSON remains a supported Core input.
-- Existing bounded Harness DSL is translated to `ProgramSource` and compiled by
-  `ProgramCompiler`.
-- Existing retained Harness artifacts are imported into `ProgramBundle` only
-  when their hashes, registry/admission profile, and executable semantics can be
-  preserved exactly. Otherwise they drain on the pinned legacy path or fail with
-  an explicit compatibility classification.
-- Existing MCP method names may remain as transport compatibility during the
-  pre-v1 window, but their implementation delegates to Program. No second
-  Harness-only compiler/runtime remains after cutover.
-- The historical `ControlVm` and VM integration schemas are now retained only
-  as explicitly superseded records (`docs/PROGRAMMABLE_HARNESS_DSL_DESIGN.md`,
-  `spec/programmable-harness-vm-integration.sdd.yaml`, and
-  `spec/programmable-harness-graph-engine-inventory-v1.json`). They are not
-  public APIs or current execution claims; live compatibility APIs remain
-  available until their separately announced rebuild boundary.
+- Bounded Core topology elaboration remains compatibility sugar for strict Core;
+  it is not the general Program language.
+- Program-v2/v3/v4 operation-tree authoring and Harness `mode: "program"` are
+  frozen. Existing versions are classified as translated, drain-only, or
+  rejected before the JavaScript authoring cutover.
+- New general Programs use JavaScript and the same Program admission,
+  activation, durability, effect, and GraphEngine boundaries.
+- Existing MCP method names may remain as transport compatibility, but adapters
+  do not own another compiler or runtime.
+- Superseded DSL and Control-VM studies are removed from the live documentation;
+  repository history remains the historical record.
 
 ## Acceptance gates
 
@@ -1026,9 +1019,9 @@ The architecture is implemented only when all are true:
 
 1. A Core-only installed consumer builds and runs without Program enabled.
 2. A developer can build and run the same static graph through Core directly.
-3. A developer can compile a Program containing branch, bounded loop, parallel,
-   race, retry sugar, checkpoint, and child Program, then execute it through
-   pinned Core generations.
+3. A developer can compile and run a JavaScript generator containing functions,
+   closures, branches, loops, checkpoints, and child commands through pinned
+   native and Core bindings.
 4. Invalid types, unknown imports, excess budgets, capability expansion, and
    unsupported runtime constructs fail before any worker/provider/tool dispatch.
 5. New-run activation is atomic and generation-checked; in-flight runs remain
@@ -1053,8 +1046,8 @@ The architecture is implemented only when all are true:
     conformance suite plus protocol-specific wire tests.
 12. SQLite and opt-in PostgreSQL Program stores pass one backend-neutral
     restart, atomicity, owner-isolation, tamper, retention, and GC suite.
-13. The dependency baseline is unchanged, or each approved substitution has the
-    separate decision and evidence required by the package-boundary policy.
+13. QuickJS and every other dependency change has the separate decision and
+    evidence required by the package-boundary policy.
 14. Two independently owned Program runtimes can collaborate through the A2A
    adapter with explicit consent, owner isolation, task/artifact correlation,
    cancellation semantics, restart-safe duplicate handling, and no capability
@@ -1065,14 +1058,13 @@ The architecture is implemented only when all are true:
 
 ## Rejected alternatives
 
-### Sole Control VM + Durable Kernel
+### VM-owned node execution or durability
 
-Rejected as the default architecture. The measured reference path added about
-`58.7 us` around a `4.3 us` VM operation and was roughly `13x` slower than the
-current integrated Core path in the recorded strict-linear experiment. More
-importantly, it duplicated scheduling, checkpoint, and execution ownership.
-A future VM requires a concrete workload that Core + Program cannot express and
-must beat explicit performance and correctness gates.
+Rejected. QuickJS is accepted only as a Program control interpreter behind a
+sealed yielded-command boundary. It does not replace `GraphEngine`, schedule
+Core nodes, own journals/checkpoint stores, or commit effects. The earlier sole
+Control VM plus separate Durable Kernel design duplicated scheduling,
+checkpoint, and execution ownership; that design remains rejected.
 
 ### One enlarged GraphEngine API
 

@@ -1,10 +1,15 @@
 # NeoGraph v1 Redesign and Migration Plan
 
-Status: Accepted execution plan
+Status: Accepted Core migration baseline; Program-language sequence superseded 2026-08-08
 Date: 2026-07-31
 Architecture: `V1_ARCHITECTURE.md`
+Program-language replacement: `QUICKJS_CONTROL_MIGRATION.md`
 Implementation gates: maintained as private project controls
 Audited source: `6b5a36fbcdafffb5da766922321157140ab906ce`
+
+The Core, storage, catalog, activation, authority, and GraphEngine work below
+remains useful. Any phase that grows or permanently publishes the NeoGraph
+Program JSON operation DSL is superseded by the QuickJS migration plan.
 
 ## 1. Starting point
 

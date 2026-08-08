@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=382e859c1b79dac9eb6c7ac0e655c92a0b470d641c2721e3b1eb181183dea23e -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=c9cfe5b49187064fd55d7ed31b96565dfe522bee91f6206498315ae79b4138dd -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -24,7 +24,9 @@ NeoGraph Harness 会在运行前编译一个有界的多工作器工作流。稳
 
 C++ 嵌入方在构造时通过 `HarnessServiceResources` 传入非默认配置文件。这个附加资源边界会保留现有的 `HarnessServiceConfig` 布局。配置文件指纹涵盖清单以及作用域注册表导出的语义投影。每个 `implementation_identity` 都是受信任的声明；对应的可调用行为发生变化时，必须同步更新它。
 
-这是当前由 Program 支持的 Harness 适配器，而不是 Control VM 切换。获准的 Harness 请求会转换为 `ProgramSource`，通过 `ProgramCompiler` 编译，经 `ProgramCatalog` 接纳，并由 `ProgramRuntime` 执行；`GraphEngine` 仍是唯一的节点执行器。历史性的 `precutover-graph-engine-v1` 配置文件及其 VM/字节码/Durable Kernel 说法只保留在明确标记为 superseded 的设计记录中。兼容性 API 不代表公开的 `ControlVm`、字节码解释器或第二个执行器。
+这是当前由 Program 支持的 Harness 兼容性适配器。获准的 Harness 请求仍会转换为旧版 `ProgramSource`，通过 `ProgramCompiler` 编译，经 `ProgramCatalog` 接纳，并由 `ProgramRuntime` 执行；`GraphEngine` 仍是唯一的节点执行器。
+
+一般 Program 创作所采用的替代方案是在嵌入式 QuickJS 上运行的标准 JavaScript。当前的 `dsl` 和 `program` 模式是迁移输入，而不是永久并存的语言。请参阅 [`QUICKJS_CONTROL_ARCHITECTURE.md`](QUICKJS_CONTROL_ARCHITECTURE.md) 和 [`QUICKJS_CONTROL_MIGRATION.md`](QUICKJS_CONTROL_MIGRATION.md)。本文档在该切换落地前描述已发布的兼容行为，并不授权新增旧版 DSL 语义。
 
 ## 构建并运行
 

@@ -40,15 +40,18 @@ the scoped registry's exported semantic projection. Each
 `implementation_identity` is a trusted declaration and must change whenever
 the corresponding callable behavior changes.
 
-This is the current Program-backed Harness adapter, not a Control VM cutover.
-Accepted Harness requests translate to `ProgramSource`, compile through
-`ProgramCompiler`, admit through `ProgramCatalog`, and execute through
-`ProgramRuntime`; `GraphEngine` remains the only node executor. The historical
-`precutover-graph-engine-v1` profile and its VM/bytecode/Durable Kernel claims
-are retained only in the explicitly superseded design records
-`docs/PROGRAMMABLE_HARNESS_DSL_DESIGN.md` and
-`spec/programmable-harness-vm-integration.sdd.yaml`. No public `ControlVm`,
-bytecode interpreter, or second executor is implied by the compatibility API.
+This is the current Program-backed Harness compatibility adapter.
+Accepted Harness requests still translate to the legacy `ProgramSource`,
+compile through `ProgramCompiler`, admit through `ProgramCatalog`, and execute
+through `ProgramRuntime`; `GraphEngine` remains the only node executor.
+
+The accepted replacement for general Program authoring is standard JavaScript
+on embedded QuickJS. The current `dsl` and `program` modes are migration inputs,
+not permanent parallel languages. See
+[`QUICKJS_CONTROL_ARCHITECTURE.md`](QUICKJS_CONTROL_ARCHITECTURE.md) and
+[`QUICKJS_CONTROL_MIGRATION.md`](QUICKJS_CONTROL_MIGRATION.md). This document
+describes shipped compatibility behavior until that cutover lands; it does not
+authorize new legacy DSL semantics.
 
 ## Build And Run
 
