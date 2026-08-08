@@ -46,3 +46,7 @@ wasm/*.js
 wasm/*.html
 wasm/*.data
 .omc/
+
+
+# Local UI automation/MCP execution logs; generated data can contain host paths.
+/results/

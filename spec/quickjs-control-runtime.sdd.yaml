@@ -2,7 +2,7 @@
 
 spec:
   id: quickjs-control-runtime
-  revision: 1
+  revision: 2
   created: "2026-08-08"
   owner: fox1245
   status: accepted
@@ -40,8 +40,8 @@ spec:
 
 completion_state:
   architecture_decision: accepted
-  legacy_document_retirement: in_progress
-  issue_cutover: in_progress
+  legacy_document_retirement: complete
+  issue_cutover: complete
   quickjs_dependency_qualification: not_started
   javascript_graph_definition: not_started
   javascript_source_and_admission: not_started
@@ -131,11 +131,11 @@ blocking_invariants:
       - C++ wrapper lowers to the same C registration contract
       - semantic version and implementation digest bind every callback
   clean_cutover:
-    statement: Compatibility is temporary and no second permanent Program runtime remains.
+    statement: Compatibility is temporary and no second source compiler or Program runtime remains.
     proof:
-      - every stored legacy version is translated, drain_only, or rejected
-      - no new legacy publication after the announced boundary
-      - legacy parser and dispatcher deleted after the final drain gate
+      - every stored legacy Core definition and Program version is translated, drain_only, or rejected
+      - no new legacy Core or Program publication after the announced boundary
+      - Core DSL elaborator and Program parser/dispatcher deleted after the final drain gate
 
 selected_upstream_contract:
   canonical_docs: https://bellard.org/quickjs/quickjs.html
@@ -167,6 +167,29 @@ javascript_profile:
       kind: generator_function
       input: canonical_json_compatible_value
       output: canonical_json_compatible_value
+  contexts:
+    definition:
+      permits:
+        - deterministic_computation
+        - sealed_pure_modules
+        - sealed_graph_builder
+      denies:
+        - command_yield
+        - program_import_slot_invocation
+        - native_host_binding_invocation
+        - external_effect
+      completion: return_exactly_one_builder_owned_by_the_same_context
+    program:
+      permits:
+        - deterministic_computation
+        - sealed_pure_modules
+        - ng_command_construction
+        - admitted_pure_native_intrinsics
+      denies:
+        - direct_GraphEngine_execution
+        - direct_effect_commit
+        - ambient_host_access
+      completion: generator_return_or_typed_terminal_failure
   allowed:
     - standard deterministic JavaScript computation
     - closures and generators
@@ -200,6 +223,71 @@ javascript_profile:
     - raw_pointers
     - values_without_canonical_encoding
 
+graph_definition_protocol:
+  source_profile: javascript_profile.entry_contracts.core_definition
+  builder:
+    representation: opaque_context_owned_host_value
+    copyable: false
+    serializable_before_seal: false
+    usable_after_context_teardown: false
+  required_representational_surface:
+    - graph_identity_and_entrypoints
+    - static_channels_and_reducers
+    - registered_nodes_and_configuration
+    - edges_and_conditional_edges
+    - barriers
+    - static_interrupts
+    - retry_policy
+  mutation_rules:
+    - only the owning definition context may mutate an open builder
+    - handles from another context, graph, or generation are rejected
+    - the first successful return seals the builder permanently
+    - exceptions, interruption, limit exhaustion, or validation failure discard the builder
+    - definition evaluation cannot dispatch nodes, commands, host bindings, or effects
+  preseal_checks:
+    - exactly_one_builder_result
+    - value_and_handle_ownership
+    - registered_node_identity_and_schema
+    - channel_port_and_edge_compatibility
+    - condition_reducer_barrier_interrupt_and_retry_validity
+    - source_coordinate_coverage
+    - canonical_size_and_depth_limits
+  resource_limits:
+    source: admitted_compile_budget_with_nonzero_platform_ceiling
+    dimensions:
+      - instruction_fuel
+      - wall_time
+      - runtime_heap_bytes
+      - native_builder_bytes
+      - stack_depth
+      - module_count_and_source_bytes
+      - graph_nodes_edges_and_canonical_output_bytes
+    exhaustion: stable_compile_limit_failure_with_zero_dispatch
+  lowering:
+    target: existing_typed_strict_Core_definition
+    canonicalization: existing_canonical_Core_rules
+    identity_inputs:
+      - JavaScript_source_and_module_Merkle_root
+      - QuickJS_runtime_compiler_and_profile_identity
+      - ng_graph_API_version
+      - registry_snapshot_and_executable_receipts
+      - canonical_strict_Core_bytes
+    output_before_admission:
+      - immutable_Core_definition
+      - source_map
+      - diagnostics
+      - capability_and_effect_inputs
+  equivalence_gate:
+    compare:
+      - direct_Cpp_Core_builder
+      - legacy_Core_DSL_when_translation_is_claimed
+      - JavaScript_define
+    require:
+      - canonical_Core_equivalence_or_documented_identity_migration
+      - observable_GraphEngine_behavior_equivalence
+      - stable_diagnostic_and_source_map_expectations
+      - zero_dispatch_during_all_definition_evaluation
+
 command_protocol:
   required_fields:
     - protocol_version
@@ -228,6 +316,52 @@ command_protocol:
     success: canonical_value
     failure: stable_typed_failure
     pending: durable_journal_head
+
+performance_contract:
+  status: blocking_preregistration_before_default_enablement
+  owner_issue: 25
+  baseline_artifact:
+    location: version_controlled_machine_readable_result
+    required_metadata:
+      - source_commit_and_dirty_state
+      - QuickJS_release_digest_and_build_options
+      - compiler_build_type_and_link_mode
+      - operating_system_architecture_and_hardware
+      - workload_profile_and_input_digest
+      - repetition_warmup_and_process_isolation
+  measurements:
+    - runtime_creation_cold
+    - source_and_module_compilation_cold
+    - define_evaluation_validation_and_Core_lowering
+    - first_generator_command
+    - warm_generator_command
+    - typed_hostcall_bridge_round_trip
+    - replay_cost_by_recorded_command_count
+    - runtime_and_builder_peak_memory
+    - concurrent_invocation_throughput_and_tail_latency
+    - JavaScript_wrapped_Core_overhead_against_direct_Core
+    - Program_enabled_but_unused_against_disabled_Core
+  method:
+    cold_case: fresh_process_and_empty_QuickJS_cache
+    warm_case: fixed_documented_preparation_without_measured_warmup_samples
+    minimum_valid_samples_per_case: 30
+    report:
+      - median
+      - p95
+      - median_absolute_deviation
+      - peak_allocated_bytes
+    isolate:
+      - JavaScript_and_bridge
+      - Program_scheduling
+      - GraphEngine
+      - provider_and_tool
+      - journal_and_persistence
+  gate:
+    threshold_source: accepted_version_controlled_preregistration
+    missing_threshold: fail
+    one_off_result: never_sufficient
+    noisy_or_inconclusive_result: rerun_and_record_without_relaxing_threshold_silently
+    required_outcome: every_blocking_cold_warm_memory_and_overhead_threshold_passes
 
 native_control_abi:
   base: C_v1
@@ -260,6 +394,39 @@ native_control_abi:
     - CatalogCapabilityBinder
     - CapabilityBindingReceipt
 
+authoring_cutover_contract:
+  retained:
+    strict_Core_JSON:
+      role: canonical_serialization_and_low_level_interchange
+      programming_language: false
+    direct_Core_Cpp:
+      role: embeddable_host_API
+      requires_QuickJS: false
+  frozen:
+    - bounded_Core_DSL
+    - graph_Elaborator_authoring
+    - Harness_mode_dsl
+    - Program_v2_v3_v4_operation_tree_authoring
+    - Harness_mode_program
+  stored_source_classification:
+    translated:
+      rule: deterministic_translation_and_equivalence_evidence_accepted
+      new_runs: JavaScript_only
+    drain_only:
+      rule: exact_legacy_runtime_remains_available_for_already_pinned_runs
+      new_publication: false
+      new_runs: false
+    rejected:
+      rule: exact_semantics_identity_authority_or_state_cannot_be_preserved
+      behavior: explicit_terminal_migration_diagnostic
+  removal_targets:
+    - Core_DSL_parser_and_elaborator
+    - Harness_Core_DSL_translation
+    - Program_source_schemas_and_operation_tree_parser
+    - Program_operation_specific_lowering_and_dispatch
+    - Harness_Program_JSON_translation
+    - legacy_syntax_only_docs_examples_and_tests
+  rollback_rule: never_reopen_legacy_authoring_or_create_a_permanent_dual_stack
 phases:
   Q0_dependency_qualification:
     deliver:
