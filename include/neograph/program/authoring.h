@@ -21,16 +21,13 @@
 
 namespace neograph::program {
 
-/** Public source frontends understood by an embedding or transport. */
+/** The only source frontends admitted for new publication. */
 enum class AuthoringFrontend : std::uint8_t {
     JavaScript,
     TrustedCpp,
-    StrictCoreJson,
-    CoreDsl,
-    ProgramJson,
 };
 
-NEOGRAPH_PROGRAM_API std::string_view to_string(AuthoringFrontend frontend) noexcept;
+NEOGRAPH_PROGRAM_API std::string_view  to_string(AuthoringFrontend frontend) noexcept;
 NEOGRAPH_PROGRAM_API AuthoringFrontend authoring_frontend_from_string(std::string_view value);
 
 /**
@@ -45,20 +42,17 @@ struct JavaScriptPublicationRequest {
     std::vector<SourceMapEntry> source_map;
 };
 
-NEOGRAPH_PROGRAM_API ProgramSource make_javascript_source(
-    JavaScriptPublicationRequest request);
+NEOGRAPH_PROGRAM_API ProgramSource make_javascript_source(JavaScriptPublicationRequest request);
 
 /** Compile a JavaScript define()/main() module through the direct API. */
-NEOGRAPH_PROGRAM_API ProgramBundle compile_javascript(
-    const ProgramCompiler& compiler,
-    JavaScriptPublicationRequest request);
+NEOGRAPH_PROGRAM_API ProgramBundle compile_javascript(const ProgramCompiler&       compiler,
+                                                      JavaScriptPublicationRequest request);
 
 /** Compile and admit one JavaScript define()/main() module through the direct API. */
-NEOGRAPH_PROGRAM_API ProgramVersion publish_javascript(
-    const ProgramCompiler& compiler,
-    ProgramCatalog&       catalog,
-    JavaScriptPublicationRequest request,
-    ProgramAdmission      admission);
+NEOGRAPH_PROGRAM_API ProgramVersion publish_javascript(const ProgramCompiler&       compiler,
+                                                       ProgramCatalog&              catalog,
+                                                       JavaScriptPublicationRequest request,
+                                                       ProgramAdmission             admission);
 
 /**
  * Build the explicit cutover rule for a retained legacy artifact.
@@ -69,13 +63,6 @@ NEOGRAPH_PROGRAM_API ProgramVersion publish_javascript(
  * otherwise it is rejected.  No rule performs shape-based source selection.
  */
 NEOGRAPH_PROGRAM_API StoredArtifactClassificationRule classify_stored_artifact(
-    StoredArtifactKind kind,
-    bool               translated,
-    bool               exact_legacy_runtime,
-    bool               recoverable_run);
-
-/** Stable migration diagnostic code for a legacy public source frontend. */
-NEOGRAPH_PROGRAM_API std::string_view legacy_authoring_diagnostic(
-    AuthoringFrontend frontend) noexcept;
+    StoredArtifactKind kind, bool translated, bool exact_legacy_runtime, bool recoverable_run);
 
 }  // namespace neograph::program

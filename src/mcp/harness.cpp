@@ -596,9 +596,7 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
                                          source_kind == program::SourceKind::JavaScript) ||
                                         (frontend == program::AuthoringFrontend::TrustedCpp &&
                                          source_kind == program::SourceKind::CppBuilder);
-            if (!source_matches || frontend == program::AuthoringFrontend::CoreDsl ||
-                frontend == program::AuthoringFrontend::StrictCoreJson ||
-                frontend == program::AuthoringFrontend::ProgramJson) {
+            if (!source_matches) {
                 throw std::invalid_argument(
                     "stored Harness artifact authoring frontend violates the JavaScript cutover");
             }
