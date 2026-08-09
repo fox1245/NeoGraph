@@ -497,6 +497,17 @@ native_control_abi:
     - CapabilityBindingReceipt
 
 authoring_cutover_contract:
+  public_authoring_frontends:
+    direct_Core_Cpp:
+      role: trusted_embeddable_host_API
+      persisted_user_source_format: false
+      requires_QuickJS: false
+    JavaScript_QuickJS:
+      role: sole_user_authored_graph_and_Program_language
+      binding: sealed_versioned_ng_control_module
+    standalone_Core_or_Program_JSON:
+      role: forbidden_public_authoring_input
+      fallback_compiler_selection: forbidden
   retained:
     strict_Core_JSON:
       role: canonical_serialization_and_low_level_interchange
@@ -504,12 +515,18 @@ authoring_cutover_contract:
     direct_Core_Cpp:
       role: embeddable_host_API
       requires_QuickJS: false
+  in_process_json_rule:
+    statement: >-
+      Direct C++ APIs may use JSON values as in-process validated data without
+      creating a standalone public JSON authoring protocol.
   frozen:
     - bounded_Core_DSL
     - graph_Elaborator_authoring
     - Harness_mode_dsl
     - Program_v2_v3_v4_operation_tree_authoring
     - Harness_mode_program
+    - standalone_Core_JSON_public_authoring
+    - standalone_Program_JSON_public_authoring
   stored_source_classification:
     translated:
       rule: deterministic_translation_and_equivalence_evidence_accepted
@@ -528,6 +545,7 @@ authoring_cutover_contract:
     - legacy_Program_operation_tree_lowering_and_dispatch
     - Harness_Program_JSON_translation
     - legacy_syntax_only_docs_examples_and_tests
+    - public_legacy_JSON_source_constructors_schemas_and_transport_routes
   rollback_rule: never_reopen_legacy_authoring_or_create_a_permanent_dual_stack
 phases:
   Q0_dependency_qualification:

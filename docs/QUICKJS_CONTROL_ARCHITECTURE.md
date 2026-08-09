@@ -7,6 +7,7 @@ Supersedes: user authoring through the bounded Core DSL and Program JSON operati
 Runtime selection: QuickJS with JavaScript
 Canonical migration plan: `QUICKJS_CONTROL_MIGRATION.md`
 Executable plan: `../spec/quickjs-control-runtime.sdd.yaml`
+Public authoring boundary: `QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md`
 Controller extension: [`SELF_EVOLVING_AGENT_CONTROLLER.md`](SELF_EVOLVING_AGENT_CONTROLLER.md)
 defines developer-authorized profiles, capability compilation, immutable
 self-evolution, and the falsifiable general-agent-controller hypothesis.
@@ -21,7 +22,9 @@ Workstreams: [#24](https://github.com/fox1245/NeoGraph-v1-redesign-backup/issues
 ## Decision
 
 NeoGraph will have one user-authored language: standard JavaScript executed by
-embedded QuickJS. This replaces both the bounded Core DSL and the Program JSON
+embedded QuickJS. The only public authoring frontends after cutover are that
+sealed QuickJS surface and the direct NeoGraph C++ embedding API for trusted
+applications. This replaces both the bounded Core DSL and the Program JSON
 operation DSL. NeoGraph will own only the domain boundary that JavaScript cannot
 provide: typed graph construction, canonical Core IR, capability admission,
 typed host calls, budgets, cancellation, durability, replay, version identity,
@@ -95,6 +98,17 @@ two bounded contexts: definition evaluation constructs validated graph data
 without dispatch, and Program evaluation yields durable control commands above
 Core. Neither context is another node scheduler or a replacement for
 `GraphEngine`.
+
+## Public authoring boundary
+
+JavaScript is the sole user-authored source language. Direct C++ construction
+remains a trusted embedding API, not a persisted wire-level language. Strict
+Core JSON, Program bundles, journals, and transport envelopes remain canonical
+data artifacts, never fallback source languages. A C++ API may use `json`
+in-process without creating a public JSON authoring protocol.
+
+The full allowed-surface, canonical-artifact, removal, and cutover contract is
+[QuickJS Public Authoring Boundary](QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md).
 
 ## Authoring shape
 
@@ -317,12 +331,14 @@ identity remains the durable authority.
 ## Compatibility and cutover
 
 Strict Core JSON remains the canonical serialization and low-level Core
-interchange format; it is validated data, not a second user programming
-language. The bounded Core topology elaborator, Harness `mode: "dsl"`, Program
-JSON operation trees, Program-v2/v3/v4 authoring schemas, and Harness
-`mode: "program"` are frozen legacy authoring surfaces. They receive only
-correctness, security, and migration fixes while stored definitions and
-in-flight runs drain. No new language feature is added to them.
+interchange format; it is validated data, not a public programming language.
+Direct C++ embedding may construct validated in-process `json` values, but
+Harness and other public source transports do not accept standalone Core or
+Program JSON authoring after cutover. The bounded Core topology elaborator,
+Harness `mode: "dsl"`, Program JSON operation trees, Program-v2/v3/v4 authoring
+schemas, and Harness `mode: "program"` are frozen legacy authoring surfaces.
+They receive only correctness, security, and migration fixes while stored
+definitions and in-flight runs drain. No new language feature is added to them.
 
 The migration uses a clean cutover:
 

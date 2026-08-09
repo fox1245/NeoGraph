@@ -3,6 +3,7 @@
 Status: Accepted execution plan; implementation not started
 Date: 2026-08-08
 Architecture: `QUICKJS_CONTROL_ARCHITECTURE.md`
+Public authoring boundary: [`QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md`](QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
 Source baseline: `61661e9ad1fc386b5142139c48c327ede7464633`
 Executable gates: `../spec/quickjs-control-runtime.sdd.yaml`
 Post-cutover controller extension:
@@ -43,8 +44,9 @@ This migration is a replacement, not a second permanent language stack.
 
 ### Keep
 
-- strict Core JSON as canonical serialization and low-level interchange;
-- `GraphEngine`;
+- direct C++ graph and runtime embedding APIs;
+- strict Core JSON as canonical serialization and low-level interchange, not a
+  standalone public source mode;
 - immutable Program versions and bundles;
 - catalog, admission, activation, owner/tenant, capability, effect, budget,
   child, checkpoint, replay, and transition-store contracts;
@@ -58,6 +60,7 @@ This migration is a replacement, not a second permanent language stack.
 - the Core `graph::Elaborator` authoring path and Harness `mode: "dsl"`;
 - Program JSON operation-tree authoring and Program-v2/v3/v4 source schemas;
 - Harness `mode: "program"`;
+- standalone Core JSON and Program JSON public source endpoints;
 - additions to `ProgramOperationKind`; and
 - new general computation in `branch`, `loop`, `map`, `parallel_map`, or
   `expand_task_graph` descriptors.
@@ -67,7 +70,8 @@ fixes required to drain existing versions.
 
 ### Replace
 
-- all user-authored graph and Program source with UTF-8 JavaScript;
+- all user-authored graph and Program source with UTF-8 JavaScript while
+  retaining direct C++ APIs for trusted embedding;
 - Core DSL elaboration with bounded `define()` evaluation, a sealed graph
   builder, typed validation, and canonical strict Core lowering;
 - operation-tree compilation with QuickJS generator compilation plus sealed
@@ -81,6 +85,8 @@ fixes required to drain existing versions.
 
 - legacy Core DSL and Program DSL schemas and authoring documentation;
 - the Core DSL parser/elaborator and Harness `mode: "dsl"` translation;
+- standalone public Core JSON and Program JSON source constructors, schemas,
+  and transport routes;
 - operation-specific Program source parsing and source-only plan descriptors not
   needed for stored-version drain;
 - Harness Program JSON translation;
@@ -207,13 +213,18 @@ Exit gate:
 
 Deliverables:
 
-- expose one JavaScript authoring mode for Core graph definitions and Programs;
+- expose JavaScript `define()` for Core graph definition and generator `main()`
+  for Program control through direct and Harness transports;
+- retain the direct C++ embedding API while documenting JavaScript as the sole
+  user-authored source language;
+- preserve strict Core JSON as validated canonical serialization and low-level
+  interchange, not a public source mode;
 - update public schemas, examples, API references, Harness transport, and source
   maps;
-- stop accepting new Core DSL and Program JSON operation-tree source at the
-  announced boundary;
+- stop accepting new Core DSL, standalone Core JSON, and Program JSON
+  operation-tree source at an announced boundary;
 - classify every stored legacy Core definition and Program version as
-  translated, drain-only, or rejected;
+  `translated`, `drain_only`, or `rejected`;
 - keep existing in-flight runs pinned; and
 - provide explicit diagnostics for every legacy source submission.
 
@@ -228,8 +239,10 @@ Deliverables:
 
 - verify no active or recoverable stored definition or version requires legacy
   authoring or runtime code;
-- delete the Core DSL parser/elaborator and legacy Program
-  schema/parser/compiler/dispatcher branches, examples, and tests;
+- delete the Core DSL parser/elaborator, legacy Program
+  schema/parser/compiler/dispatcher branches, public JSON authoring routes,
+  examples, and tests;
+- retain canonical serialization and the trusted C++ embedding API;
 - remove compatibility build/link dependencies;
 - run installed-consumer, graph-equivalence, storage migration, replay, fault,
   sanitizer, and performance gates; and
@@ -256,8 +269,8 @@ proposals, child handles, checkpoints, and effects require individual
 compatibility evidence. A source that merely looks similar does not qualify as
 equivalent.
 
-Strict Core documents remain supported as validated low-level interchange, not
-as a second user programming language.
+Strict Core documents remain supported only as validated low-level interchange
+and canonical storage, not as a public programming-language submission.
 
 ## 5. Runtime invariants
 
@@ -355,8 +368,9 @@ recreate the design fragmentation this decision rejects:
 
 Current implementation details remain discoverable from code, schemas, tests,
 and repository history until the legacy runtime is removed. Base cutover work is
-tracked only by this plan, the QuickJS architecture, the executable SDD, and
-their registered GitHub issues.
+tracked only by this plan, the QuickJS architecture, the
+[public authoring boundary](QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md), the
+executable SDD, and their registered GitHub issues.
 
 ## 9. Post-cutover controller extension
 
