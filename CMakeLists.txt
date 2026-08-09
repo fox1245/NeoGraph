@@ -533,6 +533,7 @@ add_library(neograph::core ALIAS neograph_core)
 if(NEOGRAPH_BUILD_PROGRAM)
     add_library(neograph_program
         src/program/canonical_json.cpp
+        src/program/command.cpp
         src/program/contract.cpp
         src/program/diagnostic.cpp
         src/program/source.cpp
