@@ -86,6 +86,7 @@ jobs:
             -DNEOGRAPH_BUILD_POSTGRES=ON \
             -DNEOGRAPH_BUILD_PYBIND=ON \
             -DNEOGRAPH_BUILD_PROGRAM=ON \
+            -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
             -DNEOGRAPH_BUILD_TESTS=ON \
             -DNEOGRAPH_BUILD_EXAMPLES=OFF
 
@@ -441,6 +442,8 @@ jobs:
             -DNEOGRAPH_JARVIS_FORCE_MOCK=ON \
             -DNEOGRAPH_BUILD_BENCHMARKS=OFF \
             -DNEOGRAPH_BUILD_POSTGRES=ON \
+            -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -O1" \
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -O1" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
 

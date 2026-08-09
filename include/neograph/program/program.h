@@ -23,6 +23,7 @@
 #include <neograph/program/migration.h>
 #include <neograph/program/pending.h>
 #include <neograph/program/module.h>
+#include <neograph/program/native.h>
 #include <neograph/program/replay.h>
 #include <neograph/program/registry.h>
 #include <neograph/program/run_record.h>

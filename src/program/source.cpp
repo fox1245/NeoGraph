@@ -2,12 +2,15 @@
 
 #include "canonical_json.h"
 
+#include <cstddef>
 #include <limits>
 #include <stdexcept>
 #include <utility>
 
 namespace neograph::program {
 namespace {
+
+constexpr std::size_t kMaxJavaScriptSourceBytes = 16u * 1024u * 1024u;
 
 std::string require_string(const json& value, std::string_view key) {
     const std::string owned_key(key);
@@ -93,6 +96,29 @@ void validate_common(std::string_view                   source_id,
     }
 }
 
+void validate_javascript_document(const json& document) {
+    detail::reject_unknown_fields(
+        document, "JavaScript Program source",
+        {"language", "language_version", "engine", "engine_version", "host_api_version", "source"});
+    if (require_string(document, "language") != "javascript") {
+        throw std::invalid_argument("JavaScript Program source language must be javascript");
+    }
+    if (require_uint32(document, "language_version") !=
+        ProgramSource::JAVASCRIPT_LANGUAGE_VERSION) {
+        throw std::invalid_argument("JavaScript Program source language version is unsupported");
+    }
+    if (require_string(document, "engine") != std::string(ProgramSource::JAVASCRIPT_ENGINE) ||
+        require_string(document, "engine_version") !=
+            std::string(ProgramSource::JAVASCRIPT_ENGINE_VERSION)) {
+        throw std::invalid_argument("JavaScript Program source engine is unsupported");
+    }
+    if (require_uint32(document, "host_api_version") !=
+        ProgramSource::JAVASCRIPT_HOST_API_VERSION) {
+        throw std::invalid_argument("JavaScript Program source host API version is unsupported");
+    }
+    detail::validate_utf8(require_string(document, "source"));
+}
+
 std::string compute_source_hash(std::uint32_t schema_version, const json& document) {
     json identity                      = json::object();
     identity["document"]               = document;
@@ -119,6 +145,8 @@ std::string_view to_string(SourceKind kind) noexcept {
             return "canonical_json";
         case SourceKind::CppBuilder:
             return "cpp_builder";
+        case SourceKind::JavaScript:
+            return "javascript";
     }
     return "unknown";
 }
@@ -126,6 +154,7 @@ std::string_view to_string(SourceKind kind) noexcept {
 SourceKind source_kind_from_string(std::string_view value) {
     if (value == "canonical_json") return SourceKind::CanonicalJson;
     if (value == "cpp_builder") return SourceKind::CppBuilder;
+    if (value == "javascript") return SourceKind::JavaScript;
     throw std::invalid_argument("Unknown Program source kind: " + std::string(value));
 }
 
@@ -226,6 +255,46 @@ ProgramSource ProgramSource::from_canonical_json(std::string                 sou
     return ProgramSource(std::move(impl));
 }
 
+ProgramSource ProgramSource::from_javascript(std::string                 source_id,
+                                             std::string                 source_text,
+                                             std::vector<ImportRef>      imports,
+                                             std::vector<SourceMapEntry> source_map) {
+    validate_source_id(source_id);
+    if (source_text.size() > kMaxJavaScriptSourceBytes) {
+        throw_source_error(std::move(source_id), "P_SOURCE_SIZE",
+                           "JavaScript Program source exceeds the 16 MiB input limit");
+    }
+
+    json        document{{"language", "javascript"},
+                         {"language_version", JAVASCRIPT_LANGUAGE_VERSION},
+                         {"engine", JAVASCRIPT_ENGINE},
+                         {"engine_version", JAVASCRIPT_ENGINE_VERSION},
+                         {"host_api_version", JAVASCRIPT_HOST_API_VERSION},
+                         {"source", std::move(source_text)}};
+    std::string canonical_document;
+    std::string source_hash;
+    try {
+        validate_common(source_id, JAVASCRIPT_PROGRAM_SCHEMA_VERSION, document, imports,
+                        source_map);
+        validate_javascript_document(document);
+        canonical_document = detail::canonical_json_bytes(document);
+        source_hash        = compute_source_hash(JAVASCRIPT_PROGRAM_SCHEMA_VERSION, document);
+    } catch (const std::exception& error) {
+        throw_source_error(std::move(source_id), "P_SOURCE_INVALID", error.what());
+    }
+
+    auto impl                = std::make_shared<Impl>();
+    impl->kind               = SourceKind::JavaScript;
+    impl->schema_version     = JAVASCRIPT_PROGRAM_SCHEMA_VERSION;
+    impl->source_id          = std::move(source_id);
+    impl->document           = std::move(document);
+    impl->imports            = std::move(imports);
+    impl->source_map         = std::move(source_map);
+    impl->canonical_document = std::move(canonical_document);
+    impl->source_hash        = std::move(source_hash);
+    return ProgramSource(std::move(impl));
+}
+
 ProgramSource ProgramSource::from_cpp_builder(std::string                 source_id,
                                               std::uint32_t               schema_version,
                                               json                        document,
@@ -288,10 +357,21 @@ ProgramSource ProgramSource::parse(std::string_view stored_bytes) {
         source_map.push_back(std::move(entry));
     }
 
-    auto parsed = from_cpp_builder(source_id, program_schema_version, value["document"],
+    ProgramSource parsed = [&]() {
+        if (kind == SourceKind::JavaScript) {
+            if (program_schema_version != JAVASCRIPT_PROGRAM_SCHEMA_VERSION) {
+                throw std::invalid_argument(
+                    "Stored JavaScript ProgramSource schema version is unsupported");
+            }
+            validate_javascript_document(value["document"]);
+            return from_javascript(source_id, require_string(value["document"], "source"),
                                    std::move(imports), std::move(source_map));
-    auto impl   = std::make_shared<Impl>(*parsed.impl_);
-    impl->kind  = kind;
+        }
+        return from_cpp_builder(source_id, program_schema_version, value["document"],
+                                std::move(imports), std::move(source_map));
+    }();
+    auto impl                  = std::make_shared<Impl>(*parsed.impl_);
+    impl->kind                 = kind;
     const auto stored_identity = require_string(value, "source_hash");
     if (!detail::is_sha256_identity(stored_identity) || stored_identity != impl->source_hash) {
         throw std::invalid_argument("Stored ProgramSource source_hash does not match its content");

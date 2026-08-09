@@ -179,16 +179,15 @@ ExecutableIdentity configured_tool(std::string name, char implementation) {
 }
 
 RegistrySnapshot config_requirement_snapshot() {
-    const auto provider = configured_provider();
-    const auto alpha    = configured_tool("configured-alpha", '9');
-    const auto beta     = configured_tool("configured-beta", 'a');
-    const ExecutableIdentity imported{
-        ExecutableKind::Imported, "configured-import", "1.0.0", alpha.implementation_digest};
+    const auto               provider = configured_provider();
+    const auto               alpha    = configured_tool("configured-alpha", '9');
+    const auto               beta     = configured_tool("configured-beta", 'a');
+    const ExecutableIdentity imported{ExecutableKind::Imported, "configured-import", "1.0.0",
+                                      alpha.implementation_digest};
 
     RegistrySnapshotBuilder builder;
-    builder.add_provider(
-        executable(ExecutableKind::Provider, provider.name, '8'),
-        ProviderMetadata{json::object(), json::object()});
+    builder.add_provider(executable(ExecutableKind::Provider, provider.name, '8'),
+                         ProviderMetadata{json::object(), json::object()});
     builder.add_tool(executable(ExecutableKind::Tool, alpha.name, '9'),
                      ToolMetadata{json::object(), json::object()});
     builder.add_tool(executable(ExecutableKind::Tool, beta.name, 'a'),
@@ -196,27 +195,26 @@ RegistrySnapshot config_requirement_snapshot() {
     builder.add_imported(
         executable(ExecutableKind::Imported, imported.name, '9'),
         ImportedExecutableMetadata{"module:configured", imported.name, digest('b'), alpha});
-    builder.add_node(
-        executable(ExecutableKind::Node, "configured-node", '7'), local_factory(),
-        json{{"type", "object"}}, json::object(),
-        [provider, alpha, beta, imported](const json& config) {
-            std::vector<ExecutableIdentity> requirements;
-            if (config.value("provider_id", "") == provider.name) {
-                requirements.push_back(provider);
-            }
-            if (config.contains("tool_ids") && config["tool_ids"].is_array()) {
-                for (const auto& id : config["tool_ids"]) {
-                    if (id == alpha.name)
-                        requirements.push_back(alpha);
-                    else if (id == beta.name)
-                        requirements.push_back(beta);
-                }
-            }
-            if (config.value("import_id", "") == imported.name) {
-                requirements.push_back(imported);
-            }
-            return requirements;
-        });
+    builder.add_node(executable(ExecutableKind::Node, "configured-node", '7'), local_factory(),
+                     json{{"type", "object"}}, json::object(),
+                     [provider, alpha, beta, imported](const json& config) {
+                         std::vector<ExecutableIdentity> requirements;
+                         if (config.value("provider_id", "") == provider.name) {
+                             requirements.push_back(provider);
+                         }
+                         if (config.contains("tool_ids") && config["tool_ids"].is_array()) {
+                             for (const auto& id : config["tool_ids"]) {
+                                 if (id == alpha.name)
+                                     requirements.push_back(alpha);
+                                 else if (id == beta.name)
+                                     requirements.push_back(beta);
+                             }
+                         }
+                         if (config.value("import_id", "") == imported.name) {
+                             requirements.push_back(imported);
+                         }
+                         return requirements;
+                     });
     return std::move(builder).build();
 }
 
@@ -349,10 +347,9 @@ TEST(ProgramCompilerTest, SourceKindIsPreservedAndBoundIntoBundleIdentity) {
     auto            snapshot = complete_snapshot();
     ProgramCompiler compiler(snapshot, {"program-compiler-test/v1"});
     const auto      document = program_document();
-    const auto      builder =
-        compiler.compile(ProgramSource::from_cpp_builder("builder", 1, document));
-    const auto canonical = compiler.compile(
-        ProgramSource::from_canonical_json("source.json", document.dump()));
+    const auto builder = compiler.compile(ProgramSource::from_cpp_builder("builder", 1, document));
+    const auto canonical =
+        compiler.compile(ProgramSource::from_canonical_json("source.json", document.dump()));
 
     EXPECT_EQ(builder.source_kind(), SourceKind::CppBuilder);
     EXPECT_EQ(ProgramBundle::parse(builder.serialize_canonical()).source_kind(),
@@ -361,6 +358,144 @@ TEST(ProgramCompilerTest, SourceKindIsPreservedAndBoundIntoBundleIdentity) {
     EXPECT_EQ(ProgramBundle::parse(canonical.serialize_canonical()).source_kind(),
               SourceKind::CanonicalJson);
     EXPECT_NE(builder.id(), canonical.id());
+}
+
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST(ProgramCompilerTest, JavaScriptDefineBuildsOneCoreDefinitionWithOrdinaryControlFlow) {
+    const auto source = ProgramSource::from_javascript(
+        "control.js",
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                const stages = [
+                    ["draft", "local-node"],
+                    ["review", "local-node"],
+                ];
+                graph.channel("value", {reducer: "local-reducer", initial: 0});
+                for (const [name, type] of stages) {
+                    graph.node(name, {type});
+                }
+                graph.entry("draft");
+                graph.edge("draft", "review");
+                graph.conditionalEdge("review", "local-condition", {done: "__end__"});
+                return graph;
+            }
+        )JS");
+
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto      bundle = compiler.compile(source);
+
+    EXPECT_EQ(bundle.source_kind(), SourceKind::JavaScript);
+    ASSERT_EQ(bundle.sealed_core_definitions().size(), 1U);
+    EXPECT_EQ(bundle.sealed_core_definitions().front().name, "main");
+    EXPECT_EQ(bundle.orchestration_plan().plan["operations"][0]["op"], "call_core");
+}
+
+TEST(ProgramCompilerTest, JavaScriptDefinitionMustReturnOneGraphBuilder) {
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto source = ProgramSource::from_javascript(
+        "missing-builder.js", "export function define() { return {name: 'main'}; }");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_DEFINE_VALUE"));
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptDefinitionCannotReturnMoreThanOneBuilder) {
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto source = ProgramSource::from_javascript(
+        "two-builders.js",
+        R"JS(
+            export function define() {
+                const first = ng.graph("first");
+                const second = ng.graph("second");
+                return [first, second];
+            }
+        )JS");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_DEFINE_VALUE"));
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptSourceCannotOutrunItsInterruptBudget) {
+    ProgramCompilerConfig config;
+    config.compiler_build_id              = "program-compiler-test/javascript/v1";
+    config.javascript.max_interrupt_polls = 1;
+    ProgramCompiler compiler(complete_snapshot(), std::move(config));
+    const auto source = ProgramSource::from_javascript(
+        "infinite.js", "export function define() { while (true) { } }");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_RESOURCE_LIMIT"));
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptHostExposesOnlyItsFrozenVersionedGraphBinding) {
+    const auto source = ProgramSource::from_javascript(
+        "sandbox.js",
+        R"JS(
+            export function define() {
+                if (typeof std !== "undefined" || typeof os !== "undefined" ||
+                    typeof process !== "undefined" || typeof neograph !== "undefined" ||
+                    ng.apiVersion !== 1 || !Object.isFrozen(ng)) {
+                    throw new Error("host capability leaked");
+                }
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "local-reducer", initial: 0});
+                graph.node("work", {type: "local-node"});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+        )JS");
+
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    EXPECT_EQ(compiler.compile(source).source_kind(), SourceKind::JavaScript);
+}
+
+TEST(ProgramCompilerTest, JavaScriptGraphBuilderRejectsUnknownObjectsBeforeCoreAdmission) {
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto source = ProgramSource::from_javascript(
+        "invalid-builder-value.js",
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.node("work", new Date());
+                graph.entry("work");
+                return graph;
+            }
+        )JS");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_GRAPH_VALUE"));
+    }
+}
+#endif
+
+TEST(ProgramCompilerTest, RejectsInvalidJavaScriptCompilerLimits) {
+    ProgramCompilerConfig zero_interrupts{"program-compiler-test/javascript-limits/v1"};
+    zero_interrupts.javascript.max_interrupt_polls = 0;
+    EXPECT_THROW((void)ProgramCompiler(complete_snapshot(), std::move(zero_interrupts)),
+                 std::invalid_argument);
+
+    ProgramCompilerConfig oversized_stack{"program-compiler-test/javascript-limits/v1"};
+    oversized_stack.javascript.memory_limit_bytes = 1024;
+    oversized_stack.javascript.max_stack_bytes    = 2048;
+    EXPECT_THROW((void)ProgramCompiler(complete_snapshot(), std::move(oversized_stack)),
+                 std::invalid_argument);
 }
 
 TEST(ProgramCompilerTest, EquivalentKeyAndRegistrationOrderProduceSameBundle) {
@@ -447,17 +582,16 @@ TEST(ProgramCompilerTest,
 TEST(ProgramCompilerTest,
      ConfigRequirementResolverSelectsExactProviderToolAndImportedClosureDeterministically) {
     reset_dispatch_counters();
-    const auto snapshot = config_requirement_snapshot();
-    auto       selected = node_only_program("configured-node");
-    auto       config   = selected["root"]["definition"]["nodes"]["work"];
+    const auto snapshot   = config_requirement_snapshot();
+    auto       selected   = node_only_program("configured-node");
+    auto       config     = selected["root"]["definition"]["nodes"]["work"];
     config["provider_id"] = "configured-provider";
-    config["tool_ids"]    = json::array(
-        {"configured-beta", "configured-alpha", "configured-beta"});
-    config["import_id"] = "configured-import";
+    config["tool_ids"]    = json::array({"configured-beta", "configured-alpha", "configured-beta"});
+    config["import_id"]   = "configured-import";
 
     ProgramCompiler compiler(snapshot, {"program-compiler-test/v1"});
-    const auto      bundle = compiler.compile(source_from(std::move(selected)));
-    const auto expected = std::vector<ExecutableIdentity>{
+    const auto      bundle   = compiler.compile(source_from(std::move(selected)));
+    const auto      expected = std::vector<ExecutableIdentity>{
         {ExecutableKind::Imported, "configured-import", "1.0.0", digest('9')},
         {ExecutableKind::Node, "configured-node", "1.0.0", digest('7')},
         configured_provider(),
@@ -466,11 +600,11 @@ TEST(ProgramCompilerTest,
     };
     EXPECT_EQ(bundle.executable_registry_identities(), expected);
 
-    auto alpha_only = node_only_program("configured-node");
-    auto alpha_config = alpha_only["root"]["definition"]["nodes"]["work"];
+    auto alpha_only             = node_only_program("configured-node");
+    auto alpha_config           = alpha_only["root"]["definition"]["nodes"]["work"];
     alpha_config["provider_id"] = "configured-provider";
     alpha_config["tool_ids"]    = json::array({"configured-alpha"});
-    const auto alpha_bundle = compiler.compile(source_from(std::move(alpha_only)));
+    const auto alpha_bundle     = compiler.compile(source_from(std::move(alpha_only)));
     EXPECT_NE(alpha_bundle.executable_registry_identities(),
               bundle.executable_registry_identities());
     EXPECT_NE(alpha_bundle.core_plan_identities(), bundle.core_plan_identities());
@@ -481,13 +615,11 @@ TEST(ProgramCompilerTest,
      ConfigRequirementResolverRejectsUnsupportedMissingAndMismatchedExactIdentity) {
     const auto compile_with = [](ExecutableIdentity returned, ExecutableIdentity registered) {
         RegistrySnapshotBuilder builder;
-        builder.add_provider(
-            executable(ExecutableKind::Provider, registered.name,
-                       registered.implementation_digest.back()),
-            ProviderMetadata{json::object(), json::object()});
+        builder.add_provider(executable(ExecutableKind::Provider, registered.name,
+                                        registered.implementation_digest.back()),
+                             ProviderMetadata{json::object(), json::object()});
         builder.add_node(executable(ExecutableKind::Node, "resolver-node", '7'), local_factory(),
-                         json{{"type", "object"}}, json::object(),
-                         [returned](const json&) {
+                         json{{"type", "object"}}, json::object(), [returned](const json&) {
                              return std::vector<ExecutableIdentity>{returned};
                          });
         auto snapshot = std::move(builder).build();
@@ -495,25 +627,23 @@ TEST(ProgramCompilerTest,
     };
 
     reset_dispatch_counters();
-    const ExecutableIdentity registered{
-        ExecutableKind::Provider, "registered-provider", "1.0.0", digest('c')};
-    const ExecutableIdentity missing{
-        ExecutableKind::Provider, "missing-provider", "1.0.0", digest('d')};
-    const auto missing_errors = compile_with(missing, registered);
-    const auto missing_error =
-        std::find_if(missing_errors.begin(), missing_errors.end(), [](const auto& error) {
-            return error.code == "P_REGISTRY_DEPENDENCY_MISSING";
-        });
+    const ExecutableIdentity registered{ExecutableKind::Provider, "registered-provider", "1.0.0",
+                                        digest('c')};
+    const ExecutableIdentity missing{ExecutableKind::Provider, "missing-provider", "1.0.0",
+                                     digest('d')};
+    const auto               missing_errors = compile_with(missing, registered);
+    const auto               missing_error  = std::find_if(
+        missing_errors.begin(), missing_errors.end(),
+        [](const auto& error) { return error.code == "P_REGISTRY_DEPENDENCY_MISSING"; });
     ASSERT_NE(missing_error, missing_errors.end());
     EXPECT_EQ(missing_error->primary.json_pointer, "/root/definition/nodes/work");
 
-    auto mismatched = registered;
+    auto mismatched                  = registered;
     mismatched.implementation_digest = digest('d');
-    const auto mismatch_errors = compile_with(mismatched, registered);
-    const auto mismatch_error =
-        std::find_if(mismatch_errors.begin(), mismatch_errors.end(), [](const auto& error) {
-            return error.code == "P_REGISTRY_IDENTITY_MISMATCH";
-        });
+    const auto mismatch_errors       = compile_with(mismatched, registered);
+    const auto mismatch_error        = std::find_if(
+        mismatch_errors.begin(), mismatch_errors.end(),
+        [](const auto& error) { return error.code == "P_REGISTRY_IDENTITY_MISMATCH"; });
     ASSERT_NE(mismatch_error, mismatch_errors.end());
     EXPECT_EQ(mismatch_error->primary.json_pointer, "/root/definition/nodes/work");
 
@@ -526,12 +656,11 @@ TEST(ProgramCompilerTest,
 
 TEST(ProgramCompilerTest, ConfigRequirementResolverExceptionIsPointerDiagnosticBeforeDispatch) {
     RegistrySnapshotBuilder builder;
-    builder.add_node(
-        executable(ExecutableKind::Node, "throwing-resolver-node", '7'), local_factory(),
-        json{{"type", "object"}}, json::object(),
-        [](const json&) -> std::vector<ExecutableIdentity> {
-            throw std::runtime_error("resolver failure");
-        });
+    builder.add_node(executable(ExecutableKind::Node, "throwing-resolver-node", '7'),
+                     local_factory(), json{{"type", "object"}}, json::object(),
+                     [](const json&) -> std::vector<ExecutableIdentity> {
+                         throw std::runtime_error("resolver failure");
+                     });
     auto snapshot = std::move(builder).build();
 
     reset_dispatch_counters();
@@ -547,16 +676,15 @@ TEST(ProgramCompilerTest, ConfigRequirementResolverExceptionIsPointerDiagnosticB
 
 TEST(ProgramCompilerTest, SourceRequirementLookalikeFieldsCannotGrantExecutables) {
     reset_dispatch_counters();
-    auto snapshot = node_only_snapshot("lookalike-node");
-    auto source   = node_only_program("lookalike-node");
-    auto config  = source["root"]["definition"]["nodes"]["work"];
-    config["provider_id"] = "source-provider";
-    config["tool_ids"]    = json::array({"source-tool"});
-    config["required_executables"] =
-        json::array({json{{"kind", "provider"},
-                          {"name", "source-provider"},
-                          {"semantic_version", "1.0.0"},
-                          {"implementation_digest", digest('e')}}});
+    auto snapshot                  = node_only_snapshot("lookalike-node");
+    auto source                    = node_only_program("lookalike-node");
+    auto config                    = source["root"]["definition"]["nodes"]["work"];
+    config["provider_id"]          = "source-provider";
+    config["tool_ids"]             = json::array({"source-tool"});
+    config["required_executables"] = json::array({json{{"kind", "provider"},
+                                                       {"name", "source-provider"},
+                                                       {"semantic_version", "1.0.0"},
+                                                       {"implementation_digest", digest('e')}}});
 
     ProgramCompiler compiler(snapshot, {"program-compiler-test/v1"});
     const auto      bundle = compiler.compile(source_from(std::move(source)));
@@ -591,9 +719,9 @@ TEST(ProgramCompilerTest, RejectsUnknownProgramFieldsAndWrongNestedTypes) {
 }
 
 TEST(ProgramCompilerTest, AcceptsSequenceRootAndRejectsMalformedRootPlans) {
-    auto snapshot = complete_snapshot();
-    auto sequence = program_document();
-    sequence["root"]["op"] = "sequence";
+    auto snapshot                = complete_snapshot();
+    auto sequence                = program_document();
+    sequence["root"]["op"]       = "sequence";
     sequence["root"]["children"] = json::array({
         json{{"op", "call_core"}},
         json{{"op", "emit"}, {"value", json{{"kind", "done"}}}},
@@ -616,8 +744,8 @@ TEST(ProgramCompilerTest, AcceptsSequenceRootAndRejectsMalformedRootPlans) {
     EXPECT_EQ(sequence_bundle->orchestration_plan().plan["operations"][0]["op"], "call_core");
     EXPECT_EQ(sequence_bundle->orchestration_plan().plan["operations"][1]["op"], "emit");
     EXPECT_EQ(sequence_bundle->orchestration_plan().plan["operations"][2]["op"], "return");
-    auto malformed = program_document();
-    malformed["root"]["op"] = "sequence";
+    auto malformed              = program_document();
+    malformed["root"]["op"]     = "sequence";
     const auto malformed_errors = compile_errors(snapshot, std::move(malformed));
     EXPECT_TRUE(contains_code(malformed_errors, "P_SCHEMA_REQUIRED"));
 
@@ -633,15 +761,13 @@ TEST(ProgramCompilerTest, AcceptsSequenceRootAndRejectsMalformedRootPlans) {
 TEST(ProgramCompilerTest, SealsLoweredOperationsAsTypedImmutablePlanNodes) {
     auto snapshot = complete_snapshot();
     auto document = program_document();
-    auto root = json{{"op", "sequence"},
-                     {"name", "main"},
-                     {"definition", document["root"]["definition"]}};
+    auto root =
+        json{{"op", "sequence"}, {"name", "main"}, {"definition", document["root"]["definition"]}};
     root["children"] = json::array(
-        {json{{"op", "call_core"}},
-         json{{"op", "branch"},
-              {"condition", json{{"path", "/route"}, {"equals", "ok"}}},
-              {"then", json{{"op", "return"}, {"value", 1}}},
-              {"else", json{{"op", "return"}, {"value", 0}}}}});
+        {json{{"op", "call_core"}}, json{{"op", "branch"},
+                                         {"condition", json{{"path", "/route"}, {"equals", "ok"}}},
+                                         {"then", json{{"op", "return"}, {"value", 1}}},
+                                         {"else", json{{"op", "return"}, {"value", 0}}}}});
     document["root"] = std::move(root);
 
     const auto bundle = ProgramCompiler(snapshot, {"program-compiler-test/v1"})
@@ -670,9 +796,9 @@ TEST(ProgramCompilerTest, SealsLoweredOperationsAsTypedImmutablePlanNodes) {
 }
 
 TEST(ProgramCompilerTest, AllowsExplicitChildCapacityForProgramRuntimeStartChild) {
-    const auto snapshot = complete_snapshot();
-    auto document = program_document();
-    auto requirements = document["declared_budget_requirements"];
+    const auto snapshot     = complete_snapshot();
+    auto       document     = program_document();
+    auto       requirements = document["declared_budget_requirements"];
     for (std::size_t index = 0; index < requirements.size(); ++index) {
         const auto resource = requirements[index]["resource"].get<std::string>();
         if (resource == "max_child_depth" || resource == "max_total_children") {
@@ -682,19 +808,19 @@ TEST(ProgramCompilerTest, AllowsExplicitChildCapacityForProgramRuntimeStartChild
     }
     document["declared_budget_requirements"] = std::move(requirements);
 
-    EXPECT_NO_THROW(
-        (void)ProgramCompiler(snapshot, {"program-compiler-test/v1"}).compile(source_from(document)));
+    EXPECT_NO_THROW((void)ProgramCompiler(snapshot, {"program-compiler-test/v1"})
+                        .compile(source_from(document)));
 }
 
 TEST(ProgramCompilerTest, LowersOnlyDirectlyJoinedVerifiedChildBindingSpawns) {
-    const auto snapshot = complete_snapshot();
-    auto document = program_document();
+    const auto snapshot   = complete_snapshot();
+    auto       document   = program_document();
     const auto definition = document["root"]["definition"];
-    document["root"] = json{{"op", "await"},
-                            {"name", "main"},
-                            {"definition", definition},
-                            {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}};
-    auto requirements = document["declared_budget_requirements"];
+    document["root"]      = json{{"op", "await"},
+                                 {"name", "main"},
+                                 {"definition", definition},
+                                 {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}};
+    auto requirements     = document["declared_budget_requirements"];
     for (std::size_t index = 0; index < requirements.size(); ++index) {
         const auto resource = requirements[index]["resource"].get<std::string>();
         if (resource == "max_program_operations") {
@@ -718,19 +844,17 @@ TEST(ProgramCompilerTest, LowersOnlyDirectlyJoinedVerifiedChildBindingSpawns) {
     EXPECT_EQ(spawn->child_binding(), std::optional<std::string>("child"));
     EXPECT_FALSE(spawn->body().has_value());
 
-    auto unjoined = document;
-    unjoined["root"] = json{{"op", "spawn"},
-                             {"name", "main"},
-                             {"definition", definition},
-                             {"child_binding", "child"}};
+    auto unjoined    = document;
+    unjoined["root"] = json{
+        {"op", "spawn"}, {"name", "main"}, {"definition", definition}, {"child_binding", "child"}};
     EXPECT_TRUE(contains_code(compile_errors(snapshot, std::move(unjoined)), "P_PLAN_SPAWN_SHAPE"));
 
-    auto inline_spawn = document;
+    auto inline_spawn    = document;
     inline_spawn["root"] = json{{"op", "spawn"},
-                                 {"name", "main"},
-                                 {"definition", definition},
-                                 {"child_binding", "child"},
-                                 {"body", json{{"op", "call_core"}}}};
+                                {"name", "main"},
+                                {"definition", definition},
+                                {"child_binding", "child"},
+                                {"body", json{{"op", "call_core"}}}};
     EXPECT_TRUE(
         contains_code(compile_errors(snapshot, std::move(inline_spawn)), "P_PLAN_SPAWN_SHAPE"));
 }
@@ -738,24 +862,22 @@ TEST(ProgramCompilerTest, LowersOnlyDirectlyJoinedVerifiedChildBindingSpawns) {
 TEST(ProgramCompilerTest, DispatchDescriptorWalkBenchmarkExcludesCoreExecution) {
     const auto plan = ProgramPlan::from_json(
         json{{"root", "root"},
-             {"operations",
-              json::array(
-                  {json{{"id", "root"},
-                        {"op", "sequence"},
-                        {"source_pointer", "/root"},
-                        {"children", json::array({"root.0", "root.1"})}},
-                   json{{"id", "root.0"},
-                        {"op", "return"},
-                        {"source_pointer", "/root/children/0"},
-                        {"value", 0}},
-                   json{{"id", "root.1"},
-                        {"op", "return"},
-                        {"source_pointer", "/root/children/1"},
-                        {"value", 1}}})}});
+             {"operations", json::array({json{{"id", "root"},
+                                              {"op", "sequence"},
+                                              {"source_pointer", "/root"},
+                                              {"children", json::array({"root.0", "root.1"})}},
+                                         json{{"id", "root.0"},
+                                              {"op", "return"},
+                                              {"source_pointer", "/root/children/0"},
+                                              {"value", 0}},
+                                         json{{"id", "root.1"},
+                                              {"op", "return"},
+                                              {"source_pointer", "/root/children/1"},
+                                              {"value", 1}}})}});
 
     constexpr std::size_t iterations = 100000;
-    std::uint64_t checksum = 0;
-    const auto started = std::chrono::steady_clock::now();
+    std::uint64_t         checksum   = 0;
+    const auto            started    = std::chrono::steady_clock::now();
     for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
         const auto* root = plan.find("root");
         ASSERT_NE(root, nullptr);
@@ -785,10 +907,10 @@ TEST(ProgramCompilerTest, TypedPlanRejectsDanglingAndUnknownOperationFields) {
         json{{"id", "root"}, {"op", "sequence"}, {"children", json::array({"missing"})}});
     EXPECT_THROW((void)ProgramPlan::from_json(dangling), std::invalid_argument);
 
-    auto bad_condition = json{{"root", "root"}, {"operations", json::array()}};
+    auto bad_condition          = json{{"root", "root"}, {"operations", json::array()}};
     bad_condition["operations"] = json::array(
-        {json{{"id", "return"}, {"op", "return"}, {"source_pointer", "/root/then"},
-              {"value", true}},
+        {json{
+             {"id", "return"}, {"op", "return"}, {"source_pointer", "/root/then"}, {"value", true}},
          json{{"id", "root"},
               {"op", "branch"},
               {"source_pointer", "/root"},
@@ -798,13 +920,13 @@ TEST(ProgramCompilerTest, TypedPlanRejectsDanglingAndUnknownOperationFields) {
 }
 
 TEST(ProgramCompilerTest, RejectsMalformedConditionPointerDuringNormalization) {
-    auto snapshot = complete_snapshot();
-    auto document = program_document();
+    auto snapshot    = complete_snapshot();
+    auto document    = program_document();
     document["root"] = json{{"op", "branch"},
-                             {"name", "main"},
-                             {"definition", document["root"]["definition"]},
-                             {"condition", json{{"path", "route~2"}, {"exists", true}}},
-                             {"then", json{{"op", "call_core"}}}};
+                            {"name", "main"},
+                            {"definition", document["root"]["definition"]},
+                            {"condition", json{{"path", "route~2"}, {"exists", true}}},
+                            {"then", json{{"op", "call_core"}}}};
 
     const auto diagnostics = compile_errors(snapshot, std::move(document));
     EXPECT_TRUE(std::any_of(diagnostics.begin(), diagnostics.end(), [](const auto& diagnostic) {
@@ -814,14 +936,13 @@ TEST(ProgramCompilerTest, RejectsMalformedConditionPointerDuringNormalization) {
 }
 
 TEST(ProgramCompilerTest, RejectsCancelScopesTheRuntimeCannotEnforce) {
-    auto snapshot = complete_snapshot();
-    auto document = program_document();
+    auto snapshot    = complete_snapshot();
+    auto document    = program_document();
     document["root"] = json{{"op", "sequence"},
-                             {"name", "main"},
-                             {"definition", document["root"]["definition"]},
-                             {"children", json::array({
-                                               json{{"op", "cancel"}, {"scope", "branch"}},
-                                               json{{"op", "call_core"}}})}};
+                            {"name", "main"},
+                            {"definition", document["root"]["definition"]},
+                            {"children", json::array({json{{"op", "cancel"}, {"scope", "branch"}},
+                                                      json{{"op", "call_core"}}})}};
 
     const auto diagnostics = compile_errors(snapshot, std::move(document));
     EXPECT_TRUE(std::any_of(diagnostics.begin(), diagnostics.end(), [](const auto& diagnostic) {
@@ -847,7 +968,8 @@ TEST(ProgramCompilerTest, RejectsMissingDuplicateAndInvalidBudgetClosure) {
 
     auto invalid = program_document();
     for (std::size_t index = 0; index < invalid["declared_budget_requirements"].size(); ++index) {
-        if (invalid["declared_budget_requirements"][index]["resource"] == "max_program_operations") {
+        if (invalid["declared_budget_requirements"][index]["resource"] ==
+            "max_program_operations") {
             invalid["declared_budget_requirements"][index]["minimum"] = 2;
             invalid["declared_budget_requirements"][index]["maximum"] = 1;
         }
@@ -1105,21 +1227,21 @@ TEST(ProgramCompilerTest, ImportMerkleRootIsOrderIndependentAndRejectsDuplicateS
 }
 
 TEST(ProgramCompilerTest, VerifiedModuleResolutionCarriesCoordinatesIntoBundle) {
-    auto snapshot = complete_snapshot();
+    auto            snapshot = complete_snapshot();
     ProgramCompiler compiler(snapshot, {"program-compiler-test/v1"});
 
     ProgramModuleData module_data;
     module_data.owner_scope    = "tenant:compiler";
     module_data.coordinate     = ModuleCoordinate{"test", "verified", "1.0.0", ""};
     module_data.attestation_id = "attestation:test";
-    const auto module = ProgramModule::create(std::move(module_data));
+    const auto module          = ProgramModule::create(std::move(module_data));
 
     ModuleResolution resolution;
     resolution.root = module.coordinate();
     resolution.modules.push_back(module);
     resolution.receipts.push_back({module.coordinate().qualified_name(), module.id()});
-    const auto source = source_from(
-        program_document(), {{module.coordinate().qualified_name(), module.id()}});
+    const auto source =
+        source_from(program_document(), {{module.coordinate().qualified_name(), module.id()}});
 
     const auto bundle = compiler.compile(source, resolution);
     ASSERT_EQ(bundle.module_coordinates(), std::vector<ModuleCoordinate>{module.coordinate()});
@@ -1213,8 +1335,7 @@ TEST(ProgramCompilerTest, EveryFailurePathLeavesDispatchCountersZero) {
         auto document = program_document();
         for (std::size_t index = 0; index < document["declared_budget_requirements"].size();
              ++index) {
-            if (document["declared_budget_requirements"][index]["resource"] ==
-                "max_child_depth")
+            if (document["declared_budget_requirements"][index]["resource"] == "max_child_depth")
                 document["declared_budget_requirements"][index]["maximum"] = 1;
         }
         return !compile_errors(snapshot, std::move(document)).empty();

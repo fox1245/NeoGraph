@@ -302,6 +302,7 @@ struct ClosureResult {
     std::vector<ExecutableIdentity> identities;
     CapabilityEffectClosure         closure;
     std::vector<EffectMode>         modes;
+    ExecutionGuarantee              execution_guarantee = ExecutionGuarantee::Strict;
 };
 
 ClosureResult resolve_closure(const RegistrySnapshot&    registry,
@@ -379,6 +380,7 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
     std::set<std::string>                                             capabilities;
     std::set<std::string>                                             effects;
     std::set<EffectMode>                                              modes;
+    ExecutionGuarantee execution_guarantee = ExecutionGuarantee::Strict;
     for (std::size_t index = 0; index < work.size(); ++index) {
         const auto current = work[index];
         const auto key =
@@ -427,6 +429,10 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
         if (manifest->effect_mode == EffectMode::TrustedNative) {
             capabilities.insert(std::string(TRUSTED_NATIVE_CAPABILITY));
         }
+        if (execution_guarantee_rank(manifest->execution_guarantee) <
+            execution_guarantee_rank(execution_guarantee)) {
+            execution_guarantee = manifest->execution_guarantee;
+        }
         for (const auto& dependency : manifest->required_executables) {
             work.push_back(
                 {dependency, "/sealed_core_definitions/0/definition", manifest->identity});
@@ -434,15 +440,29 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
     }
 
     ClosureResult result;
+    result.execution_guarantee = execution_guarantee;
     result.identities.reserve(visited.size());
     for (const auto& [ignored, identity] : visited) {
         (void)ignored;
         result.identities.push_back(identity);
     }
+
     std::sort(result.identities.begin(), result.identities.end(), identity_less);
     result.closure.capabilities.assign(capabilities.begin(), capabilities.end());
     result.closure.effects.assign(effects.begin(), effects.end());
     result.modes.assign(modes.begin(), modes.end());
+    return result;
+}
+
+ExecutionGuarantee composed_execution_guarantee(const ProgramBundle& parent_bundle,
+                                                const ProgramComposition& composition) {
+    auto result = parent_bundle.execution_guarantee();
+    for (const auto& child : composition.children) {
+        if (execution_guarantee_rank(child.version.execution_guarantee()) <
+            execution_guarantee_rank(result)) {
+            result = child.version.execution_guarantee();
+        }
+    }
     return result;
 }
 
@@ -868,7 +888,8 @@ ProgramCatalog::~ProgramCatalog()                                    = default;
 
 ProgramVersion ProgramCatalog::admit(const ProgramBundle& input_bundle,
                                      ProgramAdmission     admission) {
-    return materialize(input_bundle, std::move(admission), std::nullopt, nullptr, true);
+    return materialize(input_bundle, std::move(admission), std::nullopt, nullptr, true,
+                       input_bundle.execution_guarantee());
 }
 
 ProgramVersion ProgramCatalog::admit_composed(const ProgramBundle&      input_bundle,
@@ -900,7 +921,8 @@ ProgramVersion ProgramCatalog::admit_composed(const ProgramBundle&      input_bu
         throw std::invalid_argument(
             "Composed admission dependency receipts differ from the resolved module closure");
     }
-    return admit(input_bundle, std::move(admission));
+    return materialize(input_bundle, std::move(admission), std::nullopt, nullptr, true,
+                       composed_execution_guarantee(input_bundle, composition));
 }
 
 ProgramVersion ProgramCatalog::materialize(
@@ -909,6 +931,7 @@ ProgramVersion ProgramCatalog::materialize(
     std::optional<CatalogCapabilityBinding> supplied_binding,
     const ProgramVersion*                   expected_version,
     bool                                    publish,
+    ExecutionGuarantee                      effective_execution_guarantee,
     std::shared_ptr<const detail::MaterializedProgram>* isolated_materialization) {
     ProgramBundle bundle = [&]() {
         try {
@@ -923,6 +946,32 @@ ProgramVersion ProgramCatalog::materialize(
 
     AdmissionDiagnostics diagnostics(bundle.id());
     const auto           registry_fingerprint = impl_->registry.fingerprint();
+    if (execution_guarantee_rank(effective_execution_guarantee) == 0 ||
+        execution_guarantee_rank(effective_execution_guarantee) >
+            execution_guarantee_rank(bundle.execution_guarantee())) {
+        diagnostics.add("P_ADMIT_GUARANTEE", "/execution_guarantee",
+                        "Effective execution guarantee is malformed or stronger than the bundle",
+                        json{{"bundle", std::string(to_string(bundle.execution_guarantee()))},
+                             {"effective", std::string(to_string(effective_execution_guarantee))}});
+    }
+    if (execution_guarantee_rank(effective_execution_guarantee) <
+        execution_guarantee_rank(admission.profile.minimum_execution_guarantee())) {
+        diagnostics.add("P_ADMIT_GUARANTEE", "/execution_guarantee",
+                        "Effective execution guarantee falls below the admission profile floor",
+                        json{{"effective", std::string(to_string(effective_execution_guarantee))},
+                             {"minimum",
+                              std::string(
+                                  to_string(admission.profile.minimum_execution_guarantee()))}});
+    }
+    if (execution_guarantee_rank(effective_execution_guarantee) <
+        execution_guarantee_rank(admission.policy.minimum_execution_guarantee())) {
+        diagnostics.add("P_ADMIT_GUARANTEE", "/execution_guarantee",
+                        "Effective execution guarantee falls below the policy floor",
+                        json{{"effective", std::string(to_string(effective_execution_guarantee))},
+                             {"minimum",
+                              std::string(
+                                  to_string(admission.policy.minimum_execution_guarantee()))}});
+    }
 
     try {
         (void)bundle.typed_orchestration_plan();
@@ -1189,6 +1238,13 @@ ProgramVersion ProgramCatalog::materialize(
                 json{{"recomputed_executable_count", closure->identities.size()},
                      {"bundle_executable_count", bundle.executable_registry_identities().size()}});
         }
+        if (closure->execution_guarantee != bundle.execution_guarantee()) {
+            diagnostics.add(
+                "P_ADMIT_SEMANTIC_MISMATCH", "/execution_guarantee",
+                "Bundle execution guarantee is not the exact executable-closure floor",
+                json{{"bundle", std::string(to_string(bundle.execution_guarantee()))},
+                     {"recomputed", std::string(to_string(closure->execution_guarantee))}});
+        }
 
         const auto profile_executables = admission.profile.allowed_executables();
         const auto profile_modes       = admission.profile.allowed_effect_modes();
@@ -1296,14 +1352,15 @@ ProgramVersion ProgramCatalog::materialize(
     if (!diagnostics.empty()) diagnostics.throw_error();
 
     CoreMaterializationReceipt receipt{impl_->compiler_build_id,
-                                           registry_fingerprint,
-                                           {*recomputed_plan},
-                                           binding.receipts};
+                                       registry_fingerprint,
+                                       {*recomputed_plan},
+                                       binding.receipts};
     ProgramVersion version = [&]() {
         try {
             return ProgramVersion(
                 ProgramVersionData{bundle.id(), admission.profile, admission.policy,
-                                   admission.dependency_receipts, admission.owner_scope, receipt});
+                                   admission.dependency_receipts, admission.owner_scope, receipt,
+                                   effective_execution_guarantee});
         } catch (const std::exception& error) {
             AdmissionDiagnostics invalid(bundle.id());
             invalid.add("P_ADMIT_BINDING", "/admission",
@@ -1599,7 +1656,7 @@ std::optional<ProgramVersion> ProgramCatalog::resolve_version_impl(
                                stored.policy_snapshot(),
                                stored.dependency_receipts()};
     return materialize(bundle, std::move(admission), std::move(supplied_binding), &stored, false,
-                       isolated_materialization);
+                       stored.execution_guarantee(), isolated_materialization);
 }
 
 

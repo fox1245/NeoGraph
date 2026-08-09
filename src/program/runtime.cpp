@@ -572,6 +572,14 @@ void validate_child_link(const detail::MaterializedProgram& materialized,
         throw_runtime_diagnostic("P_CHILD_IDENTITY",
                                  "Child link does not bind the resolved Program version");
     }
+    if (execution_guarantee_rank(requested_version.execution_guarantee()) <
+        execution_guarantee_rank(link.minimum_execution_guarantee())) {
+        throw_runtime_diagnostic(
+            "P_CHILD_GUARANTEE",
+            "Child execution guarantee falls below the immutable link floor",
+            json{{"child", std::string(to_string(requested_version.execution_guarantee()))},
+                 {"minimum", std::string(to_string(link.minimum_execution_guarantee()))}});
+    }
     if (link.dependency_merkle_root() != materialized.bundle.module_dependency_merkle_root())
         throw_runtime_diagnostic("P_CHILD_MODULE_ROOT",
                                  "Child link dependency closure does not match the bundle");

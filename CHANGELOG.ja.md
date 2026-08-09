@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=3c51395bfc76deaba2f427652bb1d97856ee5e96f29897b1819cf6f267f1e344 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=0ce9d7195740e020aeb3404702dd07f670ab5c0c1048ae36e34a73f5c83a6604 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -67,6 +67,24 @@ NeoGraph の全注目すべき変更を本ファイルに文書化します。
   event 配信より先に行われ、同時 resume は一つの CAS 勝者だけを許可し、
   Core broker が用意されるまで effectful または非空 schema の Program を
   拒否します。
+
+- **QuickJS 制御言語フロントエンド。** オプトインの
+  `NEOGRAPH_BUILD_QUICKJS_CONTROL`、封印された
+  `ProgramSource::from_javascript(...)`、および非公開のコンパイル専用
+  QuickJS コンテキストを追加しました。ソースエンベロープはエンジン/言語/
+  ホスト API バージョンを固定し、唯一の `ng` ホスト表面はバージョン付きの
+  グラフビルダーです。メモリ、スタック、割り込みポーリング上限は
+  fail-closed で処理されます。JavaScript は不変の `call_core` Program
+  プラン一つだけを生成し、ランタイム VM、バイトコードアーティファクト、
+  Core 依存にはなりません。
+
+- **A2A Agent Card 互換候補。** 認証なし・リダイレクト非追従の well-known
+  カードを一度だけ収集するコレクターと、factory-only の不変候補コンパイラーを
+  追加しました。候補はダイジェストに固定された provenance、境界付き
+  プロトコル事実、安全な skill ID のみを保持し、free-form カードテキスト、
+  広告された RPC endpoint、provider/security 設定、credential を除外します。
+  Copy Ninja PoC は同じダイジェストに固定された独立観測行動を追加で要求し、
+  ソース agent を dispatch しません。
 
 - **SQLite Harness レコードストア (issue #147 フォローアップ)。** オプションの
   `neograph::mcp_sqlite` ターゲットと `SqliteHarnessRecordStore` を追加。WAL バック、

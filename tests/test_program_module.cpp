@@ -25,19 +25,24 @@ RegistrySnapshot make_registry() {
     return std::move(builder).build();
 }
 
-AdmissionProfile make_admission(const RegistrySnapshot& registry) {
+AdmissionProfile make_admission(const RegistrySnapshot& registry,
+                                ExecutionGuarantee      minimum_guarantee =
+                                    ExecutionGuarantee::Strict) {
     AdmissionProfileBuilder builder;
     builder.id("module-admission")
         .semantic_version("1.0.0")
         .registry(registry)
         .mode(AdmissionMode::MultiTenant)
         .max_program_schema_version(1)
+        .minimum_execution_guarantee(minimum_guarantee)
         .allow_source_kind(SourceKind::CanonicalJson)
         .allow_effect_mode(EffectMode::Brokered);
     return std::move(builder).build();
 }
 
-PolicySnapshot make_policy(const AdmissionProfile& admission, std::string owner) {
+PolicySnapshot make_policy(const AdmissionProfile& admission, std::string owner,
+                           ExecutionGuarantee minimum_guarantee =
+                               ExecutionGuarantee::Strict) {
     PolicySnapshotBuilder builder;
     builder.id("module-policy")
         .semantic_version("1.0.0")
@@ -45,14 +50,16 @@ PolicySnapshot make_policy(const AdmissionProfile& admission, std::string owner)
         .admission_profile(admission)
         .allow_capability("read")
         .allow_effect("tool")
-        .budget_ceiling(BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1});
+        .budget_ceiling(BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1})
+        .minimum_execution_guarantee(minimum_guarantee);
     return std::move(builder).build();
 }
 ProgramBundle make_bundle(std::string    module_root,
                           std::string    registry_fingerprint,
                           ContractRecord input,
                           ContractRecord output,
-                          std::string    child_binding = "child") {
+                          std::string    child_binding = "child",
+                          ExecutionGuarantee guarantee = ExecutionGuarantee::Strict) {
     const json definition = json{
         {"schema_version", SealedCoreDefinition::STORAGE_SCHEMA_VERSION},
         {"nodes", json{{"main", json{{"type", "module-node"}}}}}};
@@ -80,6 +87,7 @@ ProgramBundle make_bundle(std::string    module_root,
     data.executable_registry_identities = {
         ExecutableIdentity{ExecutableKind::Node, "module-node", "1.0.0", digest('5')}};
     data.capability_effect_closure = CapabilityEffectClosure{{"read"}, {"tool"}};
+    data.execution_guarantee = guarantee;
     data.declared_budget_requirements = {
         BudgetRequirement{"wall_time_ms", 1, 10},
         BudgetRequirement{"model_tokens", 1, 10},
@@ -102,14 +110,16 @@ struct LinkFixture {
 };
 
 LinkFixture make_fixture(std::string child_owner = "tenant:module",
-                         std::string child_binding = "child") {
+                         std::string child_binding = "child",
+                         ExecutionGuarantee child_guarantee = ExecutionGuarantee::Strict,
+                         ExecutionGuarantee accepted_guarantee = ExecutionGuarantee::Strict) {
     const auto module_root = ModuleResolution{}.dependency_merkle_root();
     const ContractRecord contract{1, json{{"type", "object"}}};
     const auto registry  = make_registry();
     auto       bundle    = make_bundle(module_root, registry.fingerprint(), contract, contract,
-                                    std::move(child_binding));
-    const auto admission = make_admission(registry);
-    const auto policy    = make_policy(admission, child_owner);
+                                    std::move(child_binding), child_guarantee);
+    const auto admission = make_admission(registry, child_guarantee);
+    const auto policy    = make_policy(admission, child_owner, child_guarantee);
     ProgramVersion version(
         ProgramVersionData{bundle.id(),
                            admission,
@@ -117,7 +127,8 @@ LinkFixture make_fixture(std::string child_owner = "tenant:module",
                            {},
                            child_owner,
                            CoreMaterializationReceipt{"compiler:module", registry.fingerprint(),
-                                                      {CorePlanIdentity{"main", digest('c')}}}});
+                                                      {CorePlanIdentity{"main", digest('c')}}},
+                           child_guarantee});
 
     ProgramModuleData parent_data;
     parent_data.owner_scope       = "tenant:module";
@@ -127,7 +138,8 @@ LinkFixture make_fixture(std::string child_owner = "tenant:module",
     parent_data.declared_effects     = {"tool"};
     parent_data.children.push_back(ChildProgramDescriptor{
         "child", version.id(), {ModulePort{"input", contract}}, {ModulePort{"output", contract}},
-        {"read"}, {"tool"}, BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1}});
+        {"read"}, {"tool"}, BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1},
+        accepted_guarantee});
     auto parent = ProgramModule::create(std::move(parent_data));
 
     ModuleResolution resolution;
@@ -153,6 +165,24 @@ TEST(ProgramModuleTest, LinksExactChildAndRoundTripsImmutableReceipt) {
     const auto parsed = ModuleLinkReceipt::parse(receipt.serialize_canonical());
     EXPECT_EQ(parsed.id(), receipt.id());
     EXPECT_EQ(parsed.serialize_canonical(), receipt.serialize_canonical());
+}
+
+TEST(ProgramModuleTest, RequiresExplicitChildGuaranteeAcceptanceAndPersistsIt) {
+    auto rejected =
+        make_fixture("tenant:module", "child", ExecutionGuarantee::Recorded,
+                     ExecutionGuarantee::Strict);
+    EXPECT_THROW(link_module_child(rejected.resolution, rejected.parent, "child", rejected.bundle,
+                                   rejected.version),
+                 std::invalid_argument);
+
+    auto accepted =
+        make_fixture("tenant:module", "child", ExecutionGuarantee::Recorded,
+                     ExecutionGuarantee::Recorded);
+    const auto receipt = link_module_child(accepted.resolution, accepted.parent, "child",
+                                           accepted.bundle, accepted.version);
+    EXPECT_EQ(receipt.minimum_execution_guarantee(), ExecutionGuarantee::Recorded);
+    EXPECT_EQ(ModuleLinkReceipt::parse(receipt.serialize_canonical()).minimum_execution_guarantee(),
+              ExecutionGuarantee::Recorded);
 }
 
 TEST(ProgramModuleTest, RejectsChildOwnerOutsideParentScope) {

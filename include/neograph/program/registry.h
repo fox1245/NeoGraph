@@ -7,7 +7,7 @@
 #include <neograph/api.h>
 #include <neograph/graph/registry.h>
 #include <neograph/json.h>
-#include <neograph/program/bundle.h>
+#include <neograph/program/native.h>
 
 #include <cstdint>
 #include <functional>
@@ -38,6 +38,8 @@ struct ExecutableManifest {
     std::vector<std::string>        required_capabilities;
     std::vector<std::string>        declared_effects;
     std::vector<ExecutableIdentity> required_executables;
+    /// Declared recoverability class of this executable's effect boundary.
+    ExecutionGuarantee              execution_guarantee = ExecutionGuarantee::Strict;
 };
 
 struct ProviderMetadata {
@@ -82,6 +84,7 @@ public:
     std::vector<ExecutableIdentity>   identities() const;
     std::optional<ExecutableManifest> find(ExecutableKind kind, std::string_view name) const;
     json                              manifest() const;
+    std::optional<NativeControlBinding> find_native(std::string_view name) const;
     std::string                       serialize_canonical() const;
 
 private:
@@ -127,6 +130,8 @@ public:
     RegistrySnapshotBuilder& add_tool(ExecutableManifest manifest, ToolMetadata metadata);
     RegistrySnapshotBuilder& add_imported(ExecutableManifest         manifest,
                                           ImportedExecutableMetadata metadata);
+    RegistrySnapshotBuilder& add_native(ExecutableManifest manifest, NativeControlBinding binding) &;
+    RegistrySnapshotBuilder&& add_native(ExecutableManifest manifest, NativeControlBinding binding) &&;
 
     RegistrySnapshot build() &&;
 

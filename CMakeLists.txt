@@ -111,6 +111,13 @@ endif()
 # find_package() calls are skipped entirely (see line ~258).
 option(NEOGRAPH_BUILD_ASYNC    "Build neograph::async (asio::ssl HTTP/HTTPS/WS client)" ON)
 option(NEOGRAPH_BUILD_PROGRAM  "Build optional neograph::program component" OFF)
+# Q0 / issue #24: keep the embedded JavaScript runtime independently opt-in
+# while it is being qualified.  It is deliberately separate from the existing
+# Program operation-tree component so Core-only and legacy Program consumers do
+# not acquire a new dependency until the JavaScript cutover is admitted.
+option(NEOGRAPH_BUILD_QUICKJS_CONTROL
+       "Build the experimental embedded QuickJS control runtime"
+       OFF)
 option(NEOGRAPH_BUILD_LLM      "Build neograph::llm (LLM providers)"     ON)
 option(NEOGRAPH_BUILD_MCP      "Build MCP components (compatibility umbrella)" ON)
 set(_neograph_mcp_component_default ${NEOGRAPH_BUILD_MCP})
@@ -309,6 +316,54 @@ endif()
 find_package(Threads REQUIRED)
 target_link_libraries(asio INTERFACE Threads::Threads)
 
+# QuickJS 2026-06-04 — private implementation detail of the experimental
+# JavaScript control runtime.  Do not add quickjs-libc.c: it supplies the
+# standalone std/os modules, filesystem/process helpers, and module loader
+# that the sealed NeoGraph contexts must never expose.  This target is neither
+# exported nor installed; Core does not link it, directly or transitively.
+if(NEOGRAPH_BUILD_QUICKJS_CONTROL AND WIN32)
+    message(FATAL_ERROR
+        "NEOGRAPH_BUILD_QUICKJS_CONTROL is POSIX-only during Q0: the pinned "
+        "upstream QuickJS sources use POSIX timing and stack APIs. Leave it "
+        "OFF on native Windows until a separately qualified port is added.")
+endif()
+
+if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+    add_library(neograph_quickjs OBJECT
+        ${DEPS_DIR}/quickjs/quickjs.c
+        ${DEPS_DIR}/quickjs/cutils.c
+        ${DEPS_DIR}/quickjs/dtoa.c
+        ${DEPS_DIR}/quickjs/libregexp.c
+        ${DEPS_DIR}/quickjs/libunicode.c
+    )
+    target_include_directories(neograph_quickjs PRIVATE ${DEPS_DIR}/quickjs)
+    target_compile_definitions(neograph_quickjs PRIVATE
+        CONFIG_VERSION=\"2026-06-04\")
+    set_target_properties(neograph_quickjs PROPERTIES
+        C_STANDARD 11
+        C_STANDARD_REQUIRED ON
+        C_EXTENSIONS ON
+        POSITION_INDEPENDENT_CODE ON)
+    function(_neograph_attach_quickjs_runtime target)
+        target_sources(${target} PRIVATE $<TARGET_OBJECTS:neograph_quickjs>)
+        target_link_libraries(${target} PRIVATE Threads::Threads)
+        if(UNIX AND NOT APPLE)
+            target_link_libraries(${target} PRIVATE m)
+        endif()
+    endfunction()
+    if(MSVC)
+        target_compile_definitions(neograph_quickjs PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    # Upstream's opcode-set mask macros intentionally pack bits into a signed
+    # int (for example M4(...) in quickjs.c). UBSan's shift check reports that
+    # representation detail even though the engine treats the result strictly
+    # as a bit mask. Keep ASan and every other UBSan check enabled; do not
+    # carry a source fork merely to rewrite upstream opcode macros.
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(neograph_quickjs PRIVATE -fno-sanitize=shift)
+    endif()
+endif()
+
 # OpenSSL — required by httplib for HTTPS, and by neograph::async
 # (asio::ssl in the async HTTP client). Conditional so a minimal-core
 # build (ASYNC/LLM/MCP/A2A all OFF) doesn't need libssl-dev on the host.
@@ -481,6 +536,8 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/contract.cpp
         src/program/diagnostic.cpp
         src/program/source.cpp
+        src/program/javascript.cpp
+        src/program/native.cpp
         src/program/bundle.cpp
         src/program/module.cpp
         src/program/version.cpp
@@ -516,6 +573,11 @@ if(NEOGRAPH_BUILD_PROGRAM)
         target_compile_definitions(neograph_program INTERFACE NEOGRAPH_STATIC_BUILD)
     endif()
     target_link_libraries(neograph_program PUBLIC neograph_core)
+    if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+        target_include_directories(neograph_program PRIVATE ${DEPS_DIR}/quickjs)
+        target_compile_definitions(neograph_program PRIVATE NEOGRAPH_PROGRAM_HAS_QUICKJS=1)
+        _neograph_attach_quickjs_runtime(neograph_program)
+    endif()
     add_library(neograph::program ALIAS neograph_program)
 
     # Persistent Program lifecycle adapter. Kept separate from the core
@@ -869,6 +931,7 @@ if(NEOGRAPH_BUILD_A2A)
         src/a2a/client.cpp
         src/a2a/server.cpp
         src/a2a/a2a_caller_node.cpp
+        src/a2a/agent_card_candidate.cpp
     )
 
     if(NEOGRAPH_BUILD_PROGRAM)

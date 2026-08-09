@@ -25,7 +25,7 @@ NeoGraph v1 has two public layers and one execution engine:
 The architectural boundary is therefore:
 
 ```text
-C++ builder / JSON / model-authored source
+C++ builder / JSON / bounded JavaScript authoring source
                   |
                   v
         ProgramCompiler (structural compile)
@@ -180,6 +180,18 @@ durable lifecycle state back to A2A tasks. This closes the NeoGraph-local
 Program/A2A cutover; it does not classify NeoCode or NeoProtocol as rebased
 consumers, and cross-host enablement remains gated on their explicit
 conformance evidence.
+
+A fetched A2A well-known card is discovery evidence, not admission.
+`AgentCardCollector` makes one explicit card GET with no Authorization header
+and never follows a redirect or invokes the advertised RPC endpoint.
+`AgentCardCandidateCompiler` distils the collected card into an immutable,
+digest-pinned, unadmitted candidate containing only bounded protocol facts and
+safe skill identifiers. The candidate excludes the card's free-form text,
+declared remote RPC endpoint, provider configuration, security schemes, and
+credentials; it cannot dispatch the source agent. The sole Copy Ninja PoC
+materializer additionally requires an independently observed profile pinned to
+that digest and constructs a local graph. Any other behavior still requires the
+ordinary local Program/admission path.
 
 ### Cross-repository compatibility and rebase boundary
 
@@ -336,7 +348,8 @@ and conformance gate for this contract.
   compiler and immutable artifact format.
 - Support sequence, branch, bounded loop, parallel, race, retry, cancellation,
   wait, checkpoint, child Program, and immutable version activation without a
-  general-purpose VM.
+  general-purpose **runtime** VM. An opt-in JavaScript frontend may use ordinary
+  authoring-time control flow, but only to emit one bounded typed Program plan.
 - Keep programs inspectable, source-mapped, reproducible, capability-scoped,
   and replayable.
 - Permit open-ended evolution as a sequence of finite admitted versions, never
@@ -346,7 +359,8 @@ and conformance gate for this contract.
 
 ## Non-goals
 
-- Executing raw model output, arbitrary C++, Python, shell, or ambient host APIs.
+- Executing raw or unsealed model output, arbitrary C++, Python, shell, or
+  ambient host APIs.
 - Mutating a live `GraphEngine` topology in place.
 - Replacing `GraphEngine` with a bytecode interpreter.
 - Inventing a new persistence engine when `CheckpointStore`, `Store`, and the
@@ -473,6 +487,25 @@ Child Programs and replacements receive a subset of the remaining budget.
 Resume, retry, fork, rollback, and child attachment never replenish it. Budget
 exhaustion is a typed terminal outcome, not a generic exception or model error.
 
+### JavaScript authoring boundary
+
+`SourceKind::JavaScript` is an opt-in, compile-only frontend, not a second
+Program runtime. A sealed source is evaluated by a private QuickJS context only
+while `ProgramCompiler` builds one Core definition. The runtime receives only
+the immutable `ProgramBundle` and typed plan; it never retains a QuickJS
+context, bytecode artifact, callback, or host capability.
+
+The JavaScript host exposes only a non-extensible `ng` graph-builder surface
+with a versioned `apiVersion`. It installs no module loader, network, provider,
+tool, filesystem, shell, or native-plugin capability. A module must export a
+synchronous `define()` that returns exactly one open builder; top-level await,
+wrong return values, and builder reuse fail closed. The compiler caps memory,
+stack, and interrupt polls, and records resource exhaustion as a typed compile
+diagnostic. The source envelope pins the QuickJS engine/language/host-API
+versions; compiler-limit changes require a new compiler build identity. Builds
+without `NEOGRAPH_BUILD_QUICKJS_CONTROL` reject JavaScript sources rather than
+linking the control runtime into Core-only consumers.
+
 ### Host admission
 
 `RunBudget` is a durable per-Program spending limit; it is not a statement
@@ -578,9 +611,11 @@ native code is rejected or isolated outside the process.
 ### ProgramSource
 
 The authored document plus its source kind, declared schema version, imports,
-and source coordinates. Accepted initial frontends are C++ builder values and
-canonical JSON. YAML or model-specific syntax may be added later only by
-lowering to the same typed source model.
+and source coordinates. Supported frontends are C++ builder values, canonical
+JSON, and opt-in JavaScript. JavaScript source is sealed in a canonical envelope
+that pins its QuickJS engine, language, and host-API versions, then lowers only
+through the compile-only builder boundary above. YAML or model-specific syntax
+may be added later only by lowering to the same typed source model.
 
 ### ProgramBundle
 
@@ -996,6 +1031,9 @@ methods are migration inputs, not parallel permanent architectures.
 - Existing strict Core JSON remains a supported Core input.
 - Existing bounded Harness DSL is translated to `ProgramSource` and compiled by
   `ProgramCompiler`.
+- JavaScript `ProgramSource` is an opt-in Program frontend, not a Core input.
+  Its engine and host-ABI identity remain part of its sealed source envelope;
+  a build that disables the QuickJS control component rejects it explicitly.
 - Existing retained Harness artifacts are imported into `ProgramBundle` only
   when their hashes, registry/admission profile, and executable semantics can be
   preserved exactly. Otherwise they drain on the pinned legacy path or fail with

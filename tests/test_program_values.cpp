@@ -151,6 +151,38 @@ TEST(ProgramSourceTest, CanonicalIdentityIgnoresObjectKeyOrder) {
     EXPECT_EQ(first.kind(), SourceKind::CanonicalJson);
 }
 
+TEST(ProgramSourceTest, JavaScriptSourcePinsEngineAndHostAbiInItsEnvelope) {
+    const auto source = ProgramSource::from_javascript(
+        "control.js", R"(neograph.define({ op: "call_core", name: "main" });)");
+
+    EXPECT_EQ(source.kind(), SourceKind::JavaScript);
+    EXPECT_EQ(source.document().at("language"), "javascript");
+    EXPECT_EQ(source.document().at("engine"), "quickjs");
+    EXPECT_EQ(source.document().at("engine_version"), "2026-06-04");
+    EXPECT_EQ(source.document().at("language_version"), 1);
+    EXPECT_EQ(source.document().at("host_api_version"), 1);
+    EXPECT_EQ(source.document().at("source"),
+              R"(neograph.define({ op: "call_core", name: "main" });)");
+
+    const auto restored = ProgramSource::parse(source.serialize_canonical());
+    EXPECT_EQ(restored.kind(), SourceKind::JavaScript);
+    EXPECT_EQ(restored.source_hash(), source.source_hash());
+    EXPECT_EQ(restored.canonical_document(), source.canonical_document());
+}
+
+TEST(ProgramSourceTest, StoredJavaScriptSourceRejectsAnIncompatibleHostAbi) {
+    const auto source = ProgramSource::from_javascript("control.js", "neograph.define({});");
+    auto       stored = json::parse(source.serialize_canonical());
+    stored["document"]["host_api_version"] = 2;
+
+    try {
+        (void)ProgramSource::parse(stored.dump());
+        FAIL() << "expected incompatible JavaScript source envelope rejection";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find("host API version"), std::string::npos);
+    }
+}
+
 TEST(ProgramSourceTest, ParseFailureDoesNotFabricateSpanForUtf8Source) {
     try {
         (void)ProgramSource::from_canonical_json("utf8-source", R"({"이름":"값",})");
@@ -414,6 +446,12 @@ TEST(ProgramBundleTest, SourceKindIsRequiredAndRoundTripsExactly) {
     EXPECT_EQ(ProgramBundle::parse(cpp_bundle.serialize_canonical()).source_kind(),
               SourceKind::CppBuilder);
 
+    const auto    js_source = ProgramSource::from_javascript("source.js", "neograph.define({});");
+    ProgramBundle js_bundle(make_bundle_data(js_source));
+    EXPECT_EQ(js_bundle.source_kind(), SourceKind::JavaScript);
+    EXPECT_EQ(ProgramBundle::parse(js_bundle.serialize_canonical()).source_kind(),
+              SourceKind::JavaScript);
+
     auto omitted        = make_bundle_data(make_source());
     omitted.source_kind = static_cast<SourceKind>(255);
     EXPECT_THROW((void)ProgramBundle(std::move(omitted)), std::invalid_argument);
@@ -531,25 +569,23 @@ TEST(ProgramBundleTest, IdentityEnvelopeRejectsFormatStorageAndContentTampering)
 }
 
 TEST(ProgramContractTest, ValidatesRetainedSchemaWithoutMcpDependency) {
-    ContractRecord contract{
-        1,
-        json{{"type", "object"},
-             {"required", json::array({"task"})},
-             {"properties", json{{"task", json{{"type", "string"}}}}},
-             {"additionalProperties", false}}};
+    ContractRecord contract{1, json{{"type", "object"},
+                                    {"required", json::array({"task"})},
+                                    {"properties", json{{"task", json{{"type", "string"}}}}},
+                                    {"additionalProperties", false}}};
 
     EXPECT_NO_THROW(validate_contract_schema(contract));
     EXPECT_NO_THROW(validate_contract_value(json{{"task", "ship"}}, contract));
     EXPECT_THROW(validate_contract_value(json::object(), contract), std::invalid_argument);
     EXPECT_THROW(validate_contract_value(json{{"task", 7}}, contract), std::invalid_argument);
-    EXPECT_THROW(validate_contract_value(json{{"task", "ship"}, {"raw_route", "forbidden"}},
-                                         contract),
-                 std::invalid_argument);
+    EXPECT_THROW(
+        validate_contract_value(json{{"task", "ship"}, {"raw_route", "forbidden"}}, contract),
+        std::invalid_argument);
 }
 
 TEST(ProgramVersionTest, RoundTripsAndNormalizesReceiptOrder) {
     ProgramBundle bundle(make_bundle_data(make_source()));
-    auto          first_data  = make_version_data(bundle);
+    auto          first_data                                    = make_version_data(bundle);
     first_data.core_materialization_receipt.capability_bindings = {
         CapabilityBindingReceipt{
             ExecutableIdentity{ExecutableKind::Tool, "tool", "1.0.0", sha('8')}, sha('9')},
@@ -573,10 +609,9 @@ TEST(ProgramVersionTest, RoundTripsAndNormalizesReceiptOrder) {
     EXPECT_EQ(parsed.core_materialization_receipt().plans.front().name, "alpha");
     EXPECT_EQ(parsed.core_materialization_receipt().capability_bindings.front().executable.name,
               "provider");
-    EXPECT_EQ(capability_binding_receipt_root(
-                  parsed.core_materialization_receipt().capability_bindings),
-              capability_binding_receipt_root(
-                  first.core_materialization_receipt().capability_bindings));
+    EXPECT_EQ(
+        capability_binding_receipt_root(parsed.core_materialization_receipt().capability_bindings),
+        capability_binding_receipt_root(first.core_materialization_receipt().capability_bindings));
 }
 
 TEST(ProgramVersionTest, RejectsSchemaInvalidTokenStringsInConstructorAndParser) {
@@ -605,19 +640,17 @@ TEST(ProgramVersionTest, RejectsSchemaInvalidTokenStringsInConstructorAndParser)
 }
 
 TEST(ProgramVersionTest, RejectsMalformedAndDuplicateCapabilityBindingReceipts) {
-    ProgramBundle bundle(make_bundle_data(make_source()));
-    const ExecutableIdentity provider{
-        ExecutableKind::Provider, "provider", "1.0.0", sha('c')};
+    ProgramBundle            bundle(make_bundle_data(make_source()));
+    const ExecutableIdentity provider{ExecutableKind::Provider, "provider", "1.0.0", sha('c')};
 
     auto malformed = make_version_data(bundle);
     malformed.core_materialization_receipt.capability_bindings.push_back(
         CapabilityBindingReceipt{provider, "route:not-a-digest"});
     EXPECT_THROW((void)ProgramVersion(std::move(malformed)), std::invalid_argument);
 
-    auto duplicate = make_version_data(bundle);
+    auto duplicate                                             = make_version_data(bundle);
     duplicate.core_materialization_receipt.capability_bindings = {
-        CapabilityBindingReceipt{provider, sha('d')},
-        CapabilityBindingReceipt{provider, sha('e')}};
+        CapabilityBindingReceipt{provider, sha('d')}, CapabilityBindingReceipt{provider, sha('e')}};
     EXPECT_THROW((void)ProgramVersion(std::move(duplicate)), std::invalid_argument);
 }
 
@@ -680,7 +713,7 @@ TEST(ProgramStoredValueTest, BundleV1MatchesKnownVectorAndVersionReceiptIsCanoni
         R"JSON(ddddddddddddddddddddd","name":"main"}],"declared_budget_requirements":[{"maximum":1,"minimum":0,"res)JSON"
         R"JSON(ource":"steps"}],"diagnostics":[],"executable_registry_identities":[{"implementation_digest":"sha256)JSON"
         R"JSON(:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","kind":"node","name":"main","sema)JSON"
-        R"JSON(ntic_version":"1.0.0"}],"format":"neograph-program-bundle","id":"sha256:536eb03dc23c6d4d3b12212e516efd5a24696073be7b8b6dc6041fe3f4cfa5d1","input_contra)JSON"
+        R"JSON(ntic_version":"1.0.0"}],"execution_guarantee":"strict","format":"neograph-program-bundle","id":"sha256:f90312429fafc252b96a0c18c986a0e5a525b7357e19a69959b83bb1787a4d65","input_contra)JSON"
         R"JSON(ct":{"schema":{},"schema_version":1},"module_dependency_merkle_root":"sha256:cccccccccccccccccccccccccccccccc)JSON"
         R"JSON(cccccccccccccccccccccccccccccccc","orchestration_plan":{"plan":{},"schema_version":1},"output_contract":)JSON"
         R"JSON({"schema":{},"schema_version":1},"program_schema_version":1,"registry_snapshot_fingerprint":"sha256:bbbbbb)JSON"
@@ -689,7 +722,7 @@ TEST(ProgramStoredValueTest, BundleV1MatchesKnownVectorAndVersionReceiptIsCanoni
         R"JSON("source_hash":"sha256:d0de8671b55a589345c561ca87b14a55755e8934e1c82fadb0ab9c934a313e3a","source_kind")JSON"
         R"JSON(:"canonical_json","source_map":[],"storage_schema_version":1})JSON";
     EXPECT_EQ(bundle.id(),
-              "sha256:536eb03dc23c6d4d3b12212e516efd5a24696073be7b8b6dc6041fe3f4cfa5d1");
+              "sha256:f90312429fafc252b96a0c18c986a0e5a525b7357e19a69959b83bb1787a4d65");
     EXPECT_EQ(bundle.serialize_canonical(), expected_bundle);
 
     const auto         registry  = make_registry_snapshot();
@@ -702,8 +735,7 @@ TEST(ProgramStoredValueTest, BundleV1MatchesKnownVectorAndVersionReceiptIsCanoni
     ProgramVersion version(std::move(version_data));
 
     const auto encoded_version = json::parse(version.serialize_canonical());
-    ASSERT_TRUE(encoded_version["core_materialization_receipt"].contains(
-        "capability_bindings"));
+    ASSERT_TRUE(encoded_version["core_materialization_receipt"].contains("capability_bindings"));
     EXPECT_EQ(encoded_version["core_materialization_receipt"]["capability_bindings"],
               json::array());
     EXPECT_EQ(ProgramVersion::parse(version.serialize_canonical()).id(), version.id());

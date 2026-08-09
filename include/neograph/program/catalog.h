@@ -149,6 +149,7 @@ private:
         const ProgramBundle& bundle, ProgramAdmission admission,
         std::optional<CatalogCapabilityBinding> supplied_binding,
         const ProgramVersion* expected_version, bool publish,
+        ExecutionGuarantee effective_execution_guarantee,
         std::shared_ptr<const detail::MaterializedProgram>* isolated_materialization = nullptr);
     std::optional<ProgramVersion> resolve_version_impl(
         std::string_view owner_scope, std::string_view id,

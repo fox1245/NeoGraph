@@ -84,6 +84,9 @@ void validate_manifest(ExecutableManifest& manifest) {
     normalize_strings(manifest.required_capabilities, "required_capabilities");
     normalize_strings(manifest.declared_effects, "declared_effects");
     normalize_dependencies(manifest);
+    if (execution_guarantee_rank(manifest.execution_guarantee) == 0) {
+        throw std::invalid_argument("Executable execution_guarantee is unsupported");
+    }
 }
 
 void require_kind(const ExecutableManifest& manifest, ExecutableKind expected) {
@@ -109,6 +112,7 @@ json encode_manifest(const SnapshotEntry& entry) {
     const auto& manifest           = entry.manifest;
     json        value              = encode_identity(manifest.identity);
     value["effect_mode"]           = std::string(to_string(manifest.effect_mode));
+    value["execution_guarantee"]    = std::string(to_string(manifest.execution_guarantee));
     value["attestation_id"]        = manifest.attestation_id;
     value["required_capabilities"] = manifest.required_capabilities;
     value["declared_effects"]      = manifest.declared_effects;
@@ -120,11 +124,48 @@ json encode_manifest(const SnapshotEntry& entry) {
     return value;
 }
 
+json encode_native_metadata(const NativeControlMetadata& metadata) {
+    const auto encode_contract = [](const ContractRecord& contract) {
+        return json{{"schema_version", contract.schema_version},
+                    {"schema", detail::owned_json_copy(contract.schema)}};
+    };
+    return json{
+        {"native_abi_version", NEOGRAPH_PROGRAM_NATIVE_ABI_V1},
+        {"input_contract", encode_contract(metadata.input_contract)},
+        {"output_contract", encode_contract(metadata.output_contract)},
+        {"idempotency", std::string(to_string(metadata.idempotency))},
+        {"replay_behavior", std::string(to_string(metadata.replay_behavior))},
+        {"resource_cost",
+         {{"max_input_bytes", metadata.resource_cost.max_input_bytes},
+          {"max_output_bytes", metadata.resource_cost.max_output_bytes},
+          {"max_wall_time_ms", metadata.resource_cost.max_wall_time_ms},
+          {"max_memory_bytes", metadata.resource_cost.max_memory_bytes}}},
+    };
+}
+
+ExecutionGuarantee native_execution_guarantee(const NativeControlMetadata& metadata) {
+    switch (metadata.replay_behavior) {
+        case NativeReplayBehavior::Deterministic:
+            return ExecutionGuarantee::Strict;
+        case NativeReplayBehavior::Recorded:
+            return ExecutionGuarantee::Recorded;
+        case NativeReplayBehavior::Unmanaged:
+            return ExecutionGuarantee::Unmanaged;
+    }
+    throw std::invalid_argument("Native control binding replay behavior is unsupported");
+}
+
 }  // namespace
+
+struct NativeBinding {
+    std::string          name;
+    NativeControlBinding binding;
+};
 
 struct RegistrySnapshot::Impl {
     graph::GraphRegistry       registry;
     std::vector<SnapshotEntry> entries;
+    std::vector<NativeBinding> native_bindings;
     std::string                fingerprint;
     json                       manifest;
 };
@@ -135,9 +176,10 @@ struct RegistrySnapshotBuilder::Impl {
         ExecutableIdentity target;
     };
 
-    graph::GraphRegistry         registry;
-    std::vector<SnapshotEntry>   entries;
-    std::vector<ImportedBinding> imported_targets;
+    graph::GraphRegistry          registry;
+    std::vector<SnapshotEntry>    entries;
+    std::vector<ImportedBinding>  imported_targets;
+    std::vector<NativeBinding>    native_bindings;
 };
 
 RegistrySnapshot::RegistrySnapshot(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
@@ -163,6 +205,14 @@ std::optional<ExecutableManifest> RegistrySnapshot::find(ExecutableKind   kind,
         });
     if (it == impl_->entries.end()) return std::nullopt;
     return it->manifest;
+}
+
+std::optional<NativeControlBinding> RegistrySnapshot::find_native(std::string_view name) const {
+    const auto binding = std::find_if(
+        impl_->native_bindings.begin(), impl_->native_bindings.end(),
+        [name](const NativeBinding& candidate) { return candidate.name == name; });
+    if (binding == impl_->native_bindings.end()) return std::nullopt;
+    return binding->binding;
 }
 
 const ExecutableManifest& detail::RegistrySnapshotAccess::require_manifest(
@@ -361,6 +411,29 @@ RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_imported(
     return *this;
 }
 
+RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_native(ExecutableManifest manifest,
+                                                              NativeControlBinding binding) & {
+    require_kind(manifest, ExecutableKind::Imported);
+    validate_manifest(manifest);
+    if (!binding.valid()) throw std::invalid_argument("Native control binding must not be empty");
+
+    const auto& metadata = binding.metadata();
+    if (manifest.execution_guarantee != native_execution_guarantee(metadata)) {
+        throw std::invalid_argument(
+            "Native control manifest execution_guarantee does not match its replay behavior");
+    }
+    impl_->native_bindings.push_back({manifest.identity.name, binding});
+    impl_->entries.push_back(SnapshotEntry{
+        std::move(manifest), detail::owned_json_copy(encode_native_metadata(metadata)), {}});
+    return *this;
+}
+
+RegistrySnapshotBuilder&& RegistrySnapshotBuilder::add_native(ExecutableManifest manifest,
+                                                               NativeControlBinding binding) && {
+    this->add_native(std::move(manifest), std::move(binding));
+    return std::move(*this);
+}
+
 RegistrySnapshot RegistrySnapshotBuilder::build() && {
     if (!impl_) throw std::logic_error("RegistrySnapshotBuilder was already consumed");
     std::sort(
@@ -399,6 +472,7 @@ RegistrySnapshot RegistrySnapshotBuilder::build() && {
         alias->manifest.effect_mode           = local->manifest.effect_mode;
         alias->manifest.required_capabilities = local->manifest.required_capabilities;
         alias->manifest.declared_effects      = local->manifest.declared_effects;
+        alias->manifest.execution_guarantee    = local->manifest.execution_guarantee;
         validate_manifest(alias->manifest);
     }
     for (const auto& entry : impl_->entries) {
@@ -428,6 +502,7 @@ RegistrySnapshot RegistrySnapshotBuilder::build() && {
     auto result         = std::make_shared<RegistrySnapshot::Impl>();
     result->registry    = std::move(impl_->registry);
     result->entries     = std::move(impl_->entries);
+    result->native_bindings = std::move(impl_->native_bindings);
     result->fingerprint = fingerprint;
     result->manifest    = detail::owned_json_copy(body);
     impl_.reset();

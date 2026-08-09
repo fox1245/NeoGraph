@@ -111,11 +111,14 @@ private:
 
 RegistrySnapshot registry(bool                     failing_factory = false,
                           std::vector<std::string> capabilities    = {},
-                          std::vector<std::string> effects         = {}) {
+                          std::vector<std::string> effects         = {},
+                          ExecutionGuarantee        node_guarantee =
+                              ExecutionGuarantee::Strict) {
     RegistrySnapshotBuilder builder;
     auto                    node = manifest(ExecutableKind::Node, "catalog-node", '1');
     node.required_capabilities   = std::move(capabilities);
     node.declared_effects        = std::move(effects);
+    node.execution_guarantee        = node_guarantee;
     builder.add_node(
         std::move(node),
         [failing_factory](const std::string& name, const json&, const NodeContext&) {
@@ -247,13 +250,15 @@ json bound_document(std::uint64_t max_concurrency = 1) {
 AdmissionProfile profile(const RegistrySnapshot& snapshot,
                          bool                    allow_source = true,
                          bool                    allow_node   = true,
-                         bool                    allow_mode   = true) {
+                         bool                    allow_mode   = true,
+                         ExecutionGuarantee minimum_guarantee = ExecutionGuarantee::Strict) {
     AdmissionProfileBuilder builder;
     builder.id("catalog-profile")
         .semantic_version("1.0.0")
         .registry(snapshot)
         .mode(AdmissionMode::MultiTenant)
-        .max_program_schema_version(1);
+        .max_program_schema_version(1)
+        .minimum_execution_guarantee(minimum_guarantee);
     if (allow_source) builder.allow_source_kind(SourceKind::CppBuilder);
     if (allow_mode) builder.allow_effect_mode(EffectMode::Brokered);
     for (const auto& identity : snapshot.identities()) {
@@ -267,13 +272,15 @@ AdmissionProfile profile(const RegistrySnapshot& snapshot,
 PolicySnapshot policy(const AdmissionProfile& admission,
                       BudgetLimits            ceiling = {1000, 100, 100, 1, 1, 20, 1, 1, 1},
                       bool                    allow_capability = false,
-                      bool                    allow_effect     = false) {
+                      bool                    allow_effect     = false,
+                      ExecutionGuarantee minimum_guarantee = ExecutionGuarantee::Strict) {
     PolicySnapshotBuilder builder;
     builder.id("catalog-policy")
         .semantic_version("1.0.0")
         .owner_scope("tenant:catalog")
         .admission_profile(admission)
-        .budget_ceiling(ceiling);
+        .budget_ceiling(ceiling)
+        .minimum_execution_guarantee(minimum_guarantee);
     if (allow_capability) builder.allow_capability("catalog-capability");
     if (allow_effect) builder.allow_effect("catalog-effect");
     return std::move(builder).build();
@@ -306,6 +313,7 @@ ProgramBundleData copy_data(const ProgramBundle& bundle) {
     data.sealed_core_definitions        = bundle.sealed_core_definitions();
     data.core_plan_identities           = bundle.core_plan_identities();
     data.capability_effect_closure      = bundle.capability_effect_closure();
+    data.execution_guarantee            = bundle.execution_guarantee();
     data.executable_registry_identities = bundle.executable_registry_identities();
     data.declared_budget_requirements   = bundle.declared_budget_requirements();
     data.source_map                     = bundle.source_map();
@@ -462,6 +470,9 @@ TEST(ProgramCatalogTest, RejectsEveryCallerAssertedSemanticTamperBeforeFactory) 
                 if (budget.resource == "max_core_steps") budget.maximum = 19;
             }
         },
+        [](ProgramBundleData& data) {
+            data.execution_guarantee = ExecutionGuarantee::Recorded;
+        },
     };
 
     for (const auto& mutate : mutations) {
@@ -526,6 +537,44 @@ TEST(ProgramCatalogTest, BrokeredClosureAdmitsWhenPolicyAllows) {
 
     EXPECT_EQ(factory_calls.load(), 1U);
     EXPECT_TRUE(store->get_version(version.id()).has_value());
+}
+
+TEST(ProgramCatalogTest, DerivesAndEnforcesExecutableExecutionGuarantees) {
+    factory_calls.store(0);
+    const auto snapshot = registry(false, {}, {}, ExecutionGuarantee::Recorded);
+    const auto bundle   = compile(snapshot);
+    EXPECT_EQ(bundle.execution_guarantee(), ExecutionGuarantee::Recorded);
+
+    CatalogFixture strict_fixture(snapshot);
+    try {
+        (void)strict_fixture.catalog.admit(bundle, strict_fixture.request());
+        FAIL() << "strict profile admitted a recorded executable closure";
+    } catch (const ProgramAdmissionError& error) {
+        EXPECT_TRUE(has_code(error, "P_ADMIT_GUARANTEE"));
+    }
+    EXPECT_EQ(factory_calls.load(), 0U);
+
+    const auto recorded_profile =
+        profile(snapshot, true, true, true, ExecutionGuarantee::Recorded);
+    const auto recorded_policy =
+        policy(recorded_profile, {1000, 100, 100, 1, 1, 20, 1, 1, 1}, false, false,
+               ExecutionGuarantee::Recorded);
+    auto store = std::make_shared<InMemoryProgramStore>();
+    ProgramCatalog catalog(CatalogConfig{store, snapshot, std::make_shared<EngineGenerationCache>(),
+                                         "catalog-test/v1"});
+
+    const auto version = catalog.admit(
+        bundle, ProgramAdmission{"tenant:catalog", recorded_profile, recorded_policy, {}});
+    EXPECT_EQ(version.execution_guarantee(), ExecutionGuarantee::Recorded);
+    EXPECT_EQ(ProgramVersion::parse(version.serialize_canonical()).execution_guarantee(),
+              ExecutionGuarantee::Recorded);
+
+    auto forged = copy_data(bundle);
+    forged.execution_guarantee = ExecutionGuarantee::Strict;
+    EXPECT_THROW((void)catalog.admit(ProgramBundle(std::move(forged)),
+                                     ProgramAdmission{"tenant:catalog", recorded_profile,
+                                                      recorded_policy, {}}),
+                 ProgramAdmissionError);
 }
 
 TEST(ProgramCatalogTest, ConfigDerivedClosureBindsExactlyAndOwnedResourcesRun) {

@@ -208,10 +208,13 @@ private:
     std::string name_;
 };
 
-RegistrySnapshot runtime_registry() {
+RegistrySnapshot runtime_registry(
+    ExecutionGuarantee completed_guarantee = ExecutionGuarantee::Strict) {
     RegistrySnapshotBuilder builder;
+    auto completed = manifest(ExecutableKind::Node, "runtime-completed", '1');
+    completed.execution_guarantee = completed_guarantee;
     builder.add_node(
-        manifest(ExecutableKind::Node, "runtime-completed", '1'),
+        std::move(completed),
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<CompletedNode>(name);
         },
@@ -413,10 +416,11 @@ struct AdmittedRuntime {
     explicit AdmittedRuntime(std::size_t                             scheduler_threads  = 1,
                              std::shared_ptr<CheckpointStore>        checkpoint_backend = {},
                              std::shared_ptr<ProgramTransitionStore> journal_backend    = {},
-                             ProgramChildQuotaConfig                 quota              = {})
-        : registry(runtime_registry()),
-          profile(make_profile(registry)),
-          policy(make_policy(profile)),
+                             ProgramChildQuotaConfig                 quota              = {},
+                             ExecutionGuarantee minimum_guarantee = ExecutionGuarantee::Strict)
+        : registry(runtime_registry(minimum_guarantee)),
+          profile(make_profile(registry, minimum_guarantee)),
+          policy(make_policy(profile, minimum_guarantee)),
           store(std::make_shared<InMemoryProgramStore>()),
           engines(std::make_shared<EngineGenerationCache>()),
           catalog(std::make_shared<ProgramCatalog>(
@@ -430,13 +434,16 @@ struct AdmittedRuntime {
           scheduler_thread_count(scheduler_threads),
           runtime(make_runtime()) {}
 
-    static AdmissionProfile make_profile(const RegistrySnapshot& registry) {
+    static AdmissionProfile make_profile(const RegistrySnapshot& registry,
+                                         ExecutionGuarantee minimum_guarantee =
+                                             ExecutionGuarantee::Strict) {
         AdmissionProfileBuilder builder;
         builder.id("runtime-profile")
             .semantic_version("1.0.0")
             .registry(registry)
             .mode(AdmissionMode::MultiTenant)
             .max_program_schema_version(1)
+            .minimum_execution_guarantee(minimum_guarantee)
             .allow_source_kind(SourceKind::CppBuilder)
             .allow_effect_mode(EffectMode::Brokered);
         for (const auto& identity : registry.identities())
@@ -444,13 +451,16 @@ struct AdmittedRuntime {
         return std::move(builder).build();
     }
 
-    static PolicySnapshot make_policy(const AdmissionProfile& profile) {
+    static PolicySnapshot make_policy(const AdmissionProfile& profile,
+                                      ExecutionGuarantee minimum_guarantee =
+                                          ExecutionGuarantee::Strict) {
         PolicySnapshotBuilder builder;
         builder.id("runtime-policy")
             .semantic_version("1.0.0")
             .owner_scope("tenant:runtime")
             .admission_profile(profile)
-            .budget_ceiling(BudgetLimits{10000, 1000, 1000, 4, 32, 20, 4, 4, 32});
+            .budget_ceiling(BudgetLimits{10000, 1000, 1000, 4, 32, 20, 4, 4, 32})
+            .minimum_execution_guarantee(minimum_guarantee);
         return std::move(builder).build();
     }
     std::unique_ptr<ProgramRuntime> make_runtime() const {
@@ -528,7 +538,8 @@ LinkedChildAdmission link_child_versions(
     AdmittedRuntime& fixture,
     ProgramVersion   parent_version,
     ProgramVersion   child_version,
-    BudgetLimits     child_budget = BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 1, 1}) {
+    BudgetLimits     child_budget = BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 1, 1},
+    ExecutionGuarantee accepted_guarantee = ExecutionGuarantee::Strict) {
     const auto child_bundle = fixture.store->get_bundle(child_version.bundle_id());
     if (!child_bundle) throw std::runtime_error("child bundle was not admitted");
 
@@ -543,7 +554,8 @@ LinkedChildAdmission link_child_versions(
                                {ModulePort{"output", child_bundle->output_contract()}},
                                child_bundle->capability_effect_closure().capabilities,
                                child_bundle->capability_effect_closure().effects,
-                               std::move(child_budget)});
+                               std::move(child_budget),
+                               accepted_guarantee});
     module_data.allowed_capabilities = child_bundle->capability_effect_closure().capabilities;
     module_data.declared_effects     = child_bundle->capability_effect_closure().effects;
     const auto parent_module = ProgramModule::create(std::move(module_data));
@@ -601,7 +613,8 @@ LinkedChildAdmission make_durable_spawn_child(
     AdmittedRuntime& fixture,
     std::string      parent_node_type = "runtime-completed",
     std::string      child_node_type  = "runtime-completed",
-    std::optional<std::uint64_t> timeout_ms = std::nullopt) {
+    std::optional<std::uint64_t> timeout_ms = std::nullopt,
+    ExecutionGuarantee accepted_guarantee = ExecutionGuarantee::Strict) {
     json await = json{{"op", "await"},
                       {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}};
     if (timeout_ms) await["timeout_ms"] = *timeout_ms;
@@ -613,7 +626,9 @@ LinkedChildAdmission make_durable_spawn_child(
     parent_document["declared_budget_requirements"][8]["minimum"] = 1;
     parent_document["declared_budget_requirements"][8]["maximum"] = 1;
     return link_child_versions(fixture, fixture.admit_document(std::move(parent_document)),
-                               fixture.admit(std::move(child_node_type)));
+                               fixture.admit(std::move(child_node_type)),
+                               BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 1, 1},
+                               accepted_guarantee);
 }
 
 
@@ -3396,6 +3411,41 @@ TEST(ProgramRuntimeTest, DurableDslSpawnRejectsAResolverReceiptForAnotherBinding
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
     EXPECT_EQ(result.failure()->code, "P_CHILD_BINDING");
+    EXPECT_EQ(result.failure()->operation_id, "root.0");
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, DurableDslSpawnRejectsReceiptWhoseGuaranteeExceedsChildVersion) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Recorded);
+    const auto linked = make_durable_spawn_child(
+        fixture, "runtime-completed", "runtime-completed", std::nullopt,
+        ExecutionGuarantee::Recorded);
+    ASSERT_EQ(linked.child_version.execution_guarantee(), ExecutionGuarantee::Recorded);
+
+    const ModuleLinkReceipt forged = ModuleLinkReceipt::create(ModuleLinkReceiptData{
+        linked.receipt.owner_scope(),
+        linked.receipt.parent_module_id(),
+        linked.receipt.dependency_merkle_root(),
+        linked.receipt.child_name(),
+        linked.receipt.child_program_version_id(),
+        linked.receipt.child_bundle_id(),
+        linked.receipt.child_input_contract_fingerprint(),
+        linked.receipt.child_output_contract_fingerprint(),
+        linked.receipt.granted_capabilities(),
+        linked.receipt.granted_effects(),
+        linked.receipt.budget(),
+        ExecutionGuarantee::Strict});
+    fixture.bind_child(linked.parent_version, "child",
+                       ProgramRuntimeChildBinding{forged, linked.child_version});
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                          "trace-guarantee-mismatched-durable-binding", {}});
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_CHILD_GUARANTEE");
     EXPECT_EQ(result.failure()->operation_id, "root.0");
     EXPECT_EQ(completed_calls.load(), 0U);
 }

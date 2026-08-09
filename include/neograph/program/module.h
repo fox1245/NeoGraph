@@ -45,6 +45,11 @@ struct ChildProgramDescriptor {
     std::vector<std::string> required_capabilities;
     std::vector<std::string> required_effects;
     BudgetLimits             budget;
+    /**
+     * Weakest child guarantee the parent explicitly accepts. A weaker child
+     * rejects before dispatch; accepting degradation is immutable module data.
+     */
+    ExecutionGuarantee       minimum_execution_guarantee = ExecutionGuarantee::Strict;
 
     bool operator==(const ChildProgramDescriptor&) const = default;
 };
@@ -146,6 +151,7 @@ struct ModuleLinkReceiptData {
     std::vector<std::string> granted_capabilities;
     std::vector<std::string> granted_effects;
     BudgetLimits             budget;
+    ExecutionGuarantee       minimum_execution_guarantee = ExecutionGuarantee::Strict;
 };
 
 class NEOGRAPH_PROGRAM_API ModuleLinkReceipt final {
@@ -166,6 +172,7 @@ public:
     const std::vector<std::string>& granted_capabilities() const noexcept;
     const std::vector<std::string>& granted_effects() const noexcept;
     const BudgetLimits& budget() const noexcept;
+    ExecutionGuarantee minimum_execution_guarantee() const noexcept;
     const std::string& id() const noexcept;
     std::string serialize_canonical() const;
 

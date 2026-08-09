@@ -2,6 +2,7 @@
 #include <neograph/program/compiler.h>
 
 #include "canonical_json.h"
+#include "javascript.h"
 #include "registry_access.h"
 
 #include <algorithm>
@@ -142,7 +143,9 @@ struct PendingDiagnostic {
 class DiagnosticAccumulator {
 public:
     explicit DiagnosticAccumulator(const ProgramSource& source)
-        : source_id_(source.source_id()), mappings_(source.source_map()) {
+        : source_id_(source.source_id()),
+          javascript_source_(source.kind() == SourceKind::JavaScript),
+          mappings_(source.source_map()) {
         std::sort(mappings_.begin(), mappings_.end(), [](const auto& lhs, const auto& rhs) {
             return std::tie(lhs.generated_pointer, lhs.authored.source_id,
                             lhs.authored.json_pointer) < std::tie(rhs.generated_pointer,
@@ -212,8 +215,11 @@ private:
                 best = &entry;
             }
         }
-        if (!best)
-            return SourceCoordinate{source_id_, std::string(generated_pointer), std::nullopt};
+        if (!best) {
+            return SourceCoordinate{
+                source_id_, javascript_source_ ? std::string{} : std::string(generated_pointer),
+                std::nullopt};
+        }
         SourceCoordinate result = best->authored;
         if (best->generated_pointer == generated_pointer) return result;
         result.span.reset();
@@ -222,6 +228,7 @@ private:
     }
 
     std::string                    source_id_;
+    bool                           javascript_source_;
     std::vector<SourceMapEntry>    mappings_;
     std::vector<PendingDiagnostic> diagnostics_;
 };
@@ -349,8 +356,8 @@ void validate_contract(const json&            document,
         try {
             validate_contract_schema(output, child_pointer(pointer, "schema"));
         } catch (const std::exception& error) {
-            diagnostics.add(CompilePhase::Schema, "P_CONTRACT_SCHEMA",
-                            DiagnosticSeverity::Error, child_pointer(pointer, "schema"),
+            diagnostics.add(CompilePhase::Schema, "P_CONTRACT_SCHEMA", DiagnosticSeverity::Error,
+                            child_pointer(pointer, "schema"),
                             "Program contract uses an invalid or unsupported schema",
                             json{{"error", error.what()}});
         }
@@ -371,23 +378,21 @@ void validate_root(const json&            document,
         return;
     }
     add_unknown_fields(diagnostics, root, pointer,
-                       {"op", "name", "definition", "children", "condition", "then", "else",
-                        "body", "max_iterations", "max_attempts", "branches", "min_success",
-                        "items", "child_binding", "timeout_ms", "scope", "reason", "value"});
+                       {"op", "name", "definition", "children", "condition", "then", "else", "body",
+                        "max_iterations", "max_attempts", "branches", "min_success", "items",
+                        "child_binding", "timeout_ms", "scope", "reason", "value"});
     if (!root.contains("op")) {
         add_required(diagnostics, pointer, "op");
     } else if (!root["op"].is_string()) {
         add_type(diagnostics, "/root/op", "string", root["op"]);
     } else {
-        const auto op = root["op"].get<std::string>();
+        const auto                                        op = root["op"].get<std::string>();
         static constexpr std::array<std::string_view, 15> operations = {
-            "call_core", "sequence", "branch", "loop", "retry",
-            "parallel", "race", "quorum", "map", "spawn",
-            "await", "emit", "checkpoint", "cancel", "return"};
+            "call_core", "sequence", "branch", "loop", "retry",      "parallel", "race",  "quorum",
+            "map",       "spawn",    "await",  "emit", "checkpoint", "cancel",   "return"};
         if (std::find(operations.begin(), operations.end(), op) == operations.end()) {
-            diagnostics.add(CompilePhase::Normalize, "P_PLAN_OPERATION",
-                            DiagnosticSeverity::Error, "/root/op",
-                            "Program-v1 root operation is not supported",
+            diagnostics.add(CompilePhase::Normalize, "P_PLAN_OPERATION", DiagnosticSeverity::Error,
+                            "/root/op", "Program-v1 root operation is not supported",
                             json{{"operation", op}});
         }
     }
@@ -452,8 +457,8 @@ void validate_root(const json&            document,
                         "A call_core operation requires at least one Core node", json::object());
     }
 }
-void validate_condition(const json& value,
-                        std::string_view pointer,
+void validate_condition(const json&            value,
+                        std::string_view       pointer,
                         DiagnosticAccumulator& diagnostics) {
     if (!value.is_object()) {
         add_type(diagnostics, pointer, "object", value);
@@ -467,56 +472,52 @@ void validate_condition(const json& value,
     }
     if (value.contains("path") &&
         (!value["path"].is_string() || value["path"].get<std::string>().empty())) {
-        add_type(diagnostics, child_pointer(pointer, "path"), "nonempty string",
-                 value["path"]);
+        add_type(diagnostics, child_pointer(pointer, "path"), "nonempty string", value["path"]);
     } else if (value.contains("path")) {
         try {
             detail::validate_json_pointer(value["path"].get<std::string>());
         } catch (const std::exception& error) {
-            diagnostics.add(CompilePhase::Normalize, "P_PLAN_CONDITION",
-                            DiagnosticSeverity::Error, child_pointer(pointer, "path"),
+            diagnostics.add(CompilePhase::Normalize, "P_PLAN_CONDITION", DiagnosticSeverity::Error,
+                            child_pointer(pointer, "path"),
                             "Program condition path must be a valid RFC 6901 JSON pointer",
                             json{{"error", error.what()}});
         }
     }
     if (alternatives != 1) {
         diagnostics.add(CompilePhase::Normalize, "P_PLAN_CONDITION", DiagnosticSeverity::Error,
-                        std::string(pointer),
-                        "A Program condition requires exactly one predicate",
+                        std::string(pointer), "A Program condition requires exactly one predicate",
                         json{{"predicates", alternatives}});
         return;
     }
-    if ((value.contains("equals") || value.contains("not_equals") ||
-         value.contains("exists")) &&
+    if ((value.contains("equals") || value.contains("not_equals") || value.contains("exists")) &&
         !value.contains("path")) {
         add_required(diagnostics, pointer, "path");
     }
     if (value.contains("exists") && !value["exists"].is_boolean())
         add_type(diagnostics, child_pointer(pointer, "exists"), "boolean", value["exists"]);
     if (value.contains("all") || value.contains("any")) {
-        const auto field = value.contains("all") ? "all" : "any";
-        const auto& list = value[field];
+        const auto  field = value.contains("all") ? "all" : "any";
+        const auto& list  = value[field];
         if (!list.is_array() || list.empty()) {
             add_type(diagnostics, child_pointer(pointer, field), "nonempty array", list);
         } else {
             for (std::size_t index = 0; index < list.size(); ++index)
-                validate_condition(list[index],
-                                   child_pointer(child_pointer(pointer, field),
-                                                 std::to_string(index)),
-                                   diagnostics);
+                validate_condition(
+                    list[index],
+                    child_pointer(child_pointer(pointer, field), std::to_string(index)),
+                    diagnostics);
         }
     }
-    if (value.contains("not")) validate_condition(value["not"],
-                                                   child_pointer(pointer, "not"),
-                                                   diagnostics);
+    if (value.contains("not"))
+        validate_condition(value["not"], child_pointer(pointer, "not"), diagnostics);
 }
 
-std::string lower_operation(const json& authored,
-                            std::string        operation_id,
-                            std::string_view   pointer,
-                            std::string_view   root_name,
-                            bool               is_root,
-                            std::vector<json>& operations,
+std::string lower_operation(const json&            authored,
+                            std::string            operation_id,
+                            std::string_view       pointer,
+                            std::string_view       root_name,
+                            bool                   is_root,
+                            std::vector<json>&     operations,
                             DiagnosticAccumulator& diagnostics) {
     if (!authored.is_object()) {
         add_type(diagnostics, pointer, "object", authored);
@@ -531,26 +532,25 @@ std::string lower_operation(const json& authored,
         return operation_id;
     }
 
-    const auto op = authored["op"].get<std::string>();
+    const auto op      = authored["op"].get<std::string>();
     const auto allowed = [&](std::initializer_list<std::string_view> fields) {
         add_unknown_fields(diagnostics, authored, pointer, fields);
     };
-    json lowered{{"id", operation_id}, {"op", op}, {"source_pointer", std::string(pointer)}};
+    json       lowered{{"id", operation_id}, {"op", op}, {"source_pointer", std::string(pointer)}};
     const auto child = [&](const json& value, std::string_view field, std::size_t index) {
         const auto child_id = operation_id + "." + std::to_string(index);
-        return lower_operation(value, child_id, child_pointer(pointer, field) + "/" +
-                                               std::to_string(index),
+        return lower_operation(value, child_id,
+                               child_pointer(pointer, field) + "/" + std::to_string(index),
                                root_name, false, operations, diagnostics);
     };
-    const auto singular_child = [&](const json& value, std::string_view field,
-                                    std::size_t index) {
+    const auto singular_child = [&](const json& value, std::string_view field, std::size_t index) {
         const auto child_id = operation_id + "." + std::to_string(index);
-        return lower_operation(value, child_id, child_pointer(pointer, field),
-                               root_name, false, operations, diagnostics);
+        return lower_operation(value, child_id, child_pointer(pointer, field), root_name, false,
+                               operations, diagnostics);
     };
     const auto required_object = [&](std::string_view field) -> std::optional<json> {
         const auto field_pointer = child_pointer(pointer, field);
-        const auto key = std::string(field);
+        const auto key           = std::string(field);
         if (!authored.contains(key)) {
             add_required(diagnostics, pointer, field);
             return std::nullopt;
@@ -590,8 +590,7 @@ std::string lower_operation(const json& authored,
         else
             allowed({"op", "core"});
         if (authored.contains("core") &&
-            (!authored["core"].is_string() ||
-             authored["core"].get<std::string>() != root_name)) {
+            (!authored["core"].is_string() || authored["core"].get<std::string>() != root_name)) {
             diagnostics.add(CompilePhase::Normalize, "P_PLAN_CORE", DiagnosticSeverity::Error,
                             child_pointer(pointer, "core"),
                             "Every call_core operation must reference the sealed root Core",
@@ -654,8 +653,7 @@ std::string lower_operation(const json& authored,
                    !maximum || *maximum == 0 || *maximum > 1000000) {
             diagnostics.add(CompilePhase::Normalize, "P_PLAN_BOUND", DiagnosticSeverity::Error,
                             child_pointer(pointer, "max_iterations"),
-                            "Program loop bound must be in the range 1..1000000",
-                            json::object());
+                            "Program loop bound must be in the range 1..1000000", json::object());
         } else {
             lowered["max_iterations"] = *maximum;
         }
@@ -672,8 +670,7 @@ std::string lower_operation(const json& authored,
                    !maximum || *maximum == 0 || *maximum > 1000000) {
             diagnostics.add(CompilePhase::Normalize, "P_PLAN_BOUND", DiagnosticSeverity::Error,
                             child_pointer(pointer, "max_attempts"),
-                            "Program retry bound must be in the range 1..1000000",
-                            json::object());
+                            "Program retry bound must be in the range 1..1000000", json::object());
         } else {
             lowered["max_attempts"] = *maximum;
         }
@@ -705,8 +702,8 @@ std::string lower_operation(const json& authored,
             if (!authored.contains("branches"))
                 add_required(diagnostics, pointer, "branches");
             else
-                add_type(diagnostics, child_pointer(pointer, "branches"),
-                         "array with two entries", authored["branches"]);
+                add_type(diagnostics, child_pointer(pointer, "branches"), "array with two entries",
+                         authored["branches"]);
         } else {
             json ids = json::array();
             for (std::size_t index = 0; index < authored["branches"].size(); ++index)
@@ -753,11 +750,11 @@ std::string lower_operation(const json& authored,
             lowered["child_binding"] = authored["child_binding"].get<std::string>();
         }
         if (authored.contains("body")) {
-            diagnostics.add(
-                CompilePhase::Normalize, "P_PLAN_SPAWN_SHAPE", DiagnosticSeverity::Error,
-                child_pointer(pointer, "body"),
-                "Program spawn dispatches a separately admitted child binding; it has no inline body",
-                json::object());
+            diagnostics.add(CompilePhase::Normalize, "P_PLAN_SPAWN_SHAPE",
+                            DiagnosticSeverity::Error, child_pointer(pointer, "body"),
+                            "Program spawn dispatches a separately admitted child binding; it has "
+                            "no inline body",
+                            json::object());
         }
     } else if (op == "await") {
         if (is_root)
@@ -806,39 +803,38 @@ std::string lower_operation(const json& authored,
             lowered["value"] = detail::owned_json_copy(authored["value"]);
     } else {
         diagnostics.add(CompilePhase::Normalize, "P_PLAN_OPERATION", DiagnosticSeverity::Error,
-                        child_pointer(pointer, "op"),
-                        "Program operation is not supported",
+                        child_pointer(pointer, "op"), "Program operation is not supported",
                         json{{"operation", op}});
     }
     operations.push_back(std::move(lowered));
     return operation_id;
 }
 
-void validate_sealed_plan_dispatch(const ProgramPlan& plan,
-                                   DiagnosticAccumulator& diagnostics) {
+void validate_sealed_plan_dispatch(const ProgramPlan& plan, DiagnosticAccumulator& diagnostics) {
     for (const auto& node : plan.nodes()) {
         const auto& dispatch = node.dispatch();
         if (dispatch.source_pointer.empty() || dispatch.source_pointer.front() != '/') {
-            diagnostics.add(CompilePhase::Seal, "P_PLAN_SOURCE_POINTER",
-                            DiagnosticSeverity::Error, node.source_pointer(),
-                            "Sealed Program operation has an invalid source pointer",
-                            json{{"operation_id", node.id()},
-                                 {"source_pointer", dispatch.source_pointer}});
+            diagnostics.add(
+                CompilePhase::Seal, "P_PLAN_SOURCE_POINTER", DiagnosticSeverity::Error,
+                node.source_pointer(), "Sealed Program operation has an invalid source pointer",
+                json{{"operation_id", node.id()}, {"source_pointer", dispatch.source_pointer}});
         }
         const auto require = [&](const std::string& referenced, std::string_view field) {
             if (plan.find(referenced)) return;
-            diagnostics.add(CompilePhase::Seal, "P_PLAN_REFERENCE",
-                            DiagnosticSeverity::Error, node.source_pointer(),
+            diagnostics.add(CompilePhase::Seal, "P_PLAN_REFERENCE", DiagnosticSeverity::Error,
+                            node.source_pointer(),
                             "Sealed Program operation has a dangling dispatch reference",
                             json{{"operation_id", node.id()},
                                  {"field", std::string(field)},
                                  {"referenced_operation_id", referenced}});
         };
-        for (const auto& child : dispatch.children) require(child, "children");
+        for (const auto& child : dispatch.children)
+            require(child, "children");
         if (dispatch.then_id) require(*dispatch.then_id, "then");
         if (dispatch.else_id) require(*dispatch.else_id, "else");
         if (dispatch.body) require(*dispatch.body, "body");
-        for (const auto& branch : dispatch.branches) require(branch, "branches");
+        for (const auto& branch : dispatch.branches)
+            require(branch, "branches");
     }
     for (const auto& node : plan.nodes()) {
         if (node.operation() != ProgramOperationKind::Spawn) continue;
@@ -848,26 +844,26 @@ void validate_sealed_plan_dispatch(const ProgramPlan& plan,
                        candidate.dispatch().body && *candidate.dispatch().body == node.id();
             });
         if (!is_direct_await_body) {
-            diagnostics.add(
-                CompilePhase::Seal, "P_PLAN_SPAWN_SHAPE", DiagnosticSeverity::Error,
-                node.source_pointer(),
-                "Program spawn must be the direct body of await so its durable child handle is joined",
-                json{{"operation_id", node.id()}});
+            diagnostics.add(CompilePhase::Seal, "P_PLAN_SPAWN_SHAPE", DiagnosticSeverity::Error,
+                            node.source_pointer(),
+                            "Program spawn must be the direct body of await so its durable child "
+                            "handle is joined",
+                            json{{"operation_id", node.id()}});
         }
     }
 }
 
-OrchestrationPlanRecord lower_plan(const json& root,
-                                   std::string_view root_name,
+OrchestrationPlanRecord lower_plan(const json&            root,
+                                   std::string_view       root_name,
                                    DiagnosticAccumulator& diagnostics) {
     std::vector<json> operations;
     lower_operation(root, "root", "/root", root_name, true, operations, diagnostics);
-    bool has_core = false;
+    bool has_core  = false;
     bool has_spawn = false;
     for (const auto& operation : operations) {
         const auto op = operation.value("op", "");
-        has_core = has_core || op == "call_core";
-        has_spawn = has_spawn || op == "spawn";
+        has_core      = has_core || op == "call_core";
+        has_spawn     = has_spawn || op == "spawn";
     }
     if (!has_core && !has_spawn) {
         diagnostics.add(
@@ -876,13 +872,13 @@ OrchestrationPlanRecord lower_plan(const json& root,
             json::object());
     }
     json operation_array = json::array();
-    for (auto& operation : operations) operation_array.push_back(std::move(operation));
-    json plan = json::object();
-    plan["root"] = "root";
+    for (auto& operation : operations)
+        operation_array.push_back(std::move(operation));
+    json plan          = json::object();
+    plan["root"]       = "root";
     plan["operations"] = std::move(operation_array);
     return OrchestrationPlanRecord{1, std::move(plan)};
 }
-
 
 bool contains_operation(const json& value, std::string_view wanted) {
     if (value.is_object()) {
@@ -917,7 +913,7 @@ void validate_budgets(const json&            document,
     }
     const bool has_spawn =
         document.contains("root") && contains_operation(document["root"], "spawn");
-    std::map<std::string, std::size_t> seen;
+    std::map<std::string, std::size_t>   seen;
     std::map<std::string, std::uint64_t> child_budget_maxima;
     for (std::size_t index = 0; index < values.size(); ++index) {
         const auto  item_pointer = child_pointer(pointer, std::to_string(index));
@@ -992,19 +988,18 @@ void validate_budgets(const json&            document,
             continue;
         }
         if (resource == "max_child_depth" && *maximum > MAX_SUPPORTED_CHILD_DEPTH) {
-            diagnostics.add(
-                CompilePhase::Normalize, "P_BUDGET_INVALID", DiagnosticSeverity::Error,
-                item_pointer, "Child depth exceeds the supported hard ceiling",
-                json{{"resource", resource},
-                     {"maximum", *maximum},
-                     {"hard_ceiling", MAX_SUPPORTED_CHILD_DEPTH}});
+            diagnostics.add(CompilePhase::Normalize, "P_BUDGET_INVALID", DiagnosticSeverity::Error,
+                            item_pointer, "Child depth exceeds the supported hard ceiling",
+                            json{{"resource", resource},
+                                 {"maximum", *maximum},
+                                 {"hard_ceiling", MAX_SUPPORTED_CHILD_DEPTH}});
             continue;
         }
         if (resource == "max_child_depth" || resource == "max_total_children")
             child_budget_maxima.emplace(resource, *maximum);
         output.budgets.push_back({resource, *minimum, *maximum});
     }
-    const auto child_depth = child_budget_maxima.find("max_child_depth");
+    const auto child_depth    = child_budget_maxima.find("max_child_depth");
     const auto total_children = child_budget_maxima.find("max_total_children");
     if (child_depth != child_budget_maxima.end() && total_children != child_budget_maxima.end() &&
         (child_depth->second == 0) != (total_children->second == 0)) {
@@ -1116,6 +1111,7 @@ std::vector<DirectReference> direct_references(const graph::TopologySpec& topolo
 struct ClosureResult {
     std::vector<ExecutableIdentity> identities;
     CapabilityEffectClosure         closure;
+    ExecutionGuarantee              execution_guarantee = ExecutionGuarantee::Strict;
 };
 
 ClosureResult resolve_closure(const RegistrySnapshot&    registry,
@@ -1142,9 +1138,8 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
         }
     }
     for (const auto& [node_name, definition] : topology.node_defs) {
-        const auto type = definition.at("type").get<std::string>();
-        const auto pointer =
-            "/root/definition/nodes/" + escape_pointer_segment(node_name);
+        const auto type    = definition.at("type").get<std::string>();
+        const auto pointer = "/root/definition/nodes/" + escape_pointer_segment(node_name);
         const ExecutableManifest* node_manifest = nullptr;
         try {
             node_manifest = &detail::RegistrySnapshotAccess::require_manifest(
@@ -1155,8 +1150,8 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
 
         std::vector<ExecutableIdentity> requirements;
         try {
-            requirements = detail::RegistrySnapshotAccess::resolve_node_requirements(
-                registry, type, definition);
+            requirements = detail::RegistrySnapshotAccess::resolve_node_requirements(registry, type,
+                                                                                     definition);
         } catch (const std::exception& error) {
             diagnostics.add(CompilePhase::Resolve, "P_REGISTRY_REQUIREMENT_RESOLVER",
                             DiagnosticSeverity::Error, pointer,
@@ -1178,9 +1173,8 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
                 requirement.kind != ExecutableKind::Tool &&
                 requirement.kind != ExecutableKind::Imported) {
                 diagnostics.add(
-                    CompilePhase::Resolve, "P_REGISTRY_REQUIREMENT_KIND",
-                    DiagnosticSeverity::Error, pointer,
-                    "Node config resolver returned an unsupported executable kind",
+                    CompilePhase::Resolve, "P_REGISTRY_REQUIREMENT_KIND", DiagnosticSeverity::Error,
+                    pointer, "Node config resolver returned an unsupported executable kind",
                     json{{"node_type", type}, {"requirement", identity_json(requirement)}});
                 continue;
             }
@@ -1191,6 +1185,8 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
     std::map<std::pair<std::string, std::string>, ExecutableIdentity> visited;
     std::set<std::string>                                             capabilities;
     std::set<std::string>                                             effects;
+    ExecutionGuarantee                                                 execution_guarantee =
+        ExecutionGuarantee::Strict;
     for (std::size_t index = 0; index < work.size(); ++index) {
         const auto current = work[index];
         const auto key =
@@ -1238,10 +1234,15 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
         effects.insert(manifest->declared_effects.begin(), manifest->declared_effects.end());
         if (manifest->effect_mode == EffectMode::TrustedNative)
             capabilities.insert(std::string(TRUSTED_NATIVE_CAPABILITY));
+        if (execution_guarantee_rank(manifest->execution_guarantee) <
+            execution_guarantee_rank(execution_guarantee)) {
+            execution_guarantee = manifest->execution_guarantee;
+        }
         for (const auto& dependency : manifest->required_executables)
             work.push_back({dependency, "/root/definition", manifest->identity});
     }
     ClosureResult result;
+    result.execution_guarantee = execution_guarantee;
     for (const auto& [key, identity] : visited) {
         (void)key;
         result.identities.push_back(identity);
@@ -1300,7 +1301,9 @@ std::vector<SourceMapEntry> generated_source_map(const ProgramSource&   source,
     }
     for (const auto pointer : {"/root", "/root/definition", "/operations/0"}) {
         if (seen.contains(pointer)) continue;
-        result.push_back({pointer, {source.source_id(), pointer, std::nullopt}});
+        const auto authored_pointer =
+            source.kind() == SourceKind::JavaScript ? std::string{} : std::string(pointer);
+        result.push_back({pointer, {source.source_id(), authored_pointer, std::nullopt}});
         seen.insert(pointer);
     }
     return result;
@@ -1349,8 +1352,17 @@ struct ProgramCompiler::Impl {
     ProgramBundle compile(const ProgramSource& source) const {
         DiagnosticAccumulator diagnostics(source);
         try {
-            const json document = source.document();
-            auto       parsed   = parse_program(source, document, diagnostics);
+            json document;
+            try {
+                document = source.kind() == SourceKind::JavaScript
+                               ? detail::evaluate_javascript_source(source, config.javascript)
+                               : source.document();
+            } catch (const detail::JavaScriptCompileError& error) {
+                diagnostics.add(CompilePhase::Source, error.code(), DiagnosticSeverity::Error, "",
+                                error.what(), error.witness());
+                diagnostics.throw_error();
+            }
+            auto parsed = parse_program(source, document, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();
             const auto parse_report = detail::RegistrySnapshotAccess::parse_local_report(
                 registry, parsed.core_definition);
@@ -1399,7 +1411,8 @@ struct ProgramCompiler::Impl {
                 throw;
             } catch (const std::exception& error) {
                 diagnostics.add(CompilePhase::Seal, "P_PLAN_TYPED", DiagnosticSeverity::Error,
-                                "/root", "Program plan could not be sealed as typed immutable nodes",
+                                "/root",
+                                "Program plan could not be sealed as typed immutable nodes",
                                 json{{"detail", error.what()}});
                 diagnostics.throw_error();
             }
@@ -1421,6 +1434,7 @@ struct ProgramCompiler::Impl {
             data.sealed_core_definitions        = {std::move(sealed)};
             data.core_plan_identities           = {{parsed.root_name, compiled_plan}};
             data.capability_effect_closure      = std::move(closure.closure);
+            data.execution_guarantee            = closure.execution_guarantee;
             data.executable_registry_identities = std::move(closure.identities);
             data.declared_budget_requirements   = std::move(parsed.budgets);
             data.source_map                     = std::move(source_map);
@@ -1445,6 +1459,14 @@ ProgramCompiler::ProgramCompiler(RegistrySnapshot registry, ProgramCompilerConfi
     if (has_control_character(impl_->config.compiler_build_id))
         throw std::invalid_argument(
             "Program compiler_build_id must not contain control characters");
+    const auto& limits = impl_->config.javascript;
+    if (limits.memory_limit_bytes == 0 || limits.max_stack_bytes == 0 ||
+        limits.max_interrupt_polls == 0) {
+        throw std::invalid_argument("JavaScript compiler limits must be positive");
+    }
+    if (limits.max_stack_bytes > limits.memory_limit_bytes) {
+        throw std::invalid_argument("JavaScript compiler stack limit exceeds memory limit");
+    }
 }
 
 ProgramCompiler::ProgramCompiler(ProgramCompiler&&) noexcept            = default;
@@ -1463,16 +1485,16 @@ ProgramBundle ProgramCompiler::compile(const ProgramSource& source) const {
     return impl_->compile(source);
 }
 
-ProgramBundle ProgramCompiler::compile(const ProgramSource&       source,
+ProgramBundle ProgramCompiler::compile(const ProgramSource&    source,
                                        const ModuleResolution& resolution) const {
     auto fail = [&](std::string code, std::string message, json witness) -> ProgramBundle {
         Diagnostic diagnostic;
-        diagnostic.phase                = CompilePhase::Resolve;
-        diagnostic.code                 = std::move(code);
-        diagnostic.severity             = DiagnosticSeverity::Error;
-        diagnostic.primary              = {source.source_id(), "/imports", std::nullopt};
-        diagnostic.message              = std::move(message);
-        diagnostic.witness              = detail::owned_json_copy(witness);
+        diagnostic.phase    = CompilePhase::Resolve;
+        diagnostic.code     = std::move(code);
+        diagnostic.severity = DiagnosticSeverity::Error;
+        diagnostic.primary  = {source.source_id(), "/imports", std::nullopt};
+        diagnostic.message  = std::move(message);
+        diagnostic.witness  = detail::owned_json_copy(witness);
         throw ProgramCompileError({std::move(diagnostic)});
     };
     try {
@@ -1483,9 +1505,9 @@ ProgramBundle ProgramCompiler::compile(const ProgramSource&       source,
                     json{{"error", error.what()}});
     }
 
-    auto actual_imports   = source.imports();
-    auto resolved_imports = resolution.imports();
-    const auto import_less = [](const auto& lhs, const auto& rhs) {
+    auto       actual_imports   = source.imports();
+    auto       resolved_imports = resolution.imports();
+    const auto import_less      = [](const auto& lhs, const auto& rhs) {
         return std::tie(lhs.source_id, lhs.content_identity) <
                std::tie(rhs.source_id, rhs.content_identity);
     };
@@ -1519,6 +1541,7 @@ ProgramBundle ProgramCompiler::compile(const ProgramSource&       source,
     data.sealed_core_definitions        = compiled.sealed_core_definitions();
     data.core_plan_identities           = compiled.core_plan_identities();
     data.capability_effect_closure      = compiled.capability_effect_closure();
+    data.execution_guarantee            = compiled.execution_guarantee();
     data.executable_registry_identities = compiled.executable_registry_identities();
     data.declared_budget_requirements   = compiled.declared_budget_requirements();
     data.source_map                     = compiled.source_map();

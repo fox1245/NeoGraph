@@ -17,6 +17,22 @@
 
 namespace neograph::program {
 
+/**
+ * The lowest recoverability/integrity class reachable through an executable
+ * closure. Strict is strongest; unmanaged is an explicit developer-authorized
+ * escape hatch and must never be presented as strict recovery.
+ */
+enum class ExecutionGuarantee : std::uint8_t {
+    Strict,
+    Recorded,
+    Unmanaged,
+};
+
+NEOGRAPH_PROGRAM_API std::string_view to_string(ExecutionGuarantee guarantee) noexcept;
+NEOGRAPH_PROGRAM_API ExecutionGuarantee execution_guarantee_from_string(std::string_view value);
+NEOGRAPH_PROGRAM_API std::uint8_t execution_guarantee_rank(
+    ExecutionGuarantee guarantee) noexcept;
+
 enum class ExecutableKind { Node, Reducer, Condition, Provider, Tool, Imported };
 
 NEOGRAPH_PROGRAM_API std::string_view to_string(ExecutableKind kind) noexcept;
@@ -122,6 +138,8 @@ struct ProgramBundleData {
     std::vector<SealedCoreDefinition> sealed_core_definitions;
     std::vector<CorePlanIdentity>     core_plan_identities;
     CapabilityEffectClosure           capability_effect_closure;
+    /// Exact weakest guarantee in the compiler-derived executable closure.
+    ExecutionGuarantee                execution_guarantee = ExecutionGuarantee::Strict;
     std::vector<ExecutableIdentity>   executable_registry_identities;
     std::vector<BudgetRequirement>    declared_budget_requirements;
     std::vector<SourceMapEntry>       source_map;
@@ -152,6 +170,7 @@ public:
     std::vector<SealedCoreDefinition>      sealed_core_definitions() const;
     const std::vector<CorePlanIdentity>&   core_plan_identities() const noexcept;
     const CapabilityEffectClosure&         capability_effect_closure() const noexcept;
+    ExecutionGuarantee                     execution_guarantee() const noexcept;
     const std::vector<ExecutableIdentity>& executable_registry_identities() const noexcept;
     const std::vector<BudgetRequirement>&  declared_budget_requirements() const noexcept;
     const std::vector<SourceMapEntry>&     source_map() const noexcept;

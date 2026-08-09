@@ -16,6 +16,7 @@
 #ifdef NEOGRAPH_CONSUMER_HAS_A2A
 #include <neograph/a2a/collaboration.h>
 #include <neograph/a2a/types.h>
+#include <neograph/a2a/agent_card_candidate.h>
 #endif
 #ifdef NEOGRAPH_CONSUMER_HAS_ACP
 #include <neograph/acp/types.h>
@@ -98,6 +99,10 @@ int main() {
         std::cerr << "installed A2A type surface failed\n";
         return EXIT_FAILURE;
     }
+    // Constructing the collector proves the installed A2A candidate surface
+    // resolves its exported implementation without making any network call.
+    neograph::a2a::AgentCardCollector candidate_collector;
+    (void)candidate_collector;
 #endif
 
 #ifdef NEOGRAPH_CONSUMER_HAS_ACP

@@ -97,6 +97,21 @@ void normalize_data(ProgramVersionData& data) {
         throw std::invalid_argument(
             "Program version policy and admission profile bind different registries");
     }
+    if (execution_guarantee_rank(data.execution_guarantee) == 0) {
+        throw std::invalid_argument("Program version execution_guarantee is unsupported");
+    }
+    if (execution_guarantee_rank(data.policy_snapshot.minimum_execution_guarantee()) <
+        execution_guarantee_rank(data.admission_profile.minimum_execution_guarantee())) {
+        throw std::invalid_argument(
+            "Program version policy weakens the admission profile guarantee floor");
+    }
+    if (execution_guarantee_rank(data.execution_guarantee) <
+            execution_guarantee_rank(data.admission_profile.minimum_execution_guarantee()) ||
+        execution_guarantee_rank(data.execution_guarantee) <
+            execution_guarantee_rank(data.policy_snapshot.minimum_execution_guarantee())) {
+        throw std::invalid_argument(
+            "Program version effective guarantee falls below its admitted guarantee floor");
+    }
     const auto effect_modes           = data.admission_profile.allowed_effect_modes();
     const auto capabilities           = data.policy_snapshot.allowed_capabilities();
     const bool profile_allows_trusted = std::find(effect_modes.begin(), effect_modes.end(),
@@ -290,6 +305,7 @@ json version_body(const ProgramVersionData& data) {
     value["ownership_scope"]     = data.ownership_scope;
     value["core_materialization_receipt"] =
         encode_materialization(data.core_materialization_receipt);
+    value["execution_guarantee"] = std::string(to_string(data.execution_guarantee));
     return value;
 }
 
@@ -315,7 +331,8 @@ ProgramVersionData parse_body(const json& value) {
     ProgramVersionData data(
         require_string(value, "bundle_id"), std::move(admission), std::move(policy),
         std::move(parsed_dependencies), require_string(value, "ownership_scope"),
-        parse_materialization(require_value(value, "core_materialization_receipt")));
+        parse_materialization(require_value(value, "core_materialization_receipt")),
+        execution_guarantee_from_string(require_string(value, "execution_guarantee")));
     normalize_data(data);
     return data;
 }
@@ -374,10 +391,11 @@ ProgramVersion ProgramVersion::parse(std::string_view stored_bytes) {
     if (!value.is_object() || require_string(value, "format") != VERSION_FORMAT) {
         throw std::invalid_argument("Stored ProgramVersion has unknown format");
     }
-    detail::reject_unknown_fields(value, "Stored ProgramVersion",
-                                  {"format", "storage_schema_version", "id", "bundle_id",
-                                   "admission_profile", "policy_snapshot", "dependency_receipts",
-                                   "ownership_scope", "core_materialization_receipt"});
+    detail::reject_unknown_fields(
+        value, "Stored ProgramVersion",
+        {"format", "storage_schema_version", "id", "bundle_id", "admission_profile",
+         "policy_snapshot", "dependency_receipts", "ownership_scope",
+         "core_materialization_receipt", "execution_guarantee"});
     if (require_uint32(value, "storage_schema_version") != STORAGE_SCHEMA_VERSION) {
         throw std::invalid_argument("Stored ProgramVersion schema version is unsupported");
     }
@@ -409,6 +427,9 @@ const std::string& ProgramVersion::ownership_scope() const noexcept {
 }
 const CoreMaterializationReceipt& ProgramVersion::core_materialization_receipt() const noexcept {
     return impl_->data.core_materialization_receipt;
+}
+ExecutionGuarantee ProgramVersion::execution_guarantee() const noexcept {
+    return impl_->data.execution_guarantee;
 }
 
 std::string ProgramVersion::serialize_canonical() const { return impl_->canonical_bytes; }

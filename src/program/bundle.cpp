@@ -444,6 +444,12 @@ void sort_unique_strings(std::vector<std::string>& values, std::string_view name
     }
 }
 
+void validate_execution_guarantee(ExecutionGuarantee guarantee, std::string_view field) {
+    if (execution_guarantee_rank(guarantee) == 0) {
+        throw std::invalid_argument(std::string(field) + " is unsupported");
+    }
+}
+
 void normalize_data(ProgramBundleData& data) {
     data.input_contract.schema   = detail::owned_json_copy(data.input_contract.schema);
     data.output_contract.schema  = detail::owned_json_copy(data.output_contract.schema);
@@ -455,7 +461,8 @@ void normalize_data(ProgramBundleData& data) {
         diagnostic.witness = detail::owned_json_copy(diagnostic.witness);
     }
     if (data.source_kind != SourceKind::CanonicalJson &&
-        data.source_kind != SourceKind::CppBuilder) {
+        data.source_kind != SourceKind::CppBuilder &&
+        data.source_kind != SourceKind::JavaScript) {
         throw std::invalid_argument("Program bundle source_kind is unknown");
     }
     require_sha256(data.source_hash, "Program bundle source_hash");
@@ -492,6 +499,7 @@ void normalize_data(ProgramBundleData& data) {
     validate_contract(data.input_contract, "Program input contract");
     validate_contract(data.output_contract, "Program output contract");
     validate_plan(data.orchestration_plan);
+    validate_execution_guarantee(data.execution_guarantee, "Program bundle execution_guarantee");
 
     if (data.sealed_core_definitions.empty() || data.core_plan_identities.empty() ||
         data.executable_registry_identities.empty() || data.declared_budget_requirements.empty()) {
@@ -745,6 +753,7 @@ json bundle_body(const ProgramBundleData& data) {
         plans.push_back(encode_core_plan(plan));
     value["core_plan_identities"]      = std::move(plans);
     value["capability_effect_closure"] = encode_closure(data.capability_effect_closure);
+    value["execution_guarantee"]      = std::string(to_string(data.execution_guarantee));
 
     json executable_identities = json::array();
     for (const auto& identity : data.executable_registry_identities) {
@@ -824,6 +833,8 @@ ProgramBundleData parse_body(const json& value) {
         parse_array<CorePlanIdentity>(value, "core_plan_identities", parse_core_plan);
     data.capability_effect_closure =
         parse_closure(require_value(value, "capability_effect_closure"));
+    data.execution_guarantee =
+        execution_guarantee_from_string(require_string(value, "execution_guarantee"));
     data.executable_registry_identities =
         parse_array<ExecutableIdentity>(value, "executable_registry_identities", parse_executable);
     data.declared_budget_requirements =
@@ -1046,6 +1057,37 @@ void validate_contract_value(const json&          value,
     validate_contract_value_impl(value, contract.schema, subject, std::string(path), 0);
 }
 
+std::string_view to_string(ExecutionGuarantee guarantee) noexcept {
+    switch (guarantee) {
+        case ExecutionGuarantee::Strict:
+            return "strict";
+        case ExecutionGuarantee::Recorded:
+            return "recorded";
+        case ExecutionGuarantee::Unmanaged:
+            return "unmanaged";
+    }
+    return "unknown";
+}
+
+ExecutionGuarantee execution_guarantee_from_string(std::string_view value) {
+    if (value == "strict") return ExecutionGuarantee::Strict;
+    if (value == "recorded") return ExecutionGuarantee::Recorded;
+    if (value == "unmanaged") return ExecutionGuarantee::Unmanaged;
+    throw std::invalid_argument("Unknown Program execution guarantee: " + std::string(value));
+}
+
+std::uint8_t execution_guarantee_rank(ExecutionGuarantee guarantee) noexcept {
+    switch (guarantee) {
+        case ExecutionGuarantee::Strict:
+            return 3;
+        case ExecutionGuarantee::Recorded:
+            return 2;
+        case ExecutionGuarantee::Unmanaged:
+            return 1;
+    }
+    return 0;
+}
+
 std::string_view to_string(ExecutableKind kind) noexcept {
     switch (kind) {
         case ExecutableKind::Node:
@@ -1164,7 +1206,7 @@ ProgramBundle ProgramBundle::parse(std::string_view stored_bytes) {
          "registry_snapshot_fingerprint", "module_dependency_merkle_root", "module_coordinates",
          "input_contract",
          "output_contract", "orchestration_plan", "sealed_core_definitions",
-         "core_plan_identities", "capability_effect_closure",
+         "core_plan_identities", "capability_effect_closure", "execution_guarantee",
          "executable_registry_identities", "declared_budget_requirements", "source_map",
          "diagnostics"});
     if (require_uint32(value, "storage_schema_version") != STORAGE_SCHEMA_VERSION) {
@@ -1237,6 +1279,9 @@ const std::vector<CorePlanIdentity>& ProgramBundle::core_plan_identities() const
 }
 const CapabilityEffectClosure& ProgramBundle::capability_effect_closure() const noexcept {
     return impl_->data.capability_effect_closure;
+}
+ExecutionGuarantee ProgramBundle::execution_guarantee() const noexcept {
+    return impl_->data.execution_guarantee;
 }
 const std::vector<ExecutableIdentity>& ProgramBundle::executable_registry_identities()
     const noexcept {

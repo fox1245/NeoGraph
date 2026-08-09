@@ -166,14 +166,17 @@ json encode_child(const ChildProgramDescriptor& child) {
                 {"outputs", std::move(outputs)},
                 {"required_capabilities", child.required_capabilities},
                 {"required_effects", child.required_effects},
-                {"budget", encode_budget(child.budget)}};
+                {"budget", encode_budget(child.budget)},
+                {"minimum_execution_guarantee",
+                 std::string(to_string(child.minimum_execution_guarantee))}};
 }
 
 ChildProgramDescriptor parse_child(const json& value) {
     require_object(value, "child program");
     detail::reject_unknown_fields(value, "child program",
                                   {"name", "program_version_id", "inputs", "outputs",
-                                   "required_capabilities", "required_effects", "budget"});
+                                   "required_capabilities", "required_effects", "budget",
+                                   "minimum_execution_guarantee"});
     ChildProgramDescriptor result;
     result.name = required_string(value, "name");
     result.program_version_id = required_string(value, "program_version_id");
@@ -186,6 +189,8 @@ ChildProgramDescriptor parse_child(const json& value) {
                                                  "required_capabilities");
     result.required_effects = parse_strings(value.at("required_effects"), "required_effects");
     result.budget = parse_budget(value.at("budget"));
+    result.minimum_execution_guarantee =
+        execution_guarantee_from_string(required_string(value, "minimum_execution_guarantee"));
     return result;
 }
 
@@ -277,6 +282,9 @@ void validate_module_data(ProgramModuleData& data) {
             require_nonempty(effect, "Child effect");
             if (!contains(data.declared_effects, effect))
                 throw std::invalid_argument("Child effect widens module authority");
+        }
+        if (execution_guarantee_rank(child.minimum_execution_guarantee) == 0) {
+            throw std::invalid_argument("Child minimum_execution_guarantee is unsupported");
         }
     }
     if (std::adjacent_find(data.children.begin(), data.children.end(),
@@ -399,7 +407,9 @@ json link_body(const ModuleLinkReceiptData& data, std::string_view id) {
                 {"child_output_contract_fingerprint", data.child_output_contract_fingerprint},
                 {"granted_capabilities", data.granted_capabilities},
                 {"granted_effects", data.granted_effects},
-                {"budget", encode_budget(data.budget)}};
+                {"budget", encode_budget(data.budget)},
+                {"minimum_execution_guarantee",
+                 std::string(to_string(data.minimum_execution_guarantee))}};
 }
 
 std::string link_identity(const ModuleLinkReceiptData& data) {
@@ -432,6 +442,9 @@ void validate_link_data(ModuleLinkReceiptData& data) {
     for (const auto& value : data.granted_capabilities)
         require_nonempty(value, "Module link capability");
     for (const auto& value : data.granted_effects) require_nonempty(value, "Module link effect");
+    if (execution_guarantee_rank(data.minimum_execution_guarantee) == 0) {
+        throw std::invalid_argument("Module link minimum_execution_guarantee is unsupported");
+    }
 }
 
 }  // namespace
@@ -696,6 +709,11 @@ void validate_program_composition(const ProgramBundle& parent_bundle,
             throw std::invalid_argument("Composition is missing a declared child");
         if (child->second->version.id() != descriptor.program_version_id)
             throw std::invalid_argument("Composition child version does not match its descriptor");
+        if (execution_guarantee_rank(child->second->version.execution_guarantee()) <
+            execution_guarantee_rank(descriptor.minimum_execution_guarantee)) {
+            throw std::invalid_argument(
+                "Composition child guarantee falls below its explicitly accepted floor");
+        }
         add_budget(aggregate, descriptor.budget);
     }
     const auto parent_plan = parent_bundle.orchestration_plan();
@@ -776,7 +794,7 @@ ModuleLinkReceipt ModuleLinkReceipt::parse(std::string_view stored_bytes) {
         {"format", "storage_schema_version", "id", "owner_scope", "parent_module_id",
          "dependency_merkle_root", "child_name", "child_program_version_id", "child_bundle_id",
          "child_input_contract_fingerprint", "child_output_contract_fingerprint",
-         "granted_capabilities", "granted_effects", "budget"});
+         "granted_capabilities", "granted_effects", "budget", "minimum_execution_guarantee"});
     if (required_string(value, "format") != "neograph-program-module-link")
         throw std::invalid_argument("Stored ModuleLinkReceipt has unknown format");
     if (required_u32(value, "storage_schema_version") != STORAGE_SCHEMA_VERSION)
@@ -798,6 +816,8 @@ ModuleLinkReceipt ModuleLinkReceipt::parse(std::string_view stored_bytes) {
                                                "granted_capabilities");
     data.granted_effects = parse_strings(value.at("granted_effects"), "granted_effects");
     data.budget = parse_budget(value.at("budget"));
+    data.minimum_execution_guarantee =
+        execution_guarantee_from_string(required_string(value, "minimum_execution_guarantee"));
     auto result = create(std::move(data));
     if (result.id() != stored_id)
         throw std::invalid_argument("Stored ModuleLinkReceipt id does not match its body");
@@ -835,6 +855,9 @@ const std::vector<std::string>& ModuleLinkReceipt::granted_effects() const noexc
     return impl_->data.granted_effects;
 }
 const BudgetLimits& ModuleLinkReceipt::budget() const noexcept { return impl_->data.budget; }
+ExecutionGuarantee ModuleLinkReceipt::minimum_execution_guarantee() const noexcept {
+    return impl_->data.minimum_execution_guarantee;
+}
 const std::string& ModuleLinkReceipt::id() const noexcept { return impl_->id; }
 std::string ModuleLinkReceipt::serialize_canonical() const {
     return detail::canonical_json_bytes(link_body(impl_->data, impl_->id));
@@ -876,6 +899,11 @@ ModuleLinkReceipt link_module_child(const ModuleResolution& resolution,
     const auto& descriptor = *descriptor_it;
     if (descriptor.program_version_id != child.id())
         throw std::invalid_argument("Child Program version does not match its descriptor");
+    if (execution_guarantee_rank(child.execution_guarantee()) <
+        execution_guarantee_rank(descriptor.minimum_execution_guarantee)) {
+        throw std::invalid_argument(
+            "Child Program guarantee falls below the module descriptor floor");
+    }
     if (descriptor.inputs.size() != 1 || descriptor.outputs.size() != 1)
         throw std::invalid_argument("Module links require exactly one input and output port");
 
@@ -927,6 +955,7 @@ ModuleLinkReceipt link_module_child(const ModuleResolution& resolution,
     data.granted_capabilities = descriptor.required_capabilities;
     data.granted_effects = descriptor.required_effects;
     data.budget = descriptor.budget;
+    data.minimum_execution_guarantee = descriptor.minimum_execution_guarantee;
     return ModuleLinkReceipt::create(std::move(data));
 }
 struct InMemoryModuleStore::Impl {
