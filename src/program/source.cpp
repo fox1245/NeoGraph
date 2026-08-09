@@ -301,8 +301,14 @@ ProgramSource ProgramSource::from_cpp_builder(std::string                 source
                                               std::vector<ImportRef>      imports,
                                               std::vector<SourceMapEntry> source_map) {
     validate_common(source_id, schema_version, document, imports, source_map);
-    auto owned_document     = detail::owned_json_copy(document);
-    auto canonical_document = detail::canonical_json_bytes(owned_document);
+    json        owned_document;
+    std::string canonical_document;
+    try {
+        owned_document     = detail::owned_json_copy(document);
+        canonical_document = detail::canonical_json_bytes(owned_document);
+    } catch (const std::exception& error) {
+        throw_source_error(std::move(source_id), "P_SOURCE_SIZE", error.what());
+    }
     if (canonical_document.size() > kMaxJavaScriptSourceBytes) {
         throw_source_error(std::move(source_id), "P_SOURCE_SIZE",
                            "Native Program builder exceeds the 16 MiB source limit");
