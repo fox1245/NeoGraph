@@ -1,11 +1,11 @@
-#include <neograph/mcp/harness.h>
 #include <neograph/harness/contract.h>
-
+#include <neograph/mcp/harness.h>
 #include <neograph/mcp/harness_program_store.h>
 #include <neograph/mcp/server.h>
 #include <neograph/program/diagnostic.h>
 #include <neograph/program/event.h>
 #include <neograph/program/result.h>
+
 #include "../program/canonical_json.h"
 
 #include <algorithm>
@@ -85,20 +85,19 @@ program::ProgramEffectReconciliation parse_reconciliation(std::string_view value
     if (value == "unknown") return program::ProgramEffectReconciliation::Unknown;
     throw std::invalid_argument("unsupported Harness effect reconciliation");
 }
-std::string alias(const program::ProgramBundle&                    bundle,
-                  std::string                                      policy,
-                  const HarnessCapabilityBindingRequest&           bindings,
-                  std::string_view                                 artifact_binding_identity,
-                  std::string_view                                 contract_hash = {}) {
-    auto bundle_id = bundle.id();
+std::string alias(const program::ProgramBundle&          bundle,
+                  std::string                            policy,
+                  const HarnessCapabilityBindingRequest& bindings,
+                  std::string_view                       artifact_binding_identity,
+                  std::string_view                       contract_hash = {}) {
+    auto bundle_id       = bundle.id();
     json binding_payload = {
         {"requested_bindings", bindings_json(bindings)},
         {"host_binding_identity", artifact_binding_identity},
     };
     if (!contract_hash.empty()) binding_payload["contract_hash"] = contract_hash;
     auto binding_id = program::detail::sha256_identity(
-        "harness-artifact-binding/v1",
-        program::detail::canonical_json_bytes(binding_payload));
+        "harness-artifact-binding/v1", program::detail::canonical_json_bytes(binding_payload));
     std::replace(bundle_id.begin(), bundle_id.end(), ':', '-');
     std::replace(policy.begin(), policy.end(), ':', '-');
     std::replace(binding_id.begin(), binding_id.end(), ':', '-');
@@ -176,8 +175,7 @@ json project(const program::ProgramResult& v) {
              i->pending_effect->state() == program::ProgramPendingState::Awaiting) ||
             (i->pending_input &&
              i->pending_input->state() == program::ProgramPendingState::Awaiting &&
-             i->pending_input->kind() ==
-                 program::ProgramPendingInputKind::CapabilityResult)) {
+             i->pending_input->kind() == program::ProgramPendingInputKind::CapabilityResult)) {
             r["status"] = "awaiting_tool_results";
         }
     }
@@ -223,12 +221,12 @@ json contract_projection(const program::ContractRun& run) {
     }
     for (const auto& diagnostic : run.diagnostics()) {
         result["diagnostics"].push_back({{"code", diagnostic.code},
-                                          {"message", diagnostic.message},
-                                          {"blocking", diagnostic.blocking}});
+                                         {"message", diagnostic.message},
+                                         {"blocking", diagnostic.blocking}});
     }
     if (run.verification()) {
         const auto& verification = *run.verification();
-        result["verification"] = {
+        result["verification"]   = {
             {"publishable", verification.publishable},
             {"status", std::string(program::to_string(verification.status))},
             {"missing_acceptance_ids", verification.missing_acceptance_ids},
@@ -241,8 +239,7 @@ json contract_projection(const program::ContractRun& run) {
 
 json runtime_final_value(const program::ProgramResult& result) {
     const auto& output = result.output();
-    if (output.is_object() && output.contains("channels") &&
-        output.at("channels").is_object() &&
+    if (output.is_object() && output.contains("channels") && output.at("channels").is_object() &&
         output.at("channels").contains("final_result") &&
         output.at("channels").at("final_result").is_object() &&
         output.at("channels").at("final_result").contains("value")) {
@@ -363,10 +360,9 @@ private:
 };
 class ForkProgramTransitionStore final : public program::ProgramTransitionStore {
 public:
-    ForkProgramTransitionStore(
-        std::string source_run_id,
-        std::shared_ptr<program::ProgramTransitionStore> source,
-        std::shared_ptr<program::ProgramTransitionStore> target)
+    ForkProgramTransitionStore(std::string                                      source_run_id,
+                               std::shared_ptr<program::ProgramTransitionStore> source,
+                               std::shared_ptr<program::ProgramTransitionStore> target)
         : source_run_id_(std::move(source_run_id)),
           source_(std::move(source)),
           target_(std::move(target)) {
@@ -375,24 +371,23 @@ public:
         }
     }
 
-    std::optional<program::ProgramRunRecord> load(
-        std::string_view owner_scope, std::string_view run_id) const override {
+    std::optional<program::ProgramRunRecord> load(std::string_view owner_scope,
+                                                  std::string_view run_id) const override {
         return select(run_id).load(owner_scope, run_id);
     }
-    std::optional<program::ProgramJournalRecord> latest(
-        std::string_view owner_scope, std::string_view run_id) const override {
+    std::optional<program::ProgramJournalRecord> latest(std::string_view owner_scope,
+                                                        std::string_view run_id) const override {
         return select(run_id).latest(owner_scope, run_id);
     }
-    std::vector<program::ProgramEvent> load_events(
-        std::string_view owner_scope,
-        std::string_view run_id,
-        std::uint64_t after_sequence) const override {
+    std::vector<program::ProgramEvent> load_events(std::string_view owner_scope,
+                                                   std::string_view run_id,
+                                                   std::uint64_t    after_sequence) const override {
         return select(run_id).load_events(owner_scope, run_id, after_sequence);
     }
     std::vector<program::ProgramEffectOutboxEntry> load_effects(
         std::string_view owner_scope,
         std::string_view run_id,
-        std::uint64_t after_sequence) const override {
+        std::uint64_t    after_sequence) const override {
         return select(run_id).load_effects(owner_scope, run_id, after_sequence);
     }
     std::optional<program::MigrationPlan> load_migration_plan(
@@ -400,11 +395,10 @@ public:
         return select(run_id).load_migration_plan(owner_scope, run_id);
     }
     program::ProgramTransitionPublishResult compare_publish(
-        std::string_view owner_scope,
-        std::string_view expected_journal_head,
+        std::string_view                      owner_scope,
+        std::string_view                      expected_journal_head,
         program::ProgramTransitionPublication publication) override {
-        return target_->compare_publish(owner_scope, expected_journal_head,
-                                        std::move(publication));
+        return target_->compare_publish(owner_scope, expected_journal_head, std::move(publication));
     }
 
 private:
@@ -412,7 +406,7 @@ private:
         return run_id == source_run_id_ ? *source_ : *target_;
     }
 
-    std::string source_run_id_;
+    std::string                                      source_run_id_;
     std::shared_ptr<program::ProgramTransitionStore> source_;
     std::shared_ptr<program::ProgramTransitionStore> target_;
 };
@@ -459,23 +453,26 @@ CallToolResult mcp_result(json value, std::string message) {
 json harness_preset_contracts() {
     return {
         {"fanout_judge",
-         {{"mode", "preset"}, {"core_name", "harness_fanout_judge"},
+         {{"mode", "preset"},
+          {"core_name", "harness_fanout_judge"},
           {"description", "Run bounded workers and aggregate their findings."}}},
         {"pr_review_panel",
-         {{"mode", "preset"}, {"core_name", "harness_pr_review_panel"},
+         {{"mode", "preset"},
+          {"core_name", "harness_pr_review_panel"},
           {"description", "Run a read-only review panel with evidence requirements."}}},
         {"bug_triage",
-         {{"mode", "preset"}, {"core_name", "harness_bug_triage"},
+         {{"mode", "preset"},
+          {"core_name", "harness_bug_triage"},
           {"description", "Run bounded workers for reproducible bug triage."}}},
         {"research_synthesis",
-         {{"mode", "preset"}, {"core_name", "harness_research_synthesis"},
+         {{"mode", "preset"},
+          {"core_name", "harness_research_synthesis"},
           {"description", "Run bounded research workers and synthesize evidence."}}},
     };
 }
 
 json harness_preset_names() {
-    return json::array(
-        {"fanout_judge", "pr_review_panel", "bug_triage", "research_synthesis"});
+    return json::array({"fanout_judge", "pr_review_panel", "bug_triage", "research_synthesis"});
 }
 
 json harness_admission_schema(const HarnessProgramSnapshots& snapshots) {
@@ -518,20 +515,21 @@ HarnessWorkerResponse HarnessWorkerResponse::input_required(json v) {
 }
 struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl> {
     struct Artifact {
-        std::string                              id;
-        HarnessProgramArtifactRecord             record;
-        HarnessCapabilityBindingRequest          bindings;
-        std::optional<program::ContractManifest> contract;
-        std::shared_ptr<program::ProgramStore>   store;
-        std::shared_ptr<program::ProgramCatalog> catalog;
-        std::shared_ptr<program::ProgramRuntime> runtime;
+        std::string                               id;
+        HarnessProgramArtifactRecord              record;
+        program::StoredArtifactClassificationRule migration_rule;
+        HarnessCapabilityBindingRequest           bindings;
+        std::optional<program::ContractManifest>  contract;
+        std::shared_ptr<program::ProgramStore>    store;
+        std::shared_ptr<program::ProgramCatalog>  catalog;
+        std::shared_ptr<program::ProgramRuntime>  runtime;
     };
     struct Run {
         std::string                              artifact_id;
         std::string                              mode;
         program::ProgramHandle                   handle;
         std::shared_ptr<program::ProgramRuntime> runtime;
-        std::optional<program::ContractRun>       contract;
+        std::optional<program::ContractRun>      contract;
         std::string                              workspace_revision;
         bool                                     contract_finalized = false;
         std::int64_t                             created;
@@ -568,19 +566,21 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             json::object());
         auto rec = store->load_artifact();
         if (!rec) return {};
-        auto p = rec->projection();
+        auto                                      p = rec->projection();
+        program::StoredArtifactClassificationRule migration_rule;
         if (!p.contains("authoring_frontend") || !p.at("authoring_frontend").is_string()) {
             // Artifacts created before Q6 carry an explicit CppBuilder source
             // kind, but no authoring metadata.  They remain resumable only as
             // drain-only legacy versions; missing metadata never selects a
             // parser based on document shape.
-            const auto rule = program::classify_stored_artifact(
+            migration_rule = program::classify_stored_artifact(
                 program::StoredArtifactKind::LegacyProgramVersion, false, true, true);
-            if (rule.classification != program::StoredArtifactClassification::DrainOnly)
-                throw std::invalid_argument("stored Harness artifact has no migration classification");
+            if (migration_rule.classification != program::StoredArtifactClassification::DrainOnly)
+                throw std::invalid_argument(
+                    "stored Harness artifact has no migration classification");
             p["authoring_frontend"] = "legacy_retained";
             p["stored_artifact_classification"] =
-                std::string(program::to_string(rule.classification));
+                std::string(program::to_string(migration_rule.classification));
         } else {
             program::AuthoringFrontend frontend;
             try {
@@ -591,19 +591,35 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
                     std::string("stored Harness artifact authoring frontend is invalid: ") +
                     error.what());
             }
-            const bool source_matches =
-                (frontend == program::AuthoringFrontend::JavaScript) ==
-                (rec->bundle().source_kind() == program::SourceKind::JavaScript);
+            const auto source_kind    = rec->bundle().source_kind();
+            const bool source_matches = (frontend == program::AuthoringFrontend::JavaScript &&
+                                         source_kind == program::SourceKind::JavaScript) ||
+                                        (frontend == program::AuthoringFrontend::TrustedCpp &&
+                                         source_kind == program::SourceKind::CppBuilder);
             if (!source_matches || frontend == program::AuthoringFrontend::CoreDsl ||
                 frontend == program::AuthoringFrontend::StrictCoreJson ||
                 frontend == program::AuthoringFrontend::ProgramJson) {
                 throw std::invalid_argument(
                     "stored Harness artifact authoring frontend violates the JavaScript cutover");
             }
+            auto classification = program::StoredArtifactClassification::Translated;
             if (p.contains("stored_artifact_classification")) {
-                const auto classification = program::stored_artifact_classification_from_string(
+                if (!p.at("stored_artifact_classification").is_string())
+                    throw std::invalid_argument(
+                        "stored Harness artifact migration classification is invalid");
+                classification = program::stored_artifact_classification_from_string(
                     p.at("stored_artifact_classification").get<std::string>());
-                if (classification == program::StoredArtifactClassification::Rejected)
+            }
+            switch (classification) {
+                case program::StoredArtifactClassification::Translated:
+                    migration_rule = program::classify_stored_artifact(
+                        program::StoredArtifactKind::LegacyProgramVersion, true, false, false);
+                    break;
+                case program::StoredArtifactClassification::DrainOnly:
+                    migration_rule = program::classify_stored_artifact(
+                        program::StoredArtifactKind::LegacyProgramVersion, false, true, true);
+                    break;
+                case program::StoredArtifactClassification::Rejected:
                     throw std::invalid_argument(
                         "stored Harness artifact is rejected by the migration boundary");
             }
@@ -632,40 +648,41 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             throw std::invalid_argument("stored Program tuple failed exact resolution");
         auto runtime = resources.make_program_runtime(catalog, transitions(*rec));
         if (!runtime) throw std::runtime_error("incomplete Program runtime");
-        auto a = std::make_shared<Artifact>(
-            Artifact{id, *rec, std::move(b), std::move(contract), store, std::move(catalog),
-                     std::move(runtime)});
+        auto a = std::make_shared<Artifact>(Artifact{id, *rec, migration_rule, std::move(b),
+                                                     std::move(contract), store, std::move(catalog),
+                                                     std::move(runtime)});
         std::lock_guard l(mutex);
         return artifacts.emplace(id, a).first->second;
     }
     json compile(const json& request) {
         try {
-            auto t  = HarnessRequestTranslator::translate(request, resources.snapshots.registry,
-                                                          config.translation_defaults);
+            auto t = HarnessRequestTranslator::translate(request, resources.snapshots.registry,
+                                                         config.translation_defaults);
             if (t.contract && t.contract->spec().owner_scope != resources.owner_scope)
                 throw HarnessTranslationError(
                     "H_CONTRACT_SCOPE", "/contract",
                     "Harness contract owner_scope must match the service owner scope");
-            auto b = t.source.kind() == program::SourceKind::JavaScript
-                         ? resources.compiler->compile(t.source, t.invocation_template.budget)
-                         : resources.compiler->compile(t.source);
-            auto id =
-                alias(b, resources.snapshots.policy.fingerprint(), t.bindings,
-                      resources.artifact_binding_identity,
-                      t.contract ? t.contract->content_hash() : std::string_view{});
-            auto p  = t.wire.projection;
-            auto source_map        = source_map_json(b.source_map());
-            p["program_bindings"]  = bindings_json(t.bindings);
-            p["source_id"]         = t.wire.source_id;
-            p["authoring_frontend"] =
-                std::string(program::to_string(t.wire.authoring_frontend));
+            auto b                  = t.source.kind() == program::SourceKind::JavaScript
+                                          ? resources.compiler->compile(t.source, t.invocation_template.budget)
+                                          : resources.compiler->compile(t.source);
+            auto id                 = alias(b, resources.snapshots.policy.fingerprint(), t.bindings,
+                                            resources.artifact_binding_identity,
+                            t.contract ? t.contract->content_hash() : std::string_view{});
+            auto p                  = t.wire.projection;
+            auto source_map         = source_map_json(b.source_map());
+            p["program_bindings"]   = bindings_json(t.bindings);
+            p["source_id"]          = t.wire.source_id;
+            p["authoring_frontend"] = std::string(program::to_string(t.wire.authoring_frontend));
+            const auto migration_rule = program::classify_stored_artifact(
+                program::StoredArtifactKind::LegacyProgramVersion, true, false, false);
+            p["stored_artifact_classification"] =
+                std::string(program::to_string(migration_rule.classification));
             p["core"]              = b.serialize_canonical();
             p["sourcemap"]         = source_map;
             p["diagnostics"]       = json::array();
             p["admission-profile"] = resources.snapshots.admission_profile.manifest();
             if (t.contract) {
-                p["contract_manifest"] =
-                    json::parse(t.contract->serialize_canonical());
+                p["contract_manifest"]      = json::parse(t.contract->serialize_canonical());
                 p["contract_manifest_hash"] = t.contract->content_hash();
             }
             auto store = std::make_shared<HarnessBoundedProgramStore>(
@@ -680,35 +697,30 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             if (!rec) throw std::runtime_error("Catalog did not publish Program tuple");
             auto runtime = resources.make_program_runtime(catalog, transitions(*rec));
             if (!runtime) throw std::runtime_error("incomplete Program runtime");
-            const bool        has_contract  = t.contract.has_value();
+            const bool        has_contract = t.contract.has_value();
             const std::string contract_hash =
                 t.contract ? t.contract->content_hash() : std::string{};
             const json contract_manifest =
                 t.contract ? json::parse(t.contract->serialize_canonical()) : json(nullptr);
             {
                 std::lock_guard l(mutex);
-                artifacts[id] =
-                    std::make_shared<Artifact>(Artifact{id, *rec, std::move(t.bindings),
-                                                        std::move(t.contract), store,
-                                                        std::move(catalog), std::move(runtime)});
+                artifacts[id] = std::make_shared<Artifact>(
+                    Artifact{id, *rec, migration_rule, std::move(t.bindings), std::move(t.contract),
+                             store, std::move(catalog), std::move(runtime)});
             }
-            auto base = "neograph://artifacts/" + id;
+            auto base      = "neograph://artifacts/" + id;
             json artifacts = {
-                {"core_lockfile",
-                 {{"uri", base + "/core"}, {"content", b.serialize_canonical()}}},
-                {"source_map",
-                 {{"uri", base + "/sourcemap"}, {"content", source_map}}},
-                {"diagnostics",
-                 {{"uri", base + "/diagnostics"}, {"content", json::array()}}},
+                {"core_lockfile", {{"uri", base + "/core"}, {"content", b.serialize_canonical()}}},
+                {"source_map", {{"uri", base + "/sourcemap"}, {"content", source_map}}},
+                {"diagnostics", {{"uri", base + "/diagnostics"}, {"content", json::array()}}},
                 {"admission_profile",
                  {{"uri", base + "/admission-profile"},
                   {"content", resources.snapshots.admission_profile.manifest()}}},
             };
             if (has_contract)
-                artifacts["contract"] = {
-                    {"uri", base + "/contract"},
-                    {"content", contract_manifest},
-                    {"manifest_hash", contract_hash}};
+                artifacts["contract"] = {{"uri", base + "/contract"},
+                                         {"content", contract_manifest},
+                                         {"manifest_hash", contract_hash}};
             return {{"ok", true},
                     {"artifact_id", id},
                     {"diagnostics", json::array()},
@@ -770,7 +782,7 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
         std::shared_ptr<Artifact>                               fork_artifact;
         std::shared_ptr<Run>                                    replay_source;
         program::ProgramResume                                  fork_resume;
-        std::shared_ptr<program::ProgramTransitionStore>         fork_source_transitions;
+        std::shared_ptr<program::ProgramTransitionStore>        fork_source_transitions;
         if (a.contains("request")) {
             if (a.size() != 1) throw std::invalid_argument("inline start accepts only request");
             auto c = compile(a.at("request"));
@@ -804,10 +816,8 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             }
             const bool has_call_id = fork.contains("call_id");
             const bool has_result  = fork.contains("result");
-            if (has_call_id != has_result ||
-                (has_call_id && !fork.at("call_id").is_string())) {
-                throw std::invalid_argument(
-                    "fork call_id and result must be supplied together");
+            if (has_call_id != has_result || (has_call_id && !fork.at("call_id").is_string())) {
+                throw std::invalid_argument("fork call_id and result must be supplied together");
             }
             if (has_call_id) {
                 fork_resume.pending_id = fork.at("call_id").get<std::string>();
@@ -818,8 +828,8 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             fork_artifact = artifact(source->artifact_id);
             if (!fork_artifact) return {{"started", false}, {"status", "not_found"}};
             fork_source_transitions = transitions(fork_artifact->record);
-            artifact_id = fork.at("artifact_id").get<std::string>();
-            fork_source = program::ExactProgramCheckpointReference{
+            artifact_id             = fork.at("artifact_id").get<std::string>();
+            fork_source             = program::ExactProgramCheckpointReference{
                 fork.at("source_run_id").get<std::string>(),
                 fork.at("checkpoint_id").get<std::string>()};
             mode = "compatible_fork";
@@ -828,6 +838,21 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
                 "start requires exactly request, artifact_id, replay, or fork");
         auto x = artifact(artifact_id);
         if (!x) return {{"started", false}, {"status", "not_found"}};
+        if (!x->migration_rule.allows_new_run) {
+            return {
+                {"started", false},
+                {"status", "migration_blocked"},
+                {"artifact_id", artifact_id},
+                {"diagnostics",
+                 json::array(
+                     {{{"phase", "migration"},
+                       {"code", x->migration_rule.diagnostic_code},
+                       {"severity", "error"},
+                       {"path", "/artifact_id"},
+                       {"message",
+                        "Stored artifact is drain-only and cannot start a new Program run"}}})},
+            };
+        }
         auto runtime = x->runtime;
         if (fork_artifact && fork_artifact->id != x->id) {
             auto store = std::make_shared<ForkProgramStore>(
@@ -839,31 +864,31 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             auto fork_transitions   = std::make_shared<ForkProgramTransitionStore>(
                 fork_source->source_run_id, std::move(source_transitions),
                 std::move(target_transitions));
-            runtime = resources.make_program_runtime(std::move(catalog),
-                                                     std::move(fork_transitions));
+            runtime =
+                resources.make_program_runtime(std::move(catalog), std::move(fork_transitions));
             if (!runtime) throw std::runtime_error("incomplete Program fork runtime");
         }
         auto invocation_template = x->record.invocation_template();
         if (fork_source) {
             const auto source_record =
-                fork_source_transitions->load(resources.owner_scope,
-                                              fork_source->source_run_id);
+                fork_source_transitions->load(resources.owner_scope, fork_source->source_run_id);
             if (!source_record) return {{"started", false}, {"status", "not_found"}};
             invocation_template.budget =
                 bounded_budget(invocation_template.budget, source_record->remaining_budget());
         }
         auto id = run_id(resources.snapshots.policy.fingerprint());
-        auto invocation = bind_harness_invocation(
-            std::move(invocation_template), resources.owner_scope, x->record.version().id(), id,
-            "harness:" + id);
-        std::optional<program::ContractRun> contract_run;
+        auto invocation =
+            bind_harness_invocation(std::move(invocation_template), resources.owner_scope,
+                                    x->record.version().id(), id, "harness:" + id);
+        std::optional<program::ContractRun>      contract_run;
         std::shared_ptr<HarnessContractRunStore> durable_contract;
-        std::string workspace_revision = x->record.version().id();
-        const auto projection = x->record.projection();
+        std::string                              workspace_revision = x->record.version().id();
+        const auto                               projection         = x->record.projection();
         if (projection.contains("workspace_revision")) {
             if (!projection.at("workspace_revision").is_string() ||
                 projection.at("workspace_revision").get<std::string>().empty())
-                throw std::invalid_argument("Harness workspace_revision must be a non-empty string");
+                throw std::invalid_argument(
+                    "Harness workspace_revision must be a non-empty string");
             workspace_revision = projection.at("workspace_revision").get<std::string>();
         }
         if (x->contract) {
@@ -880,14 +905,14 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
                 auto resume     = std::move(fork_resume);
                 resume.trace_id = "harness-fork:" + id;
                 resume.events   = events;
-                handle.emplace(runtime->fork(*fork_source, std::move(invocation), std::move(resume),
-                                             events));
+                handle.emplace(
+                    runtime->fork(*fork_source, std::move(invocation), std::move(resume), events));
             } else if (mode == "recorded_replay") {
                 auto source_handle = retained_handle(replay_source);
                 if (!source_handle.try_result())
                     return {{"started", false}, {"status", "source_not_terminal"}};
-                auto recorded = resources.make_recorded_binding(
-                    x->record.version(), x->bindings, source_handle.events_after(0));
+                auto recorded = resources.make_recorded_binding(x->record.version(), x->bindings,
+                                                                source_handle.events_after(0));
                 handle.emplace(
                     runtime->start_recorded(std::move(invocation), std::move(recorded), events));
             } else {
@@ -905,9 +930,9 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
         }
         {
             std::lock_guard l(mutex);
-            runs[id] = std::make_shared<Run>(
-                Run{artifact_id, mode, *handle, runtime, std::move(contract_run),
-                    std::move(workspace_revision), false, now_ms(), std::make_shared<std::mutex>()});
+            runs[id] = std::make_shared<Run>(Run{
+                artifact_id, mode, *handle, runtime, std::move(contract_run),
+                std::move(workspace_revision), false, now_ms(), std::make_shared<std::mutex>()});
         }
         json response = {{"started", true},
                          {"run_id", id},
@@ -949,12 +974,12 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
         auto a = artifact(retained->artifact_id());
         if (!a) return {};
         retained->validate_artifact(a->record);
-        auto h     = a->runtime->reconnect(resources.owner_scope, id);
-        auto mode  = retained->run_record().fork_receipt() ? std::string("compatible_fork")
-                                                           : std::string("live");
+        auto h    = a->runtime->reconnect(resources.owner_scope, id);
+        auto mode = retained->run_record().fork_receipt() ? std::string("compatible_fork")
+                                                          : std::string("live");
         std::optional<program::ContractRun> contract_run;
-        std::string workspace_revision = a->record.version().id();
-        const auto projection = a->record.projection();
+        std::string                         workspace_revision = a->record.version().id();
+        const auto                          projection         = a->record.projection();
         if (projection.contains("workspace_revision") &&
             projection.at("workspace_revision").is_string() &&
             !projection.at("workspace_revision").get<std::string>().empty())
@@ -964,20 +989,16 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             if (!durable_contract)
                 throw std::invalid_argument(
                     "Stored Harness contract run has no durable contract run store");
-            auto recovered = durable_contract->load_contract_run(a->record,
-                                                                  retained->run_record());
-            if (!recovered)
-                throw std::invalid_argument("Stored Harness contract run is missing");
-            if (recovered->manifest().serialize_canonical() !=
-                a->contract->serialize_canonical())
+            auto recovered = durable_contract->load_contract_run(a->record, retained->run_record());
+            if (!recovered) throw std::invalid_argument("Stored Harness contract run is missing");
+            if (recovered->manifest().serialize_canonical() != a->contract->serialize_canonical())
                 throw std::invalid_argument("Stored Harness contract manifest binding mismatch");
             contract_run.emplace(std::move(*recovered));
         }
-        auto value = std::make_shared<Run>(Run{a->id, std::move(mode), h, a->runtime,
-                                               std::move(contract_run),
-                                               std::move(workspace_revision), false,
-                                               retained->run_record().created_at_ms(),
-                                               std::make_shared<std::mutex>()});
+        auto value = std::make_shared<Run>(
+            Run{a->id, std::move(mode), h, a->runtime, std::move(contract_run),
+                std::move(workspace_revision), false, retained->run_record().created_at_ms(),
+                std::make_shared<std::mutex>()});
         std::lock_guard l(mutex);
         return runs.emplace(id, value).first->second;
     }
@@ -1000,15 +1021,15 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
         }
         const auto program_version = terminal.program_version_id();
         const auto artifact_hash   = terminal.bundle_id();
-        const auto actual           = runtime_final_value(terminal);
-        const bool completed = terminal.status() == program::ProgramTerminalStatus::Completed;
+        const auto actual          = runtime_final_value(terminal);
+        const bool completed       = terminal.status() == program::ProgramTerminalStatus::Completed;
         try {
             // Worker output is retained only as a self-report. It is never
             // used as the acceptance decision below.
-            const auto output = terminal.output();
-            const auto channels = output.is_object() && output.contains("channels")
-                                      ? output.at("channels")
-                                      : json::object();
+            const auto output         = terminal.output();
+            const auto channels       = output.is_object() && output.contains("channels")
+                                            ? output.at("channels")
+                                            : json::object();
             const auto worker_results = channels.is_object()
                                             ? channels.value("worker_results", json::array())
                                             : json::array();
@@ -1023,23 +1044,24 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             for (const auto& acceptance : contract.manifest().spec().acceptance) {
                 if (!acceptance.required) continue;
                 program::ContractEvidence evidence;
-                evidence.evidence_id        = "runtime-" + acceptance.id + "-" +
-                                              std::to_string(contract.attempt());
-                evidence.acceptance_id       = acceptance.id;
-                evidence.kind                = program::ContractEvidenceKind::DeterministicRun;
-                evidence.manifest_hash       = contract.manifest().content_hash();
-                evidence.program_version_id  = program_version;
-                evidence.run_id               = x.handle.run_id();
-                evidence.workspace_revision  = x.workspace_revision;
-                evidence.command             = "ProgramRuntime";
-                evidence.toolchain           = "neograph-program-runtime";
-                evidence.artifact_hash       = artifact_hash;
-                evidence.executed            = true;
-                evidence.passed = completed && runtime_matches_expected(actual, acceptance.expected);
-                evidence.details = {{"actual", actual},
-                                    {"expected", acceptance.expected},
-                                    {"program_status", std::string(program::to_string(
-                                         terminal.status()))}};
+                evidence.evidence_id =
+                    "runtime-" + acceptance.id + "-" + std::to_string(contract.attempt());
+                evidence.acceptance_id      = acceptance.id;
+                evidence.kind               = program::ContractEvidenceKind::DeterministicRun;
+                evidence.manifest_hash      = contract.manifest().content_hash();
+                evidence.program_version_id = program_version;
+                evidence.run_id             = x.handle.run_id();
+                evidence.workspace_revision = x.workspace_revision;
+                evidence.command            = "ProgramRuntime";
+                evidence.toolchain          = "neograph-program-runtime";
+                evidence.artifact_hash      = artifact_hash;
+                evidence.executed           = true;
+                evidence.passed =
+                    completed && runtime_matches_expected(actual, acceptance.expected);
+                evidence.details = {
+                    {"actual", actual},
+                    {"expected", acceptance.expected},
+                    {"program_status", std::string(program::to_string(terminal.status()))}};
                 if (!completed && terminal.failure())
                     evidence.details["failure"] = terminal.failure()->message;
                 contract.record_evidence(std::move(evidence));
@@ -1048,27 +1070,26 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             // Harness. Worker-provided fields are deliberately not consulted.
             for (const auto& oracle : contract.manifest().spec().independent_oracles) {
                 program::ContractEvidence evidence;
-                evidence.evidence_id         = "oracle-" + oracle + "-" +
-                                               std::to_string(contract.attempt());
-                evidence.kind                 = program::ContractEvidenceKind::IndependentOracle;
-                evidence.manifest_hash        = contract.manifest().content_hash();
-                evidence.program_version_id   = program_version;
-                evidence.run_id                = x.handle.run_id();
-                evidence.workspace_revision   = x.workspace_revision;
-                evidence.command              = "ProgramRuntime outcome oracle";
-                evidence.toolchain            = "neograph-program-runtime";
-                evidence.artifact_hash        = artifact_hash;
-                evidence.executed             = true;
-                evidence.passed               = completed && !actual.is_null();
-                evidence.details            = {{"oracle_id", oracle},
-                                    {"observed", actual},
-                                    {"program_status", std::string(program::to_string(
-                                         terminal.status()))}};
+                evidence.evidence_id =
+                    "oracle-" + oracle + "-" + std::to_string(contract.attempt());
+                evidence.kind               = program::ContractEvidenceKind::IndependentOracle;
+                evidence.manifest_hash      = contract.manifest().content_hash();
+                evidence.program_version_id = program_version;
+                evidence.run_id             = x.handle.run_id();
+                evidence.workspace_revision = x.workspace_revision;
+                evidence.command            = "ProgramRuntime outcome oracle";
+                evidence.toolchain          = "neograph-program-runtime";
+                evidence.artifact_hash      = artifact_hash;
+                evidence.executed           = true;
+                evidence.passed             = completed && !actual.is_null();
+                evidence.details            = {
+                    {"oracle_id", oracle},
+                    {"observed", actual},
+                    {"program_status", std::string(program::to_string(terminal.status()))}};
                 contract.record_evidence(std::move(evidence));
             }
         } catch (const std::exception& error) {
-            contract.record_diagnostic(
-                {"harness-contract-finalization", error.what(), true});
+            contract.record_diagnostic({"harness-contract-finalization", error.what(), true});
         }
         const auto verification =
             contract.verify(program_version, x.handle.run_id(), x.workspace_revision);
@@ -1082,9 +1103,9 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
         x.contract_finalized = true;
     }
     json snapshot(const std::shared_ptr<Run>& x) {
-        auto handle           = retained_handle(x);
-        auto record           = handle.snapshot();
-        auto terminal         = handle.try_result();
+        auto handle   = retained_handle(x);
+        auto record   = handle.snapshot();
+        auto terminal = handle.try_result();
         if (terminal && x->contract) {
             std::lock_guard lock(*x->guard);
             finalize_contract(*x, *terminal);
@@ -1109,20 +1130,20 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
         r["artifacts"]        = uris(record.run_id());
         if (x->contract) {
             const auto contract = contract_projection(*x->contract);
-            r["contract"] = contract;
+            r["contract"]       = contract;
             if (terminal && x->contract->status() != program::ContractRunStatus::Published) {
                 r["program_status"] = r.at("status");
-                r["status"] = x->contract->status() == program::ContractRunStatus::Failed
-                                   ? "failed"
-                                   : "blocked";
+                r["status"]         = x->contract->status() == program::ContractRunStatus::Failed
+                                          ? "failed"
+                                          : "blocked";
                 if (r.contains("result")) {
                     const auto candidate = r.at("result");
-                    json       projected  = json::object();
+                    json       projected = json::object();
                     for (const auto& [key, value] : r.items()) {
                         if (key != "result") projected[key] = value;
                     }
                     projected["candidate_result"] = candidate;
-                    r = std::move(projected);
+                    r                             = std::move(projected);
                 }
             }
         }
@@ -1168,21 +1189,20 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
         auto x    = run(id);
         if (!x) throw std::invalid_argument("unknown Harness run: " + id);
         std::unique_lock run_lock(*x->guard);
-        auto            handle = x->handle;
-        const auto      before = handle.snapshot();
-        bool       duplicate = false;
-        const auto now = static_cast<std::uint64_t>(now_ms());
+        auto             handle    = x->handle;
+        const auto       before    = handle.snapshot();
+        bool             duplicate = false;
+        const auto       now       = static_cast<std::uint64_t>(now_ms());
         if (a.contains("resolution")) {
             if (const auto pending = before.pending_effect()) {
-                const auto resolution =
-                    parse_reconciliation(a.at("resolution").get<std::string>());
-                const auto update = [&] {
+                const auto resolution = parse_reconciliation(a.at("resolution").get<std::string>());
+                const auto update     = [&] {
                     if (before.continuation().state == program::ContinuationState::Interrupted &&
                         resolution == program::ProgramEffectReconciliation::Unknown &&
                         !a.contains("result")) {
                         if (pending->call_id() != call)
                             return pending->reconcile(call, pending->effect_id(), resolution,
-                                                       std::nullopt, now);
+                                                          std::nullopt, now);
                         return pending->mark_outcome_unknown(now);
                     }
                     return pending->reconcile(
@@ -1197,8 +1217,9 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
                 duplicate = pending->submit(call, a.at("result"), now).disposition ==
                             program::ProgramPendingDisposition::Duplicate;
             } else if (const auto pending = before.pending_effect()) {
-                duplicate = pending->submit(call, pending->effect_id(), a.at("result"), now)
-                                .disposition == program::ProgramPendingDisposition::Duplicate;
+                duplicate =
+                    pending->submit(call, pending->effect_id(), a.at("result"), now).disposition ==
+                    program::ProgramPendingDisposition::Duplicate;
             }
         }
         if (duplicate) {
@@ -1231,7 +1252,7 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             return handle.resume(*x->runtime, std::move(value));
         }();
         const auto after = next.snapshot();
-        duplicate = duplicate || (before_journal == after.journal_head() &&
+        duplicate        = duplicate || (before_journal == after.journal_head() &&
                                   before_events == after.event_sequence() &&
                                   before_effects == after.effect_sequence());
         if (!duplicate) x->handle = std::move(next);
@@ -1355,15 +1376,15 @@ void HarnessService::register_tools(MCPServer& server) {
                 R"JSON({"type":"object","required":["service","request_schema","node_palette"],"properties":{"service":{"type":"string"},"request_schema":{"type":"object"},"node_palette":{"type":"object"}},"additionalProperties":true})JSON"),
             true),
         [a](const json&, const auto&) {
-            return mcp_result({{"service", "neograph-harness-m4"},
-                               {"request_schema", harness_program_request_schema()},
-                               {"output_schema", harness_program_output_schema()},
-                               {"node_palette", a->resources.snapshots.registry.manifest()},
-                               {"admission_profile",
-                                harness_admission_schema(a->resources.snapshots)},
-                               {"presets", harness_preset_names()},
-                               {"preset_contracts", harness_preset_contracts()}},
-                              "NeoGraph Harness Program schema");
+            return mcp_result(
+                {{"service", "neograph-harness-m4"},
+                 {"request_schema", harness_program_request_schema()},
+                 {"output_schema", harness_program_output_schema()},
+                 {"node_palette", a->resources.snapshots.registry.manifest()},
+                 {"admission_profile", harness_admission_schema(a->resources.snapshots)},
+                 {"presets", harness_preset_names()},
+                 {"preset_contracts", harness_preset_contracts()}},
+                "NeoGraph Harness Program schema");
         });
     server.register_tool(tool_definition("neograph_compile", "Compile Harness",
                                          "Compile through the public Program API.",

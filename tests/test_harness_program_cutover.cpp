@@ -1,18 +1,18 @@
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/store.h>
+#include <neograph/harness/contract.h>
 #include <neograph/mcp/harness.h>
 #include <neograph/mcp/harness_program_store.h>
-#include <neograph/harness/contract.h>
 #include <neograph/mcp/server.h>
 #include <neograph/provider.h>
 #ifdef NEOGRAPH_TESTS_HAVE_SQLITE
 #include <neograph/mcp/sqlite_harness_store.h>
+
 #include <sqlite3.h>
 #endif
 
 #include <asio/error.hpp>
 #include <asio/system_error.hpp>
-
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -43,12 +43,14 @@ json canonical_json(const json& value) {
         }
         std::sort(keys.begin(), keys.end());
         json result = json::object();
-        for (const auto& key : keys) result[key] = canonical_json(value.at(key));
+        for (const auto& key : keys)
+            result[key] = canonical_json(value.at(key));
         return result;
     }
     if (value.is_array()) {
         json result = json::array();
-        for (const auto& child : value) result.push_back(canonical_json(child));
+        for (const auto& child : value)
+            result.push_back(canonical_json(child));
         return result;
     }
     return value;
@@ -57,8 +59,8 @@ json canonical_json(const json& value) {
 class RepeatingToolProvider final : public neograph::Provider {
 public:
     std::vector<neograph::ChatCompletion> completions;
-    std::atomic<unsigned>                  calls{0};
-    std::vector<int>                       max_tokens;
+    std::atomic<unsigned>                 calls{0};
+    std::vector<int>                      max_tokens;
 
     neograph::ChatCompletion complete(const neograph::CompletionParams& params) override {
         max_tokens.push_back(params.max_tokens);
@@ -81,11 +83,10 @@ public:
             index = started_++;
             ready_.notify_all();
             if (wait_for_two_) {
-                const bool both_started =
-                    ready_.wait_for(lock, 2s, [this, &params] {
-                        return started_ >= 2 ||
-                               (params.cancel_token && params.cancel_token->is_cancelled());
-                    });
+                const bool both_started = ready_.wait_for(lock, 2s, [this, &params] {
+                    return started_ >= 2 ||
+                           (params.cancel_token && params.cancel_token->is_cancelled());
+                });
                 if (!both_started || started_ < 2) {
                     if (params.cancel_token && params.cancel_token->is_cancelled())
                         throw neograph::graph::CancelledException("sibling budget cancellation");
@@ -115,11 +116,11 @@ public:
     std::string get_name() const override { return "concurrent-budget-provider"; }
 
 private:
-    std::mutex              mutex_;
+    std::mutex mutex_;
 
     std::condition_variable ready_;
     bool                    wait_for_two_ = true;
-    int                     started_ = 0;
+    int                     started_      = 0;
 };
 class ThrowOnceProvider final : public neograph::Provider {
 public:
@@ -143,7 +144,8 @@ public:
 
     neograph::ChatCompletion complete(const neograph::CompletionParams& params) override {
         calls.fetch_add(1, std::memory_order_relaxed);
-        while (!params.cancel_token->is_cancelled()) std::this_thread::sleep_for(1ms);
+        while (!params.cancel_token->is_cancelled())
+            std::this_thread::sleep_for(1ms);
         throw neograph::graph::CancelledException("provider timeout");
     }
 
@@ -161,12 +163,46 @@ public:
         throw asio::system_error(asio::error::make_error_code(asio::error::timed_out));
     }
 
-    std::string get_name() const override {
-        return "parent-cancels-then-asio-error-provider";
-    }
+    std::string get_name() const override { return "parent-cancels-then-asio-error-provider"; }
 
 private:
     std::shared_ptr<neograph::graph::CancelToken> parent_;
+};
+
+class MutableHarnessRecordStore final : public neograph::mcp::HarnessRecordStore {
+public:
+    void save_artifact(const std::string& artifact_id, const json& record) override {
+        std::lock_guard lock(mutex_);
+        artifacts_[artifact_id] = record;
+    }
+
+    std::optional<json> load_artifact(const std::string& artifact_id) override {
+        std::lock_guard lock(mutex_);
+        const auto      it = artifacts_.find(artifact_id);
+        return it == artifacts_.end() ? std::nullopt : std::optional<json>{it->second};
+    }
+
+    void save_run(const std::string& run_id, const json& record) override {
+        std::lock_guard lock(mutex_);
+        runs_[run_id] = record;
+    }
+
+    std::optional<json> load_run(const std::string& run_id) override {
+        std::lock_guard lock(mutex_);
+        const auto      it = runs_.find(run_id);
+        return it == runs_.end() ? std::nullopt : std::optional<json>{it->second};
+    }
+
+    void mutate_artifact(const std::string&                artifact_id,
+                         const std::function<void(json&)>& mutation) {
+        std::lock_guard lock(mutex_);
+        mutation(artifacts_.at(artifact_id));
+    }
+
+private:
+    std::mutex                  mutex_;
+    std::map<std::string, json> artifacts_;
+    std::map<std::string, json> runs_;
 };
 
 json request() {
@@ -197,14 +233,12 @@ struct HarnessFixture {
     neograph::mcp::HarnessServiceConfig    config;
     neograph::mcp::HarnessServiceResources resources;
 
-    explicit HarnessFixture(
-        neograph::mcp::HarnessWorkerExecutor executor = {},
-        json provider_host_configuration = json::object(),
-        neograph::mcp::HarnessCapabilityExecutor capability_executor = {})
+    explicit HarnessFixture(neograph::mcp::HarnessWorkerExecutor executor = {},
+                            json provider_host_configuration              = json::object(),
+                            neograph::mcp::HarnessCapabilityExecutor capability_executor = {})
         : resources(make_resources(executor ? std::move(executor) : success_executor(),
                                    std::move(provider_host_configuration),
                                    std::move(capability_executor))) {}
-
 
     neograph::mcp::HarnessWorkerExecutor success_executor() {
         return [this](const neograph::mcp::HarnessWorkerCall&,
@@ -216,15 +250,15 @@ struct HarnessFixture {
     }
 
     neograph::mcp::HarnessServiceResources make_resources(
-        neograph::mcp::HarnessWorkerExecutor executor,
-        json provider_host_configuration,
+        neograph::mcp::HarnessWorkerExecutor     executor,
+        json                                     provider_host_configuration,
         neograph::mcp::HarnessCapabilityExecutor capability_executor) {
         neograph::mcp::HarnessProgramHostConfig host;
-        host.worker_executor           = std::move(executor);
-        host.compiler_build_id         = "harness-cutover-test-v1";
-        host.provider_binding_identity = digest('c');
+        host.worker_executor             = std::move(executor);
+        host.compiler_build_id           = "harness-cutover-test-v1";
+        host.provider_binding_identity   = digest('c');
         host.provider_host_configuration = std::move(provider_host_configuration);
-        host.snapshots.owner_scope     = "harness-cutover-test";
+        host.snapshots.owner_scope       = "harness-cutover-test";
         neograph::program::ExecutableIdentity provider{neograph::program::ExecutableKind::Provider,
                                                        "harness.provider", "1.0.0", digest('d')};
         neograph::program::ExecutableIdentity tool{neograph::program::ExecutableKind::Tool,
@@ -241,22 +275,20 @@ struct HarnessFixture {
               {}},
              {{{"type", "object"}, {"additionalProperties", true}},
               {{"type", "object"}, {"additionalProperties", true}}}});
-        host.snapshots.allowed_capabilities = {"tool.invoke"};
-        host.snapshots.allowed_effects      = {"filesystem.read"};
+        host.snapshots.allowed_capabilities   = {"tool.invoke"};
+        host.snapshots.allowed_effects        = {"filesystem.read"};
         host.snapshots.allowed_module_digests = {
-            digest('a'), digest('b'), provider.implementation_digest,
-            tool.implementation_digest};
-        host.snapshots.budget_ceiling         = {10000, 1000000, 100000, 8, 1000, 100, 100, 8, 100};
+            digest('a'), digest('b'), provider.implementation_digest, tool.implementation_digest};
+        host.snapshots.budget_ceiling = {10000, 1000000, 100000, 8, 1000, 100, 100, 8, 100};
         host.checkpoints = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
         host.state_store = std::make_shared<neograph::graph::InMemoryStore>();
-        host.capability_executor = capability_executor
-                                       ? std::move(capability_executor)
-                                       : neograph::mcp::HarnessCapabilityExecutor(
-                                             [](const json&, const json&, const auto&) {
-                                                 return json::object();
-                                             });
+        host.capability_executor =
+            capability_executor
+                ? std::move(capability_executor)
+                : neograph::mcp::HarnessCapabilityExecutor(
+                      [](const json&, const json&, const auto&) { return json::object(); });
         host.tool_binding_identities.emplace(tool.name, digest('f'));
-        config.translation_defaults.provider = provider;
+        config.translation_defaults.provider          = provider;
         config.translation_defaults.read_only_effects = {"filesystem.read"};
         return neograph::mcp::make_harness_program_service_resources(std::move(host));
     }
@@ -294,15 +326,48 @@ TEST(HarnessProgramCutover, CompileStartGetAndFinalResultUseProgramRuntime) {
     EXPECT_TRUE(status_uri.starts_with("neograph://runs/"));
 }
 
+TEST(HarnessProgramCutover, DrainOnlyRetainedArtifactCannotStartNewRun) {
+    HarnessFixture fixture;
+    auto           records      = std::make_shared<MutableHarnessRecordStore>();
+    fixture.config.record_store = records;
+    std::string artifact_id;
+    {
+        neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
+        const auto                    compiled = service.compile(request());
+        ASSERT_TRUE(compiled.at("ok").get<bool>()) << compiled.dump();
+        artifact_id = compiled.at("artifact_id").get<std::string>();
+
+        const auto stored = records->load_artifact(artifact_id);
+        ASSERT_TRUE(stored.has_value());
+        EXPECT_EQ(stored->at("projection").at("stored_artifact_classification"), "translated");
+    }
+
+    records->mutate_artifact(artifact_id, [](json& record) {
+        json retained = json::object();
+        for (const auto& [key, value] : record.at("projection").items()) {
+            if (key != "authoring_frontend" && key != "stored_artifact_classification")
+                retained[key] = value;
+        }
+        record["projection"] = std::move(retained);
+    });
+
+    neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
+    const auto                    blocked = service.start({{"artifact_id", artifact_id}});
+    ASSERT_FALSE(blocked.at("started").get<bool>()) << blocked.dump();
+    EXPECT_EQ(blocked.at("status"), "migration_blocked");
+    ASSERT_EQ(blocked.at("diagnostics").size(), 1U);
+    EXPECT_EQ(blocked.at("diagnostics")[0].at("code"), "P_MIGRATION_DRAIN_ONLY");
+    EXPECT_EQ(fixture.calls.load(), 0);
+}
+
 TEST(HarnessProgramCutover, JavaScriptAuthoringUsesProgramSourceAndAdmittedRuntime) {
     HarnessFixture                fixture;
     neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
-    auto value = request();
-    value["harness"] = {
-        {"mode", "javascript"},
-        {"source_id", "harness:direct.js"},
-        {"source",
-         R"JS(
+    auto                          value = request();
+    value["harness"]                    = {{"mode", "javascript"},
+                                           {"source_id", "harness:direct.js"},
+                                           {"source",
+                                            R"JS(
             export function define() {
                 const graph = ng.graph("harness_fanout_judge");
                 graph.channel("task", {reducer: "overwrite", initial: {}});
@@ -340,14 +405,13 @@ TEST(HarnessProgramCutover, JavaScriptAuthoringUsesProgramSourceAndAdmittedRunti
                 graph.edge("judge", "__end__");
                 return graph;
             }
-        )JS"}
-    };
+        )JS"}};
 
     const auto compiled = service.compile(value);
     ASSERT_TRUE(compiled.at("ok").get<bool>()) << compiled.dump();
     EXPECT_FALSE(compiled.at("bundle_id").get<std::string>().empty());
-    const auto bundle = json::parse(
-        compiled.at("artifacts").at("core_lockfile").at("content").get<std::string>());
+    const auto bundle =
+        json::parse(compiled.at("artifacts").at("core_lockfile").at("content").get<std::string>());
     EXPECT_EQ(bundle.at("source_kind"), "javascript");
     const auto started = service.start({{"artifact_id", compiled.at("artifact_id")}});
     ASSERT_TRUE(started.at("started").get<bool>()) << started.dump();
@@ -358,12 +422,12 @@ TEST(HarnessProgramCutover, JavaScriptAuthoringUsesProgramSourceAndAdmittedRunti
 }
 
 TEST(HarnessProgramCutover, HostConfigurationChangesProviderBindingAndArtifactIdentity) {
-    HarnessFixture first({}, {{"route", "provider-a"}, {"region", "test"}});
-    HarnessFixture second({}, {{"route", "provider-b"}, {"region", "test"}});
+    HarnessFixture                first({}, {{"route", "provider-a"}, {"region", "test"}});
+    HarnessFixture                second({}, {{"route", "provider-b"}, {"region", "test"}});
     neograph::mcp::HarnessService first_service(first.config, nullptr, first.resources);
     neograph::mcp::HarnessService second_service(second.config, nullptr, second.resources);
 
-    const auto first_compiled = first_service.compile(request());
+    const auto first_compiled  = first_service.compile(request());
     const auto second_compiled = second_service.compile(request());
     ASSERT_TRUE(first_compiled.at("ok").get<bool>()) << first_compiled.dump();
     ASSERT_TRUE(second_compiled.at("ok").get<bool>()) << second_compiled.dump();
@@ -372,7 +436,7 @@ TEST(HarnessProgramCutover, HostConfigurationChangesProviderBindingAndArtifactId
 }
 
 TEST(HarnessProgramCutover, ProviderTokenBudgetCancelsRepeatedToolRequests) {
-    auto provider = std::make_shared<RepeatingToolProvider>();
+    auto                     provider = std::make_shared<RepeatingToolProvider>();
     neograph::ChatCompletion first;
     first.message.role = "assistant";
     first.message.tool_calls.push_back({"call-1", "harness.lookup", "{}"});
@@ -380,12 +444,12 @@ TEST(HarnessProgramCutover, ProviderTokenBudgetCancelsRepeatedToolRequests) {
     neograph::ChatCompletion second;
     second.message.role = "assistant";
     second.message.tool_calls.push_back({"call-2", "harness.lookup", "{}"});
-    second.usage = {1, 2, 3};
+    second.usage          = {1, 2, 3};
     provider->completions = {first, second};
 
-    std::atomic<unsigned> capability_calls{0};
+    std::atomic<unsigned>                        capability_calls{0};
     neograph::mcp::HarnessProviderExecutorConfig provider_config;
-    provider_config.provider = provider;
+    provider_config.provider        = provider;
     provider_config.max_tool_rounds = 8;
     provider_config.capability_executor =
         [&capability_calls](const json&, const json&,
@@ -396,11 +460,11 @@ TEST(HarnessProgramCutover, ProviderTokenBudgetCancelsRepeatedToolRequests) {
     auto executor = neograph::mcp::make_provider_harness_executor(std::move(provider_config));
 
     HarnessFixture fixture(std::move(executor));
-    fixture.config.translation_defaults.max_output_tokens = 1;
+    fixture.config.translation_defaults.max_output_tokens             = 1;
     fixture.config.translation_defaults.input_token_ceiling_per_round = 1;
-    auto value = request();
+    auto value                                                        = request();
     value["workers"][0]["tools"] = json::array({"harness.lookup"});
-    value["tool_catalog"] = json::array({{
+    value["tool_catalog"]        = json::array({{
         {"id", "harness.lookup"},
         {"description", "Read a bounded result"},
         {"input_schema", {{"type", "object"}, {"additionalProperties", true}}},
@@ -410,13 +474,12 @@ TEST(HarnessProgramCutover, ProviderTokenBudgetCancelsRepeatedToolRequests) {
     }});
 
     neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
-    const auto compiled = service.compile(value);
+    const auto                    compiled = service.compile(value);
     ASSERT_TRUE(compiled.at("ok").get<bool>()) << compiled.dump();
     const auto started =
         service.start({{"artifact_id", compiled.at("artifact_id").get<std::string>()}});
     ASSERT_TRUE(started.at("started").get<bool>()) << started.dump();
-    const auto terminal =
-        await_terminal(service, started.at("run_id").get<std::string>());
+    const auto terminal = await_terminal(service, started.at("run_id").get<std::string>());
 
     EXPECT_EQ(terminal.at("status"), "max_steps_exhausted") << terminal.dump();
     EXPECT_EQ(provider->calls.load(std::memory_order_relaxed), 1U);
@@ -425,20 +488,19 @@ TEST(HarnessProgramCutover, ProviderTokenBudgetCancelsRepeatedToolRequests) {
     EXPECT_EQ(provider->max_tokens.front(), 1);
 }
 
-
 TEST(HarnessProgramCutover, ProviderExceptionReleasesTokenReservation) {
-    auto provider = std::make_shared<ThrowOnceProvider>();
+    auto                                         provider = std::make_shared<ThrowOnceProvider>();
     neograph::mcp::HarnessProviderExecutorConfig provider_config;
     provider_config.provider        = provider;
     provider_config.max_tool_rounds = 1;
     auto executor = neograph::mcp::make_provider_harness_executor(std::move(provider_config));
 
     neograph::mcp::HarnessWorkerCall call;
-    call.task   = {{"objective", "retry budget"}, {"acceptance", json::array()}};
-    call.worker = {{"worker_id", "retry-worker"},
-                   {"instructions", "return JSON"},
-                   {"output_schema", {{"type", "object"}}},
-                   {"_harness_provider_budget", {{"max_output_tokens", 1}}}};
+    call.task               = {{"objective", "retry budget"}, {"acceptance", json::array()}};
+    call.worker             = {{"worker_id", "retry-worker"},
+                               {"instructions", "return JSON"},
+                               {"output_schema", {{"type", "object"}}},
+                               {"_harness_provider_budget", {{"max_output_tokens", 1}}}};
     call.usage              = std::make_shared<neograph::UsageAccumulator>();
     call.model_token_budget = 1;
     call.budget_exhausted   = std::make_shared<std::atomic_bool>(false);
@@ -459,7 +521,7 @@ TEST(HarnessProgramCutover, ProviderExceptionReleasesTokenReservation) {
 }
 
 TEST(HarnessProgramCutover, ProviderTimeoutReleasesTokenReservation) {
-    auto provider = std::make_shared<TimeoutProvider>();
+    auto                                         provider = std::make_shared<TimeoutProvider>();
     neograph::mcp::HarnessProviderExecutorConfig provider_config;
     provider_config.provider        = provider;
     provider_config.max_tool_rounds = 1;
@@ -467,11 +529,11 @@ TEST(HarnessProgramCutover, ProviderTimeoutReleasesTokenReservation) {
 
     neograph::mcp::HarnessWorkerCall call;
     call.task   = {{"objective", "timeout budget"}, {"acceptance", json::array()}};
-    call.worker = {{"worker_id", "timeout-worker"},
-                   {"instructions", "wait for cancellation"},
-                   {"output_schema", {{"type", "object"}}},
-                   {"_harness_provider_budget",
-                    {{"max_output_tokens", 1}, {"provider_timeout_seconds", 1}}}};
+    call.worker = {
+        {"worker_id", "timeout-worker"},
+        {"instructions", "wait for cancellation"},
+        {"output_schema", {{"type", "object"}}},
+        {"_harness_provider_budget", {{"max_output_tokens", 1}, {"provider_timeout_seconds", 1}}}};
     call.usage              = std::make_shared<neograph::UsageAccumulator>();
     call.model_token_budget = 1;
     call.budget_exhausted   = std::make_shared<std::atomic_bool>(false);
@@ -487,10 +549,8 @@ TEST(HarnessProgramCutover, ProviderTimeoutReleasesTokenReservation) {
 TEST(HarnessProgramCutover, ProviderCancellationWinsOverTransportTimeoutCode) {
     auto parent = std::make_shared<neograph::graph::CancelToken>();
     neograph::mcp::HarnessProviderExecutorConfig provider_config;
-    provider_config.provider =
-        std::make_shared<ParentCancelsThenAsioErrorProvider>(parent);
-    auto executor =
-        neograph::mcp::make_provider_harness_executor(std::move(provider_config));
+    provider_config.provider = std::make_shared<ParentCancelsThenAsioErrorProvider>(parent);
+    auto executor = neograph::mcp::make_provider_harness_executor(std::move(provider_config));
 
     neograph::mcp::HarnessWorkerCall call;
     call.task   = {{"objective", "cancellation precedence"}};
@@ -508,22 +568,21 @@ TEST(HarnessProgramCutover, ProviderBudgetCancellationFansOutToConcurrentWorkers
         neograph::mcp::HarnessProviderExecutorConfig provider_config;
         provider_config.provider        = provider;
         provider_config.max_tool_rounds = 8;
-        auto executor =
-            neograph::mcp::make_provider_harness_executor(std::move(provider_config));
+        auto executor = neograph::mcp::make_provider_harness_executor(std::move(provider_config));
 
         neograph::mcp::HarnessWorkerCall call;
-        call.task = {{"objective", "budget probe"}, {"acceptance", json::array()}};
-        call.worker = {{"worker_id", "budget-worker"},
-                       {"instructions", "return JSON"},
-                       {"output_schema", {{"type", "object"}}},
-                       {"_harness_provider_budget", {{"max_output_tokens", 1}}}};
-        call.usage            = std::make_shared<neograph::UsageAccumulator>();
+        call.task               = {{"objective", "budget probe"}, {"acceptance", json::array()}};
+        call.worker             = {{"worker_id", "budget-worker"},
+                                   {"instructions", "return JSON"},
+                                   {"output_schema", {{"type", "object"}}},
+                                   {"_harness_provider_budget", {{"max_output_tokens", 1}}}};
+        call.usage              = std::make_shared<neograph::UsageAccumulator>();
         call.model_token_budget = 2;
-        call.budget_exhausted = std::make_shared<std::atomic_bool>(false);
-        auto cancel           = std::make_shared<neograph::graph::CancelToken>();
+        call.budget_exhausted   = std::make_shared<std::atomic_bool>(false);
+        auto cancel             = std::make_shared<neograph::graph::CancelToken>();
 
-        auto first  = std::async(std::launch::async, [&] { return executor(call, cancel); });
-        auto second = std::async(std::launch::async, [&] { return executor(call, cancel); });
+        auto       first  = std::async(std::launch::async, [&] { return executor(call, cancel); });
+        auto       second = std::async(std::launch::async, [&] { return executor(call, cancel); });
         const auto first_status  = first.wait_for(2s);
         const auto second_status = second.wait_for(2s);
         if (first_status != std::future_status::ready ||
@@ -552,16 +611,16 @@ TEST(HarnessProgramCutover, ProgramBudgetCancellationStopsWorkerGraph) {
     auto executor = neograph::mcp::make_provider_harness_executor(std::move(provider_config));
 
     HarnessFixture fixture(std::move(executor));
-    fixture.config.translation_defaults.max_output_tokens            = 1;
+    fixture.config.translation_defaults.max_output_tokens             = 1;
     fixture.config.translation_defaults.input_token_ceiling_per_round = 1;
-    fixture.config.translation_defaults.max_provider_tool_rounds     = 1;
-    auto value = request();
+    fixture.config.translation_defaults.max_provider_tool_rounds      = 1;
+    auto value                                                        = request();
     value["workers"].push_back(value["workers"][0]);
-    value["workers"][1]["id"] = "second-reviewer";
+    value["workers"][1]["id"]                = "second-reviewer";
     value["budgets"]["max_parallel_workers"] = 2;
 
     neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
-    const auto compiled = service.compile(value);
+    const auto                    compiled = service.compile(value);
     ASSERT_TRUE(compiled.at("ok").get<bool>()) << compiled.dump();
     const auto started =
         service.start({{"artifact_id", compiled.at("artifact_id").get<std::string>()}});
@@ -583,7 +642,7 @@ TEST(HarnessProgramCutover, ProviderToolRoundBudgetCancelsRepeatedToolRequests) 
         provider->completions.push_back(std::move(completion));
     }
 
-    std::atomic<unsigned> capability_calls{0};
+    std::atomic<unsigned>                        capability_calls{0};
     neograph::mcp::HarnessProviderExecutorConfig provider_config;
     provider_config.provider        = provider;
     provider_config.max_tool_rounds = 8;
@@ -596,9 +655,9 @@ TEST(HarnessProgramCutover, ProviderToolRoundBudgetCancelsRepeatedToolRequests) 
     auto executor = neograph::mcp::make_provider_harness_executor(std::move(provider_config));
 
     HarnessFixture fixture(std::move(executor));
-    auto           value = request();
+    auto           value         = request();
     value["workers"][0]["tools"] = json::array({"harness.lookup"});
-    value["tool_catalog"]         = json::array({{
+    value["tool_catalog"]        = json::array({{
         {"id", "harness.lookup"},
         {"description", "Read a bounded result"},
         {"input_schema", {{"type", "object"}, {"additionalProperties", true}}},
@@ -608,7 +667,7 @@ TEST(HarnessProgramCutover, ProviderToolRoundBudgetCancelsRepeatedToolRequests) 
     }});
 
     neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
-    const auto compiled = service.compile(value);
+    const auto                    compiled = service.compile(value);
     ASSERT_TRUE(compiled.at("ok").get<bool>()) << compiled.dump();
     const auto started =
         service.start({{"artifact_id", compiled.at("artifact_id").get<std::string>()}});
@@ -712,7 +771,7 @@ TEST(HarnessProgramCutover, ConcurrentDuplicateResumeKeepsActiveHandle) {
     bool                    resumed_started = false;
     bool                    release_resume  = false;
     HarnessFixture*         fixture_ptr     = nullptr;
-    HarnessFixture fixture([&](const neograph::mcp::HarnessWorkerCall& call,
+    HarnessFixture          fixture([&](const neograph::mcp::HarnessWorkerCall& call,
                                const std::shared_ptr<neograph::graph::CancelToken>&) {
         ++fixture_ptr->calls;
         if (!call.resume_value)
@@ -731,14 +790,14 @@ TEST(HarnessProgramCutover, ConcurrentDuplicateResumeKeepsActiveHandle) {
     });
     fixture_ptr = &fixture;
     neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
-    const auto started = service.start({{"request", request()}});
-    const auto run_id  = started.at("run_id").get<std::string>();
-    const auto paused  = await_terminal(service, run_id);
+    const auto                    started = service.start({{"request", request()}});
+    const auto                    run_id  = started.at("run_id").get<std::string>();
+    const auto                    paused  = await_terminal(service, run_id);
     ASSERT_EQ(paused.at("status"), "input_required") << paused.dump();
     const auto call_id = paused.at("pending").at("call_id").get<std::string>();
     const json result{{"approved", true}};
 
-    auto first = std::async(std::launch::async, [&] {
+    auto first           = std::async(std::launch::async, [&] {
         return service.resume({{"run_id", run_id}, {"call_id", call_id}, {"result", result}});
     });
     bool observed_resume = false;
@@ -779,8 +838,7 @@ TEST(HarnessProgramCutover, AwaitingToolsProjectsTypedPendingEffectAndExactResum
                   {{"type", "object"},
                    {"required", json::array({"tool_results"})},
                    {"properties",
-                    {{"tool_results",
-                      {{"type", "array"}, {"items", {{"type", "object"}}}}}}}}},
+                    {{"tool_results", {{"type", "array"}, {"items", {{"type", "object"}}}}}}}}},
                  {"effect",
                   {{"effect_id", "tool-effect-1"},
                    {"idempotency", "supported"},
@@ -793,27 +851,25 @@ TEST(HarnessProgramCutover, AwaitingToolsProjectsTypedPendingEffectAndExactResum
     });
     fixture_ptr = &fixture;
     neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
-    const auto started = service.start({{"request", request()}});
-    const auto run_id  = started.at("run_id").get<std::string>();
-    const auto paused  = await_terminal(service, run_id);
+    const auto                    started = service.start({{"request", request()}});
+    const auto                    run_id  = started.at("run_id").get<std::string>();
+    const auto                    paused  = await_terminal(service, run_id);
 
     ASSERT_EQ(paused.at("status"), "awaiting_tool_results") << paused.dump();
     ASSERT_TRUE(paused.at("pending").is_object());
     EXPECT_EQ(paused.at("pending").at("call_id"), "tool-call-1");
     EXPECT_EQ(paused.at("pending").at("effect_id"), "tool-effect-1");
     EXPECT_EQ(paused.at("pending").at("state"), "awaiting");
-    EXPECT_THROW(
-        (void)service.resume(
-            {{"run_id", run_id}, {"call_id", "wrong-call"}, {"result", json::object()}}),
-        neograph::program::ProgramDiagnosticError);
+    EXPECT_THROW((void)service.resume(
+                     {{"run_id", run_id}, {"call_id", "wrong-call"}, {"result", json::object()}}),
+                 neograph::program::ProgramDiagnosticError);
     EXPECT_EQ(fixture.calls.load(), 1);
 
     const auto accepted = service.resume(
         {{"run_id", run_id},
          {"call_id", "tool-call-1"},
          {"result",
-          {{"tool_results",
-            json::array({{{"name", "search"}, {"result", {{"matches", 3}}}}})}}}});
+          {{"tool_results", json::array({{{"name", "search"}, {"result", {{"matches", 3}}}}})}}}});
     EXPECT_TRUE(accepted.at("accepted").get<bool>());
     EXPECT_EQ(await_terminal(service, run_id).at("status"), "completed");
     EXPECT_EQ(fixture.calls.load(), 2);
@@ -859,8 +915,8 @@ TEST(HarnessProgramCutover, CancelDelegatesToProgramHandle) {
 }
 
 TEST(HarnessProgramCutover, SixCallbacksOwnAdapterPastServiceLifetime) {
-    std::atomic<int> worker_calls{0};
-    HarnessFixture   fixture([&](const neograph::mcp::HarnessWorkerCall&,
+    std::atomic<int>               worker_calls{0};
+    HarnessFixture                 fixture([&](const neograph::mcp::HarnessWorkerCall&,
                                const std::shared_ptr<neograph::graph::CancelToken>& cancel) {
         if (worker_calls.fetch_add(1, std::memory_order_relaxed) == 0) {
             return neograph::mcp::HarnessWorkerResponse::input_required(
@@ -868,14 +924,15 @@ TEST(HarnessProgramCutover, SixCallbacksOwnAdapterPastServiceLifetime) {
                  {"result_schema", {{"type", "object"}}},
                  {"payload", {{"question", "approve?"}}}});
         }
-        while (!cancel->is_cancelled()) std::this_thread::sleep_for(1ms);
+        while (!cancel->is_cancelled())
+            std::this_thread::sleep_for(1ms);
         return neograph::mcp::HarnessWorkerResponse::cancelled("resumed worker cancelled");
     });
     neograph::mcp::MCPServerConfig server_config;
     server_config.server_info = {{"name", "harness-test"}, {"version", "1"}};
-    std::mutex response_mutex;
-    std::condition_variable response_cv;
-    std::map<int, json> responses;
+    std::mutex               response_mutex;
+    std::condition_variable  response_cv;
+    std::map<int, json>      responses;
     neograph::mcp::MCPServer server(server_config);
     server.set_response_sink([&](const json& response) {
         if (!response.is_object() || !response.contains("id") ||
@@ -909,11 +966,11 @@ TEST(HarnessProgramCutover, SixCallbacksOwnAdapterPastServiceLifetime) {
 
     const auto call_tool = [&server, &response_mutex, &response_cv, &responses](
                                int id, std::string name, json arguments) {
-        auto immediate = server.handle_message({{"jsonrpc", "2.0"},
-                                                 {"id", id},
-                                                 {"method", "tools/call"},
-                                                 {"params", {{"name", std::move(name)},
-                                                             {"arguments", std::move(arguments)}}}});
+        auto immediate = server.handle_message(
+            {{"jsonrpc", "2.0"},
+             {"id", id},
+             {"method", "tools/call"},
+             {"params", {{"name", std::move(name)}, {"arguments", std::move(arguments)}}}});
         if (!immediate.is_null()) return immediate;
         std::unique_lock lock(response_mutex);
         if (!response_cv.wait_for(lock, 2s, [&] { return responses.contains(id); }))
@@ -931,9 +988,9 @@ TEST(HarnessProgramCutover, SixCallbacksOwnAdapterPastServiceLifetime) {
     const auto compiled_value = compiled.at("result").at("structuredContent");
     ASSERT_TRUE(compiled_value.at("ok").get<bool>()) << compiled.dump();
 
-    const auto started = call_tool(
-        5, "neograph_start",
-        {{"artifact_id", compiled_value.at("artifact_id").get<std::string>()}});
+    const auto started =
+        call_tool(5, "neograph_start",
+                  {{"artifact_id", compiled_value.at("artifact_id").get<std::string>()}});
     ASSERT_TRUE(started.contains("result")) << started.dump();
     const auto started_value = started.at("result").at("structuredContent");
     ASSERT_TRUE(started_value.at("started").get<bool>()) << started.dump();
@@ -943,8 +1000,7 @@ TEST(HarnessProgramCutover, SixCallbacksOwnAdapterPastServiceLifetime) {
     for (int poll = 0; poll != 200; ++poll) {
         paused = call_tool(6 + poll, "neograph_get", {{"run_id", run_id}});
         ASSERT_TRUE(paused.contains("result")) << paused.dump();
-        if (paused.at("result").at("structuredContent").at("status") == "input_required")
-            break;
+        if (paused.at("result").at("structuredContent").at("status") == "input_required") break;
         std::this_thread::sleep_for(5ms);
     }
     const auto paused_value = paused.at("result").at("structuredContent");
@@ -973,8 +1029,7 @@ TEST(HarnessProgramCutover, SixCallbacksOwnAdapterPastServiceLifetime) {
     for (int poll = 0; poll != 200; ++poll) {
         terminal = call_tool(209 + poll, "neograph_get", {{"run_id", run_id}});
         ASSERT_TRUE(terminal.contains("result")) << terminal.dump();
-        if (terminal.at("result").at("structuredContent").at("status") == "cancelled")
-            break;
+        if (terminal.at("result").at("structuredContent").at("status") == "cancelled") break;
         std::this_thread::sleep_for(5ms);
     }
     ASSERT_EQ(terminal.at("result").at("structuredContent").at("status"), "cancelled")
@@ -983,28 +1038,25 @@ TEST(HarnessProgramCutover, SixCallbacksOwnAdapterPastServiceLifetime) {
 
 TEST(HarnessProgramCutover, HostToolConfigurationChangesBindingAndArtifactIdentity) {
     HarnessFixture fixture;
-    const auto root =
-        std::filesystem::temp_directory_path() /
-        ("neograph-harness-binding-" +
-         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    const auto     root = std::filesystem::temp_directory_path() /
+                      ("neograph-harness-binding-" +
+                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(root);
     auto records = std::make_shared<neograph::mcp::FileHarnessRecordStore>(root.string());
     fixture.config.record_store = records;
     neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
 
     const auto configured_request = [](std::string server_ref) {
-        auto value = request();
+        auto value                   = request();
         value["workers"][0]["tools"] = json::array({"harness.lookup"});
-        value["tool_catalog"] = json::array(
+        value["tool_catalog"]        = json::array(
             {{{"id", "harness.lookup"},
-              {"description", "Look up a value"},
-              {"input_schema", {{"type", "object"}, {"additionalProperties", true}}},
-              {"output_schema", {{"type", "object"}, {"additionalProperties", true}}},
-              {"read_only", true},
-              {"executor",
-               {{"kind", "mcp"},
-                {"server_ref", std::move(server_ref)},
-                {"tool", "lookup"}}}}});
+                     {"description", "Look up a value"},
+                     {"input_schema", {{"type", "object"}, {"additionalProperties", true}}},
+                     {"output_schema", {{"type", "object"}, {"additionalProperties", true}}},
+                     {"read_only", true},
+                     {"executor",
+                      {{"kind", "mcp"}, {"server_ref", std::move(server_ref)}, {"tool", "lookup"}}}}});
         return value;
     };
     const auto first  = service.compile(configured_request("server-a"));
@@ -1015,48 +1067,43 @@ TEST(HarnessProgramCutover, HostToolConfigurationChangesBindingAndArtifactIdenti
     EXPECT_NE(first.at("artifact_id"), second.at("artifact_id"));
     EXPECT_NE(first.at("program_version_id"), second.at("program_version_id"));
 
-    const auto first_stored =
-        records->load_artifact(first.at("artifact_id").get<std::string>());
-    const auto second_stored =
-        records->load_artifact(second.at("artifact_id").get<std::string>());
+    const auto first_stored  = records->load_artifact(first.at("artifact_id").get<std::string>());
+    const auto second_stored = records->load_artifact(second.at("artifact_id").get<std::string>());
     ASSERT_TRUE(first_stored.has_value());
     ASSERT_TRUE(second_stored.has_value());
-    const auto first_record =
-        neograph::mcp::HarnessProgramArtifactRecord::parse(*first_stored);
-    const auto second_record =
-        neograph::mcp::HarnessProgramArtifactRecord::parse(*second_stored);
-    EXPECT_NE(
-        neograph::program::capability_binding_receipt_root(
-            first_record.version().core_materialization_receipt().capability_bindings),
-        neograph::program::capability_binding_receipt_root(
-            second_record.version().core_materialization_receipt().capability_bindings));
+    const auto first_record  = neograph::mcp::HarnessProgramArtifactRecord::parse(*first_stored);
+    const auto second_record = neograph::mcp::HarnessProgramArtifactRecord::parse(*second_stored);
+    EXPECT_NE(neograph::program::capability_binding_receipt_root(
+                  first_record.version().core_materialization_receipt().capability_bindings),
+              neograph::program::capability_binding_receipt_root(
+                  second_record.version().core_materialization_receipt().capability_bindings));
     std::filesystem::remove_all(root);
 }
 
 #ifdef NEOGRAPH_TESTS_HAVE_SQLITE
 TEST(HarnessProgramCutover, FrozenContractSurvivesSqliteServiceRestart) {
-    const auto path = std::filesystem::temp_directory_path() /
-                      ("neograph-harness-contract-restart-" +
-                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
-                       ".db");
-    auto contract_spec = neograph::program::ContractManifestSpec{};
-    contract_spec.manifest_id = "harness-restart-contract";
-    contract_spec.owner_scope = "harness-cutover-test";
-    contract_spec.scope = "harness-execution";
-    contract_spec.assumptions = {"ProgramRuntime is the executor"};
+    const auto path =
+        std::filesystem::temp_directory_path() /
+        ("neograph-harness-contract-restart-" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".db");
+    auto contract_spec         = neograph::program::ContractManifestSpec{};
+    contract_spec.manifest_id  = "harness-restart-contract";
+    contract_spec.owner_scope  = "harness-cutover-test";
+    contract_spec.scope        = "harness-execution";
+    contract_spec.assumptions  = {"ProgramRuntime is the executor"};
     contract_spec.requirements = {{"execute", "Execute the retained Harness Program"}};
-    contract_spec.non_goals = {"Provider implementation selection"};
-    contract_spec.acceptance = {{"runtime", "ProgramRuntime returns a value", true,
-                                 json::object()}};
-    contract_spec.fixed_test_vectors = {{"smoke", json::object(), json{{"outcome", "ok"}}}};
+    contract_spec.non_goals    = {"Provider implementation selection"};
+    contract_spec.acceptance   = {
+        {"runtime", "ProgramRuntime returns a value", true, json::object()}};
+    contract_spec.fixed_test_vectors  = {{"smoke", json::object(), json{{"outcome", "ok"}}}};
     contract_spec.independent_oracles = {"runtime-oracle"};
     contract_spec.risk_register = {{"executor", "Executor may drift", "Pin ProgramRuntime", true}};
-    contract_spec.retry_policy = {1, 100, 5000};
+    contract_spec.retry_policy  = {1, 100, 5000};
     const auto manifest = neograph::program::ContractManifest::propose(std::move(contract_spec))
                               .review({"reviewer", "approved", true})
                               .freeze();
-    auto contract_request = request();
-    contract_request["contract"] = json::parse(manifest.serialize_canonical());
+    auto contract_request                  = request();
+    contract_request["contract"]           = json::parse(manifest.serialize_canonical());
     contract_request["workspace_revision"] = "workspace-restart-1";
 
     std::string run_id;
@@ -1068,10 +1115,10 @@ TEST(HarnessProgramCutover, FrozenContractSurvivesSqliteServiceRestart) {
         fixture.config.record_store =
             std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(path.string());
         neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
-        const auto compiled = service.compile(contract_request);
+        const auto                    compiled = service.compile(contract_request);
         ASSERT_TRUE(compiled.at("ok").get<bool>()) << compiled.dump();
-        artifact_id = compiled.at("artifact_id").get<std::string>();
-        frozen_artifact = service.read("neograph://artifacts/" + artifact_id + "/contract");
+        artifact_id        = compiled.at("artifact_id").get<std::string>();
+        frozen_artifact    = service.read("neograph://artifacts/" + artifact_id + "/contract");
         const auto started = service.start({{"artifact_id", compiled.at("artifact_id")}});
         ASSERT_TRUE(started.at("started").get<bool>()) << started.dump();
         run_id = started.at("run_id").get<std::string>();
@@ -1101,37 +1148,35 @@ TEST(HarnessProgramCutover, FrozenContractSurvivesSqliteServiceRestart) {
         EXPECT_EQ(recovered.at("status"), before.at("status"));
         EXPECT_EQ(recovered.at("program_version_id"), before.at("program_version_id"));
         EXPECT_EQ(recovered.at("bundle_id"), before.at("bundle_id"));
-        EXPECT_EQ(canonical_json(recovered.at("contract")),
-                  canonical_json(before.at("contract")));
-        EXPECT_EQ(canonical_json(recovered.at("result")),
-                  canonical_json(before.at("result")));
+        EXPECT_EQ(canonical_json(recovered.at("contract")), canonical_json(before.at("contract")));
+        EXPECT_EQ(canonical_json(recovered.at("result")), canonical_json(before.at("result")));
     }
     std::error_code error;
     std::filesystem::remove(path, error);
 }
 
 TEST(HarnessProgramCutover, TamperedPersistedContractStateFailsClosed) {
-    const auto path = std::filesystem::temp_directory_path() /
-                      ("neograph-harness-contract-tamper-" +
-                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
-                       ".db");
+    const auto path =
+        std::filesystem::temp_directory_path() /
+        ("neograph-harness-contract-tamper-" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".db");
     neograph::program::ContractManifestSpec contract_spec;
-    contract_spec.manifest_id = "harness-tamper-contract";
-    contract_spec.owner_scope = "harness-cutover-test";
-    contract_spec.scope = "harness-execution";
-    contract_spec.assumptions = {"ProgramRuntime is the executor"};
+    contract_spec.manifest_id  = "harness-tamper-contract";
+    contract_spec.owner_scope  = "harness-cutover-test";
+    contract_spec.scope        = "harness-execution";
+    contract_spec.assumptions  = {"ProgramRuntime is the executor"};
     contract_spec.requirements = {{"execute", "Execute the retained Harness Program"}};
-    contract_spec.non_goals = {"Provider implementation selection"};
-    contract_spec.acceptance = {{"runtime", "ProgramRuntime returns a value", true,
-                                 json::object()}};
-    contract_spec.fixed_test_vectors = {{"smoke", json::object(), json{{"outcome", "ok"}}}};
+    contract_spec.non_goals    = {"Provider implementation selection"};
+    contract_spec.acceptance   = {
+        {"runtime", "ProgramRuntime returns a value", true, json::object()}};
+    contract_spec.fixed_test_vectors  = {{"smoke", json::object(), json{{"outcome", "ok"}}}};
     contract_spec.independent_oracles = {"runtime-oracle"};
     contract_spec.risk_register = {{"executor", "Executor may drift", "Pin ProgramRuntime", true}};
-    contract_spec.retry_policy = {1, 100, 5000};
+    contract_spec.retry_policy  = {1, 100, 5000};
     const auto manifest = neograph::program::ContractManifest::propose(std::move(contract_spec))
                               .review({"reviewer", "approved", true})
                               .freeze();
-    auto contract_request = request();
+    auto contract_request        = request();
     contract_request["contract"] = json::parse(manifest.serialize_canonical());
 
     std::string run_id;
@@ -1140,7 +1185,7 @@ TEST(HarnessProgramCutover, TamperedPersistedContractStateFailsClosed) {
         fixture.config.record_store =
             std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(path.string());
         neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
-        const auto compiled = service.compile(contract_request);
+        const auto                    compiled = service.compile(contract_request);
         ASSERT_TRUE(compiled.at("ok").get<bool>()) << compiled.dump();
         const auto started = service.start({{"artifact_id", compiled.at("artifact_id")}});
         ASSERT_TRUE(started.at("started").get<bool>()) << started.dump();
@@ -1149,10 +1194,10 @@ TEST(HarnessProgramCutover, TamperedPersistedContractStateFailsClosed) {
     }
     sqlite3* database = nullptr;
     ASSERT_EQ(sqlite3_open(path.string().c_str(), &database), SQLITE_OK);
-    ASSERT_EQ(sqlite3_exec(database,
-                           "UPDATE neograph_harness_contract_runs SET bundle_id='tampered'",
-                           nullptr, nullptr, nullptr),
-              SQLITE_OK);
+    ASSERT_EQ(
+        sqlite3_exec(database, "UPDATE neograph_harness_contract_runs SET bundle_id='tampered'",
+                     nullptr, nullptr, nullptr),
+        SQLITE_OK);
     sqlite3_close(database);
 
     HarnessFixture fixture;
@@ -1224,9 +1269,7 @@ TEST(HarnessProgramCutover, ReconnectsInterruptedSqliteRunAndContinuesExactCheck
         ASSERT_EQ(reconnected.at("status"), "input_required") << reconnected.dump();
         ASSERT_EQ(reconnected.at("pending").at("call_id"), "restart-input-1");
         const auto accepted = service.resume(
-            {{"run_id", run_id},
-             {"call_id", "restart-input-1"},
-             {"result", {{"approved", true}}}});
+            {{"run_id", run_id}, {"call_id", "restart-input-1"}, {"result", {{"approved", true}}}});
         EXPECT_TRUE(accepted.at("accepted").get<bool>());
         const auto completed = await_terminal(service, run_id);
         EXPECT_EQ(completed.at("status"), "completed") << completed.dump();
@@ -1247,8 +1290,7 @@ TEST(HarnessProgramCutover, ReconnectsSqlitePendingEffectWithCheckpointAndJourna
                   {{"type", "object"},
                    {"required", json::array({"tool_results"})},
                    {"properties",
-                    {{"tool_results",
-                      {{"type", "array"}, {"items", {{"type", "object"}}}}}}}}},
+                    {{"tool_results", {{"type", "array"}, {"items", {{"type", "object"}}}}}}}}},
                  {"effect",
                   {{"effect_id", "restart-effect-1"},
                    {"idempotency", "supported"},
@@ -1262,8 +1304,7 @@ TEST(HarnessProgramCutover, ReconnectsSqlitePendingEffectWithCheckpointAndJourna
     fixture_ptr = &fixture;
     const auto path =
         std::filesystem::temp_directory_path() /
-        ("neograph-harness-effect-reconnect-" + neograph::graph::Checkpoint::generate_id() +
-         ".db");
+        ("neograph-harness-effect-reconnect-" + neograph::graph::Checkpoint::generate_id() + ".db");
     fixture.config.record_store =
         std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(path.string());
 
@@ -1334,29 +1375,26 @@ TEST(HarnessProgramCutover, ConcurrentSqliteReconnectResumeHasOneCasWinnerAndOne
     ASSERT_EQ(second.get(run_id).at("status"), "input_required");
 
     std::promise<void> ready;
-    auto               gate = ready.get_future().share();
-    const auto resume_once = [&](neograph::mcp::HarnessService& service, bool approved) {
+    auto               gate        = ready.get_future().share();
+    const auto         resume_once = [&](neograph::mcp::HarnessService& service, bool approved) {
         gate.wait();
         try {
-            const auto accepted = service.resume(
-                {{"run_id", run_id},
-                 {"call_id", "resume-race-1"},
-                 {"result", {{"approved", approved}}}});
+            const auto accepted = service.resume({{"run_id", run_id},
+                                                  {"call_id", "resume-race-1"},
+                                                  {"result", {{"approved", approved}}}});
             return accepted.at("accepted").get<bool>() ? 1 : -1;
         } catch (const neograph::program::ProgramDiagnosticError& error) {
             return error.diagnostic().code == "P_RESUME_CONFLICT" ? 0 : -2;
         }
     };
-    auto first_resume =
-        std::async(std::launch::async, [&] { return resume_once(first, true); });
-    auto second_resume =
-        std::async(std::launch::async, [&] { return resume_once(second, false); });
+    auto first_resume  = std::async(std::launch::async, [&] { return resume_once(first, true); });
+    auto second_resume = std::async(std::launch::async, [&] { return resume_once(second, false); });
     ready.set_value();
     const int first_result  = first_resume.get();
     const int second_result = second_resume.get();
     EXPECT_EQ(first_result + second_result, 1);
     ASSERT_TRUE(first_result == 1 || second_result == 1);
-    auto& winner = first_result == 1 ? first : second;
+    auto&      winner    = first_result == 1 ? first : second;
     const auto completed = await_terminal(winner, run_id);
     EXPECT_EQ(completed.at("status"), "completed") << completed.dump();
     EXPECT_EQ(fixture.calls.load(), 2);
@@ -1389,35 +1427,32 @@ TEST(HarnessProgramCutover, CrossArtifactForkReadsSourceTransitionsAndForwardsPe
 
     const auto source_artifact = service.compile(request());
     ASSERT_TRUE(source_artifact.at("ok").get<bool>());
-    auto target_request = request();
+    auto target_request                          = request();
     target_request["budgets"]["timeout_seconds"] = 1;
-    const auto target_artifact = service.compile(target_request);
+    const auto target_artifact                   = service.compile(target_request);
     ASSERT_TRUE(target_artifact.at("ok").get<bool>()) << target_artifact.dump();
     ASSERT_NE(source_artifact.at("artifact_id"), target_artifact.at("artifact_id"));
 
-    const auto source_started =
-        service.start({{"artifact_id", source_artifact.at("artifact_id")}});
-    const auto source_run_id = source_started.at("run_id").get<std::string>();
-    const auto source_paused = await_terminal(service, source_run_id);
+    const auto source_started = service.start({{"artifact_id", source_artifact.at("artifact_id")}});
+    const auto source_run_id  = source_started.at("run_id").get<std::string>();
+    const auto source_paused  = await_terminal(service, source_run_id);
     ASSERT_EQ(source_paused.at("status"), "input_required") << source_paused.dump();
     const auto checkpoint_id =
         source_paused.at("checkpoint").at("checkpoint_id").get<std::string>();
 
-    const auto fork_started = service.start(
-        {{"fork",
-          {{"source_run_id", source_run_id},
-           {"checkpoint_id", checkpoint_id},
-           {"artifact_id", target_artifact.at("artifact_id")},
-           {"call_id", "fork-input-1"},
-           {"result", {{"approved", true}}}}}});
+    const auto fork_started = service.start({{"fork",
+                                              {{"source_run_id", source_run_id},
+                                               {"checkpoint_id", checkpoint_id},
+                                               {"artifact_id", target_artifact.at("artifact_id")},
+                                               {"call_id", "fork-input-1"},
+                                               {"result", {{"approved", true}}}}}});
     ASSERT_TRUE(fork_started.at("started").get<bool>()) << fork_started.dump();
     EXPECT_EQ(fork_started.at("execution_mode"), "compatible_fork");
     EXPECT_EQ(fork_started.at("artifact_id"), target_artifact.at("artifact_id"));
     EXPECT_EQ(fork_started.at("source_run_id"), source_run_id);
     EXPECT_EQ(fork_started.at("source_checkpoint_id"), checkpoint_id);
 
-    const auto forked =
-        await_terminal(service, fork_started.at("run_id").get<std::string>());
+    const auto forked = await_terminal(service, fork_started.at("run_id").get<std::string>());
     EXPECT_EQ(forked.at("status"), "completed") << forked.dump();
     EXPECT_EQ(forked.at("result").at("outcome"), "ok");
     EXPECT_EQ(fixture.calls.load(), 2);
