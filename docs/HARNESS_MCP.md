@@ -13,15 +13,39 @@ stable MCP surface stays at six tools:
 - `neograph_cancel` cooperatively cancels a queued, running, or waiting workflow.
 
 The shipped presets are `fanout_judge`, `pr_review_panel`, `bug_triage`, and
-`research_synthesis`. Presets produce ordinary strict-core graph artifacts, so
-the same diagnostics and source maps apply to preset and DSL requests.
+`research_synthesis`. Presets produce ordinary strict-Core graph artifacts;
+JavaScript requests preserve their own `ProgramSource` envelope and source map.
 
-### Sealed admission and explicit Core mode
+### JavaScript authoring boundary
 
-`harness.mode` accepts `preset`, `dsl`, or `core`. `preset` and `dsl` keep the
-existing bounded fanout/judge compatibility contract. `core` accepts an already
-strict topology (`schema_version: 1`) without passing it through the Elaborator;
-it is intended for an explicitly configured general-Core admission profile.
+`harness.mode` accepts `preset` or `javascript` for new publication. JavaScript
+requests carry source text in `harness.source` and may pin `harness.source_id`:
+
+```json
+{
+  "harness": {
+    "mode": "javascript",
+    "source_id": "review:main.js",
+    "source": "export function define() { const g = ng.graph('main'); /* ... */ return g; }"
+  }
+}
+```
+
+The translator wraps that text in the canonical `ProgramSource` JavaScript
+envelope (language `javascript`, QuickJS engine, frozen host API, imports, and
+source map) and sends it through `ProgramCompiler`, `ProgramCatalog`, and
+`ProgramRuntime`. `define()` constructs one graph through the sealed `ng`
+binding; an optional generator `main()` owns ordinary control flow and yields
+the existing typed Program commands. JavaScript does not dispatch Core nodes,
+select providers/tools, or bypass admission, budgets, journals, or replay.
+
+`harness.mode` must be explicit. `dsl` returns `H_MIGRATION_CORE_DSL`, `core`
+returns `H_MIGRATION_CORE_JSON`, and `program`/`program_json` return
+`H_MIGRATION_PROGRAM_JSON`; all point at `/harness/mode` and are never selected
+from a request's JSON shape or missing fields. Strict Core JSON remains an
+internal/interchange representation for validated Core and Program artifacts,
+and trusted C++ in-process construction remains supported; neither is a public
+Harness authoring language.
 
 Schema export, compile, and start now consume the same immutable
 `HarnessAdmissionProfile`. Its scoped `GraphRegistry` and manifest list every
@@ -41,14 +65,23 @@ the scoped registry's exported semantic projection. Each
 the corresponding callable behavior changes.
 
 This is the current Program-backed Harness adapter, not a Control VM cutover.
-Accepted Harness requests translate to `ProgramSource`, compile through
-`ProgramCompiler`, admit through `ProgramCatalog`, and execute through
+Accepted preset and JavaScript requests converge on `ProgramSource`, compile
+through `ProgramCompiler`, admit through `ProgramCatalog`, and execute through
 `ProgramRuntime`; `GraphEngine` remains the only node executor. The historical
 `precutover-graph-engine-v1` profile and its VM/bytecode/Durable Kernel claims
 are retained only in the explicitly superseded design records
 `docs/PROGRAMMABLE_HARNESS_DSL_DESIGN.md` and
 `spec/programmable-harness-vm-integration.sdd.yaml`. No public `ControlVm`,
 bytecode interpreter, or second executor is implied by the compatibility API.
+
+Stored artifacts carry an explicit authoring frontend and may be classified as
+`translated`, `drain_only`, or `rejected`. A translated artifact is accepted
+only with deterministic equivalence evidence; a drain-only artifact can resume
+only on its exact retained legacy runtime and cannot publish or start a new
+run; rejected artifacts fail closed. Pre-cutover records without authoring
+metadata are retained as drain-only and are never reparsed by document shape.
+Legacy parsers remain until the inventory is empty and every pinned run has
+completed or been explicitly reconciled.
 
 ## Build And Run
 

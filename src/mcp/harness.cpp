@@ -569,6 +569,45 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
         auto rec = store->load_artifact();
         if (!rec) return {};
         auto p = rec->projection();
+        if (!p.contains("authoring_frontend") || !p.at("authoring_frontend").is_string()) {
+            // Artifacts created before Q6 carry an explicit CppBuilder source
+            // kind, but no authoring metadata.  They remain resumable only as
+            // drain-only legacy versions; missing metadata never selects a
+            // parser based on document shape.
+            const auto rule = program::classify_stored_artifact(
+                program::StoredArtifactKind::LegacyProgramVersion, false, true, true);
+            if (rule.classification != program::StoredArtifactClassification::DrainOnly)
+                throw std::invalid_argument("stored Harness artifact has no migration classification");
+            p["authoring_frontend"] = "legacy_retained";
+            p["stored_artifact_classification"] =
+                std::string(program::to_string(rule.classification));
+        } else {
+            program::AuthoringFrontend frontend;
+            try {
+                frontend = program::authoring_frontend_from_string(
+                    p.at("authoring_frontend").get<std::string>());
+            } catch (const std::exception& error) {
+                throw std::invalid_argument(
+                    std::string("stored Harness artifact authoring frontend is invalid: ") +
+                    error.what());
+            }
+            const bool source_matches =
+                (frontend == program::AuthoringFrontend::JavaScript) ==
+                (rec->bundle().source_kind() == program::SourceKind::JavaScript);
+            if (!source_matches || frontend == program::AuthoringFrontend::CoreDsl ||
+                frontend == program::AuthoringFrontend::StrictCoreJson ||
+                frontend == program::AuthoringFrontend::ProgramJson) {
+                throw std::invalid_argument(
+                    "stored Harness artifact authoring frontend violates the JavaScript cutover");
+            }
+            if (p.contains("stored_artifact_classification")) {
+                const auto classification = program::stored_artifact_classification_from_string(
+                    p.at("stored_artifact_classification").get<std::string>());
+                if (classification == program::StoredArtifactClassification::Rejected)
+                    throw std::invalid_argument(
+                        "stored Harness artifact is rejected by the migration boundary");
+            }
+        }
         if (!p.contains("program_bindings"))
             throw std::invalid_argument("legacy pre-Program Harness artifact is blocked");
         std::optional<program::ContractManifest> contract;
@@ -607,15 +646,19 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
                 throw HarnessTranslationError(
                     "H_CONTRACT_SCOPE", "/contract",
                     "Harness contract owner_scope must match the service owner scope");
-            auto b  = resources.compiler->compile(t.source);
+            auto b = t.source.kind() == program::SourceKind::JavaScript
+                         ? resources.compiler->compile(t.source, t.invocation_template.budget)
+                         : resources.compiler->compile(t.source);
             auto id =
                 alias(b, resources.snapshots.policy.fingerprint(), t.bindings,
                       resources.artifact_binding_identity,
                       t.contract ? t.contract->content_hash() : std::string_view{});
             auto p  = t.wire.projection;
-            auto source_map        = source_map_json(t.source.source_map());
+            auto source_map        = source_map_json(b.source_map());
             p["program_bindings"]  = bindings_json(t.bindings);
             p["source_id"]         = t.wire.source_id;
+            p["authoring_frontend"] =
+                std::string(program::to_string(t.wire.authoring_frontend));
             p["core"]              = b.serialize_canonical();
             p["sourcemap"]         = source_map;
             p["diagnostics"]       = json::array();

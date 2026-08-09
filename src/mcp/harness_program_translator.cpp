@@ -685,9 +685,11 @@ json harness_program_request_schema() {
             "contract_manifest":{},
             "workspace_revision":{"type":"string"},
             "harness":{"type":"object","required":["mode"],"properties":{
-                "mode":{"enum":["preset","dsl","core"]},
+                "mode":{"enum":["preset","javascript","dsl","core","program","program_json"]},
                 "preset":{"type":"string"},
-                "definition":{"type":"object"}
+                "definition":{"type":"object"},
+                "source":{"type":"string"},
+                "source_id":{"type":"string"}
             },"additionalProperties":false},
             "workers":{"type":"array","items":{"type":"object","required":["id","instructions","output_schema"],"properties":{
                 "id":{"type":"string"},
@@ -744,6 +746,12 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
                                                        const program::RegistrySnapshot&  registry,
                                                        const HarnessTranslationDefaults& defaults) {
     validate_defaults(defaults);
+    if (!request.is_object() || !request.contains("harness") ||
+        !request.at("harness").is_object() || !request.at("harness").contains("mode") ||
+        !request.at("harness").at("mode").is_string()) {
+        fail("H_AUTHORING_MODE_REQUIRED", "/harness/mode",
+             "Harness authoring requires an explicit mode; no legacy compiler is selected by shape");
+    }
     try {
         validate_json_value(request, harness_program_request_schema(), "Harness request", "$");
     } catch (const std::exception& error) {
@@ -752,12 +760,27 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
 
     const auto contract = requested_contract(request);
     const auto mode = request.at("harness").at("mode").get<std::string>();
+    if (mode == "dsl")
+        fail("H_MIGRATION_CORE_DSL", "/harness/mode",
+             "Core DSL authoring is frozen; submit JavaScript define() source instead");
+    if (mode == "core")
+        fail("H_MIGRATION_CORE_JSON", "/harness/mode",
+             "Standalone Core JSON authoring is internal/interchange only; submit JavaScript define() source instead");
+    if (mode == "program" || mode == "program_json")
+        fail("H_MIGRATION_PROGRAM_JSON", "/harness/mode",
+             "Program JSON authoring is frozen; submit JavaScript generator main() source instead");
     if (mode != "core" && request.at("workers").empty())
         fail("H_WORKERS_EMPTY", "/workers", "At least one Harness worker is required");
     static const std::set<std::string> presets = {"fanout_judge", "pr_review_panel", "bug_triage",
                                                   "research_synthesis"};
     if (mode == "preset" && !presets.contains(request.at("harness").value("preset", "")))
         fail("H_PRESET", "/harness/preset", "Unknown Harness preset");
+    if (mode == "javascript" &&
+        (!request.at("harness").contains("source") ||
+         !request.at("harness").at("source").is_string() ||
+         request.at("harness").at("source").get<std::string>().empty()))
+        fail("H_JAVASCRIPT_SOURCE", "/harness/source",
+             "Harness JavaScript mode requires non-empty UTF-8 source text");
     if ((mode == "dsl" || mode == "core") && !request.at("harness").contains("definition"))
         fail("H_DSL_DEFINITION", "/harness/definition",
              "Harness dsl/core mode requires a definition");
@@ -766,11 +789,33 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
     const auto tools   = validate_tool_catalog(request, registry, defaults);
     const auto workers = workers_by_id(request, tools, limits, defaults);
 
-    json core;
-    json elaborator_map = json::array();
+    // The legacy elaborator/Core-document branches below remain compiled for
+    // retained migration paths.  The public mode checks above make them
+    // unreachable for new wire authoring, so no adapter silently falls back.
+    json                         core;
+    json                         elaborator_map = json::array();
+    std::optional<program::ProgramSource> authored_source;
     if (mode == "preset") {
         core = preset_core(request.at("harness").at("preset").get<std::string>(),
                            request.at("workers"), workers);
+    } else if (mode == "javascript") {
+        const auto source_id = request.at("harness").value(
+            "source_id", defaults.source_id_prefix + ":javascript");
+        try {
+            authored_source = program::ProgramSource::from_javascript(
+                source_id, request.at("harness").at("source").get<std::string>());
+        } catch (const program::ProgramDiagnosticError& error) {
+            fail("H_JAVASCRIPT_SOURCE", "/harness/source", error.what());
+        } catch (const std::exception& error) {
+            fail("H_JAVASCRIPT_SOURCE", "/harness/source", error.what());
+        }
+        // The worker request still supplies host-owned limits and bindings.
+        // Keep a synthetic Core-shaped view solely for finite budget derivation;
+        // the JavaScript source itself is compiled later from its sealed
+        // ProgramSource envelope and is never selected by JSON shape.
+        core = json{{"nodes", json::object()}};
+        for (const auto& [worker_id, worker_config] : workers)
+            core["nodes"]["worker:" + worker_id] = worker_config;
     } else if (mode == "dsl") {
         try {
             auto elaborated = graph::Elaborator::elaborate(request.at("harness").at("definition"));
@@ -783,14 +828,15 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
     } else {
         core = request.at("harness").at("definition");
     }
-    if (!core.is_object() || core.value("schema_version", 0) != 1 || !core.contains("name") ||
-        !core.at("name").is_string()) {
+    if (mode != "javascript" &&
+        (!core.is_object() || core.value("schema_version", 0) != 1 || !core.contains("name") ||
+         !core.at("name").is_string())) {
         fail("H_STRICT_CORE", "/harness/definition",
              "Harness translation requires a named strict Core schema_version 1 definition");
     }
-    reject_transport_values(core, "/harness/definition");
+    if (mode != "javascript") reject_transport_values(core, "/harness/definition");
 
-    bool has_worker_node = false;
+    bool has_worker_node = mode == "javascript" && !workers.empty();
     if (core.contains("nodes") && core["nodes"].is_object()) {
         for (const auto& [name, node] : core["nodes"].items()) {
             (void)name;
@@ -810,19 +856,26 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
     }
 
     const auto budget    = derive_budget(core, limits, defaults, contract);
-    const auto source_id = defaults.source_id_prefix + ":" + mode;
-    json       document  = {
-        {"program_schema_version", 1},
-        {"input_contract", {{"schema_version", 1}, {"schema", input_contract_schema()}}},
-        {"output_contract", {{"schema_version", 1}, {"schema", core_output_schema()}}},
-        {"root", {{"op", "call_core"}, {"name", core.at("name")}, {"definition", std::move(core)}}},
-        {"declared_budget_requirements", budget_records(budget)},
-    };
+    const auto source_id = authored_source ? authored_source->source_id()
+                                           : defaults.source_id_prefix + ":" + mode;
+    json       document  = json::object();
+    if (!authored_source) {
+        document = {
+            {"program_schema_version", 1},
+            {"input_contract", {{"schema_version", 1}, {"schema", input_contract_schema()}}},
+            {"output_contract", {{"schema_version", 1}, {"schema", core_output_schema()}}},
+            {"root", {{"op", "call_core"}, {"name", core.at("name")},
+                       {"definition", std::move(core)}}},
+            {"declared_budget_requirements", budget_records(budget)},
+        };
+    }
 
     HarnessWireReceipt wire;
-    wire.source_id = source_id;
-    wire.mode      = mode;
-    wire.preset    = request.at("harness").value("preset", "");
+    wire.source_id          = source_id;
+    wire.mode               = mode;
+    wire.authoring_frontend = authored_source ? program::AuthoringFrontend::JavaScript
+                                              : program::AuthoringFrontend::TrustedCpp;
+    wire.preset              = request.at("harness").value("preset", "");
     wire.workspace_revision = request.value(
         "workspace_revision",
         request.value("policy", json::object()).value("workspace_revision", ""));
@@ -849,8 +902,9 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
         for (const auto& tool_id : worker.at("tool_ids"))
             selected.insert(tool_id.get<std::string>());
     }
-    const auto& translated_nodes =
-        document.at("root").at("definition").value("nodes", json::object());
+    const auto translated_nodes =
+        authored_source ? json::object()
+                        : document.at("root").at("definition").value("nodes", json::object());
     if (translated_nodes.is_object()) {
         for (const auto& [name, node] : translated_nodes.items()) {
             if (!node.is_object() || node.value("type", "") != HARNESS_WORKER_NODE_TYPE) continue;
@@ -876,13 +930,17 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
         wire.tool_ids.push_back(id);
     }
 
-    auto map    = source_map(document.at("root").at("definition"), elaborator_map, source_id, mode,
-                             wire.worker_ids);
+    auto map = authored_source
+                   ? std::vector<program::SourceMapEntry>{}
+                   : source_map(document.at("root").at("definition"), elaborator_map, source_id,
+                                mode, wire.worker_ids);
     auto task = request.at("task");
     if (contract)
         task["contract_manifest"] = json::parse(contract->serialize_canonical());
-    auto source = program::ProgramSource::from_cpp_builder(source_id, 1, std::move(document), {},
-                                                           std::move(map));
+    auto source = authored_source
+                      ? std::move(*authored_source)
+                      : program::ProgramSource::from_cpp_builder(source_id, 1, std::move(document),
+                                                                 {}, std::move(map));
     HarnessInvocationTemplate invocation_template{{{"task", std::move(task)}}, budget};
     return {std::move(source), std::move(invocation_template), std::move(wire),
             std::move(bindings), contract};
@@ -977,7 +1035,8 @@ HarnessProgramSnapshots build_harness_program_snapshots(HarnessProgramSnapshotCo
         .registry(registry)
         .mode(config.admission_mode)
         .max_program_schema_version(1)
-        .allow_source_kind(program::SourceKind::CppBuilder);
+        .allow_source_kind(program::SourceKind::CppBuilder)
+        .allow_source_kind(program::SourceKind::JavaScript);
     bool brokered = false;
     bool trusted  = false;
     for (const auto& identity : registry.identities()) {

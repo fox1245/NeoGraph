@@ -3,6 +3,7 @@
 #include <neograph/api.h>
 #include <neograph/graph/loader.h>
 #include <neograph/program/admission.h>
+#include <neograph/program/authoring.h>
 #include <neograph/program/contract.h>
 #include <neograph/program/runtime.h>
 
@@ -77,6 +78,8 @@ bind_harness_invocation(HarnessInvocationTemplate request,
 struct HarnessWireReceipt {
     std::string              source_id;
     std::string              mode;
+    /// Explicit public authoring frontend; never inferred from document shape.
+    program::AuthoringFrontend authoring_frontend = program::AuthoringFrontend::TrustedCpp;
     std::string              preset;
     std::string              workspace_revision;
     std::vector<std::string> worker_ids;

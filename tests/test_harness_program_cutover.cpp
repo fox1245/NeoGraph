@@ -294,6 +294,69 @@ TEST(HarnessProgramCutover, CompileStartGetAndFinalResultUseProgramRuntime) {
     EXPECT_TRUE(status_uri.starts_with("neograph://runs/"));
 }
 
+TEST(HarnessProgramCutover, JavaScriptAuthoringUsesProgramSourceAndAdmittedRuntime) {
+    HarnessFixture                fixture;
+    neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
+    auto value = request();
+    value["harness"] = {
+        {"mode", "javascript"},
+        {"source_id", "harness:direct.js"},
+        {"source",
+         R"JS(
+            export function define() {
+                const graph = ng.graph("harness_fanout_judge");
+                graph.channel("task", {reducer: "overwrite", initial: {}});
+                graph.channel("worker_results", {reducer: "append", initial: []});
+                graph.channel("final_result", {reducer: "overwrite", initial: null});
+                graph.node("worker", {
+                    type: "neograph_harness_worker",
+                    worker_id: "reviewer",
+                    instructions: "Return structured findings",
+                    tool_ids: [],
+                    tool_descriptions: {},
+                    output_schema: {
+                        type: "object",
+                        required: ["status", "findings"],
+                        properties: {
+                            status: {type: "string"},
+                            findings: {type: "array"}
+                        },
+                        additionalProperties: false
+                    },
+                    provider_timeout_ms: 30000,
+                    max_output_tokens: 100,
+                    input_token_ceiling: 16384,
+                    max_retries: 1,
+                    max_provider_tool_rounds: 8,
+                    evidence_required: [],
+                    read_only: true
+                });
+                graph.node("judge", {
+                    type: "neograph_harness_judge",
+                    barrier: {wait_for: ["worker"]}
+                });
+                graph.edge("__start__", "worker");
+                graph.edge("worker", "judge");
+                graph.edge("judge", "__end__");
+                return graph;
+            }
+        )JS"}
+    };
+
+    const auto compiled = service.compile(value);
+    ASSERT_TRUE(compiled.at("ok").get<bool>()) << compiled.dump();
+    EXPECT_FALSE(compiled.at("bundle_id").get<std::string>().empty());
+    const auto bundle = json::parse(
+        compiled.at("artifacts").at("core_lockfile").at("content").get<std::string>());
+    EXPECT_EQ(bundle.at("source_kind"), "javascript");
+    const auto started = service.start({{"artifact_id", compiled.at("artifact_id")}});
+    ASSERT_TRUE(started.at("started").get<bool>()) << started.dump();
+    const auto result = await_terminal(service, started.at("run_id").get<std::string>());
+    ASSERT_EQ(result.at("status"), "completed") << result.dump();
+    EXPECT_EQ(result.at("result").at("valid_workers"), 1);
+    EXPECT_EQ(fixture.calls.load(), 1);
+}
+
 TEST(HarnessProgramCutover, HostConfigurationChangesProviderBindingAndArtifactIdentity) {
     HarnessFixture first({}, {{"route", "provider-a"}, {"region", "test"}});
     HarnessFixture second({}, {{"route", "provider-b"}, {"region", "test"}});

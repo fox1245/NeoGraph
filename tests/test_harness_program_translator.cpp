@@ -393,4 +393,58 @@ TEST(HarnessProgramTranslator, RequiresFrozenContractAndCarriesItToHarnessProjec
     EXPECT_EQ(translated.invocation_template.budget.wall_time_ms, 5000U);
 }
 
+TEST(HarnessProgramTranslator, RejectsLegacyAuthoringWithStableMigrationDiagnostics) {
+    std::atomic<int> calls{0};
+    auto             fixture = host(calls);
+    for (const auto mode : {"dsl", "core", "program", "program_json"}) {
+        auto value         = request();
+        value["harness"]  = {{"mode", mode}, {"definition", json::object()}};
+        try {
+            (void)HarnessRequestTranslator::translate(value, fixture.snapshots.registry,
+                                                       fixture.defaults);
+            FAIL() << "legacy mode unexpectedly accepted: " << mode;
+        } catch (const HarnessTranslationError& error) {
+            const auto expected = std::string(std::string_view(mode) == "dsl"
+                                                   ? "H_MIGRATION_CORE_DSL"
+                                                   : std::string_view(mode) == "core"
+                                                         ? "H_MIGRATION_CORE_JSON"
+                                                         : "H_MIGRATION_PROGRAM_JSON");
+            EXPECT_EQ(error.code(), expected);
+            EXPECT_EQ(error.pointer(), "/harness/mode");
+        }
+    }
+    EXPECT_EQ(calls.load(), 0);
+}
+
+TEST(HarnessProgramTranslator, JavaScriptModeRequiresExplicitSourceEnvelope) {
+    std::atomic<int> calls{0};
+    auto             fixture = host(calls);
+    auto              value  = request();
+    value["harness"] = {
+        {"mode", "javascript"},
+        {"source_id", "harness:direct.js"},
+        {"source", "export function define() { return ng.graph('harness_fanout_judge'); }"},
+    };
+
+    const auto translated =
+        HarnessRequestTranslator::translate(value, fixture.snapshots.registry, fixture.defaults);
+    EXPECT_EQ(translated.source.kind(), SourceKind::JavaScript);
+    EXPECT_EQ(translated.source.document().at("language"), "javascript");
+    EXPECT_EQ(translated.source.document().at("source"), value["harness"]["source"]);
+    EXPECT_EQ(translated.wire.authoring_frontend, AuthoringFrontend::JavaScript);
+    EXPECT_EQ(translated.wire.mode, "javascript");
+    EXPECT_EQ(calls.load(), 0);
+
+    auto missing_mode = value;
+    missing_mode["harness"] = {{"definition", json::object()}};
+    try {
+        (void)HarnessRequestTranslator::translate(missing_mode, fixture.snapshots.registry,
+                                                   fixture.defaults);
+        FAIL() << "missing authoring mode unexpectedly accepted";
+    } catch (const HarnessTranslationError& error) {
+        EXPECT_EQ(error.code(), "H_AUTHORING_MODE_REQUIRED");
+        EXPECT_EQ(error.pointer(), "/harness/mode");
+    }
+}
+
 }  // namespace

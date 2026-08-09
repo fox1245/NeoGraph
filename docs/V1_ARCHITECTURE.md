@@ -1028,19 +1028,28 @@ than inferred from wall time.
 The current Harness DSL, strict Core documents, retained artifacts, and MCP
 methods are migration inputs, not parallel permanent architectures.
 
-- Existing strict Core JSON remains a supported Core input.
-- Existing bounded Harness DSL is translated to `ProgramSource` and compiled by
-  `ProgramCompiler`.
-- JavaScript `ProgramSource` is an opt-in Program frontend, not a Core input.
-  Its engine and host-ABI identity remain part of its sealed source envelope;
-  a build that disables the QuickJS control component rejects it explicitly.
+- Existing strict Core JSON remains supported as internal/interchange data for
+  validated Core and Program artifacts, not as a public Harness authoring mode.
+- New Harness publication accepts an explicit JavaScript `ProgramSource`
+  envelope (and the preset compatibility surface); `define()` lowers to strict
+  Core and `main()` owns ordinary control flow through the existing typed
+  command protocol. Its engine and host-ABI identity remain part of its sealed
+  source envelope; a build that disables QuickJS rejects it explicitly.
+- Trusted C++ remains an in-process embedding surface. It may construct JSON
+  values for Core APIs because the process owns that boundary; transport JSON is
+  not thereby promoted to an authoring language.
+- Harness requests naming `dsl`, `core`, `program`, or `program_json` fail with
+  stable migration diagnostics. No adapter infers a compiler from JSON shape,
+  missing fields, or fallback heuristics.
 - Existing retained Harness artifacts are imported into `ProgramBundle` only
   when their hashes, registry/admission profile, and executable semantics can be
-  preserved exactly. Otherwise they drain on the pinned legacy path or fail with
-  an explicit compatibility classification.
+  be preserved exactly and are classified `translated`; otherwise they are
+  `drain_only` on the pinned legacy runtime when recoverable, or `rejected`.
+  Drain-only artifacts cannot publish or start new runs, and missing frontend
+  metadata never selects a parser from document shape.
 - Existing MCP method names may remain as transport compatibility during the
   pre-v1 window, but their implementation delegates to Program. No second
-  Harness-only compiler/runtime remains after cutover.
+  Harness-only compiler/runtime is selected for new publication after cutover.
 - The historical `ControlVm` and VM integration schemas are now retained only
   as explicitly superseded records (`docs/PROGRAMMABLE_HARNESS_DSL_DESIGN.md`,
   `spec/programmable-harness-vm-integration.sdd.yaml`, and
