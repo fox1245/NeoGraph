@@ -1543,52 +1543,196 @@ JSValue create_await(JSContext* context, JSValueConst this_value, int argc, JSVa
     }
 }
 
+struct JoinConstructorOptions {
+    std::string                mode;
+    std::uint64_t              required_successes = 0;
+    std::uint64_t              max_in_flight      = 0;
+    std::string                failure_policy;
+    std::optional<std::string> source_site;
+};
+
+bool read_join_constructor_options(JSContext*              context,
+                                    JSValueConst            value,
+                                    std::string_view        fixed_mode,
+                                    JoinConstructorOptions& output) {
+    json options;
+    if (!read_json(context, value, options, "join options")) return false;
+    if (!options.is_object()) {
+        graph_error(context, "P_JS_CONTROL_COMMAND", "NeoGraph join options must be an object");
+        return false;
+    }
+    for (const auto& [field, ignored] : options.items()) {
+        (void)ignored;
+        if (field != "mode" && field != "required_successes" && field != "max_in_flight" &&
+            field != "failure_policy" && field != "fail_fast" && field != "collect" &&
+            field != "source_site") {
+            graph_error(context, "P_JS_CONTROL_COMMAND",
+                        "Unknown field in NeoGraph join options: " + field);
+            return false;
+        }
+    }
+    if (options.contains("mode")) {
+        if (!options.at("mode").is_string() || options.at("mode").get<std::string>().empty()) {
+            graph_error(context, "P_JS_CONTROL_COMMAND", "NeoGraph join option mode must be a string");
+            return false;
+        }
+        output.mode = options.at("mode").get<std::string>();
+    }
+    if (!fixed_mode.empty() && !output.mode.empty() && output.mode != fixed_mode) {
+        graph_error(context, "P_JS_CONTROL_COMMAND",
+                    "NeoGraph fixed join constructor mode does not match its options");
+        return false;
+    }
+    if (options.contains("required_successes")) {
+        const auto& required = options.at("required_successes");
+        if (!required.is_number_unsigned() || required.get<std::uint64_t>() == 0) {
+            graph_error(context, "P_JS_CONTROL_COMMAND",
+                        "NeoGraph join option required_successes must be positive");
+            return false;
+        }
+        output.required_successes = required.get<std::uint64_t>();
+    }
+    if (options.contains("max_in_flight")) {
+        const auto& max_in_flight = options.at("max_in_flight");
+        if (!max_in_flight.is_number_unsigned() || max_in_flight.get<std::uint64_t>() == 0) {
+            graph_error(context, "P_JS_CONTROL_COMMAND",
+                        "NeoGraph join option max_in_flight must be positive");
+            return false;
+        }
+        output.max_in_flight = max_in_flight.get<std::uint64_t>();
+    }
+    if (options.contains("failure_policy")) {
+        const auto& policy = options.at("failure_policy");
+        if (!policy.is_string() || policy.get<std::string>().empty()) {
+            graph_error(context, "P_JS_CONTROL_COMMAND",
+                        "NeoGraph join option failure_policy must be a string");
+            return false;
+        }
+        output.failure_policy = policy.get<std::string>();
+    }
+    bool has_fail_fast = false;
+    bool fail_fast     = false;
+    if (options.contains("fail_fast")) {
+        if (!options.at("fail_fast").is_boolean()) {
+            graph_error(context, "P_JS_CONTROL_COMMAND",
+                        "NeoGraph join option fail_fast must be boolean");
+            return false;
+        }
+        has_fail_fast = true;
+        fail_fast = options.at("fail_fast").get<bool>();
+    }
+    bool has_collect = false;
+    bool collect     = false;
+    if (options.contains("collect")) {
+        if (!options.at("collect").is_boolean()) {
+            graph_error(context, "P_JS_CONTROL_COMMAND",
+                        "NeoGraph join option collect must be boolean");
+            return false;
+        }
+        has_collect = true;
+        collect = options.at("collect").get<bool>();
+    }
+    if (has_fail_fast && has_collect && fail_fast == collect) {
+        graph_error(context, "P_JS_CONTROL_COMMAND",
+                    "NeoGraph join options fail_fast and collect conflict");
+        return false;
+    }
+    if (!output.failure_policy.empty() && (has_fail_fast || has_collect)) {
+        const bool requested_fail_fast = has_fail_fast ? fail_fast : !collect;
+        const auto requested_policy = requested_fail_fast ? "fail_fast" : "collect";
+        if (output.failure_policy != requested_policy) {
+            graph_error(context, "P_JS_CONTROL_COMMAND",
+                        "NeoGraph join failure policy fields conflict");
+            return false;
+        }
+    }
+    if (has_fail_fast || has_collect) {
+        const bool use_fail_fast = has_fail_fast ? fail_fast : !collect;
+        output.failure_policy = use_fail_fast ? "fail_fast" : "collect";
+    }
+    if (options.contains("source_site")) {
+        if (!options.at("source_site").is_string() ||
+            options.at("source_site").get<std::string>().empty()) {
+            graph_error(context, "P_JS_CONTROL_COMMAND",
+                        "NeoGraph join option source_site must be a nonempty string");
+            return false;
+        }
+        output.source_site = options.at("source_site").get<std::string>();
+    }
+    return true;
+}
+
 JSValue create_join_impl(JSContext* context,
                          JSValueConst,
                          int              argc,
                          JSValueConst*    argv,
                          std::string_view fixed_mode = {}) {
-    const int minimum = fixed_mode.empty() ? 1 : (fixed_mode == "quorum" ? 2 : 1);
-    if (argc < minimum || argc > (fixed_mode.empty() ? 4 : (fixed_mode == "quorum" ? 3 : 2)))
-        return graph_error(context, "P_JS_CONTROL_COMMAND",
-                           "NeoGraph join constructor arity is invalid");
+    const int minimum = fixed_mode == "quorum" ? 2 : 1;
+    const int maximum = fixed_mode.empty() ? 5 : 4;
+    if (argc < minimum || argc > maximum)
+        return graph_error(context, "P_JS_CONTROL_COMMAND", "NeoGraph join constructor arity is invalid");
     std::vector<JavaScriptCommand> members;
     if (!read_sealed_command_array(context, argv[0], members)) return JS_EXCEPTION;
-    std::string mode = fixed_mode.empty() ? "all" : std::string(fixed_mode);
-    int         next = 1;
-    if (fixed_mode.empty() && argc > next) {
-        if (!read_string(context, argv[next], mode, "join mode")) return JS_EXCEPTION;
-        ++next;
-    }
-    std::uint64_t required = 0;
-    if (mode == "quorum") {
-        if (fixed_mode.empty() && argc <= next)
-            return graph_error(context, "P_JS_CONTROL_COMMAND",
-                               "ng.join quorum requires required_successes");
-        if (!read_command_uint64(context, argv[next], required, "join required_successes", true))
+
+    JoinConstructorOptions options;
+    options.mode = fixed_mode.empty() ? "" : std::string(fixed_mode);
+    int next = 1;
+    const bool options_object = next < argc && JS_IsObject(argv[next]) &&
+                                !JS_IsArray(context, argv[next]);
+    if (options_object) {
+        if (!read_join_constructor_options(context, argv[next], fixed_mode, options))
             return JS_EXCEPTION;
         ++next;
-    } else if (fixed_mode.empty() && argc > next) {
-        // Generic all/race joins use the next argument as source_site.  A
-        // literal undefined is accepted as a positional placeholder when a
-        // caller wants to provide a later site argument.
-        if (argc > next + 1) {
-            if (!JS_IsUndefined(argv[next]))
-                return graph_error(context, "P_JS_CONTROL_COMMAND",
-                                   "ng.join has too many arguments for all/race mode");
-            ++next;
-        }
+    } else if (fixed_mode.empty() && next < argc) {
+        if (!read_string(context, argv[next], options.mode, "join mode")) return JS_EXCEPTION;
+        ++next;
     }
+    if (fixed_mode.empty() && next < argc && JS_IsObject(argv[next]) &&
+        !JS_IsArray(context, argv[next])) {
+        if (!read_join_constructor_options(context, argv[next], fixed_mode, options))
+            return JS_EXCEPTION;
+        ++next;
+    }
+
+    if (options.mode.empty()) options.mode = fixed_mode.empty() ? "all" : std::string(fixed_mode);
+    if (options.mode != "all" && options.mode != "race" && options.mode != "quorum")
+        return graph_error(context, "P_JS_CONTROL_COMMAND", "NeoGraph join mode is unsupported");
+
+    if (options.mode == "quorum" && options.required_successes == 0) {
+        if (next >= argc || JS_IsObject(argv[next]) || JS_IsString(argv[next]) ||
+            JS_IsUndefined(argv[next]) ||
+            !read_command_uint64(context, argv[next], options.required_successes,
+                                 "join required_successes", true))
+            return JS_EXCEPTION;
+        ++next;
+    }
+
+    if (next < argc && JS_IsObject(argv[next]) && !JS_IsArray(context, argv[next])) {
+        if (!read_join_constructor_options(context, argv[next], fixed_mode, options))
+            return JS_EXCEPTION;
+        ++next;
+    }
+
     std::string source_site;
-    if (next < argc && !read_command_source_site(context, argc, argv, next, source_site))
-        return JS_EXCEPTION;
-    if (next >= argc) source_site = std::string(kDefaultCommandSourceSite);
+    if (next < argc && JS_IsUndefined(argv[next])) ++next;
+    if (next < argc) {
+        if (!read_command_source_site(context, argc, argv, next, source_site))
+            return JS_EXCEPTION;
+        ++next;
+    }
+    if (next != argc)
+        return graph_error(context, "P_JS_CONTROL_COMMAND", "NeoGraph join constructor arguments are invalid");
+    if (source_site.empty())
+        source_site = options.source_site.value_or(std::string(kDefaultCommandSourceSite));
+
     auto* capture = static_cast<DefinitionCapture*>(JS_GetContextOpaque(context));
     if (!capture)
         return graph_error(context, "P_JS_CONTROL_COMMAND", "NeoGraph command context is unbound");
-    return make_command_value(context, capture,
-                              JavaScriptCommand::join(std::move(source_site), std::move(mode),
-                                                      std::move(members), required));
+    return make_command_value(
+        context, capture,
+        JavaScriptCommand::join(std::move(source_site), std::move(options.mode),
+                                std::move(members), options.required_successes,
+                                options.max_in_flight, std::move(options.failure_policy)));
 }
 
 JSValue create_join(JSContext* context, JSValueConst this_value, int argc, JSValueConst* argv) {
@@ -2088,12 +2232,12 @@ json projected_program_document(const json& definition) {
              json{{"resource", "wall_time_ms"}, {"minimum", 1}, {"maximum", 60000}},
              json{{"resource", "model_tokens"}, {"minimum", 0}, {"maximum", 10000}},
              json{{"resource", "monetary_microunits"}, {"minimum", 0}, {"maximum", 1000000}},
-             json{{"resource", "max_concurrency"}, {"minimum", 1}, {"maximum", 1}},
-             json{{"resource", "max_program_operations"}, {"minimum", 1}, {"maximum", 1}},
+             json{{"resource", "max_concurrency"}, {"minimum", 1}, {"maximum", 4}},
+             json{{"resource", "max_program_operations"}, {"minimum", 1}, {"maximum", 32}},
              json{{"resource", "max_core_steps"}, {"minimum", 1}, {"maximum", 100}},
              json{{"resource", "max_dynamic_compiles"}, {"minimum", 0}, {"maximum", 0}},
-             json{{"resource", "max_child_depth"}, {"minimum", 0}, {"maximum", 0}},
-             json{{"resource", "max_total_children"}, {"minimum", 0}, {"maximum", 0}},
+             json{{"resource", "max_child_depth"}, {"minimum", 0}, {"maximum", 4}},
+             json{{"resource", "max_total_children"}, {"minimum", 0}, {"maximum", 4}},
          })},
     };
 }
@@ -2556,6 +2700,10 @@ JavaScriptGeneratorStep JavaScriptGenerator::next(std::optional<json> response) 
     }
     const auto& limits  = impl_->configured_limits;
     auto*       context = impl_->scope.context();
+    // A Program scheduler may resume this serialized generator on a different
+    // worker after a C++ join. QuickJS tracks stack bounds per runtime, so
+    // refresh its stack top at each turn while keeping JS execution serialized.
+    JS_UpdateStackTop(impl_->scope.runtime());
     refresh_external_interrupt(impl_->budget);
     if (impl_->budget.reason != InterruptReason::None)
         throw_control_failure(context, impl_->capture, impl_->budget, limits,

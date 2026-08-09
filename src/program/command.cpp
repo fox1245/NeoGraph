@@ -124,7 +124,7 @@ void validate_arguments(JavaScriptCommandKind kind, const json& arguments) {
 
 void validate_join_arguments(const json& arguments) {
     require_exact_fields(arguments, "JavaScript join arguments", {"mode", "members"},
-                         {"required_successes"});
+                         {"required_successes", "max_in_flight", "failure_policy"});
     const auto mode = require_string(arguments, "mode");
     if (mode != "all" && mode != "race" && mode != "quorum")
         throw std::invalid_argument("JavaScript join mode is unsupported: " + mode);
@@ -141,6 +141,13 @@ void validate_join_arguments(const json& arguments) {
     } else if (arguments.contains("required_successes")) {
         throw std::invalid_argument(
             "JavaScript all/race join must not include required_successes");
+    }
+    if (arguments.contains("max_in_flight"))
+        (void)require_positive_uint64(arguments, "max_in_flight");
+    if (arguments.contains("failure_policy")) {
+        const auto policy = require_string(arguments, "failure_policy");
+        if (policy != "fail_fast" && policy != "collect")
+            throw std::invalid_argument("JavaScript join failure_policy is unsupported: " + policy);
     }
     for (const auto& member : members) (void)JavaScriptCommand::from_json(member);
 }
@@ -270,11 +277,15 @@ JavaScriptCommand JavaScriptCommand::await(std::string source_site,
 JavaScriptCommand JavaScriptCommand::join(std::string                    source_site,
                                           std::string                    mode,
                                           std::vector<JavaScriptCommand> members,
-                                          std::uint64_t                  required_successes) {
+                                          std::uint64_t                  required_successes,
+                                          std::uint64_t                  max_in_flight,
+                                          std::string                    failure_policy) {
     json encoded_members = json::array();
     for (const auto& member : members) encoded_members.push_back(member.to_json());
     json arguments{{"mode", std::move(mode)}, {"members", std::move(encoded_members)}};
     if (required_successes != 0) arguments["required_successes"] = required_successes;
+    if (max_in_flight != 0) arguments["max_in_flight"] = max_in_flight;
+    if (!failure_policy.empty()) arguments["failure_policy"] = std::move(failure_policy);
     return make(PROTOCOL_VERSION, JavaScriptCommandKind::Join,
                 JAVASCRIPT_IMPORT_SLOT_JOIN, std::move(source_site), std::move(arguments));
 }

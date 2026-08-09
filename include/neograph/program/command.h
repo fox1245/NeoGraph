@@ -86,7 +86,9 @@ public:
     static JavaScriptCommand join(std::string                   source_site,
                                   std::string                   mode,
                                   std::vector<JavaScriptCommand> members,
-                                  std::uint64_t                 required_successes = 0);
+                                  std::uint64_t                 required_successes = 0,
+                                  std::uint64_t                 max_in_flight = 0,
+                                  std::string                   failure_policy = {});
     static JavaScriptCommand emit(std::string source_site, json value);
     static JavaScriptCommand checkpoint(std::string source_site, json value);
     static JavaScriptCommand cancel_scope(std::string source_site,
