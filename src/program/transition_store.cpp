@@ -249,8 +249,7 @@ bool valid_command_history_append(
             });
         if (found == prior.rend()) {
             if (entry.command_ordinal() != highest_ordinal + 1 || !entry.pending() ||
-                std::any_of(prior.begin(), prior.end(),
-                            [](const auto& previous) { return previous.pending(); }))
+                (!prior.empty() && prior.back().pending()))
                 return false;
             highest_ordinal = entry.command_ordinal();
             prior.push_back(entry);

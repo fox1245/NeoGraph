@@ -140,12 +140,24 @@ void exercise_javascript_command_history(ProgramTransitionStore& store) {
         completed, javascript_command_entry(3, true), 40);
     EXPECT_EQ(store.compare_publish("owner-a", completed.journal_record.id, duplicate),
               ProgramTransitionPublishResult::Conflict);
+    const auto second_pending = javascript_command_publication(
+        completed, javascript_command_entry(3, false, 2), 50);
+    ASSERT_EQ(store.compare_publish("owner-a", completed.journal_record.id, second_pending),
+              ProgramTransitionPublishResult::Published);
+    const auto second_completed = javascript_command_publication(
+        second_pending, javascript_command_entry(4, true, 2), 60);
+    ASSERT_EQ(store.compare_publish("owner-a", second_pending.journal_record.id,
+                                    second_completed),
+              ProgramTransitionPublishResult::Published);
 
     const auto commands = store.load_javascript_commands("owner-a", "run-1", 0);
-    ASSERT_EQ(commands.size(), 2U);
-    EXPECT_TRUE(commands.front().pending());
-    EXPECT_TRUE(commands.back().completed());
-    EXPECT_EQ(commands.front().coordinate_id(), commands.back().coordinate_id());
+    ASSERT_EQ(commands.size(), 4U);
+    EXPECT_TRUE(commands[0].pending());
+    EXPECT_TRUE(commands[1].completed());
+    EXPECT_TRUE(commands[2].pending());
+    EXPECT_TRUE(commands[3].completed());
+    EXPECT_EQ(commands[0].coordinate_id(), commands[1].coordinate_id());
+    EXPECT_EQ(commands[2].coordinate_id(), commands[3].coordinate_id());
 }
 
 ProgramTransitionPublication terminal_publication(const ProgramTransitionPublication& start,

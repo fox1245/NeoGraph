@@ -132,6 +132,17 @@ public:
                       ProgramEventKind kind,
                       ProgramEventPayload payload);
     void         complete(RunOutcome outcome) noexcept;
+    /**
+     * Atomically append one JavaScript yielded-command journal entry while
+     * the attempt remains Running.  A terminal result may complete an
+     * existing pending coordinate; the store rejects every other duplicate.
+     */
+    ProgramTransitionPublishResult publish_javascript_command(
+        std::uint64_t              command_ordinal,
+        JavaScriptCommand           command,
+        std::optional<std::string> effect_identity,
+        std::optional<json>         terminal_result,
+        std::optional<RunBudget>    remaining_budget = std::nullopt);
     ProgramEvent make_event(std::string_view operation_id,
                             ProgramEventKind kind,
                             ProgramEventPayload payload);

@@ -663,6 +663,94 @@ bool checkpointless_replay_safe(const ProgramPlan& plan) {
                        });
 }
 
+struct JavaScriptPendingCommand {
+    std::uint64_t    ordinal = 0;
+    JavaScriptCommand command = JavaScriptCommand::call_core(
+        "runtime:pending", "runtime:pending", json::object());
+    std::string bundle_id;
+    std::string      effect_identity;
+};
+
+std::optional<JavaScriptPendingCommand> javascript_pending_command(
+    const ProgramPendingEffect& pending) {
+    if (pending.core_node() != "javascript") return std::nullopt;
+    const auto payload = pending.payload();
+    if (!payload.is_object() || !payload.contains("bundle_id") ||
+        !payload.at("bundle_id").is_string() || !payload.contains("command_ordinal") ||
+        !payload.at("command_ordinal").is_number_unsigned() || !payload.contains("command") ||
+        !payload.contains("effect_identity") || !payload.at("effect_identity").is_string()) {
+        throw_runtime_diagnostic(
+            "P_JS_COMMAND_JOURNAL_MISMATCH",
+            "JavaScript pending effect does not carry a complete command coordinate");
+    }
+    const auto bundle_id = payload.at("bundle_id").get<std::string>();
+    const auto ordinal = payload.at("command_ordinal").get<std::uint64_t>();
+    const auto command = JavaScriptCommand::from_json(payload.at("command"));
+    const auto effect_identity = payload.at("effect_identity").get<std::string>();
+    if (bundle_id.empty() || ordinal == 0 || !detail::is_sha256_identity(effect_identity)) {
+        throw_runtime_diagnostic(
+            "P_JS_COMMAND_JOURNAL_MISMATCH",
+            "JavaScript pending effect carries an invalid command coordinate");
+    }
+    const auto expected_operation_id = "root.javascript." + std::to_string(ordinal);
+    if (pending.operation_id() != expected_operation_id ||
+        effect_identity != pending.effect_id() || effect_identity != pending.call_id() ||
+        detail::canonical_json_bytes(command.to_json()) !=
+            detail::canonical_json_bytes(pending.core_interrupt_value())) {
+        throw_runtime_diagnostic(
+            "P_JS_COMMAND_JOURNAL_MISMATCH",
+            "JavaScript pending effect coordinate disagrees with its command payload");
+    }
+    const auto expected_effect_identity = detail::sha256_identity(
+        "program-javascript-command-effect/v1",
+        detail::canonical_json_bytes(json{{"bundle_id", bundle_id},
+                                          {"command_ordinal", ordinal},
+                                          {"command", command.to_json()}}));
+    if (effect_identity != expected_effect_identity) {
+        throw_runtime_diagnostic(
+            "P_JS_COMMAND_JOURNAL_MISMATCH",
+            "JavaScript pending effect identity does not bind its command coordinate");
+    }
+    return JavaScriptPendingCommand{ordinal, command, bundle_id, effect_identity};
+}
+
+json javascript_resume_terminal_result(const json& value) {
+    return json{{"status", "completed"},
+                {"output", detail::owned_json_copy(value)},
+                {"execution_trace", json::array()},
+                {"usage", json{{"wall_time_ms", 0U},
+                                  {"model_tokens", 0U},
+                                  {"monetary_microunits", 0U},
+                                  {"program_operations", 0U},
+                                  {"core_steps", 0U},
+                                  {"peak_concurrency", 0U}}}};
+}
+
+ProgramJavaScriptCommandJournalEntry javascript_completion_entry(
+    const std::vector<ProgramJavaScriptCommandJournalEntry>& entries,
+    const JavaScriptPendingCommand&                           pending,
+    const json&                                                result) {
+    const auto found = std::find_if(entries.rbegin(), entries.rend(), [&](const auto& entry) {
+        return entry.command_ordinal() == pending.ordinal;
+    });
+    if (found == entries.rend() || !found->pending() ||
+        found->bundle_id() != pending.bundle_id ||
+        detail::canonical_json_bytes(found->command().to_json()) !=
+            detail::canonical_json_bytes(pending.command.to_json()) ||
+        found->effect_identity() != std::optional<std::string>(pending.effect_identity)) {
+        throw_runtime_diagnostic(
+            "P_JS_COMMAND_JOURNAL_MISMATCH",
+            "JavaScript pending command does not match the durable command journal");
+    }
+    return ProgramJavaScriptCommandJournalEntry(
+        ProgramJavaScriptCommandJournalEntryData{entries.empty() ? 1 : entries.back().sequence() + 1,
+                                                 found->bundle_id(),
+                                                 pending.ordinal,
+                                                 pending.command,
+                                                 pending.effect_identity,
+                                                 result});
+}
+
 ProgramChildRecord child_record_for(std::string_view         child_run_id,
                                     const ModuleLinkReceipt& link,
                                     const ProgramInvocation& invocation,
@@ -1684,6 +1772,105 @@ ProgramRunRecord RunControl::snapshot() const {
         throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program run was not found");
     }
     return *record;
+}
+
+ProgramTransitionPublishResult RunControl::publish_javascript_command(
+    std::uint64_t              command_ordinal,
+    JavaScriptCommand           command,
+    std::optional<std::string> effect_identity,
+    std::optional<json>         terminal_result,
+    std::optional<RunBudget>    remaining_budget) {
+    if (!command_ordinal) return ProgramTransitionPublishResult::Conflict;
+
+    for (int retry = 0; retry < 3; ++retry) {
+        const auto previous = transitions->load(owner_scope, run_id);
+        const auto previous_journal = transitions->latest(owner_scope, run_id);
+        if (!previous || !previous_journal || previous->journal_head() != previous_journal->id ||
+            previous->continuation().state != ContinuationState::Running ||
+            previous->continuation().attempt != attempt) {
+            return ProgramTransitionPublishResult::Conflict;
+        }
+
+        const auto existing = transitions->load_javascript_commands(owner_scope, run_id);
+        const auto found = std::find_if(
+            existing.rbegin(), existing.rend(), [&](const auto& entry) {
+                return entry.command_ordinal() == command_ordinal;
+            });
+        if (found != existing.rend()) {
+            if (found->bundle_id() != bundle_id ||
+                detail::canonical_json_bytes(found->command().to_json()) !=
+                    detail::canonical_json_bytes(command.to_json()) ||
+                found->effect_identity() != effect_identity) {
+                return ProgramTransitionPublishResult::Conflict;
+            }
+            if (found->completed()) {
+                return found->terminal_result() == terminal_result
+                           ? ProgramTransitionPublishResult::AlreadyPresent
+                           : ProgramTransitionPublishResult::Conflict;
+            }
+            if (!terminal_result) return ProgramTransitionPublishResult::AlreadyPresent;
+        }
+
+        const auto sequence = existing.empty() ? 1 : existing.back().sequence() + 1;
+        ProgramJavaScriptCommandJournalEntry entry(
+            ProgramJavaScriptCommandJournalEntryData{sequence,
+                                                     bundle_id,
+                                                     command_ordinal,
+                                                     command,
+                                                     effect_identity,
+                                                     terminal_result});
+        auto journal = ProgramJournalRecord::create(ProgramJournalRecordData{
+            previous->journal_head(),
+            run_id,
+            program_version_id,
+            bundle_id,
+            previous_journal->sequence + 1,
+            previous->continuation(),
+            remaining_budget.value_or(previous->remaining_budget()),
+            RunBudget{},
+            previous->exact_checkpoint(),
+            now_ms()});
+
+        ProgramRunRecordData data;
+        data.owner_scope                    = owner_scope;
+        data.run_id                         = run_id;
+        data.program_version_id             = program_version_id;
+        data.bundle_id                      = bundle_id;
+        data.binding_fingerprint            = previous->binding_fingerprint();
+        data.invocation                     = previous->invocation();
+        data.child_depth                    = previous->child_depth();
+        data.children                       = previous->children();
+        data.continuation                   = journal.continuation;
+        data.remaining_budget               = journal.remaining_budget;
+        data.exact_checkpoint               = previous->exact_checkpoint();
+        data.pending_input                  = previous->pending_input();
+        data.pending_effect                 = previous->pending_effect();
+        data.fork_receipt                   = previous->fork_receipt();
+        data.fork_source_run_id             = previous->fork_source_run_id();
+        data.fork_source_program_version_id = previous->fork_source_program_version_id();
+        data.fork_source_checkpoint_id      = previous->fork_source_checkpoint_id();
+        data.recorded_binding_set_fingerprint =
+            previous->recorded_binding_set_fingerprint();
+        data.journal_head    = journal.id;
+        data.event_sequence  = previous->event_sequence();
+        data.effect_sequence = previous->effect_sequence();
+        data.created_at_ms   = previous->created_at_ms();
+        data.updated_at_ms   = journal.timestamp_ms;
+
+        auto publication = ProgramTransitionPublication{
+            ProgramRunRecord::create(std::move(data)), std::move(journal), {}, {}, std::nullopt,
+            {std::move(entry)}};
+        const auto published = transitions->compare_publish(
+            owner_scope, previous->journal_head(), std::move(publication));
+        if (published == ProgramTransitionPublishResult::Published ||
+            published == ProgramTransitionPublishResult::AlreadyPresent) {
+            return published;
+        }
+        // A concurrent terminal transition cannot be retried as a live
+        // command.  Otherwise, reload the head and let the exact coordinate
+        // check above classify an already-published append.
+    }
+    return ProgramTransitionPublishResult::Conflict;
 }
 
 }  // namespace detail
@@ -2889,7 +3076,13 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             recovered_thread_id = checkpoint->core_thread_id;
             resume_checkpoint_id = checkpoint->checkpoint_id;
         } else {
-            if (!checkpointless_replay_safe(pinned->bundle.typed_orchestration_plan())) {
+            // JavaScript control sessions are replayed from their durable
+            // yielded-command journal.  They intentionally do not require a
+            // Core checkpoint: every prior command result is fed back into a
+            // fresh generator, and a pending head is surfaced as an external
+            // effect instead of being redispatched.
+            if (!pinned->bundle.control_source() &&
+                !checkpointless_replay_safe(pinned->bundle.typed_orchestration_plan())) {
                 throw_runtime_diagnostic(
                     "P_RUN_RECOVERY_BLOCKED",
                     "Running Program has no checkpoint and is not replay-safe without Core dispatch",
@@ -3087,6 +3280,21 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         throw_runtime_diagnostic(pending_code, pending_message);
     }
 
+    // JavaScript control recovery consumes the pending command result into
+    // the same exact command coordinate.  The completed append is published
+    // together with the Interrupted->Running transition below; this keeps a
+    // fresh runtime from ever observing a resumed attempt without its
+    // authoritative command result.
+    std::optional<JavaScriptPendingCommand> javascript_pending;
+    if (const auto previous_effect = previous->pending_effect()) {
+        javascript_pending = javascript_pending_command(*previous_effect);
+        if (javascript_pending && javascript_pending->bundle_id != previous->bundle_id()) {
+            throw_runtime_diagnostic(
+                "P_JS_COMMAND_JOURNAL_MISMATCH",
+                "JavaScript pending effect bundle does not match the durable run bundle");
+        }
+    }
+
     const auto version =
         impl_->config.catalog->resolve_version(owner_scope, previous->program_version_id());
     if (!version) {
@@ -3165,8 +3373,16 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
     data.created_at_ms                    = previous->created_at_ms();
     data.updated_at_ms                    = journal.timestamp_ms;
 
+    std::vector<ProgramJavaScriptCommandJournalEntry> command_entries;
+    if (javascript_pending) {
+        const auto entries =
+            impl_->config.transitions->load_javascript_commands(owner_scope, run_id);
+        command_entries.push_back(javascript_completion_entry(
+            entries, *javascript_pending, javascript_resume_terminal_result(resume_value.value)));
+    }
     auto publication = ProgramTransitionPublication{
-        ProgramRunRecord::create(std::move(data)), std::move(journal), {started}, {}};
+        ProgramRunRecord::create(std::move(data)), std::move(journal), {started}, {},
+        std::nullopt, std::move(command_entries)};
     const auto published = impl_->config.transitions->compare_publish(
         owner_scope, previous->journal_head(), std::move(publication));
     if (published != ProgramTransitionPublishResult::Published) {
@@ -3203,7 +3419,9 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         return ProgramHandle(std::move(control));
     }
 
-    spawn_run_attempt(impl_->pool, control, std::move(resume_value.value),
+    spawn_run_attempt(impl_->pool, control,
+                      javascript_pending ? previous->invocation().input
+                                          : std::move(resume_value.value),
                       checkpoint.checkpoint_id, impl_->config.host_admission,
                       impl_->config.host_admission_resolver);
     return ProgramHandle(std::move(control));
@@ -3222,6 +3440,12 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
     if (!pending || !previous->exact_checkpoint()) {
         throw_runtime_diagnostic("P_EFFECT_NOT_AMBIGUOUS",
                                  "Program run has no pending effect to reconcile");
+    }
+    const auto javascript_pending = javascript_pending_command(*pending);
+    if (javascript_pending && javascript_pending->bundle_id != previous->bundle_id()) {
+        throw_runtime_diagnostic(
+            "P_JS_COMMAND_JOURNAL_MISMATCH",
+            "JavaScript pending effect bundle does not match the durable run bundle");
     }
     const auto                 transition_time = static_cast<std::uint64_t>(now_ms());
     ProgramPendingEffectUpdate update          = [&] {
@@ -3395,10 +3619,19 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
     data.created_at_ms                    = previous->created_at_ms();
     data.updated_at_ms                    = journal.timestamp_ms;
 
+    std::vector<ProgramJavaScriptCommandJournalEntry> command_entries;
+    if (completed && javascript_pending) {
+        const auto entries =
+            impl_->config.transitions->load_javascript_commands(owner_scope, run_id);
+        command_entries.push_back(javascript_completion_entry(
+            entries, *javascript_pending,
+            javascript_resume_terminal_result(*resolution.result)));
+    }
     const auto published = impl_->config.transitions->compare_publish(
         owner_scope, previous->journal_head(),
-        ProgramTransitionPublication{
-            ProgramRunRecord::create(std::move(data)), std::move(journal), outbox, {}});
+            ProgramTransitionPublication{
+            ProgramRunRecord::create(std::move(data)), std::move(journal), outbox, {},
+                                     std::nullopt, std::move(command_entries)});
     if (published != ProgramTransitionPublishResult::Published) {
         const auto winner = impl_->config.transitions->load(owner_scope, run_id);
         if (winner && winner->pending_effect()) {
@@ -3441,7 +3674,9 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
         live_control->complete(std::move(failure));
         return ProgramHandle(std::move(live_control));
     }
-    spawn_run_attempt(impl_->pool, live_control, *resolution.result, checkpoint.checkpoint_id,
+    spawn_run_attempt(impl_->pool, live_control,
+                      javascript_pending ? previous->invocation().input : *resolution.result,
+                      checkpoint.checkpoint_id,
                       impl_->config.host_admission, impl_->config.host_admission_resolver);
     return ProgramHandle(std::move(live_control));
 }

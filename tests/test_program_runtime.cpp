@@ -15,6 +15,7 @@
 #include <atomic>
 #include <barrier>
 #include <chrono>
+#include <condition_variable>
 #include <future>
 #include <limits>
 #include <map>
@@ -749,6 +750,67 @@ private:
     InMemoryProgramTransitionStore inner_;
     std::atomic<bool>              injected_{false};
 };
+
+class BlockAfterJavaScriptResultJournal final : public ProgramTransitionStore {
+public:
+    std::optional<ProgramRunRecord> load(std::string_view owner,
+                                         std::string_view run_id) const override {
+        return inner_.load(owner, run_id);
+    }
+    std::optional<ProgramJournalRecord> latest(std::string_view owner,
+                                               std::string_view run_id) const override {
+        return inner_.latest(owner, run_id);
+    }
+    std::vector<ProgramEvent> load_events(std::string_view owner,
+                                          std::string_view run_id,
+                                          std::uint64_t    sequence) const override {
+        return inner_.load_events(owner, run_id, sequence);
+    }
+    std::vector<ProgramEffectOutboxEntry> load_effects(std::string_view owner,
+                                                       std::string_view run_id,
+                                                       std::uint64_t    sequence) const override {
+        return inner_.load_effects(owner, run_id, sequence);
+    }
+    std::vector<ProgramJavaScriptCommandJournalEntry>
+    load_javascript_commands(std::string_view owner,
+                             std::string_view run_id,
+                             std::uint64_t    sequence) const override {
+        return inner_.load_javascript_commands(owner, run_id, sequence);
+    }
+    ProgramTransitionPublishResult compare_publish(
+        std::string_view             owner,
+        std::string_view             expected,
+        ProgramTransitionPublication publication) override {
+        const bool command_result = !publication.commands.empty() &&
+                                    publication.commands.back().completed();
+        const auto published = inner_.compare_publish(owner, expected, std::move(publication));
+        if (!command_result || published != ProgramTransitionPublishResult::Published) {
+            return published;
+        }
+        std::unique_lock lock(mutex_);
+        observed_ = true;
+        condition_.notify_all();
+        condition_.wait_for(lock, std::chrono::seconds(5), [this] { return released_; });
+        return published;
+    }
+    bool wait_for_result(std::chrono::milliseconds timeout) {
+        std::unique_lock lock(mutex_);
+        return condition_.wait_for(lock, timeout, [this] { return observed_; });
+    }
+    void release_result() {
+        std::lock_guard lock(mutex_);
+        released_ = true;
+        condition_.notify_all();
+    }
+
+private:
+    InMemoryProgramTransitionStore inner_;
+    mutable std::mutex              mutex_;
+    std::condition_variable         condition_;
+    bool                            observed_ = false;
+    bool                            released_ = false;
+};
+
 class FailChildDispatchOnceJournal final : public ProgramTransitionStore {
 public:
     std::optional<ProgramRunRecord> load(std::string_view owner,
@@ -1207,7 +1269,10 @@ TEST(ProgramRuntimeTest, TypedPendingEffectPublishesOnceAndResumesByExactCallIde
             ->resume("tenant:runtime", interrupted.run_id(),
                      resume_for(interrupted, json{{"result", "recorded"}}, "trace-effect-resume"))
             .wait();
-    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed);
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed)
+        << (resumed.failure() ? resumed.failure()->code + ": " + resumed.failure()->message +
+                                    " " + resumed.failure()->witness.dump()
+                                : "no failure detail");
     EXPECT_EQ(resumed.output()["channels"]["value"]["value"], "recorded");
     EXPECT_EQ(interrupt_calls.load(), 2U);
 
@@ -1609,6 +1674,164 @@ TEST(ProgramRuntimeTest, JavaScriptGeneratorExecutesYieldedCoreCommand) {
     EXPECT_EQ(result.output(), (json{{"requested", "draft"}, {"value", "completed"}}));
     EXPECT_EQ(result.usage().program_operations, 1U);
     EXPECT_EQ(completed_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptCommandJournalPersistsCoordinateAndResult) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "runtime-overwrite", initial: ""});
+                graph.node("work", {type: "runtime-completed"});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+
+            export function* main(input) {
+                const output = yield ng.callCore("main", {requested: input.requested}, "journal:1");
+                return {value: output.value};
+            }
+        )JS");
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json{{"requested", "journal"}}, grant(),
+                          "trace-javascript-command-journal", {}});
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    ASSERT_EQ(completed_calls.load(), 1U);
+
+    const auto entries =
+        fixture.journal->load_javascript_commands("tenant:runtime", result.run_id());
+    ASSERT_EQ(entries.size(), 2U);
+    EXPECT_EQ(entries[0].command_ordinal(), 1U);
+    EXPECT_TRUE(entries[0].pending());
+    EXPECT_EQ(entries[0].coordinate_id(), entries[1].coordinate_id());
+    EXPECT_TRUE(entries[1].completed());
+    EXPECT_EQ(entries[1].terminal_result()->at("status"), "completed");
+    EXPECT_EQ(entries[1].command().source_site(), "journal:1");
+}
+
+TEST(ProgramRuntimeTest, JavaScriptCompletedHeadFreshRuntimeReplaysRecordedResult) {
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    AdmittedRuntime fixture(1, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "runtime-overwrite", initial: ""});
+                graph.node("work", {type: "runtime-completed"});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+
+            export function* main(input) {
+                const output = yield ng.callCore("main", {requested: input.requested}, "crash:result");
+                return {value: output.value};
+            }
+        )JS");
+
+    auto original = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json{{"requested", "recorded"}}, grant(),
+                          "trace-javascript-result-crash", {}});
+    ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
+    EXPECT_EQ(completed_calls.load(), 1U);
+    const auto durable_commands =
+        journal->load_javascript_commands("tenant:runtime", original.run_id(), 0);
+    ASSERT_EQ(durable_commands.size(), 2U);
+    EXPECT_TRUE(durable_commands.back().completed());
+
+    auto fresh_runtime = fixture.make_runtime();
+    const auto replayed = fresh_runtime->reconnect("tenant:runtime", original.run_id()).wait();
+    ASSERT_EQ(replayed.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(replayed.output(), (json{{"value", "completed"}}));
+    EXPECT_EQ(completed_calls.load(), 1U);
+
+    journal->release_result();
+    (void)original.wait();
+    EXPECT_EQ(completed_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptPendingHeadFreshRuntimeResumesWithoutRedispatch) {
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "runtime-overwrite", initial: ""});
+                graph.node("work", {type: "runtime-blocking"});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+
+            export function* main(input) {
+                const output = yield ng.callCore("main", {requested: input.requested}, "crash:1");
+                return {value: output.value};
+            }
+        )JS");
+
+    // Keep the first Core dispatch in flight at the crash boundary.  A second
+    // runtime is intentionally attached to the same durable transition store,
+    // as a fresh process would be after the first one stopped after publishing
+    // the yielded-command head.
+    auto original = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json{{"requested", "crash"}}, grant(),
+                          "trace-javascript-crash-boundary", {}});
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (blocking_calls.load() == 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_EQ(blocking_calls.load(), 1U);
+    ASSERT_FALSE(original.try_result().has_value());
+
+    const auto pending_entries =
+        fixture.journal->load_javascript_commands("tenant:runtime", original.run_id());
+    ASSERT_EQ(pending_entries.size(), 1U);
+    ASSERT_TRUE(pending_entries.front().pending());
+
+    auto fresh_runtime = fixture.make_runtime();
+    auto recovered = fresh_runtime->reconnect("tenant:runtime", original.run_id());
+    const auto interrupted = recovered.wait();
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(interrupted.interrupt().has_value());
+    ASSERT_TRUE(interrupted.interrupt()->pending_effect.has_value());
+    const auto pending = *interrupted.interrupt()->pending_effect;
+    EXPECT_EQ(pending.idempotency(), ProgramEffectIdempotency::NonIdempotent);
+    EXPECT_EQ(blocking_calls.load(), 1U);
+
+    const auto resumed = fresh_runtime
+                             ->resume("tenant:runtime", original.run_id(),
+                                      resume_for(interrupted, json{{"value", "resumed"}},
+                                                 "trace-javascript-crash-resume"))
+                             .wait();
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed)
+        << (resumed.failure() ? resumed.failure()->code + ": " + resumed.failure()->message +
+                                    " " + resumed.failure()->witness.dump()
+                                : "no failure detail");
+    EXPECT_EQ(resumed.output(), (json{{"value", "resumed"}}));
+    EXPECT_EQ(blocking_calls.load(), 1U);
+
+    const auto entries =
+        fixture.journal->load_javascript_commands("tenant:runtime", original.run_id());
+    ASSERT_EQ(entries.size(), 2U);
+    EXPECT_EQ(entries[0].coordinate_id(), entries[1].coordinate_id());
+    EXPECT_TRUE(entries[1].completed());
+    EXPECT_EQ(entries[1].terminal_result()->at("output"),
+              (json{{"value", "resumed"}}));
+
+    // Stop the original process simulation after the fresh runtime has
+    // durably completed.  Its result loses the transition race and must not
+    // cause a second Core dispatch.
+    EXPECT_TRUE(original.cancel());
+    (void)original.wait();
+    EXPECT_EQ(blocking_calls.load(), 1U);
 }
 
 TEST(ProgramRuntimeTest, JavaScriptControlRejectsUnknownCommandFieldsBeforeDispatch) {

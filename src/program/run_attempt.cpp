@@ -304,6 +304,127 @@ JavaScriptCallCoreCommand parse_javascript_call_core_command(const JavaScriptCom
                                      arguments.at("input")};
 }
 
+std::string javascript_command_operation_id(std::uint64_t command_ordinal) {
+    // Keep the yielded-command operation below the root operation so a
+    // terminal ProgramFailure can retain the normal operation-id invariant.
+    return "root.javascript." + std::to_string(command_ordinal);
+}
+
+std::string javascript_command_effect_identity(const RunControl&      control,
+                                               std::uint64_t           command_ordinal,
+                                               const JavaScriptCommand& command) {
+    return detail::sha256_identity(
+        "program-javascript-command-effect/v1",
+        detail::canonical_json_bytes(json{{"bundle_id", control.bundle_id},
+                                          {"command_ordinal", command_ordinal},
+                                          {"command", command.to_json()}}));
+}
+
+ProgramPendingEffect javascript_command_pending_effect(const RunControl&      control,
+                                                       std::uint64_t           command_ordinal,
+                                                       const JavaScriptCommand& command,
+                                                       std::string_view          effect_identity) {
+    const auto command_json = command.to_json();
+    ProgramPendingEffectData pending;
+    pending.operation_id         = javascript_command_operation_id(command_ordinal);
+    pending.call_id              = std::string(effect_identity);
+    pending.effect_id            = std::string(effect_identity);
+    pending.result_schema        = json::object();
+    pending.payload              = json{{"bundle_id", control.bundle_id},
+                                        {"command_ordinal", command_ordinal},
+                                        {"command", command_json},
+                                        {"effect_identity", std::string(effect_identity)}};
+    pending.effect_mode          = EffectMode::Brokered;
+    pending.idempotency          = ProgramEffectIdempotency::NonIdempotent;
+    pending.core_node            = "javascript";
+    pending.core_interrupt_value = command_json;
+    return ProgramPendingEffect(std::move(pending));
+}
+
+json javascript_command_terminal_result(const PlanExecution& result,
+                                        std::string_view     status,
+                                        const ProgramUsage&  usage) {
+    return json{{"status", status},
+                {"output", result.output},
+                {"execution_trace", result.execution_trace},
+                {"usage", json{{"wall_time_ms", usage.wall_time_ms},
+                                  {"model_tokens", usage.model_tokens},
+                                  {"monetary_microunits", usage.monetary_microunits},
+                                  {"program_operations", usage.program_operations},
+                                  {"core_steps", usage.core_steps},
+                                  {"peak_concurrency", usage.peak_concurrency}}}};
+}
+
+std::uint64_t javascript_result_uint64(const json& value, std::string_view field) {
+    const auto key = std::string(field);
+    if (!value.contains(key) || !value.at(key).is_number_unsigned()) {
+        throw_runtime_diagnostic("P_JS_COMMAND_JOURNAL_MISMATCH",
+                                 "Recorded JavaScript command result has an invalid usage field",
+                                 json{{"field", key}});
+    }
+    return value.at(key).get<std::uint64_t>();
+}
+
+ProgramUsage parse_javascript_command_usage(const json& value) {
+    if (!value.is_object()) {
+        throw_runtime_diagnostic("P_JS_COMMAND_JOURNAL_MISMATCH",
+                                 "Recorded JavaScript command result usage is not an object");
+    }
+    detail::reject_unknown_fields(value, "Recorded JavaScript command result usage",
+                                  {"wall_time_ms", "model_tokens", "monetary_microunits",
+                                   "program_operations", "core_steps", "peak_concurrency"});
+    const auto peak = javascript_result_uint64(value, "peak_concurrency");
+    if (peak > std::numeric_limits<std::uint32_t>::max()) {
+        throw_runtime_diagnostic("P_JS_COMMAND_JOURNAL_MISMATCH",
+                                 "Recorded JavaScript command result peak concurrency is out of range");
+    }
+    return ProgramUsage{javascript_result_uint64(value, "wall_time_ms"),
+                        javascript_result_uint64(value, "model_tokens"),
+                        javascript_result_uint64(value, "monetary_microunits"),
+                        javascript_result_uint64(value, "program_operations"),
+                        javascript_result_uint64(value, "core_steps"),
+                        static_cast<std::uint32_t>(peak)};
+}
+
+struct JavaScriptRecordedCommandResult {
+    std::string              status;
+    json                     output = json::object();
+    ProgramUsage             usage;
+    std::vector<std::string> execution_trace;
+};
+
+JavaScriptRecordedCommandResult decode_javascript_command_result(const json& value) {
+    if (!value.is_object()) {
+        throw_runtime_diagnostic("P_JS_COMMAND_JOURNAL_MISMATCH",
+                                 "Recorded JavaScript command terminal result is not an object");
+    }
+    detail::reject_unknown_fields(value, "Recorded JavaScript command terminal result",
+                                  {"status", "output", "execution_trace", "usage"});
+    if (!value.contains("status") || !value.at("status").is_string() ||
+        (value.at("status").get<std::string>() != "completed" &&
+         value.at("status").get<std::string>() != "step_limit")) {
+        throw_runtime_diagnostic("P_JS_COMMAND_JOURNAL_MISMATCH",
+                                 "Recorded JavaScript command terminal result has an unknown status");
+    }
+    if (!value.contains("output") || !value.contains("execution_trace") ||
+        !value.at("execution_trace").is_array() || !value.contains("usage")) {
+        throw_runtime_diagnostic("P_JS_COMMAND_JOURNAL_MISMATCH",
+                                 "Recorded JavaScript command terminal result is incomplete");
+    }
+    JavaScriptRecordedCommandResult result;
+    result.status = value.at("status").get<std::string>();
+    result.output = detail::owned_json_copy(value.at("output"));
+    for (const auto& node : value.at("execution_trace")) {
+        if (!node.is_string()) {
+            throw_runtime_diagnostic("P_JS_COMMAND_JOURNAL_MISMATCH",
+                                     "Recorded JavaScript command execution trace is invalid");
+        }
+        result.execution_trace.push_back(node.get<std::string>());
+    }
+    result.usage = parse_javascript_command_usage(value.at("usage"));
+    return result;
+}
+
 json javascript_control_response(json output) {
     if (!output.is_object()) return output;
     const auto channels = output.find("channels");
@@ -619,12 +740,6 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     RunOutcome                            outcome;
     try {
         const auto control_source = control->materialized->bundle.control_source();
-        if (control_source && checkpoint_id) {
-            throw_runtime_diagnostic(
-                "P_JS_CONTROL_RECOVERY",
-                "JavaScript yielded-command controllers cannot resume from a persisted checkpoint",
-                json{{"checkpoint_id", *checkpoint_id}});
-        }
         if (checkpoint_id) {
             resume_checkpoint = inspect_checkpoint(*control, *checkpoint_id);
             const bool resume_valid =
@@ -2096,6 +2211,37 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                            "javascript");
                 }
                 if (step.done) {
+                    const auto recorded_commands =
+                        control->transitions->load_javascript_commands(control->owner_scope,
+                                                                       control->run_id);
+                    for (std::size_t index = 0; index < recorded_commands.size(); ++index) {
+                        const auto& recorded = recorded_commands[index];
+                        if (recorded.bundle_id() != control->bundle_id ||
+                            recorded.command_ordinal() > command_sequence) {
+                            throw_runtime_diagnostic(
+                                "P_JS_COMMAND_JOURNAL_MISMATCH",
+                                "JavaScript command journal contains an unconsumed entry",
+                                json{{"command_ordinal", recorded.command_ordinal()},
+                                     {"command_sequence", command_sequence},
+                                     {"coordinate_id", recorded.coordinate_id()}});
+                        }
+                        if (recorded.pending()) {
+                            const auto completed = std::find_if(
+                                recorded_commands.begin() + static_cast<std::ptrdiff_t>(index + 1),
+                                recorded_commands.end(), [&](const auto& later) {
+                                    return later.command_ordinal() == recorded.command_ordinal() &&
+                                           later.completed();
+                                });
+                            if (completed == recorded_commands.end()) {
+                                throw_runtime_diagnostic(
+                                    "P_JS_COMMAND_JOURNAL_MISMATCH",
+                                    "JavaScript command journal contains an unconsumed entry",
+                                    json{{"command_ordinal", recorded.command_ordinal()},
+                                         {"command_sequence", command_sequence},
+                                         {"coordinate_id", recorded.coordinate_id()}});
+                            }
+                        }
+                    }
                     result.output   = step.value;
                     result.returned = true;
                     co_return result;
@@ -2106,16 +2252,122 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         "JavaScript control yield must be a sealed ng command value",
                         json{{"source_site", "unknown"}});
                 }
-                const auto operation_id =
-                    "root.javascript/" + std::to_string(++command_sequence);
+                const auto command_value = *step.command;
+                const auto ordinal = ++command_sequence;
+                const auto operation_id = javascript_command_operation_id(ordinal);
+                const auto effect_id = javascript_command_effect_identity(
+                    *control, ordinal, command_value);
+                const auto prior_commands =
+                    control->transitions->load_javascript_commands(control->owner_scope,
+                                                                    control->run_id);
+                const auto prior = std::find_if(
+                    prior_commands.rbegin(), prior_commands.rend(), [&](const auto& entry) {
+                        return entry.command_ordinal() == ordinal;
+                    });
+
+                if (prior != prior_commands.rend()) {
+                    if (prior->bundle_id() != control->bundle_id ||
+                        detail::canonical_json_bytes(prior->command().to_json()) !=
+                            detail::canonical_json_bytes(command_value.to_json()) ||
+                        prior->effect_identity() != std::optional<std::string>(effect_id)) {
+                        throw_runtime_diagnostic(
+                            "P_JS_COMMAND_JOURNAL_MISMATCH",
+                            "Recorded JavaScript command coordinate or payload does not match",
+                            json{{"command_ordinal", ordinal},
+                                 {"expected_coordinate", prior->coordinate_id()},
+                                 {"actual_coordinate",
+                                  ProgramJavaScriptCommandJournalEntry(
+                                      ProgramJavaScriptCommandJournalEntryData{
+                                          prior->sequence(),
+                                          control->bundle_id,
+                                          ordinal,
+                                          command_value,
+                                          effect_id,
+                                          std::nullopt})
+                                      .coordinate_id()}});
+                    }
+                    if (prior->completed()) {
+                        const auto recorded =
+                            decode_javascript_command_result(*prior->terminal_result());
+                        result.execution_trace.insert(
+                            result.execution_trace.end(), recorded.execution_trace.begin(),
+                            recorded.execution_trace.end());
+                        response = std::move(recorded.output);
+                        continue;
+                    }
+
+                    // A durable pending head may have crossed an external-effect
+                    // boundary before a process crash. Recovery therefore
+                    // requires explicit reconciliation and never redispatches it.
+                    result.status = ProgramTerminalStatus::Interrupted;
+                    result.interrupt = ProgramInterrupt{
+                        "javascript",
+                        command_value.to_json(),
+                        std::nullopt,
+                        javascript_command_pending_effect(*control, ordinal, command_value,
+                                                          effect_id)};
+                    co_return result;
+                }
+
+                const auto pending_published = control->publish_javascript_command(
+                    ordinal, command_value, effect_id, std::nullopt);
+                if (pending_published != ProgramTransitionPublishResult::Published &&
+                    pending_published != ProgramTransitionPublishResult::AlreadyPresent) {
+                    throw_runtime_diagnostic(
+                        "P_JS_COMMAND_JOURNAL",
+                        "Could not durably publish the JavaScript command before dispatch",
+                        json{{"command_ordinal", ordinal}, {"effect_identity", effect_id}});
+                }
+
+                const auto model_before = model_tokens(usage);
+                const auto steps_before = core_progress->steps();
+                std::uint64_t operations_before = 0;
+                {
+                    std::lock_guard lock(plan_mutex);
+                    operations_before = operation_count;
+                }
+                const auto command_started_at = std::chrono::steady_clock::now();
                 auto command_result = co_await execute_command(
-                    *step.command, operation_id, control->cancel_token,
+                    command_value, operation_id, control->cancel_token,
                     root_scope, 0, true);
                 result.execution_trace.insert(
                     result.execution_trace.end(), command_result.execution_trace.begin(),
                     command_result.execution_trace.end());
                 if (command_result.status != ProgramTerminalStatus::Completed)
                     co_return command_result;
+
+                std::uint64_t operations_after = 0;
+                {
+                    std::lock_guard lock(plan_mutex);
+                    operations_after = operation_count;
+                }
+                const ProgramUsage command_usage{
+                    elapsed_ms(command_started_at),
+                    subtract_saturated(model_tokens(usage), model_before),
+                    0,
+                    subtract_saturated(operations_after, operations_before),
+                    subtract_saturated(core_progress->steps(), steps_before),
+                    static_cast<std::uint32_t>(std::min<std::size_t>(
+                        peak_concurrency.load(std::memory_order_relaxed),
+                        std::numeric_limits<std::uint32_t>::max()))};
+                const auto terminal_result = javascript_command_terminal_result(
+                    command_result, "completed", command_usage);
+                auto durable = control->transitions->load(control->owner_scope, control->run_id);
+                if (!durable) {
+                    throw_runtime_diagnostic(
+                        "P_JS_COMMAND_JOURNAL",
+                        "JavaScript command result lost its running snapshot");
+                }
+                const auto remaining = settle_budget(durable->remaining_budget(), command_usage);
+                const auto published = control->publish_javascript_command(
+                    ordinal, command_value, effect_id, terminal_result, remaining);
+                if (published != ProgramTransitionPublishResult::Published &&
+                    published != ProgramTransitionPublishResult::AlreadyPresent) {
+                    throw_runtime_diagnostic(
+                        "P_JS_COMMAND_JOURNAL",
+                        "Could not durably publish the JavaScript command result",
+                        json{{"command_ordinal", ordinal}, {"effect_identity", effect_id}});
+                }
                 response = std::move(command_result.output);
             }
         };
@@ -2173,6 +2425,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             outcome.failure   = std::move(plan_result.failure);
         } else if (!outcome.checkpoint && resume_checkpoint) {
             outcome.checkpoint = resume_checkpoint;
+            outcome.status = ProgramTerminalStatus::Completed;
         } else if (outcome.usage.core_steps > control->granted_budget.max_core_steps ||
                    outcome.usage.model_tokens > control->granted_budget.model_tokens ||
                    outcome.usage.wall_time_ms > control->granted_budget.wall_time_ms) {
