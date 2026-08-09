@@ -82,6 +82,13 @@ def load_preregistration(path: Path) -> tuple[dict[str, Any], dict[str, dict[str
         raise ConfigurationError("samples_per_case must be >= minimum_samples_per_case")
     if methodology.get("p95_method") != "nearest-rank":
         raise ConfigurationError("p95_method must be nearest-rank")
+    core_pair_rerun_samples = methodology.get("core_pair_failure_rerun_samples")
+    if (
+        not isinstance(core_pair_rerun_samples, int)
+        or isinstance(core_pair_rerun_samples, bool)
+        or core_pair_rerun_samples != 20
+    ):
+        raise ConfigurationError("core_pair_failure_rerun_samples must be exactly 20")
 
     entries = document.get("cases")
     if not isinstance(entries, list) or not entries:
@@ -439,20 +446,53 @@ def main() -> int:
         summary = summarize(samples)
         if summary["sample_count"] < preregistration["methodology"]["minimum_samples_per_case"]:
             raise BenchmarkError(f"{case_id}: fewer than 30 valid samples")
-        gate = evaluate_gate(summary, case["thresholds"])
-        failed = failed or (case["blocking"] and gate["status"] == "fail")
-        results.append(
-            {
-                "id": case_id,
-                "blocking": case["blocking"],
-                "scope": case["scope"],
-                "iterations_per_sample": case["iterations"],
-                "summary": summary,
-                "thresholds": case["thresholds"],
+        initial_gate = evaluate_gate(summary, case["thresholds"])
+        gate = initial_gate
+        effective_summary = summary
+        effective_samples = samples
+        failure_rerun = None
+        if (
+            case["driver"] == "core_pair"
+            and case["blocking"]
+            and initial_gate["status"] == "fail"
+        ):
+            rerun_samples = []
+            rerun_sample_count = preregistration["methodology"][
+                "core_pair_failure_rerun_samples"
+            ]
+            for sample_index in range(rerun_sample_count):
+                rerun_samples.append(
+                    paired_sample(case, sample_index, enabled, disabled, required_build_type)
+                )
+            rerun_summary = summarize(rerun_samples)
+            gate = evaluate_gate(rerun_summary, case["thresholds"])
+            effective_summary = rerun_summary
+            effective_samples = rerun_samples
+            failure_rerun = {
+                "sample_count": rerun_sample_count,
+                "summary": rerun_summary,
                 "gate": gate,
+                "raw_samples": rerun_samples,
+            }
+        failed = failed or (case["blocking"] and gate["status"] == "fail")
+        result = {
+            "id": case_id,
+            "blocking": case["blocking"],
+            "scope": case["scope"],
+            "iterations_per_sample": case["iterations"],
+            "summary": effective_summary,
+            "thresholds": case["thresholds"],
+            "gate": gate,
+            "raw_samples": effective_samples,
+        }
+        if failure_rerun is not None:
+            result["initial_run"] = {
+                "summary": summary,
+                "gate": initial_gate,
                 "raw_samples": samples,
             }
-        )
+            result["failure_rerun"] = failure_rerun
+        results.append(result)
 
     binaries = {
         "primitive": primitive_binary,

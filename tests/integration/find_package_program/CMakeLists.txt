@@ -5,6 +5,8 @@ project(neograph_program_consumer LANGUAGES C CXX)
 option(NEOGRAPH_EXPECT_PROGRAM_COMPONENT "Require installed Program component" ON)
 option(NEOGRAPH_TEST_REQUIRED_PROGRAM_REJECTION
        "Require a disabled Program component and expect package rejection" OFF)
+option(NEOGRAPH_EXPECT_QUICKJS_CONTROL
+       "Exercise the installed Program component with a co-linked second QuickJS" OFF)
 if(NEOGRAPH_EXPECT_PROGRAM_COMPONENT)
     find_package(NeoGraph CONFIG REQUIRED COMPONENTS program)
 else()
@@ -51,3 +53,16 @@ set_target_properties(native_abi_consumer PROPERTIES
     C_STANDARD_REQUIRED ON
     LINKER_LANGUAGE CXX)
 target_link_libraries(native_abi_consumer PRIVATE neograph::program)
+
+if(NEOGRAPH_EXPECT_QUICKJS_CONTROL)
+    add_library(second_quickjs STATIC second_quickjs.c)
+    set_target_properties(second_quickjs PROPERTIES
+        C_STANDARD 11
+        C_STANDARD_REQUIRED ON)
+
+    add_executable(dual_quickjs_consumer dual_quickjs_consumer.cpp)
+    target_compile_features(dual_quickjs_consumer PRIVATE cxx_std_20)
+    target_link_libraries(dual_quickjs_consumer PRIVATE
+        neograph::program
+        second_quickjs)
+endif()

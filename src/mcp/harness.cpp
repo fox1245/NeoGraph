@@ -12,6 +12,7 @@
 #include <array>
 #include <chrono>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <random>
@@ -50,6 +51,64 @@ program::RunBudget bounded_budget(const program::RunBudget& requested,
             std::min(requested.max_dynamic_compiles, ceiling.max_dynamic_compiles),
             std::min(requested.max_child_depth, ceiling.max_child_depth),
             std::min(requested.max_total_children, ceiling.max_total_children)};
+}
+void validate_compiled_budget(const program::ProgramBundle& bundle,
+                              const program::RunBudget&     expected) {
+    const auto encoded = budget_json(expected);
+    if (bundle.declared_budget_requirements().size() != encoded.size())
+        throw HarnessTranslationError(
+            "H_BUDGET_BINDING", "/budgets",
+            "Compiled Harness budget differs from the retained invocation budget");
+    for (const auto& requirement : bundle.declared_budget_requirements()) {
+        const auto expected_value = encoded.contains(requirement.resource)
+                                        ? encoded.at(requirement.resource).get<std::uint64_t>()
+                                        : std::numeric_limits<std::uint64_t>::max();
+        if (!encoded.contains(requirement.resource) || requirement.minimum != expected_value ||
+            requirement.maximum != expected_value)
+            throw HarnessTranslationError(
+                "H_BUDGET_BINDING", "/budgets",
+                "Compiled Harness budget differs from the retained invocation budget");
+    }
+}
+
+void validate_compiled_contracts(const program::ProgramBundle&  bundle,
+                                 const program::ContractRecord& input,
+                                 const program::ContractRecord& output) {
+    if (bundle.input_contract().schema_version != input.schema_version ||
+        bundle.input_contract().schema != input.schema ||
+        bundle.output_contract().schema_version != output.schema_version ||
+        bundle.output_contract().schema != output.schema)
+        throw HarnessTranslationError(
+            "H_CONTRACT_BINDING", "/harness/source",
+            "Compiled Harness contracts differ from the host-advertised contracts");
+}
+
+void validate_compiled_workers(const program::ProgramBundle&      bundle,
+                               const std::map<std::string, json>& sealed_workers) {
+    for (const auto& definition : bundle.sealed_core_definitions()) {
+        const auto nodes = definition.definition.value("nodes", json::object());
+        if (!nodes.is_object()) continue;
+        for (const auto& [node_name, node] : nodes.items()) {
+            if (!node.is_object() || node.value("type", "") != HARNESS_WORKER_NODE_TYPE) continue;
+            if (!node.contains("worker_id") || !node.at("worker_id").is_string() ||
+                node.at("worker_id").get<std::string>().empty())
+                throw HarnessTranslationError("H_WORKER_BINDING", "/harness/source",
+                                              "Compiled Harness worker node '" + node_name +
+                                                  "' has no host-sealed worker_id");
+            const auto worker_id = node.at("worker_id").get<std::string>();
+            const auto expected  = sealed_workers.find(worker_id);
+            if (expected == sealed_workers.end())
+                throw HarnessTranslationError(
+                    "H_WORKER_BINDING", "/harness/source",
+                    "Compiled Harness worker node '" + node_name +
+                        "' references a worker_id absent from the host-sealed request");
+            if (node != expected->second)
+                throw HarnessTranslationError(
+                    "H_WORKER_CONFIG_MISMATCH", "/harness/source",
+                    "Compiled Harness worker node '" + node_name +
+                        "' differs from its host-sealed worker configuration");
+        }
+    }
 }
 json executable_json(const program::ExecutableIdentity& v) {
     return {{"kind", std::string(program::to_string(v.kind))},
@@ -390,6 +449,12 @@ public:
         std::uint64_t    after_sequence) const override {
         return select(run_id).load_effects(owner_scope, run_id, after_sequence);
     }
+    std::vector<program::ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::uint64_t    after_sequence) const override {
+        return select(run_id).load_javascript_commands(owner_scope, run_id, after_sequence);
+    }
     std::optional<program::MigrationPlan> load_migration_plan(
         std::string_view owner_scope, std::string_view run_id) const override {
         return select(run_id).load_migration_plan(owner_scope, run_id);
@@ -660,9 +725,14 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
                 throw HarnessTranslationError(
                     "H_CONTRACT_SCOPE", "/contract",
                     "Harness contract owner_scope must match the service owner scope");
-            auto b                  = t.source.kind() == program::SourceKind::JavaScript
-                                          ? resources.compiler->compile(t.source, t.invocation_template.budget)
-                                          : resources.compiler->compile(t.source);
+            auto b = t.source.kind() == program::SourceKind::JavaScript
+                         ? resources.compiler->compile(t.source, t.invocation_template.budget,
+                                                       t.input_contract, t.output_contract)
+                         : resources.compiler->compile(t.source);
+            validate_compiled_budget(b, t.invocation_template.budget);
+            validate_compiled_contracts(b, t.input_contract, t.output_contract);
+            if (t.source.kind() == program::SourceKind::JavaScript)
+                validate_compiled_workers(b, t.sealed_workers);
             auto id                 = alias(b, resources.snapshots.policy.fingerprint(), t.bindings,
                                             resources.artifact_binding_identity,
                             t.contract ? t.contract->content_hash() : std::string_view{});

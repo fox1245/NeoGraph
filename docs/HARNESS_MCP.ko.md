@@ -39,15 +39,17 @@ yield합니다.
 
 #### 제어 흐름 마이그레이션 예시
 
-저작 시 확장은 일반 JavaScript 함수로 옮기고, 런타임 효과는 반드시 yield한
-타입 명령 뒤에 둡니다. 다음 모듈은 반복, 분기, 제한된 병렬 실행을 사용하며
-재시도 한도는 `define()`이 만드는 승인된 Core 노드 구성에 남깁니다.
+`define()`은 컴파일 시점에만 실행하고, 모든 런타임 효과는 yield한 타입 명령
+뒤에 둡니다. 이 완전한 요청은 제너레이터에 연산 2개와 병렬도 2의 상한을
+부여합니다. 워커 노드는 요청에서 호스트가 봉인한 구성과 정확히 일치하며,
+터미널 반환값은 Harness 결과 형태입니다.
 
 ```javascript
-function workerConfig(workerId) {
+const source = String.raw`
+function workerConfig() {
   return {
     type: "neograph_harness_worker",
-    worker_id: workerId,
+    worker_id: "reviewer",
     instructions: "Return structured findings",
     tool_ids: [],
     tool_descriptions: {},
@@ -55,7 +57,7 @@ function workerConfig(workerId) {
     provider_timeout_ms: 30000,
     max_output_tokens: 512,
     input_token_ceiling: 16384,
-    max_retries: 2,
+    max_retries: 1,
     max_provider_tool_rounds: 8,
     evidence_required: [],
     read_only: true
@@ -67,7 +69,7 @@ export function define() {
   graph.channel("task", {reducer: "overwrite", initial: {}});
   graph.channel("worker_results", {reducer: "append", initial: []});
   graph.channel("final_result", {reducer: "overwrite", initial: null});
-  graph.node("reviewer", workerConfig("reviewer"));
+  graph.node("reviewer", workerConfig());
   graph.node("judge", {
     type: "neograph_harness_judge",
     barrier: {wait_for: ["reviewer"]}
@@ -79,25 +81,40 @@ export function define() {
 }
 
 export function* main(input) {
-  const reviewed = [];
-  for (let offset = 0; offset < input.items.length; offset += 4) {
-    const batch = input.items.slice(offset, offset + 4);
-    const results = yield ng.all(
-      batch.map((item, index) =>
-        ng.callCore("review", {task: item}, `batch:${offset}:${index}`)),
-      {max_in_flight: 4},
-      `batch:${offset}`
-    );
-    reviewed.push(...results);
-  }
-
-  if (!input.require_final_review) {
-    return {reviewed};
-  }
-  const finalReview = yield ng.callCore(
-    "review", {task: {reviewed}}, "final-review");
-  return {reviewed, finalReview};
+  const results = yield ng.all([
+    ng.callCore("review", {task: input.task}, "review:first"),
+    ng.callCore("review", {task: input.task}, "review:second")
+  ], {max_in_flight: 2}, "review:all");
+  return results[0].channels.final_result.value;
 }
+`;
+
+const request = {
+  task: {
+    objective: "Review the change",
+    acceptance: ["Return structured, evidence-backed findings"]
+  },
+  harness: {mode: "javascript", source_id: "review:main.js", source},
+  workers: [{
+    id: "reviewer",
+    instructions: "Return structured findings",
+    tools: [],
+    output_schema: {type: "object", additionalProperties: true},
+    provider_timeout_seconds: 30,
+    max_output_tokens: 512
+  }],
+  tool_catalog: [],
+  budgets: {
+    max_steps: 40,
+    timeout_seconds: 60,
+    max_parallel_workers: 2,
+    max_program_operations: 2,
+    max_worker_retries: 1,
+    provider_timeout_seconds: 30,
+    max_output_tokens: 512
+  },
+  policy: {read_only: true, evidence_required: []}
+};
 ```
 
 안정적인 소스 위치 문자열은 내구성 명령 좌표의 일부입니다. 재시도와 재시작

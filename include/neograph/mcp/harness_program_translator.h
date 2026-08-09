@@ -8,6 +8,7 @@
 #include <neograph/program/runtime.h>
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -35,6 +36,7 @@ private:
 struct HarnessTranslationDefaults {
     std::uint64_t timeout_seconds              = 600;
     std::uint32_t max_parallel_workers         = 4;
+    std::uint64_t                              max_program_operations        = 64;
     std::uint64_t max_core_steps               = 40;
     std::uint32_t max_worker_retries           = 1;
     std::uint64_t provider_timeout_seconds     = 600;
@@ -99,10 +101,13 @@ struct HarnessCapabilityBindingRequest {
 };
 
 struct HarnessTranslation {
-    program::ProgramSource             source;
-    HarnessInvocationTemplate          invocation_template;
-    HarnessWireReceipt                 wire;
-    HarnessCapabilityBindingRequest    bindings;
+    program::ProgramSource                   source;
+    HarnessInvocationTemplate                invocation_template;
+    program::ContractRecord                  input_contract;
+    program::ContractRecord                  output_contract;
+    std::map<std::string, json>              sealed_workers;
+    HarnessWireReceipt                       wire;
+    HarnessCapabilityBindingRequest          bindings;
     std::optional<program::ContractManifest> contract;
 };
 

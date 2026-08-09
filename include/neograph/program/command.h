@@ -11,6 +11,7 @@
 #include <neograph/api.h>
 #include <neograph/json.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -36,6 +37,10 @@ javascript_command_kind_from_string(std::string_view value);
 
 /** Protocol version carried by every JavaScript command. */
 inline constexpr std::uint32_t JAVASCRIPT_COMMAND_PROTOCOL_VERSION = 1;
+/** Maximum number of nested await/join command envelopes, including the root. */
+inline constexpr std::size_t JAVASCRIPT_COMMAND_MAX_STRUCTURED_DEPTH = 32;
+/** Maximum total command envelopes reachable through one structured command. */
+inline constexpr std::size_t JAVASCRIPT_COMMAND_MAX_AGGREGATE_MEMBERS = 4096;
 
 /** Built-in import slots owned by the versioned `ng` command module. */
 inline constexpr std::uint32_t JAVASCRIPT_IMPORT_SLOT_CALL_CORE       = 0;

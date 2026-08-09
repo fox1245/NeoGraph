@@ -131,7 +131,7 @@ if(TARGET neograph_quickjs)
         test_quickjs_runtime.cpp
     )
     target_include_directories(neograph_quickjs_tests PRIVATE
-        ${PROJECT_SOURCE_DIR}/deps/quickjs
+        ${PROJECT_SOURCE_DIR}/deps/quickjs/neograph
     )
     target_compile_features(neograph_quickjs_tests PRIVATE cxx_std_17)
     _neograph_attach_quickjs_runtime(neograph_quickjs_tests)
@@ -158,13 +158,15 @@ endif()
 
 if(TARGET neograph_harness)
     target_sources(neograph_tests PRIVATE
-        test_harness_program_translator.cpp
-        test_harness_program_cutover.cpp
-    )
-    target_sources(neograph_tests PRIVATE
         test_harness_contract.cpp
     )
     target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_HARNESS)
+    if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+        target_sources(neograph_tests PRIVATE
+            test_harness_program_translator.cpp
+            test_harness_program_cutover.cpp
+        )
+    endif()
 endif()
 if(TARGET neograph_mcp_sqlite)
     target_sources(neograph_tests PRIVATE test_harness_program_store.cpp)

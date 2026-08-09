@@ -392,6 +392,56 @@ TEST(ProgramCompilerTest, JavaScriptDefineBuildsOneCoreDefinitionWithOrdinaryCon
     EXPECT_EQ(bundle.orchestration_plan().plan["operations"][0]["op"], "call_core");
 }
 
+TEST(ProgramCompilerTest, JavaScriptHostBudgetAndContractsReplaceEvaluatedDeclarations) {
+    const auto           source = ProgramSource::from_javascript("host-authority.js",
+                                                                 R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "local-reducer", initial: 0});
+                graph.node("work", {type: "local-node"});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+        )JS");
+    const RunBudget      budget{5000, 1000, 1, 2, 4, 20, 0, 0, 0};
+    const ContractRecord input{1,
+                               {{"type", "object"},
+                                {"required", json::array({"task"})},
+                                {"properties", {{"task", {{"type", "object"}}}}},
+                                {"additionalProperties", false}}};
+    const ContractRecord output{1,
+                                {{"type", "object"},
+                                 {"required", json::array({"outcome"})},
+                                 {"properties", {{"outcome", {{"type", "string"}}}}},
+                                 {"additionalProperties", false}}};
+
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript-host/v1"});
+    const auto      bundle = compiler.compile(source, budget, input, output);
+
+    EXPECT_EQ(bundle.input_contract().schema_version, input.schema_version);
+    EXPECT_EQ(bundle.input_contract().schema, input.schema);
+    EXPECT_EQ(bundle.output_contract().schema_version, output.schema_version);
+    EXPECT_EQ(bundle.output_contract().schema, output.schema);
+    const json expected = {
+        {"wall_time_ms", budget.wall_time_ms},
+        {"model_tokens", budget.model_tokens},
+        {"monetary_microunits", budget.monetary_microunits},
+        {"max_concurrency", budget.max_concurrency},
+        {"max_program_operations", budget.max_program_operations},
+        {"max_core_steps", budget.max_core_steps},
+        {"max_dynamic_compiles", budget.max_dynamic_compiles},
+        {"max_child_depth", budget.max_child_depth},
+        {"max_total_children", budget.max_total_children},
+    };
+    ASSERT_EQ(bundle.declared_budget_requirements().size(), expected.size());
+    for (const auto& requirement : bundle.declared_budget_requirements()) {
+        ASSERT_TRUE(expected.contains(requirement.resource));
+        EXPECT_EQ(requirement.minimum, expected.at(requirement.resource).get<std::uint64_t>());
+        EXPECT_EQ(requirement.maximum, expected.at(requirement.resource).get<std::uint64_t>());
+    }
+}
+
 TEST(ProgramCompilerTest, JavaScriptDefinitionMustReturnOneGraphBuilder) {
     ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
     const auto source = ProgramSource::from_javascript(
@@ -456,6 +506,10 @@ TEST(ProgramCompilerTest, JavaScriptStrictProfileDeniesAmbientCapabilitiesDeterm
         "export function define() { Date.now(); }",
         "export function define() { eval('1 + 1'); }",
         "export function define() { Function('return 1')(); }",
+        "export function define() { (function() {}).constructor('return 1')(); }",
+        "export function define() { (function*() {}).constructor('yield 1')(); }",
+        "export function define() { (async function() {}).constructor('return 1')(); }",
+        "export function define() { (async function*() {}).constructor('yield 1')(); }",
     };
     for (std::size_t index = 0; index < denied_sources.size(); ++index) {
         const auto source = ProgramSource::from_javascript(
@@ -531,6 +585,122 @@ TEST(ProgramCompilerTest, JavaScriptGraphBuilderAccountsNativeDocumentBytes) {
     } catch (const ProgramCompileError& error) {
         EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_GRAPH_LIMIT"));
     }
+}
+
+TEST(ProgramCompilerTest, JavaScriptRetainedBuildersShareTheQuickJsMemoryCeiling) {
+    ProgramCompilerConfig config;
+    config.compiler_build_id              = "program-compiler-test/javascript-native-live/v1";
+    config.javascript.memory_limit_bytes  = 8u * 1024u * 1024u;
+    config.javascript.max_stack_bytes     = 128u * 1024u;
+    config.javascript.max_interrupt_polls = 100'000'000u;
+    ProgramCompiler compiler(complete_snapshot(), std::move(config));
+    const auto      source = ProgramSource::from_javascript("native-live-builders.js",
+                                                            R"JS(
+            export function define() {
+                const retained = [];
+                for (let index = 0; index < 100000; ++index) {
+                    retained.push(ng.graph("retained-" + index + "-" + "x".repeat(16 * 1024)));
+                }
+                return ng.graph("main");
+            }
+        )JS");
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected cumulative native-memory rejection";
+    } catch (const ProgramCompileError& error) {
+        EXPECT_TRUE(contains_code(error.diagnostics(), "P_JS_RESOURCE_LIMIT"));
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptPreservesSafeIntegerBoundariesAndFiniteDoubles) {
+    ProgramCompiler compiler(complete_snapshot(),
+                             {"program-compiler-test/javascript-safe-number/v1"});
+    const auto      source = ProgramSource::from_javascript("safe-number-boundaries.js",
+                                                            R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "local-reducer", initial: null});
+                graph.node("work", {
+                    type: "local-node",
+                    positive_safe: 9007199254740991,
+                    negative_safe: -9007199254740991,
+                    fractional: 1234.5
+                });
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+        )JS");
+
+    std::optional<ProgramBundle> bundle;
+    try {
+        bundle = compiler.compile(source);
+    } catch (const ProgramCompileError& error) {
+        for (const auto& diagnostic : error.diagnostics()) {
+            ADD_FAILURE() << diagnostic.code << " " << diagnostic.primary.json_pointer << ": "
+                          << diagnostic.message << " " << diagnostic.witness.dump();
+        }
+        return;
+    }
+    ASSERT_EQ(bundle->sealed_core_definitions().size(), 1U);
+    const auto& node = bundle->sealed_core_definitions().front().definition.at("nodes").at("work");
+    EXPECT_EQ(node.at("positive_safe").get<std::uint64_t>(), 9007199254740991ULL);
+    EXPECT_EQ(node.at("negative_safe").get<std::int64_t>(), -9007199254740991LL);
+    EXPECT_EQ(node.at("fractional").get<double>(), 1234.5);
+}
+
+TEST(ProgramCompilerTest, JavaScriptRejectsUnsafeIntegralNumbersBeforeJsonConversion) {
+    ProgramCompiler                                        compiler(complete_snapshot(),
+                                                                    {"program-compiler-test/javascript-unsafe-number/v1"});
+    const std::vector<std::pair<std::string, std::string>> cases{
+        {"positive-2p53.js", "9007199254740992"},
+        {"rounded-2p53-plus-one.js", "9007199254740993"},
+        {"negative-2p53.js", "-9007199254740992"},
+    };
+
+    for (const auto& [source_id, literal] : cases) {
+        const auto source = ProgramSource::from_javascript(
+            source_id,
+            "export function define() { const graph = ng.graph(\"main\"); "
+            "graph.node(\"work\", {type: \"local-node\", value: " +
+                literal + "}); return graph; }");
+        try {
+            (void)compiler.compile(source);
+            FAIL() << "expected safe-integer rejection for " << literal;
+        } catch (const ProgramCompileError& error) {
+            const auto diagnostic =
+                std::find_if(error.diagnostics().begin(), error.diagnostics().end(),
+                             [](const auto& value) { return value.code == "P_JS_GRAPH_VALUE"; });
+            ASSERT_NE(diagnostic, error.diagnostics().end()) << literal;
+            EXPECT_NE(diagnostic->message.find("outside the JavaScript safe-integer range"),
+                      std::string::npos)
+                << literal;
+        }
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptPreservesEmbeddedNulPropertyKeys) {
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript-nul-key/v1"});
+    const auto      source = ProgramSource::from_javascript("nul-key.js",
+                                                            R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "local-reducer", initial: 0});
+                graph.node("work", {type: "local-node", "a\u0000b": 1, a: 2});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+        )JS");
+
+    const auto bundle = compiler.compile(source);
+    ASSERT_EQ(bundle.sealed_core_definitions().size(), 1U);
+    const auto& node = bundle.sealed_core_definitions().front().definition.at("nodes").at("work");
+    const std::string embedded_nul("a\0b", 3);
+    ASSERT_TRUE(node.contains(embedded_nul));
+    EXPECT_EQ(node.at(embedded_nul), 1);
+    EXPECT_EQ(node.at("a"), 2);
 }
 
 TEST(ProgramCompilerTest, JavaScriptHostExposesOnlyItsFrozenVersionedGraphBinding) {
@@ -736,7 +906,7 @@ TEST(ProgramCompilerTest, JavaScriptSourceMapRoundTripsAlongsideBundleSites) {
     EXPECT_NE(it, parsed.source_map().end());
 }
 
-TEST(ProgramCompilerTest, JavaScriptAllowlistRejectsUnknownSyntaxImportBeforeEvaluation) {
+TEST(ProgramCompilerTest, JavaScriptReceiptMatchedStaticImportStillFailsBeforeEvaluation) {
     ProgramModuleData module_data;
     module_data.owner_scope    = "tenant:compiler";
     module_data.coordinate     = ModuleCoordinate{"sealed", "allowed", "1.0.0", ""};
@@ -747,11 +917,11 @@ TEST(ProgramCompilerTest, JavaScriptAllowlistRejectsUnknownSyntaxImportBeforeEva
     resolution.modules.push_back(module);
     resolution.receipts.push_back({module.coordinate().qualified_name(), module.id()});
 
-    const auto source = ProgramSource::from_javascript(
-        "allowlist.js",
-        "import \"sealed:blocked@1.0.0\";\n"
-        "export function define() { return ng.graph(\"main\"); }\n",
-        {{module.coordinate().qualified_name(), module.id()}});
+    const auto source =
+        ProgramSource::from_javascript("allowlist.js",
+                                       "import \"sealed:allowed@1.0.0\";\n"
+                                       "export function define() { return ng.graph(\"main\"); }\n",
+                                       {{module.coordinate().qualified_name(), module.id()}});
     reset_dispatch_counters();
     ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
     try {
@@ -766,9 +936,28 @@ TEST(ProgramCompilerTest, JavaScriptAllowlistRejectsUnknownSyntaxImportBeforeEva
         EXPECT_EQ(it->phase, CompilePhase::Resolve);
         EXPECT_EQ(it->primary.source_id, "allowlist.js");
         ASSERT_TRUE(it->primary.span.has_value());
+        EXPECT_EQ(it->witness.at("receipt_bound_source_available"), false);
         EXPECT_EQ(it->primary.span->line_begin, 1U);
     }
     expect_dispatch_counters_zero();
+}
+#else
+TEST(ProgramCompilerTest, JavaScriptSourceRequiresQuickJSControlFeature) {
+    const auto source = ProgramSource::from_javascript(
+        "disabled.js", "export function define() { return ng.graph(\"main\"); }\n");
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+
+    try {
+        (void)compiler.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        const auto diagnostic =
+            std::find_if(error.diagnostics().begin(), error.diagnostics().end(),
+                         [](const auto& value) { return value.code == "P_JS_UNAVAILABLE"; });
+        ASSERT_NE(diagnostic, error.diagnostics().end());
+        EXPECT_EQ(diagnostic->phase, CompilePhase::Source);
+        EXPECT_EQ(diagnostic->primary.source_id, "disabled.js");
+    }
 }
 #endif
 

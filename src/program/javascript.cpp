@@ -64,28 +64,40 @@ union AllocationHeader {
 };
 
 struct AllocationAccounting {
-    std::size_t current_bytes    = 0;
-    std::size_t peak_bytes       = 0;
-    std::size_t allocation_count = 0;
-    std::size_t total_bytes      = 0;
-    std::size_t denied_count     = 0;
+    std::size_t memory_limit_bytes  = 0;
+    std::size_t current_bytes       = 0;
+    std::size_t peak_bytes          = 0;
+    std::size_t allocation_count    = 0;
+    std::size_t total_bytes         = 0;
+    std::size_t denied_count        = 0;
+    std::size_t limit_denied_count  = 0;
+    std::size_t native_bytes        = 0;
+    std::size_t native_peak_bytes   = 0;
+    std::size_t combined_peak_bytes = 0;
 };
+
+void record_allocation_denial(AllocationAccounting* accounting, bool memory_limit) noexcept {
+    if (!accounting) return;
+    ++accounting->denied_count;
+    if (memory_limit) ++accounting->limit_denied_count;
+}
 
 void* accounted_malloc(JSMallocState* state, std::size_t size) {
     if (size == 0 || size > std::numeric_limits<std::size_t>::max() - sizeof(AllocationHeader)) {
-        if (auto* accounting = static_cast<AllocationAccounting*>(state->opaque))
-            ++accounting->denied_count;
+        record_allocation_denial(static_cast<AllocationAccounting*>(state->opaque), false);
         return nullptr;
     }
-    if (size > state->malloc_limit || state->malloc_size > state->malloc_limit - size) {
-        if (auto* accounting = static_cast<AllocationAccounting*>(state->opaque))
-            ++accounting->denied_count;
+    auto*      accounting   = static_cast<AllocationAccounting*>(state->opaque);
+    const auto native_bytes = accounting ? accounting->native_bytes : 0;
+    if (size > state->malloc_limit || native_bytes > state->malloc_limit ||
+        state->malloc_size > state->malloc_limit - native_bytes ||
+        size > state->malloc_limit - native_bytes - state->malloc_size) {
+        record_allocation_denial(accounting, true);
         return nullptr;
     }
     auto* allocation = static_cast<AllocationHeader*>(std::malloc(sizeof(AllocationHeader) + size));
     if (!allocation) {
-        if (auto* accounting = static_cast<AllocationAccounting*>(state->opaque))
-            ++accounting->denied_count;
+        record_allocation_denial(static_cast<AllocationAccounting*>(state->opaque), false);
         return nullptr;
     }
     allocation->size = size;
@@ -95,6 +107,8 @@ void* accounted_malloc(JSMallocState* state, std::size_t size) {
         ++accounting->allocation_count;
         accounting->current_bytes += size;
         accounting->peak_bytes = std::max(accounting->peak_bytes, accounting->current_bytes);
+        accounting->combined_peak_bytes = std::max(
+            accounting->combined_peak_bytes, accounting->current_bytes + accounting->native_bytes);
         accounting->total_bytes += size;
     }
     return allocation + 1;
@@ -121,28 +135,32 @@ void* accounted_realloc(JSMallocState* state, void* pointer, std::size_t size) {
         accounted_free(state, pointer);
         return nullptr;
     }
+    auto*      accounting   = static_cast<AllocationAccounting*>(state->opaque);
+    const auto native_bytes = accounting ? accounting->native_bytes : 0;
     if (size > std::numeric_limits<std::size_t>::max() - sizeof(AllocationHeader) ||
-        size > state->malloc_limit || old_size > state->malloc_size ||
-        state->malloc_size - old_size > state->malloc_limit - size) {
-        if (auto* accounting = static_cast<AllocationAccounting*>(state->opaque))
-            ++accounting->denied_count;
+        size > state->malloc_limit || native_bytes > state->malloc_limit ||
+        old_size > state->malloc_size ||
+        state->malloc_size - old_size > state->malloc_limit - native_bytes ||
+        size > state->malloc_limit - native_bytes - (state->malloc_size - old_size)) {
+        record_allocation_denial(accounting, true);
         return nullptr;
     }
     auto* resized =
         static_cast<AllocationHeader*>(std::realloc(allocation, sizeof(AllocationHeader) + size));
     if (!resized) {
-        if (auto* accounting = static_cast<AllocationAccounting*>(state->opaque))
-            ++accounting->denied_count;
+        record_allocation_denial(static_cast<AllocationAccounting*>(state->opaque), false);
         return nullptr;
     }
     resized->size      = size;
     state->malloc_size = state->malloc_size - old_size + size;
-    if (auto* accounting = static_cast<AllocationAccounting*>(state->opaque)) {
+    if (accounting) {
         if (size >= old_size)
             accounting->current_bytes += size - old_size;
         else
             accounting->current_bytes -= old_size - size;
         accounting->peak_bytes = std::max(accounting->peak_bytes, accounting->current_bytes);
+        accounting->combined_peak_bytes = std::max(
+            accounting->combined_peak_bytes, accounting->current_bytes + accounting->native_bytes);
         accounting->total_bytes += size >= old_size ? size - old_size : 0;
     }
     return resized + 1;
@@ -159,6 +177,26 @@ const JSMallocFunctions kAccountedAllocator{
     accounted_realloc,
     accounted_usable_size,
 };
+
+bool reserve_native_bytes(AllocationAccounting& accounting, std::size_t bytes) {
+    if (bytes > accounting.memory_limit_bytes ||
+        accounting.current_bytes > accounting.memory_limit_bytes - bytes ||
+        accounting.native_bytes >
+            accounting.memory_limit_bytes - bytes - accounting.current_bytes) {
+        record_allocation_denial(&accounting, true);
+        return false;
+    }
+    accounting.native_bytes += bytes;
+    accounting.native_peak_bytes = std::max(accounting.native_peak_bytes, accounting.native_bytes);
+    accounting.combined_peak_bytes = std::max(accounting.combined_peak_bytes,
+                                              accounting.current_bytes + accounting.native_bytes);
+    return true;
+}
+
+void release_native_bytes(AllocationAccounting& accounting, std::size_t bytes) noexcept {
+    accounting.native_bytes =
+        bytes <= accounting.native_bytes ? accounting.native_bytes - bytes : 0;
+}
 
 struct JavaScriptExceptionDetails {
     std::string               message;
@@ -225,8 +263,10 @@ bool javascript_identifier_character(unsigned char value) noexcept {
     return value == '_' || value == '$' || std::isalnum(value) != 0;
 }
 
-std::optional<std::size_t> find_javascript_token(std::string_view source, std::string_view token) {
-    std::size_t offset = 0;
+std::optional<std::size_t> find_javascript_token(std::string_view source,
+                                                 std::string_view token,
+                                                 std::size_t      start = 0) {
+    std::size_t offset = start;
     while (offset < source.size()) {
         if (source[offset] == '/' && offset + 1 < source.size() && source[offset + 1] == '/') {
             offset += 2;
@@ -266,12 +306,10 @@ std::optional<std::size_t> find_javascript_token(std::string_view source, std::s
     return std::nullopt;
 }
 
-std::optional<SourceSpan> source_span_for_token(std::string_view source, std::string_view token) {
-    const auto found = find_javascript_token(source, token);
-    if (!found) return std::nullopt;
+SourceSpan source_span_at(std::string_view source, std::size_t found, std::size_t length) {
     std::size_t line = 1;
     std::size_t col  = 1;
-    for (std::size_t index = 0; index < *found; ++index) {
+    for (std::size_t index = 0; index < found; ++index) {
         if (source[index] == '\n') {
             ++line;
             col = 1;
@@ -279,12 +317,49 @@ std::optional<SourceSpan> source_span_for_token(std::string_view source, std::st
             ++col;
         }
     }
-    return SourceSpan{*found,
-                      *found + token.size(),
+    return SourceSpan{found,
+                      found + length,
                       static_cast<std::uint32_t>(line),
                       static_cast<std::uint32_t>(col),
                       static_cast<std::uint32_t>(line),
-                      static_cast<std::uint32_t>(col + token.size())};
+                      static_cast<std::uint32_t>(col + length)};
+}
+
+std::optional<SourceSpan> source_span_for_token(std::string_view source, std::string_view token) {
+    const auto found = find_javascript_token(source, token);
+    if (!found) return std::nullopt;
+    return source_span_at(source, *found, token.size());
+}
+
+void reject_unsealed_module_syntax(std::string_view source) {
+    auto span = source_span_for_token(source, "import");
+    if (!span) {
+        std::size_t search = 0;
+        while (const auto exported = find_javascript_token(source, "export", search)) {
+            const auto statement_end = source.find(';', *exported);
+            const auto from          = find_javascript_token(source, "from", *exported + 6);
+            if (from && (statement_end == std::string_view::npos || *from < statement_end)) {
+                auto specifier = *from + 4;
+                while (specifier < source.size() &&
+                       std::isspace(static_cast<unsigned char>(source[specifier])) != 0)
+                    ++specifier;
+                if (specifier < source.size() &&
+                    (source[specifier] == '\'' || source[specifier] == '"')) {
+                    span = source_span_at(source, *exported, specifier - *exported + 1);
+                    break;
+                }
+            }
+            search = *exported + 6;
+        }
+    }
+    if (!span) return;
+    throw JavaScriptCompileError(
+        "P_JS_IMPORT_UNAVAILABLE",
+        "Executable JavaScript imports are unavailable without receipt-bound source bytes",
+        json{{"engine", "quickjs"},
+             {"facility", "import"},
+             {"receipt_bound_source_available", false}},
+        std::move(span));
 }
 
 bool read_error_integer(JSContext*    context,
@@ -427,11 +502,12 @@ void refresh_external_interrupt(InterruptBudget& budget) {
 }
 
 struct DefinitionCapture {
-    std::string failure_code;
-    std::string failure_message;
-    json        failure_witness          = json::object();
-    std::size_t native_builder_bytes     = 0;
-    std::size_t max_native_builder_bytes = kMaxGeneratedDocumentBytes;
+    std::string           failure_code;
+    std::string           failure_message;
+    json                  failure_witness          = json::object();
+    std::size_t           native_builder_bytes     = 0;
+    std::size_t           max_native_builder_bytes = kMaxGeneratedDocumentBytes;
+    AllocationAccounting* accounting               = nullptr;
 };
 
 void record_failure(DefinitionCapture* capture,
@@ -459,10 +535,12 @@ JSValue graph_internal_error(JSContext* context, std::string message) {
 class QuickJsScope final {
 public:
     explicit QuickJsScope(const JavaScriptCompileLimits& limits) {
+        accounting_.memory_limit_bytes = limits.memory_limit_bytes;
         runtime_ = JS_NewRuntime2(&kAccountedAllocator, &accounting_);
         if (!runtime_) {
             throw JavaScriptCompileError("P_JS_RUNTIME", "QuickJS runtime initialization failed");
         }
+        JS_SetRuntimeOpaque(runtime_, &accounting_);
         JS_SetMemoryLimit(runtime_, limits.memory_limit_bytes);
         JS_SetMaxStackSize(runtime_, limits.max_stack_bytes);
         JS_SetCanBlock(runtime_, 0);
@@ -501,6 +579,7 @@ public:
 
     JSRuntime*                  runtime() const noexcept { return runtime_; }
     JSContext*                  context() const noexcept { return context_; }
+    AllocationAccounting&       accounting() noexcept { return accounting_; }
     const AllocationAccounting& accounting() const noexcept { return accounting_; }
 
 private:
@@ -522,8 +601,13 @@ std::once_flag graph_builder_class_once;
 JSClassID      command_value_class_id = JS_INVALID_CLASS_ID;
 std::once_flag command_value_class_once;
 
-void graph_builder_finalizer(JSRuntime*, JSValue value) {
-    delete static_cast<GraphBuilder*>(JS_GetOpaque(value, graph_builder_class_id));
+void graph_builder_finalizer(JSRuntime* runtime, JSValue value) {
+    auto* builder = static_cast<GraphBuilder*>(JS_GetOpaque(value, graph_builder_class_id));
+    if (!builder) return;
+    auto*      accounting   = static_cast<AllocationAccounting*>(JS_GetRuntimeOpaque(runtime));
+    const auto native_bytes = builder->native_bytes;
+    delete builder;
+    if (accounting) release_native_bytes(*accounting, native_bytes);
 }
 
 void ensure_graph_builder_class(JSRuntime* runtime) {
@@ -539,13 +623,19 @@ void ensure_graph_builder_class(JSRuntime* runtime) {
 }
 
 struct CommandValue {
-    DefinitionCapture* capture = nullptr;
-    JSContext*         context = nullptr;
+    DefinitionCapture* capture      = nullptr;
+    JSContext*         context      = nullptr;
+    std::size_t        native_bytes = 0;
     JavaScriptCommand  command;
 };
 
-void command_value_finalizer(JSRuntime*, JSValue value) {
-    delete static_cast<CommandValue*>(JS_GetOpaque(value, command_value_class_id));
+void command_value_finalizer(JSRuntime* runtime, JSValue value) {
+    auto* command = static_cast<CommandValue*>(JS_GetOpaque(value, command_value_class_id));
+    if (!command) return;
+    auto*      accounting   = static_cast<AllocationAccounting*>(JS_GetRuntimeOpaque(runtime));
+    const auto native_bytes = command->native_bytes;
+    delete command;
+    if (accounting) release_native_bytes(*accounting, native_bytes);
 }
 
 void ensure_command_value_class(JSRuntime* runtime) {
@@ -736,19 +826,22 @@ bool js_to_json(JSContext*      context,
             state.error = "graph configuration numbers must be finite";
             return false;
         }
-        if (!consume_json_bytes(state, 24)) return false;
         if (std::trunc(number) == number) {
-            if (number >= 0.0 &&
-                number <= static_cast<double>(std::numeric_limits<std::uint64_t>::max())) {
+            constexpr double kMaxSafeInteger = 0x1fffffffffffffp0;
+            if (number < -kMaxSafeInteger || number > kMaxSafeInteger) {
+                state.error =
+                    "graph configuration integer is outside the JavaScript safe-integer range";
+                return false;
+            }
+            if (!consume_json_bytes(state, 24)) return false;
+            if (number >= 0.0) {
                 output = static_cast<std::uint64_t>(number);
-                return true;
-            }
-            if (number >= static_cast<double>(std::numeric_limits<std::int64_t>::min()) &&
-                number <= static_cast<double>(std::numeric_limits<std::int64_t>::max())) {
+            } else {
                 output = static_cast<std::int64_t>(number);
-                return true;
             }
+            return true;
         }
+        if (!consume_json_bytes(state, 24)) return false;
         output = number;
         return true;
     }
@@ -837,13 +930,14 @@ bool js_to_json(JSContext*      context,
             JS_FreePropertyEnum(context, properties, property_count);
             return false;
         }
-        const char* key = JS_AtomToCString(context, properties[index].atom);
+        std::size_t key_size = 0;
+        const char* key      = JS_AtomToCStringLen(context, &key_size, properties[index].atom);
         if (!key) {
             JS_FreePropertyEnum(context, properties, property_count);
             state.error = exception_text(context);
             return false;
         }
-        const std::string name(key);
+        const std::string name(key, key_size);
         JS_FreeCString(context, key);
         if (!consume_json_bytes(state, name.size() > std::numeric_limits<std::size_t>::max() - 4
                                            ? std::numeric_limits<std::size_t>::max()
@@ -892,16 +986,68 @@ bool read_json(JSContext*       context,
     return false;
 }
 
-bool enforce_builder_byte_limit(JSContext* context, GraphBuilder* builder) {
-    if (!builder || !builder->capture) return false;
-    const auto canonical  = detail::canonical_json_bytes(builder->definition);
-    builder->native_bytes = canonical.size();
+std::size_t canonical_size(const json& value) {
+    return detail::canonical_json_bytes(value).size();
+}
+
+std::size_t replace_serialized_component(std::size_t total,
+                                         std::size_t old_size,
+                                         std::size_t new_size) {
+    if (old_size > total) throw std::logic_error("invalid JavaScript native-size accounting");
+    const auto remainder = total - old_size;
+    if (new_size > std::numeric_limits<std::size_t>::max() - remainder)
+        throw std::length_error("JavaScript native-size accounting overflow");
+    return remainder + new_size;
+}
+
+std::size_t size_after_object_set(std::size_t      total,
+                                  const json&      object,
+                                  std::string_view key,
+                                  const json&      value) {
+    const auto found = object.find(std::string(key));
+    if (found != object.end())
+        return replace_serialized_component(total, canonical_size(*found), canonical_size(value));
+    const auto key_size   = canonical_size(json(std::string(key)));
+    const auto value_size = canonical_size(value);
+    const auto separator  = object.empty() ? 0u : 1u;
+    if (key_size > std::numeric_limits<std::size_t>::max() - value_size - separator - 1u ||
+        total > std::numeric_limits<std::size_t>::max() - key_size - value_size - separator - 1u)
+        throw std::length_error("JavaScript native-size accounting overflow");
+    return total + key_size + 1u + value_size + separator;
+}
+
+std::size_t size_after_array_append(std::size_t total, const json& array, const json& value) {
+    const auto value_size = canonical_size(value);
+    const auto separator  = array.empty() ? 0u : 1u;
+    if (total > std::numeric_limits<std::size_t>::max() - value_size - separator)
+        throw std::length_error("JavaScript native-size accounting overflow");
+    return total + value_size + separator;
+}
+
+bool prepare_builder_size(JSContext* context, GraphBuilder* builder, std::size_t new_size) {
+    if (!builder || !builder->capture || !builder->capture->accounting) {
+        graph_internal_error(context, "JavaScript native memory accounting is unbound");
+        return false;
+    }
     builder->capture->native_builder_bytes =
-        std::max(builder->capture->native_builder_bytes, canonical.size());
-    if (canonical.size() <= builder->capture->max_native_builder_bytes) return true;
-    graph_error(context, "P_JS_GRAPH_LIMIT",
-                "NeoGraph graph builder exceeds its native byte limit");
-    return false;
+        std::max(builder->capture->native_builder_bytes, new_size);
+    if (new_size > builder->capture->max_native_builder_bytes) {
+        graph_error(context, "P_JS_GRAPH_LIMIT",
+                    "NeoGraph graph builder exceeds its native byte limit");
+        return false;
+    }
+    auto& accounting = *builder->capture->accounting;
+    if (new_size > builder->native_bytes) {
+        if (!reserve_native_bytes(accounting, new_size - builder->native_bytes)) {
+            graph_error(context, "P_JS_RESOURCE_LIMIT",
+                        "NeoGraph native bridge exceeds the JavaScript memory limit");
+            return false;
+        }
+    } else {
+        release_native_bytes(accounting, builder->native_bytes - new_size);
+    }
+    builder->native_bytes = new_size;
+    return true;
 }
 
 bool read_string_array(JSContext*       context,
@@ -956,8 +1102,9 @@ JSValue graph_node_impl(JSContext* context, JSValueConst this_value, int argc, J
         return graph_error(context, "P_JS_GRAPH_ARGUMENT",
                            "NeoGraph graph node names must be unique");
     }
+    const auto new_size = size_after_object_set(builder->native_bytes, nodes, name, config);
+    if (!prepare_builder_size(context, builder, new_size)) return JS_EXCEPTION;
     nodes[name] = std::move(config);
-    if (!enforce_builder_byte_limit(context, builder)) return JS_EXCEPTION;
     return return_builder(context, this_value);
 }
 
@@ -988,13 +1135,23 @@ JSValue graph_channel_impl(JSContext*    context,
         return graph_error(context, "P_JS_GRAPH_ARGUMENT",
                            "NeoGraph graph channel configuration must be an object");
     }
-    auto channels = builder->definition["channels"];
-    if (channels.contains(name)) {
-        return graph_error(context, "P_JS_GRAPH_ARGUMENT",
-                           "NeoGraph graph channel names must be unique");
+    if (!builder->definition.contains("channels")) {
+        json channels  = json::object();
+        channels[name] = config;
+        const auto new_size =
+            size_after_object_set(builder->native_bytes, builder->definition, "channels", channels);
+        if (!prepare_builder_size(context, builder, new_size)) return JS_EXCEPTION;
+        builder->definition["channels"] = std::move(channels);
+    } else {
+        auto channels = builder->definition["channels"];
+        if (channels.contains(name)) {
+            return graph_error(context, "P_JS_GRAPH_ARGUMENT",
+                               "NeoGraph graph channel names must be unique");
+        }
+        const auto new_size = size_after_object_set(builder->native_bytes, channels, name, config);
+        if (!prepare_builder_size(context, builder, new_size)) return JS_EXCEPTION;
+        channels[name] = std::move(config);
     }
-    channels[name] = std::move(config);
-    if (!enforce_builder_byte_limit(context, builder)) return JS_EXCEPTION;
     return return_builder(context, this_value);
 }
 
@@ -1009,8 +1166,24 @@ JSValue graph_channel(JSContext* context, JSValueConst this_value, int argc, JSV
     }
 }
 
-void append_edge(GraphBuilder& builder, const std::string& from, const std::string& to) {
-    builder.definition["edges"].push_back(json{{"from", from}, {"to", to}});
+bool append_edge(JSContext*         context,
+                 GraphBuilder&      builder,
+                 const std::string& from,
+                 const std::string& to) {
+    json edge{{"from", from}, {"to", to}};
+    if (!builder.definition.contains("edges")) {
+        json       edges = json::array({edge});
+        const auto new_size =
+            size_after_object_set(builder.native_bytes, builder.definition, "edges", edges);
+        if (!prepare_builder_size(context, &builder, new_size)) return false;
+        builder.definition["edges"] = std::move(edges);
+        return true;
+    }
+    auto       edges    = builder.definition["edges"];
+    const auto new_size = size_after_array_append(builder.native_bytes, edges, edge);
+    if (!prepare_builder_size(context, &builder, new_size)) return false;
+    edges.push_back(std::move(edge));
+    return true;
 }
 
 JSValue graph_edge_impl(JSContext* context, JSValueConst this_value, int argc, JSValueConst* argv) {
@@ -1022,8 +1195,7 @@ JSValue graph_edge_impl(JSContext* context, JSValueConst this_value, int argc, J
         !read_string(context, argv[1], to, "edge destination")) {
         return JS_EXCEPTION;
     }
-    append_edge(*builder, from, to);
-    if (!enforce_builder_byte_limit(context, builder)) return JS_EXCEPTION;
+    if (!append_edge(context, *builder, from, to)) return JS_EXCEPTION;
     return return_builder(context, this_value);
 }
 
@@ -1056,9 +1228,19 @@ JSValue graph_conditional_edge_impl(JSContext*    context,
         return graph_error(context, "P_JS_GRAPH_ARGUMENT",
                            "NeoGraph graph conditional edge routes must be an object");
     }
-    builder->definition["conditional_edges"].push_back(
-        json{{"from", from}, {"condition", condition}, {"routes", std::move(routes)}});
-    if (!enforce_builder_byte_limit(context, builder)) return JS_EXCEPTION;
+    json conditional{{"from", from}, {"condition", condition}, {"routes", std::move(routes)}};
+    if (!builder->definition.contains("conditional_edges")) {
+        json       edges    = json::array({conditional});
+        const auto new_size = size_after_object_set(builder->native_bytes, builder->definition,
+                                                    "conditional_edges", edges);
+        if (!prepare_builder_size(context, builder, new_size)) return JS_EXCEPTION;
+        builder->definition["conditional_edges"] = std::move(edges);
+    } else {
+        auto       edges    = builder->definition["conditional_edges"];
+        const auto new_size = size_after_array_append(builder->native_bytes, edges, conditional);
+        if (!prepare_builder_size(context, builder, new_size)) return JS_EXCEPTION;
+        edges.push_back(std::move(conditional));
+    }
     return return_builder(context, this_value);
 }
 
@@ -1093,8 +1275,12 @@ JSValue graph_barrier_impl(JSContext*    context,
         return graph_error(context, "P_JS_GRAPH_ARGUMENT",
                            "NeoGraph graph barrier node must already be declared");
     }
-    nodes[node]["barrier"] = json{{"wait_for", std::move(wait_for)}};
-    if (!enforce_builder_byte_limit(context, builder)) return JS_EXCEPTION;
+    json       barrier{{"wait_for", std::move(wait_for)}};
+    auto       node_config = nodes[node];
+    const auto new_size =
+        size_after_object_set(builder->native_bytes, node_config, "barrier", barrier);
+    if (!prepare_builder_size(context, builder, new_size)) return JS_EXCEPTION;
+    node_config["barrier"] = std::move(barrier);
     return return_builder(context, this_value);
 }
 
@@ -1137,10 +1323,21 @@ JSValue graph_interrupt_before_impl(JSContext*    context,
     json nodes;
     if (!collect_interrupt_nodes(context, argc, argv, nodes, "interruptBefore"))
         return JS_EXCEPTION;
-    auto interrupts = builder->definition["interrupt_before"];
-    for (const auto& node : nodes)
-        interrupts.push_back(node);
-    if (!enforce_builder_byte_limit(context, builder)) return JS_EXCEPTION;
+    if (!builder->definition.contains("interrupt_before")) {
+        const auto new_size = size_after_object_set(builder->native_bytes, builder->definition,
+                                                    "interrupt_before", nodes);
+        if (!prepare_builder_size(context, builder, new_size)) return JS_EXCEPTION;
+        builder->definition["interrupt_before"] = std::move(nodes);
+    } else {
+        auto       interrupts = builder->definition["interrupt_before"];
+        const auto added      = canonical_size(nodes) - 2u + (interrupts.empty() ? 0u : 1u);
+        if (builder->native_bytes > std::numeric_limits<std::size_t>::max() - added)
+            throw std::length_error("JavaScript native-size accounting overflow");
+        if (!prepare_builder_size(context, builder, builder->native_bytes + added))
+            return JS_EXCEPTION;
+        for (auto node : nodes)
+            interrupts.push_back(std::move(node));
+    }
     return return_builder(context, this_value);
 }
 
@@ -1166,10 +1363,21 @@ JSValue graph_interrupt_after_impl(JSContext*    context,
     if (!builder) return JS_EXCEPTION;
     json nodes;
     if (!collect_interrupt_nodes(context, argc, argv, nodes, "interruptAfter")) return JS_EXCEPTION;
-    auto interrupts = builder->definition["interrupt_after"];
-    for (const auto& node : nodes)
-        interrupts.push_back(node);
-    if (!enforce_builder_byte_limit(context, builder)) return JS_EXCEPTION;
+    if (!builder->definition.contains("interrupt_after")) {
+        const auto new_size = size_after_object_set(builder->native_bytes, builder->definition,
+                                                    "interrupt_after", nodes);
+        if (!prepare_builder_size(context, builder, new_size)) return JS_EXCEPTION;
+        builder->definition["interrupt_after"] = std::move(nodes);
+    } else {
+        auto       interrupts = builder->definition["interrupt_after"];
+        const auto added      = canonical_size(nodes) - 2u + (interrupts.empty() ? 0u : 1u);
+        if (builder->native_bytes > std::numeric_limits<std::size_t>::max() - added)
+            throw std::length_error("JavaScript native-size accounting overflow");
+        if (!prepare_builder_size(context, builder, builder->native_bytes + added))
+            return JS_EXCEPTION;
+        for (auto node : nodes)
+            interrupts.push_back(std::move(node));
+    }
     return return_builder(context, this_value);
 }
 
@@ -1199,8 +1407,10 @@ JSValue graph_retry_policy_impl(JSContext*    context,
         return graph_error(context, "P_JS_GRAPH_ARGUMENT",
                            "NeoGraph graph retry policy must be an object");
     }
+    const auto new_size =
+        size_after_object_set(builder->native_bytes, builder->definition, "retry_policy", policy);
+    if (!prepare_builder_size(context, builder, new_size)) return JS_EXCEPTION;
     builder->definition["retry_policy"] = std::move(policy);
-    if (!enforce_builder_byte_limit(context, builder)) return JS_EXCEPTION;
     return return_builder(context, this_value);
 }
 
@@ -1226,8 +1436,7 @@ JSValue graph_entry_impl(JSContext*    context,
     if (!builder || !require_arity(context, argc, 1, "entry")) return JS_EXCEPTION;
     std::string node;
     if (!read_string(context, argv[0], node, "entry node")) return JS_EXCEPTION;
-    append_edge(*builder, "__start__", node);
-    if (!enforce_builder_byte_limit(context, builder)) return JS_EXCEPTION;
+    if (!append_edge(context, *builder, "__start__", node)) return JS_EXCEPTION;
     return return_builder(context, this_value);
 }
 
@@ -1247,8 +1456,7 @@ JSValue graph_exit_impl(JSContext* context, JSValueConst this_value, int argc, J
     if (!builder || !require_arity(context, argc, 1, "exit")) return JS_EXCEPTION;
     std::string node;
     if (!read_string(context, argv[0], node, "exit node")) return JS_EXCEPTION;
-    append_edge(*builder, node, "__end__");
-    if (!enforce_builder_byte_limit(context, builder)) return JS_EXCEPTION;
+    if (!append_edge(context, *builder, node, "__end__")) return JS_EXCEPTION;
     return return_builder(context, this_value);
 }
 
@@ -1279,11 +1487,31 @@ JSValue create_graph_impl(JSContext* context, JSValueConst, int argc, JSValueCon
     if (name.empty()) {
         return graph_error(context, "P_JS_GRAPH_ARGUMENT", "NeoGraph graph name must not be empty");
     }
+    json       definition{{"schema_version", 1}, {"name", name}, {"nodes", json::object()}};
+    const auto document_size = canonical_size(definition);
+    if (document_size > capture->max_native_builder_bytes) {
+        return graph_error(context, "P_JS_GRAPH_LIMIT",
+                           "NeoGraph graph builder exceeds its native byte limit");
+    }
+    const auto native_size        = sizeof(GraphBuilder) + document_size;
+    capture->native_builder_bytes = std::max(capture->native_builder_bytes, document_size);
+    if (!capture->accounting || !reserve_native_bytes(*capture->accounting, native_size)) {
+        return graph_error(context, "P_JS_RESOURCE_LIMIT",
+                           "NeoGraph native bridge exceeds the JavaScript memory limit");
+    }
     JSValue object = JS_NewObjectClass(context, graph_builder_class_id);
-    if (JS_IsException(object)) return object;
-    auto* builder =
-        new GraphBuilder{capture, context, false, 0,
-                         json{{"schema_version", 1}, {"name", name}, {"nodes", json::object()}}};
+    if (JS_IsException(object)) {
+        release_native_bytes(*capture->accounting, native_size);
+        return object;
+    }
+    GraphBuilder* builder = nullptr;
+    try {
+        builder = new GraphBuilder{capture, context, false, native_size, std::move(definition)};
+    } catch (...) {
+        release_native_bytes(*capture->accounting, native_size);
+        JS_FreeValue(context, object);
+        throw;
+    }
     JS_SetOpaque(object, builder);
     const bool installed =
         define_method(context, object, "node", graph_node, 2) &&
@@ -1388,10 +1616,14 @@ bool read_sealed_command_array(JSContext*                      context,
         return false;
     }
     JS_FreeValue(context, length_value);
-    if (length == 0 || length > kMaxGraphValueElements ||
-        length > std::numeric_limits<std::uint32_t>::max()) {
+    if (length == 0) {
         graph_error(context, "P_JS_CONTROL_COMMAND",
                     "NeoGraph command members must be nonempty and bounded");
+        return false;
+    }
+    if (length >= JAVASCRIPT_COMMAND_MAX_AGGREGATE_MEMBERS) {
+        graph_error(context, "P_JS_CONTROL_COMMAND",
+                    "JavaScript command exceeds maximum aggregate member count");
         return false;
     }
     output.clear();
@@ -1418,17 +1650,35 @@ JSValue make_command_value(JSContext*         context,
                            DefinitionCapture* capture,
                            JavaScriptCommand  command) {
     ensure_command_value_class(JS_GetRuntime(context));
+    const auto encoded     = command.to_json();
+    const auto native_size = sizeof(CommandValue) + canonical_size(encoded);
+    if (!capture || !capture->accounting ||
+        !reserve_native_bytes(*capture->accounting, native_size)) {
+        return graph_error(context, "P_JS_RESOURCE_LIMIT",
+                           "NeoGraph native bridge exceeds the JavaScript memory limit");
+    }
     JSValue object = JS_NewObjectClass(context, command_value_class_id);
-    if (JS_IsException(object)) return object;
-    JS_SetOpaque(object, new CommandValue{capture, context, std::move(command)});
-    const auto encoded =
-        static_cast<CommandValue*>(JS_GetOpaque(object, command_value_class_id))->command.to_json();
+    if (JS_IsException(object)) {
+        release_native_bytes(*capture->accounting, native_size);
+        return object;
+    }
+    CommandValue* stored = nullptr;
+    try {
+        stored = new CommandValue{capture, context, native_size, std::move(command)};
+    } catch (...) {
+        release_native_bytes(*capture->accounting, native_size);
+        JS_FreeValue(context, object);
+        throw;
+    }
+    JS_SetOpaque(object, stored);
     for (const auto& [key, value] : encoded.items()) {
         JSValue property = json_to_js_value(context, value);
-        if (JS_IsException(property) ||
-            JS_DefinePropertyValueStr(context, object, key.c_str(), property, JS_PROP_ENUMERABLE) <
-                0) {
-            if (!JS_IsException(property)) JS_FreeValue(context, property);
+        if (JS_IsException(property)) {
+            JS_FreeValue(context, object);
+            return JS_EXCEPTION;
+        }
+        if (JS_DefinePropertyValueStr(context, object, key.c_str(), property, JS_PROP_ENUMERABLE) <
+            0) {
             JS_FreeValue(context, object);
             return JS_EXCEPTION;
         }
@@ -1969,6 +2219,26 @@ bool define_locked_global(JSContext*   context,
     return JS_DefinePropertyValueStr(context, global, name, value, 0) >= 0;
 }
 
+bool deny_callable_prototype_constructor(JSContext*       context,
+                                         std::string_view expression,
+                                         std::string_view name) {
+    JSValue callable = JS_Eval(context, expression.data(), expression.size(), "<strict-profile>",
+                               JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(callable)) return false;
+    JSValue prototype = JS_GetPrototype(context, callable);
+    JS_FreeValue(context, callable);
+    if (JS_IsException(prototype)) return false;
+    JSValue denied = JS_NewCFunctionMagic(context, denied_ambient, std::string(name).c_str(), 0,
+                                          JS_CFUNC_constructor_or_func_magic, AmbientFunction);
+    if (JS_IsException(denied)) {
+        JS_FreeValue(context, prototype);
+        return false;
+    }
+    const int status = JS_DefinePropertyValueStr(context, prototype, "constructor", denied, 0);
+    JS_FreeValue(context, prototype);
+    return status >= 0;
+}
+
 bool install_strict_intrinsics(JSContext* context) {
     JSValue global = JS_GetGlobalObject(context);
     if (JS_IsException(global)) return false;
@@ -1983,6 +2253,18 @@ bool install_strict_intrinsics(JSContext* context) {
         if (JS_IsException(value)) return false;
         return define_locked_global(context, global, name, value);
     };
+    constexpr std::pair<std::string_view, std::string_view> callable_prototypes[] = {
+        {"(function () {})", "Function"},
+        {"(function* () {})", "GeneratorFunction"},
+        {"(async function () {})", "AsyncFunction"},
+        {"(async function* () {})", "AsyncGeneratorFunction"},
+    };
+    for (const auto& [expression, name] : callable_prototypes) {
+        if (!deny_callable_prototype_constructor(context, expression, name)) {
+            JS_FreeValue(context, global);
+            return false;
+        }
+    }
     JSValue date = make_denied("Date", AmbientDate, true);
     if (JS_IsException(date) ||
         JS_DefinePropertyValueStr(context, date, "now", make_denied("now", AmbientDate, false), 0) <
@@ -2160,11 +2442,15 @@ json resource_witness(const JavaScriptCompileLimits& limits,
                  {"max_generated_document_bytes", limits.max_generated_document_bytes},
                  {"interrupt_reason", interrupt_reason_name(budget.reason)}};
     if (accounting) {
-        witness["allocator_current_bytes"] = accounting->current_bytes;
-        witness["allocator_peak_bytes"]    = accounting->peak_bytes;
-        witness["allocator_denied_count"]  = accounting->denied_count;
-        witness["allocator_total_bytes"]   = accounting->total_bytes;
-        witness["allocator_allocations"]   = accounting->allocation_count;
+        witness["allocator_current_bytes"]      = accounting->current_bytes;
+        witness["allocator_peak_bytes"]         = accounting->peak_bytes;
+        witness["allocator_denied_count"]       = accounting->denied_count;
+        witness["allocator_limit_denied_count"] = accounting->limit_denied_count;
+        witness["allocator_total_bytes"]        = accounting->total_bytes;
+        witness["allocator_allocations"]        = accounting->allocation_count;
+        witness["native_current_bytes"]         = accounting->native_bytes;
+        witness["native_peak_bytes"]            = accounting->native_peak_bytes;
+        witness["combined_peak_bytes"]          = accounting->combined_peak_bytes;
     }
     return witness;
 }
@@ -2210,7 +2496,9 @@ json resource_witness(const JavaScriptCompileLimits& limits,
     if (!capture.failure_code.empty()) {
         throw_captured_failure(capture, std::move(source_span));
     }
-    if (budget.reason == InterruptReason::PollLimit || looks_like_resource_exhaustion(message)) {
+    const bool allocator_limit_exhausted = accounting && accounting->limit_denied_count != 0;
+    if (budget.reason == InterruptReason::PollLimit || allocator_limit_exhausted ||
+        looks_like_resource_exhaustion(message)) {
         throw JavaScriptCompileError(
             "P_JS_RESOURCE_LIMIT", "JavaScript evaluation exceeded a configured resource limit",
             resource_witness(limits, budget, accounting), std::move(source_span));
@@ -2258,11 +2546,13 @@ JavaScriptSourceEvaluation evaluate_javascript_source(const ProgramSource&      
     validate_limits(limits);
     const auto envelope = source.document();
     const auto script   = envelope.at("source").get<std::string>();
+    reject_unsealed_module_syntax(script);
 
     const auto        started_at = std::chrono::steady_clock::now();
     QuickJsScope      scope(limits);
     DefinitionCapture capture;
     capture.max_native_builder_bytes = limits.max_generated_document_bytes;
+    capture.accounting               = &scope.accounting();
     JS_SetContextOpaque(scope.context(), &capture);
     try {
         install_host(scope.context(), HostContext::Definition);
@@ -2401,6 +2691,7 @@ struct JavaScriptGenerator::Impl {
                   std::optional<std::chrono::steady_clock::time_point> deadline)
         : configured_limits(limits), source_text(std::move(source)), scope(configured_limits) {
         capture.max_native_builder_bytes = configured_limits.max_generated_document_bytes;
+        capture.accounting               = &scope.accounting();
         budget.limit                     = configured_limits.max_interrupt_polls;
         budget.deadline =
             deadline.value_or(std::chrono::steady_clock::now() +
@@ -2567,6 +2858,7 @@ std::optional<JavaScriptGenerator> JavaScriptGenerator::open(
     validate_limits(limits);
     const auto envelope = source.document();
     const auto script   = envelope.at("source").get<std::string>();
+    reject_unsealed_module_syntax(script);
 
     auto impl = std::make_unique<Impl>(limits, script, std::move(cancellation_requested), deadline);
     auto* context = impl->scope.context();

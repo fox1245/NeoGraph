@@ -1506,72 +1506,31 @@ SourceSpan javascript_span(std::string_view source, std::size_t begin, std::size
                       column_end};
 }
 
-void validate_javascript_import_allowlist(const ProgramSource&     source,
-                                          const ModuleResolution* resolution,
-                                          DiagnosticAccumulator&   diagnostics) {
+void validate_javascript_imports_unavailable(const ProgramSource&    source,
+                                             const ModuleResolution* resolution,
+                                             DiagnosticAccumulator&  diagnostics) {
     if (source.kind() != SourceKind::JavaScript) return;
+    (void)resolution;
     const auto document = source.document();
     const auto script   = document.at("source").get<std::string>();
     const auto sites    = javascript_import_sites(script);
-    if (!resolution) {
-        if (!sites.empty()) {
-            for (const auto& site : sites) {
-                const auto span = std::optional<SourceSpan>{javascript_span(
-                    script, site.byte_begin, site.byte_end)};
-                diagnostics.add(
-                    CompilePhase::Resolve, site.dynamic ? "P_IMPORT_DYNAMIC" : "P_IMPORT_UNRESOLVED",
-                    DiagnosticSeverity::Error, "/imports",
-                    site.dynamic
-                        ? "Dynamic JavaScript module loading is forbidden"
-                        : "JavaScript imports require a verified ModuleResolution receipt",
-                    json{{"specifier", site.specifier}}, span);
-            }
-        }
-        if (!source.imports().empty()) {
-            diagnostics.add(CompilePhase::Resolve, "P_IMPORT_UNRESOLVED",
-                            DiagnosticSeverity::Error, "/imports",
-                            "JavaScript imports require a verified ModuleResolution receipt",
-                            json{{"import_count", source.imports().size()},
-                                 {"syntax_import_count", sites.size()}});
-        }
-        return;
-    }
-    if (resolution->receipts.empty()) {
-        for (const auto& site : sites) {
-            const auto span = std::optional<SourceSpan>{javascript_span(
-                script, site.byte_begin, site.byte_end)};
-            diagnostics.add(CompilePhase::Resolve,
-                            site.dynamic ? "P_IMPORT_DYNAMIC" : "P_IMPORT_UNRESOLVED",
-                            DiagnosticSeverity::Error, "/imports",
-                            site.dynamic
-                                ? "Dynamic JavaScript module loading is forbidden"
-                                : "JavaScript imports require non-empty verified ModuleResolution receipts",
-                            json{{"specifier", site.specifier}}, span);
-        }
-        if (!source.imports().empty()) {
-            diagnostics.add(CompilePhase::Resolve, "P_IMPORT_UNRESOLVED",
-                            DiagnosticSeverity::Error, "/imports",
-                            "JavaScript imports require non-empty verified ModuleResolution receipts",
-                            json{{"import_count", source.imports().size()},
-                                 {"syntax_import_count", sites.size()}});
-        }
-        return;
-    }
-    const VerifiedModuleResolver verified(*resolution);
     for (const auto& site : sites) {
-        const auto found = verified.resolve(site.specifier);
-        const auto span = std::optional<SourceSpan>{javascript_span(script, site.byte_begin,
-                                                                     site.byte_end)};
-        if (site.dynamic) {
-            diagnostics.add(CompilePhase::Resolve, "P_IMPORT_DYNAMIC", DiagnosticSeverity::Error,
-                            "/imports", "Dynamic JavaScript module loading is forbidden",
-                            json{{"specifier", site.specifier}}, span);
-        } else if (!found) {
-            diagnostics.add(CompilePhase::Resolve, "P_IMPORT_UNRESOLVED",
-                            DiagnosticSeverity::Error, "/imports",
-                            "JavaScript module is absent from the verified resolution receipts",
-                            json{{"specifier", site.specifier}}, span);
-        }
+        const auto span =
+            std::optional<SourceSpan>{javascript_span(script, site.byte_begin, site.byte_end)};
+        diagnostics.add(
+            CompilePhase::Resolve, site.dynamic ? "P_IMPORT_DYNAMIC" : "P_IMPORT_UNRESOLVED",
+            DiagnosticSeverity::Error, "/imports",
+            site.dynamic ? "Dynamic JavaScript module loading is forbidden"
+                         : "Executable JavaScript imports are unavailable without receipt-bound "
+                           "source bytes",
+            json{{"specifier", site.specifier}, {"receipt_bound_source_available", false}}, span);
+    }
+    if (!source.imports().empty() && sites.empty()) {
+        diagnostics.add(CompilePhase::Resolve, "P_IMPORT_UNRESOLVED", DiagnosticSeverity::Error,
+                        "/imports",
+                        "JavaScript import metadata has no executable receipt-bound source closure",
+                        json{{"import_count", source.imports().size()},
+                             {"receipt_bound_source_available", false}});
     }
 }
 
@@ -1648,13 +1607,18 @@ struct ProgramCompiler::Impl {
                 config.ng_api_version};
     }
 
-    ProgramBundle compile(
-        const ProgramSource& source,
-        const ModuleResolution* verified_resolution = nullptr,
-        const std::optional<RunBudget>& javascript_budget = std::nullopt) const {
-        if (javascript_budget && source.kind() != SourceKind::JavaScript)
+    ProgramBundle compile(const ProgramSource&            source,
+                          const ModuleResolution*         verified_resolution = nullptr,
+                          const std::optional<RunBudget>& javascript_budget   = std::nullopt,
+                          const ContractRecord*           input_contract      = nullptr,
+                          const ContractRecord*           output_contract     = nullptr) const {
+        const bool has_host_contracts = input_contract != nullptr || output_contract != nullptr;
+        if ((javascript_budget || has_host_contracts) && source.kind() != SourceKind::JavaScript)
             throw std::invalid_argument(
-                "Host-owned JavaScript budget requires a JavaScript ProgramSource");
+                "Host-owned JavaScript budget and contracts require a JavaScript ProgramSource");
+        if ((input_contract == nullptr) != (output_contract == nullptr))
+            throw std::invalid_argument(
+                "Host-owned JavaScript input and output contracts must be supplied together");
         DiagnosticAccumulator diagnostics(source);
         try {
             if (source.kind() == SourceKind::JavaScript &&
@@ -1683,7 +1647,7 @@ struct ProgramCompiler::Impl {
                                             {"ng_api_version", config.ng_api_version}}}});
                 diagnostics.throw_error();
             }
-            validate_javascript_import_allowlist(source, verified_resolution, diagnostics);
+            validate_javascript_imports_unavailable(source, verified_resolution, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();
             json                         document;
             std::optional<ProgramSource> control_source;
@@ -1694,6 +1658,10 @@ struct ProgramCompiler::Impl {
                     if (javascript_budget)
                         document["declared_budget_requirements"] =
                             budget_document(*javascript_budget);
+                    if (input_contract) {
+                        document["input_contract"]  = contract_json(*input_contract);
+                        document["output_contract"] = contract_json(*output_contract);
+                    }
                     if (evaluation.has_control_generator) control_source = source;
                 } else {
                     document = source.document();
@@ -1849,6 +1817,13 @@ ProgramBundle ProgramCompiler::compile(const ProgramSource& source) const {
 ProgramBundle ProgramCompiler::compile(const ProgramSource& source,
                                        const RunBudget&          javascript_budget) const {
     return impl_->compile(source, nullptr, javascript_budget);
+}
+
+ProgramBundle ProgramCompiler::compile(const ProgramSource&  source,
+                                       const RunBudget&      javascript_budget,
+                                       const ContractRecord& input_contract,
+                                       const ContractRecord& output_contract) const {
+    return impl_->compile(source, nullptr, javascript_budget, &input_contract, &output_contract);
 }
 
 ProgramBundle ProgramCompiler::compile(const ProgramSource&    source,

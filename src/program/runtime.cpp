@@ -120,6 +120,74 @@ std::string core_thread_identity(std::string_view run_id, std::string_view gener
     return detail::sha256_identity("program-core-thread/v1", identity);
 }
 
+std::string core_thread_identity(std::string_view run_id,
+                                 std::string_view generation_id,
+                                 std::string_view operation_id) {
+    std::string identity(run_id);
+    identity.push_back('\0');
+    identity.append(operation_id);
+    identity.push_back('\0');
+    identity.append(generation_id);
+    return detail::sha256_identity("program-core-thread/v1", identity);
+}
+
+std::optional<std::string> javascript_call_core_operation_for_thread(
+    const JavaScriptCommand& command,
+    std::string              operation_id,
+    std::string_view         run_id,
+    std::string_view         generation_id,
+    std::string_view         thread_id,
+    std::size_t              depth = 0) {
+    if (depth > 32) return std::nullopt;
+    if (command.kind() == JavaScriptCommandKind::CallCore) {
+        return core_thread_identity(run_id, generation_id, operation_id) == thread_id
+                   ? std::optional<std::string>{std::move(operation_id)}
+                   : std::nullopt;
+    }
+    const auto arguments = command.arguments();
+    if (command.kind() == JavaScriptCommandKind::Await) {
+        return javascript_call_core_operation_for_thread(
+            JavaScriptCommand::from_json(arguments.at("command")), operation_id + "/await", run_id,
+            generation_id, thread_id, depth + 1);
+    }
+    if (command.kind() == JavaScriptCommandKind::Join) {
+        const auto& members = arguments.at("members");
+        for (std::size_t index = 0; index < members.size(); ++index) {
+            auto found = javascript_call_core_operation_for_thread(
+                JavaScriptCommand::from_json(members.at(index)),
+                operation_id + "/member/" + std::to_string(index), run_id, generation_id, thread_id,
+                depth + 1);
+            if (found) return found;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<JavaScriptCommand> javascript_command_at_operation(
+    const JavaScriptCommand& command,
+    std::string              operation_id,
+    std::string_view         target_operation_id,
+    std::size_t              depth = 0) {
+    if (depth > 32) return std::nullopt;
+    if (operation_id == target_operation_id) return command;
+    const auto arguments = command.arguments();
+    if (command.kind() == JavaScriptCommandKind::Await) {
+        return javascript_command_at_operation(
+            JavaScriptCommand::from_json(arguments.at("command")), operation_id + "/await",
+            target_operation_id, depth + 1);
+    }
+    if (command.kind() == JavaScriptCommandKind::Join) {
+        const auto& members = arguments.at("members");
+        for (std::size_t index = 0; index < members.size(); ++index) {
+            auto found = javascript_command_at_operation(
+                JavaScriptCommand::from_json(members.at(index)),
+                operation_id + "/member/" + std::to_string(index), target_operation_id, depth + 1);
+            if (found) return found;
+        }
+    }
+    return std::nullopt;
+}
+
 struct GlobalChildQuotaState {
     explicit GlobalChildQuotaState(ProgramChildQuotaConfig limits_value)
         : limits(limits_value) {}
@@ -360,7 +428,8 @@ asio::awaitable<void> execute_host_admitted_attempt(
     std::optional<std::string>               checkpoint_id,
     std::shared_ptr<HostAdmissionController> host_admission,
     ProgramHostAdmissionResolver             resolver,
-    std::shared_ptr<asio::steady_timer>      deadline_timer) {
+    std::shared_ptr<asio::steady_timer>      deadline_timer,
+    std::optional<json>                      javascript_core_resume_value) {
     try {
         if (control->cancel_token->is_cancelled()) {
             cancel_host_admission_deadline(control, std::move(deadline_timer));
@@ -382,7 +451,8 @@ asio::awaitable<void> execute_host_admitted_attempt(
             complete_attempt_admission_cancelled(control, checkpoint_id);
             co_return;
         }
-        co_await detail::execute_run_attempt(control, std::move(input), checkpoint_id);
+        co_await detail::execute_run_attempt(control, std::move(input), checkpoint_id,
+                                             std::move(javascript_core_resume_value));
     } catch (const graph::CancelledException&) {
         cancel_host_admission_deadline(control, std::move(deadline_timer));
         complete_attempt_admission_cancelled(control, checkpoint_id);
@@ -402,22 +472,26 @@ void spawn_run_attempt(asio::thread_pool&                         pool,
                        const std::shared_ptr<detail::RunControl>& control,
                        json                                       input,
                        std::optional<std::string>                 checkpoint_id,
-                       std::shared_ptr<HostAdmissionController>   host_admission = {},
-                       ProgramHostAdmissionResolver                host_admission_resolver = {}) noexcept {
+                       std::shared_ptr<HostAdmissionController>   host_admission          = {},
+                       ProgramHostAdmissionResolver               host_admission_resolver = {},
+                       std::optional<json> javascript_core_resume_value = std::nullopt) noexcept {
     try {
         if (host_admission) {
             auto deadline_timer = arm_host_admission_deadline(control);
             asio::co_spawn(pool,
                            execute_host_admitted_attempt(
                                control, std::move(input), checkpoint_id, std::move(host_admission),
-                               std::move(host_admission_resolver), std::move(deadline_timer)),
+                               std::move(host_admission_resolver), std::move(deadline_timer),
+                               std::move(javascript_core_resume_value)),
                            [control, checkpoint_id](std::exception_ptr error) {
                                if (error)
                                    complete_attempt_launch_failure(control, checkpoint_id, error);
                            });
             return;
         }
-        asio::co_spawn(pool, detail::execute_run_attempt(control, std::move(input), checkpoint_id),
+        asio::co_spawn(pool,
+                       detail::execute_run_attempt(control, std::move(input), checkpoint_id,
+                                                   std::move(javascript_core_resume_value)),
                        [control, checkpoint_id](std::exception_ptr error) {
                            if (error)
                                complete_attempt_launch_failure(control, checkpoint_id, error);
@@ -557,6 +631,31 @@ bool budget_sum_fits(const RunBudget& parent,
                 additional.max_total_children);
 }
 
+RunBudget restore_reserved_resources(const RunBudget& available, const RunBudget& reservation) {
+    RunBudget  restored    = available;
+    const auto add_checked = [](auto current, auto reserved, std::string_view resource) {
+        if (reserved > std::numeric_limits<decltype(current)>::max() - current) {
+            throw_runtime_diagnostic(
+                "P_JS_COMMAND_BUDGET",
+                "JavaScript command reservation overflows the recoverable budget",
+                json{{"resource", resource}});
+        }
+        return static_cast<decltype(current)>(current + reserved);
+    };
+    restored.wall_time_ms =
+        add_checked(restored.wall_time_ms, reservation.wall_time_ms, "wall_time_ms");
+    restored.model_tokens =
+        add_checked(restored.model_tokens, reservation.model_tokens, "model_tokens");
+    restored.monetary_microunits = add_checked(
+        restored.monetary_microunits, reservation.monetary_microunits, "monetary_microunits");
+    restored.max_program_operations =
+        add_checked(restored.max_program_operations, reservation.max_program_operations,
+                    "max_program_operations");
+    restored.max_core_steps =
+        add_checked(restored.max_core_steps, reservation.max_core_steps, "max_core_steps");
+    return restored;
+}
+
 void validate_child_link(const detail::MaterializedProgram& materialized,
                          const ModuleLinkReceipt&          link,
                          const ProgramVersion&              requested_version,
@@ -664,11 +763,12 @@ bool checkpointless_replay_safe(const ProgramPlan& plan) {
 }
 
 struct JavaScriptPendingCommand {
-    std::uint64_t    ordinal = 0;
-    JavaScriptCommand command = JavaScriptCommand::call_core(
-        "runtime:pending", "runtime:pending", json::object());
-    std::string bundle_id;
-    std::string      effect_identity;
+    std::uint64_t     ordinal = 0;
+    JavaScriptCommand command =
+        JavaScriptCommand::call_core("runtime:pending", "runtime:pending", json::object());
+    std::string                bundle_id;
+    std::string                effect_identity;
+    std::optional<std::string> core_resume_operation_id;
 };
 
 std::optional<JavaScriptPendingCommand> javascript_pending_command(
@@ -711,19 +811,38 @@ std::optional<JavaScriptPendingCommand> javascript_pending_command(
             "P_JS_COMMAND_JOURNAL_MISMATCH",
             "JavaScript pending effect identity does not bind its command coordinate");
     }
-    return JavaScriptPendingCommand{ordinal, command, bundle_id, effect_identity};
+    return JavaScriptPendingCommand{ordinal, command, bundle_id, effect_identity, std::nullopt};
 }
 
-json javascript_resume_terminal_result(const json& value) {
+json javascript_resume_terminal_result(const json& value, const RunBudget& consumed_reservation) {
     return json{{"status", "completed"},
                 {"output", detail::owned_json_copy(value)},
                 {"execution_trace", json::array()},
-                {"usage", json{{"wall_time_ms", 0U},
-                                  {"model_tokens", 0U},
-                                  {"monetary_microunits", 0U},
-                                  {"program_operations", 0U},
-                                  {"core_steps", 0U},
-                                  {"peak_concurrency", 0U}}}};
+                {"usage", json{{"wall_time_ms", consumed_reservation.wall_time_ms},
+                               {"model_tokens", consumed_reservation.model_tokens},
+                               {"monetary_microunits", consumed_reservation.monetary_microunits},
+                               {"program_operations", consumed_reservation.max_program_operations},
+                               {"core_steps", consumed_reservation.max_core_steps},
+                               {"peak_concurrency", 0U}}}};
+}
+
+ProgramPendingEffect javascript_command_pending_effect(
+    const detail::RunControl& control, const JavaScriptPendingCommand& pending_command) {
+    const auto               command_json = pending_command.command.to_json();
+    ProgramPendingEffectData pending;
+    pending.operation_id         = "root.javascript." + std::to_string(pending_command.ordinal);
+    pending.call_id              = pending_command.effect_identity;
+    pending.effect_id            = pending_command.effect_identity;
+    pending.result_schema        = json::object();
+    pending.payload              = json{{"bundle_id", control.bundle_id},
+                                        {"command_ordinal", pending_command.ordinal},
+                                        {"command", command_json},
+                                        {"effect_identity", pending_command.effect_identity}};
+    pending.effect_mode          = EffectMode::Brokered;
+    pending.idempotency          = ProgramEffectIdempotency::NonIdempotent;
+    pending.core_node            = "javascript";
+    pending.core_interrupt_value = command_json;
+    return ProgramPendingEffect(std::move(pending));
 }
 
 ProgramJavaScriptCommandJournalEntry javascript_completion_entry(
@@ -1008,7 +1127,7 @@ ProgramJournalRecord initial_record(
     return ProgramJournalRecord::create(ProgramJournalRecordData{
         "", control.run_id, control.program_version_id, control.bundle_id, 1,
         ProgramContinuation{"root", ContinuationState::Running, control.attempt},
-        control.granted_budget, control.granted_budget, std::move(checkpoint), now_ms()});
+        control.granted_budget, RunBudget{}, std::move(checkpoint), now_ms()});
 }
 
 ProgramTransitionPublication initial_publication(
@@ -1049,12 +1168,15 @@ ProgramTransitionPublication initial_publication(
 }
 
 ProgramJournalRecord resumed_record(const detail::RunControl&   control,
-                                    const ProgramJournalRecord& previous) {
+                                    const ProgramJournalRecord& previous,
+                                    RunBudget                   remaining_budget,
+                                    RunBudget                   inflight_reservation) {
     return ProgramJournalRecord::create(ProgramJournalRecordData{
         previous.id, control.run_id, control.program_version_id, control.bundle_id,
         previous.sequence + 1,
         ProgramContinuation{"root", ContinuationState::Running, control.attempt},
-        previous.remaining_budget, previous.remaining_budget, previous.core_checkpoint, now_ms()});
+        std::move(remaining_budget), std::move(inflight_reservation), previous.core_checkpoint,
+        now_ms()});
 }
 
 ContinuationState continuation_state(ProgramTerminalStatus status) {
@@ -1110,13 +1232,30 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
         }
 
         try {
+            auto events               = control.events_after(previous->event_sequence());
+            auto terminal_reservation = RunBudget{};
+            if (result.status() == ProgramTerminalStatus::Interrupted ||
+                result.status() == ProgramTerminalStatus::AmbiguousEffect) {
+                terminal_reservation = previous_journal->inflight_reservation;
+                const auto stored_checkpoint =
+                    result.checkpoint() && control.checkpoints
+                        ? control.checkpoints->load_by_id(result.checkpoint()->checkpoint_id)
+                        : std::nullopt;
+                const bool synthetic_terminal_checkpoint =
+                    stored_checkpoint && stored_checkpoint->metadata.is_object() &&
+                    stored_checkpoint->metadata.value("neograph_program", std::string{}) ==
+                        "terminal";
+                if (result.status() == ProgramTerminalStatus::Interrupted && stored_checkpoint &&
+                    !synthetic_terminal_checkpoint) {
+                    terminal_reservation = RunBudget{};
+                }
+            }
             auto journal = ProgramJournalRecord::create(ProgramJournalRecordData{
                 previous->journal_head(), control.run_id, control.program_version_id,
                 control.bundle_id, previous_journal->sequence + 1,
                 ProgramContinuation{"root", continuation_state(result.status()), control.attempt},
-                result.remaining_budget(), RunBudget{}, result.checkpoint(), now_ms()});
+                result.remaining_budget(), terminal_reservation, result.checkpoint(), now_ms()});
 
-            auto                 events = control.events_after(previous->event_sequence());
             ProgramRunRecordData data;
             data.owner_scope         = control.owner_scope;
             data.run_id              = control.run_id;
@@ -1273,6 +1412,33 @@ void RunControl::add_terminal_cleanup(TerminalCleanup cleanup) {
 void RunControl::set_child_launch_callback(ChildLaunchCallback callback) noexcept {
     std::lock_guard lock(mutex_);
     child_launch_callback_ = std::move(callback);
+}
+void RunControl::set_child_binding_validation_callback(
+    ChildBindingValidationCallback callback) noexcept {
+    std::lock_guard lock(mutex_);
+    child_binding_validation_callback_ = std::move(callback);
+}
+
+void RunControl::validate_child_binding(std::string_view binding_name,
+                                        std::string_view operation_id) const {
+    ChildBindingValidationCallback callback;
+    {
+        std::lock_guard lock(mutex_);
+        callback = child_binding_validation_callback_;
+    }
+    if (!callback)
+        throw_runtime_diagnostic("P_CHILD_BINDING",
+                                 "Program spawn has no configured child binding resolver",
+                                 json{{"binding", std::string(binding_name)},
+                                      {"operation_id", std::string(operation_id)}});
+    try {
+        callback(binding_name, operation_id);
+    } catch (const ProgramDiagnosticError& error) {
+        auto diagnostic = error.diagnostic();
+        if (!diagnostic.witness.is_object()) diagnostic.witness = json::object();
+        diagnostic.witness["operation_id"] = std::string(operation_id);
+        throw ProgramDiagnosticError(std::move(diagnostic));
+    }
 }
 
 std::shared_ptr<RunControl> RunControl::launch_child(std::string_view binding_name,
@@ -1634,7 +1800,26 @@ void RunControl::complete(RunOutcome outcome) noexcept {
         ensure_terminal_checkpoint(*this, outcome);
 
         std::vector<ProgramEvent> terminal_events;
+        bool                      checkpoint_already_published = false;
+        bool                      checkpoint_already_staged    = false;
         if (outcome.checkpoint) {
+            std::lock_guard lock(mutex_);
+            checkpoint_already_published =
+                latest_checkpoint_ && *latest_checkpoint_ == *outcome.checkpoint;
+            if (!checkpoint_already_published) {
+                const auto found =
+                    std::find_if(events_.rbegin(), events_.rend(), [&](const auto& event) {
+                        return event.kind == ProgramEventKind::CheckpointPublished &&
+                               std::get<ProgramCheckpointEvent>(event.payload).checkpoint ==
+                                   *outcome.checkpoint;
+                    });
+                if (found != events_.rend()) {
+                    terminal_events.push_back(*found);
+                    checkpoint_already_staged = true;
+                }
+            }
+        }
+        if (outcome.checkpoint && !checkpoint_already_published && !checkpoint_already_staged) {
             terminal_events.push_back(stage_event(ProgramEventKind::CheckpointPublished,
                                                   ProgramCheckpointEvent{*outcome.checkpoint}));
         }
@@ -1776,10 +1961,11 @@ ProgramRunRecord RunControl::snapshot() const {
 
 ProgramTransitionPublishResult RunControl::publish_javascript_command(
     std::uint64_t              command_ordinal,
-    JavaScriptCommand           command,
+    JavaScriptCommand          command,
     std::optional<std::string> effect_identity,
-    std::optional<json>         terminal_result,
-    std::optional<RunBudget>    remaining_budget) {
+    std::optional<json>        terminal_result,
+    std::optional<RunBudget>   remaining_budget,
+    std::optional<RunBudget>   inflight_reservation) {
     if (!command_ordinal) return ProgramTransitionPublishResult::Conflict;
 
     for (int retry = 0; retry < 3; ++retry) {
@@ -1819,17 +2005,29 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
                                                      command,
                                                      effect_identity,
                                                      terminal_result});
+        // A completed command becomes replayable as soon as its terminal
+        // journal entry is durable. Publish every event staged by that command
+        // and its newest checkpoint in the same CAS so crash recovery cannot
+        // observe the result without the state needed to resume after it.
+        auto events                    = terminal_result ? events_after(previous->event_sequence())
+                                                         : std::vector<ProgramEvent>{};
+        auto latest_command_checkpoint = previous->exact_checkpoint();
+        for (auto event = events.rbegin(); event != events.rend(); ++event) {
+            if (event->kind != ProgramEventKind::CheckpointPublished) continue;
+            latest_command_checkpoint = std::get<ProgramCheckpointEvent>(event->payload).checkpoint;
+            break;
+        }
+        std::vector<ProgramEvent> deferred_checkpoint_events;
+        for (const auto& event : events) {
+            if (event.kind == ProgramEventKind::CheckpointPublished)
+                deferred_checkpoint_events.push_back(event);
+        }
         auto journal = ProgramJournalRecord::create(ProgramJournalRecordData{
-            previous->journal_head(),
-            run_id,
-            program_version_id,
-            bundle_id,
-            previous_journal->sequence + 1,
-            previous->continuation(),
+            previous->journal_head(), run_id, program_version_id, bundle_id,
+            previous_journal->sequence + 1, previous->continuation(),
             remaining_budget.value_or(previous->remaining_budget()),
-            RunBudget{},
-            previous->exact_checkpoint(),
-            now_ms()});
+            inflight_reservation.value_or(previous_journal->inflight_reservation),
+            latest_command_checkpoint, now_ms()});
 
         ProgramRunRecordData data;
         data.owner_scope                    = owner_scope;
@@ -1842,7 +2040,7 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
         data.children                       = previous->children();
         data.continuation                   = journal.continuation;
         data.remaining_budget               = journal.remaining_budget;
-        data.exact_checkpoint               = previous->exact_checkpoint();
+        data.exact_checkpoint               = latest_command_checkpoint;
         data.pending_input                  = previous->pending_input();
         data.pending_effect                 = previous->pending_effect();
         data.fork_receipt                   = previous->fork_receipt();
@@ -1852,18 +2050,27 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
         data.recorded_binding_set_fingerprint =
             previous->recorded_binding_set_fingerprint();
         data.journal_head    = journal.id;
-        data.event_sequence  = previous->event_sequence();
+        data.event_sequence  = events.empty() ? previous->event_sequence() : events.back().sequence;
         data.effect_sequence = previous->effect_sequence();
         data.created_at_ms   = previous->created_at_ms();
         data.updated_at_ms   = journal.timestamp_ms;
 
-        auto publication = ProgramTransitionPublication{
-            ProgramRunRecord::create(std::move(data)), std::move(journal), {}, {}, std::nullopt,
-            {std::move(entry)}};
+        auto publication = ProgramTransitionPublication{ProgramRunRecord::create(std::move(data)),
+                                                        std::move(journal),
+                                                        std::move(events),
+                                                        {},
+                                                        std::nullopt,
+                                                        {std::move(entry)}};
         const auto published = transitions->compare_publish(
             owner_scope, previous->journal_head(), std::move(publication));
         if (published == ProgramTransitionPublishResult::Published ||
             published == ProgramTransitionPublishResult::AlreadyPresent) {
+            if (terminal_result && latest_command_checkpoint) {
+                std::lock_guard lock(mutex_);
+                latest_checkpoint_ = latest_command_checkpoint;
+            }
+            for (const auto& event : deferred_checkpoint_events)
+                deliver_event(event);
             return published;
         }
         // A concurrent terminal transition cannot be retried as a live
@@ -1933,6 +2140,25 @@ struct ProgramRuntime::Impl {
     void configure_child_launcher(const std::shared_ptr<detail::RunControl>& control) {
         if (!config.child_binding_resolver || !owner) return;
         const auto weak_control = std::weak_ptr<detail::RunControl>(control);
+        control->set_child_binding_validation_callback(
+            [this, weak_control](std::string_view binding_name, std::string_view operation_id) {
+                const auto parent = weak_control.lock();
+                if (!parent) throw std::runtime_error("Parent Program control expired");
+                const auto resolved = config.child_binding_resolver(
+                    parent->owner_scope, parent->program_version_id, binding_name);
+                if (!resolved)
+                    throw_runtime_diagnostic("P_CHILD_BINDING",
+                                             "Verified child binding was not resolved",
+                                             json{{"binding", std::string(binding_name)},
+                                                  {"operation_id", std::string(operation_id)}});
+                if (resolved->receipt.child_name() != binding_name)
+                    throw_runtime_diagnostic(
+                        "P_CHILD_BINDING",
+                        "Verified child binding does not match its immutable link receipt",
+                        json{{"binding", std::string(binding_name)},
+                             {"receipt_child_name", resolved->receipt.child_name()},
+                             {"operation_id", std::string(operation_id)}});
+            });
         control->set_child_launch_callback(
             [this, weak_control](std::string_view binding_name, json input,
                                  std::string_view operation_id, std::string_view execution_key) {
@@ -2388,10 +2614,18 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                 "Durable child receipt is malformed",
                 json{{"child_run_id", run_id}, {"detail", error.what()}});
         }
-    } else {
+    }
+    RunBudget parent_budget = parent_record.remaining_budget();
+    if (!existing) {
+        const auto parent_journal = impl_->config.transitions->latest(owner_scope, parent_run_id);
+        if (!parent_journal || parent_journal->id != parent_record.journal_head()) {
+            throw_runtime_diagnostic("P_CHILD_CONFLICT",
+                                     "Parent-child admission lost the transition CAS");
+        }
+        parent_budget =
+            restore_reserved_resources(parent_budget, parent_journal->inflight_reservation);
         const auto reserved = impl_->reserved_children(parent_run_id);
-        validate_child_link(*pinned, link, version, invocation, parent_record.remaining_budget(),
-                            reserved);
+        validate_child_link(*pinned, link, version, invocation, parent_budget, reserved);
         validate_invocation(*pinned, invocation, true);
     }
 
@@ -2400,8 +2634,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
 
     bool reservation_active = false;
     if (!existing) {
-        if (!impl_->reserve_child(parent_run_id, parent_record.remaining_budget(),
-                                  invocation.budget)) {
+        if (!impl_->reserve_child(parent_run_id, parent_budget, invocation.budget)) {
             throw_runtime_diagnostic("P_CHILD_BUDGET",
                                      "Child budget exceeds the parent's unspent allocation");
         }
@@ -3095,12 +3328,16 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         if (!record->invocation().parent_run_id.empty())
             global_quota = impl_->reserve_active_child(owner_scope);
 
-
+        const auto recovery_journal = impl_->config.transitions->latest(owner_scope, run_id);
+        if (!recovery_journal || recovery_journal->id != record->journal_head()) {
+            throw_runtime_diagnostic("P_RUN_RECOVERY_CONFLICT",
+                                     "Running Program recovery lost the transition CAS");
+        }
         ProgramPersistedInvocation invocation{
             record->invocation().input,
-            record->remaining_budget(),
-            record->invocation().correlation_id,
-            record->invocation().parent_run_id,
+            restore_reserved_resources(record->remaining_budget(),
+                                       recovery_journal->inflight_reservation),
+            record->invocation().correlation_id, record->invocation().parent_run_id,
             record->child_depth()};
         auto control = std::make_shared<detail::RunControl>(
             std::string(owner_scope), std::string(run_id), record->continuation().attempt,
@@ -3280,11 +3517,13 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         throw_runtime_diagnostic(pending_code, pending_message);
     }
 
-    // JavaScript control recovery consumes the pending command result into
-    // the same exact command coordinate.  The completed append is published
-    // together with the Interrupted->Running transition below; this keeps a
-    // fresh runtime from ever observing a resumed attempt without its
-    // authoritative command result.
+    // External JavaScript commands consume the submitted result into their
+    // exact durable coordinate. A safely interrupted CallCore instead keeps
+    // its Pending coordinate and resumes Core from the exact checkpoint; the
+    // command is completed only after that resumed dispatch actually returns.
+    const auto checkpoint = *previous->exact_checkpoint();
+    const auto javascript_commands =
+        impl_->config.transitions->load_javascript_commands(owner_scope, run_id);
     std::optional<JavaScriptPendingCommand> javascript_pending;
     if (const auto previous_effect = previous->pending_effect()) {
         javascript_pending = javascript_pending_command(*previous_effect);
@@ -3294,6 +3533,39 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
                 "JavaScript pending effect bundle does not match the durable run bundle");
         }
     }
+    if (!javascript_pending && previous->pending_input() && !javascript_commands.empty() &&
+        javascript_commands.back().pending()) {
+        const auto& pending_command = javascript_commands.back();
+        if (pending_command.bundle_id() != previous->bundle_id() ||
+            !pending_command.effect_identity()) {
+            throw_runtime_diagnostic(
+                "P_JS_COMMAND_JOURNAL_MISMATCH",
+                "Interrupted CallCore does not match its durable pending coordinate");
+        }
+        const auto operation_id =
+            "root.javascript." + std::to_string(pending_command.command_ordinal());
+        const auto resume_operation = javascript_call_core_operation_for_thread(
+            pending_command.command(), operation_id, run_id, checkpoint.core_generation_id,
+            checkpoint.core_thread_id);
+        if (resume_operation) {
+            const auto target = javascript_command_at_operation(pending_command.command(),
+                                                                operation_id, *resume_operation);
+            if (!target || target->kind() != JavaScriptCommandKind::CallCore ||
+                target->arguments().at("name").get<std::string>() != checkpoint.core_name) {
+                throw_runtime_diagnostic(
+                    "P_CHECKPOINT_INCOMPATIBLE",
+                    "Interrupted JavaScript CallCore target does not match its checkpoint");
+            }
+            javascript_pending = JavaScriptPendingCommand{
+                pending_command.command_ordinal(), pending_command.command(),
+                pending_command.bundle_id(), *pending_command.effect_identity(), resume_operation};
+        }
+        if (!resume_operation) {
+            throw_runtime_diagnostic("P_CHECKPOINT_INCOMPATIBLE",
+                                     "Interrupted JavaScript command has no exact CallCore "
+                                     "coordinate for its checkpoint");
+        }
+    }
 
     const auto version =
         impl_->config.catalog->resolve_version(owner_scope, previous->program_version_id());
@@ -3301,7 +3573,7 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         throw_runtime_diagnostic("P_VERSION_NOT_FOUND", "Program version was not found");
     }
     auto       pinned     = detail::CatalogRuntimeAccess::pin(*impl_->config.catalog, *version);
-    const auto checkpoint = *previous->exact_checkpoint();
+
     const auto binding_fingerprint = capability_binding_receipt_root(
         version->core_materialization_receipt().capability_bindings);
     if (pinned->bundle.id() != previous->bundle_id() ||
@@ -3314,7 +3586,8 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
     // Exercise the non-consuming lookup before the attempt CAS. The consuming
     // checks in execute_run_attempt and Core remain authoritative because the
     // checkpoint may change between this lookup and execution.
-    (void)impl_->config.checkpoints->load_by_id(checkpoint.checkpoint_id);
+    const auto stored_resume_checkpoint =
+        impl_->config.checkpoints->load_by_id(checkpoint.checkpoint_id);
 
     const auto previous_journal = impl_->config.transitions->latest(owner_scope, run_id);
     if (!previous_journal || previous_journal->id != previous->journal_head()) {
@@ -3324,13 +3597,31 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
     if (!previous->invocation().parent_run_id.empty())
         global_quota = impl_->reserve_active_child(owner_scope);
 
-
+    const bool synthetic_terminal_checkpoint =
+        stored_resume_checkpoint && stored_resume_checkpoint->metadata.is_object() &&
+        stored_resume_checkpoint->metadata.value("neograph_program", std::string{}) == "terminal";
+    const bool reconcile_javascript_command =
+        javascript_pending &&
+        (previous->pending_effect().has_value() || !javascript_pending->core_resume_operation_id ||
+         synthetic_terminal_checkpoint);
+    // The resumed attempt needs the withheld grant to replay the generator and
+    // return a reconciled result. The durable command settlement below still
+    // consumes the full reservation, so replay cannot dispatch later work.
+    const auto attempt_budget      = restore_reserved_resources(previous->remaining_budget(),
+                                                                previous_journal->inflight_reservation);
+    auto       resumed_remaining   = previous->remaining_budget();
+    auto       resumed_reservation = previous_journal->inflight_reservation;
+    if (reconcile_javascript_command) {
+        resumed_reservation = RunBudget{};
+    } else if (javascript_pending && javascript_pending->core_resume_operation_id &&
+               resumed_reservation == RunBudget{}) {
+        auto reservation    = detail::reserve_command_resources(attempt_budget);
+        resumed_remaining   = std::move(reservation.remaining);
+        resumed_reservation = std::move(reservation.reservation);
+    }
     ProgramPersistedInvocation attempt_invocation{
-        previous->invocation().input,
-        previous->remaining_budget(),
-        previous->invocation().correlation_id,
-        previous->invocation().parent_run_id,
-        previous->child_depth()};
+        previous->invocation().input, attempt_budget, previous->invocation().correlation_id,
+        previous->invocation().parent_run_id, previous->child_depth()};
     auto control = std::make_shared<detail::RunControl>(
         std::string(owner_scope), std::string(run_id), previous->continuation().attempt + 1,
         std::move(pinned), previous->binding_fingerprint(), std::move(attempt_invocation),
@@ -3344,9 +3635,10 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         if (auto parent = impl_->find_control(owner_scope, previous->invocation().parent_run_id))
             parent->attach_child(control);
     }
-    auto       journal = resumed_record(*control, *previous_journal);
-    const auto started = control->stage_event(ProgramEventKind::Started,
-                                              ProgramStartedEvent{previous->remaining_budget()});
+    auto journal =
+        resumed_record(*control, *previous_journal, resumed_remaining, resumed_reservation);
+    const auto started =
+        control->stage_event(ProgramEventKind::Started, ProgramStartedEvent{attempt_budget});
 
     ProgramRunRecordData data;
     data.owner_scope                      = std::string(owner_scope);
@@ -3358,7 +3650,7 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
     data.child_depth                      = previous->child_depth();
     data.children                       = previous->children();
     data.continuation                     = journal.continuation;
-    data.remaining_budget                 = previous->remaining_budget();
+    data.remaining_budget                 = resumed_remaining;
     data.exact_checkpoint                 = checkpoint;
     data.pending_input                    = std::move(pending_input);
     data.pending_effect                   = std::move(pending_effect);
@@ -3374,11 +3666,13 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
     data.updated_at_ms                    = journal.timestamp_ms;
 
     std::vector<ProgramJavaScriptCommandJournalEntry> command_entries;
-    if (javascript_pending) {
+    if (reconcile_javascript_command) {
         const auto entries =
             impl_->config.transitions->load_javascript_commands(owner_scope, run_id);
         command_entries.push_back(javascript_completion_entry(
-            entries, *javascript_pending, javascript_resume_terminal_result(resume_value.value)));
+            entries, *javascript_pending,
+            javascript_resume_terminal_result(resume_value.value,
+                                              previous_journal->inflight_reservation)));
     }
     auto publication = ProgramTransitionPublication{
         ProgramRunRecord::create(std::move(data)), std::move(journal), {started}, {},
@@ -3410,20 +3704,31 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         control->deliver_event(started);
     } catch (const std::exception& error) {
         detail::RunOutcome failed;
-        failed.status           = ProgramTerminalStatus::Failed;
-        failed.remaining_budget = previous->remaining_budget();
+        failed.remaining_budget = resumed_remaining;
         failed.checkpoint       = checkpoint;
-        failed.failure =
-            ProgramFailure{"P_EVENT_SINK", error.what(), "root", "", 0, json::object()};
+        if (javascript_pending && javascript_pending->core_resume_operation_id) {
+            failed.status = ProgramTerminalStatus::AmbiguousEffect;
+            failed.interrupt =
+                ProgramInterrupt{"javascript", javascript_pending->command.to_json(), std::nullopt,
+                                 javascript_command_pending_effect(*control, *javascript_pending)};
+        } else {
+            failed.status = ProgramTerminalStatus::Failed;
+            failed.failure =
+                ProgramFailure{"P_EVENT_SINK", error.what(), "root", "", 0, json::object()};
+        }
         control->complete(std::move(failed));
         return ProgramHandle(std::move(control));
     }
 
-    spawn_run_attempt(impl_->pool, control,
-                      javascript_pending ? previous->invocation().input
-                                          : std::move(resume_value.value),
-                      checkpoint.checkpoint_id, impl_->config.host_admission,
-                      impl_->config.host_admission_resolver);
+    auto attempt_input =
+        !javascript_commands.empty() ? previous->invocation().input : std::move(resume_value.value);
+    auto core_resume_value = javascript_pending && javascript_pending->core_resume_operation_id &&
+                                     !reconcile_javascript_command
+                                 ? std::optional<json>{std::move(resume_value.value)}
+                                 : std::nullopt;
+    spawn_run_attempt(impl_->pool, control, std::move(attempt_input), checkpoint.checkpoint_id,
+                      impl_->config.host_admission, impl_->config.host_admission_resolver,
+                      std::move(core_resume_value));
     return ProgramHandle(std::move(control));
 }
 
@@ -3441,7 +3746,7 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
         throw_runtime_diagnostic("P_EFFECT_NOT_AMBIGUOUS",
                                  "Program run has no pending effect to reconcile");
     }
-    const auto javascript_pending = javascript_pending_command(*pending);
+    auto javascript_pending = javascript_pending_command(*pending);
     if (javascript_pending && javascript_pending->bundle_id != previous->bundle_id()) {
         throw_runtime_diagnostic(
             "P_JS_COMMAND_JOURNAL_MISMATCH",
@@ -3474,6 +3779,39 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
     }
 
     const auto checkpoint = *previous->exact_checkpoint();
+    const auto javascript_commands =
+        impl_->config.transitions->load_javascript_commands(owner_scope, run_id);
+    if (!javascript_pending && !javascript_commands.empty() &&
+        javascript_commands.back().pending()) {
+        const auto& pending_command = javascript_commands.back();
+        if (pending_command.bundle_id() != previous->bundle_id() ||
+            !pending_command.effect_identity()) {
+            throw_runtime_diagnostic(
+                "P_JS_COMMAND_JOURNAL_MISMATCH",
+                "Interrupted CallCore does not match its durable pending coordinate");
+        }
+        const auto operation_id =
+            "root.javascript." + std::to_string(pending_command.command_ordinal());
+        const auto resume_operation = javascript_call_core_operation_for_thread(
+            pending_command.command(), operation_id, run_id, checkpoint.core_generation_id,
+            checkpoint.core_thread_id);
+        if (!resume_operation) {
+            throw_runtime_diagnostic("P_CHECKPOINT_INCOMPATIBLE",
+                                     "Interrupted JavaScript command has no exact CallCore "
+                                     "coordinate for its checkpoint");
+        }
+        const auto target = javascript_command_at_operation(pending_command.command(), operation_id,
+                                                            *resume_operation);
+        if (!target || target->kind() != JavaScriptCommandKind::CallCore ||
+            target->arguments().at("name").get<std::string>() != checkpoint.core_name) {
+            throw_runtime_diagnostic(
+                "P_CHECKPOINT_INCOMPATIBLE",
+                "Interrupted JavaScript CallCore target does not match its checkpoint");
+        }
+        javascript_pending = JavaScriptPendingCommand{
+            pending_command.command_ordinal(), pending_command.command(),
+            pending_command.bundle_id(), *pending_command.effect_identity(), resume_operation};
+    }
     const bool completed  = update.value.state() == ProgramPendingState::Consumed &&
                            update.value.reconciliation() == ProgramEffectReconciliation::Completed;
     const bool ambiguous = update.value.state() == ProgramPendingState::Ambiguous;
@@ -3527,21 +3865,33 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
     const auto next_state = completed   ? ContinuationState::Running
                             : ambiguous ? ContinuationState::AmbiguousEffect
                                         : ContinuationState::Failed;
-    auto       journal    = ProgramJournalRecord::create(ProgramJournalRecordData{
+    const bool resume_javascript_core =
+        completed && javascript_pending && javascript_pending->core_resume_operation_id;
+    const bool reconcile_javascript_command =
+        completed && javascript_pending && !javascript_pending->core_resume_operation_id;
+    const auto attempt_budget =
+        completed && !reconcile_javascript_command
+            ? restore_reserved_resources(previous->remaining_budget(),
+                                         previous_journal->inflight_reservation)
+            : previous->remaining_budget();
+    const auto resumed_remaining =
+        resume_javascript_core ? previous->remaining_budget() : attempt_budget;
+    const auto resumed_reservation = (ambiguous || resume_javascript_core)
+                                         ? previous_journal->inflight_reservation
+                                         : RunBudget{};
+    auto       journal             = ProgramJournalRecord::create(ProgramJournalRecordData{
         previous->journal_head(), std::string(run_id), previous->program_version_id(),
         previous->bundle_id(), previous_journal->sequence + 1,
-        ProgramContinuation{"root", next_state, next_attempt}, previous->remaining_budget(),
-        completed ? previous->remaining_budget() : RunBudget{}, checkpoint, now_ms()});
+        ProgramContinuation{"root", next_state, next_attempt}, resumed_remaining,
+        resumed_reservation, checkpoint, now_ms()});
 
     std::shared_ptr<detail::RunControl> live_control;
     std::optional<ProgramResult>        terminal;
     std::vector<ProgramEvent>           outbox;
     if (completed) {
-        ProgramPersistedInvocation invocation{previous->invocation().input,
-                                              previous->remaining_budget(),
-                                              previous->invocation().correlation_id,
-                                              previous->invocation().parent_run_id,
-                                              previous->child_depth()};
+        ProgramPersistedInvocation invocation{
+            previous->invocation().input, attempt_budget, previous->invocation().correlation_id,
+            previous->invocation().parent_run_id, previous->child_depth()};
         live_control = std::make_shared<detail::RunControl>(
             std::string(owner_scope), std::string(run_id), next_attempt, std::move(pinned),
             previous->binding_fingerprint(), std::move(invocation), previous->invocation(),
@@ -3556,8 +3906,8 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
                                                   previous->invocation().parent_run_id))
                 parent->attach_child(live_control);
         }
-        outbox.push_back(live_control->stage_event(
-            ProgramEventKind::Started, ProgramStartedEvent{previous->remaining_budget()}));
+        outbox.push_back(live_control->stage_event(ProgramEventKind::Started,
+                                                   ProgramStartedEvent{attempt_budget}));
     } else {
         ProgramResultData result_data;
         result_data.status =
@@ -3603,7 +3953,7 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
     data.child_depth                      = previous->child_depth();
     data.children                       = previous->children();
     data.continuation                     = journal.continuation;
-    data.remaining_budget                 = previous->remaining_budget();
+    data.remaining_budget                 = resumed_remaining;
     data.exact_checkpoint                 = checkpoint;
     data.pending_input                    = previous->pending_input();
     data.pending_effect                   = update.value;
@@ -3620,12 +3970,13 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
     data.updated_at_ms                    = journal.timestamp_ms;
 
     std::vector<ProgramJavaScriptCommandJournalEntry> command_entries;
-    if (completed && javascript_pending) {
+    if (reconcile_javascript_command) {
         const auto entries =
             impl_->config.transitions->load_javascript_commands(owner_scope, run_id);
         command_entries.push_back(javascript_completion_entry(
             entries, *javascript_pending,
-            javascript_resume_terminal_result(*resolution.result)));
+            javascript_resume_terminal_result(*resolution.result,
+                                              previous_journal->inflight_reservation)));
     }
     const auto published = impl_->config.transitions->compare_publish(
         owner_scope, previous->journal_head(),
@@ -3666,18 +4017,29 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
         live_control->deliver_event(outbox.front());
     } catch (const std::exception& error) {
         detail::RunOutcome failure;
-        failure.status           = ProgramTerminalStatus::Failed;
-        failure.remaining_budget = previous->remaining_budget();
+        failure.remaining_budget = resumed_remaining;
         failure.checkpoint       = checkpoint;
-        failure.failure =
-            ProgramFailure{"P_EVENT_SINK", error.what(), "root", "", 0, json::object()};
+        if (resume_javascript_core) {
+            failure.status    = ProgramTerminalStatus::AmbiguousEffect;
+            failure.interrupt = ProgramInterrupt{
+                "javascript", javascript_pending->command.to_json(), std::nullopt,
+                javascript_command_pending_effect(*live_control, *javascript_pending)};
+        } else {
+            failure.status = ProgramTerminalStatus::Failed;
+            failure.failure =
+                ProgramFailure{"P_EVENT_SINK", error.what(), "root", "", 0, json::object()};
+        }
         live_control->complete(std::move(failure));
         return ProgramHandle(std::move(live_control));
     }
-    spawn_run_attempt(impl_->pool, live_control,
-                      javascript_pending ? previous->invocation().input : *resolution.result,
-                      checkpoint.checkpoint_id,
-                      impl_->config.host_admission, impl_->config.host_admission_resolver);
+    auto attempt_input =
+        !javascript_commands.empty() ? previous->invocation().input : *resolution.result;
+    auto core_resume_value = javascript_pending && javascript_pending->core_resume_operation_id
+                                 ? std::optional<json>{*resolution.result}
+                                 : std::nullopt;
+    spawn_run_attempt(impl_->pool, live_control, std::move(attempt_input), checkpoint.checkpoint_id,
+                      impl_->config.host_admission, impl_->config.host_admission_resolver,
+                      std::move(core_resume_value));
     return ProgramHandle(std::move(live_control));
 }
 

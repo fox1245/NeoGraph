@@ -329,21 +329,34 @@ if(NEOGRAPH_BUILD_QUICKJS_CONTROL AND WIN32)
 endif()
 
 if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+    # Compile through source wrappers that apply a private C symbol prefix
+    # before the pristine pinned sources are preprocessed. This is portable
+    # across object formats and prevents static consumers from capturing (or
+    # colliding with) another QuickJS engine; visibility alone only protects
+    # the shared-library export table.
+    set(_neograph_quickjs_wrapper_dir ${DEPS_DIR}/quickjs/neograph)
     add_library(neograph_quickjs OBJECT
-        ${DEPS_DIR}/quickjs/quickjs.c
-        ${DEPS_DIR}/quickjs/cutils.c
-        ${DEPS_DIR}/quickjs/dtoa.c
-        ${DEPS_DIR}/quickjs/libregexp.c
-        ${DEPS_DIR}/quickjs/libunicode.c
+        ${_neograph_quickjs_wrapper_dir}/quickjs.c
+        ${_neograph_quickjs_wrapper_dir}/cutils.c
+        ${_neograph_quickjs_wrapper_dir}/dtoa.c
+        ${_neograph_quickjs_wrapper_dir}/libregexp.c
+        ${_neograph_quickjs_wrapper_dir}/libunicode.c
     )
-    target_include_directories(neograph_quickjs PRIVATE ${DEPS_DIR}/quickjs)
+    target_include_directories(neograph_quickjs PRIVATE
+        ${_neograph_quickjs_wrapper_dir}
+        ${DEPS_DIR}/quickjs)
     target_compile_definitions(neograph_quickjs PRIVATE
         CONFIG_VERSION=\"2026-06-04\")
     set_target_properties(neograph_quickjs PROPERTIES
         C_STANDARD 11
         C_STANDARD_REQUIRED ON
         C_EXTENSIONS ON
-        POSITION_INDEPENDENT_CODE ON)
+        POSITION_INDEPENDENT_CODE ON
+        # CMP0063 is NEW through cmake_minimum_required(3.16), so the
+        # object files retain hidden C visibility when absorbed into a
+        # shared neograph_program. Public NeoGraph APIs are C++ symbols
+        # explicitly exported through the component API macros and remain unaffected.
+        C_VISIBILITY_PRESET hidden)
     function(_neograph_attach_quickjs_runtime target)
         target_sources(${target} PRIVATE $<TARGET_OBJECTS:neograph_quickjs>)
         target_link_libraries(${target} PRIVATE Threads::Threads)
@@ -577,7 +590,8 @@ if(NEOGRAPH_BUILD_PROGRAM)
     endif()
     target_link_libraries(neograph_program PUBLIC neograph_core)
     if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
-        target_include_directories(neograph_program PRIVATE ${DEPS_DIR}/quickjs)
+        target_include_directories(neograph_program PRIVATE
+            ${_neograph_quickjs_wrapper_dir})
         target_compile_definitions(neograph_program PRIVATE NEOGRAPH_PROGRAM_HAS_QUICKJS=1)
         _neograph_attach_quickjs_runtime(neograph_program)
     endif()
@@ -1739,7 +1753,7 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
         add_executable(bench_quickjs_primitives
             benchmarks/bench_quickjs_primitives.cpp)
         target_include_directories(bench_quickjs_primitives PRIVATE
-            ${DEPS_DIR}/quickjs)
+            ${_neograph_quickjs_wrapper_dir})
         target_compile_features(bench_quickjs_primitives PRIVATE cxx_std_17)
         _neograph_attach_quickjs_runtime(bench_quickjs_primitives)
     endif()

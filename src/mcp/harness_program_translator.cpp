@@ -2,6 +2,7 @@
 #include <neograph/mcp/json_schema.h>
 
 #include "../program/canonical_json.h"
+#include "../program/javascript.h"
 
 #include <algorithm>
 #include <array>
@@ -166,6 +167,8 @@ std::uint64_t effective_budget(const json&   request,
 void validate_defaults(const HarnessTranslationDefaults& defaults) {
     if (defaults.timeout_seconds == 0 || defaults.timeout_seconds > 86400 ||
         defaults.max_parallel_workers == 0 || defaults.max_parallel_workers > 64 ||
+        defaults.max_program_operations == 0 ||
+        defaults.max_program_operations == std::numeric_limits<std::uint64_t>::max() ||
         defaults.max_core_steps == 0 || defaults.max_core_steps > 1000 ||
         defaults.max_worker_retries > 5 || defaults.provider_timeout_seconds == 0 ||
         defaults.provider_timeout_seconds > 600 || defaults.max_output_tokens == 0 ||
@@ -272,6 +275,12 @@ json core_output_schema() {
     };
 }
 
+bool javascript_exports_runtime_main(const program::ProgramSource& source) {
+    return program::detail::evaluate_javascript_source(source,
+                                                       program::ProgramCompilerConfig{}.javascript)
+        .has_control_generator;
+}
+
 std::optional<json> registry_metadata(const program::RegistrySnapshot& registry,
                                       program::ExecutableKind          kind,
                                       std::string_view                 name) {
@@ -338,6 +347,7 @@ std::map<std::string, CatalogTool> validate_tool_catalog(
 struct EffectiveLimits {
     std::uint64_t timeout_seconds;
     std::uint32_t max_parallel_workers;
+    std::uint64_t max_program_operations;
     std::uint64_t max_core_steps;
     std::uint32_t max_worker_retries;
     std::uint64_t provider_timeout_seconds;
@@ -352,6 +362,8 @@ EffectiveLimits effective_limits(const json&                                    
         effective_budget(request, "timeout_seconds", defaults.timeout_seconds, 1, 86400),
         static_cast<std::uint32_t>(effective_budget(request, "max_parallel_workers",
                                                     defaults.max_parallel_workers, 1, 64)),
+        effective_budget(request, "max_program_operations", defaults.max_program_operations, 1,
+                         defaults.max_program_operations),
         effective_budget(request, "max_steps", defaults.max_core_steps, 1, 1000),
         static_cast<std::uint32_t>(
             effective_budget(request, "max_worker_retries", defaults.max_worker_retries, 0, 5)),
@@ -365,6 +377,8 @@ EffectiveLimits effective_limits(const json&                                    
         const auto& retry = contract->spec().retry_policy;
         result.max_worker_retries =
             std::min<std::uint32_t>(result.max_worker_retries, retry.max_attempts - 1);
+        result.max_program_operations =
+            std::min(result.max_program_operations, retry.max_program_operations);
     }
     return result;
 }
@@ -499,11 +513,8 @@ program::RunBudget derive_budget(const json&                                    
                                  const HarnessTranslationDefaults&               defaults,
                                  const std::optional<program::ContractManifest>& contract) {
     auto wall_time_ms = checked_mul(limits.timeout_seconds, 1000, "/budgets/timeout_seconds");
-    auto max_program_operations = std::uint64_t{1};
-    if (contract) {
+    if (contract)
         wall_time_ms = std::min(wall_time_ms, contract->spec().retry_policy.max_wall_time_ms);
-        max_program_operations = contract->spec().retry_policy.max_program_operations;
-    }
     std::uint64_t model_tokens = 0;
     if (core.contains("nodes") && core["nodes"].is_object()) {
         for (const auto& [name, node] : core["nodes"].items()) {
@@ -530,8 +541,8 @@ program::RunBudget derive_budget(const json&                                    
     return {wall_time_ms,
             model_tokens,
             defaults.monetary_microunits,
-            1,
-            max_program_operations,
+            limits.max_parallel_workers,
+            limits.max_program_operations,
             limits.max_core_steps,
             0,
             0,
@@ -667,6 +678,7 @@ json harness_program_request_schema() {
                 "max_steps":{"type":"integer"},
                 "timeout_seconds":{"type":"integer"},
                 "max_parallel_workers":{"type":"integer"},
+                "max_program_operations":{"type":"integer"},
                 "max_worker_retries":{"type":"integer"},
                 "provider_timeout_seconds":{"type":"integer"},
                 "max_output_tokens":{"type":"integer"}
@@ -776,12 +788,21 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
     const auto budget = derive_budget(core, limits, defaults, contract);
     const auto source_id =
         authored_source ? authored_source->source_id() : defaults.source_id_prefix + ":" + mode;
+    const program::ContractRecord input_contract{1, input_contract_schema()};
+    const bool                    has_runtime_main =
+        authored_source && javascript_exports_runtime_main(*authored_source);
+    const program::ContractRecord output_contract{
+        1, has_runtime_main ? final_output_schema() : core_output_schema()};
     json document = json::object();
     if (!authored_source) {
         document = {
             {"program_schema_version", 1},
-            {"input_contract", {{"schema_version", 1}, {"schema", input_contract_schema()}}},
-            {"output_contract", {{"schema_version", 1}, {"schema", core_output_schema()}}},
+            {"input_contract",
+             {{"schema_version", input_contract.schema_version},
+              {"schema", input_contract.schema}}},
+            {"output_contract",
+             {{"schema_version", output_contract.schema_version},
+              {"schema", output_contract.schema}}},
             {"root",
              {{"op", "call_core"}, {"name", core.at("name")}, {"definition", std::move(core)}}},
             {"declared_budget_requirements", budget_records(budget)},
@@ -856,7 +877,13 @@ HarnessTranslation HarnessRequestTranslator::translate(const json&              
                                                        : program::ProgramSource::from_cpp_builder(
                                         source_id, 1, std::move(document), {}, std::move(map));
     HarnessInvocationTemplate invocation_template{{{"task", std::move(task)}}, budget};
-    return {std::move(source), std::move(invocation_template), std::move(wire), std::move(bindings),
+    return {std::move(source),
+            std::move(invocation_template),
+            input_contract,
+            output_contract,
+            workers,
+            std::move(wire),
+            std::move(bindings),
             contract};
 }
 
@@ -950,7 +977,8 @@ HarnessProgramSnapshots build_harness_program_snapshots(HarnessProgramSnapshotCo
         .mode(config.admission_mode)
         .max_program_schema_version(1)
         .allow_source_kind(program::SourceKind::CppBuilder)
-        .allow_source_kind(program::SourceKind::JavaScript);
+        .allow_source_kind(program::SourceKind::JavaScript)
+        .minimum_execution_guarantee(program::ExecutionGuarantee::Unmanaged);
     bool brokered = false;
     bool trusted  = false;
     for (const auto& identity : registry.identities()) {
@@ -968,7 +996,8 @@ HarnessProgramSnapshots build_harness_program_snapshots(HarnessProgramSnapshotCo
         .semantic_version(std::move(config.policy_semantic_version))
         .owner_scope(std::move(config.owner_scope))
         .admission_profile(admission)
-        .budget_ceiling(config.budget_ceiling);
+        .budget_ceiling(config.budget_ceiling)
+        .minimum_execution_guarantee(program::ExecutionGuarantee::Unmanaged);
     for (auto& capability : config.allowed_capabilities)
         policy_builder.allow_capability(std::move(capability));
     for (auto& effect : config.allowed_effects)

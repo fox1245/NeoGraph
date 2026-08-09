@@ -38,6 +38,10 @@ public:
                                                        std::uint64_t after) const override {
         return inner_->load_effects(owner, run, after);
     }
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+        std::string_view owner, std::string_view run, std::uint64_t after) const override {
+        return inner_->load_javascript_commands(owner, run, after);
+    }
     std::optional<MigrationPlan> load_migration_plan(std::string_view owner,
                                                      std::string_view run) const override {
         return inner_->load_migration_plan(owner, run);

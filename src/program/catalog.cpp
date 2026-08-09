@@ -230,6 +230,38 @@ bool contains_identity(const std::vector<ExecutableIdentity>& values,
                        const ExecutableIdentity&              wanted) {
     return std::find(values.begin(), values.end(), wanted) != values.end();
 }
+std::map<std::uint32_t, detail::AdmittedNativeControlBinding> seal_native_bindings(
+    const RegistrySnapshot&                      registry,
+    const std::vector<ExecutableIdentity>&       closure,
+    const std::vector<CapabilityBindingReceipt>& receipts) {
+    std::map<std::uint32_t, detail::AdmittedNativeControlBinding> result;
+    for (auto native : detail::RegistrySnapshotAccess::native_bindings(registry)) {
+        if (!contains_identity(closure, native.executable)) continue;
+        const auto manifest = registry.find(native.executable.kind, native.executable.name);
+        if (!manifest || manifest->identity != native.executable ||
+            manifest->effect_mode != EffectMode::TrustedNative) {
+            throw std::logic_error(
+                "In-process native control bindings require a TrustedNative executable");
+        }
+        const auto receipt = std::find_if(receipts.begin(), receipts.end(),
+                                          [&](const CapabilityBindingReceipt& candidate) {
+                                              return candidate.executable == native.executable;
+                                          });
+        if (receipt == receipts.end() || !native.binding.valid()) {
+            throw std::logic_error(
+                "Admitted native control binding lacks its exact capability receipt");
+        }
+        const auto [ignored, inserted] = result.emplace(
+            native.import_slot, detail::AdmittedNativeControlBinding{native.import_slot, *receipt,
+                                                                     std::move(native.binding)});
+        (void)ignored;
+        if (!inserted) {
+            throw std::logic_error(
+                "Admitted native control bindings contain a duplicate import slot");
+        }
+    }
+    return result;
+}
 
 bool contains_string(const std::vector<std::string>& values, std::string_view wanted) {
     return std::find(values.begin(), values.end(), wanted) != values.end();
@@ -1246,6 +1278,20 @@ ProgramVersion ProgramCatalog::materialize(
                                 identity_json(identity));
             }
         }
+        for (const auto& native :
+             detail::RegistrySnapshotAccess::native_bindings(impl_->registry)) {
+            if (!contains_identity(closure->identities, native.executable)) continue;
+            const auto manifest =
+                impl_->registry.find(native.executable.kind, native.executable.name);
+            if (!manifest || manifest->identity != native.executable ||
+                manifest->effect_mode != EffectMode::TrustedNative) {
+                diagnostics.add(
+                    "P_ADMIT_NATIVE_BOUNDARY", "/executable_registry_identities",
+                    "In-process native control bindings require TrustedNative execution; "
+                    "Brokered multi-tenant execution requires a killable process boundary",
+                    identity_json(native.executable));
+            }
+        }
         for (const auto mode : closure->modes) {
             if (!contains_effect_mode(profile_modes, mode)) {
                 diagnostics.add("P_ADMIT_POLICY", "/executable_registry_identities",
@@ -1476,8 +1522,10 @@ ProgramVersion ProgramCatalog::materialize(
         }
     }
 
+    auto native_bindings =
+        seal_native_bindings(impl_->registry, closure->identities, binding.receipts);
     auto materialized = std::make_shared<detail::MaterializedProgram>(
-        detail::MaterializedProgram{bundle, version, generation});
+        detail::MaterializedProgram{bundle, version, generation, std::move(native_bindings)});
     if (isolate_binding) {
         if (isolated_materialization) *isolated_materialization = materialized;
     } else {

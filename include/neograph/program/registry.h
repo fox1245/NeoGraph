@@ -130,8 +130,21 @@ public:
     RegistrySnapshotBuilder& add_tool(ExecutableManifest manifest, ToolMetadata metadata);
     RegistrySnapshotBuilder& add_imported(ExecutableManifest         manifest,
                                           ImportedExecutableMetadata metadata);
+    /** Register a native callable for direct lookup without granting a JavaScript slot. */
     RegistrySnapshotBuilder& add_native(ExecutableManifest manifest, NativeControlBinding binding) &;
     RegistrySnapshotBuilder&& add_native(ExecutableManifest manifest, NativeControlBinding binding) &&;
+    /**
+     * Seal a native binding to one non-built-in JavaScript import slot.
+     *
+     * The slot participates in the RegistrySnapshot fingerprint and is the
+     * only authority accepted by `ng.hostCapability(slot, ...)` at runtime.
+     */
+    RegistrySnapshotBuilder&  add_native(std::uint32_t        import_slot,
+                                         ExecutableManifest   manifest,
+                                         NativeControlBinding binding) &;
+    RegistrySnapshotBuilder&& add_native(std::uint32_t        import_slot,
+                                         ExecutableManifest   manifest,
+                                         NativeControlBinding binding) &&;
 
     RegistrySnapshot build() &&;
 

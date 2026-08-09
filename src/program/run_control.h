@@ -54,6 +54,7 @@ class RunControl;
 using ChildLaunchCallback =
     std::function<std::shared_ptr<RunControl>(std::string_view, json, std::string_view,
                                               std::string_view)>;
+using ChildBindingValidationCallback = std::function<void(std::string_view, std::string_view)>;
 
 class RunControl final : public std::enable_shared_from_this<RunControl> {
 private:
@@ -88,6 +89,7 @@ public:
      */
     void add_terminal_cleanup(TerminalCleanup cleanup);
     void set_child_launch_callback(ChildLaunchCallback callback) noexcept;
+    void set_child_binding_validation_callback(ChildBindingValidationCallback callback) noexcept;
 
     const std::string                                owner_scope;
     const std::string                                run_id;
@@ -121,6 +123,7 @@ public:
                                              json             input,
                                              std::string_view operation_id,
                                              std::string_view execution_key) const;
+    void validate_child_binding(std::string_view binding_name, std::string_view operation_id) const;
 
     ProgramEvent stage_event(ProgramEventKind kind, ProgramEventPayload payload);
     ProgramEvent stage_event(std::string_view operation_id,
@@ -139,10 +142,11 @@ public:
      */
     ProgramTransitionPublishResult publish_javascript_command(
         std::uint64_t              command_ordinal,
-        JavaScriptCommand           command,
+        JavaScriptCommand          command,
         std::optional<std::string> effect_identity,
-        std::optional<json>         terminal_result,
-        std::optional<RunBudget>    remaining_budget = std::nullopt);
+        std::optional<json>        terminal_result,
+        std::optional<RunBudget>   remaining_budget     = std::nullopt,
+        std::optional<RunBudget>   inflight_reservation = std::nullopt);
     ProgramEvent make_event(std::string_view operation_id,
                             ProgramEventKind kind,
                             ProgramEventPayload payload);
@@ -180,15 +184,24 @@ public:
     mutable std::vector<AsyncWaiter>        waiters_;
     std::vector<TerminalCleanup>           terminal_cleanups_;
     ChildLaunchCallback                   child_launch_callback_;
+    ChildBindingValidationCallback          child_binding_validation_callback_;
     std::uint64_t                         next_sequence_      = 1;
     CancellationCause                     cancellation_cause_ = CancellationCause::None;
     bool                                  terminal_decided_   = false;
     bool                                  completion_claimed_ = false;
     std::vector<std::weak_ptr<RunControl>> children_;
 };
+struct CommandBudgetReservation {
+    RunBudget remaining;
+    RunBudget reservation;
+};
 
-asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
-                                          json                        input,
-                                          std::optional<std::string>  checkpoint_id);
+CommandBudgetReservation reserve_command_resources(RunBudget available) noexcept;
+
+asio::awaitable<void> execute_run_attempt(
+    std::shared_ptr<RunControl> control,
+    json                        input,
+    std::optional<std::string>  checkpoint_id,
+    std::optional<json>         javascript_core_resume_value = std::nullopt);
 
 }  // namespace neograph::program::detail

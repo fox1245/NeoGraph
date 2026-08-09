@@ -6,6 +6,7 @@
 #include <array>
 #include <initializer_list>
 #include <limits>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <utility>
@@ -17,6 +18,75 @@ namespace {
 constexpr std::array<std::string_view, 8> kCommandNames = {
     "call_core", "spawn", "await", "join", "emit", "checkpoint", "cancel_scope",
     "host_capability"};
+
+struct CommandStructureStats {
+    std::size_t depth   = 1;
+    std::size_t members = 0;
+};
+
+struct CommandStructureFrame {
+    JavaScriptCommandKind kind;
+    json                  arguments;
+    std::size_t           depth;
+};
+
+std::optional<CommandStructureFrame> nested_command_frame(const json& value, std::size_t depth) {
+    if (!value.is_object() || !value.contains("kind") || !value.at("kind").is_string() ||
+        !value.contains("arguments") || !value.at("arguments").is_object())
+        return std::nullopt;
+    const auto name  = value.at("kind").get<std::string>();
+    const auto found = std::find(kCommandNames.begin(), kCommandNames.end(), name);
+    if (found == kCommandNames.end()) return std::nullopt;
+    return CommandStructureFrame{
+        static_cast<JavaScriptCommandKind>(std::distance(kCommandNames.begin(), found)),
+        value.at("arguments"), depth};
+}
+
+[[noreturn]] void throw_command_depth_limit() {
+    throw std::invalid_argument("JavaScript command exceeds maximum structured nesting depth");
+}
+
+[[noreturn]] void throw_command_member_limit() {
+    throw std::invalid_argument("JavaScript command exceeds maximum aggregate member count");
+}
+
+CommandStructureStats preflight_command_structure(JavaScriptCommandKind root_kind,
+                                                  const json&           root_arguments) {
+    std::vector<CommandStructureFrame> pending;
+    pending.push_back({root_kind, root_arguments, 1});
+    CommandStructureStats stats;
+    while (!pending.empty()) {
+        const auto frame = pending.back();
+        pending.pop_back();
+        if (frame.depth > JAVASCRIPT_COMMAND_MAX_STRUCTURED_DEPTH) throw_command_depth_limit();
+        if (stats.members >= JAVASCRIPT_COMMAND_MAX_AGGREGATE_MEMBERS) throw_command_member_limit();
+        ++stats.members;
+        stats.depth = std::max(stats.depth, frame.depth);
+        if (!frame.arguments.is_object()) continue;
+
+        if (frame.kind == JavaScriptCommandKind::Await) {
+            const auto child = frame.arguments.find("command");
+            if (child != frame.arguments.end()) {
+                if (auto nested = nested_command_frame(*child, frame.depth + 1))
+                    pending.push_back(*nested);
+            }
+            continue;
+        }
+        if (frame.kind != JavaScriptCommandKind::Join) continue;
+        const auto members = frame.arguments.find("members");
+        if (members == frame.arguments.end()) continue;
+        const auto member_values = *members;
+        if (!member_values.is_array()) continue;
+        const auto remaining = JAVASCRIPT_COMMAND_MAX_AGGREGATE_MEMBERS - stats.members;
+        if (pending.size() > remaining || member_values.size() > remaining - pending.size())
+            throw_command_member_limit();
+        for (const auto& member : member_values) {
+            if (auto nested = nested_command_frame(member, frame.depth + 1))
+                pending.push_back(*nested);
+        }
+    }
+    return stats;
+}
 
 std::string require_string(const json& value, std::string_view field) {
     const auto key = std::string(field);
@@ -194,9 +264,11 @@ JavaScriptCommandKind javascript_command_kind_from_string(std::string_view value
 }
 
 struct JavaScriptCommand::Impl {
-    std::uint32_t         protocol_version = PROTOCOL_VERSION;
-    JavaScriptCommandKind kind             = JavaScriptCommandKind::CallCore;
-    std::uint32_t         import_slot      = 0;
+    std::uint32_t         protocol_version  = PROTOCOL_VERSION;
+    JavaScriptCommandKind kind              = JavaScriptCommandKind::CallCore;
+    std::uint32_t         import_slot       = 0;
+    std::size_t           structured_depth  = 1;
+    std::size_t           aggregate_members = 1;
     std::string           source_site;
     json                  arguments;
 };
@@ -217,16 +289,19 @@ JavaScriptCommand JavaScriptCommand::make(std::uint32_t         protocol_version
     validate_site(source_site);
     if (!arguments.is_object())
         throw std::invalid_argument("JavaScript command arguments must be an object");
+    const auto structure       = preflight_command_structure(kind, arguments);
     auto owned_arguments = detail::owned_json_copy(arguments);
     validate_arguments(kind, owned_arguments);
     (void)detail::canonical_json_bytes(owned_arguments);
 
-    auto impl              = std::make_shared<Impl>();
-    impl->protocol_version = protocol_version;
-    impl->kind             = kind;
-    impl->import_slot      = import_slot;
-    impl->source_site      = std::move(source_site);
-    impl->arguments        = std::move(owned_arguments);
+    auto impl               = std::make_shared<Impl>();
+    impl->protocol_version  = protocol_version;
+    impl->kind              = kind;
+    impl->import_slot       = import_slot;
+    impl->structured_depth  = structure.depth;
+    impl->aggregate_members = structure.members;
+    impl->source_site       = std::move(source_site);
+    impl->arguments         = std::move(owned_arguments);
     return JavaScriptCommand(std::move(impl));
 }
 
@@ -240,8 +315,8 @@ JavaScriptCommand JavaScriptCommand::from_json(const json& value) {
     validate_site(source_site);
     if (!value.at("arguments").is_object())
         throw std::invalid_argument("JavaScript command arguments must be an object");
-    auto result = make(protocol_version, kind, import_slot, source_site,
-                       detail::owned_json_copy(value.at("arguments")));
+    (void)preflight_command_structure(kind, value.at("arguments"));
+    auto result = make(protocol_version, kind, import_slot, source_site, value.at("arguments"));
     const auto canonical = detail::canonical_json_bytes(value);
     if (canonical != detail::canonical_json_bytes(result.to_json()))
         throw std::invalid_argument("JavaScript command is not canonical");
@@ -268,6 +343,10 @@ JavaScriptCommand JavaScriptCommand::spawn(std::string source_site,
 JavaScriptCommand JavaScriptCommand::await(std::string source_site,
                                            JavaScriptCommand child,
                                            std::uint64_t timeout_ms) {
+    if (child.impl_->structured_depth >= JAVASCRIPT_COMMAND_MAX_STRUCTURED_DEPTH)
+        throw_command_depth_limit();
+    if (child.impl_->aggregate_members >= JAVASCRIPT_COMMAND_MAX_AGGREGATE_MEMBERS)
+        throw_command_member_limit();
     json arguments{{"command", child.to_json()}};
     if (timeout_ms != 0) arguments["timeout_ms"] = timeout_ms;
     return make(PROTOCOL_VERSION, JavaScriptCommandKind::Await,
@@ -280,6 +359,15 @@ JavaScriptCommand JavaScriptCommand::join(std::string                    source_
                                           std::uint64_t                  required_successes,
                                           std::uint64_t                  max_in_flight,
                                           std::string                    failure_policy) {
+    std::size_t aggregate_members = 1;
+    for (const auto& member : members) {
+        if (member.impl_->aggregate_members >
+            JAVASCRIPT_COMMAND_MAX_AGGREGATE_MEMBERS - aggregate_members)
+            throw_command_member_limit();
+        aggregate_members += member.impl_->aggregate_members;
+        if (member.impl_->structured_depth >= JAVASCRIPT_COMMAND_MAX_STRUCTURED_DEPTH)
+            throw_command_depth_limit();
+    }
     json encoded_members = json::array();
     for (const auto& member : members) encoded_members.push_back(member.to_json());
     json arguments{{"mode", std::move(mode)}, {"members", std::move(encoded_members)}};

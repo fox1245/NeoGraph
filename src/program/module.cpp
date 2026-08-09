@@ -3,6 +3,7 @@
 #include "canonical_json.h"
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <set>
@@ -690,16 +691,28 @@ std::uint64_t budget_value(const BudgetLimits& budget, std::string_view resource
     return 0;
 }
 
+template <typename Value>
+void checked_add_budget_field(Value& total, Value value, std::string_view field) {
+    if (value > std::numeric_limits<Value>::max() - total) {
+        throw std::invalid_argument("Child budget aggregation overflows " + std::string(field));
+    }
+    total += value;
+}
+
 void add_budget(BudgetLimits& total, const BudgetLimits& value) {
-    total.wall_time_ms += value.wall_time_ms;
-    total.model_tokens += value.model_tokens;
-    total.monetary_microunits += value.monetary_microunits;
-    total.max_concurrency += value.max_concurrency;
-    total.max_program_operations += value.max_program_operations;
-    total.max_core_steps += value.max_core_steps;
-    total.max_dynamic_compiles += value.max_dynamic_compiles;
-    total.max_child_depth += value.max_child_depth;
-    total.max_total_children += value.max_total_children;
+    checked_add_budget_field(total.wall_time_ms, value.wall_time_ms, "wall_time_ms");
+    checked_add_budget_field(total.model_tokens, value.model_tokens, "model_tokens");
+    checked_add_budget_field(total.monetary_microunits, value.monetary_microunits,
+                             "monetary_microunits");
+    checked_add_budget_field(total.max_concurrency, value.max_concurrency, "max_concurrency");
+    checked_add_budget_field(total.max_program_operations, value.max_program_operations,
+                             "max_program_operations");
+    checked_add_budget_field(total.max_core_steps, value.max_core_steps, "max_core_steps");
+    checked_add_budget_field(total.max_dynamic_compiles, value.max_dynamic_compiles,
+                             "max_dynamic_compiles");
+    total.max_child_depth = std::max(total.max_child_depth, value.max_child_depth);
+    checked_add_budget_field(total.max_total_children, value.max_total_children,
+                             "max_total_children");
 }
 
 }  // namespace
@@ -795,7 +808,10 @@ void validate_program_composition(const ProgramBundle& parent_bundle,
             found->second->maximum > MAX_SUPPORTED_CHILD_DEPTH)
             throw std::invalid_argument("Child depth exceeds the supported hard ceiling");
         if (resource == std::string_view("max_child_depth")) {
-            if (found->second->maximum < 1) throw std::invalid_argument("Child depth is not admitted");
+            if (found->second->maximum < 1)
+                throw std::invalid_argument("Child depth is not admitted");
+            if (found->second->maximum < aggregate.max_child_depth)
+                throw std::invalid_argument("Child budget exceeds the parent allocation");
         } else if (resource == std::string_view("max_total_children")) {
             if (found->second->maximum < composition.parent.children().size())
                 throw std::invalid_argument("Child count exceeds the parent allocation");

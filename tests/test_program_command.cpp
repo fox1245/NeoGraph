@@ -4,6 +4,7 @@
 
 #include <limits>
 #include <string>
+#include <utility>
 
 namespace neograph::program {
 namespace {
@@ -66,6 +67,43 @@ TEST(JavaScriptCommandTest, RejectsNonCanonicalAndForgedNestedMembers) {
     EXPECT_EQ(capability.kind(), JavaScriptCommandKind::HostCapability);
     EXPECT_EQ(capability.import_slot(), 42U);
     EXPECT_EQ(JavaScriptCommand::from_json(capability.to_json()), capability);
+}
+
+TEST(JavaScriptCommandTest, RejectsStructuredDepthBeforeRecursiveDecoding) {
+    json encoded = JavaScriptCommand::call_core("main:leaf", "main", json::object()).to_json();
+    for (std::size_t depth = 1; depth <= JAVASCRIPT_COMMAND_MAX_STRUCTURED_DEPTH; ++depth) {
+        encoded = json{{"protocol_version", JAVASCRIPT_COMMAND_PROTOCOL_VERSION},
+                       {"kind", "await"},
+                       {"import_slot", JAVASCRIPT_IMPORT_SLOT_AWAIT},
+                       {"source_site", "main:await"},
+                       {"arguments", json{{"command", std::move(encoded)}}}};
+    }
+
+    try {
+        (void)JavaScriptCommand::from_json(encoded);
+        FAIL() << "expected structured-depth rejection";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_STREQ(error.what(), "JavaScript command exceeds maximum structured nesting depth");
+    }
+}
+
+TEST(JavaScriptCommandTest, RejectsAggregateJoinMembersBeforeRecursiveDecoding) {
+    const auto leaf = JavaScriptCommand::call_core("main:leaf", "main", json::object()).to_json();
+    json       members = json::array();
+    for (std::size_t index = 0; index < JAVASCRIPT_COMMAND_MAX_AGGREGATE_MEMBERS; ++index)
+        members.push_back(leaf);
+    const json encoded{{"protocol_version", JAVASCRIPT_COMMAND_PROTOCOL_VERSION},
+                       {"kind", "join"},
+                       {"import_slot", JAVASCRIPT_IMPORT_SLOT_JOIN},
+                       {"source_site", "main:join"},
+                       {"arguments", json{{"mode", "all"}, {"members", std::move(members)}}}};
+
+    try {
+        (void)JavaScriptCommand::from_json(encoded);
+        FAIL() << "expected aggregate-member rejection";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_STREQ(error.what(), "JavaScript command exceeds maximum aggregate member count");
+    }
 }
 
 }  // namespace

@@ -78,6 +78,15 @@ public:
      * conservative generic budget before admission.
      */
     ProgramBundle compile(const ProgramSource& source, const RunBudget& javascript_budget) const;
+    /**
+     * Compile JavaScript under one exact host-owned runtime budget and
+     * invocation/result contract pair. Host values replace source-authored
+     * declarations before parsing and admission.
+     */
+    ProgramBundle compile(const ProgramSource&  source,
+                          const RunBudget&      javascript_budget,
+                          const ContractRecord& input_contract,
+                          const ContractRecord& output_contract) const;
     /** Compile only when the source imports exactly one verified module closure. */
     ProgramBundle compile(const ProgramSource& source, const ModuleResolution& resolution) const;
 

@@ -301,8 +301,13 @@ double elapsed_us(Clock::time_point started) {
     return std::chrono::duration<double, std::micro>(Clock::now() - started).count();
 }
 
-void require_command(const neograph::program::detail::JavaScriptGeneratorStep& step) {
-    if (step.done || !step.value.is_object() || step.value.value("op", "") != "call_core")
+void require_command(const neograph::program::detail::JavaScriptGeneratorStep& step,
+                     bool                                                      host_bridge) {
+    const bool valid =
+        host_bridge
+            ? step.command.has_value() && step.command->kind() == JavaScriptCommandKind::CallCore
+            : step.value.is_object() && step.value.value("op", "") == "call_core";
+    if (step.done || !valid)
         throw std::runtime_error("generator benchmark did not yield call_core");
 }
 
@@ -347,16 +352,16 @@ void benchmark_generator(std::string_view case_id, std::size_t iterations, bool 
         const auto started = Clock::now();
         const auto step    = generator->next();
         const auto value   = elapsed_us(started);
-        require_command(step);
+        require_command(step, host_bridge);
         print_sample(case_id, value, "us");
         return;
     }
 
-    require_command(generator->next());
+    require_command(generator->next(), host_bridge);
     const auto started = Clock::now();
     for (std::size_t index = 0; index < iterations; ++index) {
         const auto step = generator->next(json{{"counter", index + 1}});
-        require_command(step);
+        require_command(step, host_bridge);
     }
     const auto per_command = elapsed_us(started) / static_cast<double>(iterations);
     print_sample(case_id, per_command, "us");

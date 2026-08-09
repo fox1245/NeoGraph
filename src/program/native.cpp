@@ -60,10 +60,11 @@ void validate_metadata(NativeControlMetadata& metadata) {
         throw std::invalid_argument(
             "Deterministic native control bindings must declare idempotent execution");
     }
-    const auto& cost = metadata.resource_cost;
-    if (cost.max_input_bytes == 0 || cost.max_output_bytes == 0 ||
-        cost.max_wall_time_ms == 0 || cost.max_memory_bytes == 0) {
-        throw std::invalid_argument("Native control binding resource costs must be positive");
+    const auto& declaration = metadata.resource_declaration;
+    if (declaration.max_input_bytes == 0 || declaration.max_output_bytes == 0 ||
+        declaration.advisory_wall_time_ms == 0 || declaration.advisory_memory_bytes == 0) {
+        throw std::invalid_argument(
+            "Native control binding resource declarations must be positive");
     }
 }
 
@@ -209,15 +210,32 @@ void retain_invocation_handle(detail::NativeCallbackLease* lease) noexcept {
     // the lease cannot be deleted concurrently with the handle transfer.
     lease->references.fetch_add(1, std::memory_order_relaxed);
 }
+void forget_invocation(const std::shared_ptr<detail::NativeInvocationImpl>& invocation) noexcept {
+    try {
+        const auto&     binding = invocation->binding;
+        std::lock_guard lock(binding->invocations_mutex);
+        const auto      found = binding->invocations.find(invocation->invocation_id);
+        if (found == binding->invocations.end()) return;
+        const auto current = found->second.lock();
+        if (current && current.get() != invocation.get()) return;
+        binding->invocations.erase(found);
+    } catch (...) {
+        // Registry cleanup is best effort on a C completion path. The weak
+        // entry owns no invocation or plugin storage if allocation fails here.
+    }
+}
 
 void set_terminal(const std::shared_ptr<detail::NativeInvocationImpl>& invocation,
                   NativeInvocationResult                               result) noexcept {
     try {
-        std::lock_guard lock(invocation->mutex);
-        if (invocation->finished) return;
-        invocation->finished = true;
-        invocation->result.emplace(std::move(result));
-        invocation->completion.notify_all();
+        {
+            std::lock_guard lock(invocation->mutex);
+            if (invocation->finished) return;
+            invocation->finished = true;
+            invocation->result.emplace(std::move(result));
+            invocation->completion.notify_all();
+        }
+        forget_invocation(invocation);
     } catch (...) {
         // Completion is entered from C. No C++ exception may leave this path.
     }
@@ -226,10 +244,13 @@ void set_terminal(const std::shared_ptr<detail::NativeInvocationImpl>& invocatio
 void replace_terminal(const std::shared_ptr<detail::NativeInvocationImpl>& invocation,
                       NativeInvocationResult                               result) noexcept {
     try {
-        std::lock_guard lock(invocation->mutex);
-        invocation->finished = true;
-        invocation->result.emplace(std::move(result));
-        invocation->completion.notify_all();
+        {
+            std::lock_guard lock(invocation->mutex);
+            invocation->finished = true;
+            invocation->result.emplace(std::move(result));
+            invocation->completion.notify_all();
+        }
+        forget_invocation(invocation);
     } catch (...) {
         // Completion is entered from C. No C++ exception may leave this path.
     }
@@ -277,7 +298,7 @@ NativeInvocationResult decode_completion(
     const auto& payload       = raw->payload_json;
     const bool  valid_payload = has_valid_owned_bytes(payload);
     const bool  within_budget =
-        payload.size <= invocation->binding->metadata.resource_cost.max_output_bytes;
+        payload.size <= invocation->binding->metadata.resource_declaration.max_output_bytes;
     const bool valid_status = raw->status == NEOGRAPH_PROGRAM_NATIVE_COMPLETION_SUCCESS ||
                               raw->status == NEOGRAPH_PROGRAM_NATIVE_COMPLETION_FAILURE ||
                               raw->status == NEOGRAPH_PROGRAM_NATIVE_COMPLETION_CANCELLED;
@@ -549,7 +570,7 @@ NativeInvocation NativeControlBinding::invoke(std::uint64_t invocation_id, const
     }
     validate_contract_value(input, impl_->metadata.input_contract, "Native binding input");
     const auto canonical_input = detail::canonical_json_bytes(input);
-    if (canonical_input.size() > impl_->metadata.resource_cost.max_input_bytes) {
+    if (canonical_input.size() > impl_->metadata.resource_declaration.max_input_bytes) {
         throw std::invalid_argument("Native binding input exceeds its declared byte limit");
     }
 

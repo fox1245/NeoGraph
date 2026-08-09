@@ -49,6 +49,17 @@ C++ builder / JSON / bounded JavaScript authoring source
  checkpoint / store / provider / tool / events
 ```
 
+### Bounded JavaScript contexts
+
+JavaScript authoring has two distinct execution contexts. `define()` runs only
+in the compiler's bounded compile-time QuickJS context and emits the graph that
+is normalized, sealed, and admitted. A generator `main(input)` does not run
+during structural compilation: it runs in a bounded runtime QuickJS session
+owned by one Program attempt. That session is retained only for the lifetime of
+the attempt. Every yielded typed command is durably journaled before dispatch,
+so recovery and recorded replay reconstruct behavior from the durable command
+journal rather than retaining or trusting ambient JavaScript process state.
+
 ### Durable child execution contract
 
 The terms `ControlVm` and `Durable Kernel` describe rejected *separate public
@@ -348,8 +359,9 @@ and conformance gate for this contract.
   compiler and immutable artifact format.
 - Support sequence, branch, bounded loop, parallel, race, retry, cancellation,
   wait, checkpoint, child Program, and immutable version activation without a
-  general-purpose **runtime** VM. An opt-in JavaScript frontend may use ordinary
-  authoring-time control flow, but only to emit one bounded typed Program plan.
+  general-purpose node-execution VM. JavaScript `define()` is compile-time graph
+  authoring; an optional generator `main(input)` is bounded retained runtime
+  control that yields only typed Program commands.
 - Keep programs inspectable, source-mapped, reproducible, capability-scoped,
   and replayable.
 - Permit open-ended evolution as a sequence of finite admitted versions, never
@@ -489,22 +501,31 @@ exhaustion is a typed terminal outcome, not a generic exception or model error.
 
 ### JavaScript authoring boundary
 
-`SourceKind::JavaScript` is an opt-in, compile-only frontend, not a second
-Program runtime. A sealed source is evaluated by a private QuickJS context only
-while `ProgramCompiler` builds one Core definition. The runtime receives only
-the immutable `ProgramBundle` and typed plan; it never retains a QuickJS
-context, bytecode artifact, callback, or host capability.
+`SourceKind::JavaScript` is an opt-in authoring and bounded control frontend,
+not a second executor for Core/application nodes. `ProgramCompiler` evaluates
+the synchronous `define()` export in a private compile-time QuickJS context and
+seals exactly one Core definition into the immutable `ProgramBundle`. If the
+source also exports generator `main(input)`, `ProgramRuntime` opens a separate
+bounded QuickJS session for that run attempt. The session owns ordinary
+JavaScript control flow only; yielded typed Program commands remain subject to
+admission, budgets, the durable command journal, dispatch, and replay.
 
-The JavaScript host exposes only a non-extensible `ng` graph-builder surface
-with a versioned `apiVersion`. It installs no module loader, network, provider,
-tool, filesystem, shell, or native-plugin capability. A module must export a
-synchronous `define()` that returns exactly one open builder; top-level await,
-wrong return values, and builder reuse fail closed. The compiler caps memory,
-stack, and interrupt polls, and records resource exhaustion as a typed compile
-diagnostic. The source envelope pins the QuickJS engine/language/host-API
-versions; compiler-limit changes require a new compiler build identity. Builds
-without `NEOGRAPH_BUILD_QUICKJS_CONTROL` reject JavaScript sources rather than
-linking the control runtime into Core-only consumers.
+The evaluated export set determines the output contract: define-only modules
+retain the Core root's channels-wrapped result, while modules with
+`main(input)` validate the generator's terminal return directly against the
+Program/Harness result schema.
+
+Both contexts expose a non-extensible, versioned `ng` surface and install no
+ambient module loader, network, provider, tool, filesystem, shell, or
+native-plugin capability. Wrong `define()` returns, top-level await, non-
+generator `main(input)`, and malformed yielded commands fail closed. Compile
+contexts cap memory, stack, wall time, output bytes, and interrupt polls.
+Runtime sessions are retained only for their attempt and are bounded by the
+admitted `RunBudget`; recovery replays durable command results instead of
+retaining JavaScript state. The source envelope pins the QuickJS
+engine/language/host-API versions. Builds without
+`NEOGRAPH_BUILD_QUICKJS_CONTROL` reject JavaScript sources rather than linking
+QuickJS into Core-only consumers.
 
 ### Host admission
 
@@ -613,9 +634,11 @@ native code is rejected or isolated outside the process.
 The authored document plus its source kind, declared schema version, imports,
 and source coordinates. Supported frontends are C++ builder values, canonical
 JSON, and opt-in JavaScript. JavaScript source is sealed in a canonical envelope
-that pins its QuickJS engine, language, and host-API versions, then lowers only
-through the compile-only builder boundary above. YAML or model-specific syntax
-may be added later only by lowering to the same typed source model.
+that pins its QuickJS engine, language, and host-API versions. `define()` lowers
+through the compile-time graph-builder boundary above; an optional generator
+`main(input)` remains sealed as runtime control source and yields only durable
+typed Program commands. YAML or model-specific syntax may be added later only
+by lowering to the same typed source model.
 
 ### ProgramBundle
 

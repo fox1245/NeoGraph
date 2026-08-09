@@ -19,11 +19,15 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <filesystem>
 #include <future>
 #include <map>
 #include <mutex>
+#include <string>
+#include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace std::chrono_literals;
@@ -224,8 +228,69 @@ json request() {
          {{"max_steps", 10},
           {"timeout_seconds", 5},
           {"max_parallel_workers", 2},
+          {"max_program_operations", 4},
           {"max_worker_retries", 0}}},
     };
+}
+
+std::string harness_javascript_source(std::uint32_t max_retries, std::string_view main_body) {
+    std::string source = R"JS(
+        export function define() {
+            const graph = ng.graph("harness_fanout_judge");
+            graph.channel("task", {reducer: "overwrite", initial: {}});
+            graph.channel("worker_results", {reducer: "append", initial: []});
+            graph.channel("final_result", {reducer: "overwrite", initial: null});
+            graph.node("worker", {
+                type: "neograph_harness_worker",
+                worker_id: "reviewer",
+                instructions: "Return findings",
+                tool_ids: [],
+                tool_descriptions: {},
+                output_schema: {
+                    type: "object",
+                    required: ["status", "findings"],
+                    properties: {
+                        status: {type: "string"},
+                        findings: {type: "array"}
+                    },
+                    additionalProperties: false
+                },
+                provider_timeout_ms: 30000,
+                max_output_tokens: 100,
+                input_token_ceiling: 16384,
+                max_retries: )JS";
+    source += std::to_string(max_retries);
+    source += R"JS(,
+                max_provider_tool_rounds: 8,
+                evidence_required: [],
+                read_only: false
+            });
+            graph.node("judge", {
+                type: "neograph_harness_judge",
+                barrier: {wait_for: ["worker"]}
+            });
+            graph.edge("__start__", "worker");
+            graph.edge("worker", "judge");
+            graph.edge("judge", "__end__");
+            return graph;
+        }
+
+        export function* main(input) {
+    )JS";
+    source += main_body;
+    source += R"JS(
+        }
+    )JS";
+    return source;
+}
+
+std::string harness_define_only_source(std::uint32_t max_retries) {
+    auto       source      = harness_javascript_source(max_retries, "return {};");
+    const auto main_export = source.find("export function* main");
+    if (main_export == std::string::npos)
+        throw std::logic_error("Harness JavaScript test source omitted main export");
+    source.erase(main_export);
+    return source;
 }
 
 struct HarnessFixture {
@@ -360,52 +425,52 @@ TEST(HarnessProgramCutover, DrainOnlyRetainedArtifactCannotStartNewRun) {
     EXPECT_EQ(fixture.calls.load(), 0);
 }
 
+TEST(HarnessProgramCutover, DefineOnlyJavaScriptRetainsCoreOutputContract) {
+    HarnessFixture                fixture;
+    neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
+    auto                          value          = request();
+    value["budgets"]["provider_timeout_seconds"] = 30;
+    value["budgets"]["max_output_tokens"]        = 100;
+    value["harness"]                             = {{"mode", "javascript"},
+                                                    {"source_id", "harness:define-only.js"},
+                                                    {"source", harness_define_only_source(0)}};
+
+    const auto compiled = service.compile(value);
+    ASSERT_TRUE(compiled.at("ok").get<bool>()) << compiled.dump();
+    const auto bundle =
+        json::parse(compiled.at("artifacts").at("core_lockfile").at("content").get<std::string>());
+    const auto& output_schema = bundle.at("output_contract").at("schema");
+    EXPECT_EQ(output_schema.at("required"), json::array({"channels"}));
+    EXPECT_EQ(output_schema.at("properties").at("channels").at("required"),
+              json::array({"final_result"}));
+
+    const auto started = service.start({{"artifact_id", compiled.at("artifact_id")}});
+    ASSERT_TRUE(started.at("started").get<bool>()) << started.dump();
+    const auto result = await_terminal(service, started.at("run_id").get<std::string>());
+    ASSERT_EQ(result.at("status"), "completed") << result.dump();
+    EXPECT_EQ(result.at("result").at("outcome"), "ok");
+    EXPECT_EQ(result.at("result").at("valid_workers"), 1);
+    EXPECT_EQ(fixture.calls.load(), 1);
+}
+
 TEST(HarnessProgramCutover, JavaScriptAuthoringUsesProgramSourceAndAdmittedRuntime) {
     HarnessFixture                fixture;
     neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
     auto                          value = request();
-    value["harness"]                    = {{"mode", "javascript"},
-                                           {"source_id", "harness:direct.js"},
-                                           {"source",
-                                            R"JS(
-            export function define() {
-                const graph = ng.graph("harness_fanout_judge");
-                graph.channel("task", {reducer: "overwrite", initial: {}});
-                graph.channel("worker_results", {reducer: "append", initial: []});
-                graph.channel("final_result", {reducer: "overwrite", initial: null});
-                graph.node("worker", {
-                    type: "neograph_harness_worker",
-                    worker_id: "reviewer",
-                    instructions: "Return structured findings",
-                    tool_ids: [],
-                    tool_descriptions: {},
-                    output_schema: {
-                        type: "object",
-                        required: ["status", "findings"],
-                        properties: {
-                            status: {type: "string"},
-                            findings: {type: "array"}
-                        },
-                        additionalProperties: false
-                    },
-                    provider_timeout_ms: 30000,
-                    max_output_tokens: 100,
-                    input_token_ceiling: 16384,
-                    max_retries: 1,
-                    max_provider_tool_rounds: 8,
-                    evidence_required: [],
-                    read_only: true
-                });
-                graph.node("judge", {
-                    type: "neograph_harness_judge",
-                    barrier: {wait_for: ["worker"]}
-                });
-                graph.edge("__start__", "worker");
-                graph.edge("worker", "judge");
-                graph.edge("judge", "__end__");
-                return graph;
-            }
-        )JS"}};
+    value["budgets"]["provider_timeout_seconds"] = 30;
+    value["budgets"]["max_output_tokens"]        = 100;
+    value["harness"]                             = {{"mode", "javascript"},
+                                                    {"source_id", "harness:direct.js"},
+                                                    {"source", harness_javascript_source(0,
+                                                                                         R"JS(
+            yield ng.callCore(
+                "harness_fanout_judge", {task: input.task}, "review:initial");
+            const results = yield ng.all([
+                ng.callCore("harness_fanout_judge", {task: input.task}, "review:first"),
+                ng.callCore("harness_fanout_judge", {task: input.task}, "review:second")
+            ], {max_in_flight: 2}, "review:all");
+            return results[0].channels.final_result.value;
+         )JS")}};
 
     const auto compiled = service.compile(value);
     ASSERT_TRUE(compiled.at("ok").get<bool>()) << compiled.dump();
@@ -413,12 +478,71 @@ TEST(HarnessProgramCutover, JavaScriptAuthoringUsesProgramSourceAndAdmittedRunti
     const auto bundle =
         json::parse(compiled.at("artifacts").at("core_lockfile").at("content").get<std::string>());
     EXPECT_EQ(bundle.at("source_kind"), "javascript");
+    EXPECT_EQ(bundle.at("input_contract").at("schema").at("required"), json::array({"task"}));
+    EXPECT_EQ(canonical_json(bundle.at("output_contract").at("schema")),
+              canonical_json(neograph::mcp::harness_program_output_schema()));
+    for (const auto& requirement : bundle.at("declared_budget_requirements")) {
+        if (requirement.at("resource") == "max_concurrency")
+            EXPECT_EQ(requirement.at("minimum"), 2);
+        if (requirement.at("resource") == "max_program_operations")
+            EXPECT_EQ(requirement.at("minimum"), 4);
+        EXPECT_EQ(requirement.at("minimum"), requirement.at("maximum"));
+    }
     const auto started = service.start({{"artifact_id", compiled.at("artifact_id")}});
     ASSERT_TRUE(started.at("started").get<bool>()) << started.dump();
     const auto result = await_terminal(service, started.at("run_id").get<std::string>());
     ASSERT_EQ(result.at("status"), "completed") << result.dump();
     EXPECT_EQ(result.at("result").at("valid_workers"), 1);
-    EXPECT_EQ(fixture.calls.load(), 1);
+    EXPECT_EQ(fixture.calls.load(), 3);
+}
+
+TEST(HarnessProgramCutover, JavaScriptMalformedTerminalResultFailsItsAdvertisedContract) {
+    HarnessFixture                fixture;
+    neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
+    auto                          value          = request();
+    value["budgets"]["provider_timeout_seconds"] = 30;
+    value["budgets"]["max_output_tokens"]        = 100;
+    value["harness"]                             = {{"mode", "javascript"},
+                                                    {"source_id", "harness:malformed-result.js"},
+                                                    {"source", harness_javascript_source(0, "return {};")}};
+
+    const auto compiled = service.compile(value);
+    ASSERT_TRUE(compiled.at("ok").get<bool>()) << compiled.dump();
+    const auto started = service.start({{"artifact_id", compiled.at("artifact_id")}});
+    ASSERT_TRUE(started.at("started").get<bool>()) << started.dump();
+    const auto terminal = await_terminal(service, started.at("run_id").get<std::string>());
+    ASSERT_EQ(terminal.at("status"), "failed") << terminal.dump();
+    ASSERT_TRUE(terminal.contains("failure")) << terminal.dump();
+    EXPECT_EQ(terminal.at("failure").at("code"), "P_OUTPUT_CONTRACT");
+    EXPECT_EQ(fixture.calls.load(), 0);
+}
+
+TEST(HarnessProgramCutover, JavaScriptWorkersMustMatchHostSealedConfigurationsBeforePublication) {
+    HarnessFixture                fixture;
+    neograph::mcp::HarnessService service(fixture.config, nullptr, fixture.resources);
+    auto                          value          = request();
+    value["budgets"]["provider_timeout_seconds"] = 30;
+    value["budgets"]["max_output_tokens"]        = 100;
+
+    auto       absent_worker = harness_javascript_source(0, "return {};");
+    const auto id_position   = absent_worker.find("worker_id: \"reviewer\"");
+    ASSERT_NE(id_position, std::string::npos);
+    absent_worker.replace(id_position, std::string("worker_id: \"reviewer\"").size(),
+                          "worker_id: \"not-requested\"");
+    const std::vector<std::pair<std::string, std::string>> rejected_sources = {
+        {harness_javascript_source(1, "return {};"), "H_WORKER_CONFIG_MISMATCH"},
+        {std::move(absent_worker), "H_WORKER_BINDING"},
+    };
+    for (const auto& [source, expected_code] : rejected_sources) {
+        value["harness"]    = {{"mode", "javascript"}, {"source", source}};
+        const auto rejected = service.compile(value);
+        ASSERT_FALSE(rejected.at("ok").get<bool>()) << rejected.dump();
+        ASSERT_EQ(rejected.at("diagnostics").size(), 1U) << rejected.dump();
+        EXPECT_EQ(rejected.at("diagnostics")[0].at("code"), expected_code);
+        EXPECT_TRUE(rejected.at("artifacts").empty());
+        EXPECT_FALSE(rejected.contains("artifact_id"));
+    }
+    EXPECT_EQ(fixture.calls.load(), 0);
 }
 
 TEST(HarnessProgramCutover, HostConfigurationChangesProviderBindingAndArtifactIdentity) {
@@ -982,6 +1106,8 @@ TEST(HarnessProgramCutover, SixCallbacksOwnAdapterPastServiceLifetime) {
     const auto schema = call_tool(3, "neograph_schema", json::object());
     ASSERT_TRUE(schema.contains("result")) << schema.dump();
     ASSERT_TRUE(schema.at("result").at("structuredContent").contains("request_schema"));
+    EXPECT_EQ(schema.at("result").at("structuredContent").at("output_schema"),
+              neograph::mcp::harness_program_output_schema());
 
     const auto compiled = call_tool(4, "neograph_compile", request());
     ASSERT_TRUE(compiled.contains("result")) << compiled.dump();

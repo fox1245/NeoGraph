@@ -16,6 +16,11 @@
 #include <string>
 
 namespace neograph::program {
+/**
+ * Import slots below this value are reserved by the versioned `ng` command
+ * module. Native controls must be explicitly sealed at or above this boundary.
+ */
+inline constexpr std::uint32_t NATIVE_CONTROL_IMPORT_SLOT_MIN = 7;
 
 enum class NativeIdempotency : std::uint8_t {
     Idempotent,
@@ -35,14 +40,28 @@ NEOGRAPH_PROGRAM_API std::string_view to_string(NativeReplayBehavior value) noex
 NEOGRAPH_PROGRAM_API NativeReplayBehavior
 native_replay_behavior_from_string(std::string_view value);
 
-/** Declared upper bounds. ProgramRuntime owns enforcement of time and memory. */
-struct NativeResourceCost {
-    std::size_t   max_input_bytes  = 0;
-    std::size_t   max_output_bytes = 0;
-    std::uint64_t max_wall_time_ms = 0;
-    std::size_t   max_memory_bytes = 0;
+/**
+ * Declared native resource envelope.
+ *
+ * `max_input_bytes` and `max_output_bytes` are enforced by the host wrapper.
+ * `advisory_wall_time_ms` and `advisory_memory_bytes` describe expected trusted
+ * callback demand only; they are never presented as process containment.
+ * ProgramRuntime's separately granted run deadline starts before the
+ * synchronous callback is entered and rejects a late result, but cannot
+ * preempt the callback or contain arbitrary plugin allocation.
+ *
+ * Consequently, ProgramCatalog materializes NativeControlBinding only for a
+ * TrustedNative executable admitted through TrustedEmbedding. Multi-tenant
+ * Brokered executables require a separately contained, killable broker process
+ * which this ABI does not provide.
+ */
+struct NativeResourceDeclaration {
+    std::size_t   max_input_bytes       = 0;
+    std::size_t   max_output_bytes      = 0;
+    std::uint64_t advisory_wall_time_ms = 0;
+    std::size_t   advisory_memory_bytes = 0;
 
-    bool operator==(const NativeResourceCost&) const = default;
+    bool operator==(const NativeResourceDeclaration&) const = default;
 };
 
 /** Immutable metadata which participates in the registry snapshot identity. */
@@ -51,7 +70,7 @@ struct NativeControlMetadata {
     ContractRecord       output_contract;
     NativeIdempotency    idempotency     = NativeIdempotency::NonIdempotent;
     NativeReplayBehavior replay_behavior = NativeReplayBehavior::Recorded;
-    NativeResourceCost   resource_cost;
+    NativeResourceDeclaration resource_declaration;
 };
 
 enum class NativeInvocationStatus : std::uint8_t {
@@ -89,7 +108,6 @@ public:
     NativeInvocation(const NativeInvocation&)            = delete;
     NativeInvocation& operator=(const NativeInvocation&) = delete;
     ~NativeInvocation();
-
     void cancel();
     bool cancel_requested() const noexcept;
     bool finished() const noexcept;
@@ -104,9 +122,14 @@ private:
 };
 
 /**
- * C++ wrapper over a C v1 plugin binding.  It accepts only canonical JSON
- * inputs, copies completion bytes before invoking the plugin release hook, and
- * never allows an exception from a non-conforming plugin to escape the host.
+ * C++ wrapper over a C v1 plugin binding for trusted in-process dispatch only.
+ * The invoke callback is entered synchronously, though it may arrange an
+ * asynchronous completion. The wrapper accepts canonical JSON inputs, copies
+ * completion bytes before invoking the plugin release hook, and never allows
+ * an exception from a non-conforming plugin to escape the host.
+ *
+ * This type is not a broker or memory sandbox. Catalog admission therefore
+ * seals it only to a TrustedNative executable in a TrustedEmbedding profile.
  */
 class NEOGRAPH_PROGRAM_API NativeControlBinding final {
 public:

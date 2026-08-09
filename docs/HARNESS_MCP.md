@@ -39,18 +39,26 @@ binding; an optional generator `main()` owns ordinary control flow and yields
 the existing typed Program commands. JavaScript does not dispatch Core nodes,
 select providers/tools, or bypass admission, budgets, journals, or replay.
 
+The evaluated module also selects the result contract. A source that exports
+only `define()` retains the Core root contract, including the
+`channels.final_result.value` wrapper. A source that exports runtime
+`main(input)` instead advertises and validates its terminal return directly
+against the Harness result schema.
+
 #### Control-flow migration example
 
-Move authoring-time expansion into ordinary JavaScript functions and keep every
-runtime effect behind a yielded typed command. The module below uses a loop,
-branching, and bounded parallelism; retry limits remain part of the admitted
-Core node configuration built by `define()`:
+Keep `define()` compile-time and every runtime effect behind a yielded typed
+command. This complete request gives the generator three operations—the
+`ng.all` join plus its two Core calls—and two-way parallelism. Its worker node
+exactly repeats the configuration sealed from the request and its terminal
+return has the Harness result shape:
 
 ```javascript
-function workerConfig(workerId) {
+const source = String.raw`
+function workerConfig() {
   return {
     type: "neograph_harness_worker",
-    worker_id: workerId,
+    worker_id: "reviewer",
     instructions: "Return structured findings",
     tool_ids: [],
     tool_descriptions: {},
@@ -58,7 +66,7 @@ function workerConfig(workerId) {
     provider_timeout_ms: 30000,
     max_output_tokens: 512,
     input_token_ceiling: 16384,
-    max_retries: 2,
+    max_retries: 1,
     max_provider_tool_rounds: 8,
     evidence_required: [],
     read_only: true
@@ -70,7 +78,7 @@ export function define() {
   graph.channel("task", {reducer: "overwrite", initial: {}});
   graph.channel("worker_results", {reducer: "append", initial: []});
   graph.channel("final_result", {reducer: "overwrite", initial: null});
-  graph.node("reviewer", workerConfig("reviewer"));
+  graph.node("reviewer", workerConfig());
   graph.node("judge", {
     type: "neograph_harness_judge",
     barrier: {wait_for: ["reviewer"]}
@@ -82,25 +90,40 @@ export function define() {
 }
 
 export function* main(input) {
-  const reviewed = [];
-  for (let offset = 0; offset < input.items.length; offset += 4) {
-    const batch = input.items.slice(offset, offset + 4);
-    const results = yield ng.all(
-      batch.map((item, index) =>
-        ng.callCore("review", {task: item}, `batch:${offset}:${index}`)),
-      {max_in_flight: 4},
-      `batch:${offset}`
-    );
-    reviewed.push(...results);
-  }
-
-  if (!input.require_final_review) {
-    return {reviewed};
-  }
-  const finalReview = yield ng.callCore(
-    "review", {task: {reviewed}}, "final-review");
-  return {reviewed, finalReview};
+  const results = yield ng.all([
+    ng.callCore("review", {task: input.task}, "review:first"),
+    ng.callCore("review", {task: input.task}, "review:second")
+  ], {max_in_flight: 2}, "review:all");
+  return results[0].channels.final_result.value;
 }
+`;
+
+const request = {
+  task: {
+    objective: "Review the change",
+    acceptance: ["Return structured, evidence-backed findings"]
+  },
+  harness: {mode: "javascript", source_id: "review:main.js", source},
+  workers: [{
+    id: "reviewer",
+    instructions: "Return structured findings",
+    tools: [],
+    output_schema: {type: "object", additionalProperties: true},
+    provider_timeout_seconds: 30,
+    max_output_tokens: 512
+  }],
+  tool_catalog: [],
+  budgets: {
+    max_steps: 40,
+    timeout_seconds: 60,
+    max_parallel_workers: 2,
+    max_program_operations: 3,
+    max_worker_retries: 1,
+    provider_timeout_seconds: 30,
+    max_output_tokens: 512
+  },
+  policy: {read_only: true, evidence_required: []}
+};
 ```
 
 Stable source-site strings are part of the durable command coordinate. Keep
@@ -128,13 +151,6 @@ validated declarative `TopologySpec`, so rejected input constructs no
 profile ID and fingerprint; a different or pre-profile artifact fails closed at
 start/resume instead of being reinterpreted.
 
-C++ embedders pass a non-default profile through `HarnessServiceResources` at
-construction. This additive resource boundary preserves the existing
-`HarnessServiceConfig` layout. The profile fingerprint covers the manifest and
-the scoped registry's exported semantic projection. Each
-`implementation_identity` is a trusted declaration and must change whenever
-the corresponding callable behavior changes.
-
 This is the current Program-backed Harness adapter, not a Control VM cutover.
 Accepted preset and JavaScript requests converge on `ProgramSource`, compile
 through `ProgramCompiler`, admit through `ProgramCatalog`, and execute through
@@ -144,15 +160,6 @@ are retained only in the explicitly superseded design records
 `docs/PROGRAMMABLE_HARNESS_DSL_DESIGN.md` and
 `spec/programmable-harness-vm-integration.sdd.yaml`. No public `ControlVm`,
 bytecode interpreter, or second executor is implied by the compatibility API.
-
-Stored artifacts carry an explicit authoring frontend and may be classified as
-`translated`, `drain_only`, or `rejected`. A translated artifact is accepted
-only with deterministic equivalence evidence; a drain-only artifact can resume
-only on its exact retained legacy runtime and cannot publish or start a new
-run; rejected artifacts fail closed. Pre-cutover records without authoring
-metadata are retained as drain-only and are never reparsed by document shape.
-Legacy parsers remain until the inventory is empty and every pinned run has
-completed or been explicitly reconciled.
 
 ## Build And Run
 

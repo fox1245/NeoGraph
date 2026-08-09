@@ -497,17 +497,25 @@ struct AdmittedRuntime {
     }
 
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
-    ProgramVersion admit_javascript(std::string source) {
+    ProgramVersion admit_javascript(std::string                   source,
+                                    std::optional<ContractRecord> output_contract = std::nullopt) {
         return admit_source(
-            ProgramSource::from_javascript("test:runtime-control.js", std::move(source)));
+            ProgramSource::from_javascript("test:runtime-control.js", std::move(source)),
+            std::move(output_contract));
     }
 #endif
 
-    ProgramVersion admit_source(ProgramSource source) {
+    ProgramVersion admit_source(ProgramSource                 source,
+                                std::optional<ContractRecord> output_contract = std::nullopt) {
         ProgramCompiler              compiler(registry, {"program-runtime-test/v1"});
         std::optional<ProgramBundle> bundle;
         try {
-            bundle = compiler.compile(source);
+            if (output_contract) {
+                bundle = compiler.compile(source, RunBudget{10000, 1000, 1000, 1, 32, 20, 0, 0, 0},
+                                          ContractRecord{}, *output_contract);
+            } else {
+                bundle = compiler.compile(source);
+            }
         } catch (const ProgramCompileError& error) {
             std::string message = error.what();
             for (const auto& diagnostic : error.diagnostics()) {
@@ -734,6 +742,10 @@ public:
                                                        std::uint64_t    sequence) const override {
         return inner_.load_effects(owner, run_id, sequence);
     }
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+        std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
+        return inner_.load_javascript_commands(owner, run_id, sequence);
+    }
     ProgramTransitionPublishResult compare_publish(
         std::string_view             owner,
         std::string_view             expected,
@@ -829,6 +841,10 @@ public:
                                                        std::uint64_t    sequence) const override {
         return inner_.load_effects(owner, run_id, sequence);
     }
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+        std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
+        return inner_.load_javascript_commands(owner, run_id, sequence);
+    }
     ProgramTransitionPublishResult compare_publish(
         std::string_view             owner,
         std::string_view             expected,
@@ -868,6 +884,10 @@ public:
                                                        std::string_view run_id,
                                                        std::uint64_t    sequence) const override {
         return inner_.load_effects(owner, run_id, sequence);
+    }
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+        std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
+        return inner_.load_javascript_commands(owner, run_id, sequence);
     }
     ProgramTransitionPublishResult compare_publish(
         std::string_view             owner,
@@ -1529,6 +1549,96 @@ TEST(ProgramRuntimeTest, JavaScriptGeneratorProducesSealedTypedCommandEnvelope) 
     EXPECT_EQ(step.value, step.command->to_json());
 }
 
+TEST(ProgramRuntimeTest, JavaScriptRetainedCommandsShareTheQuickJsMemoryCeiling) {
+    const auto              source = ProgramSource::from_javascript("test:native-live-commands.js",
+                                                                    R"JS(
+            export function* main() {
+                const retained = [];
+                for (let index = 0; index < 100000; ++index) {
+                    retained.push(ng.callCore(
+                        "main", {index, padding: "x".repeat(64)}, "retained:" + index));
+                }
+                yield retained[0];
+            }
+        )JS");
+    JavaScriptCompileLimits limits;
+    limits.memory_limit_bytes  = 2u * 1024u * 1024u;
+    limits.max_stack_bytes     = 128u * 1024u;
+    limits.max_interrupt_polls = 100'000'000u;
+    auto generator =
+        neograph::program::detail::JavaScriptGenerator::open(source, json::object(), limits);
+    ASSERT_TRUE(generator.has_value());
+    try {
+        (void)generator->next();
+        FAIL() << "expected cumulative native-memory rejection";
+    } catch (const neograph::program::detail::JavaScriptCompileError& error) {
+        EXPECT_EQ(error.code(), "P_JS_RESOURCE_LIMIT");
+        ASSERT_TRUE(error.witness().contains("allocator_limit_denied_count"));
+        EXPECT_GT(error.witness().at("allocator_limit_denied_count").get<std::size_t>(), 0U);
+    }
+}
+
+TEST(ProgramRuntimeTest, JavaScriptCommandFinalizersReleaseNativeMemoryCharges) {
+    const auto source = ProgramSource::from_javascript("test:native-command-release.js",
+                                                       R"JS(
+            export function* main() {
+                for (let batch = 0; batch < 2000; ++batch) {
+                    let retained = [];
+                    for (let index = 0; index < 16; ++index) {
+                        retained.push(ng.callCore(
+                            "main", {index, padding: "x".repeat(64)}, "temporary:" + index));
+                    }
+                    retained = null;
+                }
+                yield ng.callCore("main", {}, "survived");
+            }
+        )JS");
+    JavaScriptCompileLimits limits;
+    limits.memory_limit_bytes  = 2u * 1024u * 1024u;
+    limits.max_stack_bytes     = 128u * 1024u;
+    limits.max_interrupt_polls = 100'000'000u;
+    auto generator =
+        neograph::program::detail::JavaScriptGenerator::open(source, json::object(), limits);
+    ASSERT_TRUE(generator.has_value());
+    const auto step = generator->next();
+    ASSERT_TRUE(step.command.has_value());
+    EXPECT_EQ(step.command->source_site(), "survived");
+}
+
+TEST(ProgramRuntimeTest, JavaScriptRuntimeRejectsImportsBeforeQuickJsEvaluation) {
+    const auto source = ProgramSource::from_javascript(
+        "test:runtime-import.js",
+        "import \"sealed:approved@1.0.0\";\n"
+        "export function* main() { yield {}; }\n",
+        {{"sealed:approved@1.0.0", std::string("sha256:") + std::string(64, 'a')}});
+    try {
+        (void)neograph::program::detail::JavaScriptGenerator::open(source, json::object(),
+                                                                   JavaScriptCompileLimits{});
+        FAIL() << "expected pre-evaluation import rejection";
+    } catch (const neograph::program::detail::JavaScriptCompileError& error) {
+        EXPECT_EQ(error.code(), "P_JS_IMPORT_UNAVAILABLE");
+        ASSERT_TRUE(error.source_span().has_value());
+        EXPECT_EQ(error.source_span()->line_begin, 1U);
+        EXPECT_EQ(error.witness().at("receipt_bound_source_available"), false);
+    }
+}
+
+TEST(ProgramRuntimeTest, JavaScriptRuntimeRejectsDynamicImportsBeforeQuickJsEvaluation) {
+    const auto source = ProgramSource::from_javascript("test:runtime-dynamic-import.js",
+                                                       "export function* main() {\n"
+                                                       "  yield import(\"sealed:unknown@1.0.0\");\n"
+                                                       "}\n");
+    try {
+        (void)neograph::program::detail::JavaScriptGenerator::open(source, json::object(),
+                                                                   JavaScriptCompileLimits{});
+        FAIL() << "expected pre-evaluation dynamic import rejection";
+    } catch (const neograph::program::detail::JavaScriptCompileError& error) {
+        EXPECT_EQ(error.code(), "P_JS_IMPORT_UNAVAILABLE");
+        ASSERT_TRUE(error.source_span().has_value());
+        EXPECT_EQ(error.source_span()->line_begin, 2U);
+    }
+}
+
 TEST(ProgramRuntimeTest, JavaScriptGeneratorRejectsForgedCommandEnvelope) {
     const auto source = ProgramSource::from_javascript("test:forged-command.js",
                                                        R"JS(
@@ -1734,18 +1844,42 @@ TEST(ProgramRuntimeTest, JavaScriptCompletedHeadFreshRuntimeReplaysRecordedResul
         "tenant:runtime", version,
         ProgramInvocation{
             json{{"requested", "recorded"}}, grant(), "trace-javascript-result-crash", {}});
-    ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
+    if (!journal->wait_for_result(std::chrono::seconds(2))) {
+        const auto failed = original.wait();
+        FAIL() << (failed.failure() ? failed.failure()->code + ": " + failed.failure()->message +
+                                          " " + failed.failure()->witness.dump()
+                                    : "command result was not journaled");
+    }
     EXPECT_EQ(completed_calls.load(), 1U);
     const auto durable_commands =
         journal->load_javascript_commands("tenant:runtime", original.run_id(), 0);
     ASSERT_EQ(durable_commands.size(), 2U);
     EXPECT_TRUE(durable_commands.back().completed());
+    const auto durable_snapshot = journal->load("tenant:runtime", original.run_id());
+    ASSERT_TRUE(durable_snapshot.has_value());
+    ASSERT_TRUE(durable_snapshot->exact_checkpoint().has_value());
+    const auto durable_events = journal->load_events("tenant:runtime", original.run_id(), 0);
+    ASSERT_FALSE(durable_events.empty());
+    EXPECT_EQ(durable_snapshot->event_sequence(), durable_events.back().sequence);
+    EXPECT_TRUE(std::any_of(durable_events.begin(), durable_events.end(), [&](const auto& event) {
+        return event.kind == ProgramEventKind::CheckpointPublished &&
+               std::get<ProgramCheckpointEvent>(event.payload).checkpoint ==
+                   *durable_snapshot->exact_checkpoint();
+    }));
 
     auto       fresh_runtime = fixture.make_runtime();
     const auto replayed      = fresh_runtime->reconnect("tenant:runtime", original.run_id()).wait();
     ASSERT_EQ(replayed.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(replayed.output(), (json{{"value", "completed"}}));
     EXPECT_EQ(completed_calls.load(), 1U);
+    const auto replayed_events = journal->load_events("tenant:runtime", original.run_id(), 0);
+    for (const auto& durable_event : durable_events) {
+        EXPECT_EQ(std::count_if(replayed_events.begin(), replayed_events.end(),
+                                [&](const auto& replayed_event) {
+                                    return replayed_event.id == durable_event.id;
+                                }),
+                  1);
+    }
 
     journal->release_result();
     (void)original.wait();
@@ -1794,7 +1928,11 @@ TEST(ProgramRuntimeTest, JavaScriptPendingHeadFreshRuntimeResumesWithoutRedispat
     auto       fresh_runtime = fixture.make_runtime();
     auto       recovered     = fresh_runtime->reconnect("tenant:runtime", original.run_id());
     const auto interrupted   = recovered.wait();
-    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+        << (interrupted.failure()
+                ? interrupted.failure()->code + ": " + interrupted.failure()->message + " " +
+                      interrupted.failure()->witness.dump()
+                : "no failure detail");
     ASSERT_TRUE(interrupted.interrupt().has_value());
     ASSERT_TRUE(interrupted.interrupt()->pending_effect.has_value());
     const auto pending = *interrupted.interrupt()->pending_effect;
@@ -1919,7 +2057,7 @@ TEST(ProgramRuntimeTest, JavaScriptBlockedCommandHonorsExternalCancellation) {
     EXPECT_EQ(result.usage().program_operations, 1U);
 }
 
-TEST(ProgramRuntimeTest, JavaScriptFreshRuntimeRetainsConsumedOperationBudget) {
+TEST(ProgramRuntimeTest, JavaScriptCrashRecoveryDoesNotRecoverReservedResourceBudget) {
     blocking_calls.store(0);
     AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
     const auto      version = fixture.admit_javascript(javascript_runtime_source("runtime-blocking",
@@ -1939,17 +2077,21 @@ TEST(ProgramRuntimeTest, JavaScriptFreshRuntimeRetainsConsumedOperationBudget) {
 
     auto       fresh_runtime = fixture.make_runtime();
     const auto interrupted   = fresh_runtime->reconnect("tenant:runtime", original.run_id()).wait();
-    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
-
-    const auto resumed = fresh_runtime
-                             ->resume("tenant:runtime", original.run_id(),
-                                      resume_for(interrupted, json{{"value", "resumed"}},
-                                                 "trace-js-budget-recovery-resume"))
-                             .wait();
-    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::BudgetExhausted);
-    ASSERT_TRUE(resumed.failure().has_value());
-    EXPECT_EQ(resumed.failure()->code, "P_PROGRAM_OPERATION_BUDGET");
-    EXPECT_EQ(resumed.remaining_budget().max_program_operations, 0U);
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+        << (interrupted.failure()
+                ? interrupted.failure()->code + ": " + interrupted.failure()->message + " " +
+                      interrupted.failure()->witness.dump()
+                : "no failure detail");
+    EXPECT_EQ(interrupted.remaining_budget().wall_time_ms, 0U);
+    EXPECT_EQ(interrupted.remaining_budget().model_tokens, 0U);
+    EXPECT_EQ(interrupted.remaining_budget().monetary_microunits, 0U);
+    EXPECT_EQ(interrupted.remaining_budget().max_core_steps, 0U);
+    EXPECT_EQ(interrupted.remaining_budget().max_program_operations, 0U);
+    const auto durable = fixture.journal->latest("tenant:runtime", original.run_id());
+    ASSERT_TRUE(durable.has_value());
+    EXPECT_GT(durable->inflight_reservation.wall_time_ms, 0U);
+    EXPECT_GT(durable->inflight_reservation.model_tokens, 0U);
+    EXPECT_GT(durable->inflight_reservation.max_core_steps, 0U);
     EXPECT_TRUE(original.cancel());
     (void)original.wait();
     EXPECT_EQ(blocking_calls.load(), 1U);
@@ -2219,11 +2361,194 @@ TEST(ProgramRuntimeTest, JavaScriptRaceCancelsLoserChildrenWithoutOrphans) {
             json::object(), javascript_budget(2, 32, 1, 1), "trace-js-cancel-child", {}});
     const auto result = parent.wait();
 
-    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed)
+        << (result.failure() ? result.failure()->code + ": " + result.failure()->message + " " +
+                                   result.failure()->witness.dump()
+                             : "no failure detail");
     EXPECT_EQ(result.output(), (json{{"winner", true}}));
     const auto children = parent.snapshot().children();
     ASSERT_EQ(children.size(), 1U);
     EXPECT_EQ(children.front().state, ProgramChildState::Cancelled);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptInterruptedCallCoreResumesItsExactPendingCoordinate) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-interrupt", R"JS(
+    const output = yield ng.callCore("main", {}, "resume:call-core");
+    return {value: output.value};
+)JS"));
+
+    const auto interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1), "trace-js-exact-interrupt", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+        << (interrupted.failure()
+                ? interrupted.failure()->code + ": " + interrupted.failure()->message + " " +
+                      interrupted.failure()->witness.dump()
+                : "no failure detail");
+    ASSERT_TRUE(interrupted.checkpoint().has_value());
+    ASSERT_TRUE(interrupted.interrupt().has_value());
+    ASSERT_TRUE(interrupted.interrupt()->pending_input.has_value());
+
+    const auto resumed = fixture.runtime
+                             ->resume("tenant:runtime", interrupted.run_id(),
+                                      resume_for(interrupted, json{{"decision", "approved"}},
+                                                 "trace-js-exact-resume"))
+                             .wait();
+
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed)
+        << (resumed.failure() ? resumed.failure()->code + ": " + resumed.failure()->message
+                              : "no failure detail");
+    EXPECT_EQ(resumed.output(), (json{{"value", "approved"}}));
+    EXPECT_EQ(interrupt_calls.load(), 2U);
+    const auto commands =
+        fixture.journal->load_javascript_commands("tenant:runtime", interrupted.run_id());
+    ASSERT_EQ(commands.size(), 2U);
+    EXPECT_EQ(commands.front().coordinate_id(), commands.back().coordinate_id());
+    EXPECT_TRUE(commands.back().completed());
+}
+
+TEST(ProgramRuntimeTest, JavaScriptExactResumeStillValidatesMalformedTerminalOutput) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-interrupt", R"JS(
+    yield ng.callCore("main", {}, "resume:malformed-output");
+    return "not-an-object";
+)JS"),
+                                 ContractRecord{1, json{{"type", "object"}}});
+
+    const auto interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1), "trace-js-malformed-first", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+        << (interrupted.failure()
+                ? interrupted.failure()->code + ": " + interrupted.failure()->message + " " +
+                      interrupted.failure()->witness.dump()
+                : "no failure detail");
+
+    const auto resumed = fixture.runtime
+                             ->resume("tenant:runtime", interrupted.run_id(),
+                                      resume_for(interrupted, json{{"decision", "approved"}},
+                                                 "trace-js-malformed-resume"))
+                             .wait();
+
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(resumed.failure().has_value());
+    EXPECT_EQ(resumed.failure()->code, "P_OUTPUT_CONTRACT");
+    EXPECT_EQ(interrupt_calls.load(), 2U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptRaceSelectionDoesNotReplenishLateMembers) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-completed", R"JS(
+    const winner = yield ng.race([
+        ng.emit({winner: 0}, "race:first"),
+        ng.emit({winner: 1}, "race:second"),
+        ng.callCore("main", {}, "race:must-not-launch")
+    ], {max_in_flight: 2}, "race:no-replenish");
+    return winner;
+)JS"));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(2), "trace-js-race-fence", {}});
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output(), (json{{"winner", 0}}));
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptMissingSpawnBindingPreflightBlocksEverySibling) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-completed", R"JS(
+    yield ng.all([
+        ng.callCore("main", {}, "spawn-preflight:valid"),
+        ng.spawn("missing-child", {}, "spawn-preflight:missing")
+    ], {max_in_flight: 2}, "spawn-preflight:join");
+    return {unreachable: true};
+)JS"));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{
+            json::object(), javascript_budget(2, 32, 1, 1), "trace-js-spawn-preflight", {}});
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_CHILD_BINDING");
+    EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptAwaitedCallCoreResumesItsNestedExactCoordinate) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-interrupt", R"JS(
+    const output = yield ng.await(
+        ng.callCore("main", {}, "resume:nested-call-core"),
+        undefined,
+        "resume:nested-await");
+    return {value: output.value};
+)JS"));
+
+    const auto interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1), "trace-js-nested-interrupt", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(interrupted.interrupt().has_value());
+    ASSERT_TRUE(interrupted.interrupt()->pending_input.has_value());
+
+    const auto resumed = fixture.runtime
+                             ->resume("tenant:runtime", interrupted.run_id(),
+                                      resume_for(interrupted, json{{"decision", "nested-approved"}},
+                                                 "trace-js-nested-resume"))
+                             .wait();
+
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed)
+        << (resumed.failure() ? resumed.failure()->code + ": " + resumed.failure()->message
+                              : "no failure detail");
+    EXPECT_EQ(resumed.output(), (json{{"value", "nested-approved"}}));
+    EXPECT_EQ(interrupt_calls.load(), 2U);
+    const auto events = fixture.journal->load_events("tenant:runtime", interrupted.run_id(), 0);
+    const auto checkpoint_events = std::count_if(
+        events.begin(), events.end(),
+        [](const auto& event) { return event.kind == ProgramEventKind::CheckpointPublished; });
+    EXPECT_EQ(checkpoint_events, 2);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptEventSinkFailureSettlesPublishedCommandReservation) {
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-completed", R"JS(
+    yield ng.emit({published: true}, "sink:emit");
+    return {unreachable: true};
+)JS"));
+    auto sink = std::make_shared<ThrowingSink>(ProgramEventKind::Emit);
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1), "trace-js-sink", sink});
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_EVENT_SINK");
+    const auto journal = fixture.journal->latest("tenant:runtime", result.run_id());
+    ASSERT_TRUE(journal.has_value());
+    EXPECT_EQ(journal->continuation.state, ContinuationState::Failed);
+    EXPECT_EQ(journal->inflight_reservation, RunBudget{});
+    const auto commands =
+        fixture.journal->load_javascript_commands("tenant:runtime", result.run_id());
+    ASSERT_EQ(commands.size(), 2U);
+    EXPECT_TRUE(commands.back().completed());
+    EXPECT_LE(result.remaining_budget().wall_time_ms + result.usage().wall_time_ms,
+              javascript_budget(1).wall_time_ms);
 }
 #endif
 
@@ -3676,6 +4001,24 @@ TEST(ProgramRuntimeTest, ParallelJoinsAllBranchesInPlanOrder) {
     EXPECT_EQ(completed_calls.load(), 1U);
 }
 
+TEST(ProgramRuntimeTest, ParallelImmediateBranchesRetainTheirCompletionSignal) {
+    AdmittedRuntime fixture(2);
+    const json      unreachable_core{{"op", "branch"},
+                                     {"condition", json{{"path", "/unused"}, {"exists", true}}},
+                                     {"then", json{{"op", "call_core"}}},
+                                     {"else", json{{"op", "return"}, {"value", 3}}}};
+    const auto      result = run_orchestration(
+        fixture,
+        orchestration_document(json{
+                 {"op", "parallel"},
+                 {"branches", json::array({json{{"op", "return"}, {"value", 1}},
+                                           json{{"op", "return"}, {"value", 2}}, unreachable_core})}}),
+        json::object(), "trace-parallel-immediate");
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output(), json::array({1, 2, 3}));
+}
+
 TEST(ProgramRuntimeTest, NestedParallelCannotExceedRunConcurrencyGrant) {
     blocking_calls.store(0);
     AdmittedRuntime fixture(4);
@@ -3715,6 +4058,23 @@ TEST(ProgramRuntimeTest, RaceReturnsTheFirstCompletedBranchAndCancelsTheLoser) {
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(result.output(), json({{"branch", 2}}));
+}
+
+TEST(ProgramRuntimeTest, RaceImmediateBranchesRetainTheirCompletionSignal) {
+    AdmittedRuntime fixture(1);
+    const json      unreachable_core{{"op", "branch"},
+                                     {"condition", json{{"path", "/unused"}, {"exists", true}}},
+                                     {"then", json{{"op", "call_core"}}},
+                                     {"else", json{{"op", "return"}, {"value", 2}}}};
+    const auto      result = run_orchestration(
+        fixture,
+        orchestration_document(json{
+                 {"op", "race"},
+                 {"branches", json::array({json{{"op", "return"}, {"value", 1}}, unreachable_core})}}),
+        json::object(), "trace-race-immediate");
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.output(), 1);
 }
 
 TEST(ProgramRuntimeTest, RaceUsesDeclarationOrderForAReadyTie) {

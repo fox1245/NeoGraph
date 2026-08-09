@@ -35,7 +35,7 @@ ProgramJournalRecord start_journal() {
                                          1,
                                          {"root", ContinuationState::Running, 1},
                                          budget(),
-                                         budget(),
+                                         {},
                                          std::nullopt,
                                          10});
 }
@@ -105,18 +105,15 @@ ProgramJavaScriptCommandJournalEntry javascript_command_entry(std::uint64_t sequ
 ProgramTransitionPublication javascript_command_publication(
     const ProgramTransitionPublication&  previous,
     ProgramJavaScriptCommandJournalEntry command,
-    std::int64_t                         time) {
+    std::int64_t                         time,
+    std::optional<RunBudget>             remaining   = std::nullopt,
+    RunBudget                            reservation = {}) {
     const auto           old_run = previous.run_record;
-    auto                 journal = ProgramJournalRecord::create({previous.journal_record.id,
-                                                                 old_run.run_id(),
-                                                                 old_run.program_version_id(),
-                                                                 old_run.bundle_id(),
-                                                                 previous.journal_record.sequence + 1,
-                                                                 old_run.continuation(),
-                                                                 old_run.remaining_budget(),
-                                                                 {},
-                                                                 old_run.exact_checkpoint(),
-                                                                 time});
+    auto                 journal = ProgramJournalRecord::create(
+        {previous.journal_record.id, old_run.run_id(), old_run.program_version_id(),
+                         old_run.bundle_id(), previous.journal_record.sequence + 1, old_run.continuation(),
+                         remaining.value_or(old_run.remaining_budget()), reservation, old_run.exact_checkpoint(),
+                         time});
     ProgramRunRecordData data;
     data.owner_scope                      = old_run.owner_scope();
     data.run_id                           = old_run.run_id();
@@ -188,6 +185,54 @@ void exercise_javascript_command_history(ProgramTransitionStore& store) {
     EXPECT_EQ(commands[0].coordinate_id(), commands[1].coordinate_id());
     EXPECT_EQ(commands[2].coordinate_id(), commands[3].coordinate_id());
 }
+void exercise_javascript_command_reservation_settlement(ProgramTransitionStore& store) {
+    const auto start = start_publication();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, start),
+              ProgramTransitionPublishResult::Published);
+
+    auto available                   = budget();
+    available.wall_time_ms           = 800;
+    available.max_program_operations = 0;
+    RunBudget reservation;
+    reservation.wall_time_ms = 200;
+    const auto pending = javascript_command_publication(start, javascript_command_entry(1, false),
+                                                        20, available, reservation);
+    ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, pending),
+              ProgramTransitionPublishResult::Published);
+
+    const auto terminal = json{{"status", "completed"},
+                               {"usage", json{{"wall_time_ms", 50U},
+                                              {"model_tokens", 0U},
+                                              {"monetary_microunits", 0U},
+                                              {"program_operations", 1U},
+                                              {"core_steps", 0U},
+                                              {"peak_concurrency", 0U}}}};
+    const auto completed_entry =
+        ProgramJavaScriptCommandJournalEntry(ProgramJavaScriptCommandJournalEntryData{
+            2, digest('2'), 1,
+            JavaScriptCommand::call_core("journal:store", "main", json{{"input", 1}}), digest('8'),
+            terminal});
+
+    auto over_refund                   = budget();
+    over_refund.wall_time_ms           = 951;
+    over_refund.max_program_operations = 0;
+    const auto invalid =
+        javascript_command_publication(pending, completed_entry, 30, over_refund, RunBudget{});
+    EXPECT_EQ(store.compare_publish("owner-a", pending.journal_record.id, invalid),
+              ProgramTransitionPublishResult::Conflict);
+
+    auto settled                   = budget();
+    settled.wall_time_ms           = 950;
+    settled.max_program_operations = 0;
+    const auto completed =
+        javascript_command_publication(pending, completed_entry, 30, settled, RunBudget{});
+    ASSERT_EQ(store.compare_publish("owner-a", pending.journal_record.id, completed),
+              ProgramTransitionPublishResult::Published);
+    const auto latest = store.latest("owner-a", "run-1");
+    ASSERT_TRUE(latest.has_value());
+    EXPECT_EQ(latest->remaining_budget, settled);
+    EXPECT_EQ(latest->inflight_reservation, RunBudget{});
+}
 
 ProgramTransitionPublication terminal_publication(const ProgramTransitionPublication& start,
                                                   ProgramTerminalStatus               status,
@@ -255,7 +300,7 @@ ProgramTransitionPublication child_metadata_publication(
                                                              start.journal_record.sequence + 1,
                                                              {"root", ContinuationState::Running, 1},
                                                              budget(),
-                                                             budget(),
+                                                             {},
                                                              std::nullopt,
                                                              time});
     auto data                = ProgramRunRecordData{};
@@ -355,7 +400,7 @@ ProgramTransitionPublication resumed_effect_publication(
                                                                  3,
                                                                  {"root", ContinuationState::Running, 2},
                                                                  budget(),
-                                                                 budget(),
+                                                                 {},
                                                                  cp,
                                                                  30});
     ProgramRunRecordData data;
@@ -439,6 +484,31 @@ json publication_reference_body(const ProgramTransitionPublication& publication)
                  ? detail::parse_json_strict(publication.migration_plan->serialize_canonical())
                  : json(nullptr)}};
 }
+class CommandReadUnsupportedStore final : public ProgramTransitionStore {
+public:
+    std::optional<ProgramRunRecord> load(std::string_view, std::string_view) const override {
+        return std::nullopt;
+    }
+    std::optional<ProgramJournalRecord> latest(std::string_view, std::string_view) const override {
+        return std::nullopt;
+    }
+    std::vector<ProgramEvent> load_events(std::string_view,
+                                          std::string_view,
+                                          std::uint64_t) const override {
+        return {};
+    }
+    std::vector<ProgramEffectOutboxEntry> load_effects(std::string_view,
+                                                       std::string_view,
+                                                       std::uint64_t) const override {
+        return {};
+    }
+    ProgramTransitionPublishResult compare_publish(std::string_view,
+                                                   std::string_view,
+                                                   ProgramTransitionPublication) override {
+        return ProgramTransitionPublishResult::Conflict;
+    }
+};
+
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 class TestSqliteDatabase final {
 public:
@@ -523,7 +593,130 @@ private:
 };
 #endif
 
+void exercise_initial_reservation_is_rejected(ProgramTransitionStore& store) {
+    auto reservation                     = RunBudget{};
+    reservation.wall_time_ms             = 1;
+    auto                         journal = ProgramJournalRecord::create({{},
+                                                                         "run-1",
+                                                                         digest('1'),
+                                                                         digest('2'),
+                                                                         1,
+                                                                         {"root", ContinuationState::Running, 1},
+                                                                         budget(),
+                                                                         reservation,
+                                                                         std::nullopt,
+                                                                         10});
+    ProgramTransitionPublication publication{
+        start_run(journal),
+        journal,
+        {event(1, ProgramEventKind::Started, ProgramStartedEvent{budget()})},
+        {}};
+    EXPECT_EQ(store.compare_publish("owner-a", {}, std::move(publication)),
+              ProgramTransitionPublishResult::Conflict);
+}
+void exercise_cross_thread_call_core_settlement(ProgramTransitionStore& store,
+                                                bool                    exact_command_coordinate) {
+    const auto start = start_publication();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, start),
+              ProgramTransitionPublishResult::Published);
+
+    auto available                   = budget();
+    available.wall_time_ms           = 800;
+    available.max_program_operations = 0;
+    RunBudget reservation;
+    reservation.wall_time_ms = 200;
+    const auto pending = javascript_command_publication(start, javascript_command_entry(1, false),
+                                                        20, available, reservation);
+    ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, pending),
+              ProgramTransitionPublishResult::Published);
+
+    auto unrelated_checkpoint = checkpoint();
+    if (exact_command_coordinate) {
+        std::string identity = "run-1";
+        identity.push_back('\0');
+        identity.append("root.javascript.1");
+        identity.push_back('\0');
+        identity.append(digest('4'));
+        unrelated_checkpoint.core_thread_id =
+            detail::sha256_identity("program-core-thread/v1", identity);
+    } else {
+        unrelated_checkpoint.core_thread_id = "sibling-command-thread";
+    }
+    unrelated_checkpoint.checkpoint_id = "checkpoint-2";
+    auto settled                       = available;
+    settled.wall_time_ms               = 950;
+    const ProgramUsage usage{50, 0, 0, 0, 0, 0};
+    auto               journal = ProgramJournalRecord::create({pending.journal_record.id,
+                                                               "run-1",
+                                                               digest('1'),
+                                                               digest('2'),
+                                                               3,
+                                                               {"root", ContinuationState::Interrupted, 1},
+                                                               settled,
+                                                               {},
+                                                               unrelated_checkpoint,
+                                                               30});
+
+    ProgramPendingInputData pending_data;
+    pending_data.operation_id         = "root.javascript.1";
+    pending_data.call_id              = "call-1";
+    pending_data.kind                 = ProgramPendingInputKind::Input;
+    pending_data.result_schema        = json::object();
+    pending_data.payload              = json::object();
+    pending_data.core_node            = "main";
+    pending_data.core_interrupt_value = json::object();
+    auto pending_input                = ProgramPendingInput(std::move(pending_data));
+
+    ProgramResultData result_data;
+    result_data.status             = ProgramTerminalStatus::Interrupted;
+    result_data.run_id             = "run-1";
+    result_data.program_version_id = digest('1');
+    result_data.bundle_id          = digest('2');
+    result_data.attempt            = 1;
+    result_data.usage              = usage;
+    result_data.remaining_budget   = settled;
+    result_data.checkpoint         = unrelated_checkpoint;
+    result_data.interrupt = ProgramInterrupt{"main", json::object(), pending_input, std::nullopt};
+    auto result           = ProgramResult::create(std::move(result_data));
+
+    const auto           old_run = pending.run_record;
+    ProgramRunRecordData data;
+    data.owner_scope         = old_run.owner_scope();
+    data.run_id              = old_run.run_id();
+    data.program_version_id  = old_run.program_version_id();
+    data.bundle_id           = old_run.bundle_id();
+    data.binding_fingerprint = old_run.binding_fingerprint();
+    data.invocation          = old_run.invocation();
+    data.child_depth         = old_run.child_depth();
+    data.children            = old_run.children();
+    data.continuation        = journal.continuation;
+    data.remaining_budget    = settled;
+    data.exact_checkpoint    = unrelated_checkpoint;
+    data.pending_input       = pending_input;
+    data.terminal_result     = result;
+    data.journal_head        = journal.id;
+    data.event_sequence      = 3;
+    data.effect_sequence     = old_run.effect_sequence();
+    data.created_at_ms       = old_run.created_at_ms();
+    data.updated_at_ms       = 30;
+    ProgramTransitionPublication invalid{
+        ProgramRunRecord::create(std::move(data)),
+        std::move(journal),
+        {event(2, ProgramEventKind::CheckpointPublished,
+               ProgramCheckpointEvent{unrelated_checkpoint}, 30),
+         event(3, ProgramEventKind::Terminal,
+               ProgramTerminalEvent{ProgramTerminalStatus::Interrupted}, 30)},
+        {}};
+    EXPECT_EQ(store.compare_publish("owner-a", pending.journal_record.id, std::move(invalid)),
+              exact_command_coordinate ? ProgramTransitionPublishResult::Published
+                                       : ProgramTransitionPublishResult::Conflict);
+}
 }  // namespace
+
+TEST(ProgramTransitionStoreTest, MissingJavaScriptCommandReadSupportFailsClosed) {
+    CommandReadUnsupportedStore store;
+    EXPECT_THROW((void)store.load_javascript_commands("owner-a", "run-1"), std::runtime_error);
+}
 
 TEST(ProgramTransitionStoreTest, CanonicalValuesRejectTamper) {
     auto publication  = terminal_publication(start_publication(), ProgramTerminalStatus::Completed,
@@ -550,6 +743,19 @@ TEST(ProgramTransitionStoreTest, PublicationCanonicalWireMatchesReferenceTree) {
 TEST(ProgramTransitionStoreTest, InMemoryJavaScriptCommandHistoryIsAppendOnly) {
     InMemoryProgramTransitionStore store;
     exercise_javascript_command_history(store);
+}
+TEST(ProgramTransitionStoreTest, InMemoryCommandSettlementRefundIsUsageBounded) {
+    InMemoryProgramTransitionStore store;
+    exercise_javascript_command_reservation_settlement(store);
+}
+
+TEST(ProgramTransitionStoreTest, InMemoryBindsEveryReservationToItsExactCoordinate) {
+    InMemoryProgramTransitionStore initial_store;
+    exercise_initial_reservation_is_rejected(initial_store);
+    InMemoryProgramTransitionStore unrelated_store;
+    exercise_cross_thread_call_core_settlement(unrelated_store, false);
+    InMemoryProgramTransitionStore exact_store;
+    exercise_cross_thread_call_core_settlement(exact_store, true);
 }
 
 TEST(ProgramTransitionStoreTest, FirstPublishRetryAndOwnerIsolation) {
@@ -930,6 +1136,39 @@ TEST(ProgramTransitionStoreTest, SQLiteJavaScriptCommandHistorySurvivesReopen) {
     }
     std::filesystem::remove(path);
 }
+TEST(ProgramTransitionStoreTest, SQLiteCommandSettlementRefundIsUsageBounded) {
+    static std::atomic<unsigned> sequence{0};
+    const auto                   path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-program-command-reservation-" + std::to_string(sequence.fetch_add(1)) + ".db"))
+            .string();
+    std::filesystem::remove(path);
+    {
+        SQLiteProgramTransitionStore store(path);
+        exercise_javascript_command_reservation_settlement(store);
+    }
+    std::filesystem::remove(path);
+}
+
+TEST(ProgramTransitionStoreTest, SQLiteBindsEveryReservationToItsExactCoordinate) {
+    static std::atomic<unsigned> sequence{0};
+    const auto                   path =
+        (std::filesystem::temp_directory_path() / ("neograph-program-reservation-integrity-" +
+                                                   std::to_string(sequence.fetch_add(1)) + ".db"))
+            .string();
+    std::filesystem::remove(path);
+    {
+        SQLiteProgramTransitionStore rejected_store(path);
+        exercise_initial_reservation_is_rejected(rejected_store);
+        exercise_cross_thread_call_core_settlement(rejected_store, false);
+    }
+    std::filesystem::remove(path);
+    {
+        SQLiteProgramTransitionStore exact_store(path);
+        exercise_cross_thread_call_core_settlement(exact_store, true);
+    }
+    std::filesystem::remove(path);
+}
 
 TEST(ProgramTransitionStoreTest, SQLiteReopensDurableMigrationProof) {
     static std::atomic<unsigned> sequence{0};
@@ -1091,6 +1330,11 @@ TEST(ProgramTransitionStoreTest, SQLiteMigratesLegacySnapshotToDeltaLog) {
     const ProgramTransitionPublication legacy{interrupted.run_record, interrupted.journal_record,
                                               std::move(legacy_events), interrupted.effects,
                                               std::nullopt};
+    json                               legacy_retry_body = json::object();
+    for (const auto& [key, value] : publication_reference_body(interrupted).items()) {
+        if (key != "commands") legacy_retry_body[key] = value;
+    }
+    const auto legacy_retry_bytes = detail::canonical_json_bytes(legacy_retry_body);
     {
         TestSqliteDatabase database(path);
         database.execute(
@@ -1099,7 +1343,7 @@ TEST(ProgramTransitionStoreTest, SQLiteMigratesLegacySnapshotToDeltaLog) {
             "canonical_bytes BLOB NOT NULL, last_publication_bytes BLOB NOT NULL, "
             "PRIMARY KEY(owner_scope, run_id))");
         database.insert_legacy("owner-a", "run-1", legacy.serialize_canonical(),
-                               interrupted.serialize_canonical());
+                               legacy_retry_bytes);
     }
     {
         SQLiteProgramTransitionStore store(path);

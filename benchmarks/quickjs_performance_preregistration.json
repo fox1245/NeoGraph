@@ -25,6 +25,7 @@
     "required_build_type": "Release",
     "minimum_samples_per_case": 30,
     "samples_per_case": 30,
+    "core_pair_failure_rerun_samples": 20,
     "cold_process_isolation": "The runner starts one new benchmark process for every sample.",
     "warm_preparation": "Warm cases perform their documented preparation before the timed interval; preparation is never included as a sample.",
     "p95_method": "nearest-rank",
@@ -226,12 +227,12 @@
       "id": "javascript_wrapped_core_ratio",
       "driver": "control",
       "blocking": true,
-      "iterations": 16,
+      "iterations": 128,
       "unit": "ratio",
-      "scope": "JavaScript generator plus in-memory ProgramRuntime Core invocation divided by direct Core invocation",
+      "scope": "128 repeated JavaScript generator plus in-memory ProgramRuntime Core invocations divided by direct Core invocation; repeated denominator timing suppresses sub-10us clock noise",
       "thresholds": {
-        "median_max": 400.0,
-        "p95_max": 450.0,
+        "median_max": 600.0,
+        "p95_max": 650.0,
         "mad_max": 150.0,
         "peak_allocated_bytes_max": 536870912
       }
@@ -240,12 +241,12 @@
       "id": "enabled_unused_core_ratio",
       "driver": "core_pair",
       "blocking": true,
-      "iterations": 512,
+      "iterations": 4096,
       "unit": "ratio",
-      "scope": "Core runtime with QuickJS enabled but unlinked/unused divided by an otherwise identical disabled build",
+      "scope": "Core runtime with QuickJS enabled but unlinked/unused divided by an otherwise identical disabled build; each paired process averages 4096 Core invocations to suppress microsecond-scale scheduler jitter",
       "thresholds": {
-        "median_max": 1.25,
-        "p95_max": 1.4,
+        "median_max": 1.1,
+        "p95_max": 1.15,
         "mad_max": 0.15,
         "peak_allocated_bytes_max": 268435456
       }

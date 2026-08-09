@@ -83,13 +83,17 @@ public:
     load_effects(std::string_view owner_scope,
                  std::string_view run_id,
                  std::uint64_t after_sequence = 0) const = 0;
-    /** Durable yielded-command journal, ordered by append sequence. */
-    virtual std::vector<ProgramJavaScriptCommandJournalEntry>
-    load_javascript_commands(std::string_view /*owner_scope*/,
-                             std::string_view /*run_id*/,
-                             std::uint64_t /*after_sequence*/ = 0) const {
-        return {};
-    }
+    /**
+     * Durable yielded-command journal, ordered by append sequence.
+     *
+     * The base implementation fails closed. Stores that participate in
+     * JavaScript control recovery must override this operation rather than
+     * making an unreadable journal look empty.
+     */
+    virtual std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::uint64_t    after_sequence = 0) const;
     /** Durable migration proof published with a fork, if this run is a fork. */
     virtual std::optional<MigrationPlan>
     load_migration_plan(std::string_view /*owner_scope*/, std::string_view /*run_id*/) const {
@@ -97,8 +101,9 @@ public:
     }
 
     /**
-     * Atomically publishes the run snapshot, journal head, events, and effect outbox.
-     * A throw has the strong exception guarantee. An exact retry is AlreadyPresent.
+     * Atomically publishes the run snapshot, journal head, events, effect outbox,
+     * and JavaScript command appends. A throw has the strong exception guarantee.
+     * An exact retry is AlreadyPresent.
      */
     virtual ProgramTransitionPublishResult
     compare_publish(std::string_view owner_scope,

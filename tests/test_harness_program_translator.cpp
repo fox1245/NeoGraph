@@ -59,7 +59,7 @@ json worker_schema() {
 }
 
 BudgetLimits ceiling() {
-    return {86400000, 1000000000, 1000000000, 64, 1, 1000, 1, 1, 1};
+    return {86400000, 1000000000, 1000000000, 64, 64, 1000, 1, 1, 1};
 }
 
 struct FixtureHost {
@@ -106,6 +106,7 @@ FixtureHost host(std::atomic<int>&        factory_calls,
     defaults.timeout_seconds               = 5;
     defaults.max_core_steps                = 10;
     defaults.max_parallel_workers          = 2;
+    defaults.max_program_operations        = 12;
     defaults.max_worker_retries            = 1;
     defaults.provider_timeout_seconds      = 30;
     defaults.max_output_tokens             = 100;
@@ -135,6 +136,7 @@ json request() {
          {{"max_steps", 10},
           {"timeout_seconds", 5},
           {"max_parallel_workers", 2},
+          {"max_program_operations", 8},
           {"max_worker_retries", 1},
           {"provider_timeout_seconds", 30},
           {"max_output_tokens", 100}}},
@@ -218,13 +220,79 @@ TEST(HarnessProgramTranslator, PresetAndJavaScriptAreTheOnlyPublicationFrontends
     javascript_request["harness"] = {
         {"mode", "javascript"},
         {"source_id", "harness:test/control.js"},
-        {"source", "export function define() { return ng.graph('main'); }"},
+        {"source",
+         R"JS(export function define() {
+    const graph = ng.graph("main");
+    graph.channel("worker_results", {reducer: "append", initial: []});
+    graph.channel("final_result", {reducer: "overwrite", initial: null});
+    graph.node("judge", {type: "neograph_harness_judge"});
+    graph.entry("judge");
+    graph.exit("judge");
+    return graph;
+}
+export function* main(input) {
+    return {
+        outcome: "zero_findings",
+        workers: [],
+        findings: [],
+        finding_sources: [],
+        valid_workers: 0,
+        failed_workers: 0
+    };
+})JS"},
     };
     auto javascript = HarnessRequestTranslator::translate(
         javascript_request, fixture.snapshots.registry, fixture.defaults);
     EXPECT_EQ(javascript.source.kind(), SourceKind::JavaScript);
     EXPECT_EQ(javascript.wire.authoring_frontend, AuthoringFrontend::JavaScript);
     EXPECT_EQ(javascript.wire.mode, "javascript");
+    ASSERT_EQ(javascript.sealed_workers.size(), 1U);
+    EXPECT_EQ(javascript.sealed_workers.at("reviewer").at("max_retries"), 1);
+    EXPECT_EQ(javascript.input_contract.schema.at("required"), json::array({"task"}));
+    EXPECT_EQ(javascript.output_contract.schema, harness_program_output_schema());
+    ProgramCompiler compiler(fixture.snapshots.registry,
+                             ProgramCompilerConfig{"test:harness-javascript-authority"});
+    const auto bundle = compiler.compile(javascript.source, javascript.invocation_template.budget,
+                                         javascript.input_contract, javascript.output_contract);
+    EXPECT_EQ(bundle.input_contract().schema, javascript.input_contract.schema);
+    EXPECT_EQ(bundle.output_contract().schema, harness_program_output_schema());
+    const json exact_budget = {
+        {"wall_time_ms", javascript.invocation_template.budget.wall_time_ms},
+        {"model_tokens", javascript.invocation_template.budget.model_tokens},
+        {"monetary_microunits", javascript.invocation_template.budget.monetary_microunits},
+        {"max_concurrency", javascript.invocation_template.budget.max_concurrency},
+        {"max_program_operations", javascript.invocation_template.budget.max_program_operations},
+        {"max_core_steps", javascript.invocation_template.budget.max_core_steps},
+        {"max_dynamic_compiles", javascript.invocation_template.budget.max_dynamic_compiles},
+        {"max_child_depth", javascript.invocation_template.budget.max_child_depth},
+        {"max_total_children", javascript.invocation_template.budget.max_total_children},
+    };
+    ASSERT_EQ(bundle.declared_budget_requirements().size(), exact_budget.size());
+    for (const auto& requirement : bundle.declared_budget_requirements()) {
+        ASSERT_TRUE(exact_budget.contains(requirement.resource));
+        EXPECT_EQ(requirement.minimum, exact_budget.at(requirement.resource).get<std::uint64_t>());
+        EXPECT_EQ(requirement.maximum, exact_budget.at(requirement.resource).get<std::uint64_t>());
+    }
+    auto define_only_request                    = javascript_request;
+    define_only_request["harness"]["source_id"] = "harness:test/define-only.js";
+    define_only_request["harness"]["source"] =
+        R"JS(export function define() {
+    const graph = ng.graph("main");
+    graph.channel("worker_results", {reducer: "append", initial: []});
+    graph.channel("final_result", {reducer: "overwrite", initial: null});
+    graph.node("judge", {type: "neograph_harness_judge"});
+    graph.entry("judge");
+    graph.exit("judge");
+    return graph;
+})JS";
+    const auto define_only = HarnessRequestTranslator::translate(
+        define_only_request, fixture.snapshots.registry, fixture.defaults);
+    EXPECT_EQ(define_only.output_contract.schema, preset.output_contract.schema);
+    const auto define_only_bundle =
+        compiler.compile(define_only.source, define_only.invocation_template.budget,
+                         define_only.input_contract, define_only.output_contract);
+    EXPECT_FALSE(define_only_bundle.control_source().has_value());
+    EXPECT_EQ(define_only_bundle.output_contract().schema, preset.output_contract.schema);
     EXPECT_EQ(calls.load(), 0);
 }
 
@@ -269,11 +337,23 @@ TEST(HarnessProgramTranslator, EmitsNineExactFiniteTotalBudgetsAndRejectsUnbound
     }
     EXPECT_EQ(translated.invocation_template.budget.wall_time_ms, 5000u);
     EXPECT_EQ(translated.invocation_template.budget.model_tokens, 1800u);
-    EXPECT_EQ(translated.invocation_template.budget.max_concurrency, 1u);
-    EXPECT_EQ(translated.invocation_template.budget.max_program_operations, 1u);
+    EXPECT_EQ(translated.invocation_template.budget.max_concurrency, 2u);
+    EXPECT_EQ(translated.invocation_template.budget.max_program_operations, 8u);
     EXPECT_EQ(translated.invocation_template.budget.max_dynamic_compiles, 0u);
     EXPECT_EQ(translated.invocation_template.budget.max_child_depth, 0u);
     EXPECT_EQ(translated.invocation_template.budget.max_total_children, 0u);
+
+    auto above_host_default = request();
+    above_host_default["budgets"]["max_program_operations"] =
+        fixture.defaults.max_program_operations + 1;
+    try {
+        (void)HarnessRequestTranslator::translate(above_host_default, fixture.snapshots.registry,
+                                                  fixture.defaults);
+        FAIL() << "request exceeded host max_program_operations authority";
+    } catch (const HarnessTranslationError& error) {
+        EXPECT_EQ(error.code(), "H_BUDGET_FINITE");
+        EXPECT_EQ(error.pointer(), "/budgets/max_program_operations");
+    }
 
     auto unbounded              = fixture.defaults;
     unbounded.max_output_tokens = 0;
@@ -321,7 +401,7 @@ TEST(HarnessProgramTranslator, RejectionsNeverDispatchFactoriesOrUseGlobalFallba
         {"source",
          R"JS(export function define() {
     const graph = ng.graph("global_only");
-    graph.node("work", "translator_global_only", {});
+    graph.node("work", {type: "translator_global_only"});
     graph.entry("work");
     graph.exit("work");
     return graph;
@@ -361,6 +441,7 @@ TEST(HarnessProgramTranslator, RequiresFrozenContractAndCarriesItToHarnessProjec
     auto       frozen   = request();
     const auto manifest = frozen_contract("owner:test", json{{"outcome", "zero_findings"}});
     frozen["contract"]  = json::parse(manifest.serialize_canonical());
+    frozen["budgets"]["max_program_operations"] = fixture.defaults.max_program_operations;
     frozen["workspace_revision"] = "workspace-test-1";
     const auto translated =
         HarnessRequestTranslator::translate(frozen, fixture.snapshots.registry, fixture.defaults);

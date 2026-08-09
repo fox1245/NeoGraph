@@ -2,9 +2,12 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -102,6 +105,53 @@ ProgramBundle make_bundle(std::string    module_root,
     return ProgramBundle(std::move(data));
 }
 
+ProgramBundle make_composition_bundle(std::string         registry_fingerprint,
+                                      ContractRecord      input,
+                                      ContractRecord      output,
+                                      const BudgetLimits& allocation) {
+    const json definition = json{{"schema_version", SealedCoreDefinition::STORAGE_SCHEMA_VERSION},
+                                 {"nodes", json{{"main", json{{"type", "module-node"}}}}}};
+    ProgramBundleData data;
+    data.source_kind                   = SourceKind::CanonicalJson;
+    data.source_hash                   = digest('8');
+    data.canonical_program_hash        = digest('9');
+    data.compiler_build_id             = "compiler:module-overflow";
+    data.program_schema_version        = 1;
+    data.registry_snapshot_fingerprint = std::move(registry_fingerprint);
+    data.module_dependency_merkle_root = ModuleResolution{}.dependency_merkle_root();
+    data.input_contract                = std::move(input);
+    data.output_contract               = std::move(output);
+    data.orchestration_plan            = OrchestrationPlanRecord{
+        1, json{{"root", "root"},
+                           {"operations",
+                            json::array({
+                     json{{"id", "root"},
+                                     {"op", "sequence"},
+                                     {"children", json::array({"spawn-a", "spawn-b"})}},
+                     json{{"id", "spawn-a"}, {"op", "spawn"}, {"child_binding", "child-a"}},
+                     json{{"id", "spawn-b"}, {"op", "spawn"}, {"child_binding", "child-b"}},
+                 })}}};
+    data.sealed_core_definitions = {
+        SealedCoreDefinition{"main", sealed_core_definition_hash(definition), definition}};
+    data.core_plan_identities           = {CorePlanIdentity{"main", digest('c')}};
+    data.executable_registry_identities = {
+        ExecutableIdentity{ExecutableKind::Node, "module-node", "1.0.0", digest('5')}};
+    data.capability_effect_closure    = CapabilityEffectClosure{{"read"}, {"tool"}};
+    data.execution_guarantee          = ExecutionGuarantee::Strict;
+    data.declared_budget_requirements = {
+        BudgetRequirement{"wall_time_ms", 1, allocation.wall_time_ms},
+        BudgetRequirement{"model_tokens", 1, allocation.model_tokens},
+        BudgetRequirement{"monetary_microunits", 1, allocation.monetary_microunits},
+        BudgetRequirement{"max_concurrency", 1, allocation.max_concurrency},
+        BudgetRequirement{"max_program_operations", 1, allocation.max_program_operations},
+        BudgetRequirement{"max_core_steps", 1, allocation.max_core_steps},
+        BudgetRequirement{"max_dynamic_compiles", 1, allocation.max_dynamic_compiles},
+        BudgetRequirement{"max_child_depth", 1, allocation.max_child_depth},
+        BudgetRequirement{"max_total_children", 1, allocation.max_total_children},
+    };
+    return ProgramBundle(std::move(data));
+}
+
 struct LinkFixture {
     ProgramModule    parent;
     ModuleResolution resolution;
@@ -147,6 +197,93 @@ LinkFixture make_fixture(std::string child_owner = "tenant:module",
     resolution.modules.push_back(parent);
     return LinkFixture{std::move(parent), std::move(resolution), std::move(bundle),
                        std::move(version)};
+}
+
+struct OverflowCompositionFixture {
+    ProgramBundle      parent_bundle;
+    ProgramComposition composition;
+};
+
+OverflowCompositionFixture make_overflow_composition(BudgetLimits first_budget,
+                                                     BudgetLimits second_budget,
+                                                     BudgetLimits parent_allocation) {
+    const auto           module_root = ModuleResolution{}.dependency_merkle_root();
+    const ContractRecord contract{1, json{{"type", "object"}}};
+    const auto           registry  = make_registry();
+    const auto           admission = make_admission(registry);
+    auto                 first_bundle =
+        make_bundle(module_root, registry.fingerprint(), contract, contract, "unused-a");
+    auto second_bundle =
+        make_bundle(module_root, registry.fingerprint(), contract, contract, "unused-b");
+
+    const auto make_child_policy = [&](std::string id, const BudgetLimits& ceiling) {
+        PolicySnapshotBuilder builder;
+        builder.id(std::move(id))
+            .semantic_version("1.0.0")
+            .owner_scope("tenant:module")
+            .admission_profile(admission)
+            .allow_capability("read")
+            .allow_effect("tool")
+            .budget_ceiling(ceiling);
+        return std::move(builder).build();
+    };
+    const auto     first_policy  = make_child_policy("overflow-policy-a", first_budget);
+    const auto     second_policy = make_child_policy("overflow-policy-b", second_budget);
+    ProgramVersion first_version(ProgramVersionData{
+        first_bundle.id(),
+        admission,
+        first_policy,
+        {},
+        "tenant:module",
+        CoreMaterializationReceipt{
+            "compiler:module", registry.fingerprint(), {CorePlanIdentity{"main", digest('c')}}},
+        ExecutionGuarantee::Strict});
+    ProgramVersion second_version(ProgramVersionData{
+        second_bundle.id(),
+        admission,
+        second_policy,
+        {},
+        "tenant:module",
+        CoreMaterializationReceipt{
+            "compiler:module", registry.fingerprint(), {CorePlanIdentity{"main", digest('c')}}},
+        ExecutionGuarantee::Strict});
+
+    auto parent_bundle =
+        make_composition_bundle(registry.fingerprint(), contract, contract, parent_allocation);
+    ProgramModuleData parent_data;
+    parent_data.owner_scope          = "tenant:module";
+    parent_data.coordinate           = ModuleCoordinate{"test", "overflow-parent", "1.0.0", ""};
+    parent_data.attestation_id       = "attestation:module";
+    parent_data.allowed_capabilities = {"read"};
+    parent_data.declared_effects     = {"tool"};
+    parent_data.children             = {
+        ChildProgramDescriptor{"child-a",
+                               first_version.id(),
+                                           {ModulePort{"input", contract}},
+                                           {ModulePort{"output", contract}},
+                                           {"read"},
+                                           {"tool"},
+                               first_budget,
+                               ExecutionGuarantee::Strict},
+        ChildProgramDescriptor{"child-b",
+                               second_version.id(),
+                                           {ModulePort{"input", contract}},
+                                           {ModulePort{"output", contract}},
+                                           {"read"},
+                                           {"tool"},
+                               second_budget,
+                               ExecutionGuarantee::Strict},
+    };
+    auto             parent = ProgramModule::create(std::move(parent_data));
+    ModuleResolution resolution;
+    resolution.root = parent.coordinate();
+    resolution.modules.push_back(parent);
+    ProgramComposition composition{
+        std::move(parent),
+        std::move(resolution),
+        {ChildProgramBinding{"child-a", std::move(first_bundle), std::move(first_version)},
+         ChildProgramBinding{"child-b", std::move(second_bundle), std::move(second_version)}}};
+    return OverflowCompositionFixture{std::move(parent_bundle), std::move(composition)};
 }
 
 TEST(ProgramModuleTest, LinksExactChildAndRoundTripsImmutableReceipt) {
@@ -413,6 +550,43 @@ TEST(ProgramModuleTest, WholeCompositionValidatesBeforeChildDispatch) {
         {ChildProgramBinding{"child", fixture.bundle, fixture.version}}};
 
     EXPECT_NO_THROW(validate_program_composition(fixture.bundle, composition));
+}
+
+TEST(ProgramModuleTest, WholeCompositionRejectsUint64ChildBudgetAggregationOverflow) {
+    const auto maximum = std::numeric_limits<std::uint64_t>::max();
+    auto fixture = make_overflow_composition(BudgetLimits{maximum, 10, 10, 1, 10, 10, 1, 1, 1},
+                                             BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1},
+                                             BudgetLimits{maximum, 20, 20, 2, 20, 20, 2, 1, 2});
+
+    try {
+        validate_program_composition(fixture.parent_bundle, fixture.composition);
+        FAIL() << "expected uint64 child-budget aggregation overflow";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_STREQ(error.what(), "Child budget aggregation overflows wall_time_ms");
+    }
+}
+
+TEST(ProgramModuleTest, WholeCompositionRejectsUint32ChildBudgetAggregationOverflow) {
+    const auto maximum = std::numeric_limits<std::uint32_t>::max();
+    auto fixture = make_overflow_composition(BudgetLimits{10, 10, 10, maximum, 10, 10, 1, 1, 1},
+                                             BudgetLimits{10, 10, 10, 1, 10, 10, 1, 1, 1},
+                                             BudgetLimits{20, 20, 20, maximum, 20, 20, 2, 1, 2});
+
+    try {
+        validate_program_composition(fixture.parent_bundle, fixture.composition);
+        FAIL() << "expected uint32 child-budget aggregation overflow";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_STREQ(error.what(), "Child budget aggregation overflows max_concurrency");
+    }
+}
+
+TEST(ProgramModuleTest, WholeCompositionAggregatesChildDepthByMaximum) {
+    auto fixture = make_overflow_composition(
+        BudgetLimits{10, 10, 10, 1, 10, 10, 1, MAX_SUPPORTED_CHILD_DEPTH, 1},
+        BudgetLimits{10, 10, 10, 1, 10, 10, 1, MAX_SUPPORTED_CHILD_DEPTH, 1},
+        BudgetLimits{20, 20, 20, 2, 20, 20, 2, MAX_SUPPORTED_CHILD_DEPTH, 2});
+
+    EXPECT_NO_THROW(validate_program_composition(fixture.parent_bundle, fixture.composition));
 }
 
 TEST(ProgramModuleTest, WholeCompositionRejectsUndeclaredSpawnBinding) {

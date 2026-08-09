@@ -101,6 +101,15 @@ public:
 NEOGRAPH_PROGRAM_API bool
 is_valid_program_journal_transition(const ProgramJournalRecord& previous,
                                     const ProgramJournalRecord& next) noexcept;
+/**
+ * Validates release of an explicit in-flight reservation against measured
+ * usage. The next record must clear the reservation and expose exactly the
+ * unused capacity, with overflow rejected.
+ */
+NEOGRAPH_PROGRAM_API bool is_valid_program_journal_reservation_settlement(
+    const ProgramJournalRecord& previous,
+    const ProgramJournalRecord& next,
+    const ProgramUsage&         usage) noexcept;
 
 class NEOGRAPH_PROGRAM_API InMemoryProgramJournal final : public ProgramJournal {
 public:

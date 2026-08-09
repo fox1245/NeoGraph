@@ -38,16 +38,17 @@ JavaScript ソースは `harness.source` に置き、`harness.source_id` でソ�
 
 #### 制御フロー移行例
 
-オーサリング時の展開は通常の JavaScript 関数へ移し、実行時エフェクトは
-yield する型付きコマンドの背後に限定します。次のモジュールはループ、分岐、
-上限制御された並列実行を使い、再試行上限は `define()` が構築する admission
-済み Core ノード設定に残します。
+`define()` はコンパイル時に限定し、実行時のエフェクトはすべて yield された型付き
+コマンドの背後に置きます。この完全なリクエストは、ジェネレーターに 2 操作と
+2 並列の上限を与えます。ワーカーノードはリクエストからホストが封印した設定と
+完全に一致し、終端戻り値は Harness の結果形式です。
 
 ```javascript
-function workerConfig(workerId) {
+const source = String.raw`
+function workerConfig() {
   return {
     type: "neograph_harness_worker",
-    worker_id: workerId,
+    worker_id: "reviewer",
     instructions: "Return structured findings",
     tool_ids: [],
     tool_descriptions: {},
@@ -55,7 +56,7 @@ function workerConfig(workerId) {
     provider_timeout_ms: 30000,
     max_output_tokens: 512,
     input_token_ceiling: 16384,
-    max_retries: 2,
+    max_retries: 1,
     max_provider_tool_rounds: 8,
     evidence_required: [],
     read_only: true
@@ -67,7 +68,7 @@ export function define() {
   graph.channel("task", {reducer: "overwrite", initial: {}});
   graph.channel("worker_results", {reducer: "append", initial: []});
   graph.channel("final_result", {reducer: "overwrite", initial: null});
-  graph.node("reviewer", workerConfig("reviewer"));
+  graph.node("reviewer", workerConfig());
   graph.node("judge", {
     type: "neograph_harness_judge",
     barrier: {wait_for: ["reviewer"]}
@@ -79,25 +80,40 @@ export function define() {
 }
 
 export function* main(input) {
-  const reviewed = [];
-  for (let offset = 0; offset < input.items.length; offset += 4) {
-    const batch = input.items.slice(offset, offset + 4);
-    const results = yield ng.all(
-      batch.map((item, index) =>
-        ng.callCore("review", {task: item}, `batch:${offset}:${index}`)),
-      {max_in_flight: 4},
-      `batch:${offset}`
-    );
-    reviewed.push(...results);
-  }
-
-  if (!input.require_final_review) {
-    return {reviewed};
-  }
-  const finalReview = yield ng.callCore(
-    "review", {task: {reviewed}}, "final-review");
-  return {reviewed, finalReview};
+  const results = yield ng.all([
+    ng.callCore("review", {task: input.task}, "review:first"),
+    ng.callCore("review", {task: input.task}, "review:second")
+  ], {max_in_flight: 2}, "review:all");
+  return results[0].channels.final_result.value;
 }
+`;
+
+const request = {
+  task: {
+    objective: "Review the change",
+    acceptance: ["Return structured, evidence-backed findings"]
+  },
+  harness: {mode: "javascript", source_id: "review:main.js", source},
+  workers: [{
+    id: "reviewer",
+    instructions: "Return structured findings",
+    tools: [],
+    output_schema: {type: "object", additionalProperties: true},
+    provider_timeout_seconds: 30,
+    max_output_tokens: 512
+  }],
+  tool_catalog: [],
+  budgets: {
+    max_steps: 40,
+    timeout_seconds: 60,
+    max_parallel_workers: 2,
+    max_program_operations: 2,
+    max_worker_retries: 1,
+    provider_timeout_seconds: 30,
+    max_output_tokens: 512
+  },
+  policy: {read_only: true, evidence_required: []}
+};
 ```
 
 安定したソースサイト文字列は永続コマンド座標の一部です。再試行や再起動の
