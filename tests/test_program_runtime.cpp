@@ -2024,6 +2024,42 @@ TEST(ProgramRuntimeTest, JavaScriptJoinUsesDeclarationOrderForResultsAndReadyRac
                     {"race", json{{"id", 1}}}}));
 }
 
+TEST(ProgramRuntimeTest, JavaScriptStructuredCommandReplaysAfterFreshRuntimeWithoutRedispatch) {
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    AdmittedRuntime fixture(2, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-completed",
+        R"JS(
+    const results = yield ng.all([
+        ng.callCore("main", {member: 1}, "replay:first"),
+        ng.callCore("main", {member: 2}, "replay:second")
+    ], {max_in_flight: 2}, "replay:join");
+    return {values: results.map((result) => result.value)};
+)JS"));
+
+    auto original = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(2),
+                          "trace-js-structured-result-crash", {}});
+    ASSERT_TRUE(journal->wait_for_result(std::chrono::seconds(2)));
+    EXPECT_EQ(completed_calls.load(), 2U);
+
+    auto fresh_runtime = fixture.make_runtime();
+    const auto replayed = fresh_runtime->reconnect("tenant:runtime", original.run_id()).wait();
+    ASSERT_EQ(replayed.status(), ProgramTerminalStatus::Completed)
+        << (replayed.failure() ? replayed.failure()->code + ": " +
+                                     replayed.failure()->message
+                               : "no failure detail");
+    EXPECT_EQ(replayed.output(),
+              (json{{"values", json::array({"completed", "completed"})}}));
+    EXPECT_EQ(completed_calls.load(), 2U);
+
+    journal->release_result();
+    (void)original.wait();
+    EXPECT_EQ(completed_calls.load(), 2U);
+}
+
 TEST(ProgramRuntimeTest, JavaScriptJoinCollectsFailuresInDeclarationOrder) {
     completed_calls.store(0);
     AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
