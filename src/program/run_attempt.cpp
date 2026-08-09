@@ -1,11 +1,13 @@
-#include <neograph/program/diagnostic.h>
 #include <neograph/graph/cancel.h>
+#include <neograph/program/compiler.h>
+#include <neograph/program/diagnostic.h>
 
 #include "canonical_json.h"
 #include "core_progress.h"
+#include "javascript.h"
 #include "run_control.h"
-#include <asio/co_spawn.hpp>
 #include <asio/bind_executor.hpp>
+#include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/experimental/awaitable_operators.hpp>
 #include <asio/post.hpp>
@@ -14,21 +16,22 @@
 #include <asio/strand.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <map>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
-#include <mutex>
 
 namespace neograph::program::detail {
 namespace {
@@ -93,13 +96,12 @@ std::string operation_thread_id(const RunControl& control, std::string_view oper
 std::optional<json> json_path_value(const json& value, std::string_view path) {
     if (path.empty()) return value;
     if (path.front() != '/') return std::nullopt;
-    json current = value;
-    std::size_t begin = 1;
+    json        current = value;
+    std::size_t begin   = 1;
     while (begin <= path.size()) {
-        const auto end = path.find('/', begin);
-        auto       part = std::string(path.substr(begin, end == std::string_view::npos
-                                                           ? path.size() - begin
-                                                           : end - begin));
+        const auto end  = path.find('/', begin);
+        auto       part = std::string(
+            path.substr(begin, end == std::string_view::npos ? path.size() - begin : end - begin));
         std::string decoded;
         decoded.reserve(part.size());
         for (std::size_t index = 0; index < part.size(); ++index) {
@@ -125,7 +127,7 @@ std::optional<json> json_path_value(const json& value, std::string_view path) {
                 if (decoded.empty()) return std::nullopt;
                 std::size_t consumed = 0;
                 const auto  index    = std::stoull(decoded, &consumed);
-                current = current.at(static_cast<std::size_t>(index));
+                current              = current.at(static_cast<std::size_t>(index));
             } else {
                 return std::nullopt;
             }
@@ -157,8 +159,7 @@ bool condition_matches(const json& state, const json& condition) {
     if (condition.contains("not")) return !condition_matches(state, condition["not"]);
     if (!condition.contains("path") || !condition["path"].is_string()) return false;
     const auto found = json_path_value(state, condition["path"].get<std::string>());
-    if (condition.contains("exists"))
-        return found.has_value() == condition["exists"].get<bool>();
+    if (condition.contains("exists")) return found.has_value() == condition["exists"].get<bool>();
     if (condition.contains("equals")) return found && *found == condition["equals"];
     if (condition.contains("not_equals")) return !found || *found != condition["not_equals"];
     return false;
@@ -175,7 +176,7 @@ struct PlanExecution {
 };
 
 void append_trace(PlanExecution& target, PlanExecution&& source) {
-    target.output = std::move(source.output);
+    target.output        = std::move(source.output);
     target.spawned_child = std::move(source.spawned_child);
     target.execution_trace.insert(target.execution_trace.end(),
                                   std::make_move_iterator(source.execution_trace.begin()),
@@ -189,14 +190,76 @@ void append_trace(PlanExecution& target, PlanExecution&& source) {
 }
 
 PlanExecution plan_failure(ProgramTerminalStatus status,
-                           std::string          code,
-                           std::string          message,
-                           std::string          operation_id) {
+                           std::string           code,
+                           std::string           message,
+                           std::string           operation_id) {
     PlanExecution result;
     result.status  = status;
-    result.failure = ProgramFailure{std::move(code), std::move(message),
-                                    std::move(operation_id), "", 0, json::object()};
+    result.failure = ProgramFailure{
+        std::move(code), std::move(message), std::move(operation_id), "", 0, json::object()};
     return result;
+}
+
+[[noreturn]] void throw_runtime_diagnostic(std::string code,
+                                           std::string message,
+                                           json        witness = json::object());
+struct JavaScriptCallCoreCommand {
+    std::string name;
+    json        input;
+};
+
+JavaScriptCallCoreCommand parse_javascript_call_core_command(const json& command) {
+    if (!command.is_object()) {
+        throw_runtime_diagnostic("P_JS_CONTROL_COMMAND",
+                                 "JavaScript control yield must be a command object");
+    }
+    for (const auto& [key, ignored] : command.items()) {
+        (void)ignored;
+        if (key != "protocol_version" && key != "op" && key != "name" && key != "input") {
+            throw_runtime_diagnostic("P_JS_CONTROL_COMMAND",
+                                     "JavaScript control command has an unknown field",
+                                     json{{"field", key}});
+        }
+    }
+    if (!command.contains("protocol_version") ||
+        !command.at("protocol_version").is_number_unsigned() ||
+        command.at("protocol_version").get<std::uint64_t>() != 1) {
+        throw_runtime_diagnostic("P_JS_CONTROL_COMMAND",
+                                 "JavaScript control command protocol_version must be 1");
+    }
+    if (!command.contains("op") || !command.at("op").is_string() ||
+        command.at("op").get<std::string>() != "call_core") {
+        throw_runtime_diagnostic("P_JS_CONTROL_COMMAND",
+                                 "JavaScript control command op must be call_core");
+    }
+    if (!command.contains("name") || !command.at("name").is_string() ||
+        command.at("name").get<std::string>().empty()) {
+        throw_runtime_diagnostic("P_JS_CONTROL_COMMAND",
+                                 "JavaScript control call_core command requires a nonempty name");
+    }
+    if (!command.contains("input")) {
+        throw_runtime_diagnostic("P_JS_CONTROL_COMMAND",
+                                 "JavaScript control call_core command requires input");
+    }
+    return JavaScriptCallCoreCommand{command.at("name").get<std::string>(), command.at("input")};
+}
+
+json javascript_control_response(json output) {
+    if (!output.is_object()) return output;
+    const auto channels = output.find("channels");
+    if (channels == output.end() || !channels.value().is_object()) return output;
+
+    // Core output remains canonical under `channels`; expose non-conflicting
+    // channel values as ergonomic aliases for JavaScript control code.
+    std::vector<std::pair<std::string, json>> aliases;
+    aliases.reserve(channels.value().size());
+    for (const auto& [name, channel] : channels.value().items()) {
+        if (output.contains(name) || !channel.is_object() || !channel.contains("value")) continue;
+        aliases.emplace_back(name, channel.at("value"));
+    }
+    for (auto& [name, value] : aliases)
+        output[name] = std::move(value);
+    return output;
 }
 
 PlanExecution plan_result_from_child(const ProgramResult& child_result) {
@@ -210,11 +273,11 @@ PlanExecution plan_result_from_child(const ProgramResult& child_result) {
 }
 class NestedOperationFailure final : public std::runtime_error {
 public:
-    NestedOperationFailure(std::string operation_id,
-                           std::string message,
-                           std::string core_node = {},
-                           std::uint32_t attempts = 0,
-                           bool checkpoint_incompatible = false)
+    NestedOperationFailure(std::string   operation_id,
+                           std::string   message,
+                           std::string   core_node               = {},
+                           std::uint32_t attempts                = 0,
+                           bool          checkpoint_incompatible = false)
         : std::runtime_error(std::move(message)),
           operation_id(std::move(operation_id)),
           core_node(std::move(core_node)),
@@ -223,13 +286,11 @@ public:
 
     std::string   operation_id;
     std::string   core_node;
-    std::uint32_t attempts = 0;
+    std::uint32_t attempts                = 0;
     bool          checkpoint_incompatible = false;
 };
 
-[[noreturn]] void throw_runtime_diagnostic(std::string code,
-                                           std::string message,
-                                           json        witness = json::object()) {
+[[noreturn]] void throw_runtime_diagnostic(std::string code, std::string message, json witness) {
     Diagnostic diagnostic;
     diagnostic.phase    = CompilePhase::Seal;
     diagnostic.code     = std::move(code);
@@ -239,7 +300,6 @@ public:
     diagnostic.witness  = std::move(witness);
     throw ProgramDiagnosticError(std::move(diagnostic));
 }
-
 
 bool checkpoint_matches(const RunControl&             control,
                         const CoreCheckpointIdentity& checkpoint) noexcept {
@@ -260,12 +320,10 @@ bool checkpoint_is_available(const RunControl& control, std::string_view checkpo
             return latest && latest->id == checkpoint_id;
         }
         if (loaded->id != checkpoint_id) return false;
-        const CoreCheckpointIdentity identity{
-            control.materialized->root->core_name,
-            control.materialized->root->compiled_plan_identity,
-            loaded->thread_id,
-            loaded->id,
-            loaded->schema_version};
+        const CoreCheckpointIdentity identity{control.materialized->root->core_name,
+                                              control.materialized->root->compiled_plan_identity,
+                                              loaded->thread_id, loaded->id,
+                                              loaded->schema_version};
         return checkpoint_matches(control, identity);
     } catch (...) {
         return false;
@@ -346,7 +404,6 @@ std::uint64_t model_tokens(const std::shared_ptr<UsageAccumulator>& usage) noexc
     return total <= 0 ? 0 : static_cast<std::uint64_t>(total);
 }
 
-
 bool apply_terminal_cause(RunOutcome& outcome, CancellationCause cause, std::string_view message) {
     if (cause == CancellationCause::None) return false;
     if (cause == CancellationCause::EventSink) {
@@ -383,19 +440,17 @@ void cancel_deadline_timer(const asio::any_io_executor&        executor,
         } catch (...) {}
     });
 }
-asio::awaitable<void> cancel_after_timer(
-    std::shared_ptr<asio::steady_timer> timer,
-    std::shared_ptr<graph::CancelToken> token) {
+asio::awaitable<void> cancel_after_timer(std::shared_ptr<asio::steady_timer> timer,
+                                         std::shared_ptr<graph::CancelToken> token) {
     asio::error_code wait_error;
-    co_await timer->async_wait(asio::redirect_error(asio::use_awaitable, wait_error));
+    co_await         timer->async_wait(asio::redirect_error(asio::use_awaitable, wait_error));
     if (!wait_error) token->cancel();
 }
 
-
 constexpr std::string_view PROGRAM_PENDING_KIND_FIELD = "__neograph_program_pending_kind";
 
-ProgramInterrupt decode_core_interrupt(const RunControl&      control,
-                                       std::string_view       operation_id,
+ProgramInterrupt decode_core_interrupt(const RunControl&       control,
+                                       std::string_view        operation_id,
                                        const graph::RunResult& result) {
     const auto generic = [&] {
         ProgramPendingInputData pending;
@@ -411,8 +466,7 @@ ProgramInterrupt decode_core_interrupt(const RunControl&      control,
                                 ProgramPendingInput(std::move(pending)), std::nullopt};
     };
 
-    if (!result.interrupt_value.is_object() ||
-        !result.interrupt_value.contains("value") ||
+    if (!result.interrupt_value.is_object() || !result.interrupt_value.contains("value") ||
         !result.interrupt_value.at("value").is_object()) {
         return generic();
     }
@@ -425,8 +479,8 @@ ProgramInterrupt decode_core_interrupt(const RunControl&      control,
         return generic();
     }
 
-    const auto kind = pending_payload.at(std::string(PROGRAM_PENDING_KIND_FIELD))
-                          .get<std::string>();
+    const auto kind =
+        pending_payload.at(std::string(PROGRAM_PENDING_KIND_FIELD)).get<std::string>();
     const auto expiry = [&]() -> std::optional<std::uint64_t> {
         if (!pending_payload.contains("expires_at_unix_ms")) return std::nullopt;
         const auto& value = pending_payload.at("expires_at_unix_ms");
@@ -441,7 +495,7 @@ ProgramInterrupt decode_core_interrupt(const RunControl&      control,
         if (!pending_payload.contains("effect") || !pending_payload.at("effect").is_object()) {
             throw std::invalid_argument("Typed Program pending effect descriptor is missing");
         }
-        const auto& effect = pending_payload.at("effect");
+        const auto&              effect = pending_payload.at("effect");
         ProgramPendingEffectData pending;
         pending.operation_id         = std::string(operation_id);
         pending.call_id              = pending_payload.at("call_id").get<std::string>();
@@ -450,10 +504,9 @@ ProgramInterrupt decode_core_interrupt(const RunControl&      control,
         pending.payload              = pending_payload;
         pending.expires_at_unix_ms   = expiry;
         pending.effect_mode          = EffectMode::Brokered;
-        pending.idempotency          =
-            effect.value("idempotency", "unsupported") == "supported"
-                ? ProgramEffectIdempotency::Idempotent
-                : ProgramEffectIdempotency::NonIdempotent;
+        pending.idempotency          = effect.value("idempotency", "unsupported") == "supported"
+                                           ? ProgramEffectIdempotency::Idempotent
+                                           : ProgramEffectIdempotency::NonIdempotent;
         pending.core_node            = result.interrupt_node;
         pending.core_interrupt_value = result.interrupt_value;
         return ProgramInterrupt{result.interrupt_node, result.interrupt_value, std::nullopt,
@@ -463,13 +516,12 @@ ProgramInterrupt decode_core_interrupt(const RunControl&      control,
         throw std::invalid_argument("Unknown typed Program pending kind");
     }
     ProgramPendingInputData pending;
-    pending.operation_id         = std::string(operation_id);
-    pending.call_id              = pending_payload.at("call_id").get<std::string>();
-    pending.kind                 = kind == "capability_result"
-                                       ? ProgramPendingInputKind::CapabilityResult
-                                       : ProgramPendingInputKind::Input;
-    pending.result_schema        = pending_payload.at("result_schema");
-    pending.payload              = pending_payload;
+    pending.operation_id  = std::string(operation_id);
+    pending.call_id       = pending_payload.at("call_id").get<std::string>();
+    pending.kind          = kind == "capability_result" ? ProgramPendingInputKind::CapabilityResult
+                                                        : ProgramPendingInputKind::Input;
+    pending.result_schema = pending_payload.at("result_schema");
+    pending.payload       = pending_payload;
     pending.expires_at_unix_ms   = expiry;
     pending.core_node            = result.interrupt_node;
     pending.core_interrupt_value = result.interrupt_value;
@@ -482,11 +534,11 @@ ProgramInterrupt decode_core_interrupt(const RunControl&      control,
 asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                           json                        input,
                                           std::optional<std::string>  checkpoint_id) {
-    const auto started_at = control->started_at;
-    const auto deadline   = control->deadline;
-    auto       usage      = std::make_shared<UsageAccumulator>();
-    auto       core_progress = std::make_shared<AttemptCoreProgress>();
-    std::uint64_t operation_count = 0;
+    const auto               started_at      = control->started_at;
+    const auto               deadline        = control->deadline;
+    auto                     usage           = std::make_shared<UsageAccumulator>();
+    auto                     core_progress   = std::make_shared<AttemptCoreProgress>();
+    std::uint64_t            operation_count = 0;
     std::atomic<std::size_t> active_concurrency{0};
     std::atomic<std::size_t> peak_concurrency{0};
     if (std::chrono::steady_clock::now() >= deadline) control->cancel(CancellationCause::Timeout);
@@ -497,7 +549,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         control->deadline_executor,
         [control, timer]() -> asio::awaitable<void> {
             asio::error_code error;
-            co_await timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
+            co_await         timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
             if (!error) control->cancel(CancellationCause::Timeout);
             co_return;
         },
@@ -506,6 +558,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     std::optional<CoreCheckpointIdentity> resume_checkpoint;
     RunOutcome                            outcome;
     try {
+        const auto control_source = control->materialized->bundle.control_source();
+        if (control_source && checkpoint_id) {
+            throw_runtime_diagnostic(
+                "P_JS_CONTROL_RECOVERY",
+                "JavaScript yielded-command controllers cannot resume from a persisted checkpoint",
+                json{{"checkpoint_id", *checkpoint_id}});
+        }
         if (checkpoint_id) {
             resume_checkpoint = inspect_checkpoint(*control, *checkpoint_id);
             const bool resume_valid =
@@ -523,74 +582,69 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
 
         const auto& typed_plan = control->materialized->bundle.typed_orchestration_plan();
         if (typed_plan.schema_version() != ProgramPlan::SCHEMA_VERSION)
-            throw_runtime_diagnostic("P_RUNTIME_PLAN", "Admitted Program plan schema is unsupported");
+            throw_runtime_diagnostic("P_RUNTIME_PLAN",
+                                     "Admitted Program plan schema is unsupported");
         const auto root_id = typed_plan.root_id();
         if (!typed_plan.find(root_id))
-            throw_runtime_diagnostic("P_RUNTIME_PLAN", "Admitted Program root operation is missing");
+            throw_runtime_diagnostic("P_RUNTIME_PLAN",
+                                     "Admitted Program root operation is missing");
 
-        std::mutex plan_mutex;
-        std::optional<std::string> resume_id = checkpoint_id;
+        std::mutex                            plan_mutex;
+        std::optional<std::string>            resume_id = checkpoint_id;
         std::optional<CoreCheckpointIdentity> last_root_checkpoint;
-        std::map<std::string, std::uint64_t> spawn_occurrences;
+        std::map<std::string, std::uint64_t>  spawn_occurrences;
         auto root_checkpoint = [&]() -> std::optional<CoreCheckpointIdentity> {
             std::lock_guard lock(plan_mutex);
             return last_root_checkpoint;
         };
 
         struct CoreInvocation {
-            graph::RunResult                    result;
+            graph::RunResult                      result;
             std::optional<CoreCheckpointIdentity> checkpoint;
         };
 
         auto update_peak = [&](std::size_t current) {
             auto previous = peak_concurrency.load(std::memory_order_relaxed);
-            while (previous < current &&
-                   !peak_concurrency.compare_exchange_weak(previous, current,
-                                                           std::memory_order_relaxed)) {}
+            while (previous < current && !peak_concurrency.compare_exchange_weak(
+                                             previous, current, std::memory_order_relaxed)) {}
         };
-        auto charge_operation = [&](std::string_view operation_id)
-            -> std::optional<PlanExecution> {
+        auto charge_operation = [&](std::string_view operation_id) -> std::optional<PlanExecution> {
             std::lock_guard lock(plan_mutex);
             if (operation_count >= control->granted_budget.max_program_operations)
-                return plan_failure(ProgramTerminalStatus::BudgetExhausted,
-                                    "P_PROGRAM_OPERATION_BUDGET",
-                                    "Program operation budget exhausted",
-                                    std::string(operation_id));
+                return plan_failure(
+                    ProgramTerminalStatus::BudgetExhausted, "P_PROGRAM_OPERATION_BUDGET",
+                    "Program operation budget exhausted", std::string(operation_id));
             ++operation_count;
             return std::nullopt;
         };
 
-        auto run_core = [&](std::string operation_id,
-                            json        core_input,
-                            std::optional<std::string> resume,
-                            std::string thread_id,
+        auto run_core = [&](std::string operation_id, json core_input,
+                            std::optional<std::string> resume, std::string thread_id,
                             std::shared_ptr<graph::CancelToken> operation_token)
             -> asio::awaitable<CoreInvocation> {
             graph::RunConfig config;
-            config.thread_id = thread_id;
-            config.input = resume ? json::object() : core_input;
-            config.max_steps = static_cast<int>(
-                std::min<std::uint64_t>(control->granted_budget.max_core_steps,
-                                        static_cast<std::uint64_t>(
-                                            std::numeric_limits<int>::max())));
-            config.stream_mode = graph::StreamMode::ALL;
-            config.cancel_token = std::move(operation_token);
-            config.usage = usage;
+            config.thread_id          = thread_id;
+            config.input              = resume ? json::object() : core_input;
+            config.max_steps          = static_cast<int>(std::min<std::uint64_t>(
+                control->granted_budget.max_core_steps,
+                static_cast<std::uint64_t>(std::numeric_limits<int>::max())));
+            config.stream_mode        = graph::StreamMode::ALL;
+            config.cancel_token       = std::move(operation_token);
+            config.usage              = usage;
             config.model_token_budget = control->granted_budget.model_tokens;
-            config.budget_exhausted = control->budget_exhausted;
+            config.budget_exhausted   = control->budget_exhausted;
 
             graph::RunMetadata metadata;
-            metadata.deadline = deadline;
-            metadata.run_id = control->run_id;
+            metadata.deadline    = deadline;
+            metadata.run_id      = control->run_id;
             metadata.owner_scope = control->owner_scope;
-            metadata.trace_id = control->trace_id;
-            graph::RunResources resources{control->checkpoints, control->state_store};
-            graph::GraphStreamCallback callback =
-                [control, core_progress, operation_id](const graph::GraphEvent& event) {
-                    core_progress->observe(event);
-                    control->emit(operation_id, ProgramEventKind::Core,
-                                  graph::to_typed_event(event));
-                };
+            metadata.trace_id    = control->trace_id;
+            graph::RunResources        resources{control->checkpoints, control->state_store};
+            graph::GraphStreamCallback callback = [control, core_progress,
+                                                   operation_id](const graph::GraphEvent& event) {
+                core_progress->observe(event);
+                control->emit(operation_id, ProgramEventKind::Core, graph::to_typed_event(event));
+            };
             graph::RunResult result;
             if (resume) {
                 result = co_await control->materialized->root->engine->resume_from_async(
@@ -606,12 +660,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             co_return CoreInvocation{std::move(result), std::move(checkpoint)};
         };
 
-        std::function<asio::awaitable<PlanExecution>(
-            std::string, json, std::string, std::uint32_t,
-            std::shared_ptr<graph::CancelToken>)> execute;
-        execute = [&](std::string                         operation_id,
-                      json                                state,
-                      std::string                         thread_id,
+        std::function<asio::awaitable<PlanExecution>(std::string, json, std::string, std::uint32_t,
+                                                     std::shared_ptr<graph::CancelToken>)>
+            execute;
+        execute = [&](std::string operation_id, json state, std::string thread_id,
                       std::uint32_t                       child_depth,
                       std::shared_ptr<graph::CancelToken> operation_token)
             -> asio::awaitable<PlanExecution> {
@@ -623,16 +675,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             }
             const auto& operation = *found;
             const auto& dispatch  = operation.dispatch();
-            const auto op         = dispatch.operation;
+            const auto  op        = dispatch.operation;
             if (operation_token->is_cancelled()) {
-                co_return plan_failure(ProgramTerminalStatus::Cancelled,
-                                       "P_RUNTIME_CANCELLED",
-                                       "Program operation cancelled before dispatch",
-                                       operation_id);
+                co_return plan_failure(ProgramTerminalStatus::Cancelled, "P_RUNTIME_CANCELLED",
+                                       "Program operation cancelled before dispatch", operation_id);
             }
             if (op != ProgramOperationKind::CallCore) {
-                if (auto failure = charge_operation(operation_id))
-                    co_return std::move(*failure);
+                if (auto failure = charge_operation(operation_id)) co_return std::move(*failure);
             }
             if (op == ProgramOperationKind::CallCore) {
                 std::optional<std::string> resume;
@@ -643,9 +692,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         resume_id.reset();
                     } else {
                         if (operation_count >= control->granted_budget.max_program_operations)
-                            co_return plan_failure(
-                                ProgramTerminalStatus::BudgetExhausted, "P_PROGRAM_OPERATION_BUDGET",
-                                "Program operation budget exhausted", operation_id);
+                            co_return plan_failure(ProgramTerminalStatus::BudgetExhausted,
+                                                   "P_PROGRAM_OPERATION_BUDGET",
+                                                   "Program operation budget exhausted",
+                                                   operation_id);
                         ++operation_count;
                     }
                 }
@@ -657,9 +707,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 // it on every completion path.
                 auto active = active_concurrency.load(std::memory_order_relaxed);
                 while (active < control->granted_budget.max_concurrency &&
-                       !active_concurrency.compare_exchange_weak(
-                           active, active + 1, std::memory_order_relaxed,
-                           std::memory_order_relaxed)) {}
+                       !active_concurrency.compare_exchange_weak(active, active + 1,
+                                                                 std::memory_order_relaxed,
+                                                                 std::memory_order_relaxed)) {}
                 if (active >= control->granted_budget.max_concurrency)
                     co_return plan_failure(
                         ProgramTerminalStatus::BudgetExhausted, "P_CONCURRENCY_BUDGET",
@@ -667,11 +717,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         operation_id);
                 update_peak(active + 1);
                 CoreInvocation invocation;
-                const auto resume_checkpoint_for_error = resume;
+                const auto     resume_checkpoint_for_error = resume;
                 try {
-                    invocation = co_await run_core(operation_id, std::move(state),
-                                                   std::move(resume), std::move(thread_id),
-                                                   operation_token);
+                    invocation =
+                        co_await run_core(operation_id, std::move(state), std::move(resume),
+                                          std::move(thread_id), operation_token);
                 } catch (const EventSinkError&) {
                     active_concurrency.fetch_sub(1, std::memory_order_relaxed);
                     throw;
@@ -683,9 +733,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     const bool checkpoint_incompatible =
                         resume_checkpoint_for_error &&
                         !checkpoint_is_available(*control, *resume_checkpoint_for_error);
-                    throw NestedOperationFailure(
-                        operation_id, error.what(), error.node_name(),
-                        static_cast<std::uint32_t>(error.attempts()), checkpoint_incompatible);
+                    throw NestedOperationFailure(operation_id, error.what(), error.node_name(),
+                                                 static_cast<std::uint32_t>(error.attempts()),
+                                                 checkpoint_incompatible);
                 } catch (const std::exception& error) {
                     active_concurrency.fetch_sub(1, std::memory_order_relaxed);
                     const bool checkpoint_incompatible =
@@ -703,9 +753,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
                 active_concurrency.fetch_sub(1, std::memory_order_relaxed);
 
-                const auto core_status = invocation.result.status();
+                const auto    core_status = invocation.result.status();
                 PlanExecution result;
-                result.output = std::move(invocation.result.output);
+                result.output          = std::move(invocation.result.output);
                 result.execution_trace = std::move(invocation.result.execution_trace);
                 if (invocation.checkpoint &&
                     invocation.checkpoint->core_thread_id == control->core_thread_id) {
@@ -717,10 +767,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     result.interrupt =
                         decode_core_interrupt(*control, operation_id, invocation.result);
                 } else if (core_status == graph::RunStatus::StepLimit) {
-                    result.status = ProgramTerminalStatus::BudgetExhausted;
-                    result.failure = ProgramFailure{
-                        "P_CORE_STEP_BUDGET", "Core step budget exhausted", operation_id,
-                        invocation.result.interrupt_node, 0, json::object()};
+                    result.status  = ProgramTerminalStatus::BudgetExhausted;
+                    result.failure = ProgramFailure{"P_CORE_STEP_BUDGET",
+                                                    "Core step budget exhausted",
+                                                    operation_id,
+                                                    invocation.result.interrupt_node,
+                                                    0,
+                                                    json::object()};
                 }
                 co_return result;
             }
@@ -728,9 +781,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 PlanExecution result;
                 result.output = std::move(state);
                 for (const auto& child : dispatch.children) {
-                    auto child_result =
-                        co_await execute(child, result.output, thread_id,
-                                         child_depth, operation_token);
+                    auto child_result = co_await execute(child, result.output, thread_id,
+                                                         child_depth, operation_token);
                     append_trace(result, std::move(child_result));
                     if (result.status != ProgramTerminalStatus::Completed || result.returned)
                         co_return result;
@@ -747,30 +799,27 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     result.output = std::move(state);
                     co_return result;
                 }
-                co_return co_await execute(*selected,
-                                           std::move(state), std::move(thread_id), child_depth,
-                                           operation_token);
+                co_return co_await execute(*selected, std::move(state), std::move(thread_id),
+                                           child_depth, operation_token);
             }
 
             if (op == ProgramOperationKind::Loop) {
                 PlanExecution result;
-                result.output = std::move(state);
+                result.output      = std::move(state);
                 const auto maximum = *operation.max_iterations();
                 for (std::uint64_t iteration = 0;
-                     iteration < maximum &&
-                     condition_matches(result.output, operation.condition());
+                     iteration < maximum && condition_matches(result.output, operation.condition());
                      ++iteration) {
-                    auto body = co_await execute(*dispatch.body,
-                                                 result.output, thread_id, child_depth,
-                                                 operation_token);
+                    auto body = co_await execute(*dispatch.body, result.output, thread_id,
+                                                 child_depth, operation_token);
                     append_trace(result, std::move(body));
                     if (result.status != ProgramTerminalStatus::Completed || result.returned)
                         co_return result;
                 }
                 if (condition_matches(result.output, operation.condition())) {
-                    auto bounded = plan_failure(ProgramTerminalStatus::BudgetExhausted,
-                                                "P_LOOP_BOUND", "Program loop bound exhausted",
-                                                operation_id);
+                    auto bounded =
+                        plan_failure(ProgramTerminalStatus::BudgetExhausted, "P_LOOP_BOUND",
+                                     "Program loop bound exhausted", operation_id);
                     bounded.output          = std::move(result.output);
                     bounded.execution_trace = std::move(result.execution_trace);
                     result                  = std::move(bounded);
@@ -779,13 +828,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             }
 
             if (op == ProgramOperationKind::Retry) {
-                const auto maximum = *operation.max_attempts();
+                const auto                   maximum = *operation.max_attempts();
                 std::optional<PlanExecution> last_result;
                 for (std::uint64_t attempt = 0; attempt < maximum; ++attempt) {
                     try {
-                        auto attempt_result = co_await execute(
-                            *dispatch.body, state, thread_id, child_depth,
-                            operation_token);
+                        auto attempt_result = co_await execute(*dispatch.body, state, thread_id,
+                                                               child_depth, operation_token);
                         if (attempt_result.status == ProgramTerminalStatus::Completed)
                             co_return attempt_result;
                         if (attempt_result.status == ProgramTerminalStatus::Interrupted ||
@@ -799,27 +847,27 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     } catch (const NestedOperationFailure& error) {
                         if (error.checkpoint_incompatible) throw;
                         if (attempt + 1 == maximum) {
-                            auto terminal = plan_failure(
-                                ProgramTerminalStatus::Failed, "P_RUNTIME_CORE_FAILURE",
-                                error.what(), error.operation_id);
+                            auto terminal = plan_failure(ProgramTerminalStatus::Failed,
+                                                         "P_RUNTIME_CORE_FAILURE", error.what(),
+                                                         error.operation_id);
                             terminal.failure->core_node = error.core_node;
-                            terminal.failure->attempts = static_cast<std::uint32_t>(attempt + 1);
+                            terminal.failure->attempts  = static_cast<std::uint32_t>(attempt + 1);
                             co_return terminal;
                         }
                     } catch (const graph::NodeExecutionError& error) {
                         if (attempt + 1 == maximum) {
-                            auto terminal = plan_failure(
-                                ProgramTerminalStatus::Failed, "P_RUNTIME_CORE_FAILURE",
-                                error.what(), operation_id);
+                            auto terminal =
+                                plan_failure(ProgramTerminalStatus::Failed,
+                                             "P_RUNTIME_CORE_FAILURE", error.what(), operation_id);
                             terminal.failure->core_node = error.node_name();
-                            terminal.failure->attempts = static_cast<std::uint32_t>(attempt + 1);
+                            terminal.failure->attempts  = static_cast<std::uint32_t>(attempt + 1);
                             co_return terminal;
                         }
                     } catch (const std::exception& error) {
                         if (attempt + 1 == maximum) {
-                            auto terminal = plan_failure(
-                                ProgramTerminalStatus::Failed, "P_RUNTIME_CORE_FAILURE",
-                                error.what(), operation_id);
+                            auto terminal =
+                                plan_failure(ProgramTerminalStatus::Failed,
+                                             "P_RUNTIME_CORE_FAILURE", error.what(), operation_id);
                             terminal.failure->attempts = static_cast<std::uint32_t>(attempt + 1);
                             co_return terminal;
                         }
@@ -839,30 +887,30 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         operation_id);
 
                 struct ParallelState {
-                    std::mutex                                      mutex;
-                    std::vector<std::optional<PlanExecution>>       results;
+                    std::mutex                                       mutex;
+                    std::vector<std::optional<PlanExecution>>        results;
                     std::vector<std::shared_ptr<graph::CancelToken>> branch_tokens;
-                    std::exception_ptr                              error;
-                    std::size_t                                     remaining = 0;
-                    std::shared_ptr<asio::steady_timer>             timer;
+                    std::exception_ptr                               error;
+                    std::size_t                                      remaining = 0;
+                    std::shared_ptr<asio::steady_timer>              timer;
                 };
                 const auto executor = co_await asio::this_coro::executor;
-                const auto completion_executor = asio::make_strand(executor);
-                auto       parallel = std::make_shared<ParallelState>();
+                const auto                     completion_executor = asio::make_strand(executor);
+                auto                           parallel = std::make_shared<ParallelState>();
                 parallel->results.resize(branches.size());
                 parallel->remaining = branches.size();
-                parallel->timer = std::make_shared<asio::steady_timer>(completion_executor);
+                parallel->timer     = std::make_shared<asio::steady_timer>(completion_executor);
                 parallel->timer->expires_at((asio::steady_timer::time_point::max)());
                 parallel->branch_tokens.reserve(branches.size());
                 for (std::size_t index = 0; index < branches.size(); ++index) {
                     parallel->branch_tokens.push_back(operation_token->fork());
                 }
                 for (std::size_t index = 0; index < branches.size(); ++index) {
-                    const auto& branch_id = branches[index];
-                    const auto branch_thread =
-                        index == 0 ? control->core_thread_id
-                                   : operation_thread_id(*control, branch_id);
-                    auto branch_token = parallel->branch_tokens[index];
+                    const auto& branch_id     = branches[index];
+                    const auto  branch_thread = index == 0
+                                                    ? control->core_thread_id
+                                                    : operation_thread_id(*control, branch_id);
+                    auto        branch_token  = parallel->branch_tokens[index];
                     asio::co_spawn(
                         executor,
                         execute(branch_id, state, branch_thread, child_depth, branch_token),
@@ -870,7 +918,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             completion_executor,
                             [parallel, index](std::exception_ptr error, PlanExecution result) {
                                 bool cancel_siblings = false;
-                                bool all_done = false;
+                                bool all_done        = false;
                                 {
                                     std::lock_guard lock(parallel->mutex);
                                     if (error) {
@@ -892,7 +940,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     completion_executor,
                     [parallel]() -> asio::awaitable<void> {
                         asio::error_code error;
-                        co_await parallel->timer->async_wait(
+                        co_await         parallel->timer->async_wait(
                             asio::redirect_error(asio::use_awaitable, error));
                     },
                     asio::use_awaitable);
@@ -901,7 +949,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 std::vector<std::optional<PlanExecution>> parallel_results;
                 {
                     std::lock_guard lock(parallel->mutex);
-                    parallel_error = parallel->error;
+                    parallel_error   = parallel->error;
                     parallel_results = std::move(parallel->results);
                 }
                 if (parallel_error) std::rethrow_exception(parallel_error);
@@ -910,8 +958,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 result.output = json::array();
                 for (auto& branch : parallel_results) {
                     if (!branch)
-                        throw_runtime_diagnostic(
-                            "P_RUNTIME_PARALLEL", "Parallel branch completed without a result");
+                        throw_runtime_diagnostic("P_RUNTIME_PARALLEL",
+                                                 "Parallel branch completed without a result");
                     result.output.push_back(branch->output);
                     result.execution_trace.insert(
                         result.execution_trace.end(),
@@ -920,9 +968,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     if (branch->returned) result.returned = true;
                     if (result.status == ProgramTerminalStatus::Completed &&
                         branch->status != ProgramTerminalStatus::Completed) {
-                        result.status = branch->status;
+                        result.status    = branch->status;
                         result.interrupt = std::move(branch->interrupt);
-                        result.failure = std::move(branch->failure);
+                        result.failure   = std::move(branch->failure);
                     }
                 }
                 co_return result;
@@ -935,114 +983,108 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                            "Program race currently requires exactly two branches",
                                            operation_id);
 
-                const auto& first = branches[0];
+                const auto& first  = branches[0];
                 const auto& second = branches[1];
                 // A race winner is the first completion; if both branches become
                 // ready in one scheduler turn, declaration order is the tie break.
                 // Wait for the losing coroutine to observe cancellation before this
                 // operation returns, so no detached branch outlives the run handle.
                 struct RaceState {
-                    std::mutex                                      mutex;
-                    std::array<std::optional<PlanExecution>, 2>    results;
-                    std::array<std::exception_ptr, 2>              errors;
-                    std::array<bool, 2>                            finished{};
+                    std::mutex                                       mutex;
+                    std::array<std::optional<PlanExecution>, 2>      results;
+                    std::array<std::exception_ptr, 2>                errors;
+                    std::array<bool, 2>                              finished{};
                     std::vector<std::shared_ptr<graph::CancelToken>> tokens;
-                    std::optional<std::size_t>                      winner;
-                    std::size_t                                     completed = 0;
-                    bool                                            selection_scheduled = false;
-                    std::shared_ptr<asio::steady_timer>            timer;
+                    std::optional<std::size_t>                       winner;
+                    std::size_t                                      completed           = 0;
+                    bool                                             selection_scheduled = false;
+                    std::shared_ptr<asio::steady_timer>              timer;
                 };
                 const auto executor = co_await asio::this_coro::executor;
-                const auto completion_executor = asio::make_strand(executor);
-                auto race = std::make_shared<RaceState>();
+                const auto                     completion_executor = asio::make_strand(executor);
+                auto                           race                = std::make_shared<RaceState>();
                 race->timer = std::make_shared<asio::steady_timer>(completion_executor);
                 race->timer->expires_at((asio::steady_timer::time_point::max)());
                 race->tokens.push_back(operation_token->fork());
                 race->tokens.push_back(operation_token->fork());
                 const std::array<std::string, 2> ids{first, second};
                 for (std::size_t index = 0; index < ids.size(); ++index) {
-                    const auto branch_thread =
-                        index == 0 ? control->core_thread_id
-                                   : operation_thread_id(*control, ids[index]);
+                    const auto branch_thread = index == 0
+                                                   ? control->core_thread_id
+                                                   : operation_thread_id(*control, ids[index]);
                     asio::co_spawn(
                         executor,
                         execute(ids[index], state, branch_thread, child_depth, race->tokens[index]),
-                        asio::bind_executor(
-                            completion_executor,
-                            [race, index, completion_executor](std::exception_ptr error,
-                                                               PlanExecution result) {
-                                bool schedule_selection = false;
-                                bool all_done = false;
-                                {
-                                    std::lock_guard lock(race->mutex);
-                                    race->errors[index] = error;
-                                    if (!error) race->results[index] = std::move(result);
-                                    race->finished[index] = true;
-                                    ++race->completed;
-                                    // Defer selection by one strand turn. Completions that were
-                                    // already ready with this one are then visible together, so
-                                    // their deterministic tie break is declaration order rather
-                                    // than cross-worker handler arrival order.
-                                    if (!race->winner && !race->selection_scheduled) {
-                                        race->selection_scheduled = true;
-                                        schedule_selection = true;
-                                    }
-                                    all_done = race->winner &&
-                                               race->completed == race->tokens.size();
+                        asio::bind_executor(completion_executor, [race, index, completion_executor](
+                                                                     std::exception_ptr error,
+                                                                     PlanExecution      result) {
+                            bool schedule_selection = false;
+                            bool all_done           = false;
+                            {
+                                std::lock_guard lock(race->mutex);
+                                race->errors[index] = error;
+                                if (!error) race->results[index] = std::move(result);
+                                race->finished[index] = true;
+                                ++race->completed;
+                                // Defer selection by one strand turn. Completions that were
+                                // already ready with this one are then visible together, so
+                                // their deterministic tie break is declaration order rather
+                                // than cross-worker handler arrival order.
+                                if (!race->winner && !race->selection_scheduled) {
+                                    race->selection_scheduled = true;
+                                    schedule_selection        = true;
                                 }
-                                if (schedule_selection) {
-                                    asio::post(
-                                        completion_executor, [race]() {
-                                            std::optional<std::size_t> winner;
-                                            bool                       cancel_loser = false;
-                                            bool                       all_done = false;
-                                            {
-                                                std::lock_guard lock(race->mutex);
-                                                if (!race->winner) {
-                                                    for (std::size_t candidate = 0;
-                                                         candidate < race->finished.size();
-                                                         ++candidate) {
-                                                        if (race->finished[candidate]) {
-                                                            race->winner = candidate;
-                                                            cancel_loser = true;
-                                                            break;
-                                                        }
-                                                    }
+                                all_done = race->winner && race->completed == race->tokens.size();
+                            }
+                            if (schedule_selection) {
+                                asio::post(completion_executor, [race]() {
+                                    std::optional<std::size_t> winner;
+                                    bool                       cancel_loser = false;
+                                    bool                       all_done     = false;
+                                    {
+                                        std::lock_guard lock(race->mutex);
+                                        if (!race->winner) {
+                                            for (std::size_t candidate = 0;
+                                                 candidate < race->finished.size(); ++candidate) {
+                                                if (race->finished[candidate]) {
+                                                    race->winner = candidate;
+                                                    cancel_loser = true;
+                                                    break;
                                                 }
-                                                winner = race->winner;
-                                                all_done = winner &&
-                                                           race->completed == race->tokens.size();
                                             }
-                                            if (cancel_loser) {
-                                                for (std::size_t sibling = 0;
-                                                     sibling < race->tokens.size(); ++sibling)
-                                                    if (sibling != *winner)
-                                                        race->tokens[sibling]->cancel();
-                                            }
-                                            if (all_done) race->timer->cancel();
-                                        });
-                                } else if (all_done) {
-                                    race->timer->cancel();
-                                }
-                            }));
+                                        }
+                                        winner   = race->winner;
+                                        all_done = winner && race->completed == race->tokens.size();
+                                    }
+                                    if (cancel_loser) {
+                                        for (std::size_t sibling = 0; sibling < race->tokens.size();
+                                             ++sibling)
+                                            if (sibling != *winner) race->tokens[sibling]->cancel();
+                                    }
+                                    if (all_done) race->timer->cancel();
+                                });
+                            } else if (all_done) {
+                                race->timer->cancel();
+                            }
+                        }));
                 }
                 co_await asio::co_spawn(
                     completion_executor,
                     [race]() -> asio::awaitable<void> {
                         asio::error_code error;
-                        co_await race->timer->async_wait(
+                        co_await         race->timer->async_wait(
                             asio::redirect_error(asio::use_awaitable, error));
                     },
                     asio::use_awaitable);
 
-                std::optional<std::size_t>                   winner;
+                std::optional<std::size_t>                  winner;
                 std::array<std::optional<PlanExecution>, 2> results;
                 std::array<std::exception_ptr, 2>           errors;
                 {
                     std::lock_guard lock(race->mutex);
-                    winner = race->winner;
+                    winner  = race->winner;
                     results = std::move(race->results);
-                    errors = std::move(race->errors);
+                    errors  = std::move(race->errors);
                 }
                 if (!winner)
                     throw_runtime_diagnostic("P_RUNTIME_RACE", "Race completed without a winner");
@@ -1053,18 +1095,16 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 co_return std::move(*results[index]);
             }
             if (op == ProgramOperationKind::Quorum) {
-                const auto& branches = dispatch.branches;
-                const auto required = *operation.min_success();
+                const auto&   branches = dispatch.branches;
+                const auto    required = *operation.min_success();
                 PlanExecution result;
-                result.output = json::array();
+                result.output           = json::array();
                 std::uint64_t successes = 0;
                 for (std::size_t index = 0; index < branches.size(); ++index) {
                     auto branch_result = co_await execute(
-                        branches[index], state,
-                        operation_thread_id(*control, branches[index]),
+                        branches[index], state, operation_thread_id(*control, branches[index]),
                         child_depth, operation_token);
-                    const bool completed =
-                        branch_result.status == ProgramTerminalStatus::Completed;
+                    const bool completed = branch_result.status == ProgramTerminalStatus::Completed;
                     if (completed) {
                         result.output.push_back(branch_result.output);
                         ++successes;
@@ -1111,15 +1151,15 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 std::string execution_key;
                 {
                     std::lock_guard lock(plan_mutex);
-                    const auto base = thread_id + ":" + operation_id;
-                    const auto ordinal = spawn_occurrences[base]++;
-                    execution_key = base + ":" + std::to_string(ordinal);
+                    const auto      base    = thread_id + ":" + operation_id;
+                    const auto      ordinal = spawn_occurrences[base]++;
+                    execution_key           = base + ":" + std::to_string(ordinal);
                 }
                 auto child = control->launch_child(*operation.child_binding(), std::move(state),
                                                    operation_id, execution_key);
                 PlanExecution result;
-                result.output = json{{"child_run_id", child->run_id},
-                                     {"program_version_id", child->program_version_id}};
+                result.output        = json{{"child_run_id", child->run_id},
+                                            {"program_version_id", child->program_version_id}};
                 result.spawned_child = std::move(child);
                 co_return result;
             }
@@ -1129,22 +1169,24 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 PlanExecution result;
                 result.status = ProgramTerminalStatus::Cancelled;
                 result.output = std::move(state);
-                result.failure = ProgramFailure{
-                    "P_RUNTIME_CANCELLED",
-                    operation.reason().value_or("Program cancelled by plan"),
-                    operation_id,
-                    "",
-                    0,
-                    json{{"scope", operation.scope().value_or("run")}}};
+                result.failure =
+                    ProgramFailure{"P_RUNTIME_CANCELLED",
+                                   operation.reason().value_or("Program cancelled by plan"),
+                                   operation_id,
+                                   "",
+                                   0,
+                                   json{{"scope", operation.scope().value_or("run")}}};
                 co_return result;
             }
 
             if (op == ProgramOperationKind::Await) {
-                const auto child_id = *dispatch.body;
+                const auto  child_id        = *dispatch.body;
                 const auto* child_operation = typed_plan.find(child_id);
-                if (child_operation && child_operation->operation() == ProgramOperationKind::Spawn) {
-                    auto launched = co_await execute(child_id, std::move(state), std::move(thread_id),
-                                                     child_depth, operation_token);
+                if (child_operation &&
+                    child_operation->operation() == ProgramOperationKind::Spawn) {
+                    auto         launched =
+                        co_await execute(child_id, std::move(state), std::move(thread_id),
+                                         child_depth, operation_token);
                     if (launched.status != ProgramTerminalStatus::Completed) co_return launched;
                     if (!launched.spawned_child) {
                         co_return plan_failure(ProgramTerminalStatus::Failed, "P_AWAIT_HANDLE",
@@ -1157,11 +1199,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     }
 
                     const auto executor = co_await asio::this_coro::executor;
-                    auto timeout = std::make_shared<asio::steady_timer>(executor);
+                    auto timeout        = std::make_shared<asio::steady_timer>(executor);
                     timeout->expires_after(std::chrono::milliseconds(*operation.timeout_ms()));
                     auto timeout_operation = [timeout]() -> asio::awaitable<void> {
                         asio::error_code error;
-                        co_await timeout->async_wait(
+                        co_await         timeout->async_wait(
                             asio::redirect_error(asio::use_awaitable, error));
                     };
                     // Use the same first-completion group as inline await. A
@@ -1170,8 +1212,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     // both registrations before either branch can settle.
                     auto [order, child_error, child_result, timeout_error] =
                         co_await asio::experimental::make_parallel_group(
-                                     asio::co_spawn(executor, child->wait_async(), asio::deferred),
-                                     asio::co_spawn(executor, timeout_operation(), asio::deferred))
+                            asio::co_spawn(executor, child->wait_async(), asio::deferred),
+                            asio::co_spawn(executor, timeout_operation(), asio::deferred))
                             .async_wait(asio::experimental::wait_for_one(), asio::use_awaitable);
                     if (order[0] == 0) {
                         if (child_error) std::rethrow_exception(child_error);
@@ -1185,13 +1227,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                            "Program await operation timed out", operation_id);
                 }
                 if (!operation.timeout_ms()) {
-                    co_return co_await execute(child_id, std::move(state),
-                                               std::move(thread_id), child_depth, operation_token);
+                    co_return co_await execute(child_id, std::move(state), std::move(thread_id),
+                                               child_depth, operation_token);
                 }
                 const auto executor = co_await asio::this_coro::executor;
-                auto timeout = std::make_shared<asio::steady_timer>(executor);
+                auto timeout        = std::make_shared<asio::steady_timer>(executor);
                 timeout->expires_after(std::chrono::milliseconds(*operation.timeout_ms()));
-                auto child_token = operation_token->fork();
+                auto child_token       = operation_token->fork();
                 auto timeout_operation = cancel_after_timer(timeout, child_token);
                 // Await races the child completion (including a child error)
                 // against the timeout.  The awaitable `||` operator waits for
@@ -1202,13 +1244,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 // exception normally.
                 auto [order, child_error, child_result, timeout_error] =
                     co_await asio::experimental::make_parallel_group(
-                                 asio::co_spawn(
-                                     executor,
-                                     execute(child_id, std::move(state), std::move(thread_id),
-                                             child_depth, child_token),
-                                     asio::deferred),
-                                 asio::co_spawn(executor, std::move(timeout_operation),
-                                                asio::deferred))
+                        asio::co_spawn(executor,
+                                       execute(child_id, std::move(state), std::move(thread_id),
+                                               child_depth, child_token),
+                                       asio::deferred),
+                        asio::co_spawn(executor, std::move(timeout_operation), asio::deferred))
                         .async_wait(asio::experimental::wait_for_one(), asio::use_awaitable);
                 if (order[0] == 0) {
                     if (child_error) std::rethrow_exception(child_error);
@@ -1221,16 +1261,15 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             }
             if (op == ProgramOperationKind::Checkpoint) {
                 if (dispatch.body) {
-                    auto body = co_await execute(*dispatch.body,
-                                                 state, thread_id, child_depth, operation_token);
+                    auto body = co_await execute(*dispatch.body, state, thread_id, child_depth,
+                                                 operation_token);
                     if (body.status != ProgramTerminalStatus::Completed) co_return body;
-                    state = std::move(body.output);
+                    state                = std::move(body.output);
                     PlanExecution result = std::move(body);
                     if (const auto checkpoint = root_checkpoint()) {
-                        auto event = control->stage_event(
-                            operation_id,
-                            ProgramEventKind::CheckpointPublished,
-                            ProgramCheckpointEvent{*checkpoint});
+                        auto event = control->stage_event(operation_id,
+                                                          ProgramEventKind::CheckpointPublished,
+                                                          ProgramCheckpointEvent{*checkpoint});
                         control->deliver_event(event);
                     }
                     co_return result;
@@ -1238,10 +1277,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 PlanExecution result;
                 result.output = std::move(state);
                 if (const auto checkpoint = root_checkpoint()) {
-                    auto event = control->stage_event(
-                        operation_id,
-                        ProgramEventKind::CheckpointPublished,
-                        ProgramCheckpointEvent{*checkpoint});
+                    auto event =
+                        control->stage_event(operation_id, ProgramEventKind::CheckpointPublished,
+                                             ProgramCheckpointEvent{*checkpoint});
                     control->deliver_event(event);
                 }
                 co_return result;
@@ -1256,7 +1294,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
 
             if (op == ProgramOperationKind::Return) {
                 PlanExecution result;
-                result.output = operation.value();
+                result.output   = operation.value();
                 result.returned = true;
                 co_return result;
             }
@@ -1265,19 +1303,121 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                      json{{"operation", std::string(to_string(op))}});
         };
 
-        auto plan_result =
-            co_await execute(root_id, std::move(input), control->core_thread_id, 0,
-                             control->cancel_token);
-        const auto terminal_cause = terminal_cause_at_deadline(control, deadline);
-        outcome.output = std::move(plan_result.output);
-        outcome.execution_trace = std::move(plan_result.execution_trace);
-        outcome.usage.wall_time_ms = elapsed_ms(started_at);
-        outcome.usage.model_tokens = model_tokens(usage);
+        auto execute_javascript_control =
+            [&](JavaScriptGenerator& session) -> asio::awaitable<PlanExecution> {
+            PlanExecution       result;
+            std::optional<json> response;
+            std::uint64_t       command_sequence = 0;
+            for (;;) {
+                if (control->cancel_token->is_cancelled()) {
+                    co_return plan_failure(ProgramTerminalStatus::Cancelled, "P_RUNTIME_CANCELLED",
+                                           "JavaScript control command cancelled before dispatch",
+                                           "javascript");
+                }
+                const auto step = session.next(std::move(response));
+                if (step.done) {
+                    result.output   = step.value;
+                    result.returned = true;
+                    co_return result;
+                }
+                auto command = parse_javascript_call_core_command(step.value);
+                if (command.name != control->materialized->root->core_name) {
+                    throw_runtime_diagnostic(
+                        "P_JS_CONTROL_COMMAND",
+                        "JavaScript control command references a Core outside the admitted root",
+                        json{{"requested_core", command.name},
+                             {"admitted_core", control->materialized->root->core_name}});
+                }
+
+                const auto operation_id = "javascript/" + std::to_string(++command_sequence);
+                if (auto failure = charge_operation(operation_id)) co_return std::move(*failure);
+
+                auto active = active_concurrency.load(std::memory_order_relaxed);
+                while (active < control->granted_budget.max_concurrency &&
+                       !active_concurrency.compare_exchange_weak(active, active + 1,
+                                                                 std::memory_order_relaxed,
+                                                                 std::memory_order_relaxed)) {}
+                if (active >= control->granted_budget.max_concurrency) {
+                    co_return plan_failure(
+                        ProgramTerminalStatus::BudgetExhausted, "P_CONCURRENCY_BUDGET",
+                        "Program Core dispatch exceeds its admitted concurrency budget",
+                        operation_id);
+                }
+                update_peak(active + 1);
+
+                CoreInvocation invocation;
+                try {
+                    invocation = co_await run_core(
+                        operation_id, std::move(command.input), std::nullopt,
+                        operation_thread_id(*control, operation_id), control->cancel_token);
+                } catch (const EventSinkError&) {
+                    active_concurrency.fetch_sub(1, std::memory_order_relaxed);
+                    throw;
+                } catch (const graph::CancelledException&) {
+                    active_concurrency.fetch_sub(1, std::memory_order_relaxed);
+                    throw;
+                } catch (const graph::NodeExecutionError& error) {
+                    active_concurrency.fetch_sub(1, std::memory_order_relaxed);
+                    throw NestedOperationFailure(operation_id, error.what(), error.node_name(),
+                                                 static_cast<std::uint32_t>(error.attempts()));
+                } catch (const std::exception& error) {
+                    active_concurrency.fetch_sub(1, std::memory_order_relaxed);
+                    throw NestedOperationFailure(operation_id, error.what());
+                } catch (...) {
+                    active_concurrency.fetch_sub(1, std::memory_order_relaxed);
+                    throw NestedOperationFailure(operation_id, "Unknown Core failure");
+                }
+                active_concurrency.fetch_sub(1, std::memory_order_relaxed);
+
+                const auto core_status = invocation.result.status();
+                result.execution_trace.insert(
+                    result.execution_trace.end(),
+                    std::make_move_iterator(invocation.result.execution_trace.begin()),
+                    std::make_move_iterator(invocation.result.execution_trace.end()));
+                if (core_status == graph::RunStatus::Interrupted) {
+                    result.status = ProgramTerminalStatus::Interrupted;
+                    result.interrupt =
+                        decode_core_interrupt(*control, operation_id, invocation.result);
+                    co_return result;
+                }
+                if (core_status == graph::RunStatus::StepLimit) {
+                    co_return plan_failure(ProgramTerminalStatus::BudgetExhausted,
+                                           "P_CORE_STEP_BUDGET", "Core step budget exhausted",
+                                           operation_id);
+                }
+                response = javascript_control_response(std::move(invocation.result.output));
+            }
+        };
+
+        PlanExecution plan_result;
+        if (control_source) {
+            try {
+                auto session = JavaScriptGenerator::open(*control_source, std::move(input),
+                                                         JavaScriptCompileLimits{});
+                if (!session) {
+                    throw_runtime_diagnostic(
+                        "P_JS_CONTROL_MAIN",
+                        "Admitted JavaScript control source no longer exports main(input)");
+                }
+                plan_result = co_await execute_javascript_control(*session);
+            } catch (const JavaScriptCompileError& error) {
+                throw_runtime_diagnostic(error.code(), error.what(), error.witness());
+            }
+        } else {
+            plan_result = co_await execute(root_id, std::move(input), control->core_thread_id, 0,
+                                           control->cancel_token);
+        }
+
+        const auto terminal_cause        = terminal_cause_at_deadline(control, deadline);
+        outcome.output                   = std::move(plan_result.output);
+        outcome.execution_trace          = std::move(plan_result.execution_trace);
+        outcome.usage.wall_time_ms       = elapsed_ms(started_at);
+        outcome.usage.model_tokens       = model_tokens(usage);
         outcome.usage.program_operations = operation_count;
-        outcome.usage.core_steps = core_progress->steps();
-        outcome.usage.peak_concurrency = peak_concurrency.load(std::memory_order_relaxed);
-        outcome.remaining_budget = settle_budget(control->granted_budget, outcome.usage);
-        outcome.checkpoint = last_root_checkpoint;
+        outcome.usage.core_steps         = core_progress->steps();
+        outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
+        outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
+        outcome.checkpoint               = last_root_checkpoint;
 
         const auto cancellation_message =
             plan_result.failure && !plan_result.failure->message.empty()
@@ -1285,9 +1425,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 : std::string("Program attempt was cancelled");
         if (apply_terminal_cause(outcome, terminal_cause, cancellation_message)) {
         } else if (plan_result.status != ProgramTerminalStatus::Completed) {
-            outcome.status = plan_result.status;
+            outcome.status    = plan_result.status;
             outcome.interrupt = std::move(plan_result.interrupt);
-            outcome.failure = std::move(plan_result.failure);
+            outcome.failure   = std::move(plan_result.failure);
         } else if (!outcome.checkpoint && resume_checkpoint) {
             outcome.checkpoint = resume_checkpoint;
         } else if (outcome.usage.core_steps > control->granted_budget.max_core_steps ||
@@ -1300,10 +1440,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                         control->materialized->bundle.output_contract());
                 outcome.status = ProgramTerminalStatus::Completed;
             } catch (const std::exception& error) {
-                outcome.status = ProgramTerminalStatus::Failed;
-                outcome.failure = ProgramFailure{
-                    "P_OUTPUT_CONTRACT", "Program output violates its admitted contract",
-                    root_id, "", 0, json{{"detail", error.what()}}};
+                outcome.status  = ProgramTerminalStatus::Failed;
+                outcome.failure = ProgramFailure{"P_OUTPUT_CONTRACT",
+                                                 "Program output violates its admitted contract",
+                                                 root_id,
+                                                 "",
+                                                 0,
+                                                 json{{"detail", error.what()}}};
             }
         }
         if (outcome.failure) {
@@ -1316,22 +1459,22 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             }
         }
     } catch (const EventSinkError& error) {
-        outcome = failed_outcome(control, "P_EVENT_SINK", error.what());
-        outcome.usage.wall_time_ms = elapsed_ms(started_at);
-        outcome.usage.model_tokens = model_tokens(usage);
+        outcome                          = failed_outcome(control, "P_EVENT_SINK", error.what());
+        outcome.usage.wall_time_ms       = elapsed_ms(started_at);
+        outcome.usage.model_tokens       = model_tokens(usage);
         outcome.usage.program_operations = operation_count;
-        outcome.usage.core_steps = failed_core_steps(*control, core_progress->steps());
-        outcome.usage.peak_concurrency = peak_concurrency.load(std::memory_order_relaxed);
-        outcome.remaining_budget = settle_budget(control->granted_budget, outcome.usage);
+        outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
+        outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
+        outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
         apply_terminal_cause(outcome, terminal_cause_at_deadline(control, deadline), error.what());
     } catch (const graph::CancelledException& error) {
-        outcome.usage.wall_time_ms = elapsed_ms(started_at);
-        outcome.usage.model_tokens = model_tokens(usage);
+        outcome.usage.wall_time_ms       = elapsed_ms(started_at);
+        outcome.usage.model_tokens       = model_tokens(usage);
         outcome.usage.program_operations = operation_count;
-        outcome.usage.core_steps = failed_core_steps(*control, core_progress->steps());
-        outcome.usage.peak_concurrency = peak_concurrency.load(std::memory_order_relaxed);
-        outcome.remaining_budget = settle_budget(control->granted_budget, outcome.usage);
-        auto cause = terminal_cause_at_deadline(control, deadline);
+        outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
+        outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
+        outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
+        auto cause                       = terminal_cause_at_deadline(control, deadline);
         if (cause == CancellationCause::None) cause = CancellationCause::User;
         apply_terminal_cause(outcome, cause, error.what());
     } catch (const NestedOperationFailure& error) {
@@ -1339,58 +1482,57 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                  error.operation_id, error.attempts);
         if (outcome.failure) {
             outcome.failure->operation_id = error.operation_id;
-            outcome.failure->core_node     = error.core_node;
+            outcome.failure->core_node    = error.core_node;
         }
-        outcome.usage.wall_time_ms = elapsed_ms(started_at);
-        outcome.usage.model_tokens = model_tokens(usage);
+        outcome.usage.wall_time_ms       = elapsed_ms(started_at);
+        outcome.usage.model_tokens       = model_tokens(usage);
         outcome.usage.program_operations = operation_count;
-        outcome.usage.core_steps = failed_core_steps(*control, core_progress->steps());
-        outcome.usage.peak_concurrency = peak_concurrency.load(std::memory_order_relaxed);
-        outcome.remaining_budget = settle_budget(control->granted_budget, outcome.usage);
-        const auto cause = terminal_cause_at_deadline(control, deadline);
-        if (!apply_terminal_cause(outcome, cause, error.what()) &&
-            error.checkpoint_incompatible && checkpoint_id) {
+        outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
+        outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
+        outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
+        const auto cause                 = terminal_cause_at_deadline(control, deadline);
+        if (!apply_terminal_cause(outcome, cause, error.what()) && error.checkpoint_incompatible &&
+            checkpoint_id) {
             apply_checkpoint_incompatible(outcome, control, *checkpoint_id, resume_checkpoint,
                                           error.what());
         }
     } catch (const graph::NodeExecutionError& error) {
         outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", error.what(), error.node_name(),
                                  static_cast<std::uint32_t>(error.attempts()));
-        outcome.usage.wall_time_ms = elapsed_ms(started_at);
-        outcome.usage.model_tokens = model_tokens(usage);
+        outcome.usage.wall_time_ms       = elapsed_ms(started_at);
+        outcome.usage.model_tokens       = model_tokens(usage);
         outcome.usage.program_operations = operation_count;
-        outcome.usage.core_steps = failed_core_steps(*control, core_progress->steps());
-        outcome.usage.peak_concurrency = peak_concurrency.load(std::memory_order_relaxed);
-        outcome.remaining_budget = settle_budget(control->granted_budget, outcome.usage);
+        outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
+        outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
+        outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
         apply_terminal_cause(outcome, terminal_cause_at_deadline(control, deadline), error.what());
     } catch (const ProgramDiagnosticError& error) {
-        const auto& diagnostic = error.diagnostic();
+        const auto& diagnostic   = error.diagnostic();
         std::string operation_id = "root";
-        if (diagnostic.witness.is_object() &&
-            diagnostic.witness.contains("operation_id") &&
+        if (diagnostic.witness.is_object() && diagnostic.witness.contains("operation_id") &&
             diagnostic.witness["operation_id"].is_string()) {
             operation_id = diagnostic.witness["operation_id"].get<std::string>();
         }
         outcome = failed_outcome(control, diagnostic.code, diagnostic.message);
         if (outcome.failure) outcome.failure->operation_id = operation_id;
         if (outcome.failure) outcome.failure->witness = diagnostic.witness;
-        outcome.usage.wall_time_ms = elapsed_ms(started_at);
-        outcome.usage.model_tokens = model_tokens(usage);
+        outcome.usage.wall_time_ms       = elapsed_ms(started_at);
+        outcome.usage.model_tokens       = model_tokens(usage);
         outcome.usage.program_operations = operation_count;
-        outcome.usage.core_steps = failed_core_steps(*control, core_progress->steps());
-        outcome.usage.peak_concurrency = peak_concurrency.load(std::memory_order_relaxed);
-        outcome.remaining_budget = settle_budget(control->granted_budget, outcome.usage);
+        outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
+        outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
+        outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
         apply_terminal_cause(outcome, terminal_cause_at_deadline(control, deadline),
                              diagnostic.message);
     } catch (const std::exception& error) {
         outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", error.what());
-        outcome.usage.wall_time_ms = elapsed_ms(started_at);
-        outcome.usage.model_tokens = model_tokens(usage);
+        outcome.usage.wall_time_ms       = elapsed_ms(started_at);
+        outcome.usage.model_tokens       = model_tokens(usage);
         outcome.usage.program_operations = operation_count;
-        outcome.usage.core_steps = failed_core_steps(*control, core_progress->steps());
-        outcome.usage.peak_concurrency = peak_concurrency.load(std::memory_order_relaxed);
-        outcome.remaining_budget = settle_budget(control->granted_budget, outcome.usage);
-        const auto cause = terminal_cause_at_deadline(control, deadline);
+        outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
+        outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
+        outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
+        const auto cause                 = terminal_cause_at_deadline(control, deadline);
         if (!apply_terminal_cause(outcome, cause, error.what()) && checkpoint_id &&
             !checkpoint_is_available(*control, *checkpoint_id)) {
             apply_checkpoint_incompatible(outcome, control, *checkpoint_id, resume_checkpoint,
@@ -1398,11 +1540,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         }
     } catch (...) {
         outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", "Unknown Core failure");
-        outcome.usage.wall_time_ms = elapsed_ms(started_at);
+        outcome.usage.wall_time_ms       = elapsed_ms(started_at);
         outcome.usage.program_operations = operation_count;
-        outcome.usage.core_steps = failed_core_steps(*control, core_progress->steps());
-        outcome.usage.peak_concurrency = peak_concurrency.load(std::memory_order_relaxed);
-        outcome.remaining_budget = settle_budget(control->granted_budget, outcome.usage);
+        outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
+        outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
+        outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
         apply_terminal_cause(outcome, terminal_cause_at_deadline(control, deadline),
                              "Unknown Core failure");
     }
@@ -1413,7 +1555,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         if (!witness.contains("source_pointer")) {
             try {
                 const auto& typed_plan = control->materialized->bundle.typed_orchestration_plan();
-                const auto* operation = typed_plan.find(outcome.failure->operation_id);
+                const auto* operation  = typed_plan.find(outcome.failure->operation_id);
                 if (operation && !operation->dispatch().source_pointer.empty())
                     witness["source_pointer"] = operation->dispatch().source_pointer;
             } catch (...) {

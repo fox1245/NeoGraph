@@ -447,7 +447,8 @@ TEST(ProgramCompilerTest, JavaScriptHostExposesOnlyItsFrozenVersionedGraphBindin
             export function define() {
                 if (typeof std !== "undefined" || typeof os !== "undefined" ||
                     typeof process !== "undefined" || typeof neograph !== "undefined" ||
-                    ng.apiVersion !== 1 || !Object.isFrozen(ng)) {
+                    typeof ng.callCore !== "undefined" || ng.apiVersion !== 1 ||
+                    !Object.isFrozen(ng)) {
                     throw new Error("host capability leaked");
                 }
                 const graph = ng.graph("main");

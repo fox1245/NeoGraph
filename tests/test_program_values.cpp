@@ -468,6 +468,27 @@ TEST(ProgramBundleTest, SourceKindIsRequiredAndRoundTripsExactly) {
     EXPECT_THROW((void)ProgramBundle::parse(missing), std::invalid_argument);
 }
 
+TEST(ProgramBundleTest, ControlSourceRequiresMatchingJavaScriptBundleIdentity) {
+    const auto control_source =
+        ProgramSource::from_javascript("control.js", "export function* main() {}");
+
+    auto valid           = make_bundle_data(control_source);
+    valid.control_source = control_source;
+    ProgramBundle bundle(std::move(valid));
+    ASSERT_TRUE(bundle.control_source().has_value());
+    EXPECT_EQ(bundle.control_source()->source_hash(), control_source.source_hash());
+
+    auto mismatched_kind           = make_bundle_data(control_source);
+    mismatched_kind.source_kind    = SourceKind::CanonicalJson;
+    mismatched_kind.control_source = control_source;
+    EXPECT_THROW((void)ProgramBundle(std::move(mismatched_kind)), std::invalid_argument);
+
+    auto mismatched_hash           = make_bundle_data(control_source);
+    mismatched_hash.source_hash    = sha('d');
+    mismatched_hash.control_source = control_source;
+    EXPECT_THROW((void)ProgramBundle(std::move(mismatched_hash)), std::invalid_argument);
+}
+
 TEST(ProgramBundleTest, RejectsDuplicateOrAmbiguousExecutableClosureIdentities) {
     const auto source = make_source();
 

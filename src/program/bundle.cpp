@@ -2,8 +2,8 @@
 
 #include "canonical_json.h"
 
-#include <array>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <set>
@@ -67,8 +67,7 @@ void require_sha256(std::string_view value, std::string_view name) {
 
 bool is_semantic_version(std::string_view value);
 
-void validate_module_coordinate(const ModuleCoordinate& coordinate,
-                                std::string_view          name) {
+void validate_module_coordinate(const ModuleCoordinate& coordinate, std::string_view name) {
     detail::validate_token(coordinate.namespace_name, std::string(name) + " namespace");
     detail::validate_token(coordinate.name, std::string(name) + " name");
     if (!is_semantic_version(coordinate.semantic_version))
@@ -88,16 +87,16 @@ ModuleCoordinate parse_module_coordinate(const json& value) {
     detail::reject_unknown_fields(value, "Module coordinate",
                                   {"namespace", "name", "semantic_version", "content_identity"});
     ModuleCoordinate result;
-    const auto required = [&](std::string_view key) {
+    const auto       required = [&](std::string_view key) {
         const auto owned = std::string(key);
         if (!value.contains(owned) || !value[owned].is_string())
             throw std::invalid_argument("Module coordinate field '" + owned + "' must be a string");
         return value[owned].get<std::string>();
     };
-    result.namespace_name    = required("namespace");
-    result.name              = required("name");
-    result.semantic_version  = required("semantic_version");
-    result.content_identity  = required("content_identity");
+    result.namespace_name   = required("namespace");
+    result.name             = required("name");
+    result.semantic_version = required("semantic_version");
+    result.content_identity = required("content_identity");
     validate_module_coordinate(result, "Module coordinate");
     return result;
 }
@@ -461,11 +460,21 @@ void normalize_data(ProgramBundleData& data) {
         diagnostic.witness = detail::owned_json_copy(diagnostic.witness);
     }
     if (data.source_kind != SourceKind::CanonicalJson &&
-        data.source_kind != SourceKind::CppBuilder &&
-        data.source_kind != SourceKind::JavaScript) {
+        data.source_kind != SourceKind::CppBuilder && data.source_kind != SourceKind::JavaScript) {
         throw std::invalid_argument("Program bundle source_kind is unknown");
     }
     require_sha256(data.source_hash, "Program bundle source_hash");
+    if (data.control_source) {
+        if (data.source_kind != SourceKind::JavaScript ||
+            data.control_source->kind() != SourceKind::JavaScript) {
+            throw std::invalid_argument(
+                "Program bundle control_source requires JavaScript source_kind");
+        }
+        if (data.control_source->source_hash() != data.source_hash) {
+            throw std::invalid_argument(
+                "Program bundle control_source identity does not match source_hash");
+        }
+    }
     require_sha256(data.canonical_program_hash, "Program bundle canonical_program_hash");
     require_nonempty_utf8(data.compiler_build_id, "Program bundle compiler_build_id");
     if (data.program_schema_version != 1) {
@@ -480,9 +489,9 @@ void normalize_data(ProgramBundleData& data) {
     std::sort(data.module_coordinates.begin(), data.module_coordinates.end(),
               [](const auto& lhs, const auto& rhs) {
                   return std::tie(lhs.namespace_name, lhs.name, lhs.semantic_version,
-                                   lhs.content_identity) <
-                         std::tie(rhs.namespace_name, rhs.name, rhs.semantic_version,
-                                  rhs.content_identity);
+                                  lhs.content_identity) < std::tie(rhs.namespace_name, rhs.name,
+                                                                   rhs.semantic_version,
+                                                                   rhs.content_identity);
               });
     if (std::adjacent_find(data.module_coordinates.begin(), data.module_coordinates.end(),
                            [](const auto& lhs, const auto& rhs) {
@@ -724,10 +733,14 @@ BudgetRequirement parse_budget(const json& value) {
 }
 
 json bundle_body(const ProgramBundleData& data) {
-    json value                             = json::object();
-    value["source_kind"]                   = std::string(to_string(data.source_kind));
-    value["source_hash"]                   = data.source_hash;
-    value["canonical_program_hash"]        = data.canonical_program_hash;
+    json value                      = json::object();
+    value["source_kind"]            = std::string(to_string(data.source_kind));
+    value["source_hash"]            = data.source_hash;
+    value["canonical_program_hash"] = data.canonical_program_hash;
+    if (data.control_source) {
+        value["control_source"] =
+            detail::parse_json_strict(data.control_source->serialize_canonical());
+    }
     value["compiler_build_id"]             = data.compiler_build_id;
     value["program_schema_version"]        = data.program_schema_version;
     value["registry_snapshot_fingerprint"] = data.registry_snapshot_fingerprint;
@@ -738,9 +751,9 @@ json bundle_body(const ProgramBundleData& data) {
             coordinates.push_back(encode_module_coordinate(coordinate));
         value["module_coordinates"] = std::move(coordinates);
     }
-    value["input_contract"]                = encode_contract(data.input_contract);
-    value["output_contract"]               = encode_contract(data.output_contract);
-    value["orchestration_plan"]            = encode_plan(data.orchestration_plan);
+    value["input_contract"]     = encode_contract(data.input_contract);
+    value["output_contract"]    = encode_contract(data.output_contract);
+    value["orchestration_plan"] = encode_plan(data.orchestration_plan);
 
     json definitions = json::array();
     for (const auto& definition : data.sealed_core_definitions) {
@@ -753,7 +766,7 @@ json bundle_body(const ProgramBundleData& data) {
         plans.push_back(encode_core_plan(plan));
     value["core_plan_identities"]      = std::move(plans);
     value["capability_effect_closure"] = encode_closure(data.capability_effect_closure);
-    value["execution_guarantee"]      = std::string(to_string(data.execution_guarantee));
+    value["execution_guarantee"]       = std::string(to_string(data.execution_guarantee));
 
     json executable_identities = json::array();
     for (const auto& identity : data.executable_registry_identities) {
@@ -808,10 +821,13 @@ std::vector<T> parse_array(const json& value, std::string_view key, Parse parse)
 
 ProgramBundleData parse_body(const json& value) {
     ProgramBundleData data;
-    data.source_kind                   =
-        source_kind_from_string(require_string(value, "source_kind"));
-    data.source_hash                   = require_string(value, "source_hash");
-    data.canonical_program_hash        = require_string(value, "canonical_program_hash");
+    data.source_kind            = source_kind_from_string(require_string(value, "source_kind"));
+    data.source_hash            = require_string(value, "source_hash");
+    data.canonical_program_hash = require_string(value, "canonical_program_hash");
+    if (value.contains("control_source")) {
+        data.control_source =
+            ProgramSource::parse(detail::canonical_json_bytes(value.at("control_source")));
+    }
     data.compiler_build_id             = require_string(value, "compiler_build_id");
     data.program_schema_version        = require_uint32(value, "program_schema_version");
     data.registry_snapshot_fingerprint = require_string(value, "registry_snapshot_fingerprint");
@@ -880,8 +896,7 @@ bool contract_type_matches(const json& value, std::string_view type) {
     if (type == "number") return value.is_number();
     if (type == "integer") return value.is_number_integer();
     if (type == "string") return value.is_string();
-    throw std::invalid_argument("Unsupported Program contract schema type: " +
-                                std::string(type));
+    throw std::invalid_argument("Unsupported Program contract schema type: " + std::string(type));
 }
 
 void validate_contract_type_name(const json& type, std::string_view path) {
@@ -897,9 +912,7 @@ void validate_contract_type_name(const json& type, std::string_view path) {
     }
 }
 
-void validate_contract_schema_impl(const json& schema,
-                                   const std::string& path,
-                                   std::size_t        depth) {
+void validate_contract_schema_impl(const json& schema, const std::string& path, std::size_t depth) {
     check_contract_depth(depth, path);
     if (!schema.is_object()) {
         throw std::invalid_argument("Program contract schema at " + path + " must be an object");
@@ -941,8 +954,7 @@ void validate_contract_schema_impl(const json& schema,
                                         " must be an object");
         }
         for (auto it = properties.begin(); it != properties.end(); ++it) {
-            validate_contract_schema_impl(it.value(), path + "/properties/" + it.key(),
-                                          depth + 1);
+            validate_contract_schema_impl(it.value(), path + "/properties/" + it.key(), depth + 1);
         }
     }
     if (schema.contains("items")) {
@@ -951,8 +963,8 @@ void validate_contract_schema_impl(const json& schema,
     if (schema.contains("additionalProperties")) {
         const auto& additional = schema["additionalProperties"];
         if (!additional.is_boolean() && !additional.is_object()) {
-            throw std::invalid_argument("Program contract schema additionalProperties at " +
-                                        path + " must be a boolean or object");
+            throw std::invalid_argument("Program contract schema additionalProperties at " + path +
+                                        " must be a boolean or object");
         }
         if (additional.is_object()) {
             validate_contract_schema_impl(additional, path + "/additionalProperties", depth + 1);
@@ -967,8 +979,7 @@ void validate_contract_value_impl(const json&        value,
                                   std::size_t        depth) {
     check_contract_depth(depth, path);
     if (schema.contains("const") && value != schema["const"]) {
-        throw std::invalid_argument(std::string(subject) + " at " + path +
-                                    " does not match const");
+        throw std::invalid_argument(std::string(subject) + " at " + path + " does not match const");
     }
     if (schema.contains("enum")) {
         bool matched = false;
@@ -979,8 +990,7 @@ void validate_contract_value_impl(const json&        value,
             }
         }
         if (!matched) {
-            throw std::invalid_argument(std::string(subject) + " at " + path +
-                                        " is not in enum");
+            throw std::invalid_argument(std::string(subject) + " at " + path + " is not in enum");
         }
     }
     if (schema.contains("type")) {
@@ -1049,7 +1059,7 @@ void validate_contract_schema(const ContractRecord& contract, std::string_view p
     validate_contract_schema_impl(contract.schema, std::string(path), 0);
 }
 
-void validate_contract_value(const json&          value,
+void validate_contract_value(const json&           value,
                              const ContractRecord& contract,
                              std::string_view      subject,
                              std::string_view      path) {
@@ -1168,12 +1178,11 @@ struct ProgramBundle::Impl {
 ProgramBundle::ProgramBundle(ProgramBundleData data) {
     ProgramBundleData owned(data);
     normalize_data(owned);
-    auto impl  = std::make_shared<Impl>();
-    impl->data = std::move(owned);
-    auto value = bundle_identity_envelope(impl->data);
-    impl->id   = detail::sha256_identity(
-        "program-bundle", detail::canonical_json_bytes(value));
-    value["id"]          = impl->id;
+    auto impl   = std::make_shared<Impl>();
+    impl->data  = std::move(owned);
+    auto value  = bundle_identity_envelope(impl->data);
+    impl->id    = detail::sha256_identity("program-bundle", detail::canonical_json_bytes(value));
+    value["id"] = impl->id;
     impl->canonical_bytes = detail::canonical_json_bytes(value);
     // Keep legacy raw bundle construction permissive, but eagerly seal compiler-produced
     // orchestration plans into the typed immutable scheduler view when possible. Admission and
@@ -1199,16 +1208,30 @@ ProgramBundle ProgramBundle::parse(std::string_view stored_bytes) {
     if (!value.is_object() || require_string(value, "format") != BUNDLE_FORMAT) {
         throw std::invalid_argument("Stored ProgramBundle has unknown format");
     }
-    detail::reject_unknown_fields(
-        value, "Stored ProgramBundle",
-        {"format", "storage_schema_version", "id", "source_kind", "source_hash",
-         "canonical_program_hash", "compiler_build_id", "program_schema_version",
-         "registry_snapshot_fingerprint", "module_dependency_merkle_root", "module_coordinates",
-         "input_contract",
-         "output_contract", "orchestration_plan", "sealed_core_definitions",
-         "core_plan_identities", "capability_effect_closure", "execution_guarantee",
-         "executable_registry_identities", "declared_budget_requirements", "source_map",
-         "diagnostics"});
+    detail::reject_unknown_fields(value, "Stored ProgramBundle",
+                                  {"format",
+                                   "storage_schema_version",
+                                   "id",
+                                   "source_kind",
+                                   "source_hash",
+                                   "control_source",
+                                   "canonical_program_hash",
+                                   "compiler_build_id",
+                                   "program_schema_version",
+                                   "registry_snapshot_fingerprint",
+                                   "module_dependency_merkle_root",
+                                   "module_coordinates",
+                                   "input_contract",
+                                   "output_contract",
+                                   "orchestration_plan",
+                                   "sealed_core_definitions",
+                                   "core_plan_identities",
+                                   "capability_effect_closure",
+                                   "execution_guarantee",
+                                   "executable_registry_identities",
+                                   "declared_budget_requirements",
+                                   "source_map",
+                                   "diagnostics"});
     if (require_uint32(value, "storage_schema_version") != STORAGE_SCHEMA_VERSION) {
         throw std::invalid_argument("Stored ProgramBundle schema version is unsupported");
     }
@@ -1228,6 +1251,9 @@ SourceKind ProgramBundle::source_kind() const noexcept {
 }
 const std::string& ProgramBundle::source_hash() const noexcept {
     return impl_->data.source_hash;
+}
+std::optional<ProgramSource> ProgramBundle::control_source() const {
+    return impl_->data.control_source;
 }
 const std::string& ProgramBundle::canonical_program_hash() const noexcept {
     return impl_->data.canonical_program_hash;
@@ -1264,7 +1290,8 @@ OrchestrationPlanRecord ProgramBundle::orchestration_plan() const {
 }
 const ProgramPlan& ProgramBundle::typed_orchestration_plan() const {
     if (!impl_->typed_plan)
-        throw std::invalid_argument("Program bundle does not contain a valid typed orchestration plan");
+        throw std::invalid_argument(
+            "Program bundle does not contain a valid typed orchestration plan");
     return *impl_->typed_plan;
 }
 std::vector<SealedCoreDefinition> ProgramBundle::sealed_core_definitions() const {
@@ -1301,6 +1328,8 @@ std::vector<Diagnostic> ProgramBundle::diagnostics() const {
     return copy;
 }
 
-std::string ProgramBundle::serialize_canonical() const { return impl_->canonical_bytes; }
+std::string ProgramBundle::serialize_canonical() const {
+    return impl_->canonical_bytes;
+}
 
 }  // namespace neograph::program

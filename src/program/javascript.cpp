@@ -167,23 +167,18 @@ struct GraphBuilder {
     json               definition;
 };
 
-JSClassID        graph_builder_class_id = JS_INVALID_CLASS_ID;
-std::once_flag   graph_builder_class_once;
+JSClassID      graph_builder_class_id = JS_INVALID_CLASS_ID;
+std::once_flag graph_builder_class_once;
 
 void graph_builder_finalizer(JSRuntime*, JSValue value) {
     delete static_cast<GraphBuilder*>(JS_GetOpaque(value, graph_builder_class_id));
 }
 
 void ensure_graph_builder_class(JSRuntime* runtime) {
-    std::call_once(graph_builder_class_once,
-                   [] { JS_NewClassID(&graph_builder_class_id); });
+    std::call_once(graph_builder_class_once, [] { JS_NewClassID(&graph_builder_class_id); });
     if (JS_IsRegisteredClass(runtime, graph_builder_class_id)) return;
     static const JSClassDef definition{
-        "NeoGraphGraphBuilder",
-        graph_builder_finalizer,
-        nullptr,
-        nullptr,
-        nullptr,
+        "NeoGraphGraphBuilder", graph_builder_finalizer, nullptr, nullptr, nullptr,
     };
     if (JS_NewClass(runtime, graph_builder_class_id, &definition) < 0) {
         throw JavaScriptCompileError("P_JS_RUNTIME",
@@ -210,9 +205,9 @@ GraphBuilder* require_open_builder(JSContext* context, JSValueConst this_value) 
     return builder;
 }
 
-bool read_string(JSContext* context,
-                 JSValueConst value,
-                 std::string&  output,
+bool read_string(JSContext*       context,
+                 JSValueConst     value,
+                 std::string&     output,
                  std::string_view argument_name) {
     if (!JS_IsString(value)) {
         graph_error(context, "P_JS_GRAPH_ARGUMENT",
@@ -241,9 +236,9 @@ bool consume_json_element(JsonConversion& state) {
     return true;
 }
 
-bool get_standard_prototype(JSContext* context,
-                            const char* constructor_name,
-                            JSValue&    output,
+bool get_standard_prototype(JSContext*   context,
+                            const char*  constructor_name,
+                            JSValue&     output,
                             std::string& error) {
     JSValue global = JS_GetGlobalObject(context);
     if (JS_IsException(global)) {
@@ -305,11 +300,11 @@ bool is_plain_array(JSContext* context, JSValueConst value, std::string& error) 
     return matches;
 }
 
-bool js_to_json(JSContext* context,
-                JSValueConst value,
-                json&        output,
+bool js_to_json(JSContext*      context,
+                JSValueConst    value,
+                json&           output,
                 JsonConversion& state,
-                std::size_t depth) {
+                std::size_t     depth) {
     if (depth > kMaxGraphValueDepth) {
         state.error = "graph configuration exceeds the nesting-depth limit";
         return false;
@@ -397,7 +392,7 @@ bool js_to_json(JSContext* context,
                 state.error = exception_text(context);
                 return false;
             }
-            json converted;
+            json       converted;
             const bool converted_ok = js_to_json(context, element, converted, state, depth + 1);
             JS_FreeValue(context, element);
             if (!converted_ok) return false;
@@ -407,7 +402,7 @@ bool js_to_json(JSContext* context,
     }
     if (!is_plain_object(context, value, state.error)) return false;
 
-    JSPropertyEnum* symbols = nullptr;
+    JSPropertyEnum* symbols      = nullptr;
     std::uint32_t   symbol_count = 0;
     if (JS_GetOwnPropertyNames(context, &symbols, &symbol_count, value,
                                JS_GPN_SYMBOL_MASK | JS_GPN_ENUM_ONLY) < 0) {
@@ -420,7 +415,7 @@ bool js_to_json(JSContext* context,
         return false;
     }
 
-    JSPropertyEnum* properties = nullptr;
+    JSPropertyEnum* properties     = nullptr;
     std::uint32_t   property_count = 0;
     if (JS_GetOwnPropertyNames(context, &properties, &property_count, value,
                                JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0) {
@@ -447,7 +442,7 @@ bool js_to_json(JSContext* context,
             state.error = exception_text(context);
             return false;
         }
-        json converted;
+        json       converted;
         const bool converted_ok = js_to_json(context, property, converted, state, depth + 1);
         JS_FreeValue(context, property);
         if (!converted_ok) {
@@ -460,31 +455,35 @@ bool js_to_json(JSContext* context,
     return true;
 }
 
-bool read_json(JSContext* context, JSValueConst value, json& output, std::string_view argument_name) {
+bool read_json(JSContext*       context,
+               JSValueConst     value,
+               json&            output,
+               std::string_view argument_name) {
     JsonConversion conversion;
     if (js_to_json(context, value, output, conversion, 0)) return true;
     if (conversion.error.empty()) return false;
     graph_error(context, "P_JS_GRAPH_VALUE",
-                "NeoGraph graph " + std::string(argument_name) + " is not canonical JSON data: " +
-                    conversion.error);
+                "NeoGraph graph " + std::string(argument_name) +
+                    " is not canonical JSON data: " + conversion.error);
     return false;
 }
 
-bool read_string_array(JSContext* context,
-                       JSValueConst value,
-                       json&        output,
+bool read_string_array(JSContext*       context,
+                       JSValueConst     value,
+                       json&            output,
                        std::string_view argument_name) {
     if (!read_json(context, value, output, argument_name)) return false;
     if (!output.is_array()) {
-        graph_error(context, "P_JS_GRAPH_ARGUMENT",
-                    "NeoGraph graph " + std::string(argument_name) + " must be an array of strings");
+        graph_error(
+            context, "P_JS_GRAPH_ARGUMENT",
+            "NeoGraph graph " + std::string(argument_name) + " must be an array of strings");
         return false;
     }
     for (const auto& element : output) {
         if (!element.is_string()) {
-            graph_error(context, "P_JS_GRAPH_ARGUMENT",
-                        "NeoGraph graph " + std::string(argument_name) +
-                            " must be an array of strings");
+            graph_error(
+                context, "P_JS_GRAPH_ARGUMENT",
+                "NeoGraph graph " + std::string(argument_name) + " must be an array of strings");
             return false;
         }
     }
@@ -529,15 +528,16 @@ JSValue graph_node(JSContext* context, JSValueConst this_value, int argc, JSValu
     try {
         return graph_node_impl(context, this_value, argc, argv);
     } catch (const std::exception& error) {
-        return graph_internal_error(context, "NeoGraph graph node failed: " + bounded_utf8(error.what()));
+        return graph_internal_error(context,
+                                    "NeoGraph graph node failed: " + bounded_utf8(error.what()));
     } catch (...) {
         return graph_internal_error(context, "NeoGraph graph node failed unexpectedly");
     }
 }
 
-JSValue graph_channel_impl(JSContext* context,
-                           JSValueConst this_value,
-                           int argc,
+JSValue graph_channel_impl(JSContext*    context,
+                           JSValueConst  this_value,
+                           int           argc,
                            JSValueConst* argv) {
     auto* builder = require_open_builder(context, this_value);
     if (!builder || !require_arity(context, argc, 2, "channel")) return JS_EXCEPTION;
@@ -592,15 +592,16 @@ JSValue graph_edge(JSContext* context, JSValueConst this_value, int argc, JSValu
     try {
         return graph_edge_impl(context, this_value, argc, argv);
     } catch (const std::exception& error) {
-        return graph_internal_error(context, "NeoGraph graph edge failed: " + bounded_utf8(error.what()));
+        return graph_internal_error(context,
+                                    "NeoGraph graph edge failed: " + bounded_utf8(error.what()));
     } catch (...) {
         return graph_internal_error(context, "NeoGraph graph edge failed unexpectedly");
     }
 }
 
-JSValue graph_conditional_edge_impl(JSContext* context,
-                                    JSValueConst this_value,
-                                    int argc,
+JSValue graph_conditional_edge_impl(JSContext*    context,
+                                    JSValueConst  this_value,
+                                    int           argc,
                                     JSValueConst* argv) {
     auto* builder = require_open_builder(context, this_value);
     if (!builder || !require_arity(context, argc, 3, "conditionalEdge")) return JS_EXCEPTION;
@@ -621,24 +622,23 @@ JSValue graph_conditional_edge_impl(JSContext* context,
     return return_builder(context, this_value);
 }
 
-JSValue graph_conditional_edge(JSContext* context,
-                               JSValueConst this_value,
-                               int argc,
+JSValue graph_conditional_edge(JSContext*    context,
+                               JSValueConst  this_value,
+                               int           argc,
                                JSValueConst* argv) {
     try {
         return graph_conditional_edge_impl(context, this_value, argc, argv);
     } catch (const std::exception& error) {
-        return graph_internal_error(context,
-                                    "NeoGraph graph conditionalEdge failed: " +
-                                        bounded_utf8(error.what()));
+        return graph_internal_error(
+            context, "NeoGraph graph conditionalEdge failed: " + bounded_utf8(error.what()));
     } catch (...) {
         return graph_internal_error(context, "NeoGraph graph conditionalEdge failed unexpectedly");
     }
 }
 
-JSValue graph_barrier_impl(JSContext* context,
-                           JSValueConst this_value,
-                           int argc,
+JSValue graph_barrier_impl(JSContext*    context,
+                           JSValueConst  this_value,
+                           int           argc,
                            JSValueConst* argv) {
     auto* builder = require_open_builder(context, this_value);
     if (!builder || !require_arity(context, argc, 2, "barrier")) return JS_EXCEPTION;
@@ -668,11 +668,8 @@ JSValue graph_barrier(JSContext* context, JSValueConst this_value, int argc, JSV
     }
 }
 
-bool collect_interrupt_nodes(JSContext* context,
-                             int        argc,
-                             JSValueConst* argv,
-                             json&      output,
-                             std::string_view operation) {
+bool collect_interrupt_nodes(
+    JSContext* context, int argc, JSValueConst* argv, json& output, std::string_view operation) {
     if (argc == 0) {
         graph_error(context, "P_JS_GRAPH_ARGUMENT",
                     "NeoGraph graph " + std::string(operation) + " expects at least one node");
@@ -690,38 +687,38 @@ bool collect_interrupt_nodes(JSContext* context,
     return true;
 }
 
-JSValue graph_interrupt_before_impl(JSContext* context,
-                                    JSValueConst this_value,
-                                    int argc,
+JSValue graph_interrupt_before_impl(JSContext*    context,
+                                    JSValueConst  this_value,
+                                    int           argc,
                                     JSValueConst* argv) {
     auto* builder = require_open_builder(context, this_value);
     if (!builder) return JS_EXCEPTION;
     json nodes;
-    if (!collect_interrupt_nodes(context, argc, argv, nodes, "interruptBefore")) return JS_EXCEPTION;
+    if (!collect_interrupt_nodes(context, argc, argv, nodes, "interruptBefore"))
+        return JS_EXCEPTION;
     auto interrupts = builder->definition["interrupt_before"];
     for (const auto& node : nodes)
         interrupts.push_back(node);
     return return_builder(context, this_value);
 }
 
-JSValue graph_interrupt_before(JSContext* context,
-                               JSValueConst this_value,
-                               int argc,
+JSValue graph_interrupt_before(JSContext*    context,
+                               JSValueConst  this_value,
+                               int           argc,
                                JSValueConst* argv) {
     try {
         return graph_interrupt_before_impl(context, this_value, argc, argv);
     } catch (const std::exception& error) {
-        return graph_internal_error(context,
-                                    "NeoGraph graph interruptBefore failed: " +
-                                        bounded_utf8(error.what()));
+        return graph_internal_error(
+            context, "NeoGraph graph interruptBefore failed: " + bounded_utf8(error.what()));
     } catch (...) {
         return graph_internal_error(context, "NeoGraph graph interruptBefore failed unexpectedly");
     }
 }
 
-JSValue graph_interrupt_after_impl(JSContext* context,
-                                   JSValueConst this_value,
-                                   int argc,
+JSValue graph_interrupt_after_impl(JSContext*    context,
+                                   JSValueConst  this_value,
+                                   int           argc,
                                    JSValueConst* argv) {
     auto* builder = require_open_builder(context, this_value);
     if (!builder) return JS_EXCEPTION;
@@ -733,24 +730,23 @@ JSValue graph_interrupt_after_impl(JSContext* context,
     return return_builder(context, this_value);
 }
 
-JSValue graph_interrupt_after(JSContext* context,
-                              JSValueConst this_value,
-                              int argc,
+JSValue graph_interrupt_after(JSContext*    context,
+                              JSValueConst  this_value,
+                              int           argc,
                               JSValueConst* argv) {
     try {
         return graph_interrupt_after_impl(context, this_value, argc, argv);
     } catch (const std::exception& error) {
-        return graph_internal_error(context,
-                                    "NeoGraph graph interruptAfter failed: " +
-                                        bounded_utf8(error.what()));
+        return graph_internal_error(
+            context, "NeoGraph graph interruptAfter failed: " + bounded_utf8(error.what()));
     } catch (...) {
         return graph_internal_error(context, "NeoGraph graph interruptAfter failed unexpectedly");
     }
 }
 
-JSValue graph_retry_policy_impl(JSContext* context,
-                                JSValueConst this_value,
-                                int argc,
+JSValue graph_retry_policy_impl(JSContext*    context,
+                                JSValueConst  this_value,
+                                int           argc,
                                 JSValueConst* argv) {
     auto* builder = require_open_builder(context, this_value);
     if (!builder || !require_arity(context, argc, 1, "retryPolicy")) return JS_EXCEPTION;
@@ -764,21 +760,24 @@ JSValue graph_retry_policy_impl(JSContext* context,
     return return_builder(context, this_value);
 }
 
-JSValue graph_retry_policy(JSContext* context,
-                           JSValueConst this_value,
-                           int argc,
+JSValue graph_retry_policy(JSContext*    context,
+                           JSValueConst  this_value,
+                           int           argc,
                            JSValueConst* argv) {
     try {
         return graph_retry_policy_impl(context, this_value, argc, argv);
     } catch (const std::exception& error) {
-        return graph_internal_error(context,
-                                    "NeoGraph graph retryPolicy failed: " + bounded_utf8(error.what()));
+        return graph_internal_error(
+            context, "NeoGraph graph retryPolicy failed: " + bounded_utf8(error.what()));
     } catch (...) {
         return graph_internal_error(context, "NeoGraph graph retryPolicy failed unexpectedly");
     }
 }
 
-JSValue graph_entry_impl(JSContext* context, JSValueConst this_value, int argc, JSValueConst* argv) {
+JSValue graph_entry_impl(JSContext*    context,
+                         JSValueConst  this_value,
+                         int           argc,
+                         JSValueConst* argv) {
     auto* builder = require_open_builder(context, this_value);
     if (!builder || !require_arity(context, argc, 1, "entry")) return JS_EXCEPTION;
     std::string node;
@@ -791,7 +790,8 @@ JSValue graph_entry(JSContext* context, JSValueConst this_value, int argc, JSVal
     try {
         return graph_entry_impl(context, this_value, argc, argv);
     } catch (const std::exception& error) {
-        return graph_internal_error(context, "NeoGraph graph entry failed: " + bounded_utf8(error.what()));
+        return graph_internal_error(context,
+                                    "NeoGraph graph entry failed: " + bounded_utf8(error.what()));
     } catch (...) {
         return graph_internal_error(context, "NeoGraph graph entry failed unexpectedly");
     }
@@ -810,17 +810,15 @@ JSValue graph_exit(JSContext* context, JSValueConst this_value, int argc, JSValu
     try {
         return graph_exit_impl(context, this_value, argc, argv);
     } catch (const std::exception& error) {
-        return graph_internal_error(context, "NeoGraph graph exit failed: " + bounded_utf8(error.what()));
+        return graph_internal_error(context,
+                                    "NeoGraph graph exit failed: " + bounded_utf8(error.what()));
     } catch (...) {
         return graph_internal_error(context, "NeoGraph graph exit failed unexpectedly");
     }
 }
 
-bool define_method(JSContext* context,
-                   JSValueConst object,
-                   const char* name,
-                   JSCFunction* function,
-                   int length) {
+bool define_method(
+    JSContext* context, JSValueConst object, const char* name, JSCFunction* function, int length) {
     JSValue value = JS_NewCFunction(context, function, name, length);
     if (JS_IsException(value)) return false;
     return JS_DefinePropertyValueStr(context, object, name, value, JS_PROP_ENUMERABLE) >= 0;
@@ -837,12 +835,9 @@ JSValue create_graph_impl(JSContext* context, JSValueConst, int argc, JSValueCon
     }
     JSValue object = JS_NewObjectClass(context, graph_builder_class_id);
     if (JS_IsException(object)) return object;
-    auto* builder = new GraphBuilder{capture,
-                                     context,
-                                     false,
-                                     json{{"schema_version", 1},
-                                          {"name", name},
-                                          {"nodes", json::object()}}};
+    auto* builder =
+        new GraphBuilder{capture, context, false,
+                         json{{"schema_version", 1}, {"name", name}, {"nodes", json::object()}}};
     JS_SetOpaque(object, builder);
     const bool installed =
         define_method(context, object, "node", graph_node, 2) &&
@@ -857,7 +852,8 @@ JSValue create_graph_impl(JSContext* context, JSValueConst, int argc, JSValueCon
         define_method(context, object, "exit", graph_exit, 1);
     if (!installed || JS_PreventExtensions(context, object) < 0) {
         JS_FreeValue(context, object);
-        return graph_internal_error(context, "QuickJS could not initialize the NeoGraph graph builder");
+        return graph_internal_error(context,
+                                    "QuickJS could not initialize the NeoGraph graph builder");
     }
     return object;
 }
@@ -866,15 +862,72 @@ JSValue create_graph(JSContext* context, JSValueConst this_value, int argc, JSVa
     try {
         return create_graph_impl(context, this_value, argc, argv);
     } catch (const std::exception& error) {
-        return graph_internal_error(context,
-                                    "NeoGraph graph construction failed: " + bounded_utf8(error.what()));
+        return graph_internal_error(
+            context, "NeoGraph graph construction failed: " + bounded_utf8(error.what()));
     } catch (...) {
         return graph_internal_error(context, "NeoGraph graph construction failed unexpectedly");
     }
 }
 
-void install_host(JSContext* context) {
-    ensure_graph_builder_class(JS_GetRuntime(context));
+JSValue create_call_core_impl(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc != 1 && argc != 2) {
+        return graph_error(context, "P_JS_CONTROL_COMMAND",
+                           "ng.callCore expects a Core name and optional JSON input");
+    }
+    std::string name;
+    if (!read_string(context, argv[0], name, "callCore name")) return JS_EXCEPTION;
+    if (name.empty()) {
+        return graph_error(context, "P_JS_CONTROL_COMMAND",
+                           "ng.callCore Core name must not be empty");
+    }
+
+    json input = json::object();
+    if (argc == 2 && !read_json(context, argv[1], input, "callCore input")) return JS_EXCEPTION;
+    const auto canonical_input = detail::canonical_json_bytes(input);
+    JSValue    input_value =
+        JS_ParseJSON(context, canonical_input.c_str(), canonical_input.size(), "<call-core-input>");
+    if (JS_IsException(input_value)) return input_value;
+
+    JSValue command = JS_NewObject(context);
+    if (JS_IsException(command)) {
+        JS_FreeValue(context, input_value);
+        return command;
+    }
+    const auto define = [&](const char* key, JSValue value) {
+        return JS_DefinePropertyValueStr(context, command, key, value, JS_PROP_ENUMERABLE) >= 0;
+    };
+    if (!define("protocol_version", JS_NewUint32(context, 1)) ||
+        !define("op", JS_NewString(context, "call_core")) ||
+        !define("name", JS_NewStringLen(context, name.data(), name.size())) ||
+        !define("input", input_value) || JS_PreventExtensions(context, command) < 0) {
+        JS_FreeValue(context, command);
+        return graph_internal_error(context, "QuickJS could not construct a call_core command");
+    }
+    return command;
+}
+
+JSValue create_call_core(JSContext*    context,
+                         JSValueConst  this_value,
+                         int           argc,
+                         JSValueConst* argv) {
+    try {
+        return create_call_core_impl(context, this_value, argc, argv);
+    } catch (const std::exception& error) {
+        return graph_internal_error(
+            context, "NeoGraph call_core construction failed: " + bounded_utf8(error.what()));
+    } catch (...) {
+        return graph_internal_error(context, "NeoGraph call_core construction failed unexpectedly");
+    }
+}
+
+enum class HostContext {
+    Definition,
+    Program,
+};
+
+void install_host(JSContext* context, HostContext profile) {
+    const bool definition_context = profile == HostContext::Definition;
+    if (definition_context) ensure_graph_builder_class(JS_GetRuntime(context));
     JSValue global = JS_GetGlobalObject(context);
     JSValue host   = JS_NewObject(context);
     if (JS_IsException(host)) {
@@ -889,23 +942,35 @@ void install_host(JSContext* context) {
     };
 
     const int version_status = JS_DefinePropertyValueStr(
-        context, host, "apiVersion", JS_NewUint32(context, ProgramSource::JAVASCRIPT_HOST_API_VERSION),
-        JS_PROP_ENUMERABLE);
+        context, host, "apiVersion",
+        JS_NewUint32(context, ProgramSource::JAVASCRIPT_HOST_API_VERSION), JS_PROP_ENUMERABLE);
     if (version_status < 0) {
         JS_FreeValue(context, host);
         fail();
     }
-    const int graph_status = JS_DefinePropertyValueStr(
-        context, host, "graph", JS_NewCFunction(context, create_graph, "graph", 1), JS_PROP_ENUMERABLE);
-    if (graph_status < 0) {
-        JS_FreeValue(context, host);
-        fail();
+    if (definition_context) {
+        const int graph_status = JS_DefinePropertyValueStr(
+            context, host, "graph", JS_NewCFunction(context, create_graph, "graph", 1),
+            JS_PROP_ENUMERABLE);
+        if (graph_status < 0) {
+            JS_FreeValue(context, host);
+            fail();
+        }
+    } else {
+        const int call_core_status = JS_DefinePropertyValueStr(
+            context, host, "callCore", JS_NewCFunction(context, create_call_core, "callCore", 2),
+            JS_PROP_ENUMERABLE);
+        if (call_core_status < 0) {
+            JS_FreeValue(context, host);
+            fail();
+        }
     }
     if (JS_PreventExtensions(context, host) < 0) {
         JS_FreeValue(context, host);
         fail();
     }
-    const int host_status = JS_DefinePropertyValueStr(context, global, "ng", host, JS_PROP_ENUMERABLE);
+    const int host_status =
+        JS_DefinePropertyValueStr(context, global, "ng", host, JS_PROP_ENUMERABLE);
     if (host_status < 0) fail();
     JS_FreeValue(context, global);
 }
@@ -920,9 +985,9 @@ void validate_limits(const JavaScriptCompileLimits& limits) {
     }
 }
 
-[[noreturn]] void throw_evaluation_failure(JSContext* context,
-                                           const DefinitionCapture& capture,
-                                           const InterruptBudget& budget,
+[[noreturn]] void throw_evaluation_failure(JSContext*                     context,
+                                           const DefinitionCapture&       capture,
+                                           const InterruptBudget&         budget,
                                            const JavaScriptCompileLimits& limits) {
     const auto message = exception_text(context);
     if (!capture.failure_code.empty()) {
@@ -930,12 +995,12 @@ void validate_limits(const JavaScriptCompileLimits& limits) {
                                      json{{"engine", "quickjs"}});
     }
     if (budget.exhausted || looks_like_resource_exhaustion(message)) {
-        throw JavaScriptCompileError(
-            "P_JS_RESOURCE_LIMIT", "JavaScript evaluation exceeded a configured resource limit",
-            json{{"memory_limit_bytes", limits.memory_limit_bytes},
-                 {"max_stack_bytes", limits.max_stack_bytes},
-                 {"max_interrupt_polls", limits.max_interrupt_polls},
-                 {"interrupt_polls", budget.polls}});
+        throw JavaScriptCompileError("P_JS_RESOURCE_LIMIT",
+                                     "JavaScript evaluation exceeded a configured resource limit",
+                                     json{{"memory_limit_bytes", limits.memory_limit_bytes},
+                                          {"max_stack_bytes", limits.max_stack_bytes},
+                                          {"max_interrupt_polls", limits.max_interrupt_polls},
+                                          {"interrupt_polls", budget.polls}});
     }
     throw JavaScriptCompileError("P_JS_EVALUATION", "JavaScript evaluation failed: " + message,
                                  json{{"engine", "quickjs"}});
@@ -946,7 +1011,8 @@ json projected_program_document(const json& definition) {
         {"program_schema_version", ProgramCompiler::PROGRAM_SCHEMA_VERSION},
         {"input_contract", json{{"schema_version", 1}, {"schema", json::object()}}},
         {"output_contract", json{{"schema_version", 1}, {"schema", json::object()}}},
-        {"root", json{{"op", "call_core"}, {"name", definition.at("name")}, {"definition", definition}}},
+        {"root",
+         json{{"op", "call_core"}, {"name", definition.at("name")}, {"definition", definition}}},
         {"declared_budget_requirements",
          json::array({
              json{{"resource", "wall_time_ms"}, {"minimum", 1}, {"maximum", 60000}},
@@ -965,8 +1031,8 @@ json projected_program_document(const json& definition) {
 }  // namespace
 #endif
 
-json evaluate_javascript_source(const ProgramSource&           source,
-                                const JavaScriptCompileLimits& limits) {
+JavaScriptSourceEvaluation evaluate_javascript_source(const ProgramSource&           source,
+                                                      const JavaScriptCompileLimits& limits) {
     if (source.kind() != SourceKind::JavaScript) {
         throw std::invalid_argument("JavaScript evaluator received a non-JavaScript ProgramSource");
     }
@@ -983,7 +1049,7 @@ json evaluate_javascript_source(const ProgramSource&           source,
     DefinitionCapture capture;
     JS_SetContextOpaque(scope.context(), &capture);
     try {
-        install_host(scope.context());
+        install_host(scope.context(), HostContext::Definition);
         InterruptBudget budget{0, limits.max_interrupt_polls, false};
         JS_SetInterruptHandler(scope.runtime(), interrupt_after_budget, &budget);
 
@@ -992,7 +1058,7 @@ json evaluate_javascript_source(const ProgramSource&           source,
         if (JS_IsException(compiled)) {
             throw_evaluation_failure(scope.context(), capture, budget, limits);
         }
-        auto* module = static_cast<JSModuleDef*>(JS_VALUE_GET_PTR(compiled));
+        auto*   module        = static_cast<JSModuleDef*>(JS_VALUE_GET_PTR(compiled));
         JSValue module_result = JS_EvalFunction(scope.context(), compiled);
         if (JS_IsException(module_result)) {
             throw_evaluation_failure(scope.context(), capture, budget, limits);
@@ -1006,8 +1072,8 @@ json evaluate_javascript_source(const ProgramSource&           source,
                 json{{"engine", "quickjs"}});
         }
         if (module_state == JS_PROMISE_REJECTED) {
-            JSValue          rejection = JS_PromiseResult(scope.context(), module_result);
-            const auto       message   = value_text(scope.context(), rejection);
+            JSValue    rejection = JS_PromiseResult(scope.context(), module_result);
+            const auto message   = value_text(scope.context(), rejection);
             JS_FreeValue(scope.context(), rejection);
             JS_FreeValue(scope.context(), module_result);
             if (!capture.failure_code.empty()) {
@@ -1023,15 +1089,15 @@ json evaluate_javascript_source(const ProgramSource&           source,
                          {"max_interrupt_polls", limits.max_interrupt_polls},
                          {"interrupt_polls", budget.polls}});
             }
-            throw JavaScriptCompileError(
-                "P_JS_EVALUATION", "JavaScript definition module failed: " + message,
-                json{{"engine", "quickjs"}});
+            throw JavaScriptCompileError("P_JS_EVALUATION",
+                                         "JavaScript definition module failed: " + message,
+                                         json{{"engine", "quickjs"}});
         }
         if (module_state != JS_PROMISE_FULFILLED) {
             JS_FreeValue(scope.context(), module_result);
-            throw JavaScriptCompileError(
-                "P_JS_RUNTIME", "QuickJS module evaluation did not return a promise",
-                json{{"engine", "quickjs"}});
+            throw JavaScriptCompileError("P_JS_RUNTIME",
+                                         "QuickJS module evaluation did not return a promise",
+                                         json{{"engine", "quickjs"}});
         }
         JS_FreeValue(scope.context(), module_result);
 
@@ -1048,9 +1114,27 @@ json evaluate_javascript_source(const ProgramSource&           source,
             JS_FreeValue(scope.context(), define);
             JS_FreeValue(scope.context(), module_namespace);
             throw JavaScriptCompileError(
-                "P_JS_DEFINE_MISSING", "JavaScript source must export a synchronous define() function",
+                "P_JS_DEFINE_MISSING",
+                "JavaScript source must export a synchronous define() function",
                 json{{"engine", "quickjs"}});
         }
+        JSValue main = JS_GetPropertyStr(scope.context(), module_namespace, "main");
+        if (JS_IsException(main)) {
+            JS_FreeValue(scope.context(), define);
+            JS_FreeValue(scope.context(), module_namespace);
+            throw_evaluation_failure(scope.context(), capture, budget, limits);
+        }
+        const bool has_control_generator = !JS_IsUndefined(main);
+        if (has_control_generator && !JS_IsFunction(scope.context(), main)) {
+            JS_FreeValue(scope.context(), main);
+            JS_FreeValue(scope.context(), define);
+            JS_FreeValue(scope.context(), module_namespace);
+            throw JavaScriptCompileError(
+                "P_JS_CONTROL_MAIN",
+                "JavaScript control entry main must be a function when exported",
+                json{{"engine", "quickjs"}});
+        }
+        JS_FreeValue(scope.context(), main);
         JSValue builder = JS_Call(scope.context(), define, JS_UNDEFINED, 0, nullptr);
         JS_FreeValue(scope.context(), define);
         JS_FreeValue(scope.context(), module_namespace);
@@ -1058,24 +1142,28 @@ json evaluate_javascript_source(const ProgramSource&           source,
             throw_evaluation_failure(scope.context(), capture, budget, limits);
         }
         auto* graph = static_cast<GraphBuilder*>(JS_GetOpaque(builder, graph_builder_class_id));
-        if (!graph || graph->context != scope.context() || graph->capture != &capture || graph->sealed) {
+        if (!graph || graph->context != scope.context() || graph->capture != &capture ||
+            graph->sealed) {
             JS_FreeValue(scope.context(), builder);
             throw JavaScriptCompileError(
                 "P_JS_DEFINE_VALUE",
                 "JavaScript define() must return exactly one open NeoGraph graph builder",
                 json{{"engine", "quickjs"}});
         }
-        graph->sealed = true;
+        graph->sealed   = true;
         auto definition = detail::owned_json_copy(graph->definition);
         JS_FreeValue(scope.context(), builder);
         const auto canonical_definition = detail::canonical_json_bytes(definition);
         if (canonical_definition.size() > kMaxGeneratedDocumentBytes) {
             throw JavaScriptCompileError(
-                "P_JS_GRAPH_LIMIT", "JavaScript graph builder generated a definition exceeding 16 MiB",
-                json{{"bytes", canonical_definition.size()}, {"limit", kMaxGeneratedDocumentBytes}});
+                "P_JS_GRAPH_LIMIT",
+                "JavaScript graph builder generated a definition exceeding 16 MiB",
+                json{{"bytes", canonical_definition.size()},
+                     {"limit", kMaxGeneratedDocumentBytes}});
         }
         JS_SetContextOpaque(scope.context(), nullptr);
-        return projected_program_document(definition);
+        return JavaScriptSourceEvaluation{projected_program_document(definition),
+                                          has_control_generator};
     } catch (...) {
         JS_SetContextOpaque(scope.context(), nullptr);
         throw;
@@ -1083,4 +1171,284 @@ json evaluate_javascript_source(const ProgramSource&           source,
 #endif
 }
 
+struct JavaScriptGenerator::Impl {
+#if defined(NEOGRAPH_PROGRAM_HAS_QUICKJS)
+    explicit Impl(const JavaScriptCompileLimits& limits)
+        : configured_limits(limits),
+          scope(configured_limits),
+          budget{0, configured_limits.max_interrupt_polls, false} {}
+
+    ~Impl() {
+        JS_FreeValue(scope.context(), iterator);
+        JS_SetContextOpaque(scope.context(), nullptr);
+    }
+
+    JavaScriptCompileLimits configured_limits;
+    QuickJsScope            scope;
+    DefinitionCapture       capture;
+    InterruptBudget         budget;
+    JSValue                 iterator = JS_UNDEFINED;
+    bool                    finished = false;
+#else
+    explicit Impl(const JavaScriptCompileLimits&) {}
+#endif
+};
+
+JavaScriptGenerator::JavaScriptGenerator(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+JavaScriptGenerator::JavaScriptGenerator(JavaScriptGenerator&&) noexcept            = default;
+JavaScriptGenerator& JavaScriptGenerator::operator=(JavaScriptGenerator&&) noexcept = default;
+JavaScriptGenerator::~JavaScriptGenerator()                                         = default;
+
+#if defined(NEOGRAPH_PROGRAM_HAS_QUICKJS)
+namespace {
+
+JSValue json_to_js_value(JSContext* context, const json& value) {
+    const auto canonical = detail::canonical_json_bytes(value);
+    return JS_ParseJSON(context, canonical.c_str(), canonical.size(), "<program-control>");
+}
+
+[[noreturn]] void throw_control_failure(JSContext*                     context,
+                                        const DefinitionCapture&       capture,
+                                        const InterruptBudget&         budget,
+                                        const JavaScriptCompileLimits& limits) {
+    throw_evaluation_failure(context, capture, budget, limits);
+}
+
+[[noreturn]] void throw_control_value_error(std::string message) {
+    throw JavaScriptCompileError("P_JS_CONTROL_VALUE", std::move(message),
+                                 json{{"engine", "quickjs"}});
+}
+
+JavaScriptGeneratorStep decode_generator_step(JavaScriptGenerator::Impl&     impl,
+                                              JSValue                        result,
+                                              const JavaScriptCompileLimits& limits) {
+    auto* context = impl.scope.context();
+    if (!JS_IsObject(result)) {
+        JS_FreeValue(context, result);
+        throw_control_value_error(
+            "JavaScript control main().next() must return an iterator result");
+    }
+
+    JSValue done = JS_GetPropertyStr(context, result, "done");
+    if (JS_IsException(done)) {
+        JS_FreeValue(context, result);
+        throw_control_failure(context, impl.capture, impl.budget, limits);
+    }
+    if (!JS_IsBool(done)) {
+        JS_FreeValue(context, done);
+        JS_FreeValue(context, result);
+        throw_control_value_error("JavaScript control iterator result.done must be boolean");
+    }
+    const bool is_done = JS_ToBool(context, done) != 0;
+    JS_FreeValue(context, done);
+
+    JSValue value = JS_GetPropertyStr(context, result, "value");
+    if (JS_IsException(value)) {
+        JS_FreeValue(context, result);
+        throw_control_failure(context, impl.capture, impl.budget, limits);
+    }
+    if (JS_IsUndefined(value)) {
+        JS_FreeValue(context, value);
+        JS_FreeValue(context, result);
+        throw_control_value_error(
+            "JavaScript control iterator result.value must be canonical JSON, not undefined");
+    }
+
+    json           converted;
+    JsonConversion conversion;
+    const bool     converted_ok = js_to_json(context, value, converted, conversion, 0);
+    JS_FreeValue(context, value);
+    JS_FreeValue(context, result);
+    if (!converted_ok) {
+        if (conversion.error.empty()) {
+            throw_control_failure(context, impl.capture, impl.budget, limits);
+        }
+        throw_control_value_error(
+            "JavaScript control iterator result.value is not canonical JSON: " + conversion.error);
+    }
+    return JavaScriptGeneratorStep{is_done, std::move(converted)};
+}
+
+}  // namespace
+#endif
+
+std::optional<JavaScriptGenerator> JavaScriptGenerator::open(
+    const ProgramSource& source, json input, const JavaScriptCompileLimits& limits) {
+    if (source.kind() != SourceKind::JavaScript) {
+        throw std::invalid_argument("JavaScript generator received a non-JavaScript ProgramSource");
+    }
+#if !defined(NEOGRAPH_PROGRAM_HAS_QUICKJS)
+    (void)input;
+    (void)limits;
+    throw JavaScriptCompileError(
+        "P_JS_UNAVAILABLE", "JavaScript Program sources require NEOGRAPH_BUILD_QUICKJS_CONTROL=ON");
+#else
+    validate_limits(limits);
+    const auto envelope = source.document();
+    const auto script   = envelope.at("source").get<std::string>();
+
+    auto  impl    = std::make_unique<Impl>(limits);
+    auto* context = impl->scope.context();
+    JS_SetContextOpaque(context, &impl->capture);
+    try {
+        install_host(context, HostContext::Program);
+        JS_SetInterruptHandler(impl->scope.runtime(), interrupt_after_budget, &impl->budget);
+
+        JSValue compiled = JS_Eval(context, script.data(), script.size(), "<program-control>",
+                                   JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+        if (JS_IsException(compiled)) {
+            throw_control_failure(context, impl->capture, impl->budget, limits);
+        }
+        auto*   module        = static_cast<JSModuleDef*>(JS_VALUE_GET_PTR(compiled));
+        JSValue module_result = JS_EvalFunction(context, compiled);
+        if (JS_IsException(module_result)) {
+            throw_control_failure(context, impl->capture, impl->budget, limits);
+        }
+        const auto module_state = JS_PromiseState(context, module_result);
+        if (module_state == JS_PROMISE_PENDING) {
+            JS_FreeValue(context, module_result);
+            throw JavaScriptCompileError(
+                "P_JS_CONTROL_ASYNC",
+                "JavaScript control modules must complete synchronously without top-level await",
+                json{{"engine", "quickjs"}});
+        }
+        if (module_state == JS_PROMISE_REJECTED) {
+            JSValue    rejection = JS_PromiseResult(context, module_result);
+            const auto message   = value_text(context, rejection);
+            JS_FreeValue(context, rejection);
+            JS_FreeValue(context, module_result);
+            if (!impl->capture.failure_code.empty()) {
+                throw JavaScriptCompileError(impl->capture.failure_code,
+                                             impl->capture.failure_message,
+                                             json{{"engine", "quickjs"}});
+            }
+            if (impl->budget.exhausted || looks_like_resource_exhaustion(message)) {
+                throw JavaScriptCompileError(
+                    "P_JS_RESOURCE_LIMIT",
+                    "JavaScript control evaluation exceeded a configured resource limit",
+                    json{{"memory_limit_bytes", limits.memory_limit_bytes},
+                         {"max_stack_bytes", limits.max_stack_bytes},
+                         {"max_interrupt_polls", limits.max_interrupt_polls},
+                         {"interrupt_polls", impl->budget.polls}});
+            }
+            throw JavaScriptCompileError("P_JS_CONTROL_EVALUATION",
+                                         "JavaScript control module failed: " + message,
+                                         json{{"engine", "quickjs"}});
+        }
+        if (module_state != JS_PROMISE_FULFILLED) {
+            JS_FreeValue(context, module_result);
+            throw JavaScriptCompileError(
+                "P_JS_RUNTIME", "QuickJS control module evaluation did not return a promise",
+                json{{"engine", "quickjs"}});
+        }
+        JS_FreeValue(context, module_result);
+
+        JSValue module_namespace = JS_GetModuleNamespace(context, module);
+        if (JS_IsException(module_namespace)) {
+            throw_control_failure(context, impl->capture, impl->budget, limits);
+        }
+        JSValue main = JS_GetPropertyStr(context, module_namespace, "main");
+        JS_FreeValue(context, module_namespace);
+        if (JS_IsException(main)) {
+            throw_control_failure(context, impl->capture, impl->budget, limits);
+        }
+        if (JS_IsUndefined(main)) {
+            JS_FreeValue(context, main);
+            return std::nullopt;
+        }
+        if (!JS_IsFunction(context, main)) {
+            JS_FreeValue(context, main);
+            throw JavaScriptCompileError("P_JS_CONTROL_MAIN",
+                                         "JavaScript control entry main must be a function",
+                                         json{{"engine", "quickjs"}});
+        }
+
+        JSValue input_value = json_to_js_value(context, input);
+        if (JS_IsException(input_value)) {
+            JS_FreeValue(context, main);
+            throw_control_failure(context, impl->capture, impl->budget, limits);
+        }
+        JSValue iterator = JS_Call(context, main, JS_UNDEFINED, 1, &input_value);
+        JS_FreeValue(context, input_value);
+        JS_FreeValue(context, main);
+        if (JS_IsException(iterator)) {
+            throw_control_failure(context, impl->capture, impl->budget, limits);
+        }
+        if (!JS_IsObject(iterator)) {
+            JS_FreeValue(context, iterator);
+            throw JavaScriptCompileError(
+                "P_JS_CONTROL_MAIN",
+                "JavaScript control main(input) must return a synchronous generator",
+                json{{"engine", "quickjs"}});
+        }
+        JSValue next = JS_GetPropertyStr(context, iterator, "next");
+        if (JS_IsException(next)) {
+            JS_FreeValue(context, iterator);
+            throw_control_failure(context, impl->capture, impl->budget, limits);
+        }
+        const bool is_generator = JS_IsFunction(context, next);
+        JS_FreeValue(context, next);
+        if (!is_generator) {
+            JS_FreeValue(context, iterator);
+            throw JavaScriptCompileError(
+                "P_JS_CONTROL_MAIN",
+                "JavaScript control main(input) must return a synchronous generator",
+                json{{"engine", "quickjs"}});
+        }
+        impl->iterator = iterator;
+        JavaScriptGenerator generator(std::move(impl));
+        return std::optional<JavaScriptGenerator>(std::move(generator));
+    } catch (...) {
+        JS_SetContextOpaque(context, nullptr);
+        throw;
+    }
+#endif
+}
+
+JavaScriptGeneratorStep JavaScriptGenerator::next(std::optional<json> response) {
+    if (!impl_) throw std::logic_error("JavaScript generator is not initialized");
+#if !defined(NEOGRAPH_PROGRAM_HAS_QUICKJS)
+    (void)response;
+    throw JavaScriptCompileError(
+        "P_JS_UNAVAILABLE", "JavaScript Program sources require NEOGRAPH_BUILD_QUICKJS_CONTROL=ON");
+#else
+    if (impl_->finished) {
+        throw JavaScriptCompileError("P_JS_CONTROL_FINISHED",
+                                     "JavaScript control generator is already complete",
+                                     json{{"engine", "quickjs"}});
+    }
+    const auto& limits  = impl_->configured_limits;
+    auto*       context = impl_->scope.context();
+    JSValue     next    = JS_GetPropertyStr(context, impl_->iterator, "next");
+    if (JS_IsException(next)) {
+        throw_control_failure(context, impl_->capture, impl_->budget, limits);
+    }
+    if (!JS_IsFunction(context, next)) {
+        JS_FreeValue(context, next);
+        throw JavaScriptCompileError("P_JS_CONTROL_MAIN",
+                                     "JavaScript control iterator no longer has next()",
+                                     json{{"engine", "quickjs"}});
+    }
+    JSValue response_value = JS_UNDEFINED;
+    int     argc           = 0;
+    if (response) {
+        response_value = json_to_js_value(context, *response);
+        if (JS_IsException(response_value)) {
+            JS_FreeValue(context, next);
+            throw_control_failure(context, impl_->capture, impl_->budget, limits);
+        }
+        argc = 1;
+    }
+    JSValue result =
+        JS_Call(context, next, impl_->iterator, argc, response ? &response_value : nullptr);
+    if (response) JS_FreeValue(context, response_value);
+    JS_FreeValue(context, next);
+    if (JS_IsException(result)) {
+        throw_control_failure(context, impl_->capture, impl_->budget, limits);
+    }
+    auto step       = decode_generator_step(*impl_, result, limits);
+    impl_->finished = step.done;
+    return step;
+#endif
+}
 }  // namespace neograph::program::detail

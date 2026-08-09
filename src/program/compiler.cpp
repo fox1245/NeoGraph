@@ -1185,8 +1185,7 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
     std::map<std::pair<std::string, std::string>, ExecutableIdentity> visited;
     std::set<std::string>                                             capabilities;
     std::set<std::string>                                             effects;
-    ExecutionGuarantee                                                 execution_guarantee =
-        ExecutionGuarantee::Strict;
+    ExecutionGuarantee execution_guarantee = ExecutionGuarantee::Strict;
     for (std::size_t index = 0; index < work.size(); ++index) {
         const auto current = work[index];
         const auto key =
@@ -1313,15 +1312,16 @@ json contract_json(const ContractRecord& contract) {
     return json{{"schema_version", contract.schema_version}, {"schema", contract.schema}};
 }
 
-std::string canonical_program_hash(const ParsedProgram&           parsed,
-                                   const OrchestrationPlanRecord& plan,
-                                   const SealedCoreDefinition&    definition) {
+std::string canonical_program_hash(const ParsedProgram&              parsed,
+                                   const OrchestrationPlanRecord&    plan,
+                                   const SealedCoreDefinition&       definition,
+                                   const std::optional<std::string>& control_source_hash) {
     json budgets = json::array();
     for (const auto& budget : parsed.budgets)
         budgets.push_back(json{{"resource", budget.resource},
                                {"minimum", budget.minimum},
                                {"maximum", budget.maximum}});
-    const json semantic{
+    json semantic{
         {"program_schema_version", ProgramCompiler::PROGRAM_SCHEMA_VERSION},
         {"input_contract", contract_json(parsed.input_contract)},
         {"output_contract", contract_json(parsed.output_contract)},
@@ -1331,6 +1331,7 @@ std::string canonical_program_hash(const ParsedProgram&           parsed,
                            {"definition_hash", definition.definition_hash},
                            {"definition", definition.definition}}})},
         {"declared_budget_requirements", std::move(budgets)}};
+    if (control_source_hash) semantic["control_source_hash"] = *control_source_hash;
     return detail::sha256_identity("canonical-program/v1", detail::canonical_json_bytes(semantic));
 }
 
@@ -1352,11 +1353,16 @@ struct ProgramCompiler::Impl {
     ProgramBundle compile(const ProgramSource& source) const {
         DiagnosticAccumulator diagnostics(source);
         try {
-            json document;
+            json                         document;
+            std::optional<ProgramSource> control_source;
             try {
-                document = source.kind() == SourceKind::JavaScript
-                               ? detail::evaluate_javascript_source(source, config.javascript)
-                               : source.document();
+                if (source.kind() == SourceKind::JavaScript) {
+                    auto evaluation = detail::evaluate_javascript_source(source, config.javascript);
+                    document        = std::move(evaluation.document);
+                    if (evaluation.has_control_generator) control_source = source;
+                } else {
+                    document = source.document();
+                }
             } catch (const detail::JavaScriptCompileError& error) {
                 diagnostics.add(CompilePhase::Source, error.code(), DiagnosticSeverity::Error, "",
                                 error.what(), error.witness());
@@ -1416,25 +1422,29 @@ struct ProgramCompiler::Impl {
                                 json{{"detail", error.what()}});
                 diagnostics.throw_error();
             }
-            const auto program_hash = canonical_program_hash(parsed, orchestration, sealed);
-            const auto merkle_root  = import_merkle_root(source, diagnostics);
-            auto       source_map   = generated_source_map(source, diagnostics);
+            const auto program_hash = canonical_program_hash(
+                parsed, orchestration, sealed,
+                control_source ? std::optional<std::string>{source.source_hash()} : std::nullopt);
+            const auto merkle_root = import_merkle_root(source, diagnostics);
+            auto       source_map  = generated_source_map(source, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();
             ProgramBundleData data;
-            data.source_kind                    = source.kind();
-            data.source_hash                    = source.source_hash();
-            data.canonical_program_hash         = program_hash;
-            data.compiler_build_id              = config.compiler_build_id;
-            data.program_schema_version         = PROGRAM_SCHEMA_VERSION;
-            data.registry_snapshot_fingerprint  = registry.fingerprint();
-            data.module_dependency_merkle_root  = merkle_root;
-            data.input_contract                 = std::move(parsed.input_contract);
-            data.output_contract                = std::move(parsed.output_contract);
-            data.orchestration_plan             = std::move(orchestration);
-            data.sealed_core_definitions        = {std::move(sealed)};
-            data.core_plan_identities           = {{parsed.root_name, compiled_plan}};
-            data.capability_effect_closure      = std::move(closure.closure);
-            data.execution_guarantee            = closure.execution_guarantee;
+            data.source_kind                   = source.kind();
+            data.source_hash                   = source.source_hash();
+            data.control_source                = control_source;
+            data.canonical_program_hash        = program_hash;
+            data.compiler_build_id             = config.compiler_build_id;
+            data.program_schema_version        = PROGRAM_SCHEMA_VERSION;
+            data.registry_snapshot_fingerprint = registry.fingerprint();
+            data.module_dependency_merkle_root = merkle_root;
+            data.input_contract                = std::move(parsed.input_contract);
+            data.output_contract               = std::move(parsed.output_contract);
+            data.orchestration_plan            = std::move(orchestration);
+            data.sealed_core_definitions       = {std::move(sealed)};
+            data.core_plan_identities          = {{parsed.root_name, compiled_plan}};
+            data.capability_effect_closure     = std::move(closure.closure);
+            data.execution_guarantee =
+                control_source ? ExecutionGuarantee::Unmanaged : closure.execution_guarantee;
             data.executable_registry_identities = std::move(closure.identities);
             data.declared_budget_requirements   = std::move(parsed.budgets);
             data.source_map                     = std::move(source_map);
@@ -1530,6 +1540,7 @@ ProgramBundle ProgramCompiler::compile(const ProgramSource&    source,
     data.source_kind                    = compiled.source_kind();
     data.source_hash                    = compiled.source_hash();
     data.canonical_program_hash         = compiled.canonical_program_hash();
+    data.control_source                 = compiled.control_source();
     data.compiler_build_id              = compiled.compiler_build_id();
     data.program_schema_version         = compiled.program_schema_version();
     data.registry_snapshot_fingerprint  = compiled.registry_snapshot_fingerprint();
