@@ -145,12 +145,12 @@ json request() {
 
 ContractManifest frozen_contract(std::string owner_scope, json expected = json::object()) {
     ContractManifestSpec spec;
-    spec.manifest_id = "harness-contract";
-    spec.owner_scope = std::move(owner_scope);
-    spec.scope       = "harness-execution";
+    spec.manifest_id  = "harness-contract";
+    spec.owner_scope  = std::move(owner_scope);
+    spec.scope        = "harness-execution";
     spec.requirements = {{"execute", "Execute the retained Harness Program"}};
-    spec.acceptance   = {{"runtime", "ProgramRuntime returns the expected outcome", true,
-                          std::move(expected)}};
+    spec.acceptance   = {
+        {"runtime", "ProgramRuntime returns the expected outcome", true, std::move(expected)}};
     spec.retry_policy = ContractRetryPolicy{2, 10, 5000};
     return ContractManifest::propose(std::move(spec))
         .review(ContractReview{"reviewer", "approved", true})
@@ -182,29 +182,6 @@ json tool_definition() {
     };
 }
 
-json direct_dsl(const json& sealed_worker) {
-    return {
-        {"schema_version", 1},
-        {"name", "harness_fanout_judge"},
-        {"channels",
-         {{"task", {{"reducer", "overwrite"}, {"initial", json::object()}}},
-          {"worker_results", {{"reducer", "append"}, {"initial", json::array()}}},
-          {"final_result", {{"reducer", "overwrite"}, {"initial", nullptr}}}}},
-        {"nodes",
-         {{"worker_0",
-           {{"type", std::string(HARNESS_WORKER_NODE_TYPE)},
-            {"worker_id", sealed_worker.at("worker_id")}}},
-          {"judge",
-           {{"type", std::string(HARNESS_JUDGE_NODE_TYPE)},
-            {"barrier", {{"wait_for", json::array({"worker_0"})}}}}}}},
-        {"edges", json::array({
-                      {{"from", "__start__"}, {"to", "worker_0"}},
-                      {{"from", "worker_0"}, {"to", "judge"}},
-                      {{"from", "judge"}, {"to", "__end__"}},
-                  })},
-    };
-}
-
 bool contains_forbidden_transport_key(const json& value) {
     static const std::vector<std::string> keys = {"executor", "server_ref", "agent",  "url",
                                                   "auth",     "session_id", "process"};
@@ -220,33 +197,34 @@ bool contains_forbidden_transport_key(const json& value) {
     return false;
 }
 
-TEST(HarnessProgramTranslator, PresetDslAndCoreProduceEquivalentProgramDocuments) {
+TEST(HarnessProgramTranslator, PresetAndJavaScriptAreTheOnlyPublicationFrontends) {
     std::atomic<int> calls{0};
     auto             fixture = host(calls);
     EXPECT_TRUE(fixture.snapshots.registry.find(ExecutableKind::Reducer, "overwrite"));
     EXPECT_TRUE(fixture.snapshots.registry.find(ExecutableKind::Reducer, "append"));
     EXPECT_TRUE(fixture.snapshots.registry.find(ExecutableKind::Condition, "always"));
-    auto preset_request = request();
-    auto preset = HarnessRequestTranslator::translate(preset_request, fixture.snapshots.registry,
+    const auto schema_modes =
+        harness_program_request_schema().at("properties").at("harness").at("properties");
+    EXPECT_EQ(schema_modes.at("mode").at("enum"), json::array({"preset", "javascript"}));
+    EXPECT_FALSE(schema_modes.contains("definition"));
+
+    auto preset = HarnessRequestTranslator::translate(request(), fixture.snapshots.registry,
                                                       fixture.defaults);
-    const auto preset_document = preset.source.document();
-    const auto sealed_worker   = preset_document["root"]["definition"]["nodes"]["worker_0"];
+    EXPECT_EQ(preset.source.kind(), SourceKind::CppBuilder);
+    EXPECT_EQ(preset.wire.authoring_frontend, AuthoringFrontend::TrustedCpp);
+    EXPECT_EQ(preset.wire.mode, "preset");
 
-    auto dsl_request       = preset_request;
-    dsl_request["harness"] = {{"mode", "dsl"}, {"definition", direct_dsl(sealed_worker)}};
-    auto dsl = HarnessRequestTranslator::translate(dsl_request, fixture.snapshots.registry,
-                                                   fixture.defaults);
-
-    auto core_request       = preset_request;
-    core_request["harness"] = {{"mode", "core"},
-                               {"definition", preset_document["root"]["definition"]}};
-    auto core = HarnessRequestTranslator::translate(core_request, fixture.snapshots.registry,
-                                                    fixture.defaults);
-
-    EXPECT_EQ(preset.source.document(), dsl.source.document());
-    EXPECT_EQ(preset.source.document(), core.source.document());
-    EXPECT_EQ(preset.invocation_template.input, dsl.invocation_template.input);
-    EXPECT_EQ(preset.invocation_template.input, core.invocation_template.input);
+    auto javascript_request       = request();
+    javascript_request["harness"] = {
+        {"mode", "javascript"},
+        {"source_id", "harness:test/control.js"},
+        {"source", "export function define() { return ng.graph('main'); }"},
+    };
+    auto javascript = HarnessRequestTranslator::translate(
+        javascript_request, fixture.snapshots.registry, fixture.defaults);
+    EXPECT_EQ(javascript.source.kind(), SourceKind::JavaScript);
+    EXPECT_EQ(javascript.wire.authoring_frontend, AuthoringFrontend::JavaScript);
+    EXPECT_EQ(javascript.wire.mode, "javascript");
     EXPECT_EQ(calls.load(), 0);
 }
 
@@ -338,15 +316,17 @@ TEST(HarnessProgramTranslator, RejectionsNeverDispatchFactoriesOrUseGlobalFallba
                                           {{"type", "object"}, {"additionalProperties", false}},
                                           json::object());
     auto global_request       = request();
-    global_request["workers"] = json::array();
     global_request["harness"] = {
-        {"mode", "core"},
-        {"definition",
-         {{"schema_version", 1},
-          {"name", "global_only"},
-          {"nodes", {{"work", {{"type", "translator_global_only"}}}}},
-          {"edges", json::array({{{"from", "__start__"}, {"to", "work"}},
-                                 {{"from", "work"}, {"to", "__end__"}}})}}}};
+        {"mode", "javascript"},
+        {"source",
+         R"JS(export function define() {
+    const graph = ng.graph("global_only");
+    graph.node("work", "translator_global_only", {});
+    graph.entry("work");
+    graph.exit("work");
+    return graph;
+})JS"},
+    };
     auto translated = HarnessRequestTranslator::translate(
         global_request, fixture.snapshots.registry, fixture.defaults);
     ProgramCompiler compiler(fixture.snapshots.registry,
@@ -357,38 +337,37 @@ TEST(HarnessProgramTranslator, RejectionsNeverDispatchFactoriesOrUseGlobalFallba
 
 TEST(HarnessProgramTranslator, RequiresFrozenContractAndCarriesItToHarnessProjection) {
     std::atomic<int> calls{0};
-    auto              fixture = host(calls);
-    auto               proposed = ContractManifest::propose(ContractManifestSpec{
+    auto             fixture      = host(calls);
+    auto             proposed     = ContractManifest::propose(ContractManifestSpec{
         1,
         "unfrozen-harness-contract",
         "owner:test",
         "harness-execution",
-        {},
-        {{"execute", "Execute the retained Harness Program"}},
-        {},
-        {{"runtime", "ProgramRuntime returns the expected outcome", true, json::object()}},
-        {},
-        {},
-        {},
-        {},
+                        {},
+                        {{"execute", "Execute the retained Harness Program"}},
+                        {},
+                        {{"runtime", "ProgramRuntime returns the expected outcome", true, json::object()}},
+                        {},
+                        {},
+                        {},
+                        {},
         ContractRetryPolicy{1, 1, 1000}});
-    auto rejected = request();
+    auto             rejected     = request();
     rejected["contract_manifest"] = json::parse(proposed.serialize_canonical());
-    EXPECT_THROW(HarnessRequestTranslator::translate(rejected, fixture.snapshots.registry,
-                                                     fixture.defaults),
-                 HarnessTranslationError);
+    EXPECT_THROW(
+        HarnessRequestTranslator::translate(rejected, fixture.snapshots.registry, fixture.defaults),
+        HarnessTranslationError);
 
-    auto frozen = request();
+    auto       frozen   = request();
     const auto manifest = frozen_contract("owner:test", json{{"outcome", "zero_findings"}});
-    frozen["contract"] = json::parse(manifest.serialize_canonical());
+    frozen["contract"]  = json::parse(manifest.serialize_canonical());
     frozen["workspace_revision"] = "workspace-test-1";
     const auto translated =
         HarnessRequestTranslator::translate(frozen, fixture.snapshots.registry, fixture.defaults);
     ASSERT_TRUE(translated.contract.has_value());
     EXPECT_EQ(translated.contract->content_hash(), manifest.content_hash());
     EXPECT_EQ(translated.wire.workspace_revision, "workspace-test-1");
-    EXPECT_EQ(translated.wire.projection["contract_manifest_hash"],
-              manifest.content_hash());
+    EXPECT_EQ(translated.wire.projection["contract_manifest_hash"], manifest.content_hash());
     EXPECT_EQ(translated.invocation_template.budget.max_program_operations, 10U);
     EXPECT_EQ(translated.invocation_template.budget.wall_time_ms, 5000U);
 }
@@ -397,18 +376,17 @@ TEST(HarnessProgramTranslator, RejectsLegacyAuthoringWithStableMigrationDiagnost
     std::atomic<int> calls{0};
     auto             fixture = host(calls);
     for (const auto mode : {"dsl", "core", "program", "program_json"}) {
-        auto value         = request();
-        value["harness"]  = {{"mode", mode}, {"definition", json::object()}};
+        auto value       = request();
+        value["harness"] = {{"mode", mode}, {"definition", json::object()}};
         try {
             (void)HarnessRequestTranslator::translate(value, fixture.snapshots.registry,
-                                                       fixture.defaults);
+                                                      fixture.defaults);
             FAIL() << "legacy mode unexpectedly accepted: " << mode;
         } catch (const HarnessTranslationError& error) {
-            const auto expected = std::string(std::string_view(mode) == "dsl"
-                                                   ? "H_MIGRATION_CORE_DSL"
-                                                   : std::string_view(mode) == "core"
-                                                         ? "H_MIGRATION_CORE_JSON"
-                                                         : "H_MIGRATION_PROGRAM_JSON");
+            const auto expected =
+                std::string(std::string_view(mode) == "dsl"    ? "H_MIGRATION_CORE_DSL"
+                            : std::string_view(mode) == "core" ? "H_MIGRATION_CORE_JSON"
+                                                               : "H_MIGRATION_PROGRAM_JSON");
             EXPECT_EQ(error.code(), expected);
             EXPECT_EQ(error.pointer(), "/harness/mode");
         }
@@ -419,8 +397,8 @@ TEST(HarnessProgramTranslator, RejectsLegacyAuthoringWithStableMigrationDiagnost
 TEST(HarnessProgramTranslator, JavaScriptModeRequiresExplicitSourceEnvelope) {
     std::atomic<int> calls{0};
     auto             fixture = host(calls);
-    auto              value  = request();
-    value["harness"] = {
+    auto             value   = request();
+    value["harness"]         = {
         {"mode", "javascript"},
         {"source_id", "harness:direct.js"},
         {"source", "export function define() { return ng.graph('harness_fanout_judge'); }"},
@@ -435,11 +413,11 @@ TEST(HarnessProgramTranslator, JavaScriptModeRequiresExplicitSourceEnvelope) {
     EXPECT_EQ(translated.wire.mode, "javascript");
     EXPECT_EQ(calls.load(), 0);
 
-    auto missing_mode = value;
+    auto missing_mode       = value;
     missing_mode["harness"] = {{"definition", json::object()}};
     try {
         (void)HarnessRequestTranslator::translate(missing_mode, fixture.snapshots.registry,
-                                                   fixture.defaults);
+                                                  fixture.defaults);
         FAIL() << "missing authoring mode unexpectedly accepted";
     } catch (const HarnessTranslationError& error) {
         EXPECT_EQ(error.code(), "H_AUTHORING_MODE_REQUIRED");
