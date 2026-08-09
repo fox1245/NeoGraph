@@ -1729,11 +1729,31 @@ option(NEOGRAPH_BUILD_PROGRAM_CODEC_POC
 if(NEOGRAPH_BUILD_BENCHMARKS)
     add_executable(bench_neograph benchmarks/bench_neograph.cpp)
     target_link_libraries(bench_neograph PRIVATE neograph::core)
+    add_executable(bench_core_quickjs_probe
+        benchmarks/bench_core_quickjs_probe.cpp)
+    target_link_libraries(bench_core_quickjs_probe PRIVATE neograph::core)
+    target_compile_definitions(bench_core_quickjs_probe PRIVATE
+        NEOGRAPH_BENCH_QUICKJS_ENABLED=$<BOOL:${NEOGRAPH_BUILD_QUICKJS_CONTROL}>)
+    if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+        add_executable(bench_quickjs_primitives
+            benchmarks/bench_quickjs_primitives.cpp)
+        target_include_directories(bench_quickjs_primitives PRIVATE
+            ${DEPS_DIR}/quickjs)
+        target_compile_features(bench_quickjs_primitives PRIVATE cxx_std_17)
+        _neograph_attach_quickjs_runtime(bench_quickjs_primitives)
+    endif()
     if(NEOGRAPH_BUILD_PROGRAM)
         add_executable(bench_program benchmarks/bench_program.cpp)
         target_link_libraries(bench_program PRIVATE neograph::program)
         add_executable(bench_program_dispatch benchmarks/bench_program_dispatch.cpp)
         target_link_libraries(bench_program_dispatch PRIVATE neograph::program)
+        if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+            add_executable(bench_quickjs_control
+                benchmarks/bench_quickjs_control.cpp)
+            target_include_directories(bench_quickjs_control PRIVATE
+                ${PROJECT_SOURCE_DIR}/src/program)
+            target_link_libraries(bench_quickjs_control PRIVATE neograph::program)
+        endif()
         add_executable(bench_program_serialization_poc
             benchmarks/bench_program_serialization_poc.cpp)
         target_link_libraries(bench_program_serialization_poc PRIVATE neograph::program)
@@ -1891,14 +1911,20 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
     if(_neograph_benchmark_build_type STREQUAL "")
         set(_neograph_benchmark_build_type "unspecified")
     endif()
-    set(_neograph_benchmark_targets bench_neograph)
+    set(_neograph_benchmark_targets bench_neograph bench_core_quickjs_probe)
     if(NEOGRAPH_BUILD_PROGRAM)
         list(APPEND _neograph_benchmark_targets
             bench_program bench_program_dispatch
             bench_program_serialization_poc bench_program_binary_poc)
+        if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+            list(APPEND _neograph_benchmark_targets bench_quickjs_control)
+        endif()
         if(NEOGRAPH_BUILD_PROGRAM_CODEC_POC)
             list(APPEND _neograph_benchmark_targets bench_program_codec_poc)
         endif()
+    endif()
+    if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+        list(APPEND _neograph_benchmark_targets bench_quickjs_primitives)
     endif()
     foreach(_neograph_benchmark_target IN LISTS _neograph_benchmark_targets)
         target_compile_definitions(${_neograph_benchmark_target} PRIVATE
